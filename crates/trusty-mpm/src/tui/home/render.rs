@@ -24,7 +24,7 @@ use crate::tui::VERSION_LABEL;
 use crate::tui::architect::render::ARCHITECT_HINT;
 
 /// Footer on the home screen.
-pub const HOME_HINT: &str = "[↑↓] select  [Enter] open  [a] architect  [q] quit";
+pub const HOME_HINT: &str = "[↑↓] select  [Enter] open  [a] architect  [v] live  [q] quit";
 /// Footer on a service view.
 pub const SERVICE_HINT: &str = "[Esc] home  [q] quit";
 /// Most metrics lines a service view lists.

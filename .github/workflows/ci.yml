@@ -5,7 +5,7 @@
 #              below to consult (issue #4468: docs-only PRs ran the full Rust
 #              build). The exemption is applied to STEPS, never to the trigger
 #              or to the job, so required checks always report.
-#   fmt      – cargo fmt --all --check (stable)
+#   fmt      – cargo fmt --all --check (pinned 1.99.1)
 #   clippy   – cargo clippy --workspace --all-targets -D warnings (1.98.1, SKIP_UI_BUILD=1)
 #   test-shard – cargo nextest run --workspace, split 8 ways (stable,
 #              SKIP_UI_BUILD=1, full clone for git tests, .NET SDK installed
@@ -76,7 +76,9 @@
 # job's whole `timeout-minutes: 30` before cargo ran — `trusty-agents-ui clippy`
 # and `trusty-code-gui clippy` both died that way at 30m21s on PR #5992. The
 # wrapper retries each phase, kills a stalled attempt at its own ceiling, and
-# caps the total at ten minutes with an `::error::` line saying which.
+# caps the total at ten minutes with an `::error::` line saying which. Since the
+# 2026-11-11 *.ubuntu.com DNS outage it also skips apt when dpkg already has
+# every package, and falls back to a mirror outside *.ubuntu.com.
 #
 # SKIP_UI_BUILD=1 is set globally: the four crates with build.rs Svelte
 # pipelines (trusty-search, trusty-memory, trusty-analyze, trusty-agents) skip
@@ -236,7 +238,7 @@ jobs:
   # --------------------------------------------------------------------------
   changes:
     name: Detect Cargo-inert change set
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
@@ -252,6 +254,7 @@ jobs:
       # gate` accepts their skip only when the matching value here is 'false'.
       teardown_guard_relevant: ${{ steps.detect-shell-gates.outputs.teardown_guard_relevant }}
       tmux_targets_relevant: ${{ steps.detect-shell-gates.outputs.tmux_targets_relevant }}
+      sled_static_relevant: ${{ steps.detect-shell-gates.outputs.sled_static_relevant }}
     steps:
       # fetch-depth: 0 — the detector needs `git merge-base` against the base
       # branch, which a shallow checkout cannot resolve.
@@ -524,9 +527,10 @@ jobs:
         run: |
           bash scripts/ci-gate-relevance.sh teardown-guard > /dev/null
           bash scripts/ci-gate-relevance.sh tmux-targets > /dev/null
+          bash scripts/ci-gate-relevance.sh sled-static > /dev/null
 
   # --------------------------------------------------------------------------
-  # fmt: enforce cargo fmt --all --check (stable toolchain + rustfmt component)
+  # fmt: enforce cargo fmt --all --check (pinned 1.99.1 toolchain + rustfmt component)
   #
   # The instruction floor guard below is NOT gated on the docs-only detection:
   # it guards instruction/markdown content, which is exactly what a docs-only
@@ -542,14 +546,18 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install stable toolchain with rustfmt
+      - name: Install pinned 1.99.1 toolchain with rustfmt
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        # ar-T95: pinned so a stable bump (1.100.0 reformatted 3 trusty-architect
+        # files) cannot fail Format check on every PR. 1.99.1 accepts the tree
+        # both before and after that reformat. Bump deliberately, with a
+        # `cargo fmt --all` in the same PR.
+        uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt
 
@@ -574,7 +582,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -706,7 +714,7 @@ jobs:
     name: Rustdoc intra-doc links
     needs: [changes]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -729,7 +737,12 @@ jobs:
 
       - name: Install stable toolchain
         if: steps.scope.outputs.scope != 'skip'
-        uses: dtolnay/rust-toolchain@stable
+        # ar-T95: every formerly-`@stable` Rust job is pinned to 1.99.1. Rust
+        # 1.100 changed the test-binary layout (target/debug/build/<pkg>/<hash>/out/
+        # instead of target/debug/deps/), which breaks the trusty-common test-harness
+        # detection (see the HIGH issue). Bump deliberately, only after that is
+        # fixed, and with a `cargo fmt --all` in the same PR.
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # `libdbus-1-dev` is this job's alone (#7466). The `features` lane enables
       # `trusty-common/keyring-store`, and `keyring`'s Linux target section
@@ -880,7 +893,7 @@ jobs:
     # TO RUN IT ON A BRANCH: Actions → CI → "Run workflow" against that branch
     # (the `workflow_dispatch` trigger at the top of this file).
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # #10618: 60, not 45 — the nextest `ci` profile's 35 m HNSW bound must fire
     # (and name the test) before this job cap does.
     timeout-minutes: 60
@@ -953,7 +966,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -1470,7 +1483,7 @@ jobs:
     # must stay in lockstep: `test` requires BOTH, so a divergence would make
     # the roll-up unsatisfiable on whichever trigger they disagree about.
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # Must match `test-shard`'s value exactly, for two reasons. rust-cache
@@ -1489,7 +1502,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -1553,7 +1566,7 @@ jobs:
     name: Rust tests (pre-publish gate)
     needs: [changes, test-shard, test-doc]
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every test shard to have succeeded
@@ -1615,7 +1628,7 @@ jobs:
     # `!cancelled()`: a failed `changes` job leaves `docs_only` empty, which
     # the plan reads as "not Cargo-inert" and plans in full.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       count: ${{ steps.plan.outputs.count }}
@@ -1640,7 +1653,7 @@ jobs:
 
       - name: Install stable toolchain
         if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       # Both selectors' fixtures run before the step that consults them.
       - name: Crate-selection selftests
@@ -1682,7 +1695,7 @@ jobs:
     # roll-up below reads the plan, so a skip here can never report green on
     # its own.
     if: ${{ !cancelled() && needs.affected-plan.result == 'success' && needs.affected-plan.outputs.count != '0' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # `test-shard` legs run 13-27 min (build ~9-12 min from the shared cache).
     # #9271: the trusty-memory leg now carries the engine tests moved from `trusty-common-lanes` (~45 min); 60 matches that job.
     timeout-minutes: 60
@@ -1707,7 +1720,7 @@ jobs:
         run: bash scripts/ci-create-local-main.sh
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
@@ -1843,7 +1856,7 @@ jobs:
     name: Rust tests (affected crates)
     needs: [affected-plan, affected-test]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require the plan and every leg to have succeeded
@@ -1899,7 +1912,7 @@ jobs:
     name: trusty-common coverage lanes
     needs: [affected-plan]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
@@ -1934,7 +1947,7 @@ jobs:
 
       - name: Install stable toolchain
         if: steps.decide.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: steps.decide.outputs.run == 'true'
@@ -2008,7 +2021,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -2093,7 +2106,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # #7063: one line saying whether this job does real work and why.
@@ -2176,7 +2189,7 @@ jobs:
     needs: [changes]
     # #4179: see the identical note on `agents-ui` above.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       # #7063: one line saying whether this job does real work and why.
@@ -2303,7 +2316,7 @@ jobs:
     # workspace-wide required jobs it can skip at job level without leaving a
     # PR pending. An absent classifier output still runs the job (fail closed).
     if: ${{ !cancelled() && needs.changes.outputs.embedder_cuda_relevant != 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       CUDA_COMPUTE_CAP: "90"
@@ -2311,7 +2324,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         run: |
@@ -2403,7 +2416,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -2536,7 +2549,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -2551,7 +2564,7 @@ jobs:
 
       - name: Install stable toolchain
         if: needs.changes.outputs.docs_only != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.99.1
 
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
@@ -2579,7 +2592,7 @@ jobs:
       # ci-smoke profile drops thin LTO and opt-level 3 (see the profile's
       # comment in the root Cargo.toml, which records the coverage trade this
       # makes). Named profiles are stable since Cargo 1.57; this job pins
-      # `dtolnay/rust-toolchain@stable`.
+      # `dtolnay/rust-toolchain@1.99.1`.
       #
       # Artefacts land in `target/ci-smoke/`, which rust-cache handles without
       # extra configuration: its cleanup identifies a profile directory by the
@@ -2694,7 +2707,7 @@ jobs:
     name: Durable writes hold the teardown guard
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2713,7 +2726,7 @@ jobs:
     name: Every tmux -t target is exact
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2727,6 +2740,37 @@ jobs:
       - name: No bare tmux -t target
         run: bash scripts/check_tmux_exact_targets.sh
 
+  # #11156: the cloud sled's tailscaled runs in a sidecar as a uid the sled's
+  # agents cannot control (DOC-90 IN-7). Static, no docker; the live half is
+  # docker/sled/check_tailscale.sh (V5) on a docker host. Path-filtered at the
+  # job like the two gates above, and covered by `CI gate`.
+  sled-static:
+    name: Sled tailscaled isolation (static)
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.sled_static_relevant != 'false' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: tailscaled runs in a sidecar the agents cannot reach
+        run: ./scripts/check_sled_tailscale_isolation.sh
+
+      # DOC-90 §12: launch.sh starts only the enforced topology. Stub docker.
+      - name: launch.sh refuses every boundary break
+        run: ./scripts/check_sled_launch.sh
+
+      # #11156: audit B3 (V1 gateway and raw-CONNECT probe coverage) and B4
+      # (pinned, hash-verified tarballs). Both run offline, no docker.
+      - name: V1 gateway and raw-CONNECT probes cover the audited set (B3)
+        run: ./scripts/check_sled_v1_gateway.sh
+
+      - name: images extract only pinned, hash-verified tarballs (B4)
+        run: ./scripts/check_sled_pinned_tarballs.sh
+
+      - name: shellcheck the sled scripts
+        run: shellcheck -x docker/sled/check_tailscale.sh docker/sled/entrypoint.sh docker/sled/exercise.sh scripts/check_sled_tailscale_isolation.sh docker/sled/launch.sh docker/sled/launch_lib.sh docker/sled/proxy/sled-bind-addr docker/sled/proxy/entrypoint.sh scripts/check_sled_launch.sh scripts/test-data/sled-launch/docker docker/sled/check_v1.sh scripts/check_sled_v1_gateway.sh docker/sled/pinned-tarballs.sh docker/sled/fetch.sh scripts/check_sled_pinned_tarballs.sh
+
   # The three release-decision selftests (#5620, #5755). Each gate can only run
   # where a publish runs, so CI runs its fixtures to keep it able to fail.
   # Unconditional: ~10 s each, and a `paths:` filter is scoped to what changed,
@@ -2734,7 +2778,7 @@ jobs:
   # Separate jobs, so a red one names which decision broke.
   parity-selftest:
     name: Parity gate self-test (must catch a drifted tag)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 brings tags with it, which case 11 of the self-test uses
@@ -2751,7 +2795,7 @@ jobs:
 
   check5-decision:
     name: CHECK 5 decision self-test (0 compared must never print PASS)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2761,7 +2805,7 @@ jobs:
 
   check8-decision:
     name: CHECK 8 decision self-test (a run's head_sha is not what it gated)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2780,7 +2824,7 @@ jobs:
   # skips PRs: a fault found only there has already merged.
   fastembed-cache-selftest:
     name: Fastembed cache check self-test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2795,7 +2839,7 @@ jobs:
   # scripts/ci-website-relevance.sh, which counts this file as an input.
   website-corpus:
     name: Website content corpus
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -2887,7 +2931,7 @@ jobs:
   # --------------------------------------------------------------------------
   changelog-fragment:
     name: Per-PR changelog fragment
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 — the gate needs `git merge-base` against the base
@@ -3056,6 +3100,7 @@ jobs:
         rustdoc-links,
         teardown-guard,
         tmux-exact-targets,
+        sled-static,
         parity-selftest,
         check5-decision,
         check8-decision,
@@ -3065,7 +3110,7 @@ jobs:
         test,
       ]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -3168,7 +3213,7 @@ jobs:
         website-corpus,
         ci-gate,
       ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       issues: write

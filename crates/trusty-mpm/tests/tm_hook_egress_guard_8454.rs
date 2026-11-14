@@ -18,6 +18,7 @@ use crate::common;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 use trusty_mpm::daemon::bug_report::{aggregate_errors_from_paths, store_paths_under};
 
@@ -506,40 +507,125 @@ pub(crate) fn time_eval_heredoc_repro_9720() -> String {
     command
 }
 
-/// The bound on a hook's verdict on [`time_eval_heredoc_repro_9720`]: ten
-/// times the slower hook's 3.5 s EVO debug-build time after #9720. Before the
-/// fix the egress hook took 129 to 170 s.
-pub(crate) const REPRO_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(40);
-
-/// Wait for `child` until `bound`, killing it and panicking past the bound:
-/// Claude Code kills a hook at its timeout, and a killed hook is an allow.
-pub(crate) fn wait_within_9720(
-    mut child: std::process::Child,
-    bound: std::time::Duration,
-) -> Output {
-    let started = std::time::Instant::now();
-    while child.try_wait().expect("poll the hook").is_none() {
-        if started.elapsed() >= bound {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("the hook gave no verdict within {bound:?}");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    eprintln!("#9720: the hook answered in {:?}", started.elapsed());
-    child.wait_with_output().expect("hook output")
+/// One line of `<<x a.b ` filling `budget` bytes, with no `time eval`.
+// #11031: the egress walk reads this once, so its CPU time follows the
+// here-document scans' own growth; the repro's re-reads stop at the walk's
+// byte budget, which hides that growth.
+fn heredoc_line_9720(budget: usize) -> String {
+    "<<x a.b ".repeat(budget / 8)
 }
 
-/// 🔴 #9720: the binary judges the issue's repro within the bound. Its
-/// here-document scans were quadratic in the `<<` count, and the walk
-/// re-reads a `time eval` command many times.
-#[test]
-fn bash_egress_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
-    let data = tempfile::tempdir().expect("data dir");
-    let stdin = payload_with(
-        "Bash",
-        serde_json::json!({ "command": time_eval_heredoc_repro_9720() }),
+/// The bound on the CPU time a hook spends on [`time_eval_heredoc_repro_9720`].
+///
+/// #11031: CPU time, not wall time. A loaded CI runner stretched one linear
+/// run's wall time from 15 s to 40 s (run 42973040082); a process's CPU time
+/// does not count the time it waits for a core. On EVO, debug build, the
+/// slower hook (egress) used 6.0 to 10.3 s of CPU idle and 12.8 s beside 28
+/// busy loops; the bound is about six times the idle worst. Before #9720 the
+/// egress hook took 129 to 170 s.
+pub(crate) const REPRO_CPU_BOUND_9720: Duration = Duration::from_secs(60);
+
+/// How long to wait for any verdict before killing the hook as hung.
+///
+/// #11031: a hang guard, not the pass bar ([`REPRO_CPU_BOUND_9720`] is): half
+/// nextest's 600 s `ci` slow-timeout, and 7.5 times the worst CI wall time.
+pub(crate) const REPRO_HANG_GUARD_9720: Duration = Duration::from_secs(300);
+
+/// The most a one-line `<<` run's CPU time may grow when the line doubles.
+///
+/// #11031: linear scans give 2 at most, and the fixed start-up cost pulls it
+/// lower: 1.6 on EVO (90 ms to 142 ms), on main and on the #9720 fix alike.
+/// The quadratic scans #9720 removed give about 4.
+const LINE_DOUBLING_RATIO_9720: f64 = 3.0;
+
+/// A hook's output and the CPU time it used, user plus system.
+pub(crate) struct Judged9720 {
+    pub(crate) out: Output,
+    pub(crate) cpu: Duration,
+}
+
+/// Read `pipe` to its end on a thread, so a full pipe cannot stall the hook.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// Reap `child` and return its output and CPU time, killing it and panicking
+/// past `hang_guard`: Claude Code kills a hook at its timeout, and a killed
+/// hook is an allow.
+// #11031: `wait4` reports this one child's CPU time; `getrusage` would sum
+// every child of the test process, which runs other tests in parallel.
+pub(crate) fn wait_within_9720(mut child: std::process::Child, hang_guard: Duration) -> Judged9720 {
+    use std::os::unix::process::ExitStatusExt;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let pid = libc::pid_t::try_from(child.id()).expect("pid fits pid_t");
+    let started = std::time::Instant::now();
+    let mut status: libc::c_int = 0;
+    // SAFETY: `rusage` is plain integers, so all-zero is a valid value.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    loop {
+        // SAFETY: `pid` is this test's own child, not yet reaped; `wait4`
+        // writes only through the two pointers, which outlive the call.
+        let reaped = unsafe { libc::wait4(pid, &mut status, libc::WNOHANG, &mut usage) };
+        if reaped == pid {
+            break;
+        }
+        if reaped < 0 {
+            let err = std::io::Error::last_os_error();
+            assert_eq!(err.kind(), std::io::ErrorKind::Interrupted, "wait4: {err}");
+        }
+        if started.elapsed() >= hang_guard {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the hook gave no verdict within {hang_guard:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let cpu = timeval(usage.ru_utime) + timeval(usage.ru_stime);
+    eprintln!(
+        "#9720: the hook answered in {:?} wall, {cpu:?} CPU",
+        started.elapsed()
     );
+    let out = Output {
+        status: std::process::ExitStatus::from_raw(status),
+        stdout: stdout.join().expect("stdout reader"),
+        stderr: stderr.join().expect("stderr reader"),
+    };
+    Judged9720 { out, cpu }
+}
+
+/// A `timeval` as a [`Duration`]; a negative field counts as zero.
+fn timeval(t: libc::timeval) -> Duration {
+    let secs = u64::try_from(t.tv_sec).unwrap_or(0);
+    let micros = u64::try_from(t.tv_usec).unwrap_or(0);
+    Duration::from_secs(secs) + Duration::from_micros(micros)
+}
+
+/// Assert a hook spent at most [`REPRO_CPU_BOUND_9720`] of CPU on the repro.
+// #11031: replaces the 40 s wall-clock bound that a loaded runner tripped.
+pub(crate) fn assert_repro_cpu_9720(judged: &Judged9720) {
+    assert!(
+        judged.out.status.success(),
+        "the guard exits 0: {:?}",
+        judged.out
+    );
+    assert!(
+        judged.cpu <= REPRO_CPU_BOUND_9720,
+        "the repro took {:?} of CPU, over {REPRO_CPU_BOUND_9720:?}",
+        judged.cpu
+    );
+}
+
+/// Run the egress hook on a `Bash` `command` and reap it.
+fn judge_egress_9720(command: String) -> Judged9720 {
+    let data = tempfile::tempdir().expect("data dir");
+    let stdin = payload_with("Bash", serde_json::json!({ "command": command }));
     let mut child = guard_command(data.path(), &[])
         .stdin(Stdio::piped())
         .spawn()
@@ -547,8 +633,39 @@ fn bash_egress_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
     let mut pipe = child.stdin.take().expect("child stdin");
     let _ = pipe.write_all(&stdin);
     drop(pipe);
-    let out = wait_within_9720(child, REPRO_BOUND_9720);
-    assert!(out.status.success(), "the guard exits 0: {out:?}");
+    wait_within_9720(child, REPRO_HANG_GUARD_9720)
+}
+
+/// 🔴 #9720: the binary judges the issue's repro within the bound. Its
+/// here-document scans were quadratic in the `<<` count, and the walk
+/// re-reads a `time eval` command many times.
+// #11031: bounds CPU time, not wall time.
+#[test]
+fn bash_egress_judges_the_dense_heredoc_repro_in_bounded_time_9720() {
+    assert_repro_cpu_9720(&judge_egress_9720(time_eval_heredoc_repro_9720()));
+}
+
+/// 🔴 #9720: the binary's CPU time on one line of `<<` operators at most
+/// triples when the line doubles. The quadratic scans #9720 removed quadruple
+/// it.
+// #11031: a scaling check, which no host speed or load can move much.
+#[test]
+fn bash_egress_heredoc_line_cpu_grows_linearly_9720() {
+    // The least CPU time of three runs, so one run slowed by a busy core
+    // cannot fake growth.
+    let least = |budget| {
+        (0..3)
+            .map(|_| judge_egress_9720(heredoc_line_9720(budget)).cpu)
+            .min()
+            .expect("three runs")
+    };
+    let (half, full) = (least(32_768), least(65_536));
+    let ratio = full.as_secs_f64() / half.as_secs_f64().max(1e-3);
+    assert!(
+        ratio <= LINE_DOUBLING_RATIO_9720,
+        "doubling a `<<` line grew CPU time {ratio:.2}x ({half:?} -> {full:?}), over \
+         {LINE_DOUBLING_RATIO_9720}x: the here-document scans are no longer linear"
+    );
 }
 
 /// The channel-tainted session the #9741 cases run as.

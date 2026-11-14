@@ -31,6 +31,11 @@ pub use exec::{
     RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
 };
 
+// #10998: the source locator of a named copy.
+#[path = "copy_source.rs"]
+mod copy_source;
+pub use copy_source::{CopySource, KeychainLabel, MAX_KEYCHAIN_LABEL_LEN};
+
 /// Method names.
 pub mod method {
     /// List the owner and project scopes a caller can pick.
@@ -41,7 +46,8 @@ pub mod method {
     pub const SET: &str = "secrets.set";
     /// Remove one key.
     pub const DELETE: &str = "secrets.delete";
-    /// Copy keys between backends inside one project.
+    /// Copy keys into this project's vault: between backends, or one key
+    /// from a named source (#10998).
     pub const COPY: &str = "secrets.copy";
     /// Register an exec grant and return its token (DOC-74 §15.8, #9070).
     pub const GRANT: &str = "secrets.grant";
@@ -108,6 +114,11 @@ pub struct KeyMeta {
     /// (DOC-74 §15.8). #10386: `true` unless the backend holds the key's
     /// agent deny item; default `true`. Never taken from the index row (#9070).
     pub agents_may_use: bool,
+    /// Whether the key is push-only for agents (#10998): no agent may read
+    /// it, a push may send it. The backend's mark, never the index row;
+    /// `false` from a server older than the mark.
+    #[serde(default)]
+    pub agents_push_only: bool,
 }
 
 /// `secrets.list` request.
@@ -203,11 +214,18 @@ pub struct DeleteResponse {
     pub removed: bool,
 }
 
-/// `secrets.copy` request: one project's keys, between two backends.
+/// `secrets.copy` request: keys into this project's vault, from a backend.
 ///
-/// Why: DOC-74 §13 Q6 — copy stays in-project. The request names no vault;
-/// the server uses the caller's own project scope, so a cross-project copy
-/// cannot be expressed. The copy itself ships with S2.
+/// Why: DOC-74 §13 Q6 — the destination is always the caller's own project
+/// vault; the request names no destination vault. #10998 (owner ruling
+/// 2026-11-10) relaxes the source side: with `source` set, the one key is
+/// read from a named Keychain item or trusty vault key, which may be the
+/// owner vault or another project's.
+/// What: without `source`, `keys` (or every indexed key) are copied under
+/// their own names from the project vault on `from_backend`. With `source`,
+/// `keys` holds exactly one name, the destination key.
+/// Test: `api_request_constructors_match_the_wire_shape`,
+/// `api_copy_request_without_source_keeps_the_old_wire_shape`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -216,9 +234,14 @@ pub struct CopyRequest {
     pub from_backend: BackendId,
     /// Destination backend.
     pub to_backend: BackendId,
-    /// Keys to copy; empty means every indexed key.
+    /// Keys to copy; empty means every indexed key. With `source`, exactly
+    /// one: the destination key.
     #[serde(default)]
     pub keys: Vec<SecretKey>,
+    /// Where the one key is read, when not this project's vault (#10998).
+    /// `None` keeps the pre-#10998 copy and is not written on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CopySource>,
 }
 
 impl CopyRequest {
@@ -233,7 +256,19 @@ impl CopyRequest {
             from_backend,
             to_backend,
             keys: Vec::new(),
+            source: None,
         }
+    }
+
+    /// Copy one value from `source` into this project's vault as `key`
+    /// (#10998).
+    ///
+    /// What: sets `source` and makes `keys` exactly `[key]`.
+    /// Test: `api_copy_source_round_trips_and_refuses_bad_labels`.
+    pub fn from_source(mut self, source: CopySource, key: SecretKey) -> Self {
+        self.source = Some(source);
+        self.keys = vec![key];
+        self
     }
 
     /// Copy only `keys`. An empty list means every indexed key.

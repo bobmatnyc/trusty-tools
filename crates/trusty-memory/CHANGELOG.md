@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.36.7] — 2026-11-10
 
+### Changed
+
+- Requires trusty-common 0.69; no library source change (Refs #10735).
+
 ### Fixed
 
 - The `umask_000_end_to_end_export_is_owner_only_and_leaks_nothing` test no longer flakes: its 4-char leak scan now ignores the random characters of temp-dir names, which could match a token window by chance (#10549).

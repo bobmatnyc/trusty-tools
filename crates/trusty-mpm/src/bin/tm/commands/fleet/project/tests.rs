@@ -777,5 +777,10 @@ fn fleet_init_seeds_the_watch_set_pointer_and_no_watch_list() {
         gitignore.lines().any(|l| l == "local/watch.json.lock"),
         "{gitignore}"
     );
+    // #11012: `init_with_seed` passes no watch source; `init_full` seeds.
     assert!(!watch::path(&dir).exists());
 }
+
+// #11012: `tm fleet init` seeds the list when it is absent.
+#[path = "init_seed_tests.rs"]
+mod init_seed;

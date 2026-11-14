@@ -16,6 +16,10 @@ use std::process::{Command, Output};
 
 use crate::common;
 
+// #11061: the fake `claude` process, shared with the `tm` unit tests.
+#[path = "common/fake_claude.rs"]
+mod fake_claude;
+
 /// A scratch home, a private tmux server directory and a fake `claude`.
 struct FleetEnv {
     home: tempfile::TempDir,
@@ -28,10 +32,9 @@ impl FleetEnv {
         let bin = tempfile::tempdir().expect("fake bin dir");
         let claude = bin.path().join("claude");
         // #8878 ruling A: `tm fleet init` finds its claude by process name, so
-        // the fake execs a `sleep` whose name contains `claude`. A symlink, not
-        // a copy: macOS kills an unsigned copy of a system binary.
-        let sleeper = bin.path().join("claude-sleep");
-        std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
+        // the fake execs a process whose name contains `claude`. #11061: not
+        // a `/bin/sleep` symlink, which a multicall `sleep` exits at once.
+        let sleeper = fake_claude::sleeper(bin.path());
         // #8981: each start appends its argv, one line per launch. While the
         // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
         // a `claude` that cannot load its conversation does. #9092: each start
@@ -39,15 +42,16 @@ impl FleetEnv {
         // #10459: `--version` prints the CLAUDE_VERSION file, else a version
         // the Architect gate accepts, and exits 1 while VERSION_FAILS exists.
         let sleeper = sleeper.display().to_string();
+        let (secs, args) = (fake_claude::SECS_ENV, fake_claude::argv().join(" "));
         // See #10248
         trusty_common::exec_stub::write_executable(
             &claude,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = --version ]; then [ -e {fails:?} ] && exit 1; \
                  cat {version:?} 2>/dev/null || echo '2.1.312 (Claude Code)'; exit 0; fi\n\
-                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
-                 *\" --resume \"*) [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} \
-                 600\n",
+                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ns=\ncase \" $* \" in \
+                 *\" --resume \"*) [ -e {:?} ] && s=1;; esac\nexport {secs}=${{s:-600}}\n\
+                 exec {sleeper:?} {args}\n",
                 bin.path().join(PID_LOG).display().to_string(),
                 bin.path().join(ARGV_LOG).display().to_string(),
                 bin.path().join(RESUME_FAILS).display().to_string(),
@@ -1851,4 +1855,50 @@ fn fleet_project_flow_migrates_adds_refuses_removes_and_lists() {
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(json(&out), serde_json::json!([]), "{}", text(&out));
     assert!(out.stderr.is_empty(), "{}", text(&out));
+}
+
+#[test]
+fn fleet_init_seeds_the_watch_list_from_live_sessions() {
+    // #11012 AC6: `init` seeds the list from the live `tm-*` sessions on the
+    // private server, `list --json` shows it, and a second `init` leaves it.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    for (name, cwd) in [("tm-alpha", "/tmp"), ("tm-stray", "/tmp")] {
+        let started = Command::new("tmux")
+            .args(["new-session", "-d", "-s", name, "-c", cwd, "sleep 600"])
+            .env("TMUX_TMPDIR", env.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("run tmux");
+        assert!(started.success(), "tmux new-session {name}");
+    }
+    let init = ["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tmux session tm-stray not watched"),
+        "{stdout}"
+    );
+    assert_eq!(watched(&dir), ["alpha"]);
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let keys: Vec<serde_json::Value> = json(&out)
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["key"].clone())
+        .collect();
+    assert_eq!(keys, [serde_json::json!("alpha")], "{}", text(&out));
+    let before = std::fs::read(dir.join("local/watch.json")).expect("watch.json");
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("init leaves it as is"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
 }

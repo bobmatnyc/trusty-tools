@@ -29,6 +29,8 @@
 //!   route performs lands in tmux, not in daemon state, so the registry is what
 //!   a hermetic test can observe; the tmux `send-keys` itself is one call in one
 //!   shared body, reached identically from both transports.
+//!   #10893: a socket-less session is not hermetic on this route (its send
+//!   reads the live `$HOME` gate per call), so the case uses an unroutable socket.
 //! - `mpm.sessions.delete` —
 //!   [`parity_sessions_delete_agrees_across_transports`] deletes one of two
 //!   identically-built sessions over each transport and asserts each is gone.
@@ -892,10 +894,24 @@ async fn parity_sessions_resume_unpaused_agrees_across_transports() {
 /// lands in tmux, which a hermetic test has none of. What IS observable is that
 /// neither transport disturbs the registry, and that both return the same
 /// capture — and the tmux `send-keys` they skip is one call in one shared body.
+///
+/// Why the unroutable socket (#10893): with no socket the send reaches
+/// `TmuxDriver::discover`, which reads the host-state gate from the live
+/// `$HOME` on each call. A concurrent test moving `$HOME` between the two
+/// calls gave one transport "tmux unavailable" and the other a `send-keys`
+/// failure. A socket outside this process's socket directory is refused by
+/// `server_of_socket` before `discover`, so both calls answer from fixed
+/// inputs whether or not the host has tmux, and under any test runner.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_sessions_command_leaves_the_same_state_on_both_transports() {
-    let (state, id, _dir) = hermetic_with_session();
+    let (state, dir) = hermetic();
+    let id = SessionId::new();
+    let mut session = Session::new(id, "/tmp/p", ControlModel::Tmux, None);
+    session.status = SessionStatus::Active;
+    // #10893: refused before `discover`, so no env read can differ between calls.
+    session.tmux_socket = Some(dir.path().join("tm-ws-parity-10893"));
+    state.register_session(session);
     let drop = ["last_seen"];
     let before = session_json(&state, id, &drop);
     let payload = json!({"command": "help"});
@@ -918,6 +934,9 @@ async fn parity_sessions_command_leaves_the_same_state_on_both_transports() {
     .await;
     let after_rpc = session_json(&state, id, &drop);
 
+    // #10893: pin the branch taken; a route that reaches `discover` again fails here.
+    let reason = result["send_error"].as_str().unwrap_or_default();
+    assert!(reason.contains("cannot be reached"), "{result}");
     assert_same("mpm.sessions.command", body, result, &[]);
     assert_eq!(before, after_http, "HTTP must not disturb the registry");
     assert_eq!(after_http, after_rpc, "nor may the socket");

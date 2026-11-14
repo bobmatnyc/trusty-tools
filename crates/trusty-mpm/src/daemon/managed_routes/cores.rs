@@ -101,7 +101,7 @@ pub(crate) async fn spawn_core(state: &Arc<DaemonState>, req: SpawnRequest) -> R
                 branch: final_record.branch.clone(),
                 state: final_record.state.to_string(),
                 created_at: final_record.created_at.to_rfc3339(),
-                attach_cmd: attach_cmd_for(&final_record.tmux_name),
+                attach_cmd: attach_cmd_for(&final_record),
                 runtime: final_record.runtime.as_str().to_owned(),
                 deliverable_id: final_record.deliverable_id.map(|id| id.to_string()),
             };
@@ -148,7 +148,7 @@ pub(crate) async fn adopt_core(
             state: record.state.to_string(),
             cwd: record.cwd.to_string_lossy().to_string(),
             runtime: record.runtime.as_str().to_owned(),
-            attach_cmd: attach_cmd_for(&record.tmux_name),
+            attach_cmd: attach_cmd_for(&record),
         }),
         Err(crate::session_manager::ManagedError::TmuxSessionMissing(msg)) => {
             RouteOutcome::text(404, msg)
@@ -377,7 +377,7 @@ pub(crate) async fn attach_cmd_core(state: &Arc<DaemonState>, id_str: &str) -> R
     mgr.rebind_stale_panes().await; // #9313
     match mgr.get(&id).await {
         Ok(record) => RouteOutcome::ok(&AttachCmdResponse {
-            attach_cmd: attach_cmd_for(&record.tmux_name),
+            attach_cmd: attach_cmd_for(&record),
         }),
         Err(_) => not_found(id_str),
     }

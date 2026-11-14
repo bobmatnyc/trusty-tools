@@ -138,7 +138,7 @@ fn media_is_a_known_collection() -> Result<(), Box<dyn std::error::Error>> {
 fn watch_changes_is_a_known_collection() -> Result<(), Box<dyn std::error::Error>> {
     let tmp = tempfile::tempdir()?;
     let schema = json!({"type": "object", "properties": {
-        "key": {"type": "string", "pattern": SHIPPED[12]},
+        "key": {"type": "string", "pattern": SHIPPED[16]},
         "status": {"enum": ["new", "applied", "failed", "dismissed"]}}});
     fs::write(
         tmp.path().join("watch_changes.schema.json"),
@@ -163,8 +163,17 @@ fn watch_changes_is_a_known_collection() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+/// #10697: the code points Python's `re` `\s` matches on `str`
+/// (`str.isspace()`), as one class body; the schemas spell `\s` with it.
+macro_rules! py_space {
+    () => {
+        "\t\n\u{b}\u{c}\r\u{1c}-\u{1f} \u{85}\u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}"
+    };
+}
+
 /// The distinct `pattern`s of the prototype's `schemas/dashboard/*.schema.json`.
-const SHIPPED: [&str; 13] = [
+/// #10697: the first 11 match no run of `0`s; `MB`, `T` and the sha256 were unlisted.
+const SHIPPED: [&str; 17] = [
     "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z$",
     "^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
     "^[0-9]{4}-[0-9]{2}-[0-9]{2}(T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{3})?Z)?$",
@@ -173,13 +182,53 @@ const SHIPPED: [&str; 13] = [
     "^[0-9]{2}:[0-9]{2}$",
     "^G[0-9a-f]{2}$",
     "^S[0-9a-f]{2}$",
+    "^MB[0-9a-fA-F]{4,}$",
+    "^T[0-9a-f]+$",
+    "^[0-9a-f]{64}$",
     "^[^/ ,]+/[^/ ,]+(, [^/ ,]+/[^/ ,]+)*$",
     "^[^/]+/docs/briefs/.+[.]md$",
     "^docs/briefs/[^/].*[.]md$",
     "^https?://",
+    concat!("^[^/", py_space!(), "]+/[^", py_space!(), "]+[.]md$"),
     // #10896: watch_changes.key, a registry key.
     "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$",
 ];
+
+/// #10697: the status-brief pattern, `^[^/\s]+/\S+\.md$` with `\s` spelled
+/// out, loads and refuses exactly Python's whitespace; the old form names `\s`.
+#[test]
+fn status_brief_pattern_matches_python_whitespace() -> Result<(), String> {
+    let brief = Pattern::compile(SHIPPED[15])?;
+    assert!(brief.search("cto/docs/briefs/2026-10-30-x.md") && brief.search("p/a/b.md\n"));
+    assert!(!brief.search("no-slash.txt") && !brief.search("/a.md") && !brief.search("p/.md"));
+    let py_space = [
+        0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680, 0x2000,
+        0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028,
+        0x2029, 0x202f, 0x205f, 0x3000,
+    ];
+    for cp in 0..=0x3000_u32 {
+        let Some(c) = char::from_u32(cp) else {
+            continue;
+        };
+        let want = !py_space.contains(&cp) && c != '/';
+        assert_eq!(
+            brief.search(&format!("{c}/a.md")),
+            want,
+            "U+{cp:04X} before /"
+        );
+        assert_eq!(
+            brief.search(&format!("p/a{c}b.md")),
+            !py_space.contains(&cp),
+            "U+{cp:04X} after /"
+        );
+    }
+    assert!(brief.search("p/a\u{feff}\u{200b}b.md"));
+    let old = Pattern::compile("^[^/\\s]+/\\S+\\.md$")
+        .err()
+        .unwrap_or_default();
+    assert!(old.contains("escape class \\s is not supported"), "{old}");
+    Ok(())
+}
 
 /// Every `pattern` value under `v`.
 fn patterns_in(v: &Value, out: &mut Vec<String>) {
@@ -216,12 +265,14 @@ fn shipped_patterns_match_a_megabyte_on_a_small_stack() -> Result<(), Box<dyn st
         let brief = format!("{x}/docs/briefs/{x}.md");
         let rel = format!("docs/briefs/{x}.md");
         let url = format!("https://{x}");
-        for (source, text, want) in SHIPPED[..8].iter().map(|p| (*p, &digits, false)).chain([
-            (SHIPPED[8], &repos, true),
-            (SHIPPED[9], &brief, true),
-            (SHIPPED[10], &rel, true),
-            (SHIPPED[11], &url, true),
-            (SHIPPED[9], &x, false),
+        for (source, text, want) in SHIPPED[..11].iter().map(|p| (*p, &digits, false)).chain([
+            (SHIPPED[11], &repos, true),
+            (SHIPPED[12], &brief, true),
+            (SHIPPED[13], &rel, true),
+            (SHIPPED[14], &url, true),
+            (SHIPPED[12], &x, false),
+            (SHIPPED[15], &brief, true),
+            (SHIPPED[15], &x, false),
         ]) {
             let got = Pattern::compile(source)?.search(text);
             if got != want {

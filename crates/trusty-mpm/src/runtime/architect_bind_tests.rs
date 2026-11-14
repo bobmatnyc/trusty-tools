@@ -237,7 +237,7 @@ enum Site {
     Refuses(&'static str),
     /// Does not bind yet; named in [`DEFERRED`].
     Deferred,
-    /// Starts no `claude`: defines the stamp, or a doctor probe line.
+    /// Starts no `claude`: defines the stamp, reads it, or a doctor probe line.
     NoLaunch,
 }
 
@@ -255,6 +255,8 @@ const STAMP_NEEDLES: &[&str] = &[
 const SITES: &[(&str, Site)] = &[
     ("core/session_profile.rs", Site::NoLaunch),
     ("daemon/doctor_transcript_saving.rs", Site::NoLaunch),
+    // #11194: the egress hook compares a session's stamp to the PM value; it starts nothing.
+    ("bin/tm/commands/egress_guard_pm_dm.rs", Site::NoLaunch),
     (
         "core/session_launch/system_prompt.rs",
         Site::Builds("cli_launch("),

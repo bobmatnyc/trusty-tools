@@ -8,9 +8,11 @@ one content-free line per save in <inbox>/doc-edits.jsonl); `attach` (POST /api/
 Intent Ledger attachment, GET /api/attach/<item id>/<stored name> serves it sandboxed; dashboard_attach.py); `fleet`
 (GET /api/fleet: count plus working|waiting|paused|inactive per managed session); `projects` (GET /api/projects;
 dashboard_projects.py, with the watch state from the watch_changes docs); `cli_profiles` (GET /api/cli-profiles, only when the optional cli_profiles module is present,
-else 404); `static` (GET /static/<name>, the fixed STATIC_FILES names only). Every function returns the handler's
+else 404); `pane` (GET /api/pane?session=<tm-name>&lines=<n>: a managed session's masked pane tail, #11065 phase 3);
+`static` (GET /static/<name>, the fixed STATIC_FILES names only). Every function returns the handler's
 _send/_err result. Standard library only.
-Test: tests/test_dashboard_doc.py, tests/test_dashboard_attach.py, tests/test_dashboard_routes.py
+Test: tests/test_dashboard_doc.py, tests/test_dashboard_attach.py, tests/test_dashboard_routes.py,
+tests/test_dashboard_pane_route.py
 """
 import hashlib
 import json
@@ -26,6 +28,7 @@ import dashboard_attach
 import dashboard_docs as docs
 import dashboard_harness
 import dashboard_page as page
+import dashboard_pane_tail
 import dashboard_store as ds
 
 try:
@@ -37,12 +40,17 @@ _DOC_PUT_LOCK = threading.Lock()
 
 
 def _architect_get(h):
-    """None when the request may proceed (architect mode, GET/HEAD); else the 404/405 response."""
+    """True when the request was refused (the 404/405 is sent); False when it may proceed (architect mode, GET/HEAD).
+
+    #11065: h._err returns None, so a "None means proceed" contract let a refused request run its route as well.
+    """
     if h.server.config.get("mode") != "architect":
-        return h._err(404, "not_found", "no such path")
+        h._err(404, "not_found", "no such path")
+        return True
     if h.command not in ("GET", "HEAD"):
-        return h._err(405, "method_not_allowed", "GET only")
-    return None
+        h._err(405, "method_not_allowed", "GET only")
+        return True
+    return False
 
 
 def doc_put(h, raw_path, origin_allowed, digits):
@@ -132,26 +140,27 @@ def attach(h, rest, q, digits):
                                                        h.server.architect_il, root, actor=h._actor()))
 
 
-def fleet(h):
-    """GET /api/fleet: {sessions: {name: {status, alive, managed}}, count, inactive}; architect mode only, cached ~4 s."""
-    refused = _architect_get(h)
-    if refused is not None:
-        return refused
-    sv = h.server
-
+def _fleet_snapshot(sv):
+    """The /api/fleet body, from sv.fleet_cache (~4 s); /api/pane reads its managed set from the same build (#11180)."""
     def build():
         live = dashboard_harness.read_json(os.path.join(sv.inbox, "dashboard-live.json"))
         return dashboard_harness.fleet_status([d["data"] for d in sv.store.list_docs("sessions")],
                                               [d["data"] for d in sv.store.list_docs("goals")],
                                               dashboard_harness.tmux_sessions(), live)
-    return h._send(200, sv.fleet_cache.get(build))
+    return sv.fleet_cache.get(build)
+
+
+def fleet(h):
+    """GET /api/fleet: {sessions: {name: {status, alive, managed}}, count, inactive}; architect mode only, cached ~4 s."""
+    if _architect_get(h):
+        return None
+    return h._send(200, _fleet_snapshot(h.server))
 
 
 def projects(h):
     """GET /api/projects: registry projects with sessions, stack, config, custom agents and watch state; architect mode only."""
-    refused = _architect_get(h)
-    if refused is not None:
-        return refused
+    if _architect_get(h):
+        return None
     sess_ids = {d["data"].get("name"): d["id"] for d in h.server.store.list_docs("sessions")
                 if isinstance(d["data"], dict) and d["data"].get("name")}   # the row id is the doc id, not a data field
     # #10896: the Watch / Unwatch requests, read per request so a just-queued one shows at once
@@ -162,14 +171,70 @@ def cli_profiles(h, url):
     """GET /api/cli-profiles: per-profile auth status (names only) and mappings; 404 while cli_profiles is not shipped."""
     if cli_profiles_mod is None:
         return h._err(404, "not_found", "no such path")
-    refused = _architect_get(h)
-    if refused is not None:
-        return refused
+    if _architect_get(h):
+        return None
     try:
         return h._send(200, cli_profiles_mod.snapshot(h.server.cli_profiles or cli_profiles_mod.DEFAULT_FILE,
                                                       runner=h.server.cli_runner, refresh="refresh" in parse_qs(url.query)))
     except cli_profiles_mod.ProfileError as e:
         return h._err(500, "cli_profiles_unreadable", str(e))
+
+
+PANE_SESSION_MAX = 200   # characters; a longer ?session= is a 400, never a tmux lookup
+PANE_LINES_DIGITS_MAX = 6   # #11180: int() refuses over 4300 digits (a 500); the clamp makes more than 6 pointless
+
+
+def _managed_sessions(sv):
+    """Names /api/fleet lists as managed, or None when the fleet build fails or returns no session map (#11180)."""
+    try:
+        sessions = _fleet_snapshot(sv).get("sessions")
+    except Exception as e:  # noqa: BLE001 - any failure means the managed set is unknown; the caller fails closed
+        sys.stderr.write(f"pane: managed set unavailable: {e!r}\n")
+        return None
+    if not isinstance(sessions, dict):
+        return None
+    return {n for n, v in sessions.items() if isinstance(v, dict) and v.get("managed")}
+
+
+def pane(h, url):
+    """GET /api/pane?session=<tm-name>&lines=<n>: {session, lines, captured_at, truncated}; architect mode only.
+
+    Why: a Decision shows the session's most recent pane lines (#11065 phase 3). The dashboard reads them at click
+    time; nothing is stored and nothing goes on the daemon bus. Only managed sessions: list_panes covers every tmux
+    server, including personal shells (#11180).
+    What: `session` is required and matched exactly; `lines` defaults to 40 and is clamped into [10, 200] by
+    dashboard_pane_tail.clamp_lines, a non-integer or one over PANE_LINES_DIGITS_MAX digits is a 400. `session`
+    must be in the /api/fleet managed set (_fleet_snapshot) before any pane lookup: outside it is 404 not_running,
+    and a set that cannot be built is 503 fleet_unavailable (fail closed). The tail comes from h.server.pane_tail
+    (default dashboard_pane_tail.session_pane_tail: masked, line-capped, cached 3 s in memory). `captured_at` is
+    ISO-8601 UTC. 404 not_running when no tmux session has that exact name, 503 capture_failed when tmux did not
+    answer; the failure detail goes to stderr only. The Host/Origin guard in dashboard_http.py runs before this.
+    Test: tests/test_dashboard_pane_route.py
+    """
+    if _architect_get(h):
+        return None
+    q = parse_qs(url.query)
+    name = (q.get("session") or [""])[0]
+    if not name or len(name) > PANE_SESSION_MAX:
+        return h._err(400, "bad_request", f"session must be 1..{PANE_SESSION_MAX} characters")
+    raw = (q.get("lines") or [None])[0]
+    # isdigit alone passes "²"; the length cap keeps int() under its digit limit (#11180)
+    if raw is not None and not (raw.isascii() and raw.isdigit() and len(raw) <= PANE_LINES_DIGITS_MAX):
+        return h._err(400, "bad_request", "lines must be an integer")
+    n = dashboard_pane_tail.clamp_lines(None if raw is None else int(raw))
+    managed = _managed_sessions(h.server)
+    if managed is None:
+        return h._err(503, "fleet_unavailable", "managed sessions unavailable")
+    if name not in managed:   # same answer as a stopped session: the route does not reveal other tmux sessions
+        return h._err(404, "not_running", "no running session with that name")
+    tail = h.server.pane_tail(name, n)
+    if isinstance(tail, dashboard_pane_tail.PaneTailFailure):
+        sys.stderr.write(f"pane tail {tail.kind}: {tail.detail}\n")
+        if tail.kind == dashboard_pane_tail.NOT_RUNNING:
+            return h._err(404, "not_running", "no running session with that name")
+        return h._err(503, "capture_failed", "pane capture failed")
+    at = datetime.fromtimestamp(tail.captured_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return h._send(200, {"session": tail.session, "lines": list(tail.lines), "captured_at": at, "truncated": tail.truncated})
 
 
 def static(h, parts):

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use trusty_common::console_metrics::ConsoleMetricsReport;
 
+use super::machine::MachineFeeds;
 use super::services::ServiceId;
 use crate::tui::architect::{self, ArchitectAction, ArchitectState, Tab};
 
@@ -151,6 +152,8 @@ pub struct HomeState {
     pub should_exit: bool,
     /// The Architect view's tab, selection and last fetch.
     pub architect: ArchitectState,
+    /// #10942: the last `console.machine_status` and `console.history` results.
+    pub machine: MachineFeeds,
 }
 
 impl Default for HomeState {
@@ -166,6 +169,7 @@ impl Default for HomeState {
             metrics: HashMap::new(),
             should_exit: false,
             architect: ArchitectState::default(),
+            machine: MachineFeeds::default(),
         }
     }
 }
@@ -256,11 +260,11 @@ impl HomeState {
 ///
 /// Why (#10491): Enter on trusty-mpm opens today's projects view; Enter on any
 /// other row opens its service view; Esc returns home. #10966: `a` opens
-/// the Architect view.
+/// the Architect view, `v` its Live tracker.
 /// What: mutates `state` and returns the I/O the event loop must start.
 /// Test: `enter_on_mpm_opens_projects`, `enter_on_search_opens_its_view_and_esc_returns`,
 /// `arrows_move_the_selection_within_the_table`, `q_quits_from_any_view`,
-/// `a_opens_the_architect_view_and_esc_returns`.
+/// `a_opens_architect_and_v_opens_live`.
 pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<HomeAction> {
     if key.code == KeyCode::Char('q')
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -293,6 +297,11 @@ pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<
             }
             KeyCode::Char('a') => {
                 state.architect.open(Tab::Decisions);
+                state.view = View::Architect;
+                None
+            }
+            KeyCode::Char('v') => {
+                state.architect.open(Tab::Live);
                 state.view = View::Architect;
                 None
             }

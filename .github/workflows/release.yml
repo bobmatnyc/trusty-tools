@@ -1090,8 +1090,7 @@ jobs:
         # the exact string silently skipped apt on the whole arm64 leg.
         if: matrix.container == '' && startsWith(matrix.runner, 'ubuntu')
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          bash scripts/ci-apt-install.sh \
             build-essential pkg-config libssl-dev binutils curl file
 
       # ── zig + cargo-zigbuild (issue #2037) ──────────────────────────────────

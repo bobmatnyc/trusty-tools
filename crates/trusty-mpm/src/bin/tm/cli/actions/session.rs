@@ -374,6 +374,26 @@ pub(crate) enum SessionAction {
         #[arg(long)]
         force: bool,
     },
+    /// Move a session's project directory to ~/.trusty-tools/archive (#10991).
+    ///
+    /// The archive root is owner-only (0700). A manifest records the origin
+    /// path so the directory can be moved back. Refused while a session runs
+    /// in the directory unless --force, which stops it first; an Architect
+    /// session is always refused. Session records are kept; the project shows
+    /// archived until a new session runs.
+    Archive {
+        /// Managed session id.
+        id: String,
+        /// Report what would move and who would stop; change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Stop sessions running in the directory instead of refusing.
+        #[arg(long)]
+        force: bool,
+        /// Emit the raw report JSON instead of the human view.
+        #[arg(long)]
+        json: bool,
+    },
     /// Rename a managed session — from the list OR from within a session.
     ///
     /// Why: operators need to give a managed session a meaningful name. A

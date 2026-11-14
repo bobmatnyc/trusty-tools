@@ -19,7 +19,9 @@ use super::{
     ensure_git_repo_with, initialized_message, missing_git_error, plan_auto_init, refusal_message,
     stderr_means_no_repository,
 };
-use trusty_mpm::core::child_repo_scan::{ChildRepoScan, ScanIncomplete, WORKSPACE_SCAN_BUDGET};
+use trusty_mpm::core::child_repo_scan::{
+    ChildRepoScan, PROJECT_SCAN_BUDGET, ScanIncomplete, WORKSPACE_SCAN_BUDGET,
+};
 
 use crate::test_support::hermetic_temp_dir;
 
@@ -317,6 +319,24 @@ fn auto_init_initializes_a_plain_directory() {
         Some(dir.canonicalize().unwrap()),
         "the repository root must be the invocation directory, not a parent"
     );
+}
+
+/// #10461, FAILS BEFORE THE FIX: a plain directory with more subdirectories
+/// than the shared 256 budget, and no child repository, was refused as a scan
+/// that could not finish. Under `PROJECT_SCAN_BUDGET` it is initialized.
+#[test]
+fn auto_init_initializes_a_project_wider_than_the_workspace_budget() {
+    let tmp = hermetic_temp_dir();
+    let dir = tmp.path().join("wide-project");
+    std::fs::create_dir(&dir).unwrap();
+    for i in 0..(WORKSPACE_SCAN_BUDGET + 44) {
+        std::fs::create_dir(dir.join(format!("d{i}"))).unwrap();
+    }
+
+    let outcome = ensure_git_repo_with(&dir, Some(tmp.path()), "git").unwrap();
+
+    assert_eq!(outcome, AutoInitOutcome::Initialized);
+    assert!(dir.join(".git").is_dir(), "a .git directory must exist now");
 }
 
 /// Regression for the pre-fix refusal path: the directory `tm` used to answer
@@ -637,7 +657,7 @@ fn classify_keeps_every_other_failure_an_error() {
 /// #7749 review: the route `tm launch` takes once this guard refuses, pinned
 /// as observed rather than assumed.
 ///
-/// A plain directory with more than `WORKSPACE_SCAN_BUDGET` subdirectories
+/// A plain directory with more than `PROJECT_SCAN_BUDGET` subdirectories (#10461)
 /// refuses at `launch.rs:128` and nothing is initialized. The launch does NOT
 /// stop there: `git config --get remote.origin.url` outside a repository exits
 /// 1, which `get_origin_url` maps to `Ok(None)`, which `plan_for_origin` maps
@@ -652,7 +672,7 @@ fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
     let tmp = hermetic_temp_dir();
     let ws = tmp.path().join("wide-workspace");
     std::fs::create_dir(&ws).unwrap();
-    for i in 0..=WORKSPACE_SCAN_BUDGET {
+    for i in 0..=PROJECT_SCAN_BUDGET {
         std::fs::create_dir(ws.join(format!("d{i}"))).unwrap();
     }
 
@@ -663,7 +683,7 @@ fn launch_route_after_a_scan_refusal_falls_through_to_the_live_checkout() {
         outcome,
         AutoInitOutcome::Refused(AutoInitRefusal::ScanIncomplete(
             ScanIncomplete::BudgetExhausted {
-                budget: WORKSPACE_SCAN_BUDGET
+                budget: PROJECT_SCAN_BUDGET
             }
         ))
     );

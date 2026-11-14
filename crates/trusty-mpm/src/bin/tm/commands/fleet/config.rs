@@ -193,13 +193,8 @@ pub(crate) fn other_architects(config: &MpmConfig, dir: &Path) -> Vec<PathBuf> {
 /// Test: `status_without_dir_checks_the_recorded_architect`,
 /// `a_second_architect_elsewhere_is_refused`.
 pub(crate) fn architects(config: &MpmConfig) -> Vec<PathBuf> {
-    config
-        .architect_grant()
-        .projects
-        .iter()
-        .filter(|entry| entry.is_absolute() && session_profile::requested(entry).is_architect())
-        .cloned()
-        .collect()
+    // #10944 Q5: the lib owns the rule; the daemon's resolver reads it too.
+    trusty_mpm::core::architect_store::recorded_architects(config)
 }
 
 /// `dir` as the string an allowlist entry holds.

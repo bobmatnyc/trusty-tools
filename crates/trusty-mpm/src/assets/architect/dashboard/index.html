@@ -49,7 +49,7 @@ h1 { flex: 0 1 auto; min-width: min-content; overflow-wrap: normal; word-break: 
 .st-opt:hover, .st-opt:focus-visible { background: color-mix(in srgb, var(--accent) 14%, var(--surface-1)); }
 .st-opt[aria-checked="true"] .sp-name::after { content: " \2713"; }
 .sp-field { display: grid; gap: 4px; font-size: var(--fs-sm); }
-.sp-field input { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
+.sp-field input, .sp-field select { font: inherit; padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); min-width: 0; box-sizing: border-box; width: 100%; }
 .sp-field input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .sp-row .sp-field { flex: 1 1 8rem; min-width: 0; }
 .sp-field input[type="time"] { -webkit-appearance: none; appearance: none; display: block; max-width: 100%; min-height: 2.2rem; }   /* iOS gives time inputs an intrinsic width wider than a phone fieldset */
@@ -105,6 +105,19 @@ details[open] > summary > .chev::before { content: "▾"; }
 .status-briefs li { margin: 2px 0; }
 .status-briefs li:first-child { margin-top: 0; }
 .sb-link { font-family: var(--font-mono); }
+/* #11065: a session's last pane lines (Decision row "Last output", page "Show session") */
+.pane-last { margin: 8px 0 0; min-width: 0; }
+.pane-last > summary { display: flex; align-items: center; min-height: var(--h-touch); cursor: pointer; color: var(--accent); font-weight: 600; }
+.pane-out { min-width: 0; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-1); }
+.pane-head, .pane-pick { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.pane-name { font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; }
+.pane-age, .pane-msg { color: var(--ink-2); font-size: var(--fs-sm); }
+.pane-msg { margin: 6px 0 0; }
+.pane-msg:empty, .pane-lines:empty { display: none; }
+.pane-msg[data-state="error"] { color: var(--st-stop-ink); }
+.pane-lines { margin: 6px 0 0; max-height: 50vh; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pane-out .btn, .pane-pick .btn, .pane-pick select { min-height: var(--h-touch); min-width: var(--h-touch); }
+.pane-pick select { flex: 1 1 160px; min-width: 0; font: inherit; font-size: 16px; }
 .pane-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 8px; min-width: 0; }
 .pane-filter input.pf-input { flex: 1 1 220px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .pane-filter input.pf-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -112,6 +125,10 @@ details[open] > summary > .chev::before { content: "▾"; }
 .pane-filter .pf-clear[hidden] { display: none; }
 .pane-filter .pf-clear:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .pane-filter .pf-status { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
+.pane-filter select.pf-sort { flex: none; font-size: var(--fs-sm); }   /* the Decisions Sort select (issue 11047; a hex-like tag fails the token check) */
+.dg-head { display: flex; gap: 8px; align-items: baseline; padding: 10px 4px 4px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 600; color: var(--ink-2); }
+.dg-head .n { font-weight: 400; }
+.chip.proj { color: var(--ink-2); }
 .cbar input[type=search] { flex: 1 1 180px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .cbar input[type=search]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .cbar .pg-label { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--ink-2); }
@@ -463,7 +480,7 @@ button, summary, .opt { touch-action: manipulation; }
   .item > summary, .sub > summary, .sec > summary { min-height: 44px; }
   .item.prio > summary { min-height: 44px; }
   .step-top { min-height: 44px; align-items: center; }
-  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
+  .pane-filter input.pf-input, .pane-filter .pf-clear, .cbar input[type=search], .pane-filter select.pf-sort, .attach input[type=file], .other input, .row input, .cancel-form input, .step-note-form input, .fb-form input, .fb-form select, .wd-form textarea { min-height: 44px; font-size: 16px; }
 }
 @media (max-width: 600px) {
   .brand { row-gap: 8px; }
@@ -991,6 +1008,20 @@ html.lib-strip.rd-open body { padding-right: 0; }
       <datalist id="set-tz-list"></datalist>
       <label class="sp-field">Sleep from<input type="time" id="set-sleep-start" step="900"></label>
       <p class="err" id="set-time-err" role="status"></p>
+    </fieldset>
+    <!-- #11064: the owner's technical level (meta/settings.technical_level); a secondary user keeps their own level -->
+    <fieldset class="sp-group" data-arch-only id="set-level-group">
+      <legend>Technical level</legend>
+      <p class="sp-note">How technical the Architect's questions, briefs and messages to you are. Linked briefs keep the full detail; ask for more detail on any item. Secondary users keep their own level.</p>
+      <label class="sp-field">Write for<select id="set-level">
+        <option value="non-technical">Non-technical</option>
+        <option value="vibe-coder">Vibe-coder</option>
+        <option value="pm">PM (default)</option>
+        <option value="engineer">Engineer</option>
+        <option value="senior-engineer">Senior engineer</option>
+        <option value="cto">CTO</option>
+      </select></label>
+      <p class="err" id="set-level-err" role="status"></p>
     </fieldset>
     <fieldset class="sp-group" data-arch-only id="set-brief-group">
       <legend>Morning brief</legend>
@@ -3848,6 +3879,12 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!sb) return null;
     const w = el("span", "sb-latest"); w.append("Status ", statusBriefLink(sb)); return w;
   }
+  /* #11047: a decision row's project chip, in every sort mode; data.project is computed by the server from the session (never stored). The session dashboard has one project and shows none. */
+  function projectChip(it) {
+    const p = txt(it.project).trim();
+    if (!p || askKind(it) !== "D" || (typeof SESSION !== "undefined" && SESSION)) return null;
+    const c = el("span", "chip proj", p); c.title = "Project"; return c;
+  }
   function shell(it, cls) {
     const card = el("details", "item" + (cls ? " " + cls : "") + (it.status === "open" ? " needs" : "") + (it.status === "answered" || it.status === "done" || it.status === "cancelled" || it.status === "wont_do" || it.status === "interactive" ? " faded" : ""));
     syncItemState(it);
@@ -3872,6 +3909,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     else if (it.status === "interactive") sum.appendChild(el("span", "chip", "interactive"));
     else if (it.due && !runWindow(it, Date.now())) sum.appendChild(el("span", "chip due", "by " + utc(it.due)));
     if (wasReopened(it)) sum.appendChild(el("span", "chip reopened", "reopened"));
+    { const pc = projectChip(it); if (pc) sum.appendChild(pc); }   /* #11047 */
     { const bs = briefDoc(it) ? briefSlot(it.brief) : null; if (bs) sum.appendChild(bs); }
     { const sb = statusBriefSlot(it); if (sb) sum.appendChild(sb); }
     if (isParked(it)) {
@@ -3913,6 +3951,109 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const tl = taskLink(it); if (tl) m.appendChild(tl);
     return m;
   }
+  /* BEGIN paneTail */
+  /* #11065: last pane lines from GET /api/pane, fetched only on open or Refresh; textContent only, kept in memory only. */
+  function paneAge(at, now) {
+    const t = Date.parse(txt(at)); if (!isFinite(t)) return "capture time unknown";
+    const s = Math.max(0, Math.round((now - t) / 1000));
+    return "captured " + (s < 5 ? "just now" : s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : Math.floor(s / 3600) + " h ago");
+  }
+  /* An item's `session` is a tmux name or a session doc id (see sessionTasks); resolve to the tmux name, "" when it is not a live managed session. */
+  function paneName(raw, fleetBody, docs) {
+    const r = txt(raw).trim(); if (!r) return "";
+    const ds = Array.isArray(docs) ? docs : [];
+    const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : null;
+    const isName = (f && f[r]) || ds.some((x) => x && txt(x.name) === r);   /* a name never maps to another doc's pane */
+    const d = isName ? null : ds.find((x) => x && txt(x.id) === r && txt(x.name));
+    const n = d ? txt(d.name) : r;
+    return !f || (f[n] && f[n].managed) ? n : "";
+  }
+  let paneTimeoutMs = 15000;   // #11065: a stalled phone or tailnet request ends in the error state, never a stuck "Loading…"
+  async function paneFetch(name, lines) {
+    let r, j, timer, late = false;
+    const ac = typeof AbortController === "function" ? new AbortController() : null;
+    const cap = new Promise((_, no) => { timer = setTimeout(() => { late = true; if (ac) ac.abort(); no(new Error("timeout")); }, paneTimeoutMs); });
+    const within = (p) => Promise.race([p, cap]);
+    try {
+      try { r = await within(fetch("/api/pane?session=" + encodeURIComponent(name) + "&lines=" + (lines || 40), { cache: "no-store", signal: ac ? ac.signal : undefined })); }
+      catch (_) { return { state: "error", why: late ? "timeout" : "network" }; }
+      if (r.status === 404) return { state: "none" };
+      if (!r.ok) return { state: "error", why: r.status === 503 ? "capture" : "http", status: r.status };
+      try { j = await within(r.json()); } catch (_) { if (late) return { state: "error", why: "timeout" }; j = null; }
+    } finally { clearTimeout(timer); }
+    if (!j || !Array.isArray(j.lines)) return { state: "error", why: "http", status: r.status };
+    return { state: "ok", lines: j.lines.map(txt), at: txt(j.captured_at), truncated: !!j.truncated };
+  }
+  const paneViews = new Set();
+  /* One output box; `gen` drops a response that arrives after the box moved on to another session (or a newer Refresh). */
+  function paneView() {
+    const box = el("div", "pane-out"), head = el("div", "pane-head");
+    const nameEl = el("span", "pane-name"), age = el("span", "pane-age"), trunc = el("span", "chip pane-trunc", "truncated");
+    const btn = el("button", "tap btn ghost pane-refresh", "Refresh"); btn.type = "button";
+    const msg = el("p", "pane-msg"); msg.setAttribute("role", "status"); msg.setAttribute("aria-live", "polite");
+    const pre = el("pre", "pane-lines"); pre.tabIndex = 0;
+    head.append(nameEl, age, trunc, btn); box.append(head, msg, pre);
+    const v = { box: box, name: "", gen: 0, at: "", loaded: false, msg: msg, pre: pre, age: age, trunc: trunc, btn: btn };
+    const paint = (state, text) => { msg.dataset.state = state; msg.textContent = text; };
+    v.tick = (now) => { age.textContent = v.at ? paneAge(v.at, now) : ""; };
+    v.show = (name) => {
+      const g = ++v.gen; v.name = name; v.at = ""; v.loaded = true;
+      nameEl.textContent = name; pre.textContent = ""; age.textContent = ""; trunc.hidden = true; btn.hidden = !name;
+      if (!name) { btn.disabled = false; paint("none", "No live pane for this session."); return Promise.resolve(); }
+      btn.disabled = true; paint("loading", "Loading…");
+      return paneFetch(name).then((res) => {
+        if (g !== v.gen) return;
+        btn.disabled = false;
+        if (res.state === "ok") {
+          v.at = res.at; pre.textContent = res.lines.join("\n"); trunc.hidden = !res.truncated; v.tick(Date.now());
+          paint("ok", res.lines.length ? "" : "The pane is empty.");
+        } else if (res.state === "none") paint("none", "No live pane: " + name + " is not running.");
+        else paint("error", res.why === "network" ? "Network error: the pane did not load." : res.why === "timeout" ? "The pane did not answer in time. Try Refresh." : res.why === "capture" ? "The pane could not be captured. Try Refresh." : "The pane did not load (HTTP " + res.status + ").");
+      });
+    };
+    v.refresh = () => v.show(v.name);
+    trunc.hidden = true; btn.hidden = true;
+    btn.addEventListener("click", () => { v.refresh(); });
+    paneViews.add(v);
+    return v;
+  }
+  const paneRows = new Map();   /* item id + resolved name -> {open, view}; survives re-render, memory only */
+  function lastOutput(it) {
+    if ((typeof SESSION !== "undefined" && SESSION) || !txt(it && it.session).trim()) return null;
+    const name = paneName(it.session, fleet, sessions), key = it.id + "\u0000" + name;
+    let st = paneRows.get(key); if (!st) { st = { open: false, view: null }; paneRows.set(key, st); }
+    const d = el("details", "pane-last");
+    d.appendChild(el("summary", null, "Last output"));
+    if (st.open && st.view) { d.appendChild(st.view.box); d.open = true; }
+    d.addEventListener("toggle", () => {
+      st.open = d.open;
+      if (!d.open) return;
+      if (!st.view) st.view = paneView();
+      if (st.view.box.parentNode !== d) d.appendChild(st.view.box);
+      if (!st.view.loaded || st.view.msg.dataset.state === "error") st.view.show(name);   // #11065: reopening retries a failed capture
+    });
+    return d;
+  }
+  /* The page control: pick a managed session, Show, then Refresh inside the box. */
+  function paneControl() {
+    const d = el("details", "sub pane-ctl"), s = el("summary");
+    const ch = el("span", "chev"); ch.setAttribute("aria-hidden", "true");
+    s.append(ch, el("h3", null, "Show session")); d.appendChild(s);
+    const row = el("div", "pane-pick"), sel = el("select", "ctl"), go = el("button", "tap btn", "Show"), v = paneView();
+    sel.id = "pane-pick"; sel.setAttribute("aria-label", "Session to show"); go.type = "button";
+    row.append(sel, go); d.append(row, v.box);
+    go.addEventListener("click", () => { if (sel.value) v.show(sel.value); });
+    d.sync = (fleetBody) => {
+      const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : {};
+      const names = Object.keys(f).filter((n) => f[n] && f[n].managed).sort(), cur = sel.value;
+      sel.replaceChildren(...names.map((n) => { const o = el("option", null, n); o.value = n; return o; }));
+      if (names.indexOf(cur) >= 0) sel.value = cur;
+      go.disabled = !names.length;
+    };
+    d.view = v;
+    return d;
+  }
+  /* END paneTail */
   /* BEGIN taskChain */
   /* Task -> session -> project (the owner 2026-10-28). Pure: chain text parts for an item's `task` field, given the item and session lists. */
   function taskChain(it, itemList, sessionList) {
@@ -4209,6 +4350,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function renderQuestion(it) {
     const [card, body] = shell(it, it.due ? "urgent" : "");
     body.appendChild(metaRow(it));
+    { const lo = lastOutput(it); if (lo) body.appendChild(lo); }   // #11065: the session's last pane lines, on open only
     if (it.detail) body.appendChild(longField(el("p", "detail"), it.detail, { title: txt(it.title) || it.id, doc: it.doc, arch: isArchItem(it) }));
     const tools = el("div", "act-tools"); tools.setAttribute("role", "group"); tools.setAttribute("aria-label", "More actions for " + it.id);
     briefControl(body, it, tools);
@@ -4493,7 +4635,51 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function oldestFirst(a, b) {
     return txt(a.created).localeCompare(txt(b.created)) || byRank(a, b);
   }
+  /* #11047: the Decisions Sort select (D80): oldest first (default), newest first, or project A–Z. */
+  const DECISION_SORTS = [["oldest", "Oldest first"], ["newest", "Newest first"], ["project", "Project (A–Z)"]];
+  function newestFirst(a, b) {
+    return txt(b.created).localeCompare(txt(a.created)) || byRank(a, b);
+  }
+  /* Project groups of a list already in display order: projects A–Z, then "" (No project) last; each group keeps the list's order. */
+  function decisionGroups(list) {
+    const by = new Map();
+    list.forEach((i) => { const p = txt(i && i.project).trim(); if (!by.has(p)) by.set(p, []); by.get(p).push(i); });
+    const keys = Array.from(by.keys()).sort((x, y) => (x === "") - (y === "") || x.localeCompare(y, undefined, { sensitivity: "base" }) || (x < y ? -1 : x > y ? 1 : 0));
+    return keys.map((k) => ({ project: k, items: by.get(k) }));
+  }
+  /* Open decisions in display order for a sort mode; an unknown mode is oldest first. */
+  function decisionList(list, mode) {
+    if (mode === "newest") return list.sort(newestFirst);
+    list.sort(oldestFirst);
+    return mode === "project" ? decisionGroups(list).reduce((a, g) => a.concat(g.items), []) : list;
+  }
   /* END decisionOrder */
+  /* BEGIN decisionGroupsDom */
+  /* #11047: Project mode puts a header (project name + count) before each group; the other modes render the rows flat. */
+  function decisionNodes(list, mode, render) {
+    if (mode !== "project") return list.map(render);
+    return decisionGroups(list).reduce((a, g) => {
+      const h = el("div", "dg-head"), name = g.project || "No project";
+      h.dataset.dgroup = g.project;
+      h.append(el("span", "dg-name", name), el("span", "n", String(g.items.length)));
+      h.setAttribute("role", "heading"); h.setAttribute("aria-level", "4");
+      return a.concat([h], g.items.map(render));
+    }, []);
+  }
+  /* After the pane and nav filters hide rows, each group header counts its visible rows and drops out at zero. */
+  function dgSync(box) {
+    let head = null, n = 0;
+    const done = () => { if (head) { head.querySelector(".n").textContent = String(n); head.classList.toggle("nv-off", !n); } };
+    Array.from(box.children).forEach((c) => {
+      if (c.classList.contains("dg-head")) { done(); head = c; n = 0; }
+      else if (c.matches("[data-pid]") && !c.classList.contains("nv-off")) n++;
+    });
+    done();
+  }
+  /* END decisionGroupsDom */
+  const DSORT_KEY = OPEN_KEY + "-decision-sort";
+  let decisionSort = "oldest";
+  try { const v = localStorage.getItem(DSORT_KEY); if (DECISION_SORTS.some((s) => s[0] === v)) decisionSort = v; } catch (_) {}
   function newest(field) { return (x, y) => txt(y[field]).localeCompare(txt(x[field])); }
 
   /* Parked items sit in one collapsed bucket per section, soonest wake date first; they use the normal rows so answers still work. */
@@ -4501,8 +4687,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const by = { D: [], A: [], T: [] };
     items.filter(isParked).forEach((i) => by[askKind(i)].push(i));
     [["D", "q", renderQuestion], ["A", "a", renderAction], ["T", "t", renderTask]].forEach((k) => {
-      const list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
-      fillList($("list-" + k[1] + "p"), list.map(k[2]), "Nothing parked.");
+      let list = by[k[0]].sort((x, y) => txt(x.parked.until || "").localeCompare(txt(y.parked.until || "")));
+      const grouped = k[0] === "D" && decisionSort === "project";   /* #11047: Parked decisions group by project too, wake order kept */
+      if (grouped) list = decisionGroups(list).reduce((a, g) => a.concat(g.items), []);
+      fillList($("list-" + k[1] + "p"), grouped ? decisionNodes(list, "project", k[2]) : list.map(k[2]), "Nothing parked.");
       $("n-" + k[1] + "p").textContent = String(list.length);
       nl({ D: "decisions", A: "asks", T: "tasks" }[k[0]]).parked = list;
     });
@@ -4622,10 +4810,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const nBrief = (k) => briefing.filter((i) => askKind(i) === k).length;
     const P = partitionItems(open, answered, done);
     renderParked();
-    const q = P.q.sort(oldestFirst), qa = P.qa;
+    const q = decisionList(P.q, decisionSort), qa = P.qa;   /* #11047: the Sort select's order */
     const a = P.a.sort(sortKey), aa = P.aa;
     const t = P.t.concat(P.ta).sort(sortKey), ta = [];   /* Tasks have no Answered tab (the owner 2026-10-22 17:0xZ, ar-Tc2): an answered task counts as in progress */
-    fillList($("list-q"), q.map(renderQuestion), "Nothing to decide right now.");
+    fillList($("list-q"), decisionNodes(q, decisionSort, renderQuestion), "Nothing to decide right now.");
     fillList($("list-a"), a.map(renderAction), "No blockers right now.");
     fillList($("list-t"), t.map(renderTask), "The Architect has no open tasks.");
     /* Answered (waiting for the Architect) and Done are separate tabs, so the tab counts add up to the section summary (the owner 2026-10-21 14:34Z). */
@@ -5894,6 +6082,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
     return { payload: { morning_brief: Object.assign({}, existing && typeof existing === "object" ? existing : {}, { enabled: !!enabled, time: time, days: spec }) } };
   }
   /* END morningBrief */
+  /* BEGIN techLevel */
+  /* #11064: the six levels, in technical_level.py LEVELS order; unset or unknown reads as pm. The store refuses any other value. */
+  const TECH_LEVELS = ["non-technical", "vibe-coder", "pm", "engineer", "senior-engineer", "cto"];
+  function techLevelOf(s) { const v = s && typeof s === "object" ? s.technical_level : null; return TECH_LEVELS.indexOf(v) >= 0 ? v : "pm"; }
+  function techLevelPayload(level) {
+    if (TECH_LEVELS.indexOf(level) < 0) return { error: "Pick one of the six levels." };
+    return { payload: { technical_level: level } };
+  }
+  /* END techLevel */
   function browserTz() { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ""; } catch (_) { return ""; } }
   function paintSettings() {
     const st = optimisticState || userStateOf(settings);
@@ -5914,6 +6111,9 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (document.activeElement !== bt) bt.value = b.time;
     bd.forEach((i) => { if (document.activeElement !== i) i.checked = b.days.indexOf(i.dataset.day) >= 0; });
     [be, bt].concat(bd).forEach((i) => { i.disabled = readOnly; });
+    const lv = $("set-level");   /* #11064 */
+    if (document.activeElement !== lv) lv.value = techLevelOf(settings);
+    lv.disabled = readOnly;
   }
   /* One write path for every setting: read meta/settings, merge the patch, set with if_version, retry once on a 409. */
   async function saveSettings(patch) {
@@ -5957,6 +6157,18 @@ html.lib-strip.rd-open body { padding-right: 0; }
     try { await saveSettings(r.payload); }
     catch (e) { err.textContent = "Could not save the settings: " + (e && e.message ? e.message : "unknown error") + "."; }
   }
+  /* BEGIN techLevelSave */
+  /* #11064: a refused or failed write puts the stored level back and names the error; never a silent success. */
+  async function saveLevelSettings() {
+    const err = $("set-level-err"), sel = $("set-level"); err.textContent = "";
+    const back = () => { sel.value = techLevelOf(settings); };
+    if (!db || readOnly) { err.textContent = "Read-only view: the settings cannot be saved."; back(); return; }
+    const r = techLevelPayload(sel.value);
+    if (r.error) { err.textContent = r.error; back(); return; }
+    try { await saveSettings(r.payload); }
+    catch (e) { back(); err.textContent = "Could not save the technical level: " + (e && e.message ? e.message : "unknown error") + "."; }
+  }
+  /* END techLevelSave */
   (function wireUserStateMenu() {
     const btn = $("user-state-badge"), menu = $("user-state-menu");
     const opts = () => Array.from(menu.querySelectorAll(".st-opt"));
@@ -5995,6 +6207,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     ["set-tz", "set-sleep-start"].forEach((id) => $(id).addEventListener("change", saveTimeSettings));
     ["set-brief-enabled", "set-brief-time"].forEach((id) => $(id).addEventListener("change", saveBriefSettings));
     document.querySelectorAll("#set-brief-days input").forEach((i) => i.addEventListener("change", saveBriefSettings));
+    $("set-level").addEventListener("change", saveLevelSettings);   /* #11064 */
     try {   /* the one theme control (the owner 2026-10-23): light, dark or system; stored under architect-theme, applied before first paint by the head script */
       let cur = "system"; try { const v = localStorage.getItem("architect-theme"); if (v === "light" || v === "dark") cur = v; } catch (_) {}
       dlg.querySelectorAll('input[name="set-theme"]').forEach((r) => {
@@ -6204,8 +6417,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!SESSION) {
       /* Live tmux truth for the Sessions count and the four statuses; the server asks `tmux ls` (cached 4 s). */
       const pollFleet = () => fetch("/api/fleet", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
-        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; render(); }
+        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; paneCtl.sync(d); render(); }
       }).catch(() => {});
+      const paneCtl = paneControl(); $("list-q").before(paneCtl);   // #11065: page "Show session" control
+      setInterval(() => { const n = Date.now(); paneViews.forEach((v) => { if (v.box.isConnected) v.tick(n); }); }, 5000);
       pollFleet(); setInterval(pollFleet, 15000);
     }
     if (!SESSION) db.collection("sessions").onSnapshot(live((snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); }), stopped("session list"));
@@ -6436,7 +6651,15 @@ html.lib-strip.rd-open body { padding-right: 0; }
       inp.addEventListener("input", () => { clr.hidden = !inp.value; clearTimeout(t); t = setTimeout(() => paneSetQuery(p[0], inp.value), 120); });
       inp.addEventListener("keydown", (e) => { if (e.key === "Escape" && inp.value) { e.preventDefault(); e.stopPropagation(); clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); } });
       clr.addEventListener("click", () => { clearTimeout(t); inp.value = ""; clr.hidden = true; paneSetQuery(p[0], ""); inp.focus(); });
-      box.append(inp, clr, st);
+      box.append(inp, clr);
+      if (p[0] === "decisions") {   /* #11047: the Sort select; the pane filter still applies first */
+        const sel = el("select", "ctl pf-sort"); sel.id = "decision-sort"; sel.setAttribute("aria-label", "Sort decisions"); sel.title = "Sort the open and parked decisions";
+        DECISION_SORTS.forEach((o) => { const op = el("option", null, o[1]); op.value = o[0]; sel.appendChild(op); });
+        sel.value = decisionSort;
+        sel.addEventListener("change", () => { decisionSort = sel.value; try { localStorage.setItem(DSORT_KEY, decisionSort); } catch (_) {} render(); });
+        box.appendChild(sel);
+      }
+      box.appendChild(st);
       sec.insertBefore(box, body);
     });
   }
@@ -6480,17 +6703,25 @@ html.lib-strip.rd-open body { padding-right: 0; }
           if (!off && pq) { const rec = recFor(r); off = rec ? !paneHit(rec, pq) : r.textContent.toLowerCase().indexOf(pq) < 0; }
           r.classList.toggle("nv-off", off);
         });
+        dgSync(box);   /* #11047: group headers count what the filters left */
       });
-      if (pq) sec.querySelectorAll("details.sub").forEach((b) => {   /* a status block with no match drops out while the pane filter is on */
-        const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
-        if (!shown) { b.classList.add("nv-off"); solo(b, false); }
-      });
+      subHide(sec, pq, solo);
     });
     renderBar(c, raw, filt);
     renderTabs(c, filt ? "all" : raw);
     paneSync(c);
     navSave();
   }
+  /* BEGIN subHide */
+  /* A status block with no match drops out while the pane filter is on. */
+  function subHide(sec, pq, solo) {
+    if (pq) sec.querySelectorAll("details.sub").forEach((b) => {
+      if (b.classList.contains("pane-ctl")) return;   // #11065: the Show session control has no rows; nothing ever un-hides it
+      const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
+      if (!shown) { b.classList.add("nv-off"); solo(b, false); }
+    });
+  }
+  /* END subHide */
   /* The one header bar per content type (the owner 2026-10-21 14:29Z): title, open-count badge, one-line summary, tabs, then the filter and sort toolbar. The section's own header is hidden and the section never collapses. */
   const bar = { q: "" };
   function renderBar(c, sub, filt) {

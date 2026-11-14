@@ -153,6 +153,8 @@ pub struct HydrationOutcome {
 /// One completed `git` invocation, as this module needs it.
 struct GitOut {
     success: bool,
+    // #10667: kept so a failure can say how the child ended.
+    status: std::process::ExitStatus,
     stdout: Vec<u8>,
     stderr: String,
 }
@@ -197,6 +199,7 @@ fn git_with_env(repo: &Path, args: &[&str], env: &[(String, String)]) -> Result<
         .with_context(|| format!("could not run `git {}`", args.join(" ")))?;
     Ok(GitOut {
         success: out.status.success(),
+        status: out.status,
         stdout: out.stdout,
         stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
     })
@@ -208,6 +211,12 @@ fn git_ok(repo: &Path, args: &[&str], step: &str) -> Result<GitOut> {
 }
 
 /// [`git_ok`] with `env` set on the child (#9160).
+///
+/// Why (#10667): a child that failed with empty stderr left only
+/// "`git ...` failed:", so a flake under load could not say how git ended.
+/// What: the error names the step, the argv, the exit status from
+/// [`describe_exit`], and git's stderr when there is any.
+/// Test: `a_failed_git_child_reports_its_exit_status`.
 fn git_ok_with_env(
     repo: &Path,
     args: &[&str],
@@ -216,9 +225,35 @@ fn git_ok_with_env(
 ) -> Result<GitOut> {
     let out = git_with_env(repo, args, env)?;
     if !out.success {
-        bail!("{step}: `git {}` failed: {}", args.join(" "), out.stderr);
+        // #10667: name the exit status; keep stderr when git wrote any.
+        let status = describe_exit(out.status);
+        let argv = args.join(" ");
+        if out.stderr.is_empty() {
+            bail!("{step}: `git {argv}` failed ({status}) with empty stderr");
+        }
+        bail!("{step}: `git {argv}` failed ({status}): {}", out.stderr);
     }
     Ok(out)
+}
+
+/// `exit code N`, or `killed by signal N` when the child has no code (#10667).
+///
+/// What: on Unix a child ended by a signal carries no exit code, so the signal
+/// number is reported instead; `no exit code` covers any other platform.
+/// Test: `a_failed_git_child_reports_its_exit_status`,
+/// `a_signalled_child_reports_its_signal`.
+fn describe_exit(status: std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("killed by signal {signal}");
+        }
+    }
+    "no exit code".to_string()
 }
 
 /// Fail unless `repo` is a checkout with an `origin` remote.

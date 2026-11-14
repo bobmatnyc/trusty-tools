@@ -9,7 +9,7 @@
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
-use crate::commands::hook_rewrite::{build_pretooluse_rewrite_response, hook_cwd};
+use crate::commands::hook_rewrite::hook_cwd;
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
 
@@ -446,26 +446,8 @@ fn pretooluse_bash_rewrite(
     tool_input: Option<&serde_json::Value>,
     cwd: Option<&std::path::Path>,
 ) -> Option<String> {
-    use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
-    let cwd = cwd.unwrap_or(std::path::Path::new(""));
-    match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
-        (LeaseRewrite::Rewrite(new), permission) => Some(
-            super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
-        ),
-        (LeaseRewrite::Refuse(_), _) => None,
-        // #10973: inside an isolation worktree the rewrite takes the one-command
-        // shape its classifier accepts (#7477 refused the brace group there).
-        (LeaseRewrite::None, _) => {
-            super::hook_rewrite_isolated::rewrite_bash_command_for_cwd(cmd, Some(cwd)).map(|r| {
-                match r.permission {
-                    None => build_pretooluse_rewrite_response(&r.command).to_string(),
-                    permission => super::pm_guard_build_lease::rewrite_response(
-                        tool_input, &r.command, permission,
-                    ),
-                }
-            })
-        }
-    }
+    // #10973: one decision, shared with the opportunity observer's skip reason.
+    super::hook_bash_decision::pretooluse_bash_decision(cmd, tool_input, cwd).ok()
 }
 
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.

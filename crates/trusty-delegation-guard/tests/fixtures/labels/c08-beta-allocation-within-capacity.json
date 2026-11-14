@@ -1,0 +1,8 @@
+{
+  "case_id": "c08-beta-allocation-within-capacity",
+  "expected_verdict": "allow",
+  "binding_rule_ids": [
+    "beta-cap-2"
+  ],
+  "label_note": "LABEL-ONLY-c08-beta-allocation-within-capacity"
+}

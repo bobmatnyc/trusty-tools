@@ -117,6 +117,8 @@ pub(crate) struct Gate<'a> {
     architect: bool,
     // #10459: why the Architect check refused an agent caller.
     architect_refusal: Option<super::architect::ArchitectRefusal>,
+    // #10998: a named copy's source, on each of its records.
+    copy_source: Option<super::copy_source::CopySourceAudit>,
     admitted: Option<Admitted>,
 }
 
@@ -156,6 +158,7 @@ pub(crate) fn audited(
         default_policy: false,
         architect: false,
         architect_refusal: None,
+        copy_source: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -239,6 +242,11 @@ impl Gate<'_> {
     /// `architect::check_architect`; allow and deny records both carry it.
     pub(crate) fn architect(&mut self) {
         self.architect = true;
+    }
+
+    /// Name a named copy's source on every record of this call (#10998).
+    pub(crate) fn copy_source(&mut self, source: super::copy_source::CopySourceAudit) {
+        self.copy_source = Some(source);
     }
 
     /// Record why the Architect check refused this agent caller (#10459).
@@ -370,6 +378,12 @@ impl Gate<'_> {
         // #10459 P1: the Architect exemption is visible on every record.
         record.architect = self.architect.then_some(true);
         record.architect_refusal = self.architect_refusal;
+        record.copy_source = self.copy_source.clone();
+        // #11215: a time-out row says how long the call waited, or that it
+        // was refused at once for a still-hung item.
+        if denied == Some(ErrorKind::BackendTimeout) {
+            record.backend_wait = crate::store::timeout_note::last().map(Into::into);
+        }
         // #9066: a bridge call names the console's assertion on every record.
         if let Some(verdict) = self.caller.bridge() {
             record.agent_parent = record.agent_parent.or(verdict.agent_parent());

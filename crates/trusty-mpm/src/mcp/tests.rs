@@ -357,6 +357,17 @@ impl OrchestratorBackend for MockBackend {
             Err(format!("project `{name}` not found"))
         }
     }
+    async fn session_archive(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Value, String> {
+        Ok(json!({ "id": session_id, "dry_run": dry_run, "force": force }))
+    }
+    async fn project_decommission(&self, name: &str) -> Result<Value, String> {
+        Ok(json!({ "project": { "name": name }, "stopped": [], "left_as_is": [] }))
+    }
 
     // ── #2550: session-manager proxy mock impls ──────────────────────────────
     // Each echoes its parsed args so the dispatch tests can assert the tool name
@@ -466,7 +477,7 @@ async fn dispatch_tools_list_returns_full_catalog() {
     };
     let resp = dispatch(&MockBackend, req).await;
     let tools = resp.result.unwrap()["tools"].clone();
-    assert_eq!(tools.as_array().unwrap().len(), 40);
+    assert_eq!(tools.as_array().unwrap().len(), 42); // #10991: session_archive
     assert!(
         tools
             .as_array()
@@ -1512,6 +1523,48 @@ async fn dispatch_project_get_missing_name() {
             .unwrap()
             .contains("not found")
     );
+}
+
+/// Why (#10988): `project_decommission` routes its `name` to the backend and
+/// refuses a call without one.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_project_decommission_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call("project_decommission", json!({ "name": "widget" })),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("widget"), "expected 'widget' in: {text}");
+    let resp = dispatch(&MockBackend, call("project_decommission", json!({}))).await;
+    assert_eq!(resp.result.unwrap()["isError"], true);
+}
+
+/// Why (#10991): `session_archive` routes its id and both flags (absent reads
+/// false) to the backend and refuses a call without an id.
+/// Test: this test.
+#[tokio::test]
+async fn dispatch_session_archive_tool() {
+    let resp = dispatch(
+        &MockBackend,
+        call(
+            "session_archive",
+            json!({ "session_id": "abc", "dry_run": true }),
+        ),
+    )
+    .await;
+    let result = resp.result.unwrap();
+    assert_eq!(result["isError"], false);
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let echoed: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(echoed["id"], "abc");
+    assert_eq!(echoed["dry_run"], true);
+    assert_eq!(echoed["force"], false);
+    let resp = dispatch(&MockBackend, call("session_archive", json!({}))).await;
+    assert_eq!(resp.result.unwrap()["isError"], true);
 }
 
 /// Why (#1519): `project_get` must error when the required `name` arg is missing.

@@ -2171,7 +2171,8 @@ fn output_styles_name_the_todowrite_fallback() {
 /// largest component — `docs/research/token-floor-measurement-2026-09-13.md`).
 /// The #7723 trim target was ~40,000; 42,000 leaves headroom without licensing
 /// the file to regrow back toward its pre-trim size.
-const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
+/// #8021: raised 175 bytes, the measured overage of the guard-refusal rule.
+const RESIDENT_BODY_BUDGET_BYTES: usize = 42_175;
 
 /// Bodies already over [`RESIDENT_BODY_BUDGET_BYTES`] when #7825 widened the
 /// gate from rust-engineer alone to every deployed agent, each pinned at a
@@ -2192,8 +2193,9 @@ const RESIDENT_BODY_BUDGET_BYTES: usize = 42_000;
 const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
-    ("ticketing", 47_000, "#7727"),
-    ("version-control", 47_500, "#7727"),
+    // #8021: ticketing and version-control raised by their measured overage.
+    ("ticketing", 47_229, "#7727"),
+    ("version-control", 47_724, "#7727"),
 ];
 
 /// The bundled agent assets directory the composer reads.

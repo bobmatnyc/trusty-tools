@@ -446,8 +446,6 @@ crates/trusty-mpm/src/core/sm/goals/model.rs	session_state_serde_roundtrip
 crates/trusty-mpm/src/core/sm/goals/model.rs	status_default_is_pending
 crates/trusty-mpm/src/core/sm/goals/store.rs	create_dual_persists
 crates/trusty-mpm/src/core/sm/goals/store.rs	note_appends_and_persists
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_appends_note
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_sets_state_and_evidence
 crates/trusty-mpm/src/core/sm/providers/resolve.rs	resolve_tests
 crates/trusty-mpm/src/core/standalone/registry.rs	test_alias_validation
 crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure

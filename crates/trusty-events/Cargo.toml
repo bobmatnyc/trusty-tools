@@ -1,7 +1,7 @@
 [package]
 name = "trusty-events"
-# #9075: first release. ADR-0043 allows only registry installs and ADR-0065 runs
-# this crate's binary as its own daemon, so it publishes like any other crate.
+# #9075: first release. #10130/#10975: internal and not published to crates.io
+# (owner ruling 2026-10-02); build it from a checkout. `tctl` skips it.
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true

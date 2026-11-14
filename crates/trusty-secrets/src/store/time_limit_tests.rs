@@ -483,3 +483,38 @@ fn time_limited_call_that_panics_is_a_backend_failure() {
         other => panic!("expected a Backend failure, got {other:?}"),
     }
 }
+
+/// Why: #11215 — a `backend_timeout` reply and audit row could not tell a
+/// call that waited out its limit from one refused at once for a hung item.
+/// What: on the calling thread, a hung call notes its wait (the limit, not
+/// an abandoned-item refusal); the next call on that item notes a zero wait
+/// and the refusal, and starts no backend call. Both still fail with
+/// `Timeout`; neither is a miss or a success.
+/// Test: itself.
+#[test]
+fn time_limited_timeout_notes_its_wait_and_an_abandoned_item_refusal() {
+    use crate::store::timeout_note::scoped;
+    let (vault, key) = names();
+    let backend = Arc::new(Hangs::default());
+    let limited = TimeLimited::new(Arc::clone(&backend) as Arc<dyn SecretBackend>, LIMIT);
+
+    let (first, note) = scoped(|| limited.get(&vault, &key));
+    assert!(
+        matches!(first, Err(SecretsError::Timeout { .. })),
+        "{first:?}"
+    );
+    let note = note.expect("a timed-out call leaves a note");
+    assert_eq!(note.backend, "hangs");
+    assert_eq!(note.waited, LIMIT);
+    assert!(!note.abandoned_item, "{note:?}");
+
+    let (second, note) = scoped(|| limited.get(&vault, &key));
+    assert!(
+        matches!(second, Err(SecretsError::Timeout { waited, .. }) if waited.is_zero()),
+        "{second:?}"
+    );
+    let note = note.expect("a refused call leaves a note");
+    assert!(note.abandoned_item, "{note:?}");
+    assert_eq!(note.waited, Duration::ZERO);
+    assert_eq!(backend.calls.load(Ordering::SeqCst), 1, "no second thread");
+}

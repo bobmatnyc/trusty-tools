@@ -30,13 +30,13 @@ use std::time::Duration;
 /// Sleeps between spawn attempts on ETXTBSY: 8 attempts, 635 ms of sleep in
 /// total. A leaked fd lives only until the forked child execs; a Linux
 /// reproduction recovered on the first 5 ms retry every time.
-const ETXTBSY_BACKOFF_MS: [u64; 7] = [5, 10, 20, 40, 80, 160, 320];
+pub(crate) const ETXTBSY_BACKOFF_MS: [u64; 7] = [5, 10, 20, 40, 80, 160, 320];
 
 /// Same bound as `trusty_common::update::verify_installed_binary_at_path`.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// True only for ETXTBSY. Non-unix platforms have no such exec error.
-fn is_etxtbsy(e: &io::Error) -> bool {
+pub(crate) fn is_etxtbsy(e: &io::Error) -> bool {
     #[cfg(unix)]
     {
         e.raw_os_error() == Some(libc::ETXTBSY)

@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "Trusty Browser",
+  "version": "0.2.0",
+  "background": {
+    "service_worker": "worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "indicator_content.js",
+        "content.js"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8OprZD/ku63SpKOqJXpR5e6ybdC6Z/mW7kgGNZAObELjxrULcJRZOMB4h97KsK2WxCtCrUAbzk0BYtyPPLFqZJuYteRfBuy0Z+7dUENN0OJiZbrWiqEA6S/YwwDMcvZLuRHPK3px50Wcf9xBT6s/czAnM2JTrNk7JmKgmZFMkl3YNEjnm3DOdaRFMHuNY2GP6/Yh/3Qo08AZB405jIjy1Fyw2bFNOPH4WERcFF7IUUuWARHBhvlsnKK3FxFZtBVBB3PWGOxso+M/K4gjkbUW3Vh2h2yH/PI651noXFQxe5RztPISbrxBn40FPJY8pZrfWIj/zR0OETNyrJ9FVuKCcwIDAQAB",
+  "description": "Connect Trusty workflows to the right signed-in browser profile.",
+  "permissions": [
+    "storage",
+    "nativeMessaging",
+    "identity",
+    "identity.email",
+    "alarms",
+    "scripting",
+    "activeTab"
+  ],
+  "short_name": "Trusty Browser",
+  "icons": {
+    "16": "icons/trusty-browser-16.png",
+    "32": "icons/trusty-browser-32.png",
+    "48": "icons/trusty-browser-48.png",
+    "128": "icons/trusty-browser-128.png"
+  },
+  "action": {
+    "default_title": "Trusty Browser",
+    "default_icon": {
+      "16": "icons/trusty-browser-16.png",
+      "32": "icons/trusty-browser-32.png"
+    },
+    "default_popup": "setup.html"
+  },
+  "options_page": "setup.html",
+  "optional_host_permissions": [
+    "https://*/*"
+  ]
+}

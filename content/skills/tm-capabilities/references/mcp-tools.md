@@ -2,7 +2,7 @@
 
 Generated from `trusty_mpm::mcp::tools::tool_catalog()` — trusty-mpm's own MCP tool surface (`tools/list` over the `serve --stdio` bridge), in catalog order. Regenerate with `tm generate capabilities`.
 
-40 tools.
+42 tools.
 
 ## `session_list`
 
@@ -136,6 +136,16 @@ Delete a caller-supplied set of session RECORDS, and nothing else (#6431). Each 
 | Parameter | Type | Required |
 |---|---|---|
 | `session_ids` | `array` | yes |
+
+## `session_archive`
+
+Move a managed session's project directory (its workspace, else its start directory) to the owner-only archive `~/.trusty-tools/archive` (mode 0700), with a manifest recording the origin path so it can be restored. A same-filesystem move is a rename; across filesystems the copy must verify before the source is removed. FAIL-CLOSED: a session still running in the directory is REFUSED unless `force` is true, which stops it first; an Architect session is always refused. `dry_run` runs the same checks and returns the plan without changing anything. Session records are kept; the project is marked archived until a new session runs. Returns `{ dry_run, plan, stopped, manifest }`.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `dry_run` | `boolean` | no |
+| `force` | `boolean` | no |
+| `session_id` | `string` | yes |
 
 ## `session_activity`
 
@@ -281,6 +291,14 @@ Resolve a natural-language query to the best-matching registered project. Accept
 | Parameter | Type | Required |
 |---|---|---|
 | `query` | `string` | yes |
+
+## `project_decommission`
+
+Decommission a registered project: stop each of its running sessions and mark the project decommissioned. Workspaces, session records, and the trusty-search index and its data are all kept; a new session for the project clears the state. Refuses when one of the project's sessions is the Architect's. When any session fails to stop the project is NOT marked and the error names each failure. Returns the project record plus `stopped` and `left_as_is` session ids.
+
+| Parameter | Type | Required |
+|---|---|---|
+| `name` | `string` | yes |
 
 ## `session_proxy_focus`
 

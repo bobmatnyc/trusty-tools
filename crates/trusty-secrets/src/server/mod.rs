@@ -51,6 +51,8 @@ pub mod audit;
 // #9066: S3a, the console bridge's verdict.
 mod bridge;
 pub mod client;
+// #10998: `copy` from a named source (a Keychain item or another vault).
+mod copy_source;
 // #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
 mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
@@ -61,8 +63,10 @@ pub mod errors;
 mod exec;
 mod gate;
 pub mod grant;
+// #11215: the timestamp on the server's start and exit lines.
 #[cfg(test)]
 mod grant_fakes;
+mod log_stamp;
 mod methods;
 pub mod project;
 mod router;
@@ -87,8 +91,10 @@ pub use ancestry::{
 pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
+    BackendWait,
 };
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use copy_source::CopySourceAudit;
 pub use core_dump::disable_core_dumps;
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
@@ -98,6 +104,7 @@ pub use grant::{
     Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
     GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
 };
+pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{

@@ -34,6 +34,8 @@ pub mod caller_preamble;
 pub mod citation_check;
 // #8905: checks each finding's cited line holds the code it describes.
 pub mod citation_gate;
+// #10964: tells a quote of the cited file from a labelled payload or fix.
+pub(crate) mod citation_payload;
 // Why: the grounding guard for package-registry / version-existence claims
 // (#4081) — kept separate from `finding_hygiene` (self-admission markers) and
 // `citation_check` (path/content verification) because it keys on a different

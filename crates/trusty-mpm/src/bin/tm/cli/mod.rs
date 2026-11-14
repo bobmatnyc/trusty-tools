@@ -472,8 +472,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_mouse: bool,
         /// The Architect dashboard store root the Architect view reads
-        /// (`a` on the home screen). Until #10944 the daemon does not resolve
-        /// it; afterwards this stays an override (#10966).
+        /// (`a` on the home screen). Optional: without it the daemon resolves
+        /// the root (#10944); given, it overrides that (#10966).
         #[arg(long, env = "TM_ARCHITECT_STORE")]
         architect_store: Option<std::path::PathBuf>,
     },
@@ -627,6 +627,12 @@ pub(crate) enum Command {
         /// Gmail, Notion and Google Chat MCP tool, for every caller.
         #[arg(long)]
         egress_guard: bool,
+        /// Run in standing-rules mode (#10960): on `SessionStart` /
+        /// `UserPromptSubmit`, inject the Architect's
+        /// `local/standing-rules.md` into context. Architect sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        standing_rules: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -734,6 +740,7 @@ pub(crate) enum Command {
     /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
     /// slot's pool directory unless one is pinned, runs the command and exits
     /// with its status; exits 75 naming the holders when no slot frees.
+    /// `tm build-lease where <bin>` prints the freshest built binary (#10835).
     /// Test: `tests/tm_build_lease.rs`.
     BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// List the worktrees the machine-wide ledger records (#8994).
@@ -785,6 +792,13 @@ pub(crate) enum Command {
         /// allowlist).
         #[arg(long)]
         sandbox: bool,
+        /// Admit exactly one provider credential into the sandbox (#10721):
+        /// `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, read once from the
+        /// environment and then removed from it. Any other name, or the
+        /// variable unset, refuses. The sandbox launcher's `--credential`
+        /// sets it through `tm secrets exec`; requires `--sandbox`.
+        #[arg(long, value_name = "NAME", requires = "sandbox")]
+        sandbox_credential: Option<String>,
     },
     /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
@@ -936,7 +950,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`.
+    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {

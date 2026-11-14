@@ -1,0 +1,2 @@
+Added
+- Architect ledger (`datg.py`): a task can say the delivery state its request needs (`add T --needs`, `update --needs`) and a close can claim one (`close --state`), ordered prepared < sent < delivered < acknowledged. The close records the claim capped by the evidence in its outcome, and prints a FLAG line when the claim exceeds the evidence, the recorded state falls short of the need, or a value is unknown. The close is never refused for it (#10960).

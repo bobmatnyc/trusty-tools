@@ -198,7 +198,9 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// `extends_tier_child_inherits_l0_from_base_when_omitted`,
 /// `extends_tier_child_can_downgrade_l0_base_to_l1`,
 /// `extends_tier_omitted_everywhere_resolves_l1`,
-/// `extends_unions_the_subagent_whitelist`.
+/// `extends_unions_the_subagent_whitelist`,
+/// `extends_child_provider_id_wins_and_omitted_inherits`,
+/// `bundled_cto_assistant_keeps_its_bedrock_pin_through_extends`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // #3936: the base's own contribution to the `permissions.scopes`
     // accumulator, captured BEFORE `base` moves into `merged` below.
@@ -302,6 +304,11 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // explicit declaration.
     if child.agent.tier.is_some() {
         merged.agent.tier = child.agent.tier.clone();
+    }
+    // #11043: the provider pin is child-`Some`-wins, child-omits-inherits.
+    // Dropping it let an overlay such as `cto-assistant` (#7878) run unpinned.
+    if child.agent.provider_id.is_some() {
+        merged.agent.provider_id = child.agent.provider_id;
     }
 
     // --- user_authority: NEVER inherited/unioned through `extends` ---

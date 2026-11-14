@@ -44,6 +44,10 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 /// The pause between two "is it gone" reads.
 const STOP_POLL: Duration = Duration::from_millis(100);
 
+/// How long a stopped `claude`'s pane gets to read [`PaneClaude::Absent`]
+/// (#11068); it is read every [`STOP_POLL`].
+const PANE_SETTLE: Duration = Duration::from_secs(5);
+
 /// What [`relaunch`] reads and does; production passes [`LIVE`].
 ///
 /// Why: the unit tests must reach no tmux server and stop no process.
@@ -358,7 +362,8 @@ fn stop_pane_claude(
         )
     })?;
     // #9092: never type the launch line into a pane where a `claude` reads it.
-    if (ops.pane_claude)(session) != PaneClaude::Absent {
+    // #11068: a loaded host may not have settled the pane yet, so wait.
+    if pane_settles(session, ops) != PaneClaude::Absent {
         bail!(
             "stopped claude pid {pid}, but tmux session {session} still holds a `claude`, or \
              cannot say; nothing new was started"
@@ -367,6 +372,28 @@ fn stop_pane_claude(
     Ok(Step::Changed(format!(
         "stopped {was} `claude` pid {pid} in tmux session {session}"
     )))
+}
+
+/// Read `session`'s pane until it holds no `claude`, for up to [`PANE_SETTLE`].
+///
+/// Why: #11068 — the stopped `claude` has left the process table, but under
+/// CPU load one read of the pane straight after can still say `Present` or
+/// `Unknown`, and the relaunch failed.
+/// What: reads `ops.pane_claude` at once and then every [`STOP_POLL`]; the
+/// first `Absent` returns `Absent`. At the deadline the last read is
+/// returned, so a pane that keeps a `claude` still reads `Present`. At most
+/// `PANE_SETTLE / STOP_POLL + 1` reads.
+/// Test: `relaunch_waits_for_the_pane_to_settle_after_the_stop`,
+/// `relaunch_never_types_into_a_pane_that_still_holds_a_claude`.
+fn pane_settles(session: &str, ops: Ops) -> PaneClaude {
+    let deadline = Instant::now() + PANE_SETTLE;
+    loop {
+        let read = (ops.pane_claude)(session);
+        if read == PaneClaude::Absent || Instant::now() >= deadline {
+            return read;
+        }
+        std::thread::sleep(STOP_POLL);
+    }
 }
 
 /// Stop the `claude` at `pid`: SIGTERM, then SIGKILL, waiting for it to go.

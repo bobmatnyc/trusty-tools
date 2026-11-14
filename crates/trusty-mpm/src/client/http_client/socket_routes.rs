@@ -205,6 +205,12 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "/api/v1/sessions/managed/{id}/delete",
         "mpm.managed.delete",
     ),
+    // #10991
+    (
+        "POST",
+        "/api/v1/sessions/managed/{id}/archive",
+        "mpm.managed.archive",
+    ),
     // #9313: `tm sessions rebind`.
     (
         "POST",
@@ -237,6 +243,12 @@ pub(crate) const ROUTES: &[(&str, &str, &str)] = &[
         "GET",
         "/api/v1/projects/{name}/status",
         "mpm.projects.status",
+    ),
+    // #10988
+    (
+        "POST",
+        "/api/v1/projects/{name}/decommission",
+        "mpm.projects.registry.decommission",
     ),
     (
         "POST",

@@ -106,9 +106,10 @@ fn arrows_move_the_selection_within_the_table() {
     assert_eq!(state.selected, 6);
 }
 
-// #10966: `a` opens the read-only Architect view; Esc returns home.
+// #10966: `a` opens the read-only Architect view, `v` its Live tab; Esc
+// returns home.
 #[test]
-fn a_opens_the_architect_view_and_esc_returns() {
+fn a_opens_architect_and_v_opens_live() {
     use crate::tui::architect::Tab;
     let mut state = HomeState::default();
     let now = Instant::now();
@@ -118,6 +119,11 @@ fn a_opens_the_architect_view_and_esc_returns() {
     handle_key(&mut state, key(KeyCode::Esc), now);
     assert_eq!(state.view, View::Home);
     assert!(!state.should_exit);
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('v')), now), None);
+    assert_eq!(
+        (state.view, state.architect.tab),
+        (View::Architect, Tab::Live)
+    );
 }
 
 #[test]

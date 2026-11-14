@@ -16,16 +16,20 @@
 //!
 //! What: [`running_under_test_harness`] answers "is this process a cargo test
 //! binary?" from the running executable's own path, with two env-var
-//! overrides. Cargo compiles every test target to
-//! `target/<profile>/deps/<name>-<metadata-hash>`; a `cargo run` binary
-//! (`target/<profile>/<name>`) and an installed one (`~/.cargo/bin/<name>`)
-//! never sit in a `deps/` directory, so the check is true for every test
-//! target — lib unit tests, bin unit tests, integration tests, benches — and
-//! false for every way a user actually runs the software.
+//! overrides. Cargo compiles every test target to a file named
+//! `<name>-<metadata-hash>`: under `target/<profile>/deps/` up to rustc 1.99,
+//! under `target/<profile>/build/<crate>/<hash>/out/` from 1.100 (#11138). A
+//! `cargo run` binary (`target/<profile>/<name>`) and an installed one
+//! (`~/.cargo/bin/<name>`) never carry the hash, so the check is true for
+//! every test target — lib unit tests, bin unit tests, integration tests,
+//! benches — and false for every way a user actually runs the software. When
+//! the path cannot be read, or carries the hash in an unknown layout, the
+//! answer is "test": a wrong `true` refuses a write, a wrong `false` reaches a
+//! live daemon.
 //!
 //! Scope boundary: this reads THIS process's path. A test that spawns the
 //! real binary (`env!("CARGO_BIN_EXE_…")` resolves to `target/<profile>/<name>`,
-//! outside `deps/`) produces a child that is not detected. Such a test must
+//! with no hash) produces a child that is not detected. Such a test must
 //! set [`FORCE_ENV`] or `TRUSTY_DATA_DIR` on the child explicitly.
 //!
 //! It also owns [`test_repo_root`], the runtime answer to "which checkout is
@@ -42,7 +46,8 @@ use std::path::{Path, PathBuf};
 /// Forces [`running_under_test_harness`] to report `true`.
 ///
 /// Set this on a child process a test spawns, so the child inherits the
-/// parent's test-isolation even though its own path is outside `deps/`.
+/// parent's test-isolation even though its own path (`target/<profile>/<name>`)
+/// carries no cargo metadata hash.
 pub const FORCE_ENV: &str = "TRUSTY_TEST_HARNESS";
 
 /// Opt-in escape hatch: forces [`running_under_test_harness`] to report
@@ -60,15 +65,31 @@ pub const ALLOW_PRODUCTION_ENV: &str = "TRUSTY_ALLOW_PRODUCTION_STATE";
 /// run. Callers gate those mutations on this (#4255).
 /// What: [`ALLOW_PRODUCTION_ENV`] wins first (→ `false`), then [`FORCE_ENV`]
 /// (→ `true`), then this crate's own `cfg!(test)`, then the executable-path
-/// check described in the module doc.
+/// check described in the module doc. An unreadable path is `true` (#11138).
 /// Test: `running_under_test_harness_is_true_in_this_test_binary` — this
 /// module's tests run in exactly the harness the function must detect.
 pub fn running_under_test_harness() -> bool {
+    let exe = std::env::current_exe();
+    let allow_production = std::env::var(ALLOW_PRODUCTION_ENV).ok();
+    if let Err(e) = &exe
+        && !is_truthy(allow_production.as_deref())
+    {
+        // #11138: an unreadable exe path now fails closed (treated as a test),
+        // so say once why production-state writes are being refused.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            tracing::warn!(
+                "cannot read this process's executable path ({e}); treating it as a test \
+                 process and refusing production-state writes (#11138). Set \
+                 {ALLOW_PRODUCTION_ENV}=1 to override."
+            );
+        });
+    }
     detect(
-        std::env::var(ALLOW_PRODUCTION_ENV).ok().as_deref(),
+        allow_production.as_deref(),
         std::env::var(FORCE_ENV).ok().as_deref(),
         cfg!(test),
-        std::env::current_exe().ok().as_deref(),
+        exe.ok().as_deref(),
     )
 }
 
@@ -89,7 +110,8 @@ fn detect(
     if is_truthy(force) || compiled_as_test {
         return true;
     }
-    current_exe.is_some_and(is_cargo_test_binary)
+    // #11138: no readable exe path cannot be decided — fail closed.
+    current_exe.is_none_or(is_cargo_test_binary)
 }
 
 /// Shared truthiness parse for both override vars: `1`/`true`/`yes`/`on`,
@@ -105,25 +127,62 @@ fn is_truthy(value: Option<&str>) -> bool {
 
 /// Does `exe` look like a cargo-compiled test binary?
 ///
-/// Why: this is the load-bearing signal — it must be true for every test
-/// target and false for every real invocation. Cargo puts test binaries in
-/// `deps/` and appends a metadata hash to the file stem; neither is true of
-/// `cargo run`'s `target/<profile>/<name>` or an installed `~/.cargo/bin/<name>`.
-/// Requiring BOTH keeps a user who happens to have a `deps` directory on their
-/// PATH from being misdetected as a test.
-/// What: parent directory is named `deps` AND the file stem ends in
-/// `-<hex>` with at least 8 hex digits.
-/// Test: `is_cargo_test_binary_*`.
+/// Why: it must be true for every test target and false for every real
+/// invocation. Cargo sets no runtime env var that tells `cargo test` from
+/// `cargo run` (both get `CARGO`, `CARGO_MANIFEST_DIR`, `CARGO_PKG_*`), so the
+/// path is the signal. #11138: rustc 1.100's cargo moved test binaries from
+/// `target/<profile>/deps/` to `target/<profile>/build/<crate>/<hash>/out/`,
+/// and the `deps`-only check returned false for every test.
+/// What: after dropping a trailing ` (deleted)` (Linux `/proc/self/exe` on a
+/// replaced binary), the file stem must end in `-<hex>` (cargo's metadata
+/// hash, at least 8 hex digits). Then any one of:
+/// 1. the parent directory is `deps` (cargo up to 1.99);
+/// 2. the path ends `build/<crate>/<hash>/out/<name>-<hash>`, the same hash
+///    twice (cargo 1.100);
+/// 3. fail closed for a layout not listed yet: the hash is exactly 16 hex
+///    digits, the width cargo writes.
+///
+/// Production rule: a binary a user runs never carries the hash. `cargo run`
+/// and `cargo build` uplift to `target/<profile>/<name>`, and `cargo install`
+/// writes `~/.cargo/bin/<name>`, both with the hash stripped.
+///
+/// Test: `is_cargo_test_binary_*`, `detect_fails_closed_for_an_unknown_layout_with_a_cargo_hash`,
+/// `detect_is_false_for_production_shapes_beside_the_1100_layout`.
 fn is_cargo_test_binary(exe: &Path) -> bool {
-    if exe.parent().and_then(Path::file_name) != Some(std::ffi::OsStr::new("deps")) {
-        return false;
+    /// A path's final component as UTF-8.
+    fn dir_name(p: Option<&Path>) -> Option<&str> {
+        p.and_then(Path::file_name).and_then(|n| n.to_str())
     }
-    let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
+    let Some(file_name) = exe.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
-    stem.rsplit_once('-').is_some_and(|(name, hash)| {
-        !name.is_empty() && hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit())
-    })
+    // #11138: Linux `/proc/self/exe` appends ` (deleted)` once a concurrent
+    // build has replaced the binary; read the name cargo wrote.
+    let file_name = file_name.strip_suffix(" (deleted)").unwrap_or(file_name);
+    let Some(stem) = Path::new(file_name).file_stem().and_then(|s| s.to_str()) else {
+        return false;
+    };
+    let Some(hash) = stem.rsplit_once('-').and_then(|(name, hash)| {
+        (!name.is_empty() && hash.len() >= 8 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+            .then_some(hash)
+    }) else {
+        return false;
+    };
+    let parent = exe.parent();
+    if dir_name(parent) == Some("deps") {
+        return true;
+    }
+    // #11138: `build/<crate>/<hash>/out/<name>-<hash>`.
+    let hash_dir = parent.and_then(Path::parent);
+    let build_dir = hash_dir.and_then(Path::parent).and_then(Path::parent);
+    if dir_name(parent) == Some("out")
+        && dir_name(hash_dir) == Some(hash)
+        && dir_name(build_dir) == Some("build")
+    {
+        return true;
+    }
+    // #11138: an unknown layout with cargo's 16-hex hash fails closed.
+    hash.len() == 16
 }
 
 /// Names the repository root a test reads repo content from, outranking every
@@ -279,9 +338,85 @@ mod tests {
         }
     }
 
+    /// #11138: an executable path that cannot be read is undecidable, and an
+    /// undecidable process must not reach a live daemon — fail closed.
     #[test]
-    fn detect_is_false_when_exe_is_unresolvable() {
-        assert!(!detect(None, None, false, None));
+    fn detect_fails_closed_when_exe_is_unresolvable() {
+        assert!(detect(None, None, false, None));
+        // The explicit opt-in still wins, so production keeps an escape hatch.
+        assert!(!detect(Some("1"), None, false, None));
+    }
+
+    /// #11138: rustc 1.100's cargo writes test binaries to
+    /// `target/<profile>/build/<crate>/<hash>/out/<name>-<hash>`. These are
+    /// the paths main CI run 43281734883 printed.
+    #[test]
+    fn is_cargo_test_binary_accepts_the_rust_1100_build_out_layout() {
+        for exe in [
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/trusty_mpm-98af4e218cd2e034",
+            "/repo/target/debug/build/trusty-mpm/62c73b50a0eeb776/out/tm-62c73b50a0eeb776",
+            "/repo/target/debug/build/trusty-mpm/3322f910a0c480bf/out/integration-3322f910a0c480bf",
+            "/repo/target/release/build/trusty-search/0802fde7a9957161/out/registry_isolation-0802fde7a9957161",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} is a cargo test binary"
+            );
+        }
+    }
+
+    /// #11138: a binary carrying cargo's 16-hex metadata hash in a directory
+    /// layout this module does not know yet is still a test binary — the next
+    /// cargo layout change must not reopen the live-daemon hole.
+    /// #11138: on Linux `current_exe()` reads `/proc/self/exe`, which ends in
+    /// ` (deleted)` once a concurrent build has replaced the test binary. That
+    /// suffix must not turn a test process into production.
+    #[test]
+    fn is_cargo_test_binary_ignores_a_deleted_exe_suffix() {
+        for exe in [
+            "/repo/target/debug/deps/integration_tests-f54141ba75b48011 (deleted)",
+            "/repo/target/debug/build/trusty-mpm/62c73b50a0eeb776/out/tm-62c73b50a0eeb776 (deleted)",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} is a replaced cargo test binary"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_fails_closed_for_an_unknown_layout_with_a_cargo_hash() {
+        for exe in [
+            "/repo/target/debug/artifacts/trusty_mpm-98af4e218cd2e034",
+            "/build-dir/x86_64/debug/trusty-mpm/out/tm-62c73b50a0eeb776",
+        ] {
+            assert!(
+                detect(None, None, false, Some(Path::new(exe))),
+                "{exe} carries cargo's metadata hash and must fail closed"
+            );
+        }
+    }
+
+    /// #11138: the production rule — cargo uplifts (`target/<profile>/<name>`)
+    /// and `cargo install` writes (`~/.cargo/bin/<name>`) WITHOUT the hash, so
+    /// an unhashed name is never a test, even inside the new `build/` tree.
+    #[test]
+    fn detect_is_false_for_production_shapes_beside_the_1100_layout() {
+        for exe in [
+            "/repo/target/debug/tm",
+            "/repo/target/debug/trusty-search",
+            "/Users/me/.cargo/bin/tm",
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/build-script-build",
+            "/repo/target/debug/build/trusty-mpm/98af4e218cd2e034/out/tm",
+            // Rule 3's width: a hex-looking suffix that is not 16 digits.
+            "/usr/local/bin/tool-deadbeef",
+            "/opt/x/bin/agent-0123456789abc",
+        ] {
+            assert!(
+                !detect(None, None, false, Some(Path::new(exe))),
+                "{exe} must not be mistaken for a test binary"
+            );
+        }
     }
 
     #[test]

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trusty Browser</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main>
+    <h1>Trusty Browser</h1>
+    <div id="stage" aria-hidden="true">
+      <div id="robot">
+        <img src="icons/trusty-browser.webp" width="424" height="388" alt="">
+        <span class="eye left"><span class="iris"></span></span>
+        <span class="eye right"><span class="iris"></span></span>
+      </div>
+    </div>
+    <button id="activate" disabled>Activate Extension</button>
+    <output id="status" aria-live="polite"></output>
+    <section id="transfer" hidden>
+      <p id="transfer-route"></p>
+      <button id="replace">Confirm replacement</button>
+      <button class="secondary" id="cancel">Cancel</button>
+    </section>
+    <details id="details" hidden>
+      <summary>Activation details</summary>
+      <dl>
+        <dt>Chrome profile</dt><dd id="profile"></dd>
+        <dt>Site</dt><dd id="site"></dd>
+        <dt>Site account</dt><dd id="account"></dd>
+        <dt>Workflow</dt><dd id="workflow"></dd>
+      </dl>
+      <button class="secondary" id="remove">Remove workflow</button>
+    </details>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

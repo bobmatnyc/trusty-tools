@@ -755,7 +755,8 @@ pub async fn run_pm_task_with_persona(
     let allowed_tools = persona_allowed_tools(persona_tool_names.clone());
     let max_turns = persona_max_turns(!persona_tool_names.is_empty(), &persona_cfg.llm);
     let persona_registry = Arc::new(persona_registry.with_activity_session(&sid));
-    let (content, _usage) = llm::chat_with_tools_gated(
+    // #10980: keep usage; the tool loop already wrote its usage.jsonl row.
+    let (content, usage) = llm::chat_with_tools_gated(
         &client,
         &persona_cfg.agent.model,
         &*adapter,
@@ -782,6 +783,9 @@ pub async fn run_pm_task_with_persona(
         persona = %persona_name,
         llm_ms = persona_llm_t0.elapsed().as_millis() as u64,
         response_chars = content.len(),
+        model = %persona_cfg.agent.model,
+        input_tokens = usage.prompt_tokens,
+        output_tokens = usage.completion_tokens,
         "run_pm_task_with_persona: LLM call complete"
     );
 

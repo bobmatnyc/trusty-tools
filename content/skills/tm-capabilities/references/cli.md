@@ -146,7 +146,13 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
 - `presence` — Prove you are at the Studio, so the Architect may write trust anchors
+  - `devices` — Enrolled presence devices (passkeys)
+    - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
+    - `list` — List enrolled devices
+    - `revoke` — Revoke a device: removes its record and every grant it approved. Needs Touch ID or the login password at the Studio first
   - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
+  - `request` — Ask an enrolled device to approve this session's next trust-anchor write. Asks only; grants nothing. The action text is shown to the approver labelled "unverified origin". Approving needs the console page (#8878 PR2b-2)
+  - `wait` — Wait until this session holds a valid presence grant
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
   - `init` — Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`)
@@ -157,6 +163,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `set` — Set a field to a new value
     - `tags` — Add and/or remove tags in one call (§6: "no free-text replace-whole-list footgun" — there is no plain tags-replace form)
     - `unset` — Clear (unset) a field back to absent
+  - `decommission` — Decommission a project: stop its running sessions and mark it decommissioned (#10988)
   - `deliverables` — Manage a project's Deliverables (§10.8)
     - `add` — Create a Deliverable (starts in `proposed`)
     - `list` — List a project's Deliverables (optionally filtered by status)
@@ -182,9 +189,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
-- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
+- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
-  - `copy` — Copy this project's keys from one backend to another
+  - `assign` — Copy one key of any trusty vault into a named project's scope
+  - `copy` — Copy keys into this project's scope from a backend
   - `doctor` — Report socket and backend reachability, never a value
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
@@ -212,6 +220,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
@@ -248,6 +257,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)

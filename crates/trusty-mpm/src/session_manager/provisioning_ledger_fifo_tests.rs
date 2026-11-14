@@ -24,7 +24,7 @@ use super::provisioning_ledger::{ProvisioningLedger, snapshot};
 const BOUND: Duration = Duration::from_secs(10);
 
 /// Make a FIFO at `path`.
-fn mkfifo(path: &Path) {
+pub(super) fn mkfifo(path: &Path) {
     let c = CString::new(path.as_os_str().as_bytes()).expect("path has no NUL");
     // SAFETY: `c` is a valid NUL-terminated path that outlives the call.
     let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
@@ -34,7 +34,7 @@ fn mkfifo(path: &Path) {
 /// Run `f` on a thread; `Some` with its answer when it returns inside
 /// [`BOUND`]. On a miss, a write-open of each FIFO in `fifos` wakes the
 /// blocked reader with EOF so the thread does not outlive the test.
-fn answers_in_time<T: Send + 'static>(
+pub(super) fn answers_in_time<T: Send + 'static>(
     fifos: &[PathBuf],
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Option<T> {

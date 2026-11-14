@@ -253,3 +253,102 @@ fn migration_keep_closed_records_each_deny_before_writing_it() {
         assert_eq!(result.is_err(), refuse, "refuse={refuse}");
     }
 }
+
+/// A [`MemoryBackend`] whose push-only-mark lookups fail; every other call
+/// goes through.
+#[derive(Debug)]
+struct UnreadableMark(MemoryBackend);
+
+impl SecretBackend for UnreadableMark {
+    fn id(&self) -> crate::api::BackendId {
+        self.0.id()
+    }
+    fn capabilities(&self) -> crate::store::Capabilities {
+        self.0.capabilities()
+    }
+    fn get(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+    ) -> Result<Option<crate::api::SecretValue>, SecretsError> {
+        self.0.get(vault, key)
+    }
+    fn set(
+        &self,
+        vault: &VaultName,
+        key: &SecretKey,
+        value: &crate::api::SecretValue,
+    ) -> Result<(), SecretsError> {
+        self.0.set(vault, key, value)
+    }
+    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
+        self.0.delete(vault, key)
+    }
+    fn holds_agent_controls(&self) -> bool {
+        true
+    }
+    fn control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+    ) -> Result<bool, SecretsError> {
+        if item == ControlItem::PushOnly {
+            self.0.fail_controls(true);
+        }
+        let read = self.0.control_item(item, vault, key);
+        self.0.fail_controls(false);
+        read
+    }
+    fn set_control_item(
+        &self,
+        item: ControlItem,
+        vault: &VaultName,
+        key: Option<&SecretKey>,
+        present: bool,
+    ) -> Result<(), SecretsError> {
+        self.0.set_control_item(item, vault, key, present)
+    }
+}
+
+/// Why: #10999 — an agent may push a push-only key but not a denied one,
+/// and a push-only mark that cannot be read refuses the push even when the
+/// deny reads clean (Fail-Open Check). Red when the deny lookup reads the
+/// mark as a deny, when the mark wins over a deny, or when a failed mark
+/// lookup is mapped to "admitted".
+/// Test: itself.
+#[test]
+fn agent_push_denied_admits_the_mark_refuses_a_deny_and_fails_closed() {
+    let (_tmp, backend, index) = legacy_vault();
+    let push = |backend: &dyn SecretBackend, name: &str| {
+        let mode = AgentDenyMigration::OpenAll;
+        agent_push_denied(backend, &index, &vault(), &key(name), mode, None)
+    };
+    let set = |item: ControlItem, name: &str| {
+        let set = backend.set_control_item(item, &vault(), Some(&key(name)), true);
+        set.unwrap();
+    };
+    let migrated = backend.set_control_item(ControlItem::DenyMigrated, &vault(), None, true);
+    migrated.unwrap();
+    set(ControlItem::PushOnly, "OFF_KEY");
+    set(ControlItem::PushOnly, "ON_KEY");
+    set(ControlItem::AgentDeny, "ON_KEY");
+    assert!(matches!(push(backend.as_ref(), "OFF_KEY"), Ok(false)));
+    assert!(matches!(push(backend.as_ref(), "ON_KEY"), Ok(true)));
+
+    let wrapped = UnreadableMark(MemoryBackend::new());
+    let open = key("OPEN_KEY");
+    wrapped
+        .0
+        .set_control_item(ControlItem::DenyMigrated, &vault(), None, true)
+        .unwrap();
+    assert!(matches!(
+        wrapped.control_item(ControlItem::AgentDeny, &vault(), Some(&open)),
+        Ok(false)
+    ));
+    let refused = push(&wrapped, "OPEN_KEY");
+    assert!(
+        refused.is_err(),
+        "an unreadable mark is never 'admitted': {refused:?}"
+    );
+}

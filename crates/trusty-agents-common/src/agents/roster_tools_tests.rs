@@ -185,7 +185,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
     ),
     (
         "web-qa",
-        "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__claude-in-chrome, mcp__trusty-search",
+        "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__claude-in-chrome, mcp__trusty-search",
     ),
     (
         "web-ui-engineer",

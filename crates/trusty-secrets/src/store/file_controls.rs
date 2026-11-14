@@ -27,6 +27,9 @@ pub(crate) const CONTROLS_SUBDIR: &str = ".agent-controls";
 /// The directory holding deny items, under a vault's control directory.
 const DENY_DIR: &str = "deny";
 
+/// The directory holding push-only marks (#10998).
+const PUSH_ONLY_DIR: &str = "push-only";
+
 /// The marker file, under a vault's control directory.
 const MIGRATED_FILE: &str = "migrated";
 
@@ -42,6 +45,10 @@ fn location(
     match (item, key) {
         (ControlItem::AgentDeny, Some(key)) => {
             Ok(Some((vault_dir.join(DENY_DIR), file_name(key)?)))
+        }
+        // #10998: the push-only mark, beside the deny.
+        (ControlItem::PushOnly, Some(key)) => {
+            Ok(Some((vault_dir.join(PUSH_ONLY_DIR), file_name(key)?)))
         }
         (ControlItem::DenyMigrated, None) => Ok(Some((vault_dir, MIGRATED_FILE.to_string()))),
         (ControlItem::LegacyAgentsFlag, _) => Ok(None),

@@ -503,6 +503,8 @@ pub(crate) async fn connect(
 
     // Auto-register the git project root as a local path alias (non-fatal, silent).
     super::managed_root::try_register_alias(&path);
+    // #10368: and the checkout as a `projects.json` project, or a warning.
+    super::session_project::register_at_session_start(&path, home).await;
 
     // 1b. Reconnect to an existing LIVE session for this directory if one
     //     exists — `connect` is idempotent by design. No project_dir prefix-match

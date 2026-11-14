@@ -1,0 +1,2 @@
+Fixed
+- `remove-file` (HTTP, MCP and socket) and the single-file purge paths now delete a file's chunk rows and its content-hash row in one redb transaction (#11096). They used two, so a failure of the second left the chunks gone and the hash kept, and the next reindex skipped the unchanged file as unchanged. A failed delete now answers 500 with both the chunks and the hash still in place, and a retry removes both.

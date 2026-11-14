@@ -1,0 +1,2 @@
+Fixed
+- An index whose delete did not go through while a dead reindex run was being rolled back now keeps its live corpus attached (#11022). The rollback skipped the live reopen when a delete had signalled cancel, but a delete that timed out, was refused on a root mismatch, or could not close the index's files kept the index registered with no corpus. Puts were then refused until a restart, and status did not report it. A delete that completes still removes the data directory and retires the index identity.
