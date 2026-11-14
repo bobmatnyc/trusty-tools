@@ -45,6 +45,7 @@ use super::ticket_methods;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
+use crate::store::timeout_note::TimeoutNote;
 use crate::store::{
     KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
     open_backend_at_in, platform,
@@ -466,7 +467,7 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
 /// the call arrives and is set on the body's thread, so every CLI call the
 /// body makes is bounded by it (`store::deadline`). #9572: every method
 /// shares one admission semaphore of [`State::admission_cap`] permits; see
-/// [`run_blocking`]. #9070: the request's peer pid is read here, in the
+/// [`run_blocking_noted`]. #9070: the request's peer pid is read here, in the
 /// handler's own task, because `request_peer_pid`'s task-local does not
 /// cross onto the blocking pool; it reaches the body as a [`Caller`].
 /// Test: `server_error_text_is_fixed_per_method_and_kind`,
@@ -493,9 +494,10 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
                     let deadline = Instant::now() + state.deadline_for(name);
                     // #9066: a bridged call answers as its direct method.
                     let reply_as = crate::api::bridge::direct_method(name).unwrap_or(name);
-                    run_blocking(state, admission, deadline, body, caller, params)
-                        .await
-                        .map_err(|kind| kind.to_rpc(reply_as))
+                    // #11215: a time-out reply names its wait or refusal.
+                    let (result, note) =
+                        run_blocking_noted(state, admission, deadline, body, caller, params).await;
+                    result.map_err(|kind| kind.to_rpc_noted(reply_as, note.as_ref()))
                 }
             })
         })
@@ -518,6 +520,8 @@ pub(crate) fn build_router(state: Arc<State>) -> RpcRouter {
 /// `server_timed_out_request_keeps_its_permit_until_its_call_returns`,
 /// `server_closed_admission_is_internal_and_never_runs_the_body`,
 /// `server_request_admitted_past_its_deadline_never_runs_the_body`.
+// #11215: the router calls `run_blocking_noted`; this form is the tests'.
+#[cfg(test)]
 pub(crate) async fn run_blocking(
     state: Arc<State>,
     admission: Arc<Semaphore>,
@@ -526,26 +530,45 @@ pub(crate) async fn run_blocking(
     caller: Caller,
     params: Value,
 ) -> Result<Value, ErrorKind> {
+    run_blocking_noted(state, admission, deadline, body, caller, params)
+        .await
+        .0
+}
+
+/// `run_blocking`, plus the backend time-out the body left on its thread
+/// (#11215); `None` when the body noted none or never ran to its end.
+/// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`.
+pub(crate) async fn run_blocking_noted(
+    state: Arc<State>,
+    admission: Arc<Semaphore>,
+    deadline: Instant,
+    body: MethodFn,
+    caller: Caller,
+    params: Value,
+) -> (Result<Value, ErrorKind>, Option<TimeoutNote>) {
     let until = tokio::time::Instant::from_std(deadline);
     // #9572: the wait for a permit counts against the request's deadline.
     let permit = match tokio::time::timeout_at(until, admission.acquire_owned()).await {
         Ok(Ok(permit)) => permit,
-        Ok(Err(_closed)) => return Err(ErrorKind::Internal),
-        Err(_elapsed) => return Err(ErrorKind::DeadlineExceeded),
+        Ok(Err(_closed)) => return (Err(ErrorKind::Internal), None),
+        Err(_elapsed) => return (Err(ErrorKind::DeadlineExceeded), None),
     };
     // #9572: `timeout_at` polls the acquire before its timer, so a free
     // permit is granted past the deadline; the body must not start then.
     // Returning drops the permit, which releases it.
     if Instant::now() >= deadline {
-        return Err(ErrorKind::DeadlineExceeded);
+        return (Err(ErrorKind::DeadlineExceeded), None);
     }
     let task = tokio::task::spawn_blocking(move || {
         // #9572: the permit is the thread's, released only when it finishes.
         let _permit = permit;
         // #9572: the body's CLI calls also watch the server's cancel flag.
         let cancel = Arc::clone(&state.cancel);
-        crate::store::deadline::within(deadline, || {
-            crate::store::deadline::cancellable(cancel, || body(&state, caller, params))
+        // #11215: the pool thread is reused, so the note starts empty.
+        crate::store::timeout_note::scoped(|| {
+            crate::store::deadline::within(deadline, || {
+                crate::store::deadline::cancellable(cancel, || body(&state, caller, params))
+            })
         })
     });
     // See #9572: past the deadline and its grace the request answers
@@ -553,8 +576,9 @@ pub(crate) async fn run_blocking(
     // running, and keeps its permit, until the backend call returns; the cap
     // bounds such threads.
     match tokio::time::timeout_at(until + BODY_GRACE, task).await {
-        Ok(joined) => joined.unwrap_or(Err(ErrorKind::Internal)),
-        Err(_elapsed) => Err(ErrorKind::DeadlineExceeded),
+        Ok(Ok((result, note))) => (result, note),
+        Ok(Err(_panicked)) => (Err(ErrorKind::Internal), None),
+        Err(_elapsed) => (Err(ErrorKind::DeadlineExceeded), None),
     }
 }
 
