@@ -18,11 +18,11 @@ To run in the foreground, use `trusty-browser install-host` and `trusty-browser 
 
 ## Enroll and use a workflow
 
-Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. On HTTPS, choose **Enable access to this site**. Review the Chrome profile, site URL and site account shown in the popup. Enter a lowercase workflow name and choose **Enroll this workflow**.
+Open the supported, signed-in site. Click **Trusty Browser** in the Chrome toolbar. Choose **Activate Extension**. Chrome may ask for access to the selected site. Trusty verifies the signed-in Chrome profile and site account, selects the workflow, and pairs the extension. Only the robot’s eyes follow the pointer unless reduced motion is enabled. After activation, expand **Activation details** to see the route and workflow ID.
 
 If the workflow already belongs to another profile, the popup shows the current and proposed Chrome profiles, URLs and site accounts. Choose **Confirm replacement** to transfer the workflow and revoke its old grant, or **Cancel** to keep its route.
 
-Configure one stdio MCP server per agent workflow. This example grants access to the workflow named `travel-qa`.
+Configure one stdio MCP server per agent workflow. Use the workflow ID from **Activation details** in place of `travel-qa` in this example.
 
 ```json
 {
@@ -50,7 +50,7 @@ The extension requests HTTPS access for the selected origin only on a popup gest
 
 ## Remove
 
-In the enrolled Chrome profile, click **Remove workflow** and **Confirm removal**. The service revokes the workflow ticket, browser key and active claims. An operator can also run `trusty-browser revoke travel-qa`. For a profile that will be enrolled again after operator-side revocation, complete removal from its popup to clear its saved enrollment.
+In the enrolled Chrome profile, open **Activation details**, click **Remove workflow** and **Confirm removal**. The service revokes the workflow ticket, browser key and active claims. An operator can also run `trusty-browser revoke travel-qa`. For a profile that will be enrolled again after operator-side revocation, complete removal from its popup to clear its saved enrollment.
 
 Run `trusty-browser uninstall-service` to stop the launchd job and remove its native-host registrations. Chrome manages removal of the unpacked extension in each profile. Use `trusty-browser revoke` for each workflow you want to remove from the private state directory.
 
