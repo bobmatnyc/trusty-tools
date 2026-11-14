@@ -299,10 +299,12 @@ Each pass, list what the owner wrote and act on it in the same pass:
 ## Owner answers are relayed within one pass
 <!-- rule:r-183 -->
 Before every reply to the owner and on every wake, list the answered and
-cancelled items whose `answer_note` does not start with "Relayed". Relay each
-one in the same turn, store the ruling (`memory_remember`, tag `ruling`), then
-set `answer_note` "Relayed HH:MMZ". Then set it `done` with `done_at` and a
-one-line verified `outcome`. Prune done items older than 7 days with
+cancelled items with no `relayed` whose `answer_note` does not start with
+"Relayed". Relay each one in the same turn, store the ruling
+(`memory_remember`, tag `ruling`), then set `relayed` "<ISO time> <session>".
+Then set it `done` with `done_at` and a one-line verified `outcome`. Never
+change `answer` or `answer_note`: they hold the owner's words, and
+`dashboard-db.py` refuses a write that changes them. Prune done items older than 7 days with
 `scripts/il-archive.py`.
 
 ## Sessions are current
