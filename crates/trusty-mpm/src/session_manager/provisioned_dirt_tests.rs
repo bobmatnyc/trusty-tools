@@ -17,11 +17,12 @@ use std::process::Command;
 
 use super::decommission_force::ProvisioningDirt;
 use super::decommission_owned::owned_workspace_keep_reason;
-use super::provisioning_ledger::LEDGER_NAME;
+use super::provisioning_ledger::{LEDGER_NAME, record_compiled_prompt};
+use super::provisioning_ledger_fifo_tests::{answers_in_time, mkfifo};
 use super::record::ManagedSessionId;
 use super::worktree_git_fixture::GitWorktreeFixture;
-use super::worktree_ignored_output::ignored_output_refusal;
-use super::worktree_safety::{DirtyWorktree, inspect_dirt_excusing};
+use super::worktree_ignored_output::{ignored_output_refusal, kept_ignored_output};
+use super::worktree_safety::{DirtyWorktree, count_dirty_files, inspect_dirt_excusing};
 
 /// Run `git -C <dir> <args>` and assert it succeeded.
 fn git(dir: &Path, args: &[&str]) {
@@ -239,5 +240,128 @@ fn a_missing_ledger_keeps_a_gitignored_claude_md_11221() {
     std::fs::remove_file(ws.join(".git").join(LEDGER_NAME)).expect("remove the ledger");
 
     let refusal = ignored_output_refusal(&ws).expect("no ledger vouches for CLAUDE.md");
+    assert!(refusal.contains("CLAUDE.md"), "{refusal}");
+}
+
+/// Set `dir`'s mode bits.
+fn chmod(dir: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).expect("chmod");
+}
+
+/// 🔴 #11221 round 2: git reports a directory it cannot open only as a stderr
+/// warning on exit 0, so the gitignored file inside read as absent and the
+/// ignored-output check answered "nothing kept".
+#[test]
+fn an_unreadable_dir_holding_a_gitignored_file_refuses_removal_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "unreadable-ignored", "target/\nsecret.env\n");
+    let sub = ws.join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    std::fs::write(sub.join("secret.env"), "TOKEN=mine\n").expect("write secret.env");
+    chmod(&sub, 0o000);
+
+    let checked = kept_ignored_output(&ws);
+    let refusal = ignored_output_refusal(&ws);
+
+    chmod(&sub, 0o755);
+    let err = checked.expect_err("an unreadable directory is a failed check");
+    assert!(err.contains("sub/"), "{err}");
+    let refusal = refusal.expect("a failed check refuses removal");
+    assert!(refusal.contains("check failed"), "{refusal}");
+}
+
+/// 🔴 #11221 round 2: the same warning made pass 1 of the dirt count read an
+/// untracked directory it cannot open as zero files.
+#[test]
+fn a_git_warning_fails_the_pass_one_count_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "unreadable-untracked", "target/\n");
+    let sub = ws.join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    std::fs::write(sub.join("findings.md"), "mine\n").expect("write findings");
+    chmod(&sub, 0o000);
+
+    let counted = count_dirty_files(&ws);
+
+    chmod(&sub, 0o755);
+    let err = counted.expect_err("a git warning is a failed count, not 0");
+    assert!(err.contains("sub/"), "{err}");
+}
+
+/// 🔴 #11221 round 2: a FIFO at the ledger path blocked every removal gate
+/// and the launch-time record. Each must answer at once and vouch for
+/// nothing; a relaunch replaces the FIFO with a regular ledger.
+#[test]
+fn a_fifo_ledger_vouches_for_nothing_and_does_not_block_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "fifo-ledger", "target/\nCLAUDE.md\n");
+    let _home = spawn(&ws);
+    let prompt = compiled_prompt(&ws);
+    let ledger = ws.join(".git").join(LEDGER_NAME);
+    std::fs::remove_file(&ledger).expect("remove the ledger");
+    mkfifo(&ledger);
+
+    let fifos = [ledger.clone()];
+    let w = ws.clone();
+    let answer = answers_in_time(&fifos, move || {
+        let dirt = trusty_mpm_dirt_only(&w).map(|d| d.dirty_files);
+        let refusal = ignored_output_refusal(&w);
+        let recorded = record_compiled_prompt(&prompt, b"prompt").map_err(|e| e.to_string());
+        (dirt, refusal, recorded)
+    });
+    let (dirt, refusal, recorded) = answer.expect("a FIFO ledger blocked a check or the record");
+    assert_eq!(dirt, Some(1), "the compiled prompt is counted");
+    assert!(
+        refusal.as_deref().is_some_and(|r| r.contains("CLAUDE.md")),
+        "{refusal:?}"
+    );
+    assert_eq!(recorded, Ok(false), "nothing is recorded into a FIFO");
+
+    let w = ws.clone();
+    let relaunched = answers_in_time(&fifos, move || spawn(&w));
+    assert!(
+        relaunched.is_some(),
+        "a relaunch blocked on the FIFO ledger"
+    );
+    let meta = std::fs::symlink_metadata(&ledger).expect("ledger");
+    assert!(meta.is_file(), "the relaunch wrote a regular ledger");
+}
+
+/// 🔴 #11221 round 2: a symlink at the ledger path was followed, so a ledger
+/// outside the admin dir vouched for the tree.
+#[test]
+fn a_symlinked_ledger_is_not_followed_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "symlink-ledger", "target/\nCLAUDE.md\n");
+    let _home = spawn(&ws);
+    let prompt = compiled_prompt(&ws);
+    let ledger = ws.join(".git").join(LEDGER_NAME);
+    let real = ws.join(".git").join("ledger-elsewhere.json");
+    std::fs::rename(&ledger, &real).expect("move the ledger");
+    std::os::unix::fs::symlink(&real, &ledger).expect("symlink the ledger");
+
+    let dirt = trusty_mpm_dirt_only(&ws).expect("a symlinked ledger vouches for nothing");
+    assert_eq!(dirt.dirty_files, 1, "{}", dirt.reason);
+    let refusal = ignored_output_refusal(&ws).expect("CLAUDE.md is not vouched for");
+    assert!(refusal.contains("CLAUDE.md"), "{refusal}");
+    let recorded = record_compiled_prompt(&prompt, b"prompt").map_err(|e| e.to_string());
+    assert_eq!(recorded, Ok(false), "nothing is recorded through a symlink");
+    let meta = std::fs::symlink_metadata(&ledger).expect("ledger");
+    assert!(
+        meta.file_type().is_symlink(),
+        "the symlink was not replaced"
+    );
+}
+
+/// #11221 round 2: a corrupt ledger vouches for no gitignored `CLAUDE.md`.
+#[test]
+fn a_corrupt_ledger_keeps_a_gitignored_claude_md_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "claude-md-corrupt-ledger", "target/\nCLAUDE.md\n");
+    let _home = spawn(&ws);
+    std::fs::write(ws.join(".git").join(LEDGER_NAME), "not json").expect("corrupt the ledger");
+
+    let refusal = ignored_output_refusal(&ws).expect("a corrupt ledger vouches for nothing");
     assert!(refusal.contains("CLAUDE.md"), "{refusal}");
 }

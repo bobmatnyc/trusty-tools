@@ -54,7 +54,9 @@ use tracing::warn;
 use super::provisioning_ledger;
 use super::worktree_deployed_assets::{DeployedAssets, is_asset_path};
 use super::worktree_nested::is_disposable_dir_name;
-use super::worktree_safety::{DirtyWorktree, DirtyWorktreePolicy, git_stdout, inspect_dirt};
+use super::worktree_safety::{
+    DirtyWorktree, DirtyWorktreePolicy, git_stdout_warning_free, inspect_dirt,
+};
 use crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS;
 use crate::core::standalone::hooks::backup;
 
@@ -253,8 +255,11 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// rule excuses, and counts the files left, skipping harness files and tm's
 /// deployed agents and skills inside a directory such as `.claude/`.
 /// `Ok(None)` means nothing is kept. A git failure or an unreadable file is
-/// `Err`. #11221: a top-level entry the ledger vouches for is not kept.
+/// `Err`, and so is any git stderr on exit 0. #11221: a top-level entry the
+/// ledger vouches for is not kept.
 /// Test: `a_gitignored_claude_md_tm_wrote_passes_the_ignored_output_check_11221`,
+/// `an_unreadable_dir_holding_a_gitignored_file_refuses_removal_11221`,
+/// `a_corrupt_ledger_keeps_a_gitignored_claude_md_11221`,
 /// `kept_output_counts_files_in_an_ignored_results_dir`,
 /// `kept_output_is_none_for_build_output_only`,
 /// `kept_output_errors_when_git_cannot_answer`,
@@ -263,7 +268,8 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// `a_user_agent_with_a_disposable_name_keeps_the_tree`,
 /// `a_vercel_dir_holding_an_env_file_keeps_the_tree`.
 pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, String> {
-    let status = git_stdout(path, IGNORED_STATUS_ARGS)?;
+    // #11221: a git warning on exit 0 hides the files it could not list.
+    let status = git_stdout_warning_free(path, IGNORED_STATUS_ARGS)?;
     // #11221: a gitignored `CLAUDE.md` the spawn wrote is tm's while the
     // ledger still vouches for its bytes; no ledger vouches for nothing.
     let ledger = provisioning_ledger::load(path);

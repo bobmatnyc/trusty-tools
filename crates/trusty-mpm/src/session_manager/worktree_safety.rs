@@ -439,8 +439,10 @@ fn inspect_dirt_with(
 /// What: pass one counts every `-unormal` entry except the ownership sentinel
 /// and anything rooted at `.trusty-mpm/`; pass two hands `.trusty-mpm/` to
 /// [`trusty_mpm_dirt`], which sees ignored and untracked content alike.
+/// A git warning on stderr fails the count (#11221).
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
-/// `inspect_dirt_excludes_own_sentinel`.
+/// `inspect_dirt_excludes_own_sentinel`,
+/// `a_git_warning_fails_the_pass_one_count_11221`.
 ///
 /// `pub(crate)` since #7185 so the ADR-0057 removal guard asks this ONE
 /// question instead of its own plain `git status --porcelain` count, which
@@ -458,7 +460,9 @@ fn count_dirty_files_with(path: &Path, excuse: Option<ExcuseEntry>) -> Result<us
     } else {
         STATUS_ARGS
     };
-    let status = git_stdout(path, args)?;
+    // #11221: a git warning on exit 0 (an unreadable directory) is a failed
+    // count, never a clean one.
+    let status = git_stdout_warning_free(path, args)?;
     let mut count = 0usize;
     for line in status.lines() {
         if line.trim().is_empty() || excuse.is_some_and(|excused| excused(line)) {
@@ -1077,8 +1081,10 @@ pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
 /// as absent, and the tree as clean.
 /// What: the bounded run of [`git_stdout`]; a non-zero exit or any non-blank
 /// stderr is an `Err` carrying git's stderr.
-/// Test: `an_unreadable_dir_under_trusty_mpm_keeps_the_clone_11221`.
-fn git_stdout_warning_free(dir: &Path, args: &[&str]) -> Result<String, String> {
+/// Test: `an_unreadable_dir_under_trusty_mpm_keeps_the_clone_11221`,
+/// `a_git_warning_fails_the_pass_one_count_11221`,
+/// `an_unreadable_dir_holding_a_gitignored_file_refuses_removal_11221`.
+pub(crate) fn git_stdout_warning_free(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = bounded_git_output(git_command(dir, args))
         .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;
     let stderr = String::from_utf8_lossy(&out.stderr);

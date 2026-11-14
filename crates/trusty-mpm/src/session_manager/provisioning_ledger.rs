@@ -282,6 +282,7 @@ fn still_matching(ws: &Path, recorded: BTreeMap<String, String>) -> BTreeMap<Str
 /// Why: the path is decided by `instruction_pipeline::compiled_prompt_path`;
 /// matching its exact shape keeps a scope segment named `.trusty-mpm` from
 /// being taken for the harness directory.
+/// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`.
 fn compiled_prompt_location(dest: &Path) -> Option<(&Path, String)> {
     use crate::core::harness_root::{HARNESS_DIR, SESSIONS_DIR};
     use crate::core::instruction_pipeline::COMPILED_PROMPT_FILE;
@@ -314,7 +315,8 @@ fn compiled_prompt_location(dest: &Path) -> Option<(&Path, String)> {
 /// Two launches racing in one root can drop each other's entry, which also
 /// only keeps a workspace.
 /// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
-/// `an_edited_compiled_prompt_still_keeps_the_clone_11221`.
+/// `an_edited_compiled_prompt_still_keeps_the_clone_11221`,
+/// `a_fifo_ledger_vouches_for_nothing_and_does_not_block_11221`.
 pub(crate) fn record_compiled_prompt(dest: &Path, bytes: &[u8]) -> std::io::Result<bool> {
     let Some((root, rel)) = compiled_prompt_location(dest) else {
         return Ok(false);
@@ -345,10 +347,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The ledger at `path`, or `None` when missing, unreadable, corrupt or of an
-/// unknown version.
+/// The ledger at `path`, or `None` when missing, unreadable, corrupt, of an
+/// unknown version, or not a regular file (a FIFO, symlink or directory).
+/// Test: `a_fifo_ledger_vouches_for_nothing_and_does_not_block_11221`,
+/// `a_symlinked_ledger_is_not_followed_11221`.
 fn read_ledger(path: &Path) -> Option<ProvisioningLedger> {
-    let bytes = std::fs::read(path).ok()?;
+    // #11221: `std::fs::read` blocked forever on a FIFO ledger (the #8540 case).
+    let bytes = read_regular_file(path).ok()?;
     serde_json::from_slice::<ProvisioningLedger>(&bytes)
         .ok()
         .filter(|l| l.version == 1)
