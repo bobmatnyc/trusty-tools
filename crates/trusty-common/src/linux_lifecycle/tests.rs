@@ -282,3 +282,142 @@ fn unparsable_status_fails_the_scan_instead_of_skipping_the_pid() {
         Ok(false)
     ));
 }
+
+// ─── #11085: instance_path_args ─────────────────────────────────────────────
+
+#[test]
+fn descriptor_rejects_bad_instance_path_args() {
+    let ok = plain_descriptor();
+    assert!(
+        ok.instance_path_args.is_empty(),
+        "nothing opts in by default"
+    );
+    let with = |flag: &str, path: &str| {
+        let mut desc = ok.clone();
+        desc.instance_path_args = vec![(flag.into(), path.into())];
+        desc.validate()
+    };
+    with("--data-dir", "/srv/data").expect("a flag and an absolute path");
+    for flag in ["", "--data-dir=x", "--a\0b"] {
+        assert!(with(flag, "/srv/data").is_err(), "flag {flag:?}");
+    }
+    assert!(with("--data-dir", "data").is_err(), "a relative path");
+    assert!(with("--data-dir", "/srv/\0").is_err(), "a NUL in the path");
+    let mut dup = ok.clone();
+    dup.instance_path_args = vec![("-d".into(), "/a".into()), ("-d".into(), "/b".into())];
+    assert!(dup.validate().is_err(), "a duplicate flag");
+}
+
+/// A `/proc/<pid>/cmdline` body for `argv`, with an `argv[0]`.
+fn cmdline(argv: &[&str]) -> Vec<u8> {
+    let mut out = b"/opt/bin/daemon\0".to_vec();
+    for arg in argv {
+        out.extend_from_slice(arg.as_bytes());
+        out.push(0);
+    }
+    out
+}
+
+/// Two existing directories under a temp dir, `own` and `other`, as strings.
+struct Dirs {
+    _tmp: tempfile::TempDir,
+    root: PathBuf,
+    own: String,
+    other: String,
+}
+
+impl Dirs {
+    fn new() -> Self {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
+        for name in ["own", "other"] {
+            std::fs::create_dir(root.join(name)).expect("create dir");
+        }
+        let at = |name: &str| root.join(name).to_str().expect("utf-8").to_string();
+        let (own, other) = (at("own"), at("other"));
+        Self {
+            _tmp: tmp,
+            root,
+            own,
+            other,
+        }
+    }
+
+    fn wanted(&self) -> Vec<(String, PathBuf)> {
+        vec![("--data-dir".to_string(), PathBuf::from(&self.own))]
+    }
+}
+
+// #11085: the AC6 residual — `--data-dir X` with the data-dir variable unset
+// read as the default instance.
+#[test]
+fn path_flag_marks_a_sibling_only_when_every_value_names_another_path() {
+    let d = Dirs::new();
+    let want = d.wanted();
+    let sibling = |argv: &[&str]| instance::names_other_instance(&cmdline(argv), &want);
+    let other_eq = format!("--data-dir={}", d.other);
+    assert!(
+        sibling(&["start", "--data-dir", &d.other]),
+        "`<flag> <value>`"
+    );
+    assert!(sibling(&["start", &other_eq]), "`<flag>=<value>`");
+    assert!(
+        sibling(&["--data-dir", &d.other, "--data-dir", &d.other]),
+        "every value names another path"
+    );
+    // This instance, by text, by components and through a symlink.
+    let own_eq = format!("--data-dir={}", d.own);
+    let own_slash = format!("{}//", d.own);
+    let alias = d.root.join("alias");
+    std::os::unix::fs::symlink(&d.own, &alias).expect("symlink");
+    let alias = alias.to_str().expect("utf-8").to_string();
+    for own in [d.own.as_str(), &own_slash, &alias] {
+        assert!(!sibling(&["start", "--data-dir", own]), "{own} is this one");
+    }
+    assert!(!sibling(&["start", &own_eq]));
+    // One value that may name this instance is enough.
+    assert!(!sibling(&["--data-dir", &d.other, "--data-dir", &d.own]));
+    // No flag, a longer flag, or the flag after `--` constrains nothing.
+    assert!(!sibling(&["start", "--foreground"]));
+    let longer = format!("--data-dir-x={}", d.other);
+    assert!(!sibling(&["--data-dir-x", &d.other, &longer]));
+    assert!(!sibling(&["start", "--", "--data-dir", &d.other]));
+    // A descriptor that does not opt in sees no sibling.
+    let argv = cmdline(&["start", "--data-dir", &d.other]);
+    assert!(!instance::names_other_instance(&argv, &[]));
+    // An existing directory is not one that does not exist.
+    let missing_own = vec![("--data-dir".to_string(), d.root.join("missing"))];
+    assert!(instance::names_other_instance(&argv, &missing_own));
+}
+
+// #11085: fail closed — a value the matcher cannot rule out is this instance,
+// so the scan refuses instead of reading a live daemon as absent.
+#[test]
+fn path_flag_counts_every_undecidable_value_as_this_instance() {
+    let d = Dirs::new();
+    let want = d.wanted();
+    let sibling = |argv: &[&str]| instance::names_other_instance(&cmdline(argv), &want);
+    assert!(!sibling(&["start", "--data-dir"]), "a flag with no value");
+    // Both resolve from this process's cwd, which is not the daemon's.
+    assert!(!sibling(&["--data-dir", "."]), "a relative value");
+    assert!(!sibling(&["--data-dir=.."]), "a relative `=` value");
+    let missing = d.root.join("missing").to_str().expect("utf-8").to_string();
+    assert!(!sibling(&["--data-dir", &missing]), "an unresolvable value");
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return; // root resolves through a mode-000 directory
+    }
+    let locked = d.root.join("locked");
+    std::fs::create_dir_all(locked.join("inner")).expect("locked dir");
+    let inner = locked.join("inner");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let behind_lock = instance::may_name(inner.as_os_str().as_encoded_bytes(), Path::new(&d.own));
+    let wanted_locked = instance::may_name(d.other.as_bytes(), &inner);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(behind_lock, "a value that cannot be resolved (EACCES)");
+    assert!(
+        wanted_locked,
+        "an instance path that cannot be resolved (EACCES)"
+    );
+}

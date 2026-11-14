@@ -16,7 +16,8 @@ use super::Signal;
 /// Test: `tests/linux_lifecycle.rs` has a real-process test for
 /// `ProbeInconclusive`, `Unidentified`, `RunningUnserved`, `IdentityMismatch`,
 /// `IdentityUnreadable`, `InstanceUnreadable`, `Survivor`, `StoppedSignalNotReached`,
-/// `AlreadyRunning`, `ChildExited`, `NotReady` and `ChildUnpinned`; the unit
+/// `AlreadyRunning`, `ChildExited`, `NotReady`, `ChildUnpinned`,
+/// `RestartBlocked` and `NotThisInstance`; the unit
 /// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
 /// `NoPeerPid`, `Signal`, `BinaryMissing`, `Spawn` and `Io` have no test.
 #[derive(Debug, thiserror::Error)]
@@ -187,6 +188,38 @@ pub enum LifecycleError {
         binary: String,
         /// The read error.
         source: io::Error,
+    },
+    /// `restart` found the daemon running, but other processes are this
+    /// instance too, so the start after the stop would refuse (#11085).
+    ///
+    /// Nothing was signalled: the running daemon stays up.
+    #[error(
+        "pid(s) {} run `{binary}` for this instance, but pid(s) {} do as well; a start after \
+         the stop would refuse, so nothing was stopped",
+        pid_list(serving),
+        pid_list(others)
+    )]
+    RestartBlocked {
+        /// The running daemon's pids: the socket's peer and the caller's pid.
+        serving: Vec<u32>,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The other matching pids, ascending.
+        others: Vec<u32>,
+    },
+    /// The pid a caller named runs the daemon's binary but is not this
+    /// instance: its argv, environment or owner differs (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error(
+        "pid {pid} runs `{binary}` but is not this instance (its arguments, environment or \
+         owner differ); not signalled"
+    )]
+    NotThisInstance {
+        /// The named pid.
+        pid: u32,
+        /// The descriptor's binary name.
+        binary: String,
     },
 }
 

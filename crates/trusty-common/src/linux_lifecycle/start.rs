@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use super::liveness::refuse_unserved_daemon;
+use super::pid::refuse_restart_blockers;
 use super::process::{Dial, PinnedProcess, Signal, dial};
 use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with};
 use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL};
@@ -252,13 +253,21 @@ pub async fn restart(desc: &DaemonDescriptor) -> Result<RestartOutcome, Lifecycl
 
 /// [`restart`] with an explicit signal delivery (the test seam).
 ///
-/// What: `NotRunning` from stop proceeds to start (P-b); every stop error is
+/// What: while the socket serves, another process that is this instance is
+/// [`LifecycleError::RestartBlocked`] before any signal (#11085). Then
+/// `NotRunning` from stop proceeds to start (P-b); every stop error is
 /// returned as is, before any spawn.
-/// Test: `restart_does_not_start_when_stop_reports_a_survivor`.
+/// Test: `restart_does_not_start_when_stop_reports_a_survivor`,
+/// `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
+///
+/// [`LifecycleError::RestartBlocked`]: crate::linux_lifecycle::LifecycleError::RestartBlocked
 pub async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
+    desc.validate()?;
+    // #11085: never stop a healthy daemon that the start would then refuse on.
+    refuse_restart_blockers(desc, None).await?;
     let stop = stop_with(desc, delivery).await?;
     let start = start(desc).await?;
     Ok(RestartOutcome { stop, start })

@@ -122,11 +122,25 @@ pub async fn stop_with(
         settle(desc, pid).await?;
         return not_running(desc);
     }
+    terminate(desc, delivery, &target).await
+}
 
-    send(delivery, &target, Signal::Term)?;
+/// Steps 3 and 4 of [`stop_with`] on an identified, pinned process.
+///
+/// What: SIGTERM, the `stop_grace` exit wait, SIGKILL and the `kill_wait` exit
+/// wait (`Survivor` when the pid outlives it), then the stopped-signal wait.
+/// Test: `stop_sends_sigkill_to_a_process_that_ignores_sigterm`,
+/// `stop_pid_reports_a_survivor_and_restart_pid_starts_nothing`.
+pub(crate) async fn terminate(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    target: &PinnedProcess,
+) -> Result<StopOutcome, LifecycleError> {
+    let pid = target.pid();
+    send(delivery, target, Signal::Term)?;
     let mut forced = false;
     if !target.wait_exit(desc.stop_grace).await {
-        send(delivery, &target, Signal::Kill)?;
+        send(delivery, target, Signal::Kill)?;
         forced = true;
         if !target.wait_exit(desc.kill_wait).await {
             return Err(LifecycleError::Survivor { pid });
@@ -147,7 +161,10 @@ fn not_running(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError> {
 /// `Ok(true)` when the pinned process is alive and runs `desc.binary`;
 /// `Ok(false)` when it exited mid-check; an error, with nothing signalled,
 /// when it runs something else or cannot be read.
-fn identity_holds(desc: &DaemonDescriptor, target: &PinnedProcess) -> Result<bool, LifecycleError> {
+pub(crate) fn identity_holds(
+    desc: &DaemonDescriptor,
+    target: &PinnedProcess,
+) -> Result<bool, LifecycleError> {
     let pid = target.pid();
     let read = exe_name(pid);
     // Alive after the read means the read saw the pinned process: a pid
