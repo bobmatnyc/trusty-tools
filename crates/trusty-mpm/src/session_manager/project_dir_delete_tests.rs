@@ -702,7 +702,9 @@ fn an_unpushed_commit_on_another_branch_refuses() {
     let err = plan_repo(&fx).expect_err("an unpushed side branch");
     assert!(
         matches!(&err, DirDeleteError::Dirty { reason, .. }
-            if reason.contains("1 unpushed commit(s) on local branches")),
+        if reason.contains(
+            "1 unpushed commit(s) reachable from local branches, tags or the stash that no remote has"
+        )),
         "{err}"
     );
 }

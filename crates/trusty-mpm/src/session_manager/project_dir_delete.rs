@@ -354,8 +354,8 @@ fn work_outside_head(dir: &Path) -> Option<String> {
         Err(e) => failed(e),
         Ok((0, false)) => None,
         Ok((unpushed, stash)) => Some(format!(
-            "its `.git` holds {unpushed} unpushed commit(s) on local branches and {} stash; \
-             deleting the directory deletes them",
+            "its `.git` holds {unpushed} unpushed commit(s) reachable from local branches, tags \
+             or the stash that no remote has, and {} stash; deleting the directory deletes them",
             if stash { "a" } else { "no" }
         )),
     }
