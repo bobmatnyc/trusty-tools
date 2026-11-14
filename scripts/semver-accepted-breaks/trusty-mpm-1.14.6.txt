@@ -5,3 +5,4 @@ accept  constructible_struct_adds_field field OpportunityRow.skip_reason
 accept  constructible_struct_adds_field field ProjectDecommissionReport.index_shutdown
 accept  enum_variant_added variant ProjectDecommissionError:IndexShutdown
 accept  enum_variant_added variant ProjectStoreError:UnresolvableHomePath
+accept  enum_variant_added variant SmGoalError:VerifiedWithoutEvidence
