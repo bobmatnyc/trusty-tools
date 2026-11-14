@@ -906,3 +906,100 @@ async fn legacy_verified_without_evidence_does_not_allow_done() {
     );
     assert_ne!(store.get(id).expect("present").status, GoalStatus::Done);
 }
+
+/// A legacy goal JSON with the given status and `sessions` array (test helper).
+fn legacy_goal(id: &str, status: &str, sessions: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","description":"legacy goal","status":"{status}","acceptance":[],"sessions":{sessions},"progress":100,"created":"2026-06-16T12:00:00Z","updated":"2026-06-16T12:00:00Z","notes":[]}}"#
+    )
+}
+
+/// Why: #10722 — a goal an older build stored as `Done` through an evidence-less
+/// `Verified` link must not still read `Done` once that link is downgraded.
+/// What: seeds a palace `Done` goal with one evidence-less `Verified` link; loads
+/// from the palace, again from the palace, then from the cache fallback; asserts
+/// `InProgress` each time, and that load never wrote to the palace.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_without_evidence_is_reopened_on_load() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacydone00000";
+    let sessions = r#"[{"session_id":"s-0","task":"a","state":"verified"}]"#;
+    palace
+        .remember_goal(legacy_goal(id, "done", sessions), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+    let writes = palace.write_count();
+
+    for round in 0..2 {
+        let store = SmGoalStore::load(palace.clone(), dir.path())
+            .await
+            .expect("load");
+        let g = store.get(id).expect("present");
+        assert_eq!(
+            g.status,
+            GoalStatus::InProgress,
+            "palace load round {round}"
+        );
+        assert_eq!(g.progress, 0);
+    }
+    assert_eq!(
+        palace.write_count(),
+        writes,
+        "load must not write the palace"
+    );
+
+    palace.set_fail(true);
+    let store = SmGoalStore::load(palace.clone(), dir.path())
+        .await
+        .expect("cache fallback load");
+    let g = store.get(id).expect("present from cache");
+    assert_eq!(g.status, GoalStatus::InProgress, "cache fallback load");
+}
+
+/// Why: #10722 — the load-time reopen must leave a legitimately closed goal alone.
+/// What: seeds a palace `Done` goal whose every link is `Verified` with evidence;
+/// loads it twice and asserts it is still `Done`, unchanged from the stored form.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_with_evidence_stays_done() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacyok000000";
+    let sessions =
+        r#"[{"session_id":"s-0","task":"a","state":"verified","evidence":"tests green"}]"#;
+    let json = legacy_goal(id, "done", sessions);
+    let stored: super::model::Goal = serde_json::from_str(&json).expect("parse");
+    palace
+        .remember_goal(json, GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    for _ in 0..2 {
+        let store = SmGoalStore::load(palace.clone(), dir.path())
+            .await
+            .expect("load");
+        let g = store.get(id).expect("present");
+        assert_eq!(g.status, GoalStatus::Done);
+        assert_eq!(*g, stored, "an evidenced Done goal loads unchanged");
+    }
+}
+
+/// Why: #10722 — `set_status(Done)` refuses a goal with no links (`all_verified`
+/// is false on an empty set), so load must not keep such a goal `Done` either.
+/// What: seeds a palace `Done` goal with no links; asserts it loads `Pending`.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_without_links_is_reopened_as_pending() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacyempty000";
+    palace
+        .remember_goal(legacy_goal(id, "done", "[]"), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    let store = SmGoalStore::load(palace, dir.path()).await.expect("load");
+    assert_eq!(store.get(id).expect("present").status, GoalStatus::Pending);
+}

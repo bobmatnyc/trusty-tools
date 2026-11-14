@@ -516,6 +516,10 @@ impl SessionManagerAgent {
             // link at its prior state; the warning carries the error's cause.
             if let Err(e) = store.update(goal_id, update).await {
                 tracing::warn!(%session_id, %goal_id, "delegate: goal update failed: {e}");
+                // #10722: record the refusal on the goal, as the observe arm does.
+                let _ = store
+                    .note(goal_id, format!("update {session_id} failed: {e}"))
+                    .await;
             }
         }
         Ok(())

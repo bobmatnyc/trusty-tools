@@ -160,9 +160,16 @@ impl SmGoalStore {
     /// evidence, and a `progress` that counted it. No stored link may be
     /// `Verified` without evidence, so load applies the same rule as the writers.
     /// What: each `Verified` link without non-blank evidence becomes `Running`
-    /// (observed, not verified) with a warning; then [`Goal::recompute_progress`]
-    /// runs and the goal is inserted by id.
-    /// Test: `legacy_verified_without_evidence_does_not_allow_done`.
+    /// (observed, not verified) with a warning. A `Done` goal that then fails the
+    /// [`Goal::all_verified`] gate is reopened with a warning: `InProgress` when it
+    /// has links, `Pending` when it has none. Then [`Goal::recompute_progress`]
+    /// runs and the goal is inserted by id; `updated` is not bumped. Only the
+    /// `goals.json` cache is rewritten by [`SmGoalStore::load`]; the palace entry
+    /// keeps its old form until the goal's next mutation.
+    /// Test: `legacy_verified_without_evidence_does_not_allow_done`,
+    /// `legacy_done_without_evidence_is_reopened_on_load`,
+    /// `legacy_done_with_evidence_stays_done`,
+    /// `legacy_done_without_links_is_reopened_as_pending`.
     fn insert_loaded(&mut self, mut goal: Goal) {
         for link in &mut goal.sessions {
             // #10722: fail closed on legacy evidence-less Verified links.
@@ -174,6 +181,24 @@ impl SmGoalStore {
                 );
                 link.state = SessionTaskState::Running;
             }
+        }
+        // #10722: a loaded Done goal must pass the same gate as `set_status(Done)`.
+        if goal.status == GoalStatus::Done && !goal.all_verified() {
+            let reopened = if goal.sessions.is_empty() {
+                GoalStatus::Pending
+            } else {
+                GoalStatus::InProgress
+            };
+            tracing::warn!(
+                goal_id = %goal.id,
+                from = "done",
+                to = reopened.label(),
+                verified = goal.verified_count(),
+                total = goal.sessions.len(),
+                "goal store: loaded Done goal fails the verification gate \
+                 (not every link is Verified with evidence); reopening it"
+            );
+            goal.status = reopened;
         }
         goal.recompute_progress();
         self.goals.insert(goal.id.clone(), goal);
