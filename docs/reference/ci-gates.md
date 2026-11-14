@@ -310,6 +310,9 @@ and #11191 turned `main` red that way. Owner ruling 2026-11-14.
   merge commit, which always contains `main`.
 - No `paths:` filter and no job-level `if:`, so it reports on every PR. A PR
   that changes no bundle file passes at once.
+- It runs only for PRs that target `main` (`branches: [main]`). A PR with
+  merge conflicts gets no `pull_request` run at all, as with `ci.yml`, so the
+  check stays unreported there until the conflict is resolved.
 - For bundle PRs this overrides "a `BEHIND` branch merges fine" below.
 - It runs when the PR changes, not when `main` moves. Re-run it after another
   bundle PR merges.
