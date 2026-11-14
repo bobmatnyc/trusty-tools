@@ -270,6 +270,10 @@ pub(crate) mod pm_guard_secret_file_list;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
+// #10761: bracket expressions parsed and expanded for the secret-read rule.
+pub(crate) mod pm_guard_secret_brackets;
+#[cfg(test)]
+mod pm_guard_secret_brackets_tests;
 // #7557: the word-list / ref / text-payload position rules, split out of
 // `pm_guard_secret_read` when the structure check pushed it over the cap.
 pub(crate) mod pm_guard_secret_positions;

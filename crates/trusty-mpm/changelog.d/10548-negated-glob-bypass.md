@@ -1,0 +1,2 @@
+Security
+- The pm-guard secret-read rule now refuses a glob whose bracket expression can reach a secret-bearing file name. `cat .[!x]nv` and `cat .[^x]nv` were allowed although a shell expands both onto `.env`. The guard now parses negated classes, ranges, `[:name:]` classes and a leading `]` member, and judges every name a class can match; a class that reaches no secret name, such as `.[!eE]nv`, still runs. A bracket it cannot read is refused, not ignored (#10761, #10548).
