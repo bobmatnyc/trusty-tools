@@ -1066,6 +1066,48 @@ async fn an_in_place_start_never_types_into_a_session_that_already_existed_10101
     result.expect("an existing session is left in place");
 }
 
+/// A spec built by the in-place seam with `profile`'s stamp.
+fn reused_spec(
+    profile: trusty_mpm::core::session_profile::SessionProfile,
+) -> trusty_mpm::runtime::launch_spec::LaunchSpec {
+    let root = tempfile::TempDir::new().expect("tmp config root");
+    let mut prompt = probe_prompt("/p.txt");
+    prompt.stamp = trusty_mpm::core::session_profile::launch_env(profile);
+    super::inplace_session_spec(std::path::Path::new("/w"), root.path(), &prompt, None)
+        .expect("a spec builds")
+}
+
+/// #11270 (Fail-Open Check): an Architect start into a session already
+/// running is an error naming the remedy, never a notice with exit 0.
+#[test]
+fn a_reused_session_refuses_an_architect_spec_11270() {
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let err = super::reused_session_notice(
+        &reused_spec(SessionProfile::Architect),
+        "tm-architect",
+        "the default tmux server",
+    )
+    .expect_err("an Architect start into a running session is refused");
+    let text = err.to_string();
+    assert!(
+        text.contains("tm-architect") && text.contains("tm fleet relaunch"),
+        "{text}"
+    );
+}
+
+/// #11270: a PM start into a session already running keeps the notice it
+/// printed before, word for word.
+#[test]
+fn a_reused_session_keeps_the_notice_for_a_pm_spec_11270() {
+    use trusty_mpm::core::session_profile::SessionProfile;
+    let notice = super::reused_session_notice(&reused_spec(SessionProfile::Pm), "tm-w", "srv")
+        .expect("a PM start is left in place");
+    assert_eq!(
+        notice,
+        "tmux session tm-w already existed on srv; left in place, claude was not started in it"
+    );
+}
+
 /// #10101: a `tm connect` that fails after its registration, here while
 /// composing the session MCP config, removes the registration. Red at
 /// c3ac72a3aa: `?` returned past the rollback and the record stayed.

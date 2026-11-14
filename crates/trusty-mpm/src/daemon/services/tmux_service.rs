@@ -339,6 +339,12 @@ impl TmuxService {
         // #8878: `-A` below attaches to a session already of this name; only a
         // `claude` this spawn started in a session it created is bound.
         let already_running = driver.pane_id(tmux_name).is_some();
+        // #11270: an Architect typed into a running session cannot be bound;
+        // refused before the create, so the GUI shows the remedy.
+        if already_running {
+            crate::runtime::architect_bind::refuse_reused(profile.is_architect(), tmux_name)
+                .map_err(DaemonError::Unprocessable)?;
+        }
         let workdir_str = workdir.to_string_lossy().into_owned();
         driver
             .create_session(tmux_name, Some(&workdir_str))
@@ -374,8 +380,9 @@ impl TmuxService {
     /// What: for a session this spawn created,
     /// [`crate::runtime::architect_bind::bind_profile`] under the process home,
     /// finding the `claude` under the session's pane shell on `driver`'s
-    /// server; a session that was already running is not re-bound. Not bound
-    /// is a warning in the daemon log.
+    /// server; a session that was already running holds no Architect launch
+    /// (refused in [`Self::spawn_claude`], #11270) and binds nothing. Not
+    /// bound is a warning in the daemon log.
     /// Test: `every_architect_spawn_site_binds_8878`.
     fn bind_gui_spawn(
         driver: &TmuxDriver,
@@ -384,21 +391,17 @@ impl TmuxService {
         profile: crate::core::session_profile::SessionProfile,
         already_running: bool,
     ) {
-        use crate::runtime::architect_bind::{
-            bind_profile, bind_reused, find_claude_with, home_root,
-        };
-        let architect = profile.is_architect();
-        let binding = if already_running {
-            bind_reused(architect)
-        } else {
-            bind_profile(
-                home_root().as_deref(),
-                architect,
-                workdir,
-                tmux_name,
-                || find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok()),
-            )
-        };
+        use crate::runtime::architect_bind::{bind_profile, find_claude_with, home_root};
+        if already_running {
+            return; // #11270: a non-Architect launch; nothing to bind.
+        }
+        let binding = bind_profile(
+            home_root().as_deref(),
+            profile.is_architect(),
+            workdir,
+            tmux_name,
+            || find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok()),
+        );
         if let Some(warning) = binding.warning(tmux_name) {
             tracing::warn!("{warning}");
         }

@@ -376,6 +376,15 @@ pub(crate) async fn launch(
     // 12. Create a detached tmux session rooted at the MANAGED clone directory,
     //     on the host server (#10101), through the #2398 choke point.
     //     #10101: a failure from here on removes the registration it leaves.
+    // #11270: `create` attaches to a session of this name already running and
+    // the launch below would type into it unbound; an Architect spec is refused
+    // first. The registration is kept, as in `tm connect`: a `DELETE` would
+    // kill the running session.
+    if host.has_session(&tmux_name) {
+        let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&claude_spec);
+        trusty_mpm::runtime::architect_bind::refuse_reused(architect, &tmux_name)
+            .map_err(anyhow::Error::msg)?;
+    }
     let registered = super::launch_host::Registered::new(&daemon, session_id);
     if let Err(e) = host.create(&tmux_name, &managed_workdir) {
         return Err(registered.fail(e).await);

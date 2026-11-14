@@ -1,0 +1,2 @@
+Fixed
+- An Architect launch into a tmux session that is already running is now refused before anything is typed, with an error naming `tm fleet relaunch` and `tm fleet bind`, instead of leaving a supervisor `claude` unbound behind a warning: `tm session start` exits non-zero rather than printing a notice, `tm launch` refuses before it attaches, and the GUI spawn answers 422. Other launches into a running session are unchanged ([#11270](https://github.com/bobmatnyc/trusty-tools/issues/11270))

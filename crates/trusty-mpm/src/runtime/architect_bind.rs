@@ -14,9 +14,10 @@
 //! through [`crate::core::architect_session::bind_architect`], the one record
 //! writer every path reaches. A non-Architect launch is
 //! [`Binding::NotArchitect`] and costs nothing. The `claude` is found under
-//! the session's pane shell, never named by a caller. A session that was
-//! already running is not re-bound ([`Binding::NotStarted`]); `tm fleet bind`
-//! re-binds a running Architect after presence (#8878 PR2a). The bare-`tm` in-place relaunch refuses a
+//! the session's pane shell, never named by a caller. An Architect launch into
+//! a session that was already running is refused before anything is typed
+//! ([`refuse_reused`], #11270); `tm fleet bind` re-binds a running Architect
+//! after presence (#8878 PR2a). The bare-`tm` in-place relaunch refuses a
 //! supervisor session before it execs (#9092). [`DEFERRED`] names the one
 //! path that does not bind yet. Every failure is a [`Binding`] the caller
 //! reports; none grants anything, since no record means the floor denies.
@@ -62,8 +63,6 @@ pub enum Binding {
     NoClaude(String),
     /// A `claude` was found but its record did not land or read back.
     NotRecorded(String),
-    /// The session was already running, so its `claude` is not re-bound.
-    NotStarted,
 }
 
 impl Binding {
@@ -74,7 +73,6 @@ impl Binding {
         let why = match self {
             Self::NotArchitect | Self::Bound(_) => return None,
             Self::NoClaude(why) | Self::NotRecorded(why) => why.as_str(),
-            Self::NotStarted => "the session was already running",
         };
         Some(format!(
             "warning: the Architect `claude` in tmux session {session} is NOT bound ({why}); \
@@ -119,18 +117,28 @@ pub fn bind_launch(
     bind_profile(root, spec_is_architect(spec), &spec.cwd, session, find)
 }
 
-/// What a launch into a session that was already running binds: nothing.
+/// Refuse an Architect launch into tmux session `session` when it was already
+/// running; `Ok` for every other launch.
 ///
-/// Why: only a `claude` this command started may be recorded; the pane's
-/// `claude` may be one it found there (#8878 critic). `tm fleet bind`
-/// re-binds a running Architect after presence (#8878 PR2a).
-/// Test: `a_reused_session_binds_nothing_8878`.
-pub fn bind_reused(architect: bool) -> Binding {
-    if architect {
-        Binding::NotStarted
-    } else {
-        Binding::NotArchitect
+/// Why (#11270): a launch typed into a running session cannot be bound — the
+/// pane's `claude` may be one it found there (#8878 critic) — so the typed
+/// Architect ran unbound and only a warning said so. Refusing before anything
+/// is typed leaves no unbound supervisor and grants no record.
+/// What: `Err` with the operator message (the session, why, and the remedies
+/// `tm fleet relaunch` and `tm fleet bind`) when `architect`; `Ok(())`
+/// otherwise. Callers run it before any keystroke reaches the session.
+/// Test: `an_architect_launch_into_a_running_session_is_refused_11270`,
+/// `every_reused_session_arm_refuses_an_architect_before_typing_11270`.
+pub fn refuse_reused(architect: bool, session: &str) -> Result<(), String> {
+    if !architect {
+        return Ok(());
     }
+    Err(format!(
+        "not starting the Architect in tmux session {session}: the session is already \
+         running, and a `claude` started in it could not be bound as the Architect. Run \
+         `tm fleet relaunch` to restart the Architect bound, or `tm fleet bind` from its pane \
+         to bind the `claude` already running there"
+    ))
 }
 
 /// Bind the `claude` `find` locates for a launch started in `session` in

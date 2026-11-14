@@ -296,7 +296,7 @@ const SITES: &[(&str, Site)] = &[
 /// [`SITES`], so a new stamp site fails here until it is bound or deferred.
 /// The pane line typer is reached only through `send_spec_launch`, which
 /// binds, and the unbound form only from the fleet path (which binds through
-/// `bind_architect`) and a start into a session that was already running.
+/// `bind_architect`); a session already running refuses an Architect (#11270).
 #[test]
 fn every_architect_spawn_site_binds_8878() {
     let sources = production_sources();
@@ -351,11 +351,7 @@ fn every_architect_spawn_site_binds_8878() {
     only("send_spec_launch_with(", &["runtime/cli_launch.rs"]);
     only(
         "send_spec_launch_unbound(",
-        &[
-            "runtime/cli_launch.rs",
-            "bin/tm/commands/fleet/launch.rs",
-            "bin/tm/commands/session/start.rs",
-        ],
+        &["runtime/cli_launch.rs", "bin/tm/commands/fleet/launch.rs"],
     );
     only("deliver_in(", &["runtime/claude_code.rs"]);
     only("record_launch(", &["core/architect_session.rs"]);
@@ -383,35 +379,82 @@ fn every_architect_spawn_site_binds_8878() {
     );
 }
 
-/// #8878 critic: a start into a session that was already running sends the
-/// launch unbound and records nothing, as `tm connect` starts nothing there;
-/// the GUI spawn does the same for a session it attached to.
+/// #11270: an Architect launch into a session that was already running is
+/// refused with the remedy; every other launch passes the gate unchanged.
 #[test]
-fn a_reused_session_binds_nothing_8878() {
-    assert_eq!(bind_reused(false), Binding::NotArchitect);
-    let reused = bind_reused(true);
-    assert_eq!(reused, Binding::NotStarted);
-    let warn = reused.warning("tm-a").expect("warns");
-    assert!(warn.contains("already running"), "{warn}");
+fn an_architect_launch_into_a_running_session_is_refused_11270() {
+    assert_eq!(refuse_reused(false, "tm-a"), Ok(()));
+    let refusal = refuse_reused(true, "tm-architect").expect_err("an Architect is refused");
+    for part in [
+        "tm-architect",
+        "already running",
+        "tm fleet relaunch",
+        "tm fleet bind",
+    ] {
+        assert!(refusal.contains(part), "{part} missing: {refusal}");
+    }
+}
+
+/// The byte offset of `needle` in `text`'s code (comment lines skipped).
+fn code_at(text: &str, needle: &str) -> Option<usize> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim_start().starts_with("//")
+            && let Some(col) = line.find(needle)
+        {
+            return Some(at + col);
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// #11270 (Fail-Open Check): every path that can reach a session already
+/// running runs the refusal before the tmux create and before any keystroke,
+/// and `tm session start` no longer types an unbound launch at all.
+#[test]
+fn every_reused_session_arm_refuses_an_architect_before_typing_11270() {
     let sources = production_sources();
-    let start = &sources
-        .iter()
-        .find(|(rel, _)| rel == "bin/tm/commands/session/start.rs")
-        .expect("start.rs")
-        .1;
-    let reused_arm = start
-        .split("let sent = if already_running {")
-        .nth(1)
-        .and_then(|rest| rest.split("} else {").next())
-        .expect("start binds by already_running");
+    let text = |rel: &str| {
+        sources
+            .iter()
+            .find(|(r, _)| r == rel)
+            .map(|(_, t)| t.clone())
+            .unwrap_or_else(|| panic!("{rel} missing"))
+    };
+    let before = |rel: &str, gate: &str, later: &[&str]| {
+        let code = text(rel);
+        let gate_at = code_at(&code, gate).unwrap_or_else(|| panic!("{rel}: no {gate}"));
+        for step in later {
+            let step_at = code_at(&code, step).unwrap_or_else(|| panic!("{rel}: no {step}"));
+            assert!(gate_at < step_at, "{rel}: {step} runs before {gate}");
+        }
+    };
+    let start = "bin/tm/commands/session/start.rs";
     assert!(
-        reused_arm.contains("send_spec_launch_unbound(") && reused_arm.contains("bind_reused("),
-        "{reused_arm}"
+        !code_has(&text(start), "send_spec_launch_unbound("),
+        "{start} still types an unbound launch"
     );
-    let gui = &sources
-        .iter()
-        .find(|(rel, _)| rel == "daemon/services/tmux_service.rs")
-        .expect("tmux_service.rs")
-        .1;
-    assert!(gui.contains("if already_running {\n            bind_reused(architect)"));
+    assert!(
+        code_has(&text(start), "refuse_reused("),
+        "{start} does not refuse"
+    );
+    before(
+        start,
+        "reused_session_notice(&spec",
+        &["host.create(&body.name", "send_spec_launch("],
+    );
+    before(
+        "bin/tm/commands/launch.rs",
+        "refuse_reused(",
+        &[
+            "host.create(&tmux_name, &managed_workdir)",
+            "send_spec_launch(",
+        ],
+    );
+    before(
+        "daemon/services/tmux_service.rs",
+        "refuse_reused(",
+        &["create_session(tmux_name", "send_line(&target, &line)"],
+    );
 }

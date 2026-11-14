@@ -282,8 +282,7 @@ pub fn send_spec_launch(
 
 /// [`send_spec_launch`] without the bind, for `tm fleet init|relaunch` — which
 /// binds through `architect_session::bind_architect` under its own home and
-/// stops an Architect it cannot bind (#8878, #10448) — and for `tm session
-/// start` into a session that was already running, which binds nothing.
+/// stops an Architect it cannot bind (#8878, #10448).
 /// Test: `every_architect_spawn_site_binds_8878`.
 pub fn send_spec_launch_unbound(
     server: Option<&str>,
