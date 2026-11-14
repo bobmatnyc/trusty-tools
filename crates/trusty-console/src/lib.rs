@@ -61,6 +61,9 @@ pub mod events_uds;
 // #6517: background whole-machine host-metrics sampler + cache feeding the
 // machine-status route.
 pub mod host_status;
+// #11085: Linux `start`, `stop` and `restart` on `trusty_common::linux_lifecycle`.
+#[cfg(target_os = "linux")]
+pub(crate) mod linux_lifecycle;
 // #6641: the bounded 10-minute sample window, the per-service transition log,
 // and the SSE fan-out the Phase 3 graphs read.
 pub mod machine_history;
@@ -146,6 +149,16 @@ pub enum Commands {
         #[command(subcommand)]
         action: service::ServiceAction,
     },
+    /// Start `trusty-console serve` detached from the install dir and wait
+    /// until it serves (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Start,
+    /// Stop the running console; exits 1 when none runs (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Stop,
+    /// Stop the console, confirm it stopped, then start it (Linux only, #11085).
+    #[cfg(target_os = "linux")]
+    Restart,
 }
 
 /// Arguments for `trusty-console port`.
@@ -278,6 +291,13 @@ pub async fn run_from(argv: Vec<String>) -> Result<()> {
         Commands::Config(cmd) => cmd.run().await,
         // `service` drives macOS launchd synchronously; no async work needed.
         Commands::Service { action } => service::run_service_action(&action),
+        // #11085: D2 keeps macOS unchanged; these verbs exist on Linux only.
+        #[cfg(target_os = "linux")]
+        Commands::Start => linux_lifecycle::start().await,
+        #[cfg(target_os = "linux")]
+        Commands::Stop => linux_lifecycle::stop().await,
+        #[cfg(target_os = "linux")]
+        Commands::Restart => linux_lifecycle::restart().await,
     }
 }
 
