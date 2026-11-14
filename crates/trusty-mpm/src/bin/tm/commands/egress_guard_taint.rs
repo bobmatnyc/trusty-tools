@@ -7,7 +7,9 @@
 //! where D09's "egress denied" takes effect.
 //! What: [`taint_verdict`] judges a gated tool — the path-touching tools in
 //! [`GATED_TOOLS`], and a claude.ai connector tool not proven read-only
-//! ([`connector_write`], #10735) — by [`channels_taint::read_state`] for the payload's
+//! ([`connector_write`], #10735), and a native family tool not proven
+//! read-only ([`family_write`]) that the #11273 main-thread pass allowed
+//! — by [`channels_taint::read_state`] for the payload's
 //! `session_id`, under the hook's home. A tainted session, a gated call with no
 //! string `session_id`, and an unknown home each deny; every other tool is not
 //! judged here. #9923: an untainted session under a live owner-answer mark,
@@ -27,7 +29,7 @@ use serde_json::Value;
 use trusty_mpm::core::channels_readiness::{NOT_READY_CHECK, NotReady};
 use trusty_mpm::core::channels_taint;
 
-use crate::commands::egress_guard_families::is_claude_ai_connector;
+use crate::commands::egress_guard_families::{Classification, FamilyTable, is_claude_ai_connector};
 
 /// The audit slug a taint deny records.
 pub(crate) const TAINT_CHECK: &str = "egress-channel-tainted";
@@ -126,6 +128,35 @@ fn words(segment: &str) -> Vec<String> {
 /// `tainted_session_allows_claude_ai_connector_reads_10735`,
 /// `tainted_session_denies_unknown_claude_ai_connector_verbs_10735`.
 fn connector_write(tool_name: &str) -> bool {
+    server_write(tool_name, |server| {
+        // `claude_ai_Google_Drive` → service words `google`, `drive`.
+        is_claude_ai_connector(server).then(|| words(server).into_iter().skip(2).collect())
+    })
+}
+
+/// True when `tool_name` is a native family MCP tool not proven read-only
+/// (#11273).
+///
+/// Why: a main thread now passes the family rule, so a channel-tainted PM
+/// could post through `slack-mcp` where the family deny used to stop it;
+/// the taint arm must refuse those sends and writes as it does a connector's.
+/// What: the [`connector_write`] verb test over a tool whose name the built-in
+/// [`FamilyTable`] classifies as a family; every word of the server names the
+/// service. The guard asks it only for a call its main-thread pass lifted.
+/// Test: `a_tainted_main_thread_family_send_is_denied_11273`.
+pub(crate) fn family_write(tool_name: &str) -> bool {
+    if !matches!(
+        FamilyTable::builtin().classify(tool_name),
+        Classification::Family(_)
+    ) {
+        return false;
+    }
+    server_write(tool_name, |server| Some(words(server)))
+}
+
+/// The shared verb test of [`connector_write`] and [`family_write`]:
+/// `service` gives the server's service words, `None` when it is not judged.
+fn server_write(tool_name: &str, service: impl FnOnce(&str) -> Option<Vec<String>>) -> bool {
     let segments: Vec<&str> = tool_name.split("__").collect();
     if segments.len() < 3 || !segments[0].eq_ignore_ascii_case("mcp") {
         return false;
@@ -133,12 +164,9 @@ fn connector_write(tool_name: &str) -> bool {
     let Some((tool, server)) = segments[1..].split_last() else {
         return false;
     };
-    let server = server.join("_");
-    if !is_claude_ai_connector(&server) {
+    let Some(service) = service(&server.join("_")) else {
         return false;
-    }
-    // `claude_ai_Google_Drive` → service words `google`, `drive`.
-    let service: Vec<String> = words(&server).into_iter().skip(2).collect();
+    };
     let tool = words(tool);
     let verb = tool.iter().find(|w| !service.contains(w));
     let read_verb = verb.is_some_and(|v| CONNECTOR_READ_VERBS.contains(&v.as_str()));
@@ -167,14 +195,35 @@ fn connector_write(tool_name: &str) -> bool {
 /// `tainted_session_multiedit_denies`,
 /// `an_untainted_session_under_a_live_mark_is_tainted_and_denied`,
 /// `a_relative_launch_dir_under_a_live_mark_denies`.
+#[cfg(test)]
 pub(crate) fn taint_verdict(
     payload: &Value,
     home: Option<&Path>,
     launch: Option<&Path>,
 ) -> Option<String> {
+    taint_verdict_lifted(payload, home, launch, false)
+}
+
+/// [`taint_verdict`], gating also a native family send or write when
+/// `lifted` says the main-thread pass allowed this call (#11273).
+///
+/// Why: before #11273 the family deny stopped a tainted PM's `slack-mcp`
+/// send; the pass removed that, so the taint arm takes it over. A call the
+/// #10387 read lift allowed is not `lifted`, so a subagent's allowlisted read
+/// is judged exactly as before.
+/// Test: `a_tainted_main_thread_family_send_is_denied_11273`,
+/// `an_untainted_main_thread_family_send_is_allowed_11273`.
+pub(crate) fn taint_verdict_lifted(
+    payload: &Value,
+    home: Option<&Path>,
+    launch: Option<&Path>,
+    lifted: bool,
+) -> Option<String> {
     let tool = payload.get("tool_name").and_then(Value::as_str)?;
     // #10735: a claude.ai connector send or write is gated like a path tool.
-    if !GATED_TOOLS.contains(&tool) && !connector_write(tool) {
+    // #11273: so is a lifted native family send or write.
+    let lifted_write = lifted && family_write(tool);
+    if !GATED_TOOLS.contains(&tool) && !connector_write(tool) && !lifted_write {
         return None;
     }
     let Some(session) = payload.get("session_id").and_then(Value::as_str) else {

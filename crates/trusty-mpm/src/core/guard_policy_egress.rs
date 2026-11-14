@@ -10,7 +10,8 @@
 use super::{GuardPolicy, Role, policy};
 
 const ALL: &[Role] = &[Role::Pm, Role::Architect, Role::Agent];
-const ARCHITECT: &[Role] = &[Role::Architect];
+const AGENT: &[Role] = &[Role::Agent];
+const MAIN_THREADS: &[Role] = &[Role::Pm, Role::Architect];
 
 // The Architect core hard limits an entry cites (`content/instructions/architect/core.md`).
 const GUARD_STAYS_ON: Option<&str> = Some("the guard stays on");
@@ -57,12 +58,14 @@ pub static EGRESS_MALFORMED_MCP_NAME: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
+// #11273: the family and Bash rules bind subagents; a PM or Architect main
+// thread passes them, and a call of unknown thread is judged as a subagent's.
 pub static EGRESS_FAMILY: GuardPolicy = policy(
     "GP-043",
     "egress-family",
-    "No call to a messaging or mail family (Slack, Gmail, Notion, chat) outside its allowlist.",
-    "#8454, #10387",
-    ALL,
+    "A subagent may not call a messaging or mail family (Slack, Gmail, Notion, chat), bar claude.ai connectors and allowlisted reads.",
+    "#8454, #10387, #10735, #11273",
+    AGENT,
     true,
     OUTWARD_ACTION,
 );
@@ -70,9 +73,9 @@ pub static EGRESS_FAMILY: GuardPolicy = policy(
 pub static EGRESS_BASH: GuardPolicy = policy(
     "GP-044",
     "egress-bash",
-    "No Bash command that reaches a messaging or mail endpoint.",
-    "#8454",
-    ALL,
+    "A subagent may not run a Bash command that reaches a messaging or mail endpoint or sender.",
+    "#8454, #11273",
+    AGENT,
     true,
     OUTWARD_ACTION,
 );
@@ -100,9 +103,9 @@ pub static EGRESS_POLICY_NOT_READY: GuardPolicy = policy(
 pub static EGRESS_ARCHITECT_AUDIT_UNWRITABLE: GuardPolicy = policy(
     "GP-047",
     "egress-architect-audit-unwritable",
-    "An Architect egress allow stands only once its audit line is written.",
-    "#10447",
-    ARCHITECT,
+    "A PM or Architect main-thread egress allow stands only once its audit line is written.",
+    "#10447, #11273",
+    MAIN_THREADS,
     true,
     OUTWARD_ACTION,
 );

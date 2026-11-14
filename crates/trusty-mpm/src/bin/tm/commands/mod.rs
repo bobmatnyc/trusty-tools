@@ -55,12 +55,14 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
-// #10447: the Architect main-thread allow arm.
+// #10447, #11273: the PM and Architect main-thread pass and its audit.
 pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
+// #11273: Bash commands that only mention a family host.
+pub(crate) mod egress_guard_bash_mention;
 pub(crate) mod egress_guard_families;
-// #11194: a main thread's Slack send to the owner's DM.
+// #11194, #11273: which thread is a PM or Architect main thread.
 pub(crate) mod egress_guard_pm_dm;
 pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.

@@ -1,29 +1,28 @@
-//! `tm hook --egress-guard`: deny every outbound-channel MCP tool, for every
-//! caller (#8454 G3, slice S1). #10735 (owner ruling D6d): the claude.ai
-//! connector servers are exempt from the family deny; the Bash, taint and
-//! audit denies stay.
+//! `tm hook --egress-guard`: deny every outbound-channel MCP tool and Bash
+//! channel command to a subagent (#8454 G3, slice S1); a PM or Architect main
+//! thread passes (#11273). #10735 (owner ruling D6d): the claude.ai connector
+//! servers are exempt from the family deny; the taint and audit denies stay.
 //!
-//! Why: a tm-launched session must not message anyone through Slack, Gmail,
-//! Notion or Google Chat on its own; the daemon's owner channel is meant to be
-//! the only outbound path. `tm hook --pm-guard` cannot carry this rule: both
-//! of its bypass variables lift it, it exempts subagents, and its settings
-//! entry can be removed by the pm-guard opt-out. So this is a separate mode
-//! that never reads `TRUSTY_MPM_PM_UNRESTRICTED` or `TRUSTY_MPM_DISABLE_HOOKS`.
-//! `CLAUDE_MPM_SUB_AGENT` and the payload's `agent_id` are read only to
-//! narrow an Architect exemption: the trust-anchor floor's (#8454 S2,
-//! Architect D1) and the Architect main-thread allow (#10447). It binds every
-//! other tm-launched session, subagents included (Bob ruling 3). It never calls
+//! Why: a subagent must not message anyone through Slack, Gmail, Notion or
+//! Google Chat on its own; owner ruling 2026-11-14 (#11273): "Only PMs
+//! (including Architect) should be allowed egress." `tm hook --pm-guard`
+//! cannot carry this rule: both of its bypass variables lift it, it exempts
+//! subagents, and its settings entry can be removed by the pm-guard opt-out.
+//! So this is a separate mode that never reads `TRUSTY_MPM_PM_UNRESTRICTED` or
+//! `TRUSTY_MPM_DISABLE_HOOKS`. `CLAUDE_MPM_SUB_AGENT`, the payload's
+//! `agent_id` and `session_id` and the launch stamp decide the thread; an
+//! unknown thread is a subagent's. It never calls
 //! `ChannelPolicy::check_egress`: an `Allow` from a channel policy must not
 //! read as permission to run a family tool.
 //! What: [`egress_guard`] reads the `PreToolUse` payload, runs the #8878
 //! trust-anchor floor ([`verdict`]), [`decide`]s, lifts the deny of a Slack
 //! read the host `channels.slack_read_allowlist` grants this project
 //! (`egress_guard_slack_read`, #10387), lifts a family or Bash channel deny
-//! for the Architect's main thread (`egress_guard_architect`, #10447; the
-//! allow stands only once audited), lifts a main thread's Slack send to the
-//! owner's DM (`egress_guard_pm_dm`, #11194; audited the same way), applies the channel-taint
-//! arm with its policy readiness gate ([`with_taint_async`], #8433, #9741;
-//! the daemon's verdict first, #8454 VC), and on
+//! for a PM or Architect main thread (`egress_guard_architect`, #11273; the
+//! allow stands only once audited), applies the channel-taint arm with its
+//! policy readiness gate ([`with_taint_lifted_async`], #8433, #9741; the
+//! daemon's verdict first, #8454 VC; a lifted family send or write is gated
+//! too, #11273), and on
 //! a deny records it through `pm_guard_deny_log`, prints the deny from
 //! `build_pm_guard_deny_response`, and exits 0. It fails closed: an unusable
 //! payload and a panic ([`deny_on_panic`]) both deny. Any other tool gets no
@@ -40,10 +39,9 @@ use crate::commands::egress_guard_bash::{
     BASH_CHECK, bash_deny_reason, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
-use crate::commands::egress_guard_pm_dm as pm_dm;
 use crate::commands::egress_guard_slack_read::{lift, load_allowlist};
 use crate::commands::egress_guard_taint::{
-    POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict,
+    POLICY_CHECK, TAINT_CHECK, policy_not_ready_reason, taint_verdict_lifted,
 };
 use crate::commands::egress_verdict_client::cached_policy_ready;
 use crate::commands::hook_stdin::{
@@ -164,12 +162,12 @@ pub(crate) fn decide(
         Classification::Family(family) => deny(
             "egress-family",
             format!(
-                "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and no \
-                 tm-launched session, PM or subagent, may use an outbound message channel \
-                 directly (#8454); only the Architect's main thread is exempt (#10447), \
-                 a main thread may send to the owner's Slack DM (#11194), and the claude.ai connectors are not this deny's subject (#10735). \
-                 Read and list tools are denied too, except a Slack channel or thread read \
-                 the host config grants this project (#10387). Ask the operator instead."
+                "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and only \
+                 a PM's or the Architect's main thread may use an outbound message channel \
+                 directly (#11273); a subagent, or a call whose thread the guard cannot \
+                 establish, may not (#8454). The claude.ai connectors are not this deny's \
+                 subject (#10735), and a Slack channel or thread read the host config grants \
+                 this project is allowed (#10387). Ask the PM or the operator instead."
             ),
         ),
         Classification::Malformed(detail) => deny(
@@ -259,16 +257,18 @@ enum TaintStep<'a> {
 }
 
 /// The taint arm up to the readiness gate: a deny stands, an allow of a
-/// readable payload that [`taint_verdict`] refuses needs the policy.
+/// readable payload that [`taint_verdict_lifted`] refuses needs the policy.
 /// #9923: `launch` is the session's launch directory, `None` when unknown.
+/// #11273: `lifted` is true when the main-thread pass allowed the call.
 fn taint_step<'a>(
     first: Verdict,
     read: &'a Result<serde_json::Value, HookStdinError>,
     home: Option<&std::path::Path>,
     launch: Option<&std::path::Path>,
+    lifted: bool,
 ) -> TaintStep<'a> {
     match (first, read) {
-        (Verdict::Allow, Ok(payload)) => match taint_verdict(payload, home, launch) {
+        (Verdict::Allow, Ok(payload)) => match taint_verdict_lifted(payload, home, launch, lifted) {
             None => TaintStep::Done(Verdict::Allow),
             Some(taint) => TaintStep::Policy { payload, taint },
         },
@@ -309,7 +309,22 @@ pub(crate) fn with_taint(
     launch: Option<&std::path::Path>,
     ready: impl FnOnce() -> Result<(), NotReady>,
 ) -> Verdict {
-    match taint_step(first, read, home, launch) {
+    with_taint_lifted(first, read, home, launch, false, ready)
+}
+
+/// [`with_taint`] for a call the main-thread pass may have lifted (#11273):
+/// `lifted` also gates a native family send or write.
+/// Test: `a_tainted_main_thread_family_send_is_denied_11273`.
+#[cfg(test)]
+pub(crate) fn with_taint_lifted(
+    first: Verdict,
+    read: &Result<serde_json::Value, HookStdinError>,
+    home: Option<&std::path::Path>,
+    launch: Option<&std::path::Path>,
+    lifted: bool,
+    ready: impl FnOnce() -> Result<(), NotReady>,
+) -> Verdict {
+    match taint_step(first, read, home, launch, lifted) {
         TaintStep::Done(verdict) => verdict,
         TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready()),
     }
@@ -323,6 +338,7 @@ pub(crate) fn with_taint(
 /// only for a tainted gated call.
 /// Test: `untainted_session_never_queries_the_daemon`,
 /// `daemon_unreachable_falls_back_to_inline_load_never_allow`.
+#[cfg(test)]
 pub(crate) async fn with_taint_async<F>(
     first: Verdict,
     read: &Result<serde_json::Value, HookStdinError>,
@@ -333,7 +349,23 @@ pub(crate) async fn with_taint_async<F>(
 where
     F: std::future::Future<Output = Result<(), NotReady>>,
 {
-    match taint_step(first, read, home, launch) {
+    with_taint_lifted_async(first, read, home, launch, false, ready).await
+}
+
+/// [`with_taint_async`] with the #11273 `lifted` flag; the guard's own path.
+/// Test: `a_tainted_main_thread_family_send_is_denied_11273`.
+pub(crate) async fn with_taint_lifted_async<F>(
+    first: Verdict,
+    read: &Result<serde_json::Value, HookStdinError>,
+    home: Option<&std::path::Path>,
+    launch: Option<&std::path::Path>,
+    lifted: bool,
+    ready: impl FnOnce() -> F,
+) -> Verdict
+where
+    F: std::future::Future<Output = Result<(), NotReady>>,
+{
+    match taint_step(first, read, home, launch, lifted) {
         TaintStep::Done(verdict) => verdict,
         TaintStep::Policy { payload, taint } => taint_deny(payload, taint, ready().await),
     }
@@ -364,9 +396,9 @@ where
 /// Read, decide and audit one call; `Some(deny)` to print, `None` to allow.
 ///
 /// What: the stdin read under `PM_GUARD_STDIN_TIMEOUT`, then [`verdict`], the
-/// #10387 Slack read [`lift`], the #10447 Architect lift and the taint arm.
+/// #10387 Slack read [`lift`], the #11273 main-thread pass and the taint arm.
 /// An allowed Slack read prints its audit line on stderr; an allowed
-/// Architect call is denied unless its audit line is appended. A
+/// main-thread call is denied unless its audit line is appended. A
 /// deny is recorded and POSTed through `pm_guard_deny_log` first; neither can
 /// change the verdict — a failed record is reported on stderr, a failed POST
 /// is dropped, and a panic in either is caught by [`deny_on_panic`].
@@ -383,23 +415,21 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
     // #10387: after the floor, before the taint arm.
     let project_dir = env.project_dir.as_deref();
     let (first, slack_read) = lift(first, &read, &table, project_dir, || load_allowlist(home));
-    // #10447: the Architect's main thread, after the floor and the read lift.
-    let (first, architect_allowed) =
-        architect::lift(first, &read, &table, &env, MpmConfig::load_default);
-    // #11194: a main thread's Slack send to the owner's DM, after the Architect lift.
-    let (first, pm_dm_allowed) = pm_dm::lift(first, &read, &env);
+    // #11273: a PM or Architect main thread, after the floor and the read lift.
+    let (first, main_allowed) = architect::lift(first, &read, &table, &env);
     // #9923 (Architect Q10): the launch directory, which a `cd` does not move.
     let launch = session_profile::hook_project_dir(env.project_dir.clone());
     // #9741: the policy loads under the same home the taint is read from.
     // #8454 VC: the daemon's verdict first; the inline load where none is served.
     let ready = || cached_policy_ready(url, home, || policy_ready(home));
-    let verdict = with_taint_async(first, &read, home, launch.as_deref(), ready).await;
-    // #10447: an Architect allow stands only once its audit line is written.
+    // #11273: a lifted family send or write is gated by the taint arm too.
+    let lifted = main_allowed.is_some();
+    let verdict =
+        with_taint_lifted_async(first, &read, home, launch.as_deref(), lifted, ready).await;
+    // #11273: a main-thread allow stands only once its audit line is written.
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let audit = architect::audit_path();
-    let verdict = architect::audited(verdict, architect_allowed, audit.as_deref(), &now);
-    // #11194: the owner-DM allow, audited to the same file under the same rule.
-    let verdict = pm_dm::audited(verdict, pm_dm_allowed, audit.as_deref(), &now);
+    let verdict = architect::audited(verdict, main_allowed, audit.as_deref(), &now);
     let Verdict::Deny { check, reason } = verdict else {
         // #10387: one audit line per allowed read, no call content.
         if let Some(allowed) = slack_read {

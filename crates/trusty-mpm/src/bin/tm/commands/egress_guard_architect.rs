@@ -1,54 +1,49 @@
-//! The Architect main-thread allow arm of `tm hook --egress-guard` (#10447).
+//! The main-thread pass of `tm hook --egress-guard` (#11273), and its audit.
+//! The file keeps its #10447 name: the Architect-only lift it held folded into
+//! this one pass for every PM and Architect main thread.
 //!
-//! Why: owner ruling 2026-10-29 — the Architect acts as the owner's proxy, so
-//! its own session may reach Slack, Gmail, Notion and Google Chat directly.
-//! It supersedes the D9a "no Architect carve-out" ruling (#10416) for the
-//! Architect's main thread only; PMs, agents and subagents stay denied.
+//! Why: owner ruling 2026-11-14 — "Only PMs (including Architect) should be
+//! allowed egress." and "Keep both subagent paths as they are." The family
+//! and Bash rules now bind subagents; a PM or Architect main thread passes
+//! them whether or not the Architect is bound to a launch record (#11270).
 //! What: [`lift`] runs on the guard's verdict after the #8878 trust-anchor
-//! floor. It judges only an `egress-family` deny (an MCP or MCP-resource tool
-//! of a family) and an `egress-bash` deny whose command names a channel host
-//! or program; the over-cap and walk-budget Bash denies are never judged,
-//! since the floor did not read those commands. A judged deny is lifted only
-//! when [`architect_main_thread`] holds — the one identity predicate the
-//! #8878 floor uses: no payload `agent_id`, `CLAUDE_MPM_SUB_AGENT` unset, the
-//! `supervisor` launch stamp, a `CLAUDE_PROJECT_DIR` that requests the
-//! supervisor profile and is in the user-level `[supervisor] projects`
-//! allowlist after canonicalization, and the hook's nearest `claude`
-//! matching a `tm fleet init` / `tm fleet relaunch` launch record on PID and
-//! start time. The record keeps a nested `TRUSTY_MPM_SESSION_PROFILE=supervisor
-//! claude` in the Architect directory out (Architect ruling 13:03Z).
-//! [`audited`] then lets the allow stand only once one audit line is
-//! appended: family, tool, time and session, never a message body or a
-//! command argument.
-//! FAIL-CLOSED: a trust-anchor deny is never judged. An unreadable or
-//! malformed user config loads as the default config, whose allowlist is
-//! empty; an unreadable `.trusty-mpm.toml` requests the PM profile; either
-//! fails the identity, which keeps the deny. An audit line that cannot be
-//! written denies.
+//! floor and the #10387 read lift. It judges only an `egress-family` deny (an
+//! MCP or MCP-resource tool of a family) and an `egress-bash` deny whose
+//! command reaches a channel host or runs a channel program; the over-cap and
+//! walk-budget Bash denies are never judged, since no rule read those
+//! commands. A judged deny is lifted only when
+//! `egress_guard_pm_dm::main_thread_role` names a PM or Architect main
+//! thread. [`audited`] then lets the allow stand only once one audit line is
+//! appended: role, family, tool, time and session, never a message body or a
+//! command argument. Every lifted call is audited, reads included.
+//! FAIL-CLOSED: a trust-anchor deny is never judged; an unreadable payload,
+//! an unknown thread, a subagent and an unknown stamp keep the deny. An audit
+//! line that cannot be written turns the allow into an [`AUDIT_CHECK`] deny,
+//! which the guard records in its deny log like any other deny.
 //! Test: `egress_guard_architect_tests.rs`.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use trusty_mpm::core::config::MpmConfig;
 
 use crate::commands::egress_guard::{BASH_TOOL, RESOURCE_TOOLS, Verdict};
 use crate::commands::egress_guard_bash::{
     BASH_CHECK, BashDeny, bash_egress_deny, bash_oversize_reason,
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
+use crate::commands::egress_guard_pm_dm::{MainRole, main_thread_role};
 use crate::commands::hook_stdin::HookStdinError;
-use crate::commands::pm_guard_architect_reason::architect_main_thread;
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 
 /// The check slug of an MCP family deny.
 const FAMILY_CHECK: &str = "egress-family";
 
-/// The audit slug of an allowed Architect call.
-pub(crate) const ALLOWED_AUDIT: &str = "egress-architect-allowed";
+/// The audit slug of an allowed main-thread call (#11273).
+pub(crate) const ALLOWED_AUDIT: &str = "egress-main-thread-allowed";
 
-/// The check slug of a deny whose audit line could not be written.
+/// The check slug of a deny whose audit line could not be written. The slug
+/// keeps its #10447 spelling so GP-047 and existing deny logs still match.
 pub(crate) const AUDIT_CHECK: &str = "egress-architect-audit-unwritable";
 
 /// The audit file's name, under the trusty-mpm data directory.
@@ -57,9 +52,11 @@ const AUDIT_FILE: &str = "egress-architect-allowed.log";
 /// The longest field an audit line carries.
 const MAX_FIELD: usize = 128;
 
-/// An allowed Architect call, as its audit line names it.
+/// An allowed main-thread call, as its audit line names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ArchitectAllowed {
+pub(crate) struct MainThreadAllowed {
+    /// The caller's role.
+    pub(crate) role: MainRole,
     /// The MCP family, or the service a Bash command reaches.
     pub(crate) family: String,
     /// The tool name; never its input.
@@ -68,17 +65,18 @@ pub(crate) struct ArchitectAllowed {
     pub(crate) session: String,
 }
 
-impl ArchitectAllowed {
-    /// `egress-architect-allowed time=<rfc3339> session=<id> family=<f>
-    /// tool=<name>`, every field reduced to `[A-Za-z0-9._:-]`.
+impl MainThreadAllowed {
+    /// `egress-main-thread-allowed time=<rfc3339> session=<id> role=<pm|architect>
+    /// family=<f> tool=<name>`, every field reduced to `[A-Za-z0-9._:-]`.
     ///
     /// Why: a payload field could carry a newline and forge a second line.
-    /// Test: `architect_audit_line_carries_no_body_and_no_newline`.
+    /// Test: `main_thread_audit_line_carries_no_body_and_no_newline_11273`.
     pub(crate) fn audit_line(&self, time: &str) -> String {
         format!(
-            "{ALLOWED_AUDIT} time={} session={} family={} tool={}",
+            "{ALLOWED_AUDIT} time={} session={} role={} family={} tool={}",
             field(time),
             field(&self.session),
+            self.role.label(),
             field(&self.family),
             field(&self.tool)
         )
@@ -132,35 +130,34 @@ fn liftable_family(check: &str, payload: &Value, table: &FamilyTable) -> Option<
     }
 }
 
-/// Lift a family or Bash channel deny for the Architect's main thread.
+/// Lift a family or Bash channel deny for a PM or Architect main thread.
 ///
-/// Why / What: see the module doc. `config` is called only for a judged
-/// deny, so every other call reads no file and walks no process table.
-/// Test: `architect_main_thread_may_send_slack_and_name_the_slack_host`,
-/// `architect_relaunch_is_allowed_only_once_recorded`,
-/// `nested_supervisor_claude_in_the_architect_dir_is_denied`,
-/// `architect_subagent_stays_denied`, `pm_project_with_supervisor_env_stays_denied`,
-/// `unreadable_config_or_profile_stays_denied`,
-/// `trust_anchor_deny_holds_for_the_architect_main_thread`.
+/// Why / What: see the module doc. #11273: no config read and no launch
+/// record; the identity is `main_thread_role` alone.
+/// Test: `pm_and_architect_main_threads_pass_every_family_11273`,
+/// `architect_main_thread_passes_without_a_launch_record_11273`,
+/// `architect_subagent_stays_denied`,
+/// `trust_anchor_deny_holds_for_the_architect_main_thread`,
+/// `budget_and_cap_bash_denies_are_never_lifted_11273`.
 pub(crate) fn lift(
     first: Verdict,
     read: &Result<Value, HookStdinError>,
     table: &FamilyTable,
     env: &HookEnv,
-    config: impl FnOnce() -> MpmConfig,
-) -> (Verdict, Option<ArchitectAllowed>) {
+) -> (Verdict, Option<MainThreadAllowed>) {
     let (Verdict::Deny { check, .. }, Ok(payload)) = (&first, read) else {
         return (first, None);
     };
     let Some(family) = liftable_family(check, payload, table) else {
         return (first, None);
     };
-    // #10447: the floor's identity predicate; any failed check keeps the deny.
-    if architect_main_thread(payload, env, config).is_err() {
+    // #11273: a subagent, an unknown thread or an unknown stamp keeps the deny.
+    let Some(role) = main_thread_role(payload, env) else {
         return (first, None);
-    }
+    };
     let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");
-    let allowed = ArchitectAllowed {
+    let allowed = MainThreadAllowed {
+        role,
         family,
         tool: text("tool_name").to_owned(),
         session: text("session_id").to_owned(),
@@ -187,41 +184,27 @@ fn append(path: &Path, line: &str) -> std::io::Result<()> {
     file.write_all(format!("{line}\n").as_bytes())
 }
 
-/// The final verdict: an Architect allow stands only once audited.
+/// The final verdict: a main-thread allow stands only once audited.
 ///
-/// Why: requirement 3 of #10447 — every allowed call leaves one audit line,
-/// so an allow whose line cannot be written must not go through.
+/// Why: GP-047 — every lifted call leaves one audit line, so an allow whose
+/// line cannot be written must not go through, and a deny is never touched.
 /// What: `verdict` unchanged unless it is [`Verdict::Allow`] and `allowed` is
 /// set; then the line is appended to `path`, and a `None` path or a failed
-/// write is an [`AUDIT_CHECK`] deny.
-/// Test: `architect_allow_needs_its_audit_line`.
+/// write is an [`AUDIT_CHECK`] deny naming the role and the error kind. The
+/// guard records that deny in its deny log, so the refused call still leaves
+/// a record.
+/// Test: `main_thread_allow_needs_its_audit_line_11273`,
+/// `an_audit_failure_never_turns_a_deny_into_an_allow_11273`.
 pub(crate) fn audited(
     verdict: Verdict,
-    allowed: Option<ArchitectAllowed>,
+    allowed: Option<MainThreadAllowed>,
     path: Option<&Path>,
     time: &str,
 ) -> Verdict {
-    let line = allowed.map(|allowed| allowed.audit_line(time));
-    audited_line(verdict, line, path, "Architect call (#10447)")
-}
-
-/// [`audited`] over a ready audit line; `what` names the allow in the deny.
-///
-/// Why: #11194's PM owner-DM allow is audited in the same file, with the
-/// same rule — no line written, no allow.
-/// What: `verdict` unchanged unless it is [`Verdict::Allow`] and `line` is
-/// set; then `line` is appended to `path`, and a `None` path or a failed
-/// write is an [`AUDIT_CHECK`] deny.
-/// Test: `architect_allow_needs_its_audit_line`, `pm_dm_allow_needs_its_audit_line`.
-pub(crate) fn audited_line(
-    verdict: Verdict,
-    line: Option<String>,
-    path: Option<&Path>,
-    what: &str,
-) -> Verdict {
-    let (Verdict::Allow, Some(line)) = (&verdict, line) else {
+    let (Verdict::Allow, Some(allowed)) = (&verdict, allowed) else {
         return verdict;
     };
+    let line = allowed.audit_line(time);
     let written = match path {
         Some(path) => append(path, &line).map_err(|err| err.kind().to_string()),
         None => Err("the trusty-mpm data directory is unknown".to_owned()),
@@ -231,9 +214,10 @@ pub(crate) fn audited_line(
         Err(why) => Verdict::Deny {
             check: AUDIT_CHECK,
             reason: format!(
-                "tm hook --egress-guard would allow this {what}, but its audit \
-                 line could not be written ({why}), so it denies it. Fix the trusty-mpm data \
-                 directory and retry."
+                "tm hook --egress-guard would allow this {} main-thread call (#11273), but its \
+                 audit line could not be written ({why}), so it denies it. Fix the trusty-mpm \
+                 data directory and retry.",
+                allowed.role.label()
             ),
         },
     }
