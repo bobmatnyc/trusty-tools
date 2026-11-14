@@ -52,6 +52,19 @@ class Grants(Leases):
             if forget <= now:
                 del self.spent[digest]
 
+    async def expire(self, now: float) -> None:
+        """Purge stale codes and end every grant idle for ``GRANT_IDLE`` or longer.
+
+        Why: an idle grant otherwise holds a cap slot until its own agent calls
+        again (#11239). What: runs before every cap check and grant listing.
+        Test: `test_idle_profile_grants_release_the_total_cap`,
+        `test_idle_tab_grant_releases_the_tab_cap_even_without_audit`.
+        """
+        self.purge(now)
+        for grant in list(self.grants.values()):
+            if grant.state == "active" and now - grant.last_used >= GRANT_IDLE:
+                await self.end(grant, "idle")
+
     def check_caps(
         self, generation: str | None, tab: int | None, me: Grant | None
     ) -> None:
@@ -79,7 +92,7 @@ class Grants(Leases):
         except OSError:
             raise Refusal("AuditUnavailable") from None
 
-    def mint(self, request: Frame) -> Frame:
+    async def mint(self, request: Frame) -> Frame:
         scope, tab = request.get("scope"), request.get("tab")
         expected = {"op", "scope", *FIELDS} | ({"tab"} if scope == "tab" else set())
         if (
@@ -103,7 +116,7 @@ class Grants(Leases):
         if scope == "tab" and peer is None:
             raise Refusal("BrowserDisconnected")
         generation = peer.generation if scope == "tab" and peer else None
-        self.purge(codes.clock())
+        await self.expire(codes.clock())
         self.check_caps(generation, tab if scope == "tab" else None, None)
         code = codes.new_code()
         digest = codes.code_digest(code)
@@ -144,7 +157,7 @@ class Grants(Leases):
             raise Refusal(
                 "RedeemLocked", retry_after_s=math.ceil(self.lockout.remaining(now))
             )
-        self.purge(now)
+        await self.expire(now)
         digest = codes.code_digest(code)
         grant = self.codes.get(digest) if digest else None
         if grant is None or grant.state != "code":
@@ -326,7 +339,7 @@ class Grants(Leases):
 
     async def grant_operator(self, request: Frame) -> Frame:
         op = request.get("op")
-        self.purge(codes.clock())
+        await self.expire(codes.clock())
         if op == "grants" and set(request) == {"op"}:
             now = codes.clock()
             return {"ok": True, "grants": [g.entry(now) for g in self.grants.values()]}

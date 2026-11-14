@@ -212,7 +212,7 @@ class Broker(Grants):
         assert self.db is not None
         op = string(request, "op")
         if op == "mint":  # #11239: codes are minted only on this socket.
-            return self.mint(request)
+            return await self.mint(request)
         if op == "resolve":
             return resolve_workflow(self.db, request)
         workflow = string(request, "workflow")

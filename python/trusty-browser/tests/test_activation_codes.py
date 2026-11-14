@@ -525,6 +525,58 @@ def test_idle_browser_loss_and_socket_close_end_the_grant(short, clock):
     run(short, body)
 
 
+def test_idle_profile_grants_release_the_total_cap(short, clock):
+    async def body(rig):
+        calls = []
+        for _ in range(codes.MAX_GRANTS):
+            ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+            assert ack["ok"]
+            calls.append(call)
+        clock[0] += codes.GRANT_IDLE - 1
+        assert (await rig.mint(rig.alpha))["limit"] == "total"
+        clock[0] += 1
+        fresh = []
+        for _ in range(codes.MAX_GRANTS):
+            ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+            assert ack["ok"], ack
+            fresh.append(call)
+        assert rig.outcomes("grant_end") == ["idle"] * codes.MAX_GRANTS
+        assert (await rig.mint(rig.alpha))["limit"] == "total"
+        for call in calls:
+            assert (await gone(call)) == {
+                "ok": False,
+                "error": "GrantEnded",
+                "reason": "idle",
+            }
+        assert (await fresh[0]({"op": "claim"}))["ok"]
+
+    run(short, body)
+
+
+def test_idle_tab_grant_releases_the_tab_cap_even_without_audit(
+    short, clock, monkeypatch
+):
+    async def body(rig):
+        _, stale = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        assert (await stale({"op": "claim"}))["ok"]
+        clock[0] += codes.GRANT_IDLE
+        real = rig.broker.audit.write
+
+        def broken(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(rig.broker.audit, "write", broken)
+        assert (await rig.operator(op="grants")) == {"ok": True, "grants": []}
+        assert not rig.broker.claims
+        monkeypatch.setattr(rig.broker.audit, "write", real)
+        ack, _ = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        assert ack["ok"], ack
+        assert (await rig.mint(rig.alpha, "tab", 7))["limit"] == "tab"
+        assert (await gone(stale))["reason"] == "idle"
+
+    run(short, body)
+
+
 def test_broker_restart_leaves_no_code_or_grant(short, clock):
     async def body(rig):
         code = (await rig.mint(rig.alpha))["code"]

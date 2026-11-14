@@ -128,8 +128,12 @@ New errors on these operations:
 answered `TabNotFound`), `browser_gone` (the profile's pairing ended or was
 replaced), `unenrolled` (the route was removed or replaced), `idle` (no
 operation for `GRANT_IDLE`), `audit` (an operation's result line could not be
-written). A grant also ends silently when its socket closes. When a grant ends
-its claims are dropped and their indicators cleared. A click in flight when its
+written). An idle grant ends at its own next operation, or earlier at the next
+mint, redeem or operator op, whichever comes first; once ended it no longer
+counts toward `MAX_GRANTS_PER_TAB` or `MAX_GRANTS`, and its agent's next call
+answers `GrantEnded` with `reason: idle`. A grant also ends silently when its
+socket closes. When a grant ends its claims are dropped and their indicators
+cleared. A click in flight when its
 grant ends answers `OutcomeUnknown`, as a click does today when its browser
 disconnects; a snapshot in flight answers `GrantEnded`.
 
@@ -168,4 +172,4 @@ Failure policy: mint, redeem and each operation's `admitted` line are
 fail-closed — if the write fails the request is refused with
 `AuditUnavailable` and nothing is created, consumed or run. A failed result
 line ends the grant (`reason: audit`). Revoke, lock and grant-end lines are
-best-effort: a failed write never blocks a revoke or a lock.
+best-effort: a failed write never blocks a revoke, a lock or a grant end.
