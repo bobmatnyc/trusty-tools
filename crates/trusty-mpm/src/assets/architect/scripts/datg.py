@@ -47,6 +47,9 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   separate sections, and FLAGs an owner claim with no `owner turn:` cite in the session record or in the
   file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
   (exit 1 when one is found).
+- Supersession (#10960, DOC-87 G-4): `update NEW --answer A --source owner ... --supersedes OLD` (batch key
+  "supersedes") stores `superseded_by: NEW` on the owner ruling OLD; an explicit link only, never inferred. The
+  relay check refuses a cite of OLD and names NEW; a superseded item takes no new answer.
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
 but at least one notification was not confirmed; stderr lists each queue outcome. Do not
@@ -99,7 +102,7 @@ from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers an
 from datg_ops import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     OWED_MAX, REFS_MAX, REF_KEY, _all_ids, _bad, _check_goal, _check_opts, _find, _int, _lim, _merge_refs,
     _next_id, _opts, _rows, _title, apply_add, apply_op, apply_pulse, apply_session, apply_update,
-    collect_closed, op_init, write_ops_ev,
+    collect_closed, op_init, supersede, write_ops_ev,
 )
 from datg_task import (  # noqa: E402,F401  (#11101: re-exported for task_pulse.py and tests)
     ACTIVE, WARNINGS, WIP_CAP_DEFAULT, task_mmdd, task_mode, task_problem, wip_cap, wip_check, wip_count,
@@ -261,6 +264,7 @@ def build_parser():
     s.add_argument("--source", choices=("owner", "architect"))
     for f in ("cite", "quote", "until", "basis"):
         s.add_argument(f"--{f}")
+    s.add_argument("--supersedes", metavar="ID", help="the owner ruling this owner-sourced answer replaces (#10960)")
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--outcome", required=True)
@@ -419,7 +423,7 @@ def main(argv=None):
             print(write_ops(a.project, [entry]))
         elif a.verb == "update":
             entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank",
-                                                "state", "needs")}
+                                                "state", "needs", "supersedes")}
             entry.update({VERB_KEY: "update", "id": a.id})
             if a.source:   # #10780: only the flags given, so the shape check names a stray one
                 entry["source"] = {"by": a.source, **{k: getattr(a, k) for k in ("cite", "quote", "until", "basis")

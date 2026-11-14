@@ -21,6 +21,8 @@ What:
 - #10960 G-5 `delivery_gaps`: a closed task with a claimed `delivery` state or a `needs` records the claim capped
   by the evidence kind in its outcome (`delivery_state`); a claim above the evidence, a state below the need, or
   an unknown value is a FLAG line in every guard_mode. A close is never refused for it.
+- #10960 G-4 `supersession_flags`: an owner ruling marked `superseded_by` is not current (owner_rulings skips
+  it); a link whose successor is not an owner ruling in the ledger is a FLAG line, never a block.
 Rollout (DOC-87 section 10): `config.guard_mode` is "shadow" (the default) or "enforce". In shadow G2 only
 warns and appends to <datg>/guards.jsonl; in enforce the dispatch is denied and the close refused. G1 and G3
 are flags in the resume digest and `datg.py guards`; they never block. Enforce binds this Python writer and
@@ -165,15 +167,36 @@ def policy_files(project):
 
 
 def owner_rulings(st, now):
-    """[(item, source)] of the current owner rulings: answered, source.by owner, not past `until`."""
+    """[(item, source)] of the current owner rulings: answered, source.by owner, not past `until`, not superseded.
+
+    Test: test_a_superseded_ruling_is_not_current_and_a_broken_link_is_flagged_10960
+    """
     out = []
     for i in st.get("items") or []:
         src = i.get("source") if isinstance(i.get("source"), dict) else {}
-        if i.get("status") != "answered" or src.get("by") != "owner":
+        if i.get("status") != "answered" or src.get("by") != "owner" or "superseded_by" in i:   # #10960 G-4
             continue
         until = parse_ts(src.get("until")) if src.get("until") else None
         if until is None or until > now:
             out.append((i, src))
+    return out
+
+
+def supersession_flags(st):
+    """#10960 G-4: one FLAG line per `superseded_by` link whose successor is not an owner ruling in this ledger
+    (archived, removed or hand-edited). The old ruling stays superseded; the relay check still refuses its cite.
+
+    Test: test_a_superseded_ruling_is_not_current_and_a_broken_link_is_flagged_10960
+    """
+    by_id = {i.get("id"): i for i in st.get("items") or []}
+    out = []
+    for i in st.get("items") or []:
+        if "superseded_by" not in i:
+            continue
+        succ = by_id.get(i["superseded_by"]) or {}
+        if (succ.get("source") or {}).get("by") != "owner":
+            out.append(f"  FLAG supersession: {i.get('id')} is superseded by {i['superseded_by']!r}, which is not an "
+                       "owner ruling in this ledger; confirm the current ruling with the owner.")
     return out
 
 
@@ -290,7 +313,8 @@ def dispatch_card(project, st, prompt):
 def guard_lines(project, st):
     """#10800 G1 and G3 flag lines for the digest and `datg.py guards`; a failed check is one visible line."""
     try:
-        return policy_flags(project, st) + delivery_flags(st, read_log(project, 262144))
+        return (policy_flags(project, st) + supersession_flags(st)
+                + delivery_flags(st, read_log(project, 262144)))
     except Exception as e:  # noqa: BLE001 - a guard never breaks the resume digest
         return [f"  FLAG guards not checked ({type(e).__name__}: {e})"]
 

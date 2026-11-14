@@ -33,11 +33,18 @@ timeout, a read error or a record ending mid-line refuses. A quote that
 is in the turn but does not say the relayed thing cannot pass: the owner label carries only the quote,
 and the Architect's reading of it goes after `Architect answer:` with its basis. Text with no owner
 label passes untouched; so does a quoted owner ruling relayed as history once it is cited.
+#10960 (DOC-87 G-4 X10-X13): a verified quote whose owner turn is a ledger owner ruling marked `superseded_by`
+(`datg.py update --supersedes`) refuses and names the successor; it passes with a FLAG on stderr (X11) only when
+every successor on the chain is bounded and the last `until` is still ahead. A label whose parentheses say
+`superseded` relays history and is not refused. The ledgers are the Architect IL (ARCHITECT_IL, default local/il)
+and every IL_SCHEDULE session, state.json and archive.jsonl. A missing ledger holds no link. A damaged record (an
+unreadable or corrupt schedule, state.json or archive line) refuses only a cite whose chain touches it (see
+touches); every other cite passes with a FLAG on stderr and a `finding` row in the log (Di9: no blanket gate).
 Every labelled relay checked, passed or refused, is appended to inbox/relay-provenance.jsonl.
 Exit 0: no owner label, or every label verified (one `cite ok` line each). Exit 3: refused (the reason,
 and how to resend as an Architect answer). Exit 2: usage. Paths: ARCHITECT_OWNER_TURNS,
 ARCHITECT_RELAY_LOG and DASHBOARD_ROOT override the record, the log and the dashboard store.
-Test: tests/test_relay.py (through relay.sh)
+Test: tests/test_relay.py (through relay.sh), tests/test_relay_supersession.py
 """
 import json
 import os
@@ -117,7 +124,12 @@ def _ts(s):
 
 
 def chat_turns(at):
-    """Owner chat turns recorded within WINDOW of `at`, read under the record's shared lock.
+    """The texts of the owner chat turns recorded within WINDOW of `at` (chat_records)."""
+    return [text for _, text in chat_records(at)]
+
+
+def chat_records(at):
+    """[(at, text)] of the owner chat turns recorded within WINDOW of `at`, read under the record's shared lock.
 
     Refused (#10960, DOC-87 X22) when the lock is not held in time, the record cannot be read, or it ends mid-line
     (a write cut short): the check denies rather than trust a torn read. A missing record has no turns. A line that
@@ -145,7 +157,7 @@ def chat_turns(at):
             continue
         t = _ts(rec.get("at")) if isinstance(rec, dict) else None
         if t and want and abs(t - want) <= WINDOW and isinstance(rec.get("text"), str):
-            out.append(rec["text"])
+            out.append((rec["at"], rec["text"]))
     return out
 
 
@@ -330,8 +342,14 @@ def verify(cite, quotes):
     return kind
 
 
-def check(text):
-    """[(label, name, cite, kind, quotes)] for every owner label in `text`; Refused on the first bad one."""
+# #10960: the supersession check lives in relay_supersession.py, which imports names defined above;
+# run as a script this module is __main__, so register it under its own name for that import.
+sys.modules.setdefault("relay_provenance", sys.modules[__name__])
+from relay_supersession import ledger_items, superseded, touches  # noqa: E402
+
+
+def check(text, findings=None):
+    """[(label, name, cite, kind, quotes, flag)] per owner label; Refused on the first bad one. Damage -> `findings`."""
     text = unicodedata.normalize("NFKC", text).replace("\u201c", '"').replace("\u201d", '"')   # #10780 H1
     marks = list(LABEL.finditer(text))
     starts = {m.start() for m in marks}
@@ -344,7 +362,7 @@ def check(text):
         lead = text[m0.end() if m0 else 0:marks[0].start()]
         if lead.strip() and not ARCH_LABEL.match(lead):
             raise Refused("text before the first owner label is not the owner's; label it `Architect answer: ...`")
-    out = []
+    out, items, damage = [], None, findings if findings is not None else []
     for i, m in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
         label = f"User {m.group(1)} ({m.group(2)})"
@@ -354,7 +372,19 @@ def check(text):
                           "`Architect answer:`")
         try:
             quotes, cite, _ = check_segment(text[m.end():end])
-            out.append((label, m.group(2), cite, verify(cite, quotes), quotes))
+            kind, flag = verify(cite, quotes), None
+            if not re.search(r"\bsuperseded\b", m.group(2)):   # #10960 G-4; a `superseded` label relays history
+                if items is None:
+                    items, got = ledger_items()
+                    damage += got
+                refuse, flag, chain, located = superseded(cite, quotes, items)
+                if refuse:
+                    raise Refused(flag)
+                for d in damage:
+                    if touches(d, cite, quotes, chain, located):
+                        raise Refused(f"the ledger record {d['path']} {d['reason']} and may hold this cite's "
+                                      "supersession link; repair it, or cite a ruling recorded in a sound ledger")
+            out.append((label, m.group(2), cite, kind, quotes, flag))
         except Refused as e:
             raise Refused(f"{label}: {e}")
     return out
@@ -371,20 +401,33 @@ def log(session, outcome, detail):
         print(f"relay_provenance: log not written ({e})", file=sys.stderr)
 
 
+def report_damage(session, damage):
+    """#10960 (Di9): each damaged ledger record is a `finding` log row and a loud FLAG on stderr, never a halt."""
+    for d in damage:
+        log(session, "finding", {"damaged": d["path"], "reason": d["reason"]})
+        print(f"FLAG DAMAGED LEDGER: {d['path']} {d['reason']}. Owner cites whose link chain does not touch it were "
+              "checked without it; repair it.", file=sys.stderr)
+
+
 def main(argv):
     if len(argv) != 3 or argv[0] != "check" or not argv[1] or not argv[2]:
         print("usage: relay_provenance.py check <session> <text>", file=sys.stderr)
         return 2
-    session, text = argv[1], argv[2]
+    session, text, findings = argv[1], argv[2], []
     try:
-        found = check(text)
+        found = check(text, findings)
     except Refused as e:
+        report_damage(session, findings)
         log(session, "refused", {"reason": str(e)})
         print(f"NO-OWNER-CITE: {e}. {HOW}")
         return 3
-    for label, _, cite, kind, quotes in found:
-        log(session, "verified", {"kind": kind, "label": label, "cite": cite, "quotes": [q[:300] for q in quotes]})
+    for label, _, cite, kind, quotes, flag in found:
+        log(session, "verified", {"kind": kind, "label": label, "cite": cite, "quotes": [q[:300] for q in quotes],
+                                  **({"flag": flag} if flag else {})})
         print(f"cite ok: {label} {cite} ({kind})")
+        if flag:   # #10960 X11: stderr, so relay.sh still sends and the caller sees it
+            print(f"FLAG superseded-bounded: {label}: {flag}", file=sys.stderr)
+    report_damage(session, findings)
     return 0
 
 
