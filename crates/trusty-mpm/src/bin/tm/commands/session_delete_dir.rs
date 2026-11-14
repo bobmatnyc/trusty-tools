@@ -21,8 +21,7 @@ use std::path::PathBuf;
 
 use anyhow::Context as _;
 use trusty_mpm::client::DaemonClient;
-use trusty_mpm::core::architect_store::{DEFAULT_ARCHITECT_DIR, recorded_architects};
-use trusty_mpm::core::config::MpmConfig;
+use trusty_mpm::core::architect_store::protected_architect_dirs;
 use trusty_mpm::core::presence_local::LocalAuthenticator;
 use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 use trusty_mpm::session_manager::project_dir_delete::{
@@ -52,10 +51,9 @@ pub(crate) async fn run(
         sessions.push(DirSession::from_summary(&target));
     }
     let root = workspace_root(&TrustyToolsConfig::load());
-    let mut architect_dirs = recorded_architects(&MpmConfig::load_default());
-    if let Some(home) = dirs::home_dir() {
-        architect_dirs.push(home.join(DEFAULT_ARCHITECT_DIR));
-    }
+    let env = |name: &str| std::env::var(name).ok();
+    let architect_dirs = protected_architect_dirs(&env, dirs::home_dir().as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))?;
     let session_id = target.id.clone();
     let report = tokio::task::spawn_blocking(move || {
         delete_blocking(&session_id, &sessions, root, &architect_dirs, dry_run, yes)
