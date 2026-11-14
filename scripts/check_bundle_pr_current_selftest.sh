@@ -207,6 +207,12 @@ for FAIL_GIT in "merge-base --all" "diff"; do
   export FAIL_GIT
   expect "git ${FAIL_GIT} fails, changed-file list -> error" 2 "ERROR"     -- --head os_head --base m_os
 done
+# #11120: fail only the merge pass's own calls; every earlier diff and log runs.
+OS_M="$(git -C "${W}" rev-parse m_os)"; OS_P1="$(git -C "${W}" rev-parse m_os^1)"
+FAIL_GIT="diff -z --no-renames --name-only ${OLD_MAIN} ${OS_P1}"; export FAIL_GIT
+expect "git diff merge-base..first-parent fails -> error" 2 "git diff ${OLD_MAIN} ${OS_P1} failed" -- --head os_head --base m_os
+FAIL_GIT="log -1"; export FAIL_GIT
+expect "git log -1 on a merge fails -> error"      2 "git log ${OS_M} failed" -- --head os_head --base m_os
 unset FAIL_GIT
 PATH="${OLD_PATH}"
 

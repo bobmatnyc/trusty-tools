@@ -337,6 +337,9 @@ ruling 2026-11-14.
   bundle PR merging first. Until a merge queue or a re-run on every `main`
   move exists, the supervisor covers that by merge order; re-run the check
   after another bundle PR merges.
+- Known limit (#11120): a feature branch can merge `main`, keep its own bytes
+  for a bundle file, then land. A PR whose head already holds both sides'
+  commits for that file passes. Check such a PR by hand, or merge `main` into it.
 
 ## Merge states, and what each one means
 
