@@ -13,16 +13,17 @@
 //! shares, one unary exchange, one stream open, and the mapping from a JSON-RPC
 //! refusal back to the HTTP status the daemon's own REST layer sent for it.
 //! [`crate::bridge::map`] owns which path becomes which method,
-//! [`crate::bridge::routes`] owns the axum side, and
-//! [`crate::bridge::serve`] binds the listener.
+//! [`crate::bridge::routes`] owns the axum side, [`crate::bridge::serve`]
+//! builds the router, and [`crate::bridge::scheme`] and
+//! [`crate::bridge::channel`] carry the webview's requests into it in-process.
 //!
 //! **There is no HTTP fallback to the daemon.** The daemon binds no TCP port
 //! (#6637 slice 2c retired its listener), so a fallback that dials the old
 //! fixed port is not a safety net — it is a way to report whatever now holds
 //! that port as a healthy `tcode`. A daemon with no socket reads as
-//! unreachable, which is what it is. This bridge's own loopback listener
-//! (`serve.rs`) is the one TCP port left on the trusty-code side; #10166
-//! tracks replacing it.
+//! unreachable, which is what it is. The bridge itself binds nothing either:
+//! #10166 replaced its loopback listener with a custom URI scheme and an IPC
+//! channel.
 //!
 //! Test: `status_matches_the_retired_rest_mapping`,
 //! `socket_app_name_matches_the_daemon_resolver`,
@@ -31,8 +32,10 @@
 //! `call_reports_an_empty_answer_as_malformed`, plus `tests/bridge_uds.rs`,
 //! which drives the whole router against a stub daemon socket.
 
+pub mod channel;
 pub mod map;
 pub mod routes;
+pub mod scheme;
 pub mod serve;
 pub mod transcript_md;
 
@@ -296,7 +299,7 @@ pub async fn call(
 /// that outlasts `open_timeout`.
 ///
 /// Test: `open_stream_reports_a_dead_socket_as_unreachable`, and
-/// `a_healthy_but_silent_stream_gets_its_head_immediately` in
+/// `a_healthy_but_silent_stream_opens_immediately` in
 /// `tests/bridge_uds.rs` for the open that succeeds.
 pub async fn open_stream(
     socket: &Path,

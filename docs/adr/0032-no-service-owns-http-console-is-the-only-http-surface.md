@@ -21,7 +21,7 @@
   Decision in the owner's own words, for discoverability — see that section
   below. An **Addendum (2026-10-22)** names `trusty-code-gui`'s loopback
   webview bridge as the desktop-companion exception, deferred to #10166 by
-  ruling Da5.
+  ruling Da5. An **Addendum (2026-10-23)** records that #10166 closed it.
 - **Date:** 2026-08-07
 - **Accepted:** 2026-08-07 (owner ruling, verbatim below)
 - **Scope:** Workspace-wide (every trusty-\* daemon that currently binds HTTP:
@@ -324,6 +324,17 @@ defers its replacement with a non-TCP transport to
 [#10166](https://github.com/bobmatnyc/trusty-tools/issues/10166). Until #10166
 lands, `scripts/check_no_tcp_listeners.sh` carries it as an allowlisted row.
 The Decision above is otherwise unchanged.
+
+## Addendum (2026-10-23): the desktop-companion exception closes
+
+[#10166](https://github.com/bobmatnyc/trusty-tools/issues/10166) removes the
+loopback listener the 2026-10-22 addendum excepted. `trusty-code-gui`'s webview
+now reaches the bridge router in-process: REST calls go over the
+`tcode-bridge://` Tauri custom URI scheme, and the two event streams over a
+Tauri IPC `Channel` (owner ruling, 2026-10-23). The bridge binds no TCP port,
+its `tcp_listener_allowlist.tsv` row is deleted, and the exception no longer
+applies. `trusty-console` is again the only TCP surface in the workspace, apart
+from the rows that allowlist still names.
 
 ## Related Decisions
 
