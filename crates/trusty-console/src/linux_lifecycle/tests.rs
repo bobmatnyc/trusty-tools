@@ -299,14 +299,7 @@ fn lifecycle_fixture_entry() {
 fn spawn_fixture(root: &Path, dir: &Path, override_value: &Path, extra: &[&str]) -> Child {
     std::fs::create_dir_all(dir).expect("data dir");
     std::fs::write(dir.join("trusty-console.sock"), b"not a socket").expect("block the socket");
-    let bin = root.join("bin");
-    std::fs::create_dir_all(&bin).expect("bin dir");
-    let link = bin.join(BINARY);
-    let exe = std::env::current_exe().expect("current exe");
-    std::fs::hard_link(&exe, &link)
-        .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
-        .expect("link the fixture");
-    let mut cmd = Command::new(&link);
+    let mut cmd = Command::new(install_fixture(root));
     // libtest takes `serve` as a second exact filter, which matches no test.
     cmd.args([
         "linux_lifecycle::tests::lifecycle_fixture_entry",
@@ -333,6 +326,20 @@ fn spawn_fixture(root: &Path, dir: &Path, override_value: &Path, extra: &[&str])
         std::thread::sleep(Duration::from_millis(20));
     }
     child
+}
+
+/// Link the test binary as `<root>/bin/trusty-console`; returns its path.
+fn install_fixture(root: &Path) -> PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let link = bin.join(BINARY);
+    if !link.exists() {
+        let exe = std::env::current_exe().expect("current exe");
+        std::fs::hard_link(&exe, &link)
+            .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
+            .expect("link the fixture");
+    }
+    link
 }
 
 /// A short root (sun_path is 108 bytes) with `data/` as the override.
@@ -434,6 +441,9 @@ async fn restart_through_http_addr_reports_a_survivor_and_starts_nothing() {
     let (root, data, dir) = fixture_root();
     let mut fixture = spawn_fixture(root.path(), &dir, &data, &[FIXTURE_IGNORE_TERM_ENV]);
     let mut target = target_in(&dir, Some(&data.clone().into_os_string()));
+    // #11085: restart checks the binary before its stop; the stop error
+    // below returns before any start.
+    target.desc.install_dir = root.path().join("bin");
     target.desc.stop_grace = Duration::from_millis(300);
     target.desc.kill_wait = Duration::from_millis(500);
 
@@ -444,23 +454,33 @@ async fn restart_through_http_addr_reports_a_survivor_and_starts_nothing() {
     let shown = format!("{:#}", result.expect_err("a survivor fails the restart"));
     assert!(shown.contains(&fixture.id().to_string()), "{shown}");
     assert!(shown.contains("survived SIGKILL"), "{shown}");
-    assert!(!shown.contains("not installed"), "start ran: {shown}");
     assert!(alive, "the fixture survived, as the seam made it");
 }
 
 // AC11 / P-b: `stop` on a stopped console exits 1; `restart` reaches start.
+// The spawned fixture finds no fixture dir in its cleared environment and
+// exits, so the start fails after its spawn.
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_on_nothing_running_exits_1_and_restart_reaches_start() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let override_value = dir.path().join("data").into_os_string();
-    let target = target_in(dir.path(), Some(&override_value));
+    let (root, data, dir) = fixture_root();
+    let mut target = target_in(&dir, Some(&data.into_os_string()));
+    target.desc.install_dir = install_fixture(root.path())
+        .parent()
+        .expect("bin dir")
+        .to_path_buf();
+    let args = [
+        "linux_lifecycle::tests::lifecycle_fixture_entry",
+        "serve",
+        "--exact",
+    ];
+    target.desc.spawn_args = args.map(String::from).to_vec();
 
     let stop = stop_report(stop_with(&target, &KernelDelivery).await).expect_err("exit 1");
     assert!(format!("{stop:#}").contains("No trusty-console running"));
     let restart = restart_report(restart_with(&target, &KernelDelivery).await);
-    let shown = format!("{:#}", restart.expect_err("no binary to start"));
+    let shown = format!("{:#}", restart.expect_err("the fixture exits at boot"));
     assert!(
-        shown.contains("not installed"),
+        shown.contains("exited before serving the socket"),
         "restart reached start: {shown}"
     );
 }
