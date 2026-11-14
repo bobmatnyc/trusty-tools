@@ -303,15 +303,7 @@ fn spawn_fixture(
     env: &[(&str, &OsString)],
     socket: Option<&Path>,
 ) -> Child {
-    let bin = links.join("bin");
-    std::fs::create_dir_all(&bin).expect("bin dir");
-    let link = bin.join(BINARY);
-    if !link.exists() {
-        let exe = std::env::current_exe().expect("current exe");
-        std::fs::hard_link(&exe, &link)
-            .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
-            .expect("link the fixture");
-    }
+    let link = install_fixture(links);
     let mut cmd = Command::new(&link);
     cmd.args([
         "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
@@ -335,6 +327,20 @@ fn spawn_fixture(
         }
     }
     child
+}
+
+/// Hard-link the test binary as `<links>/bin/trusty-search`; returns the link.
+fn install_fixture(links: &Path) -> PathBuf {
+    let bin = links.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let link = bin.join(BINARY);
+    if !link.exists() {
+        let exe = std::env::current_exe().expect("current exe");
+        std::fs::hard_link(&exe, &link)
+            .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
+            .expect("link the fixture");
+    }
+    link
 }
 
 /// A dir beside the test binary, for the hard link (same filesystem).
@@ -508,20 +514,31 @@ async fn restart_names_a_survivor_and_starts_nothing() {
 }
 
 // AC11 / P-b: a stopped daemon is a `stop` error and a `restart` that reaches
-// the start; here the start meets an empty install dir.
+// the start. #11085: the fixture binary is installed, so restart passes its
+// pre-stop binary check; the spawned fixture finds no FIX_DIR in its cleared
+// environment and exits, so only a start that ran fails this way.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
+    let links = links_dir();
     let data = tempfile::tempdir().expect("data dir");
     let mut desc = descriptor_for(Some(data.path()), None, None, None).expect("descriptor");
-    desc.install_dir = data.path().join("empty-install");
+    desc.install_dir = install_fixture(links.path())
+        .parent()
+        .expect("bin dir")
+        .to_path_buf();
+    let fixture_args = [
+        "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
+        "--exact",
+    ];
+    desc.spawn_args = fixture_args.map(String::from).to_vec();
     let stop = stop_report(lc::stop(&desc).await);
     let restart = restart_with(&desc, &KernelDelivery, || None).await;
     let stop = stop.expect_err("stop on a stopped daemon exits 1");
     assert!(format!("{stop:#}").contains("No daemon running"));
-    let restart = format!("{:#}", restart.expect_err("no binary to start"));
+    let restart = format!("{:#}", restart.expect_err("the fixture exits at boot"));
     assert!(
-        restart.contains("not installed"),
+        restart.contains("exited before serving the socket"),
         "restart reached start: {restart}"
     );
 }
