@@ -167,6 +167,7 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
 /// `env_passthrough_covers_every_variable_this_crate_reads` requires every
 /// name this crate's `src/` reads to be in [`ENV_PASSTHROUGH`], in
 /// `BASE_ENV`, or here.
+#[cfg(test)]
 pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     ("OPENROUTER_API_KEY", "credential; owner decision (#11085)"),
     (
@@ -184,4 +185,5 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     ("TRUSTY_SEARCH_TEST_ASSUME_LAUNCHD_SUPERVISED", "test seam"),
     ("TRUSTY_RSS_PROBE_CHILD", "test re-exec marker"),
     ("TRUSTY_MAX_INDEX_FILES_ABSENT_4356", "test marker"),
+    ("PRINT_SNAPSHOT_10498", "test snapshot printer"),
 ];

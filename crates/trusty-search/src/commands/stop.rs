@@ -233,7 +233,8 @@ pub(crate) fn find_daemon_pids() -> Vec<u32> {
     out
 }
 
-#[cfg(unix)]
+// #11085: Linux stops through `linux_lifecycle`; only macOS signals by pid.
+#[cfg(all(unix, not(target_os = "linux")))]
 pub(crate) fn send_signal(pid: u32, sig: &str) -> std::io::Result<()> {
     let status = std::process::Command::new("kill")
         .arg(format!("-{sig}"))
