@@ -91,7 +91,9 @@ pub enum SessionRegistrationError {
 /// `session_start_never_registers_home_or_its_ancestors`,
 /// `session_start_refuses_a_root_git_does_not_confirm`,
 /// `session_start_second_start_leaves_the_bytes_alone`,
-/// `session_start_through_a_symlink_to_home_is_refused`.
+/// `session_start_through_a_symlink_to_home_is_refused`,
+/// `session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604`,
+/// `session_start_name_collision_with_another_repo_is_name_taken_10604`.
 pub async fn register_session_checkout(
     registry_dir: &Path,
     cwd: &Path,
@@ -138,7 +140,13 @@ pub async fn register_session_checkout(
             }
         }
     };
-    let same_repo = kept.repo_url == repo_url || (key.is_some() && kept_key(&kept) == key);
+    // #10604: an old `~` row keeps its stale stored key; `held_keys` adds the
+    // key its checkout's origin gives now. A failed lookup adds nothing.
+    let same_repo = kept.repo_url == repo_url
+        || key.as_deref().is_some_and(|key| {
+            kept_key(&kept).as_deref() == Some(key)
+                || super::registry::held_keys(&kept).iter().any(|k| k == key)
+        });
     if !same_repo {
         return Err(SessionRegistrationError::NameTaken { name, root });
     }
