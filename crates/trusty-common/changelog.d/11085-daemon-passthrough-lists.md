@@ -1,0 +1,2 @@
+Added
+- `linux_lifecycle::passthrough::MEMORY_DAEMON` and `SEARCH_DAEMON`: the non-credential variables a Linux-started trusty-memory or trusty-search daemon keeps. Both daemons' descriptors and trusty-console's read them, so a daemon a console bridge auto-starts gets the same settings as one its own `start` spawns (#11085).

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use trusty_common::linux_lifecycle::{PinnedProcess, Signal};
 
 use super::addr_pid::{AddrLookup, Listener, lookup, parse_listener};
-use super::env::{CREDENTIAL_NAMED_PATHS, EXCLUDED};
+use super::env::{CREDENTIAL_NAMED_EXCEPTIONS, EXCLUDED};
 use super::*;
 
 /// The fixture's data dir; set only in the fixture child.
@@ -88,12 +88,12 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
         assert!(passed(name), "{name} must reach the console");
     }
     for name in &target.desc.env_passthrough {
-        // #11085: a credential-named PATH, documented in `CREDENTIAL_NAMED_PATHS`.
-        if CREDENTIAL_NAMED_PATHS.contains(&name.as_str()) {
+        // #11085: passed on purpose, documented in `CREDENTIAL_NAMED_EXCEPTIONS`.
+        if CREDENTIAL_NAMED_EXCEPTIONS.contains(&name.as_str()) {
             continue;
         }
         // By name segment: `TRUSTY_SECRETS_EXTERNAL` is a vault-location flag,
-        // while `GITHUB_WEBHOOK_SECRET` is a credential.
+        // while `GITHUB_TOKEN` is a credential.
         let upper = name.to_ascii_uppercase();
         let credential = upper.split('_').any(|segment| {
             ["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASS"].contains(&segment)
@@ -103,7 +103,7 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
     for (name, _) in EXCLUDED {
         assert!(!passed(name), "{name} is excluded");
     }
-    assert!(!passed("GITHUB_WEBHOOK_SECRET"));
+    assert!(!passed("GITHUB_TOKEN"));
 }
 
 // #11085: the token-file PATH reaches a spawned console, or a restarted
@@ -116,9 +116,63 @@ fn env_passthrough_carries_the_token_file_path() {
         target.desc.env_passthrough.iter().any(|n| n == name),
         "{name} must reach the console"
     );
-    // The exception list holds that one PATH and nothing else.
-    assert_eq!(CREDENTIAL_NAMED_PATHS, [name]);
+    // The exception list holds that PATH and the webhook secret, nothing else.
+    assert_eq!(
+        CREDENTIAL_NAMED_EXCEPTIONS,
+        [name, crate::webhook::SECRET_ENV]
+    );
     assert!(EXCLUDED.iter().all(|(excluded, _)| *excluded != name));
+}
+
+// #11085 (owner decision): `serve` reads the webhook secret from its
+// environment only, so a verb-started console without it refuses webhooks.
+#[test]
+fn env_passthrough_carries_the_webhook_secret() {
+    let target = target_in(Path::new("/tmp/c"), None);
+    let name = crate::webhook::SECRET_ENV;
+    assert_eq!(name, "GITHUB_WEBHOOK_SECRET");
+    assert!(
+        target.desc.env_passthrough.iter().any(|n| n == name),
+        "{name} must reach the console"
+    );
+    assert!(EXCLUDED.iter().all(|(excluded, _)| *excluded != name));
+}
+
+// #11085: a console bridge auto-starts the memory and search daemons with the
+// console's environment, so every name their own verbs pass must reach the
+// console too. Fails naming each missing name.
+#[test]
+fn console_passthrough_carries_every_memory_and_search_name() {
+    use trusty_common::linux_lifecycle::passthrough::{MEMORY_DAEMON, SEARCH_DAEMON};
+    let target = target_in(Path::new("/tmp/c"), None);
+    let passed = |name: &str| target.desc.env_passthrough.iter().any(|n| n == name);
+    let missing: Vec<&str> = MEMORY_DAEMON
+        .iter()
+        .chain(SEARCH_DAEMON)
+        .copied()
+        .filter(|name| !passed(name))
+        .collect();
+    assert!(missing.is_empty(), "missing from the console: {missing:?}");
+    for name in [
+        "TRUSTY_MEMORY_MULTI_TENANT",
+        "TRUSTY_EMBEDDER_MODEL",
+        "TRUSTY_EMBEDDER",
+        "TRUSTY_DEVICE",
+        "ORT_DYLIB_PATH",
+        "LD_LIBRARY_PATH",
+        "DBUS_SESSION_BUS_ADDRESS",
+        // The analyze and mpm daemons the other bridges auto-start.
+        "TMUX_TMPDIR",
+        "ANALYZE_LSP",
+    ] {
+        assert!(passed(name), "{name} must reach the console");
+    }
+    let unique: std::collections::HashSet<&String> = target.desc.env_passthrough.iter().collect();
+    assert_eq!(
+        unique.len(),
+        target.desc.env_passthrough.len(),
+        "no duplicates"
+    );
 }
 
 #[test]

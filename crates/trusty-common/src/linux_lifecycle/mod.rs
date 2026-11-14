@@ -69,6 +69,7 @@
 mod error;
 mod instance;
 mod liveness;
+pub mod passthrough;
 mod pid;
 mod process;
 mod start;

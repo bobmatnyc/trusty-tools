@@ -13,6 +13,13 @@
 //! this console before any signal (AC10). `stop` on a console that is not
 //! running exits 1; `restart` starts it (P-b). Every `LifecycleError` is a
 //! non-zero exit with its message.
+//!
+//! Limits: `restart` respawns plain `serve`, so `--http`, `--tailscale` and
+//! `--poll-interval` from the original start are not carried over;
+//! `TRUSTY_CONSOLE_BIND` is the form that persists. A restart through
+//! `http_addr` of an HTTP-only console whose socket bind keeps failing stops
+//! it; the new child then fails readiness after 60 s, the console stays down,
+//! and the exit is non-zero (`NotReady`).
 //! Test: `tests.rs`.
 
 pub(crate) mod addr_pid;
@@ -30,7 +37,6 @@ use trusty_common::linux_lifecycle::{
 };
 
 use self::addr_pid::AddrLookup;
-pub(crate) use self::env::ENV_PASSTHROUGH;
 
 /// The executable spawned from the install dir and required of the peer.
 pub(crate) const BINARY: &str = "trusty-console";
@@ -81,7 +87,7 @@ fn target() -> Result<Target> {
 /// `resolve_data_dir` reads all three as the live data dir. Such a value would
 /// address the live socket yet miss the live console in the `/proc` scan.
 /// What: `serve` as spawn and liveness args, the socket-refuses stopped
-/// signal, [`ENV_PASSTHROUGH`], and `instance_env` pinned to the override
+/// signal, [`env::effective_passthrough`], and `instance_env` pinned to the override
 /// (the module default's key, with the value passed here).
 ///
 /// # Errors
@@ -110,7 +116,8 @@ pub(crate) fn target_for(
         .context("build the trusty-console lifecycle descriptor")?;
     desc.spawn_args = DAEMON_ARGS.map(String::from).to_vec();
     desc.liveness_args = DAEMON_ARGS.map(String::from).to_vec();
-    desc.env_passthrough = ENV_PASSTHROUGH.iter().map(|s| (*s).to_string()).collect();
+    // #11085: the bridges' auto-started daemons inherit this environment.
+    desc.env_passthrough = env::effective_passthrough();
     desc.instance_env = vec![(DATA_DIR_OVERRIDE_ENV.to_string(), override_value.cloned())];
     desc.ready_timeout = READY_TIMEOUT;
     Ok(Target { desc, addr_file })
