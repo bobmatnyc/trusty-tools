@@ -270,3 +270,110 @@ async fn a_joiner_past_the_open_queue_bound_answers_palace_opening() {
     let retry = crate::handle_message(&state, recall_call("joined-open", "q")).await;
     assert!(retry.get("error").is_none(), "retry failed: {retry}");
 }
+
+/// Why (#11255 review, M1): with `TRUSTY_WRITE_OP_BUDGET_SECS=0` each fresh
+/// open's queue wait is zero, so a recall re-joined as fast as
+/// `spawn_blocking` returned, for its whole open wait.
+/// What: a zero budget, a 1 s open wait, the open lock held throughout. The
+/// call answers `PalaceOpening` at its deadline, and the opens started stay
+/// near one per 50 ms floor, never thousands.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn a_zero_queue_wait_rejoins_no_faster_than_the_floor() {
+    let wait = Duration::from_secs(1);
+    let (mut state, _tmp) = stalled_state("floor-open", wait, QUEUE_BOUND).await;
+    state.write_op_budget = Duration::ZERO;
+    let gate = state
+        .registry
+        .open_lock_for_test(&PalaceId::new("floor-open"));
+    let held = gate.lock();
+    let started = std::time::Instant::now();
+    let e = crate::tools::recall_open::open_for_recall(&state, "floor-open")
+        .await
+        .map(drop)
+        .expect_err("the open lock is held");
+    let waited = started.elapsed();
+    drop(held);
+    assert!(PalaceOpening::find(&e).is_some(), "{e:#}");
+    assert!(waited >= wait, "answered after {waited:?}");
+    assert!(
+        waited < wait + Duration::from_secs(1),
+        "answered after {waited:?}"
+    );
+    // About wait / 50 ms = 20; the margins absorb a loaded host.
+    let opens = state.recall_opens.opens_started();
+    assert!(
+        (2..=40).contains(&opens),
+        "{opens} opens started in {waited:?}"
+    );
+}
+
+/// Why (#11255 review, M2): a joiner of a shared open that fails for real
+/// must get that failure, not the retryable `PalaceOpening`.
+/// What: a corrupt `palace.json`, the open lock held while two calls join one
+/// open; once it frees, both answer the "open palace … failed" chain.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn a_joiner_of_a_failed_open_gets_the_open_failure() {
+    let (state, tmp) = stalled_state("corrupt-open", Duration::from_secs(5), QUEUE_BOUND).await;
+    std::fs::write(
+        tmp.path().join("corrupt-open").join("palace.json"),
+        b"{not json",
+    )
+    .expect("corrupt palace.json");
+    let failures = joined_opens(&state, "corrupt-open").await;
+    for e in &failures {
+        assert!(PalaceOpening::find(e).is_none(), "{e:#}");
+        assert!(
+            format!("{e:#}").starts_with("open palace corrupt-open failed: "),
+            "{e:#}"
+        );
+    }
+}
+
+/// Why (#11255 review, M2): a joiner of an open of a missing palace must
+/// still answer `-32004`, not the retryable `PalaceOpening`.
+/// What: two calls join one open of a palace with no metadata; once the
+/// open lock frees, both map to `-32004`.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn a_joiner_of_a_missing_palace_open_answers_not_found() {
+    let (state, _tmp) = stalled_state("present", Duration::from_secs(5), QUEUE_BOUND).await;
+    for e in joined_opens(&state, "absent-open").await {
+        let reply = crate::transport::rpc::JsonRpcResponse::from_anyhow(json!(1), e);
+        let err = reply.error.expect("an error response");
+        assert_eq!(err.code, -32004, "{}", err.message);
+    }
+}
+
+/// Two `open_for_recall` calls of `palace` that join one open while its open
+/// lock is held; the lock frees once both have joined. Returns their errors.
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn joined_opens(state: &AppState, palace: &str) -> Vec<anyhow::Error> {
+    let gate = state.registry.open_lock_for_test(&PalaceId::new(palace));
+    let held = gate.lock();
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..2 {
+        let (state, palace) = (state.clone(), palace.to_string());
+        set.spawn(async move {
+            crate::tools::recall_open::open_for_recall(&state, &palace)
+                .await
+                .map(drop)
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        state.recall_opens.opens_started(),
+        1,
+        "the second call joined"
+    );
+    drop(held);
+    let outcomes = set.join_all().await;
+    outcomes
+        .into_iter()
+        .map(|o| o.expect_err("the open fails"))
+        .collect()
+}

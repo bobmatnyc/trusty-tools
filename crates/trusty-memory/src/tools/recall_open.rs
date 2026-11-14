@@ -71,6 +71,9 @@ impl PalaceOpening {
     }
 }
 
+/// The least time between two joins of one recall's opens (#11255 review, M1).
+const REJOIN_FLOOR: Duration = Duration::from_millis(50);
+
 /// The outcome one shared open publishes to every recall waiting on it.
 type SharedOpen = Result<Arc<PalaceHandle>, Arc<anyhow::Error>>;
 
@@ -182,32 +185,38 @@ fn shared_failure(palace: &str, e: &Arc<anyhow::Error>) -> anyhow::Error {
 /// its outcome: the handle, or its failure (see [`shared_failure`]). A
 /// shared open that hit the registry's open-queue bound ([`OpenQueueTimeout`])
 /// is not this call's failure: the call joins a fresh open for what is left
-/// of its own wait. Past that wait the call fails with [`PalaceOpening`]; the
+/// of its own wait, no sooner than [`REJOIN_FLOOR`] after its last join.
+/// Past that wait the call fails with [`PalaceOpening`]; the
 /// open goes on, never cancelled. An open task that ends without an outcome
 /// (a panic) is an error, never an empty result.
 /// Test: `a_held_palace_open_answers_palace_opening_and_the_open_continues`,
 /// `concurrent_recalls_of_a_stalled_open_share_one_open_attempt`,
 /// `a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds`,
-/// `a_joiner_past_the_open_queue_bound_answers_palace_opening`.
+/// `a_joiner_past_the_open_queue_bound_answers_palace_opening`,
+/// `a_zero_queue_wait_rejoins_no_faster_than_the_floor`,
+/// `a_joiner_of_a_failed_open_gets_the_open_failure`,
+/// `a_joiner_of_a_missing_palace_open_answers_not_found`.
 pub(crate) async fn open_for_recall(state: &AppState, palace: &str) -> Result<Arc<PalaceHandle>> {
     if let Some(handle) = state.registry.get(&PalaceId::new(palace)) {
         return Ok(handle);
     }
     let wait = state.recall_limits.open_wait;
     let deadline = tokio::time::Instant::now() + wait;
+    let opening = || -> anyhow::Error {
+        PalaceOpening {
+            palace: palace.to_string(),
+            waited: wait,
+        }
+        .into()
+    };
     loop {
+        let joined = tokio::time::Instant::now();
         let mut rx = RecallOpens::join(state, palace);
         let shared = match tokio::time::timeout_at(deadline, rx.wait_for(Option::is_some)).await {
             Ok(Ok(done)) => done.clone(),
             Ok(Err(_closed)) => None,
             // #11255: the open is left running; it still registers the palace.
-            Err(_elapsed) => {
-                return Err(PalaceOpening {
-                    palace: palace.to_string(),
-                    waited: wait,
-                }
-                .into());
-            }
+            Err(_elapsed) => return Err(opening()),
         };
         match shared {
             Some(Ok(handle)) => return Ok(handle),
@@ -215,7 +224,15 @@ pub(crate) async fn open_for_recall(state: &AppState, palace: &str) -> Result<Ar
             // wait out this call's own deadline on a fresh open. A fresh open
             // starts after the last one left the map (N2), so it waits a whole
             // queue bound, and the deadline ends the loop.
-            Some(Err(e)) if e.downcast_ref::<OpenQueueTimeout>().is_some() => continue,
+            Some(Err(e)) if e.downcast_ref::<OpenQueueTimeout>().is_some() => {
+                // #11255 review, M1: a zero queue wait (a zero write-op
+                // budget) must not re-join as fast as `spawn_blocking` returns.
+                let floor = (joined + REJOIN_FLOOR).min(deadline);
+                tokio::time::sleep_until(floor).await;
+                if floor >= deadline {
+                    return Err(opening());
+                }
+            }
             Some(Err(e)) => return Err(shared_failure(palace, &e)),
             None => {
                 return Err(anyhow!(
