@@ -310,8 +310,14 @@ ruling 2026-11-14.
 - The check walks each commit in `<head>..main`, not the net diff from the
   merge base, so a bundle file `main` changed and then reverted still fails.
   `seed_history.tsv` is append-only, so a reverted seed asset leaves history
-  lines behind anyway. Renames count on both sides, deletions count, and a
-  merge commit counts for a file it changes against every parent.
+  lines behind anyway. Renames count on both sides, and deletions count.
+- A merge commit counts for a file it changes against every parent, and for
+  a file it changes against its first parent that the first-parent side also
+  changed since the merge base. So a merge that resolves a file both sides
+  changed fails the PR even when it keeps one side's bytes. A merge that only
+  carries a side's change over does not count; that side's own commits do,
+  when the PR head lacks them. A stacked PR whose base PR merged therefore
+  passes.
 - The bundle path list and the remedy commands are in
   `scripts/check_bundle_pr_current.sh`; its selftest is
   `scripts/check_bundle_pr_current_selftest.sh`.

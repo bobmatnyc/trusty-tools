@@ -96,6 +96,26 @@ branch y1 "${OLD_MAIN}"; put README.md y1; commit y1
 branch x2 x1; g merge -q --no-edit y1
 branch y2 y1; g merge -q --no-edit x1
 branch y3 y2; put python/trusty-architect/y3.py y; commit "y3 bundle"
+# #11120: both sides change REV; head os_head holds both side commits and its
+# own resolution, main's merge keeps the second parent's bytes, which -c skips.
+branch os_p2 "${OLD_MAIN}"; put "${REV}" p2; commit "os side"
+branch m_os "${OLD_MAIN}"; put "${REV}" m1; commit "os main side"
+branch os_head "${OLD_MAIN}"; g merge -q --no-edit m_os
+g merge -q --no-commit os_p2; put "${REV}" r3; commit "os head resolves"
+g checkout -q m_os; g merge -q --no-commit os_p2; put "${REV}" p2; commit "os merge takes theirs"
+# Merges that resolve nothing: one brings only docs; a stacked PR's head holds
+# the merged PR's bundle commit; one keeps its first parent's bundle bytes.
+branch nbside "${OLD_MAIN}"; put docs/d.md d; commit "nbside docs"
+branch m_nbm "${OLD_MAIN}"; put README.md nbm; commit "nbm docs"
+g merge -q --no-ff --no-edit nbside
+branch pr_a "${OLD_MAIN}"; put python/trusty-architect/pr_a.py a; commit "pr_a bundle"
+branch stacked pr_a; put python/trusty-architect/stacked.py s; commit "stacked bundle"
+branch m_stk "${OLD_MAIN}"; put README.md stk; commit "stk docs"
+g merge -q --no-ff -m "Merge pull request #1 from x/pr_a" pr_a
+branch fpside "${OLD_MAIN}"; put docs/fp.md f; commit "fpside docs"
+branch m_fp "${OLD_MAIN}"; put python/trusty-architect/fp.py f; commit "fp bundle"
+branch fp_head m_fp; put "${BUNDLE}" fp; commit "fp head bundle"
+g checkout -q m_fp; g merge -q --no-ff -m "Merge pull request #2 from x/fpside" fpside
 g checkout -q --orphan orphan; put README.md orphan; commit orphan
 g checkout -q main
 
@@ -160,11 +180,34 @@ expect "main merged a bundle side branch -> fail"  1 "side bundle"         -- --
 expect "main evil merge edits bundle -> fail"      1 "  python/trusty-architect/evil.py" -- --head bundle --base m_evil
 expect "criss-cross, no bundle commit -> pass"     0 "1 commit(s) behind y2" -- --head x2 --base y2
 expect "criss-cross, bundle commit -> fail"        1 "  python/trusty-architect/y3.py" -- --head x2 --base y3
+expect "merge keeps one side of a both-sides bundle change -> fail" 1 "  ${REV}" -- --head os_head --base m_os
+expect "one-sided merge fail lists the merge"      1 "os merge takes theirs" -- --head os_head --base m_os
+expect "main merged a docs-only branch -> pass"    0 "3 commit(s) behind m_nbm" -- --head bundle --base m_nbm
+expect "stacked PR, main merged its base PR -> pass" 0 "none of those commits changes" -- --head stacked --base m_stk
+expect "merge keeps first parent's bundle -> pass" 0 "2 commit(s) behind m_fp" -- --head fp_head --base m_fp
 expect "no shared history -> error"                2 "share no history"    -- --head orphan --base main --files "${TMP}/files"
 # A mktemp that always fails, first on PATH (macOS mktemp ignores a bad TMPDIR).
 mkdir -p "${TMP}/fakebin"; printf '#!/bin/sh\nexit 1\n' > "${TMP}/fakebin/mktemp"; chmod +x "${TMP}/fakebin/mktemp"
 OLD_PATH="${PATH}"; PATH="${TMP}/fakebin:${PATH}"
 expect "temp file cannot be made -> error"         2 "temp directory"      -- --head bundle --base main
+PATH="${OLD_PATH}"
+# A git that fails one call with git's own error status, first on PATH; every
+# other call goes to the real git. --files skips the changed-file diff.
+REAL_GIT="$(command -v git)"
+mkdir -p "${TMP}/fakegit"
+# shellcheck disable=SC2016  # $* and $FAIL_GIT expand in the wrapper, not here.
+printf '#!/bin/sh\ncase " $* " in *" $FAIL_GIT "*) exit 128 ;; esac\nexec "%s" "$@"\n' "${REAL_GIT}" > "${TMP}/fakegit/git"
+chmod +x "${TMP}/fakegit/git"
+PATH="${TMP}/fakegit:${PATH}"
+for FAIL_GIT in "rev-parse" "merge-base --is-ancestor" "rev-list --count" "log" "rev-list --merges" "rev-list --parents" "merge-base --all" "diff"; do
+  export FAIL_GIT
+  expect "git ${FAIL_GIT} fails -> error"           2 "ERROR"               -- --head os_head --base m_os --files "${TMP}/files"
+done
+for FAIL_GIT in "merge-base --all" "diff"; do
+  export FAIL_GIT
+  expect "git ${FAIL_GIT} fails, changed-file list -> error" 2 "ERROR"     -- --head os_head --base m_os
+done
+unset FAIL_GIT
 PATH="${OLD_PATH}"
 
 expect "unknown head -> error"                      2 "does not resolve"   -- --head 0000000000000000000000000000000000000000 --base main

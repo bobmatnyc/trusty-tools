@@ -24,9 +24,12 @@
 #   function of its inputs, but seed_history.tsv is append-only
 #   (architect_bundle_meta.py history keeps every line it has), so a reverted
 #   seed asset still leaves history lines behind; and the walk needs no choice
-#   among several merge bases. A merge commit counts only for a file it changes
-#   against EVERY parent (`-c`); a change it brings from one side is that
-#   side's own commit, walked on its own when <head> lacks it.
+#   among several merge bases. A merge commit counts for a file it changes
+#   against EVERY parent (`-c`), and for a file it changes against its first
+#   parent that the first-parent side also changed since the merge base: a
+#   resolution of a file both sides changed, even one that keeps one side's
+#   bytes (#11120). A change it only carries over from a side is that side's
+#   own commit, walked on its own when <head> lacks it.
 #   The changed files come from --files (one path per line, `-` for stdin),
 #   from --range (`git diff --no-renames`), or by default from
 #   `git diff --no-renames <merge-base> <head>`, the PR's own changes, taken
@@ -207,6 +210,54 @@ g --literal-pathspecs log -z -c --no-renames --full-history --name-only \
   --format='%x01%h %s' "${head_sha}..${base_sha}" -- "${BUNDLE_PATHS[@]}" > "$log" \
   || die "git log ${head_sha}..${base_sha} failed"
 
+# names_in <list> <file>: 0 when <file> is one of the NUL-delimited <list>.
+names_in() {
+  local n
+  while IFS= read -r -d '' n || [ -n "$n" ]; do
+    [ "$n" = "$2" ] && return 0
+  done < "$1"
+  return 1
+}
+
+# resolved_files <merge>: appends a log record for the bundle files <merge>
+# changes against its first parent that the first-parent side also changed
+# since the merge base. With more than two parents, or none in common, every
+# file it changes against its first parent counts.
+resolved_files() {
+  local m="$1" p1 p2 extra mb rc f subj
+  read -r m p1 p2 extra < "${tmpd}/parents"
+  g --literal-pathspecs diff -z --no-renames --name-only "$p1" "$m" -- "${BUNDLE_PATHS[@]}" \
+    > "${tmpd}/mdiff" || die "git diff ${p1} ${m} failed"
+  [ -s "${tmpd}/mdiff" ] || return 0
+  : > "${tmpd}/sides"
+  if [ -z "$extra" ]; then
+    rc=0
+    g merge-base --all "$p1" "$p2" > "${tmpd}/mbases" || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || die "git merge-base --all ${p1} ${p2} failed (exit ${rc})"
+    [ -s "${tmpd}/mbases" ] || cp "${tmpd}/mdiff" "${tmpd}/sides" || die "cannot copy a temp file"
+    while IFS= read -r mb; do
+      g --literal-pathspecs diff -z --no-renames --name-only "$mb" "$p1" -- "${BUNDLE_PATHS[@]}" \
+        >> "${tmpd}/sides" || die "git diff ${mb} ${p1} failed"
+    done < "${tmpd}/mbases"
+  else
+    cp "${tmpd}/mdiff" "${tmpd}/sides" || die "cannot copy a temp file"
+  fi
+  subj="$(g log -1 --format='%h %s' "$m")" || die "git log ${m} failed"
+  printf '\001%s\0' "$subj"
+  while IFS= read -r -d '' f || [ -n "$f" ]; do
+    if names_in "${tmpd}/sides" "$f"; then printf '%s\0' "$f"; fi
+  done < "${tmpd}/mdiff"
+}
+
+# #11120: -c misses a merge that resolves a file both sides changed to one
+# side's bytes; walk each merge in the range for that case too.
+g rev-list --merges "${head_sha}..${base_sha}" > "${tmpd}/merges" \
+  || die "git rev-list --merges ${head_sha}..${base_sha} failed"
+while IFS= read -r m; do
+  g rev-list --parents -n 1 "$m" > "${tmpd}/parents" || die "git rev-list --parents ${m} failed"
+  resolved_files "$m" >> "$log"
+done < "${tmpd}/merges"
+
 mfiles=()
 mcommits=()
 cur=""
@@ -218,7 +269,14 @@ while IFS= read -r -d '' tok || [ -n "$tok" ]; do
   tok="${tok#$'\n'}"
   [ -n "$tok" ] || continue
   is_bundle "$tok" || continue
-  if [ "$counted" -eq 0 ]; then mcommits+=("$cur"); counted=1; fi
+  if [ "$counted" -eq 0 ]; then
+    counted=1
+    seen=0
+    for c in ${mcommits[@]+"${mcommits[@]}"}; do
+      if [ "$c" = "$cur" ]; then seen=1; break; fi
+    done
+    [ "$seen" -eq 1 ] || mcommits+=("$cur")
+  fi
   seen=0
   for f in ${mfiles[@]+"${mfiles[@]}"}; do
     if [ "$f" = "$tok" ]; then seen=1; break; fi
