@@ -152,7 +152,7 @@ version = "0.1.1"
 
 [[member]]
 path = "agents/secrets-manager.md"
-version = "0.3.0"
+version = "0.4.0"
 
 [[member]]
 path = "agents/security.md"
