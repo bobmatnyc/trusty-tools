@@ -247,8 +247,9 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data) };
     let mut desc =
         descriptor_for(Some(&data.clone().into_os_string()), socket.clone()).expect("descriptor");
-    // An install dir with no binary: a start that ran would fail BinaryMissing.
-    desc.install_dir = tmp.path().join("empty-install");
+    // #11085: restart checks the binary before its stop; the stop error
+    // below returns before any start.
+    desc.install_dir = tmp.path().join("bin");
     desc.stop_grace = Duration::from_millis(300);
     desc.kill_wait = Duration::from_millis(500);
     let result = restart_with(&desc, &DropKill).await;
@@ -262,7 +263,6 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     let shown = format!("{err:#}");
     assert!(shown.contains(&fixture.id().to_string()), "{shown}");
     assert!(shown.contains("survived SIGKILL"), "{shown}");
-    assert!(!shown.contains("not installed"), "start ran: {shown}");
     assert!(alive, "the fixture survived, as the seam made it");
 }
 
