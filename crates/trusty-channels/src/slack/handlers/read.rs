@@ -30,11 +30,16 @@ use super::{AUTH_TEST, CONVERSATIONS_HISTORY, CONVERSATIONS_REPLIES, DEFAULT_REA
 use crate::slack::api::client::BaseClient;
 use crate::slack::api::error::SlackError;
 use crate::slack::server::ToolCallError;
+use std::time::Duration;
 use trusty_common::slack_format::mrkdwn_escape;
 
 /// Slack's `ok:false` slug for a channel the token cannot see — a bad id, or
 /// a private channel the bot is not a member of.
 const CHANNEL_NOT_FOUND: &str = "channel_not_found";
+
+/// Upper bound on the `auth.test` lookup that explains a `channel_not_found`.
+/// Past it the caller gets the bare slug.
+const IDENTITY_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Call a channel-read `method`, explaining a `channel_not_found` failure.
 ///
@@ -64,18 +69,29 @@ async fn call_channel_read(
 /// Why: the caller needs to know which principal to invite. The lookup is a
 /// courtesy: it must never turn `channel_not_found` into another error or a
 /// success.
-/// What: calls `auth.test`; when it answers with a `user_id`, returns
+/// The lookup adds at most [`IDENTITY_LOOKUP_TIMEOUT`] to the error path.
+/// What: calls `auth.test` once (no `429` retry) under
+/// [`IDENTITY_LOOKUP_TIMEOUT`]; when it answers with a `user_id`, returns
 /// `SlackError::Api` text that starts with `channel_not_found` and names the
-/// user (escaped) and the invite step. Any lookup failure, or a reply with no
-/// `user_id`, returns the bare `SlackError::Api("channel_not_found")`.
+/// user (escaped) and the invite step. Any lookup failure — a `429`, the
+/// timeout, an error — or a reply with no `user_id` returns the bare
+/// `SlackError::Api("channel_not_found")`.
 /// Test: `tests/tools_http.rs::channel_read_not_found_names_the_bot_user`,
-/// `::channel_read_not_found_unchanged_when_identity_unknown`.
+/// `::channel_read_not_found_unchanged_when_identity_unknown`,
+/// `::channel_read_not_found_bare_when_identity_rate_limited`,
+/// `::channel_read_not_found_bare_when_identity_slow`.
 async fn explain_channel_not_found(client: &BaseClient) -> SlackError {
     let bare = || SlackError::Api(CHANNEL_NOT_FOUND.to_string());
-    let identity = match client.call_method(AUTH_TEST, &json!({})).await {
-        Ok(identity) => identity,
-        Err(e) => {
+    let no_args = json!({});
+    let lookup = client.call_method_once(AUTH_TEST, &no_args);
+    let identity = match tokio::time::timeout(IDENTITY_LOOKUP_TIMEOUT, lookup).await {
+        Ok(Ok(identity)) => identity,
+        Ok(Err(e)) => {
             tracing::debug!(error = %e, "auth.test failed; reporting bare channel_not_found");
+            return bare();
+        }
+        Err(_) => {
+            tracing::debug!("auth.test timed out; reporting bare channel_not_found");
             return bare();
         }
     };

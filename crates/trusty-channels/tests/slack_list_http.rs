@@ -456,6 +456,96 @@ async fn list_channels_default_types_include_private_and_explicit_types_win() {
     assert_eq!(query_pairs(&requests[1]), pairs(&[("types", "im")]));
 }
 
+/// Mount `conversations.list`: `missing_scope` for any `types` naming
+/// `private_channel`, one public channel otherwise.
+async fn mount_list_without_groups_read(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .and(query_param("types", "public_channel,private_channel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": false, "error": "missing_scope", "needed": "groups:read"
+        })))
+        .with_priority(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .and(query_param("types", "public_channel"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channels": [{"id": "C1", "name": "general", "is_private": false}],
+            "response_metadata": {"next_cursor": "cGFnZTI="}
+        })))
+        .with_priority(2)
+        .mount(server)
+        .await;
+}
+
+// A token with channels:read but not groups:read: a no-argument call still
+// lists the public channels and reports the narrowed `types`, and a cursor
+// call carrying that `types` continues the same listing.
+#[tokio::test]
+async fn list_channels_default_falls_back_to_public_on_missing_scope() {
+    let server = MockServer::start().await;
+    mount_list_without_groups_read(&server).await;
+    let client = client_for(&server);
+
+    let out = dispatch(&client, "slack_list_channels", json!({}))
+        .await
+        .expect("default listing must not fail without groups:read");
+    assert_eq!(out["channels"][0]["id"], "C1");
+    assert_eq!(out["types"], "public_channel");
+    assert_eq!(out["next_cursor"], "cGFnZTI=");
+
+    let next = dispatch(
+        &client,
+        "slack_list_channels",
+        json!({"types": out["types"], "cursor": out["next_cursor"]}),
+    )
+    .await
+    .expect("cursor page with the reported types");
+    assert_eq!(next["types"], "public_channel");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        3,
+        "one fallback retry, then one cursor call"
+    );
+    assert_eq!(
+        query_pairs(&requests[0]),
+        pairs(&[("types", "public_channel,private_channel")])
+    );
+    assert_eq!(
+        query_pairs(&requests[1]),
+        pairs(&[("types", "public_channel")])
+    );
+    assert_eq!(
+        query_pairs(&requests[2]),
+        pairs(&[("cursor", "cGFnZTI="), ("types", "public_channel")])
+    );
+}
+
+// A caller-named `types` is never narrowed: its `missing_scope` is the result.
+#[tokio::test]
+async fn list_channels_explicit_types_missing_scope_is_an_error() {
+    let server = MockServer::start().await;
+    mount_list_without_groups_read(&server).await;
+
+    let err = dispatch(
+        &client_for(&server),
+        "slack_list_channels",
+        json!({"types": "public_channel,private_channel"}),
+    )
+    .await
+    .expect_err("explicit types must surface missing_scope");
+    assert!(
+        matches!(&err, ToolCallError::Slack(SlackError::Api(slug)) if slug == "missing_scope"),
+        "got {err:?}"
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
 /// One channel-read case: tool, Slack method, tool arguments, expected query.
 type ToolReadCase = (
     &'static str,

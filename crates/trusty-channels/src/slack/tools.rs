@@ -194,15 +194,19 @@ pub fn tool_list_response() -> Value {
             "slack_list_channels",
             "List one page of channels visible to the authenticated principal. \
              Default `types` is 'public_channel,private_channel', so private \
-             channels the bot is a member of are included. To list every \
-             channel, pass the previous call's `next_cursor` back as `cursor` \
-             until `next_cursor` is null.",
+             channels the bot is a member of are included; a token without \
+             the groups:read scope gets public channels only. The result's \
+             `types` names the set actually listed. To list every channel, \
+             pass the previous call's `next_cursor` back as `cursor`, with \
+             its `types`, until `next_cursor` is null.",
             json!({
                 "types": {
                     "type": "string",
                     "description": "Comma-separated channel types: public_channel, \
                         private_channel, mpim, im. Default \
-                        'public_channel,private_channel'.",
+                        'public_channel,private_channel', narrowed to \
+                        'public_channel' without groups:read. An explicit \
+                        value is sent as is.",
                 },
                 "limit": {
                     "type": "integer",

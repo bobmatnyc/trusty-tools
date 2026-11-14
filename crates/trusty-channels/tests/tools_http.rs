@@ -837,6 +837,68 @@ async fn channel_read_not_found_unchanged_when_identity_unknown() {
     }
 }
 
+/// Most the identity lookup may add to a `channel_not_found`: the handler's
+/// 3 s bound plus scheduling slack.
+const IDENTITY_LOOKUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Read a channel whose read answers `channel_not_found` while `auth.test`
+/// answers `identity`; return the error and the elapsed time.
+async fn not_found_with_identity(
+    identity: ResponseTemplate,
+) -> (ToolCallError, std::time::Duration) {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        "conversations.history",
+        json!({ "ok": false, "error": "channel_not_found" }),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/auth.test"))
+        .respond_with(identity)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let started = std::time::Instant::now();
+    let err = dispatch(
+        &client_for(&server),
+        "slack_read_channel",
+        channel_read_args(),
+    )
+    .await
+    .expect_err("channel_not_found must stay an error");
+    (err, started.elapsed())
+}
+
+// A rate-limited `auth.test` is not retried: the bare slug comes back at once,
+// not after minutes of `Retry-After` backoff.
+#[tokio::test]
+async fn channel_read_not_found_bare_when_identity_rate_limited() {
+    let (err, elapsed) =
+        not_found_with_identity(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+            .await;
+    assert!(
+        matches!(&err, ToolCallError::Slack(SlackError::Api(m)) if m == "channel_not_found"),
+        "{err:?}"
+    );
+    assert!(elapsed < IDENTITY_LOOKUP_BUDGET, "lookup took {elapsed:?}");
+}
+
+// A hung `auth.test` is abandoned at the bound; the caller gets the bare slug
+// even though the late reply would have named the bot.
+#[tokio::test]
+async fn channel_read_not_found_bare_when_identity_slow() {
+    let slow = ResponseTemplate::new(200)
+        .set_body_json(json!({ "ok": true, "user": "mpm", "user_id": "U0BOT" }))
+        .set_delay(std::time::Duration::from_secs(20));
+    let (err, elapsed) = not_found_with_identity(slow).await;
+    assert!(
+        matches!(&err, ToolCallError::Slack(SlackError::Api(m)) if m == "channel_not_found"),
+        "{err:?}"
+    );
+    assert!(elapsed < IDENTITY_LOOKUP_BUDGET, "lookup took {elapsed:?}");
+}
+
 // ── slack_get_reactions (issue #3614) ──────────────────────────────────────
 
 #[tokio::test]
