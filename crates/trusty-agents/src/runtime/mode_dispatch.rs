@@ -204,8 +204,8 @@ pub(super) async fn dispatch_cli_mode(
     // Both flags are accepted; `--api` is the canonical user-facing alias used
     // in the Makefile and README; `--serve` is kept for backwards compat.
     if cli.api || cli.serve {
-        // #6433: TAGENT_NO_API=1 refuses before the gateway starts or any
-        // listener binds (DOC-90 AG-1).
+        // #6433: a set TAGENT_NO_API (any value but an explicit off value)
+        // refuses before the gateway starts or any listener binds (DOC-90 AG-1).
         if let Some(msg) = crate::api::server::no_api::process_no_api_refusal(cli.api, cli.serve) {
             anyhow::bail!(msg);
         }

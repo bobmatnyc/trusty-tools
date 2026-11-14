@@ -22,8 +22,11 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
+use std::net::IpAddr;
+
 use crate::api::server::ApiConfig;
-use crate::api::server::routes::{build_router, serve_with_config};
+use crate::api::server::no_api::process_no_api_refusal;
+use crate::api::server::routes::{bind_refusal, build_router, serve_with_config};
 use crate::api::server::state::AppState;
 
 /// POST `/api/tm/sessions` carrying `origin`, returning the response status.
@@ -140,26 +143,68 @@ async fn non_loopback_without_token_refuses_start() {
         port: 0,
         token: None,
     };
-    let err = serve_with_config(cfg)
+    assert_startup_refused(cfg).await;
+}
+
+/// Run `serve_with_config` under a timeout and assert it refused before
+/// binding, with either #6433 refusal.
+///
+/// Why: an exported `TAGENT_NO_API` on the test host makes the no-API
+/// refusal fire first; both outcomes prove the bind was never reached, and
+/// the test must not mutate process env to force one.
+/// What: fails if the call serves past 5 s (code that accepts the bind serves
+/// forever) or returns `Ok`; otherwise the error must equal `bind_refusal`'s
+/// or the no-API refusal's message.
+/// Test: used by the two `non_loopback_*_refuses_start` tests.
+async fn assert_startup_refused(cfg: ApiConfig) {
+    let bind = cfg.bind;
+    let err = tokio::time::timeout(std::time::Duration::from_secs(5), serve_with_config(cfg))
         .await
-        .expect_err("non-loopback bind without a token must refuse to start");
+        .expect("serve_with_config must return at once, not bind and serve (#6433)")
+        .expect_err("a non-loopback bind must refuse to start (#6433)");
     let msg = err.to_string();
-    // #6433: the refusal no longer offers a token as the way out.
+    let bind_msg = bind_refusal(bind).expect("the bind under test must be non-loopback");
+    let no_api_msg = process_no_api_refusal(true, true);
     assert!(
-        msg.contains("non-loopback") && msg.contains("#6433") && msg.contains("--bind"),
-        "refusal must be actionable (non-loopback, #6433, --bind), got: {msg}"
+        msg == bind_msg || no_api_msg.as_deref() == Some(msg.as_str()),
+        "refusal must be the bind or the no-API refusal, got: {msg}"
     );
-    assert!(
-        msg.contains("/api/agents/*"),
-        "refusal should point at the console proxy as the intended remote path, got: {msg}"
-    );
+}
+
+/// Why: #6433 / DOC-90 AG-2 — only loopback binds are allowed; the refusal
+/// is actionable and points remote access at the console proxy.
+/// What: a table of refused and accepted addresses through `bind_refusal`,
+/// including IPv4-mapped IPv6 forms of private and loopback addresses.
+/// Test: this test.
+#[test]
+fn bind_refusal_table() {
+    for refused in [
+        "0.0.0.0",
+        "::",
+        "10.0.0.1",
+        "::ffff:10.0.0.1",
+        "::ffff:127.0.0.1",
+    ] {
+        let ip: IpAddr = refused.parse().expect("table address parses");
+        let msg = bind_refusal(ip).unwrap_or_else(|| panic!("{refused} must be refused"));
+        assert!(
+            msg.contains("non-loopback")
+                && msg.contains("#6433")
+                && msg.contains("--bind")
+                && msg.contains("/api/agents/*"),
+            "refusal for {refused} must be actionable, got: {msg}"
+        );
+    }
+    for accepted in ["127.0.0.1", "127.0.0.2", "::1"] {
+        let ip: IpAddr = accepted.parse().expect("table address parses");
+        assert_eq!(bind_refusal(ip), None, "{accepted} must be accepted");
+    }
 }
 
 /// Why: #6433 / DOC-90 AG-2 — a token does not make LAN exposure acceptable;
 /// a non-loopback bind is refused whether or not a token is set.
 /// What: `serve_with_config` with `0.0.0.0` and a token returns `Err` before
-/// binding. A timeout bounds the call: code that accepts the bind serves
-/// forever, and the test must fail rather than hang.
+/// binding, under a timeout (see `assert_startup_refused`).
 /// Test: this test.
 #[tokio::test]
 async fn non_loopback_with_token_refuses_start() {
@@ -168,15 +213,7 @@ async fn non_loopback_with_token_refuses_start() {
         port: 0,
         token: Some("tok".to_string()),
     };
-    let err = tokio::time::timeout(std::time::Duration::from_secs(5), serve_with_config(cfg))
-        .await
-        .expect("serve_with_config must return at once, not bind and serve (#6433)")
-        .expect_err("non-loopback bind with a token must refuse to start (#6433)");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("non-loopback") && msg.contains("#6433"),
-        "refusal must name the non-loopback bind and #6433, got: {msg}"
-    );
+    assert_startup_refused(cfg).await;
 }
 
 /// Why: #3329's control is the DEFAULT bind, not the refusal — the refusal only

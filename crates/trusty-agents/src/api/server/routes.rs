@@ -591,16 +591,37 @@ pub async fn serve(port: u16) -> Result<()> {
     serve_with_config(ApiConfig::unauthenticated(port)).await
 }
 
+/// The refusal message for a non-loopback `bind`, or `None` for loopback.
+///
+/// Why (#6433, DOC-90 AG-2): the API can spawn arbitrary subprocesses, so a
+/// token does not make LAN exposure acceptable; only loopback is allowed.
+/// What: `None` for `127.0.0.0/8` and `::1`; `Some(message)` for anything
+/// else, including unspecified addresses and IPv4-mapped IPv6 (even
+/// `::ffff:127.0.0.1`, which `IpAddr::is_loopback` does not treat as
+/// loopback).
+/// Test: `super::tests::guard::bind_refusal_table`.
+pub(crate) fn bind_refusal(bind: std::net::IpAddr) -> Option<String> {
+    if bind.is_loopback() {
+        return None;
+    }
+    Some(format!(
+        "refusing to start the trusty-agents API on non-loopback bind {bind}: this API can \
+         spawn arbitrary subprocesses, so it binds loopback only, with or without an API \
+         token (#6433). Omit --bind for the 127.0.0.1 default. For remote access, front \
+         this surface with the trusty-console proxy (reachable as /api/agents/*)."
+    ))
+}
+
 /// Serve the HTTP API and embedded web UI, honoring `ApiConfig`. (#181, #3329)
 ///
 /// Why: Loopback-only doctrine (#3329, tightened by #6433 / DOC-90 AG-2) —
 /// the API can spawn arbitrary subprocesses and mutate live sessions, so it
 /// binds `127.0.0.1` by default and REFUSES any non-loopback interface, token
 /// or not. Remote access goes through the trusty-console reverse proxy
-/// (`/api/agents/*`). `TAGENT_NO_API=1` refuses the API outright (DOC-90
-/// AG-1). We also write the standard `http_addr` discovery file after bind so
+/// (`/api/agents/*`). A set `TAGENT_NO_API` refuses the API outright unless
+/// it is an explicit off value (DOC-90 AG-1). We also write the standard `http_addr` discovery file after bind so
 /// the console proxy can resolve this surface, and remove it on shutdown.
-/// What: Bails under `TAGENT_NO_API=1`, then on any non-loopback `cfg.bind`,
+/// What: Bails on `no_api::no_api_refusal`, then on `bind_refusal`,
 /// both before any listener binds; binds `cfg.bind:cfg.port`; builds the
 /// router trusting the resolved bind address as a self-origin for the write
 /// guard; writes/removes the `http_addr` discovery file; prints the loopback
@@ -610,21 +631,14 @@ pub async fn serve(port: u16) -> Result<()> {
 /// `--api --port 7654` and confirm the discovery file appears.
 pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     // #6433: the `--api` early dispatch in `runtime::startup` reaches here
-    // without passing `mode_dispatch`, so the TAGENT_NO_API gate lives here too.
-    if let Some(msg) = super::no_api::process_no_api_refusal(true, false) {
+    // without passing `mode_dispatch`, so the TAGENT_NO_API gate lives here
+    // too. Either flag can reach this point, so the message names both.
+    if let Some(msg) = super::no_api::process_no_api_refusal(true, true) {
         anyhow::bail!(msg);
     }
-    // #6433: refuse ANY non-loopback bind, token or not (DOC-90 AG-2). The
-    // API can spawn arbitrary subprocesses; a token does not make LAN
-    // exposure acceptable.
-    if !cfg.bind.is_loopback() {
-        anyhow::bail!(
-            "refusing to start the trusty-agents API on non-loopback bind {bind}: this API can \
-             spawn arbitrary subprocesses, so it binds loopback only, with or without an API \
-             token (#6433). Omit --bind for the 127.0.0.1 default. For remote access, front \
-             this surface with the trusty-console proxy (reachable as /api/agents/*).",
-            bind = cfg.bind
-        );
+    // #6433: refuse ANY non-loopback bind, token or not (DOC-90 AG-2).
+    if let Some(msg) = bind_refusal(cfg.bind) {
+        anyhow::bail!(msg);
     }
 
     // #364: Don't block server startup on docs indexing. For projects with

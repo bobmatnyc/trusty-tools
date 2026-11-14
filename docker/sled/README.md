@@ -210,8 +210,10 @@ The `ENV` layer adds DOC-90 section 7 to cloudtest's: `TRUSTY_NO_UPDATE_CHECK=1`
 `TAGENT_NO_API=1`, `TRUSTY_CONSOLE_TOKEN_FILE=/run/secrets/trusty-console-token`,
 plus `TS_NO_LOGS_NO_SUPPORT=true` for tailscaled and `GH_NO_UPDATE_NOTIFIER=1`.
 
-`TAGENT_NO_API=1` is enforced: `tagent` refuses `--api` and `--serve` before
-any listener binds (#6433 interim slice). The entrypoint never starts either.
+`TAGENT_NO_API` is enforced: `tagent` refuses `--api` and `--serve` before
+any listener binds (#6433 interim slice). It fails closed: any value except
+unset, empty, `0`, `false`, `no` or `off` refuses. The entrypoint never
+starts either mode.
 
 Not yet enforced by the binaries:
 
