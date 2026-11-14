@@ -42,6 +42,9 @@ class Leases:
             return None
         return claim
 
+    def admit_tab(self, session: Session, peer: Peer, tab: int) -> None:
+        """Scope hook before any command reaches a tab; ``grants.Grants`` narrows it."""
+
     async def dispatch(self, session: Session, request: Frame) -> Frame:
         op = string(request, "op")
         allowed = {
@@ -68,6 +71,8 @@ class Leases:
             assert isinstance(tab, int)
             if self.peers.get(profile) is not peer:
                 raise Refusal("StaleLease")
+            # #11239: a code session may only claim inside its grant's scope.
+            self.admit_tab(session, peer, tab)
             claim = self.active(peer, tab)
             if claim is not None and claim.owner != session.owner:
                 raise Refusal(

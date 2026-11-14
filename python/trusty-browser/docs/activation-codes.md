@@ -27,7 +27,7 @@ fields are refused.
   one browser pairing generation (`peer.generation`). The broker does not see
   Chrome's `documentId`; a navigation inside the same tab keeps the
   incarnation, a closed or replaced tab, or a browser restart, ends it.
-- Constants (`grants.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
+- Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
   `MAX_GRANTS_PER_TAB = 1`, `MAX_GRANTS = 3`, lockout `FAIL_LIMIT = 5` failures
   in `FAIL_WINDOW = 60` s, first lock `LOCK_BASE = 60` s, doubling per repeat
   lock up to `LOCK_MAX = 900` s.
@@ -87,14 +87,17 @@ Reply:
 
 Tab scope adds `"tab": 7`. The grant belongs to this socket connection only.
 Redeem consumes the code atomically: of two concurrent redeems, exactly one
-wins. On any refusal the broker writes the error frame and closes the
-connection.
+wins. A tab-scoped redeem asks the browser for the profile's enrolled tab
+(`inspect`, an existing command) and binds only when it is the granted tab.
+Mint does not probe the tab. On any refusal the broker writes the error
+frame and closes the connection.
 
 | Error | Cause |
 |---|---|
 | `InvalidRequest` | Malformed frame |
 | `CodeRefused` | Wrong, already used, expired, or being redeemed by another connection. The agent cannot tell which; the audit log can |
-| `RedeemLocked` | Lockout is active; carries `retry_after_s`. A correct code is refused too |
+| `RedeemLocked` | Lockout is active; carries `retry_after_s` (whole seconds, rounded up). A correct code is refused too |
+| other browser refusal | Tab scope: the redeem-time tab probe (`inspect`) failed for another reason, such as `AmbiguousTab`; the code stays redeemable |
 | `TabClosed` | Tab scope: the tab incarnation ended before redeem. The code is consumed and never bound to another tab |
 | `BrowserDisconnected` | Profile scope: no paired browser; the code stays redeemable until it expires |
 | `GrantLimit` | Redeem would exceed a cap; the code stays redeemable |
@@ -138,7 +141,7 @@ Sender: the local operator CLI (later phase). The existing
 | Request | Reply |
 |---|---|
 | `{"op": "grants"}` | `{"ok": true, "grants": [entry, ...]}` |
-| `{"op": "revoke_grant", "grant": "g-..."}` | `{"ok": true}` or `{"ok": false, "error": "UnknownGrant"}` |
+| `{"op": "revoke_grant", "grant": "g-..."}` | `{"ok": true, "revoked": 1}` or `{"ok": false, "error": "UnknownGrant"}` |
 | `{"op": "revoke_grants"}` | `{"ok": true, "revoked": <count>}` |
 
 An entry is `{"grant", "scope", "profile", "tab" (tab scope only), "state":
@@ -155,7 +158,9 @@ line with only these keys: `ts`, `event`, `grant`, `scope`, `profile`, `op`,
 hash, a ticket, a lease token, page content, or a URL path or query.
 
 Events: `mint`, `redeem` (outcome `ok`, `wrong`, `replay`, `expired`,
-`contended`, `locked`, `tab_closed`, `browser_disconnected`, `limit`), `lock`,
+`revoked`, `contended`, `locked`, `tab_closed`, `browser_disconnected`,
+`limit`, or the browser's refusal name when the tab probe fails), `lock`
+(outcome is the lock length, for example `60s`),
 `revoke`, `grant_end` (outcome is the reason, or `closed`), `operation`
 (outcome `admitted`, then a second line with `ok` or the error name).
 

@@ -12,6 +12,10 @@ import os
 import socket
 import struct
 import sys
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trusty_browser.codes import Grant
 
 Frame = dict[str, object]
 HEADER = struct.Struct("=I")
@@ -138,3 +142,5 @@ class Session:
     row: sqlite3.Row
     owner: str = field(default_factory=lambda: secrets.token_urlsafe(12))
     journal: dict[str, tuple[Frame, Frame]] = field(default_factory=dict)
+    # #11239: set when the session was opened by an activation code.
+    grant: Grant | None = None

@@ -40,10 +40,12 @@ from trusty_browser.protocol import (
     verify_peer,
     write_frame,
 )
-from trusty_browser.leases import TTL, Leases
+from trusty_browser.leases import TTL
+from trusty_browser.grants import MINT_ERRORS, OPERATOR_OPS, Grants
 
 
-class Broker(Leases):
+# #11239: Grants layers activation codes over Leases.
+class Broker(Grants):
     def __init__(self, state: Path) -> None:
         self.state = state.expanduser().absolute()
         self.sessions: dict[asyncio.StreamWriter, Session] = {}
@@ -54,6 +56,7 @@ class Broker(Leases):
         self.paths: list[Path] = []
         self.lock: BinaryIO | None = None
         self.db: sqlite3.Connection | None = None
+        self.init_grants()
 
     async def __aenter__(self) -> Broker:
         self.db = database(self.state)
@@ -159,6 +162,7 @@ class Broker(Leases):
         for future in peer.pending.values():
             if not future.done():
                 future.set_exception(ConnectionResetError())
+        self.peer_gone(peer)  # #11239: the profile's grants end with its pairing.
 
     async def bootstrap(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -190,14 +194,14 @@ class Broker(Leases):
                 "WorkflowCredentialOccupied",
                 "Unauthorized",
             }
+            reply: Frame = {
+                "ok": False,
+                "error": str(exc) if str(exc) in safe else "EnrollmentFailed",
+            }
+            if isinstance(exc, Refusal) and str(exc) in MINT_ERRORS:  # #11239
+                reply = exc.response
             with contextlib.suppress(ConnectionError, TimeoutError):
-                await write_frame(
-                    writer,
-                    {
-                        "ok": False,
-                        "error": str(exc) if str(exc) in safe else "EnrollmentFailed",
-                    },
-                )
+                await write_frame(writer, reply)
         except EOFError:
             pass
         finally:
@@ -207,6 +211,8 @@ class Broker(Leases):
     async def enrollment_request(self, request: Frame) -> Frame:
         assert self.db is not None
         op = string(request, "op")
+        if op == "mint":  # #11239: codes are minted only on this socket.
+            return self.mint(request)
         if op == "resolve":
             return resolve_workflow(self.db, request)
         workflow = string(request, "workflow")
@@ -242,6 +248,7 @@ class Broker(Leases):
         finish_removals(self.db, self.state)
 
     async def detach(self, profile: str) -> None:
+        await self.end_profile(profile)  # #11239
         for w, s in list(self.sessions.items()):
             if s.row["profile"] == profile:
                 w.close()
@@ -261,6 +268,9 @@ class Broker(Leases):
         try:
             verify_peer(writer)
             req = await asyncio.wait_for(read_frame(reader), 5)
+            if req.get("op") in OPERATOR_OPS:  # #11239
+                await write_frame(writer, await self.grant_operator(req))
+                return
             if set(req) != {"op", "workflow"} or req["op"] != "revoke":
                 raise Refusal("InvalidRequest")
             await self.revoke(string(req, "workflow"))
@@ -317,11 +327,17 @@ class Broker(Leases):
         try:
             verify_peer(writer)
             hello = await asyncio.wait_for(read_frame(reader), 5)
-            if set(hello) != {"op", "workflow", "ticket"} or hello.get("op") != "open":
+            if hello.get("op") == "redeem":  # #11239
+                session = await self.redeem(hello)
+                ack = self.redeemed(session)
+            elif (
+                set(hello) != {"op", "workflow", "ticket"} or hello.get("op") != "open"
+            ):
                 raise Refusal("InvalidRequest")
-            session = Session(self.route(hello, False))
+            else:
+                session, ack = Session(self.route(hello, False)), {"ok": True}
             self.sessions[writer] = session
-            await write_frame(writer, {"ok": True})
+            await write_frame(writer, ack)
             while True:
                 request = await read_frame(reader)
                 try:
@@ -329,6 +345,8 @@ class Broker(Leases):
                 except Refusal as exc:
                     response = exc.response
                 await write_frame(writer, response)
+                if response.get("error") == "GrantEnded":  # #11239
+                    break
         except Refusal as exc:
             with contextlib.suppress(ConnectionError, TimeoutError):
                 await write_frame(writer, exc.response)
@@ -337,6 +355,7 @@ class Broker(Leases):
         finally:
             self.sessions.pop(writer, None)
             if session is not None:
+                await self.close_session(session)  # #11239
                 for key, claim in list(self.claims.items()):
                     if claim.owner == session.owner:
                         del self.claims[key]
