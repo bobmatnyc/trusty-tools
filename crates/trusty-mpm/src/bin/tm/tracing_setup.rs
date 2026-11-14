@@ -160,10 +160,13 @@ pub(crate) fn env_filter(default: &str) -> tracing_subscriber::EnvFilter {
 /// exactly `aws` (a span-scoped `aws[..]` directive does not count). Precedence: `EnvFilter` applies the most specific (longest) matching
 /// target, so an operator's `aws_config=debug` overrides the guard for
 /// `aws_config::*` only, and `aws=<level>` replaces the guard for all of them.
+/// The target is compared untrimmed, as the parser keeps it: `aws =warn`
+/// does not name `aws`, so the guard stays.
 /// Test: `aws_info_events_are_dropped_under_rust_log_info`,
 /// `aws_info_events_are_dropped_at_the_default_level`,
 /// `an_explicit_aws_directive_is_honoured`,
-/// `a_span_scoped_aws_directive_keeps_the_guard`.
+/// `a_span_scoped_aws_directive_keeps_the_guard`,
+/// `a_whitespace_padded_aws_directive_keeps_the_guard`.
 fn filter_from_directives(rust_log: Option<&str>, default: &str) -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
     let base = rust_log
@@ -173,12 +176,12 @@ fn filter_from_directives(rust_log: Option<&str>, default: &str) -> tracing_subs
     // #8948: hold AWS SDK targets at warn (key id in log)
     // Only a static directive (no `[span{fields}]` part) can replace the guard:
     // `aws[foo]=debug` is dynamic and says nothing about events outside `foo`.
+    // #8948: no trim — the parser keeps `aws =warn` as target "aws ", not aws
     let named = base
         .split(',')
-        .map(str::trim)
         .filter(|d| !d.contains('['))
         .filter_map(|d| d.split('=').next())
-        .any(|target| target.trim() == AWS_LOG_GUARD);
+        .any(|target| target == AWS_LOG_GUARD);
     if !named {
         directives.push_str(&format!(",{AWS_LOG_GUARD}=warn"));
     }
@@ -558,6 +561,27 @@ mod tests {
                 "{rust_log}: AWS WARN must still show: {out}"
             );
         }
+    }
+
+    /// REGRESSION (#8948 review): `Directive::parse` keeps trailing whitespace
+    /// in the target, so `aws =warn` names `"aws "`, which matches no `aws_*`
+    /// target and must not count as naming `aws` and drop the guard.
+    #[test]
+    fn a_whitespace_padded_aws_directive_keeps_the_guard() {
+        let leaked: Vec<(&str, String)> = [
+            // Red-first: leaked `info-key-8948` at bb873ccb0d.
+            "info,aws =warn",
+            "debug,aws =warn",
+            // Preserved behaviour: the parser rejects the whole string, the
+            // `info` default applies, and the guard is appended.
+            "info, aws=warn",
+            "debug, aws=warn",
+        ]
+        .into_iter()
+        .map(|rust_log| (rust_log, emitted(Some(rust_log))))
+        .filter(|(_, out)| out.contains("info-key-8948"))
+        .collect();
+        assert!(leaked.is_empty(), "credential line leaked: {leaked:#?}");
     }
 
     /// The invariant behind the matrix, stated on its own: no combination of
