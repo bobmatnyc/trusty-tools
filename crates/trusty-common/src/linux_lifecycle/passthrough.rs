@@ -12,9 +12,8 @@
 //! `src/` and the trusty-common code it calls. Register a new read here, never
 //! a credential (`*_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`): the daemons
 //! read those from the `.env.local` tiers and the credential store.
-//! Test: trusty-memory `descriptor_passes_the_security_and_data_variables_but_no_credential`,
-//! trusty-search `env_passthrough_carries_every_daemon_setting_and_no_credential`,
-//! trusty-console `console_passthrough_carries_every_memory_and_search_name`.
+//! Test: `daemon_lists_hold_no_credential_and_no_duplicate`; each consumer's
+//! descriptor tests in trusty-memory, trusty-search and trusty-console.
 
 /// The trusty-memory daemon's passthrough (`serve --foreground`).
 pub const MEMORY_DAEMON: &[&str] = &[
@@ -262,3 +261,25 @@ pub const SEARCH_DAEMON: &[&str] = &[
     "TRUSTY_SHUTDOWN_FLUSH_TIMEOUT_SECS",
     crate::shutdown::TERMINATION_GRACE_ENV,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::{MEMORY_DAEMON, SEARCH_DAEMON};
+
+    // #11085: a credential name here would reach every daemon a console
+    // bridge starts; a duplicate means a list was merged by hand.
+    #[test]
+    fn daemon_lists_hold_no_credential_and_no_duplicate() {
+        for list in [MEMORY_DAEMON, SEARCH_DAEMON] {
+            for (i, name) in list.iter().enumerate() {
+                let credential = name.to_ascii_uppercase().split('_').any(|segment| {
+                    ["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASS"].contains(&segment)
+                });
+                assert!(!credential, "{name} looks like a credential");
+                assert!(!list[..i].contains(name), "{name} is listed twice");
+            }
+        }
+        assert!(MEMORY_DAEMON.contains(&"TRUSTY_MEMORY_MULTI_TENANT"));
+        assert!(SEARCH_DAEMON.contains(&"TRUSTY_EMBEDDER"));
+    }
+}
