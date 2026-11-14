@@ -165,3 +165,70 @@ fn keeps_a_bracket_expression_whole_through_the_cut() {
     assert!(quoted.contains(&"/srv/app/.env".to_string()), "{quoted:?}");
     assert_eq!(path_words("cat .[!x"), vec!["cat", ".[", "x"]);
 }
+
+/// #10761 review: the lexer strips the quoting that made a `]` a member, so the
+/// guard cannot tell which `]` closes the class and must judge every one.
+#[test]
+fn a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed() {
+    for command in [
+        r"cat .[x\]e]nv",
+        r#"cat .[x"]"e]nv"#,
+        r"cat .[x']'e]nv",
+        r"cat ./conf/.[x\]e]nv",
+        r#"cat /srv/app/.[x"]"e]nv"#,
+        r"head -n 1 .[x\]e]nv",
+        r#"grep KEY .[x"]"e]nv"#,
+        r"tail .[x']'e]nv",
+        r"cat .[x\]e]nv.local",
+        r"cat .[x\]-f]nv",
+    ] {
+        assert!(denies(command), "`{command}` must deny");
+    }
+    // Every reading of these reaches no secret-class name.
+    for command in [r"cat .[x\]y]nv", "cat a[0]b[1].txt"] {
+        assert_eq!(
+            evaluate_secret_file_read_command(command),
+            None,
+            "`{command}` must allow"
+        );
+    }
+}
+
+/// #10761 review: ripgrep's globset reads a `/` inside a class as a member, so
+/// the `Grep` glob arm must not cut the class at it.
+#[test]
+fn a_grep_glob_class_carrying_a_slash_is_read_whole() {
+    for glob in [".[!x/]nv", ".e[!/]v", "**/.e[!/]v", ".[/e]nv"] {
+        let input = serde_json::json!({"pattern": "KEY", "path": "/repo", "glob": glob});
+        assert!(
+            evaluate_secret_file_read_tool("Grep", Some(&input)).is_some(),
+            "glob `{glob}` must deny"
+        );
+    }
+    for glob in ["src/[a-z]*.rs", "[!/]*.md"] {
+        let input = serde_json::json!({"pattern": "KEY", "path": "/repo", "glob": glob});
+        assert_eq!(
+            evaluate_secret_file_read_tool("Grep", Some(&input)),
+            None,
+            "glob `{glob}` must allow"
+        );
+    }
+}
+
+/// #10761 review: an unclosed `[` must not rescan the rest of the text, or a
+/// long command overruns the hook budget. 16 KB of `[:` takes milliseconds on
+/// a linear scan; the 10 s bound only trips on the super-linear one.
+#[test]
+fn a_long_run_of_unclosed_brackets_scans_in_bounded_time() {
+    let text = format!("cat .env '{}'", "[:".repeat(8 * 1024));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let words = path_words(&text);
+        let denied = denies(&text);
+        let _ = tx.send((words.len(), denied));
+    });
+    let outcome = rx.recv_timeout(std::time::Duration::from_secs(10));
+    let (words, denied) = outcome.expect("the bracket scan must finish within 10 s");
+    assert!(words > 0);
+    assert!(denied, "the `.env` operand must still deny");
+}
