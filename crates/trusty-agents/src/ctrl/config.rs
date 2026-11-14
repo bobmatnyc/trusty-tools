@@ -91,7 +91,10 @@ pub struct SessionOverrides {
 /// Any other override value returns an error so the user's typo doesn't
 /// silently fall through to env defaults. When `provider_override` is `None`
 /// we delegate to `pick_credentials()` exactly as before.
-/// Test: `provider_override_bedrock_and_local_get_their_own_variants`;
+/// Under a provider lock (#10978) only `bedrock` is accepted, and the final
+/// slug and runner must pass the lock.
+/// Test: `provider_override_bedrock_and_local_get_their_own_variants`,
+/// `session_routing_is_refused_off_bedrock_under_the_lock`;
 /// `apply_credential_routing` tests still pass since this helper is composed
 /// before that point.
 pub(crate) fn resolve_overridden_credentials(
@@ -123,6 +126,24 @@ pub(crate) fn resolve_overridden_credentials(
             requested
         );
     }
+    // #10978: under a provider lock only `/provider bedrock` is accepted, and
+    // the final slug must pass the lock before any credential is chosen.
+    let lock = llm::provider_lock::active();
+    if llm::provider_lock::is_locked(&lock) {
+        if let Some(requested) = provider_override
+            && !requested.eq_ignore_ascii_case("bedrock")
+        {
+            anyhow::bail!(
+                "agent '{}': session provider override '{}' is refused because \
+                 provider lock = bedrock; no other provider is tried",
+                cfg.agent.name,
+                requested
+            );
+        }
+        if provider_override.is_none() {
+            cfg.enforce_provider_lock(&lock)?;
+        }
+    }
     // #7370: configured AWS/local providers do not require unrelated ambient API credentials.
     if provider_override.is_none() {
         if cfg.agent.model.starts_with("bedrock/") {
@@ -140,6 +161,8 @@ pub(crate) fn resolve_overridden_credentials(
             if !cfg.agent.model.starts_with("bedrock/") {
                 cfg.agent.model = format!("bedrock/{}", cfg.agent.model);
             }
+            // #10978: a claude-code runner still never reaches Bedrock.
+            cfg.enforce_provider_lock(&lock)?;
             // audit 2026-08-19: was `OpenRouter` as a placeholder. The adapter
             // still routes on the `bedrock/` model prefix; only the credential
             // type changed, and `qualify_openrouter_model` was already a no-op
@@ -164,8 +187,19 @@ pub(crate) fn resolve_overridden_credentials(
             "unknown provider override '{}'. Valid: openrouter, claude-code, bedrock, local",
             other
         ),
-        None => llm::credentials::pick_credentials(Some(cfg.agent.runner))
-            .ok_or_else(|| anyhow::anyhow!("{}", llm::credentials::missing_credentials_error())),
+        None => llm::credentials::pick_credentials(Some(cfg.agent.runner)).ok_or_else(|| {
+            // #10978: under the lock `pick_credentials` is always `None`; say why.
+            if llm::provider_lock::is_locked(&lock) {
+                anyhow::anyhow!(
+                    "agent '{}' (model '{}'): provider lock = bedrock, so no ambient \
+                     credential is used; no other provider is tried",
+                    cfg.agent.name,
+                    cfg.agent.model
+                )
+            } else {
+                anyhow::anyhow!("{}", llm::credentials::missing_credentials_error())
+            }
+        }),
     }
 }
 
@@ -414,7 +448,7 @@ pub(crate) async fn resolve_agent_config(
         return Ok((AgentConfig::load(&project_ctrl)?, Some(project_ctrl)));
     }
 
-    Ok((AgentConfig::ctrl_default(), None))
+    Ok((AgentConfig::try_ctrl_default()?, None))
 }
 
 /// Resolve the agent config used by `ctrl_chat_turn` — the conversational
@@ -464,7 +498,7 @@ pub(crate) async fn resolve_ctrl_agent_config(
         return Ok((AgentConfig::load(&pm_fallback)?, Some(pm_fallback)));
     }
 
-    Ok((AgentConfig::ctrl_default(), None))
+    Ok((AgentConfig::try_ctrl_default()?, None))
 }
 
 /// Apply the canonical 3-way credential routing rules to `cfg` (#271).

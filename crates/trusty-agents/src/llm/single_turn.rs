@@ -33,9 +33,11 @@ use crate::perf::TokenUsage;
 /// converts tool-call arguments (which arrive as stringified JSON) into
 /// `serde_json::Value` so downstream dispatch can index by field.
 /// What: Sends `system` + `user` messages, optional tools, returns
-/// `ChatResponse { content, tool_calls }`.
+/// `ChatResponse { content, tool_calls }`. Under a provider lock it is
+/// refused before any request, naming the model (#10978).
 /// Test: Smoke test with a trivial prompt; asserts non-empty response or
-/// a tool_call with `name == "delegate_to_agent"`.
+/// a tool_call with `name == "delegate_to_agent"`; the lock by
+/// `single_turn_chat_is_refused_under_the_provider_lock`.
 pub async fn chat(
     client: &Client<OpenAIConfig>,
     model: &str,
@@ -45,6 +47,10 @@ pub async fn chat(
     max_tokens: u32,
     tools: Vec<ChatCompletionTool>,
 ) -> Result<ChatResponse> {
+    // #10978: this client always posts to OpenRouter, whatever the slug says.
+    crate::llm::provider_lock::refuse_off_provider(&format!(
+        "OpenRouter chat for model '{model}'"
+    ))?;
     let system_msg: ChatCompletionRequestMessage =
         ChatCompletionRequestSystemMessageArgs::default()
             .content(system_prompt)

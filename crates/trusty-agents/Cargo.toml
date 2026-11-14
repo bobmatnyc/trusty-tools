@@ -15,7 +15,7 @@ name = "trusty-agents"
 # 0.39.4: patch bump for an owner-authorized reinstall carrying the #7655
 # xlsx-bounds validator (via trusty-search 0.54.1) for live verification;
 # no public API change.
-version = "0.39.5"
+version = "0.40.0"
 edition = "2024"
 description = "Trusty Agents: Rust-native agentic harness with multi-model routing, tool execution, and subprocess delegation."
 license.workspace = true

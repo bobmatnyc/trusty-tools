@@ -348,6 +348,8 @@ pub(super) async fn run_eval_subcommand(args: &[String]) -> Result<()> {
         )
     };
 
+    // #10978: the built-in eval model is `anthropic/…`; refuse it under a lock.
+    llm::provider_lock::check_agent(&llm::provider_lock::active(), "eval", &model, false)?;
     // Live LLM client adapter — uses the existing OpenRouter chat path.
     let client = llm::create_client()?;
     let live = LiveEvalClient {

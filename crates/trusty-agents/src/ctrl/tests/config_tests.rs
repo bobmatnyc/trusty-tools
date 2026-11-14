@@ -582,6 +582,46 @@ fn provider_override_still_works_on_an_unpinned_agent() {
     );
 }
 
+/// Why: #10978 — under a provider lock a session cannot route a turn off
+/// Bedrock: a bare slug, or a `/provider` other than `bedrock`, is refused
+/// naming the lock and the agent. `/provider bedrock` and a `bedrock/` slug
+/// still resolve.
+/// Test: itself.
+#[test]
+fn session_routing_is_refused_off_bedrock_under_the_lock() {
+    use super::super::config::resolve_overridden_credentials as resolve;
+    use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+    use llm::credentials::LlmCredentials;
+
+    let base = AgentConfig::ctrl_default();
+    let _locked = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+    for (model, requested) in [
+        ("claude-sonnet-4-6", None),
+        ("bedrock/x", Some("openrouter")),
+        ("bedrock/x", Some("claude-code")),
+        ("bedrock/x", Some("local")),
+    ] {
+        let mut cfg = base.clone();
+        cfg.agent.model = model.into();
+        let err = resolve(&mut cfg, requested).expect_err("refused under the lock");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("provider lock = bedrock") && msg.contains("ctrl"),
+            "{requested:?}: {msg}"
+        );
+    }
+    let mut cfg = base.clone();
+    cfg.agent.model = "bedrock/x".into();
+    assert_eq!(
+        resolve(&mut cfg, None).expect("bedrock"),
+        LlmCredentials::Bedrock
+    );
+    assert_eq!(
+        resolve(&mut cfg, Some("bedrock")).expect("bedrock override"),
+        LlmCredentials::Bedrock
+    );
+}
+
 /// audit 2026-08-19 (finding 18): `/provider bedrock` and `/provider local`
 /// get credential variants that name their real transport.
 ///

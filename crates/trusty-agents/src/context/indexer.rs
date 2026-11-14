@@ -86,7 +86,7 @@ async fn run_indexer(mut rx: mpsc::Receiver<TurnRecord>, store_dir: PathBuf, api
             tracing::debug!("history indexer: no api key, skipping embedding");
             continue;
         }
-        match embed_turn(&turn, &api_key).await {
+        match embed_turn(&turn, &api_key, OPENROUTER_EMBEDDINGS_URL).await {
             Ok(embedding) => {
                 let entry = IndexedEntry {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -128,7 +128,18 @@ async fn run_indexer(mut rx: mpsc::Receiver<TurnRecord>, store_dir: PathBuf, api
     }
 }
 
-async fn embed_turn(turn: &TurnRecord, api_key: &str) -> anyhow::Result<Vec<f32>> {
+/// The OpenRouter embeddings endpoint the history indexer posts to.
+const OPENROUTER_EMBEDDINGS_URL: &str = "https://openrouter.ai/api/v1/embeddings";
+
+/// Embed one turn's agent, prompt and response through OpenRouter.
+///
+/// Why: the retriever ranks past turns by vector similarity.
+/// What: refuses first under a provider lock (#10978) — the request carries
+/// the turn's prompt and response text to OpenRouter — then POSTs to `url`.
+/// Test: `embed_turn_is_refused_under_the_provider_lock`.
+async fn embed_turn(turn: &TurnRecord, api_key: &str, url: &str) -> anyhow::Result<Vec<f32>> {
+    // #10978: no turn text leaves for OpenRouter under the lock.
+    crate::llm::provider_lock::refuse_off_provider("history indexer embeddings (OpenRouter)")?;
     let prompt_prefix: String = turn.prompt_text.chars().take(2000).collect();
     let response_prefix: String = turn.response_text.chars().take(2000).collect();
     let text = format!(
@@ -138,7 +149,7 @@ async fn embed_turn(turn: &TurnRecord, api_key: &str) -> anyhow::Result<Vec<f32>
 
     let client = reqwest::Client::new();
     let resp = client
-        .post("https://openrouter.ai/api/v1/embeddings")
+        .post(url)
         .bearer_auth(api_key)
         .json(&serde_json::json!({
             "model": "openai/text-embedding-3-small",
@@ -235,6 +246,33 @@ fn split_camel_case_indexer(s: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: #10978 — under the lock no turn text may be sent for embedding.
+    /// The URL is a closed loopback port, so without the guard the error is a
+    /// connection failure, not the lock refusal; no request leaves the host.
+    /// Test: itself.
+    #[tokio::test]
+    async fn embed_turn_is_refused_under_the_provider_lock() {
+        use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+        let _l = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+        let turn = TurnRecord {
+            session_id: "s".into(),
+            agent: "a".into(),
+            turn_number: 1,
+            timestamp: Utc::now(),
+            prompt_text: "secret prompt".into(),
+            response_text: "r".into(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        };
+        let err = embed_turn(&turn, "sk-test", "http://127.0.0.1:1/embeddings")
+            .await
+            .expect_err("refused under the lock");
+        assert!(
+            err.to_string().contains("provider lock = bedrock"),
+            "{err:#}"
+        );
+    }
 
     #[test]
     fn tokenize_lowers_and_drops_short() {

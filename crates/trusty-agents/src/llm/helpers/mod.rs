@@ -82,6 +82,11 @@ pub fn create_client_for_model(model: &str) -> Result<Client<OpenAIConfig>> {
     create_client_inner(!(model.starts_with("bedrock/") || model.starts_with("ollama/")))
 }
 fn create_client_inner(require_credentials: bool) -> Result<Client<OpenAIConfig>> {
+    // #10978: under a provider lock every agent slug is `bedrock/`, so this
+    // OpenRouter client is never the route. Build it keyless, like the
+    // configured-Bedrock case above, so a stray use cannot authenticate.
+    let require_credentials = require_credentials
+        && !crate::llm::provider_lock::is_locked(&crate::llm::provider_lock::active());
     // #250: Tolerate missing OPENROUTER_API_KEY when an alternative credential
     // is configured (ANTHROPIC_API_KEY for direct API; CLAUDE_CODE_OAUTH_TOKEN
     // for the claude CLI subprocess path). The downstream call sites either

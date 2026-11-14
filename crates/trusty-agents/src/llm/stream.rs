@@ -269,7 +269,8 @@ where
 /// branch is covered by `streaming_supported_allows_bedrock` at the gate
 /// level (constructing a live `BedrockProvider` here needs network/credential
 /// access, out of scope for a unit test — see `bedrock_impl`'s own tests for
-/// the Bedrock-specific event mapping).
+/// the Bedrock-specific event mapping); the provider lock (#10978) by
+/// `stream_reply_is_refused_under_the_provider_lock`.
 pub async fn stream_reply(
     model: &str,
     messages: Vec<ChatMessage>,
@@ -282,6 +283,10 @@ pub async fn stream_reply(
         return stream_reply_bedrock(model, messages, session_id, agent, cadence, sampling).await;
     }
 
+    // #10978: the non-Bedrock branch streams from OpenRouter.
+    crate::llm::provider_lock::refuse_off_provider(&format!(
+        "OpenRouter stream for model '{model}'"
+    ))?;
     let api_key = trusty_common::credentials::resolve_key("openrouter").unwrap_or_default();
     if api_key.is_empty() {
         return Err(anyhow!(

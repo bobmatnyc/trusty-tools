@@ -374,3 +374,25 @@ fn parse_streaming_flag_table() {
     assert!(!parse_streaming_flag(Some(" OFF ")));
     assert!(!parse_streaming_flag(Some("No")));
 }
+
+/// Why: #10978 — the non-Bedrock branch streams from OpenRouter, so under the
+/// provider lock it must refuse before any request. With no credential, the
+/// unguarded path fails with a missing-key error instead of the refusal.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn stream_reply_is_refused_under_the_provider_lock() {
+    let got = crate::llm::provider_lock::block_on_locked_without_credentials(stream_reply(
+        "claude-sonnet-4-6",
+        Vec::new(),
+        "s",
+        "a",
+        Duration::from_millis(10),
+        SamplingParams::default(),
+    ));
+    let err = got.expect_err("refused under the lock");
+    assert!(
+        err.to_string().contains("provider lock = bedrock"),
+        "{err:#}"
+    );
+}
