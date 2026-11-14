@@ -260,6 +260,7 @@ Every issue body and every comment ends with the attribution line below.
 | `staleness.close_stale_after_days` | `60` |
 | `staleness.exempt_labels` | `keep`, `paused`, `blocked` |
 | `staleness.exempt_when_milestoned` | `true` |
+| `staleness.close_idle_milestoned_backlog_after_days` | `30` — milestoned, Status Backlog, no PR, no activity; closes as not planned (see Staleness) |
 | `staleness.decision_request` | digest — one comment per epic tracker, never a question per issue |
 | `coverage` | every open issue belongs to an epic or to a `Backlog · <area>` milestone |
 
@@ -352,6 +353,14 @@ posts ONE triage comment naming its recommended disposition with evidence:
 
 At **60 days** it closes with a note, unless the issue is pinned to a milestone
 or carries `keep`, `paused`, or `blocked`.
+
+**Idle milestoned backlog (owner ruling 2026-11-14, Dm5).** A milestoned issue
+closes as not planned at **30 days** when all of these hold: its Status is
+Backlog, it has no linked or open PR, and it has no activity. Activity is a
+comment, a label or state change, or a linked PR by anyone other than an
+automated sweep. The sweep skips issues that carry `keep`, `paused`, `blocked`,
+`epic`, or `status:in-progress`. The closure sets Status to Won't Do and carries
+`closed:sweep`. Anyone may reopen the issue with a comment saying why.
 
 🔴 **A sweep closure carries `closed:sweep`** (owner ruling 2026-09-27) — age,
 staleness, duplicate, or obsolete dispositions all count. A fix closure comes
