@@ -771,3 +771,196 @@ fn a_gitignored_user_file_refuses() {
     );
     assert!(fx.repo.join("my-notes.txt").exists());
 }
+
+// ---- fix round 1 on PR #11218: a guard that cannot get its input refuses ---
+
+/// A directory made unsearchable (mode 000); its mode is restored on drop so
+/// the `TempDir` can be removed.
+struct Locked(PathBuf);
+
+impl Locked {
+    fn new(dir: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::create_dir_all(dir).expect("mkdir locked");
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).expect("chmod 000");
+        Self(dir.to_path_buf())
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// True when this process ignores permission bits (root), so EACCES never fires.
+fn permissions_are_ignored(probe_parent: &Path) -> bool {
+    let dir = probe_parent.join("perm-probe");
+    let _lock = Locked::new(&dir);
+    let ignored = std::fs::read_dir(&dir).is_ok();
+    if ignored {
+        eprintln!("skipping: running as root, permission bits are not enforced");
+    }
+    ignored
+}
+
+/// `fx.repo` spelled through a `..` segment, so a raw prefix test misses it.
+fn non_canonical_repo(fx: &GitWorktreeFixture) -> PathBuf {
+    let owner = fx.repo.parent().expect("owner dir");
+    std::fs::create_dir_all(owner.join("detour")).expect("mkdir detour");
+    let leaf = fx.repo.file_name().expect("repo leaf");
+    owner.join("detour").join("..").join(leaf)
+}
+
+/// A user home whose `.trusty-mpm/config.toml` holds `text`.
+fn home_with_config(text: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().expect("home");
+    std::fs::create_dir_all(home.path().join(".trusty-mpm")).expect("mkdir .trusty-mpm");
+    std::fs::write(home.path().join(".trusty-mpm/config.toml"), text).expect("write config");
+    home
+}
+
+fn no_env(_: &str) -> Option<String> {
+    None
+}
+
+fn plan_with_arch(
+    fx: &GitWorktreeFixture,
+    arch: &[PathBuf],
+) -> Result<DirDeletePlan, DirDeleteError> {
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    plan_dir_delete(
+        input(&sessions, &fx.repos_root, arch),
+        &FakeProbes::default(),
+    )
+}
+
+#[test]
+fn an_architect_entry_with_a_malformed_profile_is_protected() {
+    // #10992 critic HIGH: a recorded entry whose `.trusty-mpm.toml` does not
+    // parse reads as a PM profile; the guard must still see it.
+    let fx = GitWorktreeFixture::new();
+    let arch = fx.repo.join("architect");
+    std::fs::create_dir_all(&arch).expect("mkdir architect");
+    std::fs::write(arch.join(".trusty-mpm.toml"), "profile = [not toml\n").expect("write profile");
+    let listed = format!("{:?}", arch.display().to_string());
+    let home = home_with_config(&format!("[architect]\nprojects = [{listed}]\n"));
+    let dirs = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
+        .expect("readable config");
+    let err = plan_with_arch(&fx, &dirs).expect_err("a recorded Architect dir inside");
+    assert!(matches!(err, DirDeleteError::ArchitectDir { .. }), "{err}");
+}
+
+#[test]
+fn an_env_named_architect_dir_is_protected() {
+    // #10992 critic HIGH: `ARCHITECT_PROJECT_DIR` names an Architect too.
+    let fx = GitWorktreeFixture::new();
+    let arch = fx.repo.join("env-architect");
+    std::fs::create_dir_all(&arch).expect("mkdir architect");
+    let named = arch.display().to_string();
+    let env = |name: &str| (name == "ARCHITECT_PROJECT_DIR").then(|| named.clone());
+    let home = tempfile::tempdir().expect("home");
+    let dirs = crate::core::architect_store::protected_architect_dirs(&env, Some(home.path()))
+        .expect("no config is not an error");
+    let err = plan_with_arch(&fx, &dirs).expect_err("the env-named Architect dir inside");
+    assert!(matches!(err, DirDeleteError::ArchitectDir { .. }), "{err}");
+}
+
+#[test]
+fn an_unreadable_or_malformed_user_config_refuses_the_delete() {
+    // #10992 critic HIGH: never proceed on a defaulted config.
+    let home = home_with_config("[architect\nprojects = 3\n");
+    let config = home.path().join(".trusty-mpm/config.toml");
+    let err = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
+        .expect_err("malformed config");
+    assert!(err.contains(&config.display().to_string()), "{err}");
+    if permissions_are_ignored(home.path()) {
+        return;
+    }
+    std::fs::write(&config, "[architect]\nprojects = []\n").expect("rewrite config");
+    let _lock = Locked::new(&home.path().join(".trusty-mpm"));
+    let err = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
+        .expect_err("unreadable config");
+    assert!(err.contains(&config.display().to_string()), "{err}");
+}
+
+#[test]
+fn a_missing_user_config_is_not_an_error() {
+    let home = tempfile::tempdir().expect("home");
+    let dirs = crate::core::architect_store::protected_architect_dirs(&no_env, Some(home.path()))
+        .expect("no config file is not an error");
+    let default = home
+        .path()
+        .join(crate::core::architect_store::DEFAULT_ARCHITECT_DIR);
+    assert_eq!(dirs, vec![default]);
+}
+
+#[test]
+fn an_unresolvable_architect_dir_refuses() {
+    // #10992 critic MEDIUM (plan_dir_delete): a canonicalize error other than
+    // NotFound refuses; it never falls back to the raw spelling.
+    let fx = GitWorktreeFixture::new();
+    if permissions_are_ignored(&fx.repos_root) {
+        return;
+    }
+    let _lock = Locked::new(&fx.repo.join("locked"));
+    let arch = [non_canonical_repo(&fx).join("locked").join("architect")];
+    let err = plan_with_arch(&fx, &arch).expect_err("an unresolvable Architect dir");
+    let text = err.to_string();
+    assert!(
+        text.contains("cannot resolve the Architect directory"),
+        "{text}"
+    );
+}
+
+#[test]
+fn an_unresolvable_occupant_counts() {
+    // #10992 critic MEDIUM (works_inside): a session under the target whose
+    // path cannot be canonicalized (EACCES) is still an occupant.
+    let fx = GitWorktreeFixture::new();
+    if permissions_are_ignored(&fx.repos_root) {
+        return;
+    }
+    let _lock = Locked::new(&fx.repo.join("locked"));
+    let inner = non_canonical_repo(&fx).join("locked").join("inner");
+    let sessions = [
+        session("s1", &fx.repo, Some(SessionKind::Ordinary), "stopped"),
+        session("s2", &inner, Some(SessionKind::Ordinary), "active"),
+    ];
+    let err = plan_dir_delete(
+        input(&sessions, &fx.repos_root, &[]),
+        &FakeProbes::default(),
+    )
+    .expect_err("the unresolvable occupant runs");
+    assert!(
+        matches!(&err, DirDeleteError::Running { running, .. } if running == &["tm-s2".to_string()]),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_missing_leaf_under_the_target_counts() {
+    // #10992 critic MEDIUM (works_inside): a not-yet-existing directory under
+    // an existing ancestor inside the target is an occupant.
+    let fx = GitWorktreeFixture::new();
+    let missing = non_canonical_repo(&fx).join("not-yet").join("there");
+    let sessions = [
+        session("s1", &fx.repo, Some(SessionKind::Ordinary), "stopped"),
+        session("s2", &missing, Some(SessionKind::Ordinary), "active"),
+    ];
+    let err = plan_dir_delete(
+        input(&sessions, &fx.repos_root, &[]),
+        &FakeProbes::default(),
+    )
+    .expect_err("the missing-leaf occupant runs");
+    assert!(
+        matches!(&err, DirDeleteError::Running { running, .. } if running == &["tm-s2".to_string()]),
+        "{err}"
+    );
+}
