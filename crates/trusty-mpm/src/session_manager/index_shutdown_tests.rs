@@ -65,11 +65,7 @@ impl Rig {
     }
 }
 
-async fn recording(
-    daemon: &'static str,
-    calls: &CallLog,
-    answer: Answer,
-) -> MockUdsDaemon {
+async fn recording(daemon: &'static str, calls: &CallLog, answer: Answer) -> MockUdsDaemon {
     let calls = Arc::clone(calls);
     uds_mock::spawn(move |method, params| {
         calls
