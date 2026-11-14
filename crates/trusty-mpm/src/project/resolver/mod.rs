@@ -401,8 +401,25 @@ pub fn one_project_per_repo(projects: &[Project]) -> Vec<&Project> {
 
 /// The comparison key that matches a `repo_url` to a project: lowercased,
 /// then [`normalise_url`].
+///
+/// #10604: a `~` spelling is first expanded by the same
+/// [`local_repo_path`](crate::project::project_key::local_repo_path) the key
+/// minting and [`local_checkout_for_url`] use, so `~/code/x` and the absolute
+/// path it names fold to one node. An unexpandable `~` stays as spelled. No
+/// `git` runs here: a path never folds with its origin URL.
+/// Test: `repo_key_folds_a_tilde_and_an_absolute_spelling_10604`.
 fn repo_key(url: &str) -> String {
-    normalise_url(&url.to_lowercase()).to_string()
+    repo_key_in(url, dirs::home_dir().as_deref())
+}
+
+/// [`repo_key`] with an explicit home directory (#10604).
+fn repo_key_in(url: &str, home: Option<&std::path::Path>) -> String {
+    let expanded = crate::project::project_key::local_repo_path(url, home);
+    let spelled = expanded.as_deref().map_or_else(
+        || std::borrow::Cow::Borrowed(url),
+        std::path::Path::to_string_lossy,
+    );
+    normalise_url(&spelled.to_lowercase()).to_string()
 }
 
 /// The order that picks the winner among one repo's registrations (#10476).

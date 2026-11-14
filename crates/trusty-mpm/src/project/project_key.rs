@@ -19,6 +19,7 @@ use trusty_common::RegisteredProject;
 use trusty_common::github_path::{UNKNOWN_OWNER, derive_github_path, parse_github_path};
 
 use super::record::Project;
+use super::store::ProjectStoreError;
 
 /// The local directory a path-spelled `repo_url` names, if it is one (#10604).
 ///
@@ -39,14 +40,13 @@ pub fn local_repo_path(repo_url: &str, home: Option<&Path>) -> Option<PathBuf> {
     if trimmed.starts_with('/') {
         return Some(PathBuf::from(trimmed));
     }
+    if trimmed != "~" && !trimmed.starts_with("~/") {
+        return None;
+    }
     // #10604: `$HOME` is passed through as given; a relative one would make
     // `git -C` run against the daemon's cwd and store a wrong permanent key.
-    let home = home.filter(|h| h.is_absolute());
-    if trimmed == "~" {
-        return home.map(Path::to_path_buf);
-    }
-    let rest = trimmed.strip_prefix("~/")?;
-    home.map(|h| h.join(rest))
+    let home = home.filter(|h| h.is_absolute())?;
+    Some(trusty_common::workspace_layout::expand_tilde(trimmed, home))
 }
 
 /// `true` when `repo_url` is spelled as a local path (`/…`, `~`, `~/…`, `~user/…`).
@@ -54,7 +54,15 @@ pub fn local_repo_path(repo_url: &str, home: Option<&Path>) -> Option<PathBuf> {
 /// Why: such a value must never fall through to URL parsing (#10604).
 pub fn is_path_spelling(repo_url: &str) -> bool {
     let trimmed = repo_url.trim();
-    trimmed.starts_with('/') || trimmed.starts_with('~')
+    trimmed.starts_with('/') || is_home_spelling(trimmed)
+}
+
+/// `true` when `repo_url` is spelled relative to a home directory (`~…`).
+///
+/// Why: only this spelling depends on `$HOME`, so only it can be unresolvable
+/// at registration (#10604).
+pub fn is_home_spelling(repo_url: &str) -> bool {
+    repo_url.trim().starts_with('~')
 }
 
 /// Canonical lowercase `owner/repo` for a repo URL or checkout path, if it has one.
@@ -96,10 +104,42 @@ pub fn project_key_from_repo_url_in(repo_url: &str, home: Option<&Path>) -> Opti
 ///
 /// Why: every registered project needs a key; a project with no origin still
 /// needs a stable one.
-/// What: [`project_key_from_repo_url`], falling back to a fresh `local:<uuid>`.
+/// What: [`assign_project_key_in`] against the process home directory.
 /// Test: `key_from_path_without_origin_is_none`.
-pub fn assign_project_key(repo_url: &str) -> String {
-    project_key_from_repo_url(repo_url).unwrap_or_else(|| format!("local:{}", uuid::Uuid::new_v4()))
+pub fn assign_project_key(repo_url: &str) -> Result<String, ProjectStoreError> {
+    assign_project_key_in(repo_url, dirs::home_dir().as_deref())
+}
+
+/// [`assign_project_key`] with an explicit home directory (#10604).
+///
+/// Why: the key is stored once and never moves, so a `~` checkout that cannot
+/// be read must not be minted a permanent `local:` key in place of its origin.
+/// What: [`project_key_from_repo_url_in`], else a fresh `local:<uuid>`. A `~`
+/// spelling whose home is unset or relative, or whose directory cannot be
+/// read, is [`ProjectStoreError::UnresolvableHomePath`] instead.
+/// Test: `a_tilde_checkout_without_a_usable_home_is_refused_10604`.
+pub fn assign_project_key_in(
+    repo_url: &str,
+    home: Option<&Path>,
+) -> Result<String, ProjectStoreError> {
+    if let Some(key) = project_key_from_repo_url_in(repo_url, home) {
+        return Ok(key);
+    }
+    // #10604: refuse rather than mint a key for a guessed or unread directory.
+    if is_home_spelling(repo_url) {
+        let reason = match local_repo_path(repo_url, home) {
+            None => "HOME is unset or not absolute, or the `~user` form is unsupported",
+            Some(dir) if !dir.is_dir() => "it is not a readable directory",
+            Some(_) => "",
+        };
+        if !reason.is_empty() {
+            return Err(ProjectStoreError::UnresolvableHomePath {
+                repo_url: repo_url.trim().to_string(),
+                reason,
+            });
+        }
+    }
+    Ok(format!("local:{}", uuid::Uuid::new_v4()))
 }
 
 /// The registry project whose local checkout is `root`.

@@ -659,6 +659,28 @@ fn local_checkout_for_expands_a_tilde_repo_url_10604() {
     );
 }
 
+/// #10604: `repo_key` expands a `~` spelling the way key minting does, so a
+/// `~` and an absolute registration of one checkout fold; an unexpandable `~`
+/// stays as spelled rather than becoming a guessed path.
+#[test]
+fn repo_key_folds_a_tilde_and_an_absolute_spelling_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        repo_key_in("~/code/Widget/", Some(home)),
+        repo_key_in("/home/u/code/widget.git", Some(home))
+    );
+    assert_eq!(repo_key_in("~/code/widget", None), "~/code/widget");
+    assert_eq!(
+        repo_key_in("~/code/widget", Some(std::path::Path::new("rel"))),
+        "~/code/widget"
+    );
+    // URLs keep #10720's rule.
+    assert_eq!(
+        repo_key_in("https://github.com/Acme/Widget.git/", Some(home)),
+        "https://github.com/acme/widget"
+    );
+}
+
 #[test]
 fn local_checkout_for_refuses_what_names_no_project() {
     assert_eq!(local_checkout_for(&proj("empty", "")), None);

@@ -79,7 +79,11 @@ fn key_from_path_without_origin_is_none() {
         project_key_from_repo_url(tmp.path().to_str().unwrap()),
         None
     );
-    assert!(assign_project_key(tmp.path().to_str().unwrap()).starts_with("local:"));
+    assert!(
+        assign_project_key(tmp.path().to_str().unwrap())
+            .unwrap()
+            .starts_with("local:")
+    );
 }
 
 /// Why (#10604): a flat or mixed-case hand clone registered as a `~` path must
@@ -103,7 +107,7 @@ fn a_flat_checkout_spelled_with_a_tilde_keys_by_its_origin_10604() {
             "{spelled}"
         );
     }
-    // No home: no key (the store then mints `local:`), never a URL guess.
+    // No home: no key (registration then refuses it), never a URL guess.
     assert_eq!(
         project_key_from_repo_url_in("~/trusty-mpm-projects/trusty-tools", None),
         None
@@ -124,6 +128,158 @@ fn a_relative_home_expands_no_tilde_path_10604() {
         local_repo_path("/abs/x", Some(relative)),
         Some(PathBuf::from("/abs/x"))
     );
+}
+
+/// Why (#10604): a `~` checkout that cannot be read must not be minted a
+/// permanent `local:` key while registration carries on.
+/// Test: this test.
+#[cfg(unix)]
+#[test]
+fn a_tilde_checkout_without_a_usable_home_is_refused_10604() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let refused = |home: Option<&Path>| {
+        matches!(
+            assign_project_key_in("~/code/widget", home),
+            Err(ProjectStoreError::UnresolvableHomePath { .. })
+        )
+    };
+    assert!(refused(None), "no HOME");
+    assert!(refused(Some(Path::new("relative/home"))), "relative HOME");
+    let home = TempDir::new().unwrap();
+    assert!(refused(Some(home.path())), "missing checkout");
+    std::fs::create_dir_all(home.path().join("code/widget")).unwrap();
+    // A readable directory with no origin still gets a `local:` key.
+    let key = assign_project_key_in("~/code/widget", Some(home.path())).unwrap();
+    assert!(key.starts_with("local:"), "{key}");
+    // An unreadable HOME hides the checkout: refused, not keyed.
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
+    let unreadable = refused(Some(home.path()));
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(unreadable, "unreadable HOME");
+}
+
+/// Restores `$HOME` on drop; every user is `#[serial_test::serial]`.
+struct HomeGuard(Option<std::ffi::OsString>);
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: callers are `#[serial]`, so no other test races the write.
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+}
+
+/// Point `$HOME` at `value` until the guard drops.
+fn set_home(value: &Path) -> HomeGuard {
+    let prior = std::env::var_os("HOME");
+    // SAFETY: callers are `#[serial]`.
+    unsafe { std::env::set_var("HOME", value) };
+    HomeGuard(prior)
+}
+
+/// Why (#10604): under an isolated, empty `$HOME`, a hand clone registered as
+/// `~/code/Trusty_Tools` keys, resolves and clones as its GitHub URL does.
+/// Before the fix the key was `code/trusty-tools` and the checkout
+/// `<repos_root>/code/trusty-tools`.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn clean_home_tilde_checkout_keys_like_its_github_url_10604() {
+    let home = TempDir::new().unwrap();
+    assert!(std::fs::read_dir(home.path()).unwrap().next().is_none());
+    let _home = set_home(home.path());
+    let origin = "https://github.com/BobMatNYC/Trusty_Tools.git";
+    let dir = checkout(&home.path().join("code"), "Trusty_Tools", origin);
+    let spelled = "~/code/Trusty_Tools";
+
+    assert_eq!(
+        project_key_from_repo_url(origin).as_deref(),
+        Some("bobmatnyc/trusty-tools")
+    );
+    assert_eq!(
+        project_key_from_repo_url(spelled),
+        project_key_from_repo_url(origin)
+    );
+    let reg = TempDir::new().unwrap();
+    assert_eq!(
+        register(reg.path(), "trusty-tools", spelled).await,
+        "bobmatnyc/trusty-tools"
+    );
+    let resolved = crate::project::local_checkout_for_url(spelled).expect("a checkout");
+    assert!(
+        trusty_common::identifies_same_path(&resolved, &dir),
+        "{resolved:?}"
+    );
+    for (owner, repo) in [
+        ("BobMatNYC", "Trusty_Tools"),
+        ("bobmatnyc", "trusty-tools.git"),
+    ] {
+        let path = crate::core::repo_paths::base_clone_path(owner, repo);
+        assert!(path.ends_with("bobmatnyc/trusty-tools"), "{path:?}");
+    }
+}
+
+/// Why (#10604): under a relative `$HOME`, registering a `~` checkout fails
+/// with the cause and writes nothing.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_tilde_registration_under_a_relative_home_writes_nothing_10604() {
+    let _home = set_home(Path::new("relative/home"));
+    let reg = TempDir::new().unwrap();
+    let mut store = ProjectStore::load(reg.path()).await.unwrap();
+    let err = store
+        .upsert(project("widget", "~/code/widget"))
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("~/code/widget"), "{err}");
+    assert!(matches!(
+        store.get("widget").await,
+        Err(ProjectStoreError::NotFound(_))
+    ));
+}
+
+/// Why (#10604): stored keys are not migrated (owner decision, 2026-11-02). A
+/// `~` record keyed the pre-fix way still resolves to its checkout and stops a
+/// registration of the same checkout by its GitHub URL; its key is unchanged.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::serial]
+async fn register_unless_present_keeps_an_old_tilde_keyed_record_10604() {
+    let home = TempDir::new().unwrap();
+    let _home = set_home(home.path());
+    let origin = "https://github.com/BobMatNYC/Trusty_Tools.git";
+    let dir = checkout(&home.path().join("code"), "Trusty_Tools", origin);
+    let reg = TempDir::new().unwrap();
+    let raw = serde_json::json!({ "projects": { "Trusty_Tools": {
+        "name": "Trusty_Tools",
+        "repo_url": "~/code/Trusty_Tools",
+        "default_branch": "main",
+        "project_key": "code/trusty-tools"
+    }}});
+    std::fs::write(reg.path().join("projects.json"), raw.to_string()).unwrap();
+    let registry = crate::project::ProjectRegistry::load(reg.path())
+        .await
+        .unwrap();
+
+    let found = registered_project_for_root(&registry.list().await.unwrap(), &dir);
+    assert_eq!(
+        found,
+        Some(trusty_common::RegisteredProject::new(
+            "Trusty_Tools",
+            "code/trusty-tools"
+        ))
+    );
+    let kept = registry
+        .register_unless_present(project("trusty-tools", origin))
+        .await
+        .unwrap()
+        .expect("the old record answers");
+    assert_eq!(kept.name, "Trusty_Tools");
+    assert_eq!(kept.project_key.as_deref(), Some("code/trusty-tools"));
+    assert_eq!(registry.list().await.unwrap().len(), 1);
 }
 
 /// Why: only the registered checkout may claim the project's index; a linked
