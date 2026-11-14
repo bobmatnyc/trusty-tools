@@ -57,6 +57,9 @@ mod project_ensure;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
+// #10989: the decommission park of a main checkout.
+#[cfg(test)]
+mod project_park_decommission_tests;
 // #10551: `search.index.embed_missing`, the embed-only resume of a failed semantic stage.
 mod embed_missing;
 #[cfg(test)]

@@ -32,7 +32,8 @@ use super::project::map_error;
 use crate::core::project_map::PinnedBy;
 use crate::service::persistence::PersistedIndex;
 use crate::service::project_map_state::{
-    ensure_map, park_decision, pin_decision, pin_on_create, unpark_decision, MapContext, MapRefusal,
+    ensure_map, park_decision_for, pin_decision, pin_on_create, rollback_park, unpark_decision,
+    MapContext, MapRefusal,
 };
 use crate::service::project_resolve::{Candidate, LiveDisk};
 use crate::service::server::SearchAppState;
@@ -64,12 +65,25 @@ pub struct ProjectIndexParams {
     pub index_id: String,
 }
 
+/// Params of `search.project.park` (#10989).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectParkParams {
+    /// The index to park.
+    pub index_id: String,
+    /// tm decommissioned the index's project: park any root kind, and answer
+    /// parked only when the index unloaded. Defaults to `false`.
+    #[serde(default)]
+    pub decommission: bool,
+}
+
 /// Mount the four project-map methods onto `router`.
 ///
 /// Why: the socket is the map's only remote write path.
-/// What: `map` answers `{path, schema, projects, parked}`; `park` answers
+/// What: `map` answers `{path, schema, projects, parked}`; `park` (params
+/// `{index_id, decommission?}`, #10989) answers
 /// `{index_id, parked, key, reason, canonical_index_id, unpinned, unloaded}`; `unpark`
-/// answers `{index_id, unparked, reindex_queued, reindex}` (or
+/// answers `{index_id, unparked, watching, reindex_queued, reindex}` (or
 /// `reindex_error`); `pin` answers `{index_id, key, pinned_by, previous}`.
 /// An unreadable map or registry is `CODE_INTERNAL_ERROR` naming the file and
 /// the remedy; an unknown or unparked id is `CODE_NOT_FOUND`; a refused park
@@ -85,13 +99,11 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         async move { map_report(&state).await }
     });
     let held = Arc::clone(state);
-    let router = router.typed::<ProjectIndexParams, serde_json::Value, _, _>(
-        METHOD_PROJECT_PARK,
-        move |p| {
+    let router =
+        router.typed::<ProjectParkParams, serde_json::Value, _, _>(METHOD_PROJECT_PARK, move |p| {
             let state = Arc::clone(&held);
-            async move { park_report(&state, &p.index_id).await }
-        },
-    );
+            async move { park_report(&state, &p.index_id, p.decommission).await }
+        });
     let held = Arc::clone(state);
     let router = router.typed::<ProjectIndexParams, serde_json::Value, _, _>(
         METHOD_PROJECT_UNPARK,
@@ -159,19 +171,31 @@ fn row(ctx: &MapContext, index_id: &str) -> Option<PersistedIndex> {
 }
 
 /// `search.project.park`: record the park, then unload the index.
+///
+/// What: `decommission` (#10989) parks any root kind; if its unload is then
+/// refused (a reindex runs), the park is rolled back and the call fails with
+/// `CODE_CONFLICT` `data.error = "park_unload_refused"`, so a decommission
+/// park never answers parked while the index stays loaded. A plain park keeps
+/// the #9169 behaviour: parked, with `unloaded: false`.
+/// Test: `a_decommission_park_whose_unload_is_refused_leaves_the_index_unparked`.
 async fn park_report(
     state: &Arc<SearchAppState>,
     index_id: &str,
+    decommission: bool,
 ) -> Result<serde_json::Value, RpcError> {
     let id = index_id.to_string();
     let (outcome, ctx) = blocking(state, "park_refused", move |ctx, candidates, disk| {
-        park_decision(&ctx.map_path, &id, candidates, disk)
+        park_decision_for(&ctx.map_path, &id, candidates, disk, decommission)
     })
     .await?;
     // #9169: the map row is written first, so a request racing the unload is
     // already refused as parked.
     let unloaded =
         crate::service::server::detach_parked(state, index_id, row(&ctx, index_id)).await;
+    if decommission && !unloaded {
+        // #10989: fail-open check — never parked-but-loaded for a decommission.
+        return Err(undo_unloaded_park(&ctx, index_id, &outcome.unpinned).await);
+    }
     Ok(serde_json::json!({
         "index_id": index_id,
         "parked": true,
@@ -181,6 +205,49 @@ async fn park_report(
         // #9169: the pins the park dropped, by group key.
         "unpinned": outcome.unpinned.iter().map(|p| &p.key).collect::<Vec<_>>(),
         "unloaded": unloaded,
+    }))
+}
+
+/// Roll back a decommission park whose unload was refused (#10989).
+///
+/// What: [`rollback_park`] on the blocking pool, then the `CODE_CONFLICT`
+/// error the caller returns. A rollback that fails is named in the message,
+/// with `data.rolled_back = false`, since the index is then parked and loaded.
+async fn undo_unloaded_park(
+    ctx: &MapContext,
+    index_id: &str,
+    unpinned: &[crate::core::project_map::PinnedProject],
+) -> RpcError {
+    let (path, id, pins) = (
+        ctx.map_path.clone(),
+        index_id.to_string(),
+        unpinned.to_vec(),
+    );
+    let undone = tokio::task::spawn_blocking(move || rollback_park(&path, &id, &pins))
+        .await
+        .map_err(|e| format!("rollback task failed: {e}"))
+        .and_then(|r| r.map_err(|e| e.to_string()));
+    let (message, rolled_back) = match undone {
+        Ok(()) => (
+            format!(
+                "{index_id} was not parked: it could not be unloaded (a reindex is \
+                 running); retry when the reindex ends"
+            ),
+            true,
+        ),
+        Err(e) => (
+            format!(
+                "{index_id} could not be unloaded (a reindex is running) and the park \
+                 could not be rolled back ({e}); it is parked and still loaded"
+            ),
+            false,
+        ),
+    };
+    RpcError::new(CODE_CONFLICT, message.clone()).with_data(serde_json::json!({
+        "error": "park_unload_refused",
+        "message": message,
+        "index_id": index_id,
+        "rolled_back": rolled_back,
     }))
 }
 
@@ -196,14 +263,21 @@ async fn unpark_report(
     .await?;
     let queued =
         crate::service::server::reindex_after_unpark(state, index_id, row(&ctx, index_id)).await;
+    // #10989: report the watch the reload restarted (false when disabled or failed).
+    let watching = state
+        .watcher_manager
+        .is_watching(&crate::core::registry::IndexId::new(index_id))
+        .await;
     // The row is gone either way; a reindex that could not be queued is
     // reported, and `trusty-search reindex` retries it.
     Ok(match queued {
         Ok(reindex) => serde_json::json!({
-            "index_id": index_id, "unparked": true, "reindex_queued": true, "reindex": reindex,
+            "index_id": index_id, "unparked": true, "watching": watching,
+            "reindex_queued": true, "reindex": reindex,
         }),
         Err((status, body)) => serde_json::json!({
-            "index_id": index_id, "unparked": true, "reindex_queued": false,
+            "index_id": index_id, "unparked": true, "watching": watching,
+            "reindex_queued": false,
             "reindex_error": { "status": status.as_u16(), "body": body },
         }),
     })
