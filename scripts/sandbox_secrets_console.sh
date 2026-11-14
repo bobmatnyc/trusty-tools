@@ -37,6 +37,10 @@
 #   or any physical ancestor (#9161); a <dir> path holding a quote, a
 #   backslash or a control character (it is written into JSON); a live child
 #   already recorded for <dir>.
+#   Event bus dir (#11159): <dir>/data/trusty-events is made, or narrowed, to
+#   0700 before any child starts. The console resolves it with the caller's
+#   umask (0775 under 002) and refuses to dial a socket in a directory that
+#   is not 0700. A symlinked <dir>/data or <dir>/data/trusty-events refuses.
 #   Teardown is kill-by-pid only: <dir>/secrets.pid and <dir>/console.pid.
 #   A pid is signalled only while its argv still ends in the token this
 #   script gave it (`--socket <socket>` or `--http <bind>`): TERM, 10 s, KILL,
@@ -76,6 +80,9 @@ set -euo pipefail
 SANDBOX_PATH="/usr/bin:/bin"
 SOCKET_SUBPATH=".trusty-tools/trusty-secrets/secrets.sock"
 CONSENT_SUBPATH=".trusty-tools/trusty-common/config.yaml"
+# #11159: trusty_common::control_bus::events_socket_path() under the data dir.
+EVENTS_SUBPATH="trusty-events/trusty-events.sock"
+EVENTS_DIR=""
 SOCKET_WAIT_SECS="${SANDBOX_SOCKET_WAIT_SECS:-10}"
 ME="sandbox_secrets_console"
 
@@ -333,7 +340,14 @@ for role in secrets console; do
   fi
 done
 
+# #11159: the console's create_dir_all makes the bus dir with the caller's umask
+# (0775 under 002), then refuses to dial into it; make or narrow it to 0700
+# before any child starts. A failure is fatal, never a warning.
+EVENTS_DIR="$SANDBOX/data/${EVENTS_SUBPATH%/*}"
+[ ! -L "$SANDBOX/data" ] || die "$SANDBOX/data is a symlink"
+[ ! -L "$EVENTS_DIR" ] || die "$EVENTS_DIR is a symlink"
 mkdir -p "$SANDBOX/home/${CONSENT_SUBPATH%/*}" "$SANDBOX/data" "$SANDBOX/mpm" "$SANDBOX/projects"
+{ mkdir -p "$EVENTS_DIR" && chmod 700 "$EVENTS_DIR"; } || die "cannot make the event bus dir 0700: $EVENTS_DIR"
 printf 'secrets:\n  default_backend: file\n' > "$SANDBOX/home/$CONSENT_SUBPATH"
 
 # Seed the projects; git runs with the sandbox's own empty environment.
