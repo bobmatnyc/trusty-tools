@@ -1,0 +1,32 @@
+{
+  "case_id": "c05-alpha-census-within",
+  "project_id": "alpha",
+  "boundary": "launch",
+  "description": "Summarise test logs",
+  "subagent_type": "analyst",
+  "model": null,
+  "run_in_background": true,
+  "prompt": "Summarise the synthetic test logs into five bullets.",
+  "rules": [
+    {
+      "rule_id": "alpha-census-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/alpha/0007",
+      "span_start": 0,
+      "text": "A launch is allowed only while at most 3 workers are running.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": {
+    "snapshot_age_ms": 120,
+    "registry_epoch": 3,
+    "complete": true,
+    "running": 1,
+    "queued": 0,
+    "background": 0,
+    "depth": 1,
+    "tree": "tree-synthetic"
+  }
+}

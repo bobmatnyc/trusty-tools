@@ -12014,6 +12014,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-delegation-guard"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "uuid",
+]
+
+[[package]]
 name = "trusty-embedderd"
 version = "0.5.0"
 dependencies = [
