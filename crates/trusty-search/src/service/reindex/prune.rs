@@ -74,12 +74,8 @@ pub(super) struct PruneOutcome {
 ///      suspenders against any residual path-normalisation mismatch), or that
 ///      the index's admission policy now EXCLUDES it (#8922),
 ///   2. removes its data from: the staging redb corpus (chunk rows, entity row,
-///      file-hash entry), the in-memory HNSW + BM25 + chunk map + embedding LRU,
-///      and the in-process file-hash DashMap.
-///
-/// After the per-file loop, all confirmed-pruned hash entries are batched into a
-/// single `delete_file_hash_entries` call (one redb write-txn instead of one
-/// per file — fix 2).
+///      file-hash entry, all in one transaction — #11087), the in-memory HNSW +
+///      BM25 + chunk map + embedding LRU, and the in-process file-hash DashMap.
 ///
 /// Errors from individual store operations are counted and a single aggregated
 /// `warn!` is emitted at the end if any files partially failed (fix 3).
@@ -172,10 +168,10 @@ pub(super) async fn prune_deleted_files_from_staging(
 
     // Per-file removal from in-memory + staging redb structures.
     // `remove_file_no_kg_rebuild` handles: in-memory chunks/HNSW/BM25/LRU
-    // + redb chunks + redb entities. The KG rebuild is omitted per-file
-    // because Phase 3 rebuilds it once for the whole reindex.
+    // + redb chunks + redb entities + redb hash, in one transaction (#11087).
+    // The KG rebuild is omitted per-file because Phase 3 rebuilds it once for
+    // the whole reindex.
     //
-    // Fix 2: collect confirmed-pruned paths for a single batched hash delete.
     // Fix 3: count per-file failures; emit one aggregated warn at the end.
     let mut total_pruned_chunks: usize = 0;
     let mut pruned_paths_for_hash: Vec<String> = Vec::new();
@@ -282,32 +278,9 @@ pub(super) async fn prune_deleted_files_from_staging(
         );
     }
 
-    // Fix 2: single batched hash-entry delete for all confirmed-pruned files
-    // (one redb write-txn instead of one per file).
-    if !pruned_paths_for_hash.is_empty() {
-        let corpus = {
-            let indexer = handle.indexer.read().await;
-            indexer.corpus_store()
-        };
-        if let Some(corpus) = corpus {
-            let paths = pruned_paths_for_hash.clone();
-            let idx = index_id.0.clone();
-            match tokio::task::spawn_blocking(move || corpus.delete_file_hash_entries(&paths)).await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!("reindex[{idx}]: prune pass: batched hash delete failed ({e})");
-                    failed_count += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "reindex[{idx}]: prune pass: batched hash delete task panicked ({e})"
-                    );
-                    failed_count += 1;
-                }
-            }
-        }
-    }
+    // #11087: no batched hash delete here any more. Each file's hash row left
+    // in its chunks' transaction above; a separate later delete left a
+    // committed hash with no chunks when the process exited between the two.
 
     // Fix 3: aggregate failure report.
     if failed_count > 0 {

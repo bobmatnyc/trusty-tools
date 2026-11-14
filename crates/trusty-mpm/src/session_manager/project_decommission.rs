@@ -7,9 +7,10 @@
 //! grow a flag (its own doc), so this is a separate function that shares no
 //! removal path with it.
 //! What: [`SessionManager::decommission_project`] stops each live session bound
-//! to the project, then stamps the registry row. It removes no directory and
-//! makes no trusty-search call.
-//! Test: `project_decommission_tests.rs`;
+//! to the project, shuts its search index and palace down through
+//! [`IndexShutdown`] (#10989: park and unload, data kept), then stamps the
+//! registry row. It removes no directory and deletes no index data.
+//! Test: `project_decommission_tests.rs`, `index_shutdown_tests.rs`;
 //! `decommission_keeps_index_data_when_deletion_is_allowed` in
 //! `search_gc_guard_tests`.
 
@@ -19,6 +20,7 @@ use thiserror::Error;
 use tracing::{info, warn};
 
 use super::architect::{ProtectedVerb, refusal, refuses_verbs};
+use super::index_shutdown::{IndexShutdown, IndexShutdownReport, ShutdownTarget};
 use super::manager::SessionManager;
 use super::record::{ManagedSessionState, SessionRecord};
 use crate::project::{Project, ProjectRegistry, ProjectStoreError, resolve_session_project};
@@ -67,6 +69,25 @@ pub enum ProjectDecommissionError {
         /// The registry write error.
         source: ProjectStoreError,
     },
+    /// Every stop succeeded but the search index or the palace may still be
+    /// loaded; the project stays active (#10989). A retry re-runs the
+    /// shutdown, which is idempotent.
+    #[error(
+        "project '{name}' was not decommissioned: its sessions stopped but its indexes \
+         may still be loaded ({}); stopped: [{}]",
+        still_loaded.join("; "),
+        stopped.join(", ")
+    )]
+    IndexShutdown {
+        /// The project name.
+        name: String,
+        /// Ids of the sessions that did stop.
+        stopped: Vec<String>,
+        /// One line per item that may still be loaded, with its error.
+        still_loaded: Vec<String>,
+        /// The whole shutdown report.
+        report: IndexShutdownReport,
+    },
 }
 
 /// What a completed project decommission did (#10988).
@@ -78,6 +99,10 @@ pub struct ProjectDecommissionReport {
     pub stopped: Vec<String>,
     /// Ids of bound sessions that were already not running, left as they were.
     pub left_as_is: Vec<String>,
+    /// What the search-index and palace shutdown did (#10989). `None` only
+    /// from a daemon that predates the shutdown.
+    #[serde(default)]
+    pub index_shutdown: Option<IndexShutdownReport>,
 }
 
 impl SessionManager {
@@ -94,7 +119,8 @@ impl SessionManager {
     /// active. Otherwise stamps `decommissioned_at` via
     /// [`ProjectRegistry::mark_decommissioned`]; a stamp failure returns
     /// [`ProjectDecommissionError::StampFailed`] with the stopped ids. No
-    /// workspace removal, no index call.
+    /// workspace removal and no index delete; the index shutdown runs through
+    /// [`IndexShutdown::acquire`] (see [`Self::decommission_project_with`]).
     /// Test: `decommission_project_stops_live_sessions_and_keeps_the_workspace`,
     /// `decommission_project_refuses_an_architect_session`,
     /// `decommission_project_failed_stop_leaves_the_project_active`,
@@ -105,13 +131,36 @@ impl SessionManager {
         registry: &ProjectRegistry,
         name: &str,
     ) -> Result<ProjectDecommissionReport, ProjectDecommissionError> {
+        self.decommission_project_with(registry, name, IndexShutdown::acquire())
+            .await
+    }
+
+    /// [`Self::decommission_project`] with an explicit shutdown capability.
+    ///
+    /// What: as [`Self::decommission_project`]; after every stop succeeded it
+    /// runs `shutdown` (#10989) — `Err(reason)` reports both items skipped —
+    /// and an item that may still be loaded returns
+    /// [`ProjectDecommissionError::IndexShutdown`] without stamping.
+    /// Test: `decommission_project_parks_and_unloads_and_never_deletes`,
+    /// `decommission_project_failed_park_leaves_the_project_active`,
+    /// `decommission_project_failed_unload_leaves_the_project_active`.
+    pub async fn decommission_project_with(
+        &self,
+        registry: &ProjectRegistry,
+        name: &str,
+        shutdown: Result<IndexShutdown, String>,
+    ) -> Result<ProjectDecommissionReport, ProjectDecommissionError> {
         let project = registry.get(name).await?;
-        let bound: Vec<SessionRecord> = self
+        let all: Vec<SessionRecord> = self
             .list()
             .await
             .into_iter()
-            .filter(|r| !r.state.is_terminal())
             .filter(|r| resolve_session_project(r, std::slice::from_ref(&project)).is_some())
+            .collect();
+        let bound: Vec<SessionRecord> = all
+            .iter()
+            .filter(|r| !r.state.is_terminal())
+            .cloned()
             .collect();
         // #8942: refuse the whole verb before any stop, so nothing half-runs.
         if let Some(r) = bound.iter().find(|r| refuses_verbs(r.kind, &r.state)) {
@@ -148,6 +197,31 @@ impl SessionManager {
                 failed,
             });
         }
+        // #10989: shut the indexes down (data kept); one left loaded is no success.
+        let index_shutdown = match &shutdown {
+            Ok(cap) => {
+                // Palace resolution reads the checkout's pin and git config.
+                let held = project.clone();
+                let target = tokio::task::spawn_blocking(move || shutdown_target(&held, &all))
+                    .await
+                    .map_err(|e| format!("shutdown target task failed: {e}"));
+                match target {
+                    Ok(target) => cap.shut_down(&target).await,
+                    Err(e) => IndexShutdownReport::failed(&e),
+                }
+            }
+            Err(why) => IndexShutdownReport::skipped(why),
+        };
+        let still_loaded = index_shutdown.still_loaded();
+        if !still_loaded.is_empty() {
+            warn!(project = %name, ?still_loaded, "project decommission: index shutdown failed");
+            return Err(ProjectDecommissionError::IndexShutdown {
+                name: name.to_string(),
+                stopped,
+                still_loaded,
+                report: index_shutdown,
+            });
+        }
         // #10988: a stamp failure after the stops must still name what stopped.
         let project = match registry.mark_decommissioned(name, Utc::now()).await {
             Ok(p) => p,
@@ -160,13 +234,35 @@ impl SessionManager {
                 });
             }
         };
-        info!(project = %name, stopped = stopped.len(), "project decommissioned (workspaces and indexes kept)");
+        info!(project = %name, stopped = stopped.len(), "project decommissioned (workspaces and index data kept, indexes unloaded)");
         Ok(ProjectDecommissionReport {
             project,
             stopped,
             left_as_is,
+            index_shutdown: Some(index_shutdown),
         })
     }
+}
+
+/// What to shut down for `project`, given every session record bound to it.
+///
+/// What: the first bound record whose checkout (`workspace_path`, else `cwd`)
+/// is on disk supplies the path, else the project's own
+/// [`crate::project::local_checkout_for`] when that is on disk (#10989 F2: a
+/// project with no records still resolves its palace); see
+/// [`ShutdownTarget::for_project`].
+/// Test: `decommission_project_without_records_unloads_by_its_checkout`.
+fn shutdown_target(project: &Project, records: &[SessionRecord]) -> ShutdownTarget {
+    let root = records
+        .iter()
+        .map(|r| r.workspace_path.clone().unwrap_or_else(|| r.cwd.clone()))
+        .find(|p| p.is_dir())
+        .or_else(|| crate::project::local_checkout_for(project).filter(|p| p.is_dir()));
+    ShutdownTarget::for_project(
+        project.project_key.as_deref(),
+        &project.repo_url,
+        root.as_deref(),
+    )
 }
 
 #[cfg(test)]

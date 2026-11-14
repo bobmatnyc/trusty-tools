@@ -372,6 +372,8 @@ pub mod savings_divert;
 pub mod savings_instructions;
 // #10973: the per-tool-call compression opportunity ledger rows.
 pub mod savings_opportunity;
+// #10973: why an opportunity row was not compressed, and the per-reason fold.
+pub mod savings_opportunity_reason;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;

@@ -47,6 +47,9 @@ Intent Ledger (docs/specs/SPEC-IL-01.md), interface choices where the spec is op
   separate sections, and FLAGs an owner claim with no `owner turn:` cite in the session record or in the
   file named by session ref `handoff`. `provenance FILE..` prints the same flags for any handoff file
   (exit 1 when one is found).
+- Supersession (#10960, DOC-87 G-4): `update NEW --answer A --source owner ... --supersedes OLD` (batch key
+  "supersedes") stores `superseded_by: NEW` on the owner ruling OLD; an explicit link only, never inferred. The
+  relay check refuses a cite of OLD and names NEW; a superseded item takes no new answer.
 Escalation: `update --esc architect` (or the same field in a batch entry) also queues a `decision` through the D10
 intake (scripts/pm-notify.sh, override DATG_NOTIFY_CMD). Exit 3 means the ledger was saved
 but at least one notification was not confirmed; stderr lists each queue outcome. Do not
@@ -66,6 +69,8 @@ pulse write records a task's pulse note. --state-dir / $DATG_STATE_DIR pin the e
 card 'Task: <code>-Txx' under the named goal (G2, 'Card:' before #11101), and a task closed done must cite evidence in its outcome; both warn and record to
 guards.jsonl until config.guard_mode is "enforce". The digest and `guards` (exit 1 on a flag) report policy-file
 conflicts with owner rulings (G1) and idle ready work or repair displacing delivery (G3).
+#10960 G-5: `add T --needs S`, `update --needs S|none`, `close/update --state S` (S: prepared < sent < delivered
+< acknowledged). A close records the claim capped by its outcome evidence; shortfalls are FLAG lines, never a refusal.
 Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
 lives in datg_store.py (state files, commit, lock; _SESSION, _STATE_DIR), datg_ops.py (write ops),
 datg_log.py (prune, archive, rotate, notices), datg_read.py (digest, freshness, stamp) and datg_task.py
@@ -97,7 +102,7 @@ from datg_store import (  # noqa: E402,F401  (#10161: re-exported for callers an
 from datg_ops import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     OWED_MAX, REFS_MAX, REF_KEY, _all_ids, _bad, _check_goal, _check_opts, _find, _int, _lim, _merge_refs,
     _next_id, _opts, _rows, _title, apply_add, apply_op, apply_pulse, apply_session, apply_update,
-    collect_closed, op_init, write_ops_ev,
+    collect_closed, op_init, supersede, write_ops_ev,
 )
 from datg_task import (  # noqa: E402,F401  (#11101: re-exported for task_pulse.py and tests)
     ACTIVE, WARNINGS, WIP_CAP_DEFAULT, task_mmdd, task_mode, task_problem, wip_cap, wip_check, wip_count,
@@ -108,7 +113,7 @@ from datg_log import (  # noqa: E402,F401  (#10161: re-exported for callers and 
 from datg_read import (  # noqa: E402,F401  (#10161: re-exported for callers and tests)
     MUTATING_BASH, MUTATING_TOOLS, _digest_sections, _read_json, _short, _stamp_path, _to_epoch, build_digest,
     check_dispatch, dispatch_mode, goal_named, log_hook_warning, op_fresh, provenance_flags, stamp_turn, summary, turn_tools,
-    unsourced_claim,
+    reconcile_failed, reconcile_lines, unsourced_claim,
 )
 
 
@@ -135,7 +140,7 @@ def session_start_context(st, project):
         dig = "\n" + build_digest(project, max(50, room // 4))
     except Exception as e:  # #10109: fail open, but visibly
         print(f"datg hook: SessionStart digest failed ({e})", file=sys.stderr)
-        dig = ""
+        dig = "\n" + "\n".join(reconcile_failed(e))   # #10960 G-3: never a silent "reconciled"
     ctx = head + dig
     if "\nTRUNCATED:" in dig or len(ctx) > HOOK_CONTEXT_MAX:
         ctx = ctx[:HOOK_CONTEXT_MAX - len(ptr) - 1] + "\n" + ptr
@@ -218,6 +223,9 @@ def hook_failure(payload, project, err):
         return json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                                   "permissionDecisionReason": reason}}, separators=(",", ":"))
     print(f"datg hook: failed open ({err})", file=sys.stderr)
+    if isinstance(payload, dict) and payload.get("hook_event_name") == "SessionStart":   # #10960 G-3: say it
+        return json.dumps({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "\n".join(
+            reconcile_failed(err))}}, separators=(",", ":"))
     if dispatch and project:
         record_guard(project, "hook_error", f"dispatch check failed open ({type(err).__name__}: {err})"[:300])
     return ""
@@ -249,18 +257,21 @@ def build_parser():
     s.add_argument("--opts", help="comma list, trailing * marks the recommendation")
     s.add_argument("--to")
     s.add_argument("--id")
+    s.add_argument("--needs", help="#10960: delivery state the task's request needs (sent|delivered|acknowledged)")
     s = sub.add_parser("update")
     s.add_argument("id")
-    for f in ("title", "status", "answer", "outcome", "esc", "to", "note"):
+    for f in ("title", "status", "answer", "outcome", "esc", "to", "note", "state", "needs"):
         s.add_argument(f"--{f}")
     s.add_argument("--rank", type=int)
     # #10780: who the answer came from; owner needs --cite and --quote, architect needs --basis.
     s.add_argument("--source", choices=("owner", "architect"))
     for f in ("cite", "quote", "until", "basis"):
         s.add_argument(f"--{f}")
+    s.add_argument("--supersedes", metavar="ID", help="the owner ruling this owner-sourced answer replaces (#10960)")
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--outcome", required=True)
+    s.add_argument("--state", help="#10960: delivery state the outcome claims; capped by its evidence, flag-only")
     s = sub.add_parser("batch", help="JSON list of ops on stdin: one write per turn")
     s = sub.add_parser("show")
     s.add_argument("--brief", action="store_true")
@@ -411,10 +422,11 @@ def main(argv=None):
             print(op_init(a.project, a.code))
         elif a.verb == "add":
             entry = {VERB_KEY: "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
-                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id}
+                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id, "needs": a.needs}
             print(write_ops(a.project, [entry]))
         elif a.verb == "update":
-            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
+            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank",
+                                                "state", "needs", "supersedes")}
             entry.update({VERB_KEY: "update", "id": a.id})
             if a.source:   # #10780: only the flags given, so the shape check names a stray one
                 entry["source"] = {"by": a.source, **{k: getattr(a, k) for k in ("cite", "quote", "until", "basis")
@@ -425,7 +437,7 @@ def main(argv=None):
             print(", ".join(e["id"] for e in evs))
             return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
-            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
+            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome, "state": a.state}]))
         elif a.verb == "batch":
             try:
                 ops = json.loads(sys.stdin.read())
@@ -448,7 +460,11 @@ def main(argv=None):
         elif a.verb == "archive-show":
             print(archive_lookup(a.project, a.id))
         elif a.verb == "digest":
-            print(build_digest(a.project, a.max_tokens))
+            try:
+                print(build_digest(a.project, a.max_tokens))
+            except DatgError as e:   # #10960 G-3: the unreadable ledger is said on stdout too; exit code unchanged
+                print("\n".join(reconcile_failed(e)))
+                raise
             if not a.no_log:
                 try:
                     append_log(a.project, {"ts": now_iso(), "session": os.environ.get("DATG_SESSION", ""), "kind": "digest"})

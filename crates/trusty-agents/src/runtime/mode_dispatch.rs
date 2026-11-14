@@ -204,6 +204,11 @@ pub(super) async fn dispatch_cli_mode(
     // Both flags are accepted; `--api` is the canonical user-facing alias used
     // in the Makefile and README; `--serve` is kept for backwards compat.
     if cli.api || cli.serve {
+        // #6433: a set TAGENT_NO_API (any value but an explicit off value)
+        // refuses before the gateway starts or any listener binds (DOC-90 AG-1).
+        if let Some(msg) = crate::api::server::no_api::process_no_api_refusal(cli.api, cli.serve) {
+            anyhow::bail!(msg);
+        }
         let port = cli.port.unwrap_or(8080);
         // #181: bearer token from `--api-token <TOK>` (preferred) or
         // `TAGENT_API_TOKEN` env var. CLI flag takes precedence so an
@@ -222,8 +227,8 @@ pub(super) async fn dispatch_cli_mode(
         // receiving Telegram channel logs one reason line and serves exactly
         // as before.
         let gateway = telegram_gateway::start_for_api_host();
-        // #3329: default to loopback; `--bind` is the explicit non-loopback
-        // opt-in (which serve_with_config gates on a token being present).
+        // #3329: default to loopback. #6433: serve_with_config refuses any
+        // non-loopback `--bind`, token or not.
         let served = crate::api::server::serve_with_config(
             crate::api::server::ApiConfig::with_bind(cli.bind, port, token),
         )

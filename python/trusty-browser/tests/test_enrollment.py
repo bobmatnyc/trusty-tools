@@ -261,3 +261,71 @@ def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch)
 
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(check(Path(tmp)))
+
+
+def test_activation_selects_distinct_workflows_and_preserves_existing_names():
+    async def run(tmp_path):
+        async with service.Broker(tmp_path) as broker:
+            req = request()
+            target = {k: req[k] for k in ("email", "url", "account")}
+            resolve = dict(op="resolve", **target)
+            managed = (await broker.enrollment_request(resolve))["workflow"]
+            assert managed.startswith("browser-")
+            assert (await broker.enrollment_request(resolve))["workflow"] == managed
+            for change in ({"account": "second"}, {"url": "https://second.test"}, {"email": "t@t.test"}):
+                assert (await broker.enrollment_request({**resolve, **change}))["workflow"] != managed
+            assert not (tmp_path / "workflows").exists()
+            assert (await broker.enrollment_request(req))["ok"]
+            assert (await broker.enrollment_request(resolve))["workflow"] == req["workflow"]
+
+    with tempfile.TemporaryDirectory() as root:
+        asyncio.run(run(Path(root)))
+
+
+def stored_state(broker, state):
+    tables = [
+        r[0]
+        for r in broker.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+        )
+    ]
+    rows = {t: sorted(map(tuple, broker.db.execute(f"SELECT * FROM {t}"))) for t in tables}
+    files = sorted(str(p.relative_to(state)) for p in state.rglob("*"))
+    return rows, files
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"profile": str(uuid.uuid4())},
+        {"account": None},
+        {"url": ""},
+        {"email": " test@example.test"},
+        {"account": "travel\n"},
+        {"url": 7},
+    ],
+    ids=["extra-key", "missing-key", "empty", "leading-space", "trailing-newline", "not-string"],
+)
+def test_refused_resolve_answers_invalid_enrollment_and_stores_nothing(change, monkeypatch):
+    async def check(state):
+        req = request()
+        resolve = {"op": "resolve", **{k: req[k] for k in ("email", "url", "account")}}
+        bad = {k: v for k, v in {**resolve, **change}.items() if v is not None}
+        async with service.Broker(state) as broker:
+            before = stored_state(broker, state)
+            with pytest.raises(ValueError, match="^InvalidEnrollment$"):
+                await broker.enrollment_request(bad)
+            monkeypatch.setattr(service, "verify_chrome_host", lambda *_: None)
+            reader, writer = await asyncio.open_unix_connection(state / "enrollment.sock")
+            try:
+                await service.write_frame(writer, bad)
+                reply = await service.read_frame(reader)
+            finally:
+                writer.close()
+                await writer.wait_closed()
+            assert reply == {"ok": False, "error": "InvalidEnrollment"}
+            assert stored_state(broker, state) == before
+            assert not (state / "workflows").exists()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asyncio.run(check(Path(tmp)))

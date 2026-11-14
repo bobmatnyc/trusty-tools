@@ -1,0 +1,4 @@
+Added
+- `search.project.park` takes an optional `decommission: true` (#10989). A decommission park unloads any registered index, a main checkout and its group's live index included, records it as `reason = decommissioned`, stops its file watcher and keeps its corpus and registration. If the unload is refused because a reindex runs, the park is rolled back and the call fails `-32009` with `data.error = "park_unload_refused"`, so it never answers parked while the index stays loaded. A plain park is unchanged.
+- An unloaded parked index's file watcher is stopped even when the index was not resident (#10989).
+- `search.project.unpark` restarts the index's file watcher after the reload and answers `watching` (#10989).

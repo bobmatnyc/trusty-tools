@@ -5,7 +5,8 @@ DNS-rebinding and CSRF guard.
 What: `Handler` routes GET / (the page with the shim), /config.json, /api/<coll>[/<id>] (store reads and versioned
 writes; 409 on if_version mismatch), /api/batch, /api/user, /api/il, /api/harness[/diff], /api/viz, /live, /files,
 /usage, /media, /media-file, /doc, /doc-sync, /briefs and /vendor (see dashboard-serve.py for the API list), plus the
-dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /static). A request
+dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /api/pane,
+/static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
 /config.json `warnings` lists why this interpreter degrades the page ([] on Python >= 3.11, #10606).
@@ -182,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 return routes.fleet(self)
             if parts == ["api", "projects"]:
                 return routes.projects(self)
+            if parts == ["api", "pane"]:   # #11065: a session's masked pane tail
+                return routes.pane(self, url)
             if parts == ["api", "cli-profiles"]:
                 return routes.cli_profiles(self, url)
             if parts == ["api", "harness", "diff"]:

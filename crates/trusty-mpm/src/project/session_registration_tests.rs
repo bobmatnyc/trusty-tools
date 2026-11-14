@@ -285,3 +285,83 @@ async fn session_start_through_a_symlink_to_home_is_refused() {
     }
     assert_eq!(registry_bytes(&registry), None);
 }
+
+/// Seed `projects.json` in `registry` with one record and return its bytes.
+fn seed_one(registry: &Path, name: &str, repo_url: &str, key: &str) -> Vec<u8> {
+    std::fs::create_dir_all(registry).expect("mkdir registry");
+    let raw = serde_json::json!({ "projects": { name: {
+        "name": name,
+        "repo_url": repo_url,
+        "default_branch": "main",
+        "project_key": key
+    }}})
+    .to_string();
+    std::fs::write(registry.join("projects.json"), &raw).expect("seed");
+    raw.into_bytes()
+}
+
+/// #10604: a session started in a checkout an old `~` record holds, under the
+/// key a URL parse of `~/…` gave, is the same repository. Before the fix it
+/// was `NameTaken`, so every session start printed the notice.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = crate::project::project_key::project_key_tests::set_home(home.path());
+    let root = checkout(
+        &home.path().join("code").join("Trusty_Tools"),
+        "https://github.com/BobMatNYC/Trusty_Tools.git",
+    );
+    let registry = tempfile::tempdir().expect("registry");
+    let doc = seed_one(
+        registry.path(),
+        "Trusty_Tools",
+        "~/code/Trusty_Tools",
+        "code/trusty-tools",
+    );
+
+    let outcome = register_session_checkout(registry.path(), &root, Some(home.path())).await;
+
+    assert!(
+        matches!(&outcome, Ok(SessionRegistration::AlreadyRegistered { name, .. }) if name == "Trusty_Tools"),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        registry_bytes(registry.path()).as_deref(),
+        Some(doc.as_slice()),
+        "the old record was rewritten or a second one added"
+    );
+}
+
+/// #10604: a different repository whose checkout name collides with a record
+/// is still `NameTaken` — including when that record is an old `~` row whose
+/// checkout is gone, so its current key cannot be looked up.
+#[tokio::test]
+#[serial_test::serial]
+async fn session_start_name_collision_with_another_repo_is_name_taken_10604() {
+    let home = tempfile::tempdir().expect("home");
+    let _home = crate::project::project_key::project_key_tests::set_home(home.path());
+    let root = checkout(
+        &home.path().join("other").join("widget"),
+        "https://github.com/other/widget.git",
+    );
+    for (repo_url, key) in [
+        ("https://github.com/acme/widget", "acme/widget"),
+        ("~/code/widget", "code/widget"),
+    ] {
+        let registry = tempfile::tempdir().expect("registry");
+        let doc = seed_one(registry.path(), "widget", repo_url, key);
+
+        let outcome = register_session_checkout(registry.path(), &root, Some(home.path())).await;
+
+        assert!(
+            matches!(&outcome, Err(SessionRegistrationError::NameTaken { name, .. }) if name == "widget"),
+            "{repo_url}: {outcome:?}"
+        );
+        assert_eq!(
+            registry_bytes(registry.path()).as_deref(),
+            Some(doc.as_slice()),
+            "{repo_url}: the registry changed"
+        );
+    }
+}

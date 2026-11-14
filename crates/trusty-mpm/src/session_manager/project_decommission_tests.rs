@@ -287,6 +287,144 @@ async fn decommission_project_keeps_records_resumable() {
     assert_eq!(resumed.state, ManagedSessionState::Active);
 }
 
+/// #10989 acceptance 3: decommission parks the project's index and unloads its
+/// palace through the non-destructive capability, and sends no delete.
+/// Test: this function IS the test. Fails if decommission skips the park or
+/// the unload, or reaches any delete method.
+#[tokio::test]
+async fn decommission_project_parks_and_unloads_and_never_deletes() {
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    use crate::session_manager::index_shutdown::{
+        METHOD_PALACE_UNLOAD, METHOD_PARK, ShutdownState,
+    };
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (live, ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert_eq!(
+        shutdown.search,
+        ShutdownState::Unloaded {
+            id: "widget-idx".into()
+        }
+    );
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    let methods = rig.methods();
+    assert!(
+        methods.contains(&format!("search:{METHOD_PARK}")),
+        "{methods:?}"
+    );
+    assert!(
+        methods.contains(&format!("memory:{METHOD_PALACE_UNLOAD}")),
+        "{methods:?}"
+    );
+    assert!(!methods.iter().any(|m| m.contains("delete")), "{methods:?}");
+    assert_eq!(
+        rig.params_of(METHOD_PARK).expect("park")["decommission"],
+        true
+    );
+    assert_eq!(report.stopped, vec![live.to_string()]);
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+    assert!(ws.is_dir(), "the workspace is kept");
+}
+
+/// #10989 Fail-Open Check: a refused park fails the verb by name and leaves the
+/// project active; the stopped session is reported.
+/// Test: this function IS the test. Fails if the `IndexShutdown` arm in
+/// `decommission_project_with` is removed (the project would be stamped).
+#[tokio::test]
+async fn decommission_project_failed_park_leaves_the_project_active() {
+    use crate::session_manager::index_shutdown::tests::{busy_search, healthy_memory, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (live, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(busy_search(), healthy_memory()).await;
+
+    let err = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect_err("a refused park must fail the verb");
+
+    match &err {
+        ProjectDecommissionError::IndexShutdown {
+            stopped,
+            still_loaded,
+            ..
+        } => {
+            assert_eq!(stopped, &vec![live.to_string()], "{err}");
+            assert_eq!(still_loaded.len(), 1, "{err}");
+            assert!(still_loaded[0].contains("widget-idx"), "{err}");
+        }
+        other => panic!("expected IndexShutdown, got {other}"),
+    }
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
+/// #10989 Fail-Open Check: a refused palace unload fails the verb the same way.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_failed_unload_leaves_the_project_active() {
+    use crate::session_manager::index_shutdown::tests::{busy_memory, healthy_search, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(healthy_search(), busy_memory()).await;
+
+    let err = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect_err("a refused unload must fail the verb");
+
+    assert!(
+        matches!(&err, ProjectDecommissionError::IndexShutdown { still_loaded, .. }
+            if still_loaded.len() == 1 && still_loaded[0].starts_with("memory palace")),
+        "{err}"
+    );
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
 /// An unknown project is the registry's `NotFound`, with nothing stopped.
 #[tokio::test]
 async fn decommission_project_unknown_name_errors() {
@@ -302,4 +440,147 @@ async fn decommission_project_unknown_name_errors() {
         ),
         "{err}"
     );
+}
+
+/// #10989 HIGH finding: a project started again after its decommission gets
+/// its index back. Decommission parks it `decommissioned`; the spawn tail
+/// (`reactivate_for_session`, then `restore_for_session`) unparks it.
+/// Test: this function IS the test. Fails if the spawn tail leaves the
+/// decommission park in place.
+#[tokio::test]
+async fn decommission_then_spawn_unparks_the_index() {
+    use crate::session_manager::index_restore::tests::{Parked, stateful_search};
+    use crate::session_manager::index_restore::{
+        IndexRestore, METHOD_UNPARK, RestoreState, restore_for_session,
+    };
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let parked: Parked = Arc::default();
+    let rig = rig(stateful_search(&parked), healthy_memory()).await;
+    mgr.decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("decommission");
+    assert_eq!(
+        parked.lock().expect("parked")[0]["reason"],
+        "decommissioned",
+        "premise: decommission parked the index"
+    );
+
+    let (new, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let record = mgr.get(&new).await.expect("new session");
+    registry
+        .reactivate_for_session(&record)
+        .await
+        .expect("reactivate");
+    let state = restore_for_session(
+        &registry,
+        &record,
+        Ok(IndexRestore::at(Some(rig.search_socket()))),
+    )
+    .await
+    .expect("the restore succeeds");
+
+    assert_eq!(
+        state,
+        RestoreState::Unparked {
+            ids: vec!["widget-idx".into()]
+        }
+    );
+    assert!(
+        parked.lock().expect("parked").is_empty(),
+        "nothing stays parked"
+    );
+    assert!(rig.methods().contains(&format!("search:{METHOD_UNPARK}")));
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
+/// #10989 Fail-Open Check: an unpark that fails is the spawn's named error —
+/// it names the session and the still-parked index, and never reads as live.
+/// Test: this function IS the test. Fails if `restore_for_session` maps
+/// `RestoreState::Failed` to `Ok`.
+#[tokio::test]
+async fn a_failed_unpark_fails_the_spawn_by_name() {
+    use crate::session_manager::index_restore::tests::row;
+    use crate::session_manager::index_restore::{IndexRestore, METHOD_MAP, restore_for_session};
+    use crate::session_manager::index_shutdown::tests::{Answer, healthy_memory, rig};
+    use crate::uds_mock::RpcError;
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (id, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let record = mgr.get(&id).await.expect("session");
+    let search: Answer = Arc::new(|m: &str, _: &serde_json::Value| match m {
+        METHOD_MAP => Ok(serde_json::json!({
+            "parked": [row("widget-idx", "acme/widget", "decommissioned")]
+        })),
+        _ => Err(RpcError::new(-32603, "project map unwritable")),
+    });
+    let rig = rig(search, healthy_memory()).await;
+
+    let err = restore_for_session(
+        &registry,
+        &record,
+        Ok(IndexRestore::at(Some(rig.search_socket()))),
+    )
+    .await
+    .expect_err("a failed unpark fails the spawn");
+
+    assert!(err.contains(&id.to_string()), "{err}");
+    assert!(err.contains("widget-idx"), "{err}");
+    assert!(err.contains("still parked"), "{err}");
+}
+
+/// #10989 F2: a project with no session records still has a palace to unload.
+/// Its checkout comes from the registry row (`local_checkout_for`), so the
+/// decommission succeeds while a healthy trusty-memory runs.
+/// Test: this function IS the test. Fails if `shutdown_target` takes the root
+/// only from session records (the palace is then unresolved and the verb
+/// refuses with `IndexShutdown`).
+#[tokio::test]
+async fn decommission_project_without_records_unloads_by_its_checkout() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let checkout = crate::test_support::hermetic_temp_dir();
+    let mut project = registry.get("widget").await.expect("row");
+    project.name = "local-proj".into();
+    project.repo_url = checkout.path().to_string_lossy().into_owned();
+    project.project_key = Some("local:1234".into());
+    registry.register(project).await.expect("register");
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "local-proj", Ok(rig.capability()))
+        .await
+        .expect("a project with no records decommissions");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(report.stopped.is_empty() && report.left_as_is.is_empty());
 }

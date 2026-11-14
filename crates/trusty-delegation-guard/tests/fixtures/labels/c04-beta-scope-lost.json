@@ -1,0 +1,8 @@
+{
+  "case_id": "c04-beta-scope-lost",
+  "expected_verdict": "revise",
+  "binding_rule_ids": [
+    "beta-scope-1"
+  ],
+  "label_note": "LABEL-ONLY-c04-beta-scope-lost"
+}

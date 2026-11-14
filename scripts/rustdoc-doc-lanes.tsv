@@ -79,6 +79,9 @@ LANE	features	trusty-common/test-support
 # verified locally: `cargo doc -p trusty-embedderd --features load-dynamic`
 # exits 0 with defaults still on, so this LANE's additive-only `--features`
 # reaches the module cleanly.
+# #10892: `types` is default-on and gates the crate's modules in lib.rs
+# (cfg sites, so not NO-CFG).
+LANE	features	trusty-delegation-guard/types
 LANE	features	trusty-embedderd/bundled-ort,trusty-embedderd/daemon,trusty-embedderd/load-dynamic
 LANE	features	trusty-mcp/config,trusty-mcp/daemon-bridge-json-rpc
 LANE	features	trusty-memory/daemon,trusty-memory/mcp-schema,trusty-memory/server

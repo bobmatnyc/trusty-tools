@@ -82,7 +82,7 @@ trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primi
 # #10662: `memory::embed` imports `embedder::retry_transient_init`, first in
 # trusty-common 0.67.5. The workspace entry admits `^0.67`, so this crate states
 # its own floor, as trusty-memory does. The dev-dependency below matches it.
-trusty-common = { path = "../trusty-common", version = "0.70", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["symgraph-parser", "credentials", "chat-attachments", "cli-help", "palace-resolve", "stdio-mcp-client", "session-naming", "config-cli", "axum-server", "inference-client", "bedrock", "uds", "memory-rpc", "gh-cli", "redb-open", "log-drain", "update-check"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): `trusty_common::log_drain::{run_once, DrainConfig, ObjectStoreDestination, DestinationUri, DrainTarget, LogSource, Level}` — the drain CORE `crate::log_drain`'s scheduler calls.  `update-check` (#11075): `update::NO_UPDATE_CHECK_ENV`, the one opt-out name; the feature compiles a module only and adds no dependency.
 # Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
 #      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
 #      surface (it owns its own axum stack for the orchestrator's UI). Setting
@@ -180,7 +180,6 @@ backon = "1"
 indexmap = { version = "2", features = ["serde"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 mime_guess = "2"
-local-ip-address = "0.6"
 hostname = "0.4"
 async-stream = "0.3"
 tokio-stream = "0.1"

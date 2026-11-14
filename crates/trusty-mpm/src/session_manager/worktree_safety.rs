@@ -50,7 +50,8 @@
 //!    1, 2 and 4 in its own right.
 //! 4. **Is there anything under `.trusty-mpm/` that is not one of two
 //!    disposable artefacts?** — accounted per-file by pathspec, covering the
-//!    gitignored and untracked spellings alike.
+//!    gitignored and untracked spellings alike. #11221: a file the
+//!    provisioning ledger vouches for byte for byte is tm's, not work.
 //! 5. **Is there a high-value gitignored file?** (#4166) — a short list of
 //!    names that are unrecoverable if deleted (`.env*`, `*.bak`, `*.orig`),
 //!    found by the same walk as question 3. See
@@ -221,11 +222,17 @@ const STATUS_ARGS_PER_FILE: &[&str] = &[
 /// right now, so the guard must not depend on either.
 /// What: scoped by the `-- .trusty-mpm` pathspec so the expensive `-uall`
 /// recursion is confined to one small directory instead of the whole checkout.
+/// #11221: `--ignored=traditional`, not `matching`. Under a DIRECTORY pattern
+/// (`/.trusty-mpm/` in `info/exclude`, #8758) `matching` collapses the whole
+/// subtree to one `!! .trusty-mpm/` line, which no allowlist or ledger entry
+/// can vouch for; `traditional` with `-uall` lists every ignored file.
+/// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+/// `a_user_file_under_trusty_mpm_still_keeps_the_clone_11221`.
 const TRUSTY_MPM_STATUS_ARGS: &[&str] = &[
     "status",
     "--porcelain",
     "--untracked-files=all",
-    "--ignored=matching",
+    "--ignored=traditional",
     "--ignore-submodules=none",
     "--",
     TRUSTY_MPM_DIR,
@@ -432,8 +439,10 @@ fn inspect_dirt_with(
 /// What: pass one counts every `-unormal` entry except the ownership sentinel
 /// and anything rooted at `.trusty-mpm/`; pass two hands `.trusty-mpm/` to
 /// [`trusty_mpm_dirt`], which sees ignored and untracked content alike.
+/// A git warning on stderr fails the count (#11221).
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
-/// `inspect_dirt_excludes_own_sentinel`.
+/// `inspect_dirt_excludes_own_sentinel`,
+/// `a_git_warning_fails_the_pass_one_count_11221`.
 ///
 /// `pub(crate)` since #7185 so the ADR-0057 removal guard asks this ONE
 /// question instead of its own plain `git status --porcelain` count, which
@@ -451,7 +460,9 @@ fn count_dirty_files_with(path: &Path, excuse: Option<ExcuseEntry>) -> Result<us
     } else {
         STATUS_ARGS
     };
-    let status = git_stdout(path, args)?;
+    // #11221: a git warning on exit 0 (an unreadable directory) is a failed
+    // count, never a clean one.
+    let status = git_stdout_warning_free(path, args)?;
     let mut count = 0usize;
     for line in status.lines() {
         if line.trim().is_empty() || excuse.is_some_and(|excused| excused(line)) {
@@ -500,12 +511,17 @@ fn is_trusty_mpm_scoped(path: &str) -> bool {
 /// live `wip-backup-20260727-jira/` hole, and it must work whether the subtree
 /// is gitignored (invisible to plain status) or untracked (collapsed by plain
 /// status) — hence [`TRUSTY_MPM_STATUS_ARGS`].
-/// What: one count per reported entry that is not on the allowlist. A quoted
-/// path is an ERROR, not a silently-unmatched one: if the guard cannot spell
-/// the path it cannot decide the path is disposable.
+/// What: one count per reported entry that is not on the allowlist and, as an
+/// untracked (`??`) or ignored (`!!`) file, is not one the provisioning ledger
+/// vouches for byte for byte (#11221). A quoted path is an ERROR, not a
+/// silently-unmatched one: if the guard cannot spell the path it cannot decide
+/// the path is disposable. No ledger vouches for nothing.
 /// Test: `inspect_dirt_counts_wip_backup_under_trusty_mpm`,
 /// `inspect_dirt_counts_pause_snapshots_under_trusty_mpm`,
-/// `inspect_dirt_counts_a_deleted_tracked_file_under_trusty_mpm`.
+/// `inspect_dirt_counts_a_deleted_tracked_file_under_trusty_mpm`,
+/// `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+/// `an_edited_compiled_prompt_still_keeps_the_clone_11221`,
+/// `a_missing_ledger_keeps_the_compiled_prompt_counted_11221`.
 fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
     // NOT `Path::exists()`: that collapses every I/O error to `false`, and
     // pass 1 has already skipped every `.trusty-mpm/`-scoped entry on the
@@ -523,7 +539,13 @@ fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(format!("`{}` is unreadable: {e}", dir.display())),
     }
-    let out = git_stdout(root, TRUSTY_MPM_STATUS_ARGS)?;
+    let out = git_stdout_warning_free(root, TRUSTY_MPM_STATUS_ARGS)?;
+    // #11221: tm's compiled prompt is excused only while the ledger vouches for it.
+    let ledger = super::provisioning_ledger::load(root);
+    let vouched = |line: &str, entry: &str| {
+        (line.starts_with("?? ") || line.starts_with("!! "))
+            && ledger.as_ref().is_some_and(|l| l.vouches_for(root, entry))
+    };
     let mut count = 0usize;
     for line in out.lines() {
         if line.trim().is_empty() {
@@ -535,7 +557,7 @@ fn trusty_mpm_dirt(root: &Path) -> Result<usize, String> {
                 "`{entry}` under {TRUSTY_MPM_DIR}/ has a quoted path this guard cannot classify"
             ));
         }
-        if DISPOSABLE_TRUSTY_MPM_FILES.contains(&entry) {
+        if DISPOSABLE_TRUSTY_MPM_FILES.contains(&entry) || vouched(line, entry) {
             continue;
         }
         count += 1;
@@ -1045,6 +1067,33 @@ pub(crate) fn git_stdout(dir: &Path, args: &[&str]) -> Result<String, String> {
             args.join(" "),
             out.status,
             String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// [`git_stdout`], where anything git writes to stderr is also an `Err`
+/// (#11221).
+///
+/// Why: under `-uall --ignored=traditional` git walks into ignored
+/// directories, and one it cannot open costs only a `warning: could not open
+/// directory` line while the exit status stays 0 — so its files would read
+/// as absent, and the tree as clean.
+/// What: the bounded run of [`git_stdout`]; a non-zero exit or any non-blank
+/// stderr is an `Err` carrying git's stderr.
+/// Test: `an_unreadable_dir_under_trusty_mpm_keeps_the_clone_11221`,
+/// `a_git_warning_fails_the_pass_one_count_11221`,
+/// `an_unreadable_dir_holding_a_gitignored_file_refuses_removal_11221`.
+pub(crate) fn git_stdout_warning_free(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = bounded_git_output(git_command(dir, args))
+        .map_err(|e| format!("`git {}` could not be run: {e}", args.join(" ")))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() || !stderr.trim().is_empty() {
+        return Err(format!(
+            "`git {}` did not answer cleanly ({}): {}",
+            args.join(" "),
+            out.status,
+            stderr.trim()
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())

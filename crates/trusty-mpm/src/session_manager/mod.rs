@@ -32,6 +32,10 @@ mod harness_gate;
 pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
+// #10989: the non-destructive door decommission parks and unloads through.
+pub mod index_shutdown;
+// #10989: a new session unparks its project's decommission park.
+pub mod index_restore;
 pub mod injection_status;
 // #9167 AC5: the inject path's `message` record.
 pub mod inject_record;
@@ -247,6 +251,10 @@ mod decommission_owned_ledger_tests;
 // #8540: a FIFO provisioning file never blocks a launch or a decommission.
 #[cfg(test)]
 mod provisioning_ledger_fifo_tests;
+
+// #11221: a spawn-provisioned workspace passes the dirt and ignored-output checks.
+#[cfg(test)]
+mod provisioned_dirt_tests;
 
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]

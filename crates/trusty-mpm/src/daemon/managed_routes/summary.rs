@@ -54,7 +54,7 @@ pub fn record_to_json(r: &SessionRecord) -> serde_json::Value {
         "branch": r.branch,
         "created_at": r.created_at.to_rfc3339(),
         "last_activity_at": r.last_activity_at.map(|t| t.to_rfc3339()),
-        "attach_cmd": attach_cmd_for(&r.tmux_name),
+        "attach_cmd": attach_cmd_for(r),
         "runtime": r.runtime.as_str(),
         "pending_decision": r.pending_decision,
         "pending_decision_id": r.live_decision_id().map(|d| d.to_string()), // See #9841
@@ -872,14 +872,25 @@ pub(super) async fn numbered_summaries(
         .collect()
 }
 
-/// Build the tmux attach command string for a session.
+/// Build the tmux attach command string for a session, on its own server.
 ///
-/// Why: clients need the exact attach command without hardcoding the convention.
-/// What: returns `tmux attach-session -t '=<name>'` — exact and quoted for
-/// zsh (#8443), via `trusty_common::tmux::shell_attach_command`.
-/// Test: attach-cmd handler test.
-pub(super) fn attach_cmd_for(tmux_name: &str) -> String {
-    crate::core::tmux::shell_attach_command(tmux_name)
+/// Why: clients need the exact attach command without hardcoding the
+/// convention. #10101: a PM on its workspace's private server is invisible to
+/// a bare `tmux attach-session`, which reaches only the default server.
+/// What: `tmux attach-session -t '=<name>'` — exact and quoted for zsh
+/// (#8443), via `trusty_common::tmux::shell_attach_command` — behind
+/// `-S '<socket>'` when the record stores its server's socket.
+/// Test: `attach_cmd_names_the_records_workspace_socket_10101`.
+pub(super) fn attach_cmd_for(record: &SessionRecord) -> String {
+    let attach = crate::core::tmux::shell_attach_command(&record.tmux_name);
+    // #10101: the record's own server; no socket is the default server.
+    match record.tmux_socket.as_deref() {
+        Some(socket) => {
+            let quoted = socket.to_string_lossy().replace('\'', r"'\''");
+            attach.replacen("tmux ", &format!("tmux -S '{quoted}' "), 1)
+        }
+        None => attach,
+    }
 }
 
 /// Parse a UUID path segment into a [`ManagedSessionId`].

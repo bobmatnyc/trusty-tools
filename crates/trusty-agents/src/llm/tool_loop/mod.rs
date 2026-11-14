@@ -10,6 +10,7 @@
 //! Test: `tests::parallel_tool_dispatch_does_not_cancel_peers` covers the
 //! concurrent-dispatch contract without a live LLM.
 
+mod bedrock_trace;
 mod compression_hook;
 #[cfg(test)]
 mod tests;
@@ -159,18 +160,23 @@ pub async fn chat_with_tools_gated(
         let (profile, region) =
             aws_config.unwrap_or((ambient_profile.as_deref(), ambient_region.as_deref()));
         let bedrock_client = bedrock::build_client(profile, region).await?;
-        return bedrock::chat_with_tools(
-            &bedrock_client,
-            model_id,
-            messages,
-            temperature,
-            max_tokens,
-            tools_json,
-            registry,
-            allowed_tools,
-            max_turns,
-            stop_sequences,
-        )
+        // #10980: emit LLM events and a usage row (exact id, runner `bedrock`).
+        let task_prefix = first_user_text_for_prefix(&initial_messages);
+        let project_dir = crate::usage::project_dir();
+        return bedrock_trace::traced_bedrock_call(model_id, &task_prefix, &project_dir, || {
+            bedrock::chat_with_tools(
+                &bedrock_client,
+                model_id,
+                messages,
+                temperature,
+                max_tokens,
+                tools_json,
+                registry,
+                allowed_tools,
+                max_turns,
+                stop_sequences,
+            )
+        })
         .await;
     }
 

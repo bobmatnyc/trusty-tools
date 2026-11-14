@@ -13,7 +13,7 @@ import sys
 import time
 
 import datg_guards
-from datg_task import wip_check
+from datg_task import set_delivery, wip_check
 
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
                         WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
@@ -139,6 +139,7 @@ def apply_add(st, a):
                    "goal": a["goal"], "title": title, "opts": _check_opts(a.get("opts")),
                    "answer": "", "outcome": "", "esc": None}
             st["items"].append(obj)
+    set_delivery(obj, a, pre)   # #10960 G-5: `add T --needs`
     ev = "drift" if pre == "D" and title.lower().startswith("drift:") else "open"
     return {"id": new_id, "ev": ev, "note": title}
 
@@ -187,6 +188,29 @@ def verify_owner_quote(cite, quote):
         raise DatgError(f"source by owner refused: {e}")
 
 
+def supersede(st, new, old_id):
+    """#10960 (DOC-87 G-4): mark the owner ruling `old_id` as replaced by `new`, an explicit link only.
+
+    Why: an authentic quote of an owner turn the owner has since reversed still passed the relay check.
+    What: sets `superseded_by` = new id on the old item. Both must be D/A items whose answer is sourced to the
+    owner, the new one unsuperseded; the old one may not already name another successor (the same one is a
+    no-op), so links never fork or cycle. Later turns never supersede by inference.
+    Test: tests/test_relay_supersession.py TestLinkCase
+    """
+    if (new.get("source") or {}).get("by") != "owner":
+        raise DatgError("--supersedes needs the new item's answer sourced to the owner (--source owner)")
+    pre, old = _find(st, old_id)
+    if pre not in "DA" or old is new:
+        raise DatgError(f"--supersedes takes another decision or action item, not {old_id}")
+    if (old.get("source") or {}).get("by") != "owner":
+        raise DatgError(f"{old_id} is not an owner ruling; only an owner-sourced answer is superseded")
+    if new.get("superseded_by"):
+        raise DatgError(f"{new['id']} is itself superseded by {new['superseded_by']}")
+    if old.get("superseded_by") not in (None, new["id"]):
+        raise DatgError(f"{old_id} is already superseded by {old['superseded_by']}")
+    old["superseded_by"] = new["id"]
+
+
 def apply_update(st, a):
     pre, o = _find(st, a.get("id"))
     evs = []
@@ -208,6 +232,9 @@ def apply_update(st, a):
     if a.get("answer") is not None:
         if pre not in "DA":
             raise DatgError("answer applies to D/A")
+        if o.get("superseded_by"):   # #10960 G-4: a superseded ruling stays history; a new one is a new item
+            raise DatgError(f"{o['id']} is superseded by {o['superseded_by']}; record a new ruling on a new item "
+                            f"with --supersedes {o['superseded_by']}")
         o["answer"] = _lim(a["answer"], "answer", 300, ml=True)
         o["status"] = "answered"
         if a.get("source") is not None:
@@ -215,6 +242,8 @@ def apply_update(st, a):
         else:
             o.pop("source", None)   # #10780: a new answer with no source is unsourced, never the old answer's source
         evs.append("answered")
+    if a.get("supersedes") is not None:
+        supersede(st, o, a["supersedes"])
     if a.get("to") is not None:
         if pre != "T":
             raise DatgError("to applies to tasks")
@@ -223,6 +252,7 @@ def apply_update(st, a):
         if pre == "G":
             raise DatgError("outcome does not apply to goals")
         o["outcome"] = _lim(a["outcome"], "outcome", 300, ml=True)
+    set_delivery(o, a, pre)   # #10960 G-5: `--state`, `--needs`
     if a.get("status") is not None:
         if a["status"] not in STATUS[pre]:
             raise DatgError(f"status for {pre} must be one of {STATUS[pre]}")
@@ -358,7 +388,8 @@ def apply_op(st, a):
     if verb == "close":
         if not a.get("outcome"):
             raise DatgError("close needs --outcome")
-        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done"})
+        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done",
+                                 "state": a.get("state")})   # #10960 G-5: the claimed delivery state
     raise DatgError(f"unknown op {verb!r}")
 
 
@@ -377,7 +408,9 @@ def write_ops_ev(project, ops):
 
     #10800 G2: a task closed with no evidence in its outcome is refused under guard_mode enforce; in shadow
     the write lands, and stderr and <datg>/guards.jsonl record it (never log.jsonl: the Rust writer parity).
-    Test: tests/test_datg_guards.py EvidenceCase
+    #10960 G-5: delivery_gaps sets a closed task's recorded `delivery`; its FLAG lines go to the same two places
+    in every guard_mode and never refuse.
+    Test: tests/test_datg_guards.py EvidenceCase, tests/test_datg_delivery.py DeliveryCase
     """
     with Locked(project):
         st = load_state(project)
@@ -390,8 +423,12 @@ def write_ops_ev(project, ops):
         gaps = datg_guards.evidence_gaps(closed)
         if gaps and datg_guards.guard_mode(st) == "enforce":
             raise DatgError(gaps[0][1])
+        flags = datg_guards.delivery_gaps(closed)
         commit(project, st, evs, closed)
         for ref, msg in gaps:
             datg_guards.record_guard(project, "evidence", msg, ref)
             print(msg + datg_guards.SHADOW, file=sys.stderr)
+        for ref, msg in flags:
+            datg_guards.record_guard(project, "delivery", msg, ref)
+            print(msg, file=sys.stderr)
     return evs, st

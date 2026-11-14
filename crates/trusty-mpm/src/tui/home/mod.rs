@@ -110,7 +110,8 @@ pub async fn run_tui_entry(
 /// to `project_ctl::run_in_terminal`; leaving that view (`q`) returns here.
 /// #10476: `mouse` applies to that view; this screen never captures.
 /// #10966: while the Architect view is open, a fetch task reads the store at
-/// `architect_store` and another reads the Live tracker, each every
+/// `architect_store` (or the daemon-resolved one when `None`, #10944) and
+/// another reads the Live tracker, each every
 /// `architect::REFRESH`, over the daemon socket.
 /// #10942: two more tasks poll `console.machine_status` and `console.history`
 /// over the console socket for the MACHINE STATUS cards.

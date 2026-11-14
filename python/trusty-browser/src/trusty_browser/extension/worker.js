@@ -188,9 +188,9 @@ function reconnect() {
   retryMs = 250;
   void connect();
 }
-async function enableSite(pattern) {
+async function enableSite({pattern,tab:expectedTab,url:expectedUrl}) {
   const [tab] = await chrome.tabs.query({active:true,lastFocusedWindow:true});
-  if (!tab?.url || new URL(tab.url).protocol !== "https:" ||
+  if (!tab?.url || tab.id !== expectedTab || tab.url !== expectedUrl || new URL(tab.url).protocol !== "https:" ||
       pattern !== new URL(tab.url).protocol + "//" + new URL(tab.url).hostname + "/*" ||
       !await chrome.permissions.contains({origins:[pattern]})) {
     throw new Error("Access to this site has not been granted.");
@@ -233,7 +233,9 @@ function bootstrap(request) {
     const timeout = setTimeout(() => finish(null,"Enrollment timed out. Reopen the popup to retry."),8000);
     port.onDisconnect.addListener(() => finish(null,chrome.runtime.lastError?.message || "Enrollment disconnected"));
     port.onMessage.addListener(reply => {
-      if (reply?.ok === true && reply.workflow === request.workflow) return finish(reply,null);
+      if (reply?.ok === true && (request.op === "resolve"
+          ? typeof reply.workflow === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(reply.workflow)
+          : reply.workflow === request.workflow)) return finish(reply,null);
       const error = new Error(typeof reply?.error === "string" ? reply.error : "Invalid enrollment reply");
       // Only the verified enrollment host can report a definitive protocol refusal.
       if (reply?.ok === false && typeof reply.error === "string") error.response = reply;
@@ -256,7 +258,7 @@ function usablePrevious(previous) {
 }
 async function setup(msg) {
   await storageReady;
-  if (msg.type === "enable") return await enableSite(msg.pattern);
+  if (msg.type === "enable") return await enableSite(msg);
   if (msg.type === "cancel") {
     if (replacement?.id === msg.confirmation) replacement = null;
     return {ok:true};
@@ -289,7 +291,7 @@ async function setup(msg) {
     const [tab] = await chrome.tabs.query({active:true,lastFocusedWindow:true});
     if (!documents.has(tab?.id) && tab?.url && new URL(tab.url).protocol === "https:") {
       const url = new URL(tab.url);
-      return {ok:true,permissionPattern:url.protocol + "//" + url.hostname + "/*"};
+      return {ok:true,tab:tab.id,url:tab.url,permissionPattern:url.protocol + "//" + url.hostname + "/*"};
     }
   }
   const route = await activeRoute();
@@ -299,7 +301,21 @@ async function setup(msg) {
   if (!sameRoute(route,msg.route) || msg.route.tab !== route.tab || msg.route.document !== route.document) {
     throw new Error("The profile, tab or site changed. Reopen the popup.");
   }
-  const workflow = msg.workflow;
+  let workflow = msg.workflow;
+  if (msg.type === "activate") {
+    workflow = pending?.workflow || (await bootstrap({
+      op:"resolve", email:route.email, url:route.url, account:route.account
+    })).workflow;
+    const current = await activeRoute();
+    if (!sameRoute(route,current) || current.tab !== route.tab || current.document !== route.document) {
+      throw new Error("The profile, tab or site changed. Reopen the popup.");
+    }
+    if (enrollmentBusy) throw new Error("Enrollment already in progress.");
+    const latest = await chrome.storage.local.get(["pending","enrollment"]);
+    if (latest.enrollment || latest.pending?.key !== pending?.key || enrollmentBusy) {
+      throw new Error("Enrollment changed. Reopen the popup.");
+    }
+  }
   if (typeof workflow !== "string" || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(workflow)) {
     throw new Error("Use 1–64 lowercase letters, digits, underscores or hyphens, starting with a letter or digit.");
   }
@@ -326,7 +342,7 @@ async function setup(msg) {
       if (response?.error === "EnrollmentConflict" && usablePrevious(response.previous)) {
         const {email,url,account,version} = response.previous;
         replacement = {...route,workflow,version,id:crypto.randomUUID()};
-        return {ok:true,previous:{email,url,account},confirmation:replacement.id};
+        return {ok:true,workflow,previous:{email,url,account},confirmation:replacement.id};
       }
       throw error;
     }
@@ -338,7 +354,7 @@ async function setup(msg) {
 }
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id || sender.url !== origin + "/setup.html" ||
-      !["enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
+      !["activate","enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
   setup(msg).then(reply,error => reply({ok:false,error:error.message}));
   return true;
 });

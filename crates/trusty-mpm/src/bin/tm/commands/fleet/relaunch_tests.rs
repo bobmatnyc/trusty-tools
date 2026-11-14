@@ -59,8 +59,18 @@ fn architect_ok(_: &Path, _: &str) -> anyhow::Result<()> {
 }
 
 /// The planted answers in order; `Absent` once they run out.
+/// The next queued read; #11068: the last one repeats, so a pane queued to
+/// end on `Present` keeps a `claude` through the settle wait.
 fn pane_claude(_: &str) -> PaneClaude {
-    PANE_CLAUDE.with(|q| q.borrow_mut().pop_front().unwrap_or(PaneClaude::Absent))
+    PANE_CLAUDE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.len() > 1 {
+            q.pop_front()
+        } else {
+            q.front().copied()
+        }
+        .unwrap_or(PaneClaude::Absent)
+    })
 }
 
 fn stop_ok(pid: u32) -> Result<(), String> {
@@ -430,8 +440,29 @@ fn relaunch_names_the_stopped_pid_when_the_new_claude_fails() {
     assert!(!calls().contains(&"send".to_owned()), "{:?}", calls());
 }
 
+/// #11068: a pane that still reads `Present` once after the stop, then
+/// `Absent`, is a relaunch, not a refusal.
+#[test]
+fn relaunch_waits_for_the_pane_to_settle_after_the_stop() {
+    let reads = [PaneClaude::Present, PaneClaude::Present, PaneClaude::Absent];
+    let fx = Fixture::new(live(), &reads);
+    let report = fx.relaunch(STUB).expect("the pane settles");
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            format!("stop {OLD_PID}"),
+            "send".to_owned()
+        ]
+    );
+}
+
+/// A pane that keeps a `claude` through the whole settle wait still refuses
+/// (#9092); #11068: the wait is bounded by [`PANE_SETTLE`].
 #[test]
 fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
+    let started = std::time::Instant::now();
     let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Present]);
     let err = fx.relaunch(STUB).expect_err("a surviving claude refuses");
     assert!(
@@ -442,6 +473,15 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
         calls(),
         ["prepare".to_owned(), format!("stop {OLD_PID}")],
         "no send"
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= PANE_SETTLE,
+        "refused before the bound: {waited:?}"
+    );
+    assert!(
+        waited < PANE_SETTLE * 2,
+        "waited past the bound: {waited:?}"
     );
 
     let fx = Fixture::new(live(), &[PaneClaude::Present]);
@@ -567,40 +607,40 @@ fn prune_replaced_removes_only_this_sessions_dead_records() {
     );
 }
 
-/// Spawn `program 600`, reaped by a thread so a stopped child does not linger
-/// as a zombie, and panic if it is not still running a moment later.
+// #11061: the fake `claude` process, shared with `tests/tm_fleet.rs`.
+#[path = "../../../../../tests/common/fake_claude.rs"]
+mod fake_claude;
+
+/// Spawn `command`, reaped by a thread so a stopped child does not linger as
+/// a zombie, and panic if it is not still running a moment later.
 ///
 /// #10089: on a host whose `sleep` is a multicall binary (uutils coreutils on
 /// EVO) a program name it does not know exits at once; without this check the
 /// test then fails with "the process table holds no entry for pid N".
-fn spawn_alive(program: &Path) -> u32 {
-    let mut child = std::process::Command::new(program)
-        .arg("600")
-        .spawn()
-        .expect("spawn");
+fn spawn_alive(mut command: std::process::Command) -> u32 {
+    let mut child = command.spawn().expect("spawn");
     let pid = child.id();
     std::thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        panic!(
-            "sleeper pid {pid} ({}) exited at once: {status}",
-            program.display()
-        );
+        panic!("sleeper pid {pid} ({command:?}) exited at once: {status}");
     }
     std::thread::spawn(move || child.wait());
     pid
 }
 
-/// Spawn `name` (a symlink to `/bin/sleep` in `bin`) for 600 s.
-fn spawn_sleeper(bin: &Path, name: &str) -> u32 {
-    let path = bin.join(name);
-    std::os::unix::fs::symlink("/bin/sleep", &path).expect("symlink");
-    spawn_alive(&path)
+/// Spawn the fake `claude` (see [`fake_claude`]) in `bin` for 600 s.
+fn spawn_sleeper(bin: &Path) -> u32 {
+    let mut command = std::process::Command::new(fake_claude::sleeper(bin));
+    command
+        .args(fake_claude::argv())
+        .env(fake_claude::SECS_ENV, "600");
+    spawn_alive(command)
 }
 
 #[test]
 fn stop_claude_ends_a_claude_process() {
     let bin = tempfile::tempdir().expect("tempdir");
-    let pid = spawn_sleeper(bin.path(), "claude-sleep");
+    let pid = spawn_sleeper(bin.path());
     let deadline = Instant::now() + Duration::from_secs(5);
     while !process::process_name_is_claude(pid) && Instant::now() < deadline {
         std::thread::sleep(STOP_POLL);
@@ -616,7 +656,9 @@ fn stop_claude_ends_a_claude_process() {
 fn stop_claude_refuses_a_process_not_named_claude() {
     // #10089: the real `sleep`, unrenamed; a symlink with an unknown name dies
     // under a multicall `sleep`. Its process name is `sleep`, not `claude`.
-    let pid = spawn_alive(Path::new("/bin/sleep"));
+    let mut sleep = std::process::Command::new("/bin/sleep");
+    sleep.arg("600");
+    let pid = spawn_alive(sleep);
     let err = stop_claude(pid).expect_err("not a claude");
     assert!(err.contains("is not a `claude` process"), "{err}");
     assert!(process::is_process_alive(pid), "the process was signalled");

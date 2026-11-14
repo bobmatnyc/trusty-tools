@@ -7,22 +7,24 @@ import vm from "node:vm";
 const worker = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
 const id="jabfhcolknbbdajilgpficniedhcfahc", origin="chrome-extension://"+id;
 const email="user@example.org", url="http://127.0.0.1:1234/app", account="site-user";
+const plain = value => JSON.parse(JSON.stringify(value));
 function event() {
   let callback;
   return {addListener(fn){callback=fn;},fire(...args){return callback?.(...args);}};
 }
 async function fixture() {
   const stored = {}, requests = [];
-  let refuse = null;
+  let refuse = null, during = null;
   const runtime = {id,onMessage:event(),onConnect:event(),onStartup:event(),onInstalled:event(),
     connectNative(name) {
       const port = {onMessage:event(),onDisconnect:event(),disconnect(){this.onDisconnect.fire();},
         postMessage(msg){
           if (name !== "com.trusty.browser.enroll") return;
           requests.push(msg);
+          during?.(msg);
           queueMicrotask(()=>{
             if (refuse === "disconnect") return this.onDisconnect.fire();
-            this.onMessage.fire(refuse || {ok:true,workflow:msg.workflow,state:"active"});
+            this.onMessage.fire(refuse || {ok:true,workflow:msg.op === "resolve" ? "browser-managed" : msg.workflow,state:"active"});
           });
         }};
       return port;
@@ -35,9 +37,11 @@ async function fixture() {
     alarms:{onAlarm:event(),create(){}}};
   vm.runInNewContext(worker,{chrome,crypto:webcrypto,TextEncoder,URL,importScripts(){},
     TrustyControlIndicator:{clearAll(){},clear(){}},clearTimeout(){},setTimeout(){return 0;}});
-  runtime.onConnect.fire({name:"qa-document",sender:{id,url,frameId:0,documentId:"D",tab:{id:1}},onDisconnect:event()});
+  const open=(tab,documentId)=>runtime.onConnect.fire({name:"qa-document",
+    sender:{id,url,frameId:0,documentId,tab:{id:tab}},onDisconnect:event()});
+  open(1,"D");
   const call=(msg)=>new Promise(resolve=>runtime.onMessage.fire(msg,{id,url:origin+"/setup.html"},resolve));
-  return {call,stored,runtime,requests,refuse(v){refuse=v;}};
+  return {call,stored,runtime,requests,chrome,open,refuse(v){refuse=v;},during(fn){during=fn;}};
 }
 test("popup confirms the previewed route and resumes exactly the pending enrollment after refusal", async()=>{
   const f=await fixture();
@@ -132,4 +136,102 @@ test("only a pre-commit occupied name clears the pending enrollment", async()=>{
   f.refuse(null);
   assert.equal((await enroll("other")).ok,true);
   assert.equal(f.stored.enrollment.key,key);
+});
+
+test("one-click activation uses the service-selected workflow and resumes pending grants", async()=>{
+  const f = await fixture();
+  const {route} = await f.call({type:"preview"});
+  const response = await f.call({type:"activate",route,workflow:"ignored"});
+  assert.equal(response.workflow,"browser-managed");
+  assert.deepEqual(f.requests.map(m => m.op),["resolve","enroll"]);
+  assert.equal(f.requests[0].email,email);
+  assert.equal(f.requests[0].account,account);
+  assert.equal(f.requests[0].url,url);
+  assert.equal(f.stored.enrollment.workflow,"browser-managed");
+
+  const retry = await fixture();
+  const preview = await retry.call({type:"preview"});
+  retry.refuse("disconnect");
+  await retry.call({type:"enroll",workflow:"prior-name",route:preview.route});
+  const key = retry.stored.pending.key;
+  retry.refuse(null);
+  const resumed = await retry.call({type:"activate",route:preview.route});
+  assert.equal(resumed.workflow,"prior-name");
+  assert.equal(retry.stored.enrollment.key,key);
+  assert.deepEqual(retry.requests.map(m => m.op),["enroll","enroll"]);
+});
+
+test("activation refuses a malformed resolve reply and stores nothing", async()=>{
+  const f = await fixture();
+  const {route} = await f.call({type:"preview"});
+  for (const reply of [{ok:true,workflow:"Bad Name"},{ok:true},{ok:true,workflow:"-lead"},{ok:true,workflow:7}]) {
+    f.refuse(reply);
+    const response = await f.call({type:"activate",route});
+    assert.deepEqual(plain(response),{ok:false,error:"Invalid enrollment reply"});
+    assert.equal(f.stored.pending,undefined);
+    assert.equal(f.stored.enrollment,undefined);
+  }
+  assert.deepEqual(f.requests.map(m => m.op),["resolve","resolve","resolve","resolve"]);
+  f.refuse(null);
+  assert.equal((await f.call({type:"activate",route})).workflow,"browser-managed");
+});
+
+test("activation refuses when the tab or document changes during resolve", async()=>{
+  for (const change of ["tab","document"]) {
+    const f = await fixture();
+    const {route} = await f.call({type:"preview"});
+    const query = f.chrome.tabs.query;
+    f.during(msg => {
+      if (msg.op !== "resolve") return;
+      if (change === "tab") {
+        f.open(2,"D2");
+        f.chrome.tabs.query = async()=>[{id:2,url}];
+      } else {
+        f.open(1,"E");
+      }
+    });
+    const response = await f.call({type:"activate",route});
+    assert.deepEqual(plain(response),{ok:false,error:"The profile, tab or site changed. Reopen the popup."},change);
+    assert.deepEqual(f.requests.map(m => m.op),["resolve"],change);
+    assert.equal(f.stored.pending,undefined,change);
+    assert.equal(f.stored.enrollment,undefined,change);
+    f.during(null);
+    f.chrome.tabs.query = query;
+    if (change === "document") f.open(1,"D");
+    assert.equal((await f.call({type:"activate",route})).workflow,"browser-managed",change);
+  }
+});
+
+test("activation refuses when the pending or stored enrollment changes during resolve", async()=>{
+  const injected = {pending:{key:"f".repeat(64),workflow:"elsewhere",email,url,account,profile:"p"},
+    enrollment:{key:"e".repeat(64),workflow:"elsewhere",email,url,account,profile:"p"}};
+  for (const field of ["pending","enrollment"]) {
+    const f = await fixture();
+    const {route} = await f.call({type:"preview"});
+    f.during(msg => { if (msg.op === "resolve") f.stored[field] = injected[field]; });
+    const response = await f.call({type:"activate",route});
+    assert.deepEqual(plain(response),{ok:false,error:"Enrollment changed. Reopen the popup."},field);
+    assert.deepEqual(f.requests.map(m => m.op),["resolve"],field);
+    assert.deepEqual(f.stored,{[field]:injected[field]},field);
+    f.during(null);
+    delete f.stored[field];
+    assert.equal((await f.call({type:"activate",route})).workflow,"browser-managed",field);
+  }
+});
+
+test("enabling a site refuses a tab id or URL that is not the active tab", async()=>{
+  const f = await fixture();
+  const page = "https://site.test/app", pattern = "https://site.test/*", calls = [];
+  f.chrome.tabs.query = async()=>[{id:1,url:page}];
+  f.chrome.permissions = {contains:async q=>{calls.push(["contains",q]);return true;}};
+  f.chrome.scripting = {getRegisteredContentScripts:async()=>[],
+    registerContentScripts:async s=>{calls.push(["register",s]);},
+    executeScript:async s=>{calls.push(["execute",s]);}};
+  for (const wrong of [{tab:2,url:page},{tab:1,url:"https://site.test/other"},{tab:"1",url:page}]) {
+    const response = await f.call({type:"enable",pattern,...wrong});
+    assert.deepEqual(plain(response),{ok:false,error:"Access to this site has not been granted."},JSON.stringify(wrong));
+    assert.deepEqual(calls,[],JSON.stringify(wrong));
+  }
+  assert.deepEqual(plain(await f.call({type:"enable",pattern,tab:1,url:page})),{ok:true});
+  assert.deepEqual(calls.map(c => c[0]),["contains","register"]);
 });

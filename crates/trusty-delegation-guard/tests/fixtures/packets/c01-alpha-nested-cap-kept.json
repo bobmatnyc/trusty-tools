@@ -1,0 +1,23 @@
+{
+  "case_id": "c01-alpha-nested-cap-kept",
+  "project_id": "alpha",
+  "boundary": "contract",
+  "description": "Index the parser module",
+  "subagent_type": "engineer",
+  "model": null,
+  "run_in_background": false,
+  "prompt": "Index the parser module. You may start at most 2 nested workers.",
+  "rules": [
+    {
+      "rule_id": "alpha-cap-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/alpha/0001",
+      "span_start": 0,
+      "text": "Each child agent may start at most 2 nested workers.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": null
+}

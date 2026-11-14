@@ -873,7 +873,8 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         ("scripts/relay.sh", true),
         ("scripts/posted.sh", true),
         ("scripts/relay-marker.py", false),
-        ("scripts/relay_provenance.py", false), // #10780
+        ("scripts/relay_provenance.py", false),   // #10780
+        ("scripts/relay_supersession.py", false), // #10960
         ("docs/architect/voice.md", false),
     ] {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
@@ -1692,6 +1693,10 @@ fn a_seed_with_one_more_skill_seeds_it() {
 /// #10571: the refresh of unedited seeds and the bundle provenance.
 #[path = "seed_refresh_tests.rs"]
 mod seed_refresh_tests;
+
+/// #11058: the wiring list and the `fleet_seed_wiring` doctor row.
+#[path = "seed_wiring_tests.rs"]
+mod seed_wiring_tests;
 
 /// #10571: every seeded script passes the pm-guard credential rules.
 #[path = "seed_guard_tests.rs"]

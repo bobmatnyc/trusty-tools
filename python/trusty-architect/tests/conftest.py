@@ -65,3 +65,4 @@ def _owner_provenance_files_in_tmp(tmp_path, monkeypatch):
     """#10780: no test reads or appends to the live owner-turn record or relay-provenance log."""
     monkeypatch.setenv("ARCHITECT_OWNER_TURNS", str(tmp_path / "owner-turns.jsonl"))
     monkeypatch.setenv("ARCHITECT_RELAY_LOG", str(tmp_path / "relay-provenance.jsonl"))
+    monkeypatch.setenv("ARCHITECT_IL", str(tmp_path / "no-architect-il"))   # #10960: the supersession ledgers

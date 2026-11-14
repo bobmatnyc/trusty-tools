@@ -16,7 +16,7 @@ schema_major = 1
 
 [[member]]
 path = "agents/BASE-AGENT.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "agents/BASE-ENGINEER.md"
@@ -152,7 +152,7 @@ version = "0.1.1"
 
 [[member]]
 path = "agents/secrets-manager.md"
-version = "0.3.0"
+version = "0.4.0"
 
 [[member]]
 path = "agents/security.md"
@@ -636,7 +636,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-secrets.md"
-version = "1.5.0"
+version = "1.6.0"
 
 [[member]]
 path = "skills/tm-session-management.md"

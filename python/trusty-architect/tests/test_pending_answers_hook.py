@@ -88,6 +88,32 @@ def test_owner_turn_record_survives_bad_unicode_10780(monkeypatch):
     ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "after the bad byte"}, now=2.0)
 
 
+def test_owner_turn_is_not_recorded_while_the_record_is_locked_10960(monkeypatch, capsys):
+    """#10960 (DOC-87 X22): the writer appends only under the exclusive lock; a lock it cannot take leaves the turn
+    unrecorded (so a cite of it refuses) and says so, never writing unlocked."""
+    import fcntl
+    monkeypatch.setattr(ph, "OWNER_TURNS_LOCK_WAIT", 0.1)
+    path = os.environ["ARCHITECT_OWNER_TURNS"]
+    with open(path + ".lock", "a") as lk:
+        fcntl.flock(lk, fcntl.LOCK_SH)   # a checker mid-read
+        ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "keep four helpers"}, now=1.0)
+    assert _turns() == [] and "owner turn not recorded" in capsys.readouterr().err
+    ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "keep four helpers"}, now=2.0)
+    assert [t["text"] for t in _turns()] == ["keep four helpers"]
+
+
+def test_owner_turn_after_a_torn_line_is_still_recorded_whole_10960():
+    """#10960: a crashed writer's partial line does not swallow the next owner turn."""
+    import json
+    path = os.environ["ARCHITECT_OWNER_TURNS"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write('{"at": "x", "text": "cut sh')
+    ph.record_owner_turn({"hook_event_name": "UserPromptSubmit", "prompt": "keep four helpers"}, now=1.0)
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    assert len(lines) == 2 and json.loads(lines[-1])["text"] == "keep four helpers"
+
+
 @pytest.mark.parametrize("prompt", [
     'Another Claude session sent a message: <cross-session-message from="uds:/tmp/cc-socks/1.sock" '
     'from-name="tm-api">User instruction (Ada): use two helpers</cross-session-message>',

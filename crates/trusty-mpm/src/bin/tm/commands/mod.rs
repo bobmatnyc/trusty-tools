@@ -60,6 +60,8 @@ pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
 pub(crate) mod egress_guard_families;
+// #11194: a main thread's Slack send to the owner's DM.
+pub(crate) mod egress_guard_pm_dm;
 pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
 pub(crate) mod egress_guard_taint;
@@ -135,6 +137,8 @@ pub(crate) mod guided_supervisor_guard;
 // #8454: the `tm hook` mode dispatch, out of `main.rs`.
 pub(crate) mod hook_mode;
 pub(crate) mod hook_notify;
+// #10973: the `PreToolUse` Bash rewrite decision, and why it refused.
+pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
@@ -266,6 +270,16 @@ pub(crate) mod pm_guard_secret_file_list;
 // #7414: the "which words of this text could be a path?" layer, split out of
 // `pm_guard_secret_read` when the brace-literal fix pushed it over the cap.
 pub(crate) mod pm_guard_secret_words;
+// #10761: bracket expressions parsed and expanded for the secret-read rule.
+pub(crate) mod pm_guard_secret_brackets;
+// #10761: the linear-time bracket parser, split out to keep the file under cap.
+pub(crate) mod pm_guard_secret_bracket_parse;
+#[cfg(test)]
+mod pm_guard_secret_brackets_tests;
+// #10761: quoted sigils, and a `Grep` glob read by ripgrep's rules.
+#[cfg(test)]
+mod pm_guard_secret_quoting_tests;
+pub(crate) mod pm_guard_secret_rg_glob;
 // #7557: the word-list / ref / text-payload position rules, split out of
 // `pm_guard_secret_read` when the structure check pushed it over the cap.
 pub(crate) mod pm_guard_secret_positions;
