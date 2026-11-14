@@ -132,9 +132,11 @@ class Peer:
 
         Why: a paired profile has no site route, and a page refusal carries only
         the fields the contract names (#11239). What: a lost reply is
-        ``OutcomeUnknown`` for a mutating op, else ``BrowserDisconnected``; an
+        ``OutcomeUnknown`` for a mutating op, else ``BrowserDisconnected``, and
+        so is a worker's own ``OutcomeUnknown`` or ``BrowserDisconnected``; an
         unknown error name becomes ``BrowserRefused``.
         Test: `test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried`,
+        `test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing`,
         `test_document_changed_is_relayed_without_extra_fields_and_not_journaled`.
         """
         ident = secrets.token_urlsafe(18)
@@ -156,6 +158,11 @@ class Peer:
             code = observed.get("error")
             if code not in PAGE_ERRORS:
                 raise Refusal("BrowserRefused")
+            if code in UNFINISHED:
+                # #11239: a click the worker could not finish may have run; a read is retry-safe.
+                raise Refusal(
+                    "OutcomeUnknown" if op in MUTATING else "BrowserDisconnected"
+                )
             extra = {k: observed[k] for k in REFUSAL_FIELDS if k in observed}
             raise Refusal(str(code), **extra)
         if observed.get("email") != email:
@@ -168,7 +175,9 @@ class Peer:
 PAGE_WAIT = 8.0  # the worker answers within 7 s
 MUTATING = {"page_click", "page_type", "page_navigate"}
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
-PAGE_ERRORS = {
+# Worker names for a command it could not finish; relayed without fields.
+UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
+PAGE_ERRORS = UNFINISHED | {
     "InvalidOperation",
     "InvalidRequest",
     "ProfileMismatch",

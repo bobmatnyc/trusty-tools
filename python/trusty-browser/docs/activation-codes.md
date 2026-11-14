@@ -300,7 +300,10 @@ repeat `request_id` with an identical frame returns the stored reply without
 running again; a repeat with a different frame answers `Conflict`; 4096
 entries answer `SessionFull`. Only a reply from an operation the worker ran,
 `ok` or `OutcomeUnknown`, is journaled. A refusal is not journaled, so a retry
-with the same `request_id` runs again.
+with the same `request_id` runs again. The journal is read right after frame
+validation and before lease validation, so a journaled `OutcomeUnknown` whose
+lease was dropped still answers from the journal and sends nothing to the
+browser.
 
 Each success refreshes the lease deadline, as today. Code-session leases send
 no `lease_show` or `lease_clear` to the browser; see "Control indicator".
@@ -320,8 +323,8 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
-| `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser (existing) |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: the browser did not answer after the command was sent (existing) |
+| `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
 | `Conflict`, `SessionFull` | none | Journal refusals (existing) |
 | `GrantEnded` | `reason` | The grant is gone. The broker closes the connection after this frame (existing) |
 | `AuditUnavailable` | none | The admitted audit line could not be written; nothing was sent to the browser (existing) |
@@ -404,7 +407,10 @@ Envelope:
   them to the agent and drops any other field.
 - The worker answers within 7 seconds; the broker waits 8 (existing). A
   missing answer is `BrowserDisconnected`, or `OutcomeUnknown` for
-  `page_click`, `page_type` and `page_navigate`.
+  `page_click`, `page_type` and `page_navigate`. A worker refusal named
+  `BrowserDisconnected` or `OutcomeUnknown` is treated the same way, by the
+  command's kind and not by the name the worker chose (see "Worker
+  refusals").
 
 | op | Extra request fields | `result` on success |
 |---|---|---|
@@ -442,6 +448,13 @@ build:
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
+| `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
+
+The broker relays these last two without fields and by the command's kind:
+for `page_click`, `page_type` and `page_navigate` either name reaches the
+agent as `OutcomeUnknown` and is journaled; for any other command either name
+reaches the agent as `BrowserDisconnected`, which is not journaled.
 
 `grant_end` never refuses except with `InvalidRequest` or `ProfileMismatch`;
 an unknown grant answers `"ended"`.
@@ -581,7 +594,9 @@ when the change crossed origins.
 
 Before every op the broker runs, in order: grant liveness (`check_live`:
 idle, generation, enrollment or pairing still current), the admitted audit
-line, frame validation, and lease validation. Then the op's own scope check
+line, frame validation, the journal (`page_click`, `page_type`,
+`page_navigate`: a recorded `request_id` answers here), and lease validation.
+Then the op's own scope check
 below runs, then the browser command. A failure stops the sequence; later
 steps do not run.
 
@@ -859,6 +874,11 @@ Python (broker and shim):
   or a ref; the admitted-line failure answers `AuditUnavailable` with nothing
   sent; a result-line failure ends the grant with `audit` and releases no
   result.
+- Unfinished worker command: a worker `OutcomeUnknown` or
+  `BrowserDisconnected` to a click, type or navigate reaches the agent as
+  `OutcomeUnknown`, and a retry with the same `request_id` returns it while
+  the fake worker receives the command once; the same names on a read reach
+  the agent as `BrowserDisconnected` and a retry runs again.
 - Last-grant signal: `grant_end` reaches the worker on every end route with
   `last` true only for the profile's final code or grant; the pairing
   acknowledgement lists exactly the live codes and grants.

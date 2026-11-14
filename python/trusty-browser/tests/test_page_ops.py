@@ -538,3 +538,60 @@ def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_ke
         assert not rig.broker.grants[ack["grant"]].session.journal
 
     run(short, body)
+
+
+def mutating_frame(op, lease, rid="r"):
+    base = {"op": op, "lease": lease, "request_id": rid}
+    return {
+        "page_click": {**base, "ref": "1.0"},
+        "page_type": {**base, "ref": "1.0", "text": "x"},
+        "page_navigate": {**base, "url": ORIGIN},
+    }[op]
+
+
+@pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
+@pytest.mark.parametrize("op", ["page_click", "page_type", "page_navigate"])
+def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
+    short, clock, op, worker_error
+):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse[op] = {"error": worker_error, "text": PAGE_TEXT}
+        frame = mutating_frame(op, lease)
+        unknown = {"ok": False, "error": "OutcomeUnknown"}
+        assert await call(frame) == unknown
+        assert await call(frame) == unknown  # the retry answers from the journal
+        assert len(rig.a.sent(op)) == 1  # the browser ran the command once
+        assert (await call({**frame, "request_id": "r", "op": op, "lease": "x"})) == {
+            "ok": False,
+            "error": "Conflict",
+        }
+        assert len(rig.a.sent(op)) == 1
+        grant = rig.broker.grants[ack["grant"]]
+        assert grant.state == "active" and list(grant.session.journal) == ["r"]
+        assert not rig.broker.claims  # the lease drops, as the fate table says
+
+    run(short, body)
+
+
+@pytest.mark.parametrize("worker_error", ["BrowserDisconnected", "OutcomeUnknown"])
+def test_worker_browser_disconnected_on_a_read_is_relayed_and_retry_runs_again(
+    short, clock, worker_error
+):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse["page_read"] = {"error": worker_error, "text": PAGE_TEXT}
+        disconnected = {"ok": False, "error": "BrowserDisconnected"}
+        assert await call({"op": "page_read", "lease": lease}) == disconnected
+        assert rig.broker.grants[ack["grant"]].state == "active"
+        rig.a.refuse["page_tabs"] = {"error": worker_error}
+        assert await call({"op": "tabs"}) == disconnected
+        assert await call({"op": "tabs"}) == disconnected
+        assert len(rig.a.sent("page_tabs")) == 2  # a read is safe to run again
+        del rig.a.refuse["page_tabs"]
+        assert (await call({"op": "tabs"}))["ok"]
+        assert not rig.broker.grants[ack["grant"]].session.journal
+
+    run(short, body)

@@ -280,6 +280,15 @@ class Pages(Grants):
             tab = request["tab"]
             assert isinstance(tab, int)
             return await self.select(session, grant, tab)
+        if op in MUTATING:
+            # #11239: a journaled request answers before lease validation, so an
+            # OutcomeUnknown that dropped the lease still never runs twice.
+            previous = session.journal.get(string(request, "request_id"))
+            if previous is not None:
+                if request != previous[0]:
+                    raise Refusal("Conflict")
+                seen = previous[1].get("tab")
+                return previous[1], seen if type(seen) is int else None, None
         claim = self.leased(session, grant, request)
         if op == "release":
             self.drop(claim)
@@ -301,11 +310,6 @@ class Pages(Grants):
             reply = {"ok": True, "tab": tab, **result, "document_changed": changed}
             return reply, tab, host(result["origin"])
         rid = string(request, "request_id")
-        previous = session.journal.get(rid)
-        if previous is not None:
-            if request != previous[0]:
-                raise Refusal("Conflict")
-            return previous[1], tab, None
         if len(session.journal) >= 4096:
             raise Refusal("SessionFull")
         if op == "page_navigate":
