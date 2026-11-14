@@ -14,7 +14,10 @@
 //! `DestructiveIndexDelete::acquire` — checks the confirmation, asks the
 //! [`Authenticator`] for presence, re-runs the session guards against a list
 //! read again after the prompt (#11238), and re-runs the disk guards before
-//! [`DirDeleteCapability::remove`] runs `remove_dir_all`.
+//! [`DirDeleteCapability::remove`] runs `remove_dir_all`. The Architect
+//! directory list is read once at start and is not re-read after the prompt;
+//! an Architect session inside the target is still caught by the Protected
+//! guard on the fresh session list.
 //! Guards, in order: the directory is strictly inside the allowlisted root
 //! (no symlink leaf; `..` and symlinked parents resolved by canonicalizing);
 //! it holds no recorded Architect directory; no session working in it is the
@@ -583,9 +586,13 @@ impl DirDeleteCapability {
     /// `plan.confirm_name` (`--yes` skips it); `auth` must answer `Granted`;
     /// the directory must still be contained; a test process may only remove
     /// inside the temp dir; the session guards run against `input.recheck`'s
-    /// fresh list (#11238), refusing when it cannot be read; and last the disk
-    /// guards run once more, so work or a process that appeared while the user
-    /// typed still refuses.
+    /// fresh list (#11238), refusing when it cannot be read or does not hold
+    /// the target session; and last the disk guards run once more, so work or
+    /// a process that appeared while the user typed still refuses.
+    /// Test: `a_failed_session_reread_refuses_the_delete`,
+    /// `an_empty_reread_list_refuses_the_delete`,
+    /// `a_reread_list_without_the_target_refuses_the_delete`,
+    /// `the_target_turning_running_at_the_reread_refuses_the_delete`.
     pub fn acquire(
         plan: &DirDeletePlan,
         input: DirDeleteInput<'_>,
@@ -631,6 +638,17 @@ impl DirDeleteCapability {
                     path: dir.clone(),
                     reason,
                 })?;
+        // #11238: the daemon list is unfiltered, so a healthy re-read holds the
+        // target; `{}` parses as an empty list and must not read as "no occupants".
+        if !fresh.iter().any(|s| s.id == plan.session_id) {
+            return Err(DirDeleteError::SessionsUnchecked {
+                path: dir,
+                reason: format!(
+                    "the target session {} is missing from the re-read session list",
+                    plan.session_id
+                ),
+            });
+        }
         session_guards(&dir, &plan.session_id, &fresh, input.architect_dirs)?;
         disk_guards(&dir, plan.task.as_deref(), probes)?;
         Ok(Self { dir })
