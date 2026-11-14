@@ -39,9 +39,23 @@
 #   The daemon admits tmux only on a TMUX_TMPDIR inside its data dir
 #   (crates/trusty-mpm/src/core/tmux_access.rs). The socket path must fit
 #   sun_path, so a --dir whose socket path exceeds 103 bytes refuses; pick a
-#   shorter --dir (e.g. under /tmp). Teardown: when the daemon exits, the script
-#   runs `tmux -S <that socket> kill-server`, which stops only the sandbox's
-#   server. SIGINT, SIGTERM and SIGHUP are passed to the daemon first.
+#   shorter --dir (e.g. under /tmp). Teardown (#10922): when the daemon exits,
+#   the script runs `tmux -S <socket> kill-server` for every socket in
+#   <dir>/data/tmux/tmux-<uid>/ (`default` and each per-workspace tm-ws-*
+#   server), having first listed their server and live pane pids (a dead
+#   pane's pid is skipped). It then sends TERM to those pids and every
+#   descendant of the live panes (a `claude` survives kill-server's SIGHUP),
+#   and KILL 3 s later. It never follows a symlink: a symlinked <dir>/data,
+#   <dir>/data/tmux or tmux-<uid> (or one that resolves elsewhere) refuses the
+#   tmux step with exit 1, and a symlinked socket entry is skipped. Last it
+#   confirms that no tmux server answers under that dir and that no process of
+#   this user holds a cwd, an open file or a bound unix socket under <dir>
+#   (/proc and /proc/net/unix on Linux, /usr/sbin/lsof on macOS); a survivor
+#   is named on stderr and the exit becomes 1, and so does a survivor check
+#   that could not run, naming the missing check. No tmux
+#   call addresses any server but by -S path, and each runs under `env -i`, so
+#   an inherited TMUX never reaches tmux. SIGINT, SIGTERM and SIGHUP are passed
+#   to the daemon first.
 #   Socket (#6288): every tm client reaches the daemon over its Unix socket,
 #   <dir>/data/trusty-mpm/trusty-mpm.sock; the script prints that path and the
 #   TRUSTY_MPM_SOCKET pin a client uses to reach this sandbox. A --dir whose
@@ -86,7 +100,9 @@
 #   --credential NAME=<ref>  admit one provider key, resolved from <ref> by
 #               `tm secrets exec` (#10721); the ref is never printed
 #   --dry-run   validate and print what would run; create and start nothing
-# Exit: the daemon's status; 1 on a refusal; 2 on a usage error.
+# Exit: the daemon's status; 1 on a refusal, or when teardown leaves a process
+#   under <dir>, refuses a symlinked socket dir, or cannot run its survivor
+#   check, after a clean daemon exit; 2 on a usage error.
 #
 # Test: scripts/sandbox_daemon_selftest.sh.
 # Portability: bash 3.2 (macOS) and bash 5 (Linux).
@@ -292,11 +308,138 @@ cd "$SANDBOX/home" || die "cannot enter <dir>/home: $SANDBOX/home"
 # #9557: 0700, since the daemon refuses a socket dir others can write.
 { mkdir -p "$TMUX_DIR" && chmod 700 "$TMUX_DIR"; } || die "cannot create the tmux socket dir: $TMUX_DIR"
 
-# teardown: stop the sandbox's own tmux server, addressed by socket path only.
-teardown() {
-  if [ -S "$SOCK" ] && command -v tmux >/dev/null 2>&1; then
-    env -i PATH="$PATH" tmux -S "$SOCK" kill-server >/dev/null 2>&1 || true
+# sbx_tmux ARGS...: tmux with no inherited TMUX; callers always pass -S.
+sbx_tmux() { env -i PATH="$PATH" tmux "$@"; }
+
+# descendants PID...: every descendant of the given pids, from one ps table.
+descendants() {
+  local table frontier next all="" pid ppid
+  table="$(ps -A -o pid= -o ppid= 2>/dev/null || true)"
+  frontier=" $* "
+  while [ -n "${frontier// /}" ]; do
+    next=""
+    while read -r pid ppid; do
+      case "$frontier" in *" $ppid "*) next="$next $pid" ;; esac
+    done <<< "$table"
+    all="$all$next"
+    frontier=" $next "
+  done
+  echo "$all"
+}
+
+# held_under DIR: pids of this user with a cwd, an open file or a bound unix
+# socket at DIR or below it. #10922: a probe that cannot run returns 1 and
+# names the missing check on stderr; it never reads as "nothing held".
+# SANDBOX_LSOF (selftest only) forces the lsof probe with that binary;
+# SANDBOX_PROC (selftest only) moves the Linux probe off /proc.
+held_under() {
+  local lsof="${SANDBOX_LSOF:-}" proc="${SANDBOX_PROC:-/proc}" raw inodes uid
+  uid="$(id -u)"
+  if [ -z "$lsof" ] && [ -d "$proc/self/fd" ]; then
+    # Linux: /proc/<pid>/{cwd,fd/*}, plus /proc/net/unix for socket paths.
+    [ -r "$proc/net/unix" ] || { echo "sandbox_daemon: survivor check failed: $proc/net/unix is not readable" >&2; return 1; }
+    command -v find >/dev/null 2>&1 || { echo "sandbox_daemon: survivor check failed: no find for $proc" >&2; return 1; }
+    # #10922: prove find can read and print links under $proc before trusting
+    # its output; a find without -printf, or one denied $proc/self, would
+    # otherwise read as "nothing held".
+    [ -n "$(find "$proc/self/cwd" -maxdepth 0 -printf '%l' 2>/dev/null)" ] \
+      && [ -n "$(find "$proc/self/fd" -mindepth 1 -maxdepth 1 -printf '%l' 2>/dev/null)" ] \
+      || { echo "sandbox_daemon: survivor check failed: find cannot list $proc/<pid>/cwd and fd links" >&2; return 1; }
+    inodes=" $(awk -v d="$1" 'NR > 1 && ($8 == d || index($8, d "/") == 1) { printf "%s ", $7 }' "$proc/net/unix") "
+    # find exits non-zero when a pid vanishes mid-walk; that is not a failure.
+    { find "$proc"/[0-9]*/cwd -maxdepth 0 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
+      find "$proc"/[0-9]*/fd -mindepth 1 -maxdepth 1 -user "$uid" -printf '%p\t%l\n' 2>/dev/null || true
+    } | awk -F '\t' -v d="$1" -v inodes="$inodes" '{
+        pid = $1; sub(/\/(cwd|fd\/[^\/]*)$/, "", pid); sub(/.*\//, "", pid); t = $2
+        if (t == d || index(t, d "/") == 1) print pid
+        else if (t ~ /^socket:\[/ && index(inodes, " " substr(t, 9, length(t) - 9) " ")) print pid
+      }' | sort -u
+    return 0
   fi
+  [ -n "$lsof" ] || [ "$(uname -s)" != Darwin ] || lsof=/usr/sbin/lsof
+  [ -n "$lsof" ] || { echo "sandbox_daemon: survivor check failed: no /proc and no lsof probe on $(uname -s)" >&2; return 1; }
+  [ -x "$lsof" ] || { echo "sandbox_daemon: survivor check failed: $lsof is missing or not executable" >&2; return 1; }
+  # -n -P: no host or port lookups (36 s against 0.4 s on a measured Mac).
+  raw="$("$lsof" -w -n -P -u "$uid" -Fpn 2>/dev/null)" || { echo "sandbox_daemon: survivor check failed: $lsof exited $?" >&2; return 1; }
+  printf '%s\n' "$raw" | awk -v d="$1" '/^p/ { p = substr($0, 2) }
+    /^n/ { n = substr($0, 2); if (n == d || index(n, d "/") == 1) print p }' | sort -u
+}
+
+# tmux_dir_ok DIR: 0 when DIR is absent, or when no component from
+# <dir>/data down is a symlink and DIR resolves to itself. #10922: teardown
+# must never reach a socket outside the sandbox, such as /tmp/tmux-<uid>.
+tmux_dir_ok() {
+  local c
+  for c in "$SANDBOX/data" "$TMUX_DIR" "$1"; do
+    [ ! -L "$c" ] || return 1
+  done
+  [ -e "$1" ] || return 0
+  [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$1" ]
+}
+
+# teardown: stop every tmux server under the sandbox's socket dir, then the
+# processes they ran, then confirm nothing is left. Returns 1 on a survivor,
+# a refused socket dir, or a survivor check that could not run.
+# #10922: managed sessions run on per-workspace servers (tm-ws-*) beside
+# `default`, and `claude` outlives the SIGHUP kill-server sends its pane.
+teardown() {
+  local dir s tracked="" panes="" pid sp pp dead survivors="" i held failed=0
+  local -a sockets=()
+  dir="${SOCK%/*}"
+  # Off <dir>, so this script is not counted as a survivor.
+  cd / || true
+  if ! tmux_dir_ok "$dir"; then
+    echo "sandbox_daemon: teardown refused the tmux socket dir: $dir has a symlinked component; no tmux server was stopped" >&2
+    failed=1
+  elif command -v tmux >/dev/null 2>&1; then
+    # A symlinked entry is skipped: -S would follow it out of the sandbox.
+    for s in "$dir"/*; do
+      if [ -L "$s" ]; then
+        echo "sandbox_daemon: teardown skipped a symlinked socket entry: $s" >&2
+      elif [ -S "$s" ]; then
+        sockets+=("$s")
+      fi
+    done
+    for s in ${sockets[@]+"${sockets[@]}"}; do
+      # A dead pane's pid may already belong to another process; skip it.
+      while read -r sp pp dead; do
+        [ -n "$sp" ] || continue
+        tracked="$tracked $sp"
+        [ "$dead" = 1 ] || panes="$panes $pp"
+      done <<< "$(sbx_tmux -S "$s" list-panes -a -F '#{pid} #{pane_pid} #{pane_dead}' 2>/dev/null || true)"
+    done
+    # shellcheck disable=SC2086  # $panes is a word list of pids
+    [ -z "${panes// /}" ] || tracked="$tracked $panes $(descendants $panes)"
+    for s in ${sockets[@]+"${sockets[@]}"}; do sbx_tmux -S "$s" kill-server >/dev/null 2>&1 || true; done
+  fi
+  # TERM what kill-server left, 3 s, then KILL, 2 s.
+  for pid in $tracked; do kill -TERM "$pid" 2>/dev/null || true; done
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    survivors=""
+    for pid in $tracked; do kill -0 "$pid" 2>/dev/null && survivors="$survivors $pid"; done
+    [ -n "$survivors" ] || break
+    [ "$i" -ne 15 ] || break
+    [ "$i" -ne 10 ] || for pid in $survivors; do kill -KILL "$pid" 2>/dev/null || true; done
+    sleep 0.3
+  done
+  # Confirm: no server answers under <dir>, and no process of this user holds
+  # a cwd, an open file or a bound socket under <dir>.
+  for s in ${sockets[@]+"${sockets[@]}"}; do
+    sbx_tmux -S "$s" list-sessions >/dev/null 2>&1 && survivors="$survivors tmux:$s"
+  done
+  if held="$(held_under "$SANDBOX")"; then
+    for pid in $held; do
+      [ "$pid" != "$$" ] || continue
+      case " $survivors " in *" $pid "*) ;; *) survivors="$survivors $pid" ;; esac
+    done
+  else
+    failed=1
+  fi
+  if [ -n "${survivors// /}" ]; then
+    echo "sandbox_daemon: teardown left processes under $SANDBOX:$survivors" >&2
+    return 1
+  fi
+  return "$failed"
 }
 
 if [ -z "$CRED_NAME" ]; then
@@ -327,5 +470,9 @@ while :; do
   set -e
   kill -0 "$DAEMON_PID" 2>/dev/null || break
 done
-teardown
+# #10922: the daemon is reaped, so its pid may be reused; a signal during
+# teardown must not reach `kill -TERM "$DAEMON_PID"`.
+trap '' INT TERM HUP
+# #10922: a survivor turns a clean daemon exit into exit 1.
+if ! teardown && [ "$STATUS" -eq 0 ]; then STATUS=1; fi
 exit "$STATUS"
