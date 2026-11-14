@@ -10,6 +10,7 @@ import stat
 import tempfile
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -17,6 +18,8 @@ from trusty_browser import audit, codes, enrollment, service
 
 URL = "https://qa.test/app/page?q=private-query"
 PAGE_TEXT = "page-secret-text"
+ORIGIN = "https://qa.test"
+TITLE = "private-title"
 
 
 @pytest.fixture
@@ -39,23 +42,65 @@ def clock(monkeypatch):
 
 
 class FakeBrowser:
-    """Answers broker commands as the extension would, for one paired profile."""
+    """Answers broker commands as the extension would, for one paired profile.
+
+    Workflow commands (``inspect``, ``snapshot``, ``click``, ``lease_*``) answer
+    from ``tab``; page commands answer from the ``tabs`` model, and
+    ``refuse[op]`` forces a worker refusal frame for one op.
+    """
 
     def __init__(self, rig, row):
         self.rig, self.row, self.tab = rig, row, 7
         self.missing: set[int] = set()
         self.seen: list[tuple[str, object]] = []
+        self.frames: list[dict] = []
         self.hold: dict[str, asyncio.Event] = {}
         self.arrived: dict[str, asyncio.Event] = {}
+        self.refuse: dict[str, dict] = {}
+        self.done: list[tuple] = []
+        self.ack: dict = {}
+        self.tabs = {
+            7: {
+                "window": 1,
+                "index": 0,
+                "active": True,
+                "access": True,
+                "origin": ORIGIN,
+            },
+            8: {
+                "window": 1,
+                "index": 1,
+                "active": False,
+                "access": False,
+                "origin": None,
+            },
+            9: {
+                "window": 2,
+                "index": 0,
+                "active": True,
+                "access": True,
+                "origin": ORIGIN,
+            },
+        }
+        for tab, item in self.tabs.items():
+            item.update(title=TITLE if item["access"] else None, document=f"d{tab}-1")
+
+    def add(self, tab, access=True):
+        self.tabs[tab] = {"window": 3, "index": tab, "active": False, "access": access}
+        self.tabs[tab].update(
+            origin=ORIGIN if access else None,
+            title=TITLE if access else None,
+            document=f"d{tab}-1",
+        )
 
     async def pair(self, life="boot"):
-        hello = dict(
-            type="hello",
-            profile=self.row["profile"],
-            email=self.row["email"],
-            incarnation=life,
-            nonce=secrets.token_hex(32),
-        )
+        hello = {
+            "type": "hello",
+            "profile": self.row["profile"],
+            "email": self.row["email"],
+            "incarnation": life,
+            "nonce": secrets.token_hex(32),
+        }
         self.reader, self.writer = await asyncio.open_unix_connection(
             self.rig.state / "service.sock"
         )
@@ -64,8 +109,9 @@ class FakeBrowser:
         proof = service.pairing_proof(
             self.row["key"], "extension", hello, challenge["nonce"]
         )
-        await service.write_frame(self.writer, dict(type="proof", proof=proof))
-        assert (await service.read_frame(self.reader))["ok"]
+        await service.write_frame(self.writer, {"type": "proof", "proof": proof})
+        self.ack = await service.read_frame(self.reader)
+        assert self.ack["ok"], self.ack
         self.task = asyncio.create_task(self.loop())
         return self
 
@@ -77,27 +123,103 @@ class FakeBrowser:
                 req = await service.read_frame(self.reader)
                 asyncio.create_task(self.answer(req))
 
+    def page(self, req):
+        """The page-command result, or a refusal frame (``error`` key)."""
+        op, tab = req["op"], req.get("tab")
+        if op in self.refuse:
+            return self.refuse[op]
+        if op == "grant_end":
+            return "ended"
+        if op == "page_tabs":
+            keys = ("window", "index", "active", "access", "origin", "title")
+            entries = [
+                {"tab": t, **{k: i[k] for k in keys}, "extra": "dropped"}
+                for t, i in self.tabs.items()
+            ]
+            return {"tabs": entries}
+        item = self.tabs.get(tab)
+        if item is None:
+            return {"error": "TabNotFound", "tab": tab}
+        seen = {k: item[k] for k in ("access", "document", "origin", "title")}
+        if not item["access"]:
+            seen.update(document=None, origin=None, title=None)
+        if op == "page_tab":
+            return seen
+        if op == "page_navigate":
+            target = urlsplit(req["url"])
+            item["origin"] = f"{target.scheme}://{target.netloc}"
+            item["access"] = item["origin"] == ORIGIN
+            item["title"] = TITLE if item["access"] else None
+            item["document"] = f"d{tab}-{secrets.token_hex(2)}"
+            landed = self.page({**req, "op": "page_tab"})
+            del landed["title"]
+            return {**landed, "settled": True}
+        if not item["access"]:
+            return {"error": "PermissionNeeded", "tab": tab, "origin": None}
+        if op == "page_read":
+            return {
+                "document": item["document"],
+                "origin": ORIGIN,
+                "url": ORIGIN + "/app/page?q=private-query",
+                "title": TITLE,
+                "text": PAGE_TEXT,
+                "elements": [
+                    {"ref": "1.0", "tag": "input", "role": "textbox", "name": "Search"}
+                ],
+                "truncated": False,
+            }
+        if req.get("document") != item["document"]:
+            # ``secret`` is a field the broker must drop before relaying.
+            return {
+                "error": "DocumentChanged",
+                "tab": tab,
+                "access": True,
+                "document": item["document"],
+                "secret": PAGE_TEXT,
+            }
+        self.done.append((op, req.get("ref"), req.get("text")))
+        return {"document": item["document"]}
+
     async def answer(self, req):
         op = req["op"]
         self.seen.append((op, req.get("tab")))
+        self.frames.append(req)
         if op in self.arrived:
             self.arrived[op].set()
         if op in self.hold:
             await self.hold[op].wait()
-        tab = req.get("tab", self.tab)
-        reply = dict(
-            id=req["id"],
-            ok=True,
-            email=req["email"],
-            url=req["url"],
-            account=req["account"],
-            tab=tab,
-            result={"field": PAGE_TEXT},
-        )
-        if tab is None or tab in self.missing:
-            reply = dict(id=req["id"], ok=False, error="TabNotFound")
+        if op == "grant_end" or op.startswith("page_"):
+            result = self.page(req)
+            if isinstance(result, dict) and "error" in result:
+                reply = dict(id=req["id"], ok=False, **result)
+            else:
+                reply = {
+                    "id": req["id"],
+                    "ok": True,
+                    "email": req["email"],
+                    "result": result,
+                }
+                if "tab" in req:
+                    reply["tab"] = req["tab"]
+        else:
+            tab = req.get("tab", self.tab)
+            reply = {
+                "id": req["id"],
+                "ok": True,
+                "email": req["email"],
+                "url": req["url"],
+                "account": req["account"],
+                "tab": tab,
+                "result": {"field": PAGE_TEXT},
+            }
+            if tab is None or tab in self.missing:
+                reply = {"id": req["id"], "ok": False, "error": "TabNotFound"}
         with contextlib.suppress(ConnectionError, RuntimeError):
             await service.write_frame(self.writer, reply)
+
+    def sent(self, *ops):
+        """Frames of the given ops the broker sent, in order."""
+        return [f for f in self.frames if f["op"] in ops]
 
     async def leave(self):
         self.writer.close()
@@ -114,15 +236,15 @@ class Rig:
 
     def seed(self, name, url=URL):
         key = secrets.token_hex(32)
-        row = dict(
-            op="enroll",
-            profile=str(uuid.uuid4()),
-            email=name + "@example.test",
-            workflow=name,
-            url=url,
-            account=name,
-            key=key,
-        )
+        row = {
+            "op": "enroll",
+            "profile": str(uuid.uuid4()),
+            "email": name + "@example.test",
+            "workflow": name,
+            "url": url,
+            "account": name,
+            "key": key,
+        }
         with contextlib.closing(enrollment.database(self.state)) as db:
             enrollment.register(db, self.state, row)
         ticket = enrollment.read_credential(
@@ -140,8 +262,24 @@ class Rig:
         writer.close()
         return reply
 
+    def credential(self, name):
+        """A fresh pairing credential, as the worker generates one."""
+        return {
+            "profile": str(uuid.uuid4()),
+            "email": name + "@example.test",
+            "key": secrets.token_hex(32),
+        }
+
+    async def pair(self, cred, op="pair"):
+        return await self.once("enrollment.sock", {"op": op, **cred})
+
+    async def popup(self, cred, op, **fields):
+        triple = {k: cred[k] for k in ("profile", "email", "key")}
+        return await self.once("enrollment.sock", {"op": op, **triple, **fields})
+
     async def mint(self, row, scope="profile", tab=None):
-        frame = {k: row[k] for k in enrollment.FIELDS}
+        names = enrollment.FIELDS if "workflow" in row else ("profile", "email", "key")
+        frame = {k: row[k] for k in names}
         frame.update(op="mint", scope=scope)
         if tab is not None:
             frame["tab"] = tab
@@ -149,7 +287,7 @@ class Rig:
 
     async def redeem(self, code):
         reader, writer, reply = await self.connect(
-            "agent.sock", dict(op="redeem", code=code)
+            "agent.sock", {"op": "redeem", "code": code}
         )
 
         async def call(frame):
@@ -162,7 +300,7 @@ class Rig:
     async def open(self, row):
         reader, writer, reply = await self.connect(
             "agent.sock",
-            dict(op="open", workflow=row["workflow"], ticket=row["ticket"]),
+            {"op": "open", "workflow": row["workflow"], "ticket": row["ticket"]},
         )
         self.writers.append(writer)
 
@@ -235,7 +373,7 @@ def test_mint_reply_carries_a_pasteable_code_scope_and_expiry(short, clock):
         assert plain["scope"] == "profile" and "tab" not in plain
         assert plain["code"] != minted["code"]
         assert stat.S_IMODE((rig.state / "audit.jsonl").stat().st_mode) == 0o600
-        reply, call = await rig.redeem(minted["code"].lower().replace("1", "l"))
+        reply, _call = await rig.redeem(minted["code"].lower().replace("1", "l"))
         assert reply["ok"] and reply["grant"] == minted["grant"] and reply["tab"] == 7
 
     run(short, body)
@@ -260,14 +398,14 @@ def test_wrong_replayed_and_expired_codes_refuse_alike_but_audit_apart(short, cl
 def test_two_concurrent_redeems_have_exactly_one_winner(short, clock):
     async def body(rig):
         code = (await rig.mint(rig.alpha, "tab", 7))["code"]
-        rig.a.hold["inspect"], rig.a.arrived["inspect"] = (
+        rig.a.hold["page_tab"], rig.a.arrived["page_tab"] = (
             asyncio.Event(),
             asyncio.Event(),
         )
         first = asyncio.create_task(rig.redeem(code))
-        await rig.a.arrived["inspect"].wait()
+        await rig.a.arrived["page_tab"].wait()
         loser, _ = await rig.redeem(code)
-        rig.a.hold["inspect"].set()
+        rig.a.hold["page_tab"].set()
         winner, _ = await first
         assert winner["ok"] and loser == {"ok": False, "error": "CodeRefused"}
         profile = (await rig.mint(rig.alpha))["code"]
@@ -281,18 +419,19 @@ def test_two_concurrent_redeems_have_exactly_one_winner(short, clock):
 def test_tab_closed_before_redeem_is_refused_and_never_rebound(short, clock):
     async def body(rig):
         closed = (await rig.mint(rig.alpha, "tab", 7))["code"]
-        replaced = (await rig.mint(rig.alpha, "tab", 7))["code"]
-        rig.a.tab = None
+        unknown = (await rig.mint(rig.alpha, "tab", 9))["code"]
+        saved = rig.a.tabs.pop(7)
         assert (await rig.redeem(closed))[0] == {"ok": False, "error": "TabClosed"}
-        rig.a.tab = 8
-        assert (await rig.redeem(replaced))[0] == {"ok": False, "error": "TabClosed"}
+        rig.a.refuse["page_tab"] = {"error": "UnknownGrant"}
+        assert (await rig.redeem(unknown))[0] == {"ok": False, "error": "TabClosed"}
+        del rig.a.refuse["page_tab"]
+        rig.a.tabs[7] = saved
         assert (await rig.redeem(closed))[0]["error"] == "CodeRefused"
         restarted = (await rig.mint(rig.alpha, "tab", 8))["code"]
         await rig.a.leave()
         rig.a = await FakeBrowser(rig, rig.alpha).pair("boot-two")
-        rig.a.tab = 8
         assert (await rig.redeem(restarted))[0]["error"] == "TabClosed"
-        assert ("lease_show", 8) not in rig.a.seen
+        assert ("page_tab", 8) not in rig.a.seen
         assert rig.outcomes("redeem").count("tab_closed") == 3
 
     run(short, body)
@@ -300,42 +439,12 @@ def test_tab_closed_before_redeem_is_refused_and_never_rebound(short, clock):
 
 def test_tab_closed_after_redeem_ends_the_grant(short, clock):
     async def body(rig):
-        reply, call = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
-        lease = (await call({"op": "claim"}))["lease"]
-        rig.a.missing.add(7)
-        ended = await gone(call, dict(op="snapshot", lease=lease, request_id="r1"))
+        _reply, call = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.tabs.pop(7)
+        ended = await gone(call, {"op": "page_read", "lease": lease})
         assert ended == {"ok": False, "error": "GrantEnded", "reason": "tab_closed"}
         assert not rig.broker.claims and not rig.broker.grants
-
-    run(short, body)
-
-
-def test_tab_scoped_session_is_refused_on_another_tab(short, clock):
-    async def body(rig):
-        _, call = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
-        rig.a.tab = 8
-        assert (await call({"op": "claim"})) == {"ok": False, "error": "OutOfScope"}
-        assert not rig.broker.claims
-        assert [s for s in rig.a.seen if s[0] != "inspect"] == []
-        rig.a.tab = 7
-        assert (await call({"op": "claim"}))["tab"] == 7
-
-    run(short, body)
-
-
-def test_profile_scoped_session_is_refused_on_another_profile(short, clock):
-    async def body(rig):
-        _, travel = await rig.open(rig.beta)
-        beta_lease = (await travel({"op": "claim"}))["lease"]
-        seen = list(rig.b.seen)
-        _, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
-        assert (await call({"op": "claim", "profile": rig.beta["profile"]}))[
-            "error"
-        ] == "InvalidRequest"
-        foreign = dict(op="snapshot", lease=beta_lease, request_id="x")
-        assert (await call(foreign))["error"] == "StaleLease"
-        assert (await call({"op": "claim"}))["email"] == rig.alpha["email"]
-        assert rig.b.seen == seen
 
     run(short, body)
 
@@ -394,7 +503,7 @@ def test_revoke_one_and_all_refuse_the_next_call(short, clock):
             "revoked": 1,
         }
         assert (await gone(first))["reason"] == "revoked"
-        assert (await second({"op": "claim"}))["ok"]
+        assert (await second({"op": "tabs"}))["ok"]
         assert await rig.operator(op="revoke_grant", grant="g-unknown") == {
             "ok": False,
             "error": "UnknownGrant",
@@ -412,14 +521,15 @@ def test_revoke_during_an_in_flight_click_answers_outcome_unknown(short, clock):
     async def body(rig):
         minted = await rig.mint(rig.alpha)
         _, call = await rig.redeem(minted["code"])
-        lease = (await call({"op": "claim"}))["lease"]
-        rig.a.hold["click"], rig.a.arrived["click"] = asyncio.Event(), asyncio.Event()
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        hold, arrived = asyncio.Event(), asyncio.Event()
+        rig.a.hold["page_click"], rig.a.arrived["page_click"] = hold, arrived
         click = asyncio.create_task(
-            call(dict(op="click", lease=lease, request_id="c", marker="m"))
+            call({"op": "page_click", "lease": lease, "request_id": "c", "ref": "1.0"})
         )
-        await rig.a.arrived["click"].wait()
+        await arrived.wait()
         await rig.operator(op="revoke_grant", grant=minted["grant"])
-        rig.a.hold["click"].set()
+        hold.set()
         assert await click == {"ok": False, "error": "OutcomeUnknown"}
         assert (await gone(call))["error"] == "GrantEnded"
 
@@ -451,7 +561,7 @@ def test_more_than_three_grants_on_distinct_tabs_and_profiles_coexist(short, clo
     async def body(rig):
         calls = []
         for tab in range(1, 6):
-            rig.a.tab = tab  # the redeem probe reads the active tab
+            rig.a.add(tab)
             ack, call = await rig.redeem(
                 (await rig.mint(rig.alpha, "tab", tab))["code"]
             )
@@ -465,8 +575,7 @@ def test_more_than_three_grants_on_distinct_tabs_and_profiles_coexist(short, clo
         assert len(listed) == 8
         assert rig.outcomes("redeem") == ["ok"] * 8
         for tab, call in enumerate(calls[:5], start=1):
-            rig.a.tab = tab
-            assert (await call({"op": "claim"}))["tab"] == tab
+            assert (await call({"op": "select", "tab": tab}))["tab"] == tab
         assert len(rig.broker.claims) == 5
         assert (await rig.mint(rig.alpha, "tab", 3))["limit"] == "tab"
 
@@ -527,13 +636,13 @@ def test_unenroll_ends_codes_and_grants_for_the_profile(short, clock):
 def test_idle_browser_loss_and_socket_close_end_the_grant(short, clock):
     async def body(rig):
         _, idle = await rig.redeem((await rig.mint(rig.alpha))["code"])
-        assert (await idle({"op": "claim"}))["ok"]
+        assert (await idle({"op": "tabs"}))["ok"]
         clock[0] += codes.GRANT_IDLE
         assert (await gone(idle))["reason"] == "idle"
         _, lost = await rig.redeem((await rig.mint(rig.alpha))["code"])
         await rig.a.leave()
         assert (await gone(lost))["reason"] == "browser_gone"
-        reply, closing = await rig.redeem((await rig.mint(rig.beta))["code"])
+        _reply, _closing = await rig.redeem((await rig.mint(rig.beta))["code"])
         rig.writers[-1].close()
         for _ in range(200):
             if not rig.broker.grants:
@@ -570,7 +679,7 @@ def test_idle_profile_grants_leave_the_grant_list(short, clock):
                 "error": "GrantEnded",
                 "reason": "idle",
             }
-        assert (await fresh[0]({"op": "claim"}))["ok"]
+        assert (await fresh[0]({"op": "tabs"}))["ok"]
 
     run(short, body)
 
@@ -580,7 +689,7 @@ def test_idle_tab_grant_releases_the_tab_cap_even_without_audit(
 ):
     async def body(rig):
         _, stale = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
-        assert (await stale({"op": "claim"}))["ok"]
+        assert (await stale({"op": "select", "tab": 7}))["ok"]
         clock[0] += codes.GRANT_IDLE
         real = rig.broker.audit.write
 
@@ -617,9 +726,9 @@ def test_broker_restart_leaves_no_code_or_grant(short, clock):
     async def again():
         async with service.Broker(rig.state) as broker:
             assert not broker.grants and not broker.codes
-            reply = await rig.once("agent.sock", dict(op="redeem", code=rig.code))
+            reply = await rig.once("agent.sock", {"op": "redeem", "code": rig.code})
             assert reply == {"ok": False, "error": "CodeRefused"}
-            assert (await rig.once("operator.sock", dict(op="grants"))) == {
+            assert (await rig.once("operator.sock", {"op": "grants"})) == {
                 "ok": True,
                 "grants": [],
             }
@@ -634,12 +743,30 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
     async def body(rig):
         minted = await rig.mint(rig.alpha, "tab", 7)
         _, call = await rig.redeem(minted["code"])
-        claim = await call({"op": "claim"})
-        assert (await call(dict(op="snapshot", lease=claim["lease"], request_id="s")))[
-            "result"
-        ]["field"] == PAGE_TEXT
-        await call(dict(op="click", lease=claim["lease"], request_id="c", marker="m"))
-        await call(dict(op="release", lease=claim["lease"]))
+        claim = await call({"op": "select", "tab": 7})
+        lease = claim["lease"]
+        read = await call({"op": "page_read", "lease": lease})
+        assert read["text"] == PAGE_TEXT and read["title"] == TITLE
+        ref, typed = "424242.987654", "typed-secret-text"
+        frames = [
+            {
+                "op": "page_type",
+                "lease": lease,
+                "request_id": "t",
+                "ref": ref,
+                "text": typed,
+            },
+            {"op": "page_click", "lease": lease, "request_id": "c", "ref": ref},
+            {
+                "op": "page_navigate",
+                "lease": lease,
+                "request_id": "n",
+                "url": URL + "#frag",
+            },
+            {"op": "release", "lease": lease},
+        ]
+        for frame in frames:
+            assert (await call(frame))["ok"], frame
         await rig.redeem(minted["code"])
         await rig.operator(op="revoke_grants")
         text = (rig.state / "audit.jsonl").read_text()
@@ -649,10 +776,15 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
             codes.code_digest(minted["code"]),
             rig.alpha["ticket"],
             rig.alpha["key"],
-            claim["lease"],
+            lease,
             PAGE_TEXT,
+            TITLE,
+            typed,
+            ref,
+            "Search",
             "/app/page",
             "private-query",
+            "frag",
         ]
         assert [value for value in forbidden if value in text] == []
         lines = rig.audit()
@@ -661,9 +793,18 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
         ops = [(l["op"], l["outcome"]) for l in lines if l["event"] == "operation"]
         assert ops == [
             (op, o)
-            for op in ("claim", "snapshot", "click", "release")
+            for op in (
+                "select",
+                "page_read",
+                "page_type",
+                "page_click",
+                "page_navigate",
+                "release",
+            )
             for o in ("admitted", "ok")
         ]
+        results = [l for l in lines if l["event"] == "operation"][1::2]
+        assert [l.get("tab") for l in results] == [7] * 6
         assert stat.S_IMODE((rig.state / "audit.jsonl").stat().st_mode) == 0o600
 
     run(short, body)
@@ -688,11 +829,11 @@ def test_audit_write_failure_fails_mint_redeem_and_operations_closed(
         monkeypatch.setattr(rig.broker.audit, "write", real)
         _, call = await rig.redeem(code)
         monkeypatch.setattr(rig.broker.audit, "write", broken)
-        assert (await call({"op": "claim"})) == {
+        assert (await call({"op": "select", "tab": 7})) == {
             "ok": False,
             "error": "AuditUnavailable",
         }
-        assert not rig.broker.claims and ("inspect", None) not in rig.a.seen
+        assert not rig.broker.claims and rig.a.sent("page_tab") == []
 
     run(short, body)
 
@@ -721,12 +862,12 @@ def test_open_path_works_beside_a_code_session(short, clock):
         assert opened == {"ok": True}
         _, coded = await rig.redeem((await rig.mint(rig.alpha))["code"])
         held = await workflow({"op": "claim"})
-        assert (await coded({"op": "claim"}))["error"] == "TabClaimed"
-        assert (await workflow(dict(op="release", lease=held["lease"])))["ok"]
-        mine = await coded({"op": "claim"})
+        assert (await coded({"op": "select", "tab": 7}))["error"] == "TabClaimed"
+        assert (await workflow({"op": "release", "lease": held["lease"]}))["ok"]
+        mine = await coded({"op": "select", "tab": 7})
         assert (await workflow({"op": "claim"}))["error"] == "TabClaimed"
-        assert (await coded(dict(op="snapshot", lease=mine["lease"], request_id="s")))[
-            "ok"
-        ]
+        assert (await coded({"op": "page_read", "lease": mine["lease"]}))["ok"]
+        assert (await coded({"op": "claim"}))["error"] == "InvalidRequest"
+        assert (await workflow({"op": "tabs"}))["error"] == "InvalidRequest"
 
     run(short, body)

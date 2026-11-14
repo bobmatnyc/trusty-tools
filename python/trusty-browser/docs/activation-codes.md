@@ -804,7 +804,7 @@ Paths are under `python/trusty-browser/`. No file is in both columns.
 | `src/trusty_browser/pages.py` (new: code-session ops) | `src/trusty_browser/extension/setup.css` |
 | `src/trusty_browser/codes.py` | `src/trusty_browser/extension/indicator.js` |
 | `src/trusty_browser/audit.py` | `src/trusty_browser/extension/indicator_content.js` (no change expected) |
-| `src/trusty_browser/enrollment.py` (pairing records) | `src/trusty_browser/extension/content.js` (no change expected) |
+| `src/trusty_browser/enrollment.py`, `src/trusty_browser/pairing.py` (new: pairing records, split for the line cap) | `src/trusty_browser/extension/content.js` (no change expected) |
 | `src/trusty_browser/agent_mcp.py` | `src/trusty_browser/extension/manifest.json` (frozen: no change) |
 | `src/trusty_browser/cli.py` (operator verbs); `native_host.py`, `mac_peer.py`, `vault.py`, `assets.py`, `install_host.py` (no change expected) | `tests/test_worker.mjs` |
 | `tests/test_activation_codes.py` | `tests/test_popup.mjs` |

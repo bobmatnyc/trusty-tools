@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass
 import hashlib
 import secrets
 import sqlite3
 import time
+from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
@@ -70,7 +70,7 @@ class Grant:
             "scope": self.scope,
             "profile": str(self.row["profile"]),
             "tab": self.tab,
-            "origin": urlsplit(str(self.row["url"])).hostname,
+            "origin": urlsplit(str(self.row["url"] or "")).hostname,
         }
 
     def entry(self, now: float) -> dict[str, object]:

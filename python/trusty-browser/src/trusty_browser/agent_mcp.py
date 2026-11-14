@@ -15,9 +15,10 @@ import struct
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
-from typing import Any, BinaryIO
+from typing import Annotated, Any, BinaryIO
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import WithJsonSchema
 
 from trusty_browser import vault
 
@@ -195,7 +196,7 @@ class CodeSession:
                 raise Refused(reply)
             return reply
 
-    def call(self, op: str, **fields: str) -> dict[str, Any]:
+    def call(self, op: str, **fields: object) -> dict[str, Any]:
         with self.lock:
             if self.wire is None:
                 raise local("NotConnected", NOT_CONNECTED)
@@ -213,14 +214,62 @@ class CodeSession:
         return {"ok": True, "disconnected": held}
 
 
+# #11239: an unvalidated parameter, so a non-string code is never quoted back.
+CodeArg = Annotated[Any, WithJsonSchema({"type": "string"})]
+
+
+def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None:
+    """Register code mode's page tools; contract "MCP tools", "Code mode".
+
+    Test: `test_end_to_end_page_session_through_the_mcp_server`.
+    """
+
+    @server.tool()
+    def browser_tabs() -> dict[str, Any]:
+        """List the tabs this grant may address, with page access, origin and title."""
+        return call("tabs")
+
+    @server.tool()
+    def browser_select(tab: int) -> dict[str, Any]:
+        """Lease a tab by id for this session (does not focus it); returns the lease."""
+        return call("select", tab=tab)
+
+    @server.tool()
+    def page_read(lease: str) -> dict[str, Any]:
+        """Read the leased tab's page: text and elements with refs for click and type."""
+        return call("page_read", lease=lease)
+
+    @server.tool()
+    def page_click(lease: str, ref: str, request_id: str) -> dict[str, Any]:
+        """Click the element a page_read returned as ``ref``. Reuse the request ID to retry."""
+        return call("page_click", lease=lease, ref=ref, request_id=request_id)
+
+    @server.tool()
+    def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:
+        """Replace the text of an editable element named by ``ref``."""
+        return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
+
+    @server.tool()
+    def page_navigate(lease: str, url: str, request_id: str) -> dict[str, Any]:
+        """Navigate the leased tab to an https URL (or http://127.0.0.1)."""
+        return call("page_navigate", lease=lease, url=url, request_id=request_id)
+
+    @server.tool()
+    def browser_release(lease: str) -> dict[str, Any]:
+        """Release a lease taken with browser_select."""
+        return call("release", lease=lease)
+
+
 def run_codes(state: Path) -> None:
     """Serve code mode: no credential, no socket until ``browser_connect``."""
     session = CodeSession(state / "agent.sock")
     server = FastMCP("trusty-browser")
 
     @server.tool()
-    def browser_connect(code: str) -> dict[str, Any]:
+    def browser_connect(code: CodeArg) -> dict[str, Any]:
         """Redeem a one-use activation code (tb-...) from the Trusty Browser popup."""
+        if not isinstance(code, str):
+            raise local("InvalidRequest", "code must be a string")
         return session.connect(code)
 
     @server.tool()
@@ -228,7 +277,7 @@ def run_codes(state: Path) -> None:
         """Close the session; the broker ends its grant."""
         return session.disconnect()
 
-    add_tab_tools(server, session.call)
+    add_page_tools(server, session.call)
     try:
         server.run(transport="stdio")
     finally:

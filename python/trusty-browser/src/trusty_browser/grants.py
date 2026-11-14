@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import secrets
+import sqlite3
 import time
 from pathlib import Path
 
-from trusty_browser import codes
+from trusty_browser import codes, pairing
 from trusty_browser.audit import Audit
 from trusty_browser.codes import CODE_TTL, GRANT_IDLE, Grant, Lockout
 from trusty_browser.enrollment import FIELDS, original_fields, registration_id
 from trusty_browser.leases import Leases
 from trusty_browser.protocol import Claim, Frame, Peer, Refusal, Session, string
 
-MINT_ERRORS = {
+# Refusals relayed whole on enrollment.sock (#11239); anything else is EnrollmentFailed.
+RELAYED = {
     "InvalidMint",
+    "InvalidRequest",
     "NotEnrolled",
     "BrowserDisconnected",
     "GrantLimit",
     "AuditUnavailable",
+    "UnknownGrant",
 }
 OPERATOR_OPS = {"grants", "revoke_grant", "revoke_grants"}
+POPUP_OPS = OPERATOR_OPS
 
 
 def gone(grant: Grant) -> Refusal:
@@ -41,6 +47,8 @@ class Grants(Leases):
         self.spent: dict[str, tuple[str, float]] = {}
         self.lockout = Lockout()
         self.audit = Audit(self.state)
+        self.tasks: set[asyncio.Future[None]] = set()
+        self.sweeper: asyncio.TimerHandle | None = None
 
     def purge(self, now: float) -> None:
         for digest, grant in list(self.codes.items()):
@@ -48,6 +56,8 @@ class Grants(Leases):
                 del self.codes[digest]
                 self.grants.pop(grant.ident, None)
                 self.spent[digest] = ("expired", grant.deadline + CODE_TTL)
+                grant.state, grant.reason = "ended", "expired"
+                self.notify(grant, "expired")
         for digest, (_, forget) in list(self.spent.items()):
             if forget <= now:
                 del self.spent[digest]
@@ -91,26 +101,47 @@ class Grants(Leases):
         except OSError:
             raise Refusal("AuditUnavailable") from None
 
+    def minter(self, request: Frame) -> sqlite3.Row:
+        """The row a mint frame proves: the credential triple, or phase 1's six fields."""
+        assert self.db is not None
+        if "workflow" not in request:
+            fields = pairing.triple(request)
+            if fields is None:
+                raise Refusal("InvalidMint")
+            row = pairing.credential_row(self.db, self.state, fields)
+        else:
+            if not all(isinstance(request[k], str) and request[k] for k in FIELDS):
+                raise Refusal("InvalidMint")
+            row = self.db.execute(
+                "SELECT * FROM routes WHERE workflow=? AND profile=?",
+                (request["workflow"], request["profile"]),
+            ).fetchone()
+            if row is not None and not secrets.compare_digest(
+                registration_id(original_fields(row, self.state)),
+                registration_id(request),
+            ):
+                row = None
+        if row is None:
+            raise Refusal("NotEnrolled")
+        return row
+
     async def mint(self, request: Frame) -> Frame:
+        """Mint one code for the credential's profile; contract "mint".
+
+        Test: `test_mint_with_a_pairing_credential_succeeds_and_a_wrong_key_does_not`,
+        `test_mint_is_refused_for_an_unenrolled_profile`.
+        """
         scope, tab = request.get("scope"), request.get("tab")
-        expected = {"op", "scope", *FIELDS} | ({"tab"} if scope == "tab" else set())
+        names = FIELDS if "workflow" in request else pairing.CREDENTIAL
+        expected = {"op", "scope", *names} | ({"tab"} if scope == "tab" else set())
         if (
             set(request) != expected
             or scope not in ("profile", "tab")
             or scope == "tab"
             and (type(tab) is not int or tab < 0)
-            or not all(isinstance(request[k], str) and request[k] for k in FIELDS)
         ):
             raise Refusal("InvalidMint")
-        assert self.db is not None
-        row = self.db.execute(
-            "SELECT * FROM routes WHERE workflow=? AND profile=?",
-            (request["workflow"], request["profile"]),
-        ).fetchone()
-        if row is None or not secrets.compare_digest(
-            registration_id(original_fields(row, self.state)), registration_id(request)
-        ):
-            raise Refusal("NotEnrolled")
+        row = self.minter(request)
         peer = self.peers.get(str(row["profile"]))
         if scope == "tab" and peer is None:
             raise Refusal("BrowserDisconnected")
@@ -132,6 +163,7 @@ class Grants(Leases):
         self.record("mint", grant, outcome="ok")
         self.codes[digest] = grant
         self.grants[grant.ident] = grant
+        self.arm()
         reply: Frame = {"ok": True, "code": code, **grant.fields()}
         del reply["origin"]
         if grant.tab is None:
@@ -177,6 +209,7 @@ class Grants(Leases):
                 self.consume(grant)
                 self.grants.pop(grant.ident, None)
                 grant.state, grant.reason = "ended", "tab_closed"
+                self.notify(grant, "tab_closed")
             elif grant.state == "pending":
                 grant.state = "code"
             if str(exc) not in {"CodeRefused", "AuditUnavailable"}:
@@ -198,6 +231,7 @@ class Grants(Leases):
         grant.session = Session(grant.row, grant=grant)
         grant.last_used = codes.clock()
         self.lockout.succeed()
+        self.arm()
         return grant.session
 
     def redeemed(self, session: Session) -> Frame:
@@ -223,17 +257,66 @@ class Grants(Leases):
         if peer is None or peer.generation != grant.generation:
             raise Refusal("TabClosed")
         try:
-            obs = await peer.command("inspect")
+            # #11239: probe the granted tab by its id, never the active tab.
+            await peer.page("page_tab", grant.ident, tab=grant.tab)
         except Refusal as exc:
-            if str(exc) == "TabNotFound":
+            if str(exc) in ("TabNotFound", "UnknownGrant"):
                 raise Refusal("TabClosed") from None
             raise
-        if (
-            obs["tab"] != grant.tab
-            or self.peers.get(str(grant.row["profile"])) is not peer
-        ):
+        if self.peers.get(str(grant.row["profile"])) is not peer:
             raise Refusal("TabClosed")
         return peer
+
+    def live(self, profile: str) -> list[str]:
+        """Ids of the profile's unredeemed codes and live grants."""
+        return [g.ident for g in self.grants.values() if g.row["profile"] == profile]
+
+    def notify(self, grant: Grant, reason: str) -> None:
+        """Tell the profile's worker, best effort and without waiting, that a grant ended.
+
+        Why: the worker drops its row, and all-https access with the last one
+        (#11239, "All-https access"). What: ``last`` is true when the profile
+        holds no other code or grant.
+        Test: `test_grant_end_reaches_the_worker_on_every_end_route_with_last`.
+        """
+        profile = str(grant.row["profile"])
+        peer = self.peers.get(profile)
+        if peer is None:
+            return
+        last = not self.live(profile)
+
+        async def send() -> None:
+            with contextlib.suppress(Refusal):
+                await peer.page("grant_end", grant.ident, reason=reason, last=last)
+
+        task = asyncio.ensure_future(send())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    def arm(self) -> None:
+        """Keep one loop callback at the earliest code or idle deadline (no thread)."""
+        if self.sweeper is not None:
+            self.sweeper.cancel()
+            self.sweeper = None
+        due = [
+            g.deadline if g.state == "code" else g.last_used + GRANT_IDLE
+            for g in self.grants.values()
+            if g.state in ("code", "active")
+        ]
+        if not due:
+            return
+        delay = max(0.0, min(due) - codes.clock())
+        loop = asyncio.get_running_loop()
+        self.sweeper = loop.call_later(delay, self.sweep)
+
+    def sweep(self) -> None:
+        async def run() -> None:
+            await self.expire(codes.clock())
+            self.arm()
+
+        task = asyncio.ensure_future(run())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     def retire(self, grant: Grant, reason: str) -> list[Claim]:
         """End a grant synchronously; return its claims for indicator clearing."""
@@ -246,6 +329,7 @@ class Grants(Leases):
             self.codes.pop(grant.digest, None)
             self.spent[grant.digest] = ("revoked", grant.deadline + CODE_TTL)
         self.audit.best_effort("grant_end", **grant.fields(), outcome=reason)
+        self.notify(grant, reason)
         if grant.session is None:
             return []
         owner = grant.session.owner
@@ -275,78 +359,40 @@ class Grants(Leases):
         assert self.db is not None
         profile = str(grant.row["profile"])
         peer = self.peers.get(profile)
-        route = self.db.execute(
-            "SELECT ticket FROM routes WHERE profile=?", (profile,)
-        ).fetchone()
+        # #11239: the enrollment or pairing that minted the grant must still stand.
+        route = pairing.profile_row(self.db, profile)
         if grant.state != "active":
             return
         if codes.clock() - grant.last_used >= GRANT_IDLE:
             await self.end(grant, "idle")
         elif peer is None or peer.generation != grant.generation:
             await self.end(grant, "browser_gone")
-        elif route is None or route["ticket"] != grant.row["ticket"]:
+        elif route is None or any(
+            route[k] != grant.row[k] for k in ("ticket", "browser_key")
+        ):
             await self.end(grant, "unenrolled")
 
-    def admit_tab(self, session: Session, peer: Peer, tab: int) -> None:
-        grant = session.grant
-        if grant is None:
-            return
-        if (
-            peer.generation != grant.generation
-            or grant.scope == "tab"
-            and tab != grant.tab
-        ):
-            raise Refusal("OutOfScope")
+    async def grant_operator(self, request: Frame, profile: str | None = None) -> Frame:
+        """List or revoke codes and grants; ``profile`` narrows to one profile (popup).
 
-    async def dispatch(self, session: Session, request: Frame) -> Frame:
-        grant = session.grant
-        if grant is None:
-            return await super().dispatch(session, request)
-        await self.check_live(grant)
-        if grant.state != "active":
-            raise gone(grant)
-        op = request.get("op")
-        name = op if op in ("claim", "release", "click", "snapshot") else "invalid"
-        self.record("operation", grant, op=name, outcome="admitted")
-        grant.last_used = codes.clock()
-        try:
-            result = await super().dispatch(session, request)
-        except Refusal as exc:
-            if grant.scope == "tab" and str(exc) == "TabNotFound":
-                await self.end(grant, "tab_closed")
-            self.audit.best_effort(
-                "operation", **grant.fields(), op=name, outcome=str(exc)
-            )
-            if grant.state != "active" and str(exc) != "OutcomeUnknown":
-                raise gone(grant) from None
-            raise
-        if grant.state != "active":
-            self.audit.best_effort(
-                "operation", **grant.fields(), op=name, outcome="grant_ended"
-            )
-            if name != "click":
-                raise gone(grant)
-            result = {"ok": False, "error": "OutcomeUnknown"}
-            session.journal[str(request["request_id"])] = (request, result)
-            return result
-        grant.last_used = codes.clock()
-        try:
-            self.audit.write("operation", **grant.fields(), op=name, outcome="ok")
-        except OSError:
-            await self.end(grant, "audit")
-        return result
-
-    async def grant_operator(self, request: Frame) -> Frame:
+        Test: `test_revoke_one_and_all_refuse_the_next_call`,
+        `test_popup_list_and_revoke_see_only_the_credential_profile`.
+        """
         op = request.get("op")
         await self.expire(codes.clock())
+        mine = [
+            g
+            for g in self.grants.values()
+            if profile is None or g.row["profile"] == profile
+        ]
         if op == "grants" and set(request) == {"op"}:
             now = codes.clock()
-            return {"ok": True, "grants": [g.entry(now) for g in self.grants.values()]}
+            return {"ok": True, "grants": [g.entry(now) for g in mine]}
         if op == "revoke_grants" and set(request) == {"op"}:
-            targets = list(self.grants.values())
+            targets = mine
         elif op == "revoke_grant" and set(request) == {"op", "grant"}:
             grant = self.grants.get(string(request, "grant"))
-            if grant is None:
+            if grant is None or grant not in mine:
                 return {"ok": False, "error": "UnknownGrant"}
             targets = [grant]
         else:
@@ -355,3 +401,15 @@ class Grants(Leases):
             self.audit.best_effort("revoke", **grant.fields(), outcome="ok")
             await self.end(grant, "revoked")
         return {"ok": True, "revoked": len(targets)}
+
+    async def popup_grants(self, request: Frame) -> Frame:
+        """The popup's list and revoke on enrollment.sock, inside one credential's profile."""
+        assert self.db is not None
+        fields = pairing.triple(request)
+        if fields is None or request.get("op") not in POPUP_OPS:
+            raise Refusal("InvalidRequest")
+        row = pairing.credential_row(self.db, self.state, fields)
+        if row is None:
+            raise Refusal("NotEnrolled")
+        rest = {k: v for k, v in request.items() if k not in pairing.CREDENTIAL}
+        return await self.grant_operator(rest, str(row["profile"]))

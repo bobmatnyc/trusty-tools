@@ -5,27 +5,30 @@
 import asyncio
 import contextlib
 import json
-from pathlib import Path
 import socket
 import struct
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from trusty_browser import agent_mcp, codes, service
-
 # #11239: code mode runs against the real broker and fake extension of these tests.
 from test_activation_codes import FakeBrowser, Rig, clock, short  # noqa: F401
+
+from trusty_browser import agent_mcp, codes, service
 
 CODE_TOOLS = {
     "browser_connect",
     "browser_disconnect",
-    "browser_claim",
-    "browser_snapshot",
-    "browser_click",
+    "browser_tabs",
+    "browser_select",
+    "page_read",
+    "page_click",
+    "page_type",
+    "page_navigate",
     "browser_release",
 }
 
@@ -198,6 +201,9 @@ def test_code_mode_starts_and_lists_tools_with_no_broker(short, clock):
         assert {tool.name for tool in tools} == CODE_TOOLS
         connect = next(t for t in tools if t.name == "browser_connect")
         assert set(connect.inputSchema["properties"]) == {"code"}
+        assert connect.inputSchema["properties"]["code"]["type"] == "string"
+        select = next(t for t in tools if t.name == "browser_select")
+        assert select.inputSchema["properties"]["tab"]["type"] == "integer"
         assert unavailable(
             await agent.refused("browser_connect", code=codes.new_code())
         )
@@ -217,9 +223,15 @@ def test_code_mode_starts_and_lists_tools_with_no_broker(short, clock):
 def test_tools_before_connect_answer_not_connected(short, clock):
     async def body(agent):
         for name, args in [
-            ("browser_claim", {}),
-            ("browser_snapshot", {"lease": "l", "request_id": "r"}),
-            ("browser_click", {"lease": "l", "request_id": "r", "marker": "m"}),
+            ("browser_tabs", {}),
+            ("browser_select", {"tab": 7}),
+            ("page_read", {"lease": "l"}),
+            ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
+            ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
+            (
+                "page_navigate",
+                {"lease": "l", "url": "https://a.test", "request_id": "r"},
+            ),
             ("browser_release", {"lease": "l"}),
         ]:
             frame = await agent.refused(name, **args)
@@ -246,20 +258,20 @@ def test_connect_returns_grant_facts_and_tools_work_within_the_grant(short, cloc
                 "idle_timeout_s": int(codes.GRANT_IDLE),
             }
             assert broker.grants[minted["grant"]].state == "active"
-            claim = await agent.ok("browser_claim")
-            assert claim["tab"] == 7 and {"lease", "generation"} <= set(claim)
+            claim = await agent.ok("browser_select", tab=7)
+            assert claim["tab"] == 7 and claim["access"] is True
             lease = claim["lease"]
-            read = await agent.ok("browser_snapshot", lease=lease, request_id="r")
-            assert read["result"] == {"field": "page-secret-text"}
+            read = await agent.ok("page_read", lease=lease)
+            assert read["text"] == "page-secret-text"
             clicked = await agent.ok(
-                "browser_click", lease=lease, request_id="c", marker="m"
+                "page_click", lease=lease, ref="1.0", request_id="c"
             )
-            assert clicked["ok"] and clicked["tab"] == 7
+            assert clicked == {"ok": True, "tab": 7, "document": "d7-1"}
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
-            agent.rig.a.tab = 8
-            assert await agent.refused("browser_claim") == {
+            assert await agent.refused("browser_select", tab=9) == {
                 "ok": False,
                 "error": "OutOfScope",
+                "tab": 9,
             }
             assert not broker.claims
 
@@ -275,7 +287,7 @@ def test_second_connect_is_refused_and_spends_no_code(short, clock):
             frame = await agent.refused("browser_connect", code=second["code"])
             assert frame["error"] == "AlreadyConnected"
             assert broker.grants[second["grant"]].state == "code"
-            assert (await agent.ok("browser_claim"))["lease"]
+            assert (await agent.ok("browser_select", tab=7))["lease"]
             await agent.ok("browser_disconnect")
             reply = await agent.ok("browser_connect", code=second["code"])
             assert reply["grant"] == second["grant"]
@@ -289,7 +301,7 @@ def test_code_refusals_reach_the_agent_and_leave_no_session(short, clock):
 
             async def refused(code):
                 frame = await agent.refused("browser_connect", code=code)
-                missing = await agent.refused("browser_claim")
+                missing = await agent.refused("browser_tabs")
                 assert missing["error"] == "NotConnected"
                 return frame
 
@@ -322,14 +334,14 @@ def test_scope_and_audit_refusals_reach_the_agent_and_leave_no_session(short, cl
 
             async def refused(code):
                 frame = await agent.refused("browser_connect", code=code)
-                missing = await agent.refused("browser_claim")
+                missing = await agent.refused("browser_tabs")
                 assert missing["error"] == "NotConnected"
                 return frame
 
-            rig.a.tab = None
             closed = await agent.mint("tab", 7)
+            saved = rig.a.tabs.pop(7)
             assert await refused(closed) == {"ok": False, "error": "TabClosed"}
-            rig.a.tab = 7
+            rig.a.tabs[7] = saved
             held, limited = [await agent.mint("tab", 7) for _ in range(2)]
             assert (await rig.redeem(held))[0]["ok"]
             assert await refused(limited) == {
@@ -363,12 +375,12 @@ def test_grant_ended_drops_the_session(short, clock):
                 "grant"
             ]
             await agent.rig.operator(op="revoke_grant", grant=grant)
-            assert await agent.refused("browser_claim") == {
+            assert await agent.refused("browser_tabs") == {
                 "ok": False,
                 "error": "GrantEnded",
                 "reason": "revoked",
             }
-            assert (await agent.refused("browser_claim"))["error"] == "NotConnected"
+            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
             assert (await agent.ok("browser_connect", code=await agent.mint()))["ok"]
 
     drive(short, body)
@@ -388,7 +400,7 @@ def test_disconnect_and_shutdown_end_the_grant(short, clock):
                 }
                 await agent.settled()
                 assert agent.rig.outcomes("grant_end") == ["closed"]
-                missing = await agent.refused("browser_claim")
+                missing = await agent.refused("browser_tabs")
                 assert missing["error"] == "NotConnected"
                 await agent.ok("browser_connect", code=await agent.mint())
                 assert agent.rig.broker.grants
@@ -402,11 +414,11 @@ def test_broker_loss_mid_session_answers_unavailable_then_reconnects(short, cloc
     async def body(agent):
         async with agent.broker():
             await agent.ok("browser_connect", code=await agent.mint())
-        assert unavailable(await agent.refused("browser_claim"))
-        assert (await agent.refused("browser_claim"))["error"] == "NotConnected"
+        assert unavailable(await agent.refused("browser_tabs"))
+        assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
         async with agent.broker():
             await agent.ok("browser_connect", code=await agent.mint())
-            assert (await agent.ok("browser_claim"))["lease"]
+            assert (await agent.ok("browser_select", tab=7))["lease"]
         # A dead session never blocks a new connect as AlreadyConnected.
         assert unavailable(
             await agent.refused("browser_connect", code=codes.new_code())
@@ -429,7 +441,7 @@ def test_code_never_appears_in_results_logs_or_files(short, clock):
             used.extend([first, second])
             await agent.ok("browser_connect", code=first)
             await agent.refused("browser_connect", code=second)
-            await agent.ok("browser_claim")
+            await agent.ok("browser_tabs")
             await agent.ok("browser_disconnect")
             assert (await agent.refused("browser_connect", code=first))[
                 "error"
@@ -445,3 +457,68 @@ def test_code_never_appears_in_results_logs_or_files(short, clock):
             if path.is_file():
                 data = path.read_bytes().lower()
                 assert not any(n.lower().encode() in data for n in needles), path
+
+
+def test_non_string_code_is_refused_without_quoting_it(short, clock):
+    async def body(agent):
+        async with agent.broker() as broker:
+            secret = await agent.mint()
+            for value in (424242, [secret], {"code": secret}, None):
+                result = await agent.session.call_tool(
+                    "browser_connect", {"code": value}
+                )
+                assert result.isError
+                text = result.content[0].text
+                frame = json.loads(text.partition(": ")[2])
+                assert frame == {
+                    "ok": False,
+                    "error": "InvalidRequest",
+                    "message": "code must be a string",
+                }
+                assert "424242" not in text and secret not in text
+            assert all(g.state == "code" for g in broker.grants.values())
+            assert (await agent.ok("browser_connect", code=secret))["ok"]
+
+    drive(short, body)
+
+
+def test_end_to_end_page_session_through_the_mcp_server(short, clock):
+    async def body(agent):
+        async with agent.broker() as broker:
+            rig = agent.rig
+            reply = await agent.ok("browser_connect", code=await agent.mint())
+            assert reply["scope"] == "profile"
+            tabs = (await agent.ok("browser_tabs"))["tabs"]
+            assert [t["tab"] for t in tabs] == [7, 8, 9]
+            lease = (await agent.ok("browser_select", tab=7))["lease"]
+            read = await agent.ok("page_read", lease=lease)
+            assert read["elements"][0]["ref"] == "1.0" and read["document"] == "d7-1"
+            typed = await agent.ok(
+                "page_type", lease=lease, ref="1.0", text="hello", request_id="t"
+            )
+            assert typed == {"ok": True, "tab": 7, "document": "d7-1"}
+            clicked = await agent.ok(
+                "page_click", lease=lease, ref="1.0", request_id="c"
+            )
+            assert clicked["ok"]
+            landed = await agent.ok(
+                "page_navigate",
+                lease=lease,
+                url="https://qa.test/next",
+                request_id="n",
+            )
+            assert landed["access"] is True and landed["settled"] is True
+            assert rig.a.done == [
+                ("page_type", "1.0", "hello"),
+                ("page_click", "1.0", None),
+            ]
+            assert await agent.ok("browser_release", lease=lease) == {"ok": True}
+            assert not broker.claims
+            assert await agent.ok("browser_disconnect") == {
+                "ok": True,
+                "disconnected": True,
+            }
+            await agent.settled()
+            assert rig.outcomes("grant_end") == ["closed"]
+
+    drive(short, body)

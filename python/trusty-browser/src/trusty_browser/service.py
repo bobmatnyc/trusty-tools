@@ -6,46 +6,46 @@ import argparse
 import asyncio
 import contextlib
 import fcntl
-import os
 import secrets
 import sqlite3
 import stat
 import sys
-import time
+import time  # noqa: F401 -- tests/test_service.py patches service.time
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Self
+
+from trusty_browser import pairing
 from trusty_browser.enrollment import (
+    browser_key,
     database,
     digest,
     finish_removals,
     inspect_conflict,
-    browser_key,
     register,
-    resolve_workflow,
     remove,
     replace,
+    resolve_workflow,
     status,
 )
+from trusty_browser.grants import OPERATOR_OPS, POPUP_OPS, RELAYED
 from trusty_browser.mac_peer import verify_chrome_host
-
+from trusty_browser.pages import Pages
 from trusty_browser.protocol import (
-    Peer,
     Claim,
-    Session,
     Frame,
+    Peer,
     Refusal,
+    Session,
     pairing_proof,
     read_frame,
     string,
     verify_peer,
     write_frame,
 )
-from trusty_browser.leases import TTL
-from trusty_browser.grants import MINT_ERRORS, OPERATOR_OPS, Grants
 
 
-# #11239: Grants layers activation codes over Leases.
-class Broker(Grants):
+# #11239: Pages (code-session ops) layers over Grants, which layers over Leases.
+class Broker(Pages):
     def __init__(self, state: Path) -> None:
         self.state = state.expanduser().absolute()
         self.sessions: dict[asyncio.StreamWriter, Session] = {}
@@ -58,7 +58,7 @@ class Broker(Grants):
         self.db: sqlite3.Connection | None = None
         self.init_grants()
 
-    async def __aenter__(self) -> Broker:
+    async def __aenter__(self) -> Self:
         self.db = database(self.state)
         try:
             self.lock = (self.state / "service.lock").open("ab")
@@ -85,6 +85,8 @@ class Broker(Grants):
         return self
 
     async def close(self) -> None:
+        if self.sweeper is not None:
+            self.sweeper.cancel()
         for server in self.servers:
             server.close()
         for writer in tuple(self.writers):
@@ -106,10 +108,13 @@ class Broker(Grants):
 
     def route(self, request: Frame, browser: bool) -> sqlite3.Row:
         assert self.db is not None
-        field = "profile" if browser else "workflow"
-        row = self.db.execute(
-            f"SELECT * FROM routes WHERE {field} = ?", (string(request, field),)
-        ).fetchone()
+        if browser:  # #11239: a paired profile pairs its native port too.
+            row = pairing.profile_row(self.db, string(request, "profile"))
+        else:
+            row = self.db.execute(
+                "SELECT * FROM routes WHERE workflow = ?",
+                (string(request, "workflow"),),
+            ).fetchone()
         if not isinstance(row, sqlite3.Row) or (
             not browser
             and not secrets.compare_digest(
@@ -198,7 +203,7 @@ class Broker(Grants):
                 "ok": False,
                 "error": str(exc) if str(exc) in safe else "EnrollmentFailed",
             }
-            if isinstance(exc, Refusal) and str(exc) in MINT_ERRORS:  # #11239
+            if isinstance(exc, Refusal) and str(exc) in RELAYED:  # #11239
                 reply = exc.response
             with contextlib.suppress(ConnectionError, TimeoutError):
                 await write_frame(writer, reply)
@@ -213,6 +218,10 @@ class Broker(Grants):
         op = string(request, "op")
         if op == "mint":  # #11239: codes are minted only on this socket.
             return await self.mint(request)
+        if op in ("pair", "unpair"):
+            return await self.pairing_request(request)
+        if op in POPUP_OPS:
+            return await self.popup_grants(request)
         if op == "resolve":
             return resolve_workflow(self.db, request)
         workflow = string(request, "workflow")
@@ -239,6 +248,47 @@ class Broker(Grants):
                         "previous": prior,
                     }
             raise
+
+    async def pairing_request(self, request: Frame) -> Frame:
+        """The extension's ``pair`` and ``unpair``; contract "pair".
+
+        Test: `test_pair_is_idempotent_and_seals_exactly_one_key`,
+        `test_unpair_ends_grants_and_a_removed_key_cannot_mint`.
+        """
+        assert self.db is not None
+        op, profile = request["op"], request.get("profile")
+        try:
+            if op == "pair":
+                reply = pairing.pair_profile(self.db, self.state, request)
+            else:
+                fields = pairing.triple(request)
+                if fields is None or set(request) != {"op", *pairing.CREDENTIAL}:
+                    raise Refusal("InvalidEnrollment")
+                if not pairing.unpair_profile(self.db, self.state, request, fields[0]):
+                    raise Refusal("Unauthorized")
+                await self.detach(fields[0])
+                reply = {"ok": True, "profile": fields[0]}
+        except ValueError as exc:
+            self.audit.best_effort(
+                str(op), profile=pairing.profile_id(profile), outcome=str(exc)
+            )
+            raise
+        self.audit.best_effort(str(op), profile=reply["profile"], outcome="ok")
+        return reply
+
+    async def pairing_operator(self, request: Frame) -> Frame:
+        """Operator ``pairings`` and credential-free ``unpair``; contract "Operator ops"."""
+        assert self.db is not None
+        if set(request) == {"op"} and request["op"] == "pairings":
+            return {"ok": True, "pairings": pairing.pairings(self.db)}
+        profile = pairing.profile_id(request.get("profile"))
+        if set(request) != {"op", "profile"} or profile is None:
+            raise Refusal("InvalidRequest")
+        if not pairing.unpair_profile(self.db, self.state, None, profile):
+            return {"ok": False, "error": "UnknownProfile"}
+        await self.detach(profile)
+        self.audit.best_effort("unpair", profile=profile, outcome="ok")
+        return {"ok": True, "profile": profile}
 
     async def revoke(self, workflow: str, request: Frame | None = None) -> None:
         assert self.db is not None
@@ -271,6 +321,9 @@ class Broker(Grants):
             if req.get("op") in OPERATOR_OPS:  # #11239
                 await write_frame(writer, await self.grant_operator(req))
                 return
+            if req.get("op") in ("pairings", "unpair"):
+                await write_frame(writer, await self.pairing_operator(req))
+                return
             if set(req) != {"op", "workflow"} or req["op"] != "revoke":
                 raise Refusal("InvalidRequest")
             await self.revoke(string(req, "workflow"))
@@ -301,7 +354,9 @@ class Broker(Grants):
                 raise Refusal("DuplicateProfile")
             peer = Peer(writer, row, incarnation)
             self.peers[name] = peer
-            await write_frame(writer, {"ok": True, "generation": peer.generation})
+            # #11239: ``live`` lets the worker prune grants whose end it missed.
+            ack = {"ok": True, "generation": peer.generation, "live": self.live(name)}
+            await write_frame(writer, ack)
             while True:
                 reply = await read_frame(reader)
                 pending = peer.pending.get(string(reply, "id"))

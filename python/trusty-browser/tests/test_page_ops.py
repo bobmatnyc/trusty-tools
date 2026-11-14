@@ -1,0 +1,540 @@
+"""Code-session page operations (#11239) through the real broker and a fake worker."""
+
+# ruff: noqa: F811 -- the imported fixtures `short` and `clock` are test parameters.
+
+import asyncio
+
+import pytest
+from test_activation_codes import (  # noqa: F401
+    ORIGIN,
+    PAGE_TEXT,
+    TITLE,
+    FakeBrowser,
+    clock,
+    gone,
+    run,
+    short,
+)
+
+from trusty_browser import codes, protocol
+
+CLOSED = (EOFError, asyncio.IncompleteReadError, ConnectionError)
+
+
+async def session(rig, scope="profile", tab=None, row=None):
+    ack, call = await rig.redeem((await rig.mint(row or rig.alpha, scope, tab))["code"])
+    assert ack["ok"], ack
+    return ack, call
+
+
+async def settle(rig):
+    """Let fire-and-forget grant_end sends reach the fake worker."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+    await asyncio.gather(*rig.broker.tasks)
+
+
+def test_tab_grant_select_of_another_tab_is_out_of_scope_and_sends_nothing(
+    short, clock
+):
+    async def body(rig):
+        _, call = await session(rig, "tab", 7)
+        probes = list(rig.a.sent("page_tab"))
+        assert await call({"op": "select", "tab": 9}) == {
+            "ok": False,
+            "error": "OutOfScope",
+            "tab": 9,
+        }
+        assert rig.a.sent("page_tab") == probes and not rig.broker.claims
+        selected = await call({"op": "select", "tab": 7})
+        assert selected["ok"] and selected["tab"] == 7
+
+    run(short, body)
+
+
+def test_profile_grant_never_reaches_another_profile(short, clock):
+    async def body(rig):
+        _, travel = await rig.open(rig.beta)
+        beta_lease = (await travel({"op": "claim"}))["lease"]
+        seen = list(rig.b.frames)
+        _, call = await session(rig)
+        assert (await call({"op": "select", "tab": 7, "profile": rig.beta["profile"]}))[
+            "error"
+        ] == "InvalidRequest"
+        assert (await call({"op": "page_read", "lease": beta_lease}))["error"] == (
+            "StaleLease"
+        )
+        assert (await call({"op": "tabs"}))["ok"]
+        assert rig.b.frames == seen
+        assert all(f["email"] == rig.alpha["email"] for f in rig.a.sent("page_tabs"))
+
+    run(short, body)
+
+
+def test_tabs_on_a_tab_grant_lists_only_its_tab(short, clock):
+    async def body(rig):
+        _, tabbed = await session(rig, "tab", 7)
+        only = await tabbed({"op": "tabs"})
+        assert only == {
+            "ok": True,
+            "tabs": [
+                {
+                    "tab": 7,
+                    "window": 1,
+                    "index": 0,
+                    "active": True,
+                    "access": True,
+                    "origin": ORIGIN,
+                    "title": TITLE,
+                }
+            ],
+        }
+        _, whole = await session(rig)
+        listed = (await whole({"op": "tabs"}))["tabs"]
+        assert [e["tab"] for e in listed] == [7, 8, 9]
+        assert all("extra" not in e for e in listed)
+        assert listed[1]["origin"] is None and listed[1]["title"] is None
+
+    run(short, body)
+
+
+def test_stale_generation_lease_answers_grant_ended_and_sends_nothing_new(short, clock):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        await rig.a.leave()
+        rig.a = await FakeBrowser(rig, rig.alpha).pair("boot-two")
+        assert ack["grant"] not in rig.a.ack["live"]
+        ended = await gone(call, {"op": "page_read", "lease": lease})
+        assert ended == {"ok": False, "error": "GrantEnded", "reason": "browser_gone"}
+        assert rig.a.sent("page_read", "page_tab") == []
+
+    run(short, body)
+
+
+def test_document_changed_is_relayed_without_extra_fields_and_not_journaled(
+    short, clock
+):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.tabs[7]["document"] = "d7-2"
+        frames = {
+            "page_click": {
+                "op": "page_click",
+                "lease": lease,
+                "request_id": "c",
+                "ref": "1.0",
+            },
+            "page_type": {
+                "op": "page_type",
+                "lease": lease,
+                "request_id": "t",
+                "ref": "1.0",
+                "text": "hi",
+            },
+        }
+        for op, frame in frames.items():
+            assert await call(frame) == {
+                "ok": False,
+                "error": "DocumentChanged",
+                "tab": 7,
+                "access": True,
+                "document": "d7-2",
+            }
+            assert rig.a.sent(op)[-1]["document"] == "d7-1"
+        assert rig.broker.grants and len(rig.broker.claims) == 1
+        assert (
+            not rig.a.done
+            and not rig.broker.grants[next(iter(rig.broker.grants))].session.journal
+        )
+        read = await call({"op": "page_read", "lease": lease})
+        assert read["document"] == "d7-2" and read["document_changed"] is True
+        again = await call({"op": "page_read", "lease": lease})
+        assert again["document_changed"] is False
+        for op, frame in frames.items():
+            assert (await call(frame)) == {"ok": True, "tab": 7, "document": "d7-2"}
+            assert rig.a.sent(op)[-1]["document"] == "d7-2"
+        assert [d[0] for d in rig.a.done] == ["page_click", "page_type"]
+
+    run(short, body)
+
+
+def test_permission_needed_is_relayed_and_keeps_grant_and_lease(short, clock):
+    async def body(rig):
+        ack, call = await session(rig)
+        selected = await call({"op": "select", "tab": 8})
+        assert selected == {
+            "ok": True,
+            "lease": selected["lease"],
+            "tab": 8,
+            "access": False,
+            "document": None,
+            "origin": None,
+            "title": None,
+        }
+        lease = selected["lease"]
+        assert await call({"op": "page_read", "lease": lease}) == {
+            "ok": False,
+            "error": "PermissionNeeded",
+            "tab": 8,
+            "origin": None,
+        }
+        assert rig.broker.grants[ack["grant"]].state == "active"
+        landed = await call(
+            {
+                "op": "page_navigate",
+                "lease": lease,
+                "request_id": "n",
+                "url": ORIGIN + "/",
+            }
+        )
+        assert landed["access"] is True and landed["settled"] is True
+        assert (await call({"op": "page_read", "lease": lease}))["text"] == PAGE_TEXT
+
+    run(short, body)
+
+
+def test_select_claim_is_exclusive_between_sessions_and_refusal_takes_nothing(
+    short, clock
+):
+    async def body(rig):
+        _, first = await session(rig)
+        _, second = await session(rig)
+        held = await first({"op": "select", "tab": 7})
+        refused = await second({"op": "select", "tab": 7})
+        assert refused["error"] == "TabClaimed"
+        assert set(refused) == {"ok", "error", "holder", "expires_at"}
+        assert len(rig.broker.claims) == 1
+        assert (await first({"op": "select", "tab": 7}))["lease"] == held["lease"]
+        other = await second({"op": "select", "tab": 9})
+        assert other["ok"] and len(rig.broker.claims) == 2
+        assert (await first({"op": "release", "lease": held["lease"]})) == {"ok": True}
+        taken = await second({"op": "select", "tab": 7})
+        assert taken["ok"] and taken["lease"] != held["lease"]
+        assert (await first({"op": "page_read", "lease": held["lease"]}))["error"] == (
+            "StaleLease"
+        )
+
+    run(short, body)
+
+
+def test_page_operations_relay_the_contract_shapes(short, clock):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        read = await call({"op": "page_read", "lease": lease})
+        assert set(read) == {
+            "ok",
+            "tab",
+            "document",
+            "document_changed",
+            "origin",
+            "url",
+            "title",
+            "text",
+            "elements",
+            "truncated",
+        }
+        assert read["document_changed"] is False and read["elements"][0]["ref"] == "1.0"
+        typed = {
+            "op": "page_type",
+            "lease": lease,
+            "request_id": "t",
+            "ref": "1.0",
+            "text": "",
+        }
+        assert await call(typed) == {"ok": True, "tab": 7, "document": "d7-1"}
+        assert await call(typed) == {"ok": True, "tab": 7, "document": "d7-1"}
+        assert len(rig.a.sent("page_type")) == 1  # the journal answered the repeat
+        assert (await call({**typed, "text": "other"}))["error"] == "Conflict"
+        away = await call(
+            {
+                "op": "page_navigate",
+                "lease": lease,
+                "request_id": "n",
+                "url": "https://elsewhere.test/x",
+            }
+        )
+        assert away == {
+            "ok": True,
+            "tab": 7,
+            "access": False,
+            "document": None,
+            "origin": None,
+            "settled": True,
+        }
+        assert (await call({"op": "page_read", "lease": lease}))["error"] == (
+            "PermissionNeeded"
+        )
+        for frame in rig.a.frames:
+            if frame["op"].startswith("page_"):
+                assert {"url", "account"}.isdisjoint(frame) or frame["op"] == (
+                    "page_navigate"
+                )
+                assert frame["grant"] == ack["grant"] and "account" not in frame
+
+    run(short, body)
+
+
+@pytest.mark.parametrize(
+    "route", ["operator", "popup", "idle", "tab_closed", "unknown_grant"]
+)
+def test_ended_grant_answers_grant_ended_and_sends_grant_end(short, clock, route):
+    async def body(rig):
+        tab = route == "tab_closed"
+        ack, call = await session(rig, "tab" if tab else "profile", 7 if tab else None)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = {"op": "page_read", "lease": lease}
+        reason = {"operator": "revoked", "popup": "revoked", "idle": "idle"}
+        if route == "operator":
+            await rig.operator(op="revoke_grant", grant=ack["grant"])
+        elif route == "popup":
+            await rig.popup(rig.alpha, "revoke_grant", grant=ack["grant"])
+        elif route == "idle":
+            clock[0] += codes.GRANT_IDLE
+        elif route == "tab_closed":
+            rig.a.tabs.pop(7)
+            reason[route] = "tab_closed"
+        else:
+            rig.a.refuse["page_read"] = {"error": "UnknownGrant"}
+            reason[route] = "browser_gone"
+        ended = await gone(call, frame)
+        assert ended == {"ok": False, "error": "GrantEnded", "reason": reason[route]}
+        await settle(rig)
+        sent = rig.a.sent("grant_end")
+        assert [(f["grant"], f["reason"], f["last"]) for f in sent] == [
+            (ack["grant"], reason[route], True)
+        ]
+        assert not rig.broker.claims
+
+    run(short, body)
+
+
+def test_grant_end_reaches_the_worker_on_every_end_route_with_last(short, clock):
+    async def body(rig):
+        await session(rig)
+        two_ack, two = await session(rig)
+        waiting = await rig.mint(rig.alpha)
+        rig.writers[0].close()  # session one closes: ``closed``
+        await settle(rig)
+        assert [(f["reason"], f["last"]) for f in rig.a.sent("grant_end")] == [
+            ("closed", False)
+        ]
+        await rig.operator(op="revoke_grant", grant=two_ack["grant"])
+        await settle(rig)
+        assert rig.a.sent("grant_end")[-1]["last"] is False  # a code still waits
+        assert rig.broker.sweeper is not None
+        clock[0] += codes.CODE_TTL
+        rig.broker.sweep()
+        await settle(rig)
+        last = rig.a.sent("grant_end")[-1]
+        assert (last["grant"], last["reason"], last["last"]) == (
+            waiting["grant"],
+            "expired",
+            True,
+        )
+        assert rig.broker.sweeper is None and not rig.broker.grants
+        kept = await rig.mint(rig.alpha)
+        await rig.a.leave()
+        rig.a = await FakeBrowser(rig, rig.alpha).pair("boot-two")
+        assert rig.a.ack["live"] == [kept["grant"]]
+        assert (await gone(two))["reason"] == "revoked"
+
+    run(short, body)
+
+
+def test_malformed_requests_answer_invalid_and_send_nothing(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        sent = len(rig.a.frames)
+        base = {
+            "op": "page_type",
+            "lease": lease,
+            "request_id": "t",
+            "ref": "1.0",
+            "text": "x",
+        }
+        invalid = [
+            {"op": "tabs", "extra": 1},
+            {"op": "select"},
+            {"op": "select", "tab": "7"},
+            {"op": "select", "tab": -1},
+            {"op": "select", "tab": True},
+            {**base, "text": 5},
+            {**base, "text": "x" * 8193},
+            {**base, "ref": ""},
+            {k: v for k, v in base.items() if k != "ref"},
+            {"op": "claim"},
+            {"op": "snapshot", "lease": lease, "request_id": "s"},
+            {"op": "click", "lease": lease, "request_id": "c", "marker": "m"},
+            {"op": "page_navigate", "lease": lease, "request_id": "n", "url": 5},
+            {"op": "unknown"},
+        ]
+        for frame in invalid:
+            assert (await call(frame)) == {"ok": False, "error": "InvalidRequest"}, (
+                frame
+            )
+        for url in (
+            "javascript:alert(1)",
+            "http://example.test/",
+            "https://user:pw@qa.test/",
+            "file:///etc/passwd",
+            "data:text/html,x",
+            "https://qa.test:99999/",
+        ):
+            frame = {
+                "op": "page_navigate",
+                "lease": lease,
+                "request_id": "n",
+                "url": url,
+            }
+            assert (await call(frame)) == {"ok": False, "error": "InvalidUrl"}, url
+        assert len(rig.a.frames) == sent and len(rig.broker.claims) == 1
+        local = {"op": "page_navigate", "lease": lease, "request_id": "l"}
+        assert (await call({**local, "url": "http://127.0.0.1:8080/"}))["ok"]
+
+    run(short, body)
+
+
+@pytest.mark.parametrize("op", ["page_click", "page_type", "page_navigate"])
+def test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried(
+    short, clock, monkeypatch, op
+):
+    monkeypatch.setattr(protocol, "PAGE_WAIT", 0.2)
+
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = {
+            "page_click": {"op": op, "lease": lease, "request_id": "r", "ref": "1.0"},
+            "page_type": {
+                "op": op,
+                "lease": lease,
+                "request_id": "r",
+                "ref": "1.0",
+                "text": "x",
+            },
+            "page_navigate": {
+                "op": op,
+                "lease": lease,
+                "request_id": "r",
+                "url": ORIGIN,
+            },
+        }[op]
+        rig.a.hold[op] = asyncio.Event()  # the worker never answers
+        assert await call(frame) == {"ok": False, "error": "OutcomeUnknown"}
+        assert len(rig.a.sent(op)) == 1
+        assert not rig.broker.claims
+        await rig.a.task  # the broker dropped the silent browser
+        ended = await gone(call, frame)
+        assert ended == {"ok": False, "error": "GrantEnded", "reason": "browser_gone"}
+        assert len(rig.a.sent(op)) == 1
+
+    run(short, body)
+
+
+def test_lost_reply_on_read_is_browser_disconnected(short, clock, monkeypatch):
+    monkeypatch.setattr(protocol, "PAGE_WAIT", 0.2)
+
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.hold["page_read"] = asyncio.Event()
+        assert await call({"op": "page_read", "lease": lease}) == {
+            "ok": False,
+            "error": "BrowserDisconnected",
+        }
+
+    run(short, body)
+
+
+def test_result_line_failure_ends_the_grant_and_releases_no_result(
+    short, clock, monkeypatch
+):
+    async def body(rig):
+        real = rig.broker.audit.write
+
+        def results_fail(event, **fields):
+            if event == "operation" and fields.get("outcome") == "ok":
+                raise OSError("disk full")
+            return real(event, **fields)
+
+        _, reader = await session(rig)
+        lease = (await reader({"op": "select", "tab": 7}))["lease"]
+        monkeypatch.setattr(rig.broker.audit, "write", results_fail)
+        ended = await gone(reader, {"op": "page_read", "lease": lease})
+        assert ended == {"ok": False, "error": "GrantEnded", "reason": "audit"}
+        assert PAGE_TEXT not in str(ended)
+        monkeypatch.setattr(rig.broker.audit, "write", real)
+        _, clicker = await session(rig)
+        lease = (await clicker({"op": "select", "tab": 7}))["lease"]
+        monkeypatch.setattr(rig.broker.audit, "write", results_fail)
+        frame = {"op": "page_click", "lease": lease, "request_id": "c", "ref": "1.0"}
+        assert await clicker(frame) == {"ok": False, "error": "OutcomeUnknown"}
+        assert [d[0] for d in rig.a.done] == ["page_click"]  # it did run
+        monkeypatch.setattr(rig.broker.audit, "write", real)
+        assert (await gone(clicker, frame))["reason"] == "audit"
+        await settle(rig)
+        assert [f["reason"] for f in rig.a.sent("grant_end")] == ["audit", "audit"]
+        assert not rig.broker.grants and not rig.broker.claims
+
+    run(short, body)
+
+
+def test_admitted_line_failure_sends_nothing_and_keeps_the_lease(
+    short, clock, monkeypatch
+):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        real = rig.broker.audit.write
+
+        def broken(*_a, **_k):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(rig.broker.audit, "write", broken)
+        frame = {"op": "page_click", "lease": lease, "request_id": "c", "ref": "1.0"}
+        assert await call(frame) == {"ok": False, "error": "AuditUnavailable"}
+        monkeypatch.setattr(rig.broker.audit, "write", real)
+        assert rig.a.sent("page_click") == [] and len(rig.broker.claims) == 1
+        assert not rig.broker.grants[ack["grant"]].session.journal
+        assert (await call(frame))["ok"]
+
+    run(short, body)
+
+
+@pytest.mark.parametrize(
+    "refusal, lease_kept",
+    [
+        ({"error": "StaleElement", "tab": 7}, True),
+        ({"error": "NotEditable", "tab": 7}, True),
+        ({"error": "OutOfScope", "tab": 7}, False),
+        ({"error": "TabNotFound", "tab": 7}, False),
+        ({"error": "ProfileMismatch"}, False),
+        ({"error": "SomethingNew", "tab": 7}, False),
+    ],
+)
+def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_kept):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse["page_type"] = {**refusal, "text": PAGE_TEXT}
+        frame = {
+            "op": "page_type",
+            "lease": lease,
+            "request_id": "t",
+            "ref": "1.0",
+            "text": "x",
+        }
+        reply = await call(frame)
+        expected = {k: v for k, v in refusal.items()}
+        if refusal["error"] == "SomethingNew":
+            expected = {"error": "BrowserRefused"}
+        assert reply == {"ok": False, **expected}
+        assert (len(rig.broker.claims) == 1) is lease_kept
+        assert rig.broker.grants[ack["grant"]].state == "active"
+        assert not rig.broker.grants[ack["grant"]].session.journal
+
+    run(short, body)
