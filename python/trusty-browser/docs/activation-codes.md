@@ -1,6 +1,7 @@
 # Activation codes: broker frame contract
 
-Status: phase 1 (broker core) is built. Phase 2, this document's page
+Status: phase 1 (broker core) is built, and so is the MCP adapter's
+connect flow ("MCP tools", "Built at the adapter checkpoint"). Phase 2, this document's page
 operations, is the build contract for issue #11239: the popup mint flow, the
 MCP connect flow, and tabs list, tab select, read, click, type and navigate on
 ordinary pages. A Python builder and a JavaScript builder build against it in
@@ -202,6 +203,10 @@ within `LOCK_MAX` of the previous one doubles, up to `LOCK_MAX`; a successful
 redeem, or `LOCK_MAX` without a lock, resets the length. Mint is never locked.
 
 ## Operations on a code session — `agent.sock`
+
+Not in this checkpoint: at the adapter checkpoint the broker accepts
+`claim`, `snapshot`, `click` and `release` on a code session within the
+grant's scope, and none of the ops below exists yet.
 
 A code session uses only the ops below. A workflow session (`open`) keeps
 `claim`, `snapshot`, `click` and `release` unchanged and refuses the ops below
@@ -602,34 +607,78 @@ until it expires or is cancelled.
 
 `trusty-browser-mcp` keeps workflow mode (`--workflow` or `--credential`, with
 the existing four tools `browser_claim`, `browser_snapshot`, `browser_click`,
-`browser_release`) unchanged. Run with neither flag, it starts in code mode:
-it holds no credential and opens no socket until `browser_connect`. The two
-modes register disjoint tool sets except `browser_release`, which has the same
-shape in both. All tool names below are provisional.
+`browser_release`) unchanged. Run with neither flag, it starts in code mode.
+
+### Built at the adapter checkpoint
+
+Code mode at this checkpoint (`src/trusty_browser/agent_mcp.py`, tests in
+`tests/test_agent_mcp.py`):
+
+- Start-up reads no credential, touches no file and opens no socket. The
+  server answers MCP `initialize` and `tools/list` whether the broker is
+  running or not, and whether `agent.sock` exists or not. It never exits
+  because the broker is down.
+- `browser_connect` opens `<state>/agent.sock`, sends `redeem` as the first
+  frame and keeps that one connection as the session. Every later tool call
+  uses it.
+- Server shutdown (stdin closed) closes the session, so the broker ends the
+  grant with `closed`.
 
 | Tool | Parameters | Result |
 |---|---|---|
-| `browser_connect` | `code: str` | The redeem reply: `grant`, `scope`, `profile`, `tab` (tab scope), `idle_timeout_s` |
+| `browser_connect` | `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only), `idle_timeout_s`. Never the code |
+| `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `disconnected` is `false` when no session was held |
+| `browser_claim` | none | The broker's `claim` reply, as in workflow mode, inside the grant's scope |
+| `browser_snapshot` | `lease: str`, `request_id: str` | The broker's `snapshot` reply, as in workflow mode |
+| `browser_click` | `lease: str`, `request_id: str`, `marker: str` | The broker's `click` reply, as in workflow mode |
+| `browser_release` | `lease: str` | `{"ok": true}` |
+
+Every refusal is an MCP tool error (`isError: true`). Its text is
+`Error executing tool <tool>: ` followed by one compact JSON error frame. A
+broker refusal is relayed as the broker wrote it, for example
+`{"ok":false,"error":"GrantLimit","limit":"tab"}` or
+`{"ok":false,"error":"RedeemLocked","retry_after_s":60}`. Adapter-local
+refusals carry `ok`, `error` and `message`:
+
+| Error | When | Session after |
+|---|---|---|
+| `ServiceUnavailable` | `agent.sock` is missing, refuses the connection, closes, times out (30 s) or sends a bad frame, on any tool that uses the socket | None. A later `browser_connect` works once the broker is up, without restarting the server |
+| `NotConnected` | `browser_claim`, `browser_snapshot`, `browser_click` or `browser_release` with no session | None |
+| `AlreadyConnected` | `browser_connect` while a live session is held | Unchanged. The new code is not sent and stays redeemable |
+
+Second-connect rule: refuse. `browser_connect` on a live session answers
+`AlreadyConnected`; call `browser_disconnect` first. Before refusing, the
+adapter peeks the socket without blocking; a session the broker has closed is
+dropped and the connect proceeds, so a dead session never blocks a new code.
+
+Session drop: a refused redeem (every error in "redeem"), a `GrantEnded`
+reply, and any `ServiceUnavailable` drop the session. The next tool other
+than `browser_connect` answers `NotConnected`, and `browser_connect` with a
+new code works.
+
+The code is never logged, written to disk, or placed in a result or error
+text. The adapter has no log line of its own, and the MCP library logs only
+request types.
+
+### Not in this checkpoint
+
+The code-mode page tools below are the later contract. None is registered at
+this checkpoint, and the broker still accepts `claim`, `snapshot`, `click` and
+`release` on a code session (see "Operations on a code session"). All tool
+names below are provisional.
+
+| Tool | Parameters | Result |
+|---|---|---|
 | `browser_tabs` | none | `tabs`: tab entries |
 | `browser_select` | `tab: int` | The `select` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
-| `browser_release` | `lease: str` | `{"ok": true}` |
-| `browser_disconnect` | none | `{"ok": true, "disconnected": true}` |
 
-Results are the broker reply frames. A refusal raises a tool error whose text
-is the compact JSON error frame, for example
-`{"ok":false,"error":"PermissionNeeded","tab":12,"origin":null}`. Shim-local
-refusals use the same shape: `NotConnected` (a tool other than
-`browser_connect` before a grant is held), `AlreadyConnected`
-(`browser_connect` while one is held). `browser_connect` opens `agent.sock`
-and sends `redeem`; on a refusal the broker closes the socket and the shim
-returns to not connected, so the agent may call `browser_connect` again.
-After any `GrantEnded` reply, or a closed socket, the shim is not connected.
-`browser_disconnect` closes the socket; the broker ends the grant with
-`closed`.
+When these land, code mode registers them in place of `browser_claim`,
+`browser_snapshot` and `browser_click`; `browser_release`,
+`browser_connect` and `browser_disconnect` keep their shapes.
 
 ## Audit log
 
@@ -737,9 +786,12 @@ Python (broker and shim):
 - Audit: no line carries typed text, read text, a title, a URL path or query,
   or a ref; the admitted-line failure answers `AuditUnavailable` with nothing
   sent.
-- Shim: tools before `browser_connect` answer `NotConnected`; a second connect
-  answers `AlreadyConnected`; a refused redeem leaves the shim reconnectable;
-  error text is the JSON frame.
+- Shim (built; `tests/test_agent_mcp.py`): start-up and `tools/list` with no
+  broker and no socket; tools before `browser_connect` answer `NotConnected`;
+  a second connect answers `AlreadyConnected` and spends no code; each redeem
+  refusal is relayed and leaves the shim reconnectable; `GrantEnded` and
+  broker loss drop the session; disconnect and shutdown end the grant; the
+  code never reaches a result, the server's stderr or a file.
 
 JavaScript (worker, page functions, popup):
 

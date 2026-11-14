@@ -1,4 +1,7 @@
-"""Expose one workflow to one web-QA agent over a persistent Unix socket."""
+"""Expose Trusty Browser to one agent over stdio MCP, by workflow ticket or activation code.
+
+Code mode contract (#11239): docs/activation-codes.md, "MCP tools".
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ import re
 import socket
 import stat
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any, BinaryIO
@@ -19,6 +23,13 @@ from trusty_browser import vault
 
 HEADER = struct.Struct("=I")
 MAX_FRAME = 1024 * 1024
+TIMEOUT = 30.0
+UNAVAILABLE = (
+    "The Trusty Browser service is not reachable on agent.sock; "
+    "start it, then call browser_connect again"
+)
+NOT_CONNECTED = "No activation code session; call browser_connect with a code first"
+ALREADY_CONNECTED = "A session is already held; call browser_disconnect first"
 
 
 def read_reply(stream: BinaryIO) -> dict[str, Any]:
@@ -35,6 +46,30 @@ def read_reply(stream: BinaryIO) -> dict[str, Any]:
     if not isinstance(reply, dict) or type(reply.get("ok")) is not bool:
         raise ValueError("Invalid Trusty Browser reply")
     return reply
+
+
+def add_tab_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None:
+    """Register the four lease tools; both modes share their names and shapes."""
+
+    @server.tool()
+    def browser_claim() -> dict[str, Any]:
+        """Verify the configured Chrome and site identities, then claim this workflow's tab."""
+        return call("claim")
+
+    @server.tool()
+    def browser_snapshot(lease: str, request_id: str) -> dict[str, Any]:
+        """Read the claimed tab after checking both identities again."""
+        return call("snapshot", lease=lease, request_id=request_id)
+
+    @server.tool()
+    def browser_click(lease: str, request_id: str, marker: str) -> dict[str, Any]:
+        """Submit the marker to the enrolled page. Reuse the request ID for a retry."""
+        return call("click", lease=lease, request_id=request_id, marker=marker)
+
+    @server.tool()
+    def browser_release(lease: str) -> dict[str, Any]:
+        """Release this workflow's claim."""
+        return call("release", lease=lease)
 
 
 def run(state: Path, credential: Path) -> None:
@@ -55,7 +90,7 @@ def run(state: Path, credential: Path) -> None:
         )
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as wire:
-        wire.settimeout(30)
+        wire.settimeout(TIMEOUT)
         wire.connect(str(state / "agent.sock"))
         with wire.makefile("rb") as stream:
             lock = Lock()
@@ -78,30 +113,126 @@ def run(state: Path, credential: Path) -> None:
 
             call("open", workflow=grant["workflow"], ticket=grant["ticket"])
             server = FastMCP("trusty-browser")
-
-            @server.tool()
-            def browser_claim() -> dict[str, Any]:
-                """Verify the configured Chrome and site identities, then claim this workflow's tab."""
-                return call("claim")
-
-            @server.tool()
-            def browser_snapshot(lease: str, request_id: str) -> dict[str, Any]:
-                """Read the claimed tab after checking both identities again."""
-                return call("snapshot", lease=lease, request_id=request_id)
-
-            @server.tool()
-            def browser_click(
-                lease: str, request_id: str, marker: str
-            ) -> dict[str, Any]:
-                """Submit the marker to the enrolled page. Reuse the request ID for a retry."""
-                return call("click", lease=lease, request_id=request_id, marker=marker)
-
-            @server.tool()
-            def browser_release(lease: str) -> dict[str, Any]:
-                """Release this workflow's claim."""
-                return call("release", lease=lease)
-
+            add_tab_tools(server, call)
             server.run(transport="stdio")
+
+
+class Refused(Exception):
+    """A tool error whose text is one compact JSON error frame, never a code."""
+
+    def __init__(self, frame: dict[str, Any]) -> None:
+        super().__init__(json.dumps(frame, separators=(",", ":"), allow_nan=False))
+
+
+def local(error: str, message: str) -> Refused:
+    return Refused({"ok": False, "error": error, "message": message})
+
+
+class CodeSession:
+    """At most one redeemed ``agent.sock`` connection, opened only by ``connect``.
+
+    Why: code mode must start, list tools and recover with the broker down (#11239).
+    What: every socket failure drops the connection and answers
+    ``ServiceUnavailable``; a refused redeem or ``GrantEnded`` drops it too.
+    Test: `test_code_mode_starts_and_lists_tools_with_no_broker`,
+    `test_broker_loss_mid_session_answers_unavailable_then_reconnects`.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.lock = Lock()
+        self.wire: socket.socket | None = None
+        self.stream: BinaryIO | None = None
+
+    def drop(self) -> None:
+        if self.stream is not None:
+            self.stream.close()
+        if self.wire is not None:
+            self.wire.close()
+        self.wire = self.stream = None
+
+    def alive(self) -> bool:
+        """Peek without blocking: a closed or failed socket is dead."""
+        assert self.wire is not None
+        self.wire.setblocking(False)
+        try:
+            return self.wire.recv(1, socket.MSG_PEEK) != b""
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        finally:
+            self.wire.settimeout(TIMEOUT)
+
+    def exchange(self, frame: dict[str, Any]) -> dict[str, Any]:
+        assert self.wire is not None and self.stream is not None
+        data = json.dumps(frame, allow_nan=False).encode()
+        if len(data) > MAX_FRAME:
+            raise local("InvalidRequest", "The request is too large")
+        try:
+            self.wire.sendall(HEADER.pack(len(data)) + data)
+            return read_reply(self.stream)
+        except (OSError, ValueError):
+            self.drop()
+            raise local("ServiceUnavailable", UNAVAILABLE) from None
+
+    def connect(self, code: str) -> dict[str, Any]:
+        with self.lock:
+            if self.wire is not None and self.alive():
+                raise local("AlreadyConnected", ALREADY_CONNECTED)
+            self.drop()
+            wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            wire.settimeout(TIMEOUT)
+            try:
+                wire.connect(str(self.path))
+            except OSError:
+                wire.close()
+                raise local("ServiceUnavailable", UNAVAILABLE) from None
+            self.wire, self.stream = wire, wire.makefile("rb")
+            reply = self.exchange({"op": "redeem", "code": code})
+            if not reply["ok"]:
+                self.drop()  # The broker closes a refused redeem; so do we.
+                raise Refused(reply)
+            return reply
+
+    def call(self, op: str, **fields: str) -> dict[str, Any]:
+        with self.lock:
+            if self.wire is None:
+                raise local("NotConnected", NOT_CONNECTED)
+            reply = self.exchange({"op": op, **fields})
+            if not reply["ok"]:
+                if reply.get("error") == "GrantEnded":
+                    self.drop()  # The broker closes the socket after this frame.
+                raise Refused(reply)
+            return reply
+
+    def disconnect(self) -> dict[str, Any]:
+        with self.lock:
+            held = self.wire is not None
+            self.drop()
+        return {"ok": True, "disconnected": held}
+
+
+def run_codes(state: Path) -> None:
+    """Serve code mode: no credential, no socket until ``browser_connect``."""
+    session = CodeSession(state / "agent.sock")
+    server = FastMCP("trusty-browser")
+
+    @server.tool()
+    def browser_connect(code: str) -> dict[str, Any]:
+        """Redeem a one-use activation code (tb-...) from the Trusty Browser popup."""
+        return session.connect(code)
+
+    @server.tool()
+    def browser_disconnect() -> dict[str, Any]:
+        """Close the session; the broker ends its grant."""
+        return session.disconnect()
+
+    add_tab_tools(server, session.call)
+    try:
+        server.run(transport="stdio")
+    finally:
+        session.disconnect()
 
 
 def main() -> None:
@@ -109,7 +240,7 @@ def main() -> None:
     parser.add_argument(
         "--state", type=Path, default=Path.home() / ".trusty" / "browser"
     )
-    group = parser.add_mutually_exclusive_group(required=True)
+    group = parser.add_mutually_exclusive_group()
     group.add_argument("--workflow", help="Workflow ID shown under Activation details")
     group.add_argument(
         "--credential", type=Path, help="Explicit private workflow credential file"
@@ -120,7 +251,10 @@ def main() -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", args.workflow):
             parser.error("invalid workflow name")
         credential = args.state / "workflows" / (args.workflow + ".json")
-    run(args.state, credential)
+    if credential is None:
+        run_codes(args.state)
+    else:
+        run(args.state, credential)
 
 
 if __name__ == "__main__":

@@ -37,7 +37,19 @@ Configure one stdio MCP server per agent workflow. Use the workflow ID from **Ac
 
 The MCP client offers `browser_claim`, `browser_snapshot`, `browser_click` and `browser_release`. An agent must hold a lease before using a tab. A browser restart invalidates outstanding leases. Reopen the enrolled URL in the signed-in profile before claiming again. Only one tab in that profile may match the exact URL. If a click loses its acknowledgment, inspect the site before retrying.
 
-One-use activation codes let an agent drive one profile or one tab without a workflow ticket. The broker frame contract is in [docs/activation-codes.md](docs/activation-codes.md).
+One-use activation codes let an agent drive one profile or one tab without a workflow ticket. For code mode, configure the server with no `--workflow` or `--credential` argument:
+
+```json
+{
+  "mcpServers": {
+    "trusty-browser": {
+      "command": "trusty-browser-mcp"
+    }
+  }
+}
+```
+
+The server starts and lists its tools even when the service is not running. The agent calls `browser_connect` with the code from the popup, then uses `browser_claim`, `browser_snapshot`, `browser_click` and `browser_release` inside the grant, and `browser_disconnect` to end it. If the service is down, `browser_connect` answers a `ServiceUnavailable` tool error; call it again once the service is up. Tool shapes and error frames are in "MCP tools", and the broker frame contract in the rest of [docs/activation-codes.md](docs/activation-codes.md).
 
 ## Supported sites
 
