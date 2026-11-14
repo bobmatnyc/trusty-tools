@@ -240,6 +240,7 @@ fn unresumable_remedy_line_cites_real_subcommands() {
                 SessionAction::Delete {
                     id: parsed_id,
                     force,
+                    ..
                 },
         } => {
             assert_eq!(parsed_id, id);

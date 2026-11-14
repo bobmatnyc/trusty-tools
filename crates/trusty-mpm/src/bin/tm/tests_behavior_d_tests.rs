@@ -379,7 +379,7 @@ fn cli_parses_session_delete() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Delete { id, force },
+            action: SessionAction::Delete { id, force, .. },
         } => {
             assert_eq!(id, "abc");
             assert!(!force, "default must be the fail-closed force=false");
@@ -390,12 +390,66 @@ fn cli_parses_session_delete() {
     let cli2 = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc", "--force"]).unwrap();
     match cli2.command.unwrap() {
         Command::Session {
-            action: SessionAction::Delete { id, force },
+            action: SessionAction::Delete { id, force, .. },
         } => {
             assert_eq!(id, "abc");
             assert!(force, "--force must set force=true");
         }
         other => panic!("expected session delete, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_session_delete_project_dir() {
+    // #10992: `--project-dir` opts in; `--dry-run`/`--yes` need it; `--force`
+    // (the record-only running bypass) cannot be combined with it.
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "session",
+        "delete",
+        "abc",
+        "--project-dir",
+        "--dry-run",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Session {
+            action:
+                SessionAction::Delete {
+                    project_dir,
+                    dry_run,
+                    yes,
+                    force,
+                    ..
+                },
+        } => {
+            assert!(project_dir && dry_run && !yes && !force);
+        }
+        other => panic!("expected session delete, got {other:?}"),
+    }
+    let plain = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
+    match plain.command.unwrap() {
+        Command::Session {
+            action: SessionAction::Delete { project_dir, .. },
+        } => assert!(!project_dir, "the directory is never removed by default"),
+        other => panic!("expected session delete, got {other:?}"),
+    }
+    for args in [
+        &["trusty-mpm", "session", "delete", "abc", "--dry-run"][..],
+        &["trusty-mpm", "session", "delete", "abc", "--yes"][..],
+        &[
+            "trusty-mpm",
+            "session",
+            "delete",
+            "abc",
+            "--project-dir",
+            "--force",
+        ][..],
+    ] {
+        assert!(
+            Cli::try_parse_from(args).is_err(),
+            "{args:?} must not parse"
+        );
     }
 }
 
