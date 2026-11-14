@@ -357,6 +357,13 @@ def _reconcile(project, st, now):
     current = owner_rulings(st, now)
     cur = {i["id"] for i, _ in current}
     loud, stale, unsourced, note, seen, ok = [], [], [], [], {}, []
+
+    def chain_end(i):   # the last successor id of a superseded ruling, or None
+        succ, hops = by_id.get(i.get("superseded_by")), 0
+        while succ is not None and "superseded_by" in succ and hops < SUCCESSOR_HOPS:
+            succ, hops = by_id.get(succ["superseded_by"]), hops + 1
+        return succ.get("id") if succ is not None else None
+
     srcs = [("handoff", r["value"], _handoff_path(project, r["value"]))
             for r in (st.get("session") or {}).get("refs") or [] if r.get("key") == "handoff"]
     if not srcs:
@@ -381,10 +388,11 @@ def _reconcile(project, st, now):
         ok.append(label)
         for n, ln in lines:
             refs = _refs(ln, owned)
-            if any(i["id"] in cur for i in refs):
-                seen[kind] |= {i["id"] for i in refs if i["id"] in cur}
-            elif refs:
-                stale += [_stale_ref(f"{label}:{n}", i, by_id, cur) for i in refs]
+            live = {i["id"] for i in refs if i["id"] in cur}
+            seen[kind] |= live
+            if refs:   # #11191: per ref; only a ref whose chain-end successor is on the line is exempt
+                stale += [_stale_ref(f"{label}:{n}", i, by_id, cur) for i in refs
+                          if i["id"] not in cur and chain_end(i) not in live]
             elif _rule_line(ln) if kind == RULES_FILE else (OWNER_CLAIM.search(ln) or CITE_OF.search(ln)):
                 unsourced.append(f"  FLAG reconcile: {label}:{n} has no ledger source (not an owner ruling until the "
                              f"ledger holds it): {_short(ln, 120)}")

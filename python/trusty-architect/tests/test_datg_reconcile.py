@@ -172,6 +172,25 @@ def test_the_cap_never_drops_stale_or_missing_lines_for_no_source_lines_10960(il
     assert b[-1] == f"  +{16 - (datg_read.RECONCILE_MAX - 3)} more reconcile flags not shown", b
 
 
+def test_a_current_ruling_on_a_line_never_hides_a_superseded_cite_beside_it_10960(il):
+    answer(il, "ar-D01", T1)
+    answer(il, "ar-D02", T2, supersedes="ar-D01")
+    answer(il, "ar-D03", HOLD)
+    sources(il, handoff=["- helpers: " + line(T1) + "; hold ar-D03", "- helpers ar-D01 now ar-D02"],
+            rules=["- ar-D02 ar-D03"])
+    fl = flags(il)   # line 2 names the successor beside the old ruling: an update, not a stale cite
+    assert fl == ["  FLAG reconcile: state.md:1 cites ar-D01, SUPERSEDED, not applied; ledger applies "
+                  f'ar-D02 "{T2["text"]}" (owner turn: {cite(T2)})'], fl
+
+
+def test_a_current_ruling_on_a_line_never_hides_an_expired_cite_beside_it_10960(il):
+    answer(il, "ar-D05", OLD, until="2026-11-08T09:00Z")
+    answer(il, "ar-D03", HOLD)
+    sources(il, handoff=["- docs paused ar-D05, hold ar-D03"], rules=["- ar-D03"])
+    b = block(il)
+    assert b[1:] == ["  FLAG reconcile: state.md:1 cites ar-D05, EXPIRED at 2026-11-08T09:00Z, not applied"], b
+
+
 def test_all_reconciled_when_every_source_matches_10960(il):
     answer(il, "ar-D03", HOLD)
     sources(il, handoff=["- hold: " + line(HOLD)], rules=["# Rules", "- ar-D03 " + line(HOLD)])
