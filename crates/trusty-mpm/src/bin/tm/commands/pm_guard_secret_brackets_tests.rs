@@ -147,8 +147,13 @@ fn parses_every_bracket_form_a_shell_accepts() {
         bracket_readings("id_[r]sa"),
         Some(vec!["id_rsa".to_string()])
     );
-    let negated = bracket_readings(".[!eE]nv").unwrap_or_default();
-    assert!(!negated.iter().any(|r| r == ".env"), "{negated:?}");
+    let negated = bracket_readings(".[!eE]nv");
+    assert!(
+        negated
+            .as_ref()
+            .is_some_and(|rs| !rs.is_empty() && !rs.iter().any(|r| r == ".env")),
+        "{negated:?}"
+    );
     assert!(bracket_readings(".[!e]nv").is_some_and(|rs| rs.iter().any(|r| r == ".Env")));
     assert!(bracket_readings(".[a-c]").is_some_and(|rs| rs.iter().any(|r| r == ".B")));
     assert_eq!(bracket_readings("[/]"), Some(Vec::new()));
@@ -195,6 +200,32 @@ fn a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed() {
             "`{command}` must allow"
         );
     }
+}
+
+/// #10761 review: a `[` with more than `MAX_CLOSES` (16) candidate closing `]`
+/// is unreadable and denies; 16 closes are still enumerated and allow.
+#[test]
+fn a_bracket_with_too_many_candidate_closes_fails_closed() {
+    let word = |closes: usize| format!(".[x{}nv", "]".repeat(closes));
+    let over = word(17);
+    assert_eq!(bracket_readings(&over), None, "{over}");
+    assert!(denies(&format!("cat {over}")), "17 closes must deny");
+    let at_cap = word(16);
+    assert!(bracket_readings(&at_cap).is_some(), "{at_cap}");
+    assert!(!denies(&format!("cat {at_cap}")), "16 closes still allow");
+}
+
+/// #10761 review: a word that is ambiguous (a `[` with several candidate
+/// closes) and overflows `MAX_READINGS` even with every class widened to `?`
+/// is `None`, never an empty name list, which would allow.
+#[test]
+fn an_ambiguous_word_over_the_reading_cap_is_unreadable() {
+    let word: String = "pqrstu"
+        .chars()
+        .map(|c| format!("[ab]{c}]"))
+        .collect::<String>();
+    assert_eq!(bracket_readings(&word), None, "{word}");
+    assert!(denies(&format!("cat {word}")), "`{word}` must deny");
 }
 
 /// #10761 review: ripgrep's globset reads a `/` inside a class as a member, so
