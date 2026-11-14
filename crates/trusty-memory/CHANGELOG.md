@@ -6,6 +6,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.36.8] — 2026-11-14
+
+### Added
+
+- `memory.palace_unload {palace_id}`, a socket method (not an MCP tool) that releases one palace's open handles and caches and keeps its data on disk (#10989). It waits up to 10 s for an in-flight write, flushes the palace's BM25 index, drops its session store and registry handle, and answers `{palace_id, canonical_id, exists, was_resident, unloaded, data_kept}`. A busy palace is refused (`-32006`) and nothing is released; a palace not on disk answers `exists: false`. The next use reopens the palace from disk. tm's project decommission calls it.
+- `memory.palace_unload` answers unloaded only after the palace's redb files are closed, waiting up to the same 10 s (#10989). The next use then reopens the palace writable, never on a read-only snapshot. A file still open after the wait is refused (`-32006`).
+
+### Fixed
+
+- the room-counts console metrics test waits for the evicted palace's KgWriter task before it reads the disk, which removes a flaky failure (Refs [#11080](https://github.com/bobmatnyc/trusty-tools/issues/11080))
+
 ## [0.36.7] — 2026-11-10
 
 ### Changed
