@@ -162,6 +162,8 @@ pub fn discover_claude_sessions(state: &DaemonState) -> DiscoveryResult {
         session.tmux_name = session_name.clone();
         session.status = SessionStatus::Active;
         session.origin = SessionHost::Tmux;
+        // #10368: the pane's cwd names the checkout to register as a project.
+        session.project_path = driver.pane_current_path(&session_name);
         state.register_session(session);
         tracing::info!("auto-discovered Claude Code tmux session: {session_name}");
         result.adopted += 1;
@@ -483,7 +485,9 @@ pub async fn discover_native_processes(state: &DaemonState) -> DiscoveryResult {
 /// Why: startup and `POST /sessions/discover` must surface Claude Code wherever
 /// it runs; a single entry point keeps both scans in lockstep.
 /// What: runs [`discover_claude_sessions`] then [`discover_native_processes`]
-/// and merges their [`DiscoveryResult`]s.
+/// and merges their [`DiscoveryResult`]s, then registers each adopted
+/// session's checkout as a project (#10368,
+/// [`super::session_project::register_adopted_sessions`]).
 ///
 /// Scratch-environment gate (#5784): both scans read state that `$HOME` does
 /// not isolate — the tmux server and the host process table — and adopting
@@ -512,6 +516,8 @@ pub async fn discover_all(state: &DaemonState) -> DiscoveryResult {
     let native = discover_native_processes(state).await;
     result.adopted += native.adopted;
     result.sessions.extend(native.sessions);
+    // #10368: a running session first seen here registers its checkout.
+    crate::daemon::session_project::register_adopted_sessions(state, &result.sessions).await;
     result
 }
 
