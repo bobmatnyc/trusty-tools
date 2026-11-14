@@ -1,12 +1,13 @@
 # Activation codes: broker frame contract
 
-Status: phase 1 (broker core) is built, and so is the MCP adapter's
-connect flow ("MCP tools", "Built at the adapter checkpoint"). Phase 2, this document's page
+Status: phase 1 (broker core) is built. Phase 2, this document's page
 operations, is the build contract for issue #11239: the popup mint flow, the
 MCP connect flow, and tabs list, tab select, read, click, type and navigate on
-ordinary pages. A Python builder and a JavaScript builder build against it in
-parallel; see "File ownership". Names marked provisional may change before
-release, but both sides use them exactly as written here.
+ordinary pages. The broker side of phase 2 (pairing, page operations, the MCP
+page tools and the operator CLI verbs) is built; the extension side is built
+against the same text. A Python builder and a JavaScript builder build
+against it in parallel; see "File ownership". Names marked provisional may
+change before release, but both sides use them exactly as written here.
 
 An activation code lets any local agent drive one paired Chrome profile, or
 one tab in it, without holding the workflow ticket. The popup mints a code, a
@@ -38,11 +39,14 @@ fields are refused.
   (`peer.generation`). A navigation inside the same tab keeps the incarnation;
   a closed or replaced tab, or a browser restart, ends it. See "Tab
   incarnation and documentId".
-- **Page access**: Chrome's `activeTab` grant on a tab. The user creates it by
-  clicking the extension action on that tab. It covers the origin shown at the
-  click. It survives popup close, same-origin navigation, reload and tab
-  switch. It ends on any cross-origin navigation (a different port counts) and
-  does not return when the tab goes back.
+- **Page access**: the right to inject into a tab's top document. It comes
+  from either of two Chrome grants. `activeTab`: the user clicks the extension
+  action on that tab; it covers the origin shown at the click, survives popup
+  close, same-origin navigation, reload and tab switch, ends on any
+  cross-origin navigation (a different port counts) and does not return when
+  the tab goes back. The optional `https://*/*` host permission: requested at
+  Activate and held while the profile has a live code or grant (see "All-https
+  access"); it covers every `https:` page of the profile.
 - Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
   `MAX_GRANTS_PER_TAB = 1`, lockout `FAIL_LIMIT = 5` failures
   in `FAIL_WINDOW = 60` s, first lock `LOCK_BASE = 60` s, doubling per repeat
@@ -53,8 +57,8 @@ fields are refused.
 
 - Manifest permissions stay exactly: `storage`, `nativeMessaging`, `identity`,
   `identity.email`, `alarms`, `scripting`, `activeTab`. No `host_permissions`.
-  The optional `https://*/*` stays declared and the code flow never calls
-  `chrome.permissions.request`. No manifest change.
+  The optional `https://*/*` stays declared; the code flow requests and removes
+  it as "All-https access" states. No manifest change.
 - Page code runs only through `chrome.scripting.executeScript` in the default
   `ISOLATED` world, on the top frame, of a tab the worker names by explicit id.
   No operation looks up "the active tab" at operation time. The popup reads
@@ -65,6 +69,45 @@ fields are refused.
 - Without the `tabs` permission, `chrome.tabs.query` returns no `url` or
   `title` for a tab without page access. The worker learns a tab's origin and
   title only through a successful injected probe.
+
+## All-https access
+
+Owner ruling, 2026-11-14: "Ask for all-https access at Activate, drop it when
+the last code ends." Any profile where the user clicks Activate may be paired;
+tab scope is the default choice.
+
+- The popup calls `chrome.permissions.request({origins: ["https://*/*"]})`
+  inside the Activate click handler (it needs the user gesture, which the
+  service worker does not have), then sends `pair`. Declining does not block
+  pairing or minting; page operations outside the clicked origin then answer
+  `PermissionNeeded`. A popup showing Choose scope while the profile is
+  paired and the permission is absent requests it again in the click of
+  either mint button, before sending `mint`.
+- The worker calls `chrome.permissions.remove({origins: ["https://*/*"]})` when
+  the profile has no live code and no live grant. It learns that from the
+  broker in exactly two messages, and from nothing else:
+  1. `grant_end` with `"last": true` (see "Browser hop"). The broker sends
+     `grant_end` on every end route: agent release of the session
+     (disconnect, socket close: reason `closed`), operator or popup revoke
+     (`revoked`), idle expiry (`idle`), tab closed (`tab_closed`), worker
+     `UnknownGrant` (`browser_gone`), result-line audit failure (`audit`),
+     unpair or unenroll (`unenrolled`), and unredeemed code expiry
+     (`expired`). `last` is true when, after this end, the profile holds no
+     unredeemed code and no live grant.
+  2. The `service.sock` pairing acknowledgement, which now carries
+     `"live": [grant id, ...]`: every unredeemed code and live grant of the
+     profile. The worker prunes its grant table to this list on every
+     (re)connect, and removes the permission when the list is empty. This
+     covers every `grant_end` the worker missed while its port was down,
+     including a broker restart (which ends every code and grant).
+- Idle expiry and code expiry reach the worker without waiting for an agent
+  call: the broker keeps one deadline callback on its own event loop (no
+  thread, no process) set to the earliest code deadline or grant idle
+  deadline, and ends what is due when it fires.
+- `unpair` removes the permission too; the worker does it on the `unpair`
+  reply.
+- Scope is unchanged by the permission: each agent stays inside its own
+  code's scope, enforced independently by the broker and by the worker.
 
 ## pair — `enrollment.sock` only
 
@@ -87,8 +130,17 @@ reconnects its native port; the `service.sock` hello accepts a pairing
 credential exactly as it accepts an enrollment one.
 
 `unpair` removes the pairing and ends every code and grant of the profile with
-`GrantEnded.reason: unenrolled`. The worker then deletes `pairing` and
+`GrantEnded.reason: unenrolled`, closes their agent sessions and closes the
+profile's `service.sock` connection. The worker then deletes `pairing` and
 reconnects. A workflow enrollment is removed only by the existing `unenroll`.
+An `unpair` retried after a lost `ok` reply answers `Unauthorized`, because
+the pairing is already gone; the worker treats that reply to a retry as done.
+
+The registry stores, per paired profile, exactly one row: `profile`, `email`
+and the browser key sealed with the vault (purpose `browser:<profile>`, the
+same purpose as an enrollment browser key). It never stores a code, a code
+hash or a grant. `enroll` and `replace` for a profile or email that holds a
+pairing answer `EnrollmentConflict`.
 
 | Error | Cause |
 |---|---|
@@ -107,9 +159,11 @@ before it reads the frame. `agent.sock`, `service.sock` and `operator.sock`
 refuse `mint`.
 
 Request: the profile credential, which proves the sender holds the profile's
-browser key, plus the scope. This build replaces phase 1's six-field
-registration with the credential triple, so a paired profile and an enrolled
-one mint alike.
+browser key, plus the scope. The credential triple is the form the worker
+sends, so a paired profile and an enrolled one mint alike. The broker also
+still accepts phase 1's six-field registration (`profile`, `email`,
+`workflow`, `url`, `account`, `key`) for an enrolled profile; a paired
+profile has no six-field form.
 
 ```json
 {"op": "mint", "profile": "<uuid>", "email": "...", "key": "<64 hex>",
@@ -204,10 +258,6 @@ redeem, or `LOCK_MAX` without a lock, resets the length. Mint is never locked.
 
 ## Operations on a code session — `agent.sock`
 
-Not in this checkpoint: at the adapter checkpoint the broker accepts
-`claim`, `snapshot`, `click` and `release` on a code session within the
-grant's scope, and none of the ops below exists yet.
-
 A code session uses only the ops below. A workflow session (`open`) keeps
 `claim`, `snapshot`, `click` and `release` unchanged and refuses the ops below
 with `InvalidRequest`. A code session refuses `claim`, `snapshot` and `click`
@@ -235,7 +285,9 @@ Every success reply also carries `"ok": true`.
 A tab entry is `{"tab": int, "window": int, "index": int, "active": bool,
 "access": bool, "origin": str | null, "title": str | null}`. `origin`
 (`scheme://host[:port]`) and `title` (at most 200 characters) are present only
-when `access` is true; otherwise both are null.
+when `access` is true; otherwise both are null. The broker passes on only
+these seven keys of each entry the worker returns, and for a tab grant only
+the entry of the granted tab.
 
 `select` takes a lease on the tab for this session (existing `Claim`, lease
 `TTL`, one holder per tab incarnation) and does not focus or activate the tab.
@@ -289,20 +341,42 @@ or operator op, whichever comes first; once ended it no longer counts toward
 `MAX_GRANTS_PER_TAB` or appears in a `grants` list, and its agent's next call
 answers `GrantEnded` with `reason: idle`. A grant also ends silently when its
 socket closes. When a grant ends its leases are dropped and the broker sends
-`grant_end` to the worker, best effort. A click, type or navigate in flight
-when its grant ends answers `OutcomeUnknown`; any other op in flight answers
-`GrantEnded`.
+`grant_end` to the worker, best effort, without delaying the agent's reply
+(see "All-https access" for `last` and the reconnect list). A click, type or
+navigate in flight when its grant ends answers `OutcomeUnknown`; any other op
+in flight answers `GrantEnded`.
+
+Result-line audit failure: the operation already ran in the browser, but its
+result line could not be written. The broker ends the grant with
+`reason: audit` and never releases an unrecorded result: `tabs`, `select`,
+`page_read` and `release` answer `GrantEnded` with `reason: audit` and the
+broker closes the connection; `page_click`, `page_type` and `page_navigate`
+answer `OutcomeUnknown` (journaled under the `request_id`), and the session's
+next call answers `GrantEnded` with `reason: audit`.
+
+A worker error name outside the worker refusal table reaches the agent as
+`BrowserRefused` with no fields.
 
 ## Operator ops — `operator.sock`
 
-Sender: the local operator CLI (later phase). The existing
+Sender: the local operator CLI, `trusty-browser`. The existing
 `{"op": "revoke", "workflow"}` is unchanged.
 
-| Request | Reply |
-|---|---|
-| `{"op": "grants"}` | `{"ok": true, "grants": [entry, ...]}` |
-| `{"op": "revoke_grant", "grant": "g-..."}` | `{"ok": true, "revoked": 1}` or `{"ok": false, "error": "UnknownGrant"}` |
-| `{"op": "revoke_grants"}` | `{"ok": true, "revoked": <count>}` |
+| Request | Reply | CLI verb |
+|---|---|---|
+| `{"op": "grants"}` | `{"ok": true, "grants": [entry, ...]}` | `trusty-browser grants` |
+| `{"op": "revoke_grant", "grant": "g-..."}` | `{"ok": true, "revoked": 1}` or `{"ok": false, "error": "UnknownGrant"}` | `trusty-browser revoke-grant g-...` |
+| `{"op": "revoke_grants"}` | `{"ok": true, "revoked": <count>}` | `trusty-browser revoke-grants` |
+| `{"op": "pairings"}` | `{"ok": true, "pairings": [{"profile", "email"}, ...]}` | `trusty-browser pairings` |
+| `{"op": "unpair", "profile": "<uuid>"}` | `{"ok": true, "profile": "<uuid>"}` or `{"ok": false, "error": "UnknownProfile"}` | `trusty-browser unpair <uuid>` |
+
+Operator `unpair` has the effect of the extension's `unpair` (the profile's
+codes and grants end with `unenrolled`) without a credential, as the
+operator `revoke` does for a workflow; it exists for a profile whose
+extension is gone. The CLI validates its argument before connecting (a grant
+id is `g-` and 12 lower-case hex characters; a profile is a UUID v4), prints
+the reply as one JSON line, and exits 1 on `"ok": false` or when the service
+is not running.
 
 An entry is `{"grant", "scope", "profile", "tab" (tab scope only), "state":
 "code" | "active", "expires_in_s" (code) or "idle_s" (active)}`. It never
@@ -340,7 +414,13 @@ Envelope:
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
-| `grant_end` | `reason` (a `GrantEnded` reason or `closed`) | `"ended"` |
+| `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
+
+`grant_end` carries no `tab`, and the broker does not wait for its reply
+before answering the agent. `last` is defined in "All-https access".
+
+Pairing acknowledgement (existing frame, field added): after a good proof the
+broker answers `{"ok": true, "generation": <str>, "live": [<grant id>, ...]}`.
 
 The broker adds `document_changed` to the agent's `page_read` reply by
 comparing `result.document` with the lease's previous document.
@@ -378,7 +458,8 @@ succeeds. Then it runs the command. No check reads the active tab.
 The worker keeps `{grant: {scope, tab}}` in `chrome.storage.session`, so it
 survives a service-worker restart and empties on a browser restart. It adds a
 row on a mint reply and removes it on `grant_end`, on a popup revoke reply, on
-`unpair`, and when a `grants` list reply no longer contains it. It does not
+`unpair`, when a `grants` list reply no longer contains it, and when the
+pairing acknowledgement's `live` list no longer contains it. It does not
 remove a tab grant when the tab closes; the next command answers
 `TabNotFound`, the broker ends the grant with `tab_closed`, and `grant_end`
 removes the row.
@@ -519,8 +600,11 @@ function that returns `[location.origin, document.title]` and changes nothing;
 access.
 
 Audit lines. Each op writes the fail-closed `admitted` line and then a result
-line, as in phase 1. On these lines `tab` is the operated tab (absent for
-`tabs`) and `origin` is a host name only.
+line, as in phase 1. The `admitted` line is written before frame validation,
+so it carries `op` and no `tab`; only `page_navigate`'s carries an `origin`,
+the target host, and only when the URL passes the floor. On result lines
+`tab` is the operated tab (absent for `tabs`) and `origin` is a host name
+only. A refusal's result line is best effort.
 
 | op | `op` value | `origin` on the result line | Never recorded |
 |---|---|---|---|
@@ -609,9 +693,9 @@ until it expires or is cancelled.
 the existing four tools `browser_claim`, `browser_snapshot`, `browser_click`,
 `browser_release`) unchanged. Run with neither flag, it starts in code mode.
 
-### Built at the adapter checkpoint
+### Code mode
 
-Code mode at this checkpoint (`src/trusty_browser/agent_mcp.py`, tests in
+Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 `tests/test_agent_mcp.py`):
 
 - Start-up reads no credential, touches no file and opens no socket. The
@@ -623,14 +707,20 @@ Code mode at this checkpoint (`src/trusty_browser/agent_mcp.py`, tests in
   uses it.
 - Server shutdown (stdin closed) closes the session, so the broker ends the
   grant with `closed`.
+- Code mode registers the page tools below in place of `browser_claim`,
+  `browser_snapshot` and `browser_click`, which exist in workflow mode only.
+  Tool names are provisional.
 
 | Tool | Parameters | Result |
 |---|---|---|
 | `browser_connect` | `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only), `idle_timeout_s`. Never the code |
 | `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `disconnected` is `false` when no session was held |
-| `browser_claim` | none | The broker's `claim` reply, as in workflow mode, inside the grant's scope |
-| `browser_snapshot` | `lease: str`, `request_id: str` | The broker's `snapshot` reply, as in workflow mode |
-| `browser_click` | `lease: str`, `request_id: str`, `marker: str` | The broker's `click` reply, as in workflow mode |
+| `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
+| `browser_select` | `tab: int` | The `select` reply |
+| `page_read` | `lease: str` | The `page_read` reply |
+| `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
+| `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
+| `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 
 Every refusal is an MCP tool error (`isError: true`). Its text is
@@ -643,8 +733,9 @@ refusals carry `ok`, `error` and `message`:
 | Error | When | Session after |
 |---|---|---|
 | `ServiceUnavailable` | `agent.sock` is missing, refuses the connection, closes, times out (30 s) or sends a bad frame, on any tool that uses the socket | None. A later `browser_connect` works once the broker is up, without restarting the server |
-| `NotConnected` | `browser_claim`, `browser_snapshot`, `browser_click` or `browser_release` with no session | None |
+| `NotConnected` | Any tool other than `browser_connect` and `browser_disconnect` with no session | None |
 | `AlreadyConnected` | `browser_connect` while a live session is held | Unchanged. The new code is not sent and stays redeemable |
+| `InvalidRequest` | `browser_connect` with a `code` that is not a string. The message never quotes the value | Unchanged; nothing is sent |
 
 Second-connect rule: refuse. `browser_connect` on a live session answers
 `AlreadyConnected`; call `browser_disconnect` first. Before refusing, the
@@ -660,26 +751,6 @@ The code is never logged, written to disk, or placed in a result or error
 text. The adapter has no log line of its own, and the MCP library logs only
 request types.
 
-### Not in this checkpoint
-
-The code-mode page tools below are the later contract. None is registered at
-this checkpoint, and the broker still accepts `claim`, `snapshot`, `click` and
-`release` on a code session (see "Operations on a code session"). All tool
-names below are provisional.
-
-| Tool | Parameters | Result |
-|---|---|---|
-| `browser_tabs` | none | `tabs`: tab entries |
-| `browser_select` | `tab: int` | The `select` reply |
-| `page_read` | `lease: str` | The `page_read` reply |
-| `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
-| `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
-| `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
-
-When these land, code mode registers them in place of `browser_claim`,
-`browser_snapshot` and `browser_click`; `browser_release`,
-`browser_connect` and `browser_disconnect` keep their shapes.
-
 ## Audit log
 
 `<state>/audit.jsonl`, mode 0600, opened `O_APPEND | O_NOFOLLOW`, rotated at
@@ -693,8 +764,9 @@ Events: `mint`, `redeem` (outcome `ok`, `wrong`, `replay`, `expired`,
 `revoked`, `contended`, `locked`, `tab_closed`, `browser_disconnected`,
 `limit`, or the browser's refusal name when the tab probe fails), `lock`
 (outcome is the lock length, for example `60s`), `pair` and `unpair` (outcome
-`ok` or the error name; best-effort), `revoke`, `grant_end` (outcome is the
-reason, or `closed`), `operation` (outcome `admitted`, then a second line with
+`ok` or the error name; best-effort; written for the extension's and the
+operator's `unpair`), `revoke`, `grant_end` (outcome is the reason, or
+`closed`; an unredeemed code that expires writes no line), `operation` (outcome `admitted`, then a second line with
 `ok` or the error name; per-op fields in "Per-operation checks").
 
 Failure policy: mint, redeem and each operation's `admitted` line are
@@ -705,8 +777,7 @@ grant-end lines are best-effort: a failed write never blocks them.
 
 ## Not in this build
 
-- Requesting the optional `https://*/*` host permission from the code flow,
-  or any manifest change.
+- Any manifest change.
 - Console, network or debugger access (`chrome.debugger`, devtools protocol,
   request interception).
 - Trusted input events; every event is synthetic.
@@ -716,8 +787,9 @@ grant-end lines are best-effort: a failed write never blocks them.
 - Choosing an option in a `<select>`, file inputs, drag, hover, scroll and
   keyboard shortcuts.
 - Focusing or activating a tab from the agent.
-- Page access on a tab the user did not click; such a tab answers
-  `PermissionNeeded` for read, click and type.
+- Page access on a tab the user did not click when the user declined
+  all-https access, and on any non-`https:` page other than the clicked one;
+  such a tab answers `PermissionNeeded` for read, click and type.
 
 ## File ownership
 
@@ -729,12 +801,12 @@ Paths are under `python/trusty-browser/`. No file is in both columns.
 | `src/trusty_browser/service.py` | `src/trusty_browser/extension/pages.js` (new: injected page functions, loaded by `importScripts`) |
 | `src/trusty_browser/leases.py` | `src/trusty_browser/extension/setup.html` |
 | `src/trusty_browser/grants.py` | `src/trusty_browser/extension/setup.js` |
-| `src/trusty_browser/pages.py` (new: code-session ops, if `grants.py` would pass the line cap) | `src/trusty_browser/extension/setup.css` |
+| `src/trusty_browser/pages.py` (new: code-session ops) | `src/trusty_browser/extension/setup.css` |
 | `src/trusty_browser/codes.py` | `src/trusty_browser/extension/indicator.js` |
 | `src/trusty_browser/audit.py` | `src/trusty_browser/extension/indicator_content.js` (no change expected) |
 | `src/trusty_browser/enrollment.py` (pairing records) | `src/trusty_browser/extension/content.js` (no change expected) |
 | `src/trusty_browser/agent_mcp.py` | `src/trusty_browser/extension/manifest.json` (frozen: no change) |
-| `src/trusty_browser/cli.py`, `native_host.py`, `mac_peer.py`, `vault.py`, `assets.py`, `install_host.py` (no change expected) | `tests/test_worker.mjs` |
+| `src/trusty_browser/cli.py` (operator verbs); `native_host.py`, `mac_peer.py`, `vault.py`, `assets.py`, `install_host.py` (no change expected) | `tests/test_worker.mjs` |
 | `tests/test_activation_codes.py` | `tests/test_popup.mjs` |
 | `tests/test_service.py` | `tests/test_indicator.mjs` |
 | `tests/test_agent_mcp.py` | `tests/test_content.mjs` |
@@ -785,13 +857,19 @@ Python (broker and shim):
   profile's grant id answers `UnknownGrant`.
 - Audit: no line carries typed text, read text, a title, a URL path or query,
   or a ref; the admitted-line failure answers `AuditUnavailable` with nothing
-  sent.
-- Shim (built; `tests/test_agent_mcp.py`): start-up and `tools/list` with no
+  sent; a result-line failure ends the grant with `audit` and releases no
+  result.
+- Last-grant signal: `grant_end` reaches the worker on every end route with
+  `last` true only for the profile's final code or grant; the pairing
+  acknowledgement lists exactly the live codes and grants.
+- Shim (`tests/test_agent_mcp.py`): start-up and `tools/list` with no
   broker and no socket; tools before `browser_connect` answer `NotConnected`;
   a second connect answers `AlreadyConnected` and spends no code; each redeem
   refusal is relayed and leaves the shim reconnectable; `GrantEnded` and
   broker loss drop the session; disconnect and shutdown end the grant; the
-  code never reaches a result, the server's stderr or a file.
+  code never reaches a result, the server's stderr or a file; a non-string
+  code is refused without being quoted; one end-to-end run connects, lists
+  tabs, selects, reads, types, clicks, navigates, releases and disconnects.
 
 JavaScript (worker, page functions, popup):
 
@@ -822,3 +900,8 @@ JavaScript (worker, page functions, popup):
   tab id captured at load; the countdown reaches `Code expired`; Disconnect
   sends `revoke_grant` with the row's grant id; the workflow controls are
   hidden while a pairing exists.
+- All-https access: Activate requests `https://*/*` inside the click and
+  pairs whether or not the user grants it; the permission is removed on
+  `grant_end` with `last: true`, on a pairing acknowledgement whose `live`
+  list is empty, and on `unpair`, and is kept on `grant_end` with
+  `last: false`.
