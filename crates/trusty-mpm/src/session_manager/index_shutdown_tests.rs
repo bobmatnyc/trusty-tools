@@ -365,7 +365,9 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
 /// A trusty-search whose resolve answers only `path`, and misses all else.
 fn resolves_only(path: &'static str) -> Answer {
     Arc::new(move |method, params| match method {
-        METHOD_RESOLVE if params["project"] == path => Ok(json!({ "index_id": "proj-idx" })),
+        METHOD_RESOLVE if params["project"] == path => {
+            Ok(json!({ "index_id": "proj-idx", "root_path": path }))
+        }
         METHOD_RESOLVE => Err(RpcError::new(NOT_FOUND, "no live index")),
         METHOD_PARK => Ok(json!({ "index_id": "proj-idx", "parked": true, "unloaded": true })),
         other => Err(RpcError::new(-32601, format!("unexpected {other}"))),
@@ -403,6 +405,31 @@ async fn a_path_project_is_parked_by_its_path() {
             id: "proj-idx".into()
         }
     );
+}
+
+/// Why: #10989 — trusty-search resolves a path to the deepest indexed root
+/// that contains it, so a nested project with no index of its own resolves to
+/// its ancestor's. Parking that would take search away from every project
+/// under the ancestor.
+/// Test: this test. Fails if a path answer whose `root_path` is an ancestor
+/// of the queried path is accepted.
+#[tokio::test]
+async fn a_path_resolve_to_an_ancestor_index_is_a_miss_and_parks_nothing() {
+    let target = ShutdownTarget::for_project(Some("local:1234"), "/x/y/proj", None);
+    let search: Answer = Arc::new(|method, _| match method {
+        METHOD_RESOLVE => Ok(json!({ "index_id": "parent", "root_path": "/x" })),
+        METHOD_PARK => Ok(json!({ "index_id": "parent", "parked": true, "unloaded": true })),
+        other => Err(RpcError::new(-32601, format!("unexpected {other}"))),
+    });
+    let rig = rig(search, healthy_memory()).await;
+    let report = IndexShutdown::at(Some(rig.search_socket()), None)
+        .shut_down(&target)
+        .await;
+    assert!(
+        matches!(report.search, ShutdownState::NotLoaded { .. }),
+        "{report:?}"
+    );
+    assert_eq!(rig.methods(), vec![format!("search:{METHOD_RESOLVE}")]);
 }
 
 /// Why: #10989 F4 (Fail-Open Check) — only a missing socket or a refused

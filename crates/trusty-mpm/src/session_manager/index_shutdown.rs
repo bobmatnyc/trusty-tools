@@ -265,11 +265,17 @@ enum Resolved {
     Failed(String),
 }
 
-/// Ask `search.project.resolve` for `query`'s live index.
-async fn resolve_index(socket: &Path, query: &str) -> Resolved {
+/// Ask `search.project.resolve` for `query`'s live index; `identity` is the
+/// project's `owner/repo`, when it has one.
+async fn resolve_index(socket: &Path, query: &str, identity: Option<&str>) -> Resolved {
     let params = json!({ "project": query });
     match search_rpc::call_at(socket, METHOD_RESOLVE, params, CALL_TIMEOUT).await {
         Ok(body) => match body.get("index_id").and_then(Value::as_str) {
+            // #10989: a path resolves to the deepest indexed root containing
+            // it; an ancestor's index is not this project's.
+            Some(_) if Path::new(query).is_absolute() && !owns_path(&body, query, identity) => {
+                Resolved::Miss
+            }
             Some(id) => Resolved::Index(id.to_string()),
             None => Resolved::Failed(format!("{METHOD_RESOLVE} answered no index_id for {query}")),
         },
@@ -283,6 +289,24 @@ async fn resolve_index(socket: &Path, query: &str) -> Resolved {
         }
         Err(e) => Resolved::Failed(format!("{e:#}")),
     }
+}
+
+/// Whether a resolve answer for the path `query` is the project's own index.
+///
+/// What: true when the answer's `root_path` is `query` or lies under it, or its
+/// `repo_identity` is `identity`. Paths compare component-wise after
+/// normalising. An answer with no readable `root_path` is never accepted.
+/// Test: `a_path_resolve_to_an_ancestor_index_is_a_miss_and_parks_nothing`,
+/// `a_path_project_is_parked_by_its_path`.
+fn owns_path(body: &Value, query: &str, identity: Option<&str>) -> bool {
+    let Some(root) = body.get("root_path").and_then(Value::as_str) else {
+        return false;
+    };
+    let normalise =
+        |p: &str| std::fs::canonicalize(p).unwrap_or_else(|_| Path::new(p).components().collect());
+    let same_identity =
+        identity.is_some() && body.get("repo_identity").and_then(Value::as_str) == identity;
+    normalise(root).starts_with(normalise(query)) || same_identity
 }
 
 /// Resolve the project's index, then park it for the decommission.
@@ -306,9 +330,14 @@ async fn park_search(socket: Option<&Path>, queries: &[String]) -> ShutdownState
             error: "the project has no repo identity or checkout path to resolve".to_string(),
         };
     }
+    // The identity, when present, is the first query and is never a path.
+    let identity = queries
+        .first()
+        .map(String::as_str)
+        .filter(|q| !Path::new(q).is_absolute());
     let mut found = None;
     for query in queries {
-        match resolve_index(socket, query).await {
+        match resolve_index(socket, query, identity).await {
             Resolved::Index(id) => {
                 found = Some(id);
                 break;
