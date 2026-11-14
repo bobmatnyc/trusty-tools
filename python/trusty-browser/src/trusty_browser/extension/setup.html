@@ -16,6 +16,10 @@
         <span class="eye right"><span class="iris"></span></span>
       </div>
     </div>
+    <section id="unpaired" hidden>
+      <p>Activate Trusty Browser in this profile</p>
+      <button id="pair">Activate</button>
+    </section>
     <button id="activate" disabled>Activate Extension</button>
     <output id="status" aria-live="polite"></output>
     <section id="transfer" hidden>
@@ -41,6 +45,13 @@
       </div>
       <ul id="grants" aria-label="Agent grants"></ul>
       <button class="secondary" id="disconnect-all" hidden>Disconnect all</button>
+    </section>
+    <section id="paired" hidden aria-label="Pairing">
+      <details>
+        <summary>Pairing details</summary>
+        <dl><dt>Chrome profile</dt><dd id="paired-email"></dd></dl>
+      </details>
+      <button class="secondary" id="unpair">Disconnect this profile</button>
     </section>
     <button class="secondary" id="retry" hidden>Retry</button>
     <details id="details" hidden>

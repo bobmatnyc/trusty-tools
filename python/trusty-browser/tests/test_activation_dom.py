@@ -51,9 +51,9 @@ def test_activation_popup():
             activate.focus()
             page.keyboard.press("Enter")
             expect(page.get_by_role("status")).to_have_text("Extension active")
-            page.wait_for_function("window.calls.includes('code_preview')")
+            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
             assert page.evaluate("window.calls") == [
-                "preview", "grant", "enable", "preview", "activate", "code_preview"]
+                "code_preview", "preview", "grant", "enable", "preview", "activate", "code_preview"]
             expect(page.locator("#access")).to_be_hidden()
             page.get_by_text("Activation details", exact=True).click()
             expect(page.locator("#workflow")).to_have_text("trusty-managed")
@@ -73,7 +73,7 @@ CODE_POPUP = """
       runtime:{sendMessage:async m => {
         window.calls.push(m);
         if (m.type === 'preview') return {ok:true,enrolled:'w',route:{email:'qa@example.test',url:'https://a.test/',account:'QA'}};
-        if (m.type === 'code_preview') return {ok:true,paired:true,email:'qa@example.test',profile:'p',
+        if (m.type === 'code_preview') return {ok:true,paired:false,email:'qa@example.test',profile:'p',
           target:{tab:m.tab,access:window.access,origin:window.access ? 'https://a.test' : null,title:window.access ? 'Alpha' : null}};
         if (m.type === 'grants') return {ok:true,grants:window.grants};
         if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
@@ -141,5 +141,63 @@ def test_code_popup_disables_the_tab_choice_without_page_access():
             expect(page.locator("#target")).to_have_text("Open a web page and click Trusty Browser on it")
             expect(page.get_by_role("button", name="Give access to this tab")).to_be_disabled()
             expect(page.get_by_role("button", name="Give access to the whole profile (every tab in this profile)")).to_be_enabled()
+        finally:
+            browser.close()
+
+
+PAIR_POPUP = """
+    window.calls = [];
+    let paired = false, held = false;
+    window.chrome = {
+      tabs:{query:async () => [{id:42}]},
+      permissions:{request:async () => { window.calls.push('permission'); held = true; return true; },
+        contains:async () => held},
+      runtime:{sendMessage:async m => {
+        window.calls.push(m.type);
+        if (m.type === 'code_preview') return {ok:true,paired,email:'qa@example.test',profile:paired ? 'p' : null,
+          target:{tab:m.tab,access:true,origin:'https://a.test',title:'Alpha'}};
+        if (m.type === 'preview') return {ok:false,error:'Open a supported signed-in site in the active tab.'};
+        if (m.type === 'pair') { paired = true; return {ok:true,profile:'p'}; }
+        if (m.type === 'unpair') { paired = false; held = false; return {ok:true,profile:'p'}; }
+        if (m.type === 'grants') return {ok:true,grants:[]};
+        if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
+          scope:m.scope,profile:'p',tab:m.tab,expires_at:Date.now() / 1000 + 300};
+        throw Error('unexpected request ' + m.type);
+      }}};
+"""
+
+
+def test_pairing_popup_activates_mints_and_disconnects_a_profile():
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 800})
+            page.add_init_script(PAIR_POPUP)
+            page.goto(popup.as_uri())
+            expect(page.get_by_text("Activate Trusty Browser in this profile", exact=True)).to_be_visible()
+            expect(page.locator("#access")).to_be_hidden()
+            expect(page.get_by_role("button", name="Activate Extension")).to_be_visible()
+            page.get_by_role("button", name="Activate", exact=True).click()
+            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
+            calls = page.evaluate("window.calls")
+            assert calls.index("permission") < calls.index("pair") < calls.index("code_preview", 1)
+            expect(page.get_by_role("button", name="Give access to this tab")).to_be_enabled()
+            expect(page.locator("#unpaired")).to_be_hidden()
+            for workflow_control in ("#activate", "#details", "#transfer"):
+                expect(page.locator(workflow_control)).to_be_hidden()
+            expect(page.locator("#paired-email")).to_have_text("qa@example.test")
+            # The permission is held now, so the mint click does not ask again.
+            page.get_by_role("button", name="Give access to this tab").click()
+            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
+            assert page.evaluate("window.calls").count("permission") == 1
+            page.get_by_role("button", name="Disconnect this profile").click()
+            expect(page.get_by_text("Activate Trusty Browser in this profile", exact=True)).to_be_visible()
+            expect(page.locator("#access")).to_be_hidden()
+            expect(page.locator("#paired")).to_be_hidden()
+            expect(page.locator("#code")).to_have_value("")
+            assert "unpair" in page.evaluate("window.calls")
+            assert "tb-" not in page.locator("main").inner_text()
+            expect(page.get_by_role("button", name="Activate Extension")).to_be_visible()
         finally:
             browser.close()

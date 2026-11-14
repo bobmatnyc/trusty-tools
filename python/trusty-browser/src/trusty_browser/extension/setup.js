@@ -136,6 +136,15 @@ const targetTab = (async () => {
   return Number.isInteger(found?.id) && found.id >= 0 ? found.id : null;
 })().catch(() => null);
 let tab = null, code = null, codeGrant = null, expiresAt = 0, ticker = null, poller = null, accessShown = false;
+// Chrome needs permissions.request inside the click, so the popup tracks whether https://*/* is held.
+const ALL_HTTPS = {origins:["https://*/*"]};
+let httpsHeld = false;
+async function checkHttps() {
+  try { httpsHeld = await chrome.permissions.contains(ALL_HTTPS) === true; } catch { httpsHeld = false; }
+}
+function askHttps() {
+  try { return chrome.permissions.request(ALL_HTTPS).catch(() => false); } catch { return Promise.resolve(false); }
+}
 const clock = seconds => {
   const s = Math.max(0, Math.ceil(seconds));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
@@ -195,13 +204,25 @@ function unavailable(error) {
   $("retry").hidden = false;
   statusLine.textContent = errorMessage(error);
 }
+// Contract "Popup states": no credential is Not paired; a pairing hides the workflow controls.
+function pairedView(preview) {
+  for (const id of ["activate","transfer","details"]) $(id).hidden = true;
+  $("paired-email").textContent = preview.email;
+  $("paired").hidden = false;
+}
 async function loadAccess() {
   $("retry").hidden = true;
   try {
     tab = await targetTab;
     const preview = await request({type:"code_preview", tab});
-    // A profile without a credential has no code flow until pairing ships (#11239).
-    if (!preview.paired) return;
+    await checkHttps();
+    $("unpaired").hidden = preview.profile !== null;
+    if (preview.paired) pairedView(preview); else $("paired").hidden = true;
+    if (preview.profile === null) {
+      clearInterval(poller);
+      $("access").hidden = true;
+      return preview;
+    }
     const target = preview.target;
     $("mint-tab").disabled = !target?.access;
     $("target").textContent = target?.access
@@ -213,13 +234,12 @@ async function loadAccess() {
     clearInterval(poller);
     poller = setInterval(loadGrants, 5000);
     await loadGrants();
+    return preview;
   } catch (error) { unavailable(error); }
 }
 function mint(scope) {
-  // The owner ruling asks for all-https access inside this click; Chrome needs the call in the gesture.
-  let permission;
-  try { permission = chrome.permissions.request({origins:["https://*/*"]}).catch(() => false); }
-  catch { permission = Promise.resolve(false); }
+  // Contract "All-https access": ask again inside this click when the permission is absent.
+  const permission = httpsHeld ? Promise.resolve(true) : askHttps();
   $("mint-tab").disabled = $("mint-profile").disabled = true;
   statusLine.textContent = "";
   void (async () => {
@@ -256,5 +276,37 @@ $("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revo
 $("new-code").addEventListener("click", () => show("choose"));
 $("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
 $("retry").addEventListener("click", () => loadAccess());
-refresh().catch(error => { statusLine.textContent = errorMessage(error); })
+$("pair").addEventListener("click", () => {
+  // The service worker has no user gesture, so the Activate click itself asks for all-https access.
+  const permission = askHttps();
+  $("pair").disabled = true;
+  statusLine.textContent = "";
+  void (async () => {
+    try {
+      await permission;
+      await request({type:"pair"});
+      await loadAccess();
+    } catch (error) { statusLine.textContent = errorMessage(error); }
+    finally { $("pair").disabled = false; }
+  })();
+});
+$("unpair").addEventListener("click", async () => {
+  $("unpair").disabled = true;
+  try {
+    await request({type:"unpair"});
+    clearInterval(poller);
+    forgetCode();
+    accessShown = false;
+    activate.hidden = false;
+    $("access").hidden = $("paired").hidden = true;
+    await start();
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  finally { $("unpair").disabled = false; }
+});
+async function start() {
+  const preview = await loadAccess();
+  if (preview?.paired) return;
+  await refresh();
+}
+start().catch(error => { statusLine.textContent = errorMessage(error); })
   .finally(() => { activate.disabled = false; });
