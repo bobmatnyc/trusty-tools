@@ -1,9 +1,10 @@
+# ruff: noqa: F811 -- the imported fixtures `short` and `clock` are test parameters.
+
 import json
-import os
-from pathlib import Path
 import plistlib
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -12,42 +13,104 @@ from trusty_browser.assets import extension_path
 
 
 def test_stable_assets_are_complete_and_refuse_overwriting(tmp_path):
-    state = tmp_path/"state"
+    state = tmp_path / "state"
     path = extension_path(state)
-    assert (path/"manifest.json").is_file()
+    assert (path / "manifest.json").is_file()
     assert path == extension_path(state)
     path.unlink()
     path.write_text("other")
-    with pytest.raises(ValueError,match="unrelated"):
+    with pytest.raises(ValueError, match="unrelated"):
         extension_path(state)
     assert path.read_text() == "other"
 
 
-def test_service_registration_install_repeat_uninstall_in_private_home(tmp_path,monkeypatch):
-    state=tmp_path/"state"
-    monkeypatch.setenv("HOME",str(tmp_path))
-    monkeypatch.setattr(sys,"platform","darwin")
-    plist=tmp_path/"Library/LaunchAgents/com.trusty.browser.plist"
-    manifests=tmp_path/"Library/Application Support/Google/Chrome/NativeMessagingHosts"
-    loaded=False
-    def launchctl(*args,check=True):
+def test_service_registration_install_repeat_uninstall_in_private_home(
+    tmp_path, monkeypatch
+):
+    state = tmp_path / "state"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    plist = tmp_path / "Library/LaunchAgents/com.trusty.browser.plist"
+    manifests = (
+        tmp_path / "Library/Application Support/Google/Chrome/NativeMessagingHosts"
+    )
+    loaded = False
+
+    def launchctl(*args, check=True):
         nonlocal loaded
-        if args[0]=="print":
-            return subprocess.CompletedProcess(args,0 if loaded else 113,stdout=f"path = {plist}\n",stderr="")
-        if args[0]=="bootstrap":
+        if args[0] == "print":
+            return subprocess.CompletedProcess(
+                args, 0 if loaded else 113, stdout=f"path = {plist}\n", stderr=""
+            )
+        if args[0] == "bootstrap":
             assert not loaded and args[-1] == str(plist)
-            loaded=True
-        if args[0]=="bootout":
+            loaded = True
+        if args[0] == "bootout":
             assert loaded
-            loaded=False
-    monkeypatch.setattr(cli,"launchctl",launchctl)
-    cli.manage(state,True)
+            loaded = False
+
+    monkeypatch.setattr(cli, "launchctl", launchctl)
+    cli.manage(state, True)
     assert loaded
-    assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == cli.service_args(state)
-    for name in ("com.trusty.browser","com.trusty.browser.enroll"):
-        assert Path(json.loads((manifests/(name+".json")).read_text())["path"]).is_file()
-    cli.manage(state,True)
-    cli.manage(state,False)
-    cli.manage(state,False)
+    assert plistlib.loads(plist.read_bytes())["ProgramArguments"] == cli.service_args(
+        state
+    )
+    for name in ("com.trusty.browser", "com.trusty.browser.enroll"):
+        assert Path(
+            json.loads((manifests / (name + ".json")).read_text())["path"]
+        ).is_file()
+    cli.manage(state, True)
+    cli.manage(state, False)
+    cli.manage(state, False)
     assert not loaded and not plist.exists() and not list(manifests.glob("*.json"))
-    assert (state/"extension"/"manifest.json").exists()
+    assert (state / "extension" / "manifest.json").exists()
+
+
+# #11239: operator verbs against the real broker; fixtures from the code tests.
+from test_activation_codes import clock, run, short  # noqa: F401
+
+
+def test_operator_verbs_validate_input_and_print_the_reply(
+    short, clock, monkeypatch, capsys
+):
+    import asyncio
+
+    def verb(*argv):
+        monkeypatch.setattr(
+            sys, "argv", ["trusty-browser", "--state", str(short), *argv]
+        )
+        try:
+            cli.main()
+        except SystemExit as exc:
+            return exc.code
+        return 0
+
+    async def body(rig):
+        minted = await rig.mint(rig.alpha)
+        assert await asyncio.to_thread(verb, "grants") == 0
+        listed = json.loads(capsys.readouterr().out)
+        assert [g["grant"] for g in listed["grants"]] == [minted["grant"]]
+        assert minted["code"] not in json.dumps(listed)
+        for argv in (
+            ("revoke-grant", "G-XYZ"),
+            ("revoke-grant", minted["grant"] + "0"),
+            ("unpair", "not-a-uuid"),
+        ):
+            assert await asyncio.to_thread(verb, *argv) == 1
+            assert capsys.readouterr().out == ""
+        assert rig.outcomes("revoke") == []
+        assert await asyncio.to_thread(verb, "revoke-grant", "g-000000000000") == 1
+        assert json.loads(capsys.readouterr().out)["error"] == "UnknownGrant"
+        assert await asyncio.to_thread(verb, "revoke-grant", minted["grant"]) == 0
+        assert json.loads(capsys.readouterr().out) == {"ok": True, "revoked": 1}
+        assert await asyncio.to_thread(verb, "pairings") == 0
+        assert json.loads(capsys.readouterr().out) == {"ok": True, "pairings": []}
+        profile = "3f2b6c1e-8d4a-4b7e-9c1d-2a5e6f7b8c9d"
+        assert await asyncio.to_thread(verb, "unpair", profile) == 1
+        assert json.loads(capsys.readouterr().out)["error"] == "UnknownProfile"
+        assert await asyncio.to_thread(verb, "revoke-grants") == 0
+        assert json.loads(capsys.readouterr().out) == {"ok": True, "revoked": 0}
+
+    run(short, body)
+    assert verb("grants") == 1  # the broker has stopped
+    assert "not reachable" in capsys.readouterr().err

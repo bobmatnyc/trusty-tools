@@ -49,7 +49,11 @@ One-use activation codes let an agent drive one profile or one tab without a wor
 }
 ```
 
-The server starts and lists its tools even when the service is not running. The agent calls `browser_connect` with the code from the popup, then uses `browser_claim`, `browser_snapshot`, `browser_click` and `browser_release` inside the grant, and `browser_disconnect` to end it. If the service is down, `browser_connect` answers a `ServiceUnavailable` tool error; call it again once the service is up. Tool shapes and error frames are in "MCP tools", and the broker frame contract in the rest of [docs/activation-codes.md](docs/activation-codes.md).
+Any Chrome profile can mint codes: click **Activate** in its popup to pair it (no workflow is needed), then choose this tab (the default) or the whole profile. Activate also asks for access to all `https:` pages; the extension drops that access when the profile's last code or grant ends. Declining it leaves page operations limited to the tab you clicked.
+
+The server starts and lists its tools even when the service is not running. The agent calls `browser_connect` with the code from the popup, then `browser_tabs` to list the tabs it may address, `browser_select` to lease one, and `page_read`, `page_type`, `page_click` and `page_navigate` on that lease. `page_read` returns element refs that `page_click` and `page_type` take. `browser_release` frees the lease and `browser_disconnect` ends the grant. If the service is down, `browser_connect` answers a `ServiceUnavailable` tool error; call it again once the service is up. Tool shapes and error frames are in "MCP tools", and the broker frame contract in the rest of [docs/activation-codes.md](docs/activation-codes.md).
+
+An operator can list and end codes and grants with `trusty-browser grants`, `trusty-browser revoke-grant g-…` and `trusty-browser revoke-grants`, list paired profiles with `trusty-browser pairings`, and remove a pairing with `trusty-browser unpair <profile-id>`. Each verb prints the service's JSON reply and exits 1 on a refusal.
 
 ## Supported sites
 
