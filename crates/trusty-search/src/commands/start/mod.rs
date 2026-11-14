@@ -86,6 +86,9 @@ mod swap_back_cycle_soak_tests;
 // Public entry point consumed by `commands/mod.rs`.
 pub use args::StartArgs;
 pub use daemon::handle_start;
+// #11085: the Linux lifecycle resolves the data dir with start's own rule.
+#[cfg(target_os = "linux")]
+pub(crate) use isolation::{resolve_data_dir_override, DATA_DIR_ENV};
 
 // Re-exports that formerly lived at the top of `start.rs` and are consumed by
 // the test module below (via `use super::*`) and by service::lazy_loader /

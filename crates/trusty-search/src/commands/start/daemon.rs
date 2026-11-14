@@ -275,6 +275,24 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     //
     // launchd/systemd/Docker users (and `trusty-search service`) always pass
     // `--foreground` and stay on the inline path.
+    // #11085: on Linux the detached start runs on the shared lifecycle: the
+    // install-dir binary, and success only once its pid serves the socket.
+    #[cfg(target_os = "linux")]
+    if !foreground {
+        let mut extra = vec!["--device".to_string(), device.to_string()];
+        extra.extend(discovery.spawn_arg().map(str::to_string));
+        if serial {
+            extra.push("--serial".to_string());
+        }
+        if let Some(n) = fanout_concurrency {
+            extra.extend(["--fanout-concurrency".to_string(), n.to_string()]);
+        }
+        if let Some(path) = socket.as_deref() {
+            let path = path.to_str().context("--socket must be UTF-8")?;
+            extra.extend(["--socket".to_string(), path.to_string()]);
+        }
+        return crate::commands::linux_lifecycle::start(data_dir, socket.as_deref(), extra).await;
+    }
     if !foreground {
         // Validate `--device` here too so a typo doesn't silently spawn a
         // child that will then immediately exit non-zero.

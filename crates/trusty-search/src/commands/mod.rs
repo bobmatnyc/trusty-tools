@@ -62,6 +62,9 @@ pub mod index_status;
 pub mod init;
 pub mod integrate;
 pub mod list;
+// #11085: Linux start/stop/restart on trusty_common::linux_lifecycle.
+#[cfg(target_os = "linux")]
+pub mod linux_lifecycle;
 pub mod migrate;
 pub mod migrate_redb;
 pub mod migrate_storage;
