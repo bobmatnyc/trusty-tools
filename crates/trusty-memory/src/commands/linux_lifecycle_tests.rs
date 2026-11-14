@@ -190,8 +190,9 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     let tmp = tempfile::tempdir_in(exe_dir.parent().expect("exe dir")).expect("tempdir");
     let data = tmp.path().join("data");
     std::fs::create_dir_all(&data).expect("data dir");
-    let socket = tmp.path().join("run").join("trusty-memory.sock");
-    std::fs::create_dir_all(socket.parent().expect("run dir")).expect("run dir");
+    // A short directory: the exe-dir path would overrun sun_path's 108 bytes.
+    let run = tempfile::tempdir().expect("run dir");
+    let socket = run.path().join("tm.sock");
     let mut fixture = spawn_fixture(tmp.path(), BINARY, &socket);
 
     // SAFETY: env_test_lock is held for the whole window the variable is set.
