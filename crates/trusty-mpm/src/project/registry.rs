@@ -524,8 +524,9 @@ pub(super) fn holds_registration(p: &Project, project: &Project, key: Option<&st
 /// What: the stored key, else [`origin_key`]; plus, for a `~`-spelled
 /// `repo_url` only, [`super::project_key_from_repo_url`] of it — one `git`
 /// per such row, never per absolute-path row (#10696).
-/// Test: `register_unless_present_keeps_an_old_tilde_keyed_record_10604`.
-fn held_keys(p: &Project) -> Vec<String> {
+/// Test: `register_unless_present_keeps_an_old_tilde_keyed_record_10604`,
+/// `session_start_in_an_old_tilde_record_checkout_is_the_same_repo_10604`.
+pub(super) fn held_keys(p: &Project) -> Vec<String> {
     let mut keys: Vec<String> = p
         .project_key
         .clone()

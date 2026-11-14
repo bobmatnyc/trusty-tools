@@ -159,7 +159,7 @@ fn a_tilde_checkout_without_a_usable_home_is_refused_10604() {
 }
 
 /// Restores `$HOME` on drop; every user is `#[serial_test::serial]`.
-struct HomeGuard(Option<std::ffi::OsString>);
+pub(crate) struct HomeGuard(Option<std::ffi::OsString>);
 
 impl Drop for HomeGuard {
     fn drop(&mut self) {
@@ -172,7 +172,7 @@ impl Drop for HomeGuard {
 }
 
 /// Point `$HOME` at `value` until the guard drops.
-fn set_home(value: &Path) -> HomeGuard {
+pub(crate) fn set_home(value: &Path) -> HomeGuard {
     let prior = std::env::var_os("HOME");
     // SAFETY: callers are `#[serial]`.
     unsafe { std::env::set_var("HOME", value) };

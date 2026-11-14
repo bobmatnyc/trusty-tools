@@ -215,4 +215,4 @@ pub fn accepted_index_ids_for(root: &Path, registered: Option<&RegisteredProject
 
 #[cfg(test)]
 #[path = "project_key_tests.rs"]
-mod project_key_tests;
+pub(super) mod project_key_tests;
