@@ -88,9 +88,12 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
         assert!(passed(name), "{name} must reach the console");
     }
     for name in &target.desc.env_passthrough {
-        let credential = ["KEY", "TOKEN", "SECRET", "PASSWORD"]
-            .iter()
-            .any(|word| name.to_ascii_uppercase().contains(word));
+        // By name segment: `TRUSTY_SECRETS_EXTERNAL` is a vault-location flag,
+        // while `GITHUB_WEBHOOK_SECRET` and `*_TOKEN_FILE` are credentials.
+        let upper = name.to_ascii_uppercase();
+        let credential = upper.split('_').any(|segment| {
+            ["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASS"].contains(&segment)
+        });
         assert!(!credential, "{name} looks like a credential");
     }
     for (name, _) in EXCLUDED {
@@ -323,13 +326,27 @@ fn spawn_fixture(root: &Path, dir: &Path, override_value: &Path, extra: &[&str])
 }
 
 /// A short root (sun_path is 108 bytes) with `data/` as the override.
-fn fixture_root() -> (tempfile::TempDir, PathBuf, PathBuf) {
+fn fixture_root() -> (Roots, PathBuf, PathBuf) {
     let exe = std::env::current_exe().expect("exe");
     // Beside the test binary, so the hard link stays on one filesystem.
-    let root = tempfile::tempdir_in(exe.parent().expect("exe dir")).expect("tempdir");
-    let data = root.path().join("data");
+    let bin = tempfile::tempdir_in(exe.parent().expect("exe dir")).expect("tempdir");
+    // A short data dir: the exe-dir path would overrun sun_path's 108 bytes.
+    let short = tempfile::tempdir().expect("short tempdir");
+    let data = short.path().join("data");
     let dir = data.join(BINARY);
-    (root, data, dir)
+    (Roots { bin, _short: short }, data, dir)
+}
+
+/// The fixture's two temp dirs, removed together on drop.
+struct Roots {
+    bin: tempfile::TempDir,
+    _short: tempfile::TempDir,
+}
+
+impl Roots {
+    fn path(&self) -> &Path {
+        self.bin.path()
+    }
 }
 
 // AC10: the socket bind failed, so only `http_addr` finds the console.
