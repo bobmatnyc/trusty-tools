@@ -117,8 +117,10 @@ async fn run(
     };
     let socket = settings.socket.clone();
     let idle = settings.idle_timeout;
+    // #11215: start and exit lines carry a UTC timestamp.
     eprintln!(
-        "trusty-secrets: serving on {} (exits after {}s idle)",
+        "{} trusty-secrets: serving on {} (exits after {}s idle)",
+        now(),
         socket.display(),
         idle.as_secs()
     );
@@ -134,12 +136,18 @@ async fn run(
     let backends = backends_for(&settings, &sandbox, onepassword_token);
     match serve_with(settings, backends, start, trusty_common::shutdown_signal()).await {
         Ok(exit) => {
-            eprintln!("trusty-secrets: {exit:?}; exiting");
+            eprintln!("{} trusty-secrets: {exit:?}; exiting", now());
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("trusty-secrets: {e}");
+            eprintln!("{} trusty-secrets: {e}; exiting", now());
             ExitCode::FAILURE
         }
     }
+}
+
+/// The current time for a log line (#11215).
+#[cfg(unix)]
+fn now() -> String {
+    trusty_secrets::server::log_stamp(std::time::SystemTime::now())
 }
