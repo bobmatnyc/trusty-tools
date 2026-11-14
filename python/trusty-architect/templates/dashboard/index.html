@@ -3968,13 +3968,19 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const n = d ? txt(d.name) : r;
     return !f || (f[n] && f[n].managed) ? n : "";
   }
+  let paneTimeoutMs = 15000;   // #11065: a stalled phone or tailnet request ends in the error state, never a stuck "Loading…"
   async function paneFetch(name, lines) {
-    let r, j;
-    try { r = await fetch("/api/pane?session=" + encodeURIComponent(name) + "&lines=" + (lines || 40), { cache: "no-store" }); }
-    catch (_) { return { state: "error", why: "network" }; }
-    if (r.status === 404) return { state: "none" };
-    if (!r.ok) return { state: "error", why: r.status === 503 ? "capture" : "http", status: r.status };
-    try { j = await r.json(); } catch (_) { j = null; }
+    let r, j, timer, late = false;
+    const ac = typeof AbortController === "function" ? new AbortController() : null;
+    const cap = new Promise((_, no) => { timer = setTimeout(() => { late = true; if (ac) ac.abort(); no(new Error("timeout")); }, paneTimeoutMs); });
+    const within = (p) => Promise.race([p, cap]);
+    try {
+      try { r = await within(fetch("/api/pane?session=" + encodeURIComponent(name) + "&lines=" + (lines || 40), { cache: "no-store", signal: ac ? ac.signal : undefined })); }
+      catch (_) { return { state: "error", why: late ? "timeout" : "network" }; }
+      if (r.status === 404) return { state: "none" };
+      if (!r.ok) return { state: "error", why: r.status === 503 ? "capture" : "http", status: r.status };
+      try { j = await within(r.json()); } catch (_) { if (late) return { state: "error", why: "timeout" }; j = null; }
+    } finally { clearTimeout(timer); }
     if (!j || !Array.isArray(j.lines)) return { state: "error", why: "http", status: r.status };
     return { state: "ok", lines: j.lines.map(txt), at: txt(j.captured_at), truncated: !!j.truncated };
   }
@@ -4002,7 +4008,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
           v.at = res.at; pre.textContent = res.lines.join("\n"); trunc.hidden = !res.truncated; v.tick(Date.now());
           paint("ok", res.lines.length ? "" : "The pane is empty.");
         } else if (res.state === "none") paint("none", "No live pane: " + name + " is not running.");
-        else paint("error", res.why === "network" ? "Network error: the pane did not load." : res.why === "capture" ? "The pane could not be captured. Try Refresh." : "The pane did not load (HTTP " + res.status + ").");
+        else paint("error", res.why === "network" ? "Network error: the pane did not load." : res.why === "timeout" ? "The pane did not answer in time. Try Refresh." : res.why === "capture" ? "The pane could not be captured. Try Refresh." : "The pane did not load (HTTP " + res.status + ").");
       });
     };
     v.refresh = () => v.show(v.name);
@@ -4024,7 +4030,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       if (!d.open) return;
       if (!st.view) st.view = paneView();
       if (st.view.box.parentNode !== d) d.appendChild(st.view.box);
-      if (!st.view.loaded) st.view.show(name);
+      if (!st.view.loaded || st.view.msg.dataset.state === "error") st.view.show(name);   // #11065: reopening retries a failed capture
     });
     return d;
   }
@@ -6699,16 +6705,23 @@ html.lib-strip.rd-open body { padding-right: 0; }
         });
         dgSync(box);   /* #11047: group headers count what the filters left */
       });
-      if (pq) sec.querySelectorAll("details.sub").forEach((b) => {   /* a status block with no match drops out while the pane filter is on */
-        const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
-        if (!shown) { b.classList.add("nv-off"); solo(b, false); }
-      });
+      subHide(sec, pq, solo);
     });
     renderBar(c, raw, filt);
     renderTabs(c, filt ? "all" : raw);
     paneSync(c);
     navSave();
   }
+  /* BEGIN subHide */
+  /* A status block with no match drops out while the pane filter is on. */
+  function subHide(sec, pq, solo) {
+    if (pq) sec.querySelectorAll("details.sub").forEach((b) => {
+      if (b.classList.contains("pane-ctl")) return;   // #11065: the Show session control has no rows; nothing ever un-hides it
+      const shown = Array.from(b.querySelectorAll(".rows > [data-pid], .rows > .goal-row, .rows > .il-sess")).some((r) => !r.classList.contains("nv-off"));
+      if (!shown) { b.classList.add("nv-off"); solo(b, false); }
+    });
+  }
+  /* END subHide */
   /* The one header bar per content type (the owner 2026-10-21 14:29Z): title, open-count badge, one-line summary, tabs, then the filter and sort toolbar. The section's own header is hidden and the section never collapses. */
   const bar = { q: "" };
   function renderBar(c, sub, filt) {

@@ -173,6 +173,43 @@ class TestPaneView(unittest.TestCase):
             self.assertEqual(r[1], 0)
             self.assertEqual(r[2]["lines"], "page line")
 
+    def test_capture_that_never_settles_ends_in_error_and_can_be_retried(self):
+        body = """
+        paneTimeoutMs = 50;
+        const _f = global.fetch;
+        global.fetch = (url, o) => /tm-hang/.test(url) ? new Promise(() => {}) : _f(url, o);
+        const v = paneView(); await v.show("tm-hang"); const hung = Object.assign(view(v), { off: !!v.btn.disabled });
+        routes = { "tm-slow": ok(["too late"], { delay: 200 }) };
+        await v.show("tm-slow"); await sleep(250); const slow = view(v);
+        routes = { "tm-slow": ok(["fresh"]) }; await v.refresh();
+        console.log(JSON.stringify([hung, slow, view(v)]));"""
+        for r in self.each(body):
+            self.assertEqual(r[0]["state"], "error")
+            self.assertIn("in time", r[0]["msg"])
+            self.assertFalse(r[0]["off"])          # Refresh is usable again
+            self.assertEqual([r[1]["state"], r[1]["lines"]], ["error", ""])   # the late answer never paints
+            self.assertEqual(r[2]["lines"], "fresh")
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestPaneControlFilter(unittest.TestCase):
+    def test_show_session_control_survives_entering_and_clearing_the_pane_filter(self):
+        for page in PAGES:
+            src = open(page, encoding="utf-8").read()
+            m = re.search(r"/\* BEGIN subHide \*/(.*?)/\* END subHide \*/", src, re.S)
+            self.assertTrue(m, "subHide block missing")
+            js = r"""
+            const cl = () => { const s = new Set(); return { add: (c) => s.add(c), contains: (c) => s.has(c), toggle: (c, on) => on ? s.add(c) : s.delete(c) }; };
+            const ctl = { classList: cl(), querySelectorAll: () => [] }, empty = { classList: cl(), querySelectorAll: () => [] };
+            ctl.classList.add("pane-ctl");
+            const sec = { querySelectorAll: () => [ctl, empty] }, solo = () => {};
+            """ + m.group(1) + """
+            subHide(sec, "x", solo); subHide(sec, "", solo);
+            console.log(JSON.stringify([ctl.classList.contains("nv-off"), empty.classList.contains("nv-off")]));"""
+            r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(json.loads(r.stdout), [False, True])   # the control stays; an empty status block still drops out
+
 
 class TestPaneViewMobile(unittest.TestCase):
     def test_new_targets_are_44px_and_nothing_is_wider_than_360px(self):
