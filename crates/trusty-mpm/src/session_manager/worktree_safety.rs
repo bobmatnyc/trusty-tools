@@ -424,7 +424,11 @@ fn inspect_dirt_with(
         return Some(DirtyWorktree::new(path, reason, dirty_files, unpushed));
     }
     if scan_nested {
-        return super::worktree_nested::nested_dirt(path);
+        // #11218: the excusing routes also accept the ledger's backups.
+        return match excuse {
+            Some(_) => super::worktree_nested::nested_dirt_vouched(path),
+            None => super::worktree_nested::nested_dirt(path),
+        };
     }
     None
 }

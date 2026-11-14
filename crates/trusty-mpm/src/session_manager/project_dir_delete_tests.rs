@@ -1112,3 +1112,168 @@ fn a_missing_leaf_under_the_target_counts() {
         "{err}"
     );
 }
+
+// ---- #11218 final round: the daemon's own settings backups -----------------
+
+/// The timestamped `settings.json` snapshots in `repo/.claude/`.
+fn settings_snapshots(repo: &Path) -> Vec<PathBuf> {
+    use crate::core::standalone::hooks::backup::is_snapshot_of;
+    let mut found: Vec<PathBuf> = std::fs::read_dir(repo.join(".claude"))
+        .expect("list .claude")
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .is_some_and(|n| is_snapshot_of("settings.json", n))
+        })
+        .map(|e| e.path())
+        .collect();
+    found.sort();
+    found
+}
+
+/// The launch preparation on a checkout whose committed `.gitignore` ignores
+/// `.claude/` — the live shape, where the settings backups reach only the
+/// gitignored-file walk. The hook exe is pinned, as a daemon resolves its
+/// installed binary, so the hooks writer runs and snapshots `settings.json`.
+fn spawn_provisioned_ignoring_claude(fx: &GitWorktreeFixture) -> tempfile::TempDir {
+    std::fs::write(fx.repo.join(".gitignore"), ".claude/\n").expect("write .gitignore");
+    GitWorktreeFixture::commit_all_and_push(&fx.repo, "ignore .claude");
+    let home = crate::test_support::hermetic_temp_dir();
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(home.path(), &fx.repo);
+    let exe = Path::new(crate::test_support::STABLE_HOOK_EXE);
+    crate::core::session_launch::prepare_session_for_repair_in(
+        &fw,
+        &fx.repo,
+        None,
+        Some(exe),
+        Some(home.path()),
+        None,
+    )
+    .expect("the spawn preparation succeeds");
+    // Premise: the spawn wrote both backups the live check named.
+    assert!(
+        fx.repo.join(".claude/settings.json.bak").is_file(),
+        "premise: the spawn wrote settings.json.bak"
+    );
+    assert!(
+        !settings_snapshots(&fx.repo).is_empty(),
+        "premise: the spawn wrote a timestamped settings snapshot"
+    );
+    home
+}
+
+#[test]
+fn the_spawn_written_settings_backups_do_not_refuse_11218() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned_ignoring_claude(&fx);
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    let auth = FakeAuth::granted();
+    let dry = run_dir_delete(
+        input(&sessions, &fx.repos_root, &[]),
+        DirDeleteOptions { dry_run: true },
+        &mut |_| Confirmation::Yes,
+        &auth,
+        &OsProbes,
+    )
+    .expect("only the daemon's own backups: the dry run plans");
+    assert!(dry.dry_run && !dry.removed);
+    // The real run reaches the typed-name prompt; a wrong name removes nothing.
+    let mut asked = 0;
+    let err = run_dir_delete(
+        input(&sessions, &fx.repos_root, &[]),
+        DirDeleteOptions::default(),
+        &mut |_| {
+            asked += 1;
+            Confirmation::Typed("not-the-name".into())
+        },
+        &auth,
+        &OsProbes,
+    )
+    .expect_err("a wrong typed name");
+    assert!(matches!(err, DirDeleteError::NotConfirmed { .. }), "{err}");
+    assert_eq!(asked, 1, "the real run reached the typed-name prompt");
+    assert!(fx.repo.join(".claude/settings.json.bak").exists());
+}
+
+#[test]
+fn a_user_backup_beside_the_daemon_s_still_refuses_11218() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned_ignoring_claude(&fx);
+    let claude = fx.repo.join(".claude");
+    // A snapshot-shaped name no launch wrote, and a plain user `.bak`.
+    std::fs::write(claude.join("settings.json.20990101T000000Z.bak"), "{}\n").expect("write");
+    std::fs::write(claude.join("notes.bak"), "mine\n").expect("write");
+    let err = plan_repo(&fx).expect_err("user backups are not the daemon's");
+    let DirDeleteError::Dirty { reason, .. } = &err else {
+        panic!("{err}");
+    };
+    assert!(reason.starts_with("2 gitignored file(s)"), "{reason}");
+    for named in [
+        ".claude/settings.json.20990101T000000Z.bak",
+        ".claude/notes.bak",
+    ] {
+        assert!(reason.contains(named), "missing {named}: {reason}");
+    }
+    assert!(!reason.contains(".claude/settings.json.bak"), "{reason}");
+}
+
+#[test]
+fn an_edited_daemon_backup_still_refuses_11218() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned_ignoring_claude(&fx);
+    let mut edited = settings_snapshots(&fx.repo);
+    edited.push(fx.repo.join(".claude/settings.json.bak"));
+    for path in &edited {
+        let mut bytes = std::fs::read(path).expect("read backup");
+        bytes.extend_from_slice(b"\n// kept by hand\n");
+        std::fs::write(path, bytes).expect("edit backup");
+    }
+    let err = plan_repo(&fx).expect_err("edited backups hold bytes tm never wrote");
+    let want = format!("{} gitignored file(s)", edited.len());
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_corrupt_ledger_vouches_for_no_settings_backup_11218() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned_ignoring_claude(&fx);
+    let ledger = fx
+        .repo
+        .join(".git")
+        .join(super::super::provisioning_ledger::LEDGER_NAME);
+    assert!(ledger.is_file(), "premise: the spawn recorded a ledger");
+    // A ledger with no record of the backups (an older one) vouches for neither.
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ledger).expect("read ledger")).expect("parse");
+    doc["files"]
+        .as_object_mut()
+        .expect("files")
+        .remove(".claude/settings.json.bak");
+    doc.as_object_mut()
+        .expect("ledger object")
+        .remove("settings_snapshots");
+    std::fs::write(&ledger, serde_json::to_vec(&doc).expect("encode")).expect("write");
+    let want = format!(
+        "{} gitignored file(s)",
+        settings_snapshots(&fx.repo).len() + 1
+    );
+    let err = plan_repo(&fx).expect_err("no record vouches for nothing");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
+        "{err}"
+    );
+    // An unreadable ledger refuses too (pass one already counts its files).
+    std::fs::write(&ledger, "not json").expect("corrupt the ledger");
+    let err = plan_repo(&fx).expect_err("a corrupt ledger vouches for nothing");
+    assert!(matches!(err, DirDeleteError::Dirty { .. }), "{err}");
+    assert!(fx.repo.join(".claude/settings.json.bak").exists());
+}

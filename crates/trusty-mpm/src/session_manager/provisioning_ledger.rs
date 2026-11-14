@@ -20,7 +20,7 @@
 //! unreadable or corrupt ledger ([`load`] answers `None`) excuses nothing.
 //! Test: `decommission_owned_ledger_tests`, `provisioned_dirt_tests`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,11 @@ pub(crate) struct ProvisioningLedger {
     /// a pre-#11221 ledger, which then vouches for no `.trusty-mpm/` file.
     #[serde(default)]
     pub harness_files: BTreeMap<String, String>,
+    /// #11218: repo-relative `.claude/settings.json.<stamp>.bak` snapshot a
+    /// launch created to the sha256 (hex) of its bytes. Absent in an older
+    /// ledger, which then vouches for no snapshot.
+    #[serde(default)]
+    pub settings_snapshots: BTreeMap<String, String>,
 }
 
 /// A ledgered path before a launch writes (#8663 critic round 2).
@@ -72,6 +77,9 @@ pub(crate) struct ProvisioningSnapshot {
     files: BTreeMap<&'static str, PreState>,
     /// `.gitignore`'s lines, or empty when absent or unreadable.
     gitignore: Vec<String>,
+    /// #11218: the settings snapshots present before the launch, or `None`
+    /// when `.claude/` could not be listed — then no snapshot is recorded.
+    settings_snapshots: Option<BTreeSet<String>>,
 }
 
 /// Where the ledger for the tree rooted at `ws` lives, or `None` when `ws`
@@ -184,6 +192,35 @@ fn gitignore_lines(ws: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Is repo-relative `rel` a timestamped `.claude/settings.json` snapshot, by
+/// the exact name shape the hooks writers give one (#11218)?
+fn is_settings_snapshot(rel: &str) -> bool {
+    use crate::core::standalone::hooks::backup::is_snapshot_of;
+    rel.strip_prefix(".claude/")
+        .is_some_and(|name| !name.contains('/') && is_snapshot_of("settings.json", name))
+}
+
+/// The repo-relative settings snapshots in `ws/.claude/`: empty when the
+/// directory is absent, `None` when it or an entry cannot be read (#11218).
+fn settings_snapshot_names(ws: &Path) -> Option<BTreeSet<String>> {
+    let entries = match std::fs::read_dir(ws.join(".claude")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(BTreeSet::new()),
+        Err(_) => return None,
+    };
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        // A non-UTF-8 name is never a snapshot, so it is skipped.
+        if let Some(name) = entry.ok()?.file_name().to_str() {
+            let rel = format!(".claude/{name}");
+            if is_settings_snapshot(&rel) {
+                names.insert(rel);
+            }
+        }
+    }
+    Some(names)
+}
+
 /// Capture the ledgered paths of `ws` before a launch writes (#8663).
 /// Test: `ledger_excuses_only_provisioning_dirt_on_a_clone`.
 pub(crate) fn snapshot(ws: &Path) -> ProvisioningSnapshot {
@@ -193,6 +230,7 @@ pub(crate) fn snapshot(ws: &Path) -> ProvisioningSnapshot {
             .map(|rel| (rel, pre_state(&ws.join(rel))))
             .collect(),
         gitignore: gitignore_lines(ws),
+        settings_snapshots: settings_snapshot_names(ws),
     }
 }
 
@@ -208,10 +246,13 @@ pub(crate) fn snapshot(ws: &Path) -> ProvisioningSnapshot {
 /// another into ([`copied_from`]) also needs that source's pre-state to be
 /// tm's. A file left out is never excused. `.gitignore` lines present now and
 /// absent from `before` are recorded, plus previously ledgered lines still in
-/// the file. The ledger is written atomically into the git admin dir.
-/// `Ok(false)` when `ws` has no resolvable admin dir (nothing is written);
-/// write errors propagate for the caller to log.
+/// the file. #11218: a settings snapshot absent from `before` and present now
+/// is hashed when `settings.json`'s pre-state was tm's; earlier ones carry
+/// over only while unedited. The ledger is written atomically into the git
+/// admin dir. `Ok(false)` when `ws` has no resolvable admin dir (nothing is
+/// written); write errors propagate for the caller to log.
 /// Test: `ledger_excuses_only_provisioning_dirt_on_a_clone`,
+/// `the_spawn_written_settings_backups_do_not_refuse_11218`,
 /// `ledger_does_not_carry_an_edit_made_between_launches`,
 /// `ledger_does_not_adopt_a_settings_edit_the_next_launch_rewrites`,
 /// `ledger_adopts_a_relaunch_rewrite_of_tm_or_head_bytes`.
@@ -255,12 +296,25 @@ pub(crate) fn record(ws: &Path, before: &ProvisioningSnapshot) -> std::io::Resul
             appended.push(line);
         }
     }
+    // #11218: a snapshot this launch created copies `settings.json`, so it is
+    // tm's only when the bytes the launch found there were tm's.
+    let mut settings_snapshots = still_matching(ws, prior.settings_snapshots);
+    if was_tms(".claude/settings.json")
+        && let (Some(pre), Some(now)) = (&before.settings_snapshots, settings_snapshot_names(ws))
+    {
+        for rel in now.difference(pre) {
+            if let Some(hash) = file_sha256(&ws.join(rel)) {
+                settings_snapshots.insert(rel.clone(), hash);
+            }
+        }
+    }
     let ledger = ProvisioningLedger {
         version: 1,
         files,
         gitignore_appended: appended,
         // #11221: a relaunch keeps vouching only for unedited harness writes.
         harness_files: still_matching(ws, prior.harness_files),
+        settings_snapshots,
     };
     write_atomic(&path, &serde_json::to_vec_pretty(&ledger)?)?;
     Ok(true)
@@ -404,10 +458,12 @@ impl ProvisioningLedger {
     /// tm's own writes as `!!` or `??` entries; only a byte match proves an
     /// entry is tm's and not an edit made after provisioning.
     /// What: a [`LEDGERED_FILES`] entry is matched against `files`, a
-    /// `.trusty-mpm/` path against `harness_files`; the file must be a regular
+    /// `.trusty-mpm/` path against `harness_files`, a settings snapshot
+    /// against `settings_snapshots` (#11218); the file must be a regular
     /// file, read without following a symlink. Any other path, a missing
     /// entry or an unreadable file is `false`.
     /// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+    /// `an_edited_daemon_backup_still_refuses_11218`,
     /// `a_gitignored_claude_md_tm_wrote_passes_the_ignored_output_check_11221`,
     /// `an_edited_gitignored_claude_md_still_keeps_the_clone_11221`.
     pub(crate) fn vouches_for(&self, ws: &Path, rel: &str) -> bool {
@@ -415,6 +471,9 @@ impl ProvisioningLedger {
             self.files.get(rel)
         } else if rel.starts_with(".trusty-mpm/") {
             self.harness_files.get(rel)
+        } else if is_settings_snapshot(rel) {
+            // #11218: only a snapshot `record` saw this launch create.
+            self.settings_snapshots.get(rel)
         } else {
             None
         };

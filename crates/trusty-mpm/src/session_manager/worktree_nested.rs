@@ -199,6 +199,27 @@ const IGNORED_STATUS_ARGS: &[&str] = &[
 /// `inspect_dirt_reports_high_value_gitignored_env_file`,
 /// `inspect_dirt_allows_clean_nested_worktree`.
 pub(crate) fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
+    nested_dirt_with(candidate, false)
+}
+
+/// [`nested_dirt`], skipping a high-value file the provisioning ledger vouches
+/// for byte for byte (#11218).
+///
+/// Why: a spawn writes `.claude/settings.json.bak` and a timestamped snapshot
+/// into a `.claude/` many repositories gitignore, so every fresh project read
+/// as holding two kept backups and `tm session delete --project-dir` refused.
+/// What: only the routes that already excuse provisioning dirt
+/// (`inspect_dirt_excusing`) call this; a missing or corrupt ledger, or any
+/// byte difference, vouches for nothing and the file still counts.
+/// Test: `the_spawn_written_settings_backups_do_not_refuse_11218`,
+/// `a_user_backup_beside_the_daemon_s_still_refuses_11218`,
+/// `a_corrupt_ledger_vouches_for_no_settings_backup_11218`.
+pub(super) fn nested_dirt_vouched(candidate: &Path) -> Option<DirtyWorktree> {
+    nested_dirt_with(candidate, true)
+}
+
+/// The body of [`nested_dirt`] and [`nested_dirt_vouched`].
+fn nested_dirt_with(candidate: &Path, vouch: bool) -> Option<DirtyWorktree> {
     let canonical = match std::fs::canonicalize(candidate) {
         Ok(c) => c,
         Err(e) => {
@@ -242,7 +263,20 @@ pub(crate) fn nested_dirt(candidate: &Path) -> Option<DirtyWorktree> {
             inner.unpushed_commits,
         ));
     }
-    high_value_dirt(candidate, &canonical, &scan.valuables)
+    let mut valuables = scan.valuables;
+    if vouch {
+        // #11218: by content only; no ledger keeps every file counted.
+        let ledger = super::provisioning_ledger::load(candidate);
+        valuables.retain(|p| {
+            let rel = p.strip_prefix(&canonical).ok().and_then(Path::to_str);
+            !rel.is_some_and(|rel| {
+                ledger
+                    .as_ref()
+                    .is_some_and(|l| l.vouches_for(&canonical, rel))
+            })
+        });
+    }
+    high_value_dirt(candidate, &canonical, &valuables)
 }
 
 /// Report the high-value gitignored files the walk found, if any (#4166).
