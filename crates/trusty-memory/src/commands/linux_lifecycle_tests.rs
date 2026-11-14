@@ -163,7 +163,12 @@ fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) 
         .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
         .expect("link the fixture");
     let child = Command::new(&link)
-        .args(["lifecycle_fixture_entry", "--exact", "--nocapture"])
+        // `--exact` matches the full test path, not the bare fn name.
+        .args([
+            "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
+            "--exact",
+            "--nocapture",
+        ])
         .env(FIXTURE_SOCKET_ENV, socket)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
