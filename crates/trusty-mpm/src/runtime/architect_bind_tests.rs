@@ -459,6 +459,9 @@ fn every_reused_session_arm_refuses_an_architect_before_typing_11270() {
     before(
         "daemon/services/tmux_service.rs",
         "refuse_reused(",
-        &["create_session(tmux_name", "send_line(&target, &line)"],
+        &[
+            "create_session(tmux_name",
+            "driver.send_line(&target, &line)",
+        ],
     );
 }
