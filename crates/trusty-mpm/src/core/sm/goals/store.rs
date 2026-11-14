@@ -37,8 +37,11 @@ use super::model::{Goal, GoalStatus, SessionLink, SessionTaskState};
 /// decision/blocker note. Bundling those into one optional-field struct keeps the
 /// update API a single call (and a single dual-write) rather than several.
 /// What: a `session_id` selecting the link, plus optional `state` / `evidence` /
-/// `note`. `None` fields are left unchanged; a `note` is appended to the goal.
-/// Test: `update_sets_state_and_evidence`, `update_appends_note`.
+/// `note`. A `Some(state)` replaces the link's evidence with `evidence`, so a
+/// `None` there clears it (#10722); with no `state`, a `Some(evidence)` replaces
+/// it and a `None` leaves it. A `note` is appended to the goal.
+/// Test: `update_sets_state_evidence_and_note`,
+/// `state_change_replaces_evidence_and_none_clears_it`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionUpdate {
     /// The linked session to mutate (must already be linked to the goal).
@@ -153,12 +156,25 @@ impl SmGoalStore {
 
     /// Index one goal read from the palace or cache, re-deriving its progress.
     ///
-    /// Why: #10722 — an older build persisted `progress` counting `Verified`
-    /// links that carry no evidence. Progress is derived state, so it is
-    /// recomputed under the current rule rather than trusted from disk.
-    /// What: calls [`Goal::recompute_progress`], then inserts by id.
+    /// Why: #10722 — an older build could persist a `Verified` link with no
+    /// evidence, and a `progress` that counted it. No stored link may be
+    /// `Verified` without evidence, so load applies the same rule as the writers.
+    /// What: each `Verified` link without non-blank evidence becomes `Running`
+    /// (observed, not verified) with a warning; then [`Goal::recompute_progress`]
+    /// runs and the goal is inserted by id.
     /// Test: `legacy_verified_without_evidence_does_not_allow_done`.
     fn insert_loaded(&mut self, mut goal: Goal) {
+        for link in &mut goal.sessions {
+            // #10722: fail closed on legacy evidence-less Verified links.
+            if link.state == SessionTaskState::Verified && !link.has_evidence() {
+                tracing::warn!(
+                    goal_id = %goal.id,
+                    session_id = %link.session_id,
+                    "goal store: loaded Verified link has no evidence; reading it as Running"
+                );
+                link.state = SessionTaskState::Running;
+            }
+        }
         goal.recompute_progress();
         self.goals.insert(goal.id.clone(), goal);
     }
@@ -252,6 +268,8 @@ impl SmGoalStore {
     /// Test: `update_sets_state_evidence_and_note`,
     /// `update_unknown_session_is_not_found`,
     /// `update_to_verified_without_evidence_is_rejected`,
+    /// `rejected_update_leaves_goal_unchanged_in_memory_and_on_disk`,
+    /// `state_change_replaces_evidence_and_none_clears_it`,
     /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn update(&mut self, goal_id: &str, upd: SessionUpdate) -> SmGoalResult<Goal> {
         let prior = self
