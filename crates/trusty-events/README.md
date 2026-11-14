@@ -14,11 +14,9 @@ Tracking: epic [#9074](https://github.com/bobmatnyc/trusty-tools/issues/9074),
 
 trusty-events is internal and optional. It is not published to crates.io
 (owner ruling 2026-10-02, [#10130](https://github.com/bobmatnyc/trusty-tools/issues/10130)),
-so `tctl install` and `tctl upgrade` skip it. Build it from a trusty-tools
-checkout at the same revision as your `tm`:
+so `tctl install` and `tctl upgrade` skip it. With the binary on `PATH`, run:
 
 ```bash
-cargo install --path crates/trusty-events --locked
 trusty-events serve
 ```
 
