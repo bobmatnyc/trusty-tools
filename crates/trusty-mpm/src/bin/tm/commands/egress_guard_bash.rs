@@ -4,12 +4,12 @@
 //! the same services with `curl`, a mail client or a channel binary. This arm
 //! is a tripwire for those direct forms; S5's `permissions.deny` and an OS
 //! sandbox are the boundary. It reads no bypass variable and no `agent_id`:
-//! #11273 lifts its channel deny for a PM or Architect main thread in
-//! `egress_guard_architect`, so it binds subagents.
+//! only the #10447 launch-record lift in `egress_guard_architect` passes a
+//! channel deny, so it binds subagents, PMs and an unbound Architect.
 //! What: [`bash_egress_deny`] names why the Bash arm denies a command — the
 //! first outbound-channel token it carries, or a spent walk budget. #11273: a
-//! command `egress_guard_bash_mention` finds mention-only (text programs, and
-//! `gh`/`git`/`cargo` naming a host only in prose) is no hit. Otherwise a
+//! command `egress_guard_bash_mention` finds mention-only (text programs,
+//! local `git`, and `gh` naming a host only in prose) is no hit. Otherwise a
 //! family host denies in any word; a family program denies only in command
 //! position, so `grep mail f` is allowed. A command over
 //! [`MAX_COMMAND_BYTES`] is denied unread, and so is one whose walk reads past
@@ -268,10 +268,11 @@ pub(crate) fn bash_oversize_reason(command: &str) -> Option<String> {
 pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
     match deny {
         BashDeny::Channel(hit) => format!(
-            "tm hook --egress-guard denies this Bash command: it reaches {} ({}), and only a \
-             PM's or the Architect's main thread may message Slack, Gmail, Notion or Google \
-             Chat directly (#11273); a subagent, or a call whose thread the guard cannot \
-             establish, may not (#8454). Ask the PM or the operator instead.",
+            "tm hook --egress-guard denies this Bash command: it reaches {} ({}), and only \
+             the Architect's main session bound to its tm launch record may message Slack, \
+             Gmail, Notion or Google Chat directly (#10447, #11273); a PM, a subagent, or a \
+             call whose thread the guard cannot establish may not (#8454). A family host \
+             named only as inert text is not this deny's subject. Ask the operator instead.",
             hit.service, hit.token
         ),
         BashDeny::WalkBudget => format!(

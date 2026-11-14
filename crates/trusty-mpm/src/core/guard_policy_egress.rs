@@ -10,7 +10,6 @@
 use super::{GuardPolicy, Role, policy};
 
 const ALL: &[Role] = &[Role::Pm, Role::Architect, Role::Agent];
-const AGENT: &[Role] = &[Role::Agent];
 const MAIN_THREADS: &[Role] = &[Role::Pm, Role::Architect];
 
 // The Architect core hard limits an entry cites (`content/instructions/architect/core.md`).
@@ -58,24 +57,26 @@ pub static EGRESS_MALFORMED_MCP_NAME: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
-// #11273: the family and Bash rules bind subagents; a PM or Architect main
-// thread passes them, and a call of unknown thread is judged as a subagent's.
+// #11273 (owner ruling 2026-11-14): reads pass for a PM or Architect main
+// session; sends and writes need the tm launch record (only the Architect has
+// one today), bar a PM's owner-DM send (#11194). Subagents are unchanged.
 pub static EGRESS_FAMILY: GuardPolicy = policy(
     "GP-043",
     "egress-family",
-    "A subagent may not call a messaging or mail family (Slack, Gmail, Notion, chat), bar claude.ai connectors and allowlisted reads.",
-    "#8454, #10387, #10735, #11273",
-    AGENT,
+    "No messaging or mail family call (Slack, Gmail, Notion, chat); a main session may read, and a send or write needs the tm launch record.",
+    "#8454, #10387, #10447, #11194, #11273",
+    ALL,
     true,
     OUTWARD_ACTION,
 );
 
+// #11273: inert text naming a family host passes for every role.
 pub static EGRESS_BASH: GuardPolicy = policy(
     "GP-044",
     "egress-bash",
-    "A subagent may not run a Bash command that reaches a messaging or mail endpoint or sender.",
-    "#8454, #11273",
-    AGENT,
+    "No Bash command that reaches a messaging or mail endpoint or runs a sender, without the tm launch record.",
+    "#8454, #10447, #11273",
+    ALL,
     true,
     OUTWARD_ACTION,
 );
@@ -103,8 +104,8 @@ pub static EGRESS_POLICY_NOT_READY: GuardPolicy = policy(
 pub static EGRESS_ARCHITECT_AUDIT_UNWRITABLE: GuardPolicy = policy(
     "GP-047",
     "egress-architect-audit-unwritable",
-    "A PM or Architect main-thread egress allow stands only once its audit line is written.",
-    "#10447, #11273",
+    "A main-session egress allow (Architect send, PM owner-DM send, family read) stands only once its audit line is written.",
+    "#10447, #11194, #11273",
     MAIN_THREADS,
     true,
     OUTWARD_ACTION,

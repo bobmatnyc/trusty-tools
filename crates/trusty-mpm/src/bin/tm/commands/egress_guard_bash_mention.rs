@@ -12,11 +12,16 @@
 //! redirect there). A segment is accepted when its program is the first word
 //! (no assignment, wrapper, `xargs` or lookup in front) and is:
 //! - a text program in [`TEXT_PROGRAMS`], or `rg` without `--pre`;
-//! - `gh` with a [`GH_SUBCOMMANDS`] subcommand, or `git` with a
-//!   [`GIT_SUBCOMMANDS`] subcommand, or `cargo` with a [`CARGO_SUBCOMMANDS`]
-//!   subcommand, carrying no [`EXEC_OPTIONS`] word, and naming a family host
-//!   only inside a word that holds whitespace — prose such as a title, body or
-//!   commit message, never a URL, remote, `--repo` value or option value.
+//! - `git` with a [`GIT_SUBCOMMANDS`] subcommand (none opens a remote
+//!   connection) carrying no [`EXEC_OPTIONS`] word, so a commit message,
+//!   branch name or path that names a family host is inert;
+//! - `gh` with a [`GH_SUBCOMMANDS`] subcommand, carrying no [`EXEC_OPTIONS`]
+//!   word, and naming a family host only inside a word that holds whitespace
+//!   — prose such as a title or body, never a URL, `--repo` value or option
+//!   value, since `gh` can be pointed at another host.
+//!
+//! A program that runs project code (`cargo`, `make`, an interpreter) is not
+//! listed: its words can reach whatever that code does with them.
 //!
 //! A data here-document body holding `$` or a backtick fails the segment,
 //! because an unquoted delimiter expands it. Anything else — an unknown
@@ -68,12 +73,7 @@ const GIT_SUBCOMMANDS: &[&str] = &[
     "shortlog",
 ];
 
-/// `cargo` subcommands that build or inspect the local workspace.
-const CARGO_SUBCOMMANDS: &[&str] = &[
-    "check", "build", "test", "clippy", "fmt", "doc", "tree", "metadata",
-];
-
-/// Option prefixes through which `gh`, `git` or `cargo` run a program or
+/// Option prefixes through which `gh` or `git` run a program or
 /// change the host they reach; any word starting with one fails the segment.
 const EXEC_OPTIONS: &[&str] = &[
     "-c",
@@ -147,23 +147,24 @@ fn mention_segment(segment: &str, host_in: &dyn Fn(&str) -> bool) -> bool {
     match program.as_str() {
         p if TEXT_PROGRAMS.contains(&p) => true,
         "rg" => !argv.iter().any(|w| w.starts_with("--pre")),
-        "gh" => tool_mention(&argv, argv.get(1), GH_SUBCOMMANDS, host_in),
-        "cargo" => tool_mention(&argv, argv.get(1), CARGO_SUBCOMMANDS, host_in),
+        "gh" => tool_mention(&argv, argv.get(1), GH_SUBCOMMANDS, Some(host_in)),
+        // #11273: no listed git subcommand opens a connection, so a bare host
+        // word (a branch name or a path) is inert there.
         "git" => match git_argv_at_subcommand(&argv_text) {
-            Some((git_argv, at)) => tool_mention(&argv, git_argv.get(at), GIT_SUBCOMMANDS, host_in),
+            Some((git_argv, at)) => tool_mention(&argv, git_argv.get(at), GIT_SUBCOMMANDS, None),
             None => false,
         },
         _ => false,
     }
 }
 
-/// `gh`/`git`/`cargo`: a listed `subcommand`, no [`EXEC_OPTIONS`] word, and a
-/// family host only inside a word holding whitespace.
+/// `gh`/`git`: a listed `subcommand` and no [`EXEC_OPTIONS`] word; with
+/// `host_in` set, a family host only inside a word holding whitespace.
 fn tool_mention(
     argv: &[String],
     subcommand: Option<&String>,
     listed: &[&str],
-    host_in: &dyn Fn(&str) -> bool,
+    host_in: Option<&dyn Fn(&str) -> bool>,
 ) -> bool {
     let Some(subcommand) = subcommand else {
         return false;
@@ -173,7 +174,8 @@ fn tool_mention(
     }
     argv.iter().skip(1).all(|word| {
         let exec = EXEC_OPTIONS.iter().any(|opt| word.starts_with(opt));
-        let bare_host = !word.contains(char::is_whitespace) && host_in(word);
+        let bare_host =
+            host_in.is_some_and(|host_in| !word.contains(char::is_whitespace) && host_in(word));
         !exec && !bare_host
     })
 }
