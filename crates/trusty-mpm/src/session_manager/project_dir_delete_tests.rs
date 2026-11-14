@@ -708,6 +708,24 @@ fn an_unpushed_commit_on_another_branch_refuses() {
 }
 
 #[test]
+fn a_tag_only_commit_refuses() {
+    let fx = GitWorktreeFixture::new();
+    git(&fx.repo, &["checkout", "-q", "-b", "tagged"]);
+    GitWorktreeFixture::commit_unpushed(&fx.repo);
+    git(&fx.repo, &["tag", "keep"]);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["branch", "-q", "-D", "tagged"]);
+    // Premise: HEAD is clean and pushed, and no branch reaches the commit.
+    assert!(super::super::worktree_safety::inspect_dirt(&fx.repo).is_none());
+    let err = plan_repo(&fx).expect_err("a commit only a local tag reaches");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. }
+            if reason.contains("1 unpushed commit(s)")),
+        "{err}"
+    );
+}
+
+#[test]
 fn a_stash_refuses() {
     let fx = GitWorktreeFixture::new();
     std::fs::write(fx.repo.join("README.md"), "edited\n").expect("edit README");

@@ -40,7 +40,7 @@ use super::record::ManagedSessionState;
 use super::session_kind::SessionKind;
 use super::workspace_guard::is_safe_to_remove;
 use super::worktree_ignored_output::ignored_output_refusal;
-use super::worktree_safety::{count_unlanded, git_stdout};
+use super::worktree_nested::{count_local_only_commits, count_stash_entries};
 use crate::client::ManagedSessionSummary;
 use crate::core::presence_local::{Authenticator, PresenceOutcome};
 
@@ -326,13 +326,13 @@ pub fn contained_dir(dir: &Path, root: &Path) -> Result<PathBuf, DirDeleteError>
 /// Why: in a main checkout `.git` sits inside the removed tree, so every
 /// local branch and the stash go with it, and the dirt check counts only
 /// `HEAD` and `session/<leaf>`. What: for a main checkout
-/// ([`worktree_kind`]), the commits on any local branch reachable from no
-/// remote, less those whose patch already landed ([`count_unlanded`],
-/// #6507), plus a non-empty `refs/stash`. A linked worktree's branches live
+/// ([`worktree_kind`]), the commits any local ref (branch, tag, stash)
+/// reaches and no remote does ([`count_local_only_commits`]), plus a
+/// non-empty `refs/stash` ([`count_stash_entries`]). A linked worktree's branches live
 /// in its common dir outside the tree; a directory with no `.git` has none.
 /// Every probe failure refuses.
-/// Test: `an_unpushed_commit_on_another_branch_refuses`, `a_stash_refuses`,
-/// `a_failed_branch_probe_refuses`.
+/// Test: `an_unpushed_commit_on_another_branch_refuses`, `a_tag_only_commit_refuses`,
+/// `a_stash_refuses`, `a_failed_branch_probe_refuses`.
 fn work_outside_head(dir: &Path) -> Option<String> {
     let failed = |e: String| Some(format!("the branch and stash check failed: {e}"));
     match fs::symlink_metadata(dir.join(".git")) {
@@ -345,18 +345,10 @@ fn work_outside_head(dir: &Path) -> Option<String> {
         Ok(WorktreeKind::MainCheckout) => {}
         Err(e) => return failed(e),
     }
+    // #10992: `--all` reaches a commit only a local tag holds; `--branches` did not.
     let probe = || -> Result<(usize, bool), String> {
-        let heads = git_stdout(dir, &["for-each-ref", "--format=%(refname)", "refs/heads"])?;
-        let tips: Vec<&str> = heads.split_whitespace().collect();
-        let unpushed = if tips.is_empty() {
-            0
-        } else {
-            let count = ["rev-list", "--count", "--branches", "--not", "--remotes"];
-            let list = ["rev-list", "--branches", "--not", "--remotes"];
-            count_unlanded(dir, &count, &list, &tips)?
-        };
-        let stash = git_stdout(dir, &["for-each-ref", "--format=%(refname)", "refs/stash"])?;
-        Ok((unpushed, !stash.trim().is_empty()))
+        let unpushed = count_local_only_commits(dir)?;
+        Ok((unpushed, count_stash_entries(dir)? > 0))
     };
     match probe() {
         Err(e) => failed(e),
