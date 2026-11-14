@@ -295,27 +295,42 @@ broken locally at `1f732b6d5`, while CI's `Rustdoc intra-doc links` job on the
 same SHA reported 2 broken, both introduced on `main` by #7603 after the PR's
 merge-base, in `trusty-mpm`'s `guided.rs`.
 
-## An Architect-bundle PR must contain main's tip (#11120)
+## An Architect-bundle PR must hold main's bundle changes (#11120)
 
 🔴 **`Architect bundle PR is current with main`** (`bundle-pr-current.yml`)
-fails a PR that changes an Architect bundle file while its head does not
-contain main's tip. Two bundle PRs from one base merge their regenerated
-`provenance.json` and `seed_history.tsv` into bytes neither generated; #11236
-and #11191 turned `main` red that way. Owner ruling 2026-11-14.
+fails a PR that changes an Architect bundle file while `main` has a commit,
+absent from the PR head, that changes a bundle file. Two bundle PRs from one
+base merge their regenerated `provenance.json` and `seed_history.tsv` into
+bytes neither generated; #11236 and #11191 turned `main` red that way. Owner
+ruling 2026-11-14.
 
+- A bundle PR that lacks only commits touching no bundle file passes, and the
+  message says how many commits behind it is. A TICKETING.md-only commit on
+  `main` no longer forces another merge and CI cycle (#11248).
+- The check walks each commit in `<head>..main`, not the net diff from the
+  merge base, so a bundle file `main` changed and then reverted still fails.
+  `seed_history.tsv` is append-only, so a reverted seed asset leaves history
+  lines behind anyway. Renames count on both sides, deletions count, and a
+  merge commit counts for a file it changes against every parent.
 - The bundle path list and the remedy commands are in
   `scripts/check_bundle_pr_current.sh`; its selftest is
   `scripts/check_bundle_pr_current_selftest.sh`.
 - It judges the PR head SHA against a freshly fetched `origin/main`, never the
   merge commit, which always contains `main`.
+- It fails closed with exit 2 on a failed fetch, an unresolvable ref, a
+  shallow repository, no merge base or any git error; it never passes on one.
 - No `paths:` filter and no job-level `if:`, so it reports on every PR. A PR
   that changes no bundle file passes at once.
 - It runs only for PRs that target `main` (`branches: [main]`). A PR with
   merge conflicts gets no `pull_request` run at all, as with `ci.yml`, so the
   check stays unreported there until the conflict is resolved.
-- For bundle PRs this overrides "a `BEHIND` branch merges fine" below.
-- It runs when the PR changes, not when `main` moves. Re-run it after another
-  bundle PR merges.
+- For bundle PRs this overrides "a `BEHIND` branch merges fine" below, when
+  `main` is ahead by a bundle commit.
+- Not guaranteed: it runs when the PR changes or a run is re-requested, not
+  when `main` moves. A bundle PR that passed can be overtaken by another
+  bundle PR merging first. Until a merge queue or a re-run on every `main`
+  move exists, the supervisor covers that by merge order; re-run the check
+  after another bundle PR merges.
 
 ## Merge states, and what each one means
 
