@@ -61,6 +61,8 @@ pub(crate) fn embedded_contents(dest: &str) -> Option<&'static str> {
 pub(crate) mod refresh;
 #[path = "seed_table.rs"]
 mod table;
+#[path = "seed_wiring.rs"]
+pub(crate) mod wiring;
 use table::EMBEDDED;
 
 /// Every file `tm fleet init` writes, in write order.
@@ -138,7 +140,7 @@ pub(crate) fn deploy_with(
         if records_era && file.dest.starts_with("local/") {
             continue;
         }
-        steps.push(deploy_file(dir, file, shipped_before)?);
+        steps.extend(deploy_file(dir, file, shipped_before)?);
     }
     // #10571: name the prototype commit and content this binary's bundle came from.
     if let Some(line) = files
@@ -200,32 +202,42 @@ fn records_era_steps(dir: &Path) -> Vec<Step> {
 /// What: equal bytes are unchanged; bytes `shipped_before` lists
 /// for this destination are replaced (mode kept for a script); any other
 /// bytes are an edit, reported skipped and left as is; absent is written.
+/// A kept core script lacking this release's wiring adds a `WARNING` step
+/// ([`wiring::kept_copy_warnings`], #11058).
 /// Test: `a_refresh_updates_an_unedited_earlier_copy`,
 /// `a_refresh_keeps_an_edited_copy_and_reports_it`,
-/// `an_edited_seed_or_script_is_never_overwritten`.
+/// `an_edited_seed_or_script_is_never_overwritten`,
+/// `an_edited_poller_without_owner_answer_wiring_is_warned_11058`.
 fn deploy_file(
     dir: &Path,
     file: &Seeded<'_>,
     shipped_before: ShippedBefore<'_>,
-) -> anyhow::Result<Step> {
+) -> anyhow::Result<Vec<Step>> {
     let path = dir.join(&file.dest);
     match std::fs::read(&path) {
-        Ok(bytes) if bytes == file.contents.as_bytes() => Ok(Step::Unchanged(file.dest.clone())),
+        Ok(bytes) if bytes == file.contents.as_bytes() => {
+            Ok(vec![Step::Unchanged(file.dest.clone())])
+        }
         Ok(bytes) if shipped_before(&file.dest, &bytes) => {
             write_seed(&path, file)?;
-            Ok(Step::Changed(format!(
+            Ok(vec![Step::Changed(format!(
                 "updated {} (an unedited earlier shipped copy)",
                 file.dest
-            )))
+            ))])
         }
-        Ok(_) => Ok(Step::Skipped(format!(
-            "{}: differs from the shipped copy (edited), so it is left as is; \
-             custom copy kept, not refreshed",
-            file.dest
-        ))),
+        Ok(bytes) => {
+            let mut steps = vec![Step::Skipped(format!(
+                "{}: differs from the shipped copy (edited), so it is left as is; \
+                 custom copy kept, not refreshed",
+                file.dest
+            ))];
+            // #11058: a kept core script can silently disable a refreshed sibling.
+            steps.extend(wiring::kept_copy_warnings(&file.dest, &bytes));
+            Ok(steps)
+        }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             write_seed(&path, file)?;
-            Ok(Step::Changed(format!("wrote {}", file.dest)))
+            Ok(vec![Step::Changed(format!("wrote {}", file.dest))])
         }
         Err(err) if err.kind() == std::io::ErrorKind::IsADirectory => {
             bail!(
