@@ -130,25 +130,66 @@ async fn a_failed_registry_write_leaves_the_session_registered_and_warns() {
     );
 }
 
-/// A running session a discovery scan adopted registers its checkout.
-#[tokio::test]
-async fn an_adopted_session_registers_its_checkout_as_a_project() {
+/// Register an adopted session named `name`, hosted by `origin`, in `repo`.
+fn adopt(state: &DaemonState, name: &str, origin: crate::core::session::SessionHost, repo: &Path) {
     use crate::core::session::{ControlModel, Session, SessionId};
+    let mut session = Session::new(SessionId::new(), String::new(), ControlModel::Tmux, None);
+    session.tmux_name = name.into();
+    session.origin = origin;
+    session.project_path = Some(repo.to_path_buf());
+    state.register_session(session);
+}
+
+/// D50: a plain `claude` process the native scan adopted is not a tm session,
+/// so its cwd must never become a registered checkout. Fails on d91d05face,
+/// which registered every adopted cwd.
+#[tokio::test]
+async fn a_native_adopted_cwd_writes_no_project_row() {
+    use crate::core::session::SessionHost;
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().join("root");
     let state = DaemonState::with_root(root.clone());
-    let repo = checkout(&tmp.path().join("gadget"), "https://github.com/acme/gadget");
-    let mut session = Session::new(SessionId::new(), String::new(), ControlModel::Tmux, None);
-    session.tmux_name = "tm-gadget".into();
-    session.project_path = Some(repo.clone());
-    state.register_session(session);
+    let repo = checkout(&tmp.path().join("plain"), "https://github.com/acme/plain");
+    // A native name is `<cwd-basename>-<pid>`; a `tm-` folder must not pass.
+    adopt(&state, "tm-plain-4242", SessionHost::Native, &repo);
 
-    register_adopted_sessions(&state, &["tm-gadget".to_string()]).await;
+    register_adopted_sessions(&state, &["tm-plain-4242".to_string()]).await;
 
+    let registry = registry_data_dir_under(&root);
+    assert!(
+        !registry.join("projects.json").exists(),
+        "a native-adopted cwd wrote a project row"
+    );
+}
+
+/// A tmux session tm launched (`tm-`/`tmpm-` name) registers its checkout when
+/// a scan adopts it; an external tmux session running `claude` does not.
+/// Fails on d91d05face, which registered the external session too.
+#[tokio::test]
+async fn only_a_tm_launched_tmux_session_registers_when_adopted() {
+    use crate::core::session::SessionHost;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("root");
+    let state = DaemonState::with_root(root.clone());
+    let ours = checkout(&tmp.path().join("gadget"), "https://github.com/acme/gadget");
+    let theirs = checkout(&tmp.path().join("other"), "https://github.com/acme/other");
+    adopt(&state, "tm-gadget", SessionHost::Tmux, &ours);
+    adopt(&state, "work", SessionHost::Tmux, &theirs);
+
+    register_adopted_sessions(&state, &["tm-gadget".to_string(), "work".to_string()]).await;
+
+    let registry = registry_data_dir_under(&root);
     assert_eq!(
-        registered_checkout(&registry_data_dir_under(&root), "acme/gadget")
-            .expect("the adopted session's project resolves"),
-        repo
+        registered_checkout(&registry, "acme/gadget").expect("the tm session's project resolves"),
+        ours
+    );
+    assert!(
+        matches!(
+            registered_checkout(&registry, "acme/other"),
+            Err(crate::project::CheckoutLookupError::NotRegistered(_))
+        ),
+        "an external tmux session's cwd was registered"
     );
 }
