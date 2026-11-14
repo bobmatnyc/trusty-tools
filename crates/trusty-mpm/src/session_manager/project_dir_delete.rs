@@ -19,7 +19,9 @@
 //! it holds no recorded Architect directory; no session working in it is the
 //! Architect's or of an unreported kind; no session in it is running; it has
 //! no dirty or unpushed work (`worktree_safety::inspect_dirt`); no live
-//! process stands in it (`worktree_liveness::process_holding`).
+//! process stands in it (`worktree_liveness::process_holding`). That probe
+//! sees each process's current working directory only, not open files: a
+//! process holding a file inside the tree with its cwd elsewhere is not seen.
 //! Test: `project_dir_delete_tests.rs`.
 
 use std::fs;
@@ -105,7 +107,15 @@ pub enum DirDeleteError {
     #[error("refusing to delete {} from a test process: it is outside the temp dir", .0.display())]
     TestHarness(PathBuf),
     /// `remove_dir_all` failed; part of the tree may be gone.
-    #[error("deleting {}: {error}", path.display())]
+    // #10992 critic MEDIUM: say the tree is partial, that a retry is refused
+    // once `.git` is gone, and that the record was left alone.
+    #[error(
+        "deleting {} failed part-way ({error}): the directory is PARTIALLY deleted. \
+         Remove the rest by hand: a retry is refused once `.git` is gone, because \
+         the leftover then reads as unsaved work. The session record was NOT \
+         marked deleted.",
+        path.display()
+    )]
     Remove {
         /// The directory.
         path: PathBuf,
@@ -437,6 +447,8 @@ impl DirDeleteCapability {
     }
 
     /// Remove the directory tree; returns the path removed.
+    ///
+    /// Test: `a_partial_delete_says_so_and_names_the_record`.
     pub fn remove(self) -> Result<PathBuf, DirDeleteError> {
         fs::remove_dir_all(&self.dir).map_err(|error| DirDeleteError::Remove {
             path: self.dir.clone(),

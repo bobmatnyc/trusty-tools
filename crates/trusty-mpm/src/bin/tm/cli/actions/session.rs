@@ -358,22 +358,20 @@ pub(crate) enum SessionAction {
     /// Hard-delete a managed session RECORD from the store (#2012).
     ///
     /// Why: distinct from `decommission` (stop runtime + maybe remove
-    /// workspace + tombstone) — this permanently drops the record itself via
-    /// the existing tombstone-compaction primitive, for a mis-provisioned or
-    /// stale record an operator wants gone outright rather than left as a
-    /// `Decommissioned` tombstone forever. Fail-closed: refuses a RUNNING
-    /// session unless `--force` is passed.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/delete?force=<bool>`. NEVER
-    /// removes the workspace directory from disk — deleting the record is a
-    /// store-only operation (use `decommission` first to also reclaim disk).
+    /// workspace + tombstone) — this marks the record deleted, for a
+    /// mis-provisioned or stale record an operator wants gone. Fail-closed:
+    /// refuses a RUNNING session unless `--force` is passed.
+    /// What: without `--project-dir`, POSTs
+    /// `/api/v1/sessions/managed/{id}/delete?force=<bool>` and NEVER removes
+    /// the session's directory from disk. With `--project-dir` (#10992), it
+    /// first removes the session's project directory: only strictly inside
+    /// the managed workspace root, only when no dirty or unpushed work, no
+    /// running session, no live process and no Architect is in it, and only
+    /// after the typed directory name (or `--yes`) and Touch ID (or the login
+    /// password). It then marks the record deleted. `--dry-run` shows what
+    /// would be removed and removes nothing.
     /// Test: `cli_parses_session_delete`,
     /// `cli_parses_session_delete_project_dir`.
-    ///
-    /// #10992: `--project-dir` also removes the session's project directory,
-    /// only inside the managed workspace root, and refuses dirty or unpushed
-    /// work, a running session or live process in it, and the Architect. It
-    /// shows the plan, then needs `--yes` or the typed directory name, then
-    /// Touch ID (or the login password). `--dry-run` shows the plan only.
     Delete {
         /// Managed session id.
         id: String,
