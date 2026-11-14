@@ -46,7 +46,7 @@ struct FakeProbes {
 }
 
 impl DirProbes for FakeProbes {
-    fn dirt(&self, _dir: &Path) -> Option<String> {
+    fn dirt(&self, _dir: &Path, _task: Option<&str>) -> Option<String> {
         let n = self.dirt_calls.get() + 1;
         self.dirt_calls.set(n);
         if self.dirt_from_call.is_some_and(|from| n >= from) {
@@ -70,6 +70,7 @@ fn session(id: &str, dir: &Path, kind: Option<SessionKind>, state: &str) -> DirS
         states: vec![state.into()],
         workspace: Some(dir.to_path_buf()),
         cwd: None,
+        task: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn a_path_outside_the_root_is_never_removed() {
         dir: out.clone(),
         root: fx.repos_root.clone(),
         confirm_name: "outside".into(),
+        task: None,
     };
     let probes = FakeProbes::default();
     let err =
@@ -574,4 +576,93 @@ fn a_partial_delete_says_so_and_names_the_record() {
         assert!(msg.contains(needle), "missing {needle:?} in: {msg}");
     }
     assert!(locked.join("f.txt").exists(), "the locked file survives");
+}
+
+// ---- critic 834ddb80b2c5: the #7660 provisioning exemption, shared ---------
+
+/// Provision `fx.repo` with the real launch preparation a session spawn runs
+/// (`prepare_session_with_home`, the managed-workspace layout), under a
+/// hermetic home. Returns the home, which must outlive the test.
+fn spawn_provisioned(fx: &GitWorktreeFixture) -> tempfile::TempDir {
+    let home = crate::test_support::hermetic_temp_dir();
+    let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(home.path(), &fx.repo);
+    crate::core::session_launch::prepare_session_with_home(
+        &fw,
+        &fx.repo,
+        None,
+        true,
+        Some(home.path()),
+    )
+    .expect("the spawn preparation succeeds");
+    // Premise: provisioning left dirt a plain check counts.
+    assert!(
+        super::super::worktree_safety::inspect_dirt(&fx.repo).is_some(),
+        "premise: spawn provisioning dirties the checkout"
+    );
+    home
+}
+
+/// `dir`'s `git status` entries outside `.trusty-mpm/` that the shared
+/// provisioning excuse does not accept.
+fn unexcused(dir: &Path) -> Vec<String> {
+    let mut entries = super::super::decommission_force::dirty_entries(dir);
+    entries.retain(|line| !is_provisioning_entry(dir, None, line));
+    entries
+}
+
+/// The one entry a real spawn leaves that no excuse reaches: info/exclude
+/// lists `/.trusty-mpm/` (#8758), so the `.trusty-mpm/` dirt pass reads one
+/// `!! .trusty-mpm/` line under every excuse, `decommission --force` too.
+const TRUSTY_MPM_ENTRY: usize = 1;
+
+#[test]
+fn a_spawn_provisioned_dir_is_excused_every_provisioning_file() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned(&fx);
+    // Premise: the real spawn wrote the ledgered provisioning files.
+    let all = super::super::decommission_force::dirty_entries(&fx.repo);
+    for want in ["?? .claude/settings.json", "?? CLAUDE.md"] {
+        assert!(all.iter().any(|l| l == want), "missing {want}: {all:?}");
+    }
+    // Every entry the real spawn left outside `.trusty-mpm/` is excused.
+    assert_eq!(unexcused(&fx.repo), Vec::<String>::new());
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    // The delete counts only what decommission --force counts.
+    let err = plan(&sessions, &fx.repos_root).expect_err("the .trusty-mpm entry counts");
+    let want = format!("{TRUSTY_MPM_ENTRY} uncommitted/untracked file(s)");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
+        "{err}"
+    );
+    assert!(fx.repo.exists());
+}
+
+#[test]
+fn an_untracked_non_provisioning_file_still_refuses() {
+    let fx = GitWorktreeFixture::new();
+    let _home = spawn_provisioned(&fx);
+    std::fs::write(fx.repo.join("notes.txt"), "mine\n").expect("write notes");
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    let err = plan(&sessions, &fx.repos_root).expect_err("a user file is dirt");
+    // `notes.txt` counts; every provisioning file is excused.
+    let want = format!("{} uncommitted/untracked file(s)", TRUSTY_MPM_ENTRY + 1);
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
+        "{err}"
+    );
+    assert_eq!(unexcused(&fx.repo), vec!["?? notes.txt".to_string()]);
+    assert!(
+        fx.repo.join("notes.txt").exists(),
+        "the user file was touched"
+    );
 }

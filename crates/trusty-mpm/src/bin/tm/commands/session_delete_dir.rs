@@ -204,6 +204,7 @@ mod tests {
             dir: "/w/acme/widget".into(),
             root: "/w".into(),
             confirm_name: "widget".into(),
+            task: None,
         };
         let lines = render(&plan, true);
         assert_eq!(lines[0], "would delete /w/acme/widget");

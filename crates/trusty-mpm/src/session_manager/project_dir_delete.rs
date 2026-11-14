@@ -18,7 +18,9 @@
 //! (no symlink leaf; `..` and symlinked parents resolved by canonicalizing);
 //! it holds no recorded Architect directory; no session working in it is the
 //! Architect's or of an unreported kind; no session in it is running; it has
-//! no dirty or unpushed work (`worktree_safety::inspect_dirt`); no live
+//! no dirty or unpushed work (`worktree_safety::inspect_dirt_excusing`, which
+//! excuses only what `decommission --force` excuses: `is_provisioning_entry`,
+//! #7660); no live
 //! process stands in it (`worktree_liveness::process_holding`). That probe
 //! sees each process's current working directory only, not open files: a
 //! process holding a file inside the tree with its cwd elsewhere is not seen.
@@ -31,6 +33,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::architect::{ProtectedVerb, refusal};
+use super::decommission_force::is_provisioning_entry;
 use super::record::ManagedSessionState;
 use super::session_kind::SessionKind;
 use super::workspace_guard::is_safe_to_remove;
@@ -139,6 +142,8 @@ pub struct DirSession {
     pub workspace: Option<PathBuf>,
     /// Start directory, if any.
     pub cwd: Option<PathBuf>,
+    /// The record's task, which an unedited `TASK.md` equals (#8688).
+    pub task: Option<String>,
 }
 
 impl DirSession {
@@ -153,6 +158,7 @@ impl DirSession {
             states,
             workspace: s.workspace_path.as_deref().map(PathBuf::from),
             cwd: s.cwd.as_deref().map(PathBuf::from),
+            task: s.task.clone(),
         }
     }
 
@@ -189,18 +195,28 @@ impl DirSession {
 /// The OS questions the guards ask, injectable for tests (#10992).
 pub trait DirProbes {
     /// `Some(reason)` unless the directory provably holds no unsaved work.
-    fn dirt(&self, dir: &Path) -> Option<String>;
+    /// `task` is the session record's task, for the `TASK.md` excuse.
+    fn dirt(&self, dir: &Path, task: Option<&str>) -> Option<String>;
     /// `Some(reason)` unless the probe ran and found no process in `dir`.
     fn live_process(&self, dir: &Path) -> Option<String>;
 }
 
-/// Production probes: `inspect_dirt` and `process_holding`.
+/// Production probes: `inspect_dirt_excusing` and `process_holding`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsProbes;
 
 impl DirProbes for OsProbes {
-    fn dirt(&self, dir: &Path) -> Option<String> {
-        super::worktree_safety::inspect_dirt(dir).map(|d| d.reason)
+    /// Why: a freshly spawned project dir holds tm's own provisioning files,
+    /// which a plain dirt check counts as unsaved work.
+    /// What: the dirt check `decommission --force` runs, excusing exactly
+    /// [`is_provisioning_entry`] — the same function, so the two sets cannot
+    /// drift; any other entry, or a check that cannot complete, is dirt.
+    /// Test: `a_spawn_provisioned_dir_is_excused_every_provisioning_file`,
+    /// `an_untracked_non_provisioning_file_still_refuses`.
+    fn dirt(&self, dir: &Path, task: Option<&str>) -> Option<String> {
+        // #10992 critic 834ddb80b2c5: the #7660 exemption, shared, never copied.
+        let excuse = |line: &str| is_provisioning_entry(dir, task, line);
+        super::worktree_safety::inspect_dirt_excusing(dir, &excuse).map(|d| d.reason)
     }
 
     fn live_process(&self, dir: &Path) -> Option<String> {
@@ -235,6 +251,9 @@ pub struct DirDeletePlan {
     pub root: PathBuf,
     /// The name a typed confirmation must match: the directory's leaf name.
     pub confirm_name: String,
+    /// The session record's task, re-read by the guards in `acquire`.
+    #[serde(skip)]
+    pub task: Option<String>,
 }
 
 /// What a delete did, or would do under `dry_run` (#10992).
@@ -299,9 +318,13 @@ pub fn contained_dir(dir: &Path, root: &Path) -> Result<PathBuf, DirDeleteError>
 }
 
 /// The disk guards, run at plan time and again just before removal.
-fn disk_guards(dir: &Path, probes: &dyn DirProbes) -> Result<(), DirDeleteError> {
+fn disk_guards(
+    dir: &Path,
+    task: Option<&str>,
+    probes: &dyn DirProbes,
+) -> Result<(), DirDeleteError> {
     // #10992: an unanswerable dirt check is dirt, never clean.
-    if let Some(reason) = probes.dirt(dir) {
+    if let Some(reason) = probes.dirt(dir, task) {
         return Err(DirDeleteError::Dirty {
             path: dir.to_path_buf(),
             reason,
@@ -376,7 +399,7 @@ pub fn plan_dir_delete(
             running,
         });
     }
-    disk_guards(&canon, probes)?;
+    disk_guards(&canon, target.task.as_deref(), probes)?;
     let confirm_name = canon
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -386,6 +409,7 @@ pub fn plan_dir_delete(
         dir: canon,
         root,
         confirm_name,
+        task: target.task.clone(),
     })
 }
 
@@ -442,7 +466,7 @@ impl DirDeleteCapability {
                 return Err(DirDeleteError::TestHarness(dir));
             }
         }
-        disk_guards(&dir, probes)?;
+        disk_guards(&dir, plan.task.as_deref(), probes)?;
         Ok(Self { dir })
     }
 
