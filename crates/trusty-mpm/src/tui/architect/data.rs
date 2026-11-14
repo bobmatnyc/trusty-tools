@@ -23,6 +23,11 @@ use crate::tui::theme::Tone;
 /// (#10944 version skew).
 pub const OLD_DAEMON_HINT: &str = "the daemon predates store resolution (#10944): \
      restart or upgrade it, or pass `tm tui --architect-store <dir>`";
+/// Kept as a public const for semver (Architect ruling); unused since #10944.
+// See #10944
+#[deprecated(note = "no longer used since #10944: the daemon resolves the store root")]
+pub const STORE_NOT_SET: &str = "Architect store not set: start with `tm tui --architect-store <dir>` \
+     or TM_ARCHITECT_STORE (the daemon resolves it itself once #10944 lands)";
 /// The deadline on one dashboard call.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest detail value shown before it is cut.
