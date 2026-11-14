@@ -42,6 +42,7 @@ function active(name, route) {
   $("account").textContent = route.account;
   $("workflow").textContent = name;
   statusLine.textContent = "Extension active";
+  void loadAccess();
 }
 async function refresh() {
   preview = await request({type:"preview"});
@@ -127,5 +128,133 @@ remove.addEventListener("click", async () => {
   } catch (error) { statusLine.textContent = errorMessage(error); }
   finally { remove.disabled = false; }
 });
+
+// #11239: activation codes. The code lives only in this page's memory; closing the popup discards it.
+// The target tab is read once, at load, and every request names it explicitly.
+const targetTab = (async () => {
+  const [found] = await chrome.tabs.query({active:true, currentWindow:true});
+  return Number.isInteger(found?.id) && found.id >= 0 ? found.id : null;
+})().catch(() => null);
+let tab = null, code = null, codeGrant = null, expiresAt = 0, ticker = null, poller = null, accessShown = false;
+const clock = seconds => {
+  const s = Math.max(0, Math.ceil(seconds));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+function show(state) {
+  for (const name of ["choose","shown","expired"]) $(name).hidden = name !== state;
+}
+function forgetCode() {
+  clearInterval(ticker);
+  code = codeGrant = null;
+  $("code").value = "";
+}
+function countdown() {
+  const left = expiresAt - Date.now() / 1000;
+  if (left <= 0) {
+    forgetCode();
+    show("expired");
+    return;
+  }
+  $("countdown").textContent = clock(left);
+}
+function scopeLabel(entry) { return entry.scope === "tab" ? "This tab" : "Whole profile"; }
+function renderGrants(entries) {
+  const list = $("grants");
+  list.replaceChildren(...entries.map(entry => {
+    const row = document.createElement("li");
+    const where = [entry.origin, entry.title].filter(Boolean).join(" — ");
+    const state = entry.state === "code"
+      ? "waiting for agent, " + clock(entry.expires_in_s) + " left"
+      : "agent connected, idle " + clock(entry.idle_s);
+    row.textContent = scopeLabel(entry) + (where ? ": " + where : "") + " · " + state;
+    const disconnect = document.createElement("button");
+    disconnect.className = "secondary";
+    disconnect.textContent = "Disconnect";
+    disconnect.addEventListener("click", () => revoke({type:"revoke_grant", grant:entry.grant}));
+    row.append(document.createElement("br"), disconnect);
+    return row;
+  }));
+  $("disconnect-all").hidden = entries.length === 0;
+}
+async function loadGrants() {
+  try { renderGrants((await request({type:"grants"})).grants); }
+  catch (error) { statusLine.textContent = errorMessage(error); }
+}
+async function revoke(message) {
+  try {
+    await request(message);
+    if (message.type === "revoke_grants" || message.grant === codeGrant) {
+      forgetCode();
+      show("choose");
+    }
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  await loadGrants();
+}
+function unavailable(error) {
+  $("access").hidden = true;
+  $("retry").hidden = false;
+  statusLine.textContent = errorMessage(error);
+}
+async function loadAccess() {
+  $("retry").hidden = true;
+  try {
+    tab = await targetTab;
+    const preview = await request({type:"code_preview", tab});
+    // A profile without a credential has no code flow until pairing ships (#11239).
+    if (!preview.paired) return;
+    const target = preview.target;
+    $("mint-tab").disabled = !target?.access;
+    $("target").textContent = target?.access
+      ? [target.origin, target.title].filter(Boolean).join(" — ")
+      : "Open a web page and click Trusty Browser on it";
+    $("access").hidden = false;
+    if (!accessShown) show("choose");
+    accessShown = true;
+    clearInterval(poller);
+    poller = setInterval(loadGrants, 5000);
+    await loadGrants();
+  } catch (error) { unavailable(error); }
+}
+function mint(scope) {
+  // The owner ruling asks for all-https access inside this click; Chrome needs the call in the gesture.
+  let permission;
+  try { permission = chrome.permissions.request({origins:["https://*/*"]}).catch(() => false); }
+  catch { permission = Promise.resolve(false); }
+  $("mint-tab").disabled = $("mint-profile").disabled = true;
+  statusLine.textContent = "";
+  void (async () => {
+    try {
+      await permission;
+      const reply = await request(scope === "tab" ? {type:"mint", scope, tab} : {type:"mint", scope});
+      code = reply.code;
+      codeGrant = reply.grant;
+      expiresAt = reply.expires_at;
+      $("code").value = code;
+      $("code-scope").textContent = scope === "tab" ? "This tab" : "Whole profile (every tab in this profile)";
+      show("shown");
+      countdown();
+      clearInterval(ticker);
+      ticker = setInterval(countdown, 1000);
+    } catch (error) {
+      statusLine.textContent = errorMessage(error);
+    } finally {
+      $("mint-profile").disabled = false;
+      await loadAccess();
+    }
+  })();
+}
+$("mint-tab").addEventListener("click", () => mint("tab"));
+$("mint-profile").addEventListener("click", () => mint("profile"));
+$("copy").addEventListener("click", async () => {
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code);
+    statusLine.textContent = "Code copied";
+  } catch { statusLine.textContent = "Could not copy the code."; }
+});
+$("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revoke_grant", grant:codeGrant}));
+$("new-code").addEventListener("click", () => show("choose"));
+$("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
+$("retry").addEventListener("click", () => loadAccess());
 refresh().catch(error => { statusLine.textContent = errorMessage(error); })
   .finally(() => { activate.disabled = false; });

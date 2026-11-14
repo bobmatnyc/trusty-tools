@@ -26,6 +26,8 @@ def test_activation_popup():
                         {ok:true,...target,permissionPattern:'https://test.example/*'};
                     if (m.type === 'enable') {permitted = true; return {ok:true};}
                     if (m.type === 'activate') return {ok:true,workflow:'trusty-managed'};
+                    if (m.type === 'code_preview') return {ok:true,paired:false,email:'qa@example.test',
+                        profile:null,target:null};
                     throw Error('unexpected request');
                 }}};
             """)
@@ -49,9 +51,95 @@ def test_activation_popup():
             activate.focus()
             page.keyboard.press("Enter")
             expect(page.get_by_role("status")).to_have_text("Extension active")
-            assert page.evaluate("window.calls") == ["preview", "grant", "enable", "preview", "activate"]
+            page.wait_for_function("window.calls.includes('code_preview')")
+            assert page.evaluate("window.calls") == [
+                "preview", "grant", "enable", "preview", "activate", "code_preview"]
+            expect(page.locator("#access")).to_be_hidden()
             page.get_by_text("Activation details", exact=True).click()
             expect(page.locator("#workflow")).to_have_text("trusty-managed")
             expect(page.locator("#account")).to_have_text("QA")
+        finally:
+            browser.close()
+
+
+CODE_POPUP = """
+    window.calls = [];
+    window.access = %s;
+    window.grants = [{grant:'g-0000000000aa',scope:'profile',profile:'p',state:'active',idle_s:65}];
+    let active = 42;
+    window.chrome = {
+      tabs:{query:async q => { window.calls.push({query:q}); return [{id:active++}]; }},
+      permissions:{request:async () => { window.calls.push('permission'); return false; }},
+      runtime:{sendMessage:async m => {
+        window.calls.push(m);
+        if (m.type === 'preview') return {ok:true,enrolled:'w',route:{email:'qa@example.test',url:'https://a.test/',account:'QA'}};
+        if (m.type === 'code_preview') return {ok:true,paired:true,email:'qa@example.test',profile:'p',
+          target:{tab:m.tab,access:window.access,origin:window.access ? 'https://a.test' : null,title:window.access ? 'Alpha' : null}};
+        if (m.type === 'grants') return {ok:true,grants:window.grants};
+        if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
+          scope:m.scope,profile:'p',...(m.tab === undefined ? {} : {tab:m.tab}),expires_at:Date.now() / 1000 + 2.5};
+        if (m.type === 'revoke_grant') return {ok:true,revoked:1};
+        throw Error('unexpected request ' + m.type);
+      }}};
+"""
+
+
+def sent(page, kind):
+    return [c for c in page.evaluate("window.calls") if isinstance(c, dict) and c.get("type") == kind]
+
+
+def test_code_popup_offers_tab_first_and_forgets_the_code():
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 700})
+            page.add_init_script(CODE_POPUP % "true")
+            page.goto(popup.as_uri())
+            tab_choice = page.get_by_role("button", name="Give access to this tab")
+            profile_choice = page.get_by_role("button", name="Give access to the whole profile (every tab in this profile)")
+            expect(tab_choice).to_be_enabled()
+            assert tab_choice.evaluate(
+                "(a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)",
+                profile_choice.element_handle())
+            expect(page.locator("#target")).to_have_text("https://a.test — Alpha")
+            expect(page.locator("#grants li")).to_contain_text("agent connected, idle 1:05")
+            tab_choice.click()
+            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
+            expect(page.locator("#countdown")).to_have_text("0:03")
+            calls = page.evaluate("window.calls")
+            assert calls.index("permission") < calls.index(sent(page, "mint")[0])
+            assert sent(page, "mint") == [{"type": "mint", "scope": "tab", "tab": 42}]
+            assert [c for c in calls if isinstance(c, dict) and "query" in c] == [
+                {"query": {"active": True, "currentWindow": True}}]
+            assert all(c.get("tab") == 42 for c in sent(page, "code_preview"))
+            expect(page.get_by_text("Code expired", exact=True)).to_be_visible(timeout=5000)
+            expect(page.locator("#code")).to_have_value("")
+            assert "tb-" not in page.locator("main").inner_text()
+            page.get_by_role("button", name="Disconnect", exact=True).click()
+            page.wait_for_function("window.calls.some(c => c.type === 'revoke_grant')")
+            assert sent(page, "revoke_grant") == [{"type": "revoke_grant", "grant": "g-0000000000aa"}]
+            page.get_by_role("button", name="New code").click()
+            profile_choice.click()
+            expect(page.locator("#code-scope")).to_have_text("Whole profile (every tab in this profile)")
+            page.get_by_role("button", name="Cancel code").click()
+            page.wait_for_function("window.calls.filter(c => c.type === 'revoke_grant').length === 2")
+            assert sent(page, "revoke_grant")[-1] == {"type": "revoke_grant", "grant": "g-0000000000bb"}
+            expect(page.locator("#code")).to_have_value("")
+        finally:
+            browser.close()
+
+
+def test_code_popup_disables_the_tab_choice_without_page_access():
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 700})
+            page.add_init_script(CODE_POPUP % "false")
+            page.goto(popup.as_uri())
+            expect(page.locator("#target")).to_have_text("Open a web page and click Trusty Browser on it")
+            expect(page.get_by_role("button", name="Give access to this tab")).to_be_disabled()
+            expect(page.get_by_role("button", name="Give access to the whole profile (every tab in this profile)")).to_be_enabled()
         finally:
             browser.close()

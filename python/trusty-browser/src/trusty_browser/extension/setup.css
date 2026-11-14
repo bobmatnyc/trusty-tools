@@ -39,6 +39,15 @@ details, #transfer { overflow-wrap: anywhere; }
 summary { cursor: pointer; }
 dt { color: #665549; font-size: 12px; }
 dd { margin: 0 0 8px; }
+#access { margin-top: 12px; overflow-wrap: anywhere; }
+#access p { margin: 0 0 8px; }
+#code {
+  box-sizing: border-box; width: 100%; margin-bottom: 8px; padding: 8px; border: 1px solid #cdb6a4;
+  border-radius: 7px; font: 13px/1.3 ui-monospace, Menlo, monospace; color: inherit; background: white;
+}
+#grants { margin: 12px 0 0; padding: 0; list-style: none; }
+#grants li { padding: 8px 0; border-top: 1px solid #ead9c8; font-size: 12px; }
+#grants li button { min-height: 32px; margin-top: 6px; }
 @media (prefers-reduced-motion: reduce) {
   .iris { transform: none; transition: none; }
 }
