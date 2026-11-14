@@ -12,7 +12,8 @@
 //! [`DirDeleteCapability::acquire`] — the only way to obtain something that
 //! can remove a directory, modelled on `index_delete_guard`'s
 //! `DestructiveIndexDelete::acquire` — checks the confirmation, asks the
-//! [`Authenticator`] for presence, and re-runs the disk guards before
+//! [`Authenticator`] for presence, re-runs the session guards against a list
+//! read again after the prompt (#11238), and re-runs the disk guards before
 //! [`DirDeleteCapability::remove`] runs `remove_dir_all`.
 //! Guards, in order: the directory is strictly inside the allowlisted root
 //! (no symlink leaf; `..` and symlinked parents resolved by canonicalizing);
@@ -109,6 +110,14 @@ pub enum DirDeleteError {
         /// The directory.
         path: PathBuf,
         /// What the liveness probe found.
+        reason: String,
+    },
+    /// The session list could not be read again after the prompt (#11238).
+    #[error("refusing to delete {}: the sessions could not be re-checked after the prompt: {reason}", path.display())]
+    SessionsUnchecked {
+        /// The directory.
+        path: PathBuf,
+        /// Why the re-read failed.
         reason: String,
     },
     /// The typed confirmation did not match.
@@ -452,35 +461,28 @@ fn disk_guards(
     Ok(())
 }
 
-/// Every check, with no side effect (#10992).
+/// The session guards: Architect directory, Protected / unknown kind, Running.
 ///
-/// What: see the module doc for the order; each refusal returns before the
-/// next check runs.
-/// Test: `dry_run_removes_nothing_and_reports_the_same_plan`, and one
-/// refusal test per guard in `project_dir_delete_tests.rs`.
-pub fn plan_dir_delete(
-    input: DirDeleteInput<'_>,
-    probes: &dyn DirProbes,
-) -> Result<DirDeletePlan, DirDeleteError> {
-    let target = input
-        .sessions
-        .iter()
-        .find(|s| s.id == input.session_id)
-        .ok_or_else(|| DirDeleteError::SessionNotFound(input.session_id.to_string()))?;
-    let dir = target
-        .dir()
-        .ok_or_else(|| DirDeleteError::NoDirectory(target.id.clone()))?;
-    let canon = contained_dir(dir, input.root)?;
-    let root =
-        fs::canonicalize(input.root).map_err(|e| uncontained(dir, input.root, e.to_string()))?;
-    for a in input.architect_dirs {
+/// Why: run at plan time and, #11238, again against a fresh list after the
+/// prompt — one implementation, called twice. What: `canon` is the canonical
+/// target; an occupant is `target_id` or any session that works inside it.
+/// Test: `an_architect_directory_is_refused`, `an_architect_session_is_refused`,
+/// `a_running_session_is_refused`,
+/// `a_session_spawned_during_the_prompt_refuses_the_delete`.
+fn session_guards(
+    canon: &Path,
+    target_id: &str,
+    sessions: &[DirSession],
+    architect_dirs: &[PathBuf],
+) -> Result<(), DirDeleteError> {
+    for a in architect_dirs {
         // #10992 critic MEDIUM: only NotFound may fall back to the raw spelling.
         let inside = match resolve_path(a) {
-            Ok(ca) => ca.starts_with(&canon) || a.starts_with(&canon),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => a.starts_with(&canon),
+            Ok(ca) => ca.starts_with(canon) || a.starts_with(canon),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => a.starts_with(canon),
             Err(error) => {
                 return Err(DirDeleteError::ArchitectUnresolved {
-                    path: canon,
+                    path: canon.to_path_buf(),
                     architect: a.clone(),
                     error,
                 });
@@ -488,15 +490,14 @@ pub fn plan_dir_delete(
         };
         if inside {
             return Err(DirDeleteError::ArchitectDir {
-                path: canon,
+                path: canon.to_path_buf(),
                 architect: a.clone(),
             });
         }
     }
-    let occupants: Vec<&DirSession> = input
-        .sessions
+    let occupants: Vec<&DirSession> = sessions
         .iter()
-        .filter(|s| s.id == target.id || s.works_inside(&canon))
+        .filter(|s| s.id == target_id || s.works_inside(canon))
         .collect();
     // #10992: the existing ProtectedVerb refusal; an unreported kind reads as
     // `Unknown`, which is protected too.
@@ -518,10 +519,35 @@ pub fn plan_dir_delete(
         .collect();
     if !running.is_empty() {
         return Err(DirDeleteError::Running {
-            path: canon,
+            path: canon.to_path_buf(),
             running,
         });
     }
+    Ok(())
+}
+
+/// Every check, with no side effect (#10992).
+///
+/// What: see the module doc for the order; each refusal returns before the
+/// next check runs.
+/// Test: `dry_run_removes_nothing_and_reports_the_same_plan`, and one
+/// refusal test per guard in `project_dir_delete_tests.rs`.
+pub fn plan_dir_delete(
+    input: DirDeleteInput<'_>,
+    probes: &dyn DirProbes,
+) -> Result<DirDeletePlan, DirDeleteError> {
+    let target = input
+        .sessions
+        .iter()
+        .find(|s| s.id == input.session_id)
+        .ok_or_else(|| DirDeleteError::SessionNotFound(input.session_id.to_string()))?;
+    let dir = target
+        .dir()
+        .ok_or_else(|| DirDeleteError::NoDirectory(target.id.clone()))?;
+    let canon = contained_dir(dir, input.root)?;
+    let root =
+        fs::canonicalize(input.root).map_err(|e| uncontained(dir, input.root, e.to_string()))?;
+    session_guards(&canon, &target.id, input.sessions, input.architect_dirs)?;
     disk_guards(&canon, target.task.as_deref(), probes)?;
     let confirm_name = canon
         .file_name()
@@ -543,7 +569,8 @@ pub fn plan_dir_delete(
 /// unrepresentable. What: holds the canonical directory.
 /// Test: `acquire_refuses_a_mismatched_typed_name`,
 /// `acquire_refuses_without_presence`,
-/// `acquire_rechecks_the_disk_guards_after_presence`.
+/// `acquire_rechecks_the_disk_guards_after_presence`,
+/// `a_failed_session_reread_refuses_the_delete`.
 #[derive(Debug)]
 pub struct DirDeleteCapability {
     dir: PathBuf,
@@ -555,11 +582,13 @@ impl DirDeleteCapability {
     /// What, each step failing closed: the typed name must equal
     /// `plan.confirm_name` (`--yes` skips it); `auth` must answer `Granted`;
     /// the directory must still be contained; a test process may only remove
-    /// inside the temp dir; and the disk guards run once more, after the
-    /// prompt, so work made while the user typed still refuses.
+    /// inside the temp dir; the session guards run against `input.recheck`'s
+    /// fresh list (#11238), refusing when it cannot be read; and last the disk
+    /// guards run once more, so work or a process that appeared while the user
+    /// typed still refuses.
     pub fn acquire(
         plan: &DirDeletePlan,
-        _input: DirDeleteInput<'_>,
+        input: DirDeleteInput<'_>,
         confirm: &Confirmation,
         auth: &dyn Authenticator,
         probes: &dyn DirProbes,
@@ -590,6 +619,19 @@ impl DirDeleteCapability {
                 return Err(DirDeleteError::TestHarness(dir));
             }
         }
+        // #11238: a session spawned while the prompt was open. It runs before
+        // the disk guards because a spawn makes its tmux pane before it
+        // persists its record (`create.rs`), so the `lsof` probe, last in
+        // `disk_guards`, sees the earlier trace closest to the removal.
+        let fresh =
+            input
+                .recheck
+                .sessions()
+                .map_err(|reason| DirDeleteError::SessionsUnchecked {
+                    path: dir.clone(),
+                    reason,
+                })?;
+        session_guards(&dir, &plan.session_id, &fresh, input.architect_dirs)?;
         disk_guards(&dir, plan.task.as_deref(), probes)?;
         Ok(Self { dir })
     }
