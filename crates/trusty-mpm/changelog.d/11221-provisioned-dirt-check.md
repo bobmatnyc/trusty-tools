@@ -1,0 +1,3 @@
+Fixed
+
+- A workspace holding only what its spawn wrote is no longer refused by decommission, `decommission --force` or the removal gates: the `.trusty-mpm/` dirt pass now lists each ignored file instead of one collapsed `!! .trusty-mpm/sessions/` line and excuses the compiled prompt while it still holds the bytes the provisioning ledger recorded, and the gitignored-output check excuses a gitignored `CLAUDE.md` the same way. A user file under `.trusty-mpm/`, an edited provisioning file, a gitignored file outside the provisioned set, a missing ledger and a directory git cannot open all still keep the workspace ([#11221](https://github.com/bobmatnyc/trusty-tools/issues/11221))

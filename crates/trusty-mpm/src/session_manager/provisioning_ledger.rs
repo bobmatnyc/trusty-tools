@@ -13,9 +13,12 @@
 //! were tm's own (see [`record`]), and
 //! the `.gitignore` lines it added. [`ProvisioningLedger::excuses`] excuses a
 //! `git status` entry only when the file still byte-matches the ledger, or when
-//! the `.gitignore` diff adds only ledgered lines. A missing, unreadable or
-//! corrupt ledger ([`load`] answers `None`) excuses nothing.
-//! Test: `decommission_owned_ledger_tests`.
+//! the `.gitignore` diff adds only ledgered lines. #11221: the compiled-prompt
+//! writer adds its own file through [`record_compiled_prompt`], and
+//! [`ProvisioningLedger::vouches_for`] answers for one path, for the
+//! `.trusty-mpm/` dirt pass and the gitignored-output check. A missing,
+//! unreadable or corrupt ledger ([`load`] answers `None`) excuses nothing.
+//! Test: `decommission_owned_ledger_tests`, `provisioned_dirt_tests`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -44,6 +47,11 @@ pub(crate) struct ProvisioningLedger {
     pub files: BTreeMap<String, String>,
     /// The exact `.gitignore` lines tm added, blank ones included.
     pub gitignore_appended: Vec<String>,
+    /// #11221: repo-relative `.trusty-mpm/` path to the sha256 (hex) of the
+    /// bytes tm's own writer put there ([`record_compiled_prompt`]). Absent in
+    /// a pre-#11221 ledger, which then vouches for no `.trusty-mpm/` file.
+    #[serde(default)]
+    pub harness_files: BTreeMap<String, String>,
 }
 
 /// A ledgered path before a launch writes (#8663 critic round 2).
@@ -251,7 +259,73 @@ pub(crate) fn record(ws: &Path, before: &ProvisioningSnapshot) -> std::io::Resul
         version: 1,
         files,
         gitignore_appended: appended,
+        // #11221: a relaunch keeps vouching only for unedited harness writes.
+        harness_files: still_matching(ws, prior.harness_files),
     };
+    write_atomic(&path, &serde_json::to_vec_pretty(&ledger)?)?;
+    Ok(true)
+}
+
+/// The entries of `recorded` whose file under `ws` still hashes to the
+/// recorded value; an edited or deleted file drops out (#11221).
+fn still_matching(ws: &Path, recorded: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    recorded
+        .into_iter()
+        .filter(|(rel, want)| file_sha256(&ws.join(rel)).as_ref() == Some(want))
+        .collect()
+}
+
+/// The harness root and repo-relative path of a compiled prompt at `dest`, or
+/// `None` unless `dest` is
+/// `<root>/.trusty-mpm/sessions/<scope>/INSTRUCTIONS-COMPILED.md`.
+///
+/// Why: the path is decided by `instruction_pipeline::compiled_prompt_path`;
+/// matching its exact shape keeps a scope segment named `.trusty-mpm` from
+/// being taken for the harness directory.
+fn compiled_prompt_location(dest: &Path) -> Option<(&Path, String)> {
+    use crate::core::harness_root::{HARNESS_DIR, SESSIONS_DIR};
+    use crate::core::instruction_pipeline::COMPILED_PROMPT_FILE;
+    let scope_dir = dest.parent()?;
+    let sessions = scope_dir.parent()?;
+    let harness = sessions.parent()?;
+    let root = harness.parent()?;
+    let named = |p: &Path, want: &str| p.file_name().is_some_and(|n| n == want);
+    if !(named(dest, COMPILED_PROMPT_FILE) && named(sessions, SESSIONS_DIR))
+        || !named(harness, HARNESS_DIR)
+    {
+        return None;
+    }
+    let scope = scope_dir.file_name()?.to_str()?;
+    let rel = format!("{HARNESS_DIR}/{SESSIONS_DIR}/{scope}/{COMPILED_PROMPT_FILE}");
+    Some((root, rel))
+}
+
+/// Record that tm just wrote `bytes` as the compiled prompt at `dest`
+/// (#11221).
+///
+/// Why: a launch writes `.trusty-mpm/sessions/<id>/INSTRUCTIONS-COMPILED.md`
+/// into its harness root on every spawn, resume and relaunch, after [`record`]
+/// has run. Without a record of those bytes the dirt check counted the file as
+/// work, and every spawn-provisioned workspace was refused.
+/// What: adds `dest`'s repo-relative path and the sha256 of `bytes` to the
+/// harness root's existing ledger, written atomically. `Ok(false)`, writing
+/// nothing, when `dest` is not a compiled-prompt path, the root has no git
+/// admin dir, or no ledger exists yet; that file is then never excused.
+/// Two launches racing in one root can drop each other's entry, which also
+/// only keeps a workspace.
+/// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+/// `an_edited_compiled_prompt_still_keeps_the_clone_11221`.
+pub(crate) fn record_compiled_prompt(dest: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    let Some((root, rel)) = compiled_prompt_location(dest) else {
+        return Ok(false);
+    };
+    let Some(path) = ledger_path(root) else {
+        return Ok(false);
+    };
+    let Some(mut ledger) = read_ledger(&path) else {
+        return Ok(false);
+    };
+    ledger.harness_files.insert(rel, sha256_hex(bytes));
     write_atomic(&path, &serde_json::to_vec_pretty(&ledger)?)?;
     Ok(true)
 }
@@ -316,5 +390,29 @@ impl ProvisioningLedger {
                 .is_some_and(|want| file_sha256(&ws.join(rel)).as_ref() == Some(want)),
             _ => false,
         }
+    }
+
+    /// Does the file at repo-relative `rel` in `ws` hold exactly the bytes tm
+    /// wrote there (#11221)?
+    ///
+    /// Why: the `.trusty-mpm/` dirt pass and the gitignored-output check see
+    /// tm's own writes as `!!` or `??` entries; only a byte match proves an
+    /// entry is tm's and not an edit made after provisioning.
+    /// What: a [`LEDGERED_FILES`] entry is matched against `files`, a
+    /// `.trusty-mpm/` path against `harness_files`; the file must be a regular
+    /// file, read without following a symlink. Any other path, a missing
+    /// entry or an unreadable file is `false`.
+    /// Test: `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+    /// `a_gitignored_claude_md_tm_wrote_passes_the_ignored_output_check_11221`,
+    /// `an_edited_gitignored_claude_md_still_keeps_the_clone_11221`.
+    pub(crate) fn vouches_for(&self, ws: &Path, rel: &str) -> bool {
+        let recorded = if LEDGERED_FILES.contains(&rel) {
+            self.files.get(rel)
+        } else if rel.starts_with(".trusty-mpm/") {
+            self.harness_files.get(rel)
+        } else {
+            None
+        };
+        recorded.is_some_and(|want| file_sha256(&ws.join(rel)).as_ref() == Some(want))
     }
 }
