@@ -33,13 +33,63 @@ pub(crate) fn target_socket(name: &str) -> anyhow::Result<PathBuf> {
     use trusty_mpm::daemon::services::tmux_service::holder_of;
     let driver = trusty_mpm::daemon::tmux::TmuxDriver::discover()
         .context("tmux is not available to attach with")?;
-    let dir = trusty_mpm::core::tmux_server::ambient_socket_dir();
+    let dir = holder_socket_dir();
     let holder = holder_of(&driver.on_server(DEFAULT_SERVER), &dir, name)
         .map_err(|e| anyhow::anyhow!("cannot tell which tmux server holds '{name}': {e}"))?;
     let server = holder.server().unwrap_or(DEFAULT_SERVER);
     Ok(trusty_mpm::core::tmux_server::server_socket_path(
         &dir, server,
     ))
+}
+
+/// The socket directory [`target_socket`] looks in: tmux's ambient one, or,
+/// in a test build only, the directory of an enclosing
+/// [`with_holder_socket_dir`] scope.
+///
+/// Why: the holder lookup's in-flight probe key for the default server is
+/// `<socket dir>/default`. With one ambient directory per test process, every
+/// test that resolves a holder shares that key, and a concurrent probe makes
+/// the lookup refuse (#11223).
+/// What: a release build always returns `ambient_socket_dir()`.
+/// Test: `a_scoped_holder_lookup_ignores_a_probe_held_on_another_scope_11223`.
+fn holder_socket_dir() -> PathBuf {
+    scoped_socket_dir().unwrap_or_else(trusty_mpm::core::tmux_server::ambient_socket_dir)
+}
+
+/// The enclosing [`with_holder_socket_dir`] scope's directory, if any.
+#[cfg(test)]
+fn scoped_socket_dir() -> Option<PathBuf> {
+    HOLDER_SOCKET_DIR.try_with(Clone::clone).ok()
+}
+
+/// #11223: a release build has no scope to read.
+#[cfg(not(test))]
+fn scoped_socket_dir() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// The socket directory [`holder_socket_dir`] returns inside a
+    /// [`with_holder_socket_dir`] scope.
+    static HOLDER_SOCKET_DIR: PathBuf;
+}
+
+/// Run `fut` with [`target_socket`]'s holder lookup reading `dir` as tmux's
+/// socket directory (#11223).
+///
+/// Why: a test gets in-flight probe keys and a workspace-server listing that
+/// no other test in the process shares. tmux itself still resolves `-L`
+/// against the process's `TMUX_TMPDIR`, so only the keys and the listing move.
+/// What: task-local, like `with_tmux_binary`; work moved to another task or
+/// thread does not see it.
+/// Test: `a_scoped_holder_lookup_ignores_a_probe_held_on_another_scope_11223`.
+#[cfg(test)]
+pub(crate) async fn with_holder_socket_dir<F: std::future::Future>(
+    dir: PathBuf,
+    fut: F,
+) -> F::Output {
+    HOLDER_SOCKET_DIR.scope(dir, fut).await
 }
 
 /// Whether `socket` is the default server's.
@@ -269,5 +319,43 @@ mod tests {
         assert_eq!(by_name[3], "=main:");
         let by_id = new_window_attach_argv("@12", "tmux", socket, "tm-a");
         assert_eq!(by_id[3], "@12");
+    }
+
+    /// #11223: a probe of the default server held in flight under one socket
+    /// directory refuses the holder lookup in that scope, and a lookup in
+    /// another scope still gets a real answer. The first half fails if
+    /// `holder_socket_dir` ignores the scope; the second is the property the
+    /// dead-runtime resume test relies on.
+    #[tokio::test]
+    async fn a_scoped_holder_lookup_ignores_a_probe_held_on_another_scope_11223() {
+        use trusty_mpm::core::tmux_server::{bounded_probe, probe_in_flight, server_socket_path};
+        let held = tempfile::tempdir().expect("held dir");
+        let own = tempfile::tempdir().expect("own dir");
+        let key = server_socket_path(held.path(), DEFAULT_SERVER);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        // A concurrent caller's probe of the default server, still running.
+        let first = bounded_probe(&key, std::time::Duration::from_millis(50), move || {
+            let _ = wait.recv();
+        });
+        assert_eq!(first, None, "the held probe expired");
+        assert!(probe_in_flight(&key), "the held probe still holds its key");
+
+        let name = "tm-xtest-11223-absent";
+        let refused =
+            with_holder_socket_dir(held.path().to_path_buf(), async { target_server(name) }).await;
+        let answered =
+            with_holder_socket_dir(own.path().to_path_buf(), async { target_server(name) }).await;
+        release.send(()).expect("release the held probe");
+
+        let err = refused.expect_err("a lookup sharing the held key must refuse");
+        assert!(
+            format!("{err:#}").contains("did not answer in time"),
+            "{err:#}"
+        );
+        assert_eq!(
+            answered.expect("a lookup on its own key answers"),
+            None,
+            "no server holds the name, so the answer is the default server"
+        );
     }
 }
