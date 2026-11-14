@@ -45,7 +45,8 @@
 //! took too much of. A GLOB is now kept whole in the word rather than cut at
 //! its wildcard, so `cat .en?`, `cat .e*` and `cat id_[r]sa` reach the same
 //! pattern screen the `Grep` `glob` arm uses (see `is_path_byte` and
-//! [`normalize_bracket_classes`]). The scan reads the LEXER'S tokens when the
+//! [`normalize_bracket_classes`](crate::commands::pm_guard_secret_words::normalize_bracket_classes)).
+//! The scan reads the LEXER'S tokens when the
 //! segment lexes, so `cat '.en''v'` and `cat .e\nv` no longer hide the name in
 //! quoting (see [`secret_words_in_segment`]); the raw byte scan stays as the
 //! fail-closed arm for a segment no lexer can read. `git add` loses its grant
