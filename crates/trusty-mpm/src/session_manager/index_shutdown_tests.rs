@@ -24,12 +24,15 @@ const CONFLICT: i64 = -32009;
 /// One mock daemon's answer to `(method, params)`.
 pub(crate) type Answer = Arc<dyn Fn(&str, &Value) -> Result<Value, RpcError> + Send + Sync>;
 
+/// Every `(daemon, method, params)` the rig's daemons were asked, in order.
+pub(crate) type CallLog = Arc<Mutex<Vec<(String, String, Value)>>>;
+
 /// Two recording mock daemons: trusty-search and trusty-memory.
 pub(crate) struct Rig {
     search: MockUdsDaemon,
     memory: MockUdsDaemon,
-    /// Every `(daemon, method, params)` either daemon was asked, in order.
-    pub(crate) calls: Arc<Mutex<Vec<(String, String, Value)>>>,
+    /// Every call either daemon was asked.
+    pub(crate) calls: CallLog,
 }
 
 impl Rig {
@@ -64,7 +67,7 @@ impl Rig {
 
 async fn recording(
     daemon: &'static str,
-    calls: &Arc<Mutex<Vec<(String, String, Value)>>>,
+    calls: &CallLog,
     answer: Answer,
 ) -> MockUdsDaemon {
     let calls = Arc::clone(calls);
