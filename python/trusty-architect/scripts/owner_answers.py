@@ -52,9 +52,11 @@ text: "<title>" or "<title> — <done_note>"}; the Architect sets done_ack to an
 Reads only through dashboard_store (either format); the rules live in dashboard_derive. Raises StoreError on an unreadable collection.
 Qualified ids (ar-T44): resolve_id(root, ref) maps "S0c:D01" or a bare id to the local id (NotFound when the S id is not this store's own session); qualified(root, entries) adds a derived `qid` ("<S id>:<id>", bare when unknown) to pending entries, so a relay or log line can name the
 entry fleet-wide. Stored ids stay bare.
-Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py
+refuse_owner_answer_change(store, verb, id, data) is dashboard-db.py's guard: the Architect never rewrites the owner's answer.
+Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py
 """
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -82,3 +84,44 @@ def resolve_id(root, ref):
 def qualified(root, entries):
     sid = dq.store_sid(ds.Store(root or ds.DEFAULT_ROOT))
     return [dict(e, qid=e["id"] if e.get("kind") == "owner_command" else dq.qualify(sid, e["id"])) for e in entries]
+
+
+# #10711: the notes r-183 ("Relayed HH:MMZ") and r-189 ("Acknowledged HH:MMZ: <what>") generated before `relayed`;
+# the time may also be a full ISO date-time ("Relayed 2026-11-05T23:15Z tm-api"). Anything else is the owner's.
+ARCHITECT_MARK = re.compile(r"(?:Relayed|Acknowledged) (?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\dZ(?!\w)")
+
+
+def is_architect_mark(note):
+    """True when `note` has the Architect's generated shape: marker word, a space, then an HH:MMZ or ISO time."""
+    return isinstance(note, str) and ARCHITECT_MARK.match(note) is not None
+
+
+def _cleared(value):
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def refuse_owner_answer_change(store, verb, doc_id, data):
+    """Refuse an items set/update that changes the owner's stored `answer` or `answer_note`.
+
+    Why: a close wrote "Relayed HH:MMZ" over the text the owner typed for an "Other" answer (#10711).
+    What: raises StoreError naming each field the stored doc holds as a non-empty string that the doc after the write
+    changes. A reopen (status open) may also clear either field to empty, never set a new value. An `answer_note` with
+    the Architect's generated shape (is_architect_mark) is exempt. An empty stored `answer_note` is unguarded: it holds
+    no owner text. A missing doc passes; any other read failure propagates.
+    Test: test_close_that_overwrites_an_owner_answer_field_is_refused_10711, test_owner_note_that_starts_with_a_marker_word_is_refused_10711,
+    test_reopen_cannot_launder_an_owner_note_10711, test_reopen_and_architect_marker_notes_stay_writable_10711
+    """
+    if not isinstance(data, dict):
+        return
+    try:
+        cur = store.get("items", doc_id)["data"]
+    except ds.NotFound:
+        return
+    new = {**cur, **data} if verb == "update" else data
+    reopen = new.get("status") == "open"
+    hit = [f for f in ("answer", "answer_note") if isinstance(cur.get(f), str) and cur[f].strip() and new.get(f) != cur[f]
+           and not (reopen and _cleared(new.get(f))) and not (f == "answer_note" and is_architect_mark(cur[f]))]
+    if hit:
+        holds, changes = ("holds", "changes") if len(hit) == 1 else ("hold", "change")
+        raise ds.StoreError(f"item {doc_id}: {' and '.join(hit)} {holds} the owner's answer and never {changes}; "
+                            "record the relay in `relayed` (\"<iso> <session>\") instead")

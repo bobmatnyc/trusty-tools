@@ -192,6 +192,8 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "ac71a5540005a50c480c9834e057b98d9614e440e7f7a5be55e90773f7eb44c5",
         // #11064: the text before items below senior-engineer always linked a brief.
         "6a2f6fcf1f8f50523e110cb3216f496bc1b0d2c16905d6fca2b8ffe9dbba345f",
+        // #10711: the text before a close kept the owner's answer_note.
+        "1bd4e94597f1e17172f0a1ec8106f9ecc3983b2265a0eefe4cdf2eae020e5ffc",
     ],
 };
 
