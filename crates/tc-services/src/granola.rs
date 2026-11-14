@@ -8,8 +8,8 @@
 //! consumer share one implementation.
 //! What: One `GranolaService` per published tool (5 total). Each carries its
 //! name + pre-built OpenAI-compatible function schema. `execute()` reads
-//! `GRANOLA_API_KEY` from the environment at call time (consistent with the
-//! `CTO_DB_PATH` pattern in `cto_db.rs`), issues the HTTP request, and
+//! `GRANOLA_API_KEY` from the environment at call time, issues the HTTP
+//! request, and
 //! returns the JSON response body as a string.
 //! Test: `granola_services_lists_five`, `schema_round_trips_for_each_service`,
 //! `service_for_unknown_name`, `execute_errors_when_api_key_missing`.

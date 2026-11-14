@@ -1,42 +1,33 @@
 # tc-services — Service Layer Adapters
 
-**Purpose**: High-level service adapters for CTO database, Granola API, and Google Workspace clients.
+**Purpose**: Host-agnostic service adapters for the Granola API and Google Workspace.
 
-**License**: Elastic License 2.0
+**License**: MIT
 
 ## Service Adapters
 
-### CTO Database Service
-- Query interface over trusty-cto-db (people, org units, roles, preferences, aliases)
-- Cached lookups for frequent queries
-- Transaction support for atomic updates
-- Used by directory MCP and MPM for user/org context
-
 ### Granola Integration
-- Sync historical hiring and people movement data
-- Provide enrichment signals to CTO database
-- Track org changes over time
+- Native HTTP client over the Granola public API (v1)
+- Five tools: list, get, get transcript, search, get shared document
+- `GRANOLA_API_KEY` read from the environment at call time
 
 ### Google Workspace Integration
-- Calendar sync (`trusty-gworkspace`)
-- Task management and Gmail integration
-- Directory sync from Google Workspace org units
+- Calendar and Tasks subset, bridged over `trusty-gworkspace`
+- Schemas from `trusty_gworkspace::tools`, dispatch to `trusty_gworkspace::api::services`
 
 ## Architecture
 
-- **Abstraction layer**: Service traits decouple callers from underlying storage
-- **Caching**: LRU caches for frequently accessed data
-- **Error handling**: Structured errors with retry-friendly semantics
+- **Shape**: one service per published tool, each with `name()`, `schema()` and `execute(args)`
+- **Schemas**: OpenAI-compatible function schemas as `serde_json::Value`; hosts own any typed bridge
+- **Errors**: each `execute` returns an outcome type that carries success or an error message
 - **Async runtime**: tokio-based async I/O
 
 ## Configuration
 
-Configured via:
-- Environment variables for database paths
-- Credentials for third-party APIs (Google Workspace OAuth, Granola tokens)
+- `GRANOLA_API_KEY` for Granola
+- Google Workspace OAuth credentials, through `trusty-gworkspace`
 
 ## See Also
 
 - `crates/tc-services/README.md` for API details
-- `crates/trusty-cto-db/README.md` for database schema
 - `crates/trusty-gworkspace/README.md` for Google Workspace integration

@@ -1,15 +1,11 @@
 """Read-only query functions over the CTO ops SQLite database.
 
 Why: Reimplements, in Python, the four query functions that previously
-existed ONLY as an unwired Rust `ToolExecutor` cluster
-(`crates/trusty-cto-db` + `crates/tc-services::cto_db` +
-`crates/cto-assistant`, all still present on disk but never invoked by any
-built binary — see the crate-level docstring for the DOC-41 rationale for
-not resurrecting that Rust path). The schema below is NOT a fresh guess: it
-matches the schema already documented (and unit-tested against, with an
-in-memory fixture) in `crates/trusty-cto-db/src/lib.rs`, which is the closest
-thing this repo has to a spec for "the db". That Rust module's own doc
-comments describe the real file as `~/Duetto/cto/data/cto.db` — a
+existed only as an unwired Rust `ToolExecutor` cluster, never invoked by any
+built binary and since removed from this repo (#3732, #11244) — see the
+crate-level docstring for the DOC-41 rationale for not resurrecting that
+Rust path. The schema of record is `schema/cto_db_schema.sql` in the
+bob-duetto/cto repository. The real file is `~/Duetto/cto/data/cto.db` — a
 Duetto-internal SQLite file on the owner's machine, inaccessible to this
 sandbox and unverifiable here.
 
@@ -33,12 +29,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-# Overrides the resolved DB path entirely. Named to match the pre-existing
-# (unwired) Rust crate's `ENV_CTO_DB_PATH` constant
-# (`crates/trusty-cto-db/src/lib.rs`) so an operator who later has access to
-# the real `~/Duetto/cto/data/cto.db` can point this skill at it with zero
-# code changes, matching the naming an operator might already know from that
-# module's README/comments.
+# Overrides the resolved DB path entirely. Named to match the former (unwired,
+# removed in #11244) Rust crate's `ENV_CTO_DB_PATH` constant, so an operator
+# who has access to the real `~/Duetto/cto/data/cto.db` can point this skill
+# at it with the variable name already in use.
 ENV_CTO_DB_PATH = "CTO_DB_PATH"
 
 # Opt-in to the bundled fixture. #4860: the fixture used to be the silent

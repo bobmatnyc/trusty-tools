@@ -33,7 +33,7 @@ Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
 `trusty-agents-ui`, `trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
-`trusty-crate-contracts`, `trusty-cto-db`, `trusty-embedderd`,
+`trusty-crate-contracts`, `trusty-embedderd`,
 `trusty-embedderd-py`, `trusty-gworkspace`, `trusty-installer`,
 `trusty-mcp`, `trusty-memory`, `trusty-mpm`, `trusty-review`,
 `trusty-progress`, `trusty-publish-guard`, `trusty-search`, `trusty-secrets`, `trusty-sld-lint`,
@@ -192,7 +192,7 @@ has all; `publish = false` binary stops at Deployed; docs, CI and scripts stop a
 
 **Crate class comes from Cargo.toml.** A crate with `publish = false` never reaches Published; a crate
 with no binary target never reaches Deployed. Read the manifest at the time; this file holds no copy of the
-table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-contracts`, `trusty-cto-db`,
+table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-contracts`,
 `trusty-okf`, `trusty-publish-guard`.
 
 **Close bar, by test-ladder rung** (`CLAUDE.md`, "Rust Test Ladder"):

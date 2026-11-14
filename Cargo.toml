@@ -71,7 +71,6 @@ default-members = [
     "crates/trusty-common",
     "crates/trusty-connectors",
     "crates/trusty-console",
-    "crates/trusty-cto-db",
     "crates/trusty-delegation-guard",
     "crates/trusty-embedderd",
     "crates/trusty-embedderd-py",
