@@ -7,8 +7,9 @@
 //! here makes a `start`/`restart` console behave differently.
 //! What: [`ENV_PASSTHROUGH`], derived from every non-credential env read on
 //! the `serve` path — this crate's `src/` and the trusty-common code it calls —
-//! and [`EXCLUDED`], the names deliberately left out.
-//! Test: `env_passthrough_carries_security_and_data_names_and_no_credential`.
+//! plus the token-file PATH, and [`EXCLUDED`], the names deliberately left out.
+//! Test: `env_passthrough_carries_security_and_data_names_and_no_credential`,
+//! `env_passthrough_carries_the_token_file_path`.
 
 /// Names copied from the caller's environment, when set, into the console's.
 pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
@@ -35,6 +36,11 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
     "container",
     // #11085: this crate, `bind::BindMode::from_env_and_flags` — tailnet exposure.
     "TRUSTY_CONSOLE_BIND",
+    // #11085: trusty-common `console_token::load` — a PATH to the token file,
+    // not the token. Dropping it makes the console serve every TCP route with
+    // no token (#11074, #11089). The one credential-named exception:
+    // [`CREDENTIAL_NAMED_PATHS`].
+    "TRUSTY_CONSOLE_TOKEN_FILE",
     // #11085: this crate, `secrets_uds` (registry root, externally run vault).
     "TRUSTY_MPM_ROOT",
     "TRUSTY_SECRETS_EXTERNAL",
@@ -52,13 +58,17 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
     "TRUSTY_TERMINATION_GRACE_SECS",
 ];
 
+/// Passed names that look like credentials but hold a file PATH, not a value.
+///
+/// Why: #11085 — the passthrough refuses every KEY/TOKEN/SECRET/PASSWORD
+/// name; the token-file path must still reach the console, or a restarted
+/// console drops its TCP token gate (#11074, #11089).
+#[cfg(test)]
+pub(crate) const CREDENTIAL_NAMED_PATHS: &[&str] = &["TRUSTY_CONSOLE_TOKEN_FILE"];
+
 /// Names the `serve` path reads that are deliberately NOT passed, with why.
 #[cfg(test)]
 pub(crate) const EXCLUDED: &[(&str, &str)] = &[
-    (
-        "TRUSTY_CONSOLE_TOKEN_FILE",
-        "token file; `start` and `restart` refuse while it is set (#11085)",
-    ),
     (
         "GITHUB_WEBHOOK_SECRET",
         "secret; the webhook ingress refuses deliveries without it (fail-closed)",

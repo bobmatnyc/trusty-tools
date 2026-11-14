@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use trusty_common::linux_lifecycle::{PinnedProcess, Signal};
 
 use super::addr_pid::{AddrLookup, Listener, lookup, parse_listener};
-use super::env::EXCLUDED;
+use super::env::{CREDENTIAL_NAMED_PATHS, EXCLUDED};
 use super::*;
 
 /// The fixture's data dir; set only in the fixture child.
@@ -88,8 +88,12 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
         assert!(passed(name), "{name} must reach the console");
     }
     for name in &target.desc.env_passthrough {
+        // #11085: a credential-named PATH, documented in `CREDENTIAL_NAMED_PATHS`.
+        if CREDENTIAL_NAMED_PATHS.contains(&name.as_str()) {
+            continue;
+        }
         // By name segment: `TRUSTY_SECRETS_EXTERNAL` is a vault-location flag,
-        // while `GITHUB_WEBHOOK_SECRET` and `*_TOKEN_FILE` are credentials.
+        // while `GITHUB_WEBHOOK_SECRET` is a credential.
         let upper = name.to_ascii_uppercase();
         let credential = upper.split('_').any(|segment| {
             ["KEY", "APIKEY", "TOKEN", "SECRET", "PASSWORD", "PASS"].contains(&segment)
@@ -99,7 +103,22 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
     for (name, _) in EXCLUDED {
         assert!(!passed(name), "{name} is excluded");
     }
-    assert!(!passed(trusty_common::console_token::TOKEN_FILE_ENV));
+    assert!(!passed("GITHUB_WEBHOOK_SECRET"));
+}
+
+// #11085: the token-file PATH reaches a spawned console, or a restarted
+// console serves every TCP route with no token (#11074, #11089).
+#[test]
+fn env_passthrough_carries_the_token_file_path() {
+    let target = target_in(Path::new("/tmp/c"), None);
+    let name = trusty_common::console_token::TOKEN_FILE_ENV;
+    assert!(
+        target.desc.env_passthrough.iter().any(|n| n == name),
+        "{name} must reach the console"
+    );
+    // The exception list holds that one PATH and nothing else.
+    assert_eq!(CREDENTIAL_NAMED_PATHS, [name]);
+    assert!(EXCLUDED.iter().all(|(excluded, _)| *excluded != name));
 }
 
 #[test]
@@ -119,15 +138,6 @@ fn descriptor_refuses_blank_and_non_utf8_override() {
     let err = target_for(Some(&raw), dir.join("s.sock"), dir.join("http_addr"))
         .expect_err("a non-UTF-8 override must be refused");
     assert!(format!("{err:#}").contains("UTF-8"), "{err:#}");
-}
-
-#[test]
-fn start_and_restart_refuse_while_a_token_file_is_set() {
-    let err = refuse_dropped_token_file(Some(OsString::from("/home/u/.console-token")))
-        .expect_err("a set token file must be refused");
-    assert!(format!("{err:#}").contains("TRUSTY_CONSOLE_TOKEN_FILE"));
-    assert!(refuse_dropped_token_file(None).is_ok());
-    assert!(refuse_dropped_token_file(Some(OsString::new())).is_ok());
 }
 
 #[test]

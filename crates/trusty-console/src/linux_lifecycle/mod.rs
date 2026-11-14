@@ -116,23 +116,6 @@ pub(crate) fn target_for(
     Ok(Target { desc, addr_file })
 }
 
-/// Refuse a spawn that would drop the caller's token file.
-///
-/// Why: #11085 — the token-file variable is credential-shaped, so it is not
-/// passed through; a console spawned without it would serve every TCP route
-/// with no token (#11074). Refusing keeps the gate the caller configured.
-/// Test: `start_and_restart_refuse_while_a_token_file_is_set`.
-pub(crate) fn refuse_dropped_token_file(value: Option<OsString>) -> Result<()> {
-    let name = trusty_common::console_token::TOKEN_FILE_ENV;
-    if value.is_some_and(|v| !v.is_empty()) {
-        bail!(
-            "{name} is set, but a console started by this verb would not receive it and would \
-             serve without the token gate; start it from your supervisor instead (#11085)"
-        );
-    }
-    Ok(())
-}
-
 /// `trusty-console stop` on Linux.
 ///
 /// What: exits 1 when no console runs and on any error; removes the stale
@@ -151,9 +134,6 @@ pub async fn stop() -> Result<()> {
 ///
 /// Test: `start_report_treats_only_already_running_as_success`.
 pub async fn start() -> Result<()> {
-    refuse_dropped_token_file(std::env::var_os(
-        trusty_common::console_token::TOKEN_FILE_ENV,
-    ))?;
     let target = target()?;
     start_report(lc::start(&target.desc).await)
 }
@@ -162,9 +142,6 @@ pub async fn start() -> Result<()> {
 ///
 /// Test: `restart_through_http_addr_reports_a_survivor_and_starts_nothing`.
 pub async fn restart() -> Result<()> {
-    refuse_dropped_token_file(std::env::var_os(
-        trusty_common::console_token::TOKEN_FILE_ENV,
-    ))?;
     restart_report(restart_with(&target()?, &KernelDelivery).await)
 }
 
