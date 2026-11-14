@@ -15,7 +15,7 @@ use super::pm_guard_secret_words::is_path_byte;
 use std::collections::{HashMap, HashSet};
 
 /// The most names [`bracket_readings`] enumerates before it widens instead.
-const MAX_READINGS: usize = 256;
+pub(crate) const MAX_READINGS: usize = 256;
 
 /// The most closing `]` one `[` may have before its word is unreadable.
 const MAX_CLOSES: usize = 16;
@@ -29,7 +29,7 @@ const NEUTRAL: char = '%';
 /// The character standing for `c` in a reading: itself when a secret-file
 /// rule could spell it, else [`NEUTRAL`]. `slash` keeps a `/` (see
 /// [`glob_readings`]).
-fn representative(c: char, slash: bool) -> char {
+pub(crate) fn representative(c: char, slash: bool) -> char {
     if c.is_ascii_alphanumeric()
         || matches!(c, '.' | '_' | '-' | '+' | '@' | '~')
         || (slash && c == '/')
@@ -48,7 +48,7 @@ fn representative(c: char, slash: bool) -> char {
 /// with [`Item::matches`]'s `wide` reading, so a locale collation can only add
 /// to it. A negated class always reaches some non-ASCII name character, which
 /// [`NEUTRAL`] stands for.
-fn reachable(negated: bool, items: &[Item], slash: bool) -> Vec<char> {
+pub(crate) fn reachable(negated: bool, items: &[Item], slash: bool) -> Vec<char> {
     let mut out = Vec::new();
     let mut push = |c: char| {
         if !out.contains(&c) {
@@ -117,8 +117,8 @@ pub(crate) fn widen_brackets(name: &str, unterminated: &str) -> String {
 /// the word is unreadable and the caller must deny.
 ///
 /// Why: #10761 — a negated class is judged by what it can REACH. `.[!x]nv`
-/// reaches `.env` and denies; `.[!eE]nv` reaches no secret-class name and
-/// allows. `.[!e]nv` denies: bash globbing is case-sensitive, so it matches
+/// reaches `.env` and denies; `.[!eE]nv` denies too (see the follow-up note
+/// below). `.[!e]nv` denies: bash globbing is case-sensitive, so it matches
 /// `.Env`, which this guard's case-insensitive classifier calls a secret.
 /// What: a word with no bracket is its own one reading. Otherwise each class
 /// contributes every [`reachable`] character, an opaque class `?`, and an
@@ -128,12 +128,18 @@ pub(crate) fn widen_brackets(name: &str, unterminated: &str) -> String {
 /// tried as the close. Over [`MAX_READINGS`] names each class is read as `?`;
 /// still over, an unambiguous word widens to [`widen_brackets`] and an
 /// ambiguous one is `None`.
+///
+/// #10761 follow-up: the lexer also strips the quoting that made a `!`/`^`
+/// sigil a member (`.[\!eE]nv` arrives as `.[!eE]nv`), so a class opening
+/// with one is read both ways — negated, and with the sigil as a member. The
+/// judged set is never narrower than what bash or zsh could expand.
 /// Test: `denies_a_negated_or_ranged_bracket_glob_onto_a_secret_name`,
 /// `allows_a_bracket_glob_that_reaches_no_secret_name`,
 /// `a_bracket_the_guard_cannot_read_fails_closed`,
-/// `a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed`.
+/// `a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed`,
+/// `a_quoted_negation_sigil_is_judged_as_a_member`.
 pub(crate) fn bracket_readings(name: &str) -> Option<Vec<String>> {
-    readings(name, false)
+    classify(name, false).1
 }
 
 /// [`bracket_readings`] for a `Grep` tool glob, where a class may hold `/`.
@@ -141,15 +147,20 @@ pub(crate) fn bracket_readings(name: &str) -> Option<Vec<String>> {
 /// Why: #10761 review (F2) — ripgrep's globset reads `/` inside a class as a
 /// member, so `.e[!/]v` matched `.env` while the basename cut split it.
 /// What: the whole glob is read with `/` reachable; the caller takes each
-/// reading's basename afterwards.
-/// Test: `a_grep_glob_class_carrying_a_slash_is_read_whole`.
+/// reading's basename afterwards. #10761 follow-up: kept beside
+/// [`rg_glob_readings`](super::pm_guard_secret_rg_glob::rg_glob_readings) so
+/// the `Grep` arm refuses everything it refused before.
+/// Test: `a_grep_glob_class_carrying_a_slash_is_read_whole`,
+/// `a_grep_glob_refused_by_shell_rules_stays_refused`.
 pub(crate) fn glob_readings(glob: &str) -> Option<Vec<String>> {
-    readings(glob, true)
+    classify(glob, true).1
 }
 
-fn readings(name: &str, slash: bool) -> Option<Vec<String>> {
+/// [`bracket_readings`] (`slash` keeps a `/` member), plus whether the exact
+/// enumeration overflowed [`MAX_READINGS`] so each class was read as `?`.
+fn classify(name: &str, slash: bool) -> (bool, Option<Vec<String>>) {
     if !name.contains(['[', ']']) {
-        return Some(vec![name.to_string()]);
+        return (false, Some(vec![name.to_string()]));
     }
     let chars: Vec<char> = name.chars().collect();
     let scanner = Scanner::new(&chars, false);
@@ -157,15 +168,47 @@ fn readings(name: &str, slash: bool) -> Option<Vec<String>> {
     let mut ambiguous = false;
     for widen in [false, true] {
         match enumerate(&chars, &scanner, &mut classes, widen, slash) {
-            Enumerated::Names(names) => return Some(names),
-            Enumerated::Unreadable => return None,
+            Enumerated::Names(names) => return (widen, Some(names)),
+            Enumerated::Unreadable => return (widen, None),
             Enumerated::TooMany { ambiguous: a } => ambiguous |= a,
         }
     }
     if ambiguous {
-        return None;
+        return (true, None);
     }
-    Some(vec![widen_brackets(name, ""), widen_brackets(name, "?")])
+    let widened = vec![widen_brackets(name, ""), widen_brackets(name, "?")];
+    (true, Some(widened))
+}
+
+/// The refusal for a word denied because its bracket expressions could not be
+/// read exactly, or `None` when they were.
+///
+/// Why: #10761 follow-up (E) — such a word fails closed, and the refusal said
+/// its name "is in this guard's secret-bearing file class", which misled for
+/// `find -name '[0-9][0-9]…'` and `jq '.a[0][1]…[8]'`: past [`MAX_READINGS`]
+/// combinations each class is read as `?`, and `????-??*.log` can reach a
+/// `*secrets*` name the digits never could.
+/// What: answers when [`bracket_readings`] of the word's basename is `None`,
+/// or needed the `?` widening.
+/// Test: `an_unreadable_bracket_word_is_refused_with_its_own_reason`.
+pub(crate) fn unreadable_reason(target: &str, how: &str) -> Option<String> {
+    let base = super::pm_guard_secret_read::command_basename(target);
+    let (widened, readings) = classify(&base, false);
+    let why = match readings {
+        None => "has more readings than this guard can check",
+        Some(_) if widened => {
+            "has more combinations than this guard enumerates, so each class was read as `?`, \
+             and that wider name can reach its secret-bearing file class"
+        }
+        Some(_) => return None,
+    };
+    Some(format!(
+        "naming `{target}` in {how} is refused (issue #10761) — its bracket expression {why}. \
+         The shell lexer drops the quoting that decides which `]` closes a class and whether \
+         `!`/`^` negates, so the guard fails closed rather than allow a name it could not judge. \
+         Use fewer bracket expressions in one word, or let the program read the pattern from a \
+         file."
+    ))
 }
 
 /// The outcome of one [`enumerate`] pass.
@@ -199,15 +242,29 @@ fn enumerate(
         };
         match c {
             '[' => {
-                let closes = scanner.closes(i, MAX_CLOSES);
-                if closes.len() > MAX_CLOSES {
+                // #10761: a sigil may have been quoted, so it is also a member.
+                // A `Grep` glob (`slash`) reaches ripgrep unlexed: never quoted.
+                let sigil = !slash && scanner.has_sigil(i);
+                let negated = scanner.closes(i, false, MAX_CLOSES);
+                let literal = if sigil {
+                    scanner.closes(i, true, MAX_CLOSES)
+                } else {
+                    Vec::new()
+                };
+                if negated.len() > MAX_CLOSES || literal.len() > MAX_CLOSES {
                     // #10761: more candidate closes than the guard tries.
                     return Enumerated::Unreadable;
                 }
-                ambiguous |= closes.len() > 1;
-                let choices = classes
-                    .entry((i, widen))
-                    .or_insert_with(|| choices_at(scanner, i, &closes, widen, slash));
+                let mut all = negated.clone();
+                all.extend(literal.iter().filter(|end| !negated.contains(end)));
+                ambiguous |= all.len() > 1;
+                let choices = classes.entry((i, widen)).or_insert_with(|| {
+                    let mut choices = choices_at(scanner, i, &negated, widen, slash, false);
+                    if !literal.is_empty() {
+                        choices.extend(choices_at(scanner, i, &literal, widen, slash, true));
+                    }
+                    choices
+                });
                 for (next, pieces) in choices.iter() {
                     for piece in pieces {
                         states.push((*next, format!("{prefix}{piece}")));
@@ -227,13 +284,15 @@ fn enumerate(
     Enumerated::Names(done)
 }
 
-/// Every reading of the `[` at `open` given its candidate `closes`.
+/// Every reading of the `[` at `open` given its candidate `closes`, read with
+/// `literal_sigil` as [`Scanner::closes`] found them.
 fn choices_at(
     scanner: &Scanner,
     open: usize,
     closes: &[usize],
     widen: bool,
     slash: bool,
+    literal_sigil: bool,
 ) -> Choices {
     if closes.is_empty() {
         return vec![(open + 1, vec![String::new(), "?".to_string()])];
@@ -241,7 +300,7 @@ fn choices_at(
     closes
         .iter()
         .map(|&end| {
-            let pieces = match scanner.class_to(open, end) {
+            let pieces = match scanner.class_to(open, end, literal_sigil) {
                 Bracket::Class { negated, items, .. } if !widen => {
                     reachable(negated, &items, slash)
                         .into_iter()

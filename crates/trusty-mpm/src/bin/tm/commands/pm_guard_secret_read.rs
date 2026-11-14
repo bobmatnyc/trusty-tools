@@ -383,7 +383,10 @@ use crate::commands::pm_guard_bash::{
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
-use crate::commands::pm_guard_secret_brackets::{bracket_readings, glob_readings, path_words};
+use crate::commands::pm_guard_secret_brackets::{
+    bracket_readings, glob_readings, path_words, unreadable_reason,
+};
+use crate::commands::pm_guard_secret_rg_glob::{rg_glob_readings, rg_glob_too_long};
 use crate::commands::pm_guard_secret_words::scan_spellings;
 // #7557: the position rules moved out when the structure check pushed this
 // file over the 500-SLOC cap.
@@ -1246,10 +1249,15 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// the glob as a pattern rather than as a literal filename (#7266 round 3). A
 /// directory `path` with no `glob`, a `glob` carrying no literal character, and
 /// a `glob` naming no family's literal core (`*.toml`, `*.txt`) are ordinary
-/// tree-wide search and allow. Fails CLOSED on a `glob` whose brace alternation
-/// the shared expander cannot resolve, exactly as the copy rule does.
+/// tree-wide search and allow. #10761: the glob is read both by shell rules
+/// ([`glob_readings`]) and by ripgrep's ([`rg_glob_readings`]); either one
+/// refusing, or failing CLOSED as malformed or too large, denies; a glob over
+/// `MAX_RG_GLOB_BYTES` is refused before either reads it.
 /// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
+/// `a_grep_glob_over_the_cap_is_refused_in_bounded_time`,
 /// `a_grep_glob_class_carrying_a_slash_is_read_whole`,
+/// `a_grep_glob_is_read_by_ripgrep_rules`,
+/// `a_grep_glob_refused_by_shell_rules_stays_refused`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
 /// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`,
 /// `allows_a_grep_glob_that_targets_no_credential_family`,
@@ -1261,14 +1269,15 @@ fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> 
         return Some(deny_reason(path, "the `Grep` tool"));
     }
     let glob = string_field(tool_input, "glob")?;
-    // #10761: globset reads a `/` inside a class as a member, so the class is
-    // read before the basename cut.
+    // #10761: a glob over the cap is refused; any other is read by ripgrep's
+    // own rules before the basename cut, and still by the shell rules.
+    if let Some(reason) = rg_glob_too_long(glob) {
+        return Some(reason);
+    }
+    let hit = |r: &String| reading_denies(&command_basename(r), Scan::Argv);
     let denies = names_a_process_manager_dump(glob)
-        || glob_readings(glob).is_none_or(|readings| {
-            readings
-                .iter()
-                .any(|r| reading_denies(&command_basename(r), Scan::Argv))
-        });
+        || glob_readings(glob).is_none_or(|rs| rs.iter().any(hit))
+        || rg_glob_readings(glob).is_none_or(|rs| rs.iter().any(hit));
     denies.then(|| deny_reason(glob, "a `Grep` glob"))
 }
 
@@ -1411,6 +1420,10 @@ pub(crate) fn command_basename(token: &str) -> String {
 /// The deny reason, naming the file, the command that named it, and the way
 /// through (issue #7266).
 fn deny_reason(target: &str, how: &str) -> String {
+    // #10761: an unreadable bracket word is refused for that, not its class.
+    if let Some(reason) = unreadable_reason(target, how) {
+        return reason;
+    }
     format!(
         "naming `{target}` in {how} is refused (issue #7266) — its name is in this guard's \
          secret-bearing file class (`*.tfvars`, `*.tfvars.json`, `*.tfstate*`, `.env`/`.env.*`, \
