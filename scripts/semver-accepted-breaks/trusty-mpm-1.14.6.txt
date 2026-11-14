@@ -4,3 +4,4 @@ reason  Bob VERSIONING ruling 2026-09-26 18:57Z: trusty-tools (all crates) and T
 accept  constructible_struct_adds_field field OpportunityRow.skip_reason
 accept  constructible_struct_adds_field field ProjectDecommissionReport.index_shutdown
 accept  enum_variant_added variant ProjectDecommissionError:IndexShutdown
+accept  enum_variant_added variant ProjectStoreError:UnresolvableHomePath
