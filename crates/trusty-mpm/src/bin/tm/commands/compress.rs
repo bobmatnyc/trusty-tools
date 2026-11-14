@@ -384,9 +384,8 @@ fn record_compress_savings_with(
 /// *content* is verified directly via [`log_compression_stats`]'s own test.
 fn init_stats_log_subscriber() {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        // #8948: same AWS hold-down as the daemon subscriber.
+        .with_env_filter(crate::tracing_setup::env_filter("info"))
         .with_writer(std::io::stderr)
         .try_init();
 }
