@@ -16,6 +16,9 @@
 //!   outside `.claude/agents/` and `.claude/skills/`);
 //! - it is an agent or skill file tm deployed and nobody edited since
 //!   ([`super::worktree_deployed_assets`]);
+//! - #11221: in a repository, it is a file the spawn wrote that still holds
+//!   the bytes the provisioning ledger recorded (a gitignored `CLAUDE.md`,
+//!   [`provisioning_ledger::ProvisioningLedger::vouches_for`]);
 //! - the directory git matched is build or tool output: its last component is
 //!   a disposable name ([`super::worktree_nested::is_disposable_dir_name`]) or
 //!   its trailing path is in [`DISPOSABLE_DIR_PATHS`], or its basename is OS,
@@ -48,9 +51,12 @@ use std::path::Path;
 
 use tracing::warn;
 
+use super::provisioning_ledger;
 use super::worktree_deployed_assets::{DeployedAssets, is_asset_path};
 use super::worktree_nested::is_disposable_dir_name;
-use super::worktree_safety::{DirtyWorktree, DirtyWorktreePolicy, git_stdout, inspect_dirt};
+use super::worktree_safety::{
+    DirtyWorktree, DirtyWorktreePolicy, git_stdout_warning_free, inspect_dirt,
+};
 use crate::core::scaffold_gitignore::SCAFFOLD_IGNORED_PATHS;
 use crate::core::standalone::hooks::backup;
 
@@ -249,8 +255,12 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// rule excuses, and counts the files left, skipping harness files and tm's
 /// deployed agents and skills inside a directory such as `.claude/`.
 /// `Ok(None)` means nothing is kept. A git failure or an unreadable file is
-/// `Err`.
-/// Test: `kept_output_counts_files_in_an_ignored_results_dir`,
+/// `Err`, and so is any git stderr on exit 0. #11221: a top-level entry the
+/// ledger vouches for is not kept.
+/// Test: `a_gitignored_claude_md_tm_wrote_passes_the_ignored_output_check_11221`,
+/// `an_unreadable_dir_holding_a_gitignored_file_refuses_removal_11221`,
+/// `a_corrupt_ledger_keeps_a_gitignored_claude_md_11221`,
+/// `kept_output_counts_files_in_an_ignored_results_dir`,
 /// `kept_output_is_none_for_build_output_only`,
 /// `kept_output_errors_when_git_cannot_answer`,
 /// `non_ascii_names_are_classified_not_refused`,
@@ -258,8 +268,13 @@ fn is_tagged_cache_dir(dir: &Path) -> bool {
 /// `a_user_agent_with_a_disposable_name_keeps_the_tree`,
 /// `a_vercel_dir_holding_an_env_file_keeps_the_tree`.
 pub(crate) fn kept_ignored_output(path: &Path) -> Result<Option<IgnoredOutput>, String> {
-    let status = git_stdout(path, IGNORED_STATUS_ARGS)?;
-    kept_among(path, ignored_entries(&status))
+    // #11221: a git warning on exit 0 hides the files it could not list.
+    let status = git_stdout_warning_free(path, IGNORED_STATUS_ARGS)?;
+    // #11221: a gitignored `CLAUDE.md` the spawn wrote is tm's while the
+    // ledger still vouches for its bytes; no ledger vouches for nothing.
+    let ledger = provisioning_ledger::load(path);
+    let vouched = |rel: &str| ledger.as_ref().is_some_and(|l| l.vouches_for(path, rel));
+    kept_among(path, ignored_entries(&status), &vouched)
 }
 
 /// The content of a directory git holds no state for that deleting it would
@@ -287,13 +302,16 @@ pub(crate) fn kept_unversioned_content(path: &Path) -> Result<Option<IgnoredOutp
         .iter()
         .map(|n| n.to_string_lossy().into_owned())
         .collect();
-    kept_among(path, names.iter().map(String::as_str))
+    // No git admin dir, so no provisioning ledger: nothing is vouched for.
+    kept_among(path, names.iter().map(String::as_str), &|_| false)
 }
 
-/// The rule of the module doc over `entries`, repo-relative to `path`.
+/// The rule of the module doc over `entries`, repo-relative to `path`; an
+/// entry `vouched` accepts is tm's own provisioning write (#11221).
 fn kept_among<'e>(
     path: &Path,
     entries: impl IntoIterator<Item = &'e str>,
+    vouched: &dyn Fn(&str) -> bool,
 ) -> Result<Option<IgnoredOutput>, String> {
     let mut assets = DeployedAssets::new(path);
     let mut kept: Option<IgnoredOutput> = None;
@@ -303,6 +321,7 @@ fn kept_among<'e>(
         // decides; a user skill named `build/` or `dist/` is not excused.
         if is_harness_path(bare)
             || (!is_asset_path(bare) && (is_regenerable(bare) || under_cache_dir(path, bare)))
+            || vouched(bare)
         {
             continue;
         }

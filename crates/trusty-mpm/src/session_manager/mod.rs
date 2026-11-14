@@ -252,6 +252,10 @@ mod decommission_owned_ledger_tests;
 #[cfg(test)]
 mod provisioning_ledger_fifo_tests;
 
+// #11221: a spawn-provisioned workspace passes the dirt and ignored-output checks.
+#[cfg(test)]
+mod provisioned_dirt_tests;
+
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
 mod worktree_ignored_output_route_tests;
