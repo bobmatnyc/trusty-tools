@@ -647,3 +647,359 @@ async fn failed_mutation_leaves_existing_goal_unchanged() {
     }
     assert_unchanged(&store, "set_status");
 }
+
+/// Whether `err` is the #10722 evidence refusal for `session`.
+///
+/// Matched by Debug name, not by pattern, so this file still compiles against
+/// the pre-fix store and the red tests fail on their assertions.
+fn is_evidence_refusal(err: &SmGoalError, session: &str) -> bool {
+    format!("{err:?}").starts_with("VerifiedWithoutEvidence")
+        && err.to_string().contains("evidence")
+        && err.to_string().contains(session)
+}
+
+/// Shorthand for an update of `s-0` with a state and evidence.
+fn upd(state: Option<SessionTaskState>, evidence: Option<&str>) -> SessionUpdate {
+    SessionUpdate {
+        session_id: "s-0".into(),
+        state,
+        evidence: evidence.map(str::to_string),
+        note: None,
+    }
+}
+
+/// Why: #10722 — `Verified` is the gate-satisfying state, so a link must never
+/// reach it without observed evidence; a missing or blank evidence string on a
+/// Verified update must be refused and leave the link untouched.
+/// What: links one session, then sends Verified with no evidence, and Verified
+/// with blank evidence; asserts each is the evidence refusal, the link stays
+/// `Launched` with no evidence and progress 0, and `close` is still refused.
+/// Test: this is the test.
+#[tokio::test]
+async fn update_to_verified_without_evidence_is_rejected() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    store
+        .link(&id, SessionLink::launched("s-0", "a"))
+        .await
+        .expect("link");
+
+    for evidence in [None, Some("   ")] {
+        let result = store
+            .update(&id, upd(Some(SessionTaskState::Verified), evidence))
+            .await;
+        let err = result.expect_err("Verified without evidence must be rejected");
+        assert!(
+            is_evidence_refusal(&err, "s-0"),
+            "expected VerifiedWithoutEvidence naming s-0, got {err:?}"
+        );
+        let g = store.get(&id).expect("present");
+        assert_eq!(g.sessions[0].state, SessionTaskState::Launched);
+        assert_eq!(g.sessions[0].evidence, None);
+        assert_eq!(g.progress, 0);
+    }
+    assert!(matches!(
+        store.close(&id).await,
+        Err(SmGoalError::VerificationGate { .. })
+    ));
+    assert_ne!(store.get(&id).expect("present").status, GoalStatus::Done);
+}
+
+/// Why: #10722 — a refused update must leave the goal exactly as it was, in
+/// memory and on disk, including evidence the update would have cleared.
+/// What: verifies `s-0` with evidence, snapshots the goal, the palace write
+/// count and the cache bytes, sends Verified with no evidence plus a note, and
+/// asserts all three are unchanged and a reload from the palace matches.
+/// Test: this is the test.
+#[tokio::test]
+async fn rejected_update_leaves_goal_unchanged_in_memory_and_on_disk() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace.clone(), &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    store
+        .link(&id, SessionLink::launched("s-0", "a"))
+        .await
+        .expect("link");
+    store
+        .update(
+            &id,
+            upd(Some(SessionTaskState::Verified), Some("PR opened")),
+        )
+        .await
+        .expect("verify with evidence");
+
+    let before = store.get(&id).expect("present").clone();
+    let writes = palace.write_count();
+    let cache_path = GoalCache::new(dir.path()).path();
+    let cache_before = std::fs::read(&cache_path).expect("read cache");
+
+    let mut refused = upd(Some(SessionTaskState::Verified), None);
+    refused.note = Some("must not land".into());
+    let err = store.update(&id, refused).await.expect_err("refused");
+    assert!(is_evidence_refusal(&err, "s-0"), "got {err:?}");
+
+    assert_eq!(
+        store.get(&id).expect("present"),
+        &before,
+        "memory unchanged"
+    );
+    assert_eq!(palace.write_count(), writes, "no palace write");
+    assert_eq!(
+        std::fs::read(&cache_path).expect("read cache"),
+        cache_before,
+        "cache unchanged"
+    );
+    let reloaded = SmGoalStore::load(palace, dir.path()).await.expect("load");
+    assert_eq!(
+        reloaded.get(&id).expect("present"),
+        &before,
+        "palace unchanged"
+    );
+}
+
+/// Why: #10722 — "evidence is replaced on each observation": stale evidence
+/// must never survive a state change and later satisfy `Verified`.
+/// What: Verified("A") → Running(None) clears it → Verified(None) is refused →
+/// Failed("B") replaces it → an evidence-only update ("C") replaces it and keeps
+/// the state → Verified("D") stores "D".
+/// Test: this is the test.
+#[tokio::test]
+async fn state_change_replaces_evidence_and_none_clears_it() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    store
+        .link(&id, SessionLink::launched("s-0", "a"))
+        .await
+        .expect("link");
+    let ev = |store: &SmGoalStore| {
+        let link = &store.get(&id).expect("present").sessions[0];
+        (link.state, link.evidence.clone())
+    };
+
+    store
+        .update(&id, upd(Some(SessionTaskState::Verified), Some("A")))
+        .await
+        .expect("verify A");
+    store
+        .update(&id, upd(Some(SessionTaskState::Running), None))
+        .await
+        .expect("running");
+    assert_eq!(ev(&store), (SessionTaskState::Running, None), "None clears");
+    assert_eq!(store.get(&id).expect("present").progress, 0);
+
+    let err = store
+        .update(&id, upd(Some(SessionTaskState::Verified), None))
+        .await
+        .expect_err("stale evidence must not verify");
+    assert!(is_evidence_refusal(&err, "s-0"), "got {err:?}");
+
+    store
+        .update(&id, upd(Some(SessionTaskState::Failed), Some("B")))
+        .await
+        .expect("failed B");
+    assert_eq!(ev(&store), (SessionTaskState::Failed, Some("B".into())));
+    store
+        .update(&id, upd(None, Some("C")))
+        .await
+        .expect("evidence only");
+    assert_eq!(ev(&store), (SessionTaskState::Failed, Some("C".into())));
+    store
+        .update(&id, upd(Some(SessionTaskState::Verified), Some("D")))
+        .await
+        .expect("verify D");
+    assert_eq!(ev(&store), (SessionTaskState::Verified, Some("D".into())));
+}
+
+/// Why: #10722 — `link` takes a whole [`SessionLink`] with public fields, so it
+/// is a second path that could store `Verified` without evidence.
+/// What: links a Verified link with no evidence, asserts the evidence refusal
+/// and that the goal still has no links.
+/// Test: this is the test.
+#[tokio::test]
+async fn link_verified_without_evidence_is_rejected() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let mut store = store_with(palace, &dir);
+
+    let id = store.create("g", vec![]).await.expect("create").id;
+    let mut link = SessionLink::launched("s-0", "a");
+    link.state = SessionTaskState::Verified;
+    let err = store.link(&id, link).await.expect_err("refused");
+    assert!(is_evidence_refusal(&err, "s-0"), "got {err:?}");
+    assert!(store.get(&id).expect("present").sessions.is_empty());
+}
+
+/// Why: #10722 — data persisted by an older build may hold a `Verified` link with
+/// no evidence (field absent) or blank evidence. Such a link must read as
+/// unverified, so the goal cannot reach `Done` through it.
+/// What: seeds the palace with a legacy goal JSON (one link without an
+/// `evidence` field, one with `""`), loads the store, asserts the goal
+/// deserialises, both links read `Running`, progress is 0, the rewritten cache
+/// holds no `verified` link, and `close` is refused with the goal not `Done`.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_verified_without_evidence_does_not_allow_done() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let legacy = r#"{
+        "id": "g-legacy0000000000",
+        "description": "legacy goal",
+        "status": "inProgress",
+        "acceptance": [],
+        "sessions": [
+            {"session_id": "s-0", "task": "a", "state": "verified"},
+            {"session_id": "s-1", "task": "b", "state": "verified", "evidence": ""}
+        ],
+        "progress": 100,
+        "created": "2026-06-16T12:00:00Z",
+        "updated": "2026-06-16T12:00:00Z",
+        "notes": []
+    }"#;
+    palace
+        .remember_goal(legacy.to_string(), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    let mut store = SmGoalStore::load(palace, dir.path()).await.expect("load");
+    let id = "g-legacy0000000000";
+    let g = store.get(id).expect("legacy record must still deserialise");
+    assert_eq!(g.sessions.len(), 2);
+    assert!(
+        g.sessions
+            .iter()
+            .all(|s| s.state == SessionTaskState::Running),
+        "evidence-less Verified links load as Running, got {:?}",
+        g.sessions
+    );
+    assert_eq!(
+        g.progress, 0,
+        "evidence-less Verified links count as unverified"
+    );
+    let cached = GoalCache::new(dir.path()).load().expect("load cache");
+    assert!(
+        cached[0]
+            .sessions
+            .iter()
+            .all(|s| s.state != SessionTaskState::Verified),
+        "the rewritten cache must not hold an evidence-less Verified link"
+    );
+
+    let result = store.close(id).await;
+    assert!(
+        matches!(
+            result,
+            Err(SmGoalError::VerificationGate {
+                verified: 0,
+                total: 2,
+                ..
+            })
+        ),
+        "legacy evidence-less links must not pass the gate, got {result:?}"
+    );
+    assert_ne!(store.get(id).expect("present").status, GoalStatus::Done);
+}
+
+/// A legacy goal JSON with the given status and `sessions` array (test helper).
+fn legacy_goal(id: &str, status: &str, sessions: &str) -> String {
+    format!(
+        r#"{{"id":"{id}","description":"legacy goal","status":"{status}","acceptance":[],"sessions":{sessions},"progress":100,"created":"2026-06-16T12:00:00Z","updated":"2026-06-16T12:00:00Z","notes":[]}}"#
+    )
+}
+
+/// Why: #10722 — a goal an older build stored as `Done` through an evidence-less
+/// `Verified` link must not still read `Done` once that link is downgraded.
+/// What: seeds a palace `Done` goal with one evidence-less `Verified` link; loads
+/// from the palace, again from the palace, then from the cache fallback; asserts
+/// `InProgress` each time, and that load never wrote to the palace.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_without_evidence_is_reopened_on_load() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacydone00000";
+    let sessions = r#"[{"session_id":"s-0","task":"a","state":"verified"}]"#;
+    palace
+        .remember_goal(legacy_goal(id, "done", sessions), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+    let writes = palace.write_count();
+
+    for round in 0..2 {
+        let store = SmGoalStore::load(palace.clone(), dir.path())
+            .await
+            .expect("load");
+        let g = store.get(id).expect("present");
+        assert_eq!(
+            g.status,
+            GoalStatus::InProgress,
+            "palace load round {round}"
+        );
+        assert_eq!(g.progress, 0);
+    }
+    assert_eq!(
+        palace.write_count(),
+        writes,
+        "load must not write the palace"
+    );
+
+    palace.set_fail(true);
+    let store = SmGoalStore::load(palace.clone(), dir.path())
+        .await
+        .expect("cache fallback load");
+    let g = store.get(id).expect("present from cache");
+    assert_eq!(g.status, GoalStatus::InProgress, "cache fallback load");
+}
+
+/// Why: #10722 — the load-time reopen must leave a legitimately closed goal alone.
+/// What: seeds a palace `Done` goal whose every link is `Verified` with evidence;
+/// loads it twice and asserts it is still `Done`, unchanged from the stored form.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_with_evidence_stays_done() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacyok000000";
+    let sessions =
+        r#"[{"session_id":"s-0","task":"a","state":"verified","evidence":"tests green"}]"#;
+    let json = legacy_goal(id, "done", sessions);
+    let stored: super::model::Goal = serde_json::from_str(&json).expect("parse");
+    palace
+        .remember_goal(json, GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    for _ in 0..2 {
+        let store = SmGoalStore::load(palace.clone(), dir.path())
+            .await
+            .expect("load");
+        let g = store.get(id).expect("present");
+        assert_eq!(g.status, GoalStatus::Done);
+        assert_eq!(*g, stored, "an evidenced Done goal loads unchanged");
+    }
+}
+
+/// Why: #10722 — `set_status(Done)` refuses a goal with no links (`all_verified`
+/// is false on an empty set), so load must not keep such a goal `Done` either.
+/// What: seeds a palace `Done` goal with no links; asserts it loads `Pending`.
+/// Test: this is the test.
+#[tokio::test]
+async fn legacy_done_without_links_is_reopened_as_pending() {
+    let palace = MockPalace::new();
+    let dir = TempDir::new().expect("tempdir");
+    let id = "g-legacyempty000";
+    palace
+        .remember_goal(legacy_goal(id, "done", "[]"), GOAL_TAG)
+        .await
+        .expect("seed legacy goal");
+
+    let store = SmGoalStore::load(palace, dir.path()).await.expect("load");
+    assert_eq!(store.get(id).expect("present").status, GoalStatus::Pending);
+}

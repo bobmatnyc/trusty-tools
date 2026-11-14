@@ -98,7 +98,8 @@ impl SessionTaskState {
     /// Why: the verification gate (§3.5) and the [`Goal::progress`] numerator both
     /// ask the same question — "is this link done WITH evidence?" — so centralising
     /// it avoids the two drifting apart.
-    /// What: returns `true` only for [`SessionTaskState::Verified`].
+    /// What: returns `true` only for [`SessionTaskState::Verified`]. The state
+    /// alone is not enough for the gate: see [`SessionLink::is_verified`] (#10722).
     /// Test: `verified_is_the_only_gate_satisfying_state`.
     pub fn is_verified(self) -> bool {
         matches!(self, SessionTaskState::Verified)
@@ -143,6 +144,30 @@ impl SessionLink {
             state: SessionTaskState::Launched,
             evidence: None,
         }
+    }
+
+    /// Whether this link carries non-blank evidence.
+    ///
+    /// Why: #10722 — evidence that is absent, empty, or whitespace proves nothing,
+    /// so the store and the gate treat all three the same.
+    /// What: `true` iff `evidence` is `Some` with a non-whitespace character.
+    /// Test: `update_to_verified_without_evidence_is_rejected`.
+    pub fn has_evidence(&self) -> bool {
+        self.evidence
+            .as_deref()
+            .is_some_and(|e| !e.trim().is_empty())
+    }
+
+    /// Whether this link counts as gate-satisfying completion (§3.5).
+    ///
+    /// Why: #10722 — the gate read the state alone, so a `Verified` link stored
+    /// without evidence (by an older build, or a direct caller) let a goal reach
+    /// `Done`. Requiring both makes evidence-less `Verified` data read as
+    /// unverified, including data loaded from an older palace or cache.
+    /// What: `state.is_verified() && has_evidence()`.
+    /// Test: `legacy_verified_without_evidence_does_not_allow_done`.
+    pub fn is_verified(&self) -> bool {
+        self.state.is_verified() && self.has_evidence()
     }
 }
 
@@ -220,7 +245,8 @@ impl Goal {
     /// Why: progress is DERIVED state (§9.2) — never set directly — so a single
     /// recompute keeps it consistent with the links after any mutation
     /// (link/update). With no links progress is `0` (nothing verified yet).
-    /// What: sets `progress` to `round(100 * verified / total)` as a `u8`, or `0`
+    /// What: sets `progress` to `round(100 * verified / total)` as a `u8`, where
+    /// `verified` is [`Goal::verified_count`] (state plus evidence), or `0`
     /// when `sessions` is empty. Uses integer rounding via `+ total/2` to avoid
     /// floating-point drift in the persisted value.
     /// Test: `progress_one_of_three_verified_is_33`,
@@ -231,11 +257,7 @@ impl Goal {
             self.progress = 0;
             return;
         }
-        let verified = self
-            .sessions
-            .iter()
-            .filter(|s| s.state.is_verified())
-            .count();
+        let verified = self.verified_count();
         // Integer rounding to nearest percent: (100*v + total/2) / total.
         self.progress = ((100 * verified + total / 2) / total) as u8;
     }
@@ -248,10 +270,21 @@ impl Goal {
     /// A goal with NO links cannot be verified-done (there is no observed evidence
     /// of anything), so this returns `false` for an empty fan-out.
     /// What: returns `true` iff `sessions` is non-empty and every link
-    /// `is_verified()`.
+    /// [`SessionLink::is_verified`] (state `Verified` AND non-blank evidence).
     /// Test: `all_verified_false_when_any_unverified`,
-    /// `all_verified_false_when_no_links`, `all_verified_true_when_every_link_verified`.
+    /// `all_verified_false_when_no_links`, `all_verified_true_when_every_link_verified`,
+    /// `legacy_verified_without_evidence_does_not_allow_done`.
     pub fn all_verified(&self) -> bool {
-        !self.sessions.is_empty() && self.sessions.iter().all(|s| s.state.is_verified())
+        // #10722: a link counts only with evidence, not on state alone.
+        !self.sessions.is_empty() && self.sessions.iter().all(SessionLink::is_verified)
+    }
+
+    /// Number of links that are [`SessionLink::is_verified`].
+    ///
+    /// Why: progress and the gate's rejection counts must use one definition.
+    /// What: counts links with state `Verified` and non-blank evidence.
+    /// Test: `legacy_verified_without_evidence_does_not_allow_done`.
+    pub fn verified_count(&self) -> usize {
+        self.sessions.iter().filter(|s| s.is_verified()).count()
     }
 }
