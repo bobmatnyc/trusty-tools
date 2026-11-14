@@ -20,6 +20,8 @@ pub mod core_kg;
 // #8246: ranked recall, split from `core.rs` at the SLOC cap.
 pub mod core_recall;
 pub mod helpers;
+// #11255: per-instance operation limits and their `AppState` builders.
+pub mod op_limits;
 // #7125: the bounded batch fan-out the recall-all family runs on.
 pub mod recall_stream;
 // #9544: `palace_rename`, kept out of `core.rs` for the SLOC cap.

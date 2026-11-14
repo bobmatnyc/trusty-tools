@@ -45,6 +45,11 @@ fn seed(data_root: &Path, n: usize) -> Vec<Palace> {
     out
 }
 
+/// A deadline these walks never reach (#11255).
+fn far() -> tokio::time::Instant {
+    tokio::time::Instant::now() + std::time::Duration::from_secs(3600)
+}
+
 /// An erroring search still hands back the batch it was given.
 ///
 /// Why (#7125): release runs before the `?` precisely so a failing search
@@ -63,7 +68,7 @@ async fn recall_all_releases_every_batch_when_the_search_fails() {
     assert_eq!(state.registry.len(), 0, "baseline: nothing open");
 
     let calls = RefCell::new(0usize);
-    let outcome = recall_streamed(&state, &palaces, "unit", 5, |handles| {
+    let outcome = recall_streamed(&state, &palaces, "unit", 5, far(), |handles| {
         let mut n = calls.borrow_mut();
         *n += 1;
         let fail = *n == 2;
@@ -111,7 +116,7 @@ async fn recall_streamed_visits_every_palace_in_bounded_batches() {
 
     let seen: RefCell<Vec<String>> = RefCell::new(Vec::new());
     let widths: RefCell<Vec<usize>> = RefCell::new(Vec::new());
-    let outcome = recall_streamed(&state, &palaces, "unit", 5, |handles| {
+    let outcome = recall_streamed(&state, &palaces, "unit", 5, far(), |handles| {
         widths.borrow_mut().push(handles.len());
         seen.borrow_mut()
             .extend(handles.iter().map(|h| h.id.as_str().to_string()));

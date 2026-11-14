@@ -412,6 +412,9 @@ async fn scope_all_top5_matches_the_golden() {
     )
     .await;
     assert_eq!(contents(&all5), GOLDEN_TOP5, "scope all drifted: {all5}");
+    // #11255: a walk inside its deadline reports no deadline hit.
+    assert_eq!(all5["deadline_exceeded"], false, "{all5}");
+    assert_eq!(all5["palaces_not_reached"], 0, "{all5}");
 }
 
 /// Ruling 5, second half: the default top 5 equals the `scope: "all"` ranking
@@ -640,4 +643,105 @@ async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
         );
         assert_eq!(out["search_failed"], json!([failed]), "{scope:?}");
     }
+}
+
+/// The `scope: "all"` deadline the deadline test injects (#11255).
+const DEADLINE: Duration = Duration::from_secs(3);
+
+/// Why (#11255, F2): the defect and its deadline arm. A walk with one palace
+/// whose open never finishes ran until that open gave up, then answered as if
+/// nothing had happened; behind a bridge it ran past the caller's 60 s.
+/// What: `RECALL_PALACE_BATCH + 1` cold palaces, so the last one walks alone
+/// in a second batch, and the test holds that palace's open-queue lock. The
+/// deadline (3 s) is well past the first batch and well short of the
+/// registry's 30 s queue bound, so the stalled open, not timing, decides the
+/// outcome. The reply must carry the first batch's hits, none from the
+/// stalled palace, `deadline_exceeded: true`, `palaces_not_reached: 1`, the
+/// `deadline` reason and `coverage: "partial"`.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn scope_all_returns_partial_results_at_its_deadline() {
+    use super::recall_stream::RECALL_PALACE_BATCH;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut state =
+        ready_state(tmp.path())
+            .await
+            .with_recall_limits(super::op_limits::RecallLimits {
+                open_wait: Duration::from_secs(15),
+                all_deadline: DEADLINE,
+            });
+    state.registry = std::sync::Arc::new(
+        PalaceRegistry::from_env()
+            .with_data_root(tmp.path())
+            .with_open_queue_timeout(Duration::from_secs(30)),
+    );
+    let names: Vec<String> = (0..=RECALL_PALACE_BATCH)
+        .map(|i| format!("dl-{i:02}"))
+        .collect();
+    for name in &names {
+        resident_with(
+            &state,
+            name,
+            &["a deadline walk finds this rust build fact"],
+        )
+        .await;
+        state.registry.remove(&PalaceId::new(name.as_str()));
+    }
+    // The walk keeps the listing order; stall the palace listed last.
+    let listed = PalaceRegistry::list_palaces(tmp.path()).expect("list palaces");
+    let stalled = listed.last().expect("palaces").id.clone();
+    let gate = state.registry.open_lock_for_test(&stalled);
+    let held = gate.lock();
+
+    let out = mcp(
+        &state,
+        json!({"q": "rust build fact", "top_k": 20, "scope": "all"}),
+    )
+    .await;
+    drop(held);
+    assert_eq!(out["deadline_exceeded"], true, "{out}");
+    assert_eq!(out["palaces_not_reached"], 1, "{out}");
+    assert_eq!(out["not_searched_by_reason"]["deadline"], 1, "{out}");
+    assert_eq!(out["coverage"], "partial", "{out}");
+    assert_eq!(out["palaces_searched"], RECALL_PALACE_BATCH, "{out}");
+    assert_d4(&out);
+    let results = out["results"].as_array().expect("results array");
+    assert!(
+        !results.is_empty(),
+        "the first batch's hits are kept: {out}"
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r["palace_id"].as_str() != Some(stalled.as_str())),
+        "a palace the walk never reached cannot answer: {out}"
+    );
+}
+
+/// Why (#11255, F2): after a deadline hit the reply must not start detached
+/// reopens; a walk that finished keeps the #9881 reopen.
+/// What: one lane hit owned by a closed palace, recorded with `reopen` off and
+/// then on; only the second schedules a reopen.
+/// Test: this function.
+#[tokio::test]
+async fn no_reopen_is_scheduled_when_reopen_is_off() {
+    use crate::engine::retrieval::{CrossPalaceResult, RecallResult};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = ready_state(tmp.path()).await;
+    resident_with(&state, "dl-reopen", &["a hit whose palace is closed"]).await;
+    state.registry.remove(&PalaceId::new("dl-reopen"));
+    let hits = [CrossPalaceResult {
+        palace_id: "dl-reopen".to_string(),
+        result: RecallResult {
+            drawer: Drawer::new(Uuid::new_v4(), "a hit whose palace is closed"),
+            score: 1.0,
+            layer: 2,
+        },
+    }];
+    let off = crate::tools::recall_access::record_served_across(&state, &hits, false);
+    assert_eq!(off, 0, "no reopen after a deadline hit");
+    assert!(state.registry.peek(&PalaceId::new("dl-reopen")).is_none());
+    let on = crate::tools::recall_access::record_served_across(&state, &hits, true);
+    assert_eq!(on, 1, "a finished walk still reopens to record");
 }
