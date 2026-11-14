@@ -314,6 +314,13 @@ pub async fn spawn_managed(
                 record.id, record.tmux_name
             )
         })?;
+    // #10989: undo a decommission park of this project's index; a failure is named.
+    crate::session_manager::index_restore::restore_for_session(
+        &registry,
+        &record,
+        crate::session_manager::index_restore::IndexRestore::acquire(),
+    )
+    .await?;
 
     Ok(record)
 }

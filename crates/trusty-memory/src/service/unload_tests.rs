@@ -88,6 +88,45 @@ async fn unload_releases_the_handle_and_keeps_the_palace_on_disk() {
     assert_eq!(live.len(), 1, "the drawer survived the unload");
 }
 
+/// Why: #10989 — a project started again after its decommission uses its
+/// palace with no explicit reload: the next tool call reopens it lazily.
+/// Test: this test. Fails if an unloaded palace refuses a write, or if the
+/// write lands anywhere but the palace's kept data.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unloaded_palace_reopens_on_its_next_tool_call() {
+    let (state, _tmp) = fixture();
+    make_palace(&state, "back");
+    let remember = |text: &'static str| {
+        dispatch_tool(
+            &state,
+            "memory_remember",
+            json!({"palace": "back", "text": text, "force": true}),
+        )
+    };
+    remember("written before the decommission")
+        .await
+        .expect("first write");
+    MemoryService::new(state.clone())
+        .unload_palace("back")
+        .await
+        .expect("unload");
+    let id = PalaceId::new("back");
+    assert!(state.registry.peek(&id).is_none(), "premise: unloaded");
+
+    remember("written after the session started again")
+        .await
+        .expect("the unloaded palace accepts a write");
+
+    let live = state
+        .registry
+        .open_palace(&state.data_root, &id)
+        .expect("resident again")
+        .kg
+        .load_drawer_ids()
+        .expect("drawer ids");
+    assert_eq!(live.len(), 2, "both drawers are in the palace");
+}
+
 /// Why: a palace that is not on disk cannot be loaded, so tm's shutdown must
 /// read "nothing loaded", not an error that blocks the decommission.
 /// Test: this test.

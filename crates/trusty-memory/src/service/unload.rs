@@ -55,11 +55,14 @@ impl MemoryService {
     /// (flushed first; unflushed text is queued for repair), drops the
     /// session-store handle and the registry handle under the raw and
     /// canonical ids. Then checks the postcondition that no handle is
-    /// resident; a handle that reappeared is `Conflict`.
+    /// resident; a handle that reappeared is `Conflict`. Last, waits (again
+    /// at most the lock wait) until the palace's redb files are closed, so
+    /// the next use reopens it writable; a file still open is `Conflict`.
     /// Test: `unload_releases_the_handle_and_keeps_the_palace_on_disk`,
     /// `unload_of_an_absent_palace_reports_nothing_loaded`,
     /// `unload_while_a_write_holds_the_lock_is_busy_and_releases_nothing`,
-    /// `unload_refuses_an_invalid_id`.
+    /// `unload_refuses_an_invalid_id`,
+    /// `an_unloaded_palace_reopens_on_its_next_tool_call`.
     pub async fn unload_palace(&self, palace_id: &str) -> ServiceResult<UnloadOutcome> {
         self.unload_palace_within(palace_id, UNLOAD_LOCK_WAIT).await
     }
@@ -112,6 +115,22 @@ impl MemoryService {
                 "palace {raw:?} was reopened while it was being unloaded; retry"
             )));
         }
+        // #10989 (as #9945 for rename): a dropped handle's writer task closes
+        // its redb files later; a reopen before then is a read-only snapshot.
+        let (root, keys) = (
+            state.data_root.clone(),
+            vec![raw.to_string(), canonical.clone()],
+        );
+        tokio::task::spawn_blocking(move || {
+            crate::engine::registry::await_files_closed(&root, &keys, lock_wait)
+        })
+        .await
+        .map_err(|e| ServiceError::internal(format!("palace_unload: close wait failed: {e}")))?
+        .map_err(|e| {
+            ServiceError::conflict(format!(
+                "palace_unload: handle released, files still open: {e}"
+            ))
+        })?;
         Ok(UnloadOutcome {
             palace_id: raw.to_string(),
             canonical_id: canonical,

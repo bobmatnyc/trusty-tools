@@ -296,9 +296,10 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   pins restored) and the call fails `-32009` with
   `data.error = "park_unload_refused"` and `data.rolled_back`. Unpark
   reloads it as for any park.
-- `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
-  reindex | reindex_error}`: clears the row, reloads the index, queues a
-  reindex.
+- `search.project.unpark {index_id}` → `{index_id, unparked, watching,
+  reindex_queued, reindex | reindex_error}`: clears the row, reloads the
+  index, restarts its watcher (#10989), queues a reindex. tm unparks a
+  `decommissioned` park when a new session starts for the project.
 - `search.project.pin {index_id}` → `{index_id, key, pinned_by, previous}`.
   A worktree, orphaned or parked index is refused.
 - A request naming a parked index (`search.query`, reindex, file reads and

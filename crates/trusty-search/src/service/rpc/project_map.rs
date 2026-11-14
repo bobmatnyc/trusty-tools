@@ -83,7 +83,7 @@ pub struct ProjectParkParams {
 /// What: `map` answers `{path, schema, projects, parked}`; `park` (params
 /// `{index_id, decommission?}`, #10989) answers
 /// `{index_id, parked, key, reason, canonical_index_id, unpinned, unloaded}`; `unpark`
-/// answers `{index_id, unparked, reindex_queued, reindex}` (or
+/// answers `{index_id, unparked, watching, reindex_queued, reindex}` (or
 /// `reindex_error`); `pin` answers `{index_id, key, pinned_by, previous}`.
 /// An unreadable map or registry is `CODE_INTERNAL_ERROR` naming the file and
 /// the remedy; an unknown or unparked id is `CODE_NOT_FOUND`; a refused park
@@ -263,14 +263,21 @@ async fn unpark_report(
     .await?;
     let queued =
         crate::service::server::reindex_after_unpark(state, index_id, row(&ctx, index_id)).await;
+    // #10989: report the watch the reload restarted (false when disabled or failed).
+    let watching = state
+        .watcher_manager
+        .is_watching(&crate::core::registry::IndexId::new(index_id))
+        .await;
     // The row is gone either way; a reindex that could not be queued is
     // reported, and `trusty-search reindex` retries it.
     Ok(match queued {
         Ok(reindex) => serde_json::json!({
-            "index_id": index_id, "unparked": true, "reindex_queued": true, "reindex": reindex,
+            "index_id": index_id, "unparked": true, "watching": watching,
+            "reindex_queued": true, "reindex": reindex,
         }),
         Err((status, body)) => serde_json::json!({
-            "index_id": index_id, "unparked": true, "reindex_queued": false,
+            "index_id": index_id, "unparked": true, "watching": watching,
+            "reindex_queued": false,
             "reindex_error": { "status": status.as_u16(), "body": body },
         }),
     })

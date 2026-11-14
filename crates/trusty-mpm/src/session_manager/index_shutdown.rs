@@ -32,7 +32,7 @@ pub(crate) const METHOD_PALACE_UNLOAD: &str = "memory.palace_unload";
 
 /// Per-call budget. A park waits on a vector-store save; an unload waits up to
 /// 10 s on a palace's write lock.
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bound on the "is anything listening" connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -138,15 +138,8 @@ impl ShutdownTarget {
     /// from.
     /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`.
     pub fn for_project(project_key: Option<&str>, repo_url: &str, root: Option<&Path>) -> Self {
-        let identity = project_key
-            .filter(|k| !k.starts_with("local:"))
-            .and_then(trusty_common::repo_identity::RepoIdentity::parse)
-            .map(|r| r.canonical())
-            .or_else(|| {
-                trusty_common::github_path::parse_github_path(repo_url)
-                    .map(|g| format!("{}/{}", g.owner, g.repo))
-            });
-        let search_query = identity.or_else(|| root.map(|r| r.to_string_lossy().into_owned()));
+        let search_query = repo_identity(project_key, repo_url)
+            .or_else(|| root.map(|r| r.to_string_lossy().into_owned()));
         let remote = Some(repo_url).filter(|u| !u.trim().is_empty());
         let palace = match root {
             Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
@@ -159,6 +152,19 @@ impl ShutdownTarget {
             palace,
         }
     }
+}
+
+/// A project's `owner/repo` identity: `project_key` when it is one, else
+/// parsed from `repo_url`; `None` for a `local:` key with no GitHub remote.
+pub(crate) fn repo_identity(project_key: Option<&str>, repo_url: &str) -> Option<String> {
+    project_key
+        .filter(|k| !k.starts_with("local:"))
+        .and_then(trusty_common::repo_identity::RepoIdentity::parse)
+        .map(|r| r.canonical())
+        .or_else(|| {
+            trusty_common::github_path::parse_github_path(repo_url)
+                .map(|g| format!("{}/{}", g.owner, g.repo))
+        })
 }
 
 /// The capability to shut a project's indexes down without deleting data.
@@ -213,7 +219,7 @@ impl IndexShutdown {
 ///
 /// Why: a missing socket or a refused connect means no daemon, so nothing is
 /// loaded; a daemon that accepts and then fails a call is a failure.
-async fn listening(socket: Option<&Path>) -> Option<&Path> {
+pub(super) async fn listening(socket: Option<&Path>) -> Option<&Path> {
     let socket = socket?;
     let connect = tokio::net::UnixStream::connect(socket);
     match tokio::time::timeout(CONNECT_TIMEOUT, connect).await {
@@ -344,7 +350,7 @@ async fn unload_palace(socket: Option<&Path>, palace: &Result<String, String>) -
 }
 
 /// `body[key] == true`; an absent or non-boolean field is not affirmative.
-fn is_true(body: &Value, key: &str) -> bool {
+pub(super) fn is_true(body: &Value, key: &str) -> bool {
     body.get(key).and_then(Value::as_bool) == Some(true)
 }
 

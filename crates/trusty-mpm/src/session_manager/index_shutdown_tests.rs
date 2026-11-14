@@ -44,6 +44,11 @@ impl Rig {
         )
     }
 
+    /// The trusty-search stand-in's socket (#10989 restore tests).
+    pub(crate) fn search_socket(&self) -> PathBuf {
+        self.search.socket().to_path_buf()
+    }
+
     /// The methods asked, as `daemon:method`.
     pub(crate) fn methods(&self) -> Vec<String> {
         self.calls

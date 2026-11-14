@@ -441,3 +441,114 @@ async fn decommission_project_unknown_name_errors() {
         "{err}"
     );
 }
+
+/// #10989 HIGH finding: a project started again after its decommission gets
+/// its index back. Decommission parks it `decommissioned`; the spawn tail
+/// (`reactivate_for_session`, then `restore_for_session`) unparks it.
+/// Test: this function IS the test. Fails if the spawn tail leaves the
+/// decommission park in place.
+#[tokio::test]
+async fn decommission_then_spawn_unparks_the_index() {
+    use crate::session_manager::index_restore::tests::{Parked, stateful_search};
+    use crate::session_manager::index_restore::{
+        IndexRestore, METHOD_UNPARK, RestoreState, restore_for_session,
+    };
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let parked: Parked = Arc::default();
+    let rig = rig(stateful_search(&parked), healthy_memory()).await;
+    mgr.decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("decommission");
+    assert_eq!(
+        parked.lock().expect("parked")[0]["reason"],
+        "decommissioned",
+        "premise: decommission parked the index"
+    );
+
+    let (new, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let record = mgr.get(&new).await.expect("new session");
+    registry
+        .reactivate_for_session(&record)
+        .await
+        .expect("reactivate");
+    let state = restore_for_session(
+        &registry,
+        &record,
+        Ok(IndexRestore::at(Some(rig.search_socket()))),
+    )
+    .await
+    .expect("the restore succeeds");
+
+    assert_eq!(
+        state,
+        RestoreState::Unparked {
+            ids: vec!["widget-idx".into()]
+        }
+    );
+    assert!(
+        parked.lock().expect("parked").is_empty(),
+        "nothing stays parked"
+    );
+    assert!(rig.methods().contains(&format!("search:{METHOD_UNPARK}")));
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
+/// #10989 Fail-Open Check: an unpark that fails is the spawn's named error —
+/// it names the session and the still-parked index, and never reads as live.
+/// Test: this function IS the test. Fails if `restore_for_session` maps
+/// `RestoreState::Failed` to `Ok`.
+#[tokio::test]
+async fn a_failed_unpark_fails_the_spawn_by_name() {
+    use crate::session_manager::index_restore::tests::row;
+    use crate::session_manager::index_restore::{IndexRestore, METHOD_MAP, restore_for_session};
+    use crate::session_manager::index_shutdown::tests::{Answer, healthy_memory, rig};
+    use crate::uds_mock::RpcError;
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (id, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let record = mgr.get(&id).await.expect("session");
+    let search: Answer = Arc::new(|m: &str, _: &serde_json::Value| match m {
+        METHOD_MAP => Ok(serde_json::json!({
+            "parked": [row("widget-idx", "acme/widget", "decommissioned")]
+        })),
+        _ => Err(RpcError::new(-32603, "project map unwritable")),
+    });
+    let rig = rig(search, healthy_memory()).await;
+
+    let err = restore_for_session(
+        &registry,
+        &record,
+        Ok(IndexRestore::at(Some(rig.search_socket()))),
+    )
+    .await
+    .expect_err("a failed unpark fails the spawn");
+
+    assert!(err.contains(&id.to_string()), "{err}");
+    assert!(err.contains("widget-idx"), "{err}");
+    assert!(err.contains("still parked"), "{err}");
+}

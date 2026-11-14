@@ -34,6 +34,8 @@ pub(crate) mod provisioning_ledger;
 mod index_delete_guard;
 // #10989: the non-destructive door decommission parks and unloads through.
 pub mod index_shutdown;
+// #10989: a new session unparks its project's decommission park.
+pub mod index_restore;
 pub mod injection_status;
 // #9167 AC5: the inject path's `message` record.
 pub mod inject_record;

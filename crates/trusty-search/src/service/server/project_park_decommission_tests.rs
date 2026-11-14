@@ -41,9 +41,13 @@ impl Fixture {
     }
 
     async fn call(&self, params: serde_json::Value) -> RpcResponse {
+        self.call_method(project_map::METHOD_PROJECT_PARK, params)
+            .await
+    }
+
+    async fn call_method(&self, method: &str, params: serde_json::Value) -> RpcResponse {
         let frame = serde_json::to_vec(&serde_json::json!({
-            "jsonrpc": "2.0", "id": 1, "method": project_map::METHOD_PROJECT_PARK,
-            "params": params,
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
         }))
         .expect("frame");
         self.router.dispatch(&frame).await
@@ -86,6 +90,7 @@ async fn fixture(id: &'static str) -> Fixture {
     let handle = state.registry.get(&IndexId::new(id)).expect("resident");
     state.watcher_manager.spawn_for_index(&handle).await;
     let router = project_map::register(RpcRouter::new(), &state);
+    let router = crate::service::rpc::project::register(router, &state);
     Fixture {
         tmp,
         _root_guard: root_guard,
@@ -198,4 +203,58 @@ async fn a_decommission_park_whose_unload_is_refused_leaves_the_index_unparked()
         Some(fx.id),
         "the dropped pin is restored"
     );
+}
+
+/// Why: #10989 HIGH finding — a project started again after a decommission
+/// must get its index back: tm unparks it on spawn, and the unpark must
+/// reload the index, restart the watcher the park stopped, and leave the
+/// project resolvable.
+/// Test: this test. Fails if `reindex_after_unpark` does not restart the
+/// watcher (the index would stay unwatched until its first query).
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::parallel]
+async fn a_decommission_park_then_unpark_reloads_the_index_and_restarts_its_watcher() {
+    let fx = fixture("decom-unpark-10989").await;
+    let id = IndexId::new(fx.id);
+    let parked = fx
+        .call(serde_json::json!({ "index_id": fx.id, "decommission": true }))
+        .await
+        .result
+        .expect("parked");
+    assert_eq!(parked["unloaded"], true, "{parked}");
+    assert!(
+        !fx.watching().await,
+        "premise: the park stopped the watcher"
+    );
+
+    let unparked = fx
+        .call_method(
+            project_map::METHOD_PROJECT_UNPARK,
+            serde_json::json!({ "index_id": fx.id }),
+        )
+        .await
+        .result
+        .expect("the unpark succeeds");
+
+    assert!(fx.watching().await, "the unpark restarted the watcher");
+    assert_eq!(unparked["unparked"], true, "{unparked}");
+    assert_eq!(unparked["watching"], true, "{unparked}");
+    assert!(
+        fx.state.registry.get(&id).is_some(),
+        "the index is reloaded"
+    );
+    let map = crate::core::project_map_io::load(&fx.map_path())
+        .expect("map readable")
+        .expect("map exists");
+    assert!(!map.is_parked(fx.id), "the parked row is gone");
+    let resolved = fx
+        .call_method(
+            crate::service::rpc::project::METHOD_PROJECT_RESOLVE,
+            serde_json::json!({ "project": REPO }),
+        )
+        .await
+        .result
+        .expect("the project resolves again");
+    assert_eq!(resolved["index_id"], fx.id, "{resolved}");
+    fx.state.watcher_manager.stop_for_index(&id).await;
 }

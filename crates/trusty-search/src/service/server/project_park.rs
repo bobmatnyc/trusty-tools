@@ -250,12 +250,15 @@ pub(crate) async fn detach_parked(
     true
 }
 
-/// Reload an unparked index if needed, then queue its reindex (#9169).
+/// Reload an unparked index if needed, restart its watcher, then queue its
+/// reindex (#9169, #10989).
 ///
 /// What: a non-resident index is registered cold from its `indexes.toml` row
-/// and loaded through the ordinary lazy-load path; then the ordinary reindex
-/// core runs. Every refusal is the reindex or load path's own.
-/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`.
+/// and loaded through the ordinary lazy-load path; its watcher is started
+/// again, since [`detach_parked`] stopped it; then the ordinary reindex core
+/// runs. Every refusal is the reindex or load path's own.
+/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `a_decommission_park_then_unpark_reloads_the_index_and_restarts_its_watcher`.
 pub(crate) async fn reindex_after_unpark(
     state: &Arc<SearchAppState>,
     index_id: &str,
@@ -273,6 +276,10 @@ pub(crate) async fn reindex_after_unpark(
         super::index_resolve::resolve_or_load_index(state, &id)
             .await
             .map_err(|(status, Json(body))| (status, body))?;
+    }
+    // #10989: a park stops the watcher; the unpark starts it (a no-op when watched).
+    if let Some(handle) = state.registry.get(&id) {
+        state.watcher_manager.spawn_for_index(&handle).await;
     }
     super::reindex_handlers::reindex_report(state, index_id, None).await
 }
