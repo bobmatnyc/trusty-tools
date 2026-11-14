@@ -883,6 +883,8 @@ def test_the_worker_offline_quiet_matches_the_code_lifetime():
     assert margin > protocol.PAGE_WAIT  # a redeem probe in flight fits the margin
     expected = int((codes.CODE_TTL + margin) * 1000)
     assert found == [str(expected)]
-    contract = (package.parents[1] / "docs" / "activation-codes.md").read_text()
+    # The contract doc is not package data; reach it from the source tree (#11239).
+    docs = Path(__file__).resolve().parents[1] / "docs"
+    contract = (docs / "activation-codes.md").read_text()
     assert f"`QUIET_MS = {expected}`" in contract
     assert f"which is {expected // 1000} s" in contract
