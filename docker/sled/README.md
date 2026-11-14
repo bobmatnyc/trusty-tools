@@ -210,12 +210,13 @@ The `ENV` layer adds DOC-90 section 7 to cloudtest's: `TRUSTY_NO_UPDATE_CHECK=1`
 `TAGENT_NO_API=1`, `TRUSTY_CONSOLE_TOKEN_FILE=/run/secrets/trusty-console-token`,
 plus `TS_NO_LOGS_NO_SUPPORT=true` for tailscaled and `GH_NO_UPDATE_NOTIFIER=1`.
 
+`TAGENT_NO_API=1` is enforced: `tagent` refuses `--api` and `--serve` before
+any listener binds (#6433 interim slice). The entrypoint never starts either.
+
 Not yet enforced by the binaries:
 
 - `TRUSTY_CONSOLE_TOKEN_FILE`: the console does not enforce it yet (#11074).
   Until it does, the console requires no token.
-- `TAGENT_NO_API`: `tagent` does not enforce it yet (#6433). Until it does,
-  nothing refuses `tagent --api`; the entrypoint never starts it.
 - `HF_HUB_OFFLINE`: the pinned hf-hub does not read it (DOC-90 OQ-4); the
   `:ro` model cache and the allowlist carry the guarantee.
 

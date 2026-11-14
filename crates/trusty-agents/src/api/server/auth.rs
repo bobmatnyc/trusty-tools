@@ -1,10 +1,9 @@
 //! Server configuration + bearer-token auth middleware (#181).
 //!
 //! Why: The server binds loopback (`127.0.0.1`) by default, so auth is not the
-//! control that keeps it off the LAN — the bind is (#3329). Bearer-token auth
-//! covers the one case the bind cannot: an operator who explicitly opts into a
-//! non-loopback `--bind`, which `serve_with_config` refuses to start without a
-//! token. It gates the sensitive `/api/*` routes while exempting the
+//! control that keeps it off the LAN — the bind is (#3329); #6433 makes
+//! `serve_with_config` refuse every non-loopback `--bind`. Bearer-token auth,
+//! when a token is set, gates the sensitive `/api/*` routes while exempting the
 //! `/api/health` and `/api/config` bootstrap probes and the embedded UI assets.
 //! #5052: `/api/events` is exempt HERE but not unauthenticated — it is gated in
 //! `events_sse::events_handler`, which takes this bearer token OR a ticket a
@@ -33,8 +32,7 @@ use subtle::ConstantTimeEq;
 /// extra bare args to `serve`) gives us a clean place to grow more knobs
 /// (TLS, allowed origins, …) without breaking callers.
 /// What: `bind` is the interface to listen on (#3329: defaults to loopback
-/// `127.0.0.1`; a non-loopback bind is an explicit opt-in that REQUIRES a
-/// token — see `serve_with_config`). `port` is the TCP port. `token`, when
+/// `127.0.0.1`; #6433: `serve_with_config` refuses any non-loopback bind). `port` is the TCP port. `token`, when
 /// `Some`, makes every `/api/*` route (except the public probes) require an
 /// `Authorization: Bearer <token>` header that exactly matches `token`.
 /// Test: `auth_middleware_rejects_missing_token`, `auth_middleware_allows_health`,
@@ -75,7 +73,7 @@ impl ApiConfig {
     /// `serve_with_config` still enforces the doctrine whatever this returns,
     /// so this is defence in depth rather than the primary control.
     /// What: `None` → `127.0.0.1`. `Some(ip)` is taken verbatim; a non-loopback
-    /// `ip` is then refused by `serve_with_config` unless `token` is `Some`.
+    /// `ip` is then refused by `serve_with_config`, token or not (#6433).
     /// Test: `unspecified_bind_defaults_to_loopback`.
     pub fn with_bind(bind: Option<std::net::IpAddr>, port: u16, token: Option<String>) -> Self {
         Self {
@@ -119,9 +117,8 @@ pub(super) fn bearer_token_matches(expected: &str, provided: &str) -> bool {
 ///
 /// Why: On the loopback default this middleware is not installed at all — a
 /// local caller reaches every route, which is the accepted posture for a
-/// same-host daemon (#3329). It exists for the non-loopback `--bind` opt-in,
-/// where `serve_with_config` requires a token: there, any host that can route
-/// to the port must present it. We deliberately exempt `GET /api/health` so
+/// same-host daemon (#3329). It is installed when an operator sets a token;
+/// since #6433 every bind is loopback, so it gates other local callers. We deliberately exempt `GET /api/health` so
 /// probes from load balancers or healthchecks don't need credentials, and
 /// exempt the
 /// embedded UI's static assets so a browser can load `index.html` and obtain
