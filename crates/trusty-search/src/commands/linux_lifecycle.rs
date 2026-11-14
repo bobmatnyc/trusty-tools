@@ -63,7 +63,10 @@ pub struct LifecycleArgs {
 /// resolver now serves every verb. The resolved dir is pinned in
 /// `instance_env` as `TRUSTY_DATA_DIR` and set on the spawned daemon, so the
 /// module's `/proc` scan tells this instance from a sibling with another data
-/// dir. A blank `TRUSTY_DATA_DIR_OVERRIDE` is refused: the module compares
+/// dir. The resolved dir — the default data dir for the default instance — is
+/// also the `--data-dir` entry of `instance_path_args`, so a sibling started
+/// with `--data-dir X` and no `TRUSTY_DATA_DIR` is told apart by its argv.
+/// A blank `TRUSTY_DATA_DIR_OVERRIDE` is refused: the module compares
 /// environ bytes exactly, so blank and unset would read as different
 /// instances while both resolve the live socket.
 /// What: `flag` wins over `env_data_dir` (empty counts as unset; the result
@@ -94,9 +97,9 @@ pub(crate) fn descriptor_for(
     }
     let data_dir = super::start::resolve_data_dir_override(env_data_dir, flag)?;
     let data_os = data_dir.as_deref().map(Path::as_os_str);
-    let lock = crate::service::daemon::resolve_daemon_dir(data_os)
-        .context("could not determine the trusty-search data directory")?
-        .join("daemon.lock");
+    let daemon_dir = crate::service::daemon::resolve_daemon_dir(data_os)
+        .context("could not determine the trusty-search data directory")?;
+    let lock = daemon_dir.join("daemon.lock");
     let socket = match socket_flag {
         Some(path) => path.to_path_buf(),
         None => crate::service::socket::resolve_socket_path(data_os)?,
@@ -117,6 +120,8 @@ pub(crate) fn descriptor_for(
         DATA_DIR_ENV.to_string(),
         data_dir.map(PathBuf::into_os_string),
     ));
+    // #11085 AC6: a `--data-dir X` sibling without TRUSTY_DATA_DIR is not this instance.
+    desc.instance_path_args = vec![("--data-dir".to_string(), daemon_dir)];
     desc.env_passthrough = ENV_PASSTHROUGH.iter().map(|s| (*s).to_string()).collect();
     desc.stop_grace = trusty_common::shutdown::termination_grace();
     desc.ready_timeout = READY_TIMEOUT;

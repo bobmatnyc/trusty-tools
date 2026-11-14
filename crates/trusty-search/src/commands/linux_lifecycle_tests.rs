@@ -23,6 +23,9 @@ const FIX_SOCKET: &str = "TS_LC_FIXTURE_SOCKET";
 const FIX_LOCK: &str = "TS_LC_FIXTURE_LOCK";
 const FIX_DIR: &str = "TS_LC_FIXTURE_DIR";
 const FIX_IGNORE_TERM: &str = "TS_LC_FIXTURE_IGNORE_TERM";
+/// Argv prefix naming the fixture's socket, for a fixture the module spawns
+/// with only the descriptor's environment.
+const FIX_SOCKET_ARG: &str = "ts-lc-fixture-socket=";
 
 #[test]
 #[serial_test::parallel]
@@ -49,10 +52,18 @@ fn descriptor_resolves_the_data_dir_the_same_way_for_every_verb() {
         .instance_env
         .contains(&(DATA_DIR_ENV.to_string(), Some(flag.as_os_str().to_owned()))));
     assert_eq!(desc.working_dir, PathBuf::from("/"));
+    // #11085 AC6: the path flag names the resolved dir, for every resolution.
+    let path_arg = |dir: &Path| vec![("--data-dir".to_string(), dir.to_path_buf())];
+    assert_eq!(desc.instance_path_args, path_arg(flag));
     // Env only: the same dir, and no `--data-dir` the daemon might not carry.
     let desc = descriptor_for(None, Some(env_dir.path().into()), None, None).expect("env");
     assert_eq!(desc.socket, env_dir.path().join("trusty-search.sock"));
     assert_eq!(desc.liveness_args, ["start", "--foreground"]);
+    assert_eq!(desc.instance_path_args, path_arg(env_dir.path()));
+    // The default instance: the resolved default data dir, never empty.
+    let default_dir = crate::service::daemon::resolve_daemon_dir(None).expect("default dir");
+    let desc = descriptor_for(None, None, None, None).expect("default");
+    assert_eq!(desc.instance_path_args, path_arg(&default_dir));
     assert!(desc.instance_env.contains(&(
         DATA_DIR_ENV.to_string(),
         Some(env_dir.path().as_os_str().to_owned())
@@ -260,7 +271,13 @@ fn lifecycle_fixture_entry() {
         f.lock().expect("flock");
         f
     });
-    let listener = std::env::var_os(FIX_SOCKET).map(|s| {
+    let from_argv = std::env::args_os().find_map(|a| {
+        let a = a.into_string().ok()?;
+        a.strip_prefix(FIX_SOCKET_ARG).map(OsString::from)
+    });
+    let listener = std::env::var_os(FIX_SOCKET).or(from_argv).map(|s| {
+        // A stopped fixture leaves its socket file; a restart binds over it.
+        let _ = std::fs::remove_file(&s);
         let l = std::os::unix::net::UnixListener::bind(s).expect("fixture bind");
         l.set_nonblocking(true).expect("nonblocking");
         l
@@ -470,25 +487,24 @@ async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
     );
 }
 
-// AC6 residual, for PR C: a sibling started as `start --foreground --data-dir
-// X` WITHOUT TRUSTY_DATA_DIR in its environ matches the default-data-dir
-// descriptor's scan, so that descriptor fails closed while its own socket is
-// down. A sibling that carries TRUSTY_DATA_DIR (as every daemon this crate's
-// `start` spawns does) is told apart. Fixing the first case needs a module
-// change: a liveness rule that excludes `--data-dir` argv not naming this dir.
-// #11085: the wider consequence — with such a sibling running, `restart` of a
-// HEALTHY default daemon stops it, then `start` refuses with `RunningUnserved`,
-// so the default daemon stays down. `restart` exits non-zero naming the pids.
+// #11085 AC6: a sibling started as `start --foreground --data-dir X` WITHOUT
+// TRUSTY_DATA_DIR in its environ carries every liveness arg of the default
+// instance and the same environ. The descriptor's `--data-dir` path flag, set
+// to the default data dir, tells it apart: `stop` of the default instance
+// answers NotRunning, and `restart` of a HEALTHY default daemon stops it and
+// starts a new one that serves, leaving the sibling running.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
-async fn ac6_residual_a_sibling_without_trusty_data_dir_blocks_the_default_instance() {
+async fn ac6_a_sibling_without_trusty_data_dir_no_longer_blocks_the_default_instance() {
     let links = links_dir();
     let run = tempfile::tempdir().expect("run dir");
     let sibling_dir = run.path().join("sibling");
+    // A live daemon's data dir exists; an unresolvable path stays undecided.
+    std::fs::create_dir(&sibling_dir).expect("sibling dir");
     let sib = sibling_dir.to_str().expect("utf-8").to_string();
+    let socket = run.path().join("default.sock");
     // The default-data-dir descriptor, kept off this host's live paths.
-    let mut desc =
-        descriptor_for(None, None, None, Some(&run.path().join("absent.sock"))).expect("desc");
+    let mut desc = descriptor_for(None, None, None, Some(&socket)).expect("desc");
     desc.stopped_signal = StoppedSignal::LockFree(run.path().join("daemon.lock"));
     // A unique override, so no live daemon on this host matches the scan.
     let key = run.path().join("override").into_os_string();
@@ -500,33 +516,55 @@ async fn ac6_residual_a_sibling_without_trusty_data_dir_blocks_the_default_insta
     ));
     let argv = ["start", "--foreground", "--data-dir", sib.as_str()];
 
-    let bare = spawn_fixture(
+    let sibling = spawn_fixture(
         links.path(),
         &argv,
         &[(trusty_common::DATA_DIR_OVERRIDE_ENV, &key)],
         None,
     );
-    let pid = bare.id();
-    wait_exec(pid);
-    let blocked = lc::stop(&desc).await;
-    assert!(reap(bare), "the sibling ran through the scan");
-    match blocked {
-        Err(LifecycleError::RunningUnserved { pids, .. }) => assert_eq!(pids, vec![pid]),
-        other => panic!("expected the residual RunningUnserved, got {other:?}"),
-    }
+    wait_exec(sibling.id());
+    let stopped = lc::stop(&desc).await;
 
-    let sib_os = OsString::from(&sib);
-    let pinned = spawn_fixture(
+    // A healthy default daemon on the descriptor's socket. A spawned one gets
+    // only the descriptor's environment, so the fixture keys go in
+    // `instance_env` and the socket in argv; every fixture already carries
+    // FIX_DIR, so the sibling still matches every `instance_env` value.
+    let sock_arg = format!("{FIX_SOCKET_ARG}{}", socket.display());
+    let fixture_args = [
+        "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
+        "--exact",
+        "--",
+        "start",
+        "--foreground",
+        sock_arg.as_str(),
+    ];
+    desc.instance_env
+        .push((FIX_DIR.into(), Some(links.path().into())));
+    desc.install_dir = links.path().join("bin");
+    desc.spawn_args = fixture_args.iter().map(|a| a.to_string()).collect();
+    let old = spawn_fixture(
         links.path(),
-        &argv,
-        &[
-            (trusty_common::DATA_DIR_OVERRIDE_ENV, &key),
-            (DATA_DIR_ENV, &sib_os),
-        ],
-        None,
+        &["start", "--foreground", sock_arg.as_str()],
+        &[(trusty_common::DATA_DIR_OVERRIDE_ENV, &key)],
+        Some(&socket),
     );
-    wait_exec(pinned.id());
-    let told_apart = lc::stop(&desc).await;
-    assert!(reap(pinned), "the pinned sibling ran through the scan");
-    assert_eq!(told_apart.expect("not running"), StopOutcome::NotRunning);
+    let old_pid = old.id();
+    let restarted = restart_with(&desc, &KernelDelivery, || None).await;
+    let old_alive = reap(old);
+    let serving = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+    let cleanup = lc::stop(&desc).await;
+    let sibling_alive = reap(sibling);
+
+    assert_eq!(
+        stopped.expect("the sibling is told apart"),
+        StopOutcome::NotRunning
+    );
+    restarted.expect("restart of the healthy default daemon");
+    assert!(!old_alive, "the old default daemon was stopped");
+    assert!(serving, "a new default daemon serves the socket");
+    match cleanup.expect("cleanup stop") {
+        StopOutcome::Stopped { pid, .. } => assert_ne!(pid, old_pid),
+        other => panic!("expected the restarted daemon to stop, got {other:?}"),
+    }
+    assert!(sibling_alive, "the sibling was signalled");
 }
