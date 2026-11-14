@@ -35,8 +35,9 @@
 //!   [`LifecycleError::RestartBlocked`] before any signal (#11085).
 //! - [`stop_pid`] and [`restart_pid`] act on a daemon the caller identified
 //!   by pid, such as one whose socket bind failed (#11085). The pid is pinned
-//!   and must be this instance — binary, `liveness_args`, `instance_env` and
-//!   `instance_path_args` — before any signal.
+//!   and must be proven this instance — binary, `liveness_args`,
+//!   `instance_env` and `instance_path_args` — and the socket unserved or
+//!   served by that pid, before any signal.
 //!
 //! A process whose argv gives an `instance_path_args` flag only values naming
 //! another path is a sibling, never this instance (#11085).
@@ -160,8 +161,9 @@ pub struct DaemonDescriptor {
     /// every one of these as a whole argument means the daemon still runs:
     /// `stop` and `start` refuse with [`LifecycleError::RunningUnserved`].
     /// Empty (the default) counts every process of `binary`, stdio bridges
-    /// included, which fails closed; a consumer sets the daemon-only
-    /// arguments, such as `["serve", "--foreground"]`.
+    /// included, which fails closed for the scan; [`stop_pid`] and
+    /// [`restart_pid`] refuse an empty list (#11085). A consumer sets the
+    /// daemon-only arguments, such as `["serve", "--foreground"]`.
     pub liveness_args: Vec<String>,
     /// The spawned daemon's working directory; `/` by default (#11098).
     ///
@@ -198,7 +200,9 @@ pub struct DaemonDescriptor {
     /// sibling, whatever its environment, and the scan ignores it. A process
     /// without the flag is unaffected. Values are compared by path components,
     /// then by `canonicalize`; a relative or unresolvable value, or a flag
-    /// with no value, counts as this instance, never as a sibling. List each
+    /// with no value, counts as this instance for the scan, never as a
+    /// sibling, and [`stop_pid`] and [`restart_pid`] refuse such a process
+    /// with [`LifecycleError::InstanceUndecided`]. List each
     /// alias of a flag as its own entry. Empty (the default) changes nothing.
     /// This field does not touch `spawn_args`.
     pub instance_path_args: Vec<(String, PathBuf)>,

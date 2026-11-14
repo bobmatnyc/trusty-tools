@@ -40,7 +40,7 @@ use std::io;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::Path;
 
-use super::instance::names_other_instance;
+use super::instance::{PathVerdict, path_verdict};
 use super::process::exe_name;
 use super::{DaemonDescriptor, LifecycleError, StoppedSignal, lock_is_free};
 
@@ -121,7 +121,10 @@ fn matching_processes(
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
             continue;
         };
-        if pid != me && !exclude.contains(&pid) && process_matches(pid, euid, desc)? {
+        if pid != me
+            && !exclude.contains(&pid)
+            && process_instance(pid, euid, desc)? != Instance::Not
+        {
             found.push(pid);
         }
     }
@@ -135,21 +138,34 @@ pub(crate) fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Whether a process is the instance a descriptor describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Instance<'a> {
+    /// Gone, another uid, a zombie, or a mismatch.
+    Not,
+    /// Binary, `liveness_args`, `instance_path_args` and `instance_env` match.
+    This,
+    /// All else matches, but this `instance_path_args` flag does not decide.
+    Undecided(&'a str),
+}
+
 /// Whether `pid` is a live process of `euid` that is the instance `desc`
 /// describes: binary, `liveness_args`, `instance_path_args`, `instance_env`.
 ///
-/// What: `Ok(false)` for a vanished process, another uid, a zombie, or a
-/// mismatch; an error for a read that cannot be classified.
-pub(crate) fn process_matches(
+/// What: [`Instance::Not`] for a vanished process, another uid, a zombie, or a
+/// mismatch; [`Instance::Undecided`] when only a path flag cannot be decided
+/// (the scan counts it as a match, a stop by pid refuses); an error for a read
+/// that cannot be classified.
+pub(crate) fn process_instance<'d>(
     pid: u32,
     euid: u32,
-    desc: &DaemonDescriptor,
-) -> Result<bool, LifecycleError> {
+    desc: &'d DaemonDescriptor,
+) -> Result<Instance<'d>, LifecycleError> {
     // #11098: only a vanished or foreign entry is skipped; EMFILE, ENOMEM or
     // EIO here once read a live daemon as not running.
     let status = match std::fs::read(format!("/proc/{pid}/status")) {
         Ok(s) => s,
-        Err(e) if skippable(&e, pid, euid) => return Ok(false),
+        Err(e) if skippable(&e, pid, euid) => return Ok(Instance::Not),
         Err(source) => {
             return Err(LifecycleError::Io {
                 context: format!("read /proc/{pid}/status"),
@@ -158,38 +174,41 @@ pub(crate) fn process_matches(
         }
     };
     if !status_admits(&status, pid, euid)? {
-        return Ok(false);
+        return Ok(Instance::Not);
     }
     let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
         Ok(c) => c,
-        Err(e) if vanished(&e) => return Ok(false),
+        Err(e) if vanished(&e) => return Ok(Instance::Not),
         Err(source) => return Err(LifecycleError::IdentityUnreadable { pid, source }),
     };
     if !argv_matches(&cmdline, &desc.liveness_args) {
-        return Ok(false);
+        return Ok(Instance::Not);
     }
     let name = match exe_name(pid) {
         Ok(name) => name,
         // A kernel thread has no exe; an exited process no longer has one.
-        Err(e) if vanished(&e) => return Ok(false),
+        Err(e) if vanished(&e) => return Ok(Instance::Not),
         // An undumpable process hides its exe; any other error fails closed.
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => argv0_name(&cmdline),
         Err(source) => return Err(LifecycleError::IdentityUnreadable { pid, source }),
     };
     if name != desc.binary {
-        return Ok(false);
+        return Ok(Instance::Not);
     }
     // #11085: `--data-dir X` with the data-dir variable unset is a sibling.
-    if names_other_instance(&cmdline, &desc.instance_path_args) {
-        return Ok(false);
-    }
+    let path = match path_verdict(&cmdline, &desc.instance_path_args) {
+        PathVerdict::Other => return Ok(Instance::Not),
+        PathVerdict::Same => Instance::This,
+        PathVerdict::Undecided(flag) => Instance::Undecided(flag),
+    };
     if desc.instance_env.is_empty() {
-        return Ok(true);
+        return Ok(path);
     }
     // #11098: a sibling instance (same argv, another data dir) is not this one.
     match std::fs::read(format!("/proc/{pid}/environ")) {
-        Ok(environ) => Ok(environ_matches(&environ, &desc.instance_env)),
-        Err(e) if vanished(&e) => Ok(false),
+        Ok(environ) if environ_matches(&environ, &desc.instance_env) => Ok(path),
+        Ok(_) => Ok(Instance::Not),
+        Err(e) if vanished(&e) => Ok(Instance::Not),
         Err(source) => Err(LifecycleError::InstanceUnreadable {
             pid,
             binary: desc.binary.clone(),

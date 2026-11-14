@@ -17,9 +17,10 @@ use super::Signal;
 /// `ProbeInconclusive`, `Unidentified`, `RunningUnserved`, `IdentityMismatch`,
 /// `IdentityUnreadable`, `InstanceUnreadable`, `Survivor`, `StoppedSignalNotReached`,
 /// `AlreadyRunning`, `ChildExited`, `NotReady`, `ChildUnpinned`,
-/// `RestartBlocked` and `NotThisInstance`; the unit
+/// `RestartBlocked`, `NotThisInstance`, `InstanceUndecided`, `ServedByAnother`
+/// and `BinaryMissing`; the unit
 /// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
-/// `NoPeerPid`, `Signal`, `BinaryMissing`, `Spawn` and `Io` have no test.
+/// `NoPeerPid`, `Signal`, `Spawn` and `Io` have no test.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LifecycleError {
@@ -220,6 +221,38 @@ pub enum LifecycleError {
         pid: u32,
         /// The descriptor's binary name.
         binary: String,
+    },
+    /// The pid a caller named runs the daemon's binary, arguments and
+    /// environment, but an `instance_path_args` flag of it has no value, or a
+    /// relative or unresolvable one, so whether it is this instance is
+    /// unknown (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error(
+        "pid {pid} runs `{binary}` with the daemon's arguments, but its `{flag}` value is \
+         missing, relative or unresolvable; cannot tell whether it is this instance; not signalled"
+    )]
+    InstanceUndecided {
+        /// The named pid.
+        pid: u32,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The flag that did not decide.
+        flag: String,
+    },
+    /// `stop_pid` proved the named pid is this instance, but another pid
+    /// serves the socket, so a stop of the named pid could not reach the
+    /// stopped signal (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error("pid {pid} is this instance, but pid {peer} serves {}; not signalled", socket.display())]
+    ServedByAnother {
+        /// The named pid.
+        pid: u32,
+        /// The socket's peer pid.
+        peer: u32,
+        /// The socket probed.
+        socket: PathBuf,
     },
 }
 

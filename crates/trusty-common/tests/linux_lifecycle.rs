@@ -1978,3 +1978,165 @@ async fn stop_pid_reports_a_survivor_and_restart_pid_starts_nothing() {
     assert!(lines(&marker).is_empty(), "nothing was spawned");
     assert!(is_alive(d.pid()), "the survivor still runs");
 }
+
+// #11085: the scan counts an undecided path flag as this instance and refuses,
+// but a stop by pid must not signal a process nobody proved is this instance.
+// Empty `liveness_args` lets every process of the binary pass, so it refuses.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_refuse_an_undecided_instance_before_any_signal() {
+    let fx = Fixture::new();
+    let own_dir = fx.path("own");
+    fs::create_dir(&own_dir).expect("own dir");
+    let spawned = fx.path("spawned");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.instance_path_args = vec![(DIR_FLAG.to_string(), own_dir)];
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", spawned.display())]);
+    let mut no_liveness = fx.descriptor(StoppedSignal::SocketRefuses);
+    no_liveness.liveness_args.clear();
+    no_liveness.spawn_args = desc.spawn_args.clone();
+    let flag = |value: &str| vec![DIR_FLAG.to_string(), value.to_string()];
+    let missing = fx.path("missing").display().to_string();
+    let relative = launch_unserved(&fx, &fx.socket, "rel-marker", &flag("own"));
+    let unresolvable = launch_unserved(&fx, &fx.socket, "abs-marker", &flag(&missing));
+    let no_value = launch_unserved(&fx, &fx.socket, "none-marker", &[DIR_FLAG.to_string()]);
+    let plain = launch_unserved(&fx, &fx.socket, "plain-marker", &[]);
+    let rec = Recording::new(true);
+    let mut results = Vec::new();
+    for (what, d, pid, undecided) in [
+        ("a relative value", &desc, relative.pid(), true),
+        ("an unresolvable value", &desc, unresolvable.pid(), true),
+        ("no value", &desc, no_value.pid(), true),
+        ("empty liveness_args", &no_liveness, plain.pid(), false),
+    ] {
+        let stopped = stop_pid_with(d, pid, &rec).await.map(|o| format!("{o:?}"));
+        let restarted = restart_pid_with(d, pid, &rec)
+            .await
+            .map(|o| format!("{o:?}"));
+        results.push((what, pid, undecided, stopped, restarted));
+    }
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&spawned);
+    for (what, pid, undecided, stopped, restarted) in results {
+        for (call, out) in [("stop_pid", stopped), ("restart_pid", restarted)] {
+            let refused = match &out {
+                Err(LifecycleError::InstanceUndecided { pid: p, flag, .. }) => {
+                    undecided && *p == pid && flag == DIR_FLAG
+                }
+                Err(LifecycleError::InvalidDescriptor { .. }) => !undecided,
+                _ => false,
+            };
+            assert!(refused, "{what}: {call}: expected a refusal, got {out:?}");
+        }
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&spawned).is_empty(), "restart_pid spawned");
+    for pid in [
+        relative.pid(),
+        unresolvable.pid(),
+        no_value.pid(),
+        plain.pid(),
+    ] {
+        assert!(is_alive(pid), "pid {pid} is untouched");
+    }
+}
+
+// #11085: P is this instance but unserved; Q serves the socket. A restart of
+// P stopped P and then `start` found Q serving, so the daemon reached by pid
+// was down and nothing started; a stop of P could not reach the stopped
+// signal. Both now refuse before any signal.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket() {
+    let fx = Fixture::new();
+    let p = launch_unserved(&fx, &fx.socket, "p-marker", &[]);
+    let q = fx.spawn(DAEMON, "serve", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let rec = Recording::new(true);
+    let restarted = restart_pid_with(&desc, p.pid(), &rec).await;
+    let stopped = stop_pid_with(&desc, p.pid(), &rec).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+    match &restarted {
+        Err(LifecycleError::RestartBlocked {
+            serving, others, ..
+        }) => {
+            assert_eq!(*serving, [p.pid()]);
+            assert_eq!(*others, [q.pid()]);
+        }
+        other => panic!("restart_pid: expected RestartBlocked, got {other:?}"),
+    }
+    assert!(
+        matches!(&stopped, Err(LifecycleError::ServedByAnother { pid, peer, .. })
+            if (*pid, *peer) == (p.pid(), q.pid())),
+        "stop_pid: expected ServedByAnother, got {stopped:?}"
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(p.pid()) && is_alive(q.pid()), "both untouched");
+    assert!(UnixStream::connect(&fx.socket).is_ok(), "Q still serves");
+}
+
+// #11085: a socket that cannot be probed may be served by another pid, so a
+// stop or restart by pid refuses before any signal.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_stop_short_when_the_socket_cannot_be_probed() {
+    let fx = Fixture::new();
+    let dir = fx.path("locked");
+    fs::create_dir(&dir).expect("socket dir");
+    let socket = dir.join("d.sock");
+    let p = launch_unserved(&fx, &socket, "p-marker", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor_at(StoppedSignal::SocketRefuses, &socket);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let guard = ModeGuard::lock(&dir);
+    let probe = UnixStream::connect(&socket).map(drop);
+    assert!(
+        matches!(&probe, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+        "fixture precondition: connect is refused with EACCES, got {probe:?}"
+    );
+    let rec = Recording::new(true);
+    let restarted = restart_pid_with(&desc, p.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    let stopped = stop_pid_with(&desc, p.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    std::thread::sleep(SPAWN_SETTLE);
+    drop(guard);
+    let _reaps = fx.reap_reported(&marker);
+    for (call, out) in [("restart_pid", restarted), ("stop_pid", stopped)] {
+        assert!(
+            matches!(&out, Err(LifecycleError::ProbeInconclusive { socket: s }) if *s == socket),
+            "{call}: expected ProbeInconclusive, got {out:?}"
+        );
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(p.pid()), "the daemon is untouched");
+}
+
+// #11085: mid-upgrade the install binary is briefly absent. A restart that
+// found that only at its start had already stopped the healthy daemon.
+#[tokio::test]
+async fn restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing() {
+    let fx = Fixture::new();
+    let d = fx.spawn(DAEMON, "serve", &[]);
+    let desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    let program = fx.install.join(DAEMON);
+    fs::remove_file(&program).expect("remove the install binary");
+    let rec = Recording::new(true);
+    let restarted = restart_with(&desc, &rec).await.map(|o| format!("{o:?}"));
+    let by_pid = restart_pid_with(&desc, d.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    for (call, out) in [("restart", restarted), ("restart_pid", by_pid)] {
+        assert!(
+            matches!(&out, Err(LifecycleError::BinaryMissing { path }) if *path == program),
+            "{call}: expected BinaryMissing, got {out:?}"
+        );
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(d.pid()), "the daemon still runs");
+    assert!(UnixStream::connect(&fx.socket).is_ok(), "it still serves");
+}

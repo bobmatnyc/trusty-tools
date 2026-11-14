@@ -8,12 +8,12 @@
 //! finds the pid itself — an `http_addr` lookup, a pid file — and this file
 //! turns that pid into a stop with `stop`'s safety rules: a pidfd pin, an
 //! identity and instance check before any signal, survivor detection.
-//! What: [`stop_pid_with`] pins the pid, requires it to be this instance, then
-//! signals and proves the stop as [`stop_with`] does. [`restart_pid_with`]
-//! does the same check, refuses on any other process of this instance before
-//! the stop, and then starts. A pid that no longer exists proves nothing, so
-//! both hand over to the socket path ([`stop_with`], [`restart_with`]).
-//! `refuse_restart_blockers` is the pre-stop check every restart shares.
+//! What: [`stop_pid_with`] pins the pid, requires it to be this instance and
+//! the socket to be unserved or served by it, then signals and proves the stop
+//! as [`stop_with`] does. [`restart_pid_with`] does the same checks, refuses on
+//! any other process of this instance before the stop, and then starts. A pid
+//! that no longer exists proves nothing, so both hand over to the socket path
+//! ([`stop_with`], [`restart_with`]).
 //! Test: the `stop_pid_*` and `restart_pid_*` tests in `tests/linux_lifecycle.rs`.
 //!
 //! [`stop`]: crate::linux_lifecycle::stop()
@@ -22,9 +22,9 @@
 //! [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
 //! [`restart_pid_with`]: crate::linux_lifecycle::restart_pid_with()
 
-use super::liveness::{effective_uid, process_matches, refuse_other_instances};
+use super::liveness::{Instance, effective_uid, process_instance, refuse_other_instances};
 use super::process::{Dial, PinnedProcess, dial};
-use super::start::{RestartOutcome, restart_with, start};
+use super::start::{RestartOutcome, installed_program, restart_with, start};
 use super::stop::{
     KernelDelivery, SignalDelivery, StopOutcome, identity_holds, stop_with, terminate,
 };
@@ -49,21 +49,31 @@ pub async fn stop_pid(desc: &DaemonDescriptor, pid: u32) -> Result<StopOutcome, 
 /// proven to be this daemon instance before it is signalled.
 /// What, in order:
 ///
-/// 1. Pin `pid` with a pidfd. No such process: the answer is [`stop_with`]'s,
+/// 1. Empty `liveness_args` is `InvalidDescriptor`: every process of the
+///    binary, a stdio bridge included, would pass the instance check.
+/// 2. Pin `pid` with a pidfd. No such process: the answer is [`stop_with`]'s,
 ///    the socket and then the `/proc` scan, so a stale pid never reads as
 ///    `NotRunning` while the daemon runs under another pid.
-/// 2. Require `/proc/<pid>/exe` to name `desc.binary` (`IdentityMismatch` or
+/// 3. Require `/proc/<pid>/exe` to name `desc.binary` (`IdentityMismatch` or
 ///    `IdentityUnreadable` otherwise). Then require the pid to be this
 ///    instance: this uid, every `liveness_args` element, no
 ///    `instance_path_args` flag naming another path, every `instance_env`
-///    value — `NotThisInstance` otherwise, and an unreadable `cmdline` or
-///    `environ` is an error. The pidfd is checked after the reads: a pid that
-///    exited mid-check goes to step 1's answer, and a reused pid is never read.
-/// 3. SIGTERM, SIGKILL after `stop_grace`, `Survivor` after `kill_wait`, then
+///    value — `NotThisInstance` otherwise. A path flag with no value, or a
+///    relative or unresolvable one, is `InstanceUndecided`, and an unreadable
+///    `cmdline` or `environ` is an error. The pidfd is checked after the
+///    reads: a pid that exited mid-check goes to step 2's answer, and a reused
+///    pid is never read.
+/// 4. Dial the socket. Served by another pid is `ServedByAnother`, since the
+///    stopped signal could not hold after the stop; an undecided dial is
+///    `ProbeInconclusive` or `NoPeerPid`.
+/// 5. SIGTERM, SIGKILL after `stop_grace`, `Survivor` after `kill_wait`, then
 ///    the stopped signal, as in [`stop_with`].
 ///
 /// Test: `stop_pid_stops_a_daemon_whose_socket_bind_failed`,
 /// `stop_pid_refuses_a_pid_that_is_not_this_instance`,
+/// `stop_pid_and_restart_pid_refuse_an_undecided_instance_before_any_signal`,
+/// `stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket`,
+/// `stop_pid_and_restart_pid_stop_short_when_the_socket_cannot_be_probed`,
 /// `stop_pid_of_a_pid_that_is_gone_answers_as_stop_does`,
 /// `stop_pid_reports_a_survivor_and_restart_pid_starts_nothing`.
 ///
@@ -73,12 +83,19 @@ pub async fn stop_pid_with(
     pid: u32,
     delivery: &dyn SignalDelivery,
 ) -> Result<StopOutcome, LifecycleError> {
-    desc.validate()?;
-    match identify(desc, pid)? {
-        Some(target) => terminate(desc, delivery, &target).await,
+    validate_by_pid(desc)?;
+    let Some(target) = identify(desc, pid)? else {
         // #11085: a stale pid proves nothing; the socket and the scan decide.
-        None => stop_with(desc, delivery).await,
+        return stop_with(desc, delivery).await;
+    };
+    if let Some(peer) = other_socket_peer(desc, pid).await? {
+        return Err(LifecycleError::ServedByAnother {
+            pid,
+            peer,
+            socket: desc.socket.clone(),
+        });
     }
+    terminate(desc, delivery, &target).await
 }
 
 /// Restart the daemon running as `pid`, delivering signals through the kernel.
@@ -98,12 +115,17 @@ pub async fn restart_pid(
 /// [`restart_pid`] with an explicit signal delivery (the test seam).
 ///
 /// Why: D1 — stop, prove it stopped, then start — for a daemon found by pid.
-/// What: the identity and instance check of [`stop_pid_with`]. When `pid` no
-/// longer exists, this is [`restart_with`]. Otherwise any other process of
-/// this instance is [`LifecycleError::RestartBlocked`] before any signal, then
-/// the stop, then [`start`]; every stop error returns before a spawn.
+/// What: steps 1-3 of [`stop_pid_with`], with `BinaryMissing` checked first.
+/// When `pid` no longer exists, this is [`restart_with`]. Otherwise, before
+/// any signal: a socket served by another pid is
+/// [`LifecycleError::RestartBlocked`] naming that peer, an undecided dial is
+/// `ProbeInconclusive` or `NoPeerPid`, and any other process of this instance
+/// is `RestartBlocked`. Then the stop, then [`start`]; every stop error
+/// returns before a spawn.
 /// Test: `restart_pid_restarts_a_daemon_whose_socket_bind_failed`,
 /// `restart_pid_refuses_before_any_signal_when_another_process_is_this_instance`,
+/// `stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket`,
+/// `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`,
 /// `stop_pid_reports_a_survivor_and_restart_pid_starts_nothing`.
 ///
 /// [`restart_pid`]: crate::linux_lifecycle::restart_pid()
@@ -116,21 +138,47 @@ pub async fn restart_pid_with(
     pid: u32,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
-    desc.validate()?;
+    validate_by_pid(desc)?;
+    // #11085: a missing binary found only at the start left the daemon down.
+    installed_program(desc)?;
     let Some(target) = identify(desc, pid)? else {
         return restart_with(desc, delivery).await;
     };
-    refuse_restart_blockers(desc, Some(target.pid())).await?;
+    // #11085: with another pid serving, the start after the stop would refuse.
+    if let Some(peer) = other_socket_peer(desc, pid).await? {
+        return Err(LifecycleError::RestartBlocked {
+            serving: vec![pid],
+            binary: desc.binary.clone(),
+            others: vec![peer],
+        });
+    }
+    refuse_other_instances(desc, &[pid])?;
     let stop = terminate(desc, delivery, &target).await?;
     let start = start(desc).await?;
     Ok(RestartOutcome { stop, start })
 }
 
+/// Step 1 of [`stop_pid_with`]: the descriptor, and `liveness_args` set.
+///
+/// [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
+fn validate_by_pid(desc: &DaemonDescriptor) -> Result<(), LifecycleError> {
+    desc.validate()?;
+    // #11085: with no liveness_args every process of the binary passes.
+    if desc.liveness_args.is_empty() {
+        return Err(LifecycleError::InvalidDescriptor {
+            reason: "stop and restart by pid need liveness_args: without them any process of \
+                     the binary, a stdio bridge included, passes the instance check"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// `pid`, pinned, once it is proven this instance; `None` when it is gone.
 ///
-/// What: step 2 of [`stop_pid_with`]. `Ok(None)` only when the pidfd shows
-/// the process exited (or it never existed); a live process that is not this
-/// instance is an error, never `None`.
+/// What: step 3 of [`stop_pid_with`]. `Ok(None)` only when the pidfd shows
+/// the process exited (or it never existed); a live process that is not
+/// proven this instance is an error, never `None`.
 ///
 /// [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
 fn identify(desc: &DaemonDescriptor, pid: u32) -> Result<Option<PinnedProcess>, LifecycleError> {
@@ -140,42 +188,46 @@ fn identify(desc: &DaemonDescriptor, pid: u32) -> Result<Option<PinnedProcess>, 
     if !identity_holds(desc, &target)? {
         return Ok(None);
     }
-    let instance = process_matches(pid, effective_uid(), desc)?;
+    let instance = process_instance(pid, effective_uid(), desc)?;
     // Alive after the reads means they saw the pinned process.
     if target.has_exited() {
         return Ok(None);
     }
-    if !instance {
-        return Err(LifecycleError::NotThisInstance {
+    match instance {
+        Instance::This => Ok(Some(target)),
+        Instance::Not => Err(LifecycleError::NotThisInstance {
             pid,
             binary: desc.binary.clone(),
-        });
+        }),
+        // #11085: the scan counts undecided as a match; a signal needs proof.
+        Instance::Undecided(flag) => Err(LifecycleError::InstanceUndecided {
+            pid,
+            binary: desc.binary.clone(),
+            flag: flag.to_string(),
+        }),
     }
-    Ok(Some(target))
 }
 
-/// Fail a restart before its stop when another process is this instance.
+/// The socket's peer when it is a pid other than `pid`; `None` when the
+/// socket is not served or `pid` serves it.
 ///
-/// Why: #11085 — the start after the stop refuses on such a process, which
-/// left a previously healthy daemon down.
-/// What: the running daemon's pids are `known` (a pid already proven this
-/// instance) and the socket's peer, when it serves. With neither, nothing
-/// runs healthy and the stop's own checks decide. Otherwise the scan, with
-/// those pids left out, must find nothing.
-/// Test: `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
-pub(crate) async fn refuse_restart_blockers(
+/// What: an undecided dial is [`LifecycleError::ProbeInconclusive`] or
+/// [`LifecycleError::NoPeerPid`].
+///
+/// [`LifecycleError::ProbeInconclusive`]: crate::linux_lifecycle::LifecycleError::ProbeInconclusive
+/// [`LifecycleError::NoPeerPid`]: crate::linux_lifecycle::LifecycleError::NoPeerPid
+async fn other_socket_peer(
     desc: &DaemonDescriptor,
-    known: Option<u32>,
-) -> Result<(), LifecycleError> {
-    let mut serving: Vec<u32> = known.into_iter().collect();
-    if let Dial::Peer(Some(peer)) = dial(&desc.socket).await
-        && !serving.contains(&peer)
-    {
-        serving.push(peer);
+    pid: u32,
+) -> Result<Option<u32>, LifecycleError> {
+    match dial(&desc.socket).await {
+        Dial::NotServing => Ok(None),
+        Dial::Peer(Some(peer)) => Ok((peer != pid).then_some(peer)),
+        Dial::Peer(None) => Err(LifecycleError::NoPeerPid {
+            socket: desc.socket.clone(),
+        }),
+        Dial::Inconclusive => Err(LifecycleError::ProbeInconclusive {
+            socket: desc.socket.clone(),
+        }),
     }
-    if serving.is_empty() {
-        return Ok(());
-    }
-    serving.sort_unstable();
-    refuse_other_instances(desc, &serving)
 }

@@ -10,14 +10,13 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::liveness::refuse_unserved_daemon;
-use super::pid::refuse_restart_blockers;
+use super::liveness::{refuse_other_instances, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial};
 use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with};
 use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL};
@@ -76,10 +75,7 @@ pub struct RestartOutcome {
 /// `start_and_restart_start_a_stopped_instance_while_a_sibling_runs`.
 pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleError> {
     desc.validate()?;
-    let program = desc.program();
-    if !program.is_file() {
-        return Err(LifecycleError::BinaryMissing { path: program });
-    }
+    let program = installed_program(desc)?;
     match dial(&desc.socket).await {
         Dial::NotServing => {}
         Dial::Peer(pid) => {
@@ -140,6 +136,22 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// `<install_dir>/<binary>`, or [`LifecycleError::BinaryMissing`] when it is
+/// not a file.
+///
+/// Why: #11085 — a restart that found it missing only at its start had
+/// already stopped a healthy daemon (mid-upgrade), and started nothing.
+/// Test: `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
+///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
+pub(crate) fn installed_program(desc: &DaemonDescriptor) -> Result<PathBuf, LifecycleError> {
+    let program = desc.program();
+    if !program.is_file() {
+        return Err(LifecycleError::BinaryMissing { path: program });
+    }
+    Ok(program)
 }
 
 /// Spawn `program` detached, in `desc.working_dir`, with `daemon_env` only.
@@ -253,13 +265,16 @@ pub async fn restart(desc: &DaemonDescriptor) -> Result<RestartOutcome, Lifecycl
 
 /// [`restart`] with an explicit signal delivery (the test seam).
 ///
-/// What: while the socket serves, another process that is this instance is
-/// [`LifecycleError::RestartBlocked`] before any signal (#11085). Then
+/// What: before any signal (#11085), a missing install binary is
+/// [`LifecycleError::BinaryMissing`], and, while the socket serves, another
+/// process that is this instance is [`LifecycleError::RestartBlocked`]. Then
 /// `NotRunning` from stop proceeds to start (P-b); every stop error is
 /// returned as is, before any spawn.
 /// Test: `restart_does_not_start_when_stop_reports_a_survivor`,
-/// `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
+/// `restart_refuses_before_any_signal_when_another_process_is_this_instance`,
+/// `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
 ///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
 /// [`LifecycleError::RestartBlocked`]: crate::linux_lifecycle::LifecycleError::RestartBlocked
 pub async fn restart_with(
     desc: &DaemonDescriptor,
@@ -267,8 +282,24 @@ pub async fn restart_with(
 ) -> Result<RestartOutcome, LifecycleError> {
     desc.validate()?;
     // #11085: never stop a healthy daemon that the start would then refuse on.
-    refuse_restart_blockers(desc, None).await?;
+    installed_program(desc)?;
+    refuse_restart_blockers(desc).await?;
     let stop = stop_with(desc, delivery).await?;
     let start = start(desc).await?;
     Ok(RestartOutcome { stop, start })
+}
+
+/// Fail a restart before its stop when another process is this instance.
+///
+/// Why: #11085 — the start after the stop refuses on such a process, which
+/// left a previously healthy daemon down.
+/// What: when the socket's peer serves, the scan with that pid left out must
+/// find nothing. When nothing serves, or the dial does not decide, the stop's
+/// own checks answer.
+/// Test: `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
+async fn refuse_restart_blockers(desc: &DaemonDescriptor) -> Result<(), LifecycleError> {
+    match dial(&desc.socket).await {
+        Dial::Peer(Some(peer)) => refuse_other_instances(desc, &[peer]),
+        _ => Ok(()),
+    }
 }

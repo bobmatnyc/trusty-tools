@@ -352,17 +352,20 @@ impl Dirs {
 // read as the default instance.
 #[test]
 fn path_flag_marks_a_sibling_only_when_every_value_names_another_path() {
+    use instance::PathVerdict::{Other, Same, Undecided};
     let d = Dirs::new();
     let want = d.wanted();
-    let sibling = |argv: &[&str]| instance::names_other_instance(&cmdline(argv), &want);
+    let verdict = |argv: &[&str]| instance::path_verdict(&cmdline(argv), &want);
     let other_eq = format!("--data-dir={}", d.other);
-    assert!(
-        sibling(&["start", "--data-dir", &d.other]),
+    assert_eq!(
+        verdict(&["start", "--data-dir", &d.other]),
+        Other,
         "`<flag> <value>`"
     );
-    assert!(sibling(&["start", &other_eq]), "`<flag>=<value>`");
-    assert!(
-        sibling(&["--data-dir", &d.other, "--data-dir", &d.other]),
+    assert_eq!(verdict(&["start", &other_eq]), Other, "`<flag>=<value>`");
+    assert_eq!(
+        verdict(&["--data-dir", &d.other, "--data-dir", &d.other]),
+        Other,
         "every value names another path"
     );
     // This instance, by text, by components and through a symlink.
@@ -372,37 +375,61 @@ fn path_flag_marks_a_sibling_only_when_every_value_names_another_path() {
     std::os::unix::fs::symlink(&d.own, &alias).expect("symlink");
     let alias = alias.to_str().expect("utf-8").to_string();
     for own in [d.own.as_str(), &own_slash, &alias] {
-        assert!(!sibling(&["start", "--data-dir", own]), "{own} is this one");
+        assert_eq!(verdict(&["start", "--data-dir", own]), Same, "{own}");
     }
-    assert!(!sibling(&["start", &own_eq]));
-    // One value that may name this instance is enough.
-    assert!(!sibling(&["--data-dir", &d.other, "--data-dir", &d.own]));
+    assert_eq!(verdict(&["start", &own_eq]), Same);
+    // One value naming this instance beside one naming another decides nothing.
+    assert_eq!(
+        verdict(&["--data-dir", &d.other, "--data-dir", &d.own]),
+        Undecided("--data-dir")
+    );
     // No flag, a longer flag, or the flag after `--` constrains nothing.
-    assert!(!sibling(&["start", "--foreground"]));
+    assert_eq!(verdict(&["start", "--foreground"]), Same);
     let longer = format!("--data-dir-x={}", d.other);
-    assert!(!sibling(&["--data-dir-x", &d.other, &longer]));
-    assert!(!sibling(&["start", "--", "--data-dir", &d.other]));
+    assert_eq!(verdict(&["--data-dir-x", &d.other, &longer]), Same);
+    assert_eq!(verdict(&["start", "--", "--data-dir", &d.other]), Same);
     // A descriptor that does not opt in sees no sibling.
     let argv = cmdline(&["start", "--data-dir", &d.other]);
-    assert!(!instance::names_other_instance(&argv, &[]));
+    assert_eq!(instance::path_verdict(&argv, &[]), Same);
     // An existing directory is not one that does not exist.
     let missing_own = vec![("--data-dir".to_string(), d.root.join("missing"))];
-    assert!(instance::names_other_instance(&argv, &missing_own));
+    assert_eq!(instance::path_verdict(&argv, &missing_own), Other);
 }
 
-// #11085: fail closed — a value the matcher cannot rule out is this instance,
-// so the scan refuses instead of reading a live daemon as absent.
+// #11085: a value the matcher cannot rule out is undecided — the scan counts
+// it as this instance and refuses; a stop by pid refuses to signal it.
 #[test]
-fn path_flag_counts_every_undecidable_value_as_this_instance() {
+fn path_flag_counts_every_undecidable_value_as_undecided() {
+    use instance::PathVerdict::{Other, Undecided};
     let d = Dirs::new();
     let want = d.wanted();
-    let sibling = |argv: &[&str]| instance::names_other_instance(&cmdline(argv), &want);
-    assert!(!sibling(&["start", "--data-dir"]), "a flag with no value");
+    let verdict = |argv: &[&str]| instance::path_verdict(&cmdline(argv), &want);
+    let undecided = Undecided("--data-dir");
+    assert_eq!(
+        verdict(&["start", "--data-dir"]),
+        undecided,
+        "a flag with no value"
+    );
     // Both resolve from this process's cwd, which is not the daemon's.
-    assert!(!sibling(&["--data-dir", "."]), "a relative value");
-    assert!(!sibling(&["--data-dir=.."]), "a relative `=` value");
+    assert_eq!(verdict(&["--data-dir", "."]), undecided, "a relative value");
+    assert_eq!(
+        verdict(&["--data-dir=.."]),
+        undecided,
+        "a relative `=` value"
+    );
     let missing = d.root.join("missing").to_str().expect("utf-8").to_string();
-    assert!(!sibling(&["--data-dir", &missing]), "an unresolvable value");
+    assert_eq!(
+        verdict(&["--data-dir", &missing]),
+        undecided,
+        "an unresolvable value"
+    );
+    // Any flag naming another path wins over an undecided one.
+    let two = vec![
+        ("--data-dir".to_string(), PathBuf::from(&d.own)),
+        ("-d".to_string(), PathBuf::from(&d.own)),
+    ];
+    let argv = cmdline(&["--data-dir", ".", "-d", &d.other]);
+    assert_eq!(instance::path_verdict(&argv, &two), Other);
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
         return; // root resolves through a mode-000 directory
@@ -412,12 +439,15 @@ fn path_flag_counts_every_undecidable_value_as_this_instance() {
     let inner = locked.join("inner");
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-    let behind_lock = instance::may_name(inner.as_os_str().as_encoded_bytes(), Path::new(&d.own));
-    let wanted_locked = instance::may_name(d.other.as_bytes(), &inner);
+    let behind_lock = instance::names_path(inner.as_os_str().as_encoded_bytes(), Path::new(&d.own));
+    let wanted_locked = instance::names_path(d.other.as_bytes(), &inner);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    assert!(behind_lock, "a value that cannot be resolved (EACCES)");
-    assert!(
-        wanted_locked,
+    assert_eq!(
+        behind_lock, None,
+        "a value that cannot be resolved (EACCES)"
+    );
+    assert_eq!(
+        wanted_locked, None,
         "an instance path that cannot be resolved (EACCES)"
     );
 }
