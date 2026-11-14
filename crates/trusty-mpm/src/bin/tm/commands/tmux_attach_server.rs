@@ -44,13 +44,13 @@ pub(crate) fn target_socket(name: &str) -> anyhow::Result<PathBuf> {
 
 /// The socket directory [`target_socket`] looks in: tmux's ambient one, or,
 /// in a test build only, the directory of an enclosing
-/// [`with_holder_socket_dir`] scope.
+/// `with_holder_socket_dir` scope.
 ///
 /// Why: the holder lookup's in-flight probe key for the default server is
 /// `<socket dir>/default`. With one ambient directory per test process, every
 /// test that resolves a holder shares that key, and a concurrent probe makes
 /// the lookup refuse (#11223).
-/// What: a release build always returns `ambient_socket_dir()`.
+/// What: a non-test build always returns `ambient_socket_dir()`.
 /// Test: `a_scoped_holder_lookup_ignores_a_probe_held_on_another_scope_11223`.
 fn holder_socket_dir() -> PathBuf {
     scoped_socket_dir().unwrap_or_else(trusty_mpm::core::tmux_server::ambient_socket_dir)
@@ -62,7 +62,7 @@ fn scoped_socket_dir() -> Option<PathBuf> {
     HOLDER_SOCKET_DIR.try_with(Clone::clone).ok()
 }
 
-/// #11223: a release build has no scope to read.
+/// #11223: a non-test build has no scope to read.
 #[cfg(not(test))]
 fn scoped_socket_dir() -> Option<PathBuf> {
     None
