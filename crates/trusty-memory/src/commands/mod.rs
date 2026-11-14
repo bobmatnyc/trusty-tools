@@ -31,6 +31,9 @@ pub mod kuzu_import;
 pub mod kuzu_migrate;
 pub mod legacy_kg;
 pub mod link;
+// #11085: Linux start/stop/restart on trusty_common::linux_lifecycle.
+#[cfg(target_os = "linux")]
+pub mod linux_lifecycle;
 pub(crate) mod maintenance_gate;
 pub mod migrate;
 pub mod migrations;

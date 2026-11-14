@@ -38,12 +38,11 @@ use trusty_memory::commands::palace::PalaceAction;
 use trusty_memory::commands::prompt_context::run_prompt_context_and_exit;
 use trusty_memory::commands::send_message::handle_send_message;
 use trusty_memory::commands::service::{ServiceAction, handle_service};
+use trusty_memory::commands::setup::{handle_setup, handle_setup_gui_client};
 use trusty_memory::commands::upgrade::handle_upgrade;
-use trusty_memory::commands::{
-    setup::{handle_setup, handle_setup_gui_client},
-    start::handle_start,
-    stop::handle_stop,
-};
+// #11085: Linux dispatches `start` / `stop` to `commands::linux_lifecycle`.
+#[cfg(not(target_os = "linux"))]
+use trusty_memory::commands::{start::handle_start, stop::handle_stop};
 use trusty_memory::{resolve_palace_registry_dir, serve};
 
 /// Top-level CLI for `trusty-memory`.
@@ -85,6 +84,12 @@ enum Command {
     /// Why: with `start` now self-spawning a detached daemon, operators need a
     /// way to take it down that does not depend on launchd / systemd.
     Stop,
+
+    /// Restart the daemon: stop it, confirm it stopped, then start the
+    /// installed binary (Linux; #11085). A daemon that is not running is
+    /// started.
+    #[cfg(target_os = "linux")]
+    Restart,
 
     /// Run the server.  Mode matrix (#5267; supersedes #914 PR4):
     ///   serve                  → MCP stdio (same as `--stdio`)
@@ -734,7 +739,16 @@ async fn run() -> Result<()> {
     }
 
     match cli.command {
+        // #11085: Linux runs the verbs on trusty_common::linux_lifecycle.
+        #[cfg(target_os = "linux")]
+        Command::Start => trusty_memory::commands::linux_lifecycle::start().await,
+        #[cfg(target_os = "linux")]
+        Command::Stop => trusty_memory::commands::linux_lifecycle::stop().await,
+        #[cfg(target_os = "linux")]
+        Command::Restart => trusty_memory::commands::linux_lifecycle::restart().await,
+        #[cfg(not(target_os = "linux"))]
         Command::Start => handle_start().await,
+        #[cfg(not(target_os = "linux"))]
         Command::Stop => handle_stop().await,
         Command::Serve {
             http,
