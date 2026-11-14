@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 
 use super::super::worktree_git_fixture::{
-    GitWorktreeFixture, StandingProcess, deny_all, probe_cannot_answer,
+    GitWorktreeFixture, StandingProcess, deny_writes, probe_cannot_answer,
 };
 use super::*;
 use crate::core::presence_local::{Authenticator, PresenceOutcome};
@@ -654,12 +654,14 @@ fn a_partial_delete_says_so_and_names_the_record() {
         "stopped",
     )];
     // Lock the subdirectory after the plan, so `remove_dir_all` fails part-way.
+    // #11221: read-only, not `chmod 000` — git must still read it, or the
+    // re-run dirt check refuses before the removal starts.
     let mut restore = None;
     let err = run_dir_delete(
         input(&sessions, &fx.repos_root, &[]),
         DirDeleteOptions::default(),
         &mut |_| {
-            restore = Some(deny_all(&locked));
+            restore = Some(deny_writes(&locked));
             Confirmation::Yes
         },
         &FakeAuth::granted(),
@@ -712,11 +714,6 @@ fn unexcused(dir: &Path) -> Vec<String> {
     entries
 }
 
-/// The one entry a real spawn leaves that no excuse reaches: info/exclude
-/// lists `/.trusty-mpm/` (#8758), so the `.trusty-mpm/` dirt pass reads one
-/// `!! .trusty-mpm/` line under every excuse, `decommission --force` too.
-const TRUSTY_MPM_ENTRY: usize = 1;
-
 #[test]
 fn a_spawn_provisioned_dir_is_excused_every_provisioning_file() {
     let fx = GitWorktreeFixture::new();
@@ -734,14 +731,11 @@ fn a_spawn_provisioned_dir_is_excused_every_provisioning_file() {
         Some(SessionKind::Ordinary),
         "stopped",
     )];
-    // The delete counts only what decommission --force counts.
-    let err = plan(&sessions, &fx.repos_root).expect_err("the .trusty-mpm entry counts");
-    let want = format!("{TRUSTY_MPM_ENTRY} uncommitted/untracked file(s)");
-    assert!(
-        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
-        "{err}"
-    );
-    assert!(fx.repo.exists());
+    // The delete counts only what decommission --force counts; since #11221
+    // the ledger-vouched `.trusty-mpm/` files count as nothing.
+    let planned = plan(&sessions, &fx.repos_root).expect("only provisioning files: plannable");
+    assert_eq!(planned.session_id, "s1");
+    assert!(fx.repo.exists(), "planning removed nothing");
 }
 
 #[test]
@@ -756,10 +750,11 @@ fn an_untracked_non_provisioning_file_still_refuses() {
         "stopped",
     )];
     let err = plan(&sessions, &fx.repos_root).expect_err("a user file is dirt");
-    // `notes.txt` counts; every provisioning file is excused.
-    let want = format!("{} uncommitted/untracked file(s)", TRUSTY_MPM_ENTRY + 1);
+    // `notes.txt` counts; every provisioning file is excused (#11221: the
+    // `.trusty-mpm/` files too), so it is the one file counted.
+    let want = "1 uncommitted/untracked file(s)";
     assert!(
-        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(&want)),
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.starts_with(want)),
         "{err}"
     );
     assert_eq!(unexcused(&fx.repo), vec!["?? notes.txt".to_string()]);
