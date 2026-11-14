@@ -21,11 +21,16 @@
 use super::is_redirect_shaped;
 use crate::commands::pm_guard_bash::{segment_substitution_spans, split_shell_segments, tokenize};
 use crate::commands::pm_guard_secret_read::command_basename;
+use plain::{flags_only, one_plain_command};
 use rebound::{Rebinds, rebound_call_deletes};
 
 // #10566: the names a command rebinds, split out for the 500-SLOC cap.
 #[path = "pm_guard_secret_rebound.rs"]
 mod rebound;
+
+// #10548: the plain-command reading, split out for the 500-SLOC cap.
+#[path = "pm_guard_secret_plain_command.rs"]
+mod plain;
 
 /// `gh api` switches: they take no value (pflag also accepts `--name=bool`).
 const GH_API_SWITCHES: &[&str] = &[
@@ -279,89 +284,6 @@ fn gh_calls<'a>(
         .filter(move |(at, _)| !(plain && *at > 0 && flags_only(&argv[at + 2..])))
         .filter(move |(_, w)| possibly_named(&w[0], "gh") && possibly_sub(&w[1], sub))
         .map(move |(at, w)| (w[1].as_str(), &argv[at + 2..]))
-}
-
-/// Programs that never execute an operand as a command (#10548).
-const NEVER_RUNS_OPERANDS: &[&str] = &["cargo", "rsync", "cp", "mv", "ln", "mkdir", "touch"];
-
-/// Bytes that end a segment, open a subshell, group or substitution,
-/// assign, escape, redirect or comment (#10548).
-const NOT_ONE_PLAIN_COMMAND: &[char] = &[
-    ';', '&', '|', '\n', '\r', '(', ')', '`', '{', '}', '=', '\\', '#', '<', '>',
-];
-
-/// Words that define, assign, source, re-path or re-run a program (#10548).
-const REDEFINERS: &[&str] = &[
-    "alias",
-    "function",
-    "hash",
-    "PATH",
-    "source",
-    "eval",
-    "enable",
-    "exec",
-    "builtin",
-    "command",
-    "BASH_FUNC",
-    "BASH_ENV",
-    "ENV",
-    "cd",
-    "pushd",
-    "popd",
-    "export",
-    "declare",
-    "typeset",
-    "readonly",
-    "read",
-    "printf",
-    "local",
-    "let",
-    "set",
-    "unset",
-    "shopt",
-    "trap",
-    "BASH_CMDS",
-    "commands",
-    "BASH_ALIASES",
-    "aliases",
-];
-
-/// Whether `command` is one plain command whose program is a literal
-/// [`NEVER_RUNS_OPERANDS`] word.
-///
-/// Why: #10548 P7 — `cargo test -p "$c" "$t" --no-fail-fast` read `"$c" "$t"`
-/// as a rewritten `gh api` call and refused it as a secret DELETE.
-/// What: read on the raw text, with no lexer: the command starts with the
-/// program word and a space, carries none of [`NOT_ONE_PLAIN_COMMAND`], and
-/// no identifier in it is one of [`REDEFINERS`]. So no other segment, no
-/// assignment (`NAME=`, `BASH_CMDS[cp]=`, `PA''TH=`) and no redefinition can
-/// make the program run its operands. Anything else judges every pair.
-/// Test: `a_single_segment_operand_pair_is_no_gh_api_call_10548`,
-/// `every_review_bypass_row_refuses_10548`.
-fn one_plain_command(command: &str) -> bool {
-    let text = command.trim();
-    let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    !text.contains(NOT_ONE_PLAIN_COMMAND)
-        && !text
-            .split(|c: char| !identifier(c))
-            .any(|word| REDEFINERS.contains(&word))
-        && NEVER_RUNS_OPERANDS.iter().any(|p| {
-            text.strip_prefix(p)
-                .is_some_and(|rest| rest.starts_with(' '))
-        })
-}
-
-/// Whether every word of `tail` is a plain long flag (`--no-fail-fast`), so
-/// the tail names no endpoint, method, subcommand or value (#10548).
-fn flags_only(tail: &[String]) -> bool {
-    tail.iter().all(|w| {
-        w.len() > 2
-            && w != "--method"
-            && w.strip_prefix("--").is_some_and(|name| {
-                name.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            })
-    })
 }
 
 /// Whether a program word could run `name`: by basename, or a word the shell
