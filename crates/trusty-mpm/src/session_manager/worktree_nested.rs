@@ -464,7 +464,7 @@ fn is_bare_repository(root: &Path) -> Result<bool, String> {
 /// That breadth is the point — a self-contained clone loses all of them.
 /// What: `rev-list --count --all --not --remotes`.
 /// Test: `inspect_dirt_reports_self_contained_clone_with_work_on_another_branch`.
-fn count_local_only_commits(root: &Path) -> Result<usize, String> {
+pub(crate) fn count_local_only_commits(root: &Path) -> Result<usize, String> {
     let raw = git_stdout(
         root,
         &["rev-list", "--count", "--all", "--not", "--remotes"],
@@ -484,7 +484,7 @@ fn count_local_only_commits(root: &Path) -> Result<usize, String> {
 /// is absent — so "no stash" is distinguishable from "git failed", which stays
 /// an `Err`. Only then is the reflog walked for a count.
 /// Test: `inspect_dirt_reports_self_contained_clone_holding_only_a_stash`.
-fn count_stash_entries(root: &Path) -> Result<usize, String> {
+pub(crate) fn count_stash_entries(root: &Path) -> Result<usize, String> {
     let listed = git_stdout(root, &["for-each-ref", "--format=%(refname)", "refs/stash"])?;
     if listed.trim().is_empty() {
         return Ok(0);

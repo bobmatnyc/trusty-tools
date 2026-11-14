@@ -379,7 +379,7 @@ fn cli_parses_session_delete() {
     let cli = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
     match cli.command.unwrap() {
         Command::Session {
-            action: SessionAction::Delete { id, force },
+            action: SessionAction::Delete { id, force, .. },
         } => {
             assert_eq!(id, "abc");
             assert!(!force, "default must be the fail-closed force=false");
@@ -390,7 +390,7 @@ fn cli_parses_session_delete() {
     let cli2 = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc", "--force"]).unwrap();
     match cli2.command.unwrap() {
         Command::Session {
-            action: SessionAction::Delete { id, force },
+            action: SessionAction::Delete { id, force, .. },
         } => {
             assert_eq!(id, "abc");
             assert!(force, "--force must set force=true");

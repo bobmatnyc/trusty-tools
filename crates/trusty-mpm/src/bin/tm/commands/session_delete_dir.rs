@@ -1,0 +1,241 @@
+//! `tm session delete <id> --project-dir [--dry-run] [--yes]` (#10992).
+//!
+//! Why: owner ruling D8b — "delete = dry run + typed confirm + Touch ID". The
+//! presence prompt can only reach the user from their own terminal, the way
+//! `tm presence local` and `tm fleet bind` prompt today, so the delete runs in
+//! this process; the daemon supplies the session list, and no HTTP route can
+//! remove a directory.
+//! What: [`run`] reads the session and the list from the daemon, the managed
+//! workspace root and every Architect directory (`protected_architect_dirs`;
+//! a config that exists but cannot be read refuses the delete), and
+//! hands them to `project_dir_delete::run_dir_delete` on a blocking thread,
+//! with [`DaemonSessions`] to read the list again after the prompt (#11238).
+//! Every run shows the plan first; a real run then reads the typed directory
+//! name (unless `--yes`) and asks `LocalAuthenticator` for presence. After the
+//! directory is gone the record is marked deleted through the existing
+//! `tm session delete` path.
+//! Test: the guards in `session_manager/project_dir_delete_tests.rs`; the
+//! flags by `cli_parses_session_delete_project_dir`; the view by
+//! `render_names_the_directory_and_root` below.
+
+use std::io::{BufRead as _, Write as _};
+
+use anyhow::Context as _;
+use trusty_mpm::client::DaemonClient;
+use trusty_mpm::core::architect_store::protected_architect_dirs;
+use trusty_mpm::core::presence_local::LocalAuthenticator;
+use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
+use trusty_mpm::session_manager::project_dir_delete::{
+    Confirmation, DirDeleteInput, DirDeleteOptions, DirDeletePlan, DirSession, OsProbes,
+    SessionSource, run_dir_delete,
+};
+
+/// The daemon's session list, as `run` reads it (#11238).
+async fn list_sessions(daemon: &DaemonClient) -> anyhow::Result<Vec<DirSession>> {
+    Ok(daemon
+        .list_managed_sessions()
+        .await
+        .context("listing sessions")?
+        .iter()
+        .map(DirSession::from_summary)
+        .collect())
+}
+
+/// The post-prompt re-read: [`list_sessions`] from the blocking thread.
+///
+/// Why: the session guards must see sessions spawned while the prompt was
+/// open (#11238). What: blocks on the runtime `run` was called on; any
+/// daemon, HTTP or parse error becomes `Err`, which refuses the delete.
+/// Test: `a_failed_session_reread_refuses_the_delete` (the library side).
+struct DaemonSessions {
+    daemon: DaemonClient,
+    handle: tokio::runtime::Handle,
+}
+
+impl SessionSource for DaemonSessions {
+    fn sessions(&self) -> Result<Vec<DirSession>, String> {
+        self.handle
+            .block_on(list_sessions(&self.daemon))
+            .map_err(|e| format!("{e:#}"))
+    }
+}
+
+/// Run `tm session delete <id> --project-dir`.
+pub(crate) async fn run(
+    daemon: &DaemonClient,
+    id: String,
+    dry_run: bool,
+    yes: bool,
+) -> anyhow::Result<()> {
+    let target = daemon
+        .get_managed_session(&id)
+        .await
+        .with_context(|| format!("session {id}"))?;
+    let mut sessions = list_sessions(daemon).await?;
+    if !sessions.iter().any(|s| s.id == target.id) {
+        sessions.push(DirSession::from_summary(&target));
+    }
+    let root = workspace_root(&TrustyToolsConfig::load());
+    // #10992 critic HIGH: strict config read plus `ARCHITECT_PROJECT_DIR`;
+    // a guard that cannot get its input refuses.
+    let env = |name: &str| std::env::var(name).ok();
+    let architect_dirs = protected_architect_dirs(&env, dirs::home_dir().as_deref())
+        .map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))?;
+    let session_id = target.id.clone();
+    let recheck = DaemonSessions {
+        daemon: daemon.clone(),
+        handle: tokio::runtime::Handle::current(),
+    };
+    let report = tokio::task::spawn_blocking(move || {
+        let input = DirDeleteInput {
+            session_id: &session_id,
+            sessions: &sessions,
+            root: &root,
+            architect_dirs: &architect_dirs,
+            recheck: &recheck,
+        };
+        delete_blocking(input, dry_run, yes)
+    })
+    .await
+    .context("delete task")??;
+    if report.dry_run {
+        for line in render(&report.plan, true) {
+            println!("{line}");
+        }
+        println!("dry run: nothing was deleted");
+        return Ok(());
+    }
+    println!("deleted {}", report.plan.dir.display());
+    // #10992: the directory is gone; mark the record as `tm session delete` does.
+    crate::commands::delete::session_delete(daemon, target.id.clone(), false)
+        .await
+        .with_context(|| {
+            format!(
+                "{} was deleted, but session {} was not marked deleted",
+                report.plan.dir.display(),
+                target.id
+            )
+        })
+}
+
+/// The blocking body: guards, prompt, presence, removal.
+fn delete_blocking(
+    input: DirDeleteInput<'_>,
+    dry_run: bool,
+    yes: bool,
+) -> anyhow::Result<trusty_mpm::session_manager::project_dir_delete::DirDeleteReport> {
+    let mut confirm = |plan: &DirDeletePlan| {
+        for line in render(plan, false) {
+            println!("{line}");
+        }
+        if yes {
+            return Confirmation::Yes;
+        }
+        print!(
+            "Type the directory name '{}' to delete it: ",
+            plan.confirm_name
+        );
+        let _ = std::io::stdout().flush();
+        let mut typed = String::new();
+        // #10992: an unreadable stdin types nothing, which never matches.
+        let _ = std::io::stdin().lock().read_line(&mut typed);
+        Confirmation::Typed(typed)
+    };
+    Ok(run_dir_delete(
+        input,
+        DirDeleteOptions { dry_run },
+        &mut confirm,
+        &LocalAuthenticator,
+        &OsProbes,
+    )?)
+}
+
+/// The plan, as the dry run and the real run both show it.
+fn render(plan: &DirDeletePlan, dry_run: bool) -> Vec<String> {
+    let verb = if dry_run {
+        "would delete"
+    } else {
+        "will delete"
+    };
+    vec![
+        format!("{verb} {}", plan.dir.display()),
+        format!("  session {}", plan.session_id),
+        format!("  inside  {}", plan.root.display()),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::{Cli, Command, SessionAction};
+    use clap::Parser as _;
+
+    #[test]
+    fn cli_parses_session_delete_project_dir() {
+        // #10992: `--project-dir` opts in; `--dry-run`/`--yes` need it; `--force`
+        // (the record-only running bypass) cannot be combined with it.
+        let cli = Cli::try_parse_from([
+            "trusty-mpm",
+            "session",
+            "delete",
+            "abc",
+            "--project-dir",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Session {
+                action:
+                    SessionAction::Delete {
+                        project_dir,
+                        dry_run,
+                        yes,
+                        force,
+                        ..
+                    },
+            } => {
+                assert!(project_dir && dry_run && !yes && !force);
+            }
+            other => panic!("expected session delete, got {other:?}"),
+        }
+        let plain = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
+        match plain.command.unwrap() {
+            Command::Session {
+                action: SessionAction::Delete { project_dir, .. },
+            } => assert!(!project_dir, "the directory is never removed by default"),
+            other => panic!("expected session delete, got {other:?}"),
+        }
+        for args in [
+            &["trusty-mpm", "session", "delete", "abc", "--dry-run"][..],
+            &["trusty-mpm", "session", "delete", "abc", "--yes"][..],
+            &[
+                "trusty-mpm",
+                "session",
+                "delete",
+                "abc",
+                "--project-dir",
+                "--force",
+            ][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "{args:?} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn render_names_the_directory_and_root() {
+        let plan = DirDeletePlan {
+            session_id: "s1".into(),
+            dir: "/w/acme/widget".into(),
+            root: "/w".into(),
+            confirm_name: "widget".into(),
+            task: None,
+        };
+        let lines = render(&plan, true);
+        assert_eq!(lines[0], "would delete /w/acme/widget");
+        assert!(lines.iter().any(|l| l.contains("session s1")));
+        assert_eq!(render(&plan, false)[0], "will delete /w/acme/widget");
+    }
+}

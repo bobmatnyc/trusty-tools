@@ -358,21 +358,36 @@ pub(crate) enum SessionAction {
     /// Hard-delete a managed session RECORD from the store (#2012).
     ///
     /// Why: distinct from `decommission` (stop runtime + maybe remove
-    /// workspace + tombstone) — this permanently drops the record itself via
-    /// the existing tombstone-compaction primitive, for a mis-provisioned or
-    /// stale record an operator wants gone outright rather than left as a
-    /// `Decommissioned` tombstone forever. Fail-closed: refuses a RUNNING
-    /// session unless `--force` is passed.
-    /// What: POSTs `/api/v1/sessions/managed/{id}/delete?force=<bool>`. NEVER
-    /// removes the workspace directory from disk — deleting the record is a
-    /// store-only operation (use `decommission` first to also reclaim disk).
-    /// Test: `cli_parses_session_delete`.
+    /// workspace + tombstone) — this marks the record deleted, for a
+    /// mis-provisioned or stale record an operator wants gone. Fail-closed:
+    /// refuses a RUNNING session unless `--force` is passed.
+    /// What: without `--project-dir`, POSTs
+    /// `/api/v1/sessions/managed/{id}/delete?force=<bool>` and NEVER removes
+    /// the session's directory from disk. With `--project-dir` (#10992), it
+    /// first removes the session's project directory: only strictly inside
+    /// the managed workspace root, only when no dirty or unpushed work, no
+    /// running session, no live process and no Architect is in it, and only
+    /// after the typed directory name (or `--yes`) and Touch ID (or the login
+    /// password). It then marks the record deleted. `--dry-run` shows what
+    /// would be removed and removes nothing.
+    /// Test: `cli_parses_session_delete`,
+    /// `cli_parses_session_delete_project_dir`.
     Delete {
         /// Managed session id.
         id: String,
         /// Bypass the running-session guard and delete the record anyway.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "project_dir")]
         force: bool,
+        /// Also remove the session's project directory (#10992).
+        #[arg(long)]
+        project_dir: bool,
+        /// With --project-dir: show what would be removed; change nothing.
+        #[arg(long, requires = "project_dir")]
+        dry_run: bool,
+        /// With --project-dir: skip typing the directory name. Touch ID is
+        /// still required.
+        #[arg(long, requires = "project_dir")]
+        yes: bool,
     },
     /// Move a session's project directory to ~/.trusty-tools/archive (#10991).
     ///

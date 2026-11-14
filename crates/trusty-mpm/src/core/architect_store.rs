@@ -170,18 +170,7 @@ pub fn resolve_store_root(
 /// the default directory.
 fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashError> {
     let config_path = user_config_path(home);
-    let config = match std::fs::read_to_string(&config_path) {
-        Ok(raw) => toml::from_str::<MpmConfig>(&raw).map_err(|e| {
-            unavailable(format_args!("{} is malformed: {e}", config_path.display()))
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => MpmConfig::default(),
-        Err(e) => {
-            return Err(unavailable(format_args!(
-                "cannot read {}: {e}",
-                config_path.display()
-            )));
-        }
-    };
+    let config = read_user_config(home).map_err(unavailable)?;
     let recorded = recorded_architects(&config);
     // #10944 critic HIGH: a recorded entry that lost its Architect profile must
     // not fall through to the default store (the #8995 shape).
@@ -212,6 +201,60 @@ fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashE
         ))
     })?;
     Ok((dir.join(STORE_SUBDIR), source))
+}
+
+/// `home`'s user config, read strictly: a missing file is the default, an
+/// unreadable or malformed one is an error naming the file.
+fn read_user_config(home: &Path) -> Result<MpmConfig, String> {
+    let config_path = user_config_path(home);
+    match std::fs::read_to_string(&config_path) {
+        Ok(raw) => toml::from_str::<MpmConfig>(&raw)
+            .map_err(|e| format!("{} is malformed: {e}", config_path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(MpmConfig::default()),
+        Err(e) => Err(format!("cannot read {}: {e}", config_path.display())),
+    }
+}
+
+/// Every Architect directory `tm session delete --project-dir` must keep.
+///
+/// Why: #10992 critic HIGH — the delete is irreversible, so the guard's input
+/// must be complete or the delete refuses. The defaulting loader and the
+/// profile filter in [`recorded_architects`] each dropped a real Architect.
+/// What: every absolute `[architect]` `projects` entry, with no profile
+/// filter; a non-empty `env(ARCHITECT_PROJECT_DIR)`; [`DEFAULT_ARCHITECT_DIR`]
+/// under `home`. The config is read strictly; a missing file is no error.
+///
+/// # Errors
+/// No usable home, or a config file that exists but cannot be read or parsed;
+/// the message names the file.
+///
+/// Test: `an_architect_entry_with_a_malformed_profile_is_protected`,
+/// `an_env_named_architect_dir_is_protected`,
+/// `an_unreadable_or_malformed_user_config_refuses_the_delete`,
+/// `a_missing_user_config_is_not_an_error`.
+pub fn protected_architect_dirs(
+    env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    // #10992: no home means the user config cannot be read; refuse.
+    let home = home
+        .filter(|h| h.is_absolute())
+        .ok_or("no home directory, so ~/.trusty-mpm/config.toml cannot be read")?;
+    let config = read_user_config(home)?;
+    // #10992 critic HIGH: no profile filter — a malformed `.trusty-mpm.toml`
+    // must not hide a recorded Architect.
+    let mut dirs: Vec<PathBuf> = config
+        .architect_grant()
+        .projects
+        .iter()
+        .filter(|entry| entry.is_absolute())
+        .cloned()
+        .collect();
+    if let Some(dir) = env(ENV_ARCHITECT_PROJECT_DIR).filter(|v| !v.is_empty()) {
+        dirs.push(PathBuf::from(dir));
+    }
+    dirs.push(home.join(DEFAULT_ARCHITECT_DIR));
+    Ok(dirs)
 }
 
 /// `a, b` of the paths' display forms.
