@@ -21,8 +21,8 @@
 
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::{
-    Substitution, git_subcommand, segment_substitution_spans, split_heredoc_bodies,
-    split_shell_segments, tokenize,
+    Substitution, TokenizeError, git_subcommand, rough_words, segment_substitution_spans,
+    split_heredoc_bodies, split_shell_segments, tokenize,
 };
 use crate::commands::pm_guard_secret_read::{
     Scan, command_basename, inline_program_indices, names_a_secret_file, pattern_argument_index,
@@ -103,7 +103,12 @@ fn segment_read(masked: &str, subs: &[Masked]) -> Option<String> {
     if !masked.contains("TMSUBST") {
         return None;
     }
-    let argv = tokenize(masked).ok()?;
+    let argv = match tokenize(masked) {
+        Ok(argv) => argv,
+        // #11262: operators it cannot place hide which word a reader reads.
+        Err(TokenizeError::AmbiguousOperators) => return unplaced_read(masked, subs),
+        Err(TokenizeError::UnbalancedQuoting) => return None,
+    };
     let start = strip_wrapper_prefix(&argv).unwrap_or(0);
     let program = command_basename(argv.get(start)?);
     let reader = READERS.contains(&program.as_str());
@@ -138,6 +143,28 @@ fn segment_read(masked: &str, subs: &[Masked]) -> Option<String> {
     None
 }
 
+/// The deny for a masked segment whose shell operators [`tokenize`] cannot
+/// place (#11262): any word that could be a [`READERS`] program, or a `<` or
+/// `@`, refuses, read from [`rough_words`]; anything else has no read to judge.
+/// Test: `an_unplaced_computed_read_refuses_11262`.
+fn unplaced_read(masked: &str, subs: &[Masked]) -> Option<String> {
+    let words = rough_words(masked);
+    let reader = words
+        .iter()
+        .map(|w| command_basename(w.as_str()))
+        .find(|p| READERS.contains(&p.as_str()));
+    if reader.is_none() && !masked.contains(['<', '@']) {
+        return None;
+    }
+    let word = words.iter().find(|w| w.contains("TMSUBST"))?;
+    let program = reader.unwrap_or_else(|| "a redirection".to_string());
+    Some(deny_reason(
+        &program,
+        &shown_word(word, subs),
+        "the guard cannot place its shell operators",
+    ))
+}
+
 /// `word` with every placeholder replaced by its substitution's fixed output,
 /// or `None` when one has no fixed output.
 fn resolve_word(word: &str, subs: &[Masked]) -> Option<String> {
@@ -165,6 +192,8 @@ fn fixed_output(shown: &str, body: &str) -> Option<String> {
     if body.contains(['$', '`', '\\']) {
         return None;
     }
+    // #11262: `resolve_word` refuses a body `tokenize` cannot place, as it
+    // refuses every body with no fixed output.
     let argv = tokenize(body).ok()?;
     match argv.first().map(String::as_str) {
         Some("echo") if !body.contains(['|', ';', '&', '<', '>']) => {

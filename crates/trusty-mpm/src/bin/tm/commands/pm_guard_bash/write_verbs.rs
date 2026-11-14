@@ -36,7 +36,7 @@
 use super::anchor_verbs::{
     CopyArgs, Verb, copies_contents, operands, program_name, sed_edits, source_name,
 };
-use super::bash_tokens::tokenize;
+use super::bash_tokens::{tokenize, unplaced_word};
 use super::heredoc::split_heredoc_bodies;
 use super::write_targets::UnplaceableWrite;
 use crate::commands::hook_rewrite::{first_command_token, strip_wrapper_prefix};
@@ -71,17 +71,25 @@ fn write_verb(word: &str) -> Option<WriteVerb> {
 ///
 /// Why/What: see the module doc. `is_dir` answers whether a bare destination
 /// is an existing directory; the boundary resolves it against the hook cwd.
+/// #11262: a segment whose operators cannot be placed is `Err` when any of
+/// its words is a verb.
 /// Test: `write_targets_read_cp_and_mv_destination`,
 /// `write_targets_read_sed_i_operands`,
-/// `write_targets_refuse_a_write_verb_that_does_not_lex`.
+/// `write_targets_refuse_a_write_verb_that_does_not_lex`,
+/// `an_unplaced_write_verb_refuses_11262`.
 pub(super) fn verb_write_targets(
     segment: &str,
     is_dir: &dyn Fn(&str) -> bool,
 ) -> Result<Vec<String>, UnplaceableWrite> {
-    let argv = match tokenize(&split_heredoc_bodies(segment).0) {
+    let text = split_heredoc_bodies(segment).0;
+    let argv = match tokenize(&text) {
         Ok(argv) => argv,
-        // #7228: fail closed, as an unlexable `tee` does.
-        Err(_) if first_command_token(segment).is_some_and(|w| write_verb(&w).is_some()) => {
+        // #7228: fail closed, as an unlexable `tee` does. #11262: so does a
+        // segment it cannot place that names a verb anywhere.
+        Err(error)
+            if first_command_token(segment).is_some_and(|w| write_verb(&w).is_some())
+                || unplaced_word(error, &text, |w| write_verb(w).is_some()) =>
+        {
             return Err(UNLEXABLE_WRITE_VERB);
         }
         Err(_) => return Ok(Vec::new()),

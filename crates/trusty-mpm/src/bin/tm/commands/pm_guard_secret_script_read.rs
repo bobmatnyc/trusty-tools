@@ -37,6 +37,9 @@ pub(crate) enum Unread {
     /// An interpreter's script named through a variable, a substitution or a
     /// glob: no path to read.
     Unresolvable,
+    /// #11262: a segment that runs it, or an assignment its path reads, whose
+    /// shell operators the guard cannot place.
+    Unplaceable,
 }
 
 /// What [`read_script`] found at a path.
@@ -158,6 +161,10 @@ pub(crate) fn deny_reason(word: &str, inner: Option<&str>, rule: Rule) -> String
             Unread::Unresolvable => {
                 "its path is computed at run time (a variable, a substitution or a glob), so \
                  the guard cannot judge its body and fails closed"
+            }
+            Unread::Unplaceable => {
+                "the guard cannot place the shell operators of the command that runs it, so it \
+                 cannot tell which script runs and fails closed"
             }
         },
     };

@@ -24,7 +24,7 @@
 //! Test: `write_targets_*` below; end to end in `pm_guard_write_boundary`'s
 //! `denies_a_tee_write_in_a_main_checkout` and its siblings.
 
-use super::bash_tokens::{RedirectRole, redirect_role, tokenize};
+use super::bash_tokens::{RedirectRole, redirect_role, tokenize, unplaced_word};
 use super::heredoc::{HeredocBodies, split_heredoc_bodies};
 use super::write_verbs;
 use super::{
@@ -160,13 +160,20 @@ pub(super) fn segment_write_targets(segment: &str) -> Result<Vec<String>, Unplac
 /// except options before `--` and redirect words, which the redirect scan
 /// reads. A segment that will not tokenize is an `Err` when its plain
 /// whitespace split still names `tee` as the program, and empty otherwise, so
-/// here-document prose with an apostrophe is not refused.
+/// here-document prose with an apostrophe is not refused. #11262: a segment
+/// whose operators cannot be placed is an `Err` when any word is `tee`.
 /// Test: `write_targets_read_tee_substitution_and_subshell_writes`,
-/// `write_targets_refuse_what_they_cannot_place`.
+/// `write_targets_refuse_what_they_cannot_place`,
+/// `an_unplaced_write_verb_refuses_11262`.
 fn tee_targets(segment: &str) -> Result<Vec<String>, UnplaceableWrite> {
-    let argv = match tokenize(&split_heredoc_bodies(segment).0) {
+    let text = split_heredoc_bodies(segment).0;
+    let argv = match tokenize(&text) {
         Ok(argv) => argv,
-        Err(_) if first_command_token(segment).as_deref() == Some("tee") => {
+        // #11262: a segment it cannot place refuses when any word is `tee`.
+        Err(error)
+            if first_command_token(segment).as_deref() == Some("tee")
+                || unplaced_word(error, &text, |w| basename(w) == "tee") =>
+        {
             return Err(UNLEXABLE_TEE);
         }
         Err(_) => return Ok(Vec::new()),

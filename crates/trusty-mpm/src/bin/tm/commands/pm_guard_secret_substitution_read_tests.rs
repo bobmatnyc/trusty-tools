@@ -121,3 +121,12 @@ fn resolves_genuine_arithmetic_8931() {
         assert_eq!(eval(command), None, "`{command}` must allow");
     }
 }
+
+/// #11262: a substitution body `tokenize` cannot place has no fixed output,
+/// so `resolve_word` refuses the read it names, as before the operator cut.
+#[test]
+fn an_unplaced_substitution_body_has_no_fixed_output_11262() {
+    let body = "true #'\n>f #'";
+    assert_eq!(tokenize(body), Err(TokenizeError::AmbiguousOperators));
+    assert_eq!(fixed_output(&format!("$({body})"), body), None);
+}

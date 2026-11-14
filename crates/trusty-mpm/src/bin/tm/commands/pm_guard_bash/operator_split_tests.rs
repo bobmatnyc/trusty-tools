@@ -6,7 +6,7 @@
 //! the inputs that must refuse. Every word is neutral.
 //! Test: itself.
 
-use super::super::{TokenizeError, tokenize};
+use super::super::{TokenizeError, rough_words, tokenize, unplaced_word};
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 
 /// Assert each `(segment, words)` row lexes to exactly `words`.
@@ -30,6 +30,8 @@ fn operator_split_cuts_each_redirect_class() {
         ("foo>>|bar", &["foo", ">>|bar"]),
         ("foo>&|bar", &["foo", ">&|bar"]),
         ("foo&>|bar", &["foo", "&>|bar"]),
+        // #11262 review: read as a clobber, as `is_clobber_bar` reads its `|`.
+        ("foo&>>|bar", &["foo", "&>>|bar"]),
         ("foo>&2", &["foo", ">&2"]),
         ("foo&>bar", &["foo", "&>bar"]),
         ("foo&>>bar", &["foo", "&>>bar"]),
@@ -69,6 +71,9 @@ fn operator_split_cuts_control_operators() {
         ("foo|bar", &["foo", "|", "bar"]),
         ("foo|&bar", &["foo", "|&", "bar"]),
         ("foo;;", &["foo", ";;"]),
+        // #11262 review: bash 5 reads each as one case terminator.
+        ("foo;&bar", &["foo", ";&", "bar"]),
+        ("foo;;&bar", &["foo", ";;&", "bar"]),
         ("foo;#bar", &["foo", ";"]),
         ("(foo bar)", &["(foo", "bar)"]),
         ("(foo bar)>baz", &["(foo", "bar)", ">baz"]),
@@ -143,4 +148,31 @@ fn operator_split_keeps_refusing_glued_secret_reads() {
             "{command:?} must still refuse"
         );
     }
+}
+
+/// The words a rule reads in a segment it cannot place: cut at quotes and
+/// operators, and read whole across a quote join; only the unplaceable error
+/// lets a rule act on them.
+#[test]
+fn rough_words_read_quote_joins_and_glued_operators() {
+    let words = rough_words("foo;bar>baz 'ab''c' \\qux");
+    for want in ["foo", "bar", "baz", "ab", "c", "abc", "qux"] {
+        assert!(words.iter().any(|w| w == want), "{want} in {words:?}");
+    }
+    let names_bar = |w: &str| w == "bar";
+    assert!(unplaced_word(
+        TokenizeError::AmbiguousOperators,
+        "foo;bar",
+        names_bar
+    ));
+    assert!(!unplaced_word(
+        TokenizeError::UnbalancedQuoting,
+        "foo;bar",
+        names_bar
+    ));
+    assert!(!unplaced_word(
+        TokenizeError::AmbiguousOperators,
+        "foo;baz",
+        names_bar
+    ));
 }

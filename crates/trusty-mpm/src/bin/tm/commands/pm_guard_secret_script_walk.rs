@@ -15,7 +15,7 @@ use super::{Candidate, Role, Unread, candidates, existing_paths, expand, is_comp
 use super::{fd_pipe_script, is_fd_pipe};
 use super::{locate, segment_bases, unresolved};
 use crate::commands::pm_guard_bash::{
-    MAX_SUBSTITUTION_DEPTH, Substitution, blank_shell_comments, heredoc_expansions,
+    MAX_SUBSTITUTION_DEPTH, Substitution, TokenizeError, blank_shell_comments, heredoc_expansions,
     segment_substitution_spans, split_heredoc_bodies, split_shell_segments, tokenize,
 };
 
@@ -66,10 +66,14 @@ pub(super) struct Walk<'a> {
 /// shell comments blanked, [`blank_shell_comments`]) are judged as commands
 /// of their own, first, so the refusal names the script inside. Past
 /// [`MAX_SUBSTITUTION_DEPTH`] a body is not followed and refuses
-/// ([`Unread::SubstitutionTooDeep`]).
+/// ([`Unread::SubstitutionTooDeep`]). #11262: a segment, or an assignment its
+/// script word reads, whose shell operators cannot be placed is handed over
+/// as [`Unread::Unplaceable`].
 /// Test: `a_script_run_in_a_substitution_is_judged_10566`,
 /// `substitutions_nested_past_the_bound_refuse_10566`,
-/// `an_unquoted_heredoc_substitution_is_judged_10566`.
+/// `an_unquoted_heredoc_substitution_is_judged_10566`,
+/// `an_unplaced_script_run_refuses_11262`,
+/// `an_unplaced_assignment_before_a_script_refuses_11262`.
 pub(super) fn each_script_in<T>(
     command: &str,
     bases: &[PathBuf],
@@ -99,10 +103,15 @@ pub(super) fn each_script_in<T>(
         // #10548: a substitution's words are not the segment's words; its body
         // is judged below as a command of its own.
         let argv = if walk.own {
-            let masked = masked(trimmed, &found);
-            tokenize(&masked)
-                .or_else(|_| tokenize(trimmed))
-                .unwrap_or_default()
+            match own_words(trimmed, &found) {
+                Some(argv) => argv,
+                // #11262: a segment whose operators cannot be placed may run
+                // any script, so it refuses rather than reading as no words.
+                None => match judge(trimmed, Err(Unread::Unplaceable), None, bases) {
+                    Some(answer) => return Some(answer),
+                    None => Vec::new(),
+                },
+            }
         } else {
             Vec::new()
         };
@@ -116,7 +125,12 @@ pub(super) fn each_script_in<T>(
             continue;
         }
         let seg_bases = segment_bases(&argv_text, trimmed, bases);
-        resolve_script_operand(&mut candidates, &argv_text, trimmed, &seg_bases);
+        // #11262: an assignment the script word reads that cannot be placed.
+        if resolve_script_operand(&mut candidates, &argv_text, trimmed, &seg_bases)
+            && let Some(answer) = judge(trimmed, Err(Unread::Unplaceable), None, &seg_bases)
+        {
+            return Some(answer);
+        }
         if let Some(answer) = bodies(Some(spans), &seg_bases, inner, sub_depth, judge) {
             return Some(answer);
         }
@@ -141,6 +155,24 @@ pub(super) fn each_script_in<T>(
         }
     }
     None
+}
+
+/// A segment's own words: its [`masked`] spelling, else its spelling as
+/// written; `None` when either answers [`TokenizeError::AmbiguousOperators`]
+/// and neither lexes (#11262). Unbalanced quoting keeps its empty list.
+/// Test: `an_unplaced_script_run_refuses_11262`.
+fn own_words(segment: &str, spans: &[(Range<usize>, Substitution)]) -> Option<Vec<String>> {
+    let first = match tokenize(&masked(segment, spans)) {
+        Ok(argv) => return Some(argv),
+        Err(error) => error,
+    };
+    match tokenize(segment) {
+        Ok(argv) => Some(argv),
+        Err(second) => {
+            let unplaced = TokenizeError::AmbiguousOperators;
+            (first != unplaced && second != unplaced).then(Vec::new)
+        }
+    }
 }
 
 /// `segment` with each substitution span replaced by a placeholder word —

@@ -32,7 +32,7 @@
 //! `bsd_install_s_and_sed_l_keep_their_operands`,
 //! `a_q2_verb_through_xargs_is_denied`, `reads_and_other_writes_stay_allowed`).
 
-use super::bash_tokens::{RedirectRole, redirect_role, tokenize};
+use super::bash_tokens::{RedirectRole, redirect_role, tokenize, unplaced_word};
 use super::heredoc::split_heredoc_bodies;
 use super::write_targets::{
     UnplaceableWrite, input_redirect, segment_write_targets, shell_segments_map,
@@ -141,15 +141,19 @@ fn segment_anchor_writes(segment: &str) -> Result<Vec<AnchorWrite>, UnplaceableW
 /// What: tokenizes with here-document bodies blanked and finds the program
 /// past env assignments and wrappers ([`strip_wrapper_prefix`]) — or, when a
 /// wrapper takes a flag, the first verb or `xargs` word. A segment that does
-/// not tokenize is `Err` when its plain first word is a verb or `xargs`, and
-/// `None` otherwise.
+/// not tokenize is `Err` when its plain first word is a verb or `xargs` — or,
+/// when its operators cannot be placed, any word is (#11262) — and `None`
+/// otherwise.
+/// Test: `an_unplaced_write_verb_refuses_11262`.
 fn program_argv(segment: &str) -> Result<Option<(Vec<String>, usize)>, UnplaceableWrite> {
-    let argv = match tokenize(&split_heredoc_bodies(segment).0) {
+    let text = split_heredoc_bodies(segment).0;
+    let names = |word: &str| verb_of(word).is_some() || is_xargs(word);
+    let argv = match tokenize(&text) {
         Ok(argv) => argv,
-        Err(_)
-            if first_command_token(segment)
-                .as_deref()
-                .is_some_and(|word| verb_of(word).is_some() || is_xargs(word)) =>
+        // #11262: a segment it cannot place refuses when any word is a verb.
+        Err(error)
+            if first_command_token(segment).as_deref().is_some_and(names)
+                || unplaced_word(error, &text, names) =>
         {
             return Err(UNLEXABLE_VERB);
         }

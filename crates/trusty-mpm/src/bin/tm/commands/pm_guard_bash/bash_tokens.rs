@@ -78,12 +78,11 @@ impl TokenizeError {
 /// `shlex::split`, with its `None` promoted to
 /// [`TokenizeError::UnbalancedQuoting`].
 ///
-/// Eleven non-test `shlex::split` sites have NOT migrated and still read a
-/// `None` as "no tokens": `destructive_delete.rs` (2), `main_checkout.rs` (2),
-/// this module's `mod.rs` (2), `persistence.rs` (1), `shell_lex.rs` (3), and
-/// `commands/hook_rewrite.rs` (1). Each owns its own fail-closed fallback
-/// today; moving them here is remaining work, not a claim this function
-/// already made.
+/// The direct `shlex::split` calls elsewhere in the crate have NOT migrated:
+/// they skip the operator cut and read a `None` their own way. List them with
+/// `git grep -n 'shlex::split(' -- crates/trusty-mpm/src ':!*tests.rs'`
+/// (#11262: a count written here goes stale). Moving them here is remaining
+/// work, not a claim this function already made.
 /// Test: `bash_tokens_reports_unbalanced_quoting`,
 /// `operator_split_cuts_each_redirect_class`,
 /// `operator_split_cuts_control_operators`.
@@ -92,6 +91,50 @@ pub(crate) fn tokenize(segment: &str) -> Result<Vec<String>, TokenizeError> {
     let split =
         operator_split::split_operators(segment).map_err(|_| TokenizeError::AmbiguousOperators)?;
     shlex::split(&split).ok_or(TokenizeError::UnbalancedQuoting)
+}
+
+/// The words a rule still reads in a segment [`tokenize`] answers
+/// [`TokenizeError::AmbiguousOperators`] for, to decide whether it refuses.
+///
+/// Why: #11262 review — a rule that skipped such a segment allowed what it
+/// never read, and refusing every one would refuse a multi-line command
+/// whose comments carry two apostrophes.
+/// What: `segment` cut at every blank, quote, backslash, backtick, paren and
+/// operator byte, then the same cut of `segment` with its quotes and
+/// backslashes removed, so a quote join (`'ab''c'`) reads whole too. Quoted
+/// text counts, so a rule reading these words only refuses more.
+/// Test: `rough_words_read_quote_joins_and_glued_operators`.
+pub(crate) fn rough_words(segment: &str) -> Vec<String> {
+    let cut = |text: &str| -> Vec<String> {
+        text.split(|c: char| c.is_whitespace() || "'\"\\`()<>&;|".contains(c))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let joined: String = segment
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    let mut words = cut(segment);
+    for word in cut(&joined) {
+        if !words.contains(&word) {
+            words.push(word);
+        }
+    }
+    words
+}
+
+/// Whether `error` is [`TokenizeError::AmbiguousOperators`] and one of the
+/// [`rough_words`] of `text` satisfies `names`: the test a rule's
+/// unlexable-segment arm adds so it refuses a segment it cannot place (#11262).
+/// Test: `rough_words_read_quote_joins_and_glued_operators`.
+pub(crate) fn unplaced_word(
+    error: TokenizeError,
+    text: &str,
+    names: impl Fn(&str) -> bool,
+) -> bool {
+    error == TokenizeError::AmbiguousOperators
+        && rough_words(text).iter().any(|word| names(word.as_str()))
 }
 
 /// What a redirection token does with the word beside it.

@@ -101,7 +101,10 @@
 //!   `rm`-denylisted target is catastrophic with no legitimate use, but
 //!   `cp`/`mv` of a secret-shaped name has plenty of legitimate NON-worktree
 //!   destinations, so blanket-denying every unparseable `cp`/`mv` would
-//!   refuse far more ordinary work than it protects.
+//!   refuse far more ordinary work than it protects. #11262: a segment whose
+//!   shell operators cannot be placed is not skipped — it refuses when any of
+//!   its words could be a secret-shaped source, and a `cd` of that kind
+//!   leaves every later relative destination unknown.
 //! - Indirection through a shell variable or command substitution for the
 //!   SOURCE argument is not resolved (the DESTINATION case is — see above).
 //! - A directory copy (`cp -r secrets/ dest/`) is not inspected recursively —
@@ -160,7 +163,8 @@ use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 use super::bash_tokens::RedirectRole;
 use super::heredoc::split_heredoc_bodies;
 use super::{
-    PathEnv, redirect_role, resolve_target_path, split_shell_segments, tokenize, unresolved_target,
+    PathEnv, TokenizeError, redirect_role, resolve_target_path, rough_words, split_shell_segments,
+    tokenize, unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard_secret_handling::body_written_to_a_file;
@@ -712,6 +716,10 @@ fn evaluate_secret_file_copy_command_in(
         command
     };
     let mut effective_cwd = cwd.to_path_buf();
+    // #11262: set once a `cd` whose operators cannot be placed may have moved
+    // the working directory, so no later destination is known not to be a
+    // worktree.
+    let mut cwd_unknown = false;
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
@@ -720,18 +728,31 @@ fn evaluate_secret_file_copy_command_in(
         // Same `cd`-tracking shape as the sibling ABSOLUTE guards: a
         // deliberate, partial closing of `cd worktree && cp secret .`.
         if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Ok(argv) = tokenize(trimmed)
-                && let Some(dest) = argv.get(1)
-            {
-                effective_cwd = resolve_target_path(dest, &effective_cwd, env);
+            match tokenize(trimmed) {
+                Ok(argv) => {
+                    if let Some(dest) = argv.get(1) {
+                        effective_cwd = resolve_target_path(dest, &effective_cwd, env);
+                    }
+                }
+                Err(TokenizeError::AmbiguousOperators) => cwd_unknown = true,
+                Err(TokenizeError::UnbalancedQuoting) => {}
             }
             continue;
         }
         // Unparseable segment: skip rather than fail closed — see the module
         // doc's residual-bypass list for why this differs from
-        // `destructive_delete`'s blanket refusal.
-        let Ok(argv) = tokenize(trimmed) else {
-            continue;
+        // `destructive_delete`'s blanket refusal. #11262: a segment whose
+        // operators cannot be placed refuses when any word could be a
+        // secret-shaped source.
+        let argv = match tokenize(trimmed) {
+            Ok(argv) => argv,
+            Err(TokenizeError::AmbiguousOperators) => {
+                if let Some(word) = unplaced_secret_word(trimmed) {
+                    return Some(unplaceable_copy_deny_reason(&word));
+                }
+                continue;
+            }
+            Err(TokenizeError::UnbalancedQuoting) => continue,
         };
         // #7266 fix round: the rename rule runs FIRST and ignores the
         // destination's scope entirely — see `laundered_source_rename`.
@@ -767,7 +788,9 @@ fn evaluate_secret_file_copy_command_in(
         // #7234: a leading `~` left literal by an unset `$HOME` is the same
         // shape as `$WT` and gets the same refusal.
         let dest_variable = unresolved_target(&dest_path).map(|u| u.token);
-        if !is_worktree_path(&dest_path) && dest_variable.is_none() {
+        // #11262: a relative destination after an unplaced `cd` is unknown.
+        let cwd_moved = cwd_unknown && !dest_token.starts_with(['/', '~', '$']);
+        if !is_worktree_path(&dest_path) && dest_variable.is_none() && !cwd_moved {
             continue;
         }
         for source in sources {
@@ -780,11 +803,38 @@ fn evaluate_secret_file_copy_command_in(
             }
             return Some(match &dest_variable {
                 Some(variable) => unresolved_destination_deny_reason(source, dest_token, variable),
+                None if cwd_moved && !is_worktree_path(&dest_path) => {
+                    unplaceable_copy_deny_reason(source)
+                }
                 None => SECRET_FILE_COPY_REASON.to_string(),
             });
         }
     }
     None
+}
+
+/// The first word of a segment [`tokenize`] cannot place (#11262) whose
+/// basename could be a secret-shaped source, read from [`rough_words`].
+fn unplaced_secret_word(segment: &str) -> Option<String> {
+    rough_words(segment).into_iter().find(|word| {
+        let basename = word.rsplit('/').next().unwrap_or(word);
+        !basename.is_empty() && is_secret_bearing_source(basename)
+    })
+}
+
+/// Deny reason for a secret-shaped word in a segment, or after a `cd`, whose
+/// shell operators the guard cannot place (#11262).
+///
+/// Test: `an_unplaced_copy_of_a_secret_refuses_11262`,
+/// `an_unplaced_cd_before_a_secret_copy_refuses_11262`.
+fn unplaceable_copy_deny_reason(word: &str) -> String {
+    format!(
+        "`tm hook --pm-guard` refused this command (#11262, #7122): it names the secret-shaped \
+         word `{word}` in a command whose shell operators the guard cannot place, so it cannot \
+         prove where a `cp`/`mv` would put the file and fails closed. Write the command without \
+         `$'…'` quoting or a `case` inside `$( … )`; if it copies a secret-bearing file, stop \
+         and report to the Architect."
+    )
 }
 
 /// Deny reason for a secret-shaped source whose destination still carries an

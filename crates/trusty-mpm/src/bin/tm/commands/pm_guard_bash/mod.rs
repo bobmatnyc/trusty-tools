@@ -168,8 +168,8 @@ pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
 pub(crate) use bash_tokens::{
-    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
-    without_glob_metacharacters,
+    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, rough_words,
+    tokenize, without_glob_metacharacters,
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.

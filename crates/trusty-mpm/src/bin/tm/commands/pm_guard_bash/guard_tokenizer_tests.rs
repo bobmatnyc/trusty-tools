@@ -28,6 +28,10 @@ use super::{
 };
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_command;
 
+// #11262: the rows for a segment `tokenize` cannot place, one rule per test.
+#[path = "unplaced_segment_tests.rs"]
+mod unplaced_segment_tests;
+
 /// A cwd outside any repository, so the deletion rule's repo-root arm is not
 /// what any row below is measuring.
 fn cwd() -> &'static Path {
