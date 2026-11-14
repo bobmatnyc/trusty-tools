@@ -77,7 +77,9 @@ MARKER = re.compile(r"^\[[^\]\n]*Architect [0-9]{2}:[0-9][0-9x]Z\]")
 ARCH_LABEL = re.compile(r"\s*Architect (?:answer|note|question|proposal):")
 ELLIPSIS = re.compile(r"…|\.\.\.")
 # #10960 (DOC-87 G-6 X17): a word that flips the meaning of what an ellipsis leaves out.
-NEGATION = re.compile(r"\b(?:not|no|never|without|cannot)\b|n't")
+# #10960: apostrophe-free contractions and negative pronouns count too.
+NEGATION = re.compile(r"\b(?:not|no|never|without|cannot|dont|wont|cant|isnt|shouldnt|didnt|doesnt|nothing|none|nor|"
+                      r"neither)\b|n't")
 MIN_QUOTE_WORDS, MIN_QUOTE_CHARS = 3, 12   # #10960 X18: below both, the quote must be the whole turn
 EDGE = " .,;:!?"
 NOT_IN, NEGATED, SHORT = "not in", "negated", "short"
@@ -85,7 +87,7 @@ WINDOW = timedelta(minutes=2)
 HOW = ("Quote the owner verbatim and cite the turn: User ruling (<owner>): \"<owner's words>\" "
        "(owner turn: chat <YYYY-MM-DDTHH:MMZ> | dashboard <id>). "
        "For your own reading or arithmetic send `Architect answer: ... (basis: ...)` instead.")
-FOLD = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+FOLD = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'", "ʼ": "'"})   # #10960: U+02BC as n't
 
 
 class Refused(Exception):
@@ -289,7 +291,12 @@ def check_segment(seg):
 def verify(cite, quotes):
     """'chat' or 'dashboard' when every quote is in the cited turn; Refused otherwise (a palace cite always).
 
-    Test: test_relay_refuses_a_palace_cite_even_with_the_quoted_words_10780
+    What: with two or more quotes, every ordered pair (i < j) joined by ' … ' is checked as one quote too; only
+    NEGATED refuses, so quotes taken from different turns (NOT_IN when joined) still pass.
+    Test: test_relay_refuses_a_palace_cite_even_with_the_quoted_words_10780,
+    test_relay_refuses_a_negation_elided_between_two_quotes_10960,
+    test_relay_refuses_a_negated_quote_pair_beside_other_quotes_10960,
+    test_relay_sends_two_quotes_taken_from_separate_owner_turns_10960
     """
     if PALACE.match(cite):   # #10780 round 2: an Architect-written drawer is never the owner's turn
         raise Refused("a palace drawer is written by the Architect, not the owner; cite `dashboard <id>` (an "
@@ -314,6 +321,12 @@ def verify(cite, quotes):
                           f"characters and is not the whole owner turn `{cite}`; quote more of the turn")
         if why:
             raise Refused(f"the quote \"{q[:60]}\" is not in the owner turn `{cite}`")
+    for i, a in enumerate(quotes):   # #10960: every pair, so an extra quote cannot break the match and hide the gap
+        for b in quotes[i + 1:]:
+            joined = f"{a} … {b}"
+            if quote_problem(joined, turns) == NEGATED:
+                raise Refused(f"the gap between the quotes \"{joined[:60]}\" leaves out a negation the owner turn "
+                              f"`{cite}` holds, so together they say the opposite; quote the words between them too")
     return kind
 
 

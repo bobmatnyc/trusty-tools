@@ -495,7 +495,7 @@ def _refused(tmp_path, text, why):
 @pytest.mark.parametrize("turn,quote", [
     ("do not reduce", "do ... reduce"),                                       # X17
     ("I would never cut the helpers today", "I would … cut the helpers"),
-    ("keep going, don't stop at 98%", "keep going, ... stop at 98%"),
+    ("paint the fence green, don't paint the gate blue", "paint the fence green, ... paint the gate blue"),
     ("ship it without the review", "ship it ... the review"),
 ])
 def test_relay_refuses_a_quote_whose_ellipsis_drops_a_negation_10960(tmp_path, turn, quote):
@@ -620,6 +620,51 @@ def test_relay_without_an_owner_label_ignores_the_owner_turn_record_10960(tmp_pa
         lk.close()
     assert out.returncode == 0 and out.stdout.startswith("tm-api sent "), out
     assert relay_log() == []
+
+
+def _quotes(*quotes, join=" … ", cite="chat 2026-11-07T10:30Z"):
+    body = join.join(f'"{q}"' for q in quotes)
+    return f"[Ada Architect 10:31Z] User ruling (Ada): {body} (owner turn: {cite})"
+
+
+NEGATED_PAIR_TURN = "paint the fence green, don't paint the gate blue"
+NEGATED_PAIR = ("paint the fence green,", "paint the gate blue")   # one turn, a negation elided between them
+FOREIGN = "water the plants on Friday morning"                     # a second owner turn in the same minute
+
+
+@pytest.mark.parametrize("join", [" … ", " ... ", " "])
+def test_relay_refuses_a_negation_elided_between_two_quotes_10960(tmp_path, join):
+    """Each quote alone is in the turn, but the words left out between them hold the negation."""
+    _turn_at(NEGATED_PAIR_TURN)
+    _refused(tmp_path, _quotes(*NEGATED_PAIR, join=join), "leaves out a negation")
+
+
+@pytest.mark.parametrize("quotes", [
+    NEGATED_PAIR + NEGATED_PAIR[:1],                   # a: the label repeats a quote after the pair
+    NEGATED_PAIR + (FOREIGN,),                         # b: another turn's quote after the pair
+    (FOREIGN,) + NEGATED_PAIR,                         # c: ... before the pair
+    (NEGATED_PAIR[0], FOREIGN, NEGATED_PAIR[1]),       # d: ... between the pair (quotes 1 and 3)
+], ids=["repeat-after", "foreign-after", "foreign-before", "foreign-between"])
+def test_relay_refuses_a_negated_quote_pair_beside_other_quotes_10960(tmp_path, quotes):
+    """An extra quote that breaks the whole-sequence match does not hide a negated gap between two other quotes."""
+    _turn_at(NEGATED_PAIR_TURN)
+    _turn_at(FOREIGN, at="2026-11-07T10:30:40Z")
+    _refused(tmp_path, _quotes(*quotes), "leaves out a negation")
+
+
+def test_relay_sends_two_quotes_taken_from_separate_owner_turns_10960(tmp_path):
+    """The joined form is in no single turn (NOT_IN); that alone does not refuse."""
+    _turn_at("keep four helpers until Monday", at="2026-11-07T10:30:05Z")
+    _turn_at("then return to two helpers", at="2026-11-07T10:30:40Z")
+    _sent_and_logged(tmp_path, _quotes("keep four helpers", "then return to two helpers"), "chat 2026-11-07T10:30Z")
+
+
+@pytest.mark.parametrize("neg", ["dont", "wont", "cant", "isnt", "shouldnt", "didnt", "doesnt", "nothing", "none",
+                                 "nor", "neither", "donʼt"])
+def test_relay_refuses_an_ellipsis_over_an_apostrophe_free_negation_10960(tmp_path, neg):
+    """A negation typed without an apostrophe, or with U+02BC, still counts as one."""
+    _turn_at(f"paint the fence green, {neg} paint the gate blue")
+    _refused(tmp_path, _ruling("paint the fence green, ... paint the gate blue"), "leaves out a negation")
 
 
 # --- posted.sh ---------------------------------------------------------------
