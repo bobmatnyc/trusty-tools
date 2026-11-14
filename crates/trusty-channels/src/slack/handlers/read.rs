@@ -9,8 +9,12 @@
 //! capped at one page.
 //! What: [`read_channel`] wraps `conversations.history`; [`read_thread`] wraps
 //! `conversations.replies`. Both markup-escape returned message text via
-//! [`super::clean::clean_messages`] before it reaches the model.
+//! [`super::clean::clean_messages`] before it reaches the model. A
+//! `channel_not_found` from either method names the token's Slack user and the
+//! invite step (`call_channel_read`).
 //! Test: `tests/tools_http.rs::read_channel_escapes_message_text`,
+//! `::channel_read_not_found_names_the_bot_user`,
+//! `tests/slack_list_http.rs::channel_reads_send_query_params_as_get`,
 //! `::read_channel_paginates_with_cursor`,
 //! `::read_thread_returns_replies`, `::read_thread_paginates_with_cursor`,
 //! `::read_thread_rejects_malformed_thread_ts`.
@@ -22,9 +26,77 @@ use super::args::{
     require_ts, MAX_CONVERSATION_PAGE_SIZE,
 };
 use super::clean::clean_messages;
-use super::{CONVERSATIONS_HISTORY, CONVERSATIONS_REPLIES, DEFAULT_READ_LIMIT};
+use super::{AUTH_TEST, CONVERSATIONS_HISTORY, CONVERSATIONS_REPLIES, DEFAULT_READ_LIMIT};
 use crate::slack::api::client::BaseClient;
+use crate::slack::api::error::SlackError;
 use crate::slack::server::ToolCallError;
+use trusty_common::slack_format::mrkdwn_escape;
+
+/// Slack's `ok:false` slug for a channel the token cannot see — a bad id, or
+/// a private channel the bot is not a member of.
+const CHANNEL_NOT_FOUND: &str = "channel_not_found";
+
+/// Call a channel-read `method`, explaining a `channel_not_found` failure.
+///
+/// Why: Slack answers `channel_not_found` both for a bad id and for a private
+/// channel the bot was never invited to; the bare slug names neither the bot
+/// nor the fix.
+/// What: forwards to [`BaseClient::call_method`]; on
+/// `SlackError::Api("channel_not_found")` returns [`explain_channel_not_found`]'s
+/// error instead. Every other result passes through unchanged.
+/// Test: `tests/tools_http.rs::channel_read_not_found_names_the_bot_user`,
+/// `::channel_read_not_found_unchanged_when_identity_unknown`.
+async fn call_channel_read(
+    client: &BaseClient,
+    method: &str,
+    body: &Value,
+) -> Result<Value, ToolCallError> {
+    match client.call_method(method, body).await {
+        Err(SlackError::Api(slug)) if slug == CHANNEL_NOT_FOUND => {
+            Err(explain_channel_not_found(client).await.into())
+        }
+        other => other.map_err(ToolCallError::from),
+    }
+}
+
+/// Build the `channel_not_found` error, naming the token's Slack user.
+///
+/// Why: the caller needs to know which principal to invite. The lookup is a
+/// courtesy: it must never turn `channel_not_found` into another error or a
+/// success.
+/// What: calls `auth.test`; when it answers with a `user_id`, returns
+/// `SlackError::Api` text that starts with `channel_not_found` and names the
+/// user (escaped) and the invite step. Any lookup failure, or a reply with no
+/// `user_id`, returns the bare `SlackError::Api("channel_not_found")`.
+/// Test: `tests/tools_http.rs::channel_read_not_found_names_the_bot_user`,
+/// `::channel_read_not_found_unchanged_when_identity_unknown`.
+async fn explain_channel_not_found(client: &BaseClient) -> SlackError {
+    let bare = || SlackError::Api(CHANNEL_NOT_FOUND.to_string());
+    let identity = match client.call_method(AUTH_TEST, &json!({})).await {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::debug!(error = %e, "auth.test failed; reporting bare channel_not_found");
+            return bare();
+        }
+    };
+    let Some(user_id) = identity
+        .get("user_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return bare();
+    };
+    let name = identity
+        .get("user")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map_or_else(|| user_id.to_string(), mrkdwn_escape);
+    SlackError::Api(format!(
+        "{CHANNEL_NOT_FOUND}: this token authenticates as Slack user {name} ({user_id}). \
+         The channel id is wrong, or it is a private channel this bot is not in: \
+         invite the bot (`/invite @{name}`) and retry."
+    ))
+}
 
 /// Read messages from a channel via `conversations.history`.
 ///
@@ -51,7 +123,7 @@ pub(super) async fn read_channel(client: &BaseClient, args: Value) -> Result<Val
     );
     let mut body = json!({ "channel": channel.as_str(), "limit": limit });
     apply_pagination_args(&mut body, &args)?;
-    let resp = client.call_method(CONVERSATIONS_HISTORY, &body).await?;
+    let resp = call_channel_read(client, CONVERSATIONS_HISTORY, &body).await?;
     let messages = clean_messages(&resp);
     Ok(json!({
         "channel": channel,
@@ -90,7 +162,7 @@ pub(super) async fn read_thread(client: &BaseClient, args: Value) -> Result<Valu
     );
     let mut body = json!({ "channel": channel.as_str(), "ts": thread_ts.as_str(), "limit": limit });
     apply_pagination_args(&mut body, &args)?;
-    let resp = client.call_method(CONVERSATIONS_REPLIES, &body).await?;
+    let resp = call_channel_read(client, CONVERSATIONS_REPLIES, &body).await?;
     let messages = clean_messages(&resp);
     Ok(json!({
         "channel": channel,

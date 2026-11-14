@@ -192,15 +192,26 @@ pub fn tool_list_response() -> Value {
         ),
         tool(
             "slack_list_channels",
-            "List channels visible to the authenticated principal.",
+            "List one page of channels visible to the authenticated principal. \
+             Default `types` is 'public_channel,private_channel', so private \
+             channels the bot is a member of are included. To list every \
+             channel, pass the previous call's `next_cursor` back as `cursor` \
+             until `next_cursor` is null.",
             json!({
                 "types": {
                     "type": "string",
-                    "description": "Comma-separated channel types (e.g. public_channel,private_channel).",
+                    "description": "Comma-separated channel types: public_channel, \
+                        private_channel, mpim, im. Default \
+                        'public_channel,private_channel'.",
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of channels to return.",
+                    "description": "Maximum number of channels to return per page.",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Opaque pagination cursor from a previous \
+                        call's `next_cursor`; fetches the next page.",
                 },
             }),
             &[],
@@ -476,6 +487,21 @@ mod tests {
                 "slack_read_thread schema must declare '{key}'"
             );
         }
+    }
+
+    #[test]
+    fn list_channels_schema_advertises_cursor_and_default_types() {
+        let v = tool_list_response();
+        let list = v["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "slack_list_channels")
+            .expect("slack_list_channels is a known tool");
+        assert!(list["inputSchema"]["properties"].get("cursor").is_some());
+        let description = list["description"].as_str().unwrap();
+        assert!(description.contains("public_channel,private_channel"));
+        assert!(description.contains("next_cursor"));
     }
 
     #[test]

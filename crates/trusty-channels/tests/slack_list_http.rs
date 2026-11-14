@@ -356,3 +356,161 @@ async fn write_method_still_posts_json() {
     assert_eq!(requests[0].method.as_str(), "POST");
     assert_eq!(requests[0].url.query(), None);
 }
+
+/// The query pairs of one received request, in wire order.
+fn query_pairs(request: &wiremock::Request) -> Vec<(String, String)> {
+    request.url.query_pairs().into_owned().collect()
+}
+
+/// Owned `(key, value)` pairs for comparing against [`query_pairs`].
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+// A caller walks every channel the token can see: page 1's next cursor comes
+// back in the tool result, and the follow-up call sends it to Slack.
+#[tokio::test]
+async fn list_channels_pages_with_cursor() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .and(query_param("cursor", "cGFnZTI="))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channels": [{"id": "C2", "name": "second", "is_private": true}],
+            "response_metadata": {"next_cursor": ""}
+        })))
+        .with_priority(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channels": [{"id": "C1", "name": "first", "is_private": false}],
+            "response_metadata": {"next_cursor": "cGFnZTI="}
+        })))
+        .with_priority(2)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(&server);
+
+    let first = dispatch(&client, "slack_list_channels", json!({"limit": 1}))
+        .await
+        .expect("page 1");
+    assert_eq!(first["channels"][0]["id"], "C1");
+    assert_eq!(first["next_cursor"], "cGFnZTI=");
+
+    let cursor = first["next_cursor"].clone();
+    let second = dispatch(
+        &client,
+        "slack_list_channels",
+        json!({"limit": 1, "cursor": cursor}),
+    )
+    .await
+    .expect("page 2");
+    assert_eq!(second["channels"][0]["id"], "C2");
+    assert!(second["next_cursor"].is_null(), "last page has no cursor");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests.iter().all(|r| r.body.is_empty()));
+    assert!(!query_pairs(&requests[0]).iter().any(|(k, _)| k == "cursor"));
+    assert!(query_pairs(&requests[1]).contains(&("cursor".into(), "cGFnZTI=".into())));
+}
+
+// With no arguments the listing covers private channels the bot is in, not
+// Slack's public-only default; an explicit `types` still goes through as is.
+#[tokio::test]
+async fn list_channels_default_types_include_private_and_explicit_types_win() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/conversations.list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "channels": [{"id": "G1", "name": "private-room", "is_private": true}]
+        })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client_for(&server);
+
+    let out = dispatch(&client, "slack_list_channels", json!({}))
+        .await
+        .expect("default listing");
+    assert_eq!(out["channels"][0]["is_private"], true);
+    dispatch(&client, "slack_list_channels", json!({"types": "im"}))
+        .await
+        .expect("explicit types");
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        query_pairs(&requests[0]),
+        pairs(&[("types", "public_channel,private_channel")])
+    );
+    assert_eq!(query_pairs(&requests[1]), pairs(&[("types", "im")]));
+}
+
+/// One channel-read case: tool, Slack method, tool arguments, expected query.
+type ToolReadCase = (
+    &'static str,
+    &'static str,
+    serde_json::Value,
+    &'static [(&'static str, &'static str)],
+);
+
+// #9931 moved these reads to GET + query after #9919 (`invalid_arguments` from
+// a JSON POST). Pin the tool-level wire shape: `thread_ts` arrives as `ts`.
+#[tokio::test]
+async fn channel_reads_send_query_params_as_get() {
+    let cases: [ToolReadCase; 2] = [
+        (
+            "slack_read_channel",
+            "conversations.history",
+            json!({"channel": "C1", "limit": 7, "cursor": "aGlzdA=="}),
+            &[("channel", "C1"), ("limit", "7"), ("cursor", "aGlzdA==")],
+        ),
+        (
+            "slack_read_thread",
+            "conversations.replies",
+            json!({
+                "channel": "C1", "thread_ts": "1616703000.216300",
+                "limit": 9, "cursor": "cmVwbA=="
+            }),
+            &[
+                ("channel", "C1"),
+                ("limit", "9"),
+                ("ts", "1616703000.216300"),
+                ("cursor", "cmVwbA=="),
+            ],
+        ),
+    ];
+    for (tool, slack_method, args, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/{slack_method}")))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "messages": []})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        dispatch(&client_for(&server), tool, args)
+            .await
+            .unwrap_or_else(|e| panic!("{tool}: {e:?}"));
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1, "{tool}");
+        assert_eq!(requests[0].method.as_str(), "GET", "{tool}");
+        assert!(requests[0].body.is_empty(), "{tool} carries no JSON body");
+        let mut got = query_pairs(&requests[0]);
+        let mut want = pairs(expected);
+        got.sort();
+        want.sort();
+        assert_eq!(got, want, "{tool} query");
+    }
+}

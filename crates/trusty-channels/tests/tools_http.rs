@@ -730,6 +730,113 @@ async fn ok_false_maps_to_slack_error() {
     assert!(matches!(err, ToolCallError::Slack(_)));
 }
 
+// ── channel_not_found names the bot (F2) ───────────────────────────────────
+
+/// The two channel-read tools and the Slack method each one calls.
+const CHANNEL_READS: [(&str, &str); 2] = [
+    ("slack_read_channel", "conversations.history"),
+    ("slack_read_thread", "conversations.replies"),
+];
+
+/// Arguments that pass validation for either channel-read tool.
+fn channel_read_args() -> serde_json::Value {
+    json!({ "channel": "G0PRIVATE", "thread_ts": "1616703000.216300" })
+}
+
+// A bot that is not in a private channel gets `channel_not_found`; the error
+// keeps that slug and names the token's Slack user and the invite step.
+#[tokio::test]
+async fn channel_read_not_found_names_the_bot_user() {
+    for (tool, slack_method) in CHANNEL_READS {
+        let server = MockServer::start().await;
+        mount_ok(
+            &server,
+            slack_method,
+            json!({ "ok": false, "error": "channel_not_found" }),
+        )
+        .await;
+        mount_ok(
+            &server,
+            "auth.test",
+            json!({ "ok": true, "user": "mpm", "user_id": "U0BOT", "team": "Acme" }),
+        )
+        .await;
+
+        let err = dispatch(&client_for(&server), tool, channel_read_args())
+            .await
+            .expect_err("channel_not_found must stay an error");
+        let ToolCallError::Slack(SlackError::Api(message)) = err else {
+            panic!("{tool}: expected SlackError::Api, got {err:?}");
+        };
+        assert!(
+            message.starts_with("channel_not_found"),
+            "{tool}: {message}"
+        );
+        assert!(message.contains("mpm"), "{tool}: {message}");
+        assert!(message.contains("U0BOT"), "{tool}: {message}");
+        assert!(message.contains("invite"), "{tool}: {message}");
+        assert!(!message.contains("xoxb"), "{tool}: no token in error text");
+    }
+}
+
+// When the identity lookup fails, or yields no user, the caller still gets
+// the bare `channel_not_found`; another Slack error never triggers a lookup.
+#[tokio::test]
+async fn channel_read_not_found_unchanged_when_identity_unknown() {
+    let identity_failures = [
+        ResponseTemplate::new(500),
+        ResponseTemplate::new(200).set_body_json(json!({ "ok": false, "error": "missing_scope" })),
+        ResponseTemplate::new(200).set_body_json(json!({ "ok": true })),
+    ];
+    for (tool, slack_method) in CHANNEL_READS {
+        for identity in &identity_failures {
+            let server = MockServer::start().await;
+            mount_ok(
+                &server,
+                slack_method,
+                json!({ "ok": false, "error": "channel_not_found" }),
+            )
+            .await;
+            Mock::given(method("POST"))
+                .and(path("/auth.test"))
+                .respond_with(identity.clone())
+                .expect(1)
+                .mount(&server)
+                .await;
+            let err = dispatch(&client_for(&server), tool, channel_read_args())
+                .await
+                .expect_err("channel_not_found must stay an error");
+            match err {
+                ToolCallError::Slack(SlackError::Api(message)) => {
+                    assert_eq!(message, "channel_not_found", "{tool}");
+                }
+                other => panic!("{tool}: expected SlackError::Api, got {other:?}"),
+            }
+        }
+
+        let server = MockServer::start().await;
+        mount_ok(
+            &server,
+            slack_method,
+            json!({ "ok": false, "error": "ratelimited_by_policy" }),
+        )
+        .await;
+        // Any verb: no identity lookup at all for a non-not-found error.
+        Mock::given(path("/auth.test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ok": true })))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let err = dispatch(&client_for(&server), tool, channel_read_args())
+            .await
+            .expect_err("other Slack errors pass through");
+        assert!(
+            matches!(err, ToolCallError::Slack(SlackError::Api(ref m)) if m == "ratelimited_by_policy"),
+            "{tool}: {err:?}"
+        );
+    }
+}
+
 // ── slack_get_reactions (issue #3614) ──────────────────────────────────────
 
 #[tokio::test]
