@@ -140,6 +140,62 @@ fn render(plan: &DirDeletePlan, dry_run: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{Cli, Command, SessionAction};
+    use clap::Parser as _;
+
+    #[test]
+    fn cli_parses_session_delete_project_dir() {
+        // #10992: `--project-dir` opts in; `--dry-run`/`--yes` need it; `--force`
+        // (the record-only running bypass) cannot be combined with it.
+        let cli = Cli::try_parse_from([
+            "trusty-mpm",
+            "session",
+            "delete",
+            "abc",
+            "--project-dir",
+            "--dry-run",
+        ])
+        .unwrap();
+        match cli.command.unwrap() {
+            Command::Session {
+                action:
+                    SessionAction::Delete {
+                        project_dir,
+                        dry_run,
+                        yes,
+                        force,
+                        ..
+                    },
+            } => {
+                assert!(project_dir && dry_run && !yes && !force);
+            }
+            other => panic!("expected session delete, got {other:?}"),
+        }
+        let plain = Cli::try_parse_from(["trusty-mpm", "session", "delete", "abc"]).unwrap();
+        match plain.command.unwrap() {
+            Command::Session {
+                action: SessionAction::Delete { project_dir, .. },
+            } => assert!(!project_dir, "the directory is never removed by default"),
+            other => panic!("expected session delete, got {other:?}"),
+        }
+        for args in [
+            &["trusty-mpm", "session", "delete", "abc", "--dry-run"][..],
+            &["trusty-mpm", "session", "delete", "abc", "--yes"][..],
+            &[
+                "trusty-mpm",
+                "session",
+                "delete",
+                "abc",
+                "--project-dir",
+                "--force",
+            ][..],
+        ] {
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "{args:?} must not parse"
+            );
+        }
+    }
 
     #[test]
     fn render_names_the_directory_and_root() {
