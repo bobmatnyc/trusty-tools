@@ -873,7 +873,7 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         ("scripts/relay.sh", true),
         ("scripts/posted.sh", true),
         ("scripts/relay-marker.py", false),
-        ("scripts/relay_provenance.py", false), // #10780
+        ("scripts/relay_provenance.py", false),   // #10780
         ("scripts/relay_supersession.py", false), // #10960
         ("docs/architect/voice.md", false),
     ] {
