@@ -5,10 +5,14 @@
 //! check on startup surfaces new releases without blocking the REPL.
 //! What: `check_for_update()` GETs the GitHub releases API with a 10s
 //! timeout, compares semver tags to CARGO_PKG_VERSION, returns Some if
-//! newer. `UpdateInfo` carries the tag and release URL for display. It makes
-//! no request when `TRUSTY_NO_UPDATE_CHECK` or `CI` is set (#11075).
+//! newer. `UpdateInfo` carries the tag and release URL for display.
+//! `check_for_update_on_startup()` is the automatic start-time check; it makes
+//! no request when `TRUSTY_NO_UPDATE_CHECK` or `CI` is set (#11075). The
+//! explicit `/update` command keeps calling `check_for_update()`, which always
+//! checks, as `trusty_common::update` leaves its explicit paths unguarded.
 //! Test: `parse_version_tag_strips_v_prefix`, `newer_version_detected`,
-//! `check_for_update_skips_network_when_opted_out`.
+//! `startup_check_skips_network_when_opted_out`,
+//! `explicit_check_reaches_network_when_opted_out`.
 
 use serde::Deserialize;
 use trusty_common::update::NO_UPDATE_CHECK_ENV;
@@ -71,28 +75,57 @@ fn update_check_suppressed(env: impl Fn(&str) -> Option<String>) -> bool {
         .any(|key| env(key).is_some_and(|v| !v.is_empty()))
 }
 
-/// Check GitHub releases for a newer version. Non-blocking, 10s timeout.
-/// Returns `Some(UpdateInfo)` when a newer release exists, `None` otherwise
-/// (including network failures — the check is best-effort, and an opt-out
-/// via `TRUSTY_NO_UPDATE_CHECK` or `CI`).
-pub async fn check_for_update() -> Option<UpdateInfo> {
-    check_for_update_from(RELEASES_URL, |key| std::env::var(key).ok()).await
+/// What started an update check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// The automatic start-time check; honours the opt-out.
+    Startup,
+    /// The user's `/update` command; always checks.
+    Explicit,
 }
 
-/// Body of [`check_for_update`] with the URL and env lookup injected.
+/// Check GitHub releases for a newer version. Non-blocking, 10s timeout.
+/// Returns `Some(UpdateInfo)` when a newer release exists, `None` otherwise
+/// (including network failures — the check is best-effort). Used by the
+/// explicit `/update` command, so it ignores `TRUSTY_NO_UPDATE_CHECK` and `CI`.
+pub async fn check_for_update() -> Option<UpdateInfo> {
+    check_for_update_from(RELEASES_URL, Trigger::Explicit, |key| {
+        std::env::var(key).ok()
+    })
+    .await
+}
+
+/// The automatic start-time update check.
+///
+/// Why: DOC-90 §7 — the unasked-for check must stay off the network when
+/// `TRUSTY_NO_UPDATE_CHECK` or `CI` is set (#11075).
+/// What: like [`check_for_update`], but returns `None` with no request when
+/// the environment opts out.
+/// Test: `startup_check_skips_network_when_opted_out`.
+pub async fn check_for_update_on_startup() -> Option<UpdateInfo> {
+    check_for_update_from(RELEASES_URL, Trigger::Startup, |key| {
+        std::env::var(key).ok()
+    })
+    .await
+}
+
+/// Body of both checks with the URL, trigger and env lookup injected.
 ///
 /// Why: lets a test point the request at a local listener and set the
 /// opt-out without touching process env.
-/// What: returns `None` before building a client when opted out; otherwise
-/// GETs `releases_url` and compares the tag to `CARGO_PKG_VERSION`.
-/// Test: `check_for_update_skips_network_when_opted_out`,
-/// `check_for_update_reaches_network_when_not_opted_out`.
+/// What: for [`Trigger::Startup`], returns `None` before building a client
+/// when opted out; otherwise GETs `releases_url` and compares the tag to
+/// `CARGO_PKG_VERSION`.
+/// Test: `startup_check_skips_network_when_opted_out`,
+/// `startup_check_reaches_network_when_not_opted_out`,
+/// `explicit_check_reaches_network_when_opted_out`.
 async fn check_for_update_from(
     releases_url: &str,
+    trigger: Trigger,
     env: impl Fn(&str) -> Option<String>,
 ) -> Option<UpdateInfo> {
-    // #11075: honour the shared opt-out before any network request.
-    if update_check_suppressed(env) {
+    // #11075: only the automatic check honours the opt-out; `/update` always checks.
+    if trigger == Trigger::Startup && update_check_suppressed(env) {
         tracing::trace!("update check suppressed by env var");
         return None;
     }
@@ -181,10 +214,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_for_update_skips_network_when_opted_out() {
+    async fn startup_check_skips_network_when_opted_out() {
         for pairs in [&[(NO_UPDATE_CHECK_ENV, "1")][..], &[(CI_ENV, "true")][..]] {
             let (url, hits) = counting_listener().await;
-            assert!(check_for_update_from(&url, env_of(pairs)).await.is_none());
+            let got = check_for_update_from(&url, Trigger::Startup, env_of(pairs)).await;
+            assert!(got.is_none());
             let n = hits.load(std::sync::atomic::Ordering::SeqCst);
             assert_eq!(
                 n, 0,
@@ -196,10 +230,27 @@ mod tests {
     /// Control: the listener does see a request when nothing opts out, so the
     /// zero-connection assertion above can fail.
     #[tokio::test]
-    async fn check_for_update_reaches_network_when_not_opted_out() {
+    async fn startup_check_reaches_network_when_not_opted_out() {
         let (url, hits) = counting_listener().await;
-        assert!(check_for_update_from(&url, env_of(&[])).await.is_none());
+        let got = check_for_update_from(&url, Trigger::Startup, env_of(&[])).await;
+        assert!(got.is_none());
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The explicit `/update` path is a user request, so the opt-out that
+    /// silences the start-time check must not silence it (#11075).
+    #[tokio::test]
+    async fn explicit_check_reaches_network_when_opted_out() {
+        for pairs in [&[(NO_UPDATE_CHECK_ENV, "1")][..], &[(CI_ENV, "true")][..]] {
+            let (url, hits) = counting_listener().await;
+            let got = check_for_update_from(&url, Trigger::Explicit, env_of(pairs)).await;
+            assert!(got.is_none());
+            let n = hits.load(std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(
+                n, 1,
+                "{pairs:?}: /update must still check, got {n} connection(s)"
+            );
+        }
     }
 
     #[test]

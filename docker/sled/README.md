@@ -219,6 +219,11 @@ Not yet enforced by the binaries:
 - `HF_HUB_OFFLINE`: the pinned hf-hub does not read it (DOC-90 OQ-4); the
   `:ro` model cache and the allowlist carry the guarantee.
 
+Embedding models reach the sled only through the read-only host mount that
+`launch.sh --models DIR` adds at `/models/fastembed`; the image does not bake
+them. `HF_HUB_OFFLINE=1` stays in the image as declared config (DOC-90
+section 7).
+
 ## Tailscale
 
 `tailscaled` runs in the `tm-trusty-cloud-sled-tailscale` sidecar as the
