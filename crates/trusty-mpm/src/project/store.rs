@@ -87,6 +87,14 @@ pub enum ProjectStoreError {
         existing: String,
         name: String,
     },
+
+    /// A `~`-spelled `repo_url` could not be resolved to a readable checkout,
+    /// so no key is minted for it (#10604).
+    #[error("cannot register {repo_url}: {reason}")]
+    UnresolvableHomePath {
+        repo_url: String,
+        reason: &'static str,
+    },
 }
 
 /// Map the shared locked-RMW failure modes onto the store's own error type.
@@ -332,9 +340,11 @@ impl ProjectStore {
             }
             // Lazy: an absolute-path `repo_url` shells out to git, so mint only
             // when neither the store nor the caller supplied a key.
-            let key = stored
-                .or(project.project_key.take())
-                .unwrap_or_else(|| super::project_key::assign_project_key(&project.repo_url));
+            // #10604: an unresolvable `~` checkout is refused, not keyed `local:`.
+            let key = match stored.or(project.project_key.take()) {
+                Some(key) => key,
+                None => super::project_key::assign_project_key(&project.repo_url)?,
+            };
             // #10530: only a NEW name can be refused; an existing record
             // (including a legacy one sharing a repo) is always updatable.
             if is_new
