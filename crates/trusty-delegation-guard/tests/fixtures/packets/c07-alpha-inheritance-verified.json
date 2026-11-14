@@ -1,0 +1,30 @@
+{
+  "case_id": "c07-alpha-inheritance-verified",
+  "project_id": "alpha",
+  "boundary": "contract",
+  "description": "Prepare release notes",
+  "subagent_type": "writer",
+  "model": null,
+  "run_in_background": false,
+  "prompt": "Draft release notes from the synthetic changelog fragments.",
+  "rules": [
+    {
+      "rule_id": "alpha-push-1",
+      "source_kind": "claude_md",
+      "source_ref": "CLAUDE.md",
+      "span_start": 0,
+      "text": "Never push to the release-train branch.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [
+    {
+      "rule_id": "alpha-push-1",
+      "via": "claude_md_chain",
+      "verified": true,
+      "evidence": "synthetic sentinel quote"
+    }
+  ],
+  "worker_state": null
+}
