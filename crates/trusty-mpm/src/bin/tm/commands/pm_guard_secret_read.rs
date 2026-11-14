@@ -44,8 +44,9 @@
 //! Round 6 closes what round 5's word scan let through and withdraws what it
 //! took too much of. A GLOB is now kept whole in the word rather than cut at
 //! its wildcard, so `cat .en?`, `cat .e*` and `cat id_[r]sa` reach the same
-//! pattern screen the `Grep` `glob` arm uses (see [`is_path_byte`] and
-//! [`normalize_bracket_classes`]). The scan reads the LEXER'S tokens when the
+//! pattern screen the `Grep` `glob` arm uses (see `is_path_byte` and
+//! [`normalize_bracket_classes`](crate::commands::pm_guard_secret_words::normalize_bracket_classes)).
+//! The scan reads the LEXER'S tokens when the
 //! segment lexes, so `cat '.en''v'` and `cat .e\nv` no longer hide the name in
 //! quoting (see [`secret_words_in_segment`]); the raw byte scan stays as the
 //! fail-closed arm for a segment no lexer can read. `git add` loses its grant
@@ -382,9 +383,8 @@ use crate::commands::pm_guard_bash::{
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
-use crate::commands::pm_guard_secret_words::{
-    is_path_byte, normalize_bracket_classes, scan_spellings,
-};
+use crate::commands::pm_guard_secret_brackets::{bracket_readings, glob_readings, path_words};
+use crate::commands::pm_guard_secret_words::scan_spellings;
 // #7557: the position rules moved out when the structure check pushed this
 // file over the 500-SLOC cap.
 use crate::commands::pm_guard_secret_positions::{
@@ -531,7 +531,7 @@ fn is_ssh_public_key_name(basename: &str) -> bool {
 /// key. Both are read-side answers: the copy rule calls
 /// [`is_secret_read_target`] directly and is unchanged by either (#7266
 /// round 6).
-/// What: basename, then [`normalize_bracket_classes`], then
+/// What: basename, then every [`bracket_readings`] name, each judged by
 /// [`is_ssh_public_key_name`] as an exemption, then [`is_secret_read_target`].
 /// Under [`Scan::ProgramText`] a regex-quantifier word is released when its
 /// literal core names nothing; an UNRESOLVABLE brace shape fails closed there
@@ -545,12 +545,19 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     if names_a_process_manager_dump(path) {
         return true;
     }
-    let base = normalize_bracket_classes(&command_basename(path));
-    if base.is_empty() || is_ssh_public_key_name(&base) {
+    // #10761: a bracket class is judged by every name it can reach; a word
+    // the guard cannot read denies.
+    bracket_readings(&command_basename(path))
+        .is_none_or(|readings| readings.iter().any(|base| reading_denies(base, scan)))
+}
+
+/// [`denies_as_a_read_target`] for one bracket-free reading of a basename.
+fn reading_denies(base: &str, scan: Scan) -> bool {
+    if base.is_empty() || is_ssh_public_key_name(base) {
         return false;
     }
     match scan {
-        Scan::Argv => is_secret_read_target(&base),
+        Scan::Argv => is_secret_read_target(base),
         // #7266: `{`, `{p+` and `{cmd` are syntax, not a brace alternation.
         // #7839/#7738/#7744: nor is a `.` plus a quantifier a dotfile glob —
         // in program text it is the regex wildcard. The word is released only
@@ -558,13 +565,13 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
         // literal core must name nothing, so `.env.*` and `*credentials*`
         // still refuse while `.*`, `.*?` and `.*?pen` do not.
         Scan::ProgramText
-            if has_regex_quantifier(&base)
-                && !names_a_secret(&without_glob_metacharacters(&base)) =>
+            if has_regex_quantifier(base)
+                && !names_a_secret(&without_glob_metacharacters(base)) =>
         {
             false
         }
         // See #8878: an unresolvable word fails closed, as in `is_secret_read_target`.
-        Scan::ProgramText => expand_brace_alternatives(&base)
+        Scan::ProgramText => expand_brace_alternatives(base)
             .is_none_or(|candidates| candidates.iter().any(|c| names_a_secret(c))),
     }
 }
@@ -943,7 +950,7 @@ pub(crate) fn inline_program_indices(argv: &[String]) -> Vec<usize> {
 
 /// Every distinct word in `text` that names a secret-bearing file, in order.
 ///
-/// Why: see [`is_path_byte`] — the deny must survive a segment no lexer can
+/// Why: see [`path_words`] — the deny must survive a segment no lexer can
 /// read, so the scan reads bytes rather than tokens.
 /// What: cuts every [`scan_spellings`] reading of `text` at every non-path byte
 /// and keeps the words [`names_a_secret_file`] answers for, without repeats.
@@ -956,12 +963,13 @@ pub(crate) fn inline_program_indices(argv: &[String]) -> Vec<usize> {
 pub(crate) fn secret_files_named_in(text: &str, scan: Scan) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for spelling in scan_spellings(text) {
-        for word in spelling.split(|c: char| !is_path_byte(c)) {
-            if word.is_empty() || !names_a_secret_file(word, scan) {
+        // #10761: a bracket expression stays whole through the cut.
+        for word in path_words(&spelling) {
+            if !names_a_secret_file(&word, scan) {
                 continue;
             }
-            if !out.iter().any(|seen| seen == word) {
-                out.push(word.to_string());
+            if !out.contains(&word) {
+                out.push(word);
             }
         }
     }
@@ -988,19 +996,29 @@ pub(crate) fn names_a_secret_file(word: &str, scan: Scan) -> bool {
     if names_a_process_manager_dump(word) {
         return true;
     }
-    let base = normalize_bracket_classes(&command_basename(word));
+    // #10761: a bracket class is judged by every name it can reach; a word
+    // the guard cannot read denies.
+    bracket_readings(&command_basename(word)).is_none_or(|readings| {
+        readings
+            .iter()
+            .any(|base| reading_names_a_secret_file(base, word, scan))
+    })
+}
+
+/// [`names_a_secret_file`] for one bracket-free reading `base` of `word`.
+fn reading_names_a_secret_file(base: &str, word: &str, scan: Scan) -> bool {
     // #10570: a `token*` usage tally is no token file.
-    if token_tally::is_token_tally(&base) {
+    if token_tally::is_token_tally(base) {
         return false;
     }
-    if base.is_empty() || !denies_as_a_read_target(&base, scan) {
+    if base.is_empty() || !denies_as_a_read_target(base, scan) {
         return false;
     }
     // #7533: a trailing `.` is a sentence's full stop, not an extension.
-    if base.starts_with('.') || has_a_named_extension(&base) {
+    if base.starts_with('.') || has_a_named_extension(base) {
         return true;
     }
-    if !matches_only_name_substring_family(&base) {
+    if !matches_only_name_substring_family(base) {
         return true;
     }
     word.contains('/') && !word.ends_with('/')
@@ -1231,6 +1249,7 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// tree-wide search and allow. Fails CLOSED on a `glob` whose brace alternation
 /// the shared expander cannot resolve, exactly as the copy rule does.
 /// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
+/// `a_grep_glob_class_carrying_a_slash_is_read_whole`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
 /// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`,
 /// `allows_a_grep_glob_that_targets_no_credential_family`,
@@ -1242,7 +1261,15 @@ fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> 
         return Some(deny_reason(path, "the `Grep` tool"));
     }
     let glob = string_field(tool_input, "glob")?;
-    denies_as_a_read_target(glob, Scan::Argv).then(|| deny_reason(glob, "a `Grep` glob"))
+    // #10761: globset reads a `/` inside a class as a member, so the class is
+    // read before the basename cut.
+    let denies = names_a_process_manager_dump(glob)
+        || glob_readings(glob).is_none_or(|readings| {
+            readings
+                .iter()
+                .any(|r| reading_denies(&command_basename(r), Scan::Argv))
+        });
+    denies.then(|| deny_reason(glob, "a `Grep` glob"))
 }
 
 /// A non-empty string field of a tool-input object.
@@ -1416,7 +1443,8 @@ mod tests {
     // caller of them, so its tests stay the place they are exercised.
     use crate::commands::pm_guard_secret_words::{
         bounded_brace_readings, drop_split_orphan_braces, matching_close_brace,
-        rewrite_parameter_expansions, split_parameter_expansion, walk_parameter_expansions,
+        normalize_bracket_classes, rewrite_parameter_expansions, split_parameter_expansion,
+        walk_parameter_expansions,
     };
     // #7557: the position rules this module's tests still own.
     use crate::commands::pm_guard_secret_positions::{
