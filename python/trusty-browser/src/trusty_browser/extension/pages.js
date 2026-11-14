@@ -147,7 +147,7 @@ globalThis.TrustyPages = (() => {
 TrustyPages.commands = deps => {
   const {pageProbe, pageRead, pageClick, pageType, urlAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
-  const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed"];
+  const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
@@ -156,7 +156,7 @@ TrustyPages.commands = deps => {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
-    grant_end:{reason:v => REASONS.includes(v)},
+    grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
   const none = {access:false, document:null, origin:null, title:null};
@@ -259,7 +259,8 @@ TrustyPages.commands = deps => {
         !Object.entries(spec).every(([k, ok]) => ok(req[k]))) throw refuse("InvalidRequest");
     if (await deps.identity() !== req.email) throw refuse("ProfileMismatch");
     if (req.op === "grant_end") {
-      await deps.endGrant(req.grant);
+      // grant_end refuses only a malformed frame or another account; an unknown grant is already ended.
+      try { await deps.ended(req.grant, req.last); } catch { /* The next acknowledgement prunes the row. */ }
       return {id:req.id, ok:true, email:req.email, result:"ended"};
     }
     const row = await deps.grant(req.grant);
@@ -285,78 +286,3 @@ TrustyPages.commands = deps => {
   return {command, failure, probe, handles:op => Object.hasOwn(SPECS, op)};
 };
 
-// The popup's code flow, built by the worker with its grant-table helpers (#11239).
-TrustyPages.popup = deps => {
-  const {bootstrap, credential, identity, changeTable, endGrant, keepListed, watchMints, watchers,
-    pageOps, tabId} = deps;
-  async function mint(msg, cred) {
-    const {scope} = msg;
-    if (!["tab","profile"].includes(scope) || (scope === "tab") !== Object.hasOwn(msg, "tab") ||
-        (scope === "tab" && !tabId(msg.tab))) throw new Error("InvalidMint");
-    if (scope === "tab" && !(await pageOps().probe(msg.tab)).access) throw new Error("PermissionNeeded");
-    const reply = await bootstrap({op:"mint", ...cred, scope, ...(scope === "tab" ? {tab:msg.tab} : {})});
-    const {code, grant, expires_at} = reply;
-    if (typeof grant !== "string" || !/^g-[0-9a-f]{1,64}$/.test(grant)) throw new Error("Invalid mint reply");
-    try {
-      if (typeof code !== "string" || !/^tb-[0-9A-Z]{6}(-[0-9A-Z]{6}){3}$/.test(code) || reply.scope !== scope ||
-          (scope === "tab" && reply.tab !== msg.tab) || !Number.isFinite(expires_at)) throw new Error("Invalid mint reply");
-      for (const fresh of watchers) fresh.add(grant);
-      await changeTable(t => ({...t, [grant]:{scope, tab:scope === "tab" ? msg.tab : null}}));
-    } catch (error) {
-      // A code the worker cannot honour is cancelled rather than left redeemable.
-      try { await bootstrap({op:"revoke_grant", ...cred, grant}); } catch { /* It expires within CODE_TTL. */ }
-      throw new Error(error.message === "Invalid mint reply" ? error.message : "Could not record the grant.");
-    }
-    chrome.alarms.create("code-expiry:" + grant, {when:expires_at * 1000 + 1000});
-    return {ok:true, code, grant, scope, profile:reply.profile, ...(scope === "tab" ? {tab:msg.tab} : {}), expires_at};
-  }
-  // Why: the popup's code flow — preview, mint, list and revoke — with the permission settled on every exit.
-  // What: routes one popup message; after any failure the table is re-settled so a permission the click
-  //   requested is dropped when no grant exists.
-  // Test: tests/test_worker.mjs `code preview probes the tab the popup names and never the active tab`, `failure branches never leave a grant usable or a permission held`.
-  async function codeSetup(msg) {
-    if (msg.type === "code_preview") {
-      if (msg.tab !== null && !tabId(msg.tab)) throw new Error("InvalidRequest");
-      const {enrollment} = await chrome.storage.local.get("enrollment");
-      const email = await identity();
-      const seen = msg.tab === null ? null : await pageOps().probe(msg.tab);
-      return {ok:true, paired:!!enrollment && enrollment.email === email, email, profile:enrollment?.profile ?? null,
-        target:seen && {tab:msg.tab, access:seen.access, origin:seen.origin, title:seen.title}};
-    }
-    try {
-      const cred = await credential();
-      if (msg.type === "mint") return await mint(msg, cred);
-      if (msg.type === "grants") {
-        const fresh = watchMints();
-        let reply;
-        try { reply = await bootstrap({op:"grants", ...cred}); } catch (error) { watchers.delete(fresh); throw error; }
-        if (!Array.isArray(reply.grants)) { watchers.delete(fresh); throw new Error("Invalid grants reply"); }
-        await keepListed(new Set(reply.grants.map(entry => entry?.grant)), fresh);
-        const grants = await Promise.all(reply.grants.map(async entry => {
-          if (entry?.scope !== "tab" || !tabId(entry.tab)) return entry;
-          const seen = await pageOps().probe(entry.tab);
-          return {...entry, origin:seen.origin, title:seen.title};
-        }));
-        return {ok:true, grants};
-      }
-      if (msg.type === "revoke_grant") {
-        if (typeof msg.grant !== "string" || !msg.grant) throw new Error("InvalidRequest");
-        try {
-          const {revoked} = await bootstrap({op:"revoke_grant", ...cred, grant:msg.grant});
-          await endGrant(msg.grant);
-          return {ok:true, revoked};
-        } catch (error) {
-          if (error.response?.error === "UnknownGrant") await endGrant(msg.grant);
-          throw error;
-        }
-      }
-      const {revoked} = await bootstrap({op:"revoke_grants", ...cred});
-      await changeTable(() => ({}));
-      return {ok:true, revoked};
-    } catch (error) {
-      await changeTable(t => t).catch(() => {});
-      throw error;
-    }
-  }
-  return codeSetup;
-};

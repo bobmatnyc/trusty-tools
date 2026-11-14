@@ -6,6 +6,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
 const pagesSource = await readFile(new URL("../src/trusty_browser/extension/pages.js",import.meta.url),"utf8");
+const codesSource = await readFile(new URL("../src/trusty_browser/extension/codes.js",import.meta.url),"utf8");
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
 const profile = "example", email = "qa@example.org", secret = "a".repeat(64);
 const route = "http://127.0.0.1:1234/app";
@@ -31,17 +32,17 @@ async function fixture() {
       return {ok:true,url:route,account:"site-user",result:{count:0}};
     }},alarms:{onAlarm:event(),create(){}}};
   const ctx = vm.createContext({TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
-  ctx.importScripts = (...files) => { if (files.includes("pages.js")) vm.runInContext(pagesSource,ctx); };
+  ctx.importScripts = (...files) => { vm.runInContext(pagesSource,ctx); vm.runInContext(codesSource,ctx); };
   vm.runInContext(source,ctx);
   for (let i=0;!sent.length && i<50;i++) await new Promise(r=>setImmediate(r));
   assert.equal(sent[0]?.type,"hello");
   return {chrome,port,sent,actions,timers,switchAccount(){user="other@example.org";}};
 }
 
-function sign(role,h,serverNonce) {
+function sign(role,h,serverNonce,key=secret) {
   const data = JSON.stringify(["trusty-browser-native-v1",role,"chrome-extension://"+id,
     h.profile,h.email,h.incarnation,h.nonce,serverNonce]);
-  return createHmac("sha256",secret).update(data).digest("hex");
+  return createHmac("sha256",key).update(data).digest("hex");
 }
 
 test("extension does not reveal its key or sign a forged broker challenge", async () => {
@@ -59,7 +60,7 @@ test("valid role-bound proofs admit a pinned top-level document and recheck Chro
   const h=f.sent[0], nonce="b".repeat(64);
   await f.port.onMessage.fire({type:"challenge",proof:sign("broker",h,nonce),nonce});
   assert.equal(f.sent[1].proof,sign("extension",h,nonce));
-  await f.port.onMessage.fire({ok:true,generation:"g1"});
+  await f.port.onMessage.fire({ok:true,generation:"g1",live:[]});
   f.chrome.runtime.onConnect.fire({sender:{id,url:route,frameId:0,tab:{id:7},documentId:"doc1"},
     name:"qa-document",onDisconnect:event()});
   const req = {id:"a",op:"inspect",url:route,email,account:"site-user"};
@@ -85,34 +86,38 @@ test("duplicate authenticated registration backs off then reconnects with fresh 
   assert.equal(hello.type,"hello");
   assert.notEqual(hello.nonce,f.sent[0].nonce);
   await challenge(hello);
-  await f.port.onMessage.fire({ok:true,generation:"new-connection"});
+  await f.port.onMessage.fire({ok:true,generation:"new-connection",live:[]});
   assert.equal(f.sent.at(-1).proof,sign("extension",hello,nonce));
 });
 
-// ---- #11239: activation-code grants and page commands -------------------------------------------
-const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
+// ---- #11239: activation-code grants, pairing and page commands -----------------------------------
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r)); };
 const plain = value => JSON.parse(JSON.stringify(value));
 const CODE = "tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA";
+const ENROLLED = {enrollment:{profile, key:secret, email, workflow:"w", url:route, account:"a"}};
+const PAIRED = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, key:"b".repeat(64)}};
 
-// A browser with explicit tabs, a fake broker behind the enrollment host, and a real worker table.
-async function codeFixture({session:seed = {}, held = false, tabs:layout, live = []} = {}) {
+// A browser with explicit tabs, a fake broker behind both native hosts, and the real worker table.
+async function codeFixture({session:seed = {}, held = false, tabs:layout, live = [], local:localSeed = ENROLLED,
+  ack} = {}) {
   const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [];
-  const timers = new Map(); let serial = 0, mintSerial = 0;
+  const timers = new Map(); let serial = 0, mintSerial = 0, generation = 0;
   const tabs = new Map(Object.entries(layout || {
     7:{origin:"https://a.test", title:"Alpha", active:true},
     8:{origin:"https://b.test", title:"Beta", active:false},
     9:{origin:"https://c.test", title:"Gamma", active:false},
   }).map(([id, t]) => [Number(id), {doc:"doc-" + id, ...t}]));
-  const perms = {held, removed:0};
+  const perms = {held, removed:0, requested:0};
   const sessionStore = {incarnation:"epoch-1", ...structuredClone(seed)};
+  const localStore = structuredClone(localSeed);
   const failures = {sessionSet:false};
   const listeners = new Set();
   const ok = {grants:[...live]};
-  let broker = msg => {
+  const fakeBroker = msg => {
     if (msg.op === "mint") {
       const grant = "g-" + String(++mintSerial).padStart(12, "0");
       ok.grants.push({grant, scope:msg.scope, ...(msg.scope === "tab" ? {tab:msg.tab} : {}), state:"code", expires_in_s:300});
-      return {ok:true, code:CODE, grant, scope:msg.scope, profile, ...(msg.scope === "tab" ? {tab:msg.tab} : {}),
+      return {ok:true, code:CODE, grant, scope:msg.scope, profile:msg.profile, ...(msg.scope === "tab" ? {tab:msg.tab} : {}),
         expires_at:Date.now() / 1000 + 300};
     }
     if (msg.op === "grants") return {ok:true, grants:ok.grants};
@@ -122,17 +127,19 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       return before === ok.grants.length ? {ok:false, error:"UnknownGrant"} : {ok:true, revoked:1};
     }
     if (msg.op === "revoke_grants") { const revoked = ok.grants.length; ok.grants = []; return {ok:true, revoked}; }
+    if (msg.op === "pair" || msg.op === "unpair") return {ok:true, profile:msg.profile};
     return {ok:false, error:"InvalidRequest"};
   };
+  let broker = fakeBroker;
   const accessible = t => t && (t.activeTab || (perms.held && t.origin.startsWith("https:")));
   const native = {onMessage:event(), onDisconnect:event(), postMessage(m){sent.push(m);}, disconnect(){this.closed = true;}};
   const chrome = {
     runtime:{id, onConnect:event(), onMessage:event(), onStartup:event(), onInstalled:event(),
       connectNative(name) {
-        if (name === "com.trusty.browser") return native;
+        if (name === "com.trusty.browser") { native.closed = false; return native; }
         const port = {onMessage:event(), onDisconnect:event(), disconnect(){},
           postMessage(msg) {
-            brokerCalls.push(msg);
+            brokerCalls.push(structuredClone(msg));
             queueMicrotask(() => {
               const reply = broker(msg);
               if (reply === "disconnect") port.onDisconnect.fire(); else port.onMessage.fire(reply);
@@ -141,14 +148,17 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         return port;
       }},
     storage:{
-      local:{setAccessLevel:async()=>{}, get:async()=>({enrollment:{profile, key:secret, email, workflow:"w", url:route, account:"a"}})},
+      local:{setAccessLevel:async()=>{},
+        get:async keys => Object.fromEntries([keys].flat().map(k => [k, structuredClone(localStore[k])])),
+        set:async data => { Object.assign(localStore, structuredClone(data)); },
+        remove:async keys => { for (const k of [keys].flat()) delete localStore[k]; }},
       session:{
         get:async key => ({[key]:structuredClone(sessionStore[key])}),
         set:async data => { if (failures.sessionSet) throw new Error("quota"); Object.assign(sessionStore, structuredClone(data)); },
       }},
     identity:{getProfileUserInfo:async()=>({email}), onSignInChanged:event()},
     permissions:{
-      request:async()=>{ perms.held = true; return true; },
+      request:async()=>{ perms.requested++; perms.held = true; return true; },
       contains:async()=>perms.held,
       remove:async()=>{ perms.removed++; const was = perms.held; perms.held = false; return was; },
     },
@@ -184,12 +194,18 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
     setTimeout:(fn, ms) => { timers.set(++serial, {fn, ms}); return serial; }, clearTimeout:t => timers.delete(t)});
-  ctx.importScripts = (...files) => { if (files.includes("pages.js")) vm.runInContext(pagesSource, ctx); };
+  ctx.importScripts = () => { vm.runInContext(pagesSource, ctx); vm.runInContext(codesSource, ctx); };
   vm.runInContext(source, ctx);
   await settle();
-  const hello = sent[0], nonce = "d".repeat(64);
-  await native.onMessage.fire({type:"challenge", proof:sign("broker", hello, nonce), nonce});
-  await native.onMessage.fire({ok:true, generation:"g1"});
+  // The broker's pairing acknowledgement; `liveIds` defaults to everything the fake broker lists.
+  const handshake = async liveIds => {
+    const hello = sent.findLast(m => m.type === "hello"), nonce = "d".repeat(64);
+    const key = (localStore.enrollment || localStore.pairing).key;
+    await native.onMessage.fire({type:"challenge", proof:sign("broker", hello, nonce, key), nonce});
+    await native.onMessage.fire({ok:true, generation:"g" + ++generation, live:liveIds ?? ok.grants.map(g => g.grant)});
+    await settle();
+  };
+  if (ack !== false && sent.length) await handshake(ack);
   let seq = 0;
   const command = async (op, fields = {}) => {
     const id = "c" + ++seq;
@@ -198,10 +214,20 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return plain(sent.findLast(m => m.id === id));
   };
   const popup = msg => new Promise(resolve =>
-    chrome.runtime.onMessage.fire(msg, {id, url:"chrome-extension://" + id + "/setup.html"}, resolve)).then(plain);
+    chrome.runtime.onMessage.fire(msg, {id, url:"chrome-extension://" + id + "/setup.html"}, resolve)).then(async reply => {
+    await settle();
+    return plain(reply);
+  });
   const table = () => plain(sessionStore.grants || {});
   return {chrome, native, sent, ran, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
-    sessionStore, command, popup, table, live:ok, setBroker(fn){ broker = fn; }};
+    sessionStore, localStore, command, popup, table, handshake, live:ok, fakeBroker,
+    setBroker(fn){ broker = fn; },
+    end:(grant, last, reason = "closed") => command("grant_end", {grant, reason, last}),
+    // The broker's own end: it drops the grant from its list, then sends grant_end with `last`.
+    brokerEnds(grant, reason = "revoked") {
+      ok.grants = ok.grants.filter(g => g.grant !== grant);
+      return command("grant_end", {grant, reason, last:ok.grants.length === 0});
+    }};
 }
 const mintTab = async (f, tab) => {
   await f.chrome.permissions.request({origins:["https://*/*"]});
@@ -220,6 +246,10 @@ test("a tab grant never reaches another tab", async () => {
     assert.deepEqual(reply, {id:reply.id, ok:false, error:"OutOfScope", tab:8}, op);
   }
   assert.deepEqual({ran:f.ran.length, updates:f.updates.length}, before);
+  // The redeem probe names the granted tab and the grant explicitly.
+  const probe = await f.command("page_tab", {grant, tab:7});
+  assert.deepEqual(probe, {id:probe.id, ok:true, email, tab:7,
+    result:{access:true, document:"doc-7", origin:"https://a.test", title:"A"}});
   const listed = await f.command("page_tabs", {grant});
   assert.deepEqual(listed.result.tabs.map(t => t.tab), [7]);
   assert.equal((await f.command("page_read", {grant, tab:7, document:null})).ok, true);
@@ -244,8 +274,6 @@ test("stale document refuses before the page runs", async () => {
 test("without the all-https permission only the clicked tab is readable", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
     9:{origin:"https://c.test", title:"C", active:false}}});
-  f.chrome.permissions.request = async () => false;
-  await f.chrome.permissions.request();
   const minted = await f.popup({type:"mint", scope:"profile"});
   assert.equal(minted.ok, true);
   const {grant} = minted;
@@ -264,12 +292,12 @@ test("ended grants answer UnknownGrant and the badge clears with the table", asy
   const f = await codeFixture();
   const a = (await mintTab(f, 7)).grant, b = (await f.popup({type:"mint", scope:"profile"})).grant;
   assert.equal(f.badge.at(-1), 2);
-  assert.equal((await f.command("grant_end", {grant:a, reason:"closed"})).result, "ended");
+  assert.equal((await f.brokerEnds(a, "closed")).result, "ended");
   assert.equal((await f.command("page_tab", {grant:a, tab:7})).error, "UnknownGrant");
   assert.equal((await f.popup({type:"revoke_grant", grant:b})).revoked, 1);
   assert.equal((await f.command("page_tabs", {grant:b})).error, "UnknownGrant");
   assert.equal((await f.command("page_tabs", {grant:"g-000000000999"})).error, "UnknownGrant");
-  assert.equal((await f.command("grant_end", {grant:"g-000000000999", reason:"revoked"})).result, "ended");
+  assert.equal((await f.end("g-000000000999", false, "revoked")).result, "ended");
   assert.equal(f.badge.at(-1), 0);
   assert.deepEqual(f.ran, []);
 });
@@ -284,7 +312,10 @@ test("malformed commands are refused before any page work", async () => {
     ["page_read", {grant, tab:"7", document:null}, "InvalidRequest"],
     ["page_click", {grant, tab:7, document:"doc-7", ref:"#go"}, "InvalidRequest"],
     ["page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:5}, "InvalidRequest"],
-    ["grant_end", {grant, reason:"bored"}, "InvalidRequest"],
+    ["grant_end", {grant, reason:"bored", last:true}, "InvalidRequest"],
+    ["grant_end", {grant, reason:"closed"}, "InvalidRequest"],
+    ["grant_end", {grant, reason:"closed", last:"yes"}, "InvalidRequest"],
+    ["grant_end", {grant, reason:"closed", last:true, tab:7}, "InvalidRequest"],
   ];
   for (const url of ["javascript:alert(1)", "data:text/html,x", "http://example.org/", "https://u:p@a.test/", "file:///etc", "chrome://settings"]) {
     cases.push(["page_navigate", {grant, tab:7, url}, "InvalidUrl"]);
@@ -295,6 +326,7 @@ test("malformed commands are refused before any page work", async () => {
   assert.equal(f.sent.findLast(m => m.id === "wrong").error, "ProfileMismatch");
   assert.deepEqual({ran:f.ran, updates:f.updates}, {ran:[], updates:[]});
   assert.ok(f.table()[grant]);
+  assert.equal(f.perms.held, true, "a refused grant_end changes nothing");
 });
 
 test("navigate reports access, document and settled", async () => {
@@ -312,36 +344,94 @@ test("navigate reports access, document and settled", async () => {
   assert.equal(f.sent.findLast(m => m.id === "slow").result.settled, false);
 });
 
-test("the all-https permission ends with the last grant by every route", async () => {
-  // Kept while another grant lives; dropped by grant_end, popup revoke and revoke-all.
+test("grant_end with last true removes the permission and last false keeps it", async () => {
   const f = await codeFixture();
   const a = (await mintTab(f, 7)).grant, b = (await f.popup({type:"mint", scope:"profile"})).grant;
-  await f.command("grant_end", {grant:a, reason:"idle"});
-  assert.equal(f.perms.held, true);
-  await f.popup({type:"revoke_grant", grant:b});
-  assert.equal(f.perms.held, false);
-  await mintTab(f, 7); await f.popup({type:"mint", scope:"profile"});
+  const removed = f.perms.removed;
+  assert.deepEqual((await f.end(a, false, "idle")).result, "ended");
+  assert.deepEqual([f.perms.held, Object.keys(f.table()), f.perms.removed], [true, [b], removed]);
+  // The broker still counts a code this worker has no row for: `last: false` keeps the permission.
+  assert.deepEqual((await f.end(b, false, "expired")).result, "ended");
+  assert.deepEqual([f.perms.held, f.table(), f.perms.removed], [true, {}, removed]);
+  assert.deepEqual((await f.end(b, true, "expired")).result, "ended");
+  assert.deepEqual([f.perms.held, f.table(), f.perms.removed], [false, {}, removed + 1]);
+  // Every end reason is accepted; a popup revoke or revoke-all leaves the permission to the broker's end.
+  for (const reason of ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"]) {
+    assert.equal((await f.end("g-000000000777", false, reason)).result, "ended", reason);
+  }
+  const c = (await mintTab(f, 7)).grant;
   await f.popup({type:"revoke_grants"});
+  assert.deepEqual([f.perms.held, f.table()], [true, {}]);
+  await f.end(c, true, "revoked");
+  assert.equal(f.perms.held, false);
+  assert.ok(!f.alarms.some(alarm => alarm.name.startsWith("code-expiry:")), "no worker-side expiry poll");
+});
+
+test("a last end beside a row the broker no longer lists is settled by the broker list", async () => {
+  // b's grant_end was lost: the broker list omits it, so `last` for a ends the permission.
+  const f = await codeFixture();
+  const a = (await mintTab(f, 7)).grant, b = (await f.popup({type:"mint", scope:"profile"})).grant;
+  f.live.grants = [];
+  await f.end(a, true);
   assert.deepEqual([f.perms.held, f.table()], [false, {}]);
-  // Browser-side loss ends tab grants; the profile grant keeps the permission until its code expires unredeemed.
-  await mintTab(f, 7);
-  const p = (await f.popup({type:"mint", scope:"profile"})).grant;
+  // A mint the broker counts after its `last` keeps both the row and the permission.
+  const g = await codeFixture();
+  const x = (await mintTab(g, 7)).grant, y = (await g.popup({type:"mint", scope:"profile"})).grant;
+  g.live.grants = g.live.grants.filter(e => e.grant === y);
+  await g.end(x, true);
+  assert.deepEqual([g.perms.held, Object.keys(g.table())], [true, [y]]);
+  assert.ok(b);
+});
+
+test("the pairing acknowledgement prunes the table to its live list", async () => {
+  const rows = {"g-00000000000a":{scope:"profile", tab:null}, "g-00000000000b":{scope:"tab", tab:7}};
+  const f = await codeFixture({session:{grants:rows}, held:true, ack:["g-00000000000a"]});
+  assert.deepEqual([f.perms.held, Object.keys(f.table())], [true, ["g-00000000000a"]]);
+  assert.equal((await f.command("page_tab", {grant:"g-00000000000b", tab:7})).error, "UnknownGrant");
+  // A reconnect whose list is empty ends the last row and the permission.
   f.native.onDisconnect.fire();
   await settle();
-  assert.deepEqual(Object.keys(f.table()), [p]);
-  assert.equal(f.perms.held, true);
-  f.live.grants = [];
-  const expiry = f.alarms.find(alarm => alarm.name === "code-expiry:" + p);
-  assert.ok(expiry.when > Date.now());
-  await f.chrome.alarms.onAlarm.fire({name:expiry.name});
+  assert.deepEqual([f.perms.held, Object.keys(f.table())], [true, ["g-00000000000a"]], "a dropped port alone changes nothing");
+  [...f.timers.values()].find(job => job.ms === 250).fn();
   await settle();
+  await f.handshake([]);
   assert.deepEqual([f.perms.held, f.table()], [false, {}]);
-  // An unreachable broker means no live grant: the minute tick drops the table and the permission.
-  await f.popup({type:"mint", scope:"profile"});
-  f.setBroker(() => "disconnect");
+  // A mint recorded after the hello survives an acknowledgement computed before it.
+  const g = await codeFixture({held:true, ack:false});
+  const fresh = (await g.popup({type:"mint", scope:"profile"})).grant;
+  await g.handshake([]);
+  assert.deepEqual([g.perms.held, Object.keys(g.table())], [true, [fresh]]);
+  // An acknowledgement without a live list is a refused pairing: nothing is pruned or kept on its word.
+  const h = await codeFixture({session:{grants:rows}, held:true, ack:false});
+  const hello = h.sent.at(-1), nonce = "e".repeat(64);
+  await h.native.onMessage.fire({type:"challenge", proof:sign("broker", hello, nonce), nonce});
+  await h.native.onMessage.fire({ok:true, generation:"g9"});
+  await settle();
+  assert.equal(h.native.closed, true);
+  assert.deepEqual(Object.keys(h.table()).length, 2);
+});
+
+test("an unreachable broker ends the table and the permission after the code lifetime", async () => {
+  const f = await codeFixture();
+  const {grant} = await f.popup({type:"mint", scope:"profile"});
+  await f.chrome.permissions.request();
+  f.native.onDisconnect.fire();
+  await settle();
+  assert.ok(Number.isFinite(f.sessionStore.offline_since));
+  await f.chrome.alarms.onAlarm.fire({name:"reconnect"});
+  await settle();
+  assert.deepEqual([f.perms.held, Object.keys(f.table())], [true, [grant]], "a code may still be live");
+  f.sessionStore.offline_since = Date.now() - 361000;
   await f.chrome.alarms.onAlarm.fire({name:"reconnect"});
   await settle();
   assert.deepEqual([f.perms.held, f.table()], [false, {}]);
+  // A connected worker never ends grants on the clock.
+  const g = await codeFixture();
+  await mintTab(g, 7);
+  assert.equal(g.sessionStore.offline_since, null);
+  await g.chrome.alarms.onAlarm.fire({name:"reconnect"});
+  await settle();
+  assert.equal(g.perms.held, true);
 });
 
 test("a restarted worker keeps the permission only for a grant the broker still lists", async () => {
@@ -354,8 +444,6 @@ test("a restarted worker keeps the permission only for a grant the broker still 
   await kept.chrome.alarms.onAlarm.fire({name:"reconnect"});
   await settle();
   assert.deepEqual([kept.perms.held, kept.perms.removed], [true, 0]);
-  const empty = await codeFixture({held:true});
-  assert.equal(empty.perms.held, false, "an empty table never holds the permission");
 });
 
 test("failure branches never leave a grant usable or a permission held", async () => {
@@ -366,12 +454,18 @@ test("failure branches never leave a grant usable or a permission held", async (
   f.setBroker(msg => msg.op === "mint" ? "disconnect" : {ok:true, grants:[]});
   assert.equal((await mintTab(f, 7)).ok, false);
   assert.equal(f.perms.held, false);
+  // A failed mint beside a live grant keeps the permission: the broker list still names it.
+  const kept = {grant:"g-0000000000ab", scope:"profile", state:"active", idle_s:1};
+  f.setBroker(msg => msg.op === "mint" ? {ok:false, error:"AuditUnavailable"} : {ok:true, grants:[kept]});
+  assert.equal((await mintTab(f, 7)).error, "AuditUnavailable");
+  assert.equal(f.perms.held, true);
   const revokes = [];
   f.setBroker(msg => {
     if (msg.op === "revoke_grant") { revokes.push(msg.grant); return {ok:true, revoked:1}; }
     return msg.op === "mint" ? {ok:true, code:"not-a-code", grant:"g-0000000000bb", scope:"tab", tab:7, expires_at:1} : {ok:true, grants:[]};
   });
   assert.equal((await mintTab(f, 7)).error, "Invalid mint reply");
+  assert.equal(f.perms.held, false);
   f.setBroker(msg => {
     if (msg.op === "revoke_grant") { revokes.push(msg.grant); return {ok:true, revoked:1}; }
     return msg.op === "mint" ? {ok:true, code:CODE, grant:"g-0000000000cc", scope:"tab", profile, tab:7, expires_at:1e10} : {ok:true, grants:[]};
@@ -380,7 +474,7 @@ test("failure branches never leave a grant usable or a permission held", async (
   assert.equal((await mintTab(f, 7)).error, "Could not record the grant.");
   f.failures.sessionSet = false;
   assert.deepEqual(revokes, ["g-0000000000bb", "g-0000000000cc"]);
-  assert.deepEqual(f.table(), {});
+  assert.deepEqual([f.perms.held, f.table()], [false, {}]);
   // A page script that fails while its document is current, or answers oddly, is never reported done.
   f.setBroker(msg => msg.op === "mint" ? {ok:true, code:CODE, grant:"g-0000000000dd", scope:"tab", profile, tab:7, expires_at:1e10} : {ok:true, grants:[]});
   const {grant} = await mintTab(f, 7);
@@ -419,7 +513,7 @@ test("code preview probes the tab the popup names and never the active tab", asy
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:false, activeTab:true},
     8:{origin:"https://b.test", title:"B", active:true}}});
   const preview = await f.popup({type:"code_preview", tab:7});
-  assert.deepEqual(preview, {ok:true, paired:true, email, profile,
+  assert.deepEqual(preview, {ok:true, paired:false, email, profile,
     target:{tab:7, access:true, origin:"https://a.test", title:"A"}});
   assert.deepEqual((await f.popup({type:"code_preview", tab:8})).target.access, false);
   assert.equal((await f.popup({type:"code_preview", tab:"7"})).error, "InvalidRequest");
@@ -428,4 +522,89 @@ test("code preview probes the tab the popup names and never the active tab", asy
   const minted = await f.popup({type:"mint", scope:"tab", tab:7});
   assert.deepEqual(plain(f.brokerCalls.at(-1)), {op:"mint", profile, email, key:secret, scope:"tab", tab:7});
   assert.equal(JSON.stringify(f.sessionStore).includes(minted.code), false);
+});
+
+test("a mint without a pairing is refused", async () => {
+  const f = await codeFixture({local:{}, held:true});
+  assert.equal(f.sent.length, 0, "no credential, no hello");
+  for (const msg of [{type:"mint", scope:"profile"}, {type:"mint", scope:"tab", tab:7}, {type:"grants"},
+    {type:"revoke_grants"}, {type:"revoke_grant", grant:"g-000000000001"}]) {
+    assert.equal((await f.popup(msg)).error, "NotEnrolled", msg.type);
+  }
+  assert.deepEqual(f.brokerCalls, []);
+  assert.deepEqual(await f.popup({type:"code_preview", tab:null}), {ok:true, paired:false, email, profile:null, target:null});
+});
+
+test("a paired profile mints, lists and connects with its pairing credential", async () => {
+  const {profile:paired, key} = PAIRED.pairing;
+  const f = await codeFixture({local:PAIRED});
+  assert.deepEqual([f.sent[0].type, f.sent[0].profile], ["hello", paired]);
+  assert.equal(f.native.closed, false);
+  const preview = await f.popup({type:"code_preview", tab:null});
+  assert.deepEqual(preview, {ok:true, paired:true, email, profile:paired, target:null});
+  const minted = await mintTab(f, 7);
+  assert.equal(minted.ok, true);
+  assert.deepEqual(f.brokerCalls.at(-1), {op:"mint", profile:paired, email, key, scope:"tab", tab:7});
+  assert.equal((await f.popup({type:"grants"})).grants[0].grant, minted.grant);
+  assert.deepEqual(f.brokerCalls.at(-1), {op:"grants", profile:paired, email, key});
+  // The workflow controls stay closed while the pairing exists.
+  for (const type of ["activate","enroll","replace"]) {
+    assert.match((await f.popup({type, route:{}, workflow:"w"})).error, /Disconnect it first/);
+  }
+  assert.ok(!f.brokerCalls.some(m => ["enroll","activate","replace","resolve"].includes(m.op)));
+  assert.ok(!JSON.stringify([preview, minted, f.sessionStore]).includes(key), "the key never leaves its frames");
+});
+
+test("pair records the pairing only on ok and retries with the same fields", async () => {
+  const f = await codeFixture({local:{}, held:true});
+  f.setBroker(msg => msg.op === "pair" ? "disconnect" : f.fakeBroker(msg));
+  const first = await f.popup({type:"pair"});
+  assert.equal(first.ok, false);
+  const pending = f.localStore.pairing_pending;
+  assert.match(pending.profile, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.match(pending.key, /^[0-9a-f]{64}$/);
+  assert.deepEqual([f.localStore.pairing, f.perms.held, f.sent.length], [undefined, false, 0],
+    "a failed pair leaves no pairing, no permission and no connection");
+  f.setBroker(f.fakeBroker);
+  const done = await f.popup({type:"pair"});
+  assert.deepEqual(done, {ok:true, profile:pending.profile});
+  assert.deepEqual(f.brokerCalls.filter(m => m.op === "pair"), [{op:"pair", ...pending}, {op:"pair", ...pending}]);
+  assert.deepEqual([f.localStore.pairing, f.localStore.pairing_pending], [pending, undefined]);
+  assert.deepEqual([f.sent.at(-1).type, f.sent.at(-1).profile], ["hello", pending.profile], "pairing reconnects the port");
+  assert.ok(!JSON.stringify([first, done]).includes(pending.key));
+  // A definite refusal drops the pending fields so the next Activate starts fresh.
+  const g = await codeFixture({local:{}});
+  g.setBroker(msg => msg.op === "pair" ? {ok:false, error:"EnrollmentConflict"} : g.fakeBroker(msg));
+  assert.equal((await g.popup({type:"pair"})).error, "EnrollmentConflict");
+  assert.deepEqual([g.localStore.pairing, g.localStore.pairing_pending], [undefined, undefined]);
+  // A workflow enrollment is never paired over.
+  const h = await codeFixture();
+  assert.match((await h.popup({type:"pair"})).error, /workflow enrollment/);
+  assert.ok(!h.brokerCalls.some(m => m.op === "pair"));
+});
+
+test("unpair removes the permission and the pairing record", async () => {
+  const {profile:paired, key} = PAIRED.pairing;
+  const f = await codeFixture({local:PAIRED});
+  await mintTab(f, 7);
+  const hellos = f.sent.filter(m => m.type === "hello").length;
+  assert.deepEqual(await f.popup({type:"unpair"}), {ok:true, profile:paired});
+  assert.deepEqual(f.brokerCalls.at(-1), {op:"unpair", profile:paired, email, key});
+  assert.deepEqual([f.perms.held, f.table(), f.localStore.pairing], [false, {}, undefined]);
+  assert.equal(f.native.closed, true);
+  assert.equal(f.sent.filter(m => m.type === "hello").length, hellos, "no credential, no new hello");
+  // A retry after a lost reply treats Unauthorized as done; a first Unauthorized is a refusal.
+  const g = await codeFixture({local:PAIRED});
+  await mintTab(g, 7);
+  g.setBroker(msg => msg.op === "unpair" ? "disconnect" : g.fakeBroker(msg));
+  assert.equal((await g.popup({type:"unpair"})).ok, false);
+  assert.equal(g.localStore.pairing.unpairing, true);
+  assert.equal(g.perms.held, true, "a pairing that still stands keeps its grants' permission");
+  g.setBroker(msg => msg.op === "unpair" ? {ok:false, error:"Unauthorized"} : g.fakeBroker(msg));
+  assert.equal((await g.popup({type:"unpair"})).ok, true);
+  assert.deepEqual([g.perms.held, g.table(), g.localStore.pairing], [false, {}, undefined]);
+  const h = await codeFixture({local:PAIRED});
+  h.setBroker(msg => msg.op === "unpair" ? {ok:false, error:"Unauthorized"} : h.fakeBroker(msg));
+  assert.equal((await h.popup({type:"unpair"})).error, "Unauthorized");
+  assert.equal(h.localStore.pairing.profile, paired);
 });

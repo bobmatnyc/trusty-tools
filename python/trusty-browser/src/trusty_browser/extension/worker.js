@@ -1,4 +1,4 @@
-importScripts("indicator.js", "pages.js");
+importScripts("indicator.js", "pages.js", "codes.js");
 const origin = "chrome-extension://" + chrome.runtime.id;
 const documents = new Map();
 let connection = null;
@@ -105,7 +105,8 @@ async function connect() {
   const generation = epoch;
   try {
     await storageReady;
-    const {enrollment} = await chrome.storage.local.get("enrollment");
+    // #11239: a pairing credential says hello exactly as an enrollment one does.
+    const {credential:enrollment} = await codes.stored();
     if (!enrollment) return;
     const email = await identity();
     const hello = {type:"hello", profile:enrollment.profile, email, incarnation:await lifetime,
@@ -118,11 +119,14 @@ async function connect() {
     const valid = () => connection === port && epoch === generation;
     let phase = "challenge";
     const timeout = setTimeout(() => drop(), 5000);
+    // Mints recorded after this hello survive the acknowledgement's prune.
+    const fresh = codes.watchMints();
+    const lost = () => { codes.unwatch(fresh); void codes.offline.lost(); };
     function drop() {
       if (connection !== port) return;
       connection = null;
       void TrustyControlIndicator.clearAll();
-      void endTabGrants();
+      lost();
       clearTimeout(timeout);
       port.disconnect();
       schedule();
@@ -132,7 +136,7 @@ async function connect() {
       if (connection === port) {
         connection = null;
         void TrustyControlIndicator.clearAll();
-        void endTabGrants();
+        lost();
         clearTimeout(timeout);
         void report("Disconnected. Retrying…");
         schedule();
@@ -155,10 +159,12 @@ async function connect() {
           return;
         }
         if (phase === "ready") {
-          if (msg.ok !== true || typeof msg.generation !== "string" || !msg.generation) throw new Error("Pairing refused");
+          if (msg.ok !== true || typeof msg.generation !== "string" || !msg.generation ||
+              !Array.isArray(msg.live) || !msg.live.every(g => typeof g === "string")) throw new Error("Pairing refused");
           phase = "active";
           retryMs = 250;
           clearTimeout(timeout);
+          await codes.acknowledged(msg.live, fresh);
           await report("Connected as " + enrollment.profile);
           return;
         }
@@ -188,7 +194,7 @@ async function connect() {
 function reconnect() {
   epoch++;
   void TrustyControlIndicator.clearAll();
-  void endTabGrants();
+  void codes.offline.lost();
   const port = connection;
   connection = null;
   port?.disconnect();
@@ -252,80 +258,8 @@ function bootstrap(request) {
   });
 }
 
-// #11239: activation-code grants. The table {grant: {scope, tab}} lives in storage.session, so it
-// survives service-worker eviction and empties on browser restart. The optional https://*/* permission
-// is held only while the table is not empty (owner ruling 2026-11-14 17:49Z).
-const CODE_OPS = new Set(["mint","grants","revoke_grant","revoke_grants"]);
-const ALL_HTTPS = {origins:["https://*/*"]};
-const tabId = value => Number.isInteger(value) && value >= 0;
-let tableChain = Promise.resolve();
-function serial(task) {
-  const step = tableChain.then(task);
-  tableChain = step.catch(() => {});
-  return step;
-}
-async function readTable() {
-  await tableChain;
-  const {grants} = await chrome.storage.session.get("grants");
-  return grants && typeof grants === "object" ? grants : {};
-}
-// Why: a permission or badge must never outlive the grants that justify it.
-// What: applies `edit` to the stored table, then sets the badge and drops https://*/* when it is empty.
-// Test: tests/test_worker.mjs `the all-https permission ends with the last grant by every route`.
-function changeTable(edit) {
-  return serial(async () => {
-    const {grants} = await chrome.storage.session.get("grants");
-    const next = edit({...(grants && typeof grants === "object" ? grants : {})});
-    await chrome.storage.session.set({grants:next});
-    const count = Object.keys(next).length;
-    try { await TrustyControlIndicator.grants?.(count); } catch { /* The badge is advisory. */ }
-    if (!count) {
-      try { await chrome.permissions.remove(ALL_HTTPS); } catch { /* The next alarm tick retries. */ }
-    }
-    return next;
-  });
-}
-const endTabGrants = () => changeTable(t => Object.fromEntries(Object.entries(t).filter(([, row]) => row.scope !== "tab")))
-  .catch(() => {});
-const endGrant = grant => changeTable(t => { delete t[grant]; return t; });
-// Each list request watches for mints made while it is in flight, so pruning never drops a fresh grant.
-const watchers = new Set();
-function watchMints() {
-  const fresh = new Set();
-  watchers.add(fresh);
-  return fresh;
-}
-// Keeps only rows the broker still lists, plus rows minted after the list was requested.
-function keepListed(listed, fresh) {
-  watchers.delete(fresh);
-  return changeTable(t => Object.fromEntries(Object.entries(t).filter(([g]) => listed.has(g) || fresh.has(g))));
-}
-async function credential() {
-  const {enrollment} = await chrome.storage.local.get("enrollment");
-  if (!enrollment) throw new Error("NotEnrolled");
-  const email = await identity();
-  if (enrollment.email !== email) throw new Error("The enrolled profile changed.");
-  return {profile:enrollment.profile, email, key:enrollment.key};
-}
-// Why: grant_end is best effort, and the worker can be evicted; the broker's list is the truth.
-// What: asks the broker for this profile's grants and prunes the table. The broker keeps grants in memory
-//   only, so an unreachable or refusing broker means no grant is live and the table empties.
-// Test: tests/test_worker.mjs `the all-https permission ends with the last grant by every route`.
-async function reconcile() {
-  if (!Object.keys(await readTable()).length) return changeTable(t => t);
-  const fresh = watchMints();
-  let listed = new Set();
-  try {
-    const reply = await bootstrap({op:"grants", ...await credential()});
-    if (Array.isArray(reply.grants)) listed = new Set(reply.grants.map(entry => entry?.grant));
-  } catch { /* Fail closed: an unconfirmed grant is not live. */ }
-  return keepListed(listed, fresh);
-}
-async function tick() {
-  let held = false;
-  try { held = await chrome.permissions.contains(ALL_HTTPS); } catch { /* Treated as not held. */ }
-  if (held || Object.keys(await readTable()).length) await reconcile();
-}
+// #11239: activation-code grants, the all-https permission and the pairing live in codes.js.
+const CODE_OPS = new Set(["mint","grants","revoke_grant","revoke_grants","pair","unpair"]);
 let originChain = Promise.resolve();
 const origins = {
   remember(tab, value) {
@@ -342,12 +276,10 @@ const origins = {
   },
 };
 let pageCommands;
-const pageOps = () => pageCommands ||= TrustyPages.commands({identity, endGrant,
-  grant:async grant => (await readTable())[grant] || null, ...origins});
-const codeTypes = ["code_preview","mint","grants","revoke_grant","revoke_grants"];
-let popupFlow;
-const codeSetup = msg => (popupFlow ||= TrustyPages.popup({bootstrap, credential, identity, changeTable, endGrant,
-  keepListed, watchMints, watchers, pageOps, tabId}))(msg);
+const pageOps = () => pageCommands ||= TrustyPages.commands({identity, ended:(grant, last) => codes.ended(grant, last),
+  grant:async grant => (await codes.readTable())[grant] || null, ...origins});
+const codes = TrustyCodes({bootstrap, identity, pageOps, reconnect:() => reconnect()});
+const codeTypes = ["code_preview","pair","unpair","mint","grants","revoke_grant","revoke_grants"];
 let enrollmentBusy = false;
 let replacement = null;
 const definiteRefusals = new Set(["WorkflowCredentialOccupied","InvalidEnrollment","InvalidRequest","Unauthorized","EnrollmentConflict",
@@ -367,7 +299,11 @@ async function setup(msg) {
     if (replacement?.id === msg.confirmation) replacement = null;
     return {ok:true};
   }
-  const {enrollment,pending} = await chrome.storage.local.get(["enrollment","pending"]);
+  const {enrollment,pending,pairing} = await chrome.storage.local.get(["enrollment","pending","pairing"]);
+  // #11239: no workflow enroll, activate or replace while a pairing holds this profile.
+  if (pairing && ["activate","enroll","replace"].includes(msg.type)) {
+    throw new Error("This profile is activated for activation codes. Disconnect it first.");
+  }
   if (msg.type === "preview" && enrollment) {
     const {email,url,account} = enrollment;
     if (await identity() !== email) throw new Error("The enrolled profile changed.");
@@ -459,17 +395,16 @@ async function setup(msg) {
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id || sender.url !== origin + "/setup.html" ||
       ![...codeTypes,"activate","enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
-  (codeTypes.includes(msg.type) ? codeSetup(msg) : setup(msg)).then(reply,error => reply({ok:false,error:error.message}));
+  (codeTypes.includes(msg.type) ? storageReady.then(() => codes.setup(msg)) : setup(msg)).then(reply,error => reply({ok:false,error:error.message}));
   return true;
 });
 chrome.identity.onSignInChanged.addListener(reconnect);
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.alarms.onAlarm.addListener(alarm => {
-  if (alarm.name === "reconnect") { void connect(); void tick().catch(() => {}); }
-  if (alarm.name.startsWith("code-expiry:")) void reconcile().catch(() => {});
+  if (alarm.name === "reconnect") { void connect(); void codes.tick().catch(() => {}); }
 });
 chrome.alarms.create("reconnect", {periodInMinutes:1});
+// A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
+void codes.offline.lost();
 void connect();
-// A restarted worker confirms its table with the broker before it keeps the permission.
-void storageReady.then(reconcile).catch(() => {});
