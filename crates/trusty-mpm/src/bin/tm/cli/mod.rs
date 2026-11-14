@@ -472,8 +472,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_mouse: bool,
         /// The Architect dashboard store root the Architect view reads
-        /// (`a` on the home screen). Until #10944 the daemon does not resolve
-        /// it; afterwards this stays an override (#10966).
+        /// (`a` on the home screen). Optional: without it the daemon resolves
+        /// the root (#10944); given, it overrides that (#10966).
         #[arg(long, env = "TM_ARCHITECT_STORE")]
         architect_store: Option<std::path::PathBuf>,
     },
