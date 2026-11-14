@@ -2043,12 +2043,13 @@ async fn stop_pid_and_restart_pid_refuse_an_undecided_instance_before_any_signal
 // #11085: P is this instance but unserved; Q serves the socket. A restart of
 // P stopped P and then `start` found Q serving, so the daemon reached by pid
 // was down and nothing started; a stop of P could not reach the stopped
-// signal. Both now refuse before any signal.
+// signal. Both now refuse before any signal. Q runs another binary, so the
+// `/proc` scan does not count it and only the socket check can refuse.
 #[tokio::test]
 async fn stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket() {
     let fx = Fixture::new();
     let p = launch_unserved(&fx, &fx.socket, "p-marker", &[]);
-    let q = fx.spawn(DAEMON, "serve", &[]);
+    let q = fx.spawn(OTHER, "serve", &[]);
     let marker = fx.path("marker");
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
     desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
