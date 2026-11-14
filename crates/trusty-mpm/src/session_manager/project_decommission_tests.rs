@@ -287,6 +287,144 @@ async fn decommission_project_keeps_records_resumable() {
     assert_eq!(resumed.state, ManagedSessionState::Active);
 }
 
+/// #10989 acceptance 3: decommission parks the project's index and unloads its
+/// palace through the non-destructive capability, and sends no delete.
+/// Test: this function IS the test. Fails if decommission skips the park or
+/// the unload, or reaches any delete method.
+#[tokio::test]
+async fn decommission_project_parks_and_unloads_and_never_deletes() {
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    use crate::session_manager::index_shutdown::{
+        METHOD_PALACE_UNLOAD, METHOD_PARK, ShutdownState,
+    };
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (live, ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert_eq!(
+        shutdown.search,
+        ShutdownState::Unloaded {
+            id: "widget-idx".into()
+        }
+    );
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    let methods = rig.methods();
+    assert!(
+        methods.contains(&format!("search:{METHOD_PARK}")),
+        "{methods:?}"
+    );
+    assert!(
+        methods.contains(&format!("memory:{METHOD_PALACE_UNLOAD}")),
+        "{methods:?}"
+    );
+    assert!(!methods.iter().any(|m| m.contains("delete")), "{methods:?}");
+    assert_eq!(
+        rig.params_of(METHOD_PARK).expect("park")["decommission"],
+        true
+    );
+    assert_eq!(report.stopped, vec![live.to_string()]);
+    assert!(
+        registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+    assert!(ws.is_dir(), "the workspace is kept");
+}
+
+/// #10989 Fail-Open Check: a refused park fails the verb by name and leaves the
+/// project active; the stopped session is reported.
+/// Test: this function IS the test. Fails if the `IndexShutdown` arm in
+/// `decommission_project_with` is removed (the project would be stamped).
+#[tokio::test]
+async fn decommission_project_failed_park_leaves_the_project_active() {
+    use crate::session_manager::index_shutdown::tests::{busy_search, healthy_memory, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    let (live, _ws) = seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(busy_search(), healthy_memory()).await;
+
+    let err = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect_err("a refused park must fail the verb");
+
+    match &err {
+        ProjectDecommissionError::IndexShutdown {
+            stopped,
+            still_loaded,
+            ..
+        } => {
+            assert_eq!(stopped, &vec![live.to_string()], "{err}");
+            assert_eq!(still_loaded.len(), 1, "{err}");
+            assert!(still_loaded[0].contains("widget-idx"), "{err}");
+        }
+        other => panic!("expected IndexShutdown, got {other}"),
+    }
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
+/// #10989 Fail-Open Check: a refused palace unload fails the verb the same way.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_failed_unload_leaves_the_project_active() {
+    use crate::session_manager::index_shutdown::tests::{busy_memory, healthy_search, rig};
+    let (dir, _reg, _fake, mgr, registry) = fixture().await;
+    seed_bound(
+        &mgr,
+        &dir,
+        ManagedSessionState::Active,
+        SessionKind::default(),
+    )
+    .await;
+    let rig = rig(healthy_search(), busy_memory()).await;
+
+    let err = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect_err("a refused unload must fail the verb");
+
+    assert!(
+        matches!(&err, ProjectDecommissionError::IndexShutdown { still_loaded, .. }
+            if still_loaded.len() == 1 && still_loaded[0].starts_with("memory palace")),
+        "{err}"
+    );
+    assert!(
+        !registry
+            .get("widget")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}
+
 /// An unknown project is the registry's `NotFound`, with nothing stopped.
 #[tokio::test]
 async fn decommission_project_unknown_name_errors() {
