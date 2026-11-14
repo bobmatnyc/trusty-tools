@@ -66,6 +66,8 @@ pulse write records a task's pulse note. --state-dir / $DATG_STATE_DIR pin the e
 card 'Task: <code>-Txx' under the named goal (G2, 'Card:' before #11101), and a task closed done must cite evidence in its outcome; both warn and record to
 guards.jsonl until config.guard_mode is "enforce". The digest and `guards` (exit 1 on a flag) report policy-file
 conflicts with owner rulings (G1) and idle ready work or repair displacing delivery (G3).
+#10960 G-5: `add T --needs S`, `update --needs S|none`, `close/update --state S` (S: prepared < sent < delivered
+< acknowledged). A close records the claim capped by its outcome evidence; shortfalls are FLAG lines, never a refusal.
 Layout (#10161, 500-SLOC cap): this file is the CLI, the hook entry and a facade. The logic
 lives in datg_store.py (state files, commit, lock; _SESSION, _STATE_DIR), datg_ops.py (write ops),
 datg_log.py (prune, archive, rotate, notices), datg_read.py (digest, freshness, stamp) and datg_task.py
@@ -249,9 +251,10 @@ def build_parser():
     s.add_argument("--opts", help="comma list, trailing * marks the recommendation")
     s.add_argument("--to")
     s.add_argument("--id")
+    s.add_argument("--needs", help="#10960: delivery state the task's request needs (sent|delivered|acknowledged)")
     s = sub.add_parser("update")
     s.add_argument("id")
-    for f in ("title", "status", "answer", "outcome", "esc", "to", "note"):
+    for f in ("title", "status", "answer", "outcome", "esc", "to", "note", "state", "needs"):
         s.add_argument(f"--{f}")
     s.add_argument("--rank", type=int)
     # #10780: who the answer came from; owner needs --cite and --quote, architect needs --basis.
@@ -261,6 +264,7 @@ def build_parser():
     s = sub.add_parser("close")
     s.add_argument("id")
     s.add_argument("--outcome", required=True)
+    s.add_argument("--state", help="#10960: delivery state the outcome claims; capped by its evidence, flag-only")
     s = sub.add_parser("batch", help="JSON list of ops on stdin: one write per turn")
     s = sub.add_parser("show")
     s.add_argument("--brief", action="store_true")
@@ -411,10 +415,11 @@ def main(argv=None):
             print(op_init(a.project, a.code))
         elif a.verb == "add":
             entry = {VERB_KEY: "add", "kind": a.kind, "title": a.title, "goal": a.goal, "rank": a.rank,
-                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id}
+                  "finish": a.finish, "maps": a.maps, "opts": _opts(a.opts), "to": a.to, "id": a.id, "needs": a.needs}
             print(write_ops(a.project, [entry]))
         elif a.verb == "update":
-            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank")}
+            entry = {k: getattr(a, k) for k in ("title", "status", "answer", "outcome", "esc", "to", "note", "rank",
+                                                "state", "needs")}
             entry.update({VERB_KEY: "update", "id": a.id})
             if a.source:   # #10780: only the flags given, so the shape check names a stray one
                 entry["source"] = {"by": a.source, **{k: getattr(a, k) for k in ("cite", "quote", "until", "basis")
@@ -425,7 +430,7 @@ def main(argv=None):
             print(", ".join(e["id"] for e in evs))
             return notify_escalations(a.project, evs, st)
         elif a.verb == "close":
-            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome}]))
+            print(write_ops(a.project, [{VERB_KEY: "close", "id": a.id, "outcome": a.outcome, "state": a.state}]))
         elif a.verb == "batch":
             try:
                 ops = json.loads(sys.stdin.read())

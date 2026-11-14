@@ -13,7 +13,7 @@ import sys
 import time
 
 import datg_guards
-from datg_task import wip_check
+from datg_task import set_delivery, wip_check
 
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
                         WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
@@ -139,6 +139,7 @@ def apply_add(st, a):
                    "goal": a["goal"], "title": title, "opts": _check_opts(a.get("opts")),
                    "answer": "", "outcome": "", "esc": None}
             st["items"].append(obj)
+    set_delivery(obj, a, pre)   # #10960 G-5: `add T --needs`
     ev = "drift" if pre == "D" and title.lower().startswith("drift:") else "open"
     return {"id": new_id, "ev": ev, "note": title}
 
@@ -223,6 +224,7 @@ def apply_update(st, a):
         if pre == "G":
             raise DatgError("outcome does not apply to goals")
         o["outcome"] = _lim(a["outcome"], "outcome", 300, ml=True)
+    set_delivery(o, a, pre)   # #10960 G-5: `--state`, `--needs`
     if a.get("status") is not None:
         if a["status"] not in STATUS[pre]:
             raise DatgError(f"status for {pre} must be one of {STATUS[pre]}")
@@ -358,7 +360,8 @@ def apply_op(st, a):
     if verb == "close":
         if not a.get("outcome"):
             raise DatgError("close needs --outcome")
-        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done"})
+        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done",
+                                 "state": a.get("state")})   # #10960 G-5: the claimed delivery state
     raise DatgError(f"unknown op {verb!r}")
 
 
@@ -377,7 +380,9 @@ def write_ops_ev(project, ops):
 
     #10800 G2: a task closed with no evidence in its outcome is refused under guard_mode enforce; in shadow
     the write lands, and stderr and <datg>/guards.jsonl record it (never log.jsonl: the Rust writer parity).
-    Test: tests/test_datg_guards.py EvidenceCase
+    #10960 G-5: delivery_gaps sets a closed task's recorded `delivery`; its FLAG lines go to the same two places
+    in every guard_mode and never refuse.
+    Test: tests/test_datg_guards.py EvidenceCase, tests/test_datg_delivery.py DeliveryCase
     """
     with Locked(project):
         st = load_state(project)
@@ -390,8 +395,12 @@ def write_ops_ev(project, ops):
         gaps = datg_guards.evidence_gaps(closed)
         if gaps and datg_guards.guard_mode(st) == "enforce":
             raise DatgError(gaps[0][1])
+        flags = datg_guards.delivery_gaps(closed)
         commit(project, st, evs, closed)
         for ref, msg in gaps:
             datg_guards.record_guard(project, "evidence", msg, ref)
             print(msg + datg_guards.SHADOW, file=sys.stderr)
+        for ref, msg in flags:
+            datg_guards.record_guard(project, "delivery", msg, ref)
+            print(msg, file=sys.stderr)
     return evs, st
