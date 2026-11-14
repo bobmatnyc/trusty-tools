@@ -119,7 +119,10 @@ fn a_gitignored_claude_md_tm_wrote_passes_the_ignored_output_check_11221() {
     let fx = GitWorktreeFixture::new();
     let ws = clone(&fx, "ignores-claude-md", "target/\nCLAUDE.md\n");
     let _home = spawn(&ws);
-    assert!(ws.join("CLAUDE.md").is_file(), "premise: the spawn wrote CLAUDE.md");
+    assert!(
+        ws.join("CLAUDE.md").is_file(),
+        "premise: the spawn wrote CLAUDE.md"
+    );
 
     assert_eq!(ignored_output_refusal(&ws), None);
     assert_eq!(keep(&ws, ProvisioningDirt::Refuse), None);
@@ -193,7 +196,11 @@ fn an_unreadable_dir_under_trusty_mpm_keeps_the_clone_11221() {
 
     std::fs::set_permissions(&scope, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
     let dirt = dirt.expect("an unreadable directory cannot be counted");
-    assert!(dirt.reason.contains("dirty-check failed"), "{}", dirt.reason);
+    assert!(
+        dirt.reason.contains("dirty-check failed"),
+        "{}",
+        dirt.reason
+    );
     assert!(kept.is_some());
 }
 
