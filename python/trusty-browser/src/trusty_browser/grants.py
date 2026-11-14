@@ -7,6 +7,7 @@ import contextlib
 import math
 import secrets
 import sqlite3
+import sys
 import time
 from pathlib import Path
 
@@ -49,6 +50,7 @@ class Grants(Leases):
         self.audit = Audit(self.state)
         self.tasks: set[asyncio.Future[None]] = set()
         self.sweeper: asyncio.TimerHandle | None = None
+        self.halted = False
 
     def purge(self, now: float) -> None:
         for digest, grant in list(self.codes.items()):
@@ -212,6 +214,7 @@ class Grants(Leases):
                 self.notify(grant, "tab_closed")
             elif grant.state == "pending":
                 grant.state = "code"
+            self.arm()  # a sweep that fired while pending skipped this code
             if str(exc) not in {"CodeRefused", "AuditUnavailable"}:
                 outcome = {
                     "GrantLimit": "limit",
@@ -225,6 +228,7 @@ class Grants(Leases):
         except BaseException:
             if grant.state == "pending":
                 grant.state = "code"
+            self.arm()
             raise
         self.consume(grant)
         grant.state, grant.generation = "active", peer.generation
@@ -294,10 +298,19 @@ class Grants(Leases):
         task.add_done_callback(self.tasks.discard)
 
     def arm(self) -> None:
-        """Keep one loop callback at the earliest code or idle deadline (no thread)."""
+        """Keep one loop callback at the earliest code or idle deadline (no thread).
+
+        Why: idle and code expiry must reach the worker without an agent call
+        (#11239, "All-https access"). What: called after mint, redeem (either
+        outcome) and every sweep; a no-op once ``halt`` ran.
+        Test: `test_a_refused_redeem_rearms_the_code_deadline`,
+        `test_the_deadline_callback_never_runs_after_close`.
+        """
         if self.sweeper is not None:
             self.sweeper.cancel()
             self.sweeper = None
+        if self.halted:
+            return
         due = [
             g.deadline if g.state == "code" else g.last_used + GRANT_IDLE
             for g in self.grants.values()
@@ -310,9 +323,22 @@ class Grants(Leases):
         self.sweeper = loop.call_later(delay, self.sweep)
 
     def sweep(self) -> None:
+        """The deadline callback: expire what is due in a task, then re-arm.
+
+        An exception is logged and the timer still re-arms; every due item
+        leaves ``self.grants`` before anything can raise, so it cannot spin.
+        Test: `test_a_sweep_that_raises_still_rearms_the_deadline`.
+        """
+        if self.halted:
+            return
+
         async def run() -> None:
-            await self.expire(codes.clock())
-            self.arm()
+            try:
+                await self.expire(codes.clock())
+            except Exception as exc:  # the timer must survive any failure
+                sys.stderr.write(f"trusty-browser: grant sweep failed: {exc!r}\n")
+            finally:
+                self.arm()
 
         task = asyncio.ensure_future(run())
         self.tasks.add(task)
@@ -339,7 +365,31 @@ class Grants(Leases):
         return [c for _, c in old]
 
     async def end(self, grant: Grant, reason: str) -> None:
-        await asyncio.gather(*(self.clear(c) for c in self.retire(grant, reason)))
+        """End a grant, then clear its indicators; a failed clear never stops a caller's loop.
+
+        Test: `test_a_failing_indicator_clear_cannot_stop_the_idle_sweep`.
+        """
+        claims = self.retire(grant, reason)
+        results = await asyncio.gather(
+            *(self.clear(c) for c in claims), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                sys.stderr.write(
+                    f"trusty-browser: indicator clear failed: {result!r}\n"
+                )
+            elif isinstance(result, BaseException):
+                raise result
+
+    def halt(self) -> None:
+        """Stop the deadline callback and its tasks for good; ``Broker.close`` calls it."""
+        self.halted = True
+        if self.sweeper is not None:
+            self.sweeper.cancel()
+            self.sweeper = None
+        for task in tuple(self.tasks):
+            task.cancel()
+        self.tasks.clear()
 
     def peer_gone(self, peer: Peer) -> None:
         for grant in list(self.grants.values()):

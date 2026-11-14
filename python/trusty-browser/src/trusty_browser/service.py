@@ -85,8 +85,7 @@ class Broker(Pages):
         return self
 
     async def close(self) -> None:
-        if self.sweeper is not None:
-            self.sweeper.cancel()
+        self.halt()
         for server in self.servers:
             server.close()
         for writer in tuple(self.writers):

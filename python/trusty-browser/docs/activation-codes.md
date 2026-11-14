@@ -44,9 +44,10 @@ fields are refused.
   action on that tab; it covers the origin shown at the click, survives popup
   close, same-origin navigation, reload and tab switch, ends on any
   cross-origin navigation (a different port counts) and does not return when
-  the tab goes back. The optional `https://*/*` host permission: requested at
-  Activate and held while the profile has a live code or grant (see "All-https
-  access"); it covers every `https:` page of the profile.
+  the tab goes back. The optional `https://*/*` host permission: requested in
+  the click that mints a code and held while the profile has a live code or
+  grant (see "All-https access"); it covers every `https:` page of the
+  profile.
 - Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
   `MAX_GRANTS_PER_TAB = 1`, lockout `FAIL_LIMIT = 5` failures
   in `FAIL_WINDOW = 60` s, first lock `LOCK_BASE = 60` s, doubling per repeat
@@ -74,36 +75,78 @@ fields are refused.
 
 Owner ruling, 2026-11-14: "Ask for all-https access at Activate, drop it when
 the last code ends." Any profile where the user clicks Activate may be paired;
-tab scope is the default choice.
+tab scope is the default choice. This contract reads "Activate" in that
+ruling as the click that issues a code: the permission is requested only in a
+mint click, never at pairing, so the pairing acknowledgement that follows
+`pair` (which lists no code) has nothing to remove.
+
+Request:
 
 - The popup calls `chrome.permissions.request({origins: ["https://*/*"]})`
-  inside the Activate click handler (it needs the user gesture, which the
-  service worker does not have), then sends `pair`. Declining does not block
-  pairing or minting; page operations outside the clicked origin then answer
-  `PermissionNeeded`. A popup showing Choose scope while the profile is
-  paired and the permission is absent requests it again in the click of
-  either mint button, before sending `mint`.
-- The worker calls `chrome.permissions.remove({origins: ["https://*/*"]})` when
-  the profile has no live code and no live grant. It learns that from the
-  broker in exactly two messages, and from nothing else:
-  1. `grant_end` with `"last": true` (see "Browser hop"). The broker sends
-     `grant_end` on every end route: agent release of the session
-     (disconnect, socket close: reason `closed`), operator or popup revoke
-     (`revoked`), idle expiry (`idle`), tab closed (`tab_closed`), worker
-     `UnknownGrant` (`browser_gone`), result-line audit failure (`audit`),
-     unpair or unenroll (`unenrolled`), and unredeemed code expiry
-     (`expired`). `last` is true when, after this end, the profile holds no
-     unredeemed code and no live grant.
-  2. The `service.sock` pairing acknowledgement, which now carries
-     `"live": [grant id, ...]`: every unredeemed code and live grant of the
-     profile. The worker prunes its grant table to this list on every
-     (re)connect, and removes the permission when the list is empty. This
-     covers every `grant_end` the worker missed while its port was down,
-     including a broker restart (which ends every code and grant).
+  inside the click handler of either mint button (**Give access to this tab**,
+  **Give access to the whole profile**), before it sends `mint`, whenever the
+  permission is absent. It needs the user gesture, which the service worker
+  does not have. This holds for a paired profile and for a workflow-enrolled
+  one alike. The **Activate** click sends `pair` only and requests nothing.
+- Declining does not block minting; page operations outside the clicked
+  origin then answer `PermissionNeeded`.
+
+Removal. The worker calls `chrome.permissions.remove({origins:
+["https://*/*"]})` when it learns that the profile holds no unredeemed code
+and no live grant, and no mint is in flight. It learns that from exactly
+these signals:
+
+1. `grant_end` with `"last": true` (see "Browser hop"). The broker sends
+   `grant_end` on every end route: agent release of the session
+   (disconnect, socket close: reason `closed`), operator or popup revoke
+   (`revoked`), idle expiry (`idle`), tab closed (`tab_closed`), worker
+   `UnknownGrant` (`browser_gone`), result-line audit failure (`audit`),
+   unpair or unenroll (`unenrolled`), and unredeemed code expiry
+   (`expired`). `last` is true when, after this end, the profile holds no
+   unredeemed code and no live grant.
+2. The `service.sock` pairing acknowledgement, which carries
+   `"live": [grant id, ...]`: every unredeemed code and live grant of the
+   profile. The worker prunes its grant table to this list on every
+   (re)connect, and removes the permission when the list is empty. This
+   covers every `grant_end` the worker missed while its port was down,
+   including a broker restart (which ends every code and grant).
+3. A popup `grants` reply (see "Grant list and revoke from the popup") whose
+   list is empty. The worker sends `grants` itself, outside the popup's
+   5-second refresh, in two cases the first two signals cannot settle: a
+   mint that failed after the permission was granted in its click (the
+   broker's refusal says nothing about other codes), and a `grant_end` with
+   `last: true` that leaves a row in the worker's table (a mint racing the
+   end, or an end the worker missed). The broker list is the answer in both.
+4. No credential. A profile whose `pairing` and `enrollment` are both absent
+   can hold no code, so the worker removes the permission when `unpair`
+   finishes and whenever a popup action (`pair`, `unpair`) fails and leaves
+   no credential.
+5. The offline check. While the native port is down the broker can send
+   nothing, yet then holds nothing of the profile once every code has
+   expired: the port's loss ends every grant of its pairing generation
+   (`browser_gone`), redeem needs a connected browser, and a code expires
+   `CODE_TTL` after its mint. The worker records when the port dropped, moves
+   that time forward on each successful mint, and empties its table and
+   removes the permission when it has gone `OFFLINE_QUIET` without an
+   acknowledgement. `OFFLINE_QUIET = CODE_TTL + 60` s, which is 360 s; the
+   60 s margin covers a redeem probe in flight (`PAGE_WAIT`, 8 s) and the
+   worker's one-minute reconnect alarm, on which the check runs. The worker
+   writes the figure as `QUIET_MS = 360000` in `extension/codes.js`;
+   `tests/test_activation_codes.py`
+   `test_the_worker_offline_quiet_matches_the_code_lifetime` fails when either
+   side changes without the other.
+
+The broker cannot replace 3, 4 or 5 cheaply: 3 would need a `live` list on
+every mint refusal, 4 is local state the broker never sees, and 5 is the
+case where the broker is unreachable.
+
 - Idle expiry and code expiry reach the worker without waiting for an agent
   call: the broker keeps one deadline callback on its own event loop (no
   thread, no process) set to the earliest code deadline or grant idle
-  deadline, and ends what is due when it fires.
+  deadline, and ends what is due when it fires. It is re-armed after every
+  mint, every redeem (granted or refused) and every sweep, and cancelled with
+  its in-flight sweep when the broker closes. A sweep that raises is logged
+  and still re-arms.
 - `unpair` removes the permission too; the worker does it on the `unpair`
   reply.
 - Scope is unchanged by the permission: each agent stays inside its own
@@ -670,7 +713,7 @@ are unchanged. New types:
 
 | type | Fields | Worker action | Reply on success |
 |---|---|---|---|
-| `code_preview` | `tab` (int or null) | Read the credential; probe `tab` by its id | `paired` bool, `email` str, `profile` str or null, `target` `{tab, access, origin, title}` or null |
+| `code_preview` | `tab` (int or null) | Read the credential; probe `tab` by its id | `paired` bool, `email` str, `profile` str or null, `target` `{tab, access, origin, title}` or null. `paired` is true when the profile holds a pairing (false for a workflow enrollment); `profile` is the credential's profile, null when the profile holds no credential |
 | `pair` | none | `pair` on `enrollment.sock` (see "pair") | `profile` str |
 | `unpair` | none | `unpair`, then clear `pairing` and the grant table | `profile` str |
 | `mint` | `scope` (`"tab"` or `"profile"`), `tab` (int, tab scope only) | Tab scope: probe the tab, refuse `PermissionNeeded` without access; then `mint` | the broker's mint reply fields |
@@ -688,7 +731,7 @@ again. A broker error reaches the popup as `error` set to the error name.
 |---|---|---|
 | Loading | Robot, status line | none; sends `code_preview` |
 | Unavailable | The reason: service unreachable, or no signed-in Chrome account | Retry sends `code_preview` |
-| Not paired | "Activate Trusty Browser in this profile" | **Activate** sends `pair`, then `code_preview` |
+| Not paired | "Activate Trusty Browser in this profile" | **Activate** sends `pair`, then `code_preview`; it requests no permission |
 | Choose scope | The target tab's origin and title; the grant list | **Give access to this tab** (primary, first) sends `mint` with `scope: "tab"`; **Give access to the whole profile** (secondary, second, labelled as every tab in this profile) sends `mint` with `scope: "profile"` |
 | Code shown | The code in a monospace field, a countdown `m:ss` to `expires_at`, the scope, the grant list | **Copy** writes the code with `navigator.clipboard.writeText` (sends nothing); **Cancel code** sends `revoke_grant` for its grant |
 | Code expired | "Code expired" | **New code** returns to Choose scope |
@@ -817,7 +860,7 @@ Paths are under `python/trusty-browser/`. No file is in both columns.
 | `src/trusty_browser/leases.py` | `src/trusty_browser/extension/setup.html` |
 | `src/trusty_browser/grants.py` | `src/trusty_browser/extension/setup.js` |
 | `src/trusty_browser/pages.py` (new: code-session ops) | `src/trusty_browser/extension/setup.css` |
-| `src/trusty_browser/codes.py` | `src/trusty_browser/extension/indicator.js` |
+| `src/trusty_browser/codes.py` | `src/trusty_browser/extension/indicator.js`; `src/trusty_browser/extension/codes.js` (new: worker grant table, all-https permission, pairing and the popup code flow, loaded by `importScripts`) |
 | `src/trusty_browser/audit.py` | `src/trusty_browser/extension/indicator_content.js` (no change expected) |
 | `src/trusty_browser/enrollment.py`, `src/trusty_browser/pairing.py` (new: pairing records, split for the line cap) | `src/trusty_browser/extension/content.js` (no change expected) |
 | `src/trusty_browser/agent_mcp.py` | `src/trusty_browser/extension/manifest.json` (frozen: no change) |
@@ -920,8 +963,9 @@ JavaScript (worker, page functions, popup):
   tab id captured at load; the countdown reaches `Code expired`; Disconnect
   sends `revoke_grant` with the row's grant id; the workflow controls are
   hidden while a pairing exists.
-- All-https access: Activate requests `https://*/*` inside the click and
-  pairs whether or not the user grants it; the permission is removed on
-  `grant_end` with `last: true`, on a pairing acknowledgement whose `live`
-  list is empty, and on `unpair`, and is kept on `grant_end` with
-  `last: false`.
+- All-https access: a mint click requests `https://*/*` inside the click
+  when it is absent and mints whether or not the user grants it; the
+  Activate click requests nothing; the permission is removed on each
+  signal of "All-https access" (`grant_end` with `last: true`, an empty
+  `live` list, an empty `grants` reply, no credential, the offline check)
+  and is kept on `grant_end` with `last: false`.

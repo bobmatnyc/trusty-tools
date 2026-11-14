@@ -595,3 +595,99 @@ def test_worker_browser_disconnected_on_a_read_is_relayed_and_retry_runs_again(
         assert not rig.broker.grants[ack["grant"]].session.journal
 
     run(short, body)
+
+
+def test_a_failing_indicator_clear_cannot_stop_the_idle_sweep(short, clock, capsys):
+    async def body(rig):
+        acks = []
+        for tab in (7, 9):
+            ack, call = await session(rig)
+            assert (await call({"op": "select", "tab": tab}))["ok"]
+            acks.append(ack["grant"])
+        clock[0] += codes.GRANT_IDLE
+
+        async def broken(_claim):
+            raise RuntimeError("indicator")
+
+        rig.broker.clear = broken
+        rig.broker.sweep()
+        await settle(rig)
+        assert not rig.broker.grants and not rig.broker.claims
+        sent = [(f["grant"], f["reason"]) for f in rig.a.sent("grant_end")]
+        assert sorted(sent) == sorted((g, "idle") for g in acks)
+        assert rig.broker.sweeper is None
+        assert "indicator" in capsys.readouterr().err
+
+    run(short, body)
+
+
+def test_a_sweep_that_raises_still_rearms_the_deadline(short, clock, capsys):
+    async def body(rig):
+        minted = await rig.mint(rig.alpha)
+        real = rig.broker.expire
+
+        async def broken(_now):
+            raise RuntimeError("sweep")
+
+        rig.broker.expire = broken
+        before = rig.broker.sweeper
+        rig.broker.sweep()
+        await settle(rig)
+        assert rig.broker.sweeper not in (None, before)  # the timer is re-armed
+        assert not rig.broker.sweeper.cancelled()
+        assert "sweep" in capsys.readouterr().err
+        rig.broker.expire = real
+        clock[0] += codes.CODE_TTL
+        rig.broker.sweep()
+        await settle(rig)
+        last = rig.a.sent("grant_end")[-1]
+        assert (last["grant"], last["reason"], last["last"]) == (
+            minted["grant"],
+            "expired",
+            True,
+        )
+
+    run(short, body)
+
+
+def test_a_refused_redeem_rearms_the_code_deadline(short, clock):
+    async def body(rig):
+        minted = await rig.mint(rig.alpha, "tab", 7)
+        rig.a.hold["page_tab"] = asyncio.Event()
+        rig.a.arrived["page_tab"] = asyncio.Event()
+        rig.a.refuse["page_tab"] = {"error": "ProfileMismatch"}
+        redeem = asyncio.create_task(rig.redeem(minted["code"]))
+        await rig.a.arrived["page_tab"].wait()
+        clock[0] += codes.CODE_TTL  # the code's deadline fires while it is pending
+        rig.broker.sweep()
+        await settle(rig)
+        assert rig.broker.sweeper is None
+        rig.a.hold["page_tab"].set()
+        reply, _ = await redeem
+        assert reply == {"ok": False, "error": "ProfileMismatch"}
+        for _ in range(50):  # the re-armed timer ends the code with no other call
+            if not rig.broker.grants:
+                break
+            await asyncio.sleep(0)
+        await settle(rig)
+        last = rig.a.sent("grant_end")[-1]
+        assert (last["grant"], last["reason"]) == (minted["grant"], "expired")
+        assert not rig.broker.grants
+
+    run(short, body)
+
+
+def test_the_deadline_callback_never_runs_after_close(short, clock):
+    async def body(rig):
+        await rig.mint(rig.alpha)
+        broker = rig.broker
+        assert broker.sweeper is not None
+        broker.sweep()  # a sweep task in flight when the broker closes
+        await broker.close()
+        assert broker.sweeper is None and not broker.tasks
+        broker.arm()
+        broker.sweep()
+        assert broker.sweeper is None and not broker.tasks
+        assert len(broker.grants) == 1  # nothing ran against torn-down state
+
+    run(short, body)

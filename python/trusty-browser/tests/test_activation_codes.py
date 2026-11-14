@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from trusty_browser import audit, codes, enrollment, service
+from trusty_browser import audit, codes, enrollment, protocol, service
 
 URL = "https://qa.test/app/page?q=private-query"
 PAGE_TEXT = "page-secret-text"
@@ -790,7 +790,7 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
         lines = rig.audit()
         assert {k for line in lines for k in line} <= {"ts", *audit.FIELDS}
         assert {line["origin"] for line in lines if "origin" in line} == {"qa.test"}
-        ops = [(l["op"], l["outcome"]) for l in lines if l["event"] == "operation"]
+        ops = [(e["op"], e["outcome"]) for e in lines if e["event"] == "operation"]
         assert ops == [
             (op, o)
             for op in (
@@ -803,8 +803,8 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
             )
             for o in ("admitted", "ok")
         ]
-        results = [l for l in lines if l["event"] == "operation"][1::2]
-        assert [l.get("tab") for l in results] == [7] * 6
+        results = [e for e in lines if e["event"] == "operation"][1::2]
+        assert [e.get("tab") for e in results] == [7] * 6
         assert stat.S_IMODE((rig.state / "audit.jsonl").stat().st_mode) == 0o600
 
     run(short, body)
@@ -871,3 +871,18 @@ def test_open_path_works_beside_a_code_session(short, clock):
         assert (await workflow({"op": "tabs"}))["error"] == "InvalidRequest"
 
     run(short, body)
+
+
+def test_the_worker_offline_quiet_matches_the_code_lifetime():
+    """The worker's offline check (contract "All-https access", signal 5) is
+    ``CODE_TTL + 60`` s; changing either side alone fails here."""
+    package = Path(codes.__file__).parent
+    source = (package / "extension" / "codes.js").read_text()
+    found = re.findall(r"const QUIET_MS = (\d+);", source)
+    margin = 60
+    assert margin > protocol.PAGE_WAIT  # a redeem probe in flight fits the margin
+    expected = int((codes.CODE_TTL + margin) * 1000)
+    assert found == [str(expected)]
+    contract = (package.parents[1] / "docs" / "activation-codes.md").read_text()
+    assert f"`QUIET_MS = {expected}`" in contract
+    assert f"which is {expected // 1000} s" in contract
