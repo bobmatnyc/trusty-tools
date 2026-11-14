@@ -105,6 +105,19 @@ details[open] > summary > .chev::before { content: "▾"; }
 .status-briefs li { margin: 2px 0; }
 .status-briefs li:first-child { margin-top: 0; }
 .sb-link { font-family: var(--font-mono); }
+/* #11065: a session's last pane lines (Decision row "Last output", page "Show session") */
+.pane-last { margin: 8px 0 0; min-width: 0; }
+.pane-last > summary { display: flex; align-items: center; min-height: var(--h-touch); cursor: pointer; color: var(--accent); font-weight: 600; }
+.pane-out { min-width: 0; margin: 6px 0 0; padding: 8px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface-1); }
+.pane-head, .pane-pick { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; min-width: 0; }
+.pane-name { font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; }
+.pane-age, .pane-msg { color: var(--ink-2); font-size: var(--fs-sm); }
+.pane-msg { margin: 6px 0 0; }
+.pane-msg:empty, .pane-lines:empty { display: none; }
+.pane-msg[data-state="error"] { color: var(--st-stop-ink); }
+.pane-lines { margin: 6px 0 0; max-height: 50vh; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pane-out .btn, .pane-pick .btn, .pane-pick select { min-height: var(--h-touch); min-width: var(--h-touch); }
+.pane-pick select { flex: 1 1 160px; min-width: 0; font: inherit; font-size: 16px; }
 .pane-filter { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 4px 0 8px; min-width: 0; }
 .pane-filter input.pf-input { flex: 1 1 220px; min-width: 0; font: inherit; font-size: var(--fs-sm); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface-1); color: var(--ink-1); }
 .pane-filter input.pf-input:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
@@ -3938,6 +3951,103 @@ html.lib-strip.rd-open body { padding-right: 0; }
     const tl = taskLink(it); if (tl) m.appendChild(tl);
     return m;
   }
+  /* BEGIN paneTail */
+  /* #11065: last pane lines from GET /api/pane, fetched only on open or Refresh; textContent only, kept in memory only. */
+  function paneAge(at, now) {
+    const t = Date.parse(txt(at)); if (!isFinite(t)) return "capture time unknown";
+    const s = Math.max(0, Math.round((now - t) / 1000));
+    return "captured " + (s < 5 ? "just now" : s < 60 ? s + " s ago" : s < 3600 ? Math.floor(s / 60) + " min ago" : Math.floor(s / 3600) + " h ago");
+  }
+  /* An item's `session` is a tmux name or a session doc id (see sessionTasks); resolve to the tmux name, "" when it is not a live managed session. */
+  function paneName(raw, fleetBody, docs) {
+    const r = txt(raw).trim(); if (!r) return "";
+    const ds = Array.isArray(docs) ? docs : [];
+    const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : null;
+    const isName = (f && f[r]) || ds.some((x) => x && txt(x.name) === r);   /* a name never maps to another doc's pane */
+    const d = isName ? null : ds.find((x) => x && txt(x.id) === r && txt(x.name));
+    const n = d ? txt(d.name) : r;
+    return !f || (f[n] && f[n].managed) ? n : "";
+  }
+  async function paneFetch(name, lines) {
+    let r, j;
+    try { r = await fetch("/api/pane?session=" + encodeURIComponent(name) + "&lines=" + (lines || 40), { cache: "no-store" }); }
+    catch (_) { return { state: "error", why: "network" }; }
+    if (r.status === 404) return { state: "none" };
+    if (!r.ok) return { state: "error", why: r.status === 503 ? "capture" : "http", status: r.status };
+    try { j = await r.json(); } catch (_) { j = null; }
+    if (!j || !Array.isArray(j.lines)) return { state: "error", why: "http", status: r.status };
+    return { state: "ok", lines: j.lines.map(txt), at: txt(j.captured_at), truncated: !!j.truncated };
+  }
+  const paneViews = new Set();
+  /* One output box; `gen` drops a response that arrives after the box moved on to another session (or a newer Refresh). */
+  function paneView() {
+    const box = el("div", "pane-out"), head = el("div", "pane-head");
+    const nameEl = el("span", "pane-name"), age = el("span", "pane-age"), trunc = el("span", "chip pane-trunc", "truncated");
+    const btn = el("button", "tap btn ghost pane-refresh", "Refresh"); btn.type = "button";
+    const msg = el("p", "pane-msg"); msg.setAttribute("role", "status"); msg.setAttribute("aria-live", "polite");
+    const pre = el("pre", "pane-lines"); pre.tabIndex = 0;
+    head.append(nameEl, age, trunc, btn); box.append(head, msg, pre);
+    const v = { box: box, name: "", gen: 0, at: "", loaded: false, msg: msg, pre: pre, age: age, trunc: trunc, btn: btn };
+    const paint = (state, text) => { msg.dataset.state = state; msg.textContent = text; };
+    v.tick = (now) => { age.textContent = v.at ? paneAge(v.at, now) : ""; };
+    v.show = (name) => {
+      const g = ++v.gen; v.name = name; v.at = ""; v.loaded = true;
+      nameEl.textContent = name; pre.textContent = ""; age.textContent = ""; trunc.hidden = true; btn.hidden = !name;
+      if (!name) { btn.disabled = false; paint("none", "No live pane for this session."); return Promise.resolve(); }
+      btn.disabled = true; paint("loading", "Loading…");
+      return paneFetch(name).then((res) => {
+        if (g !== v.gen) return;
+        btn.disabled = false;
+        if (res.state === "ok") {
+          v.at = res.at; pre.textContent = res.lines.join("\n"); trunc.hidden = !res.truncated; v.tick(Date.now());
+          paint("ok", res.lines.length ? "" : "The pane is empty.");
+        } else if (res.state === "none") paint("none", "No live pane: " + name + " is not running.");
+        else paint("error", res.why === "network" ? "Network error: the pane did not load." : res.why === "capture" ? "The pane could not be captured. Try Refresh." : "The pane did not load (HTTP " + res.status + ").");
+      });
+    };
+    v.refresh = () => v.show(v.name);
+    trunc.hidden = true; btn.hidden = true;
+    btn.addEventListener("click", () => { v.refresh(); });
+    paneViews.add(v);
+    return v;
+  }
+  const paneRows = new Map();   /* item id + resolved name -> {open, view}; survives re-render, memory only */
+  function lastOutput(it) {
+    if ((typeof SESSION !== "undefined" && SESSION) || !txt(it && it.session).trim()) return null;
+    const name = paneName(it.session, fleet, sessions), key = it.id + "\u0000" + name;
+    let st = paneRows.get(key); if (!st) { st = { open: false, view: null }; paneRows.set(key, st); }
+    const d = el("details", "pane-last");
+    d.appendChild(el("summary", null, "Last output"));
+    if (st.open && st.view) { d.appendChild(st.view.box); d.open = true; }
+    d.addEventListener("toggle", () => {
+      st.open = d.open;
+      if (!d.open) return;
+      if (!st.view) st.view = paneView();
+      if (st.view.box.parentNode !== d) d.appendChild(st.view.box);
+      if (!st.view.loaded) st.view.show(name);
+    });
+    return d;
+  }
+  /* The page control: pick a managed session, Show, then Refresh inside the box. */
+  function paneControl() {
+    const d = el("details", "sub pane-ctl"), s = el("summary");
+    const ch = el("span", "chev"); ch.setAttribute("aria-hidden", "true");
+    s.append(ch, el("h3", null, "Show session")); d.appendChild(s);
+    const row = el("div", "pane-pick"), sel = el("select", "ctl"), go = el("button", "tap btn", "Show"), v = paneView();
+    sel.id = "pane-pick"; sel.setAttribute("aria-label", "Session to show"); go.type = "button";
+    row.append(sel, go); d.append(row, v.box);
+    go.addEventListener("click", () => { if (sel.value) v.show(sel.value); });
+    d.sync = (fleetBody) => {
+      const f = fleetBody && fleetBody.sessions && typeof fleetBody.sessions === "object" ? fleetBody.sessions : {};
+      const names = Object.keys(f).filter((n) => f[n] && f[n].managed).sort(), cur = sel.value;
+      sel.replaceChildren(...names.map((n) => { const o = el("option", null, n); o.value = n; return o; }));
+      if (names.indexOf(cur) >= 0) sel.value = cur;
+      go.disabled = !names.length;
+    };
+    d.view = v;
+    return d;
+  }
+  /* END paneTail */
   /* BEGIN taskChain */
   /* Task -> session -> project (the owner 2026-10-28). Pure: chain text parts for an item's `task` field, given the item and session lists. */
   function taskChain(it, itemList, sessionList) {
@@ -4234,6 +4344,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   function renderQuestion(it) {
     const [card, body] = shell(it, it.due ? "urgent" : "");
     body.appendChild(metaRow(it));
+    { const lo = lastOutput(it); if (lo) body.appendChild(lo); }   // #11065: the session's last pane lines, on open only
     if (it.detail) body.appendChild(longField(el("p", "detail"), it.detail, { title: txt(it.title) || it.id, doc: it.doc, arch: isArchItem(it) }));
     const tools = el("div", "act-tools"); tools.setAttribute("role", "group"); tools.setAttribute("aria-label", "More actions for " + it.id);
     briefControl(body, it, tools);
@@ -6300,8 +6411,10 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!SESSION) {
       /* Live tmux truth for the Sessions count and the four statuses; the server asks `tmux ls` (cached 4 s). */
       const pollFleet = () => fetch("/api/fleet", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
-        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; render(); }
+        if (d && JSON.stringify(d) !== JSON.stringify(fleet)) { fleet = d; paneCtl.sync(d); render(); }
       }).catch(() => {});
+      const paneCtl = paneControl(); $("list-q").before(paneCtl);   // #11065: page "Show session" control
+      setInterval(() => { const n = Date.now(); paneViews.forEach((v) => { if (v.box.isConnected) v.tick(n); }); }, 5000);
       pollFleet(); setInterval(pollFleet, 15000);
     }
     if (!SESSION) db.collection("sessions").onSnapshot(live((snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); }), stopped("session list"));
