@@ -47,6 +47,8 @@ pub(crate) mod dbatg;
 pub(crate) mod delete;
 // #10991: `tm session archive`.
 pub(crate) mod session_archive;
+// #10992: `tm session delete --project-dir`.
+pub(crate) mod session_delete_dir;
 #[cfg(test)]
 pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.

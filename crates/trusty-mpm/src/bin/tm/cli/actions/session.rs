@@ -366,13 +366,30 @@ pub(crate) enum SessionAction {
     /// What: POSTs `/api/v1/sessions/managed/{id}/delete?force=<bool>`. NEVER
     /// removes the workspace directory from disk — deleting the record is a
     /// store-only operation (use `decommission` first to also reclaim disk).
-    /// Test: `cli_parses_session_delete`.
+    /// Test: `cli_parses_session_delete`,
+    /// `cli_parses_session_delete_project_dir`.
+    ///
+    /// #10992: `--project-dir` also removes the session's project directory,
+    /// only inside the managed workspace root, and refuses dirty or unpushed
+    /// work, a running session or live process in it, and the Architect. It
+    /// shows the plan, then needs `--yes` or the typed directory name, then
+    /// Touch ID (or the login password). `--dry-run` shows the plan only.
     Delete {
         /// Managed session id.
         id: String,
         /// Bypass the running-session guard and delete the record anyway.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "project_dir")]
         force: bool,
+        /// Also remove the session's project directory (#10992).
+        #[arg(long)]
+        project_dir: bool,
+        /// With --project-dir: show what would be removed; change nothing.
+        #[arg(long, requires = "project_dir")]
+        dry_run: bool,
+        /// With --project-dir: skip typing the directory name. Touch ID is
+        /// still required.
+        #[arg(long, requires = "project_dir")]
+        yes: bool,
     },
     /// Move a session's project directory to ~/.trusty-tools/archive (#10991).
     ///

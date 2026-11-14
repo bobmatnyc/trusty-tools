@@ -58,6 +58,8 @@ pub mod prune_progress;
 pub mod project_decommission;
 // #10991: move a session's project directory to the 0700 archive.
 pub mod archive_move;
+// #10992: remove a session's project directory behind destructive guards.
+pub mod project_dir_delete;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
