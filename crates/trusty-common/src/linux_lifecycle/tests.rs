@@ -109,6 +109,11 @@ fn descriptor_rejects_bad_spawn_and_liveness_fields() {
 // #11098: without a default key a sandbox daemon reads as production.
 #[test]
 fn descriptor_pins_the_data_dir_override_as_its_default_instance_key() {
+    // See #11085 (#11123 deferred LOW): both reads of the variable happen under
+    // ENV_LOCK, so a locked writer in another test cannot change it between them.
+    let _env = crate::data_dir::ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let name = crate::data_dir::DATA_DIR_OVERRIDE_ENV;
     assert_eq!(
         plain_descriptor().instance_env,
