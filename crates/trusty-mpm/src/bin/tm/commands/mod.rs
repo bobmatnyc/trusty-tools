@@ -272,6 +272,8 @@ pub(crate) mod pm_guard_secret_file_list;
 pub(crate) mod pm_guard_secret_words;
 // #10761: bracket expressions parsed and expanded for the secret-read rule.
 pub(crate) mod pm_guard_secret_brackets;
+// #10761: the linear-time bracket parser, split out to keep the file under cap.
+pub(crate) mod pm_guard_secret_bracket_parse;
 #[cfg(test)]
 mod pm_guard_secret_brackets_tests;
 // #7557: the word-list / ref / text-payload position rules, split out of

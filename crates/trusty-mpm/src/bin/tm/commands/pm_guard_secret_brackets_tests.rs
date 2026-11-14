@@ -143,12 +143,15 @@ fn parses_every_bracket_form_a_shell_accepts() {
     assert_eq!(widen_brackets(".[!]x]nv", ""), ".?nv");
     assert_eq!(widen_brackets(".[[:alpha:]]nv", ""), ".?nv");
     assert_eq!(widen_brackets(".[nv", "?"), ".?nv");
-    assert_eq!(bracket_readings("id_[r]sa"), vec!["id_rsa".to_string()]);
-    let negated = bracket_readings(".[!eE]nv");
+    assert_eq!(
+        bracket_readings("id_[r]sa"),
+        Some(vec!["id_rsa".to_string()])
+    );
+    let negated = bracket_readings(".[!eE]nv").unwrap_or_default();
     assert!(!negated.iter().any(|r| r == ".env"), "{negated:?}");
-    assert!(bracket_readings(".[!e]nv").iter().any(|r| r == ".Env"));
-    assert!(bracket_readings(".[a-c]").iter().any(|r| r == ".B"));
-    assert!(bracket_readings("[/]").is_empty());
+    assert!(bracket_readings(".[!e]nv").is_some_and(|rs| rs.iter().any(|r| r == ".Env")));
+    assert!(bracket_readings(".[a-c]").is_some_and(|rs| rs.iter().any(|r| r == ".B")));
+    assert_eq!(bracket_readings("[/]"), Some(Vec::new()));
 }
 
 #[test]

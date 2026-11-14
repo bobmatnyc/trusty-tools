@@ -382,7 +382,7 @@ use crate::commands::pm_guard_bash::{
 };
 // #7414: the word-cutting layer moved out when the brace-literal fix pushed
 // this file over the 500-SLOC cap.
-use crate::commands::pm_guard_secret_brackets::{bracket_readings, path_words};
+use crate::commands::pm_guard_secret_brackets::{bracket_readings, glob_readings, path_words};
 use crate::commands::pm_guard_secret_words::scan_spellings;
 // #7557: the position rules moved out when the structure check pushed this
 // file over the 500-SLOC cap.
@@ -544,10 +544,10 @@ fn denies_as_a_read_target(path: &str, scan: Scan) -> bool {
     if names_a_process_manager_dump(path) {
         return true;
     }
-    // #10761: a bracket class is judged by every name it can reach.
+    // #10761: a bracket class is judged by every name it can reach; a word
+    // the guard cannot read denies.
     bracket_readings(&command_basename(path))
-        .iter()
-        .any(|base| reading_denies(base, scan))
+        .is_none_or(|readings| readings.iter().any(|base| reading_denies(base, scan)))
 }
 
 /// [`denies_as_a_read_target`] for one bracket-free reading of a basename.
@@ -995,10 +995,13 @@ pub(crate) fn names_a_secret_file(word: &str, scan: Scan) -> bool {
     if names_a_process_manager_dump(word) {
         return true;
     }
-    // #10761: a bracket class is judged by every name it can reach.
-    bracket_readings(&command_basename(word))
-        .iter()
-        .any(|base| reading_names_a_secret_file(base, word, scan))
+    // #10761: a bracket class is judged by every name it can reach; a word
+    // the guard cannot read denies.
+    bracket_readings(&command_basename(word)).is_none_or(|readings| {
+        readings
+            .iter()
+            .any(|base| reading_names_a_secret_file(base, word, scan))
+    })
 }
 
 /// [`names_a_secret_file`] for one bracket-free reading `base` of `word`.
@@ -1245,6 +1248,7 @@ pub(crate) fn evaluate_secret_file_read_tool(
 /// tree-wide search and allow. Fails CLOSED on a `glob` whose brace alternation
 /// the shared expander cannot resolve, exactly as the copy rule does.
 /// Test: `denies_a_grep_tool_call_on_a_secret_bearing_path`,
+/// `a_grep_glob_class_carrying_a_slash_is_read_whole`,
 /// `denies_a_grep_tool_call_whose_glob_names_a_secret`,
 /// `denies_a_grep_tool_call_whose_glob_can_match_a_secret`,
 /// `allows_a_grep_glob_that_targets_no_credential_family`,
@@ -1256,7 +1260,15 @@ fn evaluate_grep_tool(tool_input: Option<&serde_json::Value>) -> Option<String> 
         return Some(deny_reason(path, "the `Grep` tool"));
     }
     let glob = string_field(tool_input, "glob")?;
-    denies_as_a_read_target(glob, Scan::Argv).then(|| deny_reason(glob, "a `Grep` glob"))
+    // #10761: globset reads a `/` inside a class as a member, so the class is
+    // read before the basename cut.
+    let denies = names_a_process_manager_dump(glob)
+        || glob_readings(glob).is_none_or(|readings| {
+            readings
+                .iter()
+                .any(|r| reading_denies(&command_basename(r), Scan::Argv))
+        });
+    denies.then(|| deny_reason(glob, "a `Grep` glob"))
 }
 
 /// A non-empty string field of a tool-input object.

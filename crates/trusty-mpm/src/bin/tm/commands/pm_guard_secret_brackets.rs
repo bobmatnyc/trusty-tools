@@ -4,16 +4,21 @@
 //! while a shell expands both onto `.env`. [`is_path_byte`] cut the word at the
 //! `!` and `^` negation sigils, so the class never reached the classifier
 //! whole, and the old `?` stand-in read `[!]x]` as a one-member class.
-//! What: [`parse_bracket`] reads one expression the way POSIX `fnmatch`, bash
-//! and zsh do. [`path_words`] is the byte cut with each expression kept whole,
+//! What: [`Scanner`] reads each expression the way POSIX `fnmatch`, bash and
+//! zsh do. [`path_words`] is the byte cut with each expression kept whole,
 //! [`bracket_readings`] turns a word into every literal name it can reach, and
 //! [`widen_brackets`] is the `?` stand-in both fall back to.
 //! Test: the `pm_guard_secret_brackets_tests` module.
 
+use super::pm_guard_secret_bracket_parse::{Bracket, Item, Scanner};
 use super::pm_guard_secret_words::is_path_byte;
+use std::collections::{HashMap, HashSet};
 
 /// The most names [`bracket_readings`] enumerates before it widens instead.
 const MAX_READINGS: usize = 256;
+
+/// The most closing `]` one `[` may have before its word is unreadable.
+const MAX_CLOSES: usize = 16;
 
 /// The stand-in for every character no secret-file rule spells.
 ///
@@ -21,193 +26,14 @@ const MAX_READINGS: usize = 256;
 /// exactly as a non-ASCII or punctuation character a class reaches would.
 const NEUTRAL: char = '%';
 
-/// One parsed bracket expression.
-enum Bracket {
-    /// A readable class whose closing `]` sits at `end`.
-    Class {
-        end: usize,
-        negated: bool,
-        items: Vec<Item>,
-    },
-    /// A terminated class this parser cannot read exactly — an unknown named
-    /// class, a multi-character collating element, a reversed range, or shell
-    /// quoting inside. It is widened to `?`, never read as matching nothing.
-    Opaque { end: usize },
-    /// No closing `]`: the shell reads the `[` literally.
-    Unterminated,
-}
-
-/// One member of a class.
-enum Item {
-    Char(char),
-    Range(char, char),
-    Named(fn(&char) -> bool),
-}
-
-impl Item {
-    /// Whether `c` is a member. `wide` also admits the other case of a letter
-    /// inside a range, which a locale collation (`aAbB…`) can put there.
-    fn matches(&self, c: char, wide: bool) -> bool {
-        match self {
-            Item::Char(m) => c == *m,
-            Item::Range(lo, hi) => {
-                let within = |x: char| (*lo..=*hi).contains(&x);
-                within(c)
-                    || (wide && within(c.to_ascii_uppercase()))
-                    || (wide && within(c.to_ascii_lowercase()))
-            }
-            Item::Named(class) => class(&c),
-        }
-    }
-}
-
-fn is_blank(c: &char) -> bool {
-    matches!(c, ' ' | '\t')
-}
-
-fn is_print(c: &char) -> bool {
-    c.is_ascii_graphic() || *c == ' '
-}
-
-fn is_space(c: &char) -> bool {
-    c.is_ascii_whitespace() || *c == '\x0b'
-}
-
-fn is_word(c: &char) -> bool {
-    c.is_ascii_alphanumeric() || *c == '_'
-}
-
-/// The `[:name:]` class bash and zsh accept; `None` for any other name.
-fn named_class(name: &str) -> Option<fn(&char) -> bool> {
-    let class: fn(&char) -> bool = match name {
-        "alnum" => char::is_ascii_alphanumeric,
-        "alpha" => char::is_ascii_alphabetic,
-        "ascii" => char::is_ascii,
-        "blank" => is_blank,
-        "cntrl" => char::is_ascii_control,
-        "digit" => char::is_ascii_digit,
-        "graph" => char::is_ascii_graphic,
-        "lower" => char::is_ascii_lowercase,
-        "print" => is_print,
-        "punct" => char::is_ascii_punctuation,
-        "space" => is_space,
-        "upper" => char::is_ascii_uppercase,
-        "word" => is_word,
-        "xdigit" => char::is_ascii_hexdigit,
-        _ => return None,
-    };
-    Some(class)
-}
-
-/// The member a `[:…:]`, `[.….]` or `[=…=]` element names, or `None` when this
-/// parser cannot read it.
-fn element_item(delim: char, name: &str) -> Option<Item> {
-    if delim == ':' {
-        return named_class(name).map(Item::Named);
-    }
-    let mut chars = name.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), None) => Some(Item::Char(c)),
-        _ => None,
-    }
-}
-
-/// Parse the bracket expression whose `[` sits at `open`.
-///
-/// Why: a `?` stand-in found by "the next `]`" misreads `[!]x]` and `[]e]`,
-/// where a `]` right after the `[` or the sigil is a member, not the close.
-/// What: an optional `!` or `^` sigil, then members until an unescaped `]`
-/// that is not first: single characters, `a-b` ranges, `[:name:]` classes and
-/// `[.c.]`/`[=c=]` elements. Quoting or `$` inside makes the class
-/// [`Bracket::Opaque`]. With `shell_text`, unquoted whitespace or a shell
-/// operator ends the word first, which makes the `[` unterminated.
-/// Test: `parses_every_bracket_form_a_shell_accepts`.
-fn parse_bracket(chars: &[char], open: usize, shell_text: bool) -> Bracket {
-    let mut i = open + 1;
-    let negated = matches!(chars.get(i), Some('!' | '^'));
-    if negated {
-        i += 1;
-    }
-    let body_start = i;
-    let mut items = Vec::new();
-    let mut opaque = false;
-    while let Some(&c) = chars.get(i) {
-        if c == ']' && i > body_start {
-            return if opaque {
-                Bracket::Opaque { end: i }
-            } else {
-                Bracket::Class {
-                    end: i,
-                    negated,
-                    items,
-                }
-            };
-        }
-        if shell_text && (c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')'))
-        {
-            return Bracket::Unterminated;
-        }
-        match c {
-            '\\' => {
-                opaque = true;
-                i += 2;
-            }
-            '\'' | '"' => {
-                opaque = true;
-                if let Some(len) = chars[i + 1..].iter().position(|q| *q == c) {
-                    i += len + 2;
-                    continue;
-                }
-                // An unbalanced quote is unreadable, so the class it opens is
-                // widened rather than read as a literal `[`.
-                return match chars[i + 1..].iter().position(|q| *q == ']') {
-                    Some(len) => Bracket::Opaque { end: i + 1 + len },
-                    None => Bracket::Unterminated,
-                };
-            }
-            '$' | '`' => {
-                opaque = true;
-                i += 1;
-            }
-            '[' if matches!(chars.get(i + 1), Some(':' | '.' | '=')) => {
-                let delim = chars[i + 1];
-                let close = (i + 2..chars.len().saturating_sub(1))
-                    .find(|&k| chars[k] == delim && chars[k + 1] == ']');
-                if let Some(k) = close {
-                    let name: String = chars[i + 2..k].iter().collect();
-                    match element_item(delim, &name) {
-                        Some(item) => items.push(item),
-                        None => opaque = true,
-                    }
-                    i = k + 2;
-                } else {
-                    items.push(Item::Char('['));
-                    i += 1;
-                }
-            }
-            _ => match (chars.get(i + 1), chars.get(i + 2)) {
-                (Some('-'), Some(&hi)) if hi != ']' => {
-                    if c > hi || !c.is_ascii() || !hi.is_ascii() || "[\\'\"$`".contains(hi) {
-                        opaque = true;
-                    } else {
-                        items.push(Item::Range(c, hi));
-                    }
-                    i += 3;
-                }
-                _ => {
-                    items.push(Item::Char(c));
-                    i += 1;
-                }
-            },
-        }
-    }
-    Bracket::Unterminated
-}
-
 /// The character standing for `c` in a reading: itself when a secret-file
-/// rule could spell it, else [`NEUTRAL`].
-fn representative(c: char) -> char {
-    if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '@' | '~') {
+/// rule could spell it, else [`NEUTRAL`]. `slash` keeps a `/` (see
+/// [`glob_readings`]).
+fn representative(c: char, slash: bool) -> char {
+    if c.is_ascii_alphanumeric()
+        || matches!(c, '.' | '_' | '-' | '+' | '@' | '~')
+        || (slash && c == '/')
+    {
         c
     } else {
         NEUTRAL
@@ -216,12 +42,13 @@ fn representative(c: char) -> char {
 
 /// Every reading character a class reaches, without repeats.
 ///
-/// What: tests each printable ASCII character except `/` (which no bracket
-/// expression matches in a pathname). A negated class compares against its
-/// members exactly; a positive one with [`Item::matches`]'s `wide` reading, so
-/// a locale collation can only add to it. A negated class always reaches some
-/// non-ASCII name character, which [`NEUTRAL`] stands for.
-fn reachable(negated: bool, items: &[Item]) -> Vec<char> {
+/// What: tests each printable ASCII character; a `/` only with `slash`, since
+/// no shell bracket expression matches one in a pathname but a globset class
+/// does. A negated class compares against its members exactly; a positive one
+/// with [`Item::matches`]'s `wide` reading, so a locale collation can only add
+/// to it. A negated class always reaches some non-ASCII name character, which
+/// [`NEUTRAL`] stands for.
+fn reachable(negated: bool, items: &[Item], slash: bool) -> Vec<char> {
     let mut out = Vec::new();
     let mut push = |c: char| {
         if !out.contains(&c) {
@@ -231,14 +58,14 @@ fn reachable(negated: bool, items: &[Item]) -> Vec<char> {
     if negated {
         push(NEUTRAL);
     }
-    for c in (' '..='~').filter(|c| *c != '/') {
+    for c in (' '..='~').filter(|c| slash || *c != '/') {
         let hit = if negated {
             !items.iter().any(|item| item.matches(c, false))
         } else {
             items.iter().any(|item| item.matches(c, true))
         };
         if hit {
-            push(representative(c));
+            push(representative(c, slash));
         }
     }
     if !negated
@@ -261,11 +88,12 @@ fn reachable(negated: bool, items: &[Item]) -> Vec<char> {
 /// `parses_every_bracket_form_a_shell_accepts`.
 pub(crate) fn widen_brackets(name: &str, unterminated: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
+    let scanner = Scanner::new(&chars, false);
     let mut out = String::with_capacity(name.len());
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            '[' => match parse_bracket(&chars, i, false) {
+            '[' => match scanner.parse(i) {
                 Bracket::Class { end, .. } | Bracket::Opaque { end } => {
                     out.push('?');
                     i = end + 1;
@@ -285,7 +113,8 @@ pub(crate) fn widen_brackets(name: &str, unterminated: &str) -> String {
     out
 }
 
-/// Every literal name a word's bracket expressions can produce.
+/// Every literal name a word's bracket expressions can produce, or `None` when
+/// the word is unreadable and the caller must deny.
 ///
 /// Why: #10761 — a negated class is judged by what it can REACH. `.[!x]nv`
 /// reaches `.env` and denies; `.[!eE]nv` reaches no secret-class name and
@@ -294,63 +123,136 @@ pub(crate) fn widen_brackets(name: &str, unterminated: &str) -> String {
 /// What: a word with no bracket is its own one reading. Otherwise each class
 /// contributes every [`reachable`] character, an opaque class `?`, and an
 /// unterminated `[` both nothing (the earlier reading) and `?` (the shell's
-/// literal `[`); a stray `]` is dropped. Over [`MAX_READINGS`] combinations
-/// the word widens to [`widen_brackets`] instead, so a parse that cannot be
-/// enumerated still fails closed.
+/// literal `[`); a stray `]` is dropped. #10761 review: the lexer strips the
+/// quoting that made a `]` a member, so every `]` [`Scanner::closes`] finds is
+/// tried as the close. Over [`MAX_READINGS`] names each class is read as `?`;
+/// still over, an unambiguous word widens to [`widen_brackets`] and an
+/// ambiguous one is `None`.
 /// Test: `denies_a_negated_or_ranged_bracket_glob_onto_a_secret_name`,
 /// `allows_a_bracket_glob_that_reaches_no_secret_name`,
-/// `a_bracket_the_guard_cannot_read_fails_closed`.
-pub(crate) fn bracket_readings(name: &str) -> Vec<String> {
+/// `a_bracket_the_guard_cannot_read_fails_closed`,
+/// `a_quoted_or_escaped_close_bracket_inside_a_class_fails_closed`.
+pub(crate) fn bracket_readings(name: &str) -> Option<Vec<String>> {
+    readings(name, false)
+}
+
+/// [`bracket_readings`] for a `Grep` tool glob, where a class may hold `/`.
+///
+/// Why: #10761 review (F2) — ripgrep's globset reads `/` inside a class as a
+/// member, so `.e[!/]v` matched `.env` while the basename cut split it.
+/// What: the whole glob is read with `/` reachable; the caller takes each
+/// reading's basename afterwards.
+/// Test: `a_grep_glob_class_carrying_a_slash_is_read_whole`.
+pub(crate) fn glob_readings(glob: &str) -> Option<Vec<String>> {
+    readings(glob, true)
+}
+
+fn readings(name: &str, slash: bool) -> Option<Vec<String>> {
     if !name.contains(['[', ']']) {
-        return vec![name.to_string()];
+        return Some(vec![name.to_string()]);
     }
     let chars: Vec<char> = name.chars().collect();
-    let mut parts: Vec<Vec<String>> = Vec::new();
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '[' => match parse_bracket(&chars, i, false) {
-                Bracket::Class {
-                    end,
-                    negated,
-                    items,
-                } => {
-                    parts.push(
-                        reachable(negated, &items)
-                            .into_iter()
-                            .map(String::from)
-                            .collect(),
-                    );
-                    i = end + 1;
-                }
-                Bracket::Opaque { end } => {
-                    parts.push(vec!["?".to_string()]);
-                    i = end + 1;
-                }
-                Bracket::Unterminated => {
-                    parts.push(vec![String::new(), "?".to_string()]);
-                    i += 1;
-                }
-            },
-            ']' => i += 1,
-            c => {
-                parts.push(vec![c.to_string()]);
-                i += 1;
-            }
+    let scanner = Scanner::new(&chars, false);
+    let mut classes = HashMap::new();
+    let mut ambiguous = false;
+    for widen in [false, true] {
+        match enumerate(&chars, &scanner, &mut classes, widen, slash) {
+            Enumerated::Names(names) => return Some(names),
+            Enumerated::Unreadable => return None,
+            Enumerated::TooMany { ambiguous: a } => ambiguous |= a,
         }
     }
-    let bounded = parts.iter().try_fold(1usize, |total, part| {
-        total.checked_mul(part.len()).filter(|n| *n <= MAX_READINGS)
-    });
-    if bounded.is_none() {
-        return vec![widen_brackets(name, ""), widen_brackets(name, "?")];
+    if ambiguous {
+        return None;
     }
-    parts.iter().fold(vec![String::new()], |prefixes, part| {
-        prefixes
-            .iter()
-            .flat_map(|prefix| part.iter().map(move |piece| format!("{prefix}{piece}")))
-            .collect()
-    })
+    Some(vec![widen_brackets(name, ""), widen_brackets(name, "?")])
+}
+
+/// The outcome of one [`enumerate`] pass.
+enum Enumerated {
+    Names(Vec<String>),
+    Unreadable,
+    TooMany { ambiguous: bool },
+}
+
+/// Each way the `[` at an index reads: the position after it and its pieces.
+type Choices = Vec<(usize, Vec<String>)>;
+
+/// One bounded enumeration of every reading of `chars`; `widen` reads each
+/// class as `?` instead of its reachable characters.
+fn enumerate(
+    chars: &[char],
+    scanner: &Scanner,
+    classes: &mut HashMap<(usize, bool), Choices>,
+    widen: bool,
+    slash: bool,
+) -> Enumerated {
+    let mut states = vec![(0usize, String::new())];
+    let mut done: Vec<String> = Vec::new();
+    let mut ambiguous = false;
+    while let Some((i, mut prefix)) = states.pop() {
+        let Some(&c) = chars.get(i) else {
+            if !done.contains(&prefix) {
+                done.push(prefix);
+            }
+            continue;
+        };
+        match c {
+            '[' => {
+                let closes = scanner.closes(i, MAX_CLOSES);
+                if closes.len() > MAX_CLOSES {
+                    // #10761: more candidate closes than the guard tries.
+                    return Enumerated::Unreadable;
+                }
+                ambiguous |= closes.len() > 1;
+                let choices = classes
+                    .entry((i, widen))
+                    .or_insert_with(|| choices_at(scanner, i, &closes, widen, slash));
+                for (next, pieces) in choices.iter() {
+                    for piece in pieces {
+                        states.push((*next, format!("{prefix}{piece}")));
+                    }
+                }
+            }
+            ']' => states.push((i + 1, prefix)),
+            c => {
+                prefix.push(c);
+                states.push((i + 1, prefix));
+            }
+        }
+        if states.len() + done.len() > MAX_READINGS {
+            return Enumerated::TooMany { ambiguous };
+        }
+    }
+    Enumerated::Names(done)
+}
+
+/// Every reading of the `[` at `open` given its candidate `closes`.
+fn choices_at(
+    scanner: &Scanner,
+    open: usize,
+    closes: &[usize],
+    widen: bool,
+    slash: bool,
+) -> Choices {
+    if closes.is_empty() {
+        return vec![(open + 1, vec![String::new(), "?".to_string()])];
+    }
+    closes
+        .iter()
+        .map(|&end| {
+            let pieces = match scanner.class_to(open, end) {
+                Bracket::Class { negated, items, .. } if !widen => {
+                    reachable(negated, &items, slash)
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                }
+                _ => vec!["?".to_string()],
+            };
+            (end + 1, pieces)
+        })
+        .collect()
 }
 
 /// The candidate path words of `text`, without repeats: the plain cut at every
@@ -363,18 +265,24 @@ pub(crate) fn bracket_readings(name: &str) -> Vec<String> {
 /// (`'commands=["grep -c K /srv/.env"]'`) would otherwise hide it.
 /// What: [`cut`] three ways — plain; joining a bracket expression that ends
 /// inside one shell word; and joining one read as a single argv token, where a
-/// space or quote is a member. Joined words can only add a deny.
+/// space or quote is a member. Joined words can only add a deny. Each joined
+/// cut uses one [`Scanner`], so the whole text costs O(n) (#10761 review).
 /// Test: `denies_a_negated_or_ranged_bracket_glob_onto_a_secret_name`,
-/// `keeps_a_bracket_expression_whole_through_the_cut`.
+/// `keeps_a_bracket_expression_whole_through_the_cut`,
+/// `a_long_run_of_unclosed_brackets_scans_in_bounded_time`.
 pub(crate) fn path_words(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut words = cut(&chars, None);
     if chars.contains(&'[') {
-        for word in cut(&chars, Some(true))
+        // #10761 review: a set, so a long text's many words dedupe in O(n).
+        let mut seen: HashSet<String> = words.iter().cloned().collect();
+        let shell = Scanner::new(&chars, true);
+        let argv = Scanner::new(&chars, false);
+        for word in cut(&chars, Some(&shell))
             .into_iter()
-            .chain(cut(&chars, Some(false)))
+            .chain(cut(&chars, Some(&argv)))
         {
-            if !words.contains(&word) {
+            if seen.insert(word.clone()) {
                 words.push(word);
             }
         }
@@ -383,16 +291,15 @@ pub(crate) fn path_words(text: &str) -> Vec<String> {
 }
 
 /// One pass of [`path_words`]: `join` is `None` for the plain cut, else the
-/// `shell_text` mode [`parse_bracket`] reads each `[` with.
-fn cut(chars: &[char], join: Option<bool>) -> Vec<String> {
+/// [`Scanner`] each `[` is read with.
+fn cut(chars: &[char], join: Option<&Scanner>) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut i = 0;
     while i < chars.len() {
         if chars[i] == '['
-            && let Some(shell_text) = join
-            && let Bracket::Class { end, .. } | Bracket::Opaque { end } =
-                parse_bracket(chars, i, shell_text)
+            && let Some(scanner) = join
+            && let Bracket::Class { end, .. } | Bracket::Opaque { end } = scanner.parse(i)
         {
             word.extend(&chars[i..=end]);
             i = end + 1;
