@@ -188,14 +188,15 @@ export const INSTALL_OPTIONS: InstallOption[] = [
 	}
 ];
 
-/** The nine crates `tctl install` manages, in `stable_set.rs` order. */
+/** The nine `stable_set.rs` members, in order. `tctl install` skips trusty-events. */
 export const STABLE_SET = [
 	'trusty-search',
 	'trusty-memory',
 	'trusty-analyze',
 	'trusty-review',
 	'tga',
-	// #10042: the optional event-bus daemon (ADR-0065), installed softly with producers.
+	// #10975: the optional event-bus daemon (ADR-0065); internal, not published, so
+	// `tctl install` and `tctl upgrade` skip it (#10130).
 	'trusty-events',
 	'trusty-console',
 	'trusty-mpm',
