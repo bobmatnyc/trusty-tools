@@ -242,8 +242,10 @@ where
     F: FnMut(Vec<Arc<PalaceHandle>>) -> Fut,
     Fut: Future<Output = Result<CrossPalaceRecall>>,
 {
-    // #11255: the `scope: "all"` deadline runs from the call's start.
-    let deadline = Instant::now() + state.recall_limits.all_deadline;
+    // #11255: the `scope: "all"` deadline runs from the call's start; capped,
+    // so an injected or configured value can never overflow the `Instant`.
+    let budget = (state.recall_limits.all_deadline).min(super::op_limits::MAX_RECALL_ALL_DEADLINE);
+    let deadline = Instant::now() + budget;
     let palaces = list_palaces_blocking(state).await?;
     PalaceHandle::without_idle_touch(async move {
         match scope {

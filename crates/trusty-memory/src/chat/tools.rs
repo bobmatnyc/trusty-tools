@@ -17,7 +17,9 @@ use crate::engine::store::kg::Triple;
 use crate::kg_write::CachePolicy;
 use crate::service::helpers::{collect_palace_stats, list_palaces_blocking};
 use crate::service::recall_stream::RecallAllScope;
-use crate::service::{DreamStatusPayload, MemoryService, load_user_config, palace_info_from};
+use crate::service::{
+    DreamStatusPayload, MemoryService, ServiceError, load_user_config, palace_info_from,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use trusty_common::{ChatMessage, ToolDef};
@@ -326,7 +328,10 @@ async fn execute_get_palace(state: &AppState, id: &str) -> Value {
 /// Why: this tool called the retrieval layer directly and so skipped the
 /// stale-snapshot demotion every MCP recall applies.
 /// What: [`MemoryService::recall_ranked`], serialized in this tool's row shape.
-/// Test: `demotion_applies_on_every_recall_surface` covers the shared method.
+/// A palace still opening answers `{error, kind: "palace_opening", retryable:
+/// true, palace, waited_ms}` (#11255).
+/// Test: `demotion_applies_on_every_recall_surface` covers the shared method;
+/// `chat_recall_memories_answers_palace_opening_for_a_stalled_open`.
 async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: usize) -> Value {
     // #8246: route through the service so the chat tool demotes too.
     let ranked = MemoryService::new(state.clone())
@@ -345,6 +350,13 @@ async fn execute_recall(state: &AppState, palace_id: &str, query: &str, top_k: u
                 }))
                 .collect::<Vec<_>>()
         ),
+        // #11255: a palace still opening is retryable; the caller can branch on
+        // `kind` / `retryable` instead of reading it as "no memories".
+        Err(ServiceError::PalaceOpening(opening)) => {
+            let mut out = opening.rpc_data();
+            out["error"] = json!(format!("recall {palace_id}: {opening}"));
+            out
+        }
         Err(e) => json!({ "error": format!("recall {palace_id}: {e}") }),
     }
 }

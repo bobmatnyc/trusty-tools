@@ -8,18 +8,23 @@
 //! Otherwise it runs the open on the blocking pool and waits at most
 //! [`crate::service::op_limits::RecallLimits::open_wait`]. Past that it answers
 //! [`PalaceOpening`], a retryable error, and leaves the open running, so the
-//! palace becomes resident and a retry finds it.
+//! palace becomes resident and a retry finds it. Callers that miss the cache
+//! together share one open ([`RecallOpens`]), so retries add no open attempts.
 //! Test: `a_held_palace_open_answers_palace_opening_and_the_open_continues`,
 //! `palace_opening_maps_to_its_own_rpc_code`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 use crate::AppState;
 use crate::engine::palace::PalaceId;
+use crate::engine::palace_not_found::PalaceNotFound;
 use crate::engine::retrieval::PalaceHandle;
 
 use super::helpers::open_palace_handle;
@@ -65,32 +70,140 @@ impl PalaceOpening {
     }
 }
 
+/// The outcome one shared open publishes to every recall waiting on it.
+type SharedOpen = Result<Arc<PalaceHandle>, Arc<anyhow::Error>>;
+
+/// The recall opens in flight, one per palace name (#11255 review, F2).
+///
+/// Why: each recall that missed the cache spawned its own blocking open, and
+/// each such task queued on the palace's open lock for up to the 60 s queue
+/// bound after its caller had already been told [`PalaceOpening`]. Every
+/// retry added a parked blocking thread, and a failed open (not cached,
+/// #3992) was repeated by each one.
+/// What: [`Self::join`] hands back a receiver for the open of `palace`,
+/// starting one blocking task only when none is in flight under that name.
+/// The task publishes its outcome to every receiver and leaves the map, so
+/// the next miss starts a fresh attempt: a failure never poisons a later one.
+/// Test: `concurrent_recalls_of_a_stalled_open_share_one_open_attempt`.
+#[derive(Default)]
+pub struct RecallOpens {
+    inflight: parking_lot::Mutex<HashMap<String, watch::Receiver<Option<SharedOpen>>>>,
+    started: AtomicUsize,
+}
+
+impl RecallOpens {
+    /// How many blocking opens this map has started; the test seam.
+    pub fn opens_started(&self) -> usize {
+        self.started.load(Ordering::Relaxed)
+    }
+
+    /// Join the in-flight open of `palace`, or start it.
+    fn join(state: &AppState, palace: &str) -> watch::Receiver<Option<SharedOpen>> {
+        let opens = Arc::clone(&state.recall_opens);
+        let mut inflight = opens.inflight.lock();
+        if let Some(rx) = inflight.get(palace) {
+            return rx.clone();
+        }
+        let (tx, rx) = watch::channel(None);
+        inflight.insert(palace.to_string(), rx.clone());
+        drop(inflight);
+        opens.started.fetch_add(1, Ordering::Relaxed);
+        let (owned, id) = (state.clone(), palace.to_string());
+        tokio::task::spawn_blocking(move || {
+            // Leaves the map even if the open panics (the sender then drops).
+            let _leave = Leave(&owned.recall_opens, &id);
+            let outcome = open_palace_handle(&owned, &id).map_err(Arc::new);
+            tx.send_replace(Some(outcome));
+        });
+        rx
+    }
+}
+
+/// Removes one palace's entry from [`RecallOpens`] when its open ends.
+struct Leave<'a>(&'a RecallOpens, &'a str);
+
+impl Drop for Leave<'_> {
+    fn drop(&mut self) {
+        self.0.inflight.lock().remove(self.1);
+    }
+}
+
+/// A shared open's failure, as each waiting recall receives it.
+///
+/// Why: `anyhow::Error` is not `Clone`, and the waiters need the failure's
+/// chain intact so the wire still maps a format refusal (`-32006`).
+/// What: displays as `open palace <id> failed`; its source is the original
+/// error's own root, so the rest of the chain is unchanged. An absence is
+/// re-raised as its own [`PalaceNotFound`] by [`shared_failure`], so `-32004`
+/// holds too.
+#[derive(Debug)]
+struct SharedOpenFailure {
+    palace: String,
+    cause: Arc<anyhow::Error>,
+}
+
+impl std::fmt::Display for SharedOpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "open palace {} failed", self.palace)
+    }
+}
+
+impl std::error::Error for SharedOpenFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&**self.cause)
+    }
+}
+
+/// The error a waiter on a failed shared open answers with.
+fn shared_failure(palace: &str, e: &Arc<anyhow::Error>) -> anyhow::Error {
+    // #11255 review: an absence keeps its type, so it still answers -32004.
+    if let Some(absent) = e.downcast_ref::<PalaceNotFound>() {
+        return absent.clone().into();
+    }
+    SharedOpenFailure {
+        palace: palace.to_string(),
+        cause: Arc::clone(e),
+    }
+    .into()
+}
+
 /// Open `palace` for a recall without blocking a runtime worker (#11255).
 ///
 /// Why: see the module doc.
 /// What: a palace the registry holds under `palace` is returned inline, with
-/// the same LRU promotion `open_palace_handle` gives it. Otherwise
-/// `open_palace_handle` runs on the blocking pool; its own result (including
-/// a not-found or open failure) is returned unchanged when it finishes within
-/// `state.recall_limits.open_wait`. Past that wait the call fails with
-/// [`PalaceOpening`] and the blocking open is left running, never cancelled.
-/// A panicked open task is an error, never an empty result.
-/// Test: `a_held_palace_open_answers_palace_opening_and_the_open_continues`.
+/// the same LRU promotion `open_palace_handle` gives it. Otherwise the call
+/// joins the one in-flight open of `palace` ([`RecallOpens`]), which runs on
+/// the blocking pool, and waits at most `state.recall_limits.open_wait` for
+/// its outcome: the handle, or its failure (see [`shared_failure`]). Past
+/// that wait the call fails with [`PalaceOpening`]; the open goes on, never
+/// cancelled. An open task that ends without an outcome (a panic) is an
+/// error, never an empty result.
+/// Test: `a_held_palace_open_answers_palace_opening_and_the_open_continues`,
+/// `concurrent_recalls_of_a_stalled_open_share_one_open_attempt`,
+/// `a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds`.
 pub(crate) async fn open_for_recall(state: &AppState, palace: &str) -> Result<Arc<PalaceHandle>> {
     if let Some(handle) = state.registry.get(&PalaceId::new(palace)) {
         return Ok(handle);
     }
     let wait = state.recall_limits.open_wait;
-    let (owned, id) = (state.clone(), palace.to_string());
-    let open = tokio::task::spawn_blocking(move || open_palace_handle(&owned, &id));
-    match tokio::time::timeout(wait, open).await {
-        Ok(Ok(opened)) => opened,
-        Ok(Err(join)) => Err(anyhow!("open palace {palace}: open task failed: {join}")),
-        // #11255: dropping the JoinHandle detaches the open; it still registers.
-        Err(_elapsed) => Err(PalaceOpening {
-            palace: palace.to_string(),
-            waited: wait,
+    let mut rx = RecallOpens::join(state, palace);
+    let shared = match tokio::time::timeout(wait, rx.wait_for(Option::is_some)).await {
+        Ok(Ok(done)) => done.clone(),
+        Ok(Err(_closed)) => None,
+        // #11255: the open is left running; it still registers the palace.
+        Err(_elapsed) => {
+            return Err(PalaceOpening {
+                palace: palace.to_string(),
+                waited: wait,
+            }
+            .into());
         }
-        .into()),
+    };
+    match shared {
+        Some(Ok(handle)) => Ok(handle),
+        Some(Err(e)) => Err(shared_failure(palace, &e)),
+        None => Err(anyhow!(
+            "open palace {palace}: open task ended without an outcome"
+        )),
     }
 }

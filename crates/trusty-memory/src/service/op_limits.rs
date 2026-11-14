@@ -34,12 +34,37 @@ pub struct RecallLimits {
     pub all_deadline: Duration,
 }
 
+/// The longest `scope: "all"` deadline honoured; a longer one is capped.
+///
+/// Why (#11255 review): `Instant::now() + deadline` panics on overflow, so an
+/// absurd `TRUSTY_RECALL_ALL_DEADLINE_SECS` could crash the daemon.
+pub const MAX_RECALL_ALL_DEADLINE: Duration = Duration::from_secs(3600);
+
 impl RecallLimits {
     /// Read both limits from the environment (see [`crate::engine::timeouts`]).
     pub fn from_env() -> Self {
+        use crate::engine::timeouts;
+        Self::resolve(
+            timeouts::recall_open_wait(),
+            timeouts::recall_all_deadline(),
+            timeouts::open_queue_timeout(),
+        )
+    }
+
+    /// The effective limits for raw `open_wait` and `all_deadline` values.
+    ///
+    /// Why (#11255 review): a configured open wait at or past the open-queue
+    /// bound answered the queue's generic timeout instead of `PalaceOpening`;
+    /// the compile-time check covered only the defaults.
+    /// What: `open_wait` is capped at three quarters of `open_queue`, so it
+    /// is always below a non-zero queue bound (a zero bound gives a zero
+    /// wait: a cold recall answers `PalaceOpening` at once). `all_deadline` is
+    /// capped at [`MAX_RECALL_ALL_DEADLINE`].
+    /// Test: `recall_limits_resolve_below_the_queue_bound_and_under_the_cap`.
+    pub fn resolve(open_wait: Duration, all_deadline: Duration, open_queue: Duration) -> Self {
         Self {
-            open_wait: crate::engine::timeouts::recall_open_wait(),
-            all_deadline: crate::engine::timeouts::recall_all_deadline(),
+            open_wait: open_wait.min(open_queue - open_queue / 4),
+            all_deadline: all_deadline.min(MAX_RECALL_ALL_DEADLINE),
         }
     }
 }
@@ -93,5 +118,43 @@ impl AppState {
     pub fn with_recall_limits(mut self, limits: RecallLimits) -> Self {
         self.recall_limits = limits;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Why (#11255 review): no configured value can make the open wait reach
+    /// the open-queue bound, or make the deadline overflow an `Instant`.
+    /// What: a table of raw `(open_wait, all_deadline, open_queue)` values,
+    /// the defaults included, and the limits `resolve` makes of each; then an
+    /// `Instant::now() + all_deadline` that must not panic.
+    /// Test: itself.
+    #[test]
+    fn recall_limits_resolve_below_the_queue_bound_and_under_the_cap() {
+        let s = Duration::from_secs;
+        let huge = Duration::from_secs(u64::MAX);
+        for ((open, all, queue), (want_open, want_all)) in [
+            ((s(15), s(20), s(60)), (s(15), s(20))),
+            ((s(60), s(20), s(60)), (s(45), s(20))),
+            ((s(90), s(20), s(60)), (s(45), s(20))),
+            ((huge, huge, s(60)), (s(45), MAX_RECALL_ALL_DEADLINE)),
+            ((s(15), s(20), s(4)), (s(3), s(20))),
+            ((s(15), s(20), Duration::ZERO), (Duration::ZERO, s(20))),
+            ((s(15), s(20), huge), (s(15), s(20))),
+        ] {
+            let got = RecallLimits::resolve(open, all, queue);
+            assert_eq!(
+                (got.open_wait, got.all_deadline),
+                (want_open, want_all),
+                "{open:?} {all:?} {queue:?}"
+            );
+            assert!(
+                queue.is_zero() || got.open_wait < queue,
+                "{got:?} vs {queue:?}"
+            );
+            let _ = tokio::time::Instant::now() + got.all_deadline;
+        }
     }
 }

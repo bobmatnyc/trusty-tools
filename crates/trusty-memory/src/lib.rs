@@ -779,6 +779,8 @@ pub struct AppState {
     /// `scope: "all"` deadline. Per-instance for the same reason as
     /// `write_op_budget`; see [`service::op_limits::RecallLimits`].
     pub recall_limits: service::op_limits::RecallLimits,
+    /// The single-palace recall opens in flight, one per palace (#11255).
+    pub recall_opens: Arc<tools::recall_open::RecallOpens>,
 }
 
 #[cfg(feature = "server")]
@@ -878,6 +880,7 @@ impl AppState {
             // #6366: the ceiling on the critical section #4002's budget stops at.
             write_pipeline_budget: crate::engine::timeouts::write_pipeline_timeout(),
             recall_limits: service::op_limits::RecallLimits::from_env(),
+            recall_opens: Arc::default(),
         }
     }
 

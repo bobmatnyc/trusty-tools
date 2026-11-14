@@ -646,23 +646,31 @@ async fn a_palace_whose_recall_fails_is_not_counted_as_searched() {
 }
 
 /// The `scope: "all"` deadline the deadline test injects (#11255).
-const DEADLINE: Duration = Duration::from_secs(3);
+const DEADLINE: Duration = Duration::from_secs(4);
+/// How far past [`DEADLINE`] the deadline test lets the reply land (#11255).
+const DEADLINE_SLACK: Duration = Duration::from_secs(3);
 
 /// Why (#11255, F2): the defect and its deadline arm. A walk with one palace
 /// whose open never finishes ran until that open gave up, then answered as if
 /// nothing had happened; behind a bridge it ran past the caller's 60 s.
-/// What: `RECALL_PALACE_BATCH + 1` cold palaces, so the last one walks alone
-/// in a second batch, and the test holds that palace's open-queue lock. The
-/// deadline (3 s) is well past the first batch and well short of the
-/// registry's 30 s queue bound, so the stalled open, not timing, decides the
-/// outcome. The reply must carry the first batch's hits, none from the
-/// stalled palace, `deadline_exceeded: true`, `palaces_not_reached: 1`, the
-/// `deadline` reason and `coverage: "partial"`.
+/// What: `RECALL_PALACE_BATCH + 1` palaces. The first batch is resident, so
+/// it costs a search and no open; the palace listed last is cold and walks
+/// alone in a second batch, with its open-queue lock held. The work before
+/// that open takes milliseconds against a 4 s deadline, and the 30 s queue
+/// bound is far past it, so the stalled open, not machine speed, decides the
+/// outcome. The reply lands within the deadline plus [`DEADLINE_SLACK`] and
+/// carries the first batch's hits, none from the stalled palace,
+/// `deadline_exceeded: true`, `palaces_not_reached: 1`, the `deadline` reason
+/// and `coverage: "partial"`. Once the lock drops, the detached open finishes
+/// and releases its palace: bounded waits until the open has returned (its
+/// clone of the open lock is gone) and the resident set equals the one
+/// before the call.
 /// Test: this function.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
 async fn scope_all_returns_partial_results_at_its_deadline() {
     use super::recall_stream::RECALL_PALACE_BATCH;
+    use std::collections::BTreeSet;
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut state =
         ready_state(tmp.path())
@@ -676,30 +684,45 @@ async fn scope_all_returns_partial_results_at_its_deadline() {
             .with_data_root(tmp.path())
             .with_open_queue_timeout(Duration::from_secs(30)),
     );
-    let names: Vec<String> = (0..=RECALL_PALACE_BATCH)
-        .map(|i| format!("dl-{i:02}"))
-        .collect();
-    for name in &names {
+    for i in 0..=RECALL_PALACE_BATCH {
+        let name = format!("dl-{i:02}");
         resident_with(
             &state,
-            name,
+            &name,
             &["a deadline walk finds this rust build fact"],
         )
         .await;
-        state.registry.remove(&PalaceId::new(name.as_str()));
     }
-    // The walk keeps the listing order; stall the palace listed last.
+    // The walk keeps the listing order; the palace listed last is cold.
     let listed = PalaceRegistry::list_palaces(tmp.path()).expect("list palaces");
     let stalled = listed.last().expect("palaces").id.clone();
+    state.registry.remove(&stalled);
+    let resident = |state: &AppState| -> BTreeSet<String> {
+        let ids = state.registry.list().into_iter();
+        ids.map(|id| id.as_str().to_string()).collect()
+    };
+    let baseline = resident(&state);
+    assert_eq!(baseline.len(), RECALL_PALACE_BATCH, "{baseline:?}");
     let gate = state.registry.open_lock_for_test(&stalled);
     let held = gate.lock();
 
+    let started = std::time::Instant::now();
     let out = mcp(
         &state,
         json!({"q": "rust build fact", "top_k": 20, "scope": "all"}),
     )
     .await;
+    let elapsed = started.elapsed();
+    // The registry's entry, this clone and the stalled open's own clone.
+    assert!(
+        std::sync::Arc::strong_count(&gate) >= 3,
+        "no open is stalled"
+    );
     drop(held);
+    assert!(
+        elapsed >= DEADLINE && elapsed < DEADLINE + DEADLINE_SLACK,
+        "the reply took {elapsed:?} against a {DEADLINE:?} deadline"
+    );
     assert_eq!(out["deadline_exceeded"], true, "{out}");
     assert_eq!(out["palaces_not_reached"], 1, "{out}");
     assert_eq!(out["not_searched_by_reason"]["deadline"], 1, "{out}");
@@ -717,6 +740,17 @@ async fn scope_all_returns_partial_results_at_its_deadline() {
             .all(|r| r["palace_id"].as_str() != Some(stalled.as_str())),
         "a palace the walk never reached cannot answer: {out}"
     );
+
+    // The detached open returns once the lock frees, then releases its palace.
+    let bound = tokio::time::Instant::now() + Duration::from_secs(20);
+    while std::sync::Arc::strong_count(&gate) > 2 || resident(&state) != baseline {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "the deadline left residue: {:?} vs {baseline:?}",
+            resident(&state)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 /// Why (#11255, F2): after a deadline hit the reply must not start detached

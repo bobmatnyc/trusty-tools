@@ -119,3 +119,117 @@ fn palace_opening_maps_to_its_own_rpc_code() {
         )
     );
 }
+
+/// A state whose palace `name` exists on disk and is not resident, with the
+/// given open wait and open-queue bound (#11255 review).
+async fn stalled_state(
+    name: &str,
+    open_wait: Duration,
+    queue_bound: Duration,
+) -> (AppState, tempfile::TempDir) {
+    let (state, tmp) = test_state();
+    let mut state = state.with_recall_limits(RecallLimits {
+        open_wait,
+        all_deadline: Duration::from_secs(20),
+    });
+    state.registry = Arc::new(
+        PalaceRegistry::from_env()
+            .with_data_root(tmp.path())
+            .with_open_queue_timeout(queue_bound),
+    );
+    dispatch_tool(&state, "palace_create", json!({"name": name}))
+        .await
+        .expect("palace_create");
+    state.registry.remove(&PalaceId::new(name));
+    (state, tmp)
+}
+
+/// `n` concurrent `open_for_recall` calls of `palace`, each on its own task.
+async fn concurrent_opens(state: &AppState, palace: &str, n: usize) -> Vec<anyhow::Result<()>> {
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..n {
+        let (state, palace) = (state.clone(), palace.to_string());
+        set.spawn(async move {
+            crate::tools::recall_open::open_for_recall(&state, &palace)
+                .await
+                .map(drop)
+        });
+    }
+    set.join_all().await
+}
+
+/// Wait, bounded, until the registry holds `id`.
+async fn until_resident(state: &AppState, id: &PalaceId) {
+    let bound = tokio::time::Instant::now() + Duration::from_secs(15);
+    while state.registry.peek(id).is_none() {
+        assert!(
+            tokio::time::Instant::now() < bound,
+            "the open never registered {id:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Why (#11255 review, F2): every recall that missed the cache started its
+/// own blocking open, each parked on the open lock for the queue bound, and
+/// every retry added one more.
+/// What: three waves of 32 concurrent recalls of one stalled palace, each
+/// wave a retry of the last. Every call answers `PalaceOpening` within the
+/// queue bound, and the seam counts one open started for all 96. Once the
+/// lock frees, that one open registers the palace and a later call opens
+/// nothing new.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn concurrent_recalls_of_a_stalled_open_share_one_open_attempt() {
+    let (state, _tmp) = stalled_state("shared-open", Duration::from_millis(300), QUEUE_BOUND).await;
+    let id = PalaceId::new("shared-open");
+    let gate = state.registry.open_lock_for_test(&id);
+    let held = gate.lock();
+    let started = std::time::Instant::now();
+    for wave in 0..3 {
+        for outcome in concurrent_opens(&state, "shared-open", 32).await {
+            let e = outcome.expect_err("a stalled open cannot succeed");
+            assert!(PalaceOpening::find(&e).is_some(), "wave {wave}: {e:#}");
+        }
+        assert_eq!(state.recall_opens.opens_started(), 1, "wave {wave}");
+    }
+    assert!(started.elapsed() < QUEUE_BOUND, "{:?}", started.elapsed());
+    drop(held);
+    until_resident(&state, &id).await;
+    crate::tools::recall_open::open_for_recall(&state, "shared-open")
+        .await
+        .expect("the shared open registered the palace");
+    assert_eq!(state.recall_opens.opens_started(), 1);
+}
+
+/// Why (#11255 review, F2): a shared open that fails must reach the callers
+/// waiting on it as that failure, and must not poison the next attempt.
+/// What: a 2 s open wait under a 3 s queue bound. The first caller answers
+/// `PalaceOpening` at 2 s; a second wave joins the same open and, waiting to
+/// 4 s, receives the queue timeout at 3 s. Then, with the lock free, a new
+/// call starts a second open, which succeeds.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn a_failed_shared_open_reaches_its_waiters_and_a_later_open_succeeds() {
+    let (wait, bound) = (Duration::from_secs(2), Duration::from_secs(3));
+    let (state, _tmp) = stalled_state("failed-open", wait, bound).await;
+    let id = PalaceId::new("failed-open");
+    let gate = state.registry.open_lock_for_test(&id);
+    let held = gate.lock();
+    let first = concurrent_opens(&state, "failed-open", 1).await;
+    let e = first[0].as_ref().expect_err("stalled");
+    assert!(PalaceOpening::find(e).is_some(), "{e:#}");
+    for outcome in concurrent_opens(&state, "failed-open", 8).await {
+        let e = outcome.expect_err("the shared open failed");
+        assert!(PalaceOpening::find(&e).is_none(), "{e:#}");
+        assert!(format!("{e:#}").contains("open queue timed out"), "{e:#}");
+    }
+    assert_eq!(state.recall_opens.opens_started(), 1);
+    drop(held);
+    crate::tools::recall_open::open_for_recall(&state, "failed-open")
+        .await
+        .expect("a later open is not poisoned");
+    assert_eq!(state.recall_opens.opens_started(), 2);
+}
