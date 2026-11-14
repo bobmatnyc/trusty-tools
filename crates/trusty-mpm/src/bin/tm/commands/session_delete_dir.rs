@@ -8,7 +8,8 @@
 //! What: [`run`] reads the session and the list from the daemon, the managed
 //! workspace root and every Architect directory (`protected_architect_dirs`;
 //! a config that exists but cannot be read refuses the delete), and
-//! hands them to `project_dir_delete::run_dir_delete` on a blocking thread.
+//! hands them to `project_dir_delete::run_dir_delete` on a blocking thread,
+//! with [`DaemonSessions`] to read the list again after the prompt (#11238).
 //! Every run shows the plan first; a real run then reads the typed directory
 //! name (unless `--yes`) and asks `LocalAuthenticator` for presence. After the
 //! directory is gone the record is marked deleted through the existing
@@ -18,7 +19,6 @@
 //! `render_names_the_directory_and_root` below.
 
 use std::io::{BufRead as _, Write as _};
-use std::path::PathBuf;
 
 use anyhow::Context as _;
 use trusty_mpm::client::DaemonClient;
@@ -27,8 +27,38 @@ use trusty_mpm::core::presence_local::LocalAuthenticator;
 use trusty_mpm::core::trusty_tools_config::{TrustyToolsConfig, workspace_root};
 use trusty_mpm::session_manager::project_dir_delete::{
     Confirmation, DirDeleteInput, DirDeleteOptions, DirDeletePlan, DirSession, OsProbes,
-    run_dir_delete,
+    SessionSource, run_dir_delete,
 };
+
+/// The daemon's session list, as `run` reads it (#11238).
+async fn list_sessions(daemon: &DaemonClient) -> anyhow::Result<Vec<DirSession>> {
+    Ok(daemon
+        .list_managed_sessions()
+        .await
+        .context("listing sessions")?
+        .iter()
+        .map(DirSession::from_summary)
+        .collect())
+}
+
+/// The post-prompt re-read: [`list_sessions`] from the blocking thread.
+///
+/// Why: the session guards must see sessions spawned while the prompt was
+/// open (#11238). What: blocks on the runtime `run` was called on; any
+/// daemon, HTTP or parse error becomes `Err`, which refuses the delete.
+/// Test: `a_failed_session_reread_refuses_the_delete` (the library side).
+struct DaemonSessions {
+    daemon: DaemonClient,
+    handle: tokio::runtime::Handle,
+}
+
+impl SessionSource for DaemonSessions {
+    fn sessions(&self) -> Result<Vec<DirSession>, String> {
+        self.handle
+            .block_on(list_sessions(&self.daemon))
+            .map_err(|e| format!("{e:#}"))
+    }
+}
 
 /// Run `tm session delete <id> --project-dir`.
 pub(crate) async fn run(
@@ -41,13 +71,7 @@ pub(crate) async fn run(
         .get_managed_session(&id)
         .await
         .with_context(|| format!("session {id}"))?;
-    let mut sessions: Vec<DirSession> = daemon
-        .list_managed_sessions()
-        .await
-        .context("listing sessions")?
-        .iter()
-        .map(DirSession::from_summary)
-        .collect();
+    let mut sessions = list_sessions(daemon).await?;
     if !sessions.iter().any(|s| s.id == target.id) {
         sessions.push(DirSession::from_summary(&target));
     }
@@ -58,8 +82,19 @@ pub(crate) async fn run(
     let architect_dirs = protected_architect_dirs(&env, dirs::home_dir().as_deref())
         .map_err(|e| anyhow::anyhow!("refusing to delete a project directory: {e}"))?;
     let session_id = target.id.clone();
+    let recheck = DaemonSessions {
+        daemon: daemon.clone(),
+        handle: tokio::runtime::Handle::current(),
+    };
     let report = tokio::task::spawn_blocking(move || {
-        delete_blocking(&session_id, &sessions, root, &architect_dirs, dry_run, yes)
+        let input = DirDeleteInput {
+            session_id: &session_id,
+            sessions: &sessions,
+            root: &root,
+            architect_dirs: &architect_dirs,
+            recheck: &recheck,
+        };
+        delete_blocking(input, dry_run, yes)
     })
     .await
     .context("delete task")??;
@@ -85,19 +120,10 @@ pub(crate) async fn run(
 
 /// The blocking body: guards, prompt, presence, removal.
 fn delete_blocking(
-    session_id: &str,
-    sessions: &[DirSession],
-    root: PathBuf,
-    architect_dirs: &[PathBuf],
+    input: DirDeleteInput<'_>,
     dry_run: bool,
     yes: bool,
 ) -> anyhow::Result<trusty_mpm::session_manager::project_dir_delete::DirDeleteReport> {
-    let input = DirDeleteInput {
-        session_id,
-        sessions,
-        root: &root,
-        architect_dirs,
-    };
     let mut confirm = |plan: &DirDeletePlan| {
         for line in render(plan, false) {
             println!("{line}");
