@@ -5,6 +5,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
+const pagesSource = await readFile(new URL("../src/trusty_browser/extension/pages.js",import.meta.url),"utf8");
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
 const profile = "example", email = "qa@example.org", secret = "a".repeat(64);
 const route = "http://127.0.0.1:1234/app";
@@ -29,7 +30,9 @@ async function fixture() {
       actions.push({id,msg,doc});
       return {ok:true,url:route,account:"site-user",result:{count:0}};
     }},alarms:{onAlarm:event(),create(){}}};
-  vm.runInNewContext(source,{importScripts:()=>{},TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
+  const ctx = vm.createContext({TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
+  ctx.importScripts = (...files) => { if (files.includes("pages.js")) vm.runInContext(pagesSource,ctx); };
+  vm.runInContext(source,ctx);
   for (let i=0;!sent.length && i<50;i++) await new Promise(r=>setImmediate(r));
   assert.equal(sent[0]?.type,"hello");
   return {chrome,port,sent,actions,timers,switchAccount(){user="other@example.org";}};
@@ -84,4 +87,345 @@ test("duplicate authenticated registration backs off then reconnects with fresh 
   await challenge(hello);
   await f.port.onMessage.fire({ok:true,generation:"new-connection"});
   assert.equal(f.sent.at(-1).proof,sign("extension",hello,nonce));
+});
+
+// ---- #11239: activation-code grants and page commands -------------------------------------------
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
+const plain = value => JSON.parse(JSON.stringify(value));
+const CODE = "tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA";
+
+// A browser with explicit tabs, a fake broker behind the enrollment host, and a real worker table.
+async function codeFixture({session:seed = {}, held = false, tabs:layout, live = []} = {}) {
+  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [];
+  const timers = new Map(); let serial = 0, mintSerial = 0;
+  const tabs = new Map(Object.entries(layout || {
+    7:{origin:"https://a.test", title:"Alpha", active:true},
+    8:{origin:"https://b.test", title:"Beta", active:false},
+    9:{origin:"https://c.test", title:"Gamma", active:false},
+  }).map(([id, t]) => [Number(id), {doc:"doc-" + id, ...t}]));
+  const perms = {held, removed:0};
+  const sessionStore = {incarnation:"epoch-1", ...structuredClone(seed)};
+  const failures = {sessionSet:false};
+  const listeners = new Set();
+  const ok = {grants:[...live]};
+  let broker = msg => {
+    if (msg.op === "mint") {
+      const grant = "g-" + String(++mintSerial).padStart(12, "0");
+      ok.grants.push({grant, scope:msg.scope, ...(msg.scope === "tab" ? {tab:msg.tab} : {}), state:"code", expires_in_s:300});
+      return {ok:true, code:CODE, grant, scope:msg.scope, profile, ...(msg.scope === "tab" ? {tab:msg.tab} : {}),
+        expires_at:Date.now() / 1000 + 300};
+    }
+    if (msg.op === "grants") return {ok:true, grants:ok.grants};
+    if (msg.op === "revoke_grant") {
+      const before = ok.grants.length;
+      ok.grants = ok.grants.filter(g => g.grant !== msg.grant);
+      return before === ok.grants.length ? {ok:false, error:"UnknownGrant"} : {ok:true, revoked:1};
+    }
+    if (msg.op === "revoke_grants") { const revoked = ok.grants.length; ok.grants = []; return {ok:true, revoked}; }
+    return {ok:false, error:"InvalidRequest"};
+  };
+  const accessible = t => t && (t.activeTab || (perms.held && t.origin.startsWith("https:")));
+  const native = {onMessage:event(), onDisconnect:event(), postMessage(m){sent.push(m);}, disconnect(){this.closed = true;}};
+  const chrome = {
+    runtime:{id, onConnect:event(), onMessage:event(), onStartup:event(), onInstalled:event(),
+      connectNative(name) {
+        if (name === "com.trusty.browser") return native;
+        const port = {onMessage:event(), onDisconnect:event(), disconnect(){},
+          postMessage(msg) {
+            brokerCalls.push(msg);
+            queueMicrotask(() => {
+              const reply = broker(msg);
+              if (reply === "disconnect") port.onDisconnect.fire(); else port.onMessage.fire(reply);
+            });
+          }};
+        return port;
+      }},
+    storage:{
+      local:{setAccessLevel:async()=>{}, get:async()=>({enrollment:{profile, key:secret, email, workflow:"w", url:route, account:"a"}})},
+      session:{
+        get:async key => ({[key]:structuredClone(sessionStore[key])}),
+        set:async data => { if (failures.sessionSet) throw new Error("quota"); Object.assign(sessionStore, structuredClone(data)); },
+      }},
+    identity:{getProfileUserInfo:async()=>({email}), onSignInChanged:event()},
+    permissions:{
+      request:async()=>{ perms.held = true; return true; },
+      contains:async()=>perms.held,
+      remove:async()=>{ perms.removed++; const was = perms.held; perms.held = false; return was; },
+    },
+    alarms:{onAlarm:event(), create(name, info){ alarms.push({name, ...info}); }},
+    tabs:{
+      get:async tab => { if (!tabs.has(tab)) throw new Error("No tab with id: " + tab); return {id:tab}; },
+      query:async q => { queries.push(q); return [...tabs].map(([tid, t], index) => ({id:tid, windowId:1, index, active:t.active})); },
+      update:async (tab, {url}) => {
+        const t = tabs.get(tab);
+        if (!t) throw new Error("No tab");
+        updates.push({tab, url});
+        const next = new URL(url).origin;
+        if (next !== t.origin) t.activeTab = false;
+        t.origin = next; t.doc = "doc-" + tab + "-" + updates.length;
+        if (!t.slow) setImmediate(() => { for (const l of [...listeners]) l(tab, {status:"loading"}); for (const l of [...listeners]) l(tab, {status:"complete"}); });
+        return {id:tab};
+      },
+      onUpdated:{addListener(l){listeners.add(l);}, removeListener(l){listeners.delete(l);}},
+    },
+    scripting:{executeScript:async ({target, func, args}) => {
+      const t = tabs.get(target.tabId);
+      if (!accessible(t)) throw new Error("Cannot access contents of the page");
+      if (target.documentIds && !target.documentIds.includes(t.doc)) throw new Error("No document with id");
+      if (func.name !== "pageProbe") ran.push({tab:target.tabId, func:func.name, args});
+      const result = func.name === "pageProbe" ? [t.origin, t.title]
+        : func.name === "pageRead" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
+          text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
+        : t.result || {ok:true};
+      if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
+      return [{frameId:0, documentId:t.doc, result}];
+    }},
+  };
+  const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
+    TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
+    setTimeout:(fn, ms) => { timers.set(++serial, {fn, ms}); return serial; }, clearTimeout:t => timers.delete(t)});
+  ctx.importScripts = (...files) => { if (files.includes("pages.js")) vm.runInContext(pagesSource, ctx); };
+  vm.runInContext(source, ctx);
+  await settle();
+  const hello = sent[0], nonce = "d".repeat(64);
+  await native.onMessage.fire({type:"challenge", proof:sign("broker", hello, nonce), nonce});
+  await native.onMessage.fire({ok:true, generation:"g1"});
+  let seq = 0;
+  const command = async (op, fields = {}) => {
+    const id = "c" + ++seq;
+    await native.onMessage.fire({id, op, email, ...fields});
+    await settle();
+    return plain(sent.findLast(m => m.id === id));
+  };
+  const popup = msg => new Promise(resolve =>
+    chrome.runtime.onMessage.fire(msg, {id, url:"chrome-extension://" + id + "/setup.html"}, resolve)).then(plain);
+  const table = () => plain(sessionStore.grants || {});
+  return {chrome, native, sent, ran, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
+    sessionStore, command, popup, table, live:ok, setBroker(fn){ broker = fn; }};
+}
+const mintTab = async (f, tab) => {
+  await f.chrome.permissions.request({origins:["https://*/*"]});
+  return f.popup({type:"mint", scope:"tab", tab});
+};
+
+test("a tab grant never reaches another tab", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
+    8:{origin:"https://b.test", title:"B", active:false}}});
+  const {grant} = await mintTab(f, 7);
+  assert.equal(f.perms.held, true);
+  const before = {ran:f.ran.length, updates:f.updates.length};
+  for (const [op, extra] of [["page_tab",{}], ["page_read",{document:null}], ["page_click",{document:"doc-8", ref:"1.0"}],
+    ["page_type",{document:"doc-8", ref:"1.0", text:"x"}], ["page_navigate",{url:"https://b.test/next"}]]) {
+    const reply = await f.command(op, {grant, tab:8, ...extra});
+    assert.deepEqual(reply, {id:reply.id, ok:false, error:"OutOfScope", tab:8}, op);
+  }
+  assert.deepEqual({ran:f.ran.length, updates:f.updates.length}, before);
+  const listed = await f.command("page_tabs", {grant});
+  assert.deepEqual(listed.result.tabs.map(t => t.tab), [7]);
+  assert.equal((await f.command("page_read", {grant, tab:7, document:null})).ok, true);
+  assert.ok(f.queries.every(q => !("active" in q)), JSON.stringify(f.queries));
+});
+
+test("stale document refuses before the page runs", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  for (const [op, extra] of [["page_click",{ref:"1.0"}], ["page_type",{ref:"1.0", text:"secret typed"}]]) {
+    for (const document of ["doc-old", null]) {
+      const reply = await f.command(op, {grant, tab:7, document, ...extra});
+      assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:true, document:"doc-7"}, op);
+    }
+  }
+  assert.deepEqual(f.ran, []);
+  const done = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(done.result, {document:"doc-7"});
+  assert.equal(f.ran.length, 1);
+});
+
+test("without the all-https permission only the clicked tab is readable", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
+    9:{origin:"https://c.test", title:"C", active:false}}});
+  f.chrome.permissions.request = async () => false;
+  await f.chrome.permissions.request();
+  const minted = await f.popup({type:"mint", scope:"profile"});
+  assert.equal(minted.ok, true);
+  const {grant} = minted;
+  assert.deepEqual((await f.command("page_read", {grant, tab:9, document:null})),
+    {id:"c1", ok:false, error:"PermissionNeeded", tab:9, origin:null});
+  assert.equal((await f.command("page_read", {grant, tab:7, document:null})).ok, true);
+  await f.command("page_navigate", {grant, tab:7, url:"https://elsewhere.test/a/b?c=d"});
+  const lost = await f.command("page_read", {grant, tab:7, document:null});
+  assert.deepEqual(lost, {id:lost.id, ok:false, error:"PermissionNeeded", tab:7, origin:"https://elsewhere.test"});
+  const mints = f.brokerCalls.filter(m => m.op === "mint").length;
+  assert.equal((await f.popup({type:"mint", scope:"tab", tab:9})).error, "PermissionNeeded");
+  assert.equal(f.brokerCalls.filter(m => m.op === "mint").length, mints);
+});
+
+test("ended grants answer UnknownGrant and the badge clears with the table", async () => {
+  const f = await codeFixture();
+  const a = (await mintTab(f, 7)).grant, b = (await f.popup({type:"mint", scope:"profile"})).grant;
+  assert.equal(f.badge.at(-1), 2);
+  assert.equal((await f.command("grant_end", {grant:a, reason:"closed"})).result, "ended");
+  assert.equal((await f.command("page_tab", {grant:a, tab:7})).error, "UnknownGrant");
+  assert.equal((await f.popup({type:"revoke_grant", grant:b})).revoked, 1);
+  assert.equal((await f.command("page_tabs", {grant:b})).error, "UnknownGrant");
+  assert.equal((await f.command("page_tabs", {grant:"g-000000000999"})).error, "UnknownGrant");
+  assert.equal((await f.command("grant_end", {grant:"g-000000000999", reason:"revoked"})).result, "ended");
+  assert.equal(f.badge.at(-1), 0);
+  assert.deepEqual(f.ran, []);
+});
+
+test("malformed commands are refused before any page work", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const cases = [
+    ["page_shout", {grant, tab:7}, "InvalidOperation"],
+    ["page_read", {grant, tab:7, document:null, extra:1}, "InvalidRequest"],
+    ["page_read", {grant, tab:7}, "InvalidRequest"],
+    ["page_read", {grant, tab:"7", document:null}, "InvalidRequest"],
+    ["page_click", {grant, tab:7, document:"doc-7", ref:"#go"}, "InvalidRequest"],
+    ["page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:5}, "InvalidRequest"],
+    ["grant_end", {grant, reason:"bored"}, "InvalidRequest"],
+  ];
+  for (const url of ["javascript:alert(1)", "data:text/html,x", "http://example.org/", "https://u:p@a.test/", "file:///etc", "chrome://settings"]) {
+    cases.push(["page_navigate", {grant, tab:7, url}, "InvalidUrl"]);
+  }
+  for (const [op, fields, error] of cases) assert.equal((await f.command(op, fields)).error, error, op + JSON.stringify(fields));
+  await f.native.onMessage.fire({id:"wrong", op:"page_tab", email:"other@example.org", grant, tab:7});
+  await settle();
+  assert.equal(f.sent.findLast(m => m.id === "wrong").error, "ProfileMismatch");
+  assert.deepEqual({ran:f.ran, updates:f.updates}, {ran:[], updates:[]});
+  assert.ok(f.table()[grant]);
+});
+
+test("navigate reports access, document and settled", async () => {
+  const f = await codeFixture({held:false, tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true}}});
+  const {grant} = await f.popup({type:"mint", scope:"tab", tab:7});
+  const same = await f.command("page_navigate", {grant, tab:7, url:"https://a.test/next"});
+  assert.deepEqual(same.result, {access:true, document:"doc-7-1", origin:"https://a.test", settled:true});
+  const cross = await f.command("page_navigate", {grant, tab:7, url:"https://b.test/"});
+  assert.deepEqual(cross.result, {access:false, document:null, origin:null, settled:true});
+  f.tabs.get(7).slow = true;
+  const pending = f.native.onMessage.fire({id:"slow", op:"page_navigate", email, grant, tab:7, url:"https://b.test/x"});
+  await settle();
+  [...f.timers.values()].find(job => job.ms === 5000).fn();
+  await pending; await settle();
+  assert.equal(f.sent.findLast(m => m.id === "slow").result.settled, false);
+});
+
+test("the all-https permission ends with the last grant by every route", async () => {
+  // Kept while another grant lives; dropped by grant_end, popup revoke and revoke-all.
+  const f = await codeFixture();
+  const a = (await mintTab(f, 7)).grant, b = (await f.popup({type:"mint", scope:"profile"})).grant;
+  await f.command("grant_end", {grant:a, reason:"idle"});
+  assert.equal(f.perms.held, true);
+  await f.popup({type:"revoke_grant", grant:b});
+  assert.equal(f.perms.held, false);
+  await mintTab(f, 7); await f.popup({type:"mint", scope:"profile"});
+  await f.popup({type:"revoke_grants"});
+  assert.deepEqual([f.perms.held, f.table()], [false, {}]);
+  // Browser-side loss ends tab grants; the profile grant keeps the permission until its code expires unredeemed.
+  await mintTab(f, 7);
+  const p = (await f.popup({type:"mint", scope:"profile"})).grant;
+  f.native.onDisconnect.fire();
+  await settle();
+  assert.deepEqual(Object.keys(f.table()), [p]);
+  assert.equal(f.perms.held, true);
+  f.live.grants = [];
+  const expiry = f.alarms.find(alarm => alarm.name === "code-expiry:" + p);
+  assert.ok(expiry.when > Date.now());
+  await f.chrome.alarms.onAlarm.fire({name:expiry.name});
+  await settle();
+  assert.deepEqual([f.perms.held, f.table()], [false, {}]);
+  // An unreachable broker means no live grant: the minute tick drops the table and the permission.
+  await f.popup({type:"mint", scope:"profile"});
+  f.setBroker(() => "disconnect");
+  await f.chrome.alarms.onAlarm.fire({name:"reconnect"});
+  await settle();
+  assert.deepEqual([f.perms.held, f.table()], [false, {}]);
+});
+
+test("a restarted worker keeps the permission only for a grant the broker still lists", async () => {
+  const row = {"g-00000000000a":{scope:"profile", tab:null}};
+  const gone = await codeFixture({session:{grants:row}, held:true});
+  assert.deepEqual([gone.perms.held, gone.table()], [false, {}], "a broker with no grants clears a restored row");
+  const live = [{grant:"g-00000000000a", scope:"profile", state:"active", idle_s:3}];
+  const kept = await codeFixture({session:{grants:row}, held:true, live});
+  assert.deepEqual([kept.perms.held, Object.keys(kept.table())], [true, ["g-00000000000a"]]);
+  await kept.chrome.alarms.onAlarm.fire({name:"reconnect"});
+  await settle();
+  assert.deepEqual([kept.perms.held, kept.perms.removed], [true, 0]);
+  const empty = await codeFixture({held:true});
+  assert.equal(empty.perms.held, false, "an empty table never holds the permission");
+});
+
+test("failure branches never leave a grant usable or a permission held", async () => {
+  const f = await codeFixture();
+  f.setBroker(msg => msg.op === "mint" ? {ok:false, error:"AuditUnavailable"} : {ok:true, grants:[]});
+  assert.equal((await mintTab(f, 7)).error, "AuditUnavailable");
+  assert.deepEqual([f.perms.held, f.table()], [false, {}]);
+  f.setBroker(msg => msg.op === "mint" ? "disconnect" : {ok:true, grants:[]});
+  assert.equal((await mintTab(f, 7)).ok, false);
+  assert.equal(f.perms.held, false);
+  const revokes = [];
+  f.setBroker(msg => {
+    if (msg.op === "revoke_grant") { revokes.push(msg.grant); return {ok:true, revoked:1}; }
+    return msg.op === "mint" ? {ok:true, code:"not-a-code", grant:"g-0000000000bb", scope:"tab", tab:7, expires_at:1} : {ok:true, grants:[]};
+  });
+  assert.equal((await mintTab(f, 7)).error, "Invalid mint reply");
+  f.setBroker(msg => {
+    if (msg.op === "revoke_grant") { revokes.push(msg.grant); return {ok:true, revoked:1}; }
+    return msg.op === "mint" ? {ok:true, code:CODE, grant:"g-0000000000cc", scope:"tab", profile, tab:7, expires_at:1e10} : {ok:true, grants:[]};
+  });
+  f.failures.sessionSet = true;
+  assert.equal((await mintTab(f, 7)).error, "Could not record the grant.");
+  f.failures.sessionSet = false;
+  assert.deepEqual(revokes, ["g-0000000000bb", "g-0000000000cc"]);
+  assert.deepEqual(f.table(), {});
+  // A page script that fails while its document is current, or answers oddly, is never reported done.
+  f.setBroker(msg => msg.op === "mint" ? {ok:true, code:CODE, grant:"g-0000000000dd", scope:"tab", profile, tab:7, expires_at:1e10} : {ok:true, grants:[]});
+  const {grant} = await mintTab(f, 7);
+  f.tabs.get(7).throwAfterRun = true;
+  assert.equal((await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"})).error, "OutcomeUnknown");
+  f.tabs.get(7).throwAfterRun = false;
+  f.tabs.get(7).result = {done:"maybe"};
+  assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"t"})).error, "OutcomeUnknown");
+  f.chrome.tabs.get = async () => { throw new Error("https://a.test/private/path"); };
+  const unexpected = await f.command("page_tabs", {grant});
+  assert.equal(unexpected.error, "TabNotFound");
+  f.chrome.tabs.query = async () => { throw new Error("https://a.test/private/path"); };
+  f.setBroker(msg => msg.op === "mint" ? {ok:true, code:CODE, grant:"g-0000000000ee", scope:"profile", profile, expires_at:1e10} : {ok:true, grants:[]});
+  const profileGrant = (await f.popup({type:"mint", scope:"profile"})).grant;
+  assert.equal(profileGrant, "g-0000000000ee");
+  const leak = await f.command("page_tabs", {grant:profileGrant});
+  assert.deepEqual(leak, {id:leak.id, ok:false, error:"BrowserDisconnected"});
+});
+
+test("page text, typed text and URLs stay inside the operation's reply", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const read = await f.command("page_read", {grant, tab:7, document:null});
+  assert.equal(read.result.text, "private page text");
+  await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"typed secret"});
+  await f.command("page_navigate", {grant, tab:7, url:"https://a.test/nav-path?token=1"});
+  const outside = JSON.stringify([f.sessionStore, f.brokerCalls, f.alarms, f.badge,
+    f.sent.filter(m => !m.id?.startsWith?.("c"))]);
+  for (const secretText of ["private page text", "typed secret", "secret-path", "nav-path", "token=1"]) {
+    assert.ok(!outside.includes(secretText), secretText);
+  }
+  assert.deepEqual(plain(f.sessionStore.origins), {7:"https://a.test"});
+});
+
+test("code preview probes the tab the popup names and never the active tab", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:false, activeTab:true},
+    8:{origin:"https://b.test", title:"B", active:true}}});
+  const preview = await f.popup({type:"code_preview", tab:7});
+  assert.deepEqual(preview, {ok:true, paired:true, email, profile,
+    target:{tab:7, access:true, origin:"https://a.test", title:"A"}});
+  assert.deepEqual((await f.popup({type:"code_preview", tab:8})).target.access, false);
+  assert.equal((await f.popup({type:"code_preview", tab:"7"})).error, "InvalidRequest");
+  assert.deepEqual(f.queries, []);
+  assert.ok(!f.brokerCalls.some(m => m.op === "mint"));
+  const minted = await f.popup({type:"mint", scope:"tab", tab:7});
+  assert.deepEqual(plain(f.brokerCalls.at(-1)), {op:"mint", profile, email, key:secret, scope:"tab", tab:7});
+  assert.equal(JSON.stringify(f.sessionStore).includes(minted.code), false);
 });
