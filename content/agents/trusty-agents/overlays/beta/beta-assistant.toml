@@ -1,0 +1,50 @@
+# Beta assistant (#10979, epic #10977 M1-T3): the bundled `assistant` with
+# Opus 5.5 on Bedrock as the main agent and the Sonnet 5.5 `research-agent`
+# overlay beside this file as its only sub-agent. Not deployed: this directory
+# sits outside the bundled roster and is loaded only when TAGENT_CONFIG_DIR
+# points here (docs/trusty-agents/user/beta-bedrock-launch.md). `extends` finds the
+# base `assistant` in the deployed tier (`~/.trusty-agents/agents`).
+#
+# Pinned by `beta_pack_parent_is_opus_on_bedrock_and_reaches_only_the_pinned_child`.
+
+[agent]
+name = "beta-assistant"
+role = "assistant"
+extends = "assistant"
+# #10979: `provider_id` is the fail-closed pin (`llm::provider_pin::resolve`);
+# the slug already carries the `bedrock/` marker, so the pin rewrites nothing.
+model = "bedrock/us.anthropic.claude-opus-5-5"
+provider_id = "bedrock"
+description = "Beta assistant: Opus 5.5 on Bedrock, delegating research to Sonnet 5.5 on Bedrock"
+display_name = "Beta Assistant"
+prompt_label = "beta"
+
+[llm]
+# #10979: the base's 1024-token reply cap truncates research summaries.
+max_tokens = 8192
+# A profile name, never a credential; the AWS SDK resolves it. Declared per
+# agent because every dispatch path installs it via `BedrockEnvGuard`.
+aws_profile = "cto"
+aws_region = "us-east-1"
+
+# #10979: persists each turn to trusty-memory chat session `persona-beta-assistant`
+# in this palace, so a restarted `tagent --api` reloads the conversation.
+[[stores]]
+name = "beta-assistant-kb"
+palace = "beta-assistant"
+
+# #10979: `extends` unions `delegate_allowed` with the base's, which would add
+# the unpinned bundled `ticketing-agent`. Replace instead, so the only reachable
+# sub-agent is the Bedrock-pinned `research-agent` overlay.
+[permissions]
+replace_subagents = true
+
+# #10979: `research-agent`, not `beta-researcher` — the ADR-0024 name floor
+# (`ASSISTANT_REACHABLE_SUBAGENTS`) admits no other research name.
+[subagents]
+delegate_allowed = ["research-agent"]
+
+[system_prompt]
+content = """
+You are running as the beta assistant. For research that needs reading code, searching memory or the web, delegate to `research-agent` with `delegate_to_agent`, then answer from its report.
+"""
