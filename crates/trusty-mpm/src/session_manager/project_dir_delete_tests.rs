@@ -666,3 +666,88 @@ fn an_untracked_non_provisioning_file_still_refuses() {
         "the user file was touched"
     );
 }
+
+// ---- critic HIGH 1: work outside HEAD goes with `.git` ---------------------
+
+/// `git -C dir <args>`, asserting success.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("spawn git");
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// Plan a delete of `fx.repo` for a stopped ordinary session.
+fn plan_repo(fx: &GitWorktreeFixture) -> Result<DirDeletePlan, DirDeleteError> {
+    let sessions = [session(
+        "s1",
+        &fx.repo,
+        Some(SessionKind::Ordinary),
+        "stopped",
+    )];
+    plan(&sessions, &fx.repos_root)
+}
+
+#[test]
+fn an_unpushed_commit_on_another_branch_refuses() {
+    let fx = GitWorktreeFixture::new();
+    git(&fx.repo, &["checkout", "-q", "-b", "side"]);
+    GitWorktreeFixture::commit_unpushed(&fx.repo);
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    // Premise: HEAD is clean and pushed, so only the branch holds the work.
+    assert!(super::super::worktree_safety::inspect_dirt(&fx.repo).is_none());
+    let err = plan_repo(&fx).expect_err("an unpushed side branch");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. }
+            if reason.contains("1 unpushed commit(s) on local branches")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_stash_refuses() {
+    let fx = GitWorktreeFixture::new();
+    std::fs::write(fx.repo.join("README.md"), "edited\n").expect("edit README");
+    git(&fx.repo, &["stash", "push", "-q"]);
+    assert!(super::super::worktree_safety::inspect_dirt(&fx.repo).is_none());
+    let err = plan_repo(&fx).expect_err("a stash");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.contains("and a stash")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_failed_branch_probe_refuses() {
+    let fx = GitWorktreeFixture::new();
+    // A branch naming a missing object: `rev-list --branches` fails on it.
+    let ghost = fx.repo.join(".git/refs/heads/ghost");
+    std::fs::write(&ghost, "0123456789012345678901234567890123456789\n").expect("ghost ref");
+    assert!(super::super::worktree_safety::inspect_dirt(&fx.repo).is_none());
+    let err = plan_repo(&fx).expect_err("an unanswerable probe");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. }
+            if reason.contains("the branch and stash check failed")),
+        "{err}"
+    );
+}
+
+// ---- critic HIGH 2: gitignored user files (#8534) --------------------------
+
+#[test]
+fn a_gitignored_user_file_refuses() {
+    let fx = GitWorktreeFixture::new();
+    std::fs::write(fx.repo.join(".gitignore"), "my-notes.txt\n").expect("write .gitignore");
+    GitWorktreeFixture::commit_all_and_push(&fx.repo, "ignore notes");
+    std::fs::write(fx.repo.join("my-notes.txt"), "mine\n").expect("write notes");
+    assert!(super::super::worktree_safety::inspect_dirt(&fx.repo).is_none());
+    let err = plan_repo(&fx).expect_err("an ignored user file");
+    assert!(
+        matches!(&err, DirDeleteError::Dirty { reason, .. } if reason.contains("my-notes.txt")),
+        "{err}"
+    );
+    assert!(fx.repo.join("my-notes.txt").exists());
+}
