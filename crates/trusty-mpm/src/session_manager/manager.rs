@@ -1296,6 +1296,42 @@ impl SessionManager {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// Classify the input box of the record's own pane (#8407).
+    ///
+    /// Why: a supervisor reading a managed pane must know whether the box holds
+    /// a human's draft without parsing escape codes itself.
+    /// What: proves the pane with [`Self::owned_pane`], captures its last
+    /// 30 rows with escape codes on the record's own
+    /// server, and runs
+    /// [`classify_input_box`](crate::core::input_box::classify_input_box). Any
+    /// refusal or capture failure is `None` (unknown), logged at debug — never
+    /// a guessed `Empty`.
+    /// Test: `managed_output_classifies_the_input_box_8407`,
+    /// `managed_output_unreadable_pane_is_unknown_8407`.
+    pub async fn input_box(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Option<crate::core::input_box::InputBox> {
+        // The box and its footer sit at the pane's bottom (as `TmuxService`).
+        const INPUT_BOX_PROBE_LINES: usize = 30;
+        let read = async {
+            let record = self.get(id).await?;
+            let pane = self.owned_pane(id, &record)?;
+            super::tmux_route::route(self.tmux.as_ref(), &record)?.capture_pane_escaped(
+                &record.tmux_name,
+                &pane,
+                INPUT_BOX_PROBE_LINES,
+            )
+        };
+        match read.await {
+            Ok(capture) => crate::core::input_box::classify_input_box(&capture),
+            Err(e) => {
+                tracing::debug!("#8407: input box of {id} unreadable: {e}");
+                None
+            }
+        }
+    }
+
     /// Capture the recorded harness pane for the LIVE managed session whose tmux
     /// session name is `tmux_name`, pane-scoped when a `pane_id` is tracked.
     ///

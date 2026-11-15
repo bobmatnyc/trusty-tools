@@ -444,6 +444,7 @@ mod tests {
             classification: None,
             pending_decision: Some("write to ci.yml?".to_string()),
             proposed_default: Some("yes".to_string()),
+            input_box: None,
         }
     }
 

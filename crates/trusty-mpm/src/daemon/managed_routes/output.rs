@@ -7,9 +7,10 @@
 //! What: [`router`] registers `GET /api/v1/sessions/managed/{id}/output`
 //! (`?lines=N&compress=<level>`); [`output_core`] is the transport-neutral body,
 //! served over the socket as `mpm.managed.output`. The answer is an
-//! [`OutputResponse`] with `input_box` always `null` (no classification from a
-//! pane capture).
-//! Test: `managed_output_*_9162` in `daemon::rpc::managed_tests`.
+//! [`OutputResponse`]; #8407: `input_box` classifies the owned pane's escaped
+//! capture, `null` when that pane could not be read.
+//! Test: `managed_output_*_9162`, `managed_output_*_8407` in
+//! `daemon::rpc::managed_tests`.
 
 use std::sync::Arc;
 
@@ -67,8 +68,11 @@ async fn get_managed_output(
 /// `SessionManager::capture_pane`, which proves the pane with `owned_pane`
 /// first. A refusal is never turned into empty output: an unknown id is 404;
 /// a record with no pane id, a gone pane or an unprovable pane is 409; a tmux
-/// failure is 500.
-/// Test: `managed_output_returns_pane_text_for_a_managed_session_9162`,
+/// failure is 500. `input_box` (#8407) comes from
+/// `SessionManager::input_box`; an unreadable box is `null`, never `empty`.
+/// Test: `managed_output_classifies_the_input_box_8407`,
+/// `managed_output_unreadable_pane_is_unknown_8407`,
+/// `managed_output_returns_pane_text_for_a_managed_session_9162`,
 /// `managed_output_with_no_owned_pane_fails_closed_9162`,
 /// `managed_output_parity_9162`.
 pub(crate) async fn output_core(
@@ -104,6 +108,7 @@ pub(crate) async fn output_core(
         original_bytes: compressed.stats.original_bytes,
         compressed_bytes: compressed.stats.compressed_bytes,
         compress_level: compressed.level_label,
-        input_box: None,
+        // #8407: classified from an escaped capture of the same owned pane.
+        input_box: mgr.input_box(&id).await,
     })
 }

@@ -303,6 +303,19 @@ impl ManagedTmuxDriver for RealTmuxDriver {
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
     }
 
+    /// #8407: the pane's escaped capture, for the input-box classifier.
+    fn capture_pane_escaped(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let lines = u32::try_from(lines).unwrap_or(u32::MAX);
+        self.driver
+            .capture_escaped(&TmuxTarget::pane(name, pane_id), lines)
+            .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         self.driver
             .list_sessions()
