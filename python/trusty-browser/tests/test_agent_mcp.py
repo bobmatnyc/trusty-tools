@@ -30,6 +30,7 @@ CODE_TOOLS = {
     "page_read",
     "page_click",
     "page_type",
+    "page_scroll",
     "page_navigate",
     "browser_release",
 }
@@ -644,6 +645,24 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 "page_click", lease=lease, ref="1.0", request_id="c"
             )
             assert clicked["ok"]
+            # #11291: an explicit scroll relays its view; the same request ID replays it.
+            scrolled = await agent.ok(
+                "page_scroll", lease=lease, to="bottom", request_id="s"
+            )
+            assert scrolled == {
+                "ok": True,
+                "tab": 7,
+                "document": "d7-1",
+                "scroll_y": 540,
+                "scroll_height": 4000,
+                "viewport_height": 600,
+                "grew": True,
+                "at_end": False,
+            }
+            again = await agent.ok(
+                "page_scroll", lease=lease, to="bottom", request_id="s"
+            )
+            assert again == scrolled
             landed = await agent.ok(
                 "page_navigate",
                 lease=lease,
@@ -654,6 +673,7 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
             assert rig.a.done == [
                 ("page_type", "1.0", "hello"),
                 ("page_click", "1.0", None),
+                ("page_scroll", "bottom", None, 1000),
             ]
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert not broker.claims

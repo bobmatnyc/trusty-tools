@@ -324,6 +324,34 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
         return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
 
     @server.tool()
+    def page_scroll(
+        lease: str,
+        request_id: str,
+        to: str = "down",
+        ref: str | None = None,
+        wait_ms: int = 1000,
+    ) -> dict[str, Any]:
+        """Scroll the leased tab, then wait up to ``wait_ms`` for new content.
+
+        Why: offscreen and infinite-scroll content loads only on scroll (#11291).
+        What: ``to`` is down or up (90% of the viewport), top, bottom, or
+        element with ``ref`` from the latest page_read. The result carries
+        scroll_y, scroll_height, viewport_height, grew (content was added) and
+        at_end. For a feed, repeat ``to="bottom"`` until grew is false, then
+        page_read again: refs from an earlier read answer StaleElement, as does
+        a ref whose element the page removed. Reuse the request ID to retry.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call(
+            "page_scroll",
+            lease=lease,
+            to=to,
+            ref=ref,
+            wait_ms=wait_ms,
+            request_id=request_id,
+        )
+
+    @server.tool()
     def page_navigate(lease: str, url: str, request_id: str) -> dict[str, Any]:
         """Navigate the leased tab to an https URL (or http://127.0.0.1)."""
         return call("page_navigate", lease=lease, url=url, request_id=request_id)

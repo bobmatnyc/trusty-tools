@@ -338,6 +338,7 @@ characters. Every request carries exactly the fields listed.
 | `page_read` | `op`, `lease` | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
+| `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
@@ -356,7 +357,7 @@ Selecting a tab this session already holds returns the same lease. A session
 may hold leases on several tabs. `select` on a tab without page access
 succeeds with `access: false`, so the agent can still navigate it.
 
-`page_click`, `page_type` and `page_navigate` keep the existing journal: a
+`page_click`, `page_type`, `page_scroll` and `page_navigate` keep the existing journal: a
 repeat `request_id` with an identical frame returns the stored reply without
 running again; a repeat with a different frame answers `Conflict`; 4096
 entries answer `SessionFull`. Only a reply from an operation the worker ran,
@@ -380,12 +381,12 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `TabNotFound` | `tab` | Profile grant: the tab does not exist; the grant stays |
 | `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
-| `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected |
+| `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_scroll`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
 | `Conflict`, `SessionFull` | none | Journal refusals (existing) |
 | `GrantEnded` | `reason` | The grant is gone. The broker closes the connection after this frame (existing) |
 | `AuditUnavailable` | none | The admitted audit line could not be written; nothing was sent to the browser (existing) |
@@ -480,6 +481,7 @@ Envelope:
 | `page_read` | `tab`, `document` (str or null: the lease's last document) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
+| `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
@@ -509,7 +511,7 @@ build:
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_scroll`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
 
 The broker relays these last two without fields and by the command's kind:
@@ -564,10 +566,11 @@ returned. The agent never writes a selector.
 - A ref is `"<read>.<n>"`: `read` is a per-document counter that the injected
   function increments on each read, `n` the element's index in that read's
   list. Both are decimal integers; the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`.
-- `page_click` and `page_type` inject into `documentIds: [document]` only. The
+- `page_click`, `page_type` and `page_scroll` inject into `documentIds: [document]` only. The
   injected function answers `StaleElement` when the ref's `read` is not the
   map's current counter, the ref is absent, the `WeakRef` is empty, or the
-  element is not connected.
+  element is not connected. A scroll runs no read, so it leaves refs valid; a
+  ref is never re-resolved to a replacement node.
 
 Why this scheme: it needs no page mutation (no attributes are written into the
 site's DOM), no selector language, and no state outside the document, and a
@@ -611,6 +614,15 @@ dispatch bubbling `pointerdown`, `mousedown`, `pointerup`, `mouseup` at the
 element's centre, `focus()` when the element is focusable, then
 `element.click()`. The reply does not wait for any navigation the click
 starts.
+
+`page_scroll` (#11291): `to` is `down` or `up` (90% of the viewport), `top`,
+`bottom`, or `element`; `ref` is a string exactly when `to` is `element`, else
+null. `wait_ms` (0 to 5000) bounds the wait for added nodes; the wait ends 150 ms
+after they stop. `grew` is true when nodes were added and the document grew;
+`at_end` is true when the viewport reaches the document bottom. An infinite
+feed is read by repeating `to: bottom` until `grew` is false, then `page_read`.
+The scroll moves the document's scrolling element only, not inner scroll
+containers; `to: element` reaches an element inside one.
 
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
@@ -689,6 +701,7 @@ only. A refusal's result line is best effort.
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
+| `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `release` | `release` | absent | none |
 | malformed | `invalid` | absent | the frame |
@@ -796,6 +809,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
+| `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 

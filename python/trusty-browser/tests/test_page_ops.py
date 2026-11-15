@@ -356,6 +356,15 @@ def test_malformed_requests_answer_invalid_and_send_nothing(short, clock):
             "ref": "1.0",
             "text": "x",
         }
+        # #11291: page_scroll's own fields.
+        scroll = {
+            "op": "page_scroll",
+            "lease": lease,
+            "request_id": "s",
+            "to": "down",
+            "ref": None,
+            "wait_ms": 0,
+        }
         invalid = [
             {"op": "tabs", "extra": 1},
             {"op": "select"},
@@ -371,6 +380,20 @@ def test_malformed_requests_answer_invalid_and_send_nothing(short, clock):
             {"op": "click", "lease": lease, "request_id": "c", "marker": "m"},
             {"op": "page_navigate", "lease": lease, "request_id": "n", "url": 5},
             {"op": "unknown"},
+            *(
+                {**scroll, **bad}
+                for bad in (
+                    {"to": "sideways"},
+                    {"to": "element"},
+                    {"ref": "1.0"},
+                    {"to": "element", "ref": ""},
+                    {"wait_ms": -1},
+                    {"wait_ms": 5001},
+                    {"wait_ms": 1.5},
+                    {"wait_ms": True},
+                )
+            ),
+            {k: v for k, v in scroll.items() if k != "wait_ms"},
         ]
         for frame in invalid:
             assert (await call(frame)) == {"ok": False, "error": "InvalidRequest"}, (

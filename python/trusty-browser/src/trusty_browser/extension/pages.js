@@ -1,6 +1,6 @@
 // Page operations for activation-code grants (#11239, docs/activation-codes.md).
 // The worker loads this file with importScripts; tests load it into a page. Top-level code touches no
-// `chrome` API. The four `page*` functions are injected by chrome.scripting.executeScript, so each one
+// `chrome` API. The `page*` functions are injected by chrome.scripting.executeScript, so each one
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
 globalThis.TrustyPages = (() => {
   // Returns [origin, title] and changes nothing; the InjectionResult supplies the documentId.
@@ -129,6 +129,47 @@ globalThis.TrustyPages = (() => {
     return {ok:true};
   }
 
+  // Why: offscreen content and infinite-scroll feeds load only when the page scrolls, and an agent needs
+  //   to know when a feed has stopped growing (#11291).
+  // What: `to` "down"/"up" scrolls the document by 90% of the viewport, "top"/"bottom" to an end, and
+  //   "element" brings `ref` (from the latest read, else StaleElement) to the centre. It then waits up to
+  //   `waitMs` for added nodes, returning 150 ms after they stop. The view reports the scroll position,
+  //   whether the document grew and whether it now sits at the bottom. Refs stay valid: no read runs.
+  // Test: tests/test_pages_dom.py `test_scroll_drives_an_infinite_feed_until_it_ends`,
+  //   `test_scroll_to_element_and_stale_refs_after_dom_change`.
+  async function pageScroll(to, ref, waitMs) {
+    let el = null;
+    if (to === "element") {
+      const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+      el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+      if (!el || !el.isConnected) return {error:"StaleElement"};
+    }
+    const root = document.scrollingElement || document.documentElement, before = root.scrollHeight;
+    let added = false, quiet = null, finish;
+    const done = new Promise(resolve => { finish = resolve; });
+    const observer = new MutationObserver(records => {
+      if (!records.some(r => r.addedNodes.length)) return;
+      added = true;
+      clearTimeout(quiet);
+      quiet = setTimeout(finish, 150);
+    });
+    observer.observe(document, {childList:true, subtree:true});
+    const limit = setTimeout(finish, waitMs);
+    const step = Math.round(innerHeight * 0.9);
+    if (to === "element") el.scrollIntoView({block:"center", inline:"center"});
+    else if (to === "down") scrollBy(0, step);
+    else if (to === "up") scrollBy(0, -step);
+    else if (to === "top") scrollTo(0, 0);
+    else scrollTo(0, root.scrollHeight);
+    if (waitMs > 0) await done;
+    observer.disconnect();
+    clearTimeout(limit);
+    clearTimeout(quiet);
+    const y = Math.round(scrollY), height = root.scrollHeight;
+    return {ok:true, view:{scroll_y:y, scroll_height:height, viewport_height:innerHeight,
+      grew:added && height > before, at_end:y + innerHeight >= height - 2}};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -137,7 +178,7 @@ globalThis.TrustyPages = (() => {
     if (address.username || address.password) return false;
     return address.protocol === "https:" || (address.protocol === "http:" && address.hostname === "127.0.0.1");
   }
-  return {pageProbe, pageRead, pageClick, pageType, urlAllowed};
+  return {pageProbe, pageRead, pageClick, pageType, pageScroll, urlAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -145,16 +186,20 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageType, urlAllowed} = TrustyPages;
+  const {pageProbe, pageRead, pageClick, pageType, pageScroll, urlAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
+  const SCROLL_TO = ["down","up","top","bottom","element"];
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
+    // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
+    page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
+      wait_ms:v => Number.isInteger(v) && v >= 0 && v <= 5000},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
@@ -188,7 +233,7 @@ TrustyPages.commands = deps => {
     return {done, cancel:() => finish(false)};
   }
 
-  // Runs the injected click/type only inside the lease's document; never reports work it did not do.
+  // Runs the injected click/type/scroll only inside the lease's document; never reports work it did not do.
   async function act(req, func, args) {
     if (req.document === null) {
       const now = await probe(req.tab);
@@ -206,7 +251,7 @@ TrustyPages.commands = deps => {
     const error = hit?.result?.error;
     if (error === "StaleElement" || error === "NotEditable") throw refuse(error, {tab:req.tab});
     if (hit?.result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
-    return {document:req.document};
+    return {document:req.document, ...(hit.result.view || {})};
   }
 
   const run = {
@@ -236,6 +281,10 @@ TrustyPages.commands = deps => {
     },
     page_click:req => act(req, pageClick, [req.ref]),
     page_type:req => act(req, pageType, [req.ref, req.text]),
+    page_scroll(req) {
+      if ((req.to === "element") !== (req.ref !== null)) throw refuse("InvalidRequest");
+      return act(req, pageScroll, [req.to, req.ref, req.wait_ms]);
+    },
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -277,7 +326,7 @@ TrustyPages.commands = deps => {
   // changed the page answers OutcomeUnknown, any other BrowserDisconnected.
   function failure(req, error) {
     if (!error?.fields) {
-      const acting = ["page_click","page_type","page_navigate"].includes(req.op);
+      const acting = ["page_click","page_type","page_scroll","page_navigate"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));
