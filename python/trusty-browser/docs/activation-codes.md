@@ -285,6 +285,7 @@ answers `InvalidRequest`.
 | `page_find` | `op`, `lease`; optional `role`, `name`, `text` (str of 1-200 characters or null; at least one set), `within_ref` str or null, `limit` int 1-50 (default 10) | `tab` int, `document` str, `document_changed` bool, `origin` str, `matches` list, `truncated` bool |
 | `page_back`, `page_forward`, `page_reload` | `op`, `lease`, `request_id` | As `page_navigate` |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
+| `switch` | `op`, `lease` | `tab` int, `window` int, `focused` bool |
 
 `files` (#11289) is a list of 1 to 10 `{"name", "type", "data"}` objects:
 `name` is 1-255 characters with no `/` or `\`, `type` a MIME type of at most
@@ -307,7 +308,14 @@ the entry of the granted tab.
 
 `select` takes a lease on the tab for this session (existing `Claim`, lease
 `TTL`, one holder per tab incarnation) and does not focus or activate the tab.
-Selecting a tab this session already holds returns the same lease. A session
+Selecting a tab this session already holds returns the same lease.
+`switch` (#11293) makes a leased tab the active tab of its window and focuses
+that window. It needs this session's own lease, so a tab another session holds
+stays unreachable (`select` answers `TabClaimed`). Focus is browser-wide state:
+a tab grant answers `OutOfScope` with the lease's `tab`, even for its own tab,
+and keeps the lease. `focused` is false when Chrome refused the window focus.
+`switch` is idempotent and not journaled; a lost reply is
+`BrowserDisconnected`. A session
 may hold leases on several tabs. `select` on a tab without page access
 succeeds with `access: false`, so the agent can still navigate it.
 
@@ -448,6 +456,7 @@ Envelope:
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
 | `page_find` | `tab`, `document`, `role`, `name`, `text`, `within_ref`, `limit` (the broker fills defaults) | `{"document", "origin", "matches", "truncated"}` |
 | `page_back`, `page_forward`, `page_reload` | `tab` | As `page_navigate` |
+| `page_switch` | `tab` | `{"window": int, "focused": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, or `closed`), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -776,6 +785,7 @@ steps do not run.
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
 | `page_back`, `page_forward`, `page_reload` | As `page_read` | Check order, `tabs.goBack` / `tabs.goForward` / `tabs.reload` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
+| `switch` | As `page_read`; tab grant: `OutOfScope` | Check order; tab grant: `OutOfScope`; `tabs.update(tab, {active: true})`, then `windows.update(window, {focused: true})` |
 
 The probe is `executeScript({target: {tabId, frameIds: [0]}, func})` with a
 function that returns `[location.origin, document.title]` and changes nothing;
@@ -805,6 +815,7 @@ only. A refusal's result line is best effort.
 | `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
 | `page_back`, `page_forward`, `page_reload` | the op name | host of the landed page when `access` | URL path, query, fragment |
 | `release` | `release` | absent | none |
+| `switch` | `switch` | host of the leased page when known | title |
 | malformed | `invalid` | absent | the frame |
 
 `outcome` on the result line is `ok` or the error name. No line carries page
@@ -890,6 +901,7 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `false` when no session was held |
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
+| `browser_switch` | `lease: str` | The `switch` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_find` | `lease: str`, `role`, `name`, `text`, `within_ref`: str or null, `limit: int` | The `page_find` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str`, `dialog: str = "dismiss"` | The `page_click` reply |
