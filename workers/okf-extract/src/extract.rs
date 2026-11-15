@@ -29,8 +29,8 @@ use xberg::{FormatMetadata, ImageExtractionConfig, XbergError};
 
 use crate::proto::{ExtractHeader, Limits};
 
-/// The xberg version the worker is pinned to (`=1.3.10`, §2.16).
-pub const XBERG_VERSION: &str = "1.3.10";
+/// The xberg version the worker is pinned to (`=1.4.0`, §2.16; #11154).
+pub const XBERG_VERSION: &str = "1.4.0";
 
 /// The xberg features the worker is built with.
 pub const FEATURES: [&str; 3] = ["pdf", "office", "excel"];

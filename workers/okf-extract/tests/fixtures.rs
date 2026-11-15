@@ -144,7 +144,7 @@ fn ascending(p: &[usize]) -> bool {
 /// What: one client extracts the PDF twice and a second client (a fresh
 /// worker process) once more; all three are byte-identical. The page words
 /// appear in page order. The provenance names worker 0.1.0, protocol 1,
-/// xberg 1.3.10, the configuration hash in the client's version and the
+/// xberg 1.4.0, the configuration hash in the client's version and the
 /// input SHA-256.
 /// Test: self-contained.
 #[test]
@@ -183,7 +183,7 @@ fn text_pdf_is_in_page_order_and_byte_identical_across_runs() {
     let get = |k: &str| p.get(k).cloned().unwrap_or(Value::Null);
     assert_eq!(get("extracted_by"), Value::from("xberg-worker@0.1.0"));
     assert_eq!(get("extract_protocol"), Value::from(1));
-    assert_eq!(get("xberg_version"), Value::from("1.3.10"));
+    assert_eq!(get("xberg_version"), Value::from("1.4.0"));
     assert_eq!(get("extract_input_sha256"), Value::from(sha));
     let config = get("extract_config");
     let config = config.as_str().unwrap();
