@@ -213,6 +213,26 @@ class ViewsAgree(unittest.TestCase):
             store.list_docs("items")
         self.assertEqual(ds.LOCK_WAIT, 10.0)   # the Rust store's LOCK_WAIT
 
+    def test_id_resolution_behind_a_held_writer_lock_stays_unavailable(self):
+        # #10679: store_sid / alias_rules caught StoreError, so a hung writer read as "no session, no aliases".
+        import dashboard_qual as qual
+        root, store = self.seed("dir")
+        store.set("meta", "id-aliases", {"rules": [{"from": "A", "to": "B"}]}, actor="test")
+        self.assertEqual(qual.alias_rules(store), [("A", "B")])
+        self.assertIsNone(qual.store_sid(store))   # meta/state has no session_id: unknown, as before
+        store.lock_wait = 0.2
+        held = open(os.path.join(root, ".lock"), "a")
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.addCleanup(held.close)
+        self.addCleanup(fcntl.flock, held, fcntl.LOCK_UN)
+        with self.assertRaises(ds.Unavailable):
+            qual.store_sid(store)
+        with self.assertRaises(ds.Unavailable):
+            qual.alias_rules(store)
+        fcntl.flock(held, fcntl.LOCK_UN)
+        store.delete("meta", "id-aliases", actor="test")
+        self.assertEqual(qual.alias_rules(store), [])   # an absent doc still reads as no rules
+
 
 def _load_serve():
     spec = importlib.util.spec_from_file_location("dashboard_serve_views", os.path.join(SCRIPTS, "dashboard-serve.py"))
