@@ -150,8 +150,12 @@ fn two_state_dirs_over_one_tree_keep_separate_state() {
         "machine B never sees machine A's state"
     );
     let journal_a = IndexJournal::open(&a.dir, &store.root, "idx").unwrap();
-    assert!(journal_a.path().starts_with(tmp.path().join("machine-a")));
-    assert!(!journal_a.path().starts_with(&store.root));
+    // #10873: the journal path is canonical (/private/var on macOS), so
+    // compare against canonical roots; /var is a symlink there.
+    let root = tmp.path().canonicalize().unwrap();
+    let path = journal_a.path();
+    assert!(path.starts_with(root.join("machine-a")), "{path:?}");
+    assert!(!path.starts_with(root.join("kb")), "{path:?}");
 }
 
 /// Why: #10746 S12 fix round, HIGH — SPEC-OKF-01 §4.9.2 rule 4 (an
