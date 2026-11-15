@@ -100,6 +100,18 @@ def add_page_tools(
         )
 
     @server.tool()
+    def page_hover(lease: str, ref: str, request_id: str) -> dict[str, Any]:
+        """Move the pointer onto the element a page_read returned as ``ref``.
+
+        Why: menus and tooltips open on hover (#11287). What: fires pointer
+        and mouse over/enter/move on the element, and out/leave on the one
+        hovered before. The events are synthetic, so CSS ``:hover`` does not
+        match. Reuse the request ID to retry.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call("page_hover", lease=lease, ref=ref, request_id=request_id)
+
+    @server.tool()
     def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:
         """Replace the text of an editable element named by ``ref``, one keystroke per character.
 

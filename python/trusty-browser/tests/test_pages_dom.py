@@ -841,3 +841,81 @@ def test_iframe_reads_measure_distance_in_top_coordinates(page):
     names = [(e["name"], e.get("within")) for e in read(page, viewport_only=True)["elements"]]
     assert names == [("Near go", "iframe")]
     assert [e["name"] for e in read(page)["elements"]] == ["Near go", "Far go"]
+
+
+HOVER = Path(__file__).with_name("fixtures") / "hover.html"
+MOVES = ["pointerover", "mouseover", "pointerenter", "mouseenter", "pointerout", "mouseout",
+         "pointerleave", "mouseleave", "pointermove", "mousemove"]
+
+
+def test_hover_fires_enter_over_and_move_then_leaves_the_old_target(page):
+    page.evaluate("""kinds => { window.moves = [];
+      for (const kind of kinds) document.addEventListener(kind, e => {
+        if (e.target.id) window.moves.push(kind + ":" + e.target.id + ":" + e.bubbles); }, true); }""", MOVES)
+    result = read(page)
+    go, bio = ref_of(result, "Go now"), ref_of(result, "Bio")
+    hover = lambda ref: page.evaluate("ref => TrustyPages.pageHover(ref)", ref)
+    reset = lambda: page.evaluate("() => { window.moves = []; }")
+    assert hover(go) == {"ok": True}
+    assert page.evaluate("moves") == ["pointerover:go:true", "mouseover:go:true", "pointerenter:go:false",
+                                      "mouseenter:go:false", "pointermove:go:true", "mousemove:go:true"]
+    reset()
+    assert hover(go) == {"ok": True}
+    assert page.evaluate("moves") == ["pointermove:go:true", "mousemove:go:true"]
+    reset()
+    assert hover(bio) == {"ok": True}
+    assert page.evaluate("moves") == ["pointerout:go:true", "mouseout:go:true", "pointerleave:go:false",
+                                      "mouseleave:go:false", "pointerover:bio:true", "mouseover:bio:true",
+                                      "pointerenter:bio:false", "mouseenter:bio:false",
+                                      "pointermove:bio:true", "mousemove:bio:true"]
+    assert page.evaluate("events") == []  # hovering clicks nothing
+    assert hover("9.0") == {"error": "StaleElement"}
+
+
+def test_hover_fixture_reveals_the_hover_action():
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.goto(HOVER.as_uri())
+            load(tab)
+            hover = lambda result, name: tab.evaluate("r => TrustyPages.pageHover(r)", ref_of(result, name))
+            first = read(tab)
+            assert "Pricing" not in [e["name"] for e in first["elements"]]
+            assert hover(first, "Products") == {"ok": True}
+            assert tab.evaluate("log") == ["products:mouseover", "menu:mouseenter", "products:mousemove"]
+            second = read(tab)
+            assert click(tab, ref_of(second, "Pricing")) == {"ok": True}
+            assert tab.evaluate("log")[-1] == "pricing:click"
+            assert hover(read(tab), "Other") == {"ok": True}
+            assert tab.evaluate("log")[-1] == "menu:mouseleave"
+            assert "Pricing" not in [e["name"] for e in read(tab)["elements"]]
+        finally:
+            browser.close()
+
+
+def test_hover_reaches_an_element_inside_a_same_origin_iframe(page):
+    # #11287 on #11300: the ref resolves through the frame hops and each event's view is the frame's window.
+    page.set_content(NESTED)
+    load(page)
+    page.evaluate(NESTED_SETUP)
+    page.evaluate("""() => { window.moves = [];
+      const frame = document.getElementById("frame").contentWindow;
+      window.views = [];
+      for (const doc of [document, frame.document])
+        for (const kind of ["mouseover", "mouseenter", "mouseout", "mouseleave"])
+          doc.addEventListener(kind, e => {
+            if (e.target.id) window.moves.push(kind + ":" + e.target.id);
+            window.views.push(e.view === e.target.ownerDocument.defaultView);
+          }, true); }""")
+    result = read(page)
+    hover = lambda name: page.evaluate("r => TrustyPages.pageHover(r)", ref_of(result, name))
+    assert hover("Frame go") == {"ok": True}
+    moves = page.evaluate("moves")
+    assert "mouseover:fbtn" in moves and "mouseenter:fbtn" in moves and "mouseenter:frame" in moves
+    assert page.evaluate("views") and all(page.evaluate("views"))
+    page.evaluate("() => { window.moves = []; }")
+    assert hover("Top") == {"ok": True}  # frame -> top page: leaves the frame button and the frame element
+    moves = page.evaluate("moves")
+    assert "mouseout:fbtn" in moves and "mouseleave:fbtn" in moves and "mouseleave:frame" in moves
+    assert "mouseover:top" in moves

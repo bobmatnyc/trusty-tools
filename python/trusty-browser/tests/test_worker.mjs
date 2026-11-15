@@ -328,7 +328,8 @@ test("a tab row never reaches another tab", async () => {
 test("stale document refuses before the page runs", async () => {
   const f = await codeFixture();
   const {grant} = await connectGrant(f);
-  for (const [op, extra] of [["page_click",{ref:"1.0"}], ["page_type",{ref:"1.0", text:"secret typed"}],
+  for (const [op, extra] of [["page_click",{ref:"1.0"}], ["page_hover",{ref:"1.0"}],
+    ["page_type",{ref:"1.0", text:"secret typed"}],
     ["page_press",{ref:null, key:"Tab", modifiers:["Shift"]}]]) {
     for (const document of ["doc-old", null]) {
       const reply = await f.command(op, {grant, tab:7, document, ...extra});
@@ -339,6 +340,10 @@ test("stale document refuses before the page runs", async () => {
   const done = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
   assert.deepEqual(done.result, {document:"doc-7"});
   assert.equal(f.ran.length, 1);
+  // #11287: hover runs the injected pageHover inside the lease document only.
+  const hovered = await f.command("page_hover", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(hovered.result, {document:"doc-7"});
+  assert.equal(f.ran.at(-1).func, "pageHover");
 });
 
 test("scroll runs in the lease's document and relays its view", async () => {

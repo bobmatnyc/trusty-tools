@@ -180,6 +180,7 @@ HISTORY = {"page_back", "page_forward", "page_reload"}
 MUTATING = {
     *HISTORY,
     "page_click",
+    "page_hover",
     "page_type",
     "page_press",
     "page_select",
