@@ -27,7 +27,13 @@ globalThis.TrustyPages = (() => {
     const selector = "a[href],button,input:not([type=hidden]),select,textarea,summary," +
       "[contenteditable]:not([contenteditable=false])," +
       ["button","link","checkbox","radio","tab","menuitem","option","switch","textbox","combobox","searchbox"]
-        .map(role => "[role=" + role + "]").join(",");
+        .map(role => "[role=" + role + "]").join(",") +
+      ",[draggable=true],[aria-dropeffect]:not([aria-dropeffect=none]),[dropzone]";
+    // #11288: a drop zone is often a bare div. When the page offers something to drag, elements whose
+    // id or class names a drop target are reported too, so page_drag has a target ref.
+    const dropNamed = document.querySelector("[draggable=true]") ?
+      ",[id*=drop i],[class*=drop i],[data-drop],[data-dropzone]" : "";
+    const wanted = selector + dropNamed;
     function implicitRole(el) {
       const tag = el.localName, type = (el.getAttribute("type") || "text").toLowerCase();
       if (tag === "a") return "link";
@@ -60,7 +66,7 @@ globalThis.TrustyPages = (() => {
     // Each hit carries its hop path ("iframe", "shadow", "iframe/shadow", ...); "" is the top light DOM.
     function* walk(root, within) {
       for (const el of root.querySelectorAll("*")) {
-        if (el.matches(selector)) yield [el, within];
+        if (el.matches(wanted)) yield [el, within];
         const hop = within ? within + "/" : "";
         if (el.shadowRoot) yield* walk(el.shadowRoot, hop + "shadow");
         if ((el.localName === "iframe" || el.localName === "frame") && shown(el)) {
@@ -95,6 +101,7 @@ globalThis.TrustyPages = (() => {
         if (el.options.length > 100) truncated = true;
       }
       if (el.disabled === true || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
+      if (el.getAttribute("draggable") === "true") entry.draggable = true;
       elements.push(entry);
       map.set(ref, new WeakRef(el));
     }
@@ -109,6 +116,54 @@ globalThis.TrustyPages = (() => {
     result.truncated = result.truncated || truncated;
     state.map = map;
     return result;
+  }
+
+  // Why: a drag must start and end on elements this document's latest read reported (#11288).
+  // What: dispatches dragstart, drag and dragend on the source and dragenter, dragover and drop on the
+  //   target, sharing one DataTransfer. The drop fires only when the target cancels dragover (the HTML
+  //   drop-target rule); otherwise dragleave fires. A cancelled dragstart ends the drag at once.
+  // Test: tests/test_pages_dom.py `test_drag_fires_the_drag_sequence_and_drops`.
+  function pageDrag(ref, target) {
+    const state = globalThis.__trustyBrowserRefs;
+    const resolve = r => {
+      const el = state && Number(r.split(".")[0]) === state.read ? state.map.get(r)?.deref() : null;
+      // #11290: connected all the way up to this document, through shadow hosts and frame elements.
+      let up = el;
+      while (up && up.isConnected && up.getRootNode() !== document) {
+        const root = up.getRootNode();
+        up = root.host || root.defaultView?.frameElement || null;
+      }
+      return up && up.isConnected ? el : null;
+    };
+    const source = resolve(ref), sink = resolve(target);
+    if (!source || !sink) return {error:"StaleElement"};
+    if (source === sink || source.contains(sink)) return {error:"NotDraggable"};
+    const point = el => {
+      el.scrollIntoView({block:"center", inline:"center"});
+      const box = el.getBoundingClientRect();
+      return {bubbles:true, cancelable:true, composed:true, view:el.ownerDocument.defaultView,
+        clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
+    };
+    const data = new DataTransfer();
+    data.effectAllowed = "all";
+    const fire = (el, kind, at, cancelable = true) =>
+      el.dispatchEvent(new DragEvent(kind, {...at, cancelable, dataTransfer:data}));
+    const from = point(source);
+    source.dispatchEvent(new PointerEvent("pointerdown", from));
+    source.dispatchEvent(new MouseEvent("mousedown", from));
+    if (!fire(source, "dragstart", from)) return {ok:true, dropped:false};
+    fire(source, "drag", from);
+    const to = point(sink);
+    fire(sink, "dragenter", to);
+    data.dropEffect = "move";
+    const accepted = !fire(sink, "dragover", to);
+    if (accepted) fire(sink, "drop", to);
+    else {
+      data.dropEffect = "none";
+      fire(sink, "dragleave", to, false);
+    }
+    fire(source, "dragend", to, false);
+    return {ok:true, dropped:accepted};
   }
 
   // Why: a click must reach only an element this document's latest read reported.
@@ -556,7 +611,7 @@ globalThis.TrustyPages = (() => {
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
   return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageSelect, pageScroll, pageSetFiles, pageHover,
-    urlAllowed, keyAllowed, modifiersAllowed};
+    pageDrag, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -564,7 +619,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, pageSetFiles, pageHover, urlAllowed,
+  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, pageSetFiles, pageHover, pageDrag, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
@@ -583,6 +638,7 @@ TrustyPages.commands = deps => {
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
+    page_drag:{tab, document:doc, ref, target:ref},
     page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11286: `ref` null presses the key on the focused element.
@@ -665,8 +721,13 @@ TrustyPages.commands = deps => {
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
     const result = hit?.result, error = result?.error;
-    if (["StaleElement","NotEditable","NotSelectable","NoSuchOption"].includes(error)) throw refuse(error, {tab:req.tab});
+    if (["StaleElement","NotEditable","NotSelectable","NoSuchOption","NotDraggable"].includes(error)) throw refuse(error, {tab:req.tab});
     if (result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
+    if (func === pageDrag) {
+      // #11288: a drag reply must say whether the target accepted the drop.
+      if (typeof result.dropped !== "boolean") throw refuse("OutcomeUnknown");
+      return {document:req.document, dropped:result.dropped};
+    }
     if (func !== pageSelect) return {document:req.document, ...(result.view || {})};
     // #11285: a select reply must say whether the value moved; anything else cannot show what ran.
     if (typeof result.changed !== "boolean" || typeof result.value !== "string") throw refuse("OutcomeUnknown");
@@ -729,6 +790,7 @@ TrustyPages.commands = deps => {
       return {origin:seen.origin, downloads};
     },
     page_hover:req => act(req, pageHover, [req.ref]),
+    page_drag:req => act(req, pageDrag, [req.ref, req.target]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -781,7 +843,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate","page_back",
-        "page_forward","page_reload","page_upload","page_hover"].includes(req.op);
+        "page_forward","page_reload","page_upload","page_hover","page_drag"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

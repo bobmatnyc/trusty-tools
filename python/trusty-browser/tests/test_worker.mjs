@@ -204,7 +204,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       const result = func.name === "pageProbe" ? [t.origin, t.title]
         : func.name === "pageRead" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
-        : t.result || {ok:true};
+        : t.result || (func.name === "pageDrag" ? {ok:true, dropped:true} : {ok:true});
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
       return [{frameId:0, documentId:t.doc, result}];
     }},
@@ -347,6 +347,19 @@ test("scroll runs in the lease's document and relays its view", async () => {
   f.tabs.get(7).result = {error:"StaleElement"};
   const gone = await f.command("page_scroll", {grant, tab:7, document:"doc-7", to:"element", ref:"1.0", wait_ms:0});
   assert.deepEqual(gone, {id:gone.id, ok:false, error:"StaleElement", tab:7});
+});
+
+// #11288: page_drag runs pageDrag in the lease's document and relays only document and dropped.
+test("page drag runs in the lease document and needs a boolean dropped", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const drag = {grant, tab:7, document:"doc-7", ref:"1.0", target:"1.1"};
+  const done = await f.command("page_drag", drag);
+  assert.deepEqual(done.result, {document:"doc-7", dropped:true});
+  assert.equal(JSON.stringify(f.ran.map(r => [r.func, r.args])), JSON.stringify([["pageDrag", ["1.0", "1.1"]]]));
+  assert.equal((await f.command("page_drag", {...drag, target:"#drop"})).error, "InvalidRequest");
+  assert.equal((await f.command("page_drag", {...drag, document:"doc-old"})).error, "DocumentChanged");
+  assert.equal(f.ran.length, 1);
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {

@@ -520,3 +520,59 @@ def test_hover_fixture_reveals_the_hover_action():
             assert "Pricing" not in [e["name"] for e in read(tab)["elements"]]
         finally:
             browser.close()
+
+
+# #11288: the drag fixture of the behavior lab (draggable item, bare-div drop zone), plus a zone
+# that never accepts a drop.
+DRAG_PAGE = """
+<title>Drag QA</title>
+<div id="drag" draggable="true">Drag this item</div>
+<div id="drop" style="padding:30px">Drop item here</div>
+<div class="drop-off" style="padding:30px">Nowhere</div>
+<script>
+  window.drops = [];
+  drag.ondragstart = e => e.dataTransfer.setData("text/plain", "item");
+  drop.ondragover = e => e.preventDefault();
+  drop.ondrop = e => { e.preventDefault(); drops.push(e.dataTransfer.getData("text/plain")); };
+</script>
+"""
+DRAG_EVENTS = ["dragstart", "drag", "dragenter", "dragleave", "dragover", "drop", "dragend"]
+
+
+@pytest.fixture()
+def drag_page(page):
+    page.set_content(DRAG_PAGE)
+    page.add_script_tag(path=str(SCRIPT))
+    page.evaluate("""kinds => {
+      window.events = [];
+      for (const kind of kinds)
+        document.addEventListener(kind, e => window.events.push(kind + ":" + (e.target.id || e.target.className)), true);
+    }""", DRAG_EVENTS)
+    return page
+
+
+def test_drag_fires_the_drag_sequence_and_drops(drag_page):
+    result = read(drag_page)
+    by_name = {e["name"]: e for e in result["elements"]}
+    assert set(by_name) == {"Drag this item", "Drop item here", "Nowhere"}
+    assert by_name["Drag this item"]["draggable"] is True
+    drag = lambda source, target: drag_page.evaluate(
+        "([s, t]) => TrustyPages.pageDrag(s, t)", [ref_of(result, source), ref_of(result, target)])
+    assert drag("Drag this item", "Drop item here") == {"ok": True, "dropped": True}
+    assert drag_page.evaluate("events") == [
+        "dragstart:drag", "drag:drag", "dragenter:drop", "dragover:drop", "drop:drop", "dragend:drag"]
+    assert drag_page.evaluate("drops") == ["item"]
+    drag_page.evaluate("() => { window.events = []; }")
+    assert drag("Drag this item", "Nowhere") == {"ok": True, "dropped": False}
+    assert drag_page.evaluate("events") == [
+        "dragstart:drag", "drag:drag", "dragenter:drop-off", "dragover:drop-off", "dragleave:drop-off",
+        "dragend:drag"]
+    assert drag("Drag this item", "Drag this item") == {"error": "NotDraggable"}
+    read(drag_page)
+    assert drag("Drag this item", "Drop item here") == {"error": "StaleElement"}
+    assert drag_page.evaluate("drops") == ["item"]
+
+
+def test_read_reports_no_drop_named_elements_without_a_draggable(page):
+    page.evaluate("() => { const d = document.createElement('div'); d.id = 'drop'; d.textContent = 'Zone'; document.body.append(d); }")
+    assert "Zone" not in [e["name"] for e in read(page)["elements"]]

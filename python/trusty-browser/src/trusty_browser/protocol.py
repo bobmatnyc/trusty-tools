@@ -185,6 +185,7 @@ MUTATING = {
     "page_navigate",
     "page_upload",
     "page_hover",
+    "page_drag",
     *HISTORY,
 }
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
@@ -201,6 +202,7 @@ PAGE_ERRORS = UNFINISHED | {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "NotDraggable",
     "NotSelectable",
     "NoSuchOption",
     "NoHistory",

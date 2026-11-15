@@ -228,6 +228,8 @@ class FakeBrowser:
             view = {"scroll_y": 540, "scroll_height": 4000, "viewport_height": 600}
             return {"document": item["document"], **view, "grew": True, "at_end": False}
         self.done.append((op, req.get("ref"), req.get("text")))
+        if op == "page_drag":
+            return {"document": item["document"], "dropped": req["target"] != "1.9"}
         return {"document": item["document"]}
 
     async def answer(self, req):

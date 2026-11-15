@@ -32,6 +32,7 @@ CODE_TOOLS = {
     "page_click",
     "page_hover",
     "page_type",
+    "page_drag",
     "page_press",
     "page_select",
     "page_scroll",
@@ -246,6 +247,10 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_hover", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
+            (
+                "page_drag",
+                {"lease": "l", "ref": "1.0", "target": "1.1", "request_id": "r"},
+            ),
             ("page_press", {"lease": "l", "key": "Enter", "request_id": "r"}),
             (
                 "page_select",

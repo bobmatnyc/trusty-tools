@@ -648,12 +648,43 @@ def test_page_select_reply_without_changed_is_browser_refused(short, clock):
     run(short, body)
 
 
+def test_drag_relays_both_refs_reports_dropped_and_replays_from_the_journal(
+    short, clock
+):
+    # #11288: page_drag is a journaled mutating op whose reply carries `dropped`.
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = mutating_frame("page_drag", lease, "d")
+        done = {"ok": True, "tab": 7, "document": "d7-1", "dropped": True}
+        assert await call(frame) == done
+        assert await call(frame) == done  # the retry answers from the journal
+        sent = rig.a.sent("page_drag")
+        assert len(sent) == 1 and (sent[0]["ref"], sent[0]["target"]) == ("1.0", "1.1")
+        refused = {**frame, "request_id": "e", "target": "1.9"}
+        assert (await call(refused))["dropped"] is False
+        assert await call({**frame, "request_id": "f", "target": 5}) == {
+            "ok": False,
+            "error": "InvalidRequest",
+        }
+        rig.a.refuse["page_drag"] = {"error": "NotDraggable", "tab": 7}
+        assert await call({**frame, "request_id": "g"}) == {
+            "ok": False,
+            "error": "NotDraggable",
+            "tab": 7,
+        }
+        assert len(rig.broker.claims) == 1  # NotDraggable keeps the lease
+
+    run(short, body)
+
+
 def mutating_frame(op, lease, rid="r"):
     base = {"op": op, "lease": lease, "request_id": rid}
     return {
         "page_click": {**base, "ref": "1.0"},
         "page_hover": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
+        "page_drag": {**base, "ref": "1.0", "target": "1.1"},
         "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_select": {**base, "ref": "1.0", "value": "x"},
         "page_navigate": {**base, "url": ORIGIN},
@@ -781,6 +812,7 @@ FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
         "page_reload",
         "page_upload",
         "page_hover",
+        "page_drag",
     ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(

@@ -349,6 +349,7 @@ answers `InvalidRequest`.
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
 | `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
+| `page_drag` | `op`, `lease`, `request_id`, `ref`, `target` | `tab` int, `document` str, `dropped` bool |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_back`, `page_forward`, `page_reload` | `op`, `lease`, `request_id` | As `page_navigate` |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
@@ -417,6 +418,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
+| `NotDraggable` | `tab` | `page_drag`: `target` is `ref` itself or lies inside it |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `NoHistory` | `tab` | `page_back`, `page_forward`: the tab has no history entry in that direction; nothing changed and the lease stays |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
@@ -520,6 +522,7 @@ Envelope:
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
 | `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
+| `page_drag` | `tab`, `document` (str or null), `ref`, `target` | `{"document": str, "dropped": bool}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_back`, `page_forward`, `page_reload` | `tab` | As `page_navigate` |
 | `page_switch` | `tab` | `{"window": int, "focused": bool}` |
@@ -551,7 +554,7 @@ build:
 | `PermissionNeeded` | `tab`, `origin` | The probe or the operation's injection failed for lack of page access |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
-| `NotEditable`, `NotSelectable`, `NoSuchOption` | `tab` | See "Element addressing" |
+| `NotEditable`, `NotSelectable`, `NoSuchOption`, `NotDraggable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `NoHistory` | `tab` | `page_back`, `page_forward`: `tabs.goBack` or `tabs.goForward` rejected on an existing tab |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_select`, `page_scroll`, `page_navigate`, `page_back`, `page_forward`, `page_reload`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
@@ -749,6 +752,23 @@ It lists the 20 newest Chrome downloads whose referrer, URL or final URL has
 the tab's current origin; a `blob:` URL counts as its creator's origin. A
 `data:` URL download from a `no-referrer` page is not attributed to any tab.
 
+`page_drag` (#11288): `ref` and `target` are refs of one read. A `target` that
+is `ref` or lies inside it answers `NotDraggable`. Each element is scrolled to
+the centre and the events use its centre point. On the source: `pointerdown`,
+`mousedown`, then `dragstart`. A cancelled `dragstart` ends the drag with
+`dropped: false` and no further events. Otherwise `drag` on the source, then
+`dragenter` and `dragover` on the target. When the target cancels `dragover`
+(the HTML drop-target rule), `drop` fires on it and `dropped` is `true`;
+otherwise `dragleave` fires and `dropped` is `false`. `dragend` fires on the
+source last. All drag events share one `DataTransfer` with `effectAllowed`
+`all`, so data the page sets in `dragstart` is readable in `drop`.
+
+Reads also report `[draggable=true]` elements (with `"draggable": true`),
+`[aria-dropeffect]` other than `none`, and `[dropzone]`. When the document
+holds a `[draggable=true]` element, elements whose `id` or `class` contains
+`drop` (case-insensitive), `[data-drop]` and `[data-dropzone]` are reported
+too, so a bare-`div` drop zone has a ref.
+
 ## Tab incarnation and documentId
 
 - **Tab incarnation (broker)**: a lease is keyed by `(peer.generation, tab)`,
@@ -830,6 +850,7 @@ only. A refusal's result line is best effort.
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
 | `page_select` | `page_select` | host of the page | chosen value, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
+| `page_drag` | `page_drag` | host of the page | refs, element names |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `page_back`, `page_forward`, `page_reload` | the op name | host of the landed page when `access` | URL path, query, fragment |
 | `page_upload` | `page_upload` | host of the page | file names, types and bytes |
@@ -847,7 +868,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption`, `NoHistory` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption`, `NoHistory`, `NotDraggable` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -946,6 +967,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
 | `page_select` | `lease: str`, `ref: str`, `value: str`, `request_id: str` | The `page_select` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
+| `page_drag` | `lease: str`, `ref: str`, `target: str`, `request_id: str` | The `page_drag` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `page_back` | `lease: str`, `request_id: str` | The `page_back` reply |
 | `page_forward` | `lease: str`, `request_id: str` | The `page_forward` reply |
@@ -1040,7 +1062,6 @@ grant-end lines are best-effort: a failed write never blocks them.
 - A page border on code-session tabs; the badge is the indicator.
 - Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,
   `page_type`.
-- Drag and hover.
 - Browser-level shortcuts (`Meta`+`t`, `Control`+`w` and the like): a
   `page_press` chord reaches the page only.
 - File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
