@@ -173,8 +173,17 @@ class Peer:
 
 
 PAGE_WAIT = 8.0  # the worker answers within 7 s
-# #11291: a scroll can load content, so it is journaled like a click; #11286: page_press too.
-MUTATING = {"page_click", "page_type", "page_press", "page_scroll", "page_navigate", "page_upload"}
+# #11291: a scroll can load content, so it is journaled like a click; #11286:
+# page_press and #11285: page_select too.
+MUTATING = {
+    "page_click",
+    "page_type",
+    "page_press",
+    "page_select",
+    "page_scroll",
+    "page_navigate",
+    "page_upload",
+}
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
@@ -189,6 +198,8 @@ PAGE_ERRORS = UNFINISHED | {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "NotSelectable",
+    "NoSuchOption",
     "InvalidUrl",
 }
 
