@@ -2357,7 +2357,10 @@ jobs:
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          key: embedder-cuda-check
+          # #11061: the key names the host compiler. The rust-cache key has
+          # no OS-image part, so the 24.04-built cache would restore on 26.04
+          # and skip the nvcc kernel build this job exists to run.
+          key: embedder-cuda-check-gcc14
           # Save only from main: a cache saved on a PR ref is readable by that
           # PR alone but still counts against the repo-wide 10 GB quota, and this
           # repo was over it — see the note on the test-shard cache above.
