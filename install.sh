@@ -12,17 +12,20 @@
 #      The `tctl` transitional alias binary is also installed (ADR-0013 / SPEC-INSTALLER-01).
 # What: Detects platform, resolves the latest (or pinned) trusty-installer
 #      release, downloads + checksum-verifies the tarball, installs
-#      `trusty-installer` (and the `tctl` alias), optionally fixes PATH, then
+#      `trusty-installer` (and the `tctl` alias), adds the install dir to PATH
+#      when a new shell would miss it (zsh: without a prompt, #11280), then
 #      runs `trusty-installer install` to finish bootstrap.
 # Test: `sh -n install.sh` for POSIX syntax; `shellcheck --shell=sh install.sh`
-#      for lint; manual run on macOS arm64 + Linux x86_64; run with
+#      for lint; tests/test-install-path.sh for PATH handling (host-only, temp
+#      HOME); manual run on macOS arm64 + Linux x86_64; run with
 #      TRUSTY_VERSION pinned and TRUSTY_YES=1 to exercise non-interactive paths.
 #
 # Environment variables:
 #   TRUSTY_VERSION         Pin trusty-installer version (e.g. "0.2.0")
 #   TRUSTY_INSTALL_DIR     Install dir (default: ${CARGO_HOME:-$HOME/.cargo}/bin)
 #   TRUSTY_YES             Set to 1 to skip all prompts (same as -y)
-#   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification
+#   TRUSTY_NO_MODIFY_PATH  Set to 1 to skip PATH modification (no shell-file
+#                          edit, and no zsh is started to probe PATH)
 #   TRUSTY_FORCE           Set to 1 to re-download even if already installed
 #   GITHUB_TOKEN / GH_TOKEN  Optional. Sent as an Authorization header when
 #                          resolving the latest release, raising the GitHub
@@ -53,6 +56,12 @@ TAG_PREFIX="${CRATE}-v"
 # copy ran). Honours CARGO_HOME like cargo itself; no Rust toolchain needed —
 # this is pure path arithmetic, and the downloader writes the binary here.
 DEFAULT_INSTALL_DIR="${CARGO_HOME:-${HOME}/.cargo}/bin"
+# #11280: the zsh PATH probe (`_zsh_sees_dir`) starts zsh with this PATH,
+# sshd's default, so the answer is what a fresh shell gets from its startup
+# files, not what the installer inherited. Tests lower the timeout after
+# sourcing; neither is a user-facing setting.
+PATH_PROBE_BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+PATH_PROBE_TIMEOUT_SECS=10
 FDA_DOCS_URL="${REPO_URL}/blob/main/CLAUDE.md"
 
 # Linux arm64 (aarch64) release target triple.
@@ -406,16 +415,26 @@ _path_export_present_in() {
 }
 
 # Why (#3874): shared by every RC file `maybe_update_path` writes so the
-#      idempotency check + append format stay in one place.
+#      idempotency check + append format stay in one place. #11280: a failed
+#      write used to abort the whole installer under `set -e` with a raw shell
+#      error; callers now need to tell "wrote it" from "already there" from
+#      "could not write" so they never print a success line for a failed write.
 # What: appends the marker comment + export line to `_afile` unless
-#      `_path_export_present_in` already finds it there.
-# Test: `_append_path_export "${dir}" "${file}"` called twice appends once.
+#      `_path_export_present_in` already finds it there. Returns 0 when it
+#      appended the line, 2 when the line was already present (no write), and
+#      1 when the write failed (missing directory, read-only file or dir).
+# Test: `test_repeat_install_is_idempotent` (twice appends once);
+#      `test_unwritable_zshenv_reports_failure` and
+#      `test_missing_zdotdir_reports_failure` (status 1, no success line), in
+#      tests/test-install-path.sh.
 _append_path_export() {
     _adir="$1"
     _afile="$2"
     if _path_export_present_in "${_adir}" "${_afile}"; then
-        return 0
+        return 2
     fi
+    # #11280: `2>/dev/null` comes first so a failed `>>` stays silent here;
+    # the caller reports it with the file name.
     {
         printf '\n# Added by trusty-tools install.sh\n'
         # shellcheck disable=SC2016
@@ -423,16 +442,182 @@ _append_path_export() {
         # shell startup, not now. The allowlist guard in maybe_update_path
         # already rejects single-quote characters from _adir.
         printf "export PATH='%s':\$PATH\n" "${_adir}"
-    } >>"${_afile}"
+    } 2>/dev/null >>"${_afile}" || return 1
+    return 0
 }
 
-# Why: Installing into ~/.local/bin is useless if it is not on PATH; help the
-#      user wire it up, but never modify their shell config without consent.
-# What: If install dir is not on PATH, append an export line to every RC file
-#      relevant to the detected shell (after confirmation), idempotently.
-#      Skipped when TRUSTY_NO_MODIFY_PATH=1.
-# Test: With a dir already on PATH, returns immediately. With a dir not on PATH
-#      and ASSUME_YES=1, appends an export line to each detected RC file, once.
+# Why (#11280): the installer's own $PATH is inherited from the user's
+#      current interactive shell, which may carry the dir from `~/.zshrc` or a
+#      one-off `export`. A non-interactive zsh (`zsh -c`, `ssh host cmd`) never
+#      reads `~/.zshrc`, so "on the installer's PATH" does not mean "on PATH
+#      for every zsh". Only a real zsh start can answer that.
+# What: starts `zsh -c` with a clean environment (`env -i`, HOME plus the
+#      sshd-style PATH_PROBE_BASE_PATH, no ZDOTDIR — a fresh Terminal or sshd
+#      zsh has none unless /etc/zshenv or ~/.zshenv sets it) and stdin from
+#      /dev/null, and checks the PATH it ends up with. That zsh reads
+#      /etc/zshenv and the user's .zshenv only — never .zprofile, .zshrc or
+#      .zlogin, since it is neither login nor interactive. A watchdog sends
+#      TERM after PATH_PROBE_TIMEOUT_SECS seconds and KILL one second later, so
+#      a hanging .zshenv cannot hang the installer. The zsh binary is $SHELL
+#      when that is an executable zsh, else `zsh` on PATH.
+#      Returns 0 when the new zsh has `_zdir` on PATH, 1 when it does not, and
+#      2 when the probe could not run (no zsh, temp-file failure, non-zero exit,
+#      timeout, or no PATH line in the output).
+# Test: `test_zshrc_only_dir_still_gets_zshenv_line`,
+#      `test_dir_already_in_zshenv_is_noop`, `test_probe_does_not_run_zshrc`,
+#      `test_hanging_zshenv_probe_times_out`, `test_no_zsh_falls_back_to_adding`
+#      in tests/test-install-path.sh.
+_zsh_sees_dir() {
+    _zdir="$1"
+    _zsh_bin=""
+    if [ "$(basename "${SHELL:-}")" = "zsh" ] && [ -x "${SHELL}" ]; then
+        _zsh_bin="${SHELL}"
+    elif need_cmd zsh; then
+        _zsh_bin="$(command -v zsh)"
+    fi
+    [ -n "${_zsh_bin}" ] || return 2
+
+    _probe_out="$(mktemp 2>/dev/null || mktemp -t trusty-path-probe)" || return 2
+    _probe_status=0
+    # The subshell's stderr goes to /dev/null so a shell's "Terminated" job
+    # notice for a timed-out probe never reaches the user's terminal.
+    (
+        # shellcheck disable=SC2016
+        env -i HOME="${HOME}" PATH="${PATH_PROBE_BASE_PATH}" \
+            "${_zsh_bin}" -c 'print -r -- "__TRUSTY_PROBE_PATH__=${PATH}"' \
+            </dev/null >"${_probe_out}" 2>/dev/null &
+        _probe_pid=$!
+        (
+            sleep "${PATH_PROBE_TIMEOUT_SECS}"
+            kill -TERM "${_probe_pid}" 2>/dev/null || exit 0
+            sleep 1
+            kill -KILL "${_probe_pid}" 2>/dev/null
+        ) </dev/null >/dev/null 2>&1 &
+        _watch_pid=$!
+        _wst=0
+        wait "${_probe_pid}" || _wst=$?
+        kill "${_watch_pid}" 2>/dev/null || true
+        exit "${_wst}"
+    ) 2>/dev/null || _probe_status=$?
+
+    _probe_path=""
+    if [ "${_probe_status}" -eq 0 ]; then
+        _probe_path="$(sed -n 's/^__TRUSTY_PROBE_PATH__=//p' "${_probe_out}" 2>/dev/null | tail -n 1)"
+    fi
+    rm -f "${_probe_out}"
+    [ "${_probe_status}" -eq 0 ] || return 2
+    [ -n "${_probe_path}" ] || return 2
+
+    case ":${_probe_path}:" in
+        *":${_zdir}:"*) return 0 ;;
+    esac
+    return 1
+}
+
+# Why (#11280): tell the user how to get the new PATH in the terminal that
+#      ran the installer, which no startup-file edit can reach.
+# What: prints "open a new terminal, or run: source <file>".
+# Test: `test_zsh_missing_dir_is_added_without_prompt` asserts the source line.
+_say_current_terminal_hint() {
+    say "To use it in this terminal, open a new terminal or run:"
+    say "    source ${1}"
+}
+
+# Why (#11280): under `curl … | sh` stdin is the pipe, so `confirm` answered
+#      "no" and a zsh user never got PATH set up. The owner ruling is to add
+#      the dir when a new zsh does not have it; TRUSTY_NO_MODIFY_PATH=1 is the
+#      opt-out. Only `.zshenv` is written, for the reasons recorded in
+#      `maybe_update_path` (#3874, #3897).
+# What: probes a new non-interactive zsh with `_zsh_sees_dir`. Present: no
+#      edit. Missing, or probe failed: appends the export line to
+#      ${ZDOTDIR:-$HOME}/.zshenv — without a prompt when stdin is not a
+#      terminal or ASSUME_YES=1, after `confirm` otherwise — then probes again
+#      and prints "Added …" only when the write succeeded and the new zsh sees
+#      the dir (or the probe cannot run). A failed probe falls toward writing:
+#      the append is idempotent, so the worst case is one redundant line,
+#      while falling toward "present" would leave PATH unset, which is #11280.
+#      Returns 1 when the write failed or the written line does not take
+#      effect, 0 otherwise.
+# Test: `test_zsh_missing_dir_is_added_without_prompt`,
+#      `test_zsh_added_dir_resolves_in_every_mode`,
+#      `test_zshrc_only_dir_still_gets_zshenv_line`,
+#      `test_dir_already_in_zshenv_is_noop`, `test_zdotdir_is_honoured`,
+#      `test_unwritable_zshenv_reports_failure` in tests/test-install-path.sh.
+_update_zsh_path() {
+    _dir="$1"
+    _rc="${ZDOTDIR:-${HOME}}/.zshenv"
+
+    _probe=0
+    _zsh_sees_dir "${_dir}" || _probe=$?
+    if [ "${_probe}" -eq 0 ]; then
+        case ":${PATH}:" in
+            *":${_dir}:"*) ;;
+            *)
+                say ""
+                say "${_dir} is already on PATH for new zsh shells."
+                _say_current_terminal_hint "${_rc}"
+                ;;
+        esac
+        return 0
+    fi
+
+    say ""
+    if [ "${_probe}" -eq 2 ]; then
+        say "Could not start zsh to check PATH; adding ${_dir} to ${_rc} (re-runs never duplicate it)."
+    fi
+    # #11280: only a terminal on stdin gets a prompt; `curl | sh` proceeds.
+    if [ "${ASSUME_YES:-0}" != "1" ] && [ -t 0 ]; then
+        if ! confirm "Add ${_dir} to your PATH in ${_rc}?"; then
+            say "Skipped PATH modification. Add this to ${_rc} manually:"
+            say "    export PATH=\"${_dir}:\$PATH\""
+            return 0
+        fi
+    elif [ "${_probe}" -eq 1 ]; then
+        say "Adding ${_dir} to PATH in ${_rc} (set TRUSTY_NO_MODIFY_PATH=1 to skip)."
+    fi
+
+    _write=0
+    _append_path_export "${_dir}" "${_rc}" || _write=$?
+    if [ "${_write}" -eq 1 ]; then
+        err "could not write ${_rc}; PATH was NOT updated. Add this line to it yourself:"
+        err "    export PATH=\"${_dir}:\$PATH\""
+        return 1
+    fi
+
+    _verify=0
+    _zsh_sees_dir "${_dir}" || _verify=$?
+    if [ "${_verify}" -eq 1 ]; then
+        warn "${_rc} names ${_dir}, but a new zsh still does not have it on PATH."
+        warn "A file read before or after it (e.g. ~/.zshenv setting ZDOTDIR, or a later PATH reset) overrides it."
+        warn "Add this line to the .zshenv your zsh reads:  export PATH=\"${_dir}:\$PATH\""
+        return 1
+    fi
+    if [ "${_write}" -eq 2 ]; then
+        say "${_rc} already adds ${_dir} to PATH."
+    elif [ "${_verify}" -eq 2 ]; then
+        say "Added ${_dir} to PATH in ${_rc} (zsh could not be started to confirm it)."
+    else
+        say "Added ${_dir} to PATH in ${_rc}."
+    fi
+    _say_current_terminal_hint "${_rc}"
+    return 0
+}
+
+# Why: Installing into the install dir is useless if it is not on PATH; wire
+#      it up for the user's login shell. #11280: for zsh the dir is added
+#      without a prompt when stdin is not a terminal (`curl … | sh`), judged by
+#      what a new zsh sees; bash and other shells keep the prompt-or-skip
+#      behaviour.
+# What: Returns early (no probe, no edit) for an unsafe dir or
+#      TRUSTY_NO_MODIFY_PATH=1. zsh: delegates to `_update_zsh_path`. bash and
+#      other shells: if the dir is not on the installer's $PATH, appends an
+#      export line to each RC file after `confirm` (a non-tty stdin without
+#      -y/TRUSTY_YES still skips), idempotently. Returns 1 when a write failed
+#      (an `error:` line is printed and no "Added" line), 0 otherwise.
+# Test: `test_zsh_writes_only_zshenv`, `test_bash_writes_both_files`,
+#      `test_bash_already_on_path_is_noop`, `test_bash_no_tty_still_skips`,
+#      `test_no_modify_path_opt_out_is_noop`, `test_unsafe_install_dir_is_noop`,
+#      `test_unwritable_bashrc_reports_failure` in tests/test-install-path.sh.
 maybe_update_path() {
     _dir="$1"
 
@@ -444,13 +629,7 @@ maybe_update_path() {
             ;;
     esac
 
-    case ":${PATH}:" in
-        *":${_dir}:"*)
-            # Already on PATH — nothing to do.
-            return 0
-            ;;
-    esac
-
+    # #11280: checked before the zsh probe, so the opt-out starts no shell.
     if [ "${TRUSTY_NO_MODIFY_PATH:-}" = "1" ]; then
         return 0
     fi
@@ -470,12 +649,14 @@ maybe_update_path() {
     # #3874's actual gap; writing the other two only added duplication risk
     # without covering any invocation .zshenv doesn't already cover. Kept
     # zsh on the same idempotent single-directory append machinery as
-    # bash/profile below, just pointed at one file.
+    # bash/profile below, just pointed at one file. #11280: that file is
+    # ${ZDOTDIR:-$HOME}/.zshenv, and "already on PATH" is a zsh probe, not
+    # the installer's inherited $PATH (see `_update_zsh_path`).
     _shell_name="$(basename "${SHELL:-/bin/sh}")"
     case "${_shell_name}" in
         zsh)
-            _rc_files="${HOME}/.zshenv"
-            _rc_display="${HOME}/.zshenv"
+            _update_zsh_path "${_dir}"
+            return $?
             ;;
         bash)
             _rc_files="${HOME}/.bashrc ${HOME}/.bash_profile"
@@ -487,12 +668,30 @@ maybe_update_path() {
             ;;
     esac
 
+    case ":${PATH}:" in
+        *":${_dir}:"*)
+            # Already on PATH — nothing to do.
+            return 0
+            ;;
+    esac
+
     say ""
     if confirm "Add ${_dir} to your PATH in ${_rc_display}?"; then
+        _failed=""
         for _rc in ${_rc_files}; do
-            _append_path_export "${_dir}" "${_rc}"
+            _write=0
+            _append_path_export "${_dir}" "${_rc}" || _write=$?
+            if [ "${_write}" -eq 1 ]; then
+                _failed="${_failed} ${_rc}"
+            fi
         done
-        say "Added ${_dir} to PATH in ${_rc_display}. Restart your shell or run:"
+        # #11280: a failed write is an error, never an "Added" line.
+        if [ -n "${_failed}" ]; then
+            err "could not write${_failed}; PATH was NOT updated there. Add this line yourself:"
+            err "    export PATH=\"${_dir}:\$PATH\""
+            return 1
+        fi
+        say "Added ${_dir} to PATH in ${_rc_display}. Open a new terminal, or run:"
         say "    export PATH=\"${_dir}:\$PATH\""
     else
         say "Skipped PATH modification. Add this to your shell config manually:"
@@ -767,10 +966,18 @@ main() {
             || die "failed to create temp directory"
 
         download_and_install "${_version}" "${_target}" "${_install_dir}" "${_sha_tool}"
-        maybe_update_path "${_install_dir}"
+        # #11280: a failed PATH write is reported there; the binaries are
+        # installed, so the bootstrap still runs.
+        maybe_update_path "${_install_dir}" || true
         _bin_path="${_install_dir}/${BIN}"
     else
         _bin_path="${_existing}"
+        # #11280: a re-run that skips the download still fixes PATH when the
+        # existing binary is the one in the install dir (e.g. on PATH only
+        # through ~/.zshrc, which `zsh -c` never reads).
+        if [ "$(dirname "${_existing}")" = "${_install_dir}" ]; then
+            maybe_update_path "${_install_dir}" || true
+        fi
     fi
 
     _bootstrap_status=0
@@ -784,7 +991,7 @@ main() {
     print_next_steps
 }
 
-# Why: lets tests (tests/install_path_test.sh) source this file to exercise
+# Why: lets tests (tests/test-install-path.sh) source this file to exercise
 #      individual functions (e.g. maybe_update_path) without triggering the
 #      full network install flow. Unset (the curl|sh default) behaves exactly
 #      as before — main always runs.

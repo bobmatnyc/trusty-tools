@@ -49,7 +49,29 @@
 #   `.../.local/bin` export line from being written (round-2 trigger b,
 #   part 2)
 #
+# #11280 additions: under `curl | sh` stdin is a pipe, and zsh users never
+# got PATH set up; "already on PATH" was judged from the installer's
+# inherited $PATH, which `zsh -c` does not share. These cases run with stdin
+# from /dev/null and no ASSUME_YES, the `curl | sh` shape:
+# - missing dir is added to .zshenv once, with no prompt, and resolves in
+#   `zsh -il`, `zsh -i`, `zsh -l -c` and `zsh -c`
+# - re-runs add nothing; a dir already in .zshenv (or via rustup's
+#   ~/.cargo/env) gets no edit; a dir present only via .zshrc still gets the
+#   .zshenv line; the probe never runs .zshrc
+# - ZDOTDIR is honoured; a ZDOTDIR a new zsh does not read gets a warning,
+#   not a success line
+# - TRUSTY_NO_MODIFY_PATH=1 makes no edit and starts no zsh
+# - an unwritable rc file or missing ZDOTDIR is an error with no "Added" line
+# - a hanging .zshenv or a missing zsh falls back to adding the line
+# - bash keeps its prompt-or-skip behaviour under a non-tty stdin
+#
+# Every case runs against a temp HOME with ZDOTDIR and the TRUSTY_* knobs
+# removed from the environment; the real $HOME is never touched.
+#
 # Test: This file *is* the test. Run with: tests/test-install-path.sh
+
+# The fixtures write literal `$PATH` text into startup files on purpose.
+# shellcheck disable=SC2016
 
 set -uo pipefail
 
@@ -77,15 +99,60 @@ assert_eq() {
 count_matches() {
     local file="$1" needle="$2"
     [[ -f "$file" ]] || { echo 0; return; }
-    grep -cF "$needle" "$file" 2>/dev/null || echo 0
+    # #11280: `grep -c` prints 0 AND exits 1 on no match; `|| echo 0` used to
+    # print a second 0, so a zero count never compared equal to "0".
+    local n
+    n=$(grep -cF "$needle" "$file" 2>/dev/null) || true
+    echo "${n:-0}"
 }
+
+# Environment knobs that must not leak from the developer's shell into a
+# test: a real ZDOTDIR would point writes at the developer's own .zshenv.
+HERMETIC_ENV=(env -u ZDOTDIR -u TRUSTY_NO_MODIFY_PATH -u TRUSTY_YES -u ASSUME_YES -u TRUSTY_INSTALL_DIR)
 
 # Runs maybe_update_path("$FAKE_HOME/.local/bin") inside a fresh subshell
 # with $HOME/$SHELL overridden, sourcing install.sh in source-only mode.
 run_maybe_update_path() {
     local home="$1" shell_path="$2"
-    HOME="$home" SHELL="$shell_path" ASSUME_YES=1 TRUSTY_INSTALL_SOURCE_ONLY=1 \
+    "${HERMETIC_ENV[@]}" HOME="$home" SHELL="$shell_path" ASSUME_YES=1 TRUSTY_INSTALL_SOURCE_ONLY=1 \
         bash -c '. "$1"; maybe_update_path "$HOME/.local/bin"' _ "$INSTALL_SH"
+}
+
+# #11280: runs maybe_update_path "$dir" the way `curl | sh` does — stdin
+# from /dev/null, no ASSUME_YES — under the shell named by RUNNER_SH
+# (default sh). Extra `NAME=value` arguments go into the environment.
+# PROBE_TIMEOUT, when set, lowers the zsh probe timeout after sourcing.
+# Prints stdout+stderr; the exit status is maybe_update_path's.
+run_curl_pipe() {
+    local home="$1" shell_path="$2" dir="$3"
+    shift 3
+    "${HERMETIC_ENV[@]}" HOME="$home" SHELL="$shell_path" TRUSTY_INSTALL_SOURCE_ONLY=1 "$@" \
+        "${RUNNER_SH:-sh}" -c '. "$1"; if [ -n "${PROBE_TIMEOUT:-}" ]; then PATH_PROBE_TIMEOUT_SECS="$PROBE_TIMEOUT"; fi; maybe_update_path "$2"' \
+        _ "$INSTALL_SH" "$dir" </dev/null 2>&1
+}
+
+# new_home — a fresh temp HOME.
+new_home() {
+    mktemp -d -t install-path-test-XXXXXX
+}
+
+# file_sum <file> — content checksum, or "absent".
+file_sum() {
+    if [[ -f "$1" ]]; then cksum <"$1"; else echo absent; fi
+}
+
+# has_text <haystack> <needle> — "yes" when needle is a substring.
+has_text() {
+    if [[ "$1" == *"$2"* ]]; then echo yes; else echo no; fi
+}
+
+# zsh_mode_path <home> <flags...> — PATH a fresh zsh started with <flags>
+# reports, from a clean environment like Terminal or sshd gives it.
+zsh_mode_path() {
+    local home="$1"
+    shift
+    env -i HOME="$home" PATH=/usr/bin:/bin:/usr/sbin:/sbin TERM=dumb \
+        zsh "$@" -c 'print -r -- "$PATH"' </dev/null 2>/dev/null
 }
 
 test_zsh_writes_only_zshenv() {
@@ -129,16 +196,19 @@ test_repeat_install_is_idempotent() {
     rm -rf "$home"
 }
 
-test_already_on_path_is_noop() {
-    echo "--- test_already_on_path_is_noop ---"
+# bash still trusts the installer's inherited $PATH (#11280 changes zsh only;
+# for zsh see test_zshrc_only_dir_still_gets_zshenv_line).
+test_bash_already_on_path_is_noop() {
+    echo "--- test_bash_already_on_path_is_noop ---"
     local home
     home=$(mktemp -d -t install-path-test-XXXXXX)
     mkdir -p "$home/.local/bin"
-    HOME="$home" SHELL="/bin/zsh" ASSUME_YES=1 TRUSTY_INSTALL_SOURCE_ONLY=1 \
+    "${HERMETIC_ENV[@]}" HOME="$home" SHELL="/bin/bash" ASSUME_YES=1 TRUSTY_INSTALL_SOURCE_ONLY=1 \
         PATH="$home/.local/bin:$PATH" \
         bash -c '. "$1"; maybe_update_path "$HOME/.local/bin"' _ "$INSTALL_SH" >/dev/null
 
-    assert_eq "$([[ -f "$home/.zshrc" ]] && echo yes || echo no)" "no" "no RC file created when dir already on PATH"
+    assert_eq "$([[ -f "$home/.bashrc" ]] && echo yes || echo no)" "no" "no .bashrc created when dir already on PATH"
+    assert_eq "$([[ -f "$home/.bash_profile" ]] && echo yes || echo no)" "no" "no .bash_profile created when dir already on PATH"
 
     rm -rf "$home"
 }
@@ -263,18 +333,387 @@ test_dir_as_prefix_of_longer_path_does_not_block_real_write() {
     rm -rf "$home"
 }
 
+# ---------------------------------------------------------------------------
+# #11280: `curl | sh` (stdin not a tty, no -y) for zsh users
+# ---------------------------------------------------------------------------
+
+# skip_without_zsh — prints a SKIP line and returns 1 when zsh is absent.
+skip_without_zsh() {
+    if ! command -v zsh >/dev/null 2>&1; then
+        echo "  SKIP: zsh not available on this host"
+        return 1
+    fi
+    return 0
+}
+
+test_zsh_missing_dir_is_added_without_prompt() {
+    echo "--- test_zsh_missing_dir_is_added_without_prompt (RUNNER_SH=${RUNNER_SH:-sh}) ---"
+    skip_without_zsh || return
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+    st=$?
+
+    assert_eq "$st" "0" "maybe_update_path exits 0"
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" ".zshenv gets exactly one export line with no prompt"
+    assert_eq "$(has_text "$out" "Added ${dir} to PATH in ${home}/.zshenv.")" "yes" "success line names the file"
+    assert_eq "$(has_text "$out" "source ${home}/.zshenv")" "yes" "tells the user how to load PATH in this terminal"
+    assert_eq "$(has_text "$out" "[y/N]")" "no" "no prompt is printed"
+    assert_eq "$([[ -f "$home/.zshrc" || -f "$home/.zprofile" ]] && echo yes || echo no)" "no" ".zshrc/.zprofile are not written"
+
+    rm -rf "$home"
+}
+
+# Criterion 1: after the write, all four zsh modes resolve the dir. On macOS
+# the login modes also run /etc/zprofile's path_helper, which must keep it.
+test_zsh_added_dir_resolves_in_every_mode() {
+    echo "--- test_zsh_added_dir_resolves_in_every_mode ---"
+    skip_without_zsh || return
+    local home dir mode p
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+
+    for mode in "-il" "-i" "-l" ""; do
+        p=$(zsh_mode_path "$home" ${mode:+"$mode"})
+        assert_eq "$(has_text ":$p:" ":$dir:")" "no" "before: zsh ${mode:-(plain)} -c does not see the dir"
+    done
+
+    run_curl_pipe "$home" /bin/zsh "$dir" >/dev/null
+
+    for mode in "-il" "-i" "-l" ""; do
+        p=$(zsh_mode_path "$home" ${mode:+"$mode"})
+        assert_eq "$(has_text ":$p:" ":$dir:")" "yes" "after: zsh ${mode:-(plain)} -c sees the dir"
+    done
+
+    rm -rf "$home"
+}
+
+test_curl_pipe_rerun_adds_no_duplicate() {
+    echo "--- test_curl_pipe_rerun_adds_no_duplicate ---"
+    skip_without_zsh || return
+    local home dir sum1 out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    run_curl_pipe "$home" /bin/zsh "$dir" >/dev/null
+    sum1=$(file_sum "$home/.zshenv")
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+    run_curl_pipe "$home" /bin/zsh "$dir" >/dev/null
+
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" "one export line after three runs"
+    assert_eq "$(file_sum "$home/.zshenv")" "$sum1" ".zshenv is byte-identical after re-runs"
+    assert_eq "$(has_text "$out" "already on PATH for new zsh shells")" "yes" "re-run reports the dir as already present"
+
+    rm -rf "$home"
+}
+
+# Criterion 2: the installer inherited the dir from the interactive shell
+# (.zshrc), but `zsh -c` does not read .zshrc — so .zshenv still gets it.
+test_zshrc_only_dir_still_gets_zshenv_line() {
+    echo "--- test_zshrc_only_dir_still_gets_zshenv_line ---"
+    skip_without_zsh || return
+    local home dir zshrc_sum
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    printf 'export PATH="%s:$PATH"\n' "$dir" >"$home/.zshrc"
+    zshrc_sum=$(file_sum "$home/.zshrc")
+
+    run_curl_pipe "$home" /bin/zsh "$dir" "PATH=$dir:$PATH" >/dev/null
+
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" ".zshenv gets the line although the installer's PATH had the dir"
+    assert_eq "$(file_sum "$home/.zshrc")" "$zshrc_sum" ".zshrc is left untouched"
+
+    rm -rf "$home"
+}
+
+test_dir_already_in_zshenv_is_noop() {
+    echo "--- test_dir_already_in_zshenv_is_noop ---"
+    skip_without_zsh || return
+    local home dir sum out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    printf 'export PATH="%s:$PATH"\n' "$dir" >"$home/.zshenv"
+    sum=$(file_sum "$home/.zshenv")
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+
+    assert_eq "$(file_sum "$home/.zshenv")" "$sum" ".zshenv is not edited"
+    assert_eq "$(has_text "$out" "Added")" "no" "no success line for a no-op"
+
+    rm -rf "$home"
+}
+
+# rustup writes `. "$HOME/.cargo/env"` into .zshenv; a text match on .zshenv
+# cannot see that, the probe can.
+test_rustup_cargo_env_counts_as_present() {
+    echo "--- test_rustup_cargo_env_counts_as_present ---"
+    skip_without_zsh || return
+    local home dir sum
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    mkdir -p "$home/.cargo"
+    printf 'case ":${PATH}:" in\n    *:"$HOME/.cargo/bin":*) ;;\n    *) export PATH="$HOME/.cargo/bin:$PATH" ;;\nesac\n' >"$home/.cargo/env"
+    printf '. "$HOME/.cargo/env"\n' >"$home/.zshenv"
+    sum=$(file_sum "$home/.zshenv")
+
+    run_curl_pipe "$home" /bin/zsh "$dir" >/dev/null
+
+    assert_eq "$(file_sum "$home/.zshenv")" "$sum" "a .zshenv sourcing ~/.cargo/env gets no extra line"
+
+    rm -rf "$home"
+}
+
+# The probe must start a non-interactive, non-login zsh: .zshrc, .zprofile
+# and .zlogin never run.
+test_probe_does_not_run_zshrc() {
+    echo "--- test_probe_does_not_run_zshrc ---"
+    skip_without_zsh || return
+    local home dir f
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    for f in .zshrc .zprofile .zlogin; do
+        printf ': >"$HOME/ran%s"\n' "$f" >"$home/$f"
+    done
+
+    run_curl_pipe "$home" /bin/zsh "$dir" >/dev/null
+
+    for f in .zshrc .zprofile .zlogin; do
+        assert_eq "$([[ -e "$home/ran$f" ]] && echo yes || echo no)" "no" "probe did not run $f"
+    done
+
+    rm -rf "$home"
+}
+
+# ZDOTDIR set, and the user's ~/.zshenv points a new zsh at it (a common
+# XDG layout): the line goes to $ZDOTDIR/.zshenv only.
+test_zdotdir_is_honoured() {
+    echo "--- test_zdotdir_is_honoured ---"
+    skip_without_zsh || return
+    local home zdot dir home_sum out
+    home=$(new_home)
+    zdot="$home/zdot"
+    mkdir -p "$zdot"
+    dir="$home/.cargo/bin"
+    printf 'export ZDOTDIR="%s"\n[ -f "$ZDOTDIR/.zshenv" ] && . "$ZDOTDIR/.zshenv"\n' "$zdot" >"$home/.zshenv"
+    home_sum=$(file_sum "$home/.zshenv")
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$zdot")
+
+    assert_eq "$(count_matches "$zdot/.zshenv" "PATH='${dir}'")" "1" "\$ZDOTDIR/.zshenv gets one export line"
+    assert_eq "$(file_sum "$home/.zshenv")" "$home_sum" "HOME/.zshenv is not edited when ZDOTDIR is set"
+    assert_eq "$(has_text "$out" "Added ${dir} to PATH in ${zdot}/.zshenv.")" "yes" "success line names \$ZDOTDIR/.zshenv"
+
+    rm -rf "$home"
+}
+
+# ZDOTDIR is in the installer's environment, but nothing makes a fresh zsh
+# read $ZDOTDIR/.zshenv: the write happens, the re-probe misses, and the user
+# gets a warning instead of a false success line.
+test_zdotdir_not_read_by_new_zsh_warns() {
+    echo "--- test_zdotdir_not_read_by_new_zsh_warns ---"
+    skip_without_zsh || return
+    local home zdot dir out st
+    home=$(new_home)
+    zdot="$home/zdot"
+    mkdir -p "$zdot"
+    dir="$home/.cargo/bin"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$zdot")
+    st=$?
+
+    assert_eq "$st" "1" "maybe_update_path exits 1"
+    assert_eq "$(count_matches "$zdot/.zshenv" "PATH='${dir}'")" "1" "the line is written to \$ZDOTDIR/.zshenv"
+    assert_eq "$(has_text "$out" "Added")" "no" "no success line"
+    assert_eq "$(has_text "$out" "a new zsh still does not have it on PATH")" "yes" "warning explains the miss"
+
+    rm -rf "$home"
+}
+
+test_no_modify_path_opt_out_is_noop() {
+    echo "--- test_no_modify_path_opt_out_is_noop ---"
+    local home dir out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    printf ': >"$HOME/probe-ran"\n' >"$home/.zshenv"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir" TRUSTY_NO_MODIFY_PATH=1)
+
+    assert_eq "$(count_matches "$home/.zshenv" "PATH=")" "0" "no export line written"
+    assert_eq "$([[ -e "$home/probe-ran" ]] && echo yes || echo no)" "no" "no zsh was started (the .zshenv marker is absent)"
+    assert_eq "$out" "" "prints nothing"
+
+    rm -rf "$home"
+}
+
+test_unsafe_install_dir_is_noop() {
+    echo "--- test_unsafe_install_dir_is_noop ---"
+    local home dir out
+    home=$(new_home)
+    dir="$home/bad dir"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+
+    assert_eq "$([[ -e "$home/.zshenv" ]] && echo yes || echo no)" "no" "no .zshenv written"
+    assert_eq "$(has_text "$out" "unsafe characters")" "yes" "warns about the unsafe dir"
+
+    rm -rf "$home"
+}
+
+test_unwritable_zshenv_reports_failure() {
+    echo "--- test_unwritable_zshenv_reports_failure ---"
+    skip_without_zsh || return
+    if [[ "$(id -u)" == "0" ]]; then
+        echo "  SKIP: root ignores file permissions"
+        return
+    fi
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    : >"$home/.zshenv"
+    chmod 444 "$home/.zshenv"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+    st=$?
+
+    assert_eq "$st" "1" "maybe_update_path exits 1"
+    assert_eq "$(has_text "$out" "error: could not write ${home}/.zshenv")" "yes" "an error names the file"
+    assert_eq "$(has_text "$out" "Added")" "no" "no success line"
+
+    chmod 644 "$home/.zshenv"
+    rm -rf "$home"
+}
+
+test_missing_zdotdir_reports_failure() {
+    echo "--- test_missing_zdotdir_reports_failure ---"
+    skip_without_zsh || return
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$home/no-such-dir")
+    st=$?
+
+    assert_eq "$st" "1" "maybe_update_path exits 1"
+    assert_eq "$(has_text "$out" "error: could not write ${home}/no-such-dir/.zshenv")" "yes" "an error names the file"
+    assert_eq "$(has_text "$out" "Added")" "no" "no success line"
+
+    rm -rf "$home"
+}
+
+# A .zshenv that hangs must not hang the installer: the probe times out, is
+# treated as failed, and the line is added (the safe direction).
+test_hanging_zshenv_probe_times_out() {
+    echo "--- test_hanging_zshenv_probe_times_out ---"
+    skip_without_zsh || return
+    local home dir out start elapsed
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    printf 'sleep 30\n' >"$home/.zshenv"
+
+    start=$(date +%s)
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir" PROBE_TIMEOUT=1)
+    elapsed=$(( $(date +%s) - start ))
+
+    assert_eq "$([[ "$elapsed" -lt 15 ]] && echo yes || echo no)" "yes" "returns well before the hanging .zshenv finishes (took ${elapsed}s)"
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" "falls back to adding the line"
+    assert_eq "$(has_text "$out" "Could not start zsh to check PATH")" "yes" "says the probe failed"
+    assert_eq "$(has_text "$out" "could not be started to confirm it")" "yes" "does not claim a verified success"
+
+    rm -rf "$home"
+}
+
+# No zsh anywhere (SHELL names a missing zsh, PATH has none): the probe fails
+# and the line is still added.
+test_no_zsh_falls_back_to_adding() {
+    echo "--- test_no_zsh_falls_back_to_adding ---"
+    local home dir bin tool out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    bin="$home/fakebin"
+    mkdir -p "$bin"
+    # `sh` too: env looks the runner shell up on the new PATH.
+    for tool in sh basename mktemp sed tail grep rm env sleep dirname; do
+        ln -s "$(command -v "$tool")" "$bin/$tool"
+    done
+
+    out=$(run_curl_pipe "$home" /nonexistent/zsh "$dir" "PATH=$bin")
+
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" "the line is added"
+    assert_eq "$(has_text "$out" "Could not start zsh to check PATH")" "yes" "says the probe failed"
+
+    rm -rf "$home"
+}
+
+# bash keeps the pre-#11280 behaviour: a non-tty stdin without -y skips.
+test_bash_no_tty_still_skips() {
+    echo "--- test_bash_no_tty_still_skips ---"
+    local home dir out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+
+    out=$(run_curl_pipe "$home" /bin/bash "$dir")
+
+    assert_eq "$([[ -e "$home/.bashrc" || -e "$home/.bash_profile" ]] && echo yes || echo no)" "no" "no bash rc file written"
+    assert_eq "$(has_text "$out" "Skipped PATH modification")" "yes" "prints the manual instructions"
+
+    rm -rf "$home"
+}
+
+test_unwritable_bashrc_reports_failure() {
+    echo "--- test_unwritable_bashrc_reports_failure ---"
+    if [[ "$(id -u)" == "0" ]]; then
+        echo "  SKIP: root ignores file permissions"
+        return
+    fi
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    : >"$home/.bashrc"
+    chmod 444 "$home/.bashrc"
+
+    out=$(run_curl_pipe "$home" /bin/bash "$dir" ASSUME_YES=1)
+    st=$?
+
+    assert_eq "$st" "1" "maybe_update_path exits 1"
+    assert_eq "$(has_text "$out" "error: could not write ${home}/.bashrc")" "yes" "an error names the file"
+    assert_eq "$(has_text "$out" "Added")" "no" "no success line"
+
+    chmod 644 "$home/.bashrc"
+    rm -rf "$home"
+}
+
 echo "==========================================================="
-echo "install.sh PATH-handling test suite (#3874, #3897 follow-up)"
+echo "install.sh PATH-handling test suite (#3874, #3897, #11280)"
 echo "==========================================================="
 test_zsh_writes_only_zshenv
 test_bash_writes_both_files
 test_repeat_install_is_idempotent
-test_already_on_path_is_noop
+test_bash_already_on_path_is_noop
 test_login_interactive_zsh_sources_dir_exactly_once
 test_differently_quoted_existing_entry_is_recognised
 test_commented_out_entry_does_not_block_real_write
 test_sibling_path_var_does_not_block_real_write
 test_dir_as_prefix_of_longer_path_does_not_block_real_write
+test_zsh_missing_dir_is_added_without_prompt
+if command -v dash >/dev/null 2>&1; then
+    RUNNER_SH=dash test_zsh_missing_dir_is_added_without_prompt
+fi
+test_zsh_added_dir_resolves_in_every_mode
+test_curl_pipe_rerun_adds_no_duplicate
+test_zshrc_only_dir_still_gets_zshenv_line
+test_dir_already_in_zshenv_is_noop
+test_rustup_cargo_env_counts_as_present
+test_probe_does_not_run_zshrc
+test_zdotdir_is_honoured
+test_zdotdir_not_read_by_new_zsh_warns
+test_no_modify_path_opt_out_is_noop
+test_unsafe_install_dir_is_noop
+test_unwritable_zshenv_reports_failure
+test_missing_zdotdir_reports_failure
+test_hanging_zshenv_probe_times_out
+test_no_zsh_falls_back_to_adding
+test_bash_no_tty_still_skips
+test_unwritable_bashrc_reports_failure
 
 echo "==========================================================="
 echo "Result: $PASS passed, $FAIL failed"
