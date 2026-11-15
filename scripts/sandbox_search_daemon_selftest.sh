@@ -607,7 +607,7 @@ DIR23="$TMP_ROOT/case23"
 mkdir -p "$DIR23/data" "$DIR23/elsewhere"
 ln -s "$DIR23/elsewhere" "$DIR23/data/trusty-search"
 set +e
-OUT23="$(run_launcher --dir "$DIR23" 2>&1)"
+OUT23="$(run_launcher --bin "$STUB" --dir "$DIR23" 2>&1)"
 S23=$?
 set -e
 if [ "$S23" -eq 1 ] && printf '%s' "$OUT23" | grep -qF "is a symlink" && [ ! -e "$DIR23/sandbox.pid" ]; then
