@@ -7,18 +7,22 @@
 //! open no connection to a host its words name, and run no other program,
 //! cannot reach a family endpoint through those words.
 //! What: [`mention_only`] is true only when every segment of the command, at
-//! every nesting depth, is one [`mention_segment`] accepts, and the text
-//! names no `/dev/tcp/` or `/dev/udp/` path (bash opens a socket for a
-//! redirect there). A segment is accepted when its program is the first word
-//! (no assignment, wrapper, `xargs` or lookup in front) and is:
+//! every nesting depth, is one [`mention_segment`] accepts, and neither the
+//! text nor any quote-removed word names a `/dev/tcp/` or `/dev/udp/` path
+//! (bash opens a socket for a redirect there). A segment carrying any
+//! unquoted `<` or `>` other than a here-document operator ([`has_redirect`])
+//! is not mention-only, whatever its target's quoting. A segment is accepted
+//! when its program is the first word (no assignment, wrapper, `xargs` or
+//! lookup in front) and is:
 //! - a text program in [`TEXT_PROGRAMS`], or `rg` without `--pre`;
 //! - `git` with a [`GIT_SUBCOMMANDS`] subcommand (none opens a remote
 //!   connection) carrying no [`EXEC_OPTIONS`] word, so a commit message,
 //!   branch name or path that names a family host is inert;
 //! - `gh` with a [`GH_SUBCOMMANDS`] subcommand, carrying no [`EXEC_OPTIONS`]
-//!   word, and naming a family host only inside a word that holds whitespace
-//!   — prose such as a title or body, never a URL, `--repo` value or option
-//!   value, since `gh` can be pointed at another host.
+//!   word, and naming a family host only in the value of a
+//!   [`GH_PROSE_OPTIONS`] option that holds whitespace — never in a URL,
+//!   `--repo` value or other word, however padded, since `gh` can be pointed
+//!   at another host.
 //!
 //! A program that runs project code (`cargo`, `make`, an interpreter) is not
 //! listed: its words can reach whatever that code does with them.
@@ -28,7 +32,9 @@
 //! program, a lex error, a spent budget — is not mention-only, and the
 //! command is judged as before.
 //! Test: `mention_only_commands_pass_for_every_role_11273`,
-//! `look_alike_mentions_stay_denied_11273`.
+//! `look_alike_mentions_stay_denied_11273`,
+//! `quoted_socket_redirects_stay_denied_11273`,
+//! `padded_gh_hosts_and_git_repo_options_stay_denied_11273`.
 
 use std::cell::Cell;
 
@@ -73,10 +79,16 @@ const GIT_SUBCOMMANDS: &[&str] = &[
     "shortlog",
 ];
 
-/// Option prefixes through which `gh` or `git` run a program or
-/// change the host they reach; any word starting with one fails the segment.
+/// `gh` options whose value is free text; only there may a host appear.
+const GH_PROSE_OPTIONS: &[&str] = &["--title", "--body", "--notes", "--subject"];
+
+/// Option prefixes through which `gh` or `git` run a program, change the
+/// host they reach, or read another repository (and its hooks); any word
+/// starting with one fails the segment.
 const EXEC_OPTIONS: &[&str] = &[
     "-c",
+    "-C",
+    "--work-tree",
     "--config",
     "--exec",
     "--upload-pack",
@@ -132,9 +144,19 @@ fn mention_segment(segment: &str, host_in: &dyn Fn(&str) -> bool) -> bool {
     if bodies.iter().any(|body| body.contains(['$', '`'])) {
         return false;
     }
+    // #11273: a redirect opens its target, quoted or not.
+    if has_redirect(&argv_text) {
+        return false;
+    }
     let Ok(argv) = tokenize(&argv_text) else {
         return false;
     };
+    if argv
+        .iter()
+        .any(|word| SOCKET_PATHS.iter().any(|path| word.contains(path)))
+    {
+        return false;
+    }
     let Ok(word) = resolve_program_word(&argv) else {
         return false;
     };
@@ -159,7 +181,8 @@ fn mention_segment(segment: &str, host_in: &dyn Fn(&str) -> bool) -> bool {
 }
 
 /// `gh`/`git`: a listed `subcommand` and no [`EXEC_OPTIONS`] word; with
-/// `host_in` set, a family host only inside a word holding whitespace.
+/// `host_in` set, a family host only in a [`GH_PROSE_OPTIONS`] value that
+/// holds whitespace. Any other word naming a host fails, padding included.
 fn tool_mention(
     argv: &[String],
     subcommand: Option<&String>,
@@ -172,12 +195,77 @@ fn tool_mention(
     if !listed.contains(&subcommand.as_str()) {
         return false;
     }
+    let mut prose_next = false;
     argv.iter().skip(1).all(|word| {
-        let exec = EXEC_OPTIONS.iter().any(|opt| word.starts_with(opt));
-        let bare_host =
-            host_in.is_some_and(|host_in| !word.contains(char::is_whitespace) && host_in(word));
-        !exec && !bare_host
+        let prose = std::mem::take(&mut prose_next);
+        if EXEC_OPTIONS.iter().any(|opt| word.starts_with(opt)) {
+            return false;
+        }
+        let Some(host_in) = host_in else {
+            return true;
+        };
+        if GH_PROSE_OPTIONS.contains(&word.as_str()) {
+            prose_next = true;
+            return true;
+        }
+        let joined = word
+            .split_once('=')
+            .filter(|(option, _)| GH_PROSE_OPTIONS.contains(option))
+            .map(|(_, value)| value);
+        // #11273: only a prose value may name a host, and only one holding
+        // whitespace (no widening past 753969b1b6).
+        match joined.or(prose.then_some(word.as_str())) {
+            Some(value) => value.contains(char::is_whitespace) || !host_in(word),
+            None => !host_in(word),
+        }
     })
+}
+
+/// Whether `text` holds an unquoted `<` or `>` other than the `<<` of a
+/// here-document or the `<<<` of a here-string, neither of which opens a
+/// file (#11273). A quoted or backslash-escaped one is text.
+///
+/// Test: `quoted_socket_redirects_stay_denied_11273`,
+/// `mention_only_commands_pass_for_every_role_11273`.
+fn has_redirect(text: &str) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+        AnsiC,
+    }
+    let mut quote = Quote::None;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Quote::Single, '\'') | (Quote::AnsiC, '\'') | (Quote::Double, '"') => {
+                quote = Quote::None;
+            }
+            (Quote::Single, _) => {}
+            (Quote::None | Quote::Double | Quote::AnsiC, '\\') => {
+                chars.next();
+            }
+            (Quote::Double | Quote::AnsiC, _) => {}
+            (Quote::None, '\'') => quote = Quote::Single,
+            (Quote::None, '"') => quote = Quote::Double,
+            (Quote::None, '$') if chars.peek() == Some(&'\'') => {
+                chars.next();
+                quote = Quote::AnsiC;
+            }
+            (Quote::None, '>') => return true,
+            (Quote::None, '<') => {
+                if chars.peek() != Some(&'<') {
+                    return true;
+                }
+                while chars.peek() == Some(&'<') {
+                    chars.next();
+                }
+            }
+            (Quote::None, _) => {}
+        }
+    }
+    false
 }
 
 #[cfg(test)]

