@@ -183,6 +183,7 @@ MUTATING = {
     "page_select",
     "page_scroll",
     "page_navigate",
+    "page_upload",
     *HISTORY,
 }
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")

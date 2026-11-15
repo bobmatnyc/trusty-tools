@@ -20,6 +20,18 @@ URL = "https://qa.test/app/page?q=private-query"
 PAGE_TEXT = "page-secret-text"
 ORIGIN = "https://qa.test"
 TITLE = "private-title"
+# #11289: one entry of a worker page_downloads result.
+DOWNLOAD = {
+    "id": 3,
+    "path": "/Users/qa/Downloads/report.txt",
+    "url": ORIGIN + "/download.txt",
+    "mime": "text/plain",
+    "state": "complete",
+    "bytes": 32,
+    "total": 32,
+    "error": None,
+    "started": "2026-11-15T00:00:00.000Z",
+}
 
 
 @pytest.fixture
@@ -190,6 +202,8 @@ class FakeBrowser:
                 ],
                 "truncated": False,
             }
+        if op == "page_downloads":
+            return {"origin": ORIGIN, "downloads": [dict(DOWNLOAD)]}
         if req.get("document") != item["document"]:
             # ``secret`` is a field the broker must drop before relaying.
             return {

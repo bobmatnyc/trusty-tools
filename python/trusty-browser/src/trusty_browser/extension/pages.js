@@ -79,7 +79,13 @@ globalThis.TrustyPages = (() => {
       if (within) entry.within = within;
       if (tag === "input") entry.type = (el.getAttribute("type") || "text").toLowerCase();
       if (["input","textarea","select"].includes(tag) && entry.type !== "password" &&
-          !["checkbox","radio"].includes(entry.type)) entry.value = cut(el.value, 512);
+          !["checkbox","radio","file"].includes(entry.type)) entry.value = cut(el.value, 512);
+      // #11289: a file input reports the names it holds, never Chrome's C:\fakepath value.
+      if (entry.type === "file") {
+        entry.files = [...(el.files || [])].slice(0, 20).map(file => cut(file.name, 255));
+        if (el.multiple) entry.multiple = true;
+        if (el.accept) entry.accept = cut(el.accept, 256);
+      }
       if (tag === "a" && el.href) entry.href = cut(el.href, 2048);
       if (entry.type === "checkbox" || entry.type === "radio") entry.checked = el.checked;
       // #11285: a select lists its choices so page_select can name one.
@@ -467,6 +473,30 @@ globalThis.TrustyPages = (() => {
       grew:added && height > before, at_end:y + innerHeight >= height - 2}};
   }
 
+  // Why: a file input cannot be typed into; the agent must hand the page real file bytes (#11289).
+  // What: builds File objects from base64 data, sets them through a DataTransfer, then fires bubbling
+  //   input and change as a user's pick would. A target that is not an enabled <input type=file>, or more
+  //   than one file for a single-file input, answers NotEditable and changes nothing.
+  // Test: tests/test_pages_dom.py `test_set_files_reaches_the_page_and_the_server`,
+  //   `test_set_files_refuses_other_targets`.
+  function pageSetFiles(ref, files) {
+    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+    if (!el || !el.isConnected) return {error:"StaleElement"};
+    const isFile = el.localName === "input" && (el.getAttribute("type") || "").toLowerCase() === "file";
+    if (!isFile || el.disabled || (files.length > 1 && !el.multiple)) return {error:"NotEditable"};
+    const transfer = new DataTransfer();
+    for (const {name, type, data} of files) {
+      const raw = atob(data), bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      transfer.items.add(new File([bytes], name, {type}));
+    }
+    el.files = transfer.files;
+    el.dispatchEvent(new Event("input", {bubbles:true, composed:true}));
+    el.dispatchEvent(new Event("change", {bubbles:true}));
+    return {ok:true};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -486,8 +516,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageSelect, pageScroll, urlAllowed, keyAllowed,
-    modifiersAllowed};
+  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageSelect, pageScroll, pageSetFiles, urlAllowed,
+    keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -495,8 +525,8 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, urlAllowed, keyAllowed, modifiersAllowed} =
-    TrustyPages;
+  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, pageSetFiles, urlAllowed, keyAllowed,
+    modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
@@ -504,6 +534,14 @@ TrustyPages.commands = deps => {
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
   const SCROLL_TO = ["down","up","top","bottom","element"];
+  // #11289: at most 10 files and 700000 base64 characters, so a frame stays under the 1 MiB native limit.
+  const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
+  const files = v => Array.isArray(v) && v.length >= 1 && v.length <= 10 &&
+    v.reduce((sum, f) => sum + (typeof f?.data === "string" ? f.data.length : Infinity), 0) <= 700000 &&
+    v.every(f => f && typeof f === "object" && Object.keys(f).length === 3 &&
+      typeof f.name === "string" && f.name.length > 0 && f.name.length <= 255 && !/[\\/]/.test(f.name) &&
+      typeof f.type === "string" && f.type.length <= 255 &&
+      typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
@@ -516,6 +554,7 @@ TrustyPages.commands = deps => {
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_back:{tab}, page_forward:{tab}, page_reload:{tab},
     page_switch:{tab},
+    page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -627,6 +666,28 @@ TrustyPages.commands = deps => {
       if ((req.to === "element") !== (req.ref !== null)) throw refuse("InvalidRequest");
       return act(req, pageScroll, [req.to, req.ref, req.wait_ms]);
     },
+    page_upload:req => act(req, pageSetFiles, [req.ref, req.files]),
+    // Why: a download the page starts must be visible to the agent, never another site's (#11289).
+    // What: lists the 20 newest Chrome downloads whose referrer, URL or final URL has the tab's current
+    //   origin (a blob: URL counts as its creator's origin). Needs page access; without the downloads
+    //   permission it answers InvalidOperation.
+    // Test: tests/test_worker.mjs `downloads are listed only for the tab's origin`.
+    async page_downloads(req) {
+      if (typeof chrome.downloads?.search !== "function") throw refuse("InvalidOperation");
+      const seen = await probe(req.tab);
+      if (!seen.access) throw await needed(req.tab);
+      const originOf = url => { try { return new URL(url).origin; } catch { return null; } };
+      const items = await chrome.downloads.search({orderBy:["-startTime"], limit:200});
+      const downloads = items
+        .filter(d => [d.referrer, d.url, d.finalUrl].some(u => u && originOf(u) === seen.origin))
+        .slice(0, 20)
+        .map(d => ({id:d.id, path:String(d.filename || "").slice(0, 4096),
+          url:String(d.finalUrl || d.url || "").slice(0, 2048), mime:String(d.mime || "").slice(0, 255),
+          state:String(d.state || ""), bytes:Number(d.bytesReceived) || 0,
+          total:Number(d.totalBytes) || 0, error:d.error ? String(d.error) : null,
+          started:String(d.startTime || "")}));
+      return {origin:seen.origin, downloads};
+    },
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -679,7 +740,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate","page_back",
-        "page_forward","page_reload"].includes(req.op);
+        "page_forward","page_reload","page_upload"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

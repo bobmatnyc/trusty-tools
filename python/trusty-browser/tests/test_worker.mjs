@@ -633,6 +633,53 @@ test("page text, typed text and URLs stay inside the operation's reply", async (
   assert.deepEqual(plain(f.sessionStore.origins), {7:"https://a.test"});
 });
 
+// #11289: file selection and downloads.
+test("upload runs only in the lease's document and refuses malformed files", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const file = {name:"a.txt", type:"text/plain", data:"aGVsbG8="};
+  for (const files of [[], [{...file, name:"a/b"}], [{...file, data:"%%%%"}], [{...file, extra:1}],
+    Array(11).fill(file), [{...file, data:"A".repeat(700004)}]]) {
+    assert.equal((await f.command("page_upload", {grant, tab:7, document:"doc-7", ref:"1.0", files})).error,
+      "InvalidRequest", JSON.stringify(files).slice(0, 80));
+  }
+  const stale = await f.command("page_upload", {grant, tab:7, document:"doc-old", ref:"1.0", files:[file]});
+  assert.equal(stale.error, "DocumentChanged");
+  assert.deepEqual(f.ran, []);
+  const done = await f.command("page_upload", {grant, tab:7, document:"doc-7", ref:"1.0", files:[file]});
+  assert.deepEqual(done.result, {document:"doc-7"});
+  assert.deepEqual(plain(f.ran), [{tab:7, func:"pageSetFiles", args:["1.0", [file]]}]);
+  f.tabs.get(7).result = {error:"NotEditable"};
+  const refused = await f.command("page_upload", {grant, tab:7, document:"doc-7", ref:"1.0", files:[file]});
+  assert.deepEqual(refused, {id:refused.id, ok:false, error:"NotEditable", tab:7});
+});
+
+test("downloads are listed only for the tab's origin", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  assert.equal((await f.command("page_downloads", {grant, tab:7})).error, "InvalidOperation");
+  const searches = [];
+  f.chrome.downloads = {search:async query => { searches.push(query); return [
+    {id:1, filename:"/dl/report.txt", url:"https://a.test/download.txt", referrer:"", mime:"text/plain",
+      state:"complete", bytesReceived:32, totalBytes:32, startTime:"2026-11-15T00:00:01Z"},
+    {id:2, filename:"/dl/generated.txt", url:"blob:https://a.test/0f1e", state:"in_progress",
+      bytesReceived:0, totalBytes:9, startTime:"2026-11-15T00:00:00Z"},
+    {id:3, filename:"/dl/other.txt", url:"https://b.test/x", referrer:"https://b.test/", state:"complete",
+      bytesReceived:1, totalBytes:1, startTime:"2026-11-14T00:00:00Z"},
+    {id:4, filename:"/dl/cdn.bin", url:"https://cdn.test/f", referrer:"https://a.test/page", state:"interrupted",
+      error:"NETWORK_FAILED", bytesReceived:0, totalBytes:0, startTime:"2026-11-13T00:00:00Z"},
+  ]; }};
+  const listed = await f.command("page_downloads", {grant, tab:7});
+  assert.equal(listed.ok, true);
+  assert.equal(listed.result.origin, "https://a.test");
+  assert.deepEqual(listed.result.downloads.map(d => d.id), [1, 2, 4]);
+  assert.deepEqual(plain(listed.result.downloads[0]), {id:1, path:"/dl/report.txt", url:"https://a.test/download.txt",
+    mime:"text/plain", state:"complete", bytes:32, total:32, error:null, started:"2026-11-15T00:00:01Z"});
+  assert.equal(listed.result.downloads[2].error, "NETWORK_FAILED");
+  assert.equal((await f.command("page_downloads", {grant, tab:8})).error, "OutOfScope");
+  assert.equal(searches.length, 1);
+});
+
 test("code preview probes the tab the popup names and never the active tab", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:false, activeTab:true},
     8:{origin:"https://b.test", title:"B", active:true}}});

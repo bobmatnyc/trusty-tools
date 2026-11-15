@@ -6,8 +6,10 @@ Code mode contract (#11239): docs/activation-codes.md, "MCP tools".
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -292,6 +294,43 @@ def code_from_file(raw: object) -> str:
     return code
 
 
+UPLOAD_MAX = 512 * 1024
+
+
+def upload_file(raw: object) -> dict[str, str]:
+    """One ``page_upload`` file entry read from a local path (#11289).
+
+    Why: the browser cannot read the agent's disk; the bytes travel in the frame.
+    What: an absolute path to a regular file of at most ``UPLOAD_MAX`` bytes
+    becomes ``{name, type, data}`` (basename, guessed MIME type, base64). A
+    refusal is ``FileRefused`` naming the path and the reason.
+    Test: `test_page_upload_reads_local_files_and_refuses_bad_paths`.
+    """
+    if not isinstance(raw, str) or not os.path.isabs(raw):
+        raise local("InvalidRequest", "paths must be absolute file path strings")
+
+    def refuse(reason: str) -> Refused:
+        return local("FileRefused", f"{raw}: {reason}")
+
+    try:
+        # O_NONBLOCK: opening a FIFO must not hang the tool.
+        with os.fdopen(os.open(raw, os.O_RDONLY | os.O_NONBLOCK), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise refuse("is not a regular file")
+            data = handle.read(UPLOAD_MAX + 1)
+    except FileNotFoundError:
+        raise refuse("does not exist") from None
+    except IsADirectoryError:
+        raise refuse("is not a regular file") from None
+    except OSError:
+        raise refuse("cannot be read") from None
+    if len(data) > UPLOAD_MAX:
+        raise refuse(f"is larger than {UPLOAD_MAX} bytes")
+    name = os.path.basename(raw)
+    kind = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return {"name": name, "type": kind, "data": base64.b64encode(data).decode()}
+
+
 def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None:
     """Register code mode's page tools; contract "MCP tools", "Code mode".
 
@@ -425,6 +464,27 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
     def page_reload(lease: str, request_id: str) -> dict[str, Any]:
         """Reload the leased tab's page."""
         return call("page_reload", lease=lease, request_id=request_id)
+
+    @server.tool()
+    def page_upload(
+        lease: str, ref: str, paths: list[str], request_id: str
+    ) -> dict[str, Any]:
+        """Set local files on the <input type=file> named by ``ref``; the page sees a user's pick.
+
+        ``paths`` are absolute local file paths, at most 10 and 512 KiB in total.
+        """
+        return call(
+            "page_upload",
+            lease=lease,
+            ref=ref,
+            files=[upload_file(p) for p in paths],
+            request_id=request_id,
+        )
+
+    @server.tool()
+    def page_downloads(lease: str) -> dict[str, Any]:
+        """List the newest downloads started from the leased tab's origin, with path and state."""
+        return call("page_downloads", lease=lease)
 
     @server.tool()
     def browser_release(lease: str) -> dict[str, Any]:

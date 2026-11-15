@@ -6,6 +6,7 @@ import asyncio
 
 import pytest
 from test_activation_codes import (  # noqa: F401
+    DOWNLOAD,
     ORIGIN,
     PAGE_TEXT,
     TITLE,
@@ -658,6 +659,7 @@ def mutating_frame(op, lease, rid="r"):
         "page_back": base,
         "page_forward": base,
         "page_reload": base,
+        "page_upload": {**base, "ref": "1.0", "files": [FILE]},
     }[op]
 
 
@@ -762,6 +764,9 @@ def test_history_ops_refuse_outside_the_grant_and_send_nothing(short, clock, op)
     run(short, body)
 
 
+FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
+
+
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
 @pytest.mark.parametrize(
     "op",
@@ -773,6 +778,7 @@ def test_history_ops_refuse_outside_the_grant_and_send_nothing(short, clock, op)
         "page_navigate",
         "page_back",
         "page_reload",
+        "page_upload",
     ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
@@ -913,5 +919,66 @@ def test_the_deadline_callback_never_runs_after_close(short, clock):
         broker.sweep()
         assert broker.sweeper is None and not broker.tasks
         assert len(broker.grants) == 1  # nothing ran against torn-down state
+
+    run(short, body)
+
+
+def test_page_upload_relays_files_and_journals_only_a_digest(short, clock):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = mutating_frame("page_upload", lease, "u")
+        assert await call(frame) == {"ok": True, "tab": 7, "document": "d7-1"}
+        assert await call(frame) == {"ok": True, "tab": 7, "document": "d7-1"}
+        sent = rig.a.sent("page_upload")
+        assert len(sent) == 1 and sent[0]["files"] == [FILE] and sent[0]["ref"] == "1.0"
+        other = {**FILE, "data": "Ynll"}
+        assert (await call({**frame, "files": [other]}))["error"] == "Conflict"
+        journal = rig.broker.grants[ack["grant"]].session.journal
+        assert "aGVsbG8=" not in repr(journal)
+        assert "aGVsbG8=" not in (rig.state / "audit.jsonl").read_text()
+        assert rig.outcomes("operation")[-1] == "Conflict"
+
+    run(short, body)
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        [],
+        [FILE] * 11,
+        [{**FILE, "name": "../a"}],
+        [{**FILE, "name": ""}],
+        [{**FILE, "data": "not base64!"}],
+        [{**FILE, "extra": 1}],
+        [{**FILE, "data": "A" * (4 * 175000)}],
+        "a.txt",
+    ],
+)
+def test_malformed_upload_files_are_refused_before_the_browser(short, clock, files):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = {**mutating_frame("page_upload", lease), "files": files}
+        assert await call(frame) == {"ok": False, "error": "InvalidRequest"}
+        assert rig.a.sent("page_upload") == []
+
+    run(short, body)
+
+
+def test_page_downloads_reports_the_workers_list_in_shape(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        listed = await call({"op": "page_downloads", "lease": lease})
+        assert listed == {
+            "ok": True,
+            "tab": 7,
+            "origin": ORIGIN,
+            "downloads": [DOWNLOAD],
+        }
+        rig.a.refuse["page_downloads"] = {"origin": ORIGIN, "downloads": [{"id": 1}]}
+        bad = await call({"op": "page_downloads", "lease": lease})
+        assert bad == {"ok": False, "error": "BrowserRefused"}
 
     run(short, body)
