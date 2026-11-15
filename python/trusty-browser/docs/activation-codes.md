@@ -328,7 +328,7 @@ time, held by a lease.
 
 Field types: `tab` is a non-negative integer. `lease`, `request_id` and `ref`
 are non-empty strings of at most 8192 characters (the existing `string` rule).
-`text` is a string of 0 to 8192 characters. `url` is a string of 1 to 8192
+`text` and `value` are strings of 0 to 8192 characters. `url` is a string of 1 to 8192
 characters. Every request carries exactly the fields listed. For `page_press`
 (#11286), `ref` may also be null (the focused element); `key` is one of
 `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`,
@@ -346,6 +346,7 @@ answers `InvalidRequest`.
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
+| `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
@@ -390,6 +391,8 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
+| `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
+| `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
@@ -489,6 +492,7 @@ Envelope:
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
+| `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
@@ -516,7 +520,7 @@ build:
 | `PermissionNeeded` | `tab`, `origin` | The probe or the operation's injection failed for lack of page access |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
-| `NotEditable` | `tab` | See "Element addressing" |
+| `NotEditable`, `NotSelectable`, `NoSuchOption` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
@@ -597,7 +601,10 @@ ref cannot reach a different document or an element from an older read.
 An element entry is `{"ref": str, "tag": str, "role": str, "name": str}` plus,
 when they apply, `"type": str` (input type), `"value": str` (at most 512
 characters; never for `type=password`), `"href": str` (absolute, at most 2048
-characters), `"checked": bool`, `"disabled": true`. `tag` is the lower-case
+characters), `"checked": bool`, `"disabled": true`, and for a `select`
+`"options"`: the first 100 options as `{"value": str, "label": str}` plus
+`"selected": true` and `"disabled": true` when they apply (more than 100 sets
+`truncated`). `tag` is the lower-case
 tag name. `role` is the `role` attribute, else the implicit role (`link`,
 `button`, `textbox`, `checkbox`, `radio`, `combobox`, `listbox`, `searchbox`,
 `generic`). `name` is the first non-empty of `aria-label`, `aria-labelledby`
@@ -656,6 +663,15 @@ synthetic (`isTrusted: false`), so the default action is emulated:
 | `Backspace`, `Delete` | Delete the selection, else one character before or after the caret |
 | arrows, `Home`, `End`, `PageUp`, `PageDown` | Move the caret in a field or contenteditable (extend the selection with `Shift`); otherwise scroll the page |
 | `Escape`, other chords | Events only |
+
+`page_select` (#11285): the target must be an enabled single-choice
+`select`; any other answers `NotSelectable`. `value` names the first enabled
+option whose value equals it, else whose label does; none answers
+`NoSuchOption`. Both refusals change nothing. An option already selected
+dispatches nothing and answers `changed: false`. Otherwise `focus()`, set
+`selectedIndex`, then dispatch bubbling `input` and `change`. `changed`
+compares the select's value before and after the events, so a page handler
+that reverts the choice answers `changed: false`; `value` is the value after.
 
 ## Tab incarnation and documentId
 
@@ -726,6 +742,7 @@ only. A refusal's result line is best effort.
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
+| `page_select` | `page_select` | host of the page | chosen value, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `release` | `release` | absent | none |
 | malformed | `invalid` | absent | the frame |
@@ -739,7 +756,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -834,6 +851,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
+| `page_select` | `lease: str`, `ref: str`, `value: str`, `request_id: str` | The `page_select` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 

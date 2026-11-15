@@ -292,6 +292,24 @@ test("page_type and page_press inject pageKeys with their action", async () => {
   assert.deepEqual(lost, {id:lost.id, ok:false, error:"OutcomeUnknown"});
 });
 
+// #11285: page_select relays whether the value moved and refuses without a usable answer.
+test("page_select relays changed and value, and its refusals", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const choose = value => f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value});
+  f.tabs.get(7).result = {ok:true, changed:false, value:"keep"};
+  assert.deepEqual((await choose("other")).result, {document:"doc-7", changed:false, value:"keep"});
+  assert.equal(JSON.stringify(f.ran.at(-1)), JSON.stringify({tab:7, func:"pageSelect", args:["1.0", "other"]}));
+  for (const error of ["NotSelectable", "NoSuchOption"]) {
+    f.tabs.get(7).result = {error};
+    const reply = await choose("x");
+    assert.deepEqual(reply, {id:reply.id, ok:false, error, tab:7});
+  }
+  f.tabs.get(7).result = {ok:true};
+  assert.equal((await choose("x")).error, "OutcomeUnknown");
+  assert.equal((await f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value:5})).error, "InvalidRequest");
+});
+
 test("without the all-https permission only the clicked tab is readable", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
     9:{origin:"https://c.test", title:"C", active:false}}});
