@@ -145,6 +145,12 @@ class FakeBrowser:
             seen.update(document=None, origin=None, title=None)
         if op == "page_tab":
             return seen
+        if op == "page_switch":
+            for other in self.tabs.values():
+                if other["window"] == item["window"]:
+                    other["active"] = False
+            item["active"] = True
+            return {"window": item["window"], "focused": True}
         if op == "page_navigate":
             target = urlsplit(req["url"])
             item["origin"] = f"{target.scheme}://{target.netloc}"

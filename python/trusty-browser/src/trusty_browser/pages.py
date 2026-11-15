@@ -33,6 +33,8 @@ OPS = {
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "release": {"op", "lease"},
+    # #11293: focus the leased tab; profile grants only.
+    "switch": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
 # Worker refusals after which the lease stays; any other drops it.
@@ -91,6 +93,7 @@ READ = {
     "truncated": (bool,),
 }
 DONE = {"document": (str,)}
+SWITCHED = {"window": (int,), "focused": (bool,)}
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -294,6 +297,8 @@ class Pages(Grants):
             self.drop(claim)
             return {"ok": True}, claim.tab, None
         tab = claim.tab
+        if op == "switch":
+            return await self.switch(grant, claim)
         if op == "page_read":
             result = shaped(
                 await self.send(
@@ -336,6 +341,30 @@ class Pages(Grants):
         reply = {"ok": True, "tab": tab, **result}
         session.journal[rid] = (request, reply)
         return reply, tab, where
+
+    async def switch(
+        self, grant: Grant, claim: Claim
+    ) -> tuple[Frame, int | None, str | None]:
+        """Make the leased tab the active tab of its window and focus that window.
+
+        Why: an agent on a profile grant must reach a tab a link opened, and the
+        human must see which tab it drives (#11293). What: needs this session's
+        own lease, so a tab another session holds stays out of reach; a tab
+        grant answers ``OutOfScope`` because focus changes browser-wide state.
+        Idempotent, so it is not journaled.
+        Test: `test_profile_grant_switch_focuses_the_leased_tab`,
+        `test_tab_grant_switch_is_out_of_scope_and_sends_nothing`,
+        `test_switch_needs_this_sessions_own_lease`.
+        """
+        if grant.scope == "tab":
+            raise Refusal("OutOfScope", tab=claim.tab)
+        result = shaped(
+            await self.send(grant, claim, claim.peer, "page_switch", tab=claim.tab),
+            SWITCHED,
+        )
+        claim.deadline = time.monotonic() + TTL
+        reply = {"ok": True, "tab": claim.tab, **result}
+        return reply, claim.tab, host(claim.origin)
 
     async def select(
         self, session: Session, grant: Grant, tab: int

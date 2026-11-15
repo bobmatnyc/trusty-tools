@@ -340,6 +340,7 @@ characters. Every request carries exactly the fields listed.
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
+| `switch` | `op`, `lease` | `tab` int, `window` int, `focused` bool |
 
 Every success reply also carries `"ok": true`.
 
@@ -352,7 +353,14 @@ the entry of the granted tab.
 
 `select` takes a lease on the tab for this session (existing `Claim`, lease
 `TTL`, one holder per tab incarnation) and does not focus or activate the tab.
-Selecting a tab this session already holds returns the same lease. A session
+Selecting a tab this session already holds returns the same lease.
+`switch` (#11293) makes a leased tab the active tab of its window and focuses
+that window. It needs this session's own lease, so a tab another session holds
+stays unreachable (`select` answers `TabClaimed`). Focus is browser-wide state:
+a tab grant answers `OutOfScope` with the lease's `tab`, even for its own tab,
+and keeps the lease. `focused` is false when Chrome refused the window focus.
+`switch` is idempotent and not journaled; a lost reply is
+`BrowserDisconnected`. A session
 may hold leases on several tabs. `select` on a tab without page access
 succeeds with `access: false`, so the agent can still navigate it.
 
@@ -481,6 +489,7 @@ Envelope:
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
+| `page_switch` | `tab` | `{"window": int, "focused": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -669,6 +678,7 @@ steps do not run.
 | `page_click`, `page_type` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
+| `switch` | As `page_read`; tab grant: `OutOfScope` | Check order; tab grant: `OutOfScope`; `tabs.update(tab, {active: true})`, then `windows.update(window, {focused: true})` |
 
 The probe is `executeScript({target: {tabId, frameIds: [0]}, func})` with a
 function that returns `[location.origin, document.title]` and changes nothing;
@@ -691,6 +701,7 @@ only. A refusal's result line is best effort.
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `release` | `release` | absent | none |
+| `switch` | `switch` | host of the leased page when known | title |
 | malformed | `invalid` | absent | the frame |
 
 `outcome` on the result line is `ok` or the error name. No line carries page
@@ -793,6 +804,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `disconnected` is `false` when no session was held |
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
+| `browser_switch` | `lease: str` | The `switch` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |

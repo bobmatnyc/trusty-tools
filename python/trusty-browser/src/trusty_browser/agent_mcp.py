@@ -309,6 +309,11 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
         return call("select", tab=tab)
 
     @server.tool()
+    def browser_switch(lease: str) -> dict[str, Any]:
+        """Bring the leased tab to the front of its window (profile grants only)."""
+        return call("switch", lease=lease)
+
+    @server.tool()
     def page_read(lease: str) -> dict[str, Any]:
         """Read the leased tab's page: text and elements with refs for click and type."""
         return call("page_read", lease=lease)

@@ -52,6 +52,58 @@ def test_tab_grant_select_of_another_tab_is_out_of_scope_and_sends_nothing(
     run(short, body)
 
 
+def test_profile_grant_switch_focuses_the_leased_tab(short, clock):
+    # #11293: the link-opened tab 8 is reachable and brought to the front.
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 8}))["lease"]
+        assert await call({"op": "switch", "lease": lease}) == {
+            "ok": True,
+            "tab": 8,
+            "window": 1,
+            "focused": True,
+        }
+        assert rig.a.sent("page_switch")[-1]["tab"] == 8
+        assert rig.a.tabs[8]["active"] and not rig.a.tabs[7]["active"]
+        listed = {t["tab"]: t["active"] for t in (await call({"op": "tabs"}))["tabs"]}
+        assert listed[8] is True and listed[7] is False
+
+    run(short, body)
+
+
+def test_tab_grant_switch_is_out_of_scope_and_sends_nothing(short, clock):
+    async def body(rig):
+        _, call = await session(rig, "tab", 7)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        assert await call({"op": "switch", "lease": lease}) == {
+            "ok": False,
+            "error": "OutOfScope",
+            "tab": 7,
+        }
+        assert not rig.a.sent("page_switch")
+        # The refusal keeps the lease: the grant still works on its own tab.
+        assert (await call({"op": "page_read", "lease": lease}))["ok"]
+        assert (await call({"op": "select", "tab": 8}))["error"] == "OutOfScope"
+
+    run(short, body)
+
+
+def test_switch_needs_this_sessions_own_lease(short, clock):
+    async def body(rig):
+        _, first = await session(rig)
+        lease = (await first({"op": "select", "tab": 8}))["lease"]
+        _, second = await session(rig)
+        assert (await second({"op": "select", "tab": 8}))["error"] == "TabClaimed"
+        assert await second({"op": "switch", "lease": lease}) == {
+            "ok": False,
+            "error": "StaleLease",
+        }
+        assert not rig.a.sent("page_switch")
+        assert (await first({"op": "switch", "lease": lease}))["ok"]
+
+    run(short, body)
+
+
 def test_profile_grant_never_reaches_another_profile(short, clock):
     async def body(rig):
         _, travel = await rig.open(rig.beta)

@@ -156,6 +156,7 @@ TrustyPages.commands = deps => {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
+    page_switch:{tab},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -247,6 +248,15 @@ TrustyPages.commands = deps => {
       const settled = await wait.done;
       const {access, document, origin} = await probe(req.tab);
       return {access, document, origin, settled};
+    },
+    // #11293: focus changes browser-wide state, so a tab grant may not switch even to its own tab.
+    async page_switch(req, row) {
+      if (row.scope === "tab") throw refuse("OutOfScope", {tab:req.tab});
+      let shown;
+      try { shown = await chrome.tabs.update(req.tab, {active:true}); } catch { throw refuse("TabNotFound", {tab:req.tab}); }
+      let focused = true;
+      try { await chrome.windows.update(shown.windowId, {focused:true}); } catch { focused = false; }
+      return {window:shown.windowId, focused};
     },
   };
 
