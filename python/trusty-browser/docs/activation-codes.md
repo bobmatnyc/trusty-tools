@@ -56,11 +56,12 @@ fields are refused.
 
 ## Build constraints
 
-- Manifest permissions stay exactly: `storage`, `nativeMessaging`, `identity`,
-  `identity.email`, `alarms`, `scripting`, `activeTab`, `debugger` (#11294).
-  No `host_permissions`.
+- Manifest permissions: `storage`, `nativeMessaging`, `identity`,
+  `identity.email`, `alarms`, `scripting`, `activeTab`, `debugger` (#11294),
+  `downloads` (#11289). No `host_permissions`.
   The optional `https://*/*` stays declared; the code flow requests and removes
-  it as "All-https access" states. No manifest change.
+  it as "All-https access" states. Adding new permissions requires one
+  re-approval per install (owner ruling 2026-11-15).
 - Page code runs only through `chrome.scripting.executeScript` in the default
   `ISOLATED` world, on the top frame, of a tab the worker names by explicit id.
   No operation looks up "the active tab" at operation time. The popup reads
@@ -71,6 +72,10 @@ fields are refused.
   "started debugging this browser" bar while attached. `chrome.debugger` is
   used for input and native dialogs only: no console, network or `Runtime`
   access beyond one 100 ms in-page wait for late dialogs.
+- `page_downloads` lists Chrome downloads (#11289): the worker uses
+  `chrome.downloads` API to read the 20 newest downloads from the leased tab's
+  site. Read-only access; no download initiation, modification or removal.
+  Returns `InvalidOperation` without the `downloads` permission.
 - `chrome.tabs.update(tabId, {url})` navigates any tab; it needs no permission
   and is confined only by the checks in this contract.
 - Without the `tabs` permission, `chrome.tabs.query` returns no `url` or
