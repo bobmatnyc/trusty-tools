@@ -241,7 +241,8 @@ test("a tab grant never reaches another tab", async () => {
   assert.equal(f.perms.held, true);
   const before = {ran:f.ran.length, updates:f.updates.length};
   for (const [op, extra] of [["page_tab",{}], ["page_read",{document:null}], ["page_click",{document:"doc-8", ref:"1.0"}],
-    ["page_type",{document:"doc-8", ref:"1.0", text:"x"}], ["page_navigate",{url:"https://b.test/next"}]]) {
+    ["page_type",{document:"doc-8", ref:"1.0", text:"x"}], ["page_navigate",{url:"https://b.test/next"}],
+    ["page_press",{document:"doc-8", ref:null, key:"Enter", modifiers:[]}]]) {
     const reply = await f.command(op, {grant, tab:8, ...extra});
     assert.deepEqual(reply, {id:reply.id, ok:false, error:"OutOfScope", tab:8}, op);
   }
@@ -259,7 +260,8 @@ test("a tab grant never reaches another tab", async () => {
 test("stale document refuses before the page runs", async () => {
   const f = await codeFixture();
   const {grant} = await mintTab(f, 7);
-  for (const [op, extra] of [["page_click",{ref:"1.0"}], ["page_type",{ref:"1.0", text:"secret typed"}]]) {
+  for (const [op, extra] of [["page_click",{ref:"1.0"}], ["page_type",{ref:"1.0", text:"secret typed"}],
+    ["page_press",{ref:null, key:"Tab", modifiers:["Shift"]}]]) {
     for (const document of ["doc-old", null]) {
       const reply = await f.command(op, {grant, tab:7, document, ...extra});
       assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:true, document:"doc-7"}, op);
@@ -286,6 +288,25 @@ test("scroll runs in the lease's document and relays its view", async () => {
   f.tabs.get(7).result = {error:"StaleElement"};
   const gone = await f.command("page_scroll", {grant, tab:7, document:"doc-7", to:"element", ref:"1.0", wait_ms:0});
   assert.deepEqual(gone, {id:gone.id, ok:false, error:"StaleElement", tab:7});
+});
+
+// #11286: typing and key presses inject the one key engine into the lease's document only.
+test("page_type and page_press inject pageKeys with their action", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  for (const [op, extra] of [["page_type", {ref:"1.0", text:"hi\n"}],
+    ["page_press", {ref:null, key:"Enter", modifiers:["Shift","Control"]}], ["page_press", {ref:"1.0", key:"a", modifiers:[]}]]) {
+    const reply = await f.command(op, {grant, tab:7, document:"doc-7", ...extra});
+    assert.deepEqual(reply, {id:reply.id, ok:true, email, result:{document:"doc-7"}, tab:7}, op);
+  }
+  assert.deepEqual(plain(f.ran), [
+    {tab:7, func:"pageKeys", args:["1.0", "type", "hi\n"]},
+    {tab:7, func:"pageKeys", args:[null, "press", {key:"Enter", modifiers:["Shift","Control"]}]},
+    {tab:7, func:"pageKeys", args:["1.0", "press", {key:"a", modifiers:[]}]},
+  ]);
+  f.tabs.get(7).throwAfterRun = true;
+  const lost = await f.command("page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Tab", modifiers:[]});
+  assert.deepEqual(lost, {id:lost.id, ok:false, error:"OutcomeUnknown"});
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {
@@ -334,6 +355,13 @@ test("malformed commands are refused before any page work", async () => {
     ["page_scroll", {grant, tab:7, document:"doc-7", to:"element", ref:null, wait_ms:0}, "InvalidRequest"],
     ["page_scroll", {grant, tab:7, document:"doc-7", to:"down", ref:"1.0", wait_ms:0}, "InvalidRequest"],
     ["page_scroll", {grant, tab:7, document:"doc-7", to:"down", ref:null, wait_ms:5001}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Return", modifiers:[]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"ab", modifiers:[]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"\n", modifiers:[]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Enter", modifiers:["Ctrl"]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Enter", modifiers:["Alt","Alt"]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", ref:"#go", key:"Enter", modifiers:[]}, "InvalidRequest"],
+    ["page_press", {grant, tab:7, document:"doc-7", key:"Enter", modifiers:[]}, "InvalidRequest"],
     ["grant_end", {grant, reason:"bored", last:true}, "InvalidRequest"],
     ["grant_end", {grant, reason:"closed"}, "InvalidRequest"],
     ["grant_end", {grant, reason:"closed", last:"yes"}, "InvalidRequest"],

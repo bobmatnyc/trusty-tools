@@ -12,6 +12,7 @@ import binascii
 import hashlib
 import secrets
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 from trusty_browser import codes
@@ -35,6 +36,7 @@ OPS = {
     "page_click": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
+    "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
@@ -170,6 +172,28 @@ def valid_files(files: object) -> bool:
     return total <= MAX_UPLOAD
 
 
+# #11286: the keys page_press names; any other single printable character is also a key.
+NAMED_KEYS = {
+    "Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown",
+    "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Space", " ",
+}  # fmt: skip
+MODIFIERS = {"Shift", "Control", "Alt", "Meta"}
+
+
+def key_allowed(key: object) -> bool:
+    """A named key, or one code point that is not a control, format or separator.
+
+    Why: the broker refuses a key the worker would refuse, before sending it.
+    What: mirrors ``keyAllowed`` in extension/pages.js.
+    Test: `test_page_press_validates_key_and_modifiers_before_sending`.
+    """
+    if not isinstance(key, str):
+        return False
+    if key in NAMED_KEYS:
+        return True
+    return len(key) == 1 and unicodedata.category(key)[0] not in "CZ"
+
+
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
@@ -177,8 +201,18 @@ def validate(request: Frame) -> str:
         raise Refusal("InvalidRequest")
     for name in ("lease", "request_id", "ref"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
-        if name in request and not (op == "page_scroll" and name == "ref"):
+        # #11286: page_press takes a null ref for the focused element.
+        nullable = op == "page_scroll" or (op == "page_press" and request[name] is None)
+        if name in request and not (name == "ref" and nullable):
             string(request, name)
+    if op == "page_press":
+        mods = request["modifiers"]
+        if not key_allowed(request["key"]) or not (
+            isinstance(mods, list)
+            and all(isinstance(m, str) and m in MODIFIERS for m in mods)
+            and len(set(mods)) == len(mods)
+        ):
+            raise Refusal("InvalidRequest")
     if op == "page_scroll":
         to, ref, wait = request["to"], request["ref"], request["wait_ms"]
         if (
@@ -414,6 +448,8 @@ class Pages(Grants):
                 args.update(to=request["to"], wait_ms=request["wait_ms"])
             if op == "page_upload":
                 args["files"] = request["files"]
+            if op == "page_press":  # #11286
+                args.update(key=request["key"], modifiers=request["modifiers"])
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:

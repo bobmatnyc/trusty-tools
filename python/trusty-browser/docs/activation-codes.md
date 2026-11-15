@@ -329,7 +329,14 @@ time, held by a lease.
 Field types: `tab` is a non-negative integer. `lease`, `request_id` and `ref`
 are non-empty strings of at most 8192 characters (the existing `string` rule).
 `text` is a string of 0 to 8192 characters. `url` is a string of 1 to 8192
-characters. Every request carries exactly the fields listed.
+characters. Every request carries exactly the fields listed. For `page_press`
+(#11286), `ref` may also be null (the focused element); `key` is one of
+`Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`,
+`ArrowLeft`, `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `Space`, or a
+single code point whose Unicode category is not C (control, format) or Z
+(separator), the space character excepted; `modifiers` is a list of distinct
+values from `Shift`, `Control`, `Alt`, `Meta`, possibly empty. Any other value
+answers `InvalidRequest`.
 
 | op | Request fields | Success reply fields |
 |---|---|---|
@@ -339,6 +346,7 @@ characters. Every request carries exactly the fields listed.
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
+| `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
@@ -369,7 +377,7 @@ Selecting a tab this session already holds returns the same lease. A session
 may hold leases on several tabs. `select` on a tab without page access
 succeeds with `access: false`, so the agent can still navigate it.
 
-`page_click`, `page_type`, `page_scroll` and `page_navigate` keep the existing journal: a
+`page_click`, `page_type`, `page_press`, `page_scroll` and `page_navigate` keep the existing journal: a
 repeat `request_id` with an identical frame returns the stored reply without
 running again; a repeat with a different frame answers `Conflict`; 4096
 entries answer `SessionFull`. Only a reply from an operation the worker ran,
@@ -391,14 +399,14 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `OutOfScope` | `tab` | Tab grant: the tab is not the granted tab; or either side's scope check refused (existing name, field added) |
 | `TabClaimed` | `holder`, `expires_at` | `select`: another session holds the tab (existing) |
 | `TabNotFound` | `tab` | Profile grant: the tab does not exist; the grant stays |
-| `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
-| `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
+| `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`, `page_press`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
+| `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_scroll`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_scroll`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
 | `Conflict`, `SessionFull` | none | Journal refusals (existing) |
 | `GrantEnded` | `reason` | The grant is gone. The broker closes the connection after this frame (existing) |
 | `AuditUnavailable` | none | The admitted audit line could not be written; nothing was sent to the browser (existing) |
@@ -427,7 +435,7 @@ Result-line audit failure: the operation already ran in the browser, but its
 result line could not be written. The broker ends the grant with
 `reason: audit` and never releases an unrecorded result: `tabs`, `select`,
 `page_read` and `release` answer `GrantEnded` with `reason: audit` and the
-broker closes the connection; `page_click`, `page_type` and `page_navigate`
+broker closes the connection; `page_click`, `page_type`, `page_press` and `page_navigate`
 answer `OutcomeUnknown` (journaled under the `request_id`), and the session's
 next call answers `GrantEnded` with `reason: audit`.
 
@@ -481,7 +489,7 @@ Envelope:
   them to the agent and drops any other field.
 - The worker answers within 7 seconds; the broker waits 8 (existing). A
   missing answer is `BrowserDisconnected`, or `OutcomeUnknown` for
-  `page_click`, `page_type` and `page_navigate`. A worker refusal named
+  `page_click`, `page_type`, `page_press` and `page_navigate`. A worker refusal named
   `BrowserDisconnected` or `OutcomeUnknown` is treated the same way, by the
   command's kind and not by the name the worker chose (see "Worker
   refusals").
@@ -494,6 +502,7 @@ Envelope:
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
+| `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
@@ -521,15 +530,15 @@ build:
 | `OutOfScope` | `tab` | Tab grant and `tab` differs from the grant's tab |
 | `TabNotFound` | `tab` | `chrome.tabs.get(tab)` fails (existing name) |
 | `PermissionNeeded` | `tab`, `origin` | The probe or the operation's injection failed for lack of page access |
-| `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`: the top document differs from `document`, or `document` is null |
+| `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_scroll`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_scroll`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
 
 The broker relays these last two without fields and by the command's kind:
-for `page_click`, `page_type` and `page_navigate` either name reaches the
+for `page_click`, `page_type`, `page_press` and `page_navigate` either name reaches the
 agent as `OutcomeUnknown` and is journaled; for any other command either name
 reaches the agent as `BrowserDisconnected`, which is not journaled.
 
@@ -580,7 +589,7 @@ returned. The agent never writes a selector.
 - A ref is `"<read>.<n>"`: `read` is a per-document counter that the injected
   function increments on each read, `n` the element's index in that read's
   list. Both are decimal integers; the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`.
-- `page_click`, `page_type` and `page_scroll` inject into `documentIds: [document]` only. The
+- `page_click`, `page_type`, `page_press` and `page_scroll` inject into `documentIds: [document]` only. The
   injected function answers `StaleElement` when the ref's `read` is not the
   map's current counter, the ref is absent, the `WeakRef` is empty, or the
   element is not connected. A scroll runs no read, so it leaves refs valid; a
@@ -641,11 +650,38 @@ containers; `to: element` reaches an element inside one.
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
 element; any other target, or a disabled or read-only one, answers
-`NotEditable`. For `input` and `textarea`: `focus()`, set the value through the
-prototype's native `value` setter, then dispatch bubbling `input` and
-`change`. For contenteditable: `focus()`, select its contents, then
-`document.execCommand("insertText", false, text)`. The text replaces the
-current content; empty `text` clears it.
+`NotEditable`. The text replaces the current content; empty `text` clears it.
+The worker injects `pageKeys(ref, "type", text)`: `focus()`, select the
+content, then one key press (below) per code point of `text` (#11286). `\n`,
+`\r` and `\r\n` press `Enter`, so a newline in a single-line field submits its
+form; `\t` presses `Tab` and later characters go to the newly focused element.
+An upper-case ASCII letter is pressed with `Shift`. A field's text is changed
+through the prototype's native `value` setter with bubbling `beforeinput` and
+`input` (`inputType` `insertText` or `deleteContent*`); a contenteditable
+element uses `document.execCommand("insertText")`. When the typing ends, every
+field it changed gets a bubbling `change`.
+
+`page_press` (#11286): the worker injects `pageKeys(ref, "press", {key,
+modifiers})`. A non-null `ref` resolves as for `page_click` (`StaleElement`) and
+is focused; a null `ref` presses on `document.activeElement`, or `body`. One
+press dispatches bubbling, cancelable `KeyboardEvent`s with `key`, `code`,
+`keyCode`, `which` and the four modifier flags: a `keydown` per modifier in the
+order `Control`, `Alt`, `Shift`, `Meta`; `keydown` for the key; `keypress` for a
+printable key or `Enter` when neither `Control` nor `Meta` is held; the default
+action, unless a listener cancelled `keydown` or `keypress`; `keyup`; then the
+modifier `keyup`s in reverse. Each event goes to the element focused at that
+moment, so `Tab`'s `keyup` reaches the newly focused element. Events are
+synthetic (`isTrusted: false`), so the default action is emulated:
+
+| Key | Default action |
+|---|---|
+| printable, `Space` (no `Control`/`Meta`) | Insert into an editable target; `Space` on a button, checkbox, radio or summary clicks it after `keyup`; otherwise `Space` scrolls a page (up with `Shift`) |
+| `Control`+`a` or `Meta`+`a` | Select all of the field, the editing host, or the document |
+| `Enter` | Newline in a `textarea`; paragraph (line break with `Shift`) in contenteditable; implicit form submission from an `input` (click the form's default button, else `requestSubmit()` when at most one field blocks it); click a button, link or summary |
+| `Tab` | Move focus in sequential order (positive `tabindex` ascending, then document order; disabled, hidden, inert, `tabindex=-1` and unchecked radios of a group skipped), backward with `Shift`, wrapping at the ends; a changed field gets `change` first; a text field it lands on is selected |
+| `Backspace`, `Delete` | Delete the selection, else one character before or after the caret |
+| arrows, `Home`, `End`, `PageUp`, `PageDown` | Move the caret in a field or contenteditable (extend the selection with `Shift`); otherwise scroll the page |
+| `Escape`, other chords | Events only |
 
 `page_upload` (#11289): the target must be an enabled `<input type=file>`,
 with `multiple` set when more than one file is given; anything else answers
@@ -669,9 +705,9 @@ the tab's current origin; a `blob:` URL counts as its creator's origin. A
   generation.
 - **documentId (worker)**: the broker stores on each code-session lease the
   `document` of its latest `select` or `page_read` reply, null until one
-  reports access, and sends it with every `page_read`, `page_click` and
-  `page_type`. The broker never enforces it; the worker does.
-- `page_click` and `page_type` require the stored `document` to be the tab's
+  reports access, and sends it with every `page_read`, `page_click`,
+  `page_type` and `page_press`. The broker never enforces it; the worker does.
+- `page_click`, `page_type` and `page_press` require the stored `document` to be the tab's
   current top document. The worker injects with `documentIds: [document]`;
   when Chrome reports no such document, or `document` is null, it probes the
   top frame and answers `DocumentChanged` with the probe's `access` and
@@ -685,7 +721,7 @@ the tab's current origin; a `blob:` URL counts as its creator's origin. A
   broker stores the probe's `document` (null without access).
 
 What the agent sees when the document changes between two calls: its next
-`page_click` or `page_type` answers `DocumentChanged` and changes nothing. A
+`page_click`, `page_type` or `page_press` answers `DocumentChanged` and changes nothing. A
 `page_read` then succeeds with `document_changed: true` and fresh refs when
 the new document is on the activated origin, or answers `PermissionNeeded`
 when the change crossed origins.
@@ -695,7 +731,7 @@ when the change crossed origins.
 Before every op the broker runs, in order: grant liveness (`check_live`:
 idle, generation, enrollment or pairing still current), the admitted audit
 line, frame validation, the journal (`page_click`, `page_type`,
-`page_navigate`: a recorded `request_id` answers here), and lease validation.
+`page_press`, `page_navigate`: a recorded `request_id` answers here), and lease validation.
 Then the op's own scope check
 below runs, then the browser command. A failure stops the sequence; later
 steps do not run.
@@ -705,7 +741,7 @@ steps do not run.
 | `tabs` | Grant generation is the peer's; tab grant: the reply list is filtered to the grant's tab | Grant known; tab grant: list only the grant's tab. Probes each listed tab for `access`, `origin`, `title` |
 | `select` | Generation; tab grant: `tab` equals the grant's tab; `TabClaimed` check | Check order, then the read-only probe |
 | `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame; failure is `PermissionNeeded` |
-| `page_click`, `page_type` | As `page_read` | Check order; inject only into `documentIds: [document]` |
+| `page_click`, `page_type`, `page_press` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
 
@@ -729,6 +765,7 @@ only. A refusal's result line is best effort.
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
+| `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `page_upload` | `page_upload` | host of the page | file names, types and bytes |
 | `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
@@ -839,6 +876,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
+| `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply. The tool reads each path under `--upload-root` (see "Upload root"; a regular file, 512 KiB in total at most) and sends its basename, guessed MIME type and base64 bytes. Without `--upload-root` it is `UploadsDisabled`; a refused path is `FileRefused` naming the path and the reason |
 | `page_downloads` | `lease: str` | The `page_downloads` reply |
@@ -961,9 +999,10 @@ grant-end lines are best-effort: a failed write never blocks them.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
 - Iframes and shadow-DOM content in `page_read`, `page_click`, `page_type`.
-- Choosing an option in a `<select>`, drag, hover, scroll and keyboard
-  shortcuts.
+- Choosing an option in a `<select>`, drag and hover.
 - File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
+- Browser-level shortcuts (`Meta`+`t`, `Control`+`w` and the like): a
+  `page_press` chord reaches the page only.
 - Focusing or activating a tab from the agent.
 - Page access on a tab the user did not click when the user declined
   all-https access, and on any non-`https:` page other than the clicked one;
@@ -1017,7 +1056,7 @@ Python (broker and shim):
 - Stale tab incarnation: a lease from an older generation answers
   `GrantEnded` `browser_gone`; nothing is sent to the new peer.
 - Stale `documentId`: the lease's stored `document` is sent on
-  `page_click`/`page_type`; a `DocumentChanged` reply is relayed with its
+  `page_click`/`page_type`/`page_press`; a `DocumentChanged` reply is relayed with its
   fields, the lease stays, the journal holds no entry for that `request_id`,
   and a retry with the same `request_id` runs again.
 - `PermissionNeeded`: relayed with `tab` and `origin`; grant and lease stay.
@@ -1059,7 +1098,7 @@ JavaScript (worker, page functions, popup):
 - Out-of-scope tab: a tab grant's command for another tab answers `OutOfScope`
   and injects nothing; no command path calls `chrome.tabs.query` with
   `active: true`.
-- Stale `documentId`: `page_click`/`page_type` with an old or null `document`
+- Stale `documentId`: `page_click`/`page_type`/`page_press` with an old or null `document`
   answer `DocumentChanged` with the probe's `access` and `document`, and the
   page's click and input listeners never fire.
 - `PermissionNeeded`: an injection that Chrome refuses answers

@@ -422,7 +422,9 @@ def test_malformed_requests_answer_invalid_and_send_nothing(short, clock):
     run(short, body)
 
 
-@pytest.mark.parametrize("op", ["page_click", "page_type", "page_navigate"])
+@pytest.mark.parametrize(
+    "op", ["page_click", "page_type", "page_press", "page_navigate"]
+)
 def test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried(
     short, clock, monkeypatch, op
 ):
@@ -440,6 +442,7 @@ def test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried(
                 "ref": "1.0",
                 "text": "x",
             },
+            "page_press": mutating_frame(op, lease),
             "page_navigate": {
                 "op": op,
                 "lease": lease,
@@ -569,17 +572,63 @@ def mutating_frame(op, lease, rid="r"):
     return {
         "page_click": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
+        "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_navigate": {**base, "url": ORIGIN},
         "page_upload": {**base, "ref": "1.0", "files": [FILE]},
     }[op]
 
 
+def test_page_press_validates_key_and_modifiers_before_sending(short, clock):
+    """#11286: a bad key or modifier list is refused by the broker; a good one reaches the worker."""
+
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = mutating_frame("page_press", lease)
+        bad = [
+            {"key": "Return"},
+            {"key": ""},
+            {"key": "ab"},
+            {"key": "\n"},
+            {"key": "\u00a0"},
+            {"key": 13},
+            {"modifiers": ["Ctrl"]},
+            {"modifiers": ["Shift", "Shift"]},
+            {"modifiers": "Shift"},
+            {"ref": ""},
+            {"ref": 1},
+        ]
+        for change in bad:
+            reply = await call({**frame, **change, "request_id": repr(change)})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, change
+        missing = {k: v for k, v in frame.items() if k != "modifiers"}
+        assert (await call(missing))["error"] == "InvalidRequest"
+        assert rig.a.sent("page_press") == []
+        for rid, change in enumerate(
+            [
+                {},
+                {"ref": "1.0", "key": "a", "modifiers": ["Control", "Meta"]},
+                {"key": "é"},
+            ]
+        ):
+            sent = {**frame, **change, "request_id": str(rid)}
+            assert await call(sent) == {"ok": True, "tab": 7, "document": "d7-1"}
+            worker = rig.a.sent("page_press")[-1]
+            assert {k: worker[k] for k in ("ref", "key", "modifiers", "document")} == {
+                "ref": sent["ref"],
+                "key": sent["key"],
+                "modifiers": sent["modifiers"],
+                "document": "d7-1",
+            }
+        assert len(rig.a.sent("page_press")) == 3
+
+    run(short, body)
 FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
 
 
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
 @pytest.mark.parametrize(
-    "op", ["page_click", "page_type", "page_navigate", "page_upload"]
+    "op", ["page_click", "page_type", "page_press", "page_navigate", "page_upload"]
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error
