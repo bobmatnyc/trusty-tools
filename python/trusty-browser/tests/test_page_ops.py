@@ -652,6 +652,7 @@ def mutating_frame(op, lease, rid="r"):
     base = {"op": op, "lease": lease, "request_id": rid}
     return {
         "page_click": {**base, "ref": "1.0"},
+        "page_hover": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
         "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_select": {**base, "ref": "1.0", "value": "x"},
@@ -779,6 +780,7 @@ FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
         "page_back",
         "page_reload",
         "page_upload",
+        "page_hover",
     ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(

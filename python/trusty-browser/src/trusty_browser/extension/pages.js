@@ -497,6 +497,45 @@ globalThis.TrustyPages = (() => {
     return {ok:true};
   }
 
+  // Why: menus and tooltips open on pointer entry, and an agent had no way to move the pointer (#11287).
+  // What: resolves the ref, scrolls it into view and moves the synthetic pointer from the element this
+  //   document last hovered to it: out/leave on the old path, over/enter on the new one (enter from the
+  //   outermost ancestor down, leave from the innermost up), then pointermove/mousemove at the centre.
+  //   Hovering the same element again sends only the moves. The events are untrusted, so CSS `:hover` does
+  //   not match; that needs trusted input (#11294).
+  // Test: tests/test_pages_dom.py `test_hover_fires_enter_over_and_move_then_leaves_the_old_target`,
+  //   `test_hover_fixture_reveals_the_hover_action`.
+  function pageHover(ref) {
+    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+    if (!el || !el.isConnected) return {error:"StaleElement"};
+    el.scrollIntoView({block:"center", inline:"center"});
+    const box = el.getBoundingClientRect();
+    const at = {cancelable:true, composed:true, view:window, pointerType:"mouse", isPrimary:true,
+      clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
+    const KEY = "__trustyBrowserHover";
+    let last = globalThis[KEY]?.deref();
+    if (!last || !last.isConnected || last.ownerDocument !== document) last = null;
+    const path = node => { const out = []; for (; node; node = node.parentElement) out.push(node); return out; };
+    const fire = (target, kinds, bubbles, relatedTarget) => {
+      for (const [Kind, type] of kinds) target.dispatchEvent(new Kind(type, {...at, bubbles, relatedTarget}));
+    };
+    if (last !== el) {
+      const old = last ? path(last) : [], now = path(el);
+      if (last) {
+        fire(last, [[PointerEvent, "pointerout"], [MouseEvent, "mouseout"]], true, el);
+        for (const node of old.filter(n => !now.includes(n)))
+          fire(node, [[PointerEvent, "pointerleave"], [MouseEvent, "mouseleave"]], false, el);
+      }
+      fire(el, [[PointerEvent, "pointerover"], [MouseEvent, "mouseover"]], true, last);
+      for (const node of now.filter(n => !old.includes(n)).reverse())
+        fire(node, [[PointerEvent, "pointerenter"], [MouseEvent, "mouseenter"]], false, last);
+      globalThis[KEY] = new WeakRef(el);
+    }
+    fire(el, [[PointerEvent, "pointermove"], [MouseEvent, "mousemove"]], true, null);
+    return {ok:true};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -516,8 +555,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageSelect, pageScroll, pageSetFiles, urlAllowed,
-    keyAllowed, modifiersAllowed};
+  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageSelect, pageScroll, pageSetFiles, pageHover,
+    urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -525,8 +564,8 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, pageSetFiles, urlAllowed, keyAllowed,
-    modifiersAllowed} = TrustyPages;
+  const {pageProbe, pageRead, pageClick, pageKeys, pageSelect, pageScroll, pageSetFiles, pageHover, urlAllowed,
+    keyAllowed, modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
@@ -544,6 +583,7 @@ TrustyPages.commands = deps => {
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
+    page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11286: `ref` null presses the key on the focused element.
     page_press:{tab, document:doc, ref:v => v === null || ref(v), key:keyAllowed, modifiers:modifiersAllowed},
@@ -609,7 +649,7 @@ TrustyPages.commands = deps => {
     return landed(tabId, wait);
   }
 
-  // Runs the injected click/type/press/select/scroll only inside the lease's document; never reports work it did not do.
+  // Runs the injected page commands only inside the lease's document; never reports work it did not do.
   async function act(req, func, args) {
     if (req.document === null) {
       const now = await probe(req.tab);
@@ -688,6 +728,7 @@ TrustyPages.commands = deps => {
           started:String(d.startTime || "")}));
       return {origin:seen.origin, downloads};
     },
+    page_hover:req => act(req, pageHover, [req.ref]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -740,7 +781,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate","page_back",
-        "page_forward","page_reload","page_upload"].includes(req.op);
+        "page_forward","page_reload","page_upload","page_hover"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

@@ -469,3 +469,54 @@ def test_fixture_download_triggers_start_downloads(files_page):
         download = info.value
         assert download.suggested_filename == filename
         assert Path(download.path()).read_text() == body
+
+
+HOVER = Path(__file__).with_name("fixtures") / "hover.html"
+MOVES = ["pointerover", "mouseover", "pointerenter", "mouseenter", "pointerout", "mouseout",
+         "pointerleave", "mouseleave", "pointermove", "mousemove"]
+
+
+def test_hover_fires_enter_over_and_move_then_leaves_the_old_target(page):
+    page.evaluate("""kinds => { window.moves = [];
+      for (const kind of kinds) document.addEventListener(kind, e => {
+        if (e.target.id) window.moves.push(kind + ":" + e.target.id + ":" + e.bubbles); }, true); }""", MOVES)
+    result = read(page)
+    go, bio = ref_of(result, "Go now"), ref_of(result, "Bio")
+    hover = lambda ref: page.evaluate("ref => TrustyPages.pageHover(ref)", ref)
+    reset = lambda: page.evaluate("() => { window.moves = []; }")
+    assert hover(go) == {"ok": True}
+    assert page.evaluate("moves") == ["pointerover:go:true", "mouseover:go:true", "pointerenter:go:false",
+                                      "mouseenter:go:false", "pointermove:go:true", "mousemove:go:true"]
+    reset()
+    assert hover(go) == {"ok": True}
+    assert page.evaluate("moves") == ["pointermove:go:true", "mousemove:go:true"]
+    reset()
+    assert hover(bio) == {"ok": True}
+    assert page.evaluate("moves") == ["pointerout:go:true", "mouseout:go:true", "pointerleave:go:false",
+                                      "mouseleave:go:false", "pointerover:bio:true", "mouseover:bio:true",
+                                      "pointerenter:bio:false", "mouseenter:bio:false",
+                                      "pointermove:bio:true", "mousemove:bio:true"]
+    assert page.evaluate("events") == []  # hovering clicks nothing
+    assert hover("9.0") == {"error": "StaleElement"}
+
+
+def test_hover_fixture_reveals_the_hover_action():
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.goto(HOVER.as_uri())
+            tab.add_script_tag(path=str(SCRIPT))
+            hover = lambda result, name: tab.evaluate("r => TrustyPages.pageHover(r)", ref_of(result, name))
+            first = read(tab)
+            assert "Pricing" not in [e["name"] for e in first["elements"]]
+            assert hover(first, "Products") == {"ok": True}
+            assert tab.evaluate("log") == ["products:mouseover", "menu:mouseenter", "products:mousemove"]
+            second = read(tab)
+            assert tab.evaluate("r => TrustyPages.pageClick(r)", ref_of(second, "Pricing")) == {"ok": True}
+            assert tab.evaluate("log")[-1] == "pricing:click"
+            assert hover(read(tab), "Other") == {"ok": True}
+            assert tab.evaluate("log")[-1] == "menu:mouseleave"
+            assert "Pricing" not in [e["name"] for e in read(tab)["elements"]]
+        finally:
+            browser.close()
