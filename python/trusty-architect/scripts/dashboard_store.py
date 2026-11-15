@@ -515,11 +515,14 @@ class Store:
 
     # ---- seed ------------------------------------------------------------
     def seed_meta(self, state_md=DEFAULT_STATE_MD, owner_name="the owner"):
-        """Create meta/state when absent (owner_name only; next ids are computed from the store). True if created."""
+        """Create meta/state (owner_name) and meta/settings ({updated}) when absent; never overwrite. True if meta/state was created."""
         # state_md is kept for callers; the NEXT IDS line is no longer read (scripts/dashboard_ids.py, the page).
-        body = {"owner_name": owner_name, "updated": now_iso()}
         try:
-            self.set("meta", "state", body, if_version=0)
+            self.set("meta", "settings", {"updated": now_iso()}, if_version=0)   # #10752: the page polls it; absent = a 404 per poll
+        except Conflict:
+            pass
+        try:
+            self.set("meta", "state", {"owner_name": owner_name, "updated": now_iso()}, if_version=0)
             return True
         except Conflict:
             return False
