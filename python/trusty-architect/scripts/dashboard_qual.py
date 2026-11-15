@@ -33,6 +33,8 @@ def store_sid(store):
         sid = (store.get("meta", "state")["data"] or {}).get("session_id")
         if isinstance(sid, str) and QUAL_RE.match(sid + ":x"):
             return sid
+    except ds.Unavailable:
+        raise   # #10679: a hung writer is a 503, never an unknown session
     except ds.StoreError:
         pass
     if os.path.realpath(store.root) == os.path.realpath(ds.DEFAULT_ROOT):
@@ -52,6 +54,8 @@ def alias_rules(store):
     """[(from_letter, to_letter)] from meta/id-aliases.json; empty when the doc is absent or malformed."""
     try:
         rules = (store.get("meta", "id-aliases")["data"] or {}).get("rules")
+    except ds.Unavailable:
+        raise   # #10679: a hung writer is a 503, never "no aliases"
     except ds.StoreError:
         return []
     out = []

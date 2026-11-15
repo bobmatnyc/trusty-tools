@@ -16,7 +16,7 @@ commit `240965496ae5fab4c9d7ae12f07d7dfad1b0308e`, scripts clean:
 
 Last recapture (#10765, answered entries carry `answer_note`): from
 `python/trusty-architect/scripts`, `dashboard_derive.py` sha256
-`8705cc2d4e20d48ccb66bcc7aaa5b7509cf4d5e4b7c1b6ec2361e175188619f7`.
+`b1f52b0320e5789732d9297270eca403ad3a91f16d484491aea7e57a3d2c113d`.
 
 Interpreter: CPython 3.14.8 (`/opt/homebrew/bin/python3`).
 
