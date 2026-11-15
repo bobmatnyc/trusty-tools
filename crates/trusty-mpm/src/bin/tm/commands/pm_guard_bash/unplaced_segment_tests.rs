@@ -15,8 +15,9 @@
 
 use std::path::Path;
 
-use super::bash_tokens::{TokenizeError, tokenize};
-use super::{evaluate_secret_file_copy_command, unclassifiable_command};
+use crate::commands::pm_guard_bash::{
+    TokenizeError, evaluate_secret_file_copy_command, tokenize, unclassifiable_command,
+};
 use crate::commands::pm_guard_secret_read::evaluate_secret_file_read_in;
 use crate::commands::pm_guard_secret_script::evaluate_script_body_secret_read;
 use crate::commands::pm_guard_secret_substitution_read::evaluate_substitution_read_command;

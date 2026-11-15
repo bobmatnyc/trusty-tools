@@ -338,6 +338,10 @@ fn judge_script(
                 (depth + 1, git_env),
                 seen,
             ),
+            // #11276: a body's segment split is approximate (prose, comments),
+            // so an unplaceable segment inside a script keeps its pre-#11262
+            // reading; the inline judges below still read the body's text.
+            Err(Unread::Unplaceable) => None,
             Err(why) => Some((Rule::Unread(why), None)),
         };
         refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
