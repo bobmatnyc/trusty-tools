@@ -567,7 +567,8 @@ returned. The agent never writes a selector.
 - `page_click` and `page_type` inject into `documentIds: [document]` only. The
   injected function answers `StaleElement` when the ref's `read` is not the
   map's current counter, the ref is absent, the `WeakRef` is empty, or the
-  element is not connected.
+  element is no longer connected to the top document (through every shadow
+  host and frame element above it).
 
 Why this scheme: it needs no page mutation (no attributes are written into the
 site's DOM), no selector language, and no state outside the document, and a
@@ -588,7 +589,10 @@ ref cannot reach a different document or an element from an older read.
 An element entry is `{"ref": str, "tag": str, "role": str, "name": str}` plus,
 when they apply, `"type": str` (input type), `"value": str` (at most 512
 characters; never for `type=password`), `"href": str` (absolute, at most 2048
-characters), `"checked": bool`, `"disabled": true`. `tag` is the lower-case
+characters), `"checked": bool`, `"disabled": true`, `"within": str`. `within` is
+the hop path from the top document's light DOM to the element, one
+`iframe` or `shadow` per hop joined by `/` (`"iframe/shadow"`); it is absent
+for an element in the top light DOM. `tag` is the lower-case
 tag name. `role` is the `role` attribute, else the implicit role (`link`,
 `button`, `textbox`, `checkbox`, `radio`, `combobox`, `listbox`, `searchbox`,
 `generic`). `name` is the first non-empty of `aria-label`, `aria-labelledby`
@@ -600,7 +604,11 @@ Reported elements: `a[href]`, `button`, `input` other than `type=hidden`,
 any element whose `role` is `button`, `link`, `checkbox`, `radio`, `tab`,
 `menuitem`, `option`, `switch`, `textbox`, `combobox` or `searchbox`. An
 element is reported only when `getClientRects().length > 0` and its computed
-`visibility` is `visible`. Only the top document's light DOM is walked.
+`visibility` is `visible`. The walk is in document order and descends into
+each open shadow root (after its host) and each visible same-origin
+`iframe` or `frame` (#11290). Closed shadow roots and cross-origin frames
+are not walked: page script cannot reach them. Refs keep the same form; the
+map holds the element itself, wherever it lives.
 
 Size bound: the JSON encoding of `result` is at most 262144 bytes of UTF-8.
 The injected function measures it; over the bound it shortens `text` first,
@@ -616,8 +624,8 @@ starts.
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
 element; any other target, or a disabled or read-only one, answers
 `NotEditable`. For `input` and `textarea`: `focus()`, set the value through the
-prototype's native `value` setter, then dispatch bubbling `input` and
-`change`. For contenteditable: `focus()`, select its contents, then
+prototype's native `value` setter, then dispatch bubbling `input` (composed,
+so it leaves a shadow root, as a native one does) and `change` (not composed). For contenteditable: `focus()`, select its contents, then
 `document.execCommand("insertText", false, text)`. The text replaces the
 current content; empty `text` clears it.
 
@@ -883,7 +891,8 @@ grant-end lines are best-effort: a failed write never blocks them.
 - Trusted input events; every event is synthetic.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
-- Iframes and shadow-DOM content in `page_read`, `page_click`, `page_type`.
+- Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,
+  `page_type`.
 - Choosing an option in a `<select>`, file inputs, drag, hover, scroll and
   keyboard shortcuts.
 - Focusing or activating a tab from the agent.
