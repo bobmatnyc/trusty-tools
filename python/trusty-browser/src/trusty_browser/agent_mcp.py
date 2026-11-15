@@ -314,14 +314,36 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
         return call("page_read", lease=lease)
 
     @server.tool()
-    def page_click(lease: str, ref: str, request_id: str) -> dict[str, Any]:
-        """Click the element a page_read returned as ``ref``. Reuse the request ID to retry."""
-        return call("page_click", lease=lease, ref=ref, request_id=request_id)
+    def page_click(
+        lease: str, ref: str, request_id: str, dialog: str = "dismiss"
+    ) -> dict[str, Any]:
+        """Click the element a page_read returned as ``ref`` with a trusted mouse click.
+
+        ``dialog`` ("accept" or "dismiss") answers a confirm, prompt or
+        beforeunload dialog the click opens; an alert is always acknowledged and
+        the reply names the dialog. Reuse the request ID to retry.
+        """
+        return call(
+            "page_click", lease=lease, ref=ref, request_id=request_id, dialog=dialog
+        )
 
     @server.tool()
-    def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:
-        """Replace the text of an editable element named by ``ref``."""
-        return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
+    def page_type(
+        lease: str, ref: str, text: str, request_id: str, dialog: str = "dismiss"
+    ) -> dict[str, Any]:
+        """Replace the text of an editable element named by ``ref`` with trusted keystrokes.
+
+        A newline presses Enter. ``dialog`` answers a dialog the typing opens, as
+        for page_click.
+        """
+        return call(
+            "page_type",
+            lease=lease,
+            ref=ref,
+            text=text,
+            request_id=request_id,
+            dialog=dialog,
+        )
 
     @server.tool()
     def page_scroll(

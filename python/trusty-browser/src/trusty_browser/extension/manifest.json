@@ -26,7 +26,8 @@
     "identity.email",
     "alarms",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "debugger"
   ],
   "short_name": "Trusty Browser",
   "icons": {
