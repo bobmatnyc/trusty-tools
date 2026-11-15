@@ -257,15 +257,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _harness(self):
         sv = self.server
-        sdocs = [d["data"] for d in sv.store.list_docs("sessions")]
-        idocs = [d["data"] for d in sv.store.list_docs("items")]
-        gdocs = [d["data"] for d in sv.store.list_docs("goals")]
+        snap = sv.store.snapshot(("sessions", "items", "goals", "meta"))   # #10679: one shared lock, so one batch is seen whole
+        sdocs, idocs, gdocs = ([d["data"] for d in snap[c]] for c in ("sessions", "items", "goals"))
         roots = sv.projects()
         cwds = {x.get("name"): roots[x.get("project")] for x in sdocs if x.get("name") and x.get("project") in roots}
-        try:
-            ustate = sv.store.get("meta", "settings")["data"].get("user_state")
-        except Exception:  # noqa: BLE001 - settings absent: state unknown, never sleeping
-            ustate = None
+        settings = next((d["data"] for d in snap["meta"] if d["id"] == "settings"), None)
+        ustate = settings.get("user_state") if isinstance(settings, dict) else None   # settings absent: unknown, never sleeping
         return dashboard_harness.build(sv.inbox, sv.claude_projects, sdocs, idocs, project_cwds=cwds, roots=roots, goal_docs=gdocs,
                                        user_state=ustate, tmux=dashboard_harness.tmux_sessions())
 

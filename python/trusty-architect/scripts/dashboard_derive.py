@@ -18,7 +18,9 @@ ID_COLLECTIONS = ("items", "goals", "priorities", "sessions", "questions", "medi
 
 
 def snapshot(store, colls):
-    return {c: store.list_docs(c) for c in colls}
+    # #10679: one read of every collection, so a batch is seen whole; a store without snapshot() reads them in turn
+    whole = getattr(store, "snapshot", None)
+    return whole(colls) if whole else {c: store.list_docs(c) for c in colls}
 
 
 def _d(doc):
