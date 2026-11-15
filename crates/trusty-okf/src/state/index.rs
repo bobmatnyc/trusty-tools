@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::OkfError;
-use crate::build::jsonl::{Appender, read_journal};
+use crate::build::jsonl::{Appender, needs_newline, read_journal};
 use crate::bundle::paths::io_err;
 use crate::state::IndexState;
 
@@ -213,10 +213,12 @@ impl IndexJournal {
 
     /// Durably append records (the feed's write, slice S7).
     ///
-    /// Test: `c118_copied_bundle_reads_pending_on_another_machine`.
+    /// Test: `c118_copied_bundle_reads_pending_on_another_machine`,
+    /// `append_reads_constant_bytes_per_record`.
     pub fn append(&self, records: &[IndexRecord]) -> Result<(), OkfError> {
-        let load = read_journal::<serde_json::Value>(&self.path)?;
-        let mut app = Appender::new(self.path.clone(), load.needs_newline);
+        // #10875: probe the last byte only; a whole-journal read per call made
+        // one feed pass O(N^2) in journal length.
+        let mut app = Appender::new(self.path.clone(), needs_newline(&self.path)?);
         for r in records {
             app.append(r)?;
         }
@@ -388,5 +390,71 @@ pub(crate) fn index_state(
         _ => IndexState::Pending {
             last_error: push_error,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! #10875: append cost and the journal's newline semantics.
+    use super::*;
+    use crate::build::jsonl::BYTES_READ;
+
+    fn rec(i: usize) -> IndexRecord {
+        IndexRecord::PutFailed {
+            path: format!("c/{i}.md"),
+            bytes: "h".into(),
+            error: "e".into(),
+        }
+    }
+
+    fn journal(dir: &tempfile::TempDir) -> IndexJournal {
+        IndexJournal {
+            path: dir.path().join("j.jsonl"),
+        }
+    }
+
+    #[test]
+    fn append_reads_constant_bytes_per_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = journal(&dir);
+        let mut per_append = Vec::new();
+        for i in 0..64 {
+            let before = BYTES_READ.with(|c| c.get());
+            j.append(&[rec(i)]).unwrap();
+            per_append.push(BYTES_READ.with(|c| c.get()) - before);
+        }
+        assert!(
+            per_append.iter().all(|n| *n <= 1),
+            "append read cost grew with the journal: {per_append:?}"
+        );
+        assert_eq!(j.read().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn append_heals_a_missing_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = journal(&dir);
+        // Empty file, then a complete line with no newline, then a torn line.
+        std::fs::write(j.path(), b"").unwrap();
+        j.append(&[rec(0)]).unwrap();
+        let first = std::fs::read_to_string(j.path()).unwrap();
+        std::fs::write(j.path(), first.trim_end_matches('\n')).unwrap();
+        j.append(&[rec(1)]).unwrap();
+        let mut bytes = std::fs::read(j.path()).unwrap();
+        bytes.extend_from_slice(b"{\"torn");
+        std::fs::write(j.path(), &bytes).unwrap();
+        j.append(&[rec(2)]).unwrap();
+        let load = read_journal::<IndexRecord>(j.path()).unwrap();
+        assert_eq!(load.records, vec![rec(0), rec(1), rec(2)]);
+        assert_eq!(load.malformed, 1);
+        assert!(!load.needs_newline);
+    }
+
+    #[test]
+    fn append_to_unreadable_journal_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let j = journal(&dir);
+        std::fs::create_dir(j.path()).unwrap();
+        assert!(matches!(j.append(&[rec(0)]), Err(OkfError::Io { .. })));
     }
 }

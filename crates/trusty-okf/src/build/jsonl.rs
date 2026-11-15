@@ -24,7 +24,7 @@
 //! crate's index-journal suite covers its own use).
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -69,7 +69,11 @@ impl<T> Default for JournalLoad<T> {
 /// Test: see the module doc.
 pub fn read_journal<T: DeserializeOwned>(path: &Path) -> Result<JournalLoad<T>, OkfError> {
     let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+        Ok(b) => {
+            #[cfg(test)]
+            BYTES_READ.with(|c| c.set(c.get() + b.len() as u64));
+            b
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(JournalLoad::default()),
         Err(e) => return Err(io_err(path, e)),
     };
@@ -90,6 +94,39 @@ pub fn read_journal<T: DeserializeOwned>(path: &Path) -> Result<JournalLoad<T>, 
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// #10875: bytes this thread read from journals, so a test can prove an
+    /// append's read cost does not grow with the journal.
+    pub(crate) static BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `path` ends without a newline, reading only its last byte.
+///
+/// Why: an appender needs only this one fact; reading the whole journal for
+/// it made a pass of N appends read O(N^2) bytes (#10875).
+/// What: an absent or empty file is `false`, as in [`read_journal`]; any
+/// other open, seek or read failure is [`OkfError::Io`].
+/// Test: `append_reads_constant_bytes_per_record`,
+/// `append_heals_a_missing_trailing_newline`.
+pub fn needs_newline(path: &Path) -> Result<bool, OkfError> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    let len = file.seek(SeekFrom::End(0)).map_err(|e| io_err(path, e))?;
+    if len == 0 {
+        return Ok(false);
+    }
+    file.seek(SeekFrom::End(-1)).map_err(|e| io_err(path, e))?;
+    let mut last = [0u8; 1];
+    file.read_exact(&mut last).map_err(|e| io_err(path, e))?;
+    #[cfg(test)]
+    BYTES_READ.with(|c| c.set(c.get() + 1));
+    Ok(last[0] != b'\n')
 }
 
 /// A lazily-opened, per-item-durable appender for one journal file.
