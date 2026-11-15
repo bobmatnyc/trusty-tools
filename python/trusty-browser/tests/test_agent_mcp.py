@@ -37,6 +37,9 @@ CODE_TOOLS = {
     "page_navigate",
     "page_upload",
     "page_downloads",
+    "page_back",
+    "page_forward",
+    "page_reload",
     "browser_release",
 }
 
@@ -523,6 +526,11 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 request_id="n",
             )
             assert landed["access"] is True and landed["settled"] is True
+            back = await agent.ok("page_back", lease=lease, request_id="b")
+            assert back["ok"] and back["origin"] == landed["origin"]
+            assert (await agent.ok("page_forward", lease=lease, request_id="f"))["ok"]
+            reloaded = await agent.ok("page_reload", lease=lease, request_id="r")
+            assert reloaded["settled"] is True and reloaded["tab"] == 7
             assert rig.a.done == [
                 ("page_type", "1.0", "hello"),
                 ("page_click", "1.0", None),

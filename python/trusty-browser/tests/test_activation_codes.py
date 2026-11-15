@@ -136,6 +136,15 @@ class FakeBrowser:
                 req = await service.read_frame(self.reader)
                 asyncio.create_task(self.answer(req))
 
+    def land(self, req, tab, item):
+        """The LANDED result after the tab's origin changed or reloaded."""
+        item["access"] = item["origin"] == ORIGIN
+        item["title"] = TITLE if item["access"] else None
+        item["document"] = f"d{tab}-{secrets.token_hex(2)}"
+        landed = self.page({**req, "op": "page_tab"})
+        del landed["title"]
+        return {**landed, "settled": True}
+
     def page(self, req):
         """The page-command result, or a refusal frame (``error`` key)."""
         op, tab = req["op"], req.get("tab")
@@ -158,15 +167,22 @@ class FakeBrowser:
             seen.update(document=None, origin=None, title=None)
         if op == "page_tab":
             return seen
+        if op in ("page_back", "page_forward", "page_reload"):
+            # #11292: a per-tab history of origins; reload is a new document in place.
+            past, ahead = item.setdefault("past", []), item.setdefault("ahead", [])
+            if op != "page_reload":
+                source, sink = (past, ahead) if op == "page_back" else (ahead, past)
+                if not source:
+                    return {"error": "NoHistory", "tab": tab}
+                sink.append(item["origin"])
+                item["origin"] = source.pop()
+            return self.land(req, tab, item)
         if op == "page_navigate":
             target = urlsplit(req["url"])
+            item.setdefault("past", []).append(item["origin"])
+            item["ahead"] = []
             item["origin"] = f"{target.scheme}://{target.netloc}"
-            item["access"] = item["origin"] == ORIGIN
-            item["title"] = TITLE if item["access"] else None
-            item["document"] = f"d{tab}-{secrets.token_hex(2)}"
-            landed = self.page({**req, "op": "page_tab"})
-            del landed["title"]
-            return {**landed, "settled": True}
+            return self.land(req, tab, item)
         if not item["access"]:
             return {"error": "PermissionNeeded", "tab": tab, "origin": None}
         if op == "page_read":
