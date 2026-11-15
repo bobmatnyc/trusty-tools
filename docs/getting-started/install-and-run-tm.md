@@ -1,18 +1,36 @@
 # Install and Run trusty-mpm (tm) on Your Laptop
 
+## Prerequisites
+
+✓ **Claude Code** — You need Claude Code installed. If not, install it from https://claude.com/download.
+
+✓ **Git & tmux** — Standard Unix tools. The installer can install these if missing; see the interactive prompts.
+
+✓ **Rust (optional)** — Only needed if the prebuilt binary for your platform is unavailable. Installer falls back to `cargo install` automatically.
+
+**Supported platforms:**
+- macOS (Apple Silicon: M1, M2, M3, …)
+- Linux (x86_64, arm64)
+
+---
+
 ## Quickstart (2 minutes)
 
 ```bash
 # 1. One-liner: download and install tctl (the control plane)
 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 
-# 2. Install trusty-mpm and its dependencies (memory + search daemons)
+# 2. Add ~/.cargo/bin to your PATH in ~/.zshrc, then reload it
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# 3. Install trusty-mpm and its dependencies (memory + search daemons)
 tctl install trusty-mpm
 
-# 3. Verify installation
+# 4. Verify installation
 tctl status
 
-# 4. Run tm in any git repo
+# 5. Run tm in any git repo
 cd ~/your-project
 tm
 ```
@@ -32,20 +50,6 @@ installer fell back to `cargo install` for your platform:
 - **`trusty-search`** — hybrid code search daemon (BM25 + vector + knowledge graph). Indexes your projects. Started automatically as a macOS/Linux service.
 
 These three form the core of the trusty-mpm platform. The installer also sets up `tctl` (a transitional alias to `trusty-installer`, the control plane binary) which orchestrates installation, upgrades, and system health checks.
-
----
-
-## Prerequisites
-
-✓ **Claude Code** — You need Claude Code installed. If not, install it from https://claude.com/download.
-
-✓ **Git & tmux** — Standard Unix tools. The installer can install these if missing; see the interactive prompts.
-
-✓ **Rust (optional)** — Only needed if the prebuilt binary for your platform is unavailable. Installer falls back to `cargo install` automatically.
-
-**Supported platforms:**
-- macOS (Apple Silicon: M1, M2, M3, …)
-- Linux (x86_64, arm64)
 
 ---
 
