@@ -173,7 +173,9 @@ class Peer:
 
 
 PAGE_WAIT = 8.0  # the worker answers within 7 s
-MUTATING = {"page_click", "page_type", "page_navigate"}
+# #11292: history and reload change the page, so they are journaled like navigate.
+HISTORY = {"page_back", "page_forward", "page_reload"}
+MUTATING = {"page_click", "page_type", "page_navigate", *HISTORY}
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
@@ -188,6 +190,7 @@ PAGE_ERRORS = UNFINISHED | {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "NoHistory",
     "InvalidUrl",
 }
 

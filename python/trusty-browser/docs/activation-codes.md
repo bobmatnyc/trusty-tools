@@ -339,6 +339,7 @@ characters. Every request carries exactly the fields listed.
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
+| `page_back`, `page_forward`, `page_reload` | `op`, `lease`, `request_id` | As `page_navigate` |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
 Every success reply also carries `"ok": true`.
@@ -356,7 +357,8 @@ Selecting a tab this session already holds returns the same lease. A session
 may hold leases on several tabs. `select` on a tab without page access
 succeeds with `access: false`, so the agent can still navigate it.
 
-`page_click`, `page_type` and `page_navigate` keep the existing journal: a
+`page_click`, `page_type`, `page_navigate`, `page_back`, `page_forward` and
+`page_reload` keep the existing journal: a
 repeat `request_id` with an identical frame returns the stored reply without
 running again; a repeat with a different frame answers `Conflict`; 4096
 entries answer `SessionFull`. Only a reply from an operation the worker ran,
@@ -383,6 +385,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
+| `NoHistory` | `tab` | `page_back`, `page_forward`: the tab has no history entry in that direction; nothing changed and the lease stays |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: the browser did not answer after the command was sent, or the worker could not finish it (existing). Journaled; a retry with the same `request_id` returns it |
@@ -481,6 +484,7 @@ Envelope:
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
+| `page_back`, `page_forward`, `page_reload` | `tab` | As `page_navigate` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -509,7 +513,8 @@ build:
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
-| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
+| `NoHistory` | `tab` | `page_back`, `page_forward`: `tabs.goBack` or `tabs.goForward` rejected on an existing tab |
+| `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`, `page_back`, `page_forward`, `page_reload`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
 
 The broker relays these last two without fields and by the command's kind:
@@ -644,6 +649,13 @@ current content; empty `text` clears it.
   to 5 seconds for `chrome.tabs.onUpdated` to report `status: "complete"` for
   that tab, then probes. `settled` is false when the wait timed out. The
   broker stores the probe's `document` (null without access).
+- `page_back`, `page_forward` and `page_reload` (#11292) ignore the stored
+  `document`, call `tabs.goBack`, `tabs.goForward` or
+  `tabs.reload(tabId, {bypassCache: false})` on the explicit tab id, then wait
+  and probe as `page_navigate` does. They need no page access, no manifest
+  change and no extension reload. A rejected `goBack`/`goForward` on a tab
+  that still exists answers `NoHistory`; a rejected `reload` answers
+  `OutcomeUnknown`.
 
 What the agent sees when the document changes between two calls: its next
 `page_click` or `page_type` answers `DocumentChanged` and changes nothing. A
@@ -668,6 +680,7 @@ steps do not run.
 | `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame; failure is `PermissionNeeded` |
 | `page_click`, `page_type` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
+| `page_back`, `page_forward`, `page_reload` | As `page_read` | Check order, `tabs.goBack` / `tabs.goForward` / `tabs.reload` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
 
 The probe is `executeScript({target: {tabId, frameIds: [0]}, func})` with a
@@ -690,6 +703,7 @@ only. A refusal's result line is best effort.
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
+| `page_back`, `page_forward`, `page_reload` | the op name | host of the landed page when `access` | URL path, query, fragment |
 | `release` | `release` | absent | none |
 | malformed | `invalid` | absent | the frame |
 
@@ -702,7 +716,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NoHistory` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -797,6 +811,9 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
+| `page_back` | `lease: str`, `request_id: str` | The `page_back` reply |
+| `page_forward` | `lease: str`, `request_id: str` | The `page_forward` reply |
+| `page_reload` | `lease: str`, `request_id: str` | The `page_reload` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 
 Every refusal is an MCP tool error (`isError: true`). Its text is

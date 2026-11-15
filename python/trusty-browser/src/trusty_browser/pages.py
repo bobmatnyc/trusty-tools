@@ -16,6 +16,7 @@ from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
 from trusty_browser.protocol import (
+    HISTORY,
     MUTATING,
     Claim,
     Frame,
@@ -32,6 +33,9 @@ OPS = {
     "page_click": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_navigate": {"op", "lease", "request_id", "url"},
+    "page_back": {"op", "lease", "request_id"},
+    "page_forward": {"op", "lease", "request_id"},
+    "page_reload": {"op", "lease", "request_id"},
     "release": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
@@ -44,6 +48,7 @@ KEEP_LEASE = {
     "InvalidUrl",
     "InvalidRequest",
     "InvalidOperation",
+    "NoHistory",
 }
 
 
@@ -314,6 +319,8 @@ class Pages(Grants):
             raise Refusal("SessionFull")
         if op == "page_navigate":
             args: Frame = {"url": request["url"]}
+        elif op in HISTORY:
+            args = {}
         else:
             args = {"document": claim.document, "ref": request["ref"]}
             if op == "page_type":
@@ -324,7 +331,7 @@ class Pages(Grants):
             if str(exc) == "OutcomeUnknown":
                 session.journal[rid] = (request, exc.response)
             raise
-        if op == "page_navigate":
+        if op == "page_navigate" or op in HISTORY:
             result = shaped(raw, LANDED)
             claim.document = result["document"]  # type: ignore[assignment]
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
