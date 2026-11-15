@@ -101,7 +101,10 @@
 //!   `rm`-denylisted target is catastrophic with no legitimate use, but
 //!   `cp`/`mv` of a secret-shaped name has plenty of legitimate NON-worktree
 //!   destinations, so blanket-denying every unparseable `cp`/`mv` would
-//!   refuse far more ordinary work than it protects.
+//!   refuse far more ordinary work than it protects. #11276: a segment whose
+//!   shell operators cannot be placed is not skipped — it refuses when it
+//!   names any secret-shaped word, and such a `cd` leaves every later
+//!   relative destination unknown.
 //! - Indirection through a shell variable or command substitution for the
 //!   SOURCE argument is not resolved (the DESTINATION case is — see above).
 //! - A directory copy (`cp -r secrets/ dest/`) is not inspected recursively —
@@ -160,13 +163,14 @@ use trusty_mpm::daemon::managed_routes::inproject::untracked_sync::glob_match;
 use super::bash_tokens::RedirectRole;
 use super::heredoc::split_heredoc_bodies;
 use super::{
-    PathEnv, redirect_role, resolve_target_path, split_shell_segments, tokenize, unresolved_target,
+    PathEnv, TokenizeError, redirect_role, resolve_target_path, split_shell_segments, tokenize,
+    unresolved_target,
 };
 use crate::commands::hook_rewrite::first_command_token;
 use crate::commands::pm_guard_secret_handling::body_written_to_a_file;
 // #7266 fix round: the READ guard's own target predicate, so "a name the read
 // guard refuses" has ONE definition that both rules read.
-use crate::commands::pm_guard_secret_read::is_secret_read_target;
+use crate::commands::pm_guard_secret_read::{Scan, is_secret_read_target, secret_files_named_in};
 
 /// Deny reason for a `cp`/`mv` of a secret-shaped source into a worktree (#7122).
 pub(crate) const SECRET_FILE_COPY_REASON: &str = "`cp`/`mv` must not copy a secret-shaped file \
@@ -684,6 +688,20 @@ pub(crate) fn is_secret_bearing_source(basename: &str) -> bool {
     }
 }
 
+/// Deny reason for a secret-shaped word in a segment, or a copy after a
+/// `cd`, whose shell operators the guard cannot place (#11276).
+///
+/// Test: `an_unplaced_copy_of_a_secret_refuses_11276`,
+/// `an_unplaced_cd_before_a_secret_copy_refuses_11276`.
+fn unplaceable_copy_deny_reason(word: &str) -> String {
+    format!(
+        "`tm hook --pm-guard` refused this command (#11276, #7122): it names the secret-shaped \
+         word `{word}` in a command whose shell operators the guard cannot place, so it cannot \
+         prove where a `cp`/`mv` would put the file and fails closed. Write the command in \
+         plainer shell; if it moves a secret-bearing file, stop and report to the Architect."
+    )
+}
+
 /// Classify a Bash command for a secret-shaped `cp`/`mv` into a worktree:
 /// `Some(reason)` denies, `None` allows.
 ///
@@ -712,6 +730,8 @@ fn evaluate_secret_file_copy_command_in(
         command
     };
     let mut effective_cwd = cwd.to_path_buf();
+    // #11276: set by a `cd` whose operators cannot be placed.
+    let mut cwd_unknown = false;
     for segment in split_shell_segments(command) {
         let trimmed = segment.trim();
         if trimmed.is_empty() {
@@ -720,18 +740,35 @@ fn evaluate_secret_file_copy_command_in(
         // Same `cd`-tracking shape as the sibling ABSOLUTE guards: a
         // deliberate, partial closing of `cd worktree && cp secret .`.
         if first_command_token(trimmed).as_deref() == Some("cd") {
-            if let Ok(argv) = tokenize(trimmed)
-                && let Some(dest) = argv.get(1)
-            {
-                effective_cwd = resolve_target_path(dest, &effective_cwd, env);
+            match tokenize(trimmed) {
+                Ok(argv) => {
+                    if let Some(dest) = argv.get(1) {
+                        effective_cwd = resolve_target_path(dest, &effective_cwd, env);
+                    }
+                }
+                // #11276: a `cd` it cannot place may move anywhere.
+                Err(TokenizeError::AmbiguousOperators) => cwd_unknown = true,
+                Err(TokenizeError::UnbalancedQuoting) => {}
             }
             continue;
         }
         // Unparseable segment: skip rather than fail closed — see the module
         // doc's residual-bypass list for why this differs from
         // `destructive_delete`'s blanket refusal.
-        let Ok(argv) = tokenize(trimmed) else {
-            continue;
+        let argv = match tokenize(trimmed) {
+            Ok(argv) => argv,
+            // #11276: unplaced operators hide which word is the source, so a
+            // segment naming any secret-shaped word refuses.
+            Err(TokenizeError::AmbiguousOperators) => {
+                match secret_files_named_in(trimmed, Scan::Argv)
+                    .into_iter()
+                    .next()
+                {
+                    Some(word) => return Some(unplaceable_copy_deny_reason(&word)),
+                    None => continue,
+                }
+            }
+            Err(TokenizeError::UnbalancedQuoting) => continue,
         };
         // #7266 fix round: the rename rule runs FIRST and ignores the
         // destination's scope entirely — see `laundered_source_rename`.
@@ -767,7 +804,9 @@ fn evaluate_secret_file_copy_command_in(
         // #7234: a leading `~` left literal by an unset `$HOME` is the same
         // shape as `$WT` and gets the same refusal.
         let dest_variable = unresolved_target(&dest_path).map(|u| u.token);
-        if !is_worktree_path(&dest_path) && dest_variable.is_none() {
+        // #11276: a relative destination after an unplaced `cd` is unknown.
+        let cwd_moved = cwd_unknown && !dest_token.starts_with(['/', '~', '$']);
+        if !is_worktree_path(&dest_path) && dest_variable.is_none() && !cwd_moved {
             continue;
         }
         for source in sources {
@@ -780,6 +819,9 @@ fn evaluate_secret_file_copy_command_in(
             }
             return Some(match &dest_variable {
                 Some(variable) => unresolved_destination_deny_reason(source, dest_token, variable),
+                None if cwd_moved && !is_worktree_path(&dest_path) => {
+                    unplaceable_copy_deny_reason(source)
+                }
                 None => SECRET_FILE_COPY_REASON.to_string(),
             });
         }

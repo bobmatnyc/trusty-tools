@@ -425,6 +425,25 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Capture a specific pane WITH escape codes (#8407).
+    ///
+    /// Why: the input-box classifier needs SGR attributes a plain capture drops.
+    /// What: the escaped counterpart of [`Self::capture_pane`]. The default is
+    /// `TmuxUnavailable`, so a driver that does not override it reads as an
+    /// unknown box, never as an empty one.
+    /// Test: `managed_output_unreadable_pane_is_unknown_8407`.
+    fn capture_pane_escaped(
+        &self,
+        name: &str,
+        pane_id: &str,
+        lines: usize,
+    ) -> Result<String, ManagedError> {
+        let _ = (name, pane_id, lines);
+        Err(ManagedError::TmuxUnavailable(
+            "capture_pane_escaped not implemented for this driver".into(),
+        ))
+    }
+
     /// Return the pane's current working directory for snapshot-before-stop (#1816).
     ///
     /// Why: the idle auto-stop path captures cwd just before killing tmux so

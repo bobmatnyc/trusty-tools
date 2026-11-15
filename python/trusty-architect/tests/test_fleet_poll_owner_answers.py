@@ -406,6 +406,15 @@ def test_an_architect_do_answer_alerts_and_wakes(pane, store, tmp_path):
     assert "run the migration" in got[0]["display"] and len(pane.submitted) == 1
 
 
+def test_an_other_answer_alert_shows_the_typed_text_truncated(pane, store, tmp_path):
+    """#10765: the alert display carries the owner's typed answer_note, cut at 80 chars as before."""
+    _answer(store, answer="Other", answer_note="use the staging bucket " + "x" * 100)
+    fp.cycle({}, now=T0)
+    display = _alerts(tmp_path)[0]["display"]
+    assert ": Other: use the staging bucket xx" in display and display.endswith("...")
+    assert len(display.split(": ", 1)[1]) == 80
+
+
 # --- a wake batch's timing during a running turn -----------------------------
 
 def _other_alert():

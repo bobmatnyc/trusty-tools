@@ -41,7 +41,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::process::{Command, ExitStatus};
 
-use super::{posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for};
+use super::{cloexec_default, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for};
 
 /// Build argv/envp/cwd from `cmd`, disclaim TCC responsibility when the SPI
 /// resolves, and `posix_spawnp` with stdio left untouched (fds 0/1/2 pass
@@ -167,6 +167,13 @@ fn spawn_pid_inherit_disclaimed(cmd: &Command) -> io::Result<libc::pid_t> {
                 libc::posix_spawnattr_getflags(&attr, &mut flags);
                 flags |= libc::POSIX_SPAWN_SETSIGDEF as libc::c_short;
                 let _ = libc::posix_spawnattr_setflags(&mut attr, flags);
+            }
+
+            // #10083: close every fd but the inherited stdio in the child.
+            if let Err(e) = cloexec_default(&mut attr, &mut file_actions, &[0, 1, 2]) {
+                libc::posix_spawnattr_destroy(&mut attr);
+                libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                return Err(e);
             }
 
             let mut pid: libc::pid_t = 0;
