@@ -1,9 +1,11 @@
 """Exercise the injected page functions of pages.js on a static page in Chromium (#11239)."""
 
+import base64
 import json
 from pathlib import Path
 
 import pytest
+from file_io_fixture import DOWNLOAD_TEXT, file_site
 from playwright.sync_api import sync_playwright
 
 from trusty_browser import service
@@ -118,3 +120,76 @@ def test_url_floor(page):
     }
     for url, allowed in cases.items():
         assert page.evaluate("u => TrustyPages.urlAllowed(u)", url) is allowed, url
+
+
+# #11289: file selection and downloads against the loopback fixture.
+@pytest.fixture()
+def files_page():
+    with file_site() as site, sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            tab = browser.new_page(accept_downloads=True)
+            tab.goto(site.origin + "/")
+            tab.add_script_tag(path=str(SCRIPT))
+            yield tab, site
+        finally:
+            browser.close()
+
+
+def b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def set_files(tab, ref, files):
+    return tab.evaluate("([r, f]) => TrustyPages.pageSetFiles(r, f)", [ref, files])
+
+
+def test_set_files_reaches_the_page_and_the_server(files_page):
+    tab, site = files_page
+    result = read(tab)
+    by_name = {e["name"]: e for e in result["elements"]}
+    attachment = by_name["Attachment"]
+    assert attachment["type"] == "file" and attachment["files"] == []
+    assert "value" not in attachment and by_name["Many"]["multiple"] is True
+    sample = {"name": "upload-example.txt", "type": "text/plain", "data": b64("hello file\n")}
+    assert set_files(tab, attachment["ref"], [sample]) == {"ok": True}
+    tab.wait_for_function("server.textContent.startsWith('received')")
+    assert tab.inner_text("#picked") == "upload-example.txt:11:text/plain:hello file"
+    assert b"hello file\n" in site.uploads[0]
+    assert b'filename="upload-example.txt"' in site.uploads[0]
+    again = read(tab)
+    assert ref_entry(again, "Attachment")["files"] == ["upload-example.txt"]
+    two = [sample, {**sample, "name": "b.txt", "data": b64("bee")}]
+    assert set_files(tab, ref_of(again, "Many"), two) == {"ok": True}
+    tab.wait_for_function("picked.textContent.includes('b.txt')")
+    assert tab.inner_text("#picked").endswith("|b.txt:3:text/plain:bee")
+
+
+def ref_entry(result, name):
+    return next(e for e in result["elements"] if e["name"] == name)
+
+
+def test_set_files_refuses_other_targets(files_page):
+    tab, _ = files_page
+    result = read(tab)
+    one = [{"name": "a.txt", "type": "text/plain", "data": b64("a")}]
+    assert set_files(tab, ref_of(result, "Download report"), one) == {"error": "NotEditable"}
+    assert set_files(tab, ref_of(result, "Attachment"), one * 2) == {"error": "NotEditable"}
+    assert set_files(tab, "9.0", one) == {"error": "StaleElement"}
+    off = ref_entry(result, "Disabled")
+    assert off["disabled"] is True
+    assert set_files(tab, off["ref"], one) == {"error": "NotEditable"}
+    assert tab.evaluate("[file.files.length, picked.textContent]") == [0, ""]
+
+
+def test_fixture_download_triggers_start_downloads(files_page):
+    tab, _ = files_page
+    result = read(tab)
+    cases = [("Download report", "report.txt", DOWNLOAD_TEXT), ("Save blob", "generated.txt", "blob body")]
+    for name, filename, body in cases:
+        with tab.expect_download() as info:
+            clicked = tab.evaluate("ref => TrustyPages.pageClick(ref)", ref_of(result, name))
+            assert clicked == {"ok": True}
+        download = info.value
+        assert download.suggested_filename == filename
+        assert Path(download.path()).read_text() == body
