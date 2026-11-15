@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.7.0] — 2026-11-14
+
+### Fixed
+
+- A `backend_timeout` reply now says whether the call waited N s for the Keychain or was refused at once because an earlier call on the same item still hangs, and names the recovery step (answer the access prompt, or end the server so the next call starts a fresh one). The error data adds `waited_ms` and `abandoned_item`; the kind and code are unchanged (#11215).
+- A `backend_timeout` audit row now carries `backend_wait` (`backend`, `waited_ms`, `abandoned_item`). The field is additive and omitted on every other row (#11215).
+- The server's start and exit lines in `trusty-secrets.stderr.log` now begin with a UTC timestamp (#11215).
+
+### Changed
+
+- `secrets.copy` to a sync target (GitHub Actions, Vercel) now admits a caller with a Claude Code ancestor for keys not denied to agents, superseding D63 D3 for agents (#10999, owner ruling 2026-11-10). A key denied to agents fails with `agent_key_denied` before its value is read; an unreadable ancestry chain still refuses with `grant_refused`. Each key's audit record names the target, key, caller pid and `agent_parent`, never the value.
+- The Vercel "already existed" (D9) failure reason now says the new value may already be set and a retry reports the same failure (#10999).
+- An agent may push a key marked push-only for agents (#10998) to a sync target; a deny still refuses and wins over the mark, and a failed lookup of the deny or the mark fails the key (#10999).
+
 ## [0.5.0] — 2026-11-13
 
 ### Breaking

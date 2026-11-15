@@ -86,16 +86,20 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
                         }
                     })
                 }
-                Err(e) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    // Why: anyhow's `{:#}` alternate format walks the full
-                    // `Caused by:` chain so MCP clients see actionable
-                    // detail (e.g. "PalaceHandle::remember_with_options:
-                    // filter rejected: too short") instead of just the
-                    // outermost context label.
-                    "error": {"code": -32603, "message": format!("{e:#}")}
-                }),
+                // #11255: a palace still opening is retryable; it gets its own
+                // code and a machine-readable `data` a client can branch on.
+                Err(e) => match tools::recall_open::PalaceOpening::find(&e) {
+                    Some(opening) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": tools::recall_open::CODE_PALACE_OPENING,
+                            "message": format!("{e:#}"),
+                            "data": opening.rpc_data(),
+                        }
+                    }),
+                    None => tool_failure(id, &e),
+                },
             }
         }
         "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
@@ -108,4 +112,18 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
             }
         }),
     }
+}
+
+/// The generic `tools/call` failure: `-32603` with the full error chain.
+fn tool_failure(id: Value, e: &anyhow::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        // Why: anyhow's `{:#}` alternate format walks the full
+        // `Caused by:` chain so MCP clients see actionable
+        // detail (e.g. "PalaceHandle::remember_with_options:
+        // filter rejected: too short") instead of just the
+        // outermost context label.
+        "error": {"code": -32603, "message": format!("{e:#}")}
+    })
 }

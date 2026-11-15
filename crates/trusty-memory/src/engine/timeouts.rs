@@ -77,6 +77,29 @@ const DEFAULT_WRITE_LOCK_SECS: u64 = 60;
 /// giving up with a clear error rather than hanging indefinitely.
 const DEFAULT_OPEN_QUEUE_SECS: u64 = 60;
 
+/// Default bound on how long a single-palace recall waits for its palace to
+/// open (#11255).
+///
+/// Why: a cold open can queue behind [`DEFAULT_OPEN_QUEUE_SECS`] of other
+/// openers, and the MCP bridge gives up at 60 s. A recall caller is better
+/// served by a fast, retryable "palace opening" answer while the open goes on.
+const DEFAULT_RECALL_OPEN_WAIT_SECS: u64 = 15;
+
+/// Default wall-clock budget of one `scope: "all"` recall_all walk (#11255).
+///
+/// Why: the walk cold-opens every non-empty palace in sequential batches; on a
+/// large estate it ran past the bridge's 60 s, and the walk kept going after
+/// the caller left. 20 s leaves the reply well inside that bound.
+const DEFAULT_RECALL_ALL_DEADLINE_SECS: u64 = 20;
+
+/// #11255: both recall bounds must answer before the open queue gives up, or
+/// the caller sees the queue's generic timeout instead of the typed answer.
+const _: () = assert!(
+    DEFAULT_RECALL_OPEN_WAIT_SECS < DEFAULT_OPEN_QUEUE_SECS
+        && DEFAULT_RECALL_ALL_DEADLINE_SECS < DEFAULT_OPEN_QUEUE_SECS,
+    "recall bounds must be shorter than the open queue bound (#11255)"
+);
+
 /// Total wall-clock ceiling for one memory write operation (issue #4002).
 ///
 /// Why: a write acquires the per-palace write mutex
@@ -254,6 +277,58 @@ pub(crate) fn write_lock_timeout() -> Duration {
 /// Test: `open_queue_timeout_default`.
 pub(crate) fn open_queue_timeout() -> Duration {
     parse_secs_env("TRUSTY_OPEN_QUEUE_TIMEOUT_SECS", DEFAULT_OPEN_QUEUE_SECS)
+}
+
+/// Return how long a single-palace recall waits on its palace open (#11255).
+///
+/// What: Reads `TRUSTY_RECALL_OPEN_WAIT_SECS` with [`recall_secs_with`];
+/// falls back to `DEFAULT_RECALL_OPEN_WAIT_SECS` (15). The caller clamps it
+/// below the open-queue bound (`RecallLimits::resolve`).
+/// Test: `recall_limit_defaults`, `recall_secs_reject_zero_negative_and_garbage`.
+// #11255: the only reader, `service::op_limits`, is `server`-only.
+#[cfg(feature = "server")]
+pub(crate) fn recall_open_wait() -> Duration {
+    recall_secs_with(
+        |k| std::env::var(k).ok(),
+        "TRUSTY_RECALL_OPEN_WAIT_SECS",
+        DEFAULT_RECALL_OPEN_WAIT_SECS,
+    )
+}
+
+/// Parse one recall bound: whole seconds, where zero also means the default.
+///
+/// Why (#11255 review): a zero open wait would fail every cold recall at once
+/// and a zero deadline would search nothing, so neither is a usable setting.
+/// What: [`parse_secs_with`] (absent, negative or non-numeric fall back to
+/// `default_secs`), then a zero result is replaced by `default_secs` too.
+/// Test: `recall_secs_reject_zero_negative_and_garbage`.
+#[cfg(feature = "server")]
+pub(crate) fn recall_secs_with(
+    lookup: impl Fn(&str) -> Option<String>,
+    key: &str,
+    default_secs: u64,
+) -> Duration {
+    let parsed = parse_secs_with(lookup, key, default_secs);
+    if parsed.is_zero() {
+        Duration::from_secs(default_secs)
+    } else {
+        parsed
+    }
+}
+
+/// Return the deadline of one `scope: "all"` recall_all walk (#11255).
+///
+/// What: Reads `TRUSTY_RECALL_ALL_DEADLINE_SECS` with [`recall_secs_with`];
+/// falls back to `DEFAULT_RECALL_ALL_DEADLINE_SECS` (20). The caller caps it
+/// (`RecallLimits::resolve`).
+/// Test: `recall_limit_defaults`, `recall_secs_reject_zero_negative_and_garbage`.
+#[cfg(feature = "server")]
+pub(crate) fn recall_all_deadline() -> Duration {
+    recall_secs_with(
+        |k| std::env::var(k).ok(),
+        "TRUSTY_RECALL_ALL_DEADLINE_SECS",
+        DEFAULT_RECALL_ALL_DEADLINE_SECS,
+    )
 }
 
 /// Return the total budget one memory write operation may spend waiting
@@ -705,6 +780,55 @@ mod tests {
         );
         assert_eq!(t, Duration::from_secs(DEFAULT_DREAM_PERMIT_WAIT_SECS));
         assert_eq!(DEFAULT_DREAM_PERMIT_WAIT_SECS, 30);
+    }
+
+    /// Why (#11255): the recall bounds are 15 s and 20 s when unset.
+    /// What: `parse_secs_with` with an empty lookup, so no env is touched.
+    /// Test: itself.
+    #[test]
+    fn recall_limit_defaults() {
+        let open = parse_secs_with(
+            |_| None,
+            "TRUSTY_RECALL_OPEN_WAIT_SECS",
+            DEFAULT_RECALL_OPEN_WAIT_SECS,
+        );
+        let all = parse_secs_with(
+            |_| None,
+            "TRUSTY_RECALL_ALL_DEADLINE_SECS",
+            DEFAULT_RECALL_ALL_DEADLINE_SECS,
+        );
+        assert_eq!(
+            (open, all),
+            (Duration::from_secs(15), Duration::from_secs(20))
+        );
+    }
+
+    /// Why (#11255 review): zero, negative, garbage and overlong values of a
+    /// recall bound each have one defined result, and none can panic.
+    /// What: a table through `recall_secs_with` with a fixed lookup, so no env
+    /// is touched. `u64::MAX` seconds parses; `RecallLimits::resolve` caps it.
+    /// Test: itself.
+    #[cfg(feature = "server")]
+    #[test]
+    fn recall_secs_reject_zero_negative_and_garbage() {
+        let default = Duration::from_secs(DEFAULT_RECALL_OPEN_WAIT_SECS);
+        for (raw, want) in [
+            (None, default),
+            (Some("0"), default),
+            (Some("-5"), default),
+            (Some("ten"), default),
+            (Some("1.5"), default),
+            (Some("99999999999999999999999"), default),
+            (Some("7"), Duration::from_secs(7)),
+            (Some("18446744073709551615"), Duration::from_secs(u64::MAX)),
+        ] {
+            let got = recall_secs_with(
+                |_| raw.map(str::to_string),
+                "TRUSTY_RECALL_OPEN_WAIT_SECS",
+                DEFAULT_RECALL_OPEN_WAIT_SECS,
+            );
+            assert_eq!(got, want, "{raw:?}");
+        }
     }
 
     /// Why: Guard that the default is 60 s when the env var is absent.

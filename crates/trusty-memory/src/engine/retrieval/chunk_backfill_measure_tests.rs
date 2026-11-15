@@ -12,15 +12,17 @@
 //! times the idle p95 and (#10283) at most [`MAX_BUSY_P95`] absolute. The
 //! absolute bound does not move with idle p95; the ratio stays, with
 //! headroom, to catch a regression on a faster host.
-//! Run alone, so the shared embedder is the real one:
-//! `cargo test -p trusty-memory --lib -- --ignored
+//! #10802: opt-in through [`MEASURE_ENV`]; unset, it prints a skip line and
+//! returns. Run alone, so the shared embedder is the real one:
+//! `TRUSTY_MEMORY_SLICE_MEASURE=1 cargo test -p trusty-memory --lib -- --ignored
 //! --exact engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured
 //! --nocapture`.
-//! Test: this file IS the test.
+//! Test: this file IS the test; `prose_with_chunks_panics_without_input_window`
+//! and `prose_with_chunks_panics_past_the_sentence_cap` pin the helper bound.
 
 use super::chunk_backfill::SliceBounds;
 use super::embed_store::{embed_planned, embed_planned_paced, plan_chunks};
-use super::embedder::shared_embedder;
+use super::embedder::{shared_embedder, shared_embedder_initialized};
 use super::handle::PalaceHandle;
 use crate::engine::embed::Embedder;
 use crate::engine::palace::{Drawer, PalaceId};
@@ -46,6 +48,12 @@ const MAX_CONTENTION_RATIO: f64 = 15.0;
 /// busy p95 is 187.2 ms on EVO; 300 ms is 1.6x that. A real stall (a slice
 /// embed holding the shared embedder for whole batches) lands in seconds.
 const MAX_BUSY_P95: Duration = Duration::from_millis(300);
+/// #10802: opt-in switch for the measurement; `scripts/perf_weekly_memory.sh`
+/// sets it for the `slice` suite.
+const MEASURE_ENV: &str = "TRUSTY_MEMORY_SLICE_MEASURE";
+/// #10802: sentence ceiling for [`prose_with_chunks`]. 64 full windows of the
+/// real embedder need under 2,000 sentences; this is about 1.3 MB of text.
+const MAX_PROSE_SENTENCES: usize = 16_384;
 
 /// `n` distinct prose sentences tagged with `tag`.
 fn prose(tag: &str, n: usize) -> String {
@@ -59,15 +67,33 @@ fn prose(tag: &str, n: usize) -> String {
 }
 
 /// Prose that splits into at least `target` chunks under `e`.
+///
+/// Why: #10802 — an embedder with no input window never chunks, so the old
+/// unbounded growth loop grew the text until the host ran out of memory.
+/// What: panics at once when `e.input_window()` is `None`, and panics once the
+/// prose would pass [`MAX_PROSE_SENTENCES`] without reaching `target` chunks.
+/// Test: `prose_with_chunks_panics_without_input_window`,
+/// `prose_with_chunks_panics_past_the_sentence_cap`.
 fn prose_with_chunks(e: &dyn Embedder, tag: &str, target: usize) -> String {
+    // #10802: a windowless embedder (the shared mock) can never reach `target`.
+    assert!(
+        e.input_window().is_some(),
+        "#10802: prose_with_chunks needs an embedder with an input window; \
+         this one has none (the shared MockEmbedder?) and never chunks"
+    );
     let mut n = 8;
-    loop {
+    // #10802: a fixed ceiling, so no embedder can make the text grow unbounded.
+    while n <= MAX_PROSE_SENTENCES {
         let text = prose(tag, n);
         if plan_chunks(e, &text).expect("split").len() >= target {
             return text;
         }
         n += (n / 4).max(8);
     }
+    panic!(
+        "#10802: prose_with_chunks passed {MAX_PROSE_SENTENCES} sentences \
+         without reaching {target} chunks"
+    );
 }
 
 /// Exactly 64 full-window chunks of prose tagged `tag` (the slice's chunk cap).
@@ -121,11 +147,25 @@ fn palace(dir: &std::path::Path, dim: usize) -> PalaceHandle {
 #[ignore = "measurement: needs the real ONNX embedder in its own process; not a gate"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slice_defaults_and_recall_contention_measured() {
+    // #10802: opt-in, so a rung-5 `--include-ignored` run skips it.
+    if std::env::var_os(MEASURE_ENV).is_none() {
+        println!("skipping slice measure: set {MEASURE_ENV}=1 and run this test alone");
+        return;
+    }
+    // #10802: a seeded mock must never produce MEASURE lines.
+    assert!(
+        !shared_embedder_initialized(),
+        "#10802: the shared embedder is already set (a mock?); run this test alone"
+    );
     let e: Emb = shared_embedder().await.expect("real embedder");
     println!(
         "MEASURE embedder dim={} window={:?}",
         e.dimension(),
         e.input_window()
+    );
+    assert!(
+        e.input_window().is_some(),
+        "#10802: the shared embedder has no input window; it is not the real ONNX one"
     );
     e.embed_batch(&["warm up".to_string()]).await.unwrap();
 
@@ -236,4 +276,22 @@ async fn slice_defaults_and_recall_contention_measured() {
         busy <= MAX_BUSY_P95,
         "#10283: contention p95 {busy:?} exceeds the absolute bound {MAX_BUSY_P95:?}"
     );
+}
+
+/// #10802: the shared mock has no input window; the helper must panic at once
+/// instead of growing the text until the host runs out of memory.
+#[test]
+#[should_panic(expected = "needs an embedder with an input window")]
+fn prose_with_chunks_panics_without_input_window() {
+    let mock = trusty_common::embedder::MockEmbedder::new(384);
+    prose_with_chunks(&mock, "nowin", 64);
+}
+
+/// #10802: an embedder whose window is too wide to ever reach `target` chunks
+/// stops at the sentence cap (about 1.3 MB of text), not at the memory limit.
+#[test]
+#[should_panic(expected = "without reaching 64 chunks")]
+fn prose_with_chunks_panics_past_the_sentence_cap() {
+    let wide = trusty_common::embedder::MockEmbedder::new(384).with_chunking(1_000_000);
+    prose_with_chunks(&wide, "wide", 64);
 }

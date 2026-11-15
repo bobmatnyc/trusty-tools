@@ -73,6 +73,9 @@ pub mod palace_ops;
 // #9881: which served recall hits record an access, per owning palace.
 #[cfg(feature = "server")]
 pub(crate) mod recall_access;
+// #11255: the single-palace recall's bounded, off-worker palace open.
+#[cfg(feature = "server")]
+pub mod recall_open;
 #[cfg(feature = "server")]
 pub mod recall_ops;
 #[cfg(feature = "server")]
