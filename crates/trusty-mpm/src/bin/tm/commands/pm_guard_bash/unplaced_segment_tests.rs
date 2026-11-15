@@ -143,6 +143,7 @@ fn an_unplaced_script_run_in_a_body_refuses_11276() {
         format!("./probe.sh {SPAN}\n"),
         format!("echo x {SPAN} ; source probe.sh\n"),
         format!("cat .env {SPAN}\n"),
+        format!("bash absent.sh {SPAN}\n"),
     ] {
         std::fs::write(dir.path().join("outer.sh"), &body).expect("write outer");
         let reason = evaluate_script_body_secret_read("bash outer.sh", dir.path());
