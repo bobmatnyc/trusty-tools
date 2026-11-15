@@ -33,6 +33,11 @@
 #                          exhausted behind a shared/NAT'd IP) to 5000/hr.
 #                          Never required — the tokenless path still works.
 #
+# Exit status: 0 on success; 1 when install.sh itself aborts; a failed
+# `trusty-installer install` bootstrap's own status (1-3) unchanged; 4 when
+# everything installed and verified but the install dir could not be added
+# to PATH (#11280).
+#
 # Security note: This script is served over HTTPS, which is the primary
 # integrity guarantee. The installer script itself is not signed — if you
 # require a higher assurance level, download and review the script manually
@@ -465,8 +470,8 @@ _append_path_export() {
 #      timeout, or no PATH line in the output).
 # Test: `test_zshrc_only_dir_still_gets_zshenv_line`,
 #      `test_dir_already_in_zshenv_is_noop`, `test_probe_does_not_run_zshrc`,
-#      `test_hanging_zshenv_probe_times_out`, `test_no_zsh_falls_back_to_adding`
-#      in tests/test-install-path.sh.
+#      `test_hanging_zshenv_probe_times_out`, `test_no_zsh_falls_back_to_adding`,
+#      `test_probe_leaves_no_stray_sleep` in tests/test-install-path.sh.
 _zsh_sees_dir() {
     _zdir="$1"
     _zsh_bin=""
@@ -487,10 +492,20 @@ _zsh_sees_dir() {
             "${_zsh_bin}" -c 'print -r -- "__TRUSTY_PROBE_PATH__=${PATH}"' \
             </dev/null >"${_probe_out}" 2>/dev/null &
         _probe_pid=$!
+        # #11280: the watchdog sleeps in the background and waits on it, with
+        # a TERM trap that kills that sleep, so stopping the watchdog after a
+        # successful probe leaves no orphaned `sleep` behind. A trapped
+        # signal interrupts `wait` at once.
         (
-            sleep "${PATH_PROBE_TIMEOUT_SECS}"
+            _sleep_pid=""
+            trap '[ -z "${_sleep_pid}" ] || kill "${_sleep_pid}" 2>/dev/null; exit 0' TERM
+            sleep "${PATH_PROBE_TIMEOUT_SECS}" &
+            _sleep_pid=$!
+            wait "${_sleep_pid}" || true
             kill -TERM "${_probe_pid}" 2>/dev/null || exit 0
-            sleep 1
+            sleep 1 &
+            _sleep_pid=$!
+            wait "${_sleep_pid}" || true
             kill -KILL "${_probe_pid}" 2>/dev/null
         ) </dev/null >/dev/null 2>&1 &
         _watch_pid=$!
@@ -886,6 +901,64 @@ print_failure_summary() {
     say "==================================================================="
 }
 
+# Exit status when the bootstrap succeeded but the PATH update failed.
+# `trusty-installer install` itself exits 0-3, and install.sh passes a failed
+# bootstrap's status through unchanged, so 4 is reserved for this case alone.
+EXIT_PATH_NOT_UPDATED=4
+
+# Why (#11280): a failed PATH write printed one `error:` line that scrolled
+#      away, and the run still ended "Installation complete and verified" with
+#      exit 0, so a new terminal said "command not found" and CI saw success.
+# What: prints the final summary and returns the installer's exit status.
+#      Bootstrap failed: `print_failure_summary`, returns the bootstrap status
+#      (the existing contract), plus the PATH note when that failed too.
+#      Bootstrap ok, PATH failed: a box saying the components are verified but
+#      PATH was NOT updated, with the exact export line, and returns
+#      EXIT_PATH_NOT_UPDATED (4). Both ok: `print_next_steps`, returns 0.
+# Test: `test_finish_install_reports_path_failure`,
+#      `test_finish_install_success_and_bootstrap_failure` in
+#      tests/test-install-path.sh.
+finish_install() {
+    _fi_bootstrap="$1"
+    _fi_bin_path="$2"
+    _fi_path_failed="$3"
+    _fi_dir="$4"
+
+    if [ "${_fi_bootstrap}" -ne 0 ]; then
+        print_failure_summary "${_fi_bootstrap}" "${_fi_bin_path}"
+        if [ "${_fi_path_failed}" = "1" ]; then
+            _say_path_not_updated "${_fi_dir}"
+        fi
+        return "${_fi_bootstrap}"
+    fi
+    if [ "${_fi_path_failed}" = "1" ]; then
+        say ""
+        say "==================================================================="
+        say "Installation incomplete: the platform components are installed and"
+        say "verified, but ${_fi_dir} was NOT added to your PATH (see the error"
+        say "above), so '${BIN}' and the other commands will not be found in a"
+        say "new terminal."
+        _say_path_not_updated "${_fi_dir}"
+        say ""
+        say "Docs: ${REPO_URL}"
+        say "==================================================================="
+        return "${EXIT_PATH_NOT_UPDATED}"
+    fi
+    print_next_steps
+    return 0
+}
+
+# Why (#11280): the one line a user needs when PATH was not updated.
+# What: prints the export line to add and where to add it.
+# Test: `test_finish_install_reports_path_failure` asserts the export line.
+_say_path_not_updated() {
+    say ""
+    say "PATH was NOT updated. Add this line to your shell startup file"
+    say "(zsh: ~/.zshenv; bash: ~/.bashrc and ~/.bash_profile), then open a"
+    say "new terminal:"
+    say "    export PATH=\"${1}:\$PATH\""
+}
+
 # ---------------------------------------------------------------------------
 # Cleanup
 # ---------------------------------------------------------------------------
@@ -972,15 +1045,16 @@ main() {
         fi
     fi
 
+    # #11280: a failed PATH update is recorded, the bootstrap still runs (the
+    # binaries are installed), and finish_install reports it at the end.
+    _path_failed=0
     if [ "${_need_install}" = "1" ]; then
         # Create temp working dir now that we know we will download.
         TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t trusty-install)" \
             || die "failed to create temp directory"
 
         download_and_install "${_version}" "${_target}" "${_install_dir}" "${_sha_tool}"
-        # #11280: a failed PATH write is reported there; the binaries are
-        # installed, so the bootstrap still runs.
-        maybe_update_path "${_install_dir}" || true
+        maybe_update_path "${_install_dir}" || _path_failed=1
         _bin_path="${_install_dir}/${BIN}"
     else
         _bin_path="${_existing}"
@@ -988,19 +1062,17 @@ main() {
         # existing binary is the one in the install dir (e.g. on PATH only
         # through ~/.zshrc, which `zsh -c` never reads).
         if [ "$(dirname "${_existing}")" = "${_install_dir}" ]; then
-            maybe_update_path "${_install_dir}" || true
+            maybe_update_path "${_install_dir}" || _path_failed=1
         fi
     fi
 
     _bootstrap_status=0
     post_install "${_bin_path}" || _bootstrap_status=$?
 
-    if [ "${_bootstrap_status}" -ne 0 ]; then
-        print_failure_summary "${_bootstrap_status}" "${_bin_path}"
-        exit "${_bootstrap_status}"
-    fi
-
-    print_next_steps
+    _final_status=0
+    finish_install "${_bootstrap_status}" "${_bin_path}" "${_path_failed}" "${_install_dir}" \
+        || _final_status=$?
+    exit "${_final_status}"
 }
 
 # Why: lets tests (tests/test-install-path.sh) source this file to exercise

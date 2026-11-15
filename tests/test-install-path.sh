@@ -694,6 +694,91 @@ test_unwritable_bashrc_reports_failure() {
     rm -rf "$home"
 }
 
+# run_sourced <home> <shell_path> <snippet> [args...] — sources install.sh in
+# source-only mode, then runs <snippet> with install.sh as $1 and the extra
+# args as $2...; stdin from /dev/null. Prints stdout+stderr; the exit status
+# is the snippet's.
+run_sourced() {
+    local home="$1" shell_path="$2" snippet="$3"
+    shift 3
+    "${HERMETIC_ENV[@]}" HOME="$home" SHELL="$shell_path" TRUSTY_INSTALL_SOURCE_ONLY=1 \
+        sh -c ". \"\$1\"; ${snippet}" _ "$INSTALL_SH" "$@" </dev/null 2>&1
+}
+
+# #11280 review: an unwritable .zshenv used to end in "Installation complete
+# and verified" with exit 0. Mirrors main(): record the PATH failure, then
+# compose the summary and status with finish_install.
+test_finish_install_reports_path_failure() {
+    echo "--- test_finish_install_reports_path_failure ---"
+    skip_without_zsh || return
+    if [[ "$(id -u)" == "0" ]]; then
+        echo "  SKIP: root ignores file permissions"
+        return
+    fi
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    : >"$home/.zshenv"
+    chmod 444 "$home/.zshenv"
+
+    out=$(run_sourced "$home" /bin/zsh \
+        'pf=0; maybe_update_path "$2" || pf=1; finish_install 0 "$2/trusty-installer" "$pf" "$2"' "$dir")
+    st=$?
+
+    assert_eq "$st" "4" "exit status is 4 (installed, PATH not updated)"
+    assert_eq "$(has_text "$out" "Installation complete and verified")" "no" "no unqualified success summary"
+    assert_eq "$(has_text "$out" "PATH was NOT updated")" "yes" "summary says PATH was not updated"
+    assert_eq "$(has_text "$out" "export PATH=\"${dir}:\$PATH\"")" "yes" "summary prints the exact export line"
+
+    chmod 644 "$home/.zshenv"
+    rm -rf "$home"
+}
+
+test_finish_install_success_and_bootstrap_failure() {
+    echo "--- test_finish_install_success_and_bootstrap_failure ---"
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+
+    out=$(run_sourced "$home" /bin/zsh 'finish_install 0 "$2/trusty-installer" 0 "$2"' "$dir")
+    st=$?
+    assert_eq "$st" "0" "both ok: exit 0"
+    assert_eq "$(has_text "$out" "Installation complete and verified")" "yes" "both ok: success summary"
+    assert_eq "$(has_text "$out" "PATH was NOT updated")" "no" "both ok: no PATH note"
+
+    out=$(run_sourced "$home" /bin/zsh 'finish_install 2 "$2/trusty-installer" 1 "$2"' "$dir")
+    st=$?
+    assert_eq "$st" "2" "bootstrap failed: its status passes through"
+    assert_eq "$(has_text "$out" "exited with status 2")" "yes" "bootstrap failed: failure summary"
+    assert_eq "$(has_text "$out" "PATH was NOT updated")" "yes" "bootstrap and PATH failed: PATH note too"
+
+    rm -rf "$home"
+}
+
+# #11280 review: stopping the probe watchdog used to orphan its `sleep` for
+# the whole timeout. 7919 is an unusual timeout so the `ps` match is ours.
+test_probe_leaves_no_stray_sleep() {
+    echo "--- test_probe_leaves_no_stray_sleep ---"
+    skip_without_zsh || return
+    local home n i
+    home=$(new_home)
+
+    run_sourced "$home" /bin/zsh 'PATH_PROBE_TIMEOUT_SECS=7919; _zsh_sees_dir /nonexistent-11280 || true' >/dev/null
+
+    n=1
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        n=$(pgrep -f '^sleep 7919$' | wc -l | tr -d ' ')
+        [[ "$n" == "0" ]] && break
+        sleep 0.2
+    done
+    assert_eq "$n" "0" "no watchdog sleep is left running after a successful probe (checked ${i}x)"
+    if [[ "$n" != "0" ]]; then
+        pkill -f '^sleep 7919$'
+    fi
+
+    rm -rf "$home"
+}
+
 echo "==========================================================="
 echo "install.sh PATH-handling test suite (#3874, #3897, #11280)"
 echo "==========================================================="
@@ -726,6 +811,9 @@ test_hanging_zshenv_probe_times_out
 test_no_zsh_falls_back_to_adding
 test_bash_no_tty_still_skips
 test_unwritable_bashrc_reports_failure
+test_finish_install_reports_path_failure
+test_finish_install_success_and_bootstrap_failure
+test_probe_leaves_no_stray_sleep
 
 echo "==========================================================="
 echo "Result: $PASS passed, $FAIL failed"
