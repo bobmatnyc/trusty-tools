@@ -630,12 +630,23 @@ Size bound: the JSON encoding of `result` is at most 262144 bytes of UTF-8.
 The injected function measures it; over the bound it shortens `text` first,
 then drops elements from the end of the list, and sets `truncated: true`.
 
-Both acting ops run in this order (#11294): attach `chrome.debugger` to the tab
-and enable `Page` dialog events; inject `pageTarget` into the lease's
-document; send trusted `Input.*` events at the point it returns; wait 100 ms in
-the page for a dialog a handler opens late; detach. A native dialog is answered
-with `Page.handleJavaScriptDialog` by the request's `dialog`. The attach comes
-first because Chrome's debugging bar resizes the viewport.
+Both acting ops run in this order (#11294): probe the tab, and answer
+`DocumentChanged` without attaching when the worker lacks host access or the
+top document is not the lease's; attach `chrome.debugger` to the tab and enable
+`Page` dialog events; inject `pageTarget` into the lease's document; send
+trusted `Input.*` events at the point it returns; wait 100 ms in the page for a
+dialog a handler opens late; detach. A native dialog is answered with
+`Page.handleJavaScriptDialog` by the request's `dialog`. The attach comes
+before targeting because Chrome's debugging bar resizes the viewport.
+
+Before every `Input.*` event the worker probes again and stops with
+`DocumentChanged` when the top document or its origin is no longer the one
+probed at the start. A key event carrying Ctrl or Meta is refused with
+`InvalidRequest`, so no command reaches a browser shortcut such as close tab,
+new tab or the address bar. A dialog answer Chrome rejects answers
+`OutcomeUnknown`, never a reply claiming the answer. The whole command is bounded
+at 5 s plus 50 ms per typed character; past the bound it answers
+`OutcomeUnknown`. Every path detaches.
 
 `page_click`: `pageTarget` scrolls the element to the viewport centre
 (`scrollIntoView({block: "center", inline: "center"})`) and answers `Obscured`

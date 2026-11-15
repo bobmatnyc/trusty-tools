@@ -180,6 +180,9 @@ globalThis.TrustyPages = (() => {
     },
     // A native dialog blocks the page until answered: an alert is acknowledged, any other follows `policy`.
     accepts:(type, policy) => type === "alert" || policy === "accept",
+    // #11294: a key event carrying Ctrl or Meta can reach browser shortcuts (close tab, new tab, address
+    //   bar), outside the lease's document. The worker sends no such event; this refuses one if it ever does.
+    keyAllowed:(method, params) => method !== "Input.dispatchKeyEvent" || ((params?.modifiers ?? 0) & 6) === 0,
   };
 
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
@@ -269,31 +272,61 @@ TrustyPages.commands = deps => {
 
   // Why: a click or type must arrive trusted, yet run only inside the lease's document and never report
   //   work it did not do (#11294).
-  // What: attaches chrome.debugger to the tab (before targeting, since Chrome's debugging bar resizes the
-  //   viewport), injects pageTarget into the lease's document only, drives CDP input at the point it
-  //   returns, answers any native dialog by `req.dialog` (an alert is always acknowledged), waits 100 ms in
-  //   the page for a dialog its handlers open late, then detaches. The reply names the last dialog seen.
+  // What: probes first and attaches chrome.debugger only to an accessible tab still on the lease's document
+  //   (before targeting, since Chrome's debugging bar resizes the viewport), injects pageTarget into that
+  //   document only, then drives CDP input at the point it returns. Before every input event it re-probes
+  //   and refuses DocumentChanged if the document or origin moved, and refuses a Ctrl/Meta key event. Any
+  //   native dialog is answered by `req.dialog` (an alert is always acknowledged); an answer Chrome
+  //   rejects, or a command outlasting its time bound, answers OutcomeUnknown. It waits 100 ms in the page
+  //   for a late dialog, then always detaches. The reply names the last dialog seen.
   // Test: tests/test_worker.mjs `click and type drive trusted input and answer dialogs`,
-  //   `stale document refuses before the page runs`.
+  //   `stale document refuses before the page runs`, `trusted input rechecks the document before every event`,
+  //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`,
+  //   `ctrl or meta key events never reach the tab`.
   async function act(req, kind, drive) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     if (req.document === null) throw changed(await probe(req.tab));
-    const debuggee = {tabId:req.tab}, send = (method, params = {}) => chrome.debugger.sendCommand(debuggee, method, params);
+    const first = await probe(req.tab);
+    if (!first.access || first.document !== req.document) throw changed(first);
+    const debuggee = {tabId:req.tab}, raw = (method, params = {}) => chrome.debugger.sendCommand(debuggee, method, params);
+    // Every input event runs only while the lease's document and origin are still the tab's top document.
+    const send = async (method, params = {}) => {
+      if (method.startsWith("Input.")) {
+        if (!trusted.keyAllowed(method, params)) throw refuse("InvalidRequest");
+        // An open dialog blocks the page probe, so its answer settles first.
+        if (!(await answered)) throw refuse("OutcomeUnknown");
+        const now = await probe(req.tab);
+        if (!now.access || now.document !== req.document || now.origin !== first.origin) throw changed(now);
+      }
+      return raw(method, params);
+    };
     try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
       const now = await probe(req.tab);
       if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
       throw changed(now);
     }
-    let seen = null;
+    let seen = null, answered = Promise.resolve(true), timer;
     const answer = (source, method, params) => {
       if (source.tabId !== req.tab || method !== "Page.javascriptDialogOpening") return;
       const accept = trusted.accepts(params?.type, req.dialog);
       seen = {type:String(params?.type), message:String(params?.message ?? "").slice(0, 1024), accepted:accept};
-      send("Page.handleJavaScriptDialog", {accept}).catch(() => {});
+      answered = raw("Page.handleJavaScriptDialog", {accept}).then(() => true, () => false);
     };
     chrome.debugger.onEvent.addListener(answer);
+    const bound = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(refuse("OutcomeUnknown")), 5000 + 50 * (req.text?.length ?? 0));
+    });
     try {
-      await send("Page.enable");
+      await Promise.race([bound, steps()]);
+    } finally {
+      clearTimeout(timer);
+      chrome.debugger.onEvent.removeListener(answer);
+      await chrome.debugger.detach(debuggee).catch(() => {});
+    }
+    return seen ? {document:req.document, dialog:seen} : {document:req.document};
+
+    async function steps() {
+      await raw("Page.enable");
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
@@ -309,13 +342,11 @@ TrustyPages.commands = deps => {
       if (point?.ok !== true || hit.documentId !== req.document || !Number.isFinite(point.x) ||
           !Number.isFinite(point.y)) throw refuse("OutcomeUnknown");
       await drive(send, point);
-      await send("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
+      await raw("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
         .catch(() => {});
-    } finally {
-      chrome.debugger.onEvent.removeListener(answer);
-      await chrome.debugger.detach(debuggee).catch(() => {});
+      // A dialog Chrome would not close leaves the page blocked: the outcome is not the one reported.
+      if (!(await answered)) throw refuse("OutcomeUnknown");
     }
-    return seen ? {document:req.document, dialog:seen} : {document:req.document};
   }
 
   const run = {

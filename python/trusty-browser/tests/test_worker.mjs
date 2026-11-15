@@ -190,20 +190,26 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
       return [{frameId:0, documentId:t.doc, result}];
     }},
-    // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press; `t.busy` refuses attach.
+    // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press (`t.dialogFails` makes its
+    // answer fail); `t.busy` refuses attach; `t.moveAt` names an event type after which the tab gets
+    // `t.move` ({doc} or {origin}); `t.hang` names a method that never answers. Like Chrome, attach needs
+    // no host access.
     debugger:{onEvent:{fns:new Set(), addListener(fn){this.fns.add(fn);}, removeListener(fn){this.fns.delete(fn);},
         fire(...args){ for (const fn of [...this.fns]) fn(...args); }},
       attach:async ({tabId}) => {
         const t = tabs.get(tabId);
-        if (t?.busy || !accessible(t)) throw new Error("Another debugger is already attached");
+        if (t?.busy) throw new Error("Another debugger is already attached");
         cdp.push({tab:tabId, method:"attach"});
       },
       detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
       sendCommand:async ({tabId}, method, params) => {
         cdp.push({tab:tabId, method, params});
         const t = tabs.get(tabId);
+        if (t.hang === method) return new Promise(() => {});
+        if (t.dialogFails && method === "Page.handleJavaScriptDialog") throw new Error("No dialog is showing");
         if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
           await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
+        if (t.moveAt && params?.type === t.moveAt) Object.assign(t, t.move);
         return {};
       }},
   };
@@ -237,7 +243,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return plain(reply);
   });
   const table = () => plain(sessionStore.grants || {});
-  return {chrome, native, sent, ran, cdp, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
+  return {ctx, chrome, native, sent, ran, cdp, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
     sessionStore, localStore, command, popup, table, handshake, live:ok, fakeBroker,
     setBroker(fn){ broker = fn; },
     end:(grant, last, reason = "closed") => command("grant_end", {grant, reason, last}),
@@ -343,6 +349,80 @@ test("click and type drive trusted input and answer dialogs", async () => {
   assert.deepEqual(covered, {id:covered.id, ok:false, error:"Obscured", tab:7});
   assert.equal(f.cdp.at(-1).method, "detach");
   assert.ok(!f.cdp.some(c => c.method === "Input.dispatchMouseEvent"));
+});
+
+const cdpSteps = f => f.cdp.map(c => c.method + (c.params?.type ? ":" + c.params.type : ""));
+
+test("trusted input rechecks the document before every event", async () => {
+  for (const move of [{doc:"doc-7-next"}, {origin:"https://evil.test"}]) {
+    const f = await codeFixture();
+    const {grant} = await mintTab(f, 7);
+    Object.assign(f.tabs.get(7), {moveAt:"mousePressed", move});
+    const reply = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+    assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:true,
+      document:move.doc || "doc-7"}, JSON.stringify(move));
+    assert.ok(!cdpSteps(f).includes("Input.dispatchMouseEvent:mouseReleased"), cdpSteps(f).join());
+    assert.equal(f.cdp.at(-1).method, "detach");
+    // Typing stops at the keystroke after the move.
+    Object.assign(f.tabs.get(7), {doc:"doc-7", origin:"https://a.test", moveAt:"keyUp"});
+    f.cdp.length = 0;
+    const typed = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"abc"});
+    assert.equal(typed.error, "DocumentChanged");
+    assert.deepEqual(f.cdp.filter(c => c.params?.type === "keyDown").map(c => c.params.key), ["a"]);
+    assert.equal(f.cdp.at(-1).method, "detach");
+  }
+});
+
+test("a no-access tab is never debugger-attached", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true}}});
+  const minted = await f.popup({type:"mint", scope:"profile"});
+  f.perms.held = false;
+  const reply = await f.command("page_click", {grant:minted.grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:false, document:null});
+  assert.deepEqual(f.cdp, []);
+});
+
+test("a failed dialog answer or a hung command answers OutcomeUnknown", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  Object.assign(f.tabs.get(7), {dialog:{type:"confirm", message:"Sure?"}, dialogFails:true});
+  const failed = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"accept"});
+  assert.deepEqual(failed, {id:failed.id, ok:false, error:"OutcomeUnknown"});
+  assert.ok(!cdpSteps(f).includes("Input.dispatchMouseEvent:mouseReleased"));
+  assert.equal(f.cdp.at(-1).method, "detach");
+  Object.assign(f.tabs.get(7), {dialog:null, dialogFails:false, hang:"Input.dispatchMouseEvent"});
+  f.cdp.length = 0;
+  const pending = f.native.onMessage.fire({id:"hung", op:"page_click", email, grant, tab:7, document:"doc-7", ref:"1.0",
+    dialog:"dismiss"});
+  await settle();
+  assert.equal(f.sent.find(m => m.id === "hung"), undefined);
+  assert.notEqual(f.cdp.at(-1).method, "detach");
+  const [key, bound] = [...f.timers].findLast(([, t]) => t.ms === 5000);
+  f.timers.delete(key);
+  bound.fn();
+  await pending;
+  await settle();
+  assert.deepEqual(plain(f.sent.find(m => m.id === "hung")), {id:"hung", ok:false, error:"OutcomeUnknown"});
+  assert.equal(f.cdp.at(-1).method, "detach");
+});
+
+test("ctrl or meta key events never reach the tab", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const {trusted} = f.ctx.TrustyPages, type = trusted.type;
+  for (const modifiers of [2, 4]) {
+    for (const key of ["w", "t", "l"]) {
+      assert.equal(trusted.keyAllowed("Input.dispatchKeyEvent", {type:"keyDown", key, modifiers}), false, key + modifiers);
+      trusted.type = send => send("Input.dispatchKeyEvent", {type:"keyDown", key, code:"Key" + key.toUpperCase(), modifiers});
+      f.cdp.length = 0;
+      const reply = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:key});
+      assert.deepEqual(reply, {id:reply.id, ok:false, error:"InvalidRequest"}, key + modifiers);
+      assert.ok(!f.cdp.some(c => c.method === "Input.dispatchKeyEvent"));
+      assert.equal(f.cdp.at(-1).method, "detach");
+    }
+  }
+  trusted.type = type;
+  assert.equal(trusted.keyAllowed("Input.dispatchKeyEvent", {type:"keyDown", key:"w"}), true);
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {
