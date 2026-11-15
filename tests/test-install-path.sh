@@ -58,10 +58,12 @@
 # - re-runs add nothing; a dir already in .zshenv (or via rustup's
 #   ~/.cargo/env) gets no edit; a dir present only via .zshrc still gets the
 #   .zshenv line; the probe never runs .zshrc
-# - ZDOTDIR is honoured; a ZDOTDIR a new zsh does not read gets a warning,
-#   not a success line
+# - the line goes to $HOME/.zshenv even with ZDOTDIR exported (the .zshenv a
+#   fresh zsh reads); a line a fresh zsh still misses gets a warning, not a
+#   success line
 # - TRUSTY_NO_MODIFY_PATH=1 makes no edit and starts no zsh
-# - an unwritable rc file or missing ZDOTDIR is an error with no "Added" line
+# - an unwritable .zshenv, read-only HOME or unwritable .bashrc is an error
+#   with no "Added" line
 # - a hanging .zshenv or a missing zsh falls back to adding the line
 # - bash keeps its prompt-or-skip behaviour under a non-tty stdin
 #
@@ -484,47 +486,50 @@ test_probe_does_not_run_zshrc() {
     rm -rf "$home"
 }
 
-# ZDOTDIR set, and the user's ~/.zshenv points a new zsh at it (a common
-# XDG layout): the line goes to $ZDOTDIR/.zshenv only.
-test_zdotdir_is_honoured() {
-    echo "--- test_zdotdir_is_honoured ---"
-    skip_without_zsh || return
-    local home zdot dir home_sum out
-    home=$(new_home)
-    zdot="$home/zdot"
-    mkdir -p "$zdot"
-    dir="$home/.cargo/bin"
-    printf 'export ZDOTDIR="%s"\n[ -f "$ZDOTDIR/.zshenv" ] && . "$ZDOTDIR/.zshenv"\n' "$zdot" >"$home/.zshenv"
-    home_sum=$(file_sum "$home/.zshenv")
-
-    out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$zdot")
-
-    assert_eq "$(count_matches "$zdot/.zshenv" "PATH='${dir}'")" "1" "\$ZDOTDIR/.zshenv gets one export line"
-    assert_eq "$(file_sum "$home/.zshenv")" "$home_sum" "HOME/.zshenv is not edited when ZDOTDIR is set"
-    assert_eq "$(has_text "$out" "Added ${dir} to PATH in ${zdot}/.zshenv.")" "yes" "success line names \$ZDOTDIR/.zshenv"
-
-    rm -rf "$home"
-}
-
-# ZDOTDIR is in the installer's environment, but nothing makes a fresh zsh
-# read $ZDOTDIR/.zshenv: the write happens, the re-probe misses, and the user
-# gets a warning instead of a false success line.
-test_zdotdir_not_read_by_new_zsh_warns() {
-    echo "--- test_zdotdir_not_read_by_new_zsh_warns ---"
+# PM ruling on #11280 AC 3: the target is the .zshenv a fresh zsh reads.
+# The common XDG layout exports ZDOTDIR from ~/.zshenv, so the installer
+# inherits ZDOTDIR, yet zsh never reads $ZDOTDIR/.zshenv. The line must land
+# in $HOME/.zshenv, and $ZDOTDIR/.zshenv must not be created.
+test_exported_zdotdir_still_writes_home_zshenv() {
+    echo "--- test_exported_zdotdir_still_writes_home_zshenv ---"
     skip_without_zsh || return
     local home zdot dir out st
     home=$(new_home)
     zdot="$home/zdot"
     mkdir -p "$zdot"
     dir="$home/.cargo/bin"
+    printf 'export ZDOTDIR="%s"\n' "$zdot" >"$home/.zshenv"
 
     out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$zdot")
     st=$?
 
+    assert_eq "$st" "0" "maybe_update_path exits 0"
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" "HOME/.zshenv gets one export line although ZDOTDIR is exported"
+    assert_eq "$([[ -e "$zdot/.zshenv" ]] && echo yes || echo no)" "no" "\$ZDOTDIR/.zshenv is not created"
+    assert_eq "$(has_text "$out" "Added ${dir} to PATH in ${home}/.zshenv.")" "yes" "success line names HOME/.zshenv"
+
+    rm -rf "$home"
+}
+
+# The write succeeds but a fresh zsh still misses the dir (here a .zshenv
+# that returns before the appended line; launchd-set ZDOTDIR is the other
+# real case). The user gets a warning naming the causes, never "Added".
+test_zshenv_line_not_taking_effect_warns() {
+    echo "--- test_zshenv_line_not_taking_effect_warns ---"
+    skip_without_zsh || return
+    local home dir out st
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+    printf 'return 0\n' >"$home/.zshenv"
+
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
+    st=$?
+
     assert_eq "$st" "1" "maybe_update_path exits 1"
-    assert_eq "$(count_matches "$zdot/.zshenv" "PATH='${dir}'")" "1" "the line is written to \$ZDOTDIR/.zshenv"
+    assert_eq "$(count_matches "$home/.zshenv" "PATH='${dir}'")" "1" "the line is written to HOME/.zshenv"
     assert_eq "$(has_text "$out" "Added")" "no" "no success line"
     assert_eq "$(has_text "$out" "a new zsh still does not have it on PATH")" "yes" "warning explains the miss"
+    assert_eq "$(has_text "$out" "launchd")" "yes" "warning names the launchd ZDOTDIR case"
 
     rm -rf "$home"
 }
@@ -583,20 +588,27 @@ test_unwritable_zshenv_reports_failure() {
     rm -rf "$home"
 }
 
-test_missing_zdotdir_reports_failure() {
-    echo "--- test_missing_zdotdir_reports_failure ---"
+# A read-only HOME with no .zshenv: the file cannot be created.
+test_readonly_home_reports_failure() {
+    echo "--- test_readonly_home_reports_failure ---"
     skip_without_zsh || return
+    if [[ "$(id -u)" == "0" ]]; then
+        echo "  SKIP: root ignores file permissions"
+        return
+    fi
     local home dir out st
     home=$(new_home)
     dir="$home/.cargo/bin"
+    chmod 555 "$home"
 
-    out=$(run_curl_pipe "$home" /bin/zsh "$dir" "ZDOTDIR=$home/no-such-dir")
+    out=$(run_curl_pipe "$home" /bin/zsh "$dir")
     st=$?
 
     assert_eq "$st" "1" "maybe_update_path exits 1"
-    assert_eq "$(has_text "$out" "error: could not write ${home}/no-such-dir/.zshenv")" "yes" "an error names the file"
+    assert_eq "$(has_text "$out" "error: could not write ${home}/.zshenv")" "yes" "an error names the file"
     assert_eq "$(has_text "$out" "Added")" "no" "no success line"
 
+    chmod 755 "$home"
     rm -rf "$home"
 }
 
@@ -704,12 +716,12 @@ test_zshrc_only_dir_still_gets_zshenv_line
 test_dir_already_in_zshenv_is_noop
 test_rustup_cargo_env_counts_as_present
 test_probe_does_not_run_zshrc
-test_zdotdir_is_honoured
-test_zdotdir_not_read_by_new_zsh_warns
+test_exported_zdotdir_still_writes_home_zshenv
+test_zshenv_line_not_taking_effect_warns
 test_no_modify_path_opt_out_is_noop
 test_unsafe_install_dir_is_noop
 test_unwritable_zshenv_reports_failure
-test_missing_zdotdir_reports_failure
+test_readonly_home_reports_failure
 test_hanging_zshenv_probe_times_out
 test_no_zsh_falls_back_to_adding
 test_bash_no_tty_still_skips

@@ -425,7 +425,7 @@ _path_export_present_in() {
 #      1 when the write failed (missing directory, read-only file or dir).
 # Test: `test_repeat_install_is_idempotent` (twice appends once);
 #      `test_unwritable_zshenv_reports_failure` and
-#      `test_missing_zdotdir_reports_failure` (status 1, no success line), in
+#      `test_readonly_home_reports_failure` (status 1, no success line), in
 #      tests/test-install-path.sh.
 _append_path_export() {
     _adir="$1"
@@ -527,25 +527,35 @@ _say_current_terminal_hint() {
 #      "no" and a zsh user never got PATH set up. The owner ruling is to add
 #      the dir when a new zsh does not have it; TRUSTY_NO_MODIFY_PATH=1 is the
 #      opt-out. Only `.zshenv` is written, for the reasons recorded in
-#      `maybe_update_path` (#3874, #3897).
+#      `maybe_update_path` (#3874, #3897). The file is the .zshenv a fresh zsh
+#      reads: Terminal.app and sshd start zsh with no ZDOTDIR, so that is
+#      $HOME/.zshenv. A ZDOTDIR the installer inherits was most likely
+#      exported BY ~/.zshenv, and zsh never reads $ZDOTDIR/.zshenv then, so an
+#      inherited ZDOTDIR is ignored (PM ruling on #11280's AC 3).
 # What: probes a new non-interactive zsh with `_zsh_sees_dir`. Present: no
 #      edit. Missing, or probe failed: appends the export line to
-#      ${ZDOTDIR:-$HOME}/.zshenv — without a prompt when stdin is not a
-#      terminal or ASSUME_YES=1, after `confirm` otherwise — then probes again
-#      and prints "Added …" only when the write succeeded and the new zsh sees
-#      the dir (or the probe cannot run). A failed probe falls toward writing:
-#      the append is idempotent, so the worst case is one redundant line,
-#      while falling toward "present" would leave PATH unset, which is #11280.
+#      $HOME/.zshenv — without a prompt when stdin is not a terminal or
+#      ASSUME_YES=1, after `confirm` otherwise — then probes again and prints
+#      "Added …" only when the write succeeded and the new zsh sees the dir (or
+#      the probe cannot run). When the re-probe still misses (ZDOTDIR set
+#      before ~/.zshenv is read, e.g. by launchd or /etc/zshenv, or a
+#      .zshenv that returns before the line) it prints a warning naming those
+#      cases instead. A failed probe falls toward writing: the append is
+#      idempotent, so the worst case is one redundant line, while falling
+#      toward "present" would leave PATH unset, which is #11280.
 #      Returns 1 when the write failed or the written line does not take
 #      effect, 0 otherwise.
 # Test: `test_zsh_missing_dir_is_added_without_prompt`,
 #      `test_zsh_added_dir_resolves_in_every_mode`,
 #      `test_zshrc_only_dir_still_gets_zshenv_line`,
-#      `test_dir_already_in_zshenv_is_noop`, `test_zdotdir_is_honoured`,
+#      `test_dir_already_in_zshenv_is_noop`,
+#      `test_exported_zdotdir_still_writes_home_zshenv`,
+#      `test_zshenv_line_not_taking_effect_warns`,
 #      `test_unwritable_zshenv_reports_failure` in tests/test-install-path.sh.
 _update_zsh_path() {
     _dir="$1"
-    _rc="${ZDOTDIR:-${HOME}}/.zshenv"
+    # #11280: never ${ZDOTDIR}; see the Why above.
+    _rc="${HOME}/.zshenv"
 
     _probe=0
     _zsh_sees_dir "${_dir}" || _probe=$?
@@ -588,7 +598,8 @@ _update_zsh_path() {
     _zsh_sees_dir "${_dir}" || _verify=$?
     if [ "${_verify}" -eq 1 ]; then
         warn "${_rc} names ${_dir}, but a new zsh still does not have it on PATH."
-        warn "A file read before or after it (e.g. ~/.zshenv setting ZDOTDIR, or a later PATH reset) overrides it."
+        warn "Likely causes: ZDOTDIR is set before ${_rc} is read (launchd, /etc/zshenv), so zsh reads \$ZDOTDIR/.zshenv instead;"
+        warn "or ${_rc} returns or resets PATH before the added line."
         warn "Add this line to the .zshenv your zsh reads:  export PATH=\"${_dir}:\$PATH\""
         return 1
     fi
@@ -650,7 +661,8 @@ maybe_update_path() {
     # without covering any invocation .zshenv doesn't already cover. Kept
     # zsh on the same idempotent single-directory append machinery as
     # bash/profile below, just pointed at one file. #11280: that file is
-    # ${ZDOTDIR:-$HOME}/.zshenv, and "already on PATH" is a zsh probe, not
+    # $HOME/.zshenv (an inherited ZDOTDIR is ignored), and "already on PATH"
+    # is a zsh probe, not
     # the installer's inherited $PATH (see `_update_zsh_path`).
     _shell_name="$(basename "${SHELL:-/bin/sh}")"
     case "${_shell_name}" in

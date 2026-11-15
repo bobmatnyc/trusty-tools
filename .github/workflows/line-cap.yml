@@ -59,6 +59,14 @@ jobs:
       - name: Gate-shells selftest (bash and zsh give one verdict)
         run: bash scripts/check_gate_shells_selftest.sh
 
+      # #11280: install.sh's PATH handling, against a temp HOME. It needs the
+      # zsh installed above; shellcheck is preinstalled on the hosted image.
+      - name: shellcheck install.sh
+        run: shellcheck --shell=sh install.sh
+
+      - name: install.sh PATH-handling tests
+        run: bash tests/test-install-path.sh
+
       # Gate on the SLOC counter's own regression fixtures (issue #2563) so a
       # future edit to scripts/lib/sloc_awk.sh that reintroduces a counting
       # bug (e.g. the nested-block-comment overcount fixed here, or the
