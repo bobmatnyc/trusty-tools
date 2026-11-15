@@ -1083,7 +1083,8 @@ fn filled_9720(prefix: &str, unit: &str) -> String {
 
 /// The bound on the issue's `time eval` x12 repro (#9720): ten times its
 /// 3.8 s EVO debug-build time after the fix. The walk re-reads that command
-/// about 70 times at ~50 ms a read, so it does not fit [`LARGE_INPUT_BOUND`].
+/// about 70 times at ~50 ms a read, so neither it nor the `$((1<<a…))` row with
+/// the same prefix fits [`LARGE_INPUT_BOUND`].
 /// Before the fix it took 170 s.
 const EVAL_REPRO_BOUND_9720: std::time::Duration = std::time::Duration::from_secs(40);
 
@@ -1100,9 +1101,12 @@ fn bash_judges_dense_heredoc_payloads_within_the_bound_9720() {
     for (command, bound) in [
         (filled_9720("", "<<x a.b "), LARGE_INPUT_BOUND),
         (filled_9720("", "cat <<x\na\nx\n"), LARGE_INPUT_BOUND),
+        // #9720: this row also carries the `time eval` x12 prefix, so the walk
+        // re-reads it ~70 times like the repro row; 5 s flaked at 6.1 s on a
+        // loaded CI runner. Before the fix each read took seconds (minutes total).
         (
             filled_9720(&format!("{eval}{shifts}"), "\n"),
-            LARGE_INPUT_BOUND,
+            EVAL_REPRO_BOUND_9720,
         ),
         (filled_9720(&eval, "<<x a.b "), EVAL_REPRO_BOUND_9720),
     ] {
