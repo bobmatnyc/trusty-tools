@@ -194,6 +194,8 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "6a2f6fcf1f8f50523e110cb3216f496bc1b0d2c16905d6fca2b8ffe9dbba345f",
         // #10711: the text before a close kept the owner's answer_note.
         "1bd4e94597f1e17172f0a1ec8106f9ecc3983b2265a0eefe4cdf2eae020e5ffc",
+        // #10680: the text before the read-back step in r-183.
+        "d46d422b543fc97df9d7b05e3794713320a97302398a651729d8d70060a7d07d",
     ],
 };
 
