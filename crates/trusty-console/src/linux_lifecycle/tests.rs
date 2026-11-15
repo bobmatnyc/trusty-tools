@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use trusty_common::linux_lifecycle::{PinnedProcess, Signal};
 
 use super::addr_pid::{AddrLookup, Listener, lookup, parse_listener};
-use super::env::{CREDENTIAL_NAMED_EXCEPTIONS, EXCLUDED};
+use super::env::{CREDENTIAL_NAMED_EXCEPTIONS, EXCLUDED, EXCLUDED_PREFIXES};
 use super::*;
 
 /// The fixture's data dir; set only in the fixture child.
@@ -103,6 +103,14 @@ fn env_passthrough_carries_security_and_data_names_and_no_credential() {
     for (name, _) in EXCLUDED {
         assert!(!passed(name), "{name} is excluded");
     }
+    for (prefix, _) in EXCLUDED_PREFIXES {
+        let hit = target
+            .desc
+            .env_passthrough
+            .iter()
+            .find(|n| n.starts_with(prefix));
+        assert!(hit.is_none(), "{hit:?} is excluded by prefix {prefix}");
+    }
     assert!(!passed("GITHUB_TOKEN"));
 }
 
@@ -164,6 +172,8 @@ fn console_passthrough_carries_every_memory_and_search_name() {
         // The analyze and mpm daemons the other bridges auto-start.
         "TMUX_TMPDIR",
         "ANALYZE_LSP",
+        // #11085: a clap `env` attribute; the auto-started `serve` has no flag.
+        "TRUSTY_ANALYZER_FACTS",
     ] {
         assert!(passed(name), "{name} must reach the console");
     }
@@ -172,6 +182,95 @@ fn console_passthrough_carries_every_memory_and_search_name() {
         unique.len(),
         target.desc.env_passthrough.len(),
         "no duplicates"
+    );
+}
+
+/// Every `env = "NAME"` inside a `#[arg(..)]` / `#[clap(..)]` attribute in a
+/// crate's non-test `src/`, mapped to the file it appears in.
+fn clap_env_names(src: &Path) -> std::collections::BTreeMap<String, String> {
+    assert!(
+        src.is_dir(),
+        "{} must exist in the workspace",
+        src.display()
+    );
+    let mut found = std::collections::BTreeMap::new();
+    let mut dirs = vec![src.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src") {
+            let path = entry.expect("entry").path();
+            let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if !file.ends_with(".rs") || file.contains("tests") || file.contains("_test") {
+                continue;
+            }
+            // The whole file: a `#[cfg(test)] mod x_tests;` line near the top
+            // of `main.rs` would otherwise hide every attribute below it.
+            let text = std::fs::read_to_string(&path).expect("read file");
+            let mut in_attr = false;
+            for line in text.lines().map(str::trim) {
+                if line.starts_with("//") {
+                    continue;
+                }
+                in_attr |= line.starts_with("#[arg(") || line.starts_with("#[clap(");
+                if !in_attr {
+                    continue;
+                }
+                let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                for (at, _) in compact.match_indices("env=\"") {
+                    let prev = compact[..at].chars().next_back();
+                    if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    let name = compact[at + 5..].split('"').next().unwrap_or("");
+                    found.insert(name.to_string(), path.display().to_string());
+                }
+                if line.contains(")]") {
+                    in_attr = false;
+                }
+            }
+        }
+    }
+    found
+}
+
+// #11085: the first variable trace read `env::var` / `var_os` only and missed
+// `TRUSTY_ANALYZER_FACTS`, a clap `env` attribute. A clap env name in a crate
+// whose daemon a console bridge starts must be passed or excluded with a reason.
+#[test]
+fn every_clap_env_name_a_bridge_daemon_crate_reads_is_passed_or_excluded() {
+    let target = target_in(Path::new("/tmp/c"), None);
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut seen = std::collections::BTreeMap::new();
+    for krate in [
+        "trusty-memory",
+        "trusty-search",
+        "trusty-analyze",
+        "trusty-mpm",
+    ] {
+        seen.extend(clap_env_names(&crates.join(krate).join("src")));
+    }
+    // The scan must see known attributes, or an empty scan would pass.
+    for known in ["TRUSTY_ANALYZER_FACTS", "TRUSTY_INDEX", "TRUSTY_MPM_URL"] {
+        assert!(
+            seen.contains_key(known),
+            "the scan missed {known}: {seen:?}"
+        );
+    }
+    let missing: Vec<String> = seen
+        .iter()
+        .filter(|(name, _)| {
+            !target.desc.env_passthrough.iter().any(|n| n == *name)
+                && !DaemonDescriptor::BASE_ENV.contains(&name.as_str())
+                && !EXCLUDED.iter().any(|(excluded, _)| excluded == name)
+        })
+        .map(|(name, file)| format!("{name} ({file})"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "not passed and not excluded: {missing:?}"
     );
 }
 

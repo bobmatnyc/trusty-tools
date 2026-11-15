@@ -11,11 +11,12 @@
 //! webhook secret), [`BRIDGE_DAEMONS`] (the analyze and mpm daemons the bridges
 //! auto-start), and trusty-common's `passthrough::MEMORY_DAEMON` and
 //! `passthrough::SEARCH_DAEMON`, the lists those daemons' own verbs pass.
-//! [`EXCLUDED`] names what is deliberately left out.
+//! [`EXCLUDED`] and [`EXCLUDED_PREFIXES`] name what is deliberately left out.
 //! Test: `env_passthrough_carries_security_and_data_names_and_no_credential`,
 //! `env_passthrough_carries_the_token_file_path`,
 //! `env_passthrough_carries_the_webhook_secret`,
-//! `console_passthrough_carries_every_memory_and_search_name`.
+//! `console_passthrough_carries_every_memory_and_search_name`,
+//! `every_clap_env_name_a_bridge_daemon_crate_reads_is_passed_or_excluded`.
 
 use trusty_common::linux_lifecycle::passthrough;
 
@@ -79,9 +80,13 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
 /// (`serve_stdio::ensure_daemon_up`). Both spawns inherit the bridge's
 /// environment, which is the console's.
 /// What: the names traced from each daemon's `env::var` / `var_os` reads, by
-/// literal and by constant. Credentials, caller-session identity and hook-time
-/// policy toggles are in [`EXCLUDED`] instead.
+/// literal and by constant, and from its clap `env = "NAME"` attributes.
+/// Credentials, caller-session identity and hook-time policy toggles are in
+/// [`EXCLUDED`] instead.
 pub(crate) const BRIDGE_DAEMONS: &[&str] = &[
+    // #11085: trusty-analyze `Cli::facts_path`, a clap `env` attribute. The
+    // auto-start spawns plain `serve`, so this is the only route to the store.
+    "TRUSTY_ANALYZER_FACTS",
     // trusty-analyze daemon: LLM region and model, build-tool and diagnostics
     // deadlines, MCP reply cap, LSP settings, its socket override.
     "AWS_REGION",
@@ -208,5 +213,41 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     (
         "TRUSTY_MPM_DISABLE_HOOKS",
         "hook-time toggle, read in the managed pane",
+    ),
+    // #11085: clap `env = "NAME"` attributes no bridge-started daemon acts on.
+    (
+        "TRUSTY_INDEX",
+        "search: pins one `serve` MCP session to a project; `start` ignores it",
+    ),
+    (
+        "TRUSTY_FASTEMBED_CACHE",
+        "analyze: deprecated `serve` flag, parsed and ignored (#5067)",
+    ),
+    ("TM_ARCHITECT_STORE", "mpm: read by `tm tui` only"),
+    (
+        "TRUSTY_MPM_ADDR",
+        "mpm: deprecated `daemon --addr`, ignored with a log line (#6288)",
+    ),
+    (
+        "TRUSTY_MPM_TAILSCALE",
+        "mpm: deprecated; when set, `daemon` refuses to start (#3330)",
+    ),
+];
+
+/// Name prefixes deliberately NOT passed, with why.
+///
+/// Why: #11085 — the console runs the review bridge only for its
+/// `console_metrics` poll; review starts no daemon of its own, and each of its
+/// settings falls back to its strict default, so a verb-started console
+/// changes nothing by dropping them.
+#[cfg(test)]
+pub(crate) const EXCLUDED_PREFIXES: &[(&str, &str)] = &[
+    (
+        "PR_INTELLIGENCE_",
+        "review: console polls console_metrics only; strict defaults",
+    ),
+    (
+        "TRUSTY_REVIEW_",
+        "review: console polls console_metrics only; strict defaults",
     ),
 ];
