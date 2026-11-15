@@ -8,7 +8,8 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -388,8 +389,40 @@ fn addr_lookup_finds_this_process_and_nothing_on_a_dead_port() {
         lookup(&file).expect("live"),
         AddrLookup::Pid(std::process::id(), addr)
     );
+
+    // #11085: a dropped listener frees its port for any parallel test to take,
+    // so the dead port is one this test holds bound, never in LISTEN.
+    let (_reservation, dead) = reserved_loopback_port();
+    std::fs::write(&file, dead.to_string()).expect("write");
+    assert_eq!(lookup(&file).expect("dead"), AddrLookup::NoListener(dead));
     drop(listener);
-    assert_eq!(lookup(&file).expect("dead"), AddrLookup::NoListener(addr));
+}
+
+/// A TCP socket bound to a fresh 127.0.0.1 port and never put in LISTEN.
+///
+/// Why: without `SO_REUSEADDR`/`SO_REUSEPORT` the kernel binds that port for no
+/// other socket while the fd lives, and the socket adds no LISTEN row to
+/// `/proc/net/tcp` — a port that is free of listeners for the whole test.
+fn reserved_loopback_port() -> (OwnedFd, SocketAddr) {
+    // SAFETY: socket(2) has no memory preconditions; the result is checked.
+    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+    assert!(raw >= 0, "socket: {}", io::Error::last_os_error());
+    // SAFETY: `raw` is a fresh descriptor nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: sockaddr_in is plain data; all-zero is a valid value.
+    let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    sa.sin_family = libc::AF_INET as libc::sa_family_t;
+    sa.sin_addr.s_addr = u32::from(Ipv4Addr::LOCALHOST).to_be();
+    let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+    // SAFETY: `sa` is a valid sockaddr_in of `len` bytes for the call.
+    let rc = unsafe { libc::bind(fd.as_raw_fd(), (&raw const sa).cast(), len) };
+    assert_eq!(rc, 0, "bind: {}", io::Error::last_os_error());
+    // SAFETY: `sa` and `len` are writable and `len` is the buffer size.
+    let rc = unsafe { libc::getsockname(fd.as_raw_fd(), (&raw mut sa).cast(), &mut len) };
+    assert_eq!(rc, 0, "getsockname: {}", io::Error::last_os_error());
+    let port = u16::from_be(sa.sin_port);
+    assert_ne!(port, 0, "the kernel assigned no port");
+    (fd, SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
 }
 
 #[test]
