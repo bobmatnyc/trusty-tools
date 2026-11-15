@@ -285,6 +285,8 @@ pub(crate) fn open_queue_timeout() -> Duration {
 /// falls back to `DEFAULT_RECALL_OPEN_WAIT_SECS` (15). The caller clamps it
 /// below the open-queue bound (`RecallLimits::resolve`).
 /// Test: `recall_limit_defaults`, `recall_secs_reject_zero_negative_and_garbage`.
+// #11255: the only reader, `service::op_limits`, is `server`-only.
+#[cfg(feature = "server")]
 pub(crate) fn recall_open_wait() -> Duration {
     recall_secs_with(
         |k| std::env::var(k).ok(),
@@ -300,6 +302,7 @@ pub(crate) fn recall_open_wait() -> Duration {
 /// What: [`parse_secs_with`] (absent, negative or non-numeric fall back to
 /// `default_secs`), then a zero result is replaced by `default_secs` too.
 /// Test: `recall_secs_reject_zero_negative_and_garbage`.
+#[cfg(feature = "server")]
 pub(crate) fn recall_secs_with(
     lookup: impl Fn(&str) -> Option<String>,
     key: &str,
@@ -319,6 +322,7 @@ pub(crate) fn recall_secs_with(
 /// falls back to `DEFAULT_RECALL_ALL_DEADLINE_SECS` (20). The caller caps it
 /// (`RecallLimits::resolve`).
 /// Test: `recall_limit_defaults`, `recall_secs_reject_zero_negative_and_garbage`.
+#[cfg(feature = "server")]
 pub(crate) fn recall_all_deadline() -> Duration {
     recall_secs_with(
         |k| std::env::var(k).ok(),
@@ -804,6 +808,7 @@ mod tests {
     /// What: a table through `recall_secs_with` with a fixed lookup, so no env
     /// is touched. `u64::MAX` seconds parses; `RecallLimits::resolve` caps it.
     /// Test: itself.
+    #[cfg(feature = "server")]
     #[test]
     fn recall_secs_reject_zero_negative_and_garbage() {
         let default = Duration::from_secs(DEFAULT_RECALL_OPEN_WAIT_SECS);
