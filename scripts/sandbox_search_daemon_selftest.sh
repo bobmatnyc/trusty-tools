@@ -616,5 +616,42 @@ else
   fail symlinked-socket-dir "exit $S23: $OUT23"
 fi
 
+# 18. default-dir-short (#10989): with no --dir and a long $TMPDIR the sandbox
+# dir still lands under /tmp, so the socket path fits sun_path.
+LONGTMP="$TMP_ROOT/$(printf 'long%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)"
+mkdir -p "$LONGTMP"
+set +e
+OUT24="$(env -i PATH="$PATH" TMPDIR="$LONGTMP/" bash "$LAUNCHER" --bin "$STUB" 2>&1)"
+S24=$?
+set -e
+DIR24="$(printf '%s\n' "$OUT24" | sed -n 's/^sandbox_search_daemon: sandbox dir: //p' | head -n 1)"
+SOCK24="$(printf '%s\n' "$OUT24" | sed -n 's/^sandbox_search_daemon: socket: //p' | head -n 1)"
+case "$DIR24" in
+  "$LONGTMP"/*) OK24=0 ;;
+  /tmp/ts-sandbox.*|/private/tmp/ts-sandbox.*) OK24=1 ;;
+  *) OK24=0 ;;
+esac
+if [ "$S24" -eq 0 ] && [ "$OK24" -eq 1 ] && [ "${#SOCK24}" -le 103 ]; then
+  pass default-dir-short
+else
+  fail default-dir-short "exit $S24, dir [$DIR24], socket length ${#SOCK24}: $OUT24"
+fi
+[ -z "$DIR24" ] || rm -rf "$DIR24"
+
+# 19. socket-path-too-long (#10989): an explicit --dir that pushes the socket
+# path over the limit dies, names --dir, and starts nothing.
+DIR25="$TMP_ROOT/$(printf 'deep%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)"
+mkdir -p "$DIR25"
+set +e
+OUT25="$(run_launcher --bin "$STUB" --dir "$DIR25" 2>&1)"
+S25=$?
+set -e
+if [ "$S25" -eq 1 ] && printf '%s' "$OUT25" | grep -qF "unix-socket limit" \
+  && printf '%s' "$OUT25" | grep -qF -- "--dir" && [ ! -e "$DIR25/sandbox.pid" ] && [ ! -e "$DIR25/home" ]; then
+  pass socket-path-too-long
+else
+  fail socket-path-too-long "exit $S25: $OUT25"
+fi
+
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

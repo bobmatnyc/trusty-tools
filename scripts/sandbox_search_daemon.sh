@@ -317,7 +317,9 @@ if [ -n "$DIR" ]; then
 elif [ "$DRY_RUN" -eq 1 ]; then
   SANDBOX="<new mktemp -d>"
 else
-  MADE="$(mktemp -d "${TMPDIR:-/tmp}/ts-sandbox.XXXXXX")"
+  # #10989: under /tmp, not $TMPDIR; macOS $TMPDIR is long and the socket path
+  # <dir>/data/trusty-search/trusty-search.sock must fit sun_path (104 bytes).
+  MADE="$(mktemp -d /tmp/ts-sandbox.XXXXXX)"
   resolve "$MADE"
   SANDBOX="$RESOLVED"
   [ -n "$SANDBOX" ] || die "could not create a sandbox directory"
@@ -382,6 +384,11 @@ else
   ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data/trusty-search")
 fi
 SOCKET="$SANDBOX/data/trusty-search/$SOCKET_NAME"
+# #10989: sun_path holds 104 bytes on macOS (108 on Linux) with the NUL; the
+# daemon refuses a longer path (SocketPathTooLong). 103 usable bytes, both OSes.
+if [ "${SANDBOX#<}" = "$SANDBOX" ] && [ "${#SOCKET}" -gt 103 ]; then
+  die "socket path is ${#SOCKET} bytes, over the 103-byte unix-socket limit: $SOCKET; pass a shorter --dir (for example /tmp/ts-sbx)"
+fi
 
 echo "sandbox_search_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_search_daemon: socket: $SOCKET"
