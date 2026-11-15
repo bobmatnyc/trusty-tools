@@ -5,7 +5,9 @@ Test: tests/test_owner_answer_read_back.py
 """
 import importlib.util
 import json
+import fcntl
 import os
+import subprocess
 import sys
 
 import pytest
@@ -44,7 +46,7 @@ def test_read_back_returns_the_stored_answer_and_version_not_the_value_in_hand(t
     assert got["text"] == LONG and got["text"] != hook_line_text
     assert got["version"] == 1
     assert read_back_cli(tmp_path, entry) == 0
-    assert capsys.readouterr().out == f"D29\tanswered\t2026-11-01T20:00:00Z\tv1\t{LONG}\n"
+    assert capsys.readouterr().out == f"D29\tanswered\t2026-11-01T20:00:00Z\t1\t{LONG}\n"
 
 
 def test_answer_saved_again_after_the_listing_blocks_the_action(tmp_path, capsys):
@@ -100,3 +102,39 @@ def test_answer_saved_after_the_read_back_stays_pending_and_is_acted_on(tmp_path
     fresh = listed(tmp_path, "D29")
     assert fresh["text"] == "no, wait for the audit"
     assert oa.read_back(str(tmp_path), "D29", fresh["kind"], fresh["at"])["text"] == "no, wait for the audit"
+
+
+def test_printed_version_is_directly_usable_as_if_version(tmp_path, capsys):
+    """#10680: the fourth column passes to `dashboard-db.py --if-version` (an int) as printed."""
+    answer(tmp_path, "D29", "yes", "2026-11-01T20:00:00Z")
+    ds.Store(str(tmp_path)).update("items", "D29", {"priority": "high"}, if_version=1)   # version 2
+    entry = listed(tmp_path, "D29")
+    assert read_back_cli(tmp_path, entry) == 0
+    version = capsys.readouterr().out.split("\t")[3]
+    assert version == "2"
+    db = os.path.join(SCRIPTS, "dashboard-db.py")
+    done = subprocess.run([sys.executable, "-I", db, "--root", str(tmp_path), "update", "items", "D29",
+                           "--json", json.dumps({"relayed": "2026-11-01T20:01:00Z tm-apex"}), "--if-version", version],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    assert ds.Store(str(tmp_path)).get("items", "D29")["data"]["relayed"].startswith("2026-11-01T20:01:00Z")
+
+
+def test_read_back_behind_a_held_writer_lock_exits_2_with_nothing_on_stdout(tmp_path, capsys, monkeypatch):
+    """#10680/#10679: a read that times out behind a hung writer is unreadable (exit 2), never confirmed or mismatched."""
+    answer(tmp_path, "D29", "yes", "2026-11-01T20:00:00Z")
+    entry = listed(tmp_path, "D29")
+    monkeypatch.setattr(ds, "LOCK_WAIT", 0.2)
+    held = open(tmp_path / ".lock", "a")
+    fcntl.flock(held, fcntl.LOCK_EX)   # a writer that never lets go
+    try:
+        with pytest.raises(oa.ReadBackError) as err:
+            oa.read_back(str(tmp_path), "D29", entry["kind"], entry["at"])
+        assert err.value.reason == "unreadable" and isinstance(err.value.__cause__, ds.Unavailable)
+        code = read_back_cli(tmp_path, entry)
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        held.close()
+    out = capsys.readouterr()
+    assert code == 2, out.err
+    assert out.out == "" and "unreadable" in out.err

@@ -324,7 +324,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "51cec9169b480299b7de6058fadff6433a7433b753b7663677e92b34166b99d1",
+            "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first

@@ -17,8 +17,8 @@ or "general"; cleared by a later `updates` entry or by the Architect setting par
 Why: the Architect runs it before each reply so an owner answer is never missed.
 What: prints the session-qualified id (S14:Ddb; bare when the item has no known session), time and answer per item; exit 1 if any exist, 0 if none, 2 on a store error.
 --read-back ID --kind KIND --at AT [--text TEXT] (#10680): re-reads that one item from the store before the Architect acts
-on it. Exit 0 prints "<qid>, kind, at, v<version>, stored text" tab-separated (relay that text; mark relayed with
---if-version <version>); exit 3 when the item is gone, no longer pending, re-answered or its text differs; exit 2 when
+on it. Exit 0 prints "<qid>, kind, at, version, stored text" tab-separated (relay that text; mark relayed with
+--if-version <version>, the bare integer); exit 3 when the item is gone, no longer pending, re-answered or its text differs; exit 2 when
 the read fails. Nothing goes to stdout unless the answer is confirmed.
 Root: --root or DASHBOARD_ROOT, default local/owner-queue.
 Test: scripts/test_fleet_poll_owner_answer.py, tests/test_owner_answer_read_back.py
@@ -68,7 +68,7 @@ def read_back(args):
     except (OSError, owner_answers.ds.StoreError) as err:
         print(f"pending-answers: read-back refused, do not act: unreadable: {err}", file=sys.stderr)
         return 2
-    print(f"{qid}\t{e['kind']}\t{e['at']}\tv{e['version']}\t{e['text']}")
+    print(f"{qid}\t{e['kind']}\t{e['at']}\t{e['version']}\t{e['text']}")
     return 0
 
 
