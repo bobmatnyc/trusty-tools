@@ -368,15 +368,15 @@ fn unbound_architect_reads_pass_after_this_lift_and_sends_do_not_11273() {
         (slack_send(&fx), false),
     ] {
         let read: Result<Value, HookStdinError> = Ok(call.clone());
-        let first = verdict(&read, &table, |p| evaluate(p, &env, &config));
-        let (first, allowed) = lift(first, &read, &table, &env, &config);
+        let first = verdict(&read, &table, |p| evaluate(p, &env, config));
+        let (first, allowed) = lift(first, &read, &table, &env, config);
         assert!(allowed.is_none(), "the record-bound lift must not fire");
         let (v, _) = main_read(first, &read, &table, &env);
         assert_eq!(v == Verdict::Allow, want_allow, "{call}");
     }
     let read: Result<Value, HookStdinError> = Ok(slack_bash(&fx));
-    let first = verdict(&read, &table, |p| evaluate(p, &env, &config));
-    let (first, _) = lift(first, &read, &table, &env, &config);
+    let first = verdict(&read, &table, |p| evaluate(p, &env, config));
+    let (first, _) = lift(first, &read, &table, &env, config);
     match first {
         Verdict::Deny { check, reason } => {
             assert_eq!(check, BASH_CHECK);
