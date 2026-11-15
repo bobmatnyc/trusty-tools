@@ -166,7 +166,7 @@ class Broker(Pages):
         for future in peer.pending.values():
             if not future.done():
                 future.set_exception(ConnectionResetError())
-        self.peer_gone(peer)  # #11239: the profile's grants end with its pairing.
+        self.peer_gone(peer)  # #11239: grants wait RECONNECT_GRACE for the worker.
 
     async def bootstrap(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -353,6 +353,7 @@ class Broker(Pages):
                 raise Refusal("DuplicateProfile")
             peer = Peer(writer, row, incarnation)
             self.peers[name] = peer
+            self.peer_back(peer)  # #11239: rebind grants across a worker restart.
             # #11239: ``live`` lets the worker prune grants whose end it missed.
             ack = {"ok": True, "generation": peer.generation, "live": self.live(name)}
             await write_frame(writer, ack)

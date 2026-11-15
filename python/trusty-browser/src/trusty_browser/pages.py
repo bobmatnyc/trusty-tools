@@ -231,6 +231,9 @@ class Pages(Grants):
                 code == "UnknownGrant"
                 or code in ("BrowserDisconnected", "OutcomeUnknown")
                 and (self.peers.get(str(grant.row["profile"])) is not peer)
+                # #11239: a grant in its reconnect grace, or already rebound, lives on.
+                and grant.grace_until is None
+                and grant.generation == peer.generation
             ):
                 await self.end(grant, "browser_gone")
             raise

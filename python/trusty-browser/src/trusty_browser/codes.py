@@ -15,7 +15,9 @@ if TYPE_CHECKING:
     from trusty_browser.protocol import Session
 
 CODE_TTL = 300.0
-GRANT_IDLE = 1800.0
+# #11239 owner ruling: a redeemed grant has no idle timeout; it lasts until the
+# browser closes, so only a lost service worker that never returns ends it.
+RECONNECT_GRACE = 45.0
 MAX_GRANTS_PER_TAB = 1
 FAIL_LIMIT = 5
 FAIL_WINDOW = 60.0
@@ -62,6 +64,8 @@ class Grant:
     session: Session | None = None
     last_used: float = 0.0
     reason: str | None = None
+    incarnation: str | None = None
+    grace_until: float | None = None
 
     def fields(self) -> dict[str, object]:
         """Audit fields: never the code, its digest or the URL path."""

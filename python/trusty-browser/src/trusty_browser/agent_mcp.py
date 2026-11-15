@@ -145,6 +145,8 @@ class CodeSession:
         self.lock = Lock()
         self.wire: socket.socket | None = None
         self.stream: BinaryIO | None = None
+        # #11239: the last GrantEnded reason, so NotConnected says why.
+        self.ended: str | None = None
 
     def drop(self) -> None:
         if self.stream is not None:
@@ -195,16 +197,26 @@ class CodeSession:
             if not reply["ok"]:
                 self.drop()  # The broker closes a refused redeem; so do we.
                 raise Refused(reply)
+            self.ended = None
             return reply
 
     def call(self, op: str, **fields: object) -> dict[str, Any]:
         with self.lock:
             if self.wire is None:
-                raise local("NotConnected", NOT_CONNECTED)
+                frame: dict[str, Any] = {
+                    "ok": False,
+                    "error": "NotConnected",
+                    "message": NOT_CONNECTED,
+                }
+                if self.ended is not None:
+                    frame["reason"] = self.ended
+                raise Refused(frame)
             reply = self.exchange({"op": op, **fields})
             if not reply["ok"]:
                 if reply.get("error") == "GrantEnded":
                     self.drop()  # The broker closes the socket after this frame.
+                    reason = reply.get("reason")
+                    self.ended = reason if isinstance(reason, str) else "revoked"
                 raise Refused(reply)
             return reply
 
@@ -212,6 +224,7 @@ class CodeSession:
         with self.lock:
             held = self.wire is not None
             self.drop()
+            self.ended = None
         return {"ok": True, "disconnected": held}
 
 

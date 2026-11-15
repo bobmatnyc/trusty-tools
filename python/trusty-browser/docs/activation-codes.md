@@ -48,11 +48,24 @@ fields are refused.
   the click that mints a profile code and held while the profile has a live code or
   grant (see "All-https access"); it covers every `https:` page of the
   profile.
-- Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
+- Constants (`codes.py`): `CODE_TTL = 300` s, `RECONNECT_GRACE = 45` s,
   `MAX_GRANTS_PER_TAB = 1`, lockout `FAIL_LIMIT = 5` failures
   in `FAIL_WINDOW = 60` s, first lock `LOCK_BASE = 60` s, doubling per repeat
   lock up to `LOCK_MAX = 900` s. Lease `TTL = 60` s (`leases.py`). There is no
   cap on the total number of grants.
+- Grant lifetime (owner ruling, #11239): a redeemed grant has no idle
+  timeout. It lasts until the browser closes, the owner revokes it, the agent
+  disconnects, or its tab, pairing or enrollment goes away. The browser is
+  identified by the hello's `incarnation`, which the worker keeps in
+  `chrome.storage.session`: it survives a service-worker restart and is
+  cleared when Chrome closes. When the native port drops, the profile's
+  active grants wait `RECONNECT_GRACE` for a new hello. The same
+  `incarnation` rebinds them, and their tab codes, to the new pairing
+  generation before the acknowledgement's `live` list is built. A different
+  `incarnation` ends them `browser_gone` at that hello, and no hello within
+  the grace ends them `browser_gone` at the grace deadline. During the grace
+  an op answers `BrowserDisconnected` and the grant stays. The 45 s covers
+  the worker's 30 s maximum reconnect backoff plus a margin.
 
 ## Build constraints
 
@@ -104,8 +117,8 @@ these signals:
 1. `grant_end` with `"last": true` (see "Browser hop"). The broker sends
    `grant_end` on every end route: agent release of the session
    (disconnect, socket close: reason `closed`), operator or popup revoke
-   (`revoked`), idle expiry (`idle`), tab closed (`tab_closed`), worker
-   `UnknownGrant` (`browser_gone`), result-line audit failure (`audit`),
+   (`revoked`), tab closed (`tab_closed`), worker `UnknownGrant` or a
+   browser that did not return within `RECONNECT_GRACE` (`browser_gone`), result-line audit failure (`audit`),
    unpair or unenroll (`unenrolled`), and unredeemed code expiry
    (`expired`). `last` is true when, after this end, the profile holds no
    unredeemed code and no live grant.
@@ -129,7 +142,7 @@ these signals:
 5. The offline check. While the native port is down the broker can send
    nothing, yet then holds nothing of the profile once every code has
    expired: the port's loss ends every grant of its pairing generation
-   (`browser_gone`), redeem needs a connected browser, and a code expires
+   (`browser_gone`) once `RECONNECT_GRACE` passes without a reconnect, redeem needs a connected browser, and a code expires
    `CODE_TTL` after its mint. The worker records when the port dropped, moves
    that time forward on each successful mint, and empties its table and
    removes the permission when it has gone `OFFLINE_QUIET` without an
@@ -158,11 +171,13 @@ every mint refusal, 4 is local state the broker never sees, 5 is the
 case where the broker is unreachable, and 6 is the case where the broker's
 answer did not arrive.
 
-- Idle expiry and code expiry reach the worker without waiting for an agent
-  call: the broker keeps one deadline callback on its own event loop (no
-  thread, no process) set to the earliest code deadline or grant idle
-  deadline, and ends what is due when it fires. It is re-armed after every
-  mint, every redeem (granted or refused) and every sweep, and cancelled with
+- Code expiry and the reconnect-grace deadline reach the worker without
+  waiting for an agent call: the broker keeps one deadline callback on its
+  own event loop (no thread, no process) set to the earliest code deadline or
+  grace deadline, and ends what is due when it fires. An active grant whose
+  browser is connected has no deadline. The callback is re-armed after every
+  mint, every redeem (granted or refused), every port loss or hello, and
+  every sweep, and cancelled with
   its in-flight sweep when the broker closes. A sweep that raises is logged
   and still re-arms.
 - `unpair` removes the permission too; the worker does it on the `unpair`
@@ -289,8 +304,7 @@ Request: `{"op": "redeem", "code": "tb-..."}`
 Reply:
 
 ```json
-{"ok": true, "grant": "g-...", "scope": "profile", "profile": "<uuid>",
- "idle_timeout_s": 1800}
+{"ok": true, "grant": "g-...", "scope": "profile", "profile": "<uuid>"}
 ```
 
 Tab scope adds `"tab": 7`. The grant belongs to this socket connection only.
@@ -396,15 +410,13 @@ named in "Per-operation checks". `OutcomeUnknown` is the one reply that may
 follow a page change; the agent reads the page to learn the outcome.
 
 `GrantEnded.reason` is one of `revoked`, `tab_closed` (the granted tab
-answered `TabNotFound`), `browser_gone` (the profile's pairing generation
-ended or was replaced, or the worker no longer knows the grant), `unenrolled`
-(the enrollment or pairing was removed or replaced), `idle` (no operation for
-`GRANT_IDLE`), `audit` (an operation's result line could not be written). An
-idle grant ends at its own next operation, or earlier at the next mint, redeem
-or operator op, whichever comes first; once ended it no longer counts toward
-`MAX_GRANTS_PER_TAB` or appears in a `grants` list, and its agent's next call
-answers `GrantEnded` with `reason: idle`. A grant also ends silently when its
-socket closes. When a grant ends its leases are dropped and the broker sends
+answered `TabNotFound`), `browser_gone` (the browser closed or restarted:
+a hello with a new `incarnation`, or no hello within `RECONNECT_GRACE`; or
+the worker no longer knows the grant), `unenrolled` (the enrollment or
+pairing was removed or replaced), `audit` (an operation's result line could
+not be written). No grant ends for idleness. An ended grant no longer counts
+toward `MAX_GRANTS_PER_TAB` or appears in a `grants` list. A grant also ends
+silently when its socket closes. When a grant ends its leases are dropped and the broker sends
 `grant_end` to the worker, best effort, without delaying the agent's reply
 (see "All-https access" for `last` and the reconnect list). A click, type or
 navigate in flight when its grant ends answers `OutcomeUnknown`; any other op
@@ -627,7 +639,9 @@ current content; empty `text` clears it.
   as today. A tab grant binds one incarnation at mint. Any command for a
   lease whose generation is not the grant's answers `GrantEnded` with
   `browser_gone`; the broker never resends an old tab id into a new
-  generation.
+  browser incarnation. A reconnect of the same incarnation (a
+  service-worker restart) moves the grant to the new generation; leases
+  taken before it were dropped with the old peer.
 - **documentId (worker)**: the broker stores on each code-session lease the
   `document` of its latest `select` or `page_read` reply, null until one
   reports access, and sends it with every `page_read`, `page_click` and
@@ -654,7 +668,8 @@ when the change crossed origins.
 ## Per-operation checks, audit and grant fate
 
 Before every op the broker runs, in order: grant liveness (`check_live`:
-idle, generation, enrollment or pairing still current), the admitted audit
+generation, with `BrowserDisconnected` inside the reconnect grace, and
+enrollment or pairing still current), the admitted audit
 line, frame validation, the journal (`page_click`, `page_type`,
 `page_navigate`: a recorded `request_id` answers here), and lease validation.
 Then the op's own scope check
@@ -710,7 +725,7 @@ Grant and lease fate per refusal:
 | `TabNotFound`, tab grant | ends `tab_closed`; the agent gets `GrantEnded` | dropped |
 | `UnknownGrant` from the worker | ends `browser_gone`; the agent gets `GrantEnded` | dropped |
 | `ProfileMismatch`, `IdentityMismatch`, `TabMismatch` | stays until the pairing generation ends | dropped |
-| `BrowserDisconnected`, `OutcomeUnknown` | ends `browser_gone` when the peer is gone, else stays | dropped |
+| `BrowserDisconnected`, `OutcomeUnknown` | stays; a lost peer starts the reconnect grace (see "Grant lifetime") | dropped |
 | `AuditUnavailable` (admitted line) | stays | stays; nothing was sent |
 | result line write fails | ends `audit` | dropped |
 
@@ -753,7 +768,7 @@ again. A broker error reaches the popup as `error` set to the error name.
 | Choose scope | The target tab's origin and title; the grant list | **Give access to this tab** (primary, first) sends `mint` with `scope: "tab"`; **Give access to the whole profile** (secondary, second, labelled as every tab in this profile) sends `mint` with `scope: "profile"` |
 | Code shown | The code in a monospace field, a countdown `m:ss` to `expires_at`, the scope, the grant list | **Copy** writes the code with `navigator.clipboard.writeText` (sends nothing); **Cancel code** sends `revoke_grant` for its grant |
 | Code expired | "Code expired" | **New code** returns to Choose scope |
-| Grant list (part of the two states above) | One row per entry: scope, tab origin and title when known, `waiting for agent, m:ss left` (code) or `agent connected, idle m:ss` (active) | **Disconnect** per row sends `revoke_grant`; **Disconnect all** sends `revoke_grants`. The list refreshes with `grants` every 5 seconds while the popup is open |
+| Grant list (part of the two states above) | One row per entry: scope, tab origin and title when known, `waiting for agent, m:ss left` (code) or `agent connected, idle m:ss` (active; informational, no timeout) | **Disconnect** per row sends `revoke_grant`; **Disconnect all** sends `revoke_grants`. The list refreshes with `grants` every 5 seconds while the popup is open |
 | Workflow enrolled | Existing activation details; the status line reads "Extension active" | Existing controls, plus Choose scope above them |
 
 When the target tab has no page access (for example a `chrome://` page), the
@@ -789,7 +804,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 
 | Tool | Parameters | Result |
 |---|---|---|
-| `browser_connect` | exactly one of `code_file: str` (preferred) or `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only), `idle_timeout_s`. Never the code |
+| `browser_connect` | exactly one of `code_file: str` (preferred) or `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only). Never the code |
 | `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `disconnected` is `false` when no session was held |
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
@@ -822,7 +837,8 @@ dropped and the connect proceeds, so a dead session never blocks a new code.
 Session drop: a refused redeem (every error in "redeem"), a `GrantEnded`
 reply, and any `ServiceUnavailable` drop the session. The next tool other
 than `browser_connect` answers `NotConnected`, and `browser_connect` with a
-new code works.
+new code works. After a `GrantEnded`, `NotConnected` carries that frame's
+`reason` until the next successful `browser_connect` or `browser_disconnect`.
 
 The code is never logged, written to disk, or placed in a result or error
 text. The adapter has no log line of its own, and the MCP library logs only
@@ -943,7 +959,7 @@ Python (broker and shim):
   fields, the lease stays, the journal holds no entry for that `request_id`,
   and a retry with the same `request_id` runs again.
 - `PermissionNeeded`: relayed with `tab` and `origin`; grant and lease stay.
-- Ended grant: after revoke (popup or operator), idle, unpair, `TabNotFound`
+- Ended grant: after revoke (popup or operator), unpair, `TabNotFound`
   on a tab grant, and `UnknownGrant`, the next op answers `GrantEnded` with
   the right reason, the connection closes, and `grant_end` is sent to the
   fake worker.
