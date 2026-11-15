@@ -785,7 +785,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 
 | Tool | Parameters | Result |
 |---|---|---|
-| `browser_connect` | `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only), `idle_timeout_s`. Never the code |
+| `browser_connect` | exactly one of `code_file: str` (preferred) or `code: str` | The redeem reply: `ok`, `grant`, `scope`, `profile`, `tab` (tab scope only), `idle_timeout_s`. Never the code |
 | `browser_disconnect` | none | `{"ok": true, "disconnected": true}`; `disconnected` is `false` when no session was held |
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
@@ -807,7 +807,8 @@ refusals carry `ok`, `error` and `message`:
 | `ServiceUnavailable` | `agent.sock` is missing, refuses the connection, closes, times out (30 s) or sends a bad frame, on any tool that uses the socket | None. A later `browser_connect` works once the broker is up, without restarting the server |
 | `NotConnected` | Any tool other than `browser_connect` and `browser_disconnect` with no session | None |
 | `AlreadyConnected` | `browser_connect` while a live session is held | Unchanged. The new code is not sent and stays redeemable |
-| `InvalidRequest` | `browser_connect` with a `code` that is not a string. The message never quotes the value | Unchanged; nothing is sent |
+| `InvalidRequest` | `browser_connect` with a `code` that is not a string, a `code_file` that is not a non-empty string, or both or neither of `code` and `code_file`. The message never quotes the value | Unchanged; nothing is sent |
+| `CodeFileRefused` | `browser_connect` with a `code_file` the adapter refuses (see "Passing a code by file"). The message is `code_file <path>: <reason>` | Unchanged; nothing is sent |
 
 Second-connect rule: refuse. `browser_connect` on a live session answers
 `AlreadyConnected`; call `browser_disconnect` first. Before refusing, the
@@ -822,6 +823,29 @@ new code works.
 The code is never logged, written to disk, or placed in a result or error
 text. The adapter has no log line of its own, and the MCP library logs only
 request types.
+
+### Passing a code by file
+
+An activation code is a secret. Passed as `code`, it lands in the agent's
+transcript. Instead, the owner saves the code to a file only they can read
+and gives the agent the path; the agent calls
+`browser_connect(code_file="/path/to/file")`. The adapter reads the file and
+sends the same `redeem` frame that `code` sends.
+
+```sh
+(umask 077; pbpaste > ~/.trusty/code.txt)   # creates the file as 0600
+```
+
+The adapter refuses the file, with `CodeFileRefused`, when it:
+
+- is a symlink (checked without following it);
+- does not exist, is not a regular file, or cannot be read;
+- is not owned by the current user;
+- has any group or other permission bit set. Use mode `0600` or `0400`;
+- is larger than 1024 bytes, is not UTF-8, or is empty or whitespace only.
+
+Surrounding whitespace and a trailing newline are stripped from the code.
+The refusal message names the path and the reason, never the file's content.
 
 ## Audit log
 

@@ -6,6 +6,7 @@ Code mode contract (#11239): docs/activation-codes.md, "MCP tools".
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -18,7 +19,7 @@ from threading import Lock
 from typing import Annotated, Any, BinaryIO
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import WithJsonSchema
+from pydantic import Field, WithJsonSchema
 
 from trusty_browser import vault
 
@@ -214,8 +215,81 @@ class CodeSession:
         return {"ok": True, "disconnected": held}
 
 
-# #11239: an unvalidated parameter, so a non-string code is never quoted back.
-CodeArg = Annotated[Any, WithJsonSchema({"type": "string"})]
+class _Absent:
+    """Marks a ``browser_connect`` argument the caller left out (unlike ``null``)."""
+
+
+ABSENT: Any = _Absent()
+CODE_FILE_MAX = 1024
+ONE_INPUT = "Give exactly one of code or code_file"
+
+
+def _optional(description: str) -> Any:
+    # #11239: unvalidated, so a non-string value is never quoted back; a
+    # default_factory keeps the default out of the schema and tells absent from null.
+    return Annotated[
+        Any,
+        WithJsonSchema({"type": "string", "description": description}),
+        Field(default_factory=lambda: ABSENT),
+    ]
+
+
+CodeArg = _optional(
+    "The activation code itself. It lands in your transcript; prefer code_file."
+)
+CodeFileArg = _optional(
+    "Path to an owner-only file (mode 0600 or 0400, not a symlink) holding the"
+    " activation code. Preferred: the code never enters your transcript."
+)
+
+
+def code_from_file(raw: object) -> str:
+    """Read an activation code from an owner-only file without ever echoing it.
+
+    Why: a code is a secret; a path keeps it out of the agent's transcript (#11239).
+    What: refuses a symlink (``lstat`` and ``O_NOFOLLOW``), anything but a regular
+    file owned by this user with no group or other bits, and a missing,
+    unreadable, oversize, non-UTF-8 or blank file. Strips surrounding whitespace.
+    A refusal is ``CodeFileRefused`` naming the path and the reason only.
+    Test: `test_code_file_refusals_name_the_path_never_the_code`,
+    `test_code_file_redeems_through_the_same_redeem_as_code`.
+    """
+    if not isinstance(raw, str) or not raw:
+        raise local("InvalidRequest", "code_file must be a non-empty path string")
+
+    def refuse(reason: str) -> Refused:
+        return local("CodeFileRefused", f"code_file {raw}: {reason}")
+
+    try:
+        if stat.S_ISLNK(os.lstat(raw).st_mode):
+            raise refuse("is a symlink")
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise refuse("does not exist") from None
+    except OSError as error:
+        reason = "is a symlink" if error.errno == errno.ELOOP else "cannot be read"
+        raise refuse(reason) from None
+    with os.fdopen(fd, "rb") as handle:
+        attrs = os.fstat(handle.fileno())
+        if not stat.S_ISREG(attrs.st_mode):
+            raise refuse("is not a regular file")
+        if attrs.st_uid != os.getuid():
+            raise refuse("is not owned by the current user")
+        if attrs.st_mode & 0o077:
+            raise refuse("must be owner-only (mode 0600 or 0400)")
+        try:
+            data = handle.read(CODE_FILE_MAX + 1)
+        except OSError:
+            raise refuse("cannot be read") from None
+    if len(data) > CODE_FILE_MAX:
+        raise refuse(f"is larger than {CODE_FILE_MAX} bytes")
+    try:
+        code = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise refuse("is not UTF-8 text") from None
+    if not code:
+        raise refuse("is empty")
+    return code
 
 
 def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None:
@@ -266,9 +340,17 @@ def run_codes(state: Path) -> None:
     server = FastMCP("trusty-browser")
 
     @server.tool()
-    def browser_connect(code: CodeArg) -> dict[str, Any]:
-        """Redeem a one-use activation code (tb-...) from the Trusty Browser popup."""
-        if not isinstance(code, str):
+    def browser_connect(code: CodeArg, code_file: CodeFileArg) -> dict[str, Any]:
+        """Redeem a one-use activation code (tb-...) from the Trusty Browser popup.
+
+        Give exactly one of code_file or code. Prefer code_file, the path of the
+        owner-only file the owner saved the code to, so the code stays secret.
+        """
+        if (code is ABSENT) == (code_file is ABSENT):
+            raise local("InvalidRequest", ONE_INPUT)
+        if code_file is not ABSENT:
+            code = code_from_file(code_file)
+        elif not isinstance(code, str):
             raise local("InvalidRequest", "code must be a string")
         return session.connect(code)
 

@@ -5,6 +5,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import socket
 import struct
 import sys
@@ -12,6 +13,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -200,8 +202,12 @@ def test_code_mode_starts_and_lists_tools_with_no_broker(short, clock):
         tools = (await agent.session.list_tools()).tools
         assert {tool.name for tool in tools} == CODE_TOOLS
         connect = next(t for t in tools if t.name == "browser_connect")
-        assert set(connect.inputSchema["properties"]) == {"code"}
-        assert connect.inputSchema["properties"]["code"]["type"] == "string"
+        props = connect.inputSchema["properties"]
+        assert set(props) == {"code", "code_file"}
+        assert not connect.inputSchema.get("required")
+        assert props["code"]["type"] == props["code_file"]["type"] == "string"
+        assert "prefer code_file" in props["code"]["description"]
+        assert "Prefer code_file" in connect.description
         select = next(t for t in tools if t.name == "browser_select")
         assert select.inputSchema["properties"]["tab"]["type"] == "integer"
         assert unavailable(
@@ -480,6 +486,143 @@ def test_non_string_code_is_refused_without_quoting_it(short, clock):
             assert (await agent.ok("browser_connect", code=secret))["ok"]
 
     drive(short, body)
+
+
+def code_file(folder: Path, name: str, content: str, mode: int = 0o600) -> Path:
+    """A real file with a real mode; the folder sits outside every scanned root."""
+    folder.mkdir(mode=0o700, exist_ok=True)
+    path = folder / name
+    path.write_text(content)
+    os.chmod(path, mode)
+    return path
+
+
+def assert_code_absent(agent: Agent, codes_used: list[str]) -> None:
+    """No result, error text, stderr line, state or audit file carries a code."""
+    needles = [c for code in codes_used for c in (code, code[3:].replace("-", ""))]
+    for text in agent.texts:
+        assert not any(n.lower() in text.lower() for n in needles), text
+    for root in (agent.rig.state, agent.home, agent.errlog):
+        for path in [root] if root.is_file() else root.rglob("*"):
+            if path.is_file():
+                data = path.read_bytes().lower()
+                assert not any(n.lower().encode() in data for n in needles), path
+
+
+def _group(f, s):
+    return code_file(f, "c", s, 0o640), "must be owner-only (mode 0600 or 0400)"
+
+
+def _world(f, s):
+    return code_file(f, "c", s, 0o604), "must be owner-only (mode 0600 or 0400)"
+
+
+def _missing(f, s):
+    f.mkdir(mode=0o700)
+    return f / "absent", "does not exist"
+
+
+def _symlink(f, s):
+    (f / "link").symlink_to(code_file(f, "real", s))
+    return f / "link", "is a symlink"
+
+
+def _empty(f, s):
+    return code_file(f, "c", ""), "is empty"
+
+
+def _blank(f, s):
+    return code_file(f, "c", " \n\t\n"), "is empty"
+
+
+def _unreadable(f, s):
+    return code_file(f, "c", s, 0o200), "cannot be read"
+
+
+def _oversize(f, s):
+    return code_file(f, "c", s + " " * 1024), "is larger than 1024 bytes"
+
+
+@pytest.mark.parametrize(
+    "arm",
+    [_group, _world, _missing, _symlink, _empty, _blank, _unreadable, _oversize],
+    ids=lambda arm: arm.__name__[1:],
+)
+def test_code_file_refusals_name_the_path_never_the_code(short, clock, arm):
+    secrets: list[str] = []
+
+    async def body(agent):
+        async with agent.broker() as broker:
+            minted = await agent.rig.mint(agent.rig.alpha)
+            secrets.append(minted["code"])
+            path, reason = arm(short.parent / "codes", minted["code"])
+            frame = await agent.refused("browser_connect", code_file=str(path))
+            assert frame == {
+                "ok": False,
+                "error": "CodeFileRefused",
+                "message": f"code_file {path}: {reason}",
+            }
+            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
+            assert broker.grants[minted["grant"]].state == "code"  # Nothing sent.
+
+    assert_code_absent(drive(short, body), secrets)
+
+
+@pytest.mark.parametrize("given", ["both", "neither"])
+def test_connect_takes_exactly_one_of_code_and_code_file(short, clock, given):
+    secrets: list[str] = []
+
+    async def body(agent):
+        async with agent.broker() as broker:
+            minted = await agent.rig.mint(agent.rig.alpha)
+            secrets.append(minted["code"])
+            path = code_file(short.parent / "codes", "c", minted["code"])
+            args = {"code": minted["code"], "code_file": str(path)}
+            frame = await agent.refused(
+                "browser_connect", **(args if given == "both" else {})
+            )
+            assert frame == {
+                "ok": False,
+                "error": "InvalidRequest",
+                "message": "Give exactly one of code or code_file",
+            }
+            assert broker.grants[minted["grant"]].state == "code"
+
+    assert_code_absent(drive(short, body), secrets)
+
+
+def test_code_file_redeems_through_the_same_redeem_as_code(short, clock):
+    secrets: list[str] = []
+
+    async def body(agent):
+        folder = short.parent / "codes"
+        async with agent.broker() as broker:
+            unknown = codes.new_code()
+            secrets.append(unknown)
+            path = code_file(folder, "unknown", unknown + "\n")
+            assert await agent.refused("browser_connect", code_file=str(path)) == {
+                "ok": False,
+                "error": "CodeRefused",
+            }
+            minted = await agent.rig.mint(agent.rig.alpha, "tab", 7)
+            secrets.append(minted["code"])
+            path = code_file(folder, "good", "  " + minted["code"] + " \n", 0o400)
+            reply = await agent.ok("browser_connect", code_file=str(path))
+            assert reply == {
+                "ok": True,
+                "grant": minted["grant"],
+                "scope": "tab",
+                "profile": agent.rig.alpha["profile"],
+                "tab": 7,
+                "idle_timeout_s": int(codes.GRANT_IDLE),
+            }
+            assert broker.grants[minted["grant"]].state == "active"
+            assert (await agent.ok("browser_select", tab=7))["lease"]
+            await agent.ok("browser_disconnect")
+            frame = await agent.refused("browser_connect", code_file=str(path))
+            assert frame == {"ok": False, "error": "CodeRefused"}
+
+    assert_code_absent(drive(short, body), secrets)
 
 
 def test_end_to_end_page_session_through_the_mcp_server(short, clock):
