@@ -32,6 +32,8 @@ CODE_TOOLS = {
     "page_type",
     "page_scroll",
     "page_navigate",
+    "page_upload",
+    "page_downloads",
     "browser_release",
 }
 
@@ -683,5 +685,57 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
             }
             await agent.settled()
             assert rig.outcomes("grant_end") == ["closed"]
+
+    drive(short, body)
+
+
+def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
+    async def body(agent):
+        folder = short.parent / "uploads"
+        sample = code_file(folder, "upload-example.txt", "hello file\n")
+        big = code_file(folder, "big.bin", "x" * (agent_mcp.UPLOAD_MAX + 1))
+        async with agent.broker():
+            rig = agent.rig
+            await agent.ok("browser_connect", code=await agent.mint())
+            lease = (await agent.ok("browser_select", tab=7))["lease"]
+            for path, reason in [
+                (folder / "missing.txt", "does not exist"),
+                (folder, "is not a regular file"),
+                (big, f"is larger than {agent_mcp.UPLOAD_MAX} bytes"),
+            ]:
+                frame = await agent.refused(
+                    "page_upload",
+                    lease=lease,
+                    ref="1.0",
+                    paths=[str(path)],
+                    request_id="u",
+                )
+                assert frame == {
+                    "ok": False,
+                    "error": "FileRefused",
+                    "message": f"{path}: {reason}",
+                }
+            relative = await agent.refused(
+                "page_upload", lease=lease, ref="1.0", paths=["a.txt"], request_id="u"
+            )
+            assert relative["error"] == "InvalidRequest"
+            assert rig.a.sent("page_upload") == []
+            done = await agent.ok(
+                "page_upload",
+                lease=lease,
+                ref="1.0",
+                paths=[str(sample)],
+                request_id="u",
+            )
+            assert done == {"ok": True, "tab": 7, "document": "d7-1"}
+            assert rig.a.sent("page_upload")[0]["files"] == [
+                {
+                    "name": "upload-example.txt",
+                    "type": "text/plain",
+                    "data": "aGVsbG8gZmlsZQo=",
+                }
+            ]
+            listed = await agent.ok("page_downloads", lease=lease)
+            assert listed["downloads"][0]["path"].endswith("report.txt")
 
     drive(short, body)
