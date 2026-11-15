@@ -21,7 +21,7 @@
 
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
 use crate::commands::pm_guard_bash::{
-    Substitution, git_subcommand, segment_substitution_spans, split_heredoc_bodies,
+    Substitution, TokenizeError, git_subcommand, segment_substitution_spans, split_heredoc_bodies,
     split_shell_segments, tokenize,
 };
 use crate::commands::pm_guard_secret_read::{
@@ -103,7 +103,12 @@ fn segment_read(masked: &str, subs: &[Masked]) -> Option<String> {
     if !masked.contains("TMSUBST") {
         return None;
     }
-    let argv = tokenize(masked).ok()?;
+    let argv = match tokenize(masked) {
+        Ok(argv) => argv,
+        // #11276: operators it cannot place hide which word a reader reads.
+        Err(TokenizeError::AmbiguousOperators) => return Some(UNPLACED_REASON.to_string()),
+        Err(TokenizeError::UnbalancedQuoting) => return None,
+    };
     let start = strip_wrapper_prefix(&argv).unwrap_or(0);
     let program = command_basename(argv.get(start)?);
     let reader = READERS.contains(&program.as_str());
@@ -165,6 +170,8 @@ fn fixed_output(shown: &str, body: &str) -> Option<String> {
     if body.contains(['$', '`', '\\']) {
         return None;
     }
+    // #11276: a body `tokenize` cannot place has no fixed output, so
+    // `resolve_word` refuses the read it names.
     let argv = tokenize(body).ok()?;
     match argv.first().map(String::as_str) {
         Some("echo") if !body.contains(['|', ';', '&', '<', '>']) => {
@@ -267,6 +274,16 @@ fn shown_word(word: &str, subs: &[Masked]) -> String {
             text.replace(&placeholder(n), shown)
         })
 }
+
+/// The refusal for a segment with a substitution whose shell operators
+/// `tokenize` cannot place (#11276): which word is a file operand is unknown.
+///
+/// Test: `an_unplaced_computed_read_refuses_11276`.
+const UNPLACED_REASON: &str = "`tm hook --pm-guard` refused this command (#11276, #8931): a \
+     segment that runs a command substitution has shell operators the guard cannot place, so \
+     it cannot tell which word a command reads as a file and fails closed. Rewrite the \
+     command in plainer shell; if it reads a secret-bearing file, stop and report to the \
+     Architect.";
 
 /// The refusal text. It names the word as written, never a file's bytes.
 fn deny_reason(program: &str, word: &str, why: &str) -> String {
