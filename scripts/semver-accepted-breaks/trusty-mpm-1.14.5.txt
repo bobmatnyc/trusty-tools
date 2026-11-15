@@ -6,5 +6,3 @@ accept  constructible_struct_adds_field field ProjectDecommissionReport.index_sh
 accept  enum_variant_added variant ProjectDecommissionError:IndexShutdown
 accept  enum_variant_added variant ProjectStoreError:UnresolvableHomePath
 accept  enum_variant_added variant SmGoalError:VerifiedWithoutEvidence
-accept  function_return_type_changed function trusty_mpm::project::assign_project_key
-accept  function_now_async function trusty_mpm::daemon::rpc::sessions_legacy_ops::register_session
