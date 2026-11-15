@@ -120,6 +120,7 @@ class Agent:
         self.home = state.parent / "cwd"
         self.home.mkdir()
         self.errlog = state.parent / "stderr.log"
+        self.upload_root: Path | None = None
 
     @contextlib.asynccontextmanager
     async def broker(self):
@@ -139,7 +140,12 @@ class Agent:
     async def serve(self):
         params = StdioServerParameters(
             command=sys.executable,
-            args=[str(Path(agent_mcp.__file__)), "--state", str(self.rig.state)],
+            args=[str(Path(agent_mcp.__file__)), "--state", str(self.rig.state)]
+            + (
+                []
+                if self.upload_root is None
+                else ["--upload-root", str(self.upload_root)]
+            ),
             cwd=str(self.home),
         )
         with self.errlog.open("a") as errlog:
@@ -181,8 +187,9 @@ class Agent:
         raise AssertionError("grant did not end")
 
 
-def drive(short, body) -> Agent:
+def drive(short, body, upload_root: Path | None = None) -> Agent:
     agent = Agent(short)
+    agent.upload_root = upload_root
 
     async def main():
         async with agent.serve():
@@ -690,10 +697,13 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
 
 
 def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
+    folder = short.parent / "uploads"
+    sample = code_file(folder, "upload-example.txt", "hello file\n")
+    big = code_file(folder, "big.bin", "x" * (agent_mcp.UPLOAD_MAX + 1))
+    outside = code_file(short.parent / "secret", "id_rsa", "key")
+    (folder / "link").symlink_to(outside)
+
     async def body(agent):
-        folder = short.parent / "uploads"
-        sample = code_file(folder, "upload-example.txt", "hello file\n")
-        big = code_file(folder, "big.bin", "x" * (agent_mcp.UPLOAD_MAX + 1))
         async with agent.broker():
             rig = agent.rig
             await agent.ok("browser_connect", code=await agent.mint())
@@ -702,6 +712,9 @@ def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
                 (folder / "missing.txt", "does not exist"),
                 (folder, "is not a regular file"),
                 (big, f"is larger than {agent_mcp.UPLOAD_MAX} bytes"),
+                (outside, "is outside the upload root"),
+                (folder / "link", "is a symlink"),
+                (f"{folder}/../secret/id_rsa", "contains a '..' component"),
             ]:
                 frame = await agent.refused(
                     "page_upload",
@@ -715,10 +728,10 @@ def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
                     "error": "FileRefused",
                     "message": f"{path}: {reason}",
                 }
-            relative = await agent.refused(
-                "page_upload", lease=lease, ref="1.0", paths=["a.txt"], request_id="u"
+            empty = await agent.refused(
+                "page_upload", lease=lease, ref="1.0", paths=[""], request_id="u"
             )
-            assert relative["error"] == "InvalidRequest"
+            assert empty["error"] == "InvalidRequest"
             assert rig.a.sent("page_upload") == []
             done = await agent.ok(
                 "page_upload",
@@ -735,7 +748,40 @@ def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
                     "data": "aGVsbG8gZmlsZQo=",
                 }
             ]
+            relative = await agent.ok(
+                "page_upload",
+                lease=lease,
+                ref="1.0",
+                paths=["upload-example.txt"],
+                request_id="r",
+            )
+            assert relative["ok"] is True
             listed = await agent.ok("page_downloads", lease=lease)
             assert listed["downloads"][0]["path"].endswith("report.txt")
+
+    drive(short, body, upload_root=folder)
+
+
+def test_page_upload_is_refused_without_an_upload_root(short, clock):
+    # PR #11305 review: no --upload-root means no file ever leaves the disk.
+    sample = code_file(short.parent / "uploads", "a.txt", "a")
+
+    async def body(agent):
+        async with agent.broker():
+            await agent.ok("browser_connect", code=await agent.mint())
+            lease = (await agent.ok("browser_select", tab=7))["lease"]
+            frame = await agent.refused(
+                "page_upload",
+                lease=lease,
+                ref="1.0",
+                paths=[str(sample)],
+                request_id="u",
+            )
+            assert frame == {
+                "ok": False,
+                "error": "UploadsDisabled",
+                "message": agent_mcp.UPLOADS_DISABLED,
+            }
+            assert agent.rig.a.sent("page_upload") == []
 
     drive(short, body)

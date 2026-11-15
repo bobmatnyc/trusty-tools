@@ -840,7 +840,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
-| `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply. The tool reads each absolute path (a regular file, 512 KiB in total at most) and sends its basename, guessed MIME type and base64 bytes; a bad path is `FileRefused` naming the path and the reason |
+| `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply. The tool reads each path under `--upload-root` (see "Upload root"; a regular file, 512 KiB in total at most) and sends its basename, guessed MIME type and base64 bytes. Without `--upload-root` it is `UploadsDisabled`; a refused path is `FileRefused` naming the path and the reason |
 | `page_downloads` | `lease: str` | The `page_downloads` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 
@@ -858,6 +858,8 @@ refusals carry `ok`, `error` and `message`:
 | `AlreadyConnected` | `browser_connect` while a live session is held | Unchanged. The new code is not sent and stays redeemable |
 | `InvalidRequest` | `browser_connect` with a `code` that is not a string, a `code_file` that is not a non-empty string, or both or neither of `code` and `code_file`. The message never quotes the value | Unchanged; nothing is sent |
 | `CodeFileRefused` | `browser_connect` with a `code_file` the adapter refuses (see "Passing a code by file"). The message is `code_file <path>: <reason>` | Unchanged; nothing is sent |
+| `UploadsDisabled` | `page_upload` when the server was started without `--upload-root` | Unchanged; nothing is sent |
+| `FileRefused` | `page_upload` with a path the adapter refuses (see "Upload root"). The message is `<path>: <reason>` | Unchanged; nothing is sent |
 
 Second-connect rule: refuse. `browser_connect` on a live session answers
 `AlreadyConnected`; call `browser_disconnect` first. Before refusing, the
@@ -895,6 +897,36 @@ The adapter refuses the file, with `CodeFileRefused`, when it:
 
 Surrounding whitespace and a trailing newline are stripped from the code.
 The refusal message names the path and the reason, never the file's content.
+
+### Upload root
+
+A page can ask the agent to attach a file, and a hostile page can ask for
+`~/.ssh/id_rsa`, `~/.aws/credentials` or a `.env`. So `page_upload` reads only
+files under one directory the owner names at start-up:
+
+```sh
+trusty-browser-mcp --upload-root ~/Uploads/agent
+```
+
+Without `--upload-root`, every `page_upload` answers `UploadsDisabled` and no
+file is read. The root must be an existing directory; the server resolves it
+once, at start-up, to its real path. Give a path relative to the root, or an
+absolute path inside it.
+
+The adapter opens the root, then each path component from the directory
+before it, with `O_NOFOLLOW`. No symlink below the root is followed, so a link
+cannot point the read outside the root, or be swapped between a check and the
+read. It refuses the path, with `FileRefused`, when it:
+
+- has a `..` component;
+- is absolute and outside the root;
+- is a symlink, or passes through one;
+- does not exist, is not a regular file (a directory, FIFO or device), or
+  cannot be read;
+- is larger than 512 KiB.
+
+Put only the files the agent may send in the root; never use your home
+directory as the root.
 
 ## Audit log
 
