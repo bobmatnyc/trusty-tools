@@ -7,9 +7,10 @@ globalThis.TrustyPages = (() => {
   function pageProbe() { return [location.origin, document.title]; }
 
   // Why: an agent addresses elements by refs from its own latest read, never by selectors.
-  // What: walks the top document's light DOM, keeps ref -> WeakRef(element) in an isolated-world map that
+  // What: walks the top document, its open shadow roots and same-origin iframes (#11290), keeps ref -> WeakRef(element) in an isolated-world map that
   //   replaces any earlier map, and returns the read result bounded to 262144 UTF-8 bytes.
-  // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`.
+  // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`,
+  //   `test_read_and_act_inside_iframes_and_shadow_roots`.
   function pageRead(reserve) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const state = globalThis[KEY] || (globalThis[KEY] = {read:0, map:new Map()});
@@ -43,7 +44,7 @@ globalThis.TrustyPages = (() => {
     }
     function accessibleName(el) {
       const labelled = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
-        .map(id => document.getElementById(id)?.innerText || "").join(" ");
+        .map(id => el.getRootNode().getElementById?.(id)?.innerText || "").join(" ");
       const labels = [...(el.labels || [])].map(label => label.innerText).join(" ");
       for (const value of [el.getAttribute("aria-label"), labelled, labels, el.getAttribute("placeholder"),
         el.innerText, el.getAttribute("title"), el.getAttribute("alt")]) {
@@ -52,12 +53,30 @@ globalThis.TrustyPages = (() => {
       }
       return "";
     }
+    const shown = el => el.getClientRects().length > 0 &&
+      el.ownerDocument.defaultView.getComputedStyle(el).visibility === "visible";
+    // #11290: document order through open shadow roots and same-origin iframes. A closed shadow root
+    // is invisible to page script; a cross-origin frame's contentDocument is null, so both are skipped.
+    // Each hit carries its hop path ("iframe", "shadow", "iframe/shadow", ...); "" is the top light DOM.
+    function* walk(root, within) {
+      for (const el of root.querySelectorAll("*")) {
+        if (el.matches(selector)) yield [el, within];
+        const hop = within ? within + "/" : "";
+        if (el.shadowRoot) yield* walk(el.shadowRoot, hop + "shadow");
+        if ((el.localName === "iframe" || el.localName === "frame") && shown(el)) {
+          let inner = null;
+          try { inner = el.contentDocument; } catch { inner = null; }
+          if (inner) yield* walk(inner, hop + "iframe");
+        }
+      }
+    }
     const elements = [];
-    for (const el of document.querySelectorAll(selector)) {
-      if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") continue;
+    for (const [el, within] of walk(document, "")) {
+      if (!shown(el)) continue;
       if (elements.length === 500) { truncated = true; break; }
       const ref = read + "." + elements.length, tag = el.localName;
       const entry = {ref, tag, role:el.getAttribute("role") || implicitRole(el), name:accessibleName(el)};
+      if (within) entry.within = within;
       if (tag === "input") entry.type = (el.getAttribute("type") || "text").toLowerCase();
       if (["input","textarea","select"].includes(tag) && entry.type !== "password" &&
           !["checkbox","radio"].includes(entry.type)) entry.value = cut(el.value, 512);
@@ -92,10 +111,16 @@ globalThis.TrustyPages = (() => {
   function pageClick(ref) {
     const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
     const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
+    // #11290: connected all the way up to this document, through shadow hosts and frame elements.
+    let up = el;
+    while (up && up.isConnected && up.getRootNode() !== document) {
+      const root = up.getRootNode();
+      up = root.host || root.defaultView?.frameElement || null;
+    }
+    if (!up || !up.isConnected) return {error:"StaleElement"};
     el.scrollIntoView({block:"center", inline:"center"});
     const box = el.getBoundingClientRect();
-    const at = {bubbles:true, cancelable:true, composed:true, view:window,
+    const at = {bubbles:true, cancelable:true, composed:true, view:el.ownerDocument.defaultView,
       clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
     el.dispatchEvent(new PointerEvent("pointerdown", at));
     el.dispatchEvent(new MouseEvent("mousedown", at));
@@ -124,6 +149,15 @@ globalThis.TrustyPages = (() => {
       const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
       el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
       if (!el || !el.isConnected) return {error:"StaleElement"};
+      {
+        // #11290: connected all the way up to this document, through shadow hosts and frame elements.
+        let up = el;
+        while (up && up.isConnected && up.getRootNode() !== document) {
+          const root = up.getRootNode();
+          up = root.host || root.defaultView?.frameElement || null;
+        }
+        if (!up || !up.isConnected) return {error:"StaleElement"};
+      }
     }
     const KINDS = ["text","search","email","url","tel","password","number"];
     const typeOf = node => (node.getAttribute("type") || "text").toLowerCase();
@@ -361,6 +395,15 @@ globalThis.TrustyPages = (() => {
     const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
     const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
     if (!el || !el.isConnected) return {error:"StaleElement"};
+    {
+      // #11290: connected all the way up to this document, through shadow hosts and frame elements.
+      let up = el;
+      while (up && up.isConnected && up.getRootNode() !== document) {
+        const root = up.getRootNode();
+        up = root.host || root.defaultView?.frameElement || null;
+      }
+      if (!up || !up.isConnected) return {error:"StaleElement"};
+    }
     if (el.localName !== "select" || el.multiple || el.disabled || el.matches(":disabled")) return {error:"NotSelectable"};
     const options = [...el.options].filter(o => !o.disabled && !o.matches(":disabled"));
     const option = options.find(o => o.value === value) || options.find(o => o.label.trim() === value.trim());
@@ -388,6 +431,15 @@ globalThis.TrustyPages = (() => {
       const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
       el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
       if (!el || !el.isConnected) return {error:"StaleElement"};
+      {
+        // #11290: connected all the way up to this document, through shadow hosts and frame elements.
+        let up = el;
+        while (up && up.isConnected && up.getRootNode() !== document) {
+          const root = up.getRootNode();
+          up = root.host || root.defaultView?.frameElement || null;
+        }
+        if (!up || !up.isConnected) return {error:"StaleElement"};
+      }
     }
     const root = document.scrollingElement || document.documentElement, before = root.scrollHeight;
     let added = false, quiet = null, finish;

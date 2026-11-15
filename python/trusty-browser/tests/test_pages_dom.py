@@ -337,3 +337,60 @@ def test_scroll_to_element_and_stale_refs_after_dom_change(feed):
     fresh = ref_of(read(feed), "Item 0")
     assert fresh != first
     assert feed.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"ok": True}
+
+
+NESTED = """
+<title>Nested QA</title>
+<button id="top">Top</button>
+<div id="host"></div>
+<div id="closed"></div>
+<iframe id="frame" srcdoc="<label>Frame name <input id='fname' value='old'></label>
+  <button id='fbtn'>Frame go</button><div id='fhost'></div>"></iframe>
+<iframe id="away" style="display:none" srcdoc="<button>Hidden frame</button>"></iframe>
+"""
+# Builds the open/closed shadow roots and logs every action event, at its real target, into one list.
+NESTED_SETUP = """async () => {
+  const frame = document.getElementById("frame");
+  if (frame.contentDocument?.readyState !== "complete" || !frame.contentDocument.getElementById("fhost"))
+    await new Promise(done => frame.addEventListener("load", done, {once:true}));
+  const open = document.getElementById("host").attachShadow({mode:"open"});
+  open.innerHTML = "<button id='sbtn'>Shadow go</button><textarea id='snote' aria-label='Shadow note'></textarea>";
+  document.getElementById("closed").attachShadow({mode:"closed"}).innerHTML = "<button>Closed go</button>";
+  const inner = frame.contentDocument.getElementById("fhost").attachShadow({mode:"open"});
+  inner.innerHTML = "<span id='lbl'>Deep label</span><input id='deep' aria-labelledby='lbl'>";
+  window.events = [];
+  for (const doc of [document, frame.contentDocument])
+    for (const kind of ["click","input","change"])
+      doc.addEventListener(kind, e => window.events.push(kind + ":" + e.composedPath()[0].id), true);
+  // A native change event is not composed, so a page logs it inside the shadow root.
+  for (const root of [open, inner])
+    root.addEventListener("change", e => window.events.push("change:" + e.target.id), true);
+}"""
+
+
+def test_read_and_act_inside_iframes_and_shadow_roots(page):
+    page.set_content(NESTED)
+    page.add_script_tag(path=str(SCRIPT))
+    page.evaluate(NESTED_SETUP)
+    result = read(page)
+    found = {e["name"]: e.get("within", "") for e in result["elements"]}
+    assert found == {"Top": "", "Shadow go": "shadow", "Shadow note": "shadow", "Frame name": "iframe",
+                     "Frame go": "iframe", "Deep label": "iframe/shadow"}
+    assert "Closed go" not in json.dumps(result) and "Hidden frame" not in json.dumps(result)
+
+    def act(js, name, *rest):
+        return page.evaluate(js, [ref_of(result, name), *rest])
+
+    for name in ("Shadow go", "Frame go"):
+        assert act("([r]) => TrustyPages.pageClick(r)", name) == {"ok": True}
+    for name, text in (("Shadow note", "s"), ("Frame name", "f"), ("Deep label", "d")):
+        assert act("([r, t]) => TrustyPages.pageType(r, t)", name, text) == {"ok": True}
+    assert page.evaluate("events") == ["click:sbtn", "click:fbtn", "input:snote", "change:snote",
+                                       "input:fname", "change:fname", "input:deep", "change:deep"]
+    assert page.evaluate("""() => {
+      const f = document.getElementById("frame").contentDocument;
+      return [document.getElementById("host").shadowRoot.getElementById("snote").value,
+              f.getElementById("fname").value, f.getElementById("fhost").shadowRoot.getElementById("deep").value];
+    }""") == ["s", "f", "d"]
+    page.evaluate("() => document.getElementById('frame').remove()")
+    assert act("([r]) => TrustyPages.pageClick(r)", "Frame go") == {"error": "StaleElement"}
