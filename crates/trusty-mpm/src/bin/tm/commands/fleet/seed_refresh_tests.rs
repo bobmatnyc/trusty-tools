@@ -260,3 +260,62 @@ fn an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608() {
         );
     }
 }
+
+/// #10608: two `init` runs over a configured instance leave the dashboard
+/// questions, the user's `~/.claude` settings and conversations, a non-seeded
+/// skill and an instance-edited shipped skill byte-identical. `HOME` is the
+/// fixture's injected scratch home; no process env is touched.
+#[test]
+fn a_repeat_init_keeps_questions_claude_home_and_skills_10608() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let home = fx.home();
+    let edited_skill = seeded_files()
+        .into_iter()
+        .map(|f| f.dest)
+        .find(|d| d.starts_with(".claude/skills/"))
+        .expect("a seeded skill");
+    let open = r#"{"data":{"state":"open","title":"Pick a host"},"id":"Q1","sv":1,"version":1}"#;
+    let answered = r#"{"data":{"answer":"EVO","state":"answered","title":"Pick a build host"},"id":"Q2","sv":1,"version":2}"#;
+    let kept: Vec<(std::path::PathBuf, String)> = vec![
+        (
+            dir.join("local/owner-queue/questions.jsonl"),
+            format!("{open}\n{answered}\n"),
+        ),
+        (
+            home.join(".claude/settings.json"),
+            "{\"model\":\"opus\",\"theme\":\"dark\"}\n".to_owned(),
+        ),
+        (
+            home.join(".claude/projects/x/conv.jsonl"),
+            "{\"type\":\"user\",\"message\":\"hello\"}\n".to_owned(),
+        ),
+        (
+            dir.join(".claude/skills/coaching/SKILL.md"),
+            "# Coaching\n\nPlain English, minimal words.\n".to_owned(),
+        ),
+        (
+            dir.join(&edited_skill),
+            format!(
+                "{}\n<!-- the instance's own note -->\n",
+                shipped(&edited_skill)
+            ),
+        ),
+    ];
+    for (path, text) in &kept {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    for run in 0..2 {
+        fx.init().unwrap();
+        for (path, text) in &kept {
+            assert_eq!(
+                &std::fs::read_to_string(path).unwrap(),
+                text,
+                "run {run}: {} changed",
+                path.display()
+            );
+        }
+    }
+}
