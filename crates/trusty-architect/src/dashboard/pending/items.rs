@@ -141,12 +141,13 @@ fn status_event(d: &Map<String, Value>, id: &str, out: &mut Vec<PendingEvent>) {
     let event = match status {
         Some("answered") if !done(note, &["Relayed"]) => {
             let answer = d.get("answer").and_then(Value::as_str);
+            // #10765: both kinds append the owner's typed answer_note.
+            let extra = note
+                .and_then(Value::as_str)
+                .map(strip)
+                .filter(|n| !n.is_empty())
+                .map_or_else(String::new, |n| format!(": {n}"));
             if matches!(answer, Some("Architect Do" | "Have Architect Do")) {
-                let extra = note
-                    .and_then(Value::as_str)
-                    .map(strip)
-                    .filter(|n| !n.is_empty())
-                    .map_or_else(String::new, |n| format!(": {n}"));
                 PendingEvent::new(
                     id,
                     "architect_do",
@@ -154,7 +155,8 @@ fn status_event(d: &Map<String, Value>, id: &str, out: &mut Vec<PendingEvent>) {
                     format!("Architect Do{extra}"),
                 )
             } else {
-                PendingEvent::new(id, "answered", s(d, "answered_at"), s(d, "answer"))
+                let text = format!("{}{extra}", s(d, "answer"));
+                PendingEvent::new(id, "answered", s(d, "answered_at"), text)
             }
         }
         Some("cancelled") if !done(note, &closed) => {

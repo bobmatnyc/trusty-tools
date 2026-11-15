@@ -202,12 +202,15 @@ fn records_era_steps(dir: &Path) -> Vec<Step> {
 /// What: equal bytes are unchanged; bytes `shipped_before` lists
 /// for this destination are replaced (mode kept for a script); any other
 /// bytes are an edit, reported skipped and left as is; absent is written.
+/// An instance-owned file ([`refresh::instance_owned`], #10608) that is
+/// present is never replaced, even when it is an earlier shipped copy.
 /// A kept core script lacking this release's wiring adds a `WARNING` step
 /// ([`wiring::kept_copy_warnings`], #11058).
 /// Test: `a_refresh_updates_an_unedited_earlier_copy`,
 /// `a_refresh_keeps_an_edited_copy_and_reports_it`,
 /// `an_edited_seed_or_script_is_never_overwritten`,
-/// `an_edited_poller_without_owner_answer_wiring_is_warned_11058`.
+/// `an_edited_poller_without_owner_answer_wiring_is_warned_11058`,
+/// `an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608`.
 fn deploy_file(
     dir: &Path,
     file: &Seeded<'_>,
@@ -218,6 +221,11 @@ fn deploy_file(
         Ok(bytes) if bytes == file.contents.as_bytes() => {
             Ok(vec![Step::Unchanged(file.dest.clone())])
         }
+        // #10608: an upgrade leaves instance-owned files byte-identical.
+        Ok(_) if refresh::instance_owned(&file.dest) => Ok(vec![Step::Skipped(format!(
+            "{}: instance-owned, kept as is on upgrade",
+            file.dest
+        ))]),
         Ok(bytes) if shipped_before(&file.dest, &bytes) => {
             write_seed(&path, file)?;
             Ok(vec![Step::Changed(format!(

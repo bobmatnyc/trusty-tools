@@ -211,6 +211,11 @@ def _relayed(data):
     return isinstance(r, str) and bool(r.strip())
 
 
+def _with_note(head, note):
+    """`head`, then ": <note>" when the owner typed a non-blank answer_note (#10765)."""
+    return head + (f": {note.strip()}" if isinstance(note, str) and note.strip() else "")
+
+
 def pending_items(items, now):
     out = []
     for doc in sorted(items, key=lambda x: x["id"]):
@@ -222,10 +227,10 @@ def pending_items(items, now):
             # "Architect Do" on an ask (page button; old stored text "Have Architect Do" still accepted): the Architect carries it out, then sets status done.
             if data.get("answer") in ("Architect Do", "Have Architect Do"):
                 out.append({"id": item_id, "kind": "architect_do", "at": str(data.get("answered_at", "")),
-                            "text": "Architect Do" + (f": {str(note).strip()}" if isinstance(note, str) and note.strip() else "")})
+                            "text": _with_note("Architect Do", note)})
             else:
                 out.append({"id": item_id, "kind": "answered", "at": str(data.get("answered_at", "")),
-                            "text": str(data.get("answer", ""))})
+                            "text": _with_note(str(data.get("answer", "")), note)})   # #10765: "Other" plus the typed text
         elif status == "cancelled" and not _done(note, ("Relayed", "Acknowledged")):
             out.append({"id": item_id, "kind": "cancelled", "at": str(data.get("cancelled_at", "")),
                         "text": str(data.get("cancel_note", ""))})

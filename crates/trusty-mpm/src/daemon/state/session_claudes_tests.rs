@@ -1122,17 +1122,19 @@ fn a_malformed_resume_id_grants_nothing_8983() {
 
 /// Error arm (Fail-Open Check): a resume on a workspace tmux server reads the
 /// granted pane's `claude` on that server, and the default server is never
-/// asked. The pane's pid is this test process; its child `claude` (a `sleep`
-/// reached through a link named `claude`) is the one found. Red on
+/// asked. The pane's pid is this test process; its child `claude` (the test
+/// binary reached through a link named `claude`) is the one found. Red on
 /// 2df3760494, whose grant had no socket and read the default server.
 #[serial_test::serial]
 #[tokio::test]
 async fn a_resume_rebind_reads_the_claude_on_the_grants_own_server() {
     let dir = crate::test_support::hermetic_temp_dir();
-    let link = dir.path().join("claude");
-    std::os::unix::fs::symlink("/bin/sleep", &link).expect("link");
+    // #11061: not a `/bin/sleep` link, which uutils `sleep` refuses.
+    use crate::test_support::fake_claude;
+    let link = fake_claude::sleeper_named(dir.path(), "claude");
     let mut claude = std::process::Command::new(&link)
-        .arg("30")
+        .args(fake_claude::argv())
+        .env(fake_claude::SECS_ENV, "30")
         .spawn()
         .expect("spawn claude");
     let log = dir.path().join("calls.log");
