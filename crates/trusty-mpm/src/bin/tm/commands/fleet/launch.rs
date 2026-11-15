@@ -171,6 +171,7 @@ pub(crate) fn claude_pid(name: &str) -> Option<u32> {
 /// session and is `Err`.
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
 /// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`,
+/// `fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270`,
 /// `fleet_init_with_a_session_override_names_every_session`,
 /// `fleet_init_resumes_the_prior_conversation_after_the_record_is_gone`,
 /// `fleet_init_clears_the_conversation_record_when_the_resume_fails`.

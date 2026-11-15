@@ -1100,6 +1100,39 @@ fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() 
     wait_gone(pid);
 }
 
+/// #11270: a launch grant that cannot be written fails `init` before the
+/// `claude` line is typed, and kills the session it created, so no Architect
+/// runs ungranted or unbound. A file in place of the grant directory makes
+/// the grant write fail; the record directory itself stays writable.
+#[test]
+fn fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(records.join("launch-grants"), "not a directory\n").unwrap();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the Architect launch could not be granted")
+            && stderr.contains("the Architect launch grant could not be written"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !env.has_session("tm-architect"),
+        "the ungranted session runs on: {}",
+        text(&out)
+    );
+    assert!(!env.has_session("tm-architect-poll"), "the poller started");
+    let pids = launch_pids(&env);
+    for &pid in &pids {
+        wait_gone(pid);
+    }
+    assert!(pids.is_empty(), "claude started without a grant: {pids:?}");
+}
+
 /// #8436: `--dir` goes through the same preflight as the default, so the
 /// binary refuses `$HOME` and writes no grant.
 #[test]
