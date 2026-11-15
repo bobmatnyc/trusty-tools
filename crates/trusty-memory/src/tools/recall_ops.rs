@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use crate::service::recall_stream::{RecallAllScope, recall_all_scoped};
 
 use super::bm25::{bm25_live_hits, bm25_search_optional, fuse_bm25_into_recall};
-use super::helpers::open_palace_handle;
+use super::recall_open::open_for_recall;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
 use super::palace_index::{PalaceScope, resolve_palace_or_index};
@@ -203,7 +203,8 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // hit from just past the cut.
     let fetch_k = ranking_window(top_k, min_score);
 
-    let handle = open_palace_handle(state, &palace)?;
+    // #11255: off the worker, bounded; a slow open answers `PalaceOpening`.
+    let handle = open_for_recall(state, &palace).await?;
     // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
     // wing- or room-scoped recall is filtered on every path. Resolving it after
     // that early return would let a scoped recall issued during embedder warmup
@@ -287,7 +288,8 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // #8246: same widened window as `memory_recall`.
     let fetch_k = ranking_window(top_k, min_score);
 
-    let handle = open_palace_handle(state, &palace)?;
+    // #11255: same bounded, off-worker open as `memory_recall`.
+    let handle = open_for_recall(state, &palace).await?;
     // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
     // same `room`/`wing` scope as `memory_recall`, resolved before the warming
     // short-circuit so no path can return unscoped results.
@@ -543,7 +545,8 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     settle_superseded(&mut results, &mut sup, include_superseded);
     demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
     results.truncate(top_k);
-    record_served_across(state, &results); // #9881 (Q4): per owning palace.
+    // #9881 (Q4): per owning palace. #11255: no reopen after a deadline hit.
+    record_served_across(state, &results, !outcome.coverage.deadline_exceeded);
 
     let payload: Vec<Value> = results
         .iter()

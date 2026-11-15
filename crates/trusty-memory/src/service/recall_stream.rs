@@ -38,9 +38,10 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
+use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::helpers::{list_palaces_blocking, open_palaces_blocking};
+use super::helpers::{OpenOutcome, list_palaces_blocking, open_palaces_blocking};
 
 /// Which palaces a recall_all searches (ADR-0071 D1, D3).
 ///
@@ -49,7 +50,8 @@ use super::helpers::{list_palaces_blocking, open_palaces_blocking};
 /// the whole estate asks for it.
 /// What: `Resident` (default) searches the palaces the registry holds at call
 /// start and opens none. `All` runs the streamed walk over every non-empty
-/// palace on disk, with no time budget.
+/// palace on disk, within `RecallLimits::all_deadline` (#11255: it had no
+/// time budget; it now answers with what it gathered when the deadline hits).
 /// Test: `recall_all_rejects_an_unknown_scope`,
 /// `default_scope_opens_no_palace_and_keeps_the_resident_set`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -115,6 +117,10 @@ pub struct RecallCoverage {
     pub open_failed: Vec<String>,
     /// Ids of palaces that opened but whose recall errored (#9299).
     pub search_failed: Vec<String>,
+    /// Whether the `scope: "all"` walk stopped at its deadline (#11255).
+    pub deadline_exceeded: bool,
+    /// Palaces the walk did not reach before its deadline (#11255).
+    pub deadline_not_reached: usize,
 }
 
 impl RecallCoverage {
@@ -123,6 +129,7 @@ impl RecallCoverage {
         self.not_resident
             + self.filter_failed
             + self.top_k_zero
+            + self.deadline_not_reached
             + self.open_failed.len()
             + self.search_failed.len()
     }
@@ -153,6 +160,9 @@ impl RecallCoverage {
     ///
     /// What: `coverage` is `"complete"` only when nothing went unsearched.
     /// `not_searched_by_reason` lists only reasons with a non-zero count.
+    /// #11255: `deadline_exceeded` and `palaces_not_reached` are on every
+    /// response; `false` and `0` unless a `scope: "all"` walk ran out of time,
+    /// and then the unreached palaces count under the `deadline` reason too.
     pub fn insert_into(&self, scope: RecallAllScope, out: &mut Map<String, Value>) {
         let not_searched = self.palaces_not_searched();
         debug_assert_eq!(
@@ -167,6 +177,7 @@ impl RecallCoverage {
             ("search_failed", self.search_failed.len()),
             ("filter_failed", self.filter_failed),
             ("top_k_zero", self.top_k_zero),
+            ("deadline", self.deadline_not_reached),
         ] {
             if n > 0 {
                 by_reason.insert(reason, n);
@@ -186,6 +197,12 @@ impl RecallCoverage {
         out.insert("not_searched_by_reason".into(), json!(by_reason));
         out.insert("open_failed".into(), json!(self.open_failed));
         out.insert("search_failed".into(), json!(self.search_failed));
+        // #11255: a partial answer from a deadline hit says so.
+        out.insert("deadline_exceeded".into(), json!(self.deadline_exceeded));
+        out.insert(
+            "palaces_not_reached".into(),
+            json!(self.deadline_not_reached),
+        );
     }
 }
 
@@ -225,6 +242,10 @@ where
     F: FnMut(Vec<Arc<PalaceHandle>>) -> Fut,
     Fut: Future<Output = Result<CrossPalaceRecall>>,
 {
+    // #11255: the `scope: "all"` deadline runs from the call's start; capped,
+    // so an injected or configured value can never overflow the `Instant`.
+    let budget = (state.recall_limits.all_deadline).min(super::op_limits::MAX_RECALL_ALL_DEADLINE);
+    let deadline = Instant::now() + budget;
     let palaces = list_palaces_blocking(state).await?;
     PalaceHandle::without_idle_touch(async move {
         match scope {
@@ -232,7 +253,8 @@ where
             RecallAllScope::All => {
                 let palaces_total = palaces.len();
                 let (kept, palaces_skipped) = skip_empty_palaces(state, palaces).await;
-                let streamed = recall_streamed(state, &kept, label, window, search).await?;
+                let streamed =
+                    recall_streamed(state, &kept, label, window, deadline, search).await?;
                 let open_failed: Vec<String> = streamed
                     .open_failed
                     .iter()
@@ -243,9 +265,12 @@ where
                     .iter()
                     .map(|id| id.as_str().to_string())
                     .collect();
-                let top_k_zero = kept
-                    .len()
-                    .saturating_sub(streamed.searched + open_failed.len() + search_failed.len());
+                let top_k_zero = kept.len().saturating_sub(
+                    streamed.searched
+                        + open_failed.len()
+                        + search_failed.len()
+                        + streamed.not_reached,
+                );
                 Ok(RecallAllOutcome {
                     results: streamed.results,
                     coverage: RecallCoverage {
@@ -255,6 +280,8 @@ where
                         top_k_zero,
                         open_failed,
                         search_failed,
+                        deadline_exceeded: streamed.deadline_exceeded,
+                        deadline_not_reached: streamed.not_reached,
                         ..RecallCoverage::default()
                     },
                 })
@@ -338,6 +365,10 @@ pub(crate) struct Streamed {
     pub(crate) open_failed: Vec<PalaceId>,
     /// Palaces that opened but whose recall errored (#9299).
     pub(crate) search_failed: Vec<PalaceId>,
+    /// Whether the walk stopped at its deadline (#11255).
+    pub(crate) deadline_exceeded: bool,
+    /// Palaces left unsearched because the deadline passed (#11255).
+    pub(crate) not_reached: usize,
 }
 
 /// How many palaces a recall-all holds open at once (issue #7125).
@@ -372,16 +403,23 @@ pub(crate) const RECALL_PALACE_BATCH: usize = 8;
 /// id (highest score wins), sorted by score descending, and truncated to
 /// `top_k`. The ids of palaces that failed to open, and of opened palaces the
 /// search reports failed, are returned, not dropped (#9299).
+/// #11255: the walk stops at `deadline`. A batch not started by then, or whose
+/// open or search is still running then, is counted in `not_reached` and
+/// `deadline_exceeded` is set; the results merged so far are returned. A batch
+/// open cut off this way finishes on a detached task that releases what it
+/// opened, so the deadline leaves no residue.
 /// Test: `recall_all_returns_open_palaces_to_baseline`,
 /// `recall_all_keeps_palaces_that_were_already_open`,
 /// `recall_all_releases_every_batch_when_the_search_fails`,
 /// `recall_streamed_visits_every_palace_in_bounded_batches`,
-/// `a_palace_whose_recall_fails_is_not_counted_as_searched`.
+/// `a_palace_whose_recall_fails_is_not_counted_as_searched`,
+/// `scope_all_returns_partial_results_at_its_deadline`.
 pub(crate) async fn recall_streamed<F, Fut>(
     state: &AppState,
     palaces: &[Palace],
     label: &'static str,
     top_k: usize,
+    deadline: Instant,
     mut search: F,
 ) -> Result<Streamed>
 where
@@ -393,6 +431,8 @@ where
         searched: 0,
         open_failed: Vec::new(),
         search_failed: Vec::new(),
+        deadline_exceeded: false,
+        not_reached: 0,
     };
     if palaces.is_empty() || top_k == 0 {
         return Ok(streamed);
@@ -404,9 +444,16 @@ where
 
     let mut merger = Merger::default();
 
-    for batch in palaces.chunks(RECALL_PALACE_BATCH) {
-        let outcome = open_palaces_blocking(state, batch, label).await;
+    for (index, batch) in palaces.chunks(RECALL_PALACE_BATCH).enumerate() {
+        // #11255: palaces from this batch on, counted if the deadline stops us.
+        let unreached = palaces.len() - index * RECALL_PALACE_BATCH;
+        let Some(outcome) = open_batch_until(state, batch, label, deadline, &pinned).await else {
+            streamed.deadline_exceeded = true;
+            streamed.not_reached = unreached;
+            break;
+        };
         // #9299: a failed open is reported in the coverage, not just logged.
+        let failed_here = outcome.failed.len();
         streamed.open_failed.extend(outcome.failed);
         let handles = outcome.opened;
         if handles.is_empty() {
@@ -415,9 +462,15 @@ where
             continue;
         }
         let opened: Vec<PalaceId> = handles.iter().map(|h| h.id.clone()).collect();
-        let found = search(handles).await;
+        let found = tokio::time::timeout_at(deadline, search(handles)).await;
         // #7125: release before `?` — an erroring search must not leak a batch.
         release_batch(state, &opened, &pinned);
+        let Ok(found) = found else {
+            // #11255: the search was cut off; its batch was opened, not searched.
+            streamed.deadline_exceeded = true;
+            streamed.not_reached = unreached - failed_here;
+            break;
+        };
         let found = found?;
         merger.add(found.results);
         // #9299: a palace whose recall errored after opening is not searched.
@@ -432,6 +485,52 @@ where
 
     streamed.results = merger.finish(top_k);
     Ok(streamed)
+}
+
+/// Open one batch, or give up at `deadline` (#11255).
+///
+/// Why: a batch of cold opens can take longer than the walk has left, and a
+/// palace open cannot be cancelled once it runs on the blocking pool.
+/// What: `None` at once when `deadline` has passed. Otherwise the batch opens
+/// on its own task; its outcome is returned if it lands by `deadline`. If not,
+/// `None`, and a detached task waits for the opens and releases each handle
+/// they brought in that is not in `pinned`. A failed open task counts every
+/// palace of the batch as `failed`, never as opened or absent.
+/// Test: `scope_all_returns_partial_results_at_its_deadline`.
+async fn open_batch_until(
+    state: &AppState,
+    batch: &[Palace],
+    label: &'static str,
+    deadline: Instant,
+    pinned: &HashSet<PalaceId>,
+) -> Option<OpenOutcome<Arc<PalaceHandle>>> {
+    if Instant::now() >= deadline {
+        return None;
+    }
+    let (owned, palaces) = (state.clone(), batch.to_vec());
+    let mut open =
+        tokio::spawn(async move { open_palaces_blocking(&owned, &palaces, label).await });
+    match tokio::time::timeout_at(deadline, &mut open).await {
+        Ok(Ok(outcome)) => Some(outcome),
+        Ok(Err(e)) => {
+            tracing::warn!("{label}: batch open task failed: {e}");
+            Some(OpenOutcome {
+                opened: Vec::new(),
+                failed: batch.iter().map(|p| p.id.clone()).collect(),
+            })
+        }
+        Err(_elapsed) => {
+            let (state, pinned) = (state.clone(), pinned.clone());
+            tokio::spawn(async move {
+                if let Ok(outcome) = open.await {
+                    let ids: Vec<PalaceId> = outcome.opened.iter().map(|h| h.id.clone()).collect();
+                    drop(outcome);
+                    release_batch(&state, &ids, &pinned);
+                }
+            });
+            None
+        }
+    }
 }
 
 /// Split `palaces` into the ones a recall-all must search and a count of the
@@ -595,6 +694,14 @@ mod coverage_tests {
                 "top_k_zero",
                 RecallCoverage {
                     top_k_zero: 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "deadline",
+                RecallCoverage {
+                    deadline_exceeded: true,
+                    deadline_not_reached: 1,
                     ..base.clone()
                 },
             ),

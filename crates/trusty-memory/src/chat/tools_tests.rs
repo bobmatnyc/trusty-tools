@@ -277,3 +277,76 @@ async fn chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot() {
         "context injection: ruling first:\n{context}"
     );
 }
+
+/// The open wait the #11255 chat tests inject; far below [`CHAT_QUEUE_BOUND`].
+const CHAT_OPEN_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+/// The registry's open-queue bound in the #11255 chat tests; an inline open
+/// waits this long on the held lock.
+const CHAT_QUEUE_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A state whose palace `name` exists on disk, is not resident, and opens
+/// under a short open wait and queue bound (#11255).
+fn stalled_chat_state(name: &str) -> crate::AppState {
+    let mut state = test_state().with_recall_limits(crate::service::op_limits::RecallLimits {
+        open_wait: CHAT_OPEN_WAIT,
+        all_deadline: std::time::Duration::from_secs(20),
+    });
+    state.registry = std::sync::Arc::new(
+        crate::engine::PalaceRegistry::from_env()
+            .with_data_root(&state.data_root)
+            .with_open_queue_timeout(CHAT_QUEUE_BOUND),
+    );
+    seed_palace(&state, name);
+    state.registry.remove(&PalaceId::new(name));
+    state
+}
+
+/// Why (#11255 review, F1): the chat `recall_memories` tool opened its palace
+/// inline on the worker, so a queued open parked it for the whole queue bound
+/// and then answered a generic error.
+/// What: holds the palace's open lock and calls the tool on the test's
+/// single-threaded runtime, where an inline open would block the only worker
+/// until the queue bound. The tool must answer within the queue bound with
+/// `kind: "palace_opening"`, `retryable: true`, and no rows.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn chat_recall_memories_answers_palace_opening_for_a_stalled_open() {
+    let state = stalled_chat_state("chatopen");
+    let gate = state
+        .registry
+        .open_lock_for_test(&PalaceId::new("chatopen"));
+    let held = gate.lock();
+    let started = std::time::Instant::now();
+    let args = json!({ "palace_id": "chatopen", "query": "anything" }).to_string();
+    let out = super::tools::execute_tool("recall_memories", &args, &state).await;
+    let waited = started.elapsed();
+    drop(held);
+    assert_eq!(out["kind"], "palace_opening", "{out}");
+    assert_eq!(out["retryable"], true, "{out}");
+    assert_eq!(out["palace"], "chatopen", "{out}");
+    assert!(out["error"].is_string(), "{out}");
+    assert!(waited < CHAT_QUEUE_BOUND, "waited {waited:?}");
+}
+
+/// Why (#11255 review, F1): the per-message context injection swallowed a
+/// failed recall into an empty context, which reads as "nothing relevant".
+/// What: the same stalled open through `recall_context`; the context must
+/// say the palace is still opening, within the queue bound.
+/// Test: this function.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // #11255: holding the open lock is the point
+async fn chat_context_says_a_stalled_palace_is_still_opening() {
+    let state = stalled_chat_state("chatctx");
+    let gate = state.registry.open_lock_for_test(&PalaceId::new("chatctx"));
+    let held = gate.lock();
+    let started = std::time::Instant::now();
+    let context = super::handler::recall_context(&state, "chatctx", "anything").await;
+    let waited = started.elapsed();
+    drop(held);
+    assert!(
+        context.contains("palace 'chatctx' is still opening"),
+        "context: {context}"
+    );
+    assert!(waited < CHAT_QUEUE_BOUND, "waited {waited:?}");
+}
