@@ -152,10 +152,16 @@ fn cli_launch_paths_type_through_the_guard() {
     );
     // #8308: the six sites start `claude` through the launch-spec helper, and
     // the helper is the one caller of the guarded send.
-    let spec_send = "cli_launch::send_spec_launch(";
+    // #11270: the CLI sites reach it through `LaunchHost::start_claude`.
+    let spec_send = "cli_launch::send_spec_launch_at(";
     for (file, needle, sites) in [
-        ("src/bin/tm/commands/launch.rs", spec_send, 2),
-        ("src/bin/tm/commands/session/start.rs", spec_send, 1),
+        ("src/bin/tm/commands/launch.rs", "host.start_claude(", 2),
+        (
+            "src/bin/tm/commands/session/start.rs",
+            "host.start_claude(",
+            1,
+        ),
+        ("src/bin/tm/commands/launch_host.rs", spec_send, 1),
         ("src/client/http_client/session_connect.rs", spec_send, 1),
         // #8878: the fleet path binds itself, so it sends unbound.
         (

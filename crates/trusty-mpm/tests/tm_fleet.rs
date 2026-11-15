@@ -1036,18 +1036,41 @@ fn fleet_init_fails_when_the_poller_pane_is_dead() {
     }
 }
 
+/// A read-only launch record directory under `root`, restored on drop.
+///
+/// #11270: the shim's grant lives in `architect-launch/launch-grants`, so a
+/// file in place of the record directory now fails the grant before
+/// `claude` starts. A writable grant directory under a read-only record
+/// directory fails only the record write, after `claude` starts.
+struct ReadOnlyRecords(PathBuf);
+
+impl ReadOnlyRecords {
+    fn new(root: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let records = root.join("architect-launch");
+        std::fs::create_dir_all(records.join("launch-grants")).unwrap();
+        std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o500)).unwrap();
+        Self(records)
+    }
+}
+
+impl Drop for ReadOnlyRecords {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 /// #10448 Fail-Open Check: a launch record that cannot be written fails
 /// `init` with the record path and the OS error, and kills the session, so no
 /// Architect runs unbound. It was a warning and exit 0, and the unbound
-/// Architect ran on. A file where the launch record directory goes makes the
-/// write fail.
+/// Architect ran on. A read-only launch record directory makes the write fail.
 #[test]
 fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() {
     let env = FleetEnv::new();
     let dir = env.dir();
     let root = env.home.path().join(".trusty-mpm");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("architect-launch"), "not a directory\n").unwrap();
+    let _records = ReadOnlyRecords::new(&root);
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1075,6 +1098,39 @@ fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() 
     assert!(!env.has_session("tm-architect-poll"), "the poller started");
     let pid = launch_pids(&env).pop().expect("the fake claude started");
     wait_gone(pid);
+}
+
+/// #11270: a launch grant that cannot be written fails `init` before the
+/// `claude` line is typed, and kills the session it created, so no Architect
+/// runs ungranted or unbound. A file in place of the grant directory makes
+/// the grant write fail; the record directory itself stays writable.
+#[test]
+fn fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(records.join("launch-grants"), "not a directory\n").unwrap();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("the Architect launch could not be granted")
+            && stderr.contains("the Architect launch grant could not be written"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !env.has_session("tm-architect"),
+        "the ungranted session runs on: {}",
+        text(&out)
+    );
+    assert!(!env.has_session("tm-architect-poll"), "the poller started");
+    let pids = launch_pids(&env);
+    for &pid in &pids {
+        wait_gone(pid);
+    }
+    assert!(pids.is_empty(), "claude started without a grant: {pids:?}");
 }
 
 /// #8436: `--dir` goes through the same preflight as the default, so the
@@ -1434,8 +1490,8 @@ fn fleet_relaunch_refuses_a_pm_dir() {
 }
 
 /// #9092 failure path: a new `claude` that cannot be recorded is exit 1, and
-/// `status` reads it as unbound. #10448: the new `claude` is stopped. A file where the
-/// launch record directory goes makes the record fail.
+/// `status` reads it as unbound. #10448: the new `claude` is stopped. A
+/// read-only launch record directory makes the record fail.
 #[test]
 fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     let env = FleetEnv::new();
@@ -1444,7 +1500,7 @@ fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     assert!(out.status.success(), "{}", text(&out));
     let records = env.home.path().join(".trusty-mpm/architect-launch");
     std::fs::remove_dir_all(&records).unwrap();
-    std::fs::write(&records, "not a directory\n").unwrap();
+    let _records = ReadOnlyRecords::new(&env.home.path().join(".trusty-mpm"));
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));

@@ -342,6 +342,8 @@ async fn start_session_in_place(
     let settings = trusty_mpm::core::launch_policy::provision_settings(&root, path, None, profile);
     // #10127: built before `POST /sessions`, so a lockdown refusal registers nothing.
     let spec = inplace_session_spec(path, &root, &prompt, settings.file.as_deref())?;
+    // #11270: refused before `POST /sessions`, so a refusal adds no record.
+    host.refuse_running_architect(&name, &spec)?;
 
     #[derive(Deserialize)]
     struct Body {
@@ -378,20 +380,27 @@ async fn start_session_in_place(
     let already_running = host.has_session(&body.name);
     let registered =
         crate::commands::launch_host::Registered::new(daemon, body.id.filter(|_| !already_running));
+    // #11270: an Architect start into a running session is refused before the
+    // tmux create, so no supervisor `claude` is left running unbound.
+    let reused = already_running
+        .then(|| reused_session_notice(&spec, &body.name, &host.describe()))
+        .transpose();
+    let reused = match reused {
+        Ok(notice) => notice,
+        Err(e) => return Err(registered.fail(e).await),
+    };
     let workdir = path.to_string_lossy().to_string();
-    if let Err(e) = host.create(&body.name, &workdir) {
+    // #11270: an Architect never attaches to a session it did not make.
+    let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&spec);
+    if let Err(e) = host.create_for(&body.name, &workdir, architect) {
         // #8286: the manual fallback names the prompt file too.
         let hint = manual_launch_hint(&body.name, &workdir, &prompt.file);
         return Err(registered.fail(e.context(hint)).await);
     }
     // #10101: D3c — a session this start did not create is never typed into,
     // as in `tm connect` (`if !already_running`).
-    if already_running {
-        println!(
-            "tmux session {} already existed on {}; left in place, claude was not started in it",
-            body.name,
-            host.describe()
-        );
+    if let Some(notice) = reused {
+        println!("{notice}");
         return Ok(());
     }
     // #2997: disclaim the pane's `claude` off the shared tmux server
@@ -402,38 +411,13 @@ async fn start_session_in_place(
     // `transcript_saving` doctor check.
     // #8286: `spec` carries the prompt `inplace_prompt_file` wrote above.
     let spec_dir = trusty_mpm::runtime::launch_spec::LaunchSpec::root_at(&root);
-    // #8878: only a session this start created is bound; the `claude` in one
-    // that was already running may not be the one it started (as `connect`).
-    let sent = if already_running {
-        trusty_mpm::runtime::cli_launch::send_spec_launch_unbound(
-            host.server(),
-            &body.name,
-            &spec,
-            &spec_dir,
-        )
-        .map(|()| {
-            let architect = trusty_mpm::runtime::architect_bind::spec_is_architect(&spec);
-            trusty_mpm::runtime::architect_bind::bind_reused(architect)
-        })
-    } else {
-        trusty_mpm::runtime::cli_launch::send_spec_launch(
-            host.server(),
-            &body.name,
-            &spec,
-            &spec_dir,
-        )
-    };
-    // #8878: an Architect `claude` the start could not bind is reported.
-    if let Ok(binding) = &sent
-        && let Some(warning) = binding.warning(&body.name)
-    {
-        eprintln!("{warning}");
-    }
-    if let Err(e) = sent {
+    // #11270: only a session this start created reaches here (the reused arm
+    // returned above); an Architect it could not bind is killed and errors.
+    if let Err(e) = host.start_claude(&body.name, &spec, &spec_dir) {
         // Only a session this start created reaches here (D3c guard above).
         host.kill(&body.name);
         let e = anyhow::anyhow!(
-            "claude could not be started in tmux session {} on {}: {e}; the session was killed",
+            "claude could not be started in tmux session {} on {}: {e:#}; the session was killed",
             body.name,
             host.describe()
         );
@@ -441,6 +425,29 @@ async fn start_session_in_place(
     }
     println!("started session {} (tmux + claude)", body.name);
     Ok(())
+}
+
+/// What `tm session start` reports for tmux session `session` on `host` that
+/// was already running, given the `spec` it would have launched.
+///
+/// Why (#11270): the start types nothing into a running session, so an
+/// Architect `spec` would end with no bound Architect and exit 0; it is an
+/// error naming the remedy instead.
+/// What: `Err` with [`trusty_mpm::runtime::architect_bind::refuse_reused`]'s
+/// message for an Architect-stamped `spec`; otherwise `Ok` with the
+/// left-in-place notice the start prints (unchanged for every other spec).
+/// Test: `a_reused_session_refuses_an_architect_spec_11270`,
+/// `a_reused_session_keeps_the_notice_for_a_pm_spec_11270`.
+pub(crate) fn reused_session_notice(
+    spec: &trusty_mpm::runtime::launch_spec::LaunchSpec,
+    session: &str,
+    host: &str,
+) -> anyhow::Result<String> {
+    use trusty_mpm::runtime::architect_bind::{refuse_reused, spec_is_architect};
+    refuse_reused(spec_is_architect(spec), session).map_err(anyhow::Error::msg)?;
+    Ok(format!(
+        "tmux session {session} already existed on {host}; left in place, claude was not started in it"
+    ))
 }
 
 /// The warning printed when the in-place tmux session cannot be created.

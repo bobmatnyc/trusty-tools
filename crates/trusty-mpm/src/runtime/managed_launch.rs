@@ -394,7 +394,9 @@ fn abort_notice(session_id: &str) -> String {
 /// line. On any failure it types [`abort_notice`] (best-effort — a pane that
 /// cannot be typed into cannot be told either), removes the spec it wrote so no
 /// credential is left on disk, and returns the error. #8878: a delivered
-/// Architect spec is then bound (`bind_delivered`).
+/// Architect spec is then bound (`bind_delivered`). #11270: an Architect spec
+/// is granted for the shim before it is typed, and an unbound one is killed
+/// and is an error.
 /// Test: `deliver_types_a_short_line_and_leaves_a_readable_spec`,
 /// `the_daemon_delivery_binds_an_architect_spec_8878`,
 /// `deliver_announces_a_refused_line_in_the_pane`,
@@ -415,11 +417,23 @@ pub(super) fn deliver_in(
     spec: &LaunchSpec,
     spec_dir: &Path,
 ) -> Result<(), super::RuntimeError> {
-    match deliver_inner(tmux, tmux_name, pane_id, spec, spec_dir) {
-        Ok(()) => {
-            bind_delivered(tmux, tmux_name, pane_id, spec);
-            Ok(())
-        }
+    let root = super::architect_bind::home_root();
+    deliver_at(tmux, tmux_name, pane_id, spec, spec_dir, root.as_deref())
+}
+
+/// [`deliver_in`] under the named `~/.trusty-mpm` `root`, which holds the
+/// #11270 grant and the launch record (test seam).
+/// Test: `a_daemon_architect_delivery_is_granted_and_an_unbound_one_is_killed_11270`.
+pub(super) fn deliver_at(
+    tmux: &dyn crate::session_manager::ManagedTmuxDriver,
+    tmux_name: &str,
+    pane_id: Option<&str>,
+    spec: &LaunchSpec,
+    spec_dir: &Path,
+    root: Option<&Path>,
+) -> Result<(), super::RuntimeError> {
+    match deliver_inner(tmux, tmux_name, pane_id, spec, spec_dir, root) {
+        Ok(()) => bind_delivered(tmux, tmux_name, pane_id, spec, root),
         Err(err) => {
             // Best-effort: this notice is short by construction, so the only way
             // it fails is a pane that is gone — in which case the error below is
@@ -434,21 +448,23 @@ pub(super) fn deliver_in(
 ///
 /// Why: the daemon's managed spawn and resume start an Architect from a
 /// stamped spec as the CLI paths do, and wrote no launch record.
-/// What: [`super::architect_bind::bind_launch`] under the process home,
-/// finding the `claude` under the launched pane's shell through `tmux` (the
-/// driver that typed the line, so the same server). Deliver already
-/// confirmed that pane was at a shell prompt, so the `claude` is the one it
-/// started. Not bound is a warning in the daemon log; the launch stands and
-/// the floor denies.
-/// Test: `the_daemon_delivery_binds_an_architect_spec_8878`.
+/// What: [`super::architect_bind::bind_launch`] under `root`, finding the
+/// `claude` under the launched pane's shell through `tmux` (the driver that
+/// typed the line, so the same server). Deliver already confirmed that pane
+/// was at a shell prompt, so the `claude` is the one it started. #11270: not
+/// bound kills the session ([`super::architect_bind::require_bound`]), logs at
+/// ERROR and is `Err`, so the caller marks the record errored.
+/// Test: `the_daemon_delivery_binds_an_architect_spec_8878`,
+/// `a_daemon_architect_delivery_is_granted_and_an_unbound_one_is_killed_11270`.
 fn bind_delivered(
     tmux: &dyn crate::session_manager::ManagedTmuxDriver,
     tmux_name: &str,
     pane_id: Option<&str>,
     spec: &LaunchSpec,
-) {
-    use super::architect_bind::{bind_launch, find_claude_with, home_root};
-    let binding = bind_launch(home_root().as_deref(), spec, tmux_name, || {
+    root: Option<&Path>,
+) -> Result<(), super::RuntimeError> {
+    use super::architect_bind::{bind_launch, find_claude_with, require_bound};
+    let binding = bind_launch(root, spec, tmux_name, || {
         find_claude_with(|| {
             let pane = pane_id
                 .map(str::to_owned)
@@ -456,9 +472,13 @@ fn bind_delivered(
             tmux.pane_pid(&pane)
         })
     });
-    if let Some(warning) = binding.warning(tmux_name) {
-        tracing::warn!("{warning}");
-    }
+    let stop = || tmux.kill_session(tmux_name).map_err(|e| e.to_string());
+    require_bound(binding, tmux_name, stop)
+        .map(drop)
+        .map_err(|why| {
+            tracing::error!("{why}");
+            super::RuntimeError::Spawn(why)
+        })
 }
 
 /// The steps [`deliver`] wraps; see its doc.
@@ -468,6 +488,7 @@ fn deliver_inner(
     pane_id: Option<&str>,
     spec: &LaunchSpec,
     spec_dir: &Path,
+    root: Option<&Path>,
 ) -> Result<(), super::RuntimeError> {
     let wrapper = crate::core::spawn_disclaim::launch_wrapper_bin().ok_or_else(|| {
         super::RuntimeError::Spawn(
@@ -515,10 +536,24 @@ fn deliver_inner(
         let _ = std::fs::remove_file(&path);
         return Err(super::RuntimeError::Spawn(e.to_string()));
     }
+    // #11270: the shim execs an Architect spec only against this grant.
+    let grant = super::architect_bind::spec_is_architect(spec)
+        .then(|| {
+            let root = root.ok_or_else(|| "the home directory cannot be resolved".to_owned())?;
+            super::architect_grant::issue(root, spec).map(|_| root)
+        })
+        .transpose()
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&path);
+            super::RuntimeError::Spawn(format!("the Architect launch could not be granted: {e}"))
+        })?;
     let line = pane_line(&spec.session_id, &wrapper, &path);
     if let Err(e) = tmux.send_command_line(tmux_name, pane_id, &line) {
         // The spec carries credentials and nothing will consume it now.
         let _ = std::fs::remove_file(&path);
+        if let Some(root) = grant {
+            super::architect_grant::revoke(root, spec);
+        }
         return Err(super::RuntimeError::TmuxUnavailable(e.to_string()));
     }
     Ok(())
