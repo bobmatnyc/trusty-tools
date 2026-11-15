@@ -101,7 +101,7 @@ cargo run -p trusty-mpm -- --help
 # corpus copy indexed; talks over its socket (#9993), no default socket.
 # Optional TRUSTY_SEARCH_BENCH_ENVELOPE=<absolute path> writes the schema-1
 # perf envelope (p50/p95/p99, n, qps per operation); unset writes nothing.
-TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search.sock \
+TRUSTY_SEARCH_BENCH_SOCKET=<sandbox dir>/data/trusty-search/trusty-search.sock \
 TRUSTY_SEARCH_BENCH_INDEX=<index id> \
 TRUSTY_SEARCH_TEST_CORPUS_ROOT=<marked corpus copy> \
   cargo test -p trusty-search --test baseline_trusty_tools -- --include-ignored --nocapture --test-threads=1
