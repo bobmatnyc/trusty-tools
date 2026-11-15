@@ -58,6 +58,8 @@ KEEP_LEASE = {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "Obscured",
+    "DebuggerBusy",
     "NotDraggable",
     "NotSelectable",
     "NoSuchOption",
@@ -143,6 +145,24 @@ SCROLLED = {
     "at_end": (bool,),
 }
 SWITCHED = {"window": (int,), "focused": (bool,)}
+# #11294: the native dialog a trusted click or type answered, when one opened.
+DIALOG = {"type": (str,), "message": (str,), "accepted": (bool,)}
+DIALOG_TYPES = {"alert", "confirm", "prompt", "beforeunload"}
+# Ops that take an optional dialog policy; the broker sends "dismiss" when absent.
+DIALOG_OPS = {"page_click", "page_type"}
+
+
+def done(raw: object) -> Frame:
+    """A click or type result: ``document``, plus ``dialog`` when one opened (#11294)."""
+    if not isinstance(raw, dict) or "dialog" not in raw:
+        return shaped(raw, DONE)
+    seen = shaped(raw["dialog"], DIALOG)
+    if seen["type"] not in DIALOG_TYPES or len(str(seen["message"])) > 1024:
+        raise Refusal("BrowserRefused")
+    shaped({k: v for k, v in raw.items() if k != "dialog"}, DONE)
+    return raw
+
+
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -214,7 +234,12 @@ def key_allowed(key: object) -> bool:
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
-    if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
+    if not isinstance(op, str) or op not in OPS:
+        raise Refusal("InvalidRequest")
+    optional = {"dialog"} if op in DIALOG_OPS else set()
+    if not OPS[op] <= set(request) <= OPS[op] | optional:
+        raise Refusal("InvalidRequest")
+    if request.get("dialog", "dismiss") not in ("accept", "dismiss"):
         raise Refusal("InvalidRequest")
     for name in ("lease", "request_id", "ref", "target"):
         # #11286: page_press takes a null ref for the focused element.
@@ -466,6 +491,8 @@ class Pages(Grants):
             args = {}
         else:
             args = {"document": claim.document, "ref": request["ref"]}
+            if op in DIALOG_OPS:  # #11294
+                args["dialog"] = request.get("dialog", "dismiss")
             if op == "page_type":
                 args["text"] = request["text"]
             if op == "page_press":  # #11286
@@ -492,7 +519,7 @@ class Pages(Grants):
         else:
             shapes = {"page_select": SELECTED, "page_scroll": SCROLLED, "page_drag": DRAGGED}
             shape = shapes.get(op, DONE)
-            result = shaped(raw, shape)
+            result = done(raw) if op in DIALOG_OPS else shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}

@@ -27,7 +27,8 @@
     "alarms",
     "scripting",
     "activeTab",
-    "downloads"
+    "downloads",
+    "debugger"
   ],
   "short_name": "Trusty Browser",
   "icons": {

@@ -100,7 +100,8 @@ const PAIRED = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, 
 // A browser with explicit tabs, a fake broker behind both native hosts, and the real worker table.
 async function codeFixture({session:seed = {}, held = false, tabs:layout, live = [], local:localSeed = ENROLLED,
   ack} = {}) {
-  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [], switches = [], focused = [];
+  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [], switches = [], focused = [],
+    cdp = [];
   const timers = new Map(); let serial = 0, mintSerial = 0, generation = 0;
   const tabs = new Map(Object.entries(layout || {
     7:{origin:"https://a.test", title:"Alpha", active:true},
@@ -204,10 +205,26 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       const result = func.name === "pageProbe" ? [t.origin, t.title]
         : func.name === "pageRead" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
-        : t.result || (func.name === "pageDrag" ? {ok:true, dropped:true} : {ok:true});
+        : t.result || (func.name === "pageDrag" ? {ok:true, dropped:true} : {ok:true, x:10, y:20});
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
       return [{frameId:0, documentId:t.doc, result}];
     }},
+    // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press; `t.busy` refuses attach.
+    debugger:{onEvent:{fns:new Set(), addListener(fn){this.fns.add(fn);}, removeListener(fn){this.fns.delete(fn);},
+        fire(...args){ for (const fn of [...this.fns]) fn(...args); }},
+      attach:async ({tabId}) => {
+        const t = tabs.get(tabId);
+        if (t?.busy || !accessible(t)) throw new Error("Another debugger is already attached");
+        cdp.push({tab:tabId, method:"attach"});
+      },
+      detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
+      sendCommand:async ({tabId}, method, params) => {
+        cdp.push({tab:tabId, method, params});
+        const t = tabs.get(tabId);
+        if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
+          await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
+        return {};
+      }},
   };
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
@@ -227,6 +244,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   let seq = 0;
   const command = async (op, fields = {}) => {
     const id = "c" + ++seq;
+    // The broker always sends a dialog policy with a click or type (#11294).
+    if ((op === "page_click" || op === "page_type") && !("dialog" in fields)) fields = {...fields, dialog:"dismiss"};
     await native.onMessage.fire({id, op, email, ...fields});
     await settle();
     return plain(sent.findLast(m => m.id === id));
@@ -237,7 +256,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return plain(reply);
   });
   const table = () => plain(sessionStore.grants || {});
-  return {chrome, native, sent, ran, queries, updates, switches, focused, brokerCalls, alarms, badge, timers, tabs, perms, failures,
+  return {chrome, native, sent, ran, cdp, queries, updates, switches, focused, brokerCalls, alarms, badge, timers, tabs, perms,
+    failures,
     sessionStore, localStore, command, popup, table, handshake, live:ok, fakeBroker,
     setBroker(fn){ broker = fn; },
     end:(grant, last, reason = "closed") => command("grant_end", {grant, reason, last}),
@@ -296,16 +316,16 @@ test("stale document refuses before the page runs", async () => {
 });
 
 // #11286: typing and key presses inject the one key engine into the lease's document only.
-test("page_type and page_press inject pageKeys with their action", async () => {
+// #11294: page_type now drives trusted CDP keystrokes; page_press keeps the synthetic key engine.
+test("page_press injects pageKeys with its action", async () => {
   const f = await codeFixture();
   const {grant} = await mintTab(f, 7);
-  for (const [op, extra] of [["page_type", {ref:"1.0", text:"hi\n"}],
+  for (const [op, extra] of [
     ["page_press", {ref:null, key:"Enter", modifiers:["Shift","Control"]}], ["page_press", {ref:"1.0", key:"a", modifiers:[]}]]) {
     const reply = await f.command(op, {grant, tab:7, document:"doc-7", ...extra});
     assert.deepEqual(reply, {id:reply.id, ok:true, email, result:{document:"doc-7"}, tab:7}, op);
   }
   assert.deepEqual(plain(f.ran), [
-    {tab:7, func:"pageKeys", args:["1.0", "type", "hi\n"]},
     {tab:7, func:"pageKeys", args:[null, "press", {key:"Enter", modifiers:["Shift","Control"]}]},
     {tab:7, func:"pageKeys", args:["1.0", "press", {key:"a", modifiers:[]}]},
   ]);
@@ -360,6 +380,45 @@ test("page drag runs in the lease document and needs a boolean dropped", async (
   assert.equal((await f.command("page_drag", {...drag, target:"#drop"})).error, "InvalidRequest");
   assert.equal((await f.command("page_drag", {...drag, document:"doc-old"})).error, "DocumentChanged");
   assert.equal(f.ran.length, 1);
+});
+
+test("click and type drive trusted input and answer dialogs", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const click = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(click.result, {document:"doc-7"});
+  assert.deepEqual(plain(f.ran), [{tab:7, func:"pageTarget", args:["1.0", "click"]}]);
+  const steps = f.cdp.map(c => c.method + (c.params?.type ? ":" + c.params.type : ""));
+  assert.deepEqual(steps, ["attach", "Page.enable", "Input.dispatchMouseEvent:mouseMoved",
+    "Input.dispatchMouseEvent:mousePressed", "Input.dispatchMouseEvent:mouseReleased", "Runtime.evaluate", "detach"]);
+  assert.deepEqual(plain(f.cdp[3].params), {type:"mousePressed", x:10, y:20, button:"left", clickCount:1, buttons:1});
+  f.cdp.length = 0;
+  await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"a\n"});
+  assert.deepEqual(f.cdp.filter(c => c.method === "Input.dispatchKeyEvent").map(c => [c.params.type, c.params.key]),
+    [["keyDown","a"], ["keyUp","a"], ["keyDown","Enter"], ["keyUp","Enter"]]);
+  for (const [type, policy, accepted] of [["alert","dismiss",true], ["confirm","dismiss",false], ["confirm","accept",true],
+    ["prompt","dismiss",false]]) {
+    f.tabs.get(7).dialog = {type, message:"Sure?"};
+    f.cdp.length = 0;
+    const reply = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:policy});
+    assert.deepEqual(reply.result, {document:"doc-7", dialog:{type, message:"Sure?", accepted}}, type + policy);
+    assert.deepEqual(plain(f.cdp.find(c => c.method === "Page.handleJavaScriptDialog").params), {accept:accepted});
+    assert.equal(f.cdp.at(-1).method, "detach");
+  }
+  f.tabs.get(7).dialog = null;
+  const bad = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"maybe"});
+  assert.equal(bad.error, "InvalidRequest");
+  f.tabs.get(7).busy = true;
+  f.cdp.length = 0;
+  const busy = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(busy, {id:busy.id, ok:false, error:"DebuggerBusy", tab:7});
+  assert.deepEqual(f.cdp, []);
+  f.tabs.get(7).busy = false;
+  f.tabs.get(7).result = {error:"Obscured"};
+  const covered = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(covered, {id:covered.id, ok:false, error:"Obscured", tab:7});
+  assert.equal(f.cdp.at(-1).method, "detach");
+  assert.ok(!f.cdp.some(c => c.method === "Input.dispatchMouseEvent"));
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {

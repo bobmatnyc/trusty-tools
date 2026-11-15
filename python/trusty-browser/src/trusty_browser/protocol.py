@@ -202,6 +202,8 @@ PAGE_ERRORS = UNFINISHED | {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "Obscured",
+    "DebuggerBusy",
     "NotDraggable",
     "NotSelectable",
     "NoSuchOption",
