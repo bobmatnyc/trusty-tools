@@ -603,6 +603,9 @@ def mutating_frame(op, lease, rid="r"):
         "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_select": {**base, "ref": "1.0", "value": "x"},
         "page_navigate": {**base, "url": ORIGIN},
+        "page_back": base,
+        "page_forward": base,
+        "page_reload": base,
     }[op]
 
 
@@ -653,9 +656,72 @@ def test_page_press_validates_key_and_modifiers_before_sending(short, clock):
     run(short, body)
 
 
+def test_back_forward_and_reload_walk_the_tab_history_within_a_tab_grant(short, clock):
+    async def body(rig):
+        _, call = await session(rig, "tab", 7)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = lambda op, rid: mutating_frame(op, lease, rid)  # noqa: E731
+        assert await call(frame("page_back", "b0")) == {
+            "ok": False,
+            "error": "NoHistory",
+            "tab": 7,
+        }
+        assert len(rig.broker.claims) == 1  # NoHistory keeps the lease
+        away = mutating_frame("page_navigate", lease, "n")
+        away["url"] = "https://elsewhere.test/second"
+        assert (await call(away))["access"] is False
+        back = await call(frame("page_back", "b1"))
+        assert back["ok"] and back["access"] is True and back["origin"] == ORIGIN
+        assert back["settled"] is True and back["tab"] == 7
+        assert await call(frame("page_back", "b1")) == back  # journaled, not re-run
+        assert len(rig.a.sent("page_back")) == 2
+        reloaded = await call(frame("page_reload", "r1"))
+        assert reloaded["ok"] and reloaded["origin"] == ORIGIN
+        assert reloaded["document"] != back["document"]
+        read = await call({"op": "page_read", "lease": lease})
+        assert read["document"] == reloaded["document"] and not read["document_changed"]
+        ahead = await call(frame("page_forward", "f1"))
+        assert ahead["ok"] and ahead["access"] is False and ahead["origin"] is None
+        assert (await call(frame("page_forward", "f2")))["error"] == "NoHistory"
+        frames = rig.a.sent("page_back", "page_forward", "page_reload")
+        assert all(
+            f["tab"] == 7 and set(f) == {"id", "op", "email", "grant", "tab"}
+            for f in frames
+        )
+
+    run(short, body)
+
+
+@pytest.mark.parametrize("op", ["page_back", "page_forward", "page_reload"])
+def test_history_ops_refuse_outside_the_grant_and_send_nothing(short, clock, op):
+    async def body(rig):
+        _, whole = await session(rig)
+        other = (await whole({"op": "select", "tab": 9}))["lease"]
+        await whole({"op": "release", "lease": other})
+        _, call = await session(rig, "tab", 7)
+        sent = len(rig.a.sent(op))
+        assert (await call({"op": "select", "tab": 9}))["error"] == "OutOfScope"
+        assert (await call(mutating_frame(op, other)))["error"] == "StaleLease"
+        assert (await call({**mutating_frame(op, "x"), "tab": 9}))["error"] == (
+            "InvalidRequest"
+        )
+        assert len(rig.a.sent(op)) == sent == 0
+
+    run(short, body)
+
+
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
 @pytest.mark.parametrize(
-    "op", ["page_click", "page_type", "page_press", "page_select", "page_navigate"]
+    "op",
+    [
+        "page_click",
+        "page_type",
+        "page_press",
+        "page_select",
+        "page_navigate",
+        "page_back",
+        "page_reload",
+    ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error

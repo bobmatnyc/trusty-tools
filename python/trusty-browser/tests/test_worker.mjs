@@ -131,6 +131,13 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return {ok:false, error:"InvalidRequest"};
   };
   let broker = fakeBroker;
+  let moves = 0;
+  const go = (tab, t, next) => {
+    if (next !== t.origin) t.activeTab = false;
+    t.origin = next; t.doc = "doc-" + tab + "-" + ++moves;
+    if (!t.slow) setImmediate(() => { for (const l of [...listeners]) l(tab, {status:"loading"}); for (const l of [...listeners]) l(tab, {status:"complete"}); });
+    return {id:tab};
+  };
   const accessible = t => t && (t.activeTab || (perms.held && t.origin.startsWith("https:")));
   const native = {onMessage:event(), onDisconnect:event(), postMessage(m){sent.push(m);}, disconnect(){this.closed = true;}};
   const chrome = {
@@ -170,12 +177,16 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         const t = tabs.get(tab);
         if (!t) throw new Error("No tab");
         updates.push({tab, url});
-        const next = new URL(url).origin;
-        if (next !== t.origin) t.activeTab = false;
-        t.origin = next; t.doc = "doc-" + tab + "-" + updates.length;
-        if (!t.slow) setImmediate(() => { for (const l of [...listeners]) l(tab, {status:"loading"}); for (const l of [...listeners]) l(tab, {status:"complete"}); });
-        return {id:tab};
+        (t.past ||= []).push(t.origin); t.ahead = [];
+        return go(tab, t, new URL(url).origin);
       },
+      // #11292: history of origins per tab; Chrome rejects goBack/goForward with nothing to go to.
+      goBack:async tab => { const t = tabs.get(tab); if (!t?.past?.length) throw new Error("Cannot find a next page in history.");
+        (t.ahead ||= []).push(t.origin); return go(tab, t, t.past.pop()); },
+      goForward:async tab => { const t = tabs.get(tab); if (!t?.ahead?.length) throw new Error("Cannot find a next page in history.");
+        t.past.push(t.origin); return go(tab, t, t.ahead.pop()); },
+      reload:async (tab, props) => { const t = tabs.get(tab); if (!t) throw new Error("No tab"); t.reloads = [...(t.reloads || []), props];
+        return go(tab, t, t.origin); },
       onUpdated:{addListener(l){listeners.add(l);}, removeListener(l){listeners.delete(l);}},
     },
     scripting:{executeScript:async ({target, func, args}) => {
@@ -693,4 +704,25 @@ test("unpair removes the permission and the pairing record", async () => {
   h.setBroker(msg => msg.op === "unpair" ? {ok:false, error:"Unauthorized"} : h.fakeBroker(msg));
   assert.equal((await h.popup({type:"unpair"})).error, "Unauthorized");
   assert.equal(h.localStore.pairing.profile, paired);
+});
+
+test("back, forward and reload report where the tab landed", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
+    9:{origin:"https://c.test", title:"C", active:false}}});
+  const {grant} = await mintTab(f, 7);
+  assert.deepEqual(await f.command("page_back", {grant, tab:7}), {id:"c1", ok:false, error:"NoHistory", tab:7});
+  await f.command("page_navigate", {grant, tab:7, url:"https://a.test/second"});
+  const back = await f.command("page_back", {grant, tab:7});
+  assert.deepEqual(back.result, {access:true, document:"doc-7-2", origin:"https://a.test", settled:true});
+  const reload = await f.command("page_reload", {grant, tab:7});
+  assert.deepEqual(reload.result, {access:true, document:"doc-7-3", origin:"https://a.test", settled:true});
+  assert.equal(JSON.stringify(f.tabs.get(7).reloads), JSON.stringify([{bypassCache:false}]));
+  assert.equal((await f.command("page_forward", {grant, tab:7})).result.document, "doc-7-4");
+  assert.equal((await f.command("page_forward", {grant, tab:7})).error, "NoHistory");
+  for (const op of ["page_back", "page_forward", "page_reload"]) {
+    assert.deepEqual(await f.command(op, {grant, tab:9}), {id:f.sent.at(-1).id, ok:false, error:"OutOfScope", tab:9});
+    assert.equal((await f.command(op, {grant, tab:7, url:"https://a.test/"})).error, "InvalidRequest");
+  }
+  assert.equal(f.tabs.get(9).past, undefined);
+  assert.equal(f.tabs.get(9).reloads, undefined);
 });
