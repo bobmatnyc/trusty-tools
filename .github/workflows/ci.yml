@@ -2320,10 +2320,10 @@ jobs:
     timeout-minutes: 30
     env:
       CUDA_COMPUTE_CAP: "90"
-      # #11061: CUDA 12.8 nvcc rejects a host gcc newer than 14, and
-      # ubuntu-latest (26.04) defaults to a newer one. cudaforge, which
-      # candle-kernels' build.rs uses, passes NVCC_CCBIN to nvcc as `-ccbin`.
-      NVCC_CCBIN: /usr/bin/g++-14
+      # #11061: CUDA 13.5 is newer than any version cudarc 0.19.7 knows
+      # (its list ends at 13.2), so its `nvcc --version` probe would panic.
+      # This picks the 13.2 bindings; the job only type-checks, never runs.
+      CUDARC_CUDA_VERSION: "13020"
     steps:
       - uses: actions/checkout@v5
 
@@ -2334,33 +2334,35 @@ jobs:
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
-            gcc-14 \
-            g++-14 \
             pkg-config \
             libssl-dev
 
       # nvcc ONLY — see the job-level comment above for why the compiler
       # (not a GPU, not a driver) is a genuine, unavoidable requirement here.
-      - name: Install nvcc (CUDA 12.8 compiler only; no driver, no GPU)
+      # #11061: ubuntu-latest is 26.04. CUDA 12.8 refuses its gcc 15, and
+      # with gcc-14 its math_functions.h still clashes with glibc 2.42's
+      # cospi/sinpi/rsqrt (12.9's header is the same). CUDA 13.5 from
+      # NVIDIA's ubuntu2604 repo has neither problem.
+      - name: Install nvcc (CUDA 13.5 compiler only; no driver, no GPU)
         run: |
-          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           rm -f cuda-keyring_1.1-1_all.deb
-          bash scripts/ci-apt-install.sh cuda-nvcc-12-8
-          echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
+          bash scripts/ci-apt-install.sh cuda-nvcc-13-5
+          echo "/usr/local/cuda-13.5/bin" >> "$GITHUB_PATH"
 
       - name: Verify nvcc is on PATH
         run: |
           nvcc --version
-          "$NVCC_CCBIN" --version
+          gcc --version
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          # #11061: the key names the host compiler. The rust-cache key has
-          # no OS-image part, so the 24.04-built cache would restore on 26.04
-          # and skip the nvcc kernel build this job exists to run.
-          key: embedder-cuda-check-gcc14
+          # #11061: the key names the CUDA major. The rust-cache key has no
+          # OS-image part, so a cache built on 24.04 with CUDA 12.8 would
+          # restore here and skip the nvcc kernel build this job exists to run.
+          key: embedder-cuda-check-cuda13
           # Save only from main: a cache saved on a PR ref is readable by that
           # PR alone but still counts against the repo-wide 10 GB quota, and this
           # repo was over it — see the note on the test-shard cache above.
