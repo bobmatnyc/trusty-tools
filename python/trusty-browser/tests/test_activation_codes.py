@@ -177,6 +177,16 @@ class FakeBrowser:
                 "document": item["document"],
                 "secret": PAGE_TEXT,
             }
+        if op == "page_select":
+            # #11285: the fake select starts at "" and moves to any new value.
+            self.done.append((op, req["ref"], req["value"]))
+            changed = item.get("selected", "") != req["value"]
+            item["selected"] = req["value"]
+            return {
+                "document": item["document"],
+                "changed": changed,
+                "value": req["value"],
+            }
         self.done.append((op, req.get("ref"), req.get("text")))
         return {"document": item["document"]}
 

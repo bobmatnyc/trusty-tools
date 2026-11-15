@@ -540,17 +540,49 @@ def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_ke
     run(short, body)
 
 
+@pytest.mark.parametrize("error", ["NotSelectable", "NoSuchOption", "StaleElement"])
+def test_page_select_refusals_keep_the_lease_and_are_not_journaled(short, clock, error):
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse["page_select"] = {"error": error, "tab": 7}
+        reply = await call(mutating_frame("page_select", lease))
+        assert reply == {"ok": False, "error": error, "tab": 7}
+        assert len(rig.broker.claims) == 1
+        assert not rig.broker.grants[ack["grant"]].session.journal
+        del rig.a.refuse["page_select"]
+        assert (await call(mutating_frame("page_select", lease)))["changed"] is True
+
+    run(short, body)
+
+
+def test_page_select_reply_without_changed_is_browser_refused(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse["page_select"] = {"document": "d7-1"}
+        reply = await call(mutating_frame("page_select", lease))
+        assert reply == {"ok": False, "error": "BrowserRefused"}
+        bad = {**mutating_frame("page_select", lease, "v"), "value": 5}
+        assert (await call(bad))["error"] == "InvalidRequest"
+
+    run(short, body)
+
+
 def mutating_frame(op, lease, rid="r"):
     base = {"op": op, "lease": lease, "request_id": rid}
     return {
         "page_click": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
+        "page_select": {**base, "ref": "1.0", "value": "x"},
         "page_navigate": {**base, "url": ORIGIN},
     }[op]
 
 
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
-@pytest.mark.parametrize("op", ["page_click", "page_type", "page_navigate"])
+@pytest.mark.parametrize(
+    "op", ["page_click", "page_type", "page_select", "page_navigate"]
+)
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error
 ):

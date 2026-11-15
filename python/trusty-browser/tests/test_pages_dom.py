@@ -109,6 +109,67 @@ def test_type_sets_values_and_refuses_non_editable(page):
         "new@b.test", "", "new note", "fixed"]
 
 
+FIXTURE = Path(__file__).with_name("fixtures") / "select.html"
+
+
+@pytest.fixture()
+def select_page():
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.goto(FIXTURE.as_uri())
+            tab.add_script_tag(path=str(SCRIPT))
+            yield tab
+        finally:
+            browser.close()
+
+
+def chose(page, ref, value):
+    return page.evaluate("([r, v]) => TrustyPages.pageSelect(r, v)", [ref, value])
+
+
+def page_log(page):
+    return page.evaluate("[...document.querySelectorAll('#log li')].map(li => li.textContent)")
+
+
+def test_select_fixture_logs_the_change(select_page):
+    result = read(select_page)
+    country = next(e for e in result["elements"] if e["name"].startswith("Country"))
+    assert country["role"] == "combobox" and country["value"] == ""
+    assert country["options"] == [
+        {"value": "", "label": "Choose one", "selected": True},
+        {"value": "us", "label": "United States"},
+        {"value": "ca", "label": "Canada"},
+        {"value": "mx", "label": "Mexico", "disabled": True},
+    ]
+    assert chose(select_page, country["ref"], "ca") == {"ok": True, "changed": True, "value": "ca"}
+    assert page_log(select_page) == ["country input ca", "country change ca"]
+    assert select_page.evaluate("country.value") == "ca"
+
+
+def test_select_sets_value_and_reports_no_effect(select_page):
+    result = read(select_page)
+    country, sticky = (ref_of(result, n) for n in ("Country Choose one United States Canada Mexico", "Sticky Keep Other"))
+    # A label matches when no option value does.
+    assert chose(select_page, country, "United States") == {"ok": True, "changed": True, "value": "us"}
+    assert chose(select_page, country, "us") == {"ok": True, "changed": False, "value": "us"}
+    # A handler that reverts the choice is a no-effect call, not a success.
+    assert chose(select_page, sticky, "other") == {"ok": True, "changed": False, "value": "keep"}
+    assert page_log(select_page) == ["country input us", "country change us", "sticky input other", "sticky change other"]
+
+
+def test_select_refuses_non_select_and_unknown_options(select_page):
+    result = read(select_page)
+    country = ref_of(result, "Country Choose one United States Canada Mexico")
+    for name in ("Locked A B", "Many X", "Name"):
+        assert chose(select_page, ref_of(result, name), "a") == {"error": "NotSelectable"}, name
+    assert chose(select_page, country, "mx") == {"error": "NoSuchOption"}
+    assert chose(select_page, country, "nowhere") == {"error": "NoSuchOption"}
+    assert chose(select_page, "9.0", "ca") == {"error": "StaleElement"}
+    assert page_log(select_page) == [] and select_page.evaluate("country.value") == ""
+
+
 def test_url_floor(page):
     cases = {
         "https://a.test/x?y=1": True, "http://127.0.0.1:8080/": True, "http://localhost/": False,
