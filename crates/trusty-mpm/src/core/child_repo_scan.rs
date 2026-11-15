@@ -376,7 +376,11 @@ impl Fence {
     /// longest existing prefix is canonicalized and the missing remainder is
     /// appended with `.` and `..` folded. A missing component that is itself
     /// a dangling link inside the root is an entry the walk fences on its own.
+    /// A `..` after such a missing link refuses (#10473): the kernel would
+    /// take the parent of the link's future target, which text cannot know.
     /// Every other stat or canonicalize error is [`ScanIncomplete::Unreadable`].
+    /// Test: `exhaustive_refuses_dotdot_past_a_dangling_link_inside_the_root`,
+    /// `exhaustive_refuses_an_absolute_dotdot_past_a_dangling_link`.
     fn check_target(&self, link: &Path) -> Result<(), ScanIncomplete> {
         match std::fs::metadata(link) {
             Ok(_) => return self.check_link(link),
@@ -394,6 +398,19 @@ impl Fence {
             let prefix: PathBuf = parts[..split].iter().collect();
             match std::fs::canonicalize(&prefix) {
                 Ok(mut target) => {
+                    // #10473: a `..` after a missing component that is a
+                    // dangling link folds by text, but the kernel takes the
+                    // parent of whatever the link later resolves to.
+                    if split < parts.len()
+                        && parts[split + 1..].contains(&Component::ParentDir)
+                        && std::fs::symlink_metadata(target.join(parts[split]))
+                            .is_ok_and(|meta| meta.file_type().is_symlink())
+                    {
+                        return Err(unreadable(
+                            link,
+                            io::Error::other("its target folds `..` past a dangling symlink"),
+                        ));
+                    }
                     for part in &parts[split..] {
                         match part {
                             Component::ParentDir => {
