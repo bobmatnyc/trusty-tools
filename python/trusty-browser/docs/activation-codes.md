@@ -340,7 +340,19 @@ characters. Every request carries exactly the fields listed.
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
+| `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
+| `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
+
+`files` (#11289) is a list of 1 to 10 `{"name", "type", "data"}` objects:
+`name` is 1-255 characters with no `/` or `\`, `type` a MIME type of at most
+255 characters, `data` standard base64. The decoded total is at most 512 KiB;
+anything else is `InvalidRequest`. `page_upload` is mutating and journaled
+like `page_type`; the journal keeps a SHA-256 of each `data`, never the bytes.
+A download entry is `{"id": int, "path": str, "url": str, "mime": str,
+"state": str, "bytes": number, "total": number, "error": str or null,
+"started": str}`; `state` is Chrome's `in_progress`, `complete` or
+`interrupted`, and `path` is the local file Chrome writes.
 
 Every success reply also carries `"ok": true`.
 
@@ -483,6 +495,8 @@ Envelope:
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
+| `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
+| `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -633,6 +647,19 @@ prototype's native `value` setter, then dispatch bubbling `input` and
 `document.execCommand("insertText", false, text)`. The text replaces the
 current content; empty `text` clears it.
 
+`page_upload` (#11289): the target must be an enabled `<input type=file>`,
+with `multiple` set when more than one file is given; anything else answers
+`NotEditable` and changes nothing. The worker builds a `File` per entry, sets
+them through a `DataTransfer` on `input.files`, then dispatches bubbling
+`input` and `change`. A file input's read entry carries `files` (the held
+names, never its `C:\fakepath` value), and `multiple` and `accept` when set.
+
+`page_downloads` (#11289): needs page access (`PermissionNeeded` otherwise)
+and the manifest's `downloads` permission (`InvalidOperation` without it).
+It lists the 20 newest Chrome downloads whose referrer, URL or final URL has
+the tab's current origin; a `blob:` URL counts as its creator's origin. A
+`data:` URL download from a `no-referrer` page is not attributed to any tab.
+
 ## Tab incarnation and documentId
 
 - **Tab incarnation (broker)**: a lease is keyed by `(peer.generation, tab)`,
@@ -703,6 +730,8 @@ only. A refusal's result line is best effort.
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
+| `page_upload` | `page_upload` | host of the page | file names, types and bytes |
+| `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
 | `release` | `release` | absent | none |
 | malformed | `invalid` | absent | the frame |
 
@@ -811,6 +840,8 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
+| `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply. The tool reads each path under `--upload-root` (see "Upload root"; a regular file, 512 KiB in total at most) and sends its basename, guessed MIME type and base64 bytes. Without `--upload-root` it is `UploadsDisabled`; a refused path is `FileRefused` naming the path and the reason |
+| `page_downloads` | `lease: str` | The `page_downloads` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 
 Every refusal is an MCP tool error (`isError: true`). Its text is
@@ -827,6 +858,8 @@ refusals carry `ok`, `error` and `message`:
 | `AlreadyConnected` | `browser_connect` while a live session is held | Unchanged. The new code is not sent and stays redeemable |
 | `InvalidRequest` | `browser_connect` with a `code` that is not a string, a `code_file` that is not a non-empty string, or both or neither of `code` and `code_file`. The message never quotes the value | Unchanged; nothing is sent |
 | `CodeFileRefused` | `browser_connect` with a `code_file` the adapter refuses (see "Passing a code by file"). The message is `code_file <path>: <reason>` | Unchanged; nothing is sent |
+| `UploadsDisabled` | `page_upload` when the server was started without `--upload-root` | Unchanged; nothing is sent |
+| `FileRefused` | `page_upload` with a path the adapter refuses (see "Upload root"). The message is `<path>: <reason>` | Unchanged; nothing is sent |
 
 Second-connect rule: refuse. `browser_connect` on a live session answers
 `AlreadyConnected`; call `browser_disconnect` first. Before refusing, the
@@ -865,6 +898,36 @@ The adapter refuses the file, with `CodeFileRefused`, when it:
 Surrounding whitespace and a trailing newline are stripped from the code.
 The refusal message names the path and the reason, never the file's content.
 
+### Upload root
+
+A page can ask the agent to attach a file, and a hostile page can ask for
+`~/.ssh/id_rsa`, `~/.aws/credentials` or a `.env`. So `page_upload` reads only
+files under one directory the owner names at start-up:
+
+```sh
+trusty-browser-mcp --upload-root ~/Uploads/agent
+```
+
+Without `--upload-root`, every `page_upload` answers `UploadsDisabled` and no
+file is read. The root must be an existing directory; the server resolves it
+once, at start-up, to its real path. Give a path relative to the root, or an
+absolute path inside it.
+
+The adapter opens the root, then each path component from the directory
+before it, with `O_NOFOLLOW`. No symlink below the root is followed, so a link
+cannot point the read outside the root, or be swapped between a check and the
+read. It refuses the path, with `FileRefused`, when it:
+
+- has a `..` component;
+- is absolute and outside the root;
+- is a symlink, or passes through one;
+- does not exist, is not a regular file (a directory, FIFO or device), or
+  cannot be read;
+- is larger than 512 KiB.
+
+Put only the files the agent may send in the root; never use your home
+directory as the root.
+
 ## Audit log
 
 `<state>/audit.jsonl`, mode 0600, opened `O_APPEND | O_NOFOLLOW`, rotated at
@@ -891,15 +954,16 @@ grant-end lines are best-effort: a failed write never blocks them.
 
 ## Not in this build
 
-- Any manifest change.
+- Any manifest change beyond the `downloads` permission (#11289).
 - Console, network or debugger access (`chrome.debugger`, devtools protocol,
   request interception).
 - Trusted input events; every event is synthetic.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
 - Iframes and shadow-DOM content in `page_read`, `page_click`, `page_type`.
-- Choosing an option in a `<select>`, file inputs, drag, hover, scroll and
-  keyboard shortcuts.
+- Choosing an option in a `<select>`, drag, hover, scroll and keyboard
+  shortcuts.
+- File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
 - Focusing or activating a tab from the agent.
 - Page access on a tab the user did not click when the user declined
   all-https access, and on any non-`https:` page other than the clicked one;

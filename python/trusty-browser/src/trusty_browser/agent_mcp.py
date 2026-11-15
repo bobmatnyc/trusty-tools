@@ -6,8 +6,10 @@ Code mode contract (#11239): docs/activation-codes.md, "MCP tools".
 from __future__ import annotations
 
 import argparse
+import base64
 import errno
 import json
+import mimetypes
 import os
 import re
 import socket
@@ -292,7 +294,144 @@ def code_from_file(raw: object) -> str:
     return code
 
 
-def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None:
+UPLOAD_MAX = 512 * 1024
+
+
+UPLOADS_DISABLED = (
+    "Uploads are off: start the MCP server with --upload-root DIR to allow"
+    " files under DIR"
+)
+
+
+def upload_root(raw: str) -> Path:
+    """Resolve ``--upload-root`` to the real path of an existing directory."""
+    root = Path(os.path.realpath(raw))
+    if not root.is_dir():
+        raise ValueError(f"--upload-root {raw} is not a directory")
+    return root
+
+
+def _inside(root: Path, raw: str) -> list[str]:
+    """The path components of ``raw`` below ``root``; raises ``ValueError`` outside it."""
+    parts = Path(raw).parts
+    if ".." in parts:
+        raise ValueError("contains a '..' component")
+    if not os.path.isabs(raw):
+        rel = Path(*parts) if parts else Path()
+    elif os.path.realpath(raw) == str(root):
+        rel = Path()
+    else:
+        # The caller may name the root through an alias (/tmp vs /private/tmp),
+        # so resolve only the parent; the final component is never followed.
+        parent = Path(os.path.realpath(os.path.dirname(raw)))
+        if parent != root and root not in parent.parents:
+            raise ValueError("is outside the upload root")
+        rel = parent.relative_to(root) / os.path.basename(raw)
+    comps = [c for c in rel.parts if c not in ("", ".")]
+    if not comps:
+        raise ValueError("is not a regular file")
+    return comps
+
+
+def upload_file(
+    raw: object, root: Path | None, budget: int = UPLOAD_MAX
+) -> dict[str, str]:
+    """One ``page_upload`` file entry read from a file under the upload root (#11289).
+
+    Why: the browser cannot read the agent's disk, and a hostile page must not
+    steer the agent into sending ~/.ssh or .env (PR #11305 review).
+    What: with no root every upload is ``UploadsDisabled``. A path relative to
+    ``root``, or absolute and inside it, is opened one component at a time from
+    a ``root`` directory fd with ``O_NOFOLLOW``, so no symlink anywhere below
+    the root is followed and the file cannot escape it. A ``..`` component, a
+    path outside the root, a symlink, and anything but a readable regular file
+    of at most ``UPLOAD_MAX`` bytes is ``FileRefused`` naming path and reason.
+    The entry is ``{name, type, data}`` (basename, guessed MIME type, base64).
+    Test: `test_page_upload_reads_local_files_and_refuses_bad_paths`,
+    tests/test_upload_root.py `test_symlink_escape_is_refused`.
+    """
+    if root is None:
+        raise local("UploadsDisabled", UPLOADS_DISABLED)
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        raise local("InvalidRequest", "paths must be non-empty file path strings")
+
+    def refuse(reason: str) -> Refused:
+        return local("FileRefused", f"{raw}: {reason}")
+
+    try:
+        comps = _inside(root, raw)
+    except ValueError as error:
+        raise refuse(str(error)) from None
+    # PR #11305 delta review: every fd, the leaf's included, is closed in the
+    # one finally, whatever raises after its open (fstat, read, a refusal).
+    fds: list[int] = []
+    try:
+        fds.append(os.open(root, os.O_RDONLY | os.O_DIRECTORY))
+        for comp in comps[:-1]:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            fds.append(os.open(comp, flags, dir_fd=fds[-1]))
+        # O_NONBLOCK: opening a FIFO must not hang the tool.
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        fds.append(os.open(comps[-1], flags, dir_fd=fds[-1]))
+        if not stat.S_ISREG(os.fstat(fds[-1]).st_mode):
+            raise refuse("is not a regular file")
+        chunks: list[bytes] = []
+        got = 0
+        while got <= budget:
+            chunk = os.read(fds[-1], budget + 1 - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        data = b"".join(chunks)
+    except FileNotFoundError:
+        raise refuse("does not exist") from None
+    except NotADirectoryError:
+        raise refuse("is a symlink or not under a directory") from None
+    except OSError as error:
+        if error.errno == errno.ELOOP:
+            raise refuse("is a symlink") from None
+        raise refuse("cannot be read") from None
+    finally:
+        for opened in fds:
+            os.close(opened)
+    if len(data) > budget:
+        if budget < UPLOAD_MAX:
+            raise refuse(f"puts the upload over {UPLOAD_MAX} bytes in total")
+        raise refuse(f"is larger than {UPLOAD_MAX} bytes")
+    name = comps[-1]
+    kind = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return {"name": name, "type": kind, "data": base64.b64encode(data).decode()}
+
+
+UPLOAD_FILES = 10
+
+
+def upload_files(paths: object, root: Path | None) -> list[dict[str, str]]:
+    """Every ``page_upload`` entry, refusing too many paths before any read.
+
+    Why: a caller can send 1000 paths; none may be opened (PR #11305 delta review).
+    What: no root is ``UploadsDisabled``; anything but a list of 1 to
+    ``UPLOAD_FILES`` paths is ``InvalidRequest``. Each file reads at most the
+    bytes left of ``UPLOAD_MAX``, so the total is bounded while reading.
+    Test: tests/test_upload_root.py `test_too_many_paths_are_refused_before_any_read`.
+    """
+    if root is None:
+        raise local("UploadsDisabled", UPLOADS_DISABLED)
+    if not isinstance(paths, list) or not 1 <= len(paths) <= UPLOAD_FILES:
+        raise local("InvalidRequest", f"paths must list 1 to {UPLOAD_FILES} files")
+    entries: list[dict[str, str]] = []
+    left = UPLOAD_MAX
+    for raw in paths:
+        entry = upload_file(raw, root, left)
+        left -= len(base64.b64decode(entry["data"]))
+        entries.append(entry)
+    return entries
+
+
+def add_page_tools(
+    server: FastMCP, call: Callable[..., dict[str, Any]], root: Path | None = None
+) -> None:
     """Register code mode's page tools; contract "MCP tools", "Code mode".
 
     Test: `test_end_to_end_page_session_through_the_mcp_server`.
@@ -357,13 +496,39 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
         return call("page_navigate", lease=lease, url=url, request_id=request_id)
 
     @server.tool()
+    def page_upload(
+        lease: str, ref: str, paths: list[str], request_id: str
+    ) -> dict[str, Any]:
+        """Set local files on the <input type=file> named by ``ref``; the page sees a user's pick.
+
+        ``paths`` name files under the server's --upload-root (relative to it, or
+        absolute inside it), at most 10 and 512 KiB in total. Without
+        --upload-root, or for a symlink or a path outside the root, it refuses.
+        """
+        return call(
+            "page_upload",
+            lease=lease,
+            ref=ref,
+            files=upload_files(paths, root),
+            request_id=request_id,
+        )
+
+    @server.tool()
+    def page_downloads(lease: str) -> dict[str, Any]:
+        """List the newest downloads started from the leased tab's origin, with path and state."""
+        return call("page_downloads", lease=lease)
+
+    @server.tool()
     def browser_release(lease: str) -> dict[str, Any]:
         """Release a lease taken with browser_select."""
         return call("release", lease=lease)
 
 
-def run_codes(state: Path) -> None:
-    """Serve code mode: no credential, no socket until ``browser_connect``."""
+def run_codes(state: Path, root: Path | None = None) -> None:
+    """Serve code mode: no credential, no socket until ``browser_connect``.
+
+    ``root`` is the only directory ``page_upload`` may read; ``None`` refuses uploads.
+    """
     session = CodeSession(state / "agent.sock")
     server = FastMCP("trusty-browser")
 
@@ -387,7 +552,7 @@ def run_codes(state: Path) -> None:
         """Close the session; the broker ends its grant."""
         return session.disconnect()
 
-    add_page_tools(server, session.call)
+    add_page_tools(server, session.call, root)
     try:
         server.run(transport="stdio")
     finally:
@@ -404,14 +569,24 @@ def main() -> None:
     group.add_argument(
         "--credential", type=Path, help="Explicit private workflow credential file"
     )
+    parser.add_argument(
+        "--upload-root",
+        help="Directory page_upload may read files from; without it uploads are refused",
+    )
     args = parser.parse_args()
+    root = None
+    if args.upload_root is not None:
+        try:
+            root = upload_root(args.upload_root)
+        except ValueError as error:
+            parser.error(str(error))
     credential = args.credential
     if args.workflow is not None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", args.workflow):
             parser.error("invalid workflow name")
         credential = args.state / "workflows" / (args.workflow + ".json")
     if credential is None:
-        run_codes(args.state)
+        run_codes(args.state, root)
     else:
         run(args.state, credential)
 

@@ -7,6 +7,9 @@ tests/test_page_ops.py.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import secrets
 import time
 from urllib.parse import urlsplit
@@ -33,6 +36,8 @@ OPS = {
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_navigate": {"op", "lease", "request_id", "url"},
+    "page_upload": {"op", "lease", "request_id", "ref", "files"},
+    "page_downloads": {"op", "lease"},
     "release": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
@@ -46,6 +51,24 @@ KEEP_LEASE = {
     "InvalidRequest",
     "InvalidOperation",
 }
+
+
+def remembered(request: Frame) -> Frame:
+    """The journal's copy of a request: file data becomes its SHA-256 (#11289).
+
+    Why: 4096 journaled uploads of 512 KiB would hold gigabytes; a digest still
+    tells a true retry from a ``Conflict``.
+    """
+    files = request.get("files")
+    if not isinstance(files, list):
+        return request
+    digests = [
+        {**f, "data": hashlib.sha256(str(f.get("data")).encode()).hexdigest()}
+        if isinstance(f, dict)
+        else f
+        for f in files
+    ]
+    return {**request, "files": digests}
 
 
 def floor_host(url: object) -> str | None:
@@ -107,6 +130,44 @@ LANDED = {
     "origin": OPTIONAL,
     "settled": (bool,),
 }
+LISTED = {"origin": (str,), "downloads": (list,)}
+DOWNLOAD = {
+    "id": (int,),
+    "path": (str,),
+    "url": (str,),
+    "mime": (str,),
+    "state": (str,),
+    "bytes": (int, float),
+    "total": (int, float),
+    "error": OPTIONAL,
+    "started": (str,),
+}
+# #11289: the worker's own limits; base64 of MAX_UPLOAD bytes fits one 1 MiB native frame.
+MAX_FILES = 10
+MAX_UPLOAD = 512 * 1024
+FILE_KEYS = {"name", "type", "data"}
+
+
+def valid_files(files: object) -> bool:
+    """True for 1-10 ``{name, type, data}`` entries whose base64 decodes within ``MAX_UPLOAD``."""
+    if not isinstance(files, list) or not 0 < len(files) <= MAX_FILES:
+        return False
+    total = 0
+    for item in files:
+        if not isinstance(item, dict) or set(item) != FILE_KEYS:
+            return False
+        name, kind, data = item["name"], item["type"], item["data"]
+        if not isinstance(name, str) or not 0 < len(name) <= 255:
+            return False
+        if "/" in name or "\\" in name:
+            return False
+        if not isinstance(kind, str) or len(kind) > 255 or not isinstance(data, str):
+            return False
+        try:
+            total += len(base64.b64decode(data, validate=True))
+        except (binascii.Error, ValueError):
+            return False
+    return total <= MAX_UPLOAD
 
 
 def validate(request: Frame) -> str:
@@ -136,6 +197,8 @@ def validate(request: Frame) -> str:
         text = request["text"]
         if not isinstance(text, str) or len(text) > 8192:
             raise Refusal("InvalidRequest")
+    if "files" in request and not valid_files(request["files"]):
+        raise Refusal("InvalidRequest")
     if "url" in request:
         url = request["url"]
         if not isinstance(url, str) or not 0 < len(url) <= 8192:
@@ -208,7 +271,7 @@ class Pages(Grants):
             )
             if name not in MUTATING:
                 raise gone(grant)
-            session.journal[str(request["request_id"])] = (request, unknown)
+            session.journal[str(request["request_id"])] = (remembered(request), unknown)
             return unknown
         grant.last_used = codes.clock()
         outcome = reply.get("error", "ok") if reply.get("ok") is False else "ok"
@@ -222,7 +285,7 @@ class Pages(Grants):
             await self.end(grant, "audit")
             if name not in MUTATING:
                 raise gone(grant) from None
-            session.journal[str(request["request_id"])] = (request, unknown)
+            session.journal[str(request["request_id"])] = (remembered(request), unknown)
             return unknown
         return reply
 
@@ -306,7 +369,7 @@ class Pages(Grants):
             # OutcomeUnknown that dropped the lease still never runs twice.
             previous = session.journal.get(string(request, "request_id"))
             if previous is not None:
-                if request != previous[0]:
+                if remembered(request) != previous[0]:
                     raise Refusal("Conflict")
                 seen = previous[1].get("tab")
                 return previous[1], seen if type(seen) is int else None, None
@@ -330,6 +393,14 @@ class Pages(Grants):
             claim.deadline = time.monotonic() + TTL
             reply = {"ok": True, "tab": tab, **result, "document_changed": changed}
             return reply, tab, host(result["origin"])
+        if op == "page_downloads":
+            raw = await self.send(grant, claim, claim.peer, op, tab=tab)
+            listed = shaped(raw, LISTED)
+            found = [shaped(d, DOWNLOAD) for d in listed["downloads"][:20]]
+            claim.deadline = time.monotonic() + TTL
+            reply = {"ok": True, "tab": tab, "origin": listed["origin"]}
+            reply["downloads"] = found
+            return reply, tab, host(listed["origin"])
         rid = string(request, "request_id")
         if len(session.journal) >= 4096:
             raise Refusal("SessionFull")
@@ -341,11 +412,13 @@ class Pages(Grants):
                 args["text"] = request["text"]
             if op == "page_scroll":
                 args.update(to=request["to"], wait_ms=request["wait_ms"])
+            if op == "page_upload":
+                args["files"] = request["files"]
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
             if str(exc) == "OutcomeUnknown":
-                session.journal[rid] = (request, exc.response)
+                session.journal[rid] = (remembered(request), exc.response)
             raise
         if op == "page_navigate":
             result = shaped(raw, LANDED)
@@ -357,7 +430,7 @@ class Pages(Grants):
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}
-        session.journal[rid] = (request, reply)
+        session.journal[rid] = (remembered(request), reply)
         return reply, tab, where
 
     async def select(
