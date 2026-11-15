@@ -138,6 +138,23 @@ class TestSeed(StoreCase):
         self.assertEqual(data["owner_name"], "owner")
         self.assertNotIn("next_ids", data)   # next ids are computed from the store (dashboard_ids.py, the page)
 
+    def test_seed_meta_seeds_valid_settings_and_never_overwrites_it(self):
+        # #10752: an absent meta/settings 404s on every page poll and grows the serve log.
+        import dashboard_schema
+        self.store.seed_meta(os.path.join(self._tmp.name, "none.md"))
+        body = self.store.get("meta", "settings")["data"]
+        self.assertEqual(list(body), ["updated"])
+        self.assertEqual(dashboard_schema.validate("meta", "settings", body), [])
+        self.store.set("meta", "settings", {"tz": "UTC"}, if_version=1)
+        self.store.seed_meta(os.path.join(self._tmp.name, "none.md"))
+        self.assertEqual(self.store.get("meta", "settings")["data"], {"tz": "UTC"})
+
+    def test_page_no_longer_subscribes_to_gh_track(self):
+        # #10752: no writer ships for meta/gh_track, so the page must not poll it (one 404 per poll).
+        page = os.path.join(os.path.dirname(HERE), "templates", "dashboard", "index.html")
+        with open(page) as f:
+            self.assertNotIn("gh_track", f.read())
+
 
 class ServerCase(StoreCase):
     def setUp(self):
@@ -221,6 +238,10 @@ eval(fs.readFileSync(process.argv[1], "utf8"));
         self.assertEqual(r["first"], [1, 1])      # first load ran although document.hidden
         self.assertEqual(r["hiddenPoll"], 2)      # later poll runs while hidden
         self.assertEqual(r["visiblePoll"], 3)
+
+    def test_fresh_store_serves_meta_settings_without_a_404(self):
+        # #10752: the page polls meta/settings; a fresh seeded store must answer 200.
+        self.assertEqual(self.call("GET", "/api/meta/settings")[0], 200)
 
     def test_round_trip_list_get_patch_conflict_add_delete_batch_user(self):
         status, body = self.call("GET", "/api/items?status=open")
