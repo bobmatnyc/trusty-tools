@@ -267,27 +267,21 @@ class Store:
         The wait is bounded by self.lock_wait; past it the read raises Unavailable (HTTP 503).
         A read never creates the lock file: none yet means no batch has ever run, so there is nothing to wait for.
         Test: tests/test_dashboard_views_agree.py"""
-        try:
-            lf = open(os.path.join(self.root, ".lock"), "r")
-        except FileNotFoundError:
-            lf = None
-        if lf is None:
+        path = os.path.join(self.root, ".lock")
+        if not os.path.exists(path):   # writers never delete the lock file once made
             yield
             return
-        with lf:
-            start = time.monotonic()
+        with open(path, "r") as lf:   # closing the file releases the flock
+            deadline = time.monotonic() + self.lock_wait
             while True:   # #10679: bounded, so a hung writer cannot hang every dashboard GET
                 try:
                     fcntl.flock(lf, fcntl.LOCK_SH | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    if time.monotonic() - start >= self.lock_wait:
+                    if time.monotonic() >= deadline:
                         raise Unavailable(f"{self.root}/.lock is held by a writer (waited {self.lock_wait}s)") from None
                     time.sleep(0.01)
-            try:
-                yield
-            finally:
-                fcntl.flock(lf, fcntl.LOCK_UN)
+            yield
 
     def get(self, coll, doc_id):
         """Return {"id","version","data"}; raise NotFound when absent."""
