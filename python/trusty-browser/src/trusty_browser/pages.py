@@ -31,6 +31,7 @@ OPS = {
     "page_read": {"op", "lease"},
     "page_click": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
+    "page_drag": {"op", "lease", "request_id", "ref", "target"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "release": {"op", "lease"},
 }
@@ -41,6 +42,7 @@ KEEP_LEASE = {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "NotDraggable",
     "InvalidUrl",
     "InvalidRequest",
     "InvalidOperation",
@@ -91,6 +93,7 @@ READ = {
     "truncated": (bool,),
 }
 DONE = {"document": (str,)}
+DRAGGED = {"document": (str,), "dropped": (bool,)}
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -104,7 +107,7 @@ def validate(request: Frame) -> str:
     op = request.get("op")
     if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
         raise Refusal("InvalidRequest")
-    for name in ("lease", "request_id", "ref"):
+    for name in ("lease", "request_id", "ref", "target"):
         if name in request:
             string(request, name)
     if "tab" in request:
@@ -318,6 +321,8 @@ class Pages(Grants):
             args = {"document": claim.document, "ref": request["ref"]}
             if op == "page_type":
                 args["text"] = request["text"]
+            if op == "page_drag":
+                args["target"] = request["target"]
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
@@ -330,7 +335,7 @@ class Pages(Grants):
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
             where = host(claim.origin)
         else:
-            result = shaped(raw, DONE)
+            result = shaped(raw, DRAGGED if op == "page_drag" else DONE)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}

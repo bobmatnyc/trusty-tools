@@ -338,6 +338,7 @@ characters. Every request carries exactly the fields listed.
 | `page_read` | `op`, `lease` | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
+| `page_drag` | `op`, `lease`, `request_id`, `ref`, `target` | `tab` int, `document` str, `dropped` bool |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
@@ -382,6 +383,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
+| `NotDraggable` | `tab` | `page_drag`: `target` is `ref` itself or lies inside it |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
@@ -480,6 +482,7 @@ Envelope:
 | `page_read` | `tab`, `document` (str or null: the lease's last document) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
+| `page_drag` | `tab`, `document` (str or null), `ref`, `target` | `{"document": str, "dropped": bool}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
 
@@ -508,6 +511,7 @@ build:
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable` | `tab` | See "Element addressing" |
+| `NotDraggable` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
@@ -621,6 +625,23 @@ prototype's native `value` setter, then dispatch bubbling `input` and
 `document.execCommand("insertText", false, text)`. The text replaces the
 current content; empty `text` clears it.
 
+`page_drag` (#11288): `ref` and `target` are refs of one read. A `target` that
+is `ref` or lies inside it answers `NotDraggable`. Each element is scrolled to
+the centre and the events use its centre point. On the source: `pointerdown`,
+`mousedown`, then `dragstart`. A cancelled `dragstart` ends the drag with
+`dropped: false` and no further events. Otherwise `drag` on the source, then
+`dragenter` and `dragover` on the target. When the target cancels `dragover`
+(the HTML drop-target rule), `drop` fires on it and `dropped` is `true`;
+otherwise `dragleave` fires and `dropped` is `false`. `dragend` fires on the
+source last. All drag events share one `DataTransfer` with `effectAllowed`
+`all`, so data the page sets in `dragstart` is readable in `drop`.
+
+Reads also report `[draggable=true]` elements (with `"draggable": true`),
+`[aria-dropeffect]` other than `none`, and `[dropzone]`. When the document
+holds a `[draggable=true]` element, elements whose `id` or `class` contains
+`drop` (case-insensitive), `[data-drop]` and `[data-dropzone]` are reported
+too, so a bare-`div` drop zone has a ref.
+
 ## Tab incarnation and documentId
 
 - **Tab incarnation (broker)**: a lease is keyed by `(peer.generation, tab)`,
@@ -689,6 +710,7 @@ only. A refusal's result line is best effort.
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
+| `page_drag` | `page_drag` | host of the page | refs, element names |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `release` | `release` | absent | none |
 | malformed | `invalid` | absent | the frame |
@@ -702,7 +724,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotDraggable` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -796,6 +818,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
+| `page_drag` | `lease: str`, `ref: str`, `target: str`, `request_id: str` | The `page_drag` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |
 
@@ -884,7 +907,7 @@ grant-end lines are best-effort: a failed write never blocks them.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
 - Iframes and shadow-DOM content in `page_read`, `page_click`, `page_type`.
-- Choosing an option in a `<select>`, file inputs, drag, hover, scroll and
+- Choosing an option in a `<select>`, file inputs, hover, scroll and
   keyboard shortcuts.
 - Focusing or activating a tab from the agent.
 - Page access on a tab the user did not click when the user declined

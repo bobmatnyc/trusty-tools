@@ -30,6 +30,7 @@ CODE_TOOLS = {
     "page_read",
     "page_click",
     "page_type",
+    "page_drag",
     "page_navigate",
     "browser_release",
 }
@@ -234,6 +235,10 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
+            (
+                "page_drag",
+                {"lease": "l", "ref": "1.0", "target": "1.1", "request_id": "r"},
+            ),
             (
                 "page_navigate",
                 {"lease": "l", "url": "https://a.test", "request_id": "r"},

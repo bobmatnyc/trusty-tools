@@ -324,6 +324,17 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
         return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
 
     @server.tool()
+    def page_drag(lease: str, ref: str, target: str, request_id: str) -> dict[str, Any]:
+        """Drag the element ``ref`` onto ``target`` (both refs from one page_read).
+
+        ``dropped`` is false when the target did not accept the drop. Reuse the
+        request ID to retry. See #11288.
+        """
+        return call(
+            "page_drag", lease=lease, ref=ref, target=target, request_id=request_id
+        )
+
+    @server.tool()
     def page_navigate(lease: str, url: str, request_id: str) -> dict[str, Any]:
         """Navigate the leased tab to an https URL (or http://127.0.0.1)."""
         return call("page_navigate", lease=lease, url=url, request_id=request_id)

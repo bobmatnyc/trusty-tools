@@ -178,6 +178,8 @@ class FakeBrowser:
                 "secret": PAGE_TEXT,
             }
         self.done.append((op, req.get("ref"), req.get("text")))
+        if op == "page_drag":
+            return {"document": item["document"], "dropped": req["target"] != "1.9"}
         return {"document": item["document"]}
 
     async def answer(self, req):
