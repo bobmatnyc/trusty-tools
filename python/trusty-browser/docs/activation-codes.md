@@ -45,7 +45,7 @@ fields are refused.
   close, same-origin navigation, reload and tab switch, ends on any
   cross-origin navigation (a different port counts) and does not return when
   the tab goes back. The optional `https://*/*` host permission: requested in
-  the click that mints a code and held while the profile has a live code or
+  the click that mints a profile code and held while the profile has a live code or
   grant (see "All-https access"); it covers every `https:` page of the
   profile.
 - Constants (`codes.py`): `CODE_TTL = 300` s, `GRANT_IDLE = 1800` s,
@@ -76,16 +76,20 @@ fields are refused.
 Owner ruling, 2026-11-14: "Ask for all-https access at Activate, drop it when
 the last code ends." Any profile where the user clicks **Pair this profile**
 may be paired; tab scope is the default choice. This contract reads "Activate" in that
-ruling as the click that issues a code: the permission is requested only in a
-mint click, never at pairing, so the pairing acknowledgement that follows
+ruling as the click that issues a profile code: the permission is requested
+only in a profile mint click, never in a tab mint click and never at pairing, so the pairing acknowledgement that follows
 `pair` (which lists no code) has nothing to remove.
 
 Request:
 
+- Owner ruling Dki, 2026-11-14: "tab scope by default". **Give access to this
+  tab** requests no host permission; its grant relies on `activeTab` from the
+  action click. Chrome shows `https://*/*` as "Read and change all your data
+  on all websites", and that prompt closes the popup, so no tab code would be
+  issued.
 - The popup calls `chrome.permissions.request({origins: ["https://*/*"]})`
-  inside the click handler of either mint button (**Give access to this tab**,
-  **Give access to the whole profile**), before it sends `mint`, whenever the
-  permission is absent. It needs the user gesture, which the service worker
+  inside the click handler of **Give access to the whole profile**, before it
+  sends `mint`, whenever the permission is absent. It needs the user gesture, which the service worker
   does not have. This holds for a paired profile and for a workflow-enrolled
   one alike. The **Pair this profile** click sends `pair` only and requests
   nothing.
@@ -144,10 +148,10 @@ these signals:
    the permission. A row left in the table keeps it; that row ends through
    its own `grant_end` (port up) or the offline check (port down).
 
-The popup reads the permission state at each mint click. It re-reads it
-after every revoke and every grant poll, and follows
+The popup reads the permission state at each profile mint click. It re-reads
+it after every revoke and every grant poll, and follows
 `chrome.permissions.onAdded` and `onRemoved`, so a removal by any of these
-signals makes the next mint click ask again.
+signals makes the next profile mint click ask again.
 
 The broker cannot replace 3, 4, 5 or 6 cheaply: 3 would need a `live` list on
 every mint refusal, 4 is local state the broker never sees, 5 is the
@@ -1001,8 +1005,9 @@ JavaScript (worker, page functions, popup):
   tab id captured at load; the countdown reaches `Code expired`; Disconnect
   sends `revoke_grant` with the row's grant id; the workflow controls are
   hidden while a pairing exists.
-- All-https access: a mint click requests `https://*/*` inside the click
-  when it is absent and mints whether or not the user grants it; the
+- All-https access: a profile mint click requests `https://*/*` inside the
+  click when it is absent and mints whether or not the user grants it; a tab
+  mint click requests nothing and mints; the
   **Pair this profile** click requests nothing; the permission is removed on each
   signal of "All-https access" (`grant_end` with `last: true`, an empty
   `live` list, an empty `grants` reply, no credential, the offline check)

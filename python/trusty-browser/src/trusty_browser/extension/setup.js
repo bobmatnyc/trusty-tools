@@ -246,8 +246,10 @@ async function loadAccess() {
   } catch (error) { unavailable(error); }
 }
 function mint(scope) {
-  // Contract "All-https access": ask again inside this click when the permission is absent.
-  const permission = httpsHeld ? Promise.resolve(true) : askHttps();
+  // Contract "All-https access": a profile mint asks inside this click when the permission is absent.
+  // See #11239 (owner ruling Dki, tab scope by default): a tab mint relies on activeTab only and never asks,
+  // because Chrome's all-sites prompt closes the popup and no code is issued.
+  const permission = scope === "tab" || httpsHeld ? Promise.resolve(true) : askHttps();
   $("mint-tab").disabled = $("mint-profile").disabled = true;
   statusLine.textContent = "";
   void (async () => {
@@ -284,7 +286,7 @@ $("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revo
 $("new-code").addEventListener("click", () => { show("choose"); void checkHttps(); });
 $("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
 $("retry").addEventListener("click", () => loadAccess());
-// #11239: contract "All-https access" — Pair this profile sends `pair` only; the mint click asks for https://*/*.
+// #11239: contract "All-https access" — Pair this profile sends `pair` only; the profile mint click asks for https://*/*.
 $("pair").addEventListener("click", async () => {
   $("pair").disabled = true;
   statusLine.textContent = "";

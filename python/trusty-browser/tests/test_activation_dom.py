@@ -109,7 +109,8 @@ def test_code_popup_offers_tab_first_and_forgets_the_code():
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
             expect(page.locator("#countdown")).to_have_text("0:03")
             calls = page.evaluate("window.calls")
-            assert calls.index("permission") < calls.index(sent(page, "mint")[0])
+            # Owner ruling Dki: a tab mint relies on activeTab and requests no host permission.
+            assert "permission" not in calls
             assert sent(page, "mint") == [{"type": "mint", "scope": "tab", "tab": 42}]
             assert [c for c in calls if isinstance(c, dict) and "query" in c] == [
                 {"query": {"active": True, "currentWindow": True}}]
@@ -123,6 +124,8 @@ def test_code_popup_offers_tab_first_and_forgets_the_code():
             page.get_by_role("button", name="New code").click()
             profile_choice.click()
             expect(page.locator("#code-scope")).to_have_text("Whole profile (every tab in this profile)")
+            calls = page.evaluate("window.calls")
+            assert calls.index("permission") < calls.index(sent(page, "mint")[1])
             page.get_by_role("button", name="Cancel code").click()
             page.wait_for_function("window.calls.filter(c => c.type === 'revoke_grant').length === 2")
             assert sent(page, "revoke_grant")[-1] == {"type": "revoke_grant", "grant": "g-0000000000bb"}
@@ -179,8 +182,34 @@ PAIR_POPUP = """
 """
 
 
+PROFILE_CHOICE = "Give access to the whole profile (every tab in this profile)"
+
+
 def permission_requests(page):
     return [c["permission"] for c in page.evaluate("window.calls") if isinstance(c, dict) and "permission" in c]
+
+
+def test_a_tab_mint_requests_no_host_permission_and_issues_a_code():
+    """#11239, owner ruling Dki: a tab mint never shows Chrome's all-sites prompt.
+
+    The permission is absent, so the pre-fix popup asked for https://*/* in the
+    tab click; in Chrome that prompt closes the popup and no code is issued.
+    """
+    popup = Path(service.__file__).with_name("extension") / "setup.html"
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 284, "height": 800})
+            page.add_init_script(PAIR_POPUP)
+            page.goto(popup.as_uri())
+            page.get_by_role("button", name="Pair this profile", exact=True).click()
+            page.get_by_role("button", name="Give access to this tab").click()
+            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
+            expect(page.locator("#code-scope")).to_have_text("This tab")
+            assert permission_requests(page) == []
+            assert page.evaluate("window.calls").count("mint") == 1
+        finally:
+            browser.close()
 
 
 def test_pairing_popup_activates_mints_and_disconnects_a_profile():
@@ -207,17 +236,23 @@ def test_pairing_popup_activates_mints_and_disconnects_a_profile():
                 expect(page.locator(workflow_control)).to_be_hidden()
             expect(page.locator("#paired-email")).to_have_text("qa@example.test")
             expect(page.locator("#activate-help")).to_be_hidden()
-            # The first mint click asks for all-https access once, before it sends `mint`.
+            # A tab mint asks for nothing (owner ruling Dki); activeTab covers the clicked tab.
             page.get_by_role("button", name="Give access to this tab").click()
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            calls = page.evaluate("window.calls")
-            assert permission_requests(page) == [["https://*/*"]]
-            assert calls.index({"permission": ["https://*/*"]}) < calls.index("mint")
-            # The permission is held now, so a second mint click mints without asking again.
+            assert permission_requests(page) == []
             page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
             page.get_by_role("button", name="Cancel code").click()
-            page.get_by_role("button", name="Give access to this tab").click()
+            # The first profile mint asks for all-https access once, before it sends `mint`.
+            page.get_by_role("button", name=PROFILE_CHOICE).click()
             page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
+            calls = page.evaluate("window.calls")
+            assert permission_requests(page) == [["https://*/*"]]
+            assert calls.index({"permission": ["https://*/*"]}) < len(calls) - 1 - calls[::-1].index("mint")
+            # The permission is held now, so a second profile mint mints without asking again.
+            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 4")
+            page.get_by_role("button", name="Cancel code").click()
+            page.get_by_role("button", name=PROFILE_CHOICE).click()
+            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 3")
             assert permission_requests(page) == [["https://*/*"]]
             page.get_by_role("button", name="Disconnect this profile").click()
             expect(page.get_by_text("Let an agent use this browser with an activation code", exact=True)).to_be_visible()
@@ -258,14 +293,14 @@ def test_a_mint_click_asks_again_after_the_worker_removed_the_permission():
             page.add_init_script(PAIR_POPUP)
             page.goto(popup.as_uri())
             page.get_by_role("button", name="Pair this profile", exact=True).click()
-            page.get_by_role("button", name="Give access to this tab").click()
+            page.get_by_role("button", name=PROFILE_CHOICE).click()
             expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
             page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
             assert permission_requests(page) == [["https://*/*"]]
             # Cancel code ends the last code; the worker then removes https://*/* (contract "All-https access").
             page.get_by_role("button", name="Cancel code").click()
             page.wait_for_function("window.removed === true")
-            page.get_by_role("button", name="Give access to this tab").click()
+            page.get_by_role("button", name=PROFILE_CHOICE).click()
             page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
             calls = page.evaluate("window.calls")
             assert permission_requests(page) == [["https://*/*"], ["https://*/*"]]
