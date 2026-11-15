@@ -57,7 +57,8 @@ use std::os::unix::ffi::OsStrExt;
 
 use super::super::{ChildHandle, PipedSpawn};
 use super::{
-    OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn, wait_for,
+    OwnedFd, cloexec_default, pipe_cloexec, posix_spawn_file_actions_addchdir_np,
+    resolve_disclaim_fn, wait_for,
 };
 
 /// Spawn `cmd` with piped stdin/stdout/stderr and TCC responsibility
@@ -185,6 +186,13 @@ pub(crate) fn spawn_piped_disclaimed(cmd: std::process::Command) -> io::Result<P
             // of rolling attribution up to the signed `trusty-mpm` binary.
             if let Some(disclaim) = resolve_disclaim_fn() {
                 let _ = disclaim(&mut attr, 1);
+            }
+
+            // #10083: the child keeps only its dup2'd stdio.
+            if let Err(e) = cloexec_default(&mut attr, &mut file_actions, &[]) {
+                libc::posix_spawnattr_destroy(&mut attr);
+                libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                return Err(e);
             }
 
             let mut pid: libc::pid_t = 0;
