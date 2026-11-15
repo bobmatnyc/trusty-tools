@@ -234,6 +234,8 @@ class FakeBrowser:
                 "value": req["value"],
             }
         self.done.append((op, req.get("ref"), req.get("text")))
+        if op == "page_drag":
+            return {"document": item["document"], "dropped": req["target"] != "1.9"}
         if self.dialog is not None:
             return {"document": item["document"], "dialog": self.dialog}
         return {"document": item["document"]}

@@ -39,6 +39,7 @@ OPS = {
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_select": {"op", "lease", "request_id", "ref", "value"},
+    "page_drag": {"op", "lease", "request_id", "ref", "target"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
@@ -135,6 +136,7 @@ SCROLLED = {
 # #11285: page_select says whether the value moved and what it is now.
 SELECTED = {"document": (str,), "changed": (bool,), "value": (str,)}
 SWITCHED = {"window": (int,), "focused": (bool,)}
+DRAGGED = {"document": (str,), "dropped": (bool,)}  # #11288
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -163,10 +165,10 @@ def validate(request: Frame) -> str:
     if not OPS[op] <= set(request) <= OPS[op] | optional(op):
         raise Refusal("InvalidRequest")
     controls(request)  # #11356
-    for name in ("lease", "request_id", "ref"):
+    for name in ("lease", "request_id", "ref", "target"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
         # #11286: page_press takes a null ref for the focused element.
-        nullable = op == "page_scroll" or (op == "page_press" and request[name] is None)
+        nullable = op == "page_scroll" or (op == "page_press" and request.get(name) is None)
         if name in request and not (name == "ref" and nullable):
             string(request, name)
     if op == "page_press":
@@ -434,6 +436,8 @@ class Pages(Grants):
                 args.update(key=request["key"], modifiers=request["modifiers"])
             if op == "page_select":
                 args["value"] = request["value"]
+            if op == "page_drag":
+                args["target"] = request["target"]
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
@@ -447,7 +451,8 @@ class Pages(Grants):
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
             where = host(claim.origin)
         else:
-            shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
+            shape = {"page_scroll": SCROLLED, "page_select": SELECTED, "page_drag": DRAGGED}
+            shape = shape.get(op, DONE)
             if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
                 shape = CUT
             result = clicked(raw) if op == "page_click" else shaped(raw, shape)

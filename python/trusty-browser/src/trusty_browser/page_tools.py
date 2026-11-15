@@ -112,6 +112,17 @@ def add_page_tools(
         return call("page_hover", lease=lease, ref=ref, request_id=request_id)
 
     @server.tool()
+    def page_drag(lease: str, ref: str, target: str, request_id: str) -> dict[str, Any]:
+        """Drag the element ``ref`` onto ``target`` (both refs from one page_read).
+
+        ``dropped`` is false when the target did not accept the drop. Reuse the
+        request ID to retry. See #11288.
+        """
+        return call(
+            "page_drag", lease=lease, ref=ref, target=target, request_id=request_id
+        )
+
+    @server.tool()
     def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:
         """Replace the text of an editable element named by ``ref``, one keystroke per character.
 

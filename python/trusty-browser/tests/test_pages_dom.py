@@ -919,3 +919,87 @@ def test_hover_reaches_an_element_inside_a_same_origin_iframe(page):
     moves = page.evaluate("moves")
     assert "mouseout:fbtn" in moves and "mouseleave:fbtn" in moves and "mouseleave:frame" in moves
     assert "mouseover:top" in moves
+
+
+# #11288: the drag fixture of the behavior lab (draggable item, bare-div drop zone), plus a zone
+# that never accepts a drop.
+DRAG_PAGE = """
+<title>Drag QA</title>
+<div id="drag" draggable="true">Drag this item</div>
+<div id="drop" style="padding:30px">Drop item here</div>
+<div class="drop-off" style="padding:30px">Nowhere</div>
+<script>
+  window.drops = [];
+  drag.ondragstart = e => e.dataTransfer.setData("text/plain", "item");
+  drop.ondragover = e => e.preventDefault();
+  drop.ondrop = e => { e.preventDefault(); drops.push(e.dataTransfer.getData("text/plain")); };
+</script>
+"""
+DRAG_EVENTS = ["dragstart", "drag", "dragenter", "dragleave", "dragover", "drop", "dragend"]
+
+
+@pytest.fixture()
+def drag_page(page):
+    page.set_content(DRAG_PAGE)
+    load(page)
+    page.evaluate("""kinds => {
+      window.events = [];
+      for (const kind of kinds)
+        document.addEventListener(kind, e => window.events.push(kind + ":" + (e.target.id || e.target.className)), true);
+    }""", DRAG_EVENTS)
+    return page
+
+
+def drag(tab, source, target):
+    return tab.evaluate("([s, t]) => TrustyPages.pageDrag(s, t)", [source, target])
+
+
+def test_drag_fires_the_drag_sequence_and_drops(drag_page):
+    result = read(drag_page)
+    by_name = {e["name"]: e for e in result["elements"]}
+    assert set(by_name) == {"Drag this item", "Drop item here", "Nowhere"}
+    assert by_name["Drag this item"]["draggable"] is True
+    item, zone, off = (ref_of(result, n) for n in ("Drag this item", "Drop item here", "Nowhere"))
+    assert drag(drag_page, item, zone) == {"ok": True, "dropped": True}
+    assert drag_page.evaluate("events") == [
+        "dragstart:drag", "drag:drag", "dragenter:drop", "dragover:drop", "drop:drop", "dragend:drag"]
+    assert drag_page.evaluate("drops") == ["item"]
+    drag_page.evaluate("() => { window.events = []; }")
+    assert drag(drag_page, item, off) == {"ok": True, "dropped": False}
+    assert drag_page.evaluate("events") == [
+        "dragstart:drag", "drag:drag", "dragenter:drop-off", "dragover:drop-off", "dragleave:drop-off",
+        "dragend:drag"]
+    assert drag(drag_page, item, item) == {"error": "NotDraggable"}
+    # #11355: refs survive an unchanged read; a zone whose name changed no longer resolves.
+    drag_page.evaluate("() => { document.getElementById('drop').textContent = 'Moved'; }")
+    assert drag(drag_page, item, zone) == {"error": "StaleElement"}
+    assert drag_page.evaluate("drops") == ["item"]
+
+
+def test_read_reports_no_drop_named_elements_without_a_draggable(page):
+    page.evaluate("() => { const d = document.createElement('div'); d.id = 'drop'; d.textContent = 'Zone'; document.body.append(d); }")
+    assert "Zone" not in [e["name"] for e in read(page)["elements"]]
+
+
+def test_drag_reaches_a_draggable_inside_an_open_shadow_root(page):
+    # #11288 on #11290: the only draggable sits in an open shadow root, so the light DOM alone holds none;
+    # the read still reports it, and the shadow's drop-named zone, and the drag lands there.
+    page.set_content("<title>Shadow drag</title><div id='host'></div>")
+    page.evaluate("""() => {
+      const root = document.getElementById("host").attachShadow({mode: "open"});
+      root.innerHTML = '<div id="item" draggable="true">Shadow item</div>' +
+        '<div class="dropzone" style="padding:30px">Shadow zone</div>';
+      window.drops = [];
+      root.querySelector("#item").ondragstart = e => e.dataTransfer.setData("text/plain", "deep");
+      const zone = root.querySelector(".dropzone");
+      zone.ondragover = e => e.preventDefault();
+      zone.ondrop = e => drops.push(e.dataTransfer.getData("text/plain"));
+    }""")
+    load(page)
+    result = read(page)
+    by_name = {e["name"]: e for e in result["elements"]}
+    assert by_name["Shadow item"] | {"ref": None} == {
+        "ref": None, "tag": "div", "role": "generic", "name": "Shadow item", "within": "shadow", "draggable": True}
+    assert by_name["Shadow zone"]["within"] == "shadow"
+    assert drag(page, by_name["Shadow item"]["ref"], by_name["Shadow zone"]["ref"]) == {"ok": True, "dropped": True}
+    assert page.evaluate("drops") == ["deep"]

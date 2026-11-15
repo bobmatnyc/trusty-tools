@@ -187,6 +187,7 @@ MUTATING = {
     "page_scroll",
     "page_navigate",
     "page_upload",
+    "page_drag",
 }
 # #11352: TextDropped also carries typed, accepted and entered.
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
@@ -211,6 +212,7 @@ PAGE_ERRORS = UNFINISHED | {
     "Obscured",
     "DebuggerBusy",
     "NoHistory",
+    "NotDraggable",
     "InvalidUrl",
 }
 
