@@ -42,8 +42,8 @@ tm
 ## What You Just Installed
 
 When you ran `tctl install trusty-mpm`, three members were installed —
-normally to `~/.local/bin` (the prebuilt path), or `~/.cargo/bin` if the
-installer fell back to `cargo install` for your platform:
+to `~/.cargo/bin` (or `$CARGO_HOME/bin` if set), whether the installer used a
+prebuilt binary or fell back to `cargo install` for your platform:
 
 - **`trusty-mpm`** (binaries: `trusty-mpm` and `tm`) — the session orchestrator. Manages Claude Code sessions, coordinates with daemons, provides the CLI and daemon interface.
 - **`trusty-memory`** — long-term memory storage daemon. Stores development context, notes, snippets. Started automatically as a macOS/Linux service.
@@ -57,7 +57,7 @@ These three form the core of the trusty-mpm platform. The installer also sets up
 
 ### Step 1: Download and Install the Installer
 
-The one-liner (`curl | sh`) downloads a prebuilt `trusty-installer` binary, verifies its SHA-256 checksum, and installs it to `~/.local/bin`:
+The one-liner (`curl | sh`) downloads a prebuilt `trusty-installer` binary, verifies its SHA-256 checksum, and installs it to `~/.cargo/bin`:
 
 ```bash
 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
@@ -67,8 +67,8 @@ curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.
 1. Detects your platform (macOS arm64, Linux x86_64/arm64).
 2. Downloads the latest prebuilt `trusty-installer` release.
 3. Verifies the binary's SHA-256 checksum against the published value.
-4. Installs `trusty-installer` and creates a `tctl` alias to `~/.local/bin`.
-5. Offers to add `~/.local/bin` to your `$PATH` if it's not already there.
+4. Installs `trusty-installer` and creates a `tctl` alias to `~/.cargo/bin`.
+5. Offers to add `~/.cargo/bin` to your `$PATH` if it's not already there.
 6. Runs `tctl install` (interactive) to begin the full stack install.
 
 **Non-interactive mode** (for CI/scripts):
@@ -85,7 +85,7 @@ TRUSTY_VERSION=x.y.z curl -sSf https://raw.githubusercontent.com/bobmatnyc/trust
 | Variable | Effect |
 |---|---|
 | `TRUSTY_VERSION` | Pin a release version; default: latest |
-| `TRUSTY_INSTALL_DIR` | Install directory; default: `~/.local/bin` |
+| `TRUSTY_INSTALL_DIR` | Install directory; default: `~/.cargo/bin` (`$CARGO_HOME/bin` if set) |
 | `TRUSTY_YES=1` | Skip all prompts (same as `-y` flag) |
 | `TRUSTY_FORCE=1` | Re-download even if already installed |
 | `TRUSTY_NO_MODIFY_PATH=1` | Don't modify shell PATH |
@@ -270,16 +270,14 @@ launchctl bootout gui/$(id -u)/com.trusty.mpm 2>/dev/null || true
 rm -f ~/Library/LaunchAgents/com.trusty.*.plist
 ```
 
-**Then remove the binaries.** They can land in either of two directories,
-depending on how they were installed — a prebuilt `tctl install` (or the
-one-liner) uses `~/.local/bin` (overridable via `TRUSTY_INSTALL_DIR`); a
-`cargo install` or build-from-source path uses `~/.cargo/bin` (or
-`$CARGO_HOME/bin` if you've overridden `CARGO_HOME`). Check both — `rm -f` so
-a name missing from one directory doesn't stop the command:
+**Then remove the binaries.** Both the prebuilt path (`tctl install` or the
+one-liner) and the `cargo install` or build-from-source path use `~/.cargo/bin`
+(or `$CARGO_HOME/bin` if you've overridden `CARGO_HOME`); the one-liner's
+location is also overridable via `TRUSTY_INSTALL_DIR`. Use `rm -f` so a name
+that is already missing doesn't stop the command:
 
 ```bash
-rm -f ~/.cargo/bin/{trusty-mpm,tm,trusty-memory,trusty-search,tctl} \
-      ~/.local/bin/{trusty-mpm,tm,trusty-memory,trusty-search,tctl}
+rm -f ~/.cargo/bin/{trusty-mpm,tm,trusty-memory,trusty-search,tctl}
 ```
 
 (`trusty-mpm` installs two binaries, `trusty-mpm` and `tm` — both need
