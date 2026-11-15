@@ -15,7 +15,7 @@ use super::{Candidate, Role, Unread, candidates, existing_paths, expand, is_comp
 use super::{fd_pipe_script, is_fd_pipe};
 use super::{locate, segment_bases, unresolved};
 use crate::commands::pm_guard_bash::{
-    MAX_SUBSTITUTION_DEPTH, Substitution, blank_shell_comments, heredoc_expansions,
+    MAX_SUBSTITUTION_DEPTH, Substitution, TokenizeError, blank_shell_comments, heredoc_expansions,
     segment_substitution_spans, split_heredoc_bodies, split_shell_segments, tokenize,
 };
 
@@ -99,10 +99,15 @@ pub(super) fn each_script_in<T>(
         // #10548: a substitution's words are not the segment's words; its body
         // is judged below as a command of its own.
         let argv = if walk.own {
-            let masked = masked(trimmed, &found);
-            tokenize(&masked)
-                .or_else(|_| tokenize(trimmed))
-                .unwrap_or_default()
+            match own_words(trimmed, &found) {
+                Some(argv) => argv,
+                // #11276: a segment whose operators cannot be placed may run
+                // any script, so it refuses rather than reading as no words.
+                None => match judge(trimmed, Err(Unread::Unplaceable), None, bases) {
+                    Some(answer) => return Some(answer),
+                    None => Vec::new(),
+                },
+            }
         } else {
             Vec::new()
         };
@@ -116,7 +121,12 @@ pub(super) fn each_script_in<T>(
             continue;
         }
         let seg_bases = segment_bases(&argv_text, trimmed, bases);
-        resolve_script_operand(&mut candidates, &argv_text, trimmed, &seg_bases);
+        // #11276: an assignment the script word reads that cannot be placed.
+        if resolve_script_operand(&mut candidates, &argv_text, trimmed, &seg_bases)
+            && let Some(answer) = judge(trimmed, Err(Unread::Unplaceable), None, &seg_bases)
+        {
+            return Some(answer);
+        }
         if let Some(answer) = bodies(Some(spans), &seg_bases, inner, sub_depth, judge) {
             return Some(answer);
         }
@@ -141,6 +151,32 @@ pub(super) fn each_script_in<T>(
         }
     }
     None
+}
+
+/// A segment's own words: its [`masked`] spelling, else its spelling as
+/// written, else either with shell comments blanked (#11276).
+///
+/// What: `None` only when no spelling lexes and one of them failed with
+/// [`TokenizeError::AmbiguousOperators`]; unbalanced quoting alone keeps the
+/// empty list it always had. A comment's apostrophe is what bash ignores and
+/// the `shlex` view does not, so blanking comments is tried before refusing.
+/// Test: `an_unplaced_script_run_refuses_11276`.
+fn own_words(segment: &str, spans: &[(Range<usize>, Substitution)]) -> Option<Vec<String>> {
+    let masked = masked(segment, spans);
+    let spellings = [
+        masked.clone(),
+        segment.to_string(),
+        blank_shell_comments(&masked),
+        blank_shell_comments(segment),
+    ];
+    let mut unplaced = false;
+    for spelling in &spellings {
+        match tokenize(spelling) {
+            Ok(argv) => return Some(argv),
+            Err(error) => unplaced |= error == TokenizeError::AmbiguousOperators,
+        }
+    }
+    (!unplaced).then(Vec::new)
 }
 
 /// `segment` with each substitution span replaced by a placeholder word —

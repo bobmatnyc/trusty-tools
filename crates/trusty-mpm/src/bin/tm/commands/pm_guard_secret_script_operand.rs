@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use super::{Candidate, Role, existing_paths, expand, is_computed, is_fd_pipe};
 use crate::commands::hook_rewrite::is_env_assignment;
-use crate::commands::pm_guard_bash::{split_shell_segments_raw, tokenize};
+use crate::commands::pm_guard_bash::{TokenizeError, split_shell_segments_raw, tokenize};
 
 /// The positional candidate the interpreter runs as its script, if any.
 ///
@@ -91,30 +91,33 @@ pub(super) fn fd_pipe_script<'a>(
 /// `$NAME` or `${NAME}` followed by `/` or nothing, and `segment` is written
 /// once in `text` with no `'` or `\`, the word is resolved by
 /// [`assigned_literal`]. It is kept only when the resolved path exists; any
-/// other case leaves the word computed, and it refuses.
+/// other case leaves the word computed, and it refuses. Answers `true` when
+/// an assignment segment it read cannot be placed (#11276), so the caller
+/// refuses whatever the prefix.
 /// Test: `a_venv_python_script_through_a_variable_allows_matt_10672`,
-/// `an_untracked_variable_script_refuses_10672`.
+/// `an_untracked_variable_script_refuses_10672`,
+/// `an_unplaced_assignment_before_a_script_refuses_11276`.
 pub(super) fn resolve_script_operand(
     candidates: &mut [Candidate],
     text: &str,
     segment: &str,
     bases: &[PathBuf],
-) {
+) -> bool {
     let Some(first) = candidates.iter_mut().find(|c| c.role == Role::Positional) else {
-        return;
+        return false;
     };
     if first.interpreter.is_none() || !first.word.starts_with('$') {
-        return;
+        return false;
     }
     // A quote or backslash could make `$NAME` literal text; that is not tracked.
     if segment.contains(['\'', '\\']) || !segment.contains(first.word.as_str()) {
-        return;
+        return false;
     }
     let rest = &first.word[1..];
     let (name, tail) = match rest.strip_prefix('{') {
         Some(braced) => match braced.split_once('}') {
             Some(split) => split,
-            None => return,
+            None => return false,
         },
         None => rest.split_at(
             rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -124,10 +127,13 @@ pub(super) fn resolve_script_operand(
     let named = name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
     if !named || !(tail.is_empty() || tail.starts_with('/')) || is_computed(tail) {
-        return;
+        return false;
     }
-    let resolved = assigned_literal(text, segment, name).map(|value| format!("{value}{tail}"));
+    let mut unplaced = false;
+    let resolved =
+        assigned_literal(text, segment, name, &mut unplaced).map(|value| format!("{value}{tail}"));
     first.resolved = resolved.filter(|word| !existing_paths(word, bases).is_empty());
+    unplaced
 }
 
 /// The literal `name` holds when `segment` runs, read from `text`.
@@ -141,8 +147,11 @@ pub(super) fn resolve_script_operand(
 /// answers `None`, as does a latest assignment that is not a plain literal.
 /// `segment` must be one raw segment written exactly once in `text`, so a
 /// wrapper's inner command (`bash -c '…'`) never resolves from the outer shell.
-/// Test: `an_untracked_variable_script_refuses_10672`.
-fn assigned_literal(text: &str, segment: &str, name: &str) -> Option<String> {
+/// #11276: an earlier segment whose operators cannot be placed sets
+/// `unplaced` and answers `None`.
+/// Test: `an_untracked_variable_script_refuses_10672`,
+/// `an_unplaced_assignment_before_a_script_refuses_11276`.
+fn assigned_literal(text: &str, segment: &str, name: &str, unplaced: &mut bool) -> Option<String> {
     if text.matches(segment).count() != 1 {
         return None;
     }
@@ -158,7 +167,13 @@ fn assigned_literal(text: &str, segment: &str, name: &str) -> Option<String> {
         if !matches!(separator_after(k), ";" | "" | "&&") {
             return None;
         }
-        let words = tokenize(raws[k].trim()).ok()?;
+        let words = match tokenize(raws[k].trim()) {
+            Ok(words) => words,
+            Err(error) => {
+                *unplaced = error == TokenizeError::AmbiguousOperators;
+                return None;
+            }
+        };
         if words.is_empty() || !words.iter().all(|w| is_env_assignment(w)) {
             return None;
         }

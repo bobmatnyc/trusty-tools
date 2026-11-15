@@ -338,6 +338,22 @@ fn judge_script(
                 (depth + 1, git_env),
                 seen,
             ),
+            // #11276: a body's segment split is approximate (an apostrophe in
+            // prose joins lines), so an unplaceable segment is read line by
+            // line: each script a line runs is judged, and an unresolved
+            // script or a secret-shaped word refuses.
+            Err(Unread::Unplaceable) => match unplaced_body_scripts(word, inner_bases, &body) {
+                Some(scripts) => scripts.into_iter().find_map(|(_, inner, interp)| {
+                    judge_script(
+                        &inner,
+                        interp.as_deref(),
+                        inner_bases,
+                        (depth + 1, git_env),
+                        seen,
+                    )
+                }),
+                None => Some((Rule::Unread(Unread::Unplaceable), None)),
+            },
             Err(why) => Some((Rule::Unread(why), None)),
         };
         refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
@@ -364,6 +380,67 @@ fn judge_script(
     // named as the computed word it was written as.
     each_script_in(&substituted, bases, subs, 0, &mut refuse)
         .or_else(|| each_script_in(&nested, bases, own, 0, &mut refuse))
+}
+
+/// The scripts an unplaceable segment inside a script body runs, read line
+/// by line (#11276); `None` when a line may run what the guard cannot judge.
+///
+/// What: a `#` comment line is skipped. Each line's script candidates — its
+/// lexed words, else a rough cut ([`rough_candidates`]) — are located, and an
+/// unresolved one refuses ([`unresolved`]). A secret-shaped word refuses, as
+/// in [`judge_text`].
+/// Test: `an_unplaced_script_run_in_a_body_refuses_11276`,
+/// `an_unplaced_benign_body_segment_allows_11276`,
+/// `the_repo_gate_scripts_allow_8879`.
+fn unplaced_body_scripts(
+    segment: &str,
+    bases: &[PathBuf],
+    body: &str,
+) -> Option<Vec<(String, PathBuf, Option<String>)>> {
+    let mut scripts = Vec::new();
+    for line in segment.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // #8879: the file rule's bracket and brace shapes are judge_text's residual 9.
+        if secret_files_named_in(line, Scan::ProgramText)
+            .iter()
+            .any(|word| !word.contains(['[', ']', '{', '}']))
+        {
+            return None;
+        }
+        let runs: Vec<Vec<Candidate>> = match crate::commands::pm_guard_bash::tokenize(line) {
+            Ok(argv) => vec![candidates(&argv).0],
+            Err(_) => rough_candidates(line),
+        };
+        for found in runs {
+            if unresolved(&found, bases, body).is_some() {
+                return None;
+            }
+            // A directory runs nothing (`crates/` cut from prose by a `<`).
+            scripts.extend(locate(&found, bases).into_iter().filter(|s| !s.1.is_dir()));
+        }
+    }
+    Some(scripts)
+}
+
+/// The script candidates of a line the guard cannot lex: one set per
+/// operator-delimited run of its whitespace-cut, quote-stripped words. A
+/// candidate word carrying a backslash is sed or regex text and is skipped.
+fn rough_candidates(line: &str) -> Vec<Vec<Candidate>> {
+    line.split([';', '&', '|', '(', ')'])
+        .map(|piece| {
+            let rough: Vec<String> = piece
+                .split(|c: char| c.is_whitespace() || c == '<' || c == '>')
+                .map(|w| w.trim_matches(['\'', '"', ',']).to_string())
+                .filter(|w| !w.is_empty())
+                .collect();
+            let (mut found, _) = candidates(&rough);
+            // A backslash-bearing word is regex or escape text (`\1/`), not a path.
+            found.retain(|c| !c.word.contains('\\'));
+            found
+        })
+        .collect()
 }
 
 /// Run the inline credential judges over `command`, the inline spelling of
