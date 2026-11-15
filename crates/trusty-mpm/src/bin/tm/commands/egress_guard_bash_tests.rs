@@ -477,10 +477,13 @@ fn bash_egress_trust_anchor_verdict_precedes_the_bash_arm() {
             assert_eq!(check, BASH_CHECK);
             assert_eq!(
                 reason,
+                // #11273: the reason names the launch-record rule.
                 "tm hook --egress-guard denies this Bash command: it reaches Slack \
-                 (hooks.slack.com) outside the owner channel, and no tm-launched session, PM \
-                 or subagent may message Slack, Gmail, Notion or Google Chat directly (#8454). \
-                 Ask the operator instead."
+                 (hooks.slack.com), and only the Architect's main session bound to its tm \
+                 launch record may message Slack, Gmail, Notion or Google Chat directly \
+                 (#10447, #11273); a PM, a subagent, or a call whose thread the guard cannot \
+                 establish may not (#8454). A family host named only as inert text is not \
+                 this deny's subject. Ask the operator instead."
             );
         }
         Verdict::Allow => panic!("a Slack host must deny"),

@@ -255,3 +255,38 @@ fn egress_trust_anchor_verdict_precedes_the_family_check() {
         }
     ));
 }
+
+/// 🔴 #11273: the family decision still denies a read for every caller; the
+/// main-session read pass after it lifts that deny for a stamped PM main
+/// thread only, never for its subagent.
+#[test]
+fn a_family_read_is_lifted_for_a_main_session_only_11273() {
+    use crate::commands::egress_guard_main_read::lift as main_read;
+    use crate::commands::pm_guard_trust_anchor::HookEnv;
+    let table = FamilyTable::builtin();
+    let main = serde_json::json!({
+        "session_id": "s-1",
+        "tool_name": "mcp__slack-mcp__slack_read_thread",
+        "tool_input": {},
+    });
+    let mut sub = main.clone();
+    sub["agent_id"] = serde_json::json!("agent-7");
+    let pm = HookEnv {
+        stamp: Some("pm".into()),
+        ..HookEnv::default()
+    };
+    for call in [&main, &sub] {
+        let read = Ok(call.clone());
+        let first = verdict(&read, &table, |_| None);
+        assert!(matches!(
+            first,
+            Verdict::Deny {
+                check: "egress-family",
+                ..
+            }
+        ));
+        let (lifted, _) = main_read(first, &read, &table, &pm);
+        let want_allow = call.get("agent_id").is_none();
+        assert_eq!(lifted == Verdict::Allow, want_allow, "{call}");
+    }
+}

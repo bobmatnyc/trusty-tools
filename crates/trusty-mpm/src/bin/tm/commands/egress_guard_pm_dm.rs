@@ -18,6 +18,10 @@
 //! FAIL-CLOSED: any other tool, server, key shape or value, a non-object
 //! input, an unreadable payload, a subagent, an unknown thread, and a missing,
 //! empty or non-PM launch stamp keep the deny. An audit line that cannot be written denies, as for the Architect.
+//! #11273: [`main_thread_role`] — the same thread and stamp tests, naming a PM
+//! or Architect main session — is the read pass's identity; it lives here so
+//! the stamp is compared in one file. No PM launch record exists yet, so this
+//! arm stays a PM's only send.
 //! Test: `egress_guard_pm_dm_tests.rs`; end to end in
 //! `tests/tm_hook_egress_pm_dm_11194.rs`.
 
@@ -105,6 +109,50 @@ fn owner_dm_target(tool: &str, input: &Value) -> Option<Option<&'static str>> {
 fn pm_launch_stamp(env: &HookEnv) -> bool {
     let (_, pm) = launch_env(SessionProfile::Pm);
     env.stamp.as_deref() == Some(std::ffi::OsStr::new(&pm))
+}
+
+/// The launch role of a main session, as the #11273 read pass names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainRole {
+    /// A session carrying the tm PM launch stamp.
+    Pm,
+    /// A session carrying an Architect launch stamp, bound or not.
+    Architect,
+}
+
+impl MainRole {
+    /// The role as an audit line names it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            MainRole::Pm => "pm",
+            MainRole::Architect => "architect",
+        }
+    }
+}
+
+/// The role of a main session from payload and stamp evidence, or `None`.
+///
+/// Why: owner ruling 2026-11-14 (#11273) — "reads pass for any main session;
+/// sends and writes need the tm launch record". This is the evidence a read
+/// needs; it is not the launch record, so it never lifts a send or a write.
+/// What: [`thread_kind`] must be `Main` (no payload `agent_id`, a string
+/// `session_id`, `CLAUDE_MPM_SUB_AGENT` unset), and the stamp must be an
+/// Architect stamp (`architect_compat::is_architect_stamp`) or exactly the
+/// PM stamp ([`pm_launch_stamp`]).
+/// FAIL-CLOSED: a subagent, an unknown thread, and a missing, empty or other
+/// stamp are each `None`.
+/// Test: `main_session_reads_pass_in_every_family_11273`,
+/// `subagent_reads_stay_denied_11273`,
+/// `unknown_thread_or_unstamped_session_reads_stay_denied_11273`.
+pub(crate) fn main_thread_role(payload: &Value, env: &HookEnv) -> Option<MainRole> {
+    // #11273: Subagent and Unknown keep the deny.
+    if thread_kind(payload, env.sub_agent) != ThreadKind::Main {
+        return None;
+    }
+    if trusty_mpm::core::architect_compat::is_architect_stamp(env.stamp.as_deref()) {
+        return Some(MainRole::Architect);
+    }
+    pm_launch_stamp(env).then_some(MainRole::Pm)
 }
 
 /// Lift a Slack family deny for a main thread's send to the owner's DM.
