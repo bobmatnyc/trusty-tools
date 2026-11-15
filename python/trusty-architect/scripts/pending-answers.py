@@ -16,8 +16,12 @@ or "general"; cleared by a later `updates` entry or by the Architect setting par
 
 Why: the Architect runs it before each reply so an owner answer is never missed.
 What: prints the session-qualified id (S14:Ddb; bare when the item has no known session), time and answer per item; exit 1 if any exist, 0 if none, 2 on a store error.
+--read-back ID --kind KIND --at AT [--text TEXT] (#10680): re-reads that one item from the store before the Architect acts
+on it. Exit 0 prints "<qid>, kind, at, v<version>, stored text" tab-separated (relay that text; mark relayed with
+--if-version <version>); exit 3 when the item is gone, no longer pending, re-answered or its text differs; exit 2 when
+the read fails. Nothing goes to stdout unless the answer is confirmed.
 Root: --root or DASHBOARD_ROOT, default local/owner-queue.
-Test: scripts/test_fleet_poll_owner_answer.py
+Test: scripts/test_fleet_poll_owner_answer.py, tests/test_owner_answer_read_back.py
 """
 import argparse
 import os
@@ -32,7 +36,13 @@ import owner_answers  # noqa: E402
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", default=os.environ.get("DASHBOARD_ROOT"))
+    ap.add_argument("--read-back", metavar="ID", help="confirm one saved answer before acting on it (#10680)")
+    ap.add_argument("--kind", help="with --read-back: the pending kind listed (answered, cancelled, ...)")
+    ap.add_argument("--at", help="with --read-back: the time listed for it")
+    ap.add_argument("--text", help="with --read-back: the text in hand, which must equal the stored text")
     args = ap.parse_args(argv)
+    if args.read_back is not None:
+        return read_back(args)
     try:
         items = owner_answers.qualified(args.root, owner_answers.pending(args.root))
     except OSError as e:
@@ -42,6 +52,24 @@ def main(argv=None):
         text = f"INTERACTIVE: {it['id']} {it['text']}" if it["kind"] == "interactive" else it["text"]
         print(f"{it['qid']}\t{it['kind']}\t{it['at']}\t{text}")
     return 1 if items else 0
+
+
+def read_back(args):
+    """#10680: exit 0 and print the stored answer only when confirmed; 3 on a mismatch, 2 on a failed read."""
+    if not args.kind or args.at is None:
+        print("pending-answers: --read-back needs --kind and --at", file=sys.stderr)
+        return 2
+    try:
+        e = owner_answers.read_back(args.root, args.read_back, args.kind, args.at, args.text)
+        qid = owner_answers.qualified(args.root, [e])[0]["qid"]
+    except owner_answers.ReadBackError as err:
+        print(f"pending-answers: read-back refused, do not act: {err}", file=sys.stderr)
+        return 3 if err.reason == "mismatch" else 2
+    except (OSError, owner_answers.ds.StoreError) as err:
+        print(f"pending-answers: read-back refused, do not act: unreadable: {err}", file=sys.stderr)
+        return 2
+    print(f"{qid}\t{e['kind']}\t{e['at']}\tv{e['version']}\t{e['text']}")
+    return 0
 
 
 if __name__ == "__main__":

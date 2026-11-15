@@ -300,9 +300,14 @@ Each pass, list what the owner wrote and act on it in the same pass:
 <!-- rule:r-183 -->
 Before every reply to the owner and on every wake, list the answered and
 cancelled items with no `relayed` whose `answer_note` does not start with
-"Relayed". Relay each one in the same turn, store the ruling
-(`memory_remember`, tag `ruling`), then set `relayed` "<ISO time> <session>".
-Then set it `done` with `done_at` and a one-line verified `outcome`. Never
+"Relayed". Before acting on one, read it back from the store:
+`python3 scripts/pending-answers.py --read-back <id> --kind <kind> --at <at>`.
+Relay the text it prints, never the hook line, `/api/meta` or a cached page
+view. Exit 3 (changed, gone or already relayed) or 2 (unreadable) means do not
+act: list again and start over. Relay each one in the same turn, store the
+ruling (`memory_remember`, tag `ruling`), then set `relayed` "<ISO time>
+<session>" with `--if-version` set to the version the read-back printed; a
+version conflict means the owner saved again, so list again. Then set it `done` with `done_at` and a one-line verified `outcome`. Never
 change `answer` or `answer_note`: they hold the owner's words, and
 `dashboard-db.py` refuses a write that changes them. Prune done items older than 7 days with
 `scripts/il-archive.py`.

@@ -53,7 +53,13 @@ Reads only through dashboard_store (either format); the rules live in dashboard_
 Qualified ids (ar-T44): resolve_id(root, ref) maps "S0c:D01" or a bare id to the local id (NotFound when the S id is not this store's own session); qualified(root, entries) adds a derived `qid` ("<S id>:<id>", bare when unknown) to pending entries, so a relay or log line can name the
 entry fleet-wide. Stored ids stay bare.
 refuse_owner_answer_change(store, verb, id, data) is dashboard-db.py's guard: the Architect never rewrites the owner's answer.
-Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py
+Read-back (#10680): read_back(root, ref, kind, at, text=None) re-reads one item from the store (a fresh Store, never a
+cached list, /api/meta or the HTTP server) and returns its pending entry of `kind` plus the doc `version`, only when that
+entry is still pending with the same `at` (and the same `text`, when given). The Architect relays the returned text, never
+the value in hand, and writes `relayed` with --if-version <version>, so an answer saved after the read-back conflicts and
+stays pending. A failed read raises ReadBackError(reason "unreadable"); an item that is gone, no longer pending,
+re-answered or changed raises ReadBackError(reason "mismatch").
+Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py, tests/test_owner_answer_read_back.py
 """
 import os
 import re
@@ -79,6 +85,36 @@ def pending(root=None, now=None, colls=COLLECTIONS):
 
 def resolve_id(root, ref):
     return dq.resolve(ds.Store(root or ds.DEFAULT_ROOT), "items", ref)
+
+
+class ReadBackError(Exception):
+    """The saved answer could not be confirmed; the caller must not act. reason: "unreadable" or "mismatch"."""
+
+    def __init__(self, reason, detail):
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+
+
+def read_back(root, ref, kind, at, text=None, now=None):
+    """#10680: confirm the saved answer from the store before acting on it; never fails open."""
+    now = now or datetime.now(timezone.utc)
+    store = ds.Store(root or ds.DEFAULT_ROOT)
+    try:
+        doc_id = dq.resolve(store, "items", ref)
+        doc = store.get("items", doc_id)
+    except ds.NotFound as e:
+        raise ReadBackError("mismatch", f"{ref} is not in the store ({e})") from e
+    except (OSError, ds.StoreError) as e:
+        raise ReadBackError("unreadable", f"{ref}: {e}") from e
+    found = [e for e in derive.pending_items([doc], now) if e["kind"] == kind]
+    if not found:
+        raise ReadBackError("mismatch", f"{doc_id} has no pending {kind} (status {doc['data'].get('status')!r})")
+    entry = next((e for e in found if e["at"] == at), None)
+    if entry is None:
+        raise ReadBackError("mismatch", f"{doc_id} {kind} was saved at {found[0]['at']}, not {at}")
+    if text is not None and entry["text"] != text:
+        raise ReadBackError("mismatch", f"{doc_id} {kind} text differs from the stored answer")
+    return dict(entry, id=doc_id, version=doc["version"])
 
 
 def qualified(root, entries):
