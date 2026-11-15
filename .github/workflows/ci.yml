@@ -238,7 +238,7 @@ jobs:
   # --------------------------------------------------------------------------
   changes:
     name: Detect Cargo-inert change set
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
@@ -546,7 +546,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -582,7 +582,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -714,7 +714,7 @@ jobs:
     name: Rustdoc intra-doc links
     needs: [changes]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
@@ -893,7 +893,7 @@ jobs:
     # TO RUN IT ON A BRANCH: Actions → CI → "Run workflow" against that branch
     # (the `workflow_dispatch` trigger at the top of this file).
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # #10618: 60, not 45 — the nextest `ci` profile's 35 m HNSW bound must fire
     # (and name the test) before this job cap does.
     timeout-minutes: 60
@@ -1483,7 +1483,7 @@ jobs:
     # must stay in lockstep: `test` requires BOTH, so a divergence would make
     # the roll-up unsatisfiable on whichever trigger they disagree about.
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       # Must match `test-shard`'s value exactly, for two reasons. rust-cache
@@ -1566,7 +1566,7 @@ jobs:
     name: Rust tests (pre-publish gate)
     needs: [changes, test-shard, test-doc]
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every test shard to have succeeded
@@ -1628,7 +1628,7 @@ jobs:
     # `!cancelled()`: a failed `changes` job leaves `docs_only` empty, which
     # the plan reads as "not Cargo-inert" and plans in full.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       count: ${{ steps.plan.outputs.count }}
@@ -1695,7 +1695,7 @@ jobs:
     # roll-up below reads the plan, so a skip here can never report green on
     # its own.
     if: ${{ !cancelled() && needs.affected-plan.result == 'success' && needs.affected-plan.outputs.count != '0' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # `test-shard` legs run 13-27 min (build ~9-12 min from the shared cache).
     # #9271: the trusty-memory leg now carries the engine tests moved from `trusty-common-lanes` (~45 min); 60 matches that job.
     timeout-minutes: 60
@@ -1856,7 +1856,7 @@ jobs:
     name: Rust tests (affected crates)
     needs: [affected-plan, affected-test]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require the plan and every leg to have succeeded
@@ -1912,7 +1912,7 @@ jobs:
     name: trusty-common coverage lanes
     needs: [affected-plan]
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       FASTEMBED_CACHE_DIR: /home/runner/.cache/fastembed
@@ -2021,7 +2021,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -2106,7 +2106,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       # #7063: one line saying whether this job does real work and why.
@@ -2189,7 +2189,7 @@ jobs:
     needs: [changes]
     # #4179: see the identical note on `agents-ui` above.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       # #7063: one line saying whether this job does real work and why.
@@ -2316,10 +2316,14 @@ jobs:
     # workspace-wide required jobs it can skip at job level without leaving a
     # PR pending. An absent classifier output still runs the job (fail closed).
     if: ${{ !cancelled() && needs.changes.outputs.embedder_cuda_relevant != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CUDA_COMPUTE_CAP: "90"
+      # #11061: CUDA 12.8 nvcc rejects a host gcc newer than 14, and
+      # ubuntu-latest (26.04) defaults to a newer one. cudaforge, which
+      # candle-kernels' build.rs uses, passes NVCC_CCBIN to nvcc as `-ccbin`.
+      NVCC_CCBIN: /usr/bin/g++-14
     steps:
       - uses: actions/checkout@v5
 
@@ -2330,6 +2334,8 @@ jobs:
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
+            gcc-14 \
+            g++-14 \
             pkg-config \
             libssl-dev
 
@@ -2344,7 +2350,9 @@ jobs:
           echo "/usr/local/cuda-12.8/bin" >> "$GITHUB_PATH"
 
       - name: Verify nvcc is on PATH
-        run: nvcc --version
+        run: |
+          nvcc --version
+          "$NVCC_CCBIN" --version
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -2416,7 +2424,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -2549,7 +2557,7 @@ jobs:
     # '' and every gated step runs, i.e. a broken classifier costs a FULL
     # build, never a silent skip.
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -2707,7 +2715,7 @@ jobs:
     name: Durable writes hold the teardown guard
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2726,7 +2734,7 @@ jobs:
     name: Every tmux -t target is exact
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2748,7 +2756,7 @@ jobs:
     name: Sled tailscaled isolation (static)
     needs: [changes]
     if: ${{ !cancelled() && needs.changes.outputs.sled_static_relevant != 'false' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2778,7 +2786,7 @@ jobs:
   # Separate jobs, so a red one names which decision broke.
   parity-selftest:
     name: Parity gate self-test (must catch a drifted tag)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 brings tags with it, which case 11 of the self-test uses
@@ -2795,7 +2803,7 @@ jobs:
 
   check5-decision:
     name: CHECK 5 decision self-test (0 compared must never print PASS)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2805,7 +2813,7 @@ jobs:
 
   check8-decision:
     name: CHECK 8 decision self-test (a run's head_sha is not what it gated)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2824,7 +2832,7 @@ jobs:
   # skips PRs: a fault found only there has already merged.
   fastembed-cache-selftest:
     name: Fastembed cache check self-test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -2839,7 +2847,7 @@ jobs:
   # scripts/ci-website-relevance.sh, which counts this file as an input.
   website-corpus:
     name: Website content corpus
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
@@ -2931,7 +2939,7 @@ jobs:
   # --------------------------------------------------------------------------
   changelog-fragment:
     name: Per-PR changelog fragment
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       # fetch-depth: 0 — the gate needs `git merge-base` against the base
@@ -3110,7 +3118,7 @@ jobs:
         test,
       ]
     if: ${{ always() }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -3213,7 +3221,7 @@ jobs:
         website-corpus,
         ci-gate,
       ]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       issues: write
