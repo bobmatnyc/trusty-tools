@@ -35,7 +35,7 @@ def db(root, *args):
 
 def seed(tmp_path, data=ANSWERED):
     root = tmp_path / "store"
-    ds.Store(str(root)).set("items", "D34", dict(data), 0)
+    ds.Store(str(root), clock=lambda: T).set("items", "D34", dict(data), 0)   # #10678: the store stamps created/updated
     return root
 
 
