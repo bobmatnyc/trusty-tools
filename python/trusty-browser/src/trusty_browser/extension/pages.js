@@ -80,54 +80,67 @@ globalThis.TrustyPages = (() => {
     return result;
   }
 
-  // Why: a click must reach only an element this document's latest read reported.
-  // What: resolves the ref, then dispatches synthetic pointer and mouse events and element.click().
-  // Test: tests/test_pages_dom.py `test_click_and_type_refuse_stale_refs`.
-  function pageClick(ref) {
-    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
-    el.scrollIntoView({block:"center", inline:"center"});
-    const box = el.getBoundingClientRect();
-    const at = {bubbles:true, cancelable:true, composed:true, view:window,
-      clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
-    el.dispatchEvent(new PointerEvent("pointerdown", at));
-    el.dispatchEvent(new MouseEvent("mousedown", at));
-    el.dispatchEvent(new PointerEvent("pointerup", at));
-    el.dispatchEvent(new MouseEvent("mouseup", at));
-    if (typeof el.focus === "function" && el.tabIndex >= 0) el.focus();
-    el.click();
-    return {ok:true};
-  }
-
-  // Why: typing replaces the content of one supported editable element from the latest read.
-  // What: native value setter plus bubbling input/change for input and textarea; insertText for
-  //   contenteditable. Any other, disabled or read-only target answers NotEditable.
-  // Test: tests/test_pages_dom.py `test_type_sets_values_and_refuses_non_editable`.
-  function pageType(ref, text) {
+  // Why: a trusted click or keystroke must land only on an element this document's latest read reported
+  //   (#11294); the worker then drives real input at the point this returns.
+  // What: resolves the ref, checks a "type" target is editable, scrolls it to the viewport centre, and for
+  //   "type" focuses it and selects its content so the first keystroke replaces it. A "click" whose centre
+  //   another element covers answers Obscured. Returns the centre in top-frame CSS pixels.
+  // Test: tests/test_pages_dom.py `test_target_refuses_stale_refs_and_covered_points`,
+  //   `test_type_sets_values_and_refuses_non_editable`.
+  function pageTarget(ref, kind) {
     const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
     const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
     if (!el || !el.isConnected) return {error:"StaleElement"};
     const kinds = ["text","search","email","url","tel","password","number"];
     const field = el.localName === "textarea" ||
       (el.localName === "input" && kinds.includes((el.getAttribute("type") || "text").toLowerCase()));
-    if ((!field && !el.isContentEditable) || el.disabled || el.readOnly) return {error:"NotEditable"};
+    if (kind === "type" && ((!field && !el.isContentEditable) || el.disabled || el.readOnly)) return {error:"NotEditable"};
+    el.scrollIntoView({block:"center", inline:"center"});
+    const box = el.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + box.height / 2;
+    if (kind === "click") {
+      const hit = document.elementFromPoint(x, y);
+      return hit && (hit === el || el.contains(hit)) ? {ok:true, x, y} : {error:"Obscured"};
+    }
     el.focus();
-    if (field) {
-      const proto = el.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
-      el.dispatchEvent(new Event("input", {bubbles:true}));
-      el.dispatchEvent(new Event("change", {bubbles:true}));
-    } else {
+    if (field) el.select();
+    else {
       const range = document.createRange();
       range.selectNodeContents(el);
-      const selection = getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      if (text) document.execCommand("insertText", false, text); else document.execCommand("delete");
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
     }
-    return {ok:true};
+    return {ok:true, x, y};
   }
+
+  // Why: sites that need native input or user activation reject synthetic events (#11294).
+  // What: drives Chrome DevTools Protocol input through `send(method, params)`, so every event the page
+  //   sees is trusted. A click is move, press, release at the point. Typing sends one keyDown/keyUp per
+  //   code point (Enter for a newline, insertText for other control characters); empty text sends
+  //   Backspace over the selection pageTarget made.
+  // Test: tests/test_pages_dom.py `test_trusted_click_and_type_arrive_trusted`.
+  const trusted = {
+    async click(send, {x, y}) {
+      const at = {x, y, button:"left", clickCount:1};
+      await send("Input.dispatchMouseEvent", {type:"mouseMoved", x, y});
+      await send("Input.dispatchMouseEvent", {type:"mousePressed", ...at, buttons:1});
+      await send("Input.dispatchMouseEvent", {type:"mouseReleased", ...at, buttons:0});
+    },
+    async type(send, text) {
+      const key = async down => {
+        await send("Input.dispatchKeyEvent", {type:"keyDown", ...down});
+        await send("Input.dispatchKeyEvent", {type:"keyUp", key:down.key, code:down.code,
+          windowsVirtualKeyCode:down.windowsVirtualKeyCode});
+      };
+      if (!text) return key({key:"Backspace", code:"Backspace", windowsVirtualKeyCode:8});
+      for (const ch of text) {
+        if (ch === "\n") await key({key:"Enter", code:"Enter", windowsVirtualKeyCode:13, text:"\r", unmodifiedText:"\r"});
+        else if (ch < " " || ch === "\u007f") await send("Input.insertText", {text:ch});
+        else await key({key:ch, text:ch, unmodifiedText:ch});
+      }
+    },
+    // A native dialog blocks the page until answered: an alert is acknowledged, any other follows `policy`.
+    accepts:(type, policy) => type === "alert" || policy === "accept",
+  };
 
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
@@ -137,7 +150,7 @@ globalThis.TrustyPages = (() => {
     if (address.username || address.password) return false;
     return address.protocol === "https:" || (address.protocol === "http:" && address.hostname === "127.0.0.1");
   }
-  return {pageProbe, pageRead, pageClick, pageType, urlAllowed};
+  return {pageProbe, pageRead, pageTarget, trusted, urlAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -145,16 +158,17 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageType, urlAllowed} = TrustyPages;
+  const {pageProbe, pageRead, pageTarget, trusted, urlAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
+  const dialog = v => v === "accept" || v === "dismiss";
   const SPECS = {
-    page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
-    page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
+    page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref, dialog},
+    page_type:{tab, document:doc, ref, dialog, text:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
@@ -188,25 +202,55 @@ TrustyPages.commands = deps => {
     return {done, cancel:() => finish(false)};
   }
 
-  // Runs the injected click/type only inside the lease's document; never reports work it did not do.
-  async function act(req, func, args) {
-    if (req.document === null) {
+  // Why: a click or type must arrive trusted, yet run only inside the lease's document and never report
+  //   work it did not do (#11294).
+  // What: attaches chrome.debugger to the tab (before targeting, since Chrome's debugging bar resizes the
+  //   viewport), injects pageTarget into the lease's document only, drives CDP input at the point it
+  //   returns, answers any native dialog by `req.dialog` (an alert is always acknowledged), waits 100 ms in
+  //   the page for a dialog its handlers open late, then detaches. The reply names the last dialog seen.
+  // Test: tests/test_worker.mjs `click and type drive trusted input and answer dialogs`,
+  //   `stale document refuses before the page runs`.
+  async function act(req, kind, drive) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    if (req.document === null) throw changed(await probe(req.tab));
+    const debuggee = {tabId:req.tab}, send = (method, params = {}) => chrome.debugger.sendCommand(debuggee, method, params);
+    try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
       const now = await probe(req.tab);
-      throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+      if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
+      throw changed(now);
     }
-    let hit;
+    let seen = null;
+    const answer = (source, method, params) => {
+      if (source.tabId !== req.tab || method !== "Page.javascriptDialogOpening") return;
+      const accept = trusted.accepts(params?.type, req.dialog);
+      seen = {type:String(params?.type), message:String(params?.message ?? "").slice(0, 1024), accepted:accept};
+      send("Page.handleJavaScriptDialog", {accept}).catch(() => {});
+    };
+    chrome.debugger.onEvent.addListener(answer);
     try {
-      [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]}, func, args});
-    } catch {
-      const now = await probe(req.tab);
-      // The lease's document is still current, so the failure came from the page: the outcome is unknown.
-      if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
-      throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+      await send("Page.enable");
+      let hit;
+      try {
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
+          func:pageTarget, args:[req.ref, kind]});
+      } catch {
+        const now = await probe(req.tab);
+        // The lease's document is still current, so the failure came from the page: the outcome is unknown.
+        if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
+        throw changed(now);
+      }
+      const point = hit?.result, error = point?.error;
+      if (["StaleElement","NotEditable","Obscured"].includes(error)) throw refuse(error, {tab:req.tab});
+      if (point?.ok !== true || hit.documentId !== req.document || !Number.isFinite(point.x) ||
+          !Number.isFinite(point.y)) throw refuse("OutcomeUnknown");
+      await drive(send, point);
+      await send("Runtime.evaluate", {expression:"new Promise(done => setTimeout(done, 100))", awaitPromise:true})
+        .catch(() => {});
+    } finally {
+      chrome.debugger.onEvent.removeListener(answer);
+      await chrome.debugger.detach(debuggee).catch(() => {});
     }
-    const error = hit?.result?.error;
-    if (error === "StaleElement" || error === "NotEditable") throw refuse(error, {tab:req.tab});
-    if (hit?.result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
-    return {document:req.document};
+    return seen ? {document:req.document, dialog:seen} : {document:req.document};
   }
 
   const run = {
@@ -234,8 +278,8 @@ TrustyPages.commands = deps => {
       return {document:hit.documentId, origin:result.origin, url:result.url, title:result.title,
         text:result.text, elements:result.elements, truncated:result.truncated};
     },
-    page_click:req => act(req, pageClick, [req.ref]),
-    page_type:req => act(req, pageType, [req.ref, req.text]),
+    page_click:req => act(req, "click", trusted.click),
+    page_type:req => act(req, "type", send => trusted.type(send, req.text)),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
