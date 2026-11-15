@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import secrets
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 from trusty_browser import codes
@@ -31,6 +32,7 @@ OPS = {
     "page_read": {"op", "lease"},
     "page_click": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
+    "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "release": {"op", "lease"},
 }
@@ -99,14 +101,45 @@ LANDED = {
 }
 
 
+# #11286: the keys page_press names; any other single printable character is also a key.
+NAMED_KEYS = {
+    "Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown",
+    "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Space", " ",
+}  # fmt: skip
+MODIFIERS = {"Shift", "Control", "Alt", "Meta"}
+
+
+def key_allowed(key: object) -> bool:
+    """A named key, or one code point that is not a control, format or separator.
+
+    Why: the broker refuses a key the worker would refuse, before sending it.
+    What: mirrors ``keyAllowed`` in extension/pages.js.
+    Test: `test_page_press_validates_key_and_modifiers_before_sending`.
+    """
+    if not isinstance(key, str):
+        return False
+    if key in NAMED_KEYS:
+        return True
+    return len(key) == 1 and unicodedata.category(key)[0] not in "CZ"
+
+
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
     if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
         raise Refusal("InvalidRequest")
     for name in ("lease", "request_id", "ref"):
-        if name in request:
+        # #11286: page_press takes a null ref for the focused element.
+        if name in request and not (op == "page_press" and request[name] is None):
             string(request, name)
+    if op == "page_press":
+        mods = request["modifiers"]
+        if not key_allowed(request["key"]) or not (
+            isinstance(mods, list)
+            and all(isinstance(m, str) and m in MODIFIERS for m in mods)
+            and len(set(mods)) == len(mods)
+        ):
+            raise Refusal("InvalidRequest")
     if "tab" in request:
         tab = request["tab"]
         if type(tab) is not int or tab < 0:
@@ -318,6 +351,8 @@ class Pages(Grants):
             args = {"document": claim.document, "ref": request["ref"]}
             if op == "page_type":
                 args["text"] = request["text"]
+            if op == "page_press":  # #11286
+                args.update(key=request["key"], modifiers=request["modifiers"])
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:

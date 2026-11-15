@@ -173,7 +173,7 @@ class Peer:
 
 
 PAGE_WAIT = 8.0  # the worker answers within 7 s
-MUTATING = {"page_click", "page_type", "page_navigate"}
+MUTATING = {"page_click", "page_type", "page_press", "page_navigate"}  # #11286: page_press
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}

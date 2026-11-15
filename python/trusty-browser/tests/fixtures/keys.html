@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- #11286: key-press fixture. Shared by tests/test_pages_dom.py and tests/keys_fixture.py (live check).
+     The page log (#log, also window.keyLog) records every keydown, keypress, keyup, focus and submit. -->
+<meta charset="utf-8">
+<title>Key fixture</title>
+<main>
+  <form id="login">
+    <label>User <input id="user" name="user"></label>
+    <label>Pass <input id="pass" name="pass" type="password"></label>
+    <button id="submit">Sign in</button>
+  </form>
+  <p>
+    <button id="first">First</button>
+    <button disabled>Off</button>
+    <span tabindex="-1">Skipped</span>
+    <a id="link" href="#linked">Link</a>
+    <input id="third" aria-label="Third">
+    <textarea id="notes" aria-label="Notes"></textarea>
+  </p>
+  <div id="editor" contenteditable="true" aria-label="Editor">hello</div>
+  <pre id="log" aria-label="Key log"></pre>
+</main>
+<script>
+  window.keyLog = [];
+  const log = document.getElementById("log");
+  const write = line => { window.keyLog.push(line); log.textContent += line + "\n"; };
+  const at = e => " @" + (e.target.id || e.target.localName);
+  const MODIFIERS = ["Control", "Alt", "Shift", "Meta"];
+  const held = e => [e.ctrlKey && "Control", e.altKey && "Alt", e.shiftKey && "Shift", e.metaKey && "Meta"]
+    .filter(name => name && name !== e.key);
+  for (const kind of ["keydown", "keypress", "keyup"]) {
+    document.addEventListener(kind, e => {
+      const chord = MODIFIERS.includes(e.key) ? [e.key] : [...held(e), e.key];
+      write(kind + " " + chord.join("+") + at(e));
+    }, true);
+  }
+  document.addEventListener("focusin", e => write("focus" + at(e)));
+  document.addEventListener("click", e => write("click" + at(e)), true);
+  document.getElementById("login").addEventListener("submit", e => {
+    e.preventDefault();
+    write("submit user=" + document.getElementById("user").value);
+  });
+</script>

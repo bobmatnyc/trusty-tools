@@ -1,6 +1,6 @@
 // Page operations for activation-code grants (#11239, docs/activation-codes.md).
 // The worker loads this file with importScripts; tests load it into a page. Top-level code touches no
-// `chrome` API. The four `page*` functions are injected by chrome.scripting.executeScript, so each one
+// `chrome` API. The `page*` function declarations are injected by chrome.scripting.executeScript, so each one
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
 globalThis.TrustyPages = (() => {
   // Returns [origin, title] and changes nothing; the InjectionResult supplies the documentId.
@@ -100,34 +100,248 @@ globalThis.TrustyPages = (() => {
     return {ok:true};
   }
 
-  // Why: typing replaces the content of one supported editable element from the latest read.
-  // What: native value setter plus bubbling input/change for input and textarea; insertText for
-  //   contenteditable. Any other, disabled or read-only target answers NotEditable.
-  // Test: tests/test_pages_dom.py `test_type_sets_values_and_refuses_non_editable`.
-  function pageType(ref, text) {
-    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
-    const kinds = ["text","search","email","url","tel","password","number"];
-    const field = el.localName === "textarea" ||
-      (el.localName === "input" && kinds.includes((el.getAttribute("type") || "text").toLowerCase()));
-    if ((!field && !el.isContentEditable) || el.disabled || el.readOnly) return {error:"NotEditable"};
-    el.focus();
-    if (field) {
-      const proto = el.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
-      el.dispatchEvent(new Event("input", {bubbles:true}));
-      el.dispatchEvent(new Event("change", {bubbles:true}));
-    } else {
+  // Why: page_type and page_press must reach the page as keystrokes: handlers listen for keydown, and a
+  //   form submits on Enter (#11286). Synthetic key events carry no default action, so this emulates it.
+  // What: action "type" checks that `ref` is a supported editable target (else NotEditable), focuses it,
+  //   selects its content and presses each character of `input` ("\n" or "\r" is Enter, "\t" is Tab).
+  //   Action "press" focuses `ref` when given (null keeps the focused element) and presses
+  //   `input.key` with `input.modifiers`. Each press fires modifier keydowns, keydown, keypress (printable
+  //   keys and Enter without Control or Meta), the default action unless a handler cancelled, keyup, then
+  //   modifier keyups. Self-contained: Chrome serializes this one function into the page.
+  // Test: tests/test_pages_dom.py `test_type_emits_key_events_and_enter_submits_the_form`,
+  //   `test_press_tab_and_shift_tab_follow_the_focus_order`,
+  //   `test_press_edits_fields_and_honours_chords_and_prevent_default`,
+  //   `test_type_sets_values_and_refuses_non_editable`.
+  function pageKeys(ref, action, input) {
+    let el = null;
+    if (ref !== null) {
+      const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+      el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+      if (!el || !el.isConnected) return {error:"StaleElement"};
+    }
+    const KINDS = ["text","search","email","url","tel","password","number"];
+    const typeOf = node => (node.getAttribute("type") || "text").toLowerCase();
+    const isField = node => node?.localName === "textarea" || (node?.localName === "input" && KINDS.includes(typeOf(node)));
+    const writable = node => (isField(node) || node?.isContentEditable === true) && !node.disabled && !node.readOnly;
+    if (action === "type" && !writable(el)) return {error:"NotEditable"};
+    const NAMED = {Enter:["Enter",13], Tab:["Tab",9], Escape:["Escape",27], Backspace:["Backspace",8],
+      Delete:["Delete",46], ArrowUp:["ArrowUp",38], ArrowDown:["ArrowDown",40], ArrowLeft:["ArrowLeft",37],
+      ArrowRight:["ArrowRight",39], Home:["Home",36], End:["End",35], PageUp:["PageUp",33], PageDown:["PageDown",34]};
+    const MODS = {Control:["ControlLeft",17,"ctrlKey"], Alt:["AltLeft",18,"altKey"],
+      Shift:["ShiftLeft",16,"shiftKey"], Meta:["MetaLeft",91,"metaKey"]};
+    const raw = new Map(), dirty = new Set();
+    let whole = null;
+    const describe = (key, shift) => {
+      if (key === "Space" || key === " ") return {key:" ", code:"Space", keyCode:32, text:" "};
+      if (NAMED[key]) return {key, code:NAMED[key][0], keyCode:NAMED[key][1]};
+      const text = shift && /^[a-z]$/.test(key) ? key.toUpperCase() : key, upper = text.toUpperCase();
+      if (/^[A-Z]$/.test(upper)) return {key:text, code:"Key" + upper, keyCode:upper.charCodeAt(0), text};
+      if (/^[0-9]$/.test(text)) return {key:text, code:"Digit" + text, keyCode:text.charCodeAt(0), text};
+      return {key:text, code:"", keyCode:0, text};
+    };
+    const fire = (node, type, d, flags) => node.dispatchEvent(new KeyboardEvent(type, {...flags, key:d.key, code:d.code,
+      keyCode:type === "keypress" ? (d.text ?? "\r").codePointAt(0) : d.keyCode, which:d.keyCode,
+      charCode:type === "keypress" ? (d.text ?? "\r").codePointAt(0) : 0,
+      bubbles:true, cancelable:true, composed:true, view:window}));
+    // The key's next target: the element focus moved to during `step`, else the current one.
+    const follow = (node, step) => {
+      const before = document.activeElement, result = step();
+      const now = document.activeElement;
+      if (now !== before) node = now && now !== document.body ? now : document.body;
+      else if (!node.isConnected) node = document.body;
+      return [node, result];
+    };
+    const selectable = node => { try { return node.selectionStart !== null; } catch { return false; } };
+    // email and number inputs have no selection API and sanitize partial text, so keep the typed text.
+    const current = node => selectable(node) ? node.value : raw.get(node) ?? node.value;
+    const span = node => {
+      if (whole === node) return [0, current(node).length];
+      if (selectable(node)) return [node.selectionStart, node.selectionEnd];
+      return [current(node).length, current(node).length];
+    };
+    // Replaces [from, to) of a field's value through the native setter, so framework value trackers see it.
+    function edit(node, from, to, data, inputType) {
+      const value = current(node), next = value.slice(0, from) + data + value.slice(to);
+      if (data && node.maxLength >= 0 && next.length > node.maxLength) return;
+      if (!node.dispatchEvent(new InputEvent("beforeinput", {bubbles:true, cancelable:true, composed:true,
+        inputType, data:data || null}))) return;
+      const proto = node.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, "value").set.call(node, next);
+      raw.set(node, next);
+      whole = null;
+      try { node.setSelectionRange(from + data.length, from + data.length); } catch { /* email, number */ }
+      node.dispatchEvent(new InputEvent("input", {bubbles:true, composed:true, inputType, data:data || null}));
+      dirty.add(node);
+    }
+    function insert(node, data) {
+      if (!writable(node)) return;
+      if (node.isContentEditable) { document.execCommand("insertText", false, data); return; }
+      const [from, to] = span(node);
+      edit(node, from, to, data, "insertText");
+    }
+    function remove(node, backward) {
+      if (!writable(node)) return;
+      if (node.isContentEditable) { document.execCommand(backward ? "delete" : "forwardDelete"); return; }
+      let [from, to] = span(node);
+      if (from === to) { if (backward) from = Math.max(0, from - 1); else to = Math.min(current(node).length, to + 1); }
+      if (from !== to) edit(node, from, to, "", backward ? "deleteContentBackward" : "deleteContentForward");
+    }
+    function commit(node) {
+      if (dirty.delete(node)) node.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+    function caret(node, key, extend) {
+      if (node.isContentEditable) {
+        const [direction, unit] = {ArrowLeft:["backward","character"], ArrowRight:["forward","character"],
+          ArrowUp:["backward","line"], ArrowDown:["forward","line"], Home:["backward","lineboundary"],
+          End:["forward","lineboundary"], PageUp:["backward","paragraphboundary"],
+          PageDown:["forward","paragraphboundary"]}[key];
+        getSelection().modify(extend ? "extend" : "move", direction, unit);
+        return;
+      }
+      let start, end;
+      try { start = node.selectionStart; end = node.selectionEnd; } catch { return; }
+      if (start === null) return;
+      const value = node.value, back = node.selectionDirection === "backward";
+      const head = extend ? (back ? start : end) : (["ArrowLeft","ArrowUp","Home","PageUp"].includes(key) ? start : end);
+      const lineStart = value.lastIndexOf("\n", head - 1) + 1, lineEnd = (value.indexOf("\n", head) + 1 || value.length + 1) - 1;
+      let to = head;
+      if (key === "ArrowLeft") to = extend || start === end ? Math.max(0, head - 1) : start;
+      else if (key === "ArrowRight") to = extend || start === end ? Math.min(value.length, head + 1) : end;
+      else if (key === "Home") to = lineStart;
+      else if (key === "End") to = lineEnd;
+      else if (key === "PageUp" || (key === "ArrowUp" && lineStart === 0)) to = 0;
+      else if (key === "PageDown" || (key === "ArrowDown" && lineEnd === value.length)) to = value.length;
+      else if (key === "ArrowUp") {
+        const above = lineStart >= 2 ? value.lastIndexOf("\n", lineStart - 2) + 1 : 0;
+        to = Math.min(above + head - lineStart, lineStart - 1);
+      } else {
+        const below = lineEnd + 1, belowEnd = (value.indexOf("\n", below) + 1 || value.length + 1) - 1;
+        to = Math.min(below + head - lineStart, belowEnd);
+      }
+      const anchor = extend ? (back ? end : start) : to;
+      node.setSelectionRange(Math.min(anchor, to), Math.max(anchor, to), to < anchor ? "backward" : "forward");
+    }
+    // Sequential focus order: positive tabindex ascending, then tabindex 0 in document order.
+    // An editing host is tabbable though Chromium reports tabIndex -1 for it without a tabindex attribute.
+    const tabIndexOf = n => n.hasAttribute("tabindex") || !n.isContentEditable || n.parentElement?.isContentEditable
+      ? n.tabIndex : 0;
+    function moveFocus(from, step) {
+      const all = [...document.querySelectorAll("a[href],area[href],button,input,select,textarea,iframe,summary," +
+        "[tabindex],[contenteditable]")].filter(n => tabIndexOf(n) >= 0 && !n.matches(":disabled") && !n.closest("[inert]") &&
+        !(n.localName === "input" && typeOf(n) === "hidden") && n.getClientRects().length > 0 &&
+        getComputedStyle(n).visibility === "visible" && !(n.localName === "input" && typeOf(n) === "radio" &&
+        n.name && !n.checked && [...document.getElementsByName(n.name)].some(r => r !== n && r.form === n.form &&
+        typeOf(r) === "radio" && (r.checked || r.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING))));
+      const order = [...all.filter(n => tabIndexOf(n) > 0).sort((a, b) => tabIndexOf(a) - tabIndexOf(b)),
+        ...all.filter(n => tabIndexOf(n) === 0)];
+      if (!order.length) return;
+      let at = order.indexOf(from), next;
+      if (at >= 0) next = order[(at + step + order.length) % order.length];
+      else if (from === document.body) next = step > 0 ? order[0] : order.at(-1);
+      else {
+        const after = order.filter(n => from.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+        next = step > 0 ? after[0] ?? order[0] : order.filter(n => !after.includes(n)).at(-1) ?? order.at(-1);
+      }
+      commit(from);
+      next.focus();
+      if (isField(next)) try { next.setSelectionRange(0, next.value.length); } catch { /* email, number */ }
+    }
+    function submitFrom(node) {
+      const form = node.form;
+      if (!form) return;
+      const controls = [...form.elements];
+      const button = controls.find(n => (n.localName === "button" && n.type === "submit") ||
+        (n.localName === "input" && ["submit","image"].includes(typeOf(n))));
+      if (button) { if (!button.disabled) button.click(); return; }
+      const blocking = ["text","search","email","url","tel","password","number","date","month","week","time","datetime-local"];
+      if (controls.filter(n => n.localName === "input" && blocking.includes(typeOf(n))).length <= 1) form.requestSubmit();
+    }
+    // The browser's default action for one unprevented key; returns work that runs after keyup, if any.
+    function defaultAction(node, d, flags) {
+      const activates = node.localName === "button" || node.localName === "summary" || (node.localName === "input" &&
+        ["submit","button","reset","image","checkbox","radio"].includes(typeOf(node)));
+      if ((flags.ctrlKey || flags.metaKey) && d.key.toLowerCase() === "a") {
+        if (isField(node)) { whole = node; try { node.setSelectionRange(0, node.value.length); } catch { /* email, number */ } }
+        else getSelection().selectAllChildren(node.isContentEditable ? node : document.body);
+      } else if (d.text !== undefined && !flags.ctrlKey && !flags.metaKey) {
+        if (writable(node)) insert(node, d.text);
+        else if (d.text === " " && activates) return () => node.click();
+        else if (d.text === " ") document.scrollingElement?.scrollBy(0, (flags.shiftKey ? -0.875 : 0.875) * innerHeight);
+      } else if (d.key === "Enter") {
+        if (node.localName === "textarea" && writable(node)) insert(node, "\n");
+        else if (node.isContentEditable) document.execCommand(flags.shiftKey ? "insertLineBreak" : "insertParagraph");
+        else if (node.localName === "input" && !activates) { commit(node); submitFrom(node); }
+        else if (activates && !["checkbox","radio"].includes(typeOf(node)) || (node.localName === "a" && node.href)) node.click();
+        else if (["checkbox","radio"].includes(typeOf(node))) submitFrom(node);
+      } else if (d.key === "Tab") moveFocus(node, flags.shiftKey ? -1 : 1);
+      else if (d.key === "Backspace" || d.key === "Delete") remove(node, d.key === "Backspace");
+      else if (d.key.startsWith("Arrow") || ["Home","End","PageUp","PageDown"].includes(d.key)) {
+        if (isField(node) || node.isContentEditable) caret(node, d.key, flags.shiftKey);
+        else {
+          const page = 0.875 * innerHeight, s = document.scrollingElement;
+          const [x, y] = {ArrowUp:[0,-40], ArrowDown:[0,40], ArrowLeft:[-40,0], ArrowRight:[40,0],
+            PageUp:[0,-page], PageDown:[0,page]}[d.key] || [0, 0];
+          if (d.key === "Home") s?.scrollTo(s.scrollLeft, 0);
+          else if (d.key === "End") s?.scrollTo(s.scrollLeft, s.scrollHeight);
+          else s?.scrollBy(x, y);
+        }
+      }
+      return null;
+    }
+    function pressOne(key, modifiers, start) {
+      const flags = {ctrlKey:false, altKey:false, shiftKey:false, metaKey:false};
+      const held = ["Control","Alt","Shift","Meta"].filter(m => modifiers.includes(m));
+      let node = start, go, after = null;
+      for (const m of held) {
+        flags[MODS[m][2]] = true;
+        [node] = follow(node, () => fire(node, "keydown", {key:m, code:MODS[m][0], keyCode:MODS[m][1]}, flags));
+      }
+      const d = describe(key, flags.shiftKey);
+      [node, go] = follow(node, () => fire(node, "keydown", d, flags));
+      if (go && (d.text !== undefined || d.key === "Enter") && !flags.ctrlKey && !flags.metaKey) {
+        [node, go] = follow(node, () => fire(node, "keypress", d, flags));
+      }
+      if (go) [node, after] = follow(node, () => defaultAction(node, d, flags));
+      [node] = follow(node, () => fire(node, "keyup", d, flags));
+      if (after) [node] = follow(node, after);
+      for (const m of held.reverse()) {
+        flags[MODS[m][2]] = false;
+        [node] = follow(node, () => fire(node, "keyup", {key:m, code:MODS[m][0], keyCode:MODS[m][1]}, flags));
+      }
+      return node;
+    }
+    if (el && typeof el.focus === "function") el.focus();
+    const active = document.activeElement;
+    let node = el ?? (active && active !== document.body ? active : document.body);
+    if (action === "press") {
+      pressOne(input.key, input.modifiers, node);
+      return {ok:true};
+    }
+    // "type": the text replaces the element's content, as one keystroke per character.
+    if (el.isContentEditable) {
       const range = document.createRange();
       range.selectNodeContents(el);
-      const selection = getSelection();
-      selection.removeAllRanges();
-      selection.addRange(range);
-      if (text) document.execCommand("insertText", false, text); else document.execCommand("delete");
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      if (!input) document.execCommand("delete");
+    } else {
+      whole = el;
+      if (!input) edit(el, 0, el.value.length, "", "deleteContentBackward");
     }
+    const chars = [...input];
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      if (ch === "\r" && chars[i + 1] === "\n") continue;
+      const key = ch === "\n" || ch === "\r" ? "Enter" : ch === "\t" ? "Tab" : ch;
+      node = pressOne(key, /^[A-Z]$/.test(ch) ? ["Shift"] : [], node);
+    }
+    for (const touched of [...dirty]) commit(touched);
     return {ok:true};
   }
+
+  // In-page entry points for tests and the live check; the worker injects pageKeys itself.
+  const pageType = (ref, text) => pageKeys(ref, "type", text);
+  const pagePress = (ref, key, modifiers) => pageKeys(ref, "press", {key, modifiers});
 
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
@@ -137,7 +351,18 @@ globalThis.TrustyPages = (() => {
     if (address.username || address.password) return false;
     return address.protocol === "https:" || (address.protocol === "http:" && address.hostname === "127.0.0.1");
   }
-  return {pageProbe, pageRead, pageClick, pageType, urlAllowed};
+  // #11286: the keys page_press accepts; any other single printable character is also a key.
+  const NAMED_KEYS = ["Enter","Tab","Escape","Backspace","Delete","ArrowUp","ArrowDown","ArrowLeft","ArrowRight",
+    "Home","End","PageUp","PageDown","Space"];
+  const MODIFIERS = ["Shift","Control","Alt","Meta"];
+  function keyAllowed(key) {
+    if (typeof key !== "string") return false;
+    if (NAMED_KEYS.includes(key) || key === " ") return true;
+    return [...key].length === 1 && !/[\p{C}\p{Z}]/u.test(key);
+  }
+  const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
+    new Set(value).size === value.length;
+  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -145,7 +370,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageType, urlAllowed} = TrustyPages;
+  const {pageProbe, pageRead, pageClick, pageKeys, urlAllowed, keyAllowed, modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
@@ -155,6 +380,8 @@ TrustyPages.commands = deps => {
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
+    // #11286: `ref` null presses the key on the focused element.
+    page_press:{tab, document:doc, ref:v => v === null || ref(v), key:keyAllowed, modifiers:modifiersAllowed},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
@@ -188,7 +415,7 @@ TrustyPages.commands = deps => {
     return {done, cancel:() => finish(false)};
   }
 
-  // Runs the injected click/type only inside the lease's document; never reports work it did not do.
+  // Runs the injected click/type/press only inside the lease's document; never reports work it did not do.
   async function act(req, func, args) {
     if (req.document === null) {
       const now = await probe(req.tab);
@@ -235,7 +462,8 @@ TrustyPages.commands = deps => {
         text:result.text, elements:result.elements, truncated:result.truncated};
     },
     page_click:req => act(req, pageClick, [req.ref]),
-    page_type:req => act(req, pageType, [req.ref, req.text]),
+    page_type:req => act(req, pageKeys, [req.ref, "type", req.text]),
+    page_press:req => act(req, pageKeys, [req.ref, "press", {key:req.key, modifiers:req.modifiers}]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -277,7 +505,7 @@ TrustyPages.commands = deps => {
   // changed the page answers OutcomeUnknown, any other BrowserDisconnected.
   function failure(req, error) {
     if (!error?.fields) {
-      const acting = ["page_click","page_type","page_navigate"].includes(req.op);
+      const acting = ["page_click","page_type","page_press","page_navigate"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

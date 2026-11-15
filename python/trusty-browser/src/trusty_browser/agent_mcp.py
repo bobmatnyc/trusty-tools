@@ -320,8 +320,38 @@ def add_page_tools(server: FastMCP, call: Callable[..., dict[str, Any]]) -> None
 
     @server.tool()
     def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:
-        """Replace the text of an editable element named by ``ref``."""
+        """Replace the text of an editable element named by ``ref``, one keystroke per character.
+
+        A newline presses Enter (a single-line field submits its form) and a tab presses Tab.
+        """
         return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
+
+    @server.tool()
+    def page_press(
+        lease: str,
+        key: str,
+        request_id: str,
+        ref: str | None = None,
+        modifiers: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Press one key, with optional modifiers, on ``ref`` or the focused element.
+
+        Why: pages submit on Enter and move focus on Tab, and page handlers
+        listen for key events (#11286). What: ``key`` is Enter, Tab, Escape,
+        Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Home,
+        End, PageUp, PageDown, Space or one printable character; ``modifiers``
+        is any of Shift, Control, Alt, Meta. Omit ``ref`` to press on the
+        focused element. Reuse the request ID to retry.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call(
+            "page_press",
+            lease=lease,
+            ref=ref,
+            key=key,
+            modifiers=modifiers or [],
+            request_id=request_id,
+        )
 
     @server.tool()
     def page_navigate(lease: str, url: str, request_id: str) -> dict[str, Any]:
