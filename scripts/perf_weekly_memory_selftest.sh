@@ -233,6 +233,12 @@ if grep -q '^eval cargo +1.99.0 test -p trusty-memory --test recall_eval -- --in
 else
 	bad "suite argv" "$(head -n 2 "$calls")"
 fi
+# #10802: the slice measure skips unless the suite opts in.
+if grep -q '^slice.*env.TRUSTY_MEMORY_SLICE_MEASURE="1"' "$calls"; then
+	pass "slice sets TRUSTY_MEMORY_SLICE_MEASURE"
+else
+	bad "slice argv" "$(grep '^slice' "$calls" | head -n 1)"
+fi
 
 # 2-6. Failures: status failed, exit 20, no envelope, later suites not run.
 # case<TAB>env<TAB>extra flag<TAB>reason substring<TAB>suites run
