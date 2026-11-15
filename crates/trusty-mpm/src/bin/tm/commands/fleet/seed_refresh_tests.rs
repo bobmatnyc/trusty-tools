@@ -223,3 +223,40 @@ fn an_edited_poller_with_owner_answer_wiring_is_not_warned_11058() {
         "{steps:?}"
     );
 }
+
+/// #10608: an upgrade over a configured instance leaves every `local/` file
+/// byte-identical, even one equal to an earlier shipped template, refreshes an
+/// unedited earlier framework script, and a repeat upgrade changes nothing.
+#[test]
+fn an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let script = "scripts/fleet-poll.py";
+    let old = |dest: &str| format!("an earlier shipped copy of {dest}\n");
+    let locals: Vec<String> = seeded_files()
+        .into_iter()
+        .map(|f| f.dest)
+        .filter(|d| d.starts_with("local/"))
+        .collect();
+    assert!(locals.len() >= 10, "{locals:?}");
+    for dest in locals.iter().map(String::as_str).chain([script]) {
+        std::fs::write(dir.join(dest), old(dest)).unwrap();
+    }
+    // Every destination's earlier bytes are a known shipped copy.
+    let history = |d: &str, b: &[u8]| b == old(d).as_bytes();
+    for _ in 0..2 {
+        super::super::seed::deploy_with(&dir, seed(), &history).unwrap();
+        for dest in &locals {
+            assert_eq!(
+                std::fs::read_to_string(dir.join(dest)).unwrap(),
+                old(dest),
+                "{dest}: an upgrade replaced instance-owned content"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(script)).unwrap(),
+            shipped(script)
+        );
+    }
+}
