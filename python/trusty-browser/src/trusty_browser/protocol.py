@@ -173,7 +173,8 @@ class Peer:
 
 
 PAGE_WAIT = 8.0  # the worker answers within 7 s
-MUTATING = {"page_click", "page_type", "page_press", "page_select", "page_navigate"}  # #11286, #11285
+# #11286, #11285; #11291: a scroll can load content, so it is journaled like a click.
+MUTATING = {"page_click", "page_type", "page_press", "page_select", "page_scroll", "page_navigate"}
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}

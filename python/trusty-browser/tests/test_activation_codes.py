@@ -187,6 +187,10 @@ class FakeBrowser:
                 "changed": changed,
                 "value": req["value"],
             }
+        if op == "page_scroll":
+            self.done.append((op, req["to"], req["ref"], req["wait_ms"]))
+            view = {"scroll_y": 540, "scroll_height": 4000, "viewport_height": 600}
+            return {"document": item["document"], **view, "grew": True, "at_end": False}
         self.done.append((op, req.get("ref"), req.get("text")))
         return {"document": item["document"]}
 

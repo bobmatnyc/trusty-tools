@@ -34,6 +34,7 @@ OPS = {
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_select": {"op", "lease", "request_id", "ref", "value"},
+    "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "release": {"op", "lease"},
 }
@@ -98,6 +99,15 @@ READ = {
 DONE = {"document": (str,)}
 # #11285: page_select says whether the value moved and what it is now.
 SELECTED = {"document": (str,), "changed": (bool,), "value": (str,)}
+SCROLL_TO = ("down", "up", "top", "bottom", "element")
+SCROLLED = {
+    **DONE,
+    "scroll_y": (int,),
+    "scroll_height": (int,),
+    "viewport_height": (int,),
+    "grew": (bool,),
+    "at_end": (bool,),
+}
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -135,7 +145,11 @@ def validate(request: Frame) -> str:
         raise Refusal("InvalidRequest")
     for name in ("lease", "request_id", "ref"):
         # #11286: page_press takes a null ref for the focused element.
-        if name in request and not (op == "page_press" and request[name] is None):
+        # #11291: page_scroll names no ref unless it scrolls to an element.
+        if name in request and not (
+            (op == "page_press" and request[name] is None)
+            or (op == "page_scroll" and name == "ref")
+        ):
             string(request, name)
     if op == "page_press":
         mods = request["modifiers"]
@@ -143,6 +157,16 @@ def validate(request: Frame) -> str:
             isinstance(mods, list)
             and all(isinstance(m, str) and m in MODIFIERS for m in mods)
             and len(set(mods)) == len(mods)
+        ):
+            raise Refusal("InvalidRequest")
+    if op == "page_scroll":
+        to, ref, wait = request["to"], request["ref"], request["wait_ms"]
+        if (
+            to not in SCROLL_TO
+            or (to == "element") != isinstance(ref, str)
+            or not (ref is None or isinstance(ref, str) and ref)
+            or type(wait) is not int
+            or not 0 <= wait <= 5000
         ):
             raise Refusal("InvalidRequest")
     if "tab" in request:
@@ -361,6 +385,8 @@ class Pages(Grants):
                 args.update(key=request["key"], modifiers=request["modifiers"])
             elif op == "page_select":
                 args["value"] = request["value"]
+            if op == "page_scroll":
+                args.update(to=request["to"], wait_ms=request["wait_ms"])
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
@@ -373,7 +399,8 @@ class Pages(Grants):
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
             where = host(claim.origin)
         else:
-            result = shaped(raw, SELECTED if op == "page_select" else DONE)
+            shape = {"page_select": SELECTED, "page_scroll": SCROLLED}.get(op, DONE)
+            result = shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}

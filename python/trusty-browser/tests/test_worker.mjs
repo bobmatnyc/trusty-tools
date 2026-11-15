@@ -310,6 +310,23 @@ test("page_select relays changed and value, and its refusals", async () => {
   assert.equal((await f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value:5})).error, "InvalidRequest");
 });
 
+test("scroll runs in the lease's document and relays its view", async () => {
+  // #11291
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const stale = await f.command("page_scroll", {grant, tab:7, document:"doc-old", to:"bottom", ref:null, wait_ms:500});
+  assert.equal(stale.error, "DocumentChanged");
+  assert.deepEqual(f.ran, []);
+  const view = {scroll_y:540, scroll_height:4000, viewport_height:600, grew:true, at_end:false};
+  f.tabs.get(7).result = {ok:true, view};
+  const done = await f.command("page_scroll", {grant, tab:7, document:"doc-7", to:"bottom", ref:null, wait_ms:500});
+  assert.deepEqual(done.result, {document:"doc-7", ...view});
+  assert.equal(JSON.stringify(f.ran.map(r => [r.func, r.args])), JSON.stringify([["pageScroll", ["bottom", null, 500]]]));
+  f.tabs.get(7).result = {error:"StaleElement"};
+  const gone = await f.command("page_scroll", {grant, tab:7, document:"doc-7", to:"element", ref:"1.0", wait_ms:0});
+  assert.deepEqual(gone, {id:gone.id, ok:false, error:"StaleElement", tab:7});
+});
+
 test("without the all-https permission only the clicked tab is readable", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
     9:{origin:"https://c.test", title:"C", active:false}}});
@@ -358,6 +375,11 @@ test("malformed commands are refused before any page work", async () => {
     ["page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Enter", modifiers:["Alt","Alt"]}, "InvalidRequest"],
     ["page_press", {grant, tab:7, document:"doc-7", ref:"#go", key:"Enter", modifiers:[]}, "InvalidRequest"],
     ["page_press", {grant, tab:7, document:"doc-7", key:"Enter", modifiers:[]}, "InvalidRequest"],
+    // #11291: page_scroll names a ref exactly when it scrolls to an element.
+    ["page_scroll", {grant, tab:7, document:"doc-7", to:"sideways", ref:null, wait_ms:0}, "InvalidRequest"],
+    ["page_scroll", {grant, tab:7, document:"doc-7", to:"element", ref:null, wait_ms:0}, "InvalidRequest"],
+    ["page_scroll", {grant, tab:7, document:"doc-7", to:"down", ref:"1.0", wait_ms:0}, "InvalidRequest"],
+    ["page_scroll", {grant, tab:7, document:"doc-7", to:"down", ref:null, wait_ms:5001}, "InvalidRequest"],
     ["grant_end", {grant, reason:"bored", last:true}, "InvalidRequest"],
     ["grant_end", {grant, reason:"closed"}, "InvalidRequest"],
     ["grant_end", {grant, reason:"closed", last:"yes"}, "InvalidRequest"],
