@@ -2040,7 +2040,12 @@ async fn managed_output_returns_pane_text_for_a_managed_session_9162() {
     let body = http.json.clone().expect("json body");
     assert_eq!(body["output"], "line one\nline two\n");
     assert_eq!(body["lines"], 20);
-    assert_eq!(body["input_box"], Value::Null, "Q2: never classified");
+    // #8407: no escaped capture is seeded, so the box reads unknown, not empty.
+    assert_eq!(
+        body["input_box"],
+        Value::Null,
+        "an unreadable box is unknown"
+    );
     let rpc = rpc_call(
         &rpc_router(&state),
         "mpm.managed.output",
@@ -2074,6 +2079,85 @@ async fn managed_output_returns_pane_text_for_a_managed_session_9162() {
         calls.iter().all(|(_, pane)| pane == "%77"),
         "only the owned pane is captured: {calls:?}"
     );
+}
+
+/// #8407: an escaped capture of a Claude Code pane whose box holds `input`.
+fn escaped_pane_8407(input: &str) -> String {
+    const RULE: &str = "────────────────────────────────────────";
+    format!("● Done.\n\n{RULE}\n❯ {input}\n{RULE}\n  ? for shortcuts\n")
+}
+
+/// #8407: GET the managed output and activity bodies for `id`, asserting the
+/// output route agrees over the socket.
+async fn output_and_activity_8407(state: &Arc<DaemonState>, id: &str) -> (Value, Value) {
+    let http = http_call(
+        http_router(Arc::clone(state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/output"),
+        None,
+    )
+    .await;
+    assert_eq!(http.status, 200, "body={:?}", http.text);
+    let rpc = rpc_call(&rpc_router(state), "mpm.managed.output", json!({"id": id})).await;
+    assert_parity("mpm.managed.output (input box)", &http, &rpc);
+    let activity = http_call(
+        http_router(Arc::clone(state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/activity"),
+        None,
+    )
+    .await;
+    assert_eq!(activity.status, 200, "body={:?}", activity.text);
+    (
+        http.json.expect("output json"),
+        activity.json.expect("activity json"),
+    )
+}
+
+/// #8407: the managed output and activity routes classify the owned pane's
+/// input box as empty, suggestion or typed. Red on a9e9fa6a90: always `null`.
+#[tokio::test]
+async fn managed_output_classifies_the_input_box_8407() {
+    let cases = [
+        ("", "empty"),
+        ("\u{1b}[2myes to both, go ahead\u{1b}[22m", "suggestion"),
+        ("ship it\u{1b}[7m \u{1b}[0m", "typed"),
+    ];
+    for (input, want) in cases {
+        let (state, _dir, fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+        fake.escaped_capture_responses
+            .lock()
+            .expect("lock")
+            .insert("%77".to_owned(), escaped_pane_8407(input));
+        let (output, activity) = output_and_activity_8407(&state, &id).await;
+        assert_eq!(output["input_box"], want, "output for {input:?}: {output}");
+        assert_eq!(
+            activity["input_box"], want,
+            "activity for {input:?}: {activity}"
+        );
+    }
+}
+
+/// #8407: a pane whose escaped capture fails reads as unknown (`null`) on
+/// both routes — never a guessed `empty` (fail-closed).
+#[tokio::test]
+async fn managed_output_unreadable_pane_is_unknown_8407() {
+    let (state, _dir, _fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+    let (output, activity) = output_and_activity_8407(&state, &id).await;
+    assert_eq!(
+        output["output"], "plain\n",
+        "the text capture still answers"
+    );
+    assert_eq!(output["input_box"], Value::Null, "{output}");
+    assert_eq!(activity["input_box"], Value::Null, "{activity}");
+    // A pane with no `❯` line is unknown too, not empty.
+    let (state, _dir, fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+    fake.escaped_capture_responses
+        .lock()
+        .expect("lock")
+        .insert("%77".to_owned(), "$ ls\n".to_owned());
+    let (output, _) = output_and_activity_8407(&state, &id).await;
+    assert_eq!(output["input_box"], Value::Null, "{output}");
 }
 
 /// #9162 (criterion 4): a record with no owned pane is refused on both

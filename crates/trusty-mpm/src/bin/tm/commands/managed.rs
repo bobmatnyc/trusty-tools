@@ -383,6 +383,11 @@ pub(crate) async fn session_activity(
     println!("runtime:    {runtime_str}");
     println!("state:      {} (confidence: {:.2})", a.state, a.confidence);
     println!("summary:    {}", a.summary);
+    // #8407: the daemon's classification, so a reader never parses escapes.
+    println!(
+        "input box:  {}",
+        a.input_box.map_or("unknown", |b| b.as_str())
+    );
     let classification_str = a
         .classification
         .as_deref()
