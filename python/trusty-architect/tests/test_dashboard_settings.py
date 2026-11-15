@@ -179,12 +179,12 @@ class TestTechLevelRoundTrip(ServerCase):
     """The page's write path (PUT /api/meta/settings, as saveSettings sends it) keeps a level across a reload and refuses others."""
 
     def test_level_survives_a_reload_and_a_bad_level_is_refused(self):
-        self.store.set("meta", "settings", {"user_state": "active"}, 0)
-        status, _ = self.call("PUT", "/api/meta/settings", {"data": {"user_state": "active", "technical_level": "cto"}, "if_version": 1})
+        self.store.set("meta", "settings", {"user_state": "active"}, 1)   # #10752: the seed already wrote v1
+        status, _ = self.call("PUT", "/api/meta/settings", {"data": {"user_state": "active", "technical_level": "cto"}, "if_version": 2})
         self.assertEqual(status, 200)
         status, body = self.call("GET", "/api/meta/settings")
         self.assertEqual((status, json.loads(body)["data"]["technical_level"]), (200, "cto"))
-        status, body = self.call("PUT", "/api/meta/settings", {"data": {"technical_level": "wizard"}, "if_version": 2})
+        status, body = self.call("PUT", "/api/meta/settings", {"data": {"technical_level": "wizard"}, "if_version": 3})
         self.assertEqual(status, 400)
         self.assertIn("technical_level", json.loads(body)["error"])
         self.assertEqual(self.store.get("meta", "settings")["data"]["technical_level"], "cto")
