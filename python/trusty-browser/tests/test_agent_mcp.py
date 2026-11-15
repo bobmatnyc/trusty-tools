@@ -27,6 +27,7 @@ CODE_TOOLS = {
     "browser_disconnect",
     "browser_tabs",
     "browser_select",
+    "browser_switch",
     "page_read",
     "page_click",
     "page_type",
@@ -237,6 +238,7 @@ def test_tools_before_connect_answer_not_connected(short, clock):
         for name, args in [
             ("browser_tabs", {}),
             ("browser_select", {"tab": 7}),
+            ("browser_switch", {"lease": "l"}),
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
@@ -284,6 +286,12 @@ def test_connect_returns_grant_facts_and_tools_work_within_the_grant(short, cloc
                 "page_click", lease=lease, ref="1.0", request_id="c"
             )
             assert clicked == {"ok": True, "tab": 7, "document": "d7-1"}
+            # #11293: a tab grant may not move browser focus, even to its own tab.
+            assert await agent.refused("browser_switch", lease=lease) == {
+                "ok": False,
+                "error": "OutOfScope",
+                "tab": 7,
+            }
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert await agent.refused("browser_select", tab=9) == {
                 "ok": False,

@@ -164,6 +164,12 @@ class FakeBrowser:
                 sink.append(item["origin"])
                 item["origin"] = source.pop()
             return self.land(req, tab, item)
+        if op == "page_switch":
+            for other in self.tabs.values():
+                if other["window"] == item["window"]:
+                    other["active"] = False
+            item["active"] = True
+            return {"window": item["window"], "focused": True}
         if op == "page_navigate":
             target = urlsplit(req["url"])
             item.setdefault("past", []).append(item["origin"])

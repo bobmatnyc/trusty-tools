@@ -100,7 +100,7 @@ const PAIRED = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, 
 // A browser with explicit tabs, a fake broker behind both native hosts, and the real worker table.
 async function codeFixture({session:seed = {}, held = false, tabs:layout, live = [], local:localSeed = ENROLLED,
   ack} = {}) {
-  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [];
+  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [], switches = [], focused = [];
   const timers = new Map(); let serial = 0, mintSerial = 0, generation = 0;
   const tabs = new Map(Object.entries(layout || {
     7:{origin:"https://a.test", title:"Alpha", active:true},
@@ -170,12 +170,19 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       remove:async()=>{ perms.removed++; const was = perms.held; perms.held = false; return was; },
     },
     alarms:{onAlarm:event(), create(name, info){ alarms.push({name, ...info}); }},
+    windows:{update:async (win, props) => { focused.push({win, ...props}); return {id:win}; }},
     tabs:{
       get:async tab => { if (!tabs.has(tab)) throw new Error("No tab with id: " + tab); return {id:tab}; },
       query:async q => { queries.push(q); return [...tabs].map(([tid, t], index) => ({id:tid, windowId:1, index, active:t.active})); },
-      update:async (tab, {url}) => {
+      update:async (tab, {url, active}) => {
         const t = tabs.get(tab);
         if (!t) throw new Error("No tab");
+        if (active === true) {
+          for (const other of tabs.values()) other.active = false;
+          t.active = true;
+          switches.push(tab);
+          return {id:tab, windowId:1};
+        }
         updates.push({tab, url});
         (t.past ||= []).push(t.origin); t.ahead = [];
         return go(tab, t, new URL(url).origin);
@@ -230,7 +237,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return plain(reply);
   });
   const table = () => plain(sessionStore.grants || {});
-  return {chrome, native, sent, ran, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
+  return {chrome, native, sent, ran, queries, updates, switches, focused, brokerCalls, alarms, badge, timers, tabs, perms, failures,
     sessionStore, localStore, command, popup, table, handshake, live:ok, fakeBroker,
     setBroker(fn){ broker = fn; },
     end:(grant, last, reason = "closed") => command("grant_end", {grant, reason, last}),
@@ -406,6 +413,26 @@ test("malformed commands are refused before any page work", async () => {
   assert.deepEqual({ran:f.ran, updates:f.updates}, {ran:[], updates:[]});
   assert.ok(f.table()[grant]);
   assert.equal(f.perms.held, true, "a refused grant_end changes nothing");
+});
+
+// #11293: switching tabs is a profile-grant capability; a tab grant refuses it before Chrome is called.
+test("page_switch focuses a tab on a profile grant and is out of scope on a tab grant", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
+    8:{origin:"https://b.test", title:"B", active:false}}});
+  const tabbed = (await mintTab(f, 7)).grant;
+  for (const tab of [7, 8]) {
+    const reply = await f.command("page_switch", {grant:tabbed, tab});
+    assert.deepEqual(reply, {id:reply.id, ok:false, error:"OutOfScope", tab}, String(tab));
+  }
+  assert.deepEqual({switches:f.switches, focused:f.focused}, {switches:[], focused:[]});
+  const whole = (await f.popup({type:"mint", scope:"profile"})).grant;
+  const reply = await f.command("page_switch", {grant:whole, tab:8});
+  assert.deepEqual(reply, {id:reply.id, ok:true, email, result:{window:1, focused:true}, tab:8});
+  assert.deepEqual(f.switches, [8]);
+  assert.deepEqual(f.focused, [{win:1, focused:true}]);
+  assert.equal(f.tabs.get(8).active, true);
+  assert.equal(f.tabs.get(7).active, false);
+  assert.equal((await f.command("page_switch", {grant:whole, tab:99})).error, "TabNotFound");
 });
 
 test("navigate reports access, document and settled", async () => {
