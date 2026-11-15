@@ -771,3 +771,54 @@ fn exhaustive_refuses_an_excepted_entry_swapped_for_a_symlink() {
 fn exhaustive_except(dir: &Path, except: &Path) -> ChildRepoScan {
     scan_for_child_repo_exhaustive(dir, Some(except), 4096)
 }
+
+/// #10473: `ws/sub/d -> ../missing` dangles inside the root, and
+/// `ws/sub/f -> d/../../x.txt` folds to `ws/x.txt` by text. After
+/// `mkdir ws/missing` the kernel takes `d/..` as `ws`, so `f` reaches
+/// `parent(ws)/x.txt`. The scan refuses before the directory exists, and
+/// still refuses once it does.
+#[cfg(unix)]
+#[test]
+fn exhaustive_refuses_dotdot_past_a_dangling_link_inside_the_root() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    symlink(Path::new("../missing"), ws.join("sub/d")).unwrap();
+    let f = ws.join("sub/f");
+    symlink(Path::new("d/../../x.txt"), &f).unwrap();
+    assert!(
+        matches!(
+            exhaustive(&ws),
+            ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { ref path, .. }) if *path == f
+        ),
+        "`..` past a dangling link must refuse, got {:?}",
+        exhaustive(&ws)
+    );
+    std::fs::create_dir_all(ws.join("missing")).unwrap();
+    assert!(matches!(
+        exhaustive(&ws),
+        ChildRepoScan::Incomplete(ScanIncomplete::SymlinkEscapes { link, .. }) if link == f
+    ));
+}
+
+/// #10473: the same fold through an absolute link target refuses too.
+#[cfg(unix)]
+#[test]
+fn exhaustive_refuses_an_absolute_dotdot_past_a_dangling_link() {
+    use std::os::unix::fs::symlink;
+    let tmp = TempDir::new().unwrap();
+    let ws = workspace(&tmp);
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    symlink(Path::new("../missing"), ws.join("sub/d")).unwrap();
+    let f = ws.join("f");
+    symlink(ws.join("sub/d/../../x.txt"), &f).unwrap();
+    assert!(
+        matches!(
+            exhaustive(&ws),
+            ChildRepoScan::Incomplete(ScanIncomplete::Unreadable { ref path, .. }) if *path == f
+        ),
+        "an absolute `..` past a dangling link must refuse, got {:?}",
+        exhaustive(&ws)
+    );
+}
