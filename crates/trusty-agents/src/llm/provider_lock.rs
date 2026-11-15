@@ -253,7 +253,10 @@ pub fn refuse_off_provider(site: &str) -> Result<(), ProviderLockError> {
 ///
 /// Why: the one ambient entry point every consumer calls, kept a thin wrapper
 /// so the logic lives in the hermetically testable [`read_from_home`].
-/// Test: [`read_from_home`]'s tests cover the body.
+/// What: a non-UTF-8 `TAGENT_PROVIDER_LOCK` is an `Unsupported` error, never
+/// "unset".
+/// Test: [`read_from_home`]'s tests cover the body;
+/// `non_utf8_env_value_fails_closed` covers the env read.
 pub fn active() -> LockState {
     #[cfg(test)]
     {
@@ -261,7 +264,17 @@ pub fn active() -> LockState {
             return state;
         }
     }
-    let env = std::env::var(LOCK_ENV).ok();
+    let env = match std::env::var(LOCK_ENV) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        // #10978: non-UTF-8 lock value fails closed
+        Err(std::env::VarError::NotUnicode(raw)) => {
+            return Err(ProviderLockError::Unsupported {
+                source_name: LOCK_ENV,
+                value: raw.to_string_lossy().into_owned(),
+            });
+        }
+    };
     read_from_home(env.as_deref(), dirs::home_dir().as_deref())
 }
 
@@ -411,6 +424,54 @@ mod tests {
             wrong_type,
             Err(ProviderLockError::Unsupported { .. })
         ));
+    }
+
+    /// Why: #10978 — a lock env value that is set but not UTF-8 must refuse,
+    /// like an unsupported value, rather than read as unset.
+    /// Test: itself.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_env_value_fails_closed() {
+        use std::os::unix::ffi::OsStrExt;
+        let _env = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _home = crate::test_env::lock_home();
+        let home = tempfile::tempdir().expect("tempdir");
+        let prior_home = std::env::var_os("HOME");
+        let prior_lock = std::env::var_os(LOCK_ENV);
+        // SAFETY: ENV_LOCK and HOME_LOCK are held; both values are restored below.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var(
+                LOCK_ENV,
+                std::ffi::OsStr::from_bytes(&[0xff, b'b', b'e', b'd']),
+            );
+        }
+        let state = active();
+        // SAFETY: as above.
+        unsafe {
+            match prior_lock {
+                Some(v) => std::env::set_var(LOCK_ENV, v),
+                None => std::env::remove_var(LOCK_ENV),
+            }
+            match prior_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert!(
+            matches!(
+                state,
+                Err(ProviderLockError::Unsupported {
+                    source_name: LOCK_ENV,
+                    ..
+                })
+            ),
+            "non-UTF-8 env: {state:?}"
+        );
+        assert!(is_locked(&state));
+        check_agent(&state, "pm", "bedrock/x", false).expect_err("refused");
     }
 
     /// Why: a half-edited file holding the lock must not unlock routing.
