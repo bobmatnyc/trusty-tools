@@ -333,7 +333,9 @@ def _inside(root: Path, raw: str) -> list[str]:
     return comps
 
 
-def upload_file(raw: object, root: Path | None) -> dict[str, str]:
+def upload_file(
+    raw: object, root: Path | None, budget: int = UPLOAD_MAX
+) -> dict[str, str]:
     """One ``page_upload`` file entry read from a file under the upload root (#11289).
 
     Why: the browser cannot read the agent's disk, and a hostile page must not
@@ -360,6 +362,8 @@ def upload_file(raw: object, root: Path | None) -> dict[str, str]:
         comps = _inside(root, raw)
     except ValueError as error:
         raise refuse(str(error)) from None
+    # PR #11305 delta review: every fd, the leaf's included, is closed in the
+    # one finally, whatever raises after its open (fstat, read, a refusal).
     fds: list[int] = []
     try:
         fds.append(os.open(root, os.O_RDONLY | os.O_DIRECTORY))
@@ -368,7 +372,18 @@ def upload_file(raw: object, root: Path | None) -> dict[str, str]:
             fds.append(os.open(comp, flags, dir_fd=fds[-1]))
         # O_NONBLOCK: opening a FIFO must not hang the tool.
         flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-        fd = os.open(comps[-1], flags, dir_fd=fds[-1])
+        fds.append(os.open(comps[-1], flags, dir_fd=fds[-1]))
+        if not stat.S_ISREG(os.fstat(fds[-1]).st_mode):
+            raise refuse("is not a regular file")
+        chunks: list[bytes] = []
+        got = 0
+        while got <= budget:
+            chunk = os.read(fds[-1], budget + 1 - got)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+        data = b"".join(chunks)
     except FileNotFoundError:
         raise refuse("does not exist") from None
     except NotADirectoryError:
@@ -380,19 +395,38 @@ def upload_file(raw: object, root: Path | None) -> dict[str, str]:
     finally:
         for opened in fds:
             os.close(opened)
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise refuse("is not a regular file")
-    with os.fdopen(fd, "rb") as handle:
-        try:
-            data = handle.read(UPLOAD_MAX + 1)
-        except OSError:
-            raise refuse("cannot be read") from None
-    if len(data) > UPLOAD_MAX:
+    if len(data) > budget:
+        if budget < UPLOAD_MAX:
+            raise refuse(f"puts the upload over {UPLOAD_MAX} bytes in total")
         raise refuse(f"is larger than {UPLOAD_MAX} bytes")
     name = comps[-1]
     kind = mimetypes.guess_type(name)[0] or "application/octet-stream"
     return {"name": name, "type": kind, "data": base64.b64encode(data).decode()}
+
+
+UPLOAD_FILES = 10
+
+
+def upload_files(paths: object, root: Path | None) -> list[dict[str, str]]:
+    """Every ``page_upload`` entry, refusing too many paths before any read.
+
+    Why: a caller can send 1000 paths; none may be opened (PR #11305 delta review).
+    What: no root is ``UploadsDisabled``; anything but a list of 1 to
+    ``UPLOAD_FILES`` paths is ``InvalidRequest``. Each file reads at most the
+    bytes left of ``UPLOAD_MAX``, so the total is bounded while reading.
+    Test: tests/test_upload_root.py `test_too_many_paths_are_refused_before_any_read`.
+    """
+    if root is None:
+        raise local("UploadsDisabled", UPLOADS_DISABLED)
+    if not isinstance(paths, list) or not 1 <= len(paths) <= UPLOAD_FILES:
+        raise local("InvalidRequest", f"paths must list 1 to {UPLOAD_FILES} files")
+    entries: list[dict[str, str]] = []
+    left = UPLOAD_MAX
+    for raw in paths:
+        entry = upload_file(raw, root, left)
+        left -= len(base64.b64decode(entry["data"]))
+        entries.append(entry)
+    return entries
 
 
 def add_page_tools(
@@ -475,7 +509,7 @@ def add_page_tools(
             "page_upload",
             lease=lease,
             ref=ref,
-            files=[upload_file(p, root) for p in paths],
+            files=upload_files(paths, root),
             request_id=request_id,
         )
 

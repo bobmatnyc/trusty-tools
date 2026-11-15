@@ -235,6 +235,11 @@ def test_set_files_refuses_other_targets(files_page):
     assert set_files(tab, ref_of(result, "Download report"), one) == {"error": "NotEditable"}
     assert set_files(tab, ref_of(result, "Attachment"), one * 2) == {"error": "NotEditable"}
     assert set_files(tab, "9.0", one) == {"error": "StaleElement"}
+    # PR #11305 delta review: data atob rejects answers NotEditable, not a throw.
+    bad = [{"name": "a.txt", "type": "text/plain", "data": "a==="}]
+    assert set_files(tab, ref_of(result, "Attachment"), bad) == {
+        "error": "NotEditable"
+    }
     off = ref_entry(result, "Disabled")
     assert off["disabled"] is True
     assert set_files(tab, off["ref"], one) == {"error": "NotEditable"}

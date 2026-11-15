@@ -115,3 +115,61 @@ def test_upload_root_must_be_a_directory(tree):
     root, _ = tree
     with pytest.raises(ValueError):
         agent_mcp.upload_root(str(root / "ok.txt"))
+
+
+def open_fds():
+    return set(os.listdir("/dev/fd"))
+
+
+@pytest.mark.parametrize("fails", ["fstat", "read"])
+def test_fd_is_closed_when_a_call_after_open_raises(tree, monkeypatch, fails):
+    # PR #11305 delta review: an error after the leaf open must not leak its fd.
+    root, _ = tree
+    before = open_fds()
+
+    def boom(*args, **kwargs):
+        raise OSError(5, "injected")
+
+    monkeypatch.setattr(agent_mcp.os, fails, boom)
+    assert reason("sub/deep.txt", root) == "cannot be read"
+    monkeypatch.undo()
+    assert open_fds() == before
+
+
+def test_fd_is_closed_when_the_file_is_refused_after_open(tree):
+    root, _ = tree
+    os.mkfifo(root / "pipe")
+    before = open_fds()
+    for raw in ("pipe", "sub"):
+        assert reason(raw, root) == "is not a regular file"
+    assert open_fds() == before
+
+
+def test_too_many_paths_are_refused_before_any_read(tree, monkeypatch):
+    root, _ = tree
+    opened = []
+    real = os.open
+
+    def counting(*args, **kwargs):
+        opened.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_mcp.os, "open", counting)
+    for paths in (["ok.txt"] * 1000, ["ok.txt"] * 11, [], "ok.txt"):
+        with pytest.raises(agent_mcp.Refused) as info:
+            agent_mcp.upload_files(paths, root)
+        assert json.loads(str(info.value))["error"] == "InvalidRequest"
+    assert opened == []
+    assert len(agent_mcp.upload_files(["ok.txt"] * 10, root)) == 10
+
+
+def test_total_size_is_bounded_while_reading(tree):
+    root, _ = tree
+    half = agent_mcp.UPLOAD_MAX // 2 + 1
+    (root / "a.bin").write_bytes(b"a" * half)
+    (root / "b.bin").write_bytes(b"b" * half)
+    with pytest.raises(agent_mcp.Refused) as info:
+        agent_mcp.upload_files(["a.bin", "b.bin"], root)
+    frame = json.loads(str(info.value))
+    total = f"puts the upload over {agent_mcp.UPLOAD_MAX} bytes in total"
+    assert frame["message"] == f"b.bin: {total}"

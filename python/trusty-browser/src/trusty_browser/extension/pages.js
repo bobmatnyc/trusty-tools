@@ -189,10 +189,15 @@ globalThis.TrustyPages = (() => {
     const isFile = el.localName === "input" && (el.getAttribute("type") || "").toLowerCase() === "file";
     if (!isFile || el.disabled || (files.length > 1 && !el.multiple)) return {error:"NotEditable"};
     const transfer = new DataTransfer();
-    for (const {name, type, data} of files) {
-      const raw = atob(data), bytes = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-      transfer.items.add(new File([bytes], name, {type}));
+    // PR #11305 delta review: bad base64 answers NotEditable, never a thrown error.
+    try {
+      for (const {name, type, data} of files) {
+        const raw = atob(data), bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        transfer.items.add(new File([bytes], name, {type}));
+      }
+    } catch {
+      return {error:"NotEditable"};
     }
     el.files = transfer.files;
     el.dispatchEvent(new Event("input", {bubbles:true, composed:true}));
