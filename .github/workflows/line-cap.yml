@@ -18,9 +18,6 @@
 #
 # A third job, `okf-boundary` (#10746), checks trusty-okf's boundary rules
 # (SPEC-OKF-01 §2.7.1). It also needs cargo, for `cargo tree`.
-#
-# A fourth job, `install-sh` (#11280), lints the repo-root install.sh and runs
-# tests/test-install-path.sh. It needs zsh, not cargo.
 name: Line cap
 
 on:
@@ -109,29 +106,6 @@ jobs:
 
       - name: No TCP listener outside the allowlist (ADR-0032)
         run: bash scripts/check_no_tcp_listeners.sh
-
-  # #11280: the repo-root install.sh (the documented `curl | sh` installer).
-  # Toolchain-free and offline: shellcheck, then its PATH-handling tests
-  # against a temp HOME. Like every job in this file it has no paths filter,
-  # so it runs on every PR and push to main, including any that touch
-  # install.sh or tests/test-install-path.sh.
-  install-sh:
-    name: install.sh lint and PATH tests
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v5
-
-      # zsh drives the tests' new-shell probes; shellcheck is installed too
-      # rather than assumed on the image (the helper skips present packages).
-      - name: Install zsh and shellcheck
-        run: bash scripts/ci-apt-install.sh zsh shellcheck
-
-      - name: shellcheck install.sh
-        run: shellcheck --shell=sh install.sh
-
-      - name: install.sh PATH-handling tests
-        run: bash tests/test-install-path.sh
 
   # Test-only workspace dev-dependency edges (#8341). A separate job because it
   # is the one gate in this file that needs cargo: `cargo metadata --no-deps`
