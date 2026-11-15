@@ -30,6 +30,7 @@ OPS = {
     "select": {"op", "tab"},
     "page_read": {"op", "lease"},
     "page_click": {"op", "lease", "request_id", "ref"},
+    "page_hover": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "release": {"op", "lease"},

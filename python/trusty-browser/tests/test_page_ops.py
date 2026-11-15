@@ -544,13 +544,16 @@ def mutating_frame(op, lease, rid="r"):
     base = {"op": op, "lease": lease, "request_id": rid}
     return {
         "page_click": {**base, "ref": "1.0"},
+        "page_hover": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
         "page_navigate": {**base, "url": ORIGIN},
     }[op]
 
 
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
-@pytest.mark.parametrize("op", ["page_click", "page_type", "page_navigate"])
+@pytest.mark.parametrize(
+    "op", ["page_click", "page_hover", "page_type", "page_navigate"]
+)
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error
 ):

@@ -337,6 +337,7 @@ characters. Every request carries exactly the fields listed.
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
 | `page_read` | `op`, `lease` | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
+| `page_hover` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
@@ -479,6 +480,7 @@ Envelope:
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
 | `page_read` | `tab`, `document` (str or null: the lease's last document) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
+| `page_hover` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, `closed`, or `expired` for an unredeemed code), `last` bool | `"ended"` |
@@ -612,6 +614,18 @@ element's centre, `focus()` when the element is focusable, then
 `element.click()`. The reply does not wait for any navigation the click
 starts.
 
+`page_hover` (#11287): `scrollIntoView` as `page_click`, then move the
+synthetic pointer from the element this document last hovered to the target:
+bubbling `pointerout` and `mouseout` on the old element, non-bubbling
+`pointerleave` and `mouseleave` on each old ancestor the target is not inside
+(innermost first), bubbling `pointerover` and `mouseover` on the target,
+non-bubbling `pointerenter` and `mouseenter` on each new ancestor (outermost
+first), then bubbling `pointermove` and `mousemove`, all at the target's
+centre. Hovering the same element again sends only the two moves. It clicks
+nothing and changes no focus. The events are untrusted, so CSS `:hover` does
+not match; a page that reveals content only through `:hover` needs trusted
+input (#11294). It is journaled like `page_click`.
+
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
 element; any other target, or a disabled or read-only one, answers
@@ -688,6 +702,7 @@ only. A refusal's result line is best effort.
 | `select` | `select` | host of the probed page when `access` | title |
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
 | `page_click` | `page_click` | host of the page | ref, element name |
+| `page_hover` | `page_hover` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `release` | `release` | absent | none |
@@ -795,6 +810,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_select` | `tab: int` | The `select` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
+| `page_hover` | `lease: str`, `ref: str`, `request_id: str` | The `page_hover` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `browser_release` | `lease: str` | `{"ok": true}` |

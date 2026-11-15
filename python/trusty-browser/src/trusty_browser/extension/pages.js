@@ -129,6 +129,45 @@ globalThis.TrustyPages = (() => {
     return {ok:true};
   }
 
+  // Why: menus and tooltips open on pointer entry, and an agent had no way to move the pointer (#11287).
+  // What: resolves the ref, scrolls it into view and moves the synthetic pointer from the element this
+  //   document last hovered to it: out/leave on the old path, over/enter on the new one (enter from the
+  //   outermost ancestor down, leave from the innermost up), then pointermove/mousemove at the centre.
+  //   Hovering the same element again sends only the moves. The events are untrusted, so CSS `:hover` does
+  //   not match; that needs trusted input (#11294).
+  // Test: tests/test_pages_dom.py `test_hover_fires_enter_over_and_move_then_leaves_the_old_target`,
+  //   `test_hover_fixture_reveals_the_hover_action`.
+  function pageHover(ref) {
+    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+    if (!el || !el.isConnected) return {error:"StaleElement"};
+    el.scrollIntoView({block:"center", inline:"center"});
+    const box = el.getBoundingClientRect();
+    const at = {cancelable:true, composed:true, view:window, pointerType:"mouse", isPrimary:true,
+      clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
+    const KEY = "__trustyBrowserHover";
+    let last = globalThis[KEY]?.deref();
+    if (!last || !last.isConnected || last.ownerDocument !== document) last = null;
+    const path = node => { const out = []; for (; node; node = node.parentElement) out.push(node); return out; };
+    const fire = (target, kinds, bubbles, relatedTarget) => {
+      for (const [Kind, type] of kinds) target.dispatchEvent(new Kind(type, {...at, bubbles, relatedTarget}));
+    };
+    if (last !== el) {
+      const old = last ? path(last) : [], now = path(el);
+      if (last) {
+        fire(last, [[PointerEvent, "pointerout"], [MouseEvent, "mouseout"]], true, el);
+        for (const node of old.filter(n => !now.includes(n)))
+          fire(node, [[PointerEvent, "pointerleave"], [MouseEvent, "mouseleave"]], false, el);
+      }
+      fire(el, [[PointerEvent, "pointerover"], [MouseEvent, "mouseover"]], true, last);
+      for (const node of now.filter(n => !old.includes(n)).reverse())
+        fire(node, [[PointerEvent, "pointerenter"], [MouseEvent, "mouseenter"]], false, last);
+      globalThis[KEY] = new WeakRef(el);
+    }
+    fire(el, [[PointerEvent, "pointermove"], [MouseEvent, "mousemove"]], true, null);
+    return {ok:true};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -137,7 +176,7 @@ globalThis.TrustyPages = (() => {
     if (address.username || address.password) return false;
     return address.protocol === "https:" || (address.protocol === "http:" && address.hostname === "127.0.0.1");
   }
-  return {pageProbe, pageRead, pageClick, pageType, urlAllowed};
+  return {pageProbe, pageRead, pageClick, pageType, pageHover, urlAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -145,7 +184,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageType, urlAllowed} = TrustyPages;
+  const {pageProbe, pageRead, pageClick, pageType, pageHover, urlAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
@@ -154,6 +193,7 @@ TrustyPages.commands = deps => {
   const ref = v => typeof v === "string" && REF.test(v);
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
+    page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
@@ -188,7 +228,7 @@ TrustyPages.commands = deps => {
     return {done, cancel:() => finish(false)};
   }
 
-  // Runs the injected click/type only inside the lease's document; never reports work it did not do.
+  // Runs the injected click/hover/type only inside the lease's document; never reports work it did not do.
   async function act(req, func, args) {
     if (req.document === null) {
       const now = await probe(req.tab);
@@ -236,6 +276,7 @@ TrustyPages.commands = deps => {
     },
     page_click:req => act(req, pageClick, [req.ref]),
     page_type:req => act(req, pageType, [req.ref, req.text]),
+    page_hover:req => act(req, pageHover, [req.ref]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -277,7 +318,7 @@ TrustyPages.commands = deps => {
   // changed the page answers OutcomeUnknown, any other BrowserDisconnected.
   function failure(req, error) {
     if (!error?.fields) {
-      const acting = ["page_click","page_type","page_navigate"].includes(req.op);
+      const acting = ["page_click","page_hover","page_type","page_navigate"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Hover fixture (#11287)</title>
+<!-- A menu that opens on pointer entry and closes on exit, the script-driven pattern most sites use. -->
+<nav>
+  <div id="menu">
+    <button id="products">Products</button>
+    <div id="submenu" hidden><button id="pricing">Pricing</button></div>
+  </div>
+  <button id="other">Other</button>
+</nav>
+<pre id="log"></pre>
+<script>
+  window.log = [];
+  const record = (name, e) => {
+    window.log.push(name + ":" + e.type);
+    document.getElementById("log").textContent = window.log.join("\n");
+  };
+  const menu = document.getElementById("menu"), submenu = document.getElementById("submenu");
+  menu.addEventListener("mouseenter", e => { submenu.hidden = false; record("menu", e); });
+  menu.addEventListener("mouseleave", e => { submenu.hidden = true; record("menu", e); });
+  document.getElementById("products").addEventListener("mouseover", e => record("products", e));
+  document.getElementById("products").addEventListener("mousemove", e => record("products", e));
+  document.getElementById("pricing").addEventListener("click", e => record("pricing", e));
+</script>
