@@ -175,6 +175,18 @@ fn console_passthrough_carries_every_memory_and_search_name() {
         "ANALYZE_LSP",
         // #11085: a clap `env` attribute; the auto-started `serve` has no flag.
         "TRUSTY_ANALYZER_FACTS",
+        // #11085: read through `architect_store::resolve_store_root`'s env
+        // lookup, so no literal `env::var` names them.
+        "DASHBOARD_ROOT",
+        "ARCHITECT_PROJECT_DIR",
+        // #11085: the full sweep — mpm daemon services read through constants,
+        // the AWS provider probe, and trusty-common's buffered tracing.
+        "TRUSTY_MPM_WORKTREE_RECLAIM",
+        "TRUSTY_MPM_SUPERVISOR_INTERVAL",
+        "TRUSTY_MPM_RESUME_FLAP_THRESHOLD",
+        "TRUSTY_DOCTOR_LOCK_STALL_SECS",
+        "AWS_PROFILE",
+        "RUST_LOG_BUFFER",
     ] {
         assert!(passed(name), "{name} must reach the console");
     }
@@ -210,31 +222,112 @@ fn clap_env_names(src: &Path) -> std::collections::BTreeMap<String, String> {
             // The whole file: a `#[cfg(test)] mod x_tests;` line near the top
             // of `main.rs` would otherwise hide every attribute below it.
             let text = std::fs::read_to_string(&path).expect("read file");
-            let mut in_attr = false;
-            for line in text.lines().map(str::trim) {
-                if line.starts_with("//") {
-                    continue;
-                }
-                in_attr |= line.starts_with("#[arg(") || line.starts_with("#[clap(");
-                if !in_attr {
-                    continue;
-                }
-                let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-                for (at, _) in compact.match_indices("env=\"") {
-                    let prev = compact[..at].chars().next_back();
-                    if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
-                        continue;
-                    }
-                    let name = compact[at + 5..].split('"').next().unwrap_or("");
-                    found.insert(name.to_string(), path.display().to_string());
-                }
-                if line.contains(")]") {
-                    in_attr = false;
-                }
+            for name in clap_env_names_in(&text) {
+                found.insert(name, path.display().to_string());
             }
         }
     }
     found
+}
+
+/// Every `env = "NAME"` inside a `#[arg(..)]` / `#[clap(..)]` attribute of
+/// one source text, in order.
+///
+/// #11085: an attribute ends where its own `#[` closes — bracket depth
+/// counted outside string literals and `//` comments — never at the first
+/// line that merely contains `)]`.
+fn clap_env_names_in(text: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for attr in clap_attributes(text) {
+        let compact: String = attr.chars().filter(|c| !c.is_whitespace()).collect();
+        for (at, _) in compact.match_indices("env=\"") {
+            let prev = compact[..at].chars().next_back();
+            if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            let name = compact[at + 5..].split('"').next().unwrap_or("");
+            found.push(name.to_string());
+        }
+    }
+    found
+}
+
+/// The text of each `#[arg(..)]` / `#[clap(..)]` attribute, comments removed.
+fn clap_attributes(text: &str) -> Vec<String> {
+    let mut attrs = Vec::new();
+    let mut rest = text;
+    while let Some(start) = ["#[arg(", "#[clap("]
+        .iter()
+        .filter_map(|open| rest.find(open))
+        .min()
+    {
+        // A start inside a `//` comment is no attribute.
+        let line_start = rest[..start].rfind('\n').map_or(0, |i| i + 1);
+        if rest[line_start..start].contains("//") {
+            rest = &rest[start + 2..];
+            continue;
+        }
+        let (mut depth, mut in_str, mut escaped, mut in_comment) = (0usize, false, false, false);
+        let mut attr = String::new();
+        let mut end = rest.len();
+        let mut chars = rest[start..].char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            if in_comment {
+                in_comment = c != '\n';
+                continue;
+            }
+            if in_str {
+                attr.push(c);
+                match (escaped, c) {
+                    (true, _) => escaped = false,
+                    (false, '\\') => escaped = true,
+                    (false, '"') => in_str = false,
+                    _ => {}
+                }
+                continue;
+            }
+            if c == '/' && chars.peek().is_some_and(|&(_, n)| n == '/') {
+                in_comment = true;
+                continue;
+            }
+            attr.push(c);
+            match c {
+                '"' => in_str = true,
+                '[' | '(' => depth += 1,
+                ']' | ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if depth == 0 && c == ']' {
+                end = start + i + 1;
+                break;
+            }
+        }
+        attrs.push(attr);
+        rest = &rest[end..];
+    }
+    attrs
+}
+
+// #11085: an inner line holding `)]` (here `vec![(1, 2)]`, or a string) must
+// not end a multi-line attribute before its own closing `)]`.
+#[test]
+fn clap_scan_reads_past_an_inner_close_bracket() {
+    let text = r#"
+        #[arg(
+            long,
+            default_value_t = pick(vec![(1, 2)]),
+            help = "a note (see #1)]",
+            env = "LATE_NAME",
+        )]
+        late: u32,
+        #[arg(long, env = "NEXT_NAME")] next: u32,
+        #[serde(rename = "x")]
+        not_clap: u32,
+        #[arg(long)]
+        // env = "IN_A_COMMENT"
+        plain: u32,
+    "#;
+    assert_eq!(clap_env_names_in(text), ["LATE_NAME", "NEXT_NAME"]);
 }
 
 // #11085: the first variable trace read `env::var` / `var_os` only and missed

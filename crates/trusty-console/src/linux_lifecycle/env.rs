@@ -79,10 +79,13 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
 /// analyze subprocess client; `trusty-mpm serve --stdio` starts the mpm daemon
 /// (`serve_stdio::ensure_daemon_up`). Both spawns inherit the bridge's
 /// environment, which is the console's.
-/// What: the names traced from each daemon's `env::var` / `var_os` reads, by
-/// literal and by constant, and from its clap `env = "NAME"` attributes.
-/// Credentials, caller-session identity and hook-time policy toggles are in
-/// [`EXCLUDED`] instead.
+/// What: every non-credential name the `serve` (analyze) and `tm daemon` (mpm)
+/// runtime paths read, and the trusty-common modules they call: literal and
+/// constant `env::var` / `var_os` reads, helper lookups over the process
+/// environment (`resolve_store_root(&process_env, ..)`, `from_env_with`), clap
+/// `env = "NAME"` attributes, and the AWS SDK chain behind the Bedrock
+/// provider. Credentials, credential pointers, caller-session identity and
+/// hook-time toggles are in [`EXCLUDED`] instead.
 pub(crate) const BRIDGE_DAEMONS: &[&str] = &[
     // #11085: trusty-analyze `Cli::facts_path`, a clap `env` attribute. The
     // auto-start spawns plain `serve`, so this is the only route to the store.
@@ -140,6 +143,42 @@ pub(crate) const BRIDGE_DAEMONS: &[&str] = &[
     "TRUSTY_BUGREPORT_GH_APP_ID",
     "TRUSTY_BUGREPORT_GH_INSTALL_ID",
     "TELEGRAM_BOT_USERNAME",
+    // #11085: trusty-mpm `architect_store::resolve_store_root(&process_env, ..)`,
+    // the daemon's dashboard store root (`daemon::rpc::architect_dashboard`).
+    "DASHBOARD_ROOT",
+    "ARCHITECT_PROJECT_DIR",
+    // #11085: trusty-mpm daemon services, read through `ENV_*` constants:
+    // merged-PR reclaim, slot-pool eviction, orphan GC logging, the resume
+    // breaker, the auto-resume loop's `SupervisorConfig::from_env`, and the
+    // doctor's lock-stall and LaunchAgents checks.
+    "TRUSTY_MPM_WORKTREE_RECLAIM",
+    "TRUSTY_MPM_WORKTREE_RECLAIM_INTERVAL_SECS",
+    "TRUSTY_MPM_SLOT_POOL_EVICT",
+    "TRUSTY_MPM_ORPHAN_GC_SKIP_LOG_EVERY",
+    "TRUSTY_MPM_RESUME_FLAP_WINDOW_SECS",
+    "TRUSTY_MPM_RESUME_FLAP_THRESHOLD",
+    "TRUSTY_MPM_RESUME_BOOT_GRACE_SECS",
+    "TRUSTY_MPM_SUPERVISOR_INTERVAL",
+    "TRUSTY_MPM_SUPERVISOR_CLASSIFY",
+    "TRUSTY_MPM_PR_CLEANUP_INTERVAL",
+    "TRUSTY_DOCTOR_LOCK_STALL_SECS",
+    "TRUSTY_MPM_LAUNCH_AGENTS_DIR",
+    // #11085: `core::alt_screen::MANAGED_DEFAULTS`, beside
+    // `CLAUDE_CODE_DISABLE_MOUSE`: an operator value wins over the default.
+    "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN",
+    // #11085: tmux's `default-shell` for a tmux server the daemon starts.
+    "SHELL",
+    // #11085: the Bedrock provider. `core::sm::providers::resolve` probes the
+    // profile and role flags and the AWS-hosted markers; the aws-config
+    // default chain (trusty-common `chat::bedrock_impl`) picks the profile,
+    // region and config file from these.
+    "AWS_PROFILE",
+    "AWS_ROLE_ARN",
+    "AWS_DEFAULT_REGION",
+    "AWS_CONFIG_FILE",
+    "AWS_EXECUTION_ENV",
+    "ECS_CONTAINER_METADATA_URI",
+    "ECS_CONTAINER_METADATA_URI_V4",
 ];
 
 /// The descriptor's passthrough: every list above, first occurrence kept.
@@ -217,7 +256,8 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     // #11085: clap `env = "NAME"` attributes no bridge-started daemon acts on.
     (
         "TRUSTY_INDEX",
-        "search: pins one `serve` MCP session to a project; `start` ignores it",
+        "search: pins one `serve` MCP session to a project; `start` ignores it, \
+         and the console's own search bridge must stay unpinned across projects",
     ),
     (
         "TRUSTY_FASTEMBED_CACHE",
@@ -232,6 +272,115 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
         "TRUSTY_MPM_TAILSCALE",
         "mpm: deprecated; when set, `daemon` refuses to start (#3330)",
     ),
+    // #11085: the full sweep of the mpm and analyze daemon paths.
+    (
+        "AWS_ACCESS_KEY_ID",
+        "credential (mpm provider probe, AWS SDK)",
+    ),
+    ("AWS_SECRET_ACCESS_KEY", "credential (AWS SDK)"),
+    ("AWS_SESSION_TOKEN", "credential (AWS SDK)"),
+    (
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "credential pointer; only the two exceptions pass",
+    ),
+    (
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "credential pointer; only the two exceptions pass",
+    ),
+    (
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "credential pointer; only the two exceptions pass",
+    ),
+    (
+        "SSH_AUTH_SOCK",
+        "credential pointer (the ssh agent); only the two exceptions pass",
+    ),
+    ("GH_ENTERPRISE_TOKEN", "credential (mpm)"),
+    ("GITHUB_ENTERPRISE_TOKEN", "credential (mpm)"),
+    ("TELEGRAM_BOT_TOKEN", "credential (mpm)"),
+    ("SLACK_BOT_TOKEN", "credential (mpm)"),
+    ("SLACK_APP_TOKEN", "credential (mpm)"),
+    (
+        "TRUSTY_LOCAL_API_KEY",
+        "credential (trusty-common inference)",
+    ),
+    (
+        "GH_USER",
+        "mpm: the caller's gh account; removed from bound children",
+    ),
+    (
+        "DBATG_SESSION",
+        "mpm: the caller's PM session; `tm dbatg` only",
+    ),
+    (
+        "SSH_CONNECTION",
+        "mpm: presence prompt; `tm presence` CLI only",
+    ),
+    ("SSH_CLIENT", "mpm: presence prompt; `tm presence` CLI only"),
+    ("SSH_TTY", "mpm: presence prompt; `tm presence` CLI only"),
+    (
+        "TRUSTY_MPM_NOTIFY_INBOX",
+        "mpm: hook-time, read by `tm hook` in the managed pane",
+    ),
+    (
+        "CLAUDE_MPM_SUB_AGENT",
+        "hook-time guard marker, read in the managed pane",
+    ),
+    (
+        "CLAUDE_PID",
+        "the caller's Claude session; scrubbed from children",
+    ),
+    (
+        "CLAUDE_EFFORT",
+        "the caller's Claude session; scrubbed from children",
+    ),
+    (
+        "CLAUDE_CODE_EXECPATH",
+        "the caller's Claude session; scrubbed from children",
+    ),
+    (
+        "RUSTUP_TOOLCHAIN",
+        "ignored: mpm strips it from every child it spawns",
+    ),
+    (
+        "TRUSTY_MEMORY_PALACE",
+        "per-caller palace pin; the console's memory bridge stays unpinned",
+    ),
+    (
+        "TRUSTY_RESIDENCY",
+        "ignored: trusty-common `residency` defines it; no daemon reads it",
+    ),
+    (
+        "TRUSTY_RESIDENCY_PULL_SECS",
+        "ignored: trusty-common `residency` defines it; no daemon reads it",
+    ),
+    (
+        "TRUSTY_RESIDENCY_STALE_SECS",
+        "ignored: trusty-common `residency` defines it; no daemon reads it",
+    ),
+    (
+        "TRUSTY_RESIDENCY_GRACE_SECS",
+        "ignored: trusty-common `residency` defines it; no daemon reads it",
+    ),
+    ("TMUX_SOCKET", "mpm: `tm architect` CLI only"),
+    ("DASHBOARD_FORMAT", "mpm: `tm architect dashboard` CLI only"),
+    ("DASHBOARD_ACTOR", "mpm: `tm architect dashboard` CLI only"),
+    (
+        "DASHBOARD_SCHEMA_DIR",
+        "mpm: `tm architect dashboard` CLI only",
+    ),
+    (
+        "DASHBOARD_LOCAL_URL",
+        "mpm: `tm architect dashboard` CLI only",
+    ),
+    (
+        "DASHBOARD_TAILNET_URL",
+        "mpm: `tm architect dashboard` CLI only",
+    ),
+    ("TM_TUI_MOUSE", "mpm: `tm tui` only"),
+    ("TM_TUI_TRACE", "mpm: `tm tui` only"),
+    ("TERM_PROGRAM", "mpm: `tm tui` only"),
+    ("ITERM_SESSION_ID", "mpm: `tm tui` only"),
 ];
 
 /// Name prefixes deliberately NOT passed, with why.

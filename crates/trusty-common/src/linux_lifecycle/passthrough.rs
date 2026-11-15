@@ -21,6 +21,9 @@ pub const MEMORY_DAEMON: &[&str] = &[
     // downloads, the session bus for the Secret Service credential store,
     // `CARGO_HOME` for the install-dir lookup, and the ORT/CUDA loader paths.
     "RUST_LOG",
+    // #11085: the log-buffer filter of `tracing_init::
+    // init_tracing_with_buffer_and_capture`, which this daemon installs.
+    "RUST_LOG_BUFFER",
     "RUST_BACKTRACE",
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -117,6 +120,9 @@ pub const SEARCH_DAEMON: &[&str] = &[
     // the Secret Service credential store, the install-dir lookup, and the
     // dynamic-loader paths a CUDA / load-dynamic ORT build needs.
     "RUST_LOG",
+    // #11085: the log-buffer filter of `tracing_init::
+    // init_tracing_with_buffer_and_capture`, which this daemon installs.
+    "RUST_LOG_BUFFER",
     "RUST_BACKTRACE",
     "HTTP_PROXY",
     "HTTPS_PROXY",
@@ -281,5 +287,8 @@ mod tests {
         }
         assert!(MEMORY_DAEMON.contains(&"TRUSTY_MEMORY_MULTI_TENANT"));
         assert!(SEARCH_DAEMON.contains(&"TRUSTY_EMBEDDER"));
+        // #11085: both daemons install trusty-common's buffered tracing.
+        assert!(MEMORY_DAEMON.contains(&"RUST_LOG_BUFFER"));
+        assert!(SEARCH_DAEMON.contains(&"RUST_LOG_BUFFER"));
     }
 }
