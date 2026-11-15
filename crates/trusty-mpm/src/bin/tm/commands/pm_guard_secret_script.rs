@@ -339,9 +339,9 @@ fn judge_script(
                 seen,
             ),
             // #11276: a body's segment split is approximate (prose, comments),
-            // so an unplaceable segment inside a script keeps its pre-#11262
-            // reading; the inline judges below still read the body's text.
-            Err(Unread::Unplaceable) => None,
+            // so an unplaceable segment refuses only when it may run a script
+            // or read a secret the inline judges cannot follow.
+            Err(Unread::Unplaceable) if !unplaced_body_segment_refuses(word) => None,
             Err(why) => Some((Rule::Unread(why), None)),
         };
         refused.map(|(rule, named)| (rule, named.or_else(|| Some(word.to_string()))))
@@ -368,6 +368,27 @@ fn judge_script(
     // named as the computed word it was written as.
     each_script_in(&substituted, bases, subs, 0, &mut refuse)
         .or_else(|| each_script_in(&nested, bases, own, 0, &mut refuse))
+}
+
+/// Whether an unplaceable segment inside a script body may run or read what
+/// the guard cannot judge (#11276).
+///
+/// What: the segment is cut on whitespace and the shell operators `;&|<>()`,
+/// quotes stripped, one piece per operator-delimited run; it refuses when any
+/// piece yields a script candidate ([`candidates`]) or the segment names a
+/// secret-shaped word. Prose that names neither allows, as before #11262.
+/// Test: `an_unplaced_script_run_in_a_body_refuses_11276`,
+/// `an_unplaced_benign_body_segment_allows_11276`.
+fn unplaced_body_segment_refuses(segment: &str) -> bool {
+    let runs_script = segment.split([';', '&', '|', '(', ')', '\n']).any(|piece| {
+        let rough: Vec<String> = piece
+            .split(|c: char| c.is_whitespace() || c == '<' || c == '>')
+            .map(|w| w.trim_matches(['\'', '"']).to_string())
+            .filter(|w| !w.is_empty())
+            .collect();
+        !candidates(&rough).0.is_empty()
+    });
+    runs_script || !secret_files_named_in(segment, Scan::Argv).is_empty()
 }
 
 /// Run the inline credential judges over `command`, the inline spelling of

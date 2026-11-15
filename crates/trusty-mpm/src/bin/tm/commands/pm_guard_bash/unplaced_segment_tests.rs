@@ -7,10 +7,11 @@
 //! What: per call site, one segment `tokenize` cannot place that runs, reads
 //! or copies what the rule refuses, asserted at the rule (the regression row)
 //! and through the secret bands the guard composes for a Bash command (a pin:
-//! the ANSI-C check ahead of every rule already refuses these shapes). The
-//! fifth site, `fixed_output`, cannot receive the new error: it returns
-//! before tokenizing any body holding `$`, `` ` `` or `\`, and its `None`
-//! already refuses. Every fixture is a placeholder; nothing is executed.
+//! the ANSI-C check ahead of every rule already refuses these shapes). Site
+//! 4, `fixed_output`, needs no row: any tokenize error yields None, which
+//! refuses. Site 5 is the copy rule. An unplaceable segment inside a script
+//! body refuses when it may run a script or name a secret. Every fixture is a
+//! placeholder; nothing is executed.
 //! Test: itself.
 
 use std::path::Path;
@@ -111,7 +112,7 @@ fn an_unplaced_computed_read_refuses_11276() {
     assert!(guard(&command, probe_cwd()).is_some(), "guard pin");
 }
 
-/// Site 4, the copy rule: a secret-shaped word in a segment it cannot place
+/// Site 5, the copy rule: a secret-shaped word in a segment it cannot place
 /// refuses.
 #[test]
 fn an_unplaced_copy_of_a_secret_refuses_11276() {
@@ -122,7 +123,7 @@ fn an_unplaced_copy_of_a_secret_refuses_11276() {
     assert!(guard(&command, probe_cwd()).is_some(), "guard pin");
 }
 
-/// Site 4, the copy rule's `cd` tracking: a `cd` it cannot place leaves a
+/// Site 5, the copy rule's `cd` tracking: a `cd` it cannot place leaves a
 /// later relative destination unknown, so a secret copy there refuses.
 #[test]
 fn an_unplaced_cd_before_a_secret_copy_refuses_11276() {
@@ -130,4 +131,36 @@ fn an_unplaced_cd_before_a_secret_copy_refuses_11276() {
     let reason = evaluate_secret_file_copy_command(&command, probe_cwd()).unwrap_or_default();
     assert!(reason.contains("#11276"), "must deny: {reason}");
     assert!(guard(&command, probe_cwd()).is_some(), "guard pin");
+}
+
+/// A script body whose own segment cannot be placed and runs another script
+/// refuses at `judge_script`: the inline judges read text, not that script.
+#[test]
+fn an_unplaced_script_run_in_a_body_refuses_11276() {
+    let dir = script_dir();
+    for body in [
+        format!("bash probe.sh {SPAN}\n"),
+        format!("./probe.sh {SPAN}\n"),
+        format!("echo x {SPAN} ; source probe.sh\n"),
+        format!("cat .env {SPAN}\n"),
+    ] {
+        std::fs::write(dir.path().join("outer.sh"), &body).expect("write outer");
+        let reason = evaluate_script_body_secret_read("bash outer.sh", dir.path());
+        assert!(reason.is_some(), "must deny: {body}");
+    }
+}
+
+/// A script body's unplaceable segment that runs nothing and names no secret
+/// (prose cut mid-sentence, the #8879 gate-script class) still allows.
+#[test]
+fn an_unplaced_benign_body_segment_allows_11276() {
+    let dir = script_dir();
+    let segment = format!("echo the gate floor {SPAN}");
+    assert_eq!(tokenize(&segment), Err(TokenizeError::AmbiguousOperators));
+    let body = format!("{segment}\n");
+    std::fs::write(dir.path().join("outer.sh"), &body).expect("write outer");
+    assert_eq!(
+        evaluate_script_body_secret_read("bash outer.sh", dir.path()),
+        None
+    );
 }

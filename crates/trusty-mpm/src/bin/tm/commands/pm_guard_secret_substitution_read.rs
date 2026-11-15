@@ -170,8 +170,8 @@ fn fixed_output(shown: &str, body: &str) -> Option<String> {
     if body.contains(['$', '`', '\\']) {
         return None;
     }
-    // #11276: a body `tokenize` cannot place has no fixed output, so
-    // `resolve_word` refuses the read it names.
+    // #11276 (site 4): any tokenize error yields None, which refuses the
+    // read `resolve_word` names.
     let argv = tokenize(body).ok()?;
     match argv.first().map(String::as_str) {
         Some("echo") if !body.contains(['|', ';', '&', '<', '>']) => {
