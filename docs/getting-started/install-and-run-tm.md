@@ -20,13 +20,17 @@
 # 1. One-liner: download and install tctl (the control plane)
 curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh
 
-# 2. Install trusty-mpm and its dependencies (memory + search daemons)
+# 2. Add ~/.cargo/bin to your PATH in ~/.zshrc, then reload it
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# 3. Install trusty-mpm and its dependencies (memory + search daemons)
 tctl install trusty-mpm
 
-# 3. Verify installation
+# 4. Verify installation
 tctl status
 
-# 4. Run tm in any git repo
+# 5. Run tm in any git repo
 cd ~/your-project
 tm
 ```
