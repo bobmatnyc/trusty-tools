@@ -120,7 +120,7 @@ class TestInputHold(unittest.TestCase):
             with self.subTest(page=page):
                 src = open(page, encoding="utf-8").read()
                 self.assertNotRegex(src, r"onSnapshot\(\(snap\)")   # every store snapshot goes through live()
-                self.assertEqual(len(re.findall(r"\.onSnapshot\(live\(", src)), 14)
+                self.assertEqual(len(re.findall(r"\.onSnapshot\(live\(", src)), 13)   # #10752: meta/gh_track is no longer polled
                 for needle in ("hold.settle();", "paintHold();", "setInterval(tickHold, 1000)", 'claimForm("cancel"', 'claimForm("wd"', 'claimForm("fb"',
                                'claimForm("cmd"', 'claimForm("note"', 'claimForm("steer"', 'claimForm("", "")', ".hold-note"):
                     self.assertIn(needle, src)

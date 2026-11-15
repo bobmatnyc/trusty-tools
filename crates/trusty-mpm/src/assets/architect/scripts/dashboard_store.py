@@ -30,7 +30,7 @@ import re
 import sys
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -563,11 +563,12 @@ class Store:
 
     # ---- seed ------------------------------------------------------------
     def seed_meta(self, state_md=DEFAULT_STATE_MD, owner_name="the owner"):
-        """Create meta/state when absent (owner_name only; next ids are computed from the store). True if created."""
+        """Create meta/state (owner_name) and meta/settings ({updated}) when absent; never overwrite. True if meta/state was created."""
         # state_md is kept for callers; the NEXT IDS line is no longer read (scripts/dashboard_ids.py, the page).
-        body = {"owner_name": owner_name, "updated": now_iso()}
+        with suppress(Conflict):  # #10752: the page polls meta/settings; absent = a 404 per poll
+            self.set("meta", "settings", {"updated": now_iso()}, if_version=0)
         try:
-            self.set("meta", "state", body, if_version=0)
+            self.set("meta", "state", {"owner_name": owner_name, "updated": now_iso()}, if_version=0)
             return True
         except Conflict:
             return False
