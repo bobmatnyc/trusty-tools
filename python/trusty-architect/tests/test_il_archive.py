@@ -70,10 +70,9 @@ def mem_calls(env):
 
 
 def seed(env, docs):
-    st = ds.Store(env["root"])
-    for i, d in docs.items():
-        st.set("items", i, d)
-    return st
+    for i, d in docs.items():   # #10678: the store stamps created itself, so its clock backdates the fixture
+        ds.Store(env["root"], clock=lambda c=d.get("created") or ds.now_iso(): c).set("items", i, d)
+    return ds.Store(env["root"])
 
 
 def done(day, session="tm-architect", **kw):

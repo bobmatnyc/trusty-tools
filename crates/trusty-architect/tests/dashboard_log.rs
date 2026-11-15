@@ -790,3 +790,42 @@ fn write_without_secret_scan_refused() -> R {
     }
     Ok(())
 }
+
+/// #10678: the store stamps `created`/`updated` from its own clock and
+/// ignores a client value for either; an event field (`done_at`) stays the
+/// client's, and a field the body lacks is not added.
+#[test]
+fn store_stamps_created_and_updated_and_ignores_client_values() -> R {
+    let bogus = "1999-01-01T00:00:00Z";
+    let future = "2099-12-31T23:59:59Z";
+    for format in FORMATS {
+        let f = Fixture::new(format)?;
+        let s = f.store();
+        let body = json!({"title": "t", "created": bogus, "updated": future, "done_at": bogus});
+        s.set("docs", "a", body, None)?;
+        let first = s.get("docs", "a")?.data;
+        assert_eq!(first["created"], NOW_ISO, "{format}");
+        assert_eq!(first["updated"], NOW_ISO, "{format}");
+        assert_eq!(first["done_at"], bogus, "{format}");
+
+        f.clock.sleep(Duration::from_secs(300));
+        s.update(
+            "docs",
+            "a",
+            json!({"created": future, "updated": bogus}),
+            None,
+        )?;
+        let second = s.get("docs", "a")?.data;
+        assert_eq!(second["created"], NOW_ISO, "{format}");
+        assert_eq!(second["updated"], "2026-10-21T10:05:00Z", "{format}");
+
+        f.clock.sleep(Duration::from_secs(300));
+        s.update("docs", "a", json!({"title": "t2"}), None)?;
+        assert_eq!(s.get("docs", "a")?.data["updated"], "2026-10-21T10:10:00Z");
+
+        s.set("docs", "b", json!({"n": 1}), None)?;
+        let plain = s.get("docs", "b")?.data;
+        assert!(!plain.contains_key("created") && !plain.contains_key("updated"));
+    }
+    Ok(())
+}

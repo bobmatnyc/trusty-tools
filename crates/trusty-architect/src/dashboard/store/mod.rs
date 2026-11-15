@@ -436,13 +436,14 @@ impl Store {
         // #11064: a level outside the six is refused whatever the schema mode.
         self.refuse_bad_levels(ops)?;
         let _lock = lock::acquire(&self.root, self.lock_wait)?;
+        // #10678: one store-side write time for every document and the log line.
+        let now = crate::classify::alerts::iso(self.clock.now_unix());
         let mut staged = Staged::default();
         let results = ops
             .iter()
-            .map(|op| self.stage(&mut staged, op))
+            .map(|op| self.stage(&mut staged, op, &now))
             .collect::<Result<Vec<_>, _>>()?;
         self.check_schemas(&staged)?;
-        let now = crate::classify::alerts::iso(self.clock.now_unix());
         // #10063 df-G01: the log's checks refuse the batch before any write.
         let seq = changes::prepare(self, &now)?;
         self.archive_removed(&staged, &now)?;

@@ -9,6 +9,7 @@ local/owner-queue, the ArtifactData mirror). A file holds the document body plus
 integer "version"; a file with no "version" (the old mirror shape) counts as version 1.
 Every write takes an exclusive flock on <root>/.lock, checks the optional if_version
 (0 = must not exist), bumps the version and replaces files with temp file + os.replace.
+The store stamps "created"/"updated" from its own clock; a client value for either is ignored (#10678).
 batch() stages every operation in memory first and restores the previous bytes if a write
 fails midway, so it is all-or-nothing. Reads take no lock (replace is atomic).
 Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical <coll>.jsonl per collection plus
@@ -118,6 +119,22 @@ def normalize_timestamps(value, key=None):
     if isinstance(value, str) and key and (key in _TS_KEYS or key.endswith("_at")) and _MINUTE_TS.match(value):
         return value[:-1] + ":00Z"
     return value
+
+
+def _stamp_write(data, old, now):
+    """Return data with the store's own write times in created/updated (#10678).
+    Why: a client clock or a hand-typed value must not decide when a document was written.
+    What: a document that carries "updated" gets now; one that carries "created" keeps the stored document's
+    created, else gets now. A field the document lacks is not added (several schemas forbid it). Event fields
+    (at, done_at, answered_at, ...) are the client's: they record when something happened, not when it was stored.
+    Test: tests/test_dashboard_store_guards.py::test_store_stamps_created_and_updated_and_ignores_client_values"""
+    out = dict(data)
+    if "updated" in out:
+        out["updated"] = now
+    if "created" in out:
+        prior = (old or {}).get("created")
+        out["created"] = prior if prior is not None else now
+    return out
 
 
 def _render(version, data):
@@ -311,7 +328,7 @@ class Store:
                 raise StoreError(str(e))
         return fresh[coll].get(doc_id)
 
-    def _stage(self, staged, op, fresh):
+    def _stage(self, staged, op, fresh, now):
         kind = op.get("op")
         if kind not in ("set", "update", "delete"):
             raise StoreError(f"unknown op {kind!r}: use set, update or delete")
@@ -346,7 +363,8 @@ class Store:
             data = {**cur["data"], **data}
         if coll == "items" and cur["exists"] and (cur["data"] or {}).get("status") == "brief_pending":
             data = _restore_on_brief(data)
-        cur.update(exists=True, data=dict(data), dirty=True, version=cur["version"] + 1)
+        data = _stamp_write(data, cur["data"] if cur["exists"] else None, now)   # #10678: the store owns write times
+        cur.update(exists=True, data=data, dirty=True, version=cur["version"] + 1)
         return {"collection": coll, "id": doc_id, "version": cur["version"]}
 
     def _commit(self, staged):
@@ -397,7 +415,7 @@ class Store:
             sys.stderr.write(f"dashboard-store: schema warning: {e}\n")
         return errs
 
-    def _commit_jsonl(self, staged, fresh, actor, op_of):
+    def _commit_jsonl(self, staged, fresh, actor, op_of, now):
         warnings = self._check_schema(staged)
         by_coll = {}
         for (coll, doc_id), st in staged.items():
@@ -433,7 +451,7 @@ class Store:
                 if mine:
                     e["warnings"] = mine
         try:
-            dj.append_changes(self.root, entries, self.clock())
+            dj.append_changes(self.root, entries, now)   # #10678: the documents' own write time
         except (OSError, ValueError) as e:
             sys.stderr.write(f"dashboard-store: change log not written: {e}\n")
 
@@ -468,14 +486,15 @@ class Store:
         _refuse_live_write_under_test(self.root)
         with self._lock():
             staged, results, fresh, op_of = {}, [], {}, {}
+            now = self.clock()   # #10678: one store-side write time for every document in the batch
             for op in ops:
                 if not isinstance(op, dict):
                     raise StoreError("each batch op must be an object")
-                results.append(self._stage(staged, op, fresh))
+                results.append(self._stage(staged, op, fresh, now))
                 op_of[(op.get("collection"), op.get("id"))] = op.get("op")
             self._log_pruned(staged, actor or self.actor)   # fail closed: no log line, no delete
             if self.fmt == "jsonl":
-                self._commit_jsonl(staged, fresh, actor or self.actor, op_of)
+                self._commit_jsonl(staged, fresh, actor or self.actor, op_of, now)
             else:
                 self._commit(staged)
         return results
