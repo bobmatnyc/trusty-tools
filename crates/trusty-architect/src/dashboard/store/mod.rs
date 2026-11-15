@@ -7,8 +7,10 @@
 //! existing formats, and a store in the other format is refused, never read
 //! as empty (LDG-3.2).
 //! What: [`Store`] over a root and a [`Format`]. Reads ([`Store::get`],
-//! [`Store::list`], [`Store::collections`], [`Store::snapshot`]) take no
-//! lock: every replace is atomic. [`Store::batch`] takes `<root>/.lock`
+//! [`Store::list`], [`Store::snapshot`]) take `<root>/.lock` shared with
+//! the same bounded wait, so a read never lands between the files of one
+//! batch (#10679); [`Store::snapshot`] reads every collection under one
+//! lock. [`Store::collections`] takes none. [`Store::batch`] takes `<root>/.lock`
 //! with a bounded wait, stages every [`Op`], runs the optional schema check
 //! ([`SchemaSet`], [`SchemaMode`]), checks the change log can take the
 //! batch, hands each removed document to the [`DeleteArchive`] (in
@@ -323,6 +325,8 @@ impl Store {
     pub fn get(&self, coll: &str, id: &str) -> Result<Doc, DashError> {
         check_name("collection", coll)?;
         check_name("doc id", id)?;
+        // #10679: never between the files of one batch.
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
         self.guard(coll)?;
         let found = match self.format {
             Format::Dir => dir::load_exact(&self.root, coll, id)?,
@@ -343,6 +347,13 @@ impl Store {
     /// # Errors
     /// A bad name, the other format, or a corrupt file.
     pub fn list(&self, coll: &str, query: &ListQuery) -> Result<Vec<Doc>, DashError> {
+        // #10679: never between the files of one batch.
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
+        self.list_unlocked(coll, query)
+    }
+
+    /// [`Store::list`] for a caller that already holds the read lock.
+    fn list_unlocked(&self, coll: &str, query: &ListQuery) -> Result<Vec<Doc>, DashError> {
         self.guard(coll)?;
         let mut docs = match self.format {
             Format::Dir => dir::list(&self.root, coll)?,
@@ -400,14 +411,21 @@ impl Store {
         Ok(mine)
     }
 
-    /// Every document of `colls`.
+    /// Every document of `colls`, read under one shared lock so every
+    /// collection comes from the same side of any batch (#10679).
     ///
     /// # Errors
     /// [`Store::list`]'s errors.
     pub fn snapshot(&self, colls: &[&str]) -> Result<Snapshot, DashError> {
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
         colls
             .iter()
-            .map(|c| Ok(((*c).to_owned(), self.list(c, &ListQuery::default())?)))
+            .map(|c| {
+                Ok((
+                    (*c).to_owned(),
+                    self.list_unlocked(c, &ListQuery::default())?,
+                ))
+            })
             .collect()
     }
 
