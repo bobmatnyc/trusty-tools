@@ -5,10 +5,10 @@
 //! know the account NAMES a project uses, so no permission is ever requested of
 //! the wrong account. The names are project facts, so they live in the
 //! committed project config, never in the machine-global deployed agent files.
-//! What: the config keeps the table as raw TOML ([`RawAccounts`]), so a bad
-//! entry never fails the rest of the file. [`accounts_for`] validates it into
-//! an [`AccountMap`] — every value allowlisted by character, bounded, and
-//! refused when it is shaped like a credential — and [`account_block`]
+//! What: the config keeps the table as raw TOML ([`RawAccounts`](crate::core::project_accounts::RawAccounts)), so a bad
+//! entry never fails the rest of the file. [`accounts_for`](crate::core::project_accounts::accounts_for) validates it into
+//! an [`AccountMap`](crate::core::project_accounts::AccountMap) — every value allowlisted by character, bounded, and
+//! refused when it is shaped like a credential — and [`account_block`](crate::core::project_accounts::account_block)
 //! renders the `## Project accounts` block the pm-guard hook appends to an ops
 //! dispatch. No error or log line ever carries a value.
 //! Test: `project_accounts_tests.rs`.
