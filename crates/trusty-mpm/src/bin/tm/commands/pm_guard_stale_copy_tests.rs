@@ -218,3 +218,50 @@ fn apply_edits_follows_replace_all_and_misses() {
     let multi = json!({ "edits": [edit, { "old_string": "b", "new_string": "c" }] });
     assert_eq!(apply_edits("a", "MultiEdit", &multi).as_deref(), Some("c"));
 }
+
+impl Fx {
+    /// A symlink at `link` (relative to the root) pointing at `target`.
+    fn symlink(&self, target: &str, link: &str) {
+        let link = self.root.join(link);
+        std::fs::create_dir_all(link.parent().expect("parent")).expect("mkdir");
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+    }
+}
+
+// #10574: APFS is case-insensitive, so a case variant names the locked file.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_locked_path_is_denied_through_a_case_variant() {
+    let fx = Fx::new();
+    assert_code(fx.write("Docs/RULES.md", "R1\n"), LOCKED);
+    assert_code(fx.bash("echo x >> Docs/Rules.md"), LOCKED);
+}
+
+#[test]
+fn a_locked_path_is_denied_through_a_symlink() {
+    let fx = Fx::new();
+    fx.symlink("../docs/rules.md", "other/l.md");
+    assert_code(fx.write("other/l.md", "R1\n"), LOCKED);
+    assert_code(fx.bash("echo x >> other/l.md"), LOCKED);
+}
+
+#[test]
+fn a_stale_write_is_denied_through_a_dotdot_after_a_symlink() {
+    let fx = Fx::new();
+    fx.symlink("../docs", "other/d");
+    fx.read("docs/scenarios.md");
+    fx.owner_edit();
+    // Lexically `other/docs/scenarios.md`; the kernel opens `docs/scenarios.md`.
+    assert_code(
+        fx.write("other/d/../docs/scenarios.md", "v2\n"),
+        STALE_INPUT_HASH,
+    );
+}
+
+#[test]
+fn a_read_through_one_spelling_keeps_a_write_through_another_fresh() {
+    let fx = Fx::new();
+    fx.symlink("../docs/scenarios.md", "other/s.md");
+    fx.read("other/s.md");
+    assert!(fx.write("docs/scenarios.md", "v2\n").is_none());
+}

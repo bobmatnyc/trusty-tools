@@ -207,7 +207,13 @@ impl ObservedStore {
                 continue;
             }
             let _ = std::fs::remove_file(&copy);
-            std::fs::remove_file(&record).map_err(|e| err(&record, e))?;
+            // #10574: a concurrent hook may have evicted it already; keep going.
+            match std::fs::remove_file(&record) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(err(&record, e));
+                }
+                _ => {}
+            }
             total -= size;
             count -= 1;
         }

@@ -118,12 +118,14 @@ fn check_pattern(pattern: &str) -> Result<(), String> {
     compile(&[pattern.to_string()]).map(|_| ())
 }
 
-/// Compile `patterns`; `*` does not cross `/`, `**` does.
+/// Compile `patterns`; `*` does not cross `/`, `**` does; case-insensitive on macOS.
 fn compile(patterns: &[String]) -> Result<GlobSet, String> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
+        // #10574: APFS is case-insensitive, so `Docs/X.md` names `docs/x.md`.
         let glob = GlobBuilder::new(pattern)
             .literal_separator(true)
+            .case_insensitive(cfg!(target_os = "macos"))
             .build()
             .map_err(|e| format!("`{pattern}` is not a valid glob: {e}"))?;
         builder.add(glob);
@@ -134,7 +136,8 @@ fn compile(patterns: &[String]) -> Result<GlobSet, String> {
 /// A registered artifact a tool call names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
-    /// The lexically normalised absolute path.
+    /// The canonical absolute path: the nearest existing ancestor
+    /// canonicalised, the rest re-joined. The store is keyed on it.
     pub abs: PathBuf,
     /// The path relative to the project root, `/`-separated.
     pub rel: String,
@@ -170,38 +173,66 @@ impl StaleCopyConfig {
     /// The artifact `path` names, resolved against `cwd`, or `None` when it
     /// lies outside the project or matches neither list.
     ///
-    /// What: lexical resolution first; when that leaves the path outside the
-    /// project, both sides are canonicalised (the nearest existing parent of
-    /// the path) and compared again, so a `/var` vs `/private/var` spelling
-    /// still matches.
+    /// What: two spellings are matched — the lexical one and the canonical one
+    /// ([`resolve`]: symlinks followed, `..` resolved physically) — each
+    /// relative to the matching spelling of the project root. Either one
+    /// matching `locked` locks the artifact, so a symlink or a case variant
+    /// cannot escape it (#10574). `abs` is the canonical path.
     /// Test: `classify_matches_registered_and_locked_paths`,
-    /// `classify_ignores_paths_outside_the_project`.
+    /// `classify_ignores_paths_outside_the_project`,
+    /// `a_locked_path_is_denied_through_a_symlink`,
+    /// `a_stale_write_is_denied_through_a_dotdot_after_a_symlink`.
     pub fn classify(&self, path: &str, cwd: &Path) -> Option<Artifact> {
-        let abs = normalize(&cwd.join(path));
-        let rel = abs
-            .strip_prefix(normalize(&self.project_dir))
-            .ok()
-            .map(Path::to_path_buf)
-            .or_else(|| canonical_rel(&abs, &self.project_dir))?;
-        let rel = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        if rel.is_empty() {
-            return None;
-        }
-        let locked = self.locked.is_match(&rel);
-        (locked || self.paths.is_match(&rel)).then_some(Artifact { abs, rel, locked })
+        let joined = cwd.join(path);
+        let lexical = normalize(&joined);
+        let abs = resolve(&joined);
+        let canon_rel = rel_under(&abs, &resolve(&self.project_dir));
+        let lex_rel = rel_under(&lexical, &normalize(&self.project_dir));
+        let rels: Vec<&String> = canon_rel.iter().chain(lex_rel.iter()).collect();
+        let rel = (*rels.first()?).clone();
+        let locked = rels.iter().any(|r| self.locked.is_match(r.as_str()));
+        let registered = rels.iter().any(|r| self.paths.is_match(r.as_str()));
+        (locked || registered).then_some(Artifact { abs, rel, locked })
     }
 }
 
-/// `abs` relative to `project_dir`, both canonicalised; `None` outside it.
-fn canonical_rel(abs: &Path, project_dir: &Path) -> Option<PathBuf> {
-    let root = project_dir.canonicalize().ok()?;
-    let parent = abs.parent()?.canonicalize().ok()?;
-    let full = parent.join(abs.file_name()?);
-    full.strip_prefix(root).ok().map(Path::to_path_buf)
+/// `path` relative to `root`, `/`-separated; `None` outside it or for the root.
+fn rel_under(path: &Path, root: &Path) -> Option<String> {
+    let rel = path
+        .strip_prefix(root)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    (!rel.is_empty()).then_some(rel)
+}
+
+/// The canonical form of `path`, which need not exist.
+///
+/// What: canonicalise the longest existing prefix (symlinks followed, `..`
+/// resolved by the filesystem), then re-join the remaining components with
+/// `.` and `..` resolved lexically — a component that does not exist cannot
+/// be a symlink. With no existing prefix, [`normalize`].
+fn resolve(path: &Path) -> PathBuf {
+    let comps: Vec<Component<'_>> = path.components().collect();
+    for split in (1..=comps.len()).rev() {
+        let prefix: PathBuf = comps[..split].iter().collect();
+        let Ok(mut out) = prefix.canonicalize() else {
+            continue;
+        };
+        for comp in &comps[split..] {
+            match comp {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other.as_os_str()),
+            }
+        }
+        return out;
+    }
+    normalize(path)
 }
 
 /// Resolve `.` and `..` lexically; a symlink is not followed.

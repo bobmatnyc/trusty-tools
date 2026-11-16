@@ -25,6 +25,12 @@
 //! (missing, empty, unreadable) allows every call; a rejected one prints a
 //! warning to stderr. Residual: a Bash read (`cat docs/x.md`) records nothing,
 //! so a later write after only a Bash read is denied as never read.
+//!
+//! Coverage gaps: [`shell_write_targets`] does not see every Bash write shape.
+//! The guard does not judge `perl -i`, `awk -i inplace`, `patch`, `git apply`,
+//! `git checkout -- <file>`, `ln`, `curl -o`, a write made inside a script the
+//! command runs, or a target spelled through `$VAR` or `~`. Such a write is
+//! allowed unchecked; these are known gaps, not judged writes.
 //! Test: `pm_guard_stale_copy_tests.rs`; end to end
 //! `tests/tm_hook_pm_guard_stale_copy_10574.rs`.
 
