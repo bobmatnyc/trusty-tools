@@ -36,48 +36,103 @@ pub(crate) struct DispatchModel<'a> {
     pub argument: Option<&'a str>,
     /// The agent's frontmatter `model:`.
     pub frontmatter: Option<&'a str>,
+    /// The agent file could not be read, so `frontmatter` is unknown rather
+    /// than absent.
+    pub frontmatter_unreadable: bool,
     /// The parent session's model, used for `inherit` or no `model:`.
     pub parent: Option<&'a str>,
 }
 
+/// Why the model a dispatch would run on cannot be named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unknown {
+    /// `inherit` or no `model:`, and no session-model record for the parent.
+    Parent,
+    /// The agent was not found and a deployed agent file was unreadable.
+    Roster,
+}
+
 impl<'a> DispatchModel<'a> {
-    /// The model request that wins, or `None` when nothing names one.
-    fn winning(&self) -> Option<&'a str> {
-        let named = |v: Option<&'a str>| v.map(str::trim).filter(|m| !m.is_empty());
-        named(self.env)
-            .or(named(self.argument))
-            .or(named(self.frontmatter).filter(|m| !m.eq_ignore_ascii_case("inherit")))
+    /// The model request that wins, or why none can be named.
+    fn winning(&self) -> Result<&'a str, Unknown> {
+        // #11353: `inherit` defers to the next source, from the argument too.
+        let named = |v: Option<&'a str>| {
+            v.map(str::trim)
+                .filter(|m| !m.is_empty() && !m.eq_ignore_ascii_case("inherit"))
+        };
+        if let Some(m) = named(self.env).or(named(self.argument)) {
+            return Ok(m);
+        }
+        if self.frontmatter_unreadable {
+            return Err(Unknown::Roster);
+        }
+        named(self.frontmatter)
             .or(named(self.parent))
+            .ok_or(Unknown::Parent)
     }
 }
 
-/// Deny text when this dispatch would put a non-allowed role on Fable.
+/// Deny text when this dispatch would, or might, put a non-allowed role on
+/// Fable.
 ///
 /// Why: #11353 — only PM, engineer (any `*-engineer`, including
 /// `data-engineer`) and research agents may run on Fable, whatever the
-/// frontmatter, config or dispatch asks for.
-/// What: expands the winning request through the config's tier aliases; `None`
-/// when it is not a Fable id, when nothing names a model, or when
-/// [`fable_allowed_for`] accepts `agent`/`role`.
+/// frontmatter, config or dispatch asks for. An unknown model fails closed: a
+/// subagent that inherits an unrecorded parent may inherit Fable.
+/// What: `None` when [`fable_allowed_for`] accepts `agent`/`role`. Otherwise
+/// expands the winning request through the config's tier aliases and refuses a
+/// Fable id. When no model can be named, the parent is taken to run on the
+/// config's `[models] default`; a known non-Fable default passes, anything else
+/// is refused with a request for an explicit `model:`.
 /// Test: `a_qa_dispatch_asking_for_fable_is_refused`,
 /// `allowed_roles_may_run_on_fable`, `inherit_under_a_fable_parent_is_refused`,
-/// `the_env_override_is_checked_first`, `non_fable_requests_pass`.
+/// `the_env_override_is_checked_first`, `non_fable_requests_pass`,
+/// `an_unknown_model_is_refused_for_a_capped_role`,
+/// `a_known_non_fable_default_admits_an_unknown_parent`.
 pub(crate) fn fable_cap_refusal(
     config: &MpmConfig,
     agent: &str,
     role: Option<&str>,
     model: DispatchModel<'_>,
 ) -> Option<String> {
-    let requested = model.winning()?;
+    if fable_allowed_for(agent, role) {
+        return None;
+    }
+    let role_name = role.unwrap_or(agent);
+    let requested = match model.winning() {
+        Ok(requested) => requested,
+        Err(unknown) => {
+            let default = config.models.default.as_deref().map(str::trim);
+            let default = default.filter(|d| !d.is_empty() && !d.eq_ignore_ascii_case("inherit"));
+            if unknown == Unknown::Parent
+                && let Some(d) = default
+                && !is_fable_model(config.expand_model_alias(d))
+            {
+                return None;
+            }
+            let why = match unknown {
+                Unknown::Parent => {
+                    "it inherits the parent session's model, and the parent model is unrecorded"
+                }
+                Unknown::Roster => {
+                    "its agent file could not be read, so its frontmatter `model:` is unknown"
+                }
+            };
+            return Some(format!(
+                "Dispatch refused (#11353): `{agent}` (role `{role_name}`) may run on the Fable \
+                 model: {why}. Fable is reserved for PM, engineer and research agents. Re-issue \
+                 the dispatch with `model: \"opus\"` (or another non-Fable model) explicitly."
+            ));
+        }
+    };
     let resolved = config.expand_model_alias(requested);
-    if !is_fable_model(resolved) || fable_allowed_for(agent, role) {
+    if !is_fable_model(resolved) {
         return None;
     }
     Some(format!(
-        "Dispatch refused (#11353): `{agent}` (role `{}`) would run on the Fable model \
+        "Dispatch refused (#11353): `{agent}` (role `{role_name}`) would run on the Fable model \
          `{resolved}`. Fable is reserved for PM, engineer and research agents. Re-issue the \
          dispatch with `model: \"opus\"` (or a lower tier){}.",
-        role.unwrap_or(agent),
         if model.env.is_some() {
             format!(" and unset `{SUBAGENT_MODEL_ENV}`, which overrides it")
         } else {
@@ -103,7 +158,7 @@ pub(crate) fn evaluate_fable_cap(
     if !is_subagent_dispatch_tool(tool_name) {
         return None;
     }
-    let env = std::env::var(SUBAGENT_MODEL_ENV).ok();
+    let env = std::env::var_os(SUBAGENT_MODEL_ENV).map(|v| v.to_string_lossy().into_owned());
     let parent = crate::commands::managed_root::resolve_managed_paths(None)
         .ok()
         .and_then(|paths| {
@@ -130,11 +185,11 @@ fn evaluate_in(
     let argument = tool_input
         .and_then(|input| input.get("model"))
         .and_then(Value::as_str);
+    let mut unreadable = false;
     let summary = tiers.iter().find_map(|tier| {
-        scan_agents_reporting(tier)
-            .agents
-            .into_iter()
-            .find(|a| a.name == agent)
+        let scan = scan_agents_reporting(tier);
+        unreadable |= !scan.unreadable.is_empty();
+        scan.agents.into_iter().find(|a| a.name == agent)
     });
     let role = summary
         .as_ref()
@@ -149,6 +204,8 @@ fn evaluate_in(
             env,
             argument,
             frontmatter,
+            // #11353: a missing agent beside an unreadable file is unknown, not absent.
+            frontmatter_unreadable: summary.is_none() && unreadable,
             parent,
         },
     )
@@ -256,16 +313,72 @@ mod tests {
         assert_eq!(fable_cap_refusal(&cfg, "qa", None, env_opus), None);
     }
 
+    /// An explicit non-Fable argument or frontmatter passes with no parent
+    /// record; nothing named and no parent is refused.
     #[test]
     fn non_fable_requests_pass() {
         let cfg = MpmConfig::default();
-        for model in [
-            ask(Some("opus"), None),
-            ask(None, Some("sonnet")),
-            ask(None, None),
-        ] {
+        for model in [ask(Some("opus"), None), ask(None, Some("sonnet"))] {
             assert_eq!(fable_cap_refusal(&cfg, "qa", Some("qa"), model), None);
         }
+        assert!(fable_cap_refusal(&cfg, "qa", Some("qa"), ask(None, None)).is_some());
+    }
+
+    /// The fail-open regression: with no env, no argument (or `inherit`), an
+    /// `inherit`/absent frontmatter and no parent record, a qa dispatch is
+    /// refused and told to pass a model. Allowed roles are untouched.
+    #[test]
+    fn an_unknown_model_is_refused_for_a_capped_role() {
+        let cfg = MpmConfig::default();
+        for model in [
+            ask(None, None),
+            ask(None, Some("inherit")),
+            ask(Some("inherit"), None),
+            ask(Some("inherit"), Some("inherit")),
+        ] {
+            let reason = fable_cap_refusal(&cfg, "qa", Some("qa"), model)
+                .expect("an unknown model must be refused for qa");
+            assert!(
+                reason.contains("unrecorded") && reason.contains("model: \"opus\""),
+                "{reason}"
+            );
+            assert_eq!(fable_cap_refusal(&cfg, "rust-engineer", None, model), None);
+        }
+        // `inherit` as an argument defers to a Fable parent, not to a name.
+        let inherit_arg = DispatchModel {
+            argument: Some("inherit"),
+            parent: Some("claude-fable-5-2"),
+            ..DispatchModel::default()
+        };
+        assert!(fable_cap_refusal(&cfg, "qa", Some("qa"), inherit_arg).is_some());
+        // An unreadable roster leaves the frontmatter unknown, even with a
+        // non-Fable parent; an explicit argument still decides.
+        let unreadable = DispatchModel {
+            frontmatter_unreadable: true,
+            parent: Some("claude-opus-5-5"),
+            ..DispatchModel::default()
+        };
+        let reason = fable_cap_refusal(&cfg, "qa", None, unreadable).expect("refused");
+        assert!(reason.contains("could not be read"), "{reason}");
+        let named = DispatchModel {
+            argument: Some("opus"),
+            ..unreadable
+        };
+        assert_eq!(fable_cap_refusal(&cfg, "qa", None, named), None);
+    }
+
+    /// A known non-Fable `[models] default` stands in for an unrecorded
+    /// parent; a Fable default does not.
+    #[test]
+    fn a_known_non_fable_default_admits_an_unknown_parent() {
+        let mut cfg = MpmConfig::default();
+        cfg.models.default = Some("opus".into());
+        assert_eq!(
+            fable_cap_refusal(&cfg, "qa", Some("qa"), ask(None, None)),
+            None
+        );
+        cfg.models.default = Some("fable".into());
+        assert!(fable_cap_refusal(&cfg, "qa", Some("qa"), ask(None, None)).is_some());
     }
 
     /// The payload path reads `role:` and `model:` from a deployed agent file,
