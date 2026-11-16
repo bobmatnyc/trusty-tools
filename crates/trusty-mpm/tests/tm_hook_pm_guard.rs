@@ -5482,9 +5482,10 @@ fn pm_guard_appends_project_accounts_to_an_ops_dispatch_only_11390() {
         "[accounts.gh]\naccount = \"octo-user\"\nverify = \"gh auth status\"\n",
     )
     .expect("write config");
+    // #11353: an ops dispatch names a non-Fable model, or the Fable cap refuses it.
     let payload = |tool: &str, agent: &str| {
         format!(
-            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"{agent}","prompt":"go","model":"sonnet"}}}}"#
         )
     };
     let stdout = run_pm_guard_at(
@@ -5494,7 +5495,9 @@ fn pm_guard_appends_project_accounts_to_an_ops_dispatch_only_11390() {
     );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
     let input = &v["hookSpecificOutput"]["updatedInput"];
-    let prompt = input["prompt"].as_str().expect("prompt");
+    let prompt = input["prompt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("prompt in {stdout}"));
     assert!(prompt.starts_with("go"), "{prompt}");
     assert!(prompt.contains("## Project accounts"), "{prompt}");
     assert!(
@@ -5526,9 +5529,10 @@ fn pm_guard_reports_a_rejected_account_map_and_keeps_the_worktree_setting_11390(
         "agent_worktree = false\n[accounts.gh]\naccount = \"me\"\nverify = \"gh auth status `id`\"\n",
     )
     .expect("write config");
+    // #11353: an ops dispatch names a non-Fable model, or the Fable cap refuses it.
     let payload = |agent: &str| {
         format!(
-            r#"{{"hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go","model":"sonnet"}}}}"#
         )
     };
     let updated = |agent: &str| -> serde_json::Value {
