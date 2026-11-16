@@ -3533,3 +3533,38 @@ fn base_ops_names_the_account_before_a_permission_ask_11390() {
         "BASE-OPS.md must say a mismatch is reported, not fixed"
     );
 }
+
+/// Why: #10577 — a bug fix reached one path and missed its siblings; the Bug
+/// Fix chain had no step that lists the other callers and data states.
+/// What: the chain carries the sweep (callers via trusty-search, data states)
+/// and the `Shared-behaviour paths` field; the brief template names the field;
+/// `code-review-standards` carries the critic check. Mutation: delete a marker
+/// or the field name and this fails.
+/// Test: this test.
+#[test]
+fn bug_fix_chain_sweeps_related_paths_10577() {
+    let chains = skill_text("skills/tm-delegation-patterns/references/workflow-chains.md");
+    assert!(has_rule(
+        chains,
+        "tm-delegation-patterns/bug-fix-related-path-sweep"
+    ));
+    let sweep = plain(chains);
+    for needle in [
+        "get_call_chain",
+        "Data states",
+        "Shared-behaviour paths:",
+        "Low-risk text edit",
+    ] {
+        assert!(sweep.contains(needle), "the sweep lost `{needle}`");
+    }
+    assert!(
+        plain(skill_text("skills/tm-delegation-patterns.md"))
+            .contains("Shared-behaviour paths: [Bug fix only"),
+        "the brief template must carry the Shared-behaviour paths field"
+    );
+    let critic = skill_text("skills/code-review-standards.md");
+    assert!(has_rule(critic, "code-review-standards/related-path-check"));
+    let check = plain(critic);
+    assert!(check.contains("Shared-behaviour paths` lists the other callers"));
+    assert!(check.contains("Skip the check for a Low-risk text edit"));
+}

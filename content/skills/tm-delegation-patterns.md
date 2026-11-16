@@ -3,7 +3,7 @@ name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
 metadata:
-  version: "1.2.1"
+  version: "1.3.0"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -119,12 +119,18 @@ Agent: [deployed subagent_type]
 Requirements:
   Objective: [Measurable outcome]
   Findings: [What is already known, with its evidence — not a chosen mechanism]
+  Shared-behaviour paths: [Bug fix only: other callers and data states]
   Success Criteria: [Conditions a wrong implementation fails]
   Testing: MANDATORY - Provide logs
   Constraints: [Performance, security, timeline]
   Time Box / Token Box: [N minutes / M tokens]
   Verification: Evidence of criteria met
 ```
+
+**`Shared-behaviour paths`, bug-fix briefs only.** Lists the other callers and
+data states of the changed behaviour, from the sweep in the Bug Fix chain
+([references/workflow-chains.md](references/workflow-chains.md)). Skip it for a
+Low-risk text edit.
 
 **Dispatch budget, every brief.** State a time box and a token box. Default
 when unstated: 45 minutes or 150k tokens for a single-crate fix; 20 minutes

@@ -3,7 +3,7 @@ name: code-review-standards
 description: Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference.
 user-invocable: false
 metadata:
-  version: "1.1.0"
+  version: "1.2.0"
 category: agent-reference
 tags: [code-review, severity, verdict, quality-gate, code-critic]
 effort: low
@@ -143,6 +143,16 @@ CRITICAL or HIGH: silent data loss, or a broken contract.
    already narrowed to the expected rows cannot show a script that skips its
    own filter or pagination; the test passes for the wrong reason. Require the
    unfiltered list, with rows that must be rejected.
+
+## Related-Path Check
+
+<!-- rule:code-review-standards/related-path-check -->
+A bug fix that reaches one path and misses its siblings ships green. For a bug
+fix, check that the brief's `Shared-behaviour paths` lists the other callers and
+data states of the changed code, and that each has a test or a stated reason.
+Find callers yourself with `get_call_chain` (or `grep`); do not trust the list.
+A caller or data state that reaches the same fault and is neither fixed nor
+tested is a HIGH finding. Skip the check for a Low-risk text edit.
 
 ## CI Push-Permission Check
 

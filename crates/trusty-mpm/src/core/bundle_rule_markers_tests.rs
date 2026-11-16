@@ -109,6 +109,7 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         &[
             "code-review-standards/github-token-protected-push",
             "code-review-standards/format-interpolated-payload",
+            "code-review-standards/related-path-check",
         ],
     ),
     (
@@ -161,6 +162,10 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
             "tm-delegation-patterns/worktree-check-first",
             "tm-delegation-patterns/no-blind-poll",
         ],
+    ),
+    (
+        "content/skills/tm-delegation-patterns/references/workflow-chains.md",
+        &["tm-delegation-patterns/bug-fix-related-path-sweep"],
     ),
     (
         "content/skills/tm-init.md",
