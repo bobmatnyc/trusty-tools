@@ -47,6 +47,12 @@ an existing layout to match it (#8382).
 Dispatching work against an issue: have `ticketing` mark it in progress, and
 update it when the work lands or blocks (`Skill(skill="tm-ticketing")`).
 
+## Issue Clusters
+
+Before dispatching engineers, group open issues on the same module or feature
+into clusters: one engineer, branch and PR per cluster, one commit per issue,
+one critic round and one gate run per PR. Detail: `Skill(skill="tm-workflow")`.
+
 ## Source Citations
 
 Link a GitHub blob permalink pinned to a commit SHA, never `blob/main`, with
