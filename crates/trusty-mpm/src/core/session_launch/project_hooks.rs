@@ -33,6 +33,8 @@ use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 // #7688: the prompt-feedback capture's groups and its identity predicate.
 use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedback_hook_groups};
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
+// #11398: the PM-only per-turn task stamp.
+use super::turn_task_hooks::{is_turn_task_hook_command, push_turn_task_group};
 // #8454: the egress-guard group, written whatever the toggles say.
 use crate::core::standalone::hooks::egress::{
     is_egress_guard_hook_command, push_egress_guard_group,
@@ -167,7 +169,8 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
 /// when `pm_guard_enabled`, so `[pm_guard] enabled = false` still removes it),
 /// and appends [`push_prompt_hook_groups`] then (#10960)
 /// [`push_standing_rules_groups`] last, so every other group keeps its bytes
-/// and position.
+/// and position. #11398: `None` (a PM) appends the
+/// [`push_turn_task_group`] `UserPromptSubmit` group last; `Some` never does.
 /// Test: `architect_hook_settings_golden`, `pm_session_registers_no_ticket_handler`.
 pub(super) fn project_managed_hook_additions_for_profile(
     exe_override: Option<&std::path::Path>,
@@ -276,6 +279,10 @@ pub(super) fn project_managed_hook_additions_for_profile(
         // #10960: the standing-rules block, every Architect, no toggle.
         push_standing_rules_groups(hooks_obj, &exe);
     }
+    // #11398: the turn-task stamp, PM sessions only, appended last.
+    if let (None, Some(hooks_obj)) = (architect, hooks.as_object_mut()) {
+        push_turn_task_group(hooks_obj, &exe);
+    }
 
     Ok(serde_json::json!({ "hooks": hooks }))
 }
@@ -371,6 +378,8 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         // #10960: a stale standing-rules group is replaced, and stripped when
         // the project stops being an Architect.
         || is_standing_rules_hook_command(cmd)
+        // #11398: replaced on relaunch, stripped on a flip to the Architect.
+        || is_turn_task_hook_command(cmd)
 }
 
 /// Recognise a hook command only the PROJECT tier ever writes.

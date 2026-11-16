@@ -31,6 +31,8 @@ pub use entry::{
 };
 // #10459: the Architect's exec-form PM-guard and prompt-hook groups.
 mod architect_hooks;
+// #11398: the PM-only `tm hook --turn-task` group.
+mod turn_task_hooks;
 // #10459: `HostInputs`, moved out for the line cap.
 mod host_inputs;
 use host_inputs::HostInputs;

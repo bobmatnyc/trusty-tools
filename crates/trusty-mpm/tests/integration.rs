@@ -142,6 +142,8 @@ mod tm_hook_session_start_8531;
 mod tm_hook_session_start_taint_8433;
 // #10960: the Architect's standing-rules block, per turn and at resume.
 mod tm_hook_standing_rules_10960;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg.
+mod tm_hook_turn_task_11398;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

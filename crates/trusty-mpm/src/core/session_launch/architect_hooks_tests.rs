@@ -183,6 +183,16 @@ fn architect_hook_settings_golden() {
     .expect("pm additions");
     for direct_commands in [false, true] {
         let mut expected = pm.clone();
+        // #11398: the PM's turn-task group (its last `UserPromptSubmit` group)
+        // is PM-only; the Architect block is unchanged.
+        let pm_submit = expected["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .expect("UserPromptSubmit");
+        let turn_task = pm_submit.pop().expect("the PM turn-task group");
+        assert!(
+            turn_task.to_string().contains(" hook --turn-task"),
+            "{turn_task}"
+        );
         expected["hooks"]["PreToolUse"][0] = json!({
             "matcher": "",
             "hooks": [guard_entry(true)]

@@ -127,6 +127,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --turn-task",
+            "timeout": 5,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ]
   }

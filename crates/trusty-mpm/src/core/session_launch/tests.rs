@@ -1582,9 +1582,10 @@ fn write_project_hooks_replaces_existing() {
         &std::fs::read_to_string(project.join(".claude").join("settings.json")).unwrap(),
     )
     .unwrap();
+    // #11398: the trusty-memory prompt-context group and the PM turn-task group.
     assert_eq!(
         value["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
-        1
+        2
     );
 }
 
