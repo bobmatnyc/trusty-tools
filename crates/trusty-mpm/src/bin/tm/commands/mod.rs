@@ -156,6 +156,8 @@ pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
+// #10973: chained commands judged per segment.
+pub(crate) mod hook_rewrite_chain;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
@@ -249,6 +251,8 @@ pub(crate) mod repair_delegation_list;
 // #8547: which `subagent_type` names are known, and the refusal for the rest.
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
+// #11353: the Fable cap on the live dispatch path.
+pub(crate) mod pm_guard_fable;
 pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;

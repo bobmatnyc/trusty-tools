@@ -57,6 +57,10 @@ pub struct TierAliases {
     pub sonnet: Option<String>,
     /// Full model id (or alias) for the Opus family.
     pub opus: Option<String>,
+    /// Full model id for the Fable family. #11353: only PM, engineer and
+    /// research roles may resolve to it; see [`fable_allowed_for`].
+    #[serde(default)]
+    pub fable: Option<String>,
 }
 
 /// `[models]` section — model selection and tier aliases.
@@ -752,7 +756,14 @@ impl MpmConfig {
                 .tiers
                 .opus
                 .as_deref()
-                .unwrap_or("claude-opus-4-5"),
+                .unwrap_or(OPUS_DEFAULT_MODEL_ID),
+            // #11353: the Fable tier alias.
+            "fable" => self
+                .models
+                .tiers
+                .fable
+                .as_deref()
+                .unwrap_or(FABLE_DEFAULT_MODEL_ID),
             "auto" => "claude-sonnet-4-5",
             other => other,
         }
@@ -785,6 +796,80 @@ impl MpmConfig {
 /// model id strings Claude Code accepts.
 /// Test: `model_resolution_precedence`.
 pub fn resolve_agent_model(
+    config: &MpmConfig,
+    agent_name: &str,
+    frontmatter_model: Option<&str>,
+    explicit: Option<&str>,
+) -> String {
+    resolve_agent_model_for_role(config, agent_name, None, frontmatter_model, explicit)
+}
+
+/// The Opus model id used when `[models.tiers] opus` is unset, and the Fable
+/// cap's fallback when that tier is itself set to a Fable id (#11353, Dq7).
+pub const OPUS_DEFAULT_MODEL_ID: &str = "claude-opus-5-5";
+
+/// The Fable model id used when `[models.tiers] fable` is unset (#11353).
+pub const FABLE_DEFAULT_MODEL_ID: &str = "claude-fable-5-2";
+
+/// Whether a resolved model id belongs to the Fable family (#11353).
+pub fn is_fable_model(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("fable")
+}
+
+/// May an agent of this role run on the Fable tier?
+///
+/// Why: owner ruling on #11353 — Fable is reserved for complex work: PM
+/// sessions, code/engineer agents and research agents.
+/// What: reads `role` (frontmatter `role:`), or the agent name when no role is
+/// known. Allowed: `pm`, `engineer`, `research`, and any `*-engineer` role or
+/// name (the language engineers). Everything else, including an unknown role,
+/// is refused (fail closed).
+/// Test: `fable_gate_allows_pm_engineer_research`,
+/// `fable_gate_caps_other_roles_to_opus`.
+pub fn fable_allowed_for(agent_name: &str, role: Option<&str>) -> bool {
+    let key = role.unwrap_or(agent_name).trim().to_ascii_lowercase();
+    matches!(key.as_str(), "pm" | "engineer" | "research") || key.ends_with("-engineer")
+}
+
+/// [`resolve_agent_model`] with the agent's role, applying the Fable gate.
+///
+/// Why: #11353 — a config entry, frontmatter or explicit `--model` asking for
+/// Fable must not put a non-complex agent on Fable.
+/// What: runs the four-level precedence, then, when the result is a Fable id
+/// and [`fable_allowed_for`] refuses the role, substitutes the Opus tier and
+/// logs the agent, requested and resolved models at `info`.
+/// Test: `fable_gate_allows_pm_engineer_research`,
+/// `fable_gate_caps_other_roles_to_opus`.
+pub fn resolve_agent_model_for_role(
+    config: &MpmConfig,
+    agent_name: &str,
+    role: Option<&str>,
+    frontmatter_model: Option<&str>,
+    explicit: Option<&str>,
+) -> String {
+    let requested = resolve_requested_model(config, agent_name, frontmatter_model, explicit);
+    // #11353: cap Fable to Opus for every role outside PM/engineer/research.
+    if !is_fable_model(&requested) || fable_allowed_for(agent_name, role) {
+        return requested;
+    }
+    let opus = config.expand_model_alias("opus");
+    let capped = if is_fable_model(opus) {
+        OPUS_DEFAULT_MODEL_ID
+    } else {
+        opus
+    };
+    tracing::info!(
+        agent = agent_name,
+        role = role.unwrap_or(agent_name),
+        requested = %requested,
+        resolved = capped,
+        "fable tier is reserved for pm/engineer/research; capped to opus (#11353)"
+    );
+    capped.to_string()
+}
+
+/// The ungated four-level precedence behind [`resolve_agent_model_for_role`].
+fn resolve_requested_model(
     config: &MpmConfig,
     agent_name: &str,
     frontmatter_model: Option<&str>,

@@ -1,6 +1,7 @@
 # ruff: noqa: F811 -- the imported fixtures `short` and `clock` are test parameters.
 
 import json
+import shutil
 import plistlib
 import subprocess
 import sys
@@ -17,7 +18,7 @@ def test_stable_assets_are_complete_and_refuse_overwriting(tmp_path):
     path = extension_path(state)
     assert (path / "manifest.json").is_file()
     assert path == extension_path(state)
-    path.unlink()
+    shutil.rmtree(path)
     path.write_text("other")
     with pytest.raises(ValueError, match="unrelated"):
         extension_path(state)
@@ -86,11 +87,11 @@ def test_operator_verbs_validate_input_and_print_the_reply(
         return 0
 
     async def body(rig):
-        minted = await rig.mint(rig.alpha)
+        minted = await rig.grant(rig.alpha)
         assert await asyncio.to_thread(verb, "grants") == 0
         listed = json.loads(capsys.readouterr().out)
         assert [g["grant"] for g in listed["grants"]] == [minted["grant"]]
-        assert minted["code"] not in json.dumps(listed)
+        assert rig.alpha["key"] not in json.dumps(listed)
         for argv in (
             ("revoke-grant", "G-XYZ"),
             ("revoke-grant", minted["grant"] + "0"),
@@ -114,3 +115,38 @@ def test_operator_verbs_validate_input_and_print_the_reply(
     run(short, body)
     assert verb("grants") == 1  # the broker has stopped
     assert "not reachable" in capsys.readouterr().err
+
+
+def test_republish_reaches_a_profile_holding_an_old_hash_path(tmp_path):
+    # #11363: Chrome keeps the resolved path of the old symlinked layout.
+    from trusty_browser import assets
+
+    state = tmp_path / "state"
+    old = state / "assets" / ("a" * 64)
+    state.mkdir(mode=0o700)
+    (state / "assets").mkdir(mode=0o700)
+    old.mkdir()
+    (old / "manifest.json").write_text('{"version": "0.1.0"}')
+    (old / "setup.html").write_text("old enroll popup")
+    (state / "extension").symlink_to(Path("assets") / ("a" * 64))
+    source = tmp_path / "source"
+    shutil.copytree(Path(assets.__file__).with_name("extension"), source)
+
+    path = extension_path(state, source)
+    assert not path.is_symlink() and path.is_dir()
+    assert old.is_symlink() and old.resolve() == path.resolve()
+    assert (old / "setup.html").read_text() == (source / "setup.html").read_text()
+    first = assets.published(state)
+    assert first == assets.stamp(source)
+
+    (source / "setup.html").write_text("republished popup")
+    (source / "gone.js").write_text("x")
+    extension_path(state, source)
+    (source / "gone.js").unlink()
+    extension_path(state, source)
+    # The profile's stored path, the old hash dir, serves the current assets.
+    assert (old / "setup.html").read_text() == "republished popup"
+    assert not (old / "gone.js").exists()
+    assert assets.published(state) == assets.stamp(source) != first
+    manifest = json.loads((old / "manifest.json").read_text())
+    assert manifest["version_name"].endswith("+" + assets.stamp(source))

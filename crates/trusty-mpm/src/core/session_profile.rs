@@ -272,6 +272,25 @@ pub fn launch_env(profile: SessionProfile) -> (String, String) {
     (SESSION_PROFILE_ENV.to_owned(), profile.id().to_owned())
 }
 
+/// The PM launch model stamp, read by the Fable cap (#11353).
+///
+/// Why: a subagent with `inherit` or no `model:` runs on its parent's model,
+/// and the statusline record of that model is written only once a render
+/// fires, so a headless session or its first dispatch has none. The launch
+/// that passes `--model` knows the model before `claude` starts, and the hook
+/// inherits the `claude` process environment.
+/// What: the variable name; [`launch_model_env`] builds the pair. The guard
+/// reads it after the statusline record, which carries the live model.
+/// Test: `a_managed_launch_stamps_its_model_for_the_fable_cap`,
+/// `an_inherit_dispatch_follows_the_launch_model_stamp`.
+pub const LAUNCH_MODEL_ENV: &str = "TRUSTY_MPM_LAUNCH_MODEL";
+
+/// The launch-model stamp for `model`: `(LAUNCH_MODEL_ENV, model)`.
+/// Test: `a_managed_launch_stamps_its_model_for_the_fable_cap`.
+pub fn launch_model_env(model: &str) -> (String, String) {
+    (LAUNCH_MODEL_ENV.to_owned(), model.to_owned())
+}
+
 /// The model a session of `profile` launches on.
 ///
 /// Why: `tm launch` passes `--model`, which outranks the project settings, so

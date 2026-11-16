@@ -99,8 +99,7 @@ def test_manifest_assets_match_registered_native_origin():
     assert ORIGIN == f"chrome-extension://{extension_id}/"
     assets = [manifest["background"]["service_worker"], manifest["options_page"],
               *manifest["icons"].values(), *manifest["action"]["default_icon"].values()]
-    for content_script in manifest["content_scripts"]:
-        assets.extend(content_script["js"])
+    assert "content_scripts" not in manifest  # #11239: the site adapter is gone
     assert all((extension / name).is_file() for name in assets)
 
 

@@ -13,6 +13,8 @@
 //! [`isolated_rewrite`], which also decides the permission the rewrite carries
 //! from the ORIGINAL command, as the build-lease rewrite does, so a `deny` rule
 //! on the original is never bypassed. An unreadable cwd gets no rewrite.
+//! A chain (`hook_rewrite_chain`) is never rewritten here: the no-shell shape
+//! cannot carry one (`an_isolation_worktree_refuses_every_chain`).
 //! Test: `the_isolated_shape_is_one_simple_command`,
 //! `a_program_that_is_not_an_executable_is_not_rewritten`,
 //! `an_isolated_rewrite_refuses_what_the_brace_rewrite_refuses`,
@@ -199,8 +201,6 @@ mod tests {
         for command in [
             "",
             "make build",
-            "git diff | head",
-            "git diff && ls",
             "git diff > out.txt",
             "git diff # note",
             "cat -n src/lib.rs",
@@ -212,6 +212,12 @@ mod tests {
                 None,
                 "{command}"
             );
+        }
+        // #10973: the brace rewrite now compresses a safe chain; the isolated
+        // shape still cannot carry one.
+        for command in ["git diff | head", "git diff && git diff --stat"] {
+            assert_eq!(isolated(command), None, "{command}");
+            assert!(rewrite_bash_command_for_compression(command).is_some());
         }
     }
 

@@ -745,8 +745,10 @@ pub(crate) fn connect_claude_spec(
 ///
 /// Why: the one seam where `tm launch` turns the operator's config into the
 /// renderer, split out so a test can drive it from a config root.
-/// What: [`connect_claude_spec`] plus `--model <pm_model>`.
-/// Test: `launch_claude_spec_follows_the_configured_renderer`.
+/// What: [`connect_claude_spec`] plus `--model <pm_model>`, and the same model
+/// as the `TRUSTY_MPM_LAUNCH_MODEL` stamp the Fable cap reads (#11353).
+/// Test: `launch_claude_spec_follows_the_configured_renderer`,
+/// `a_managed_launch_stamps_its_model_for_the_fable_cap`.
 pub(crate) fn launch_claude_spec(
     cwd: &std::path::Path,
     config_root: Option<&std::path::Path>,
@@ -756,12 +758,17 @@ pub(crate) fn launch_claude_spec(
     mcp_env: &[(String, String)],
     files: &trusty_mpm::core::launch_policy::LaunchFiles,
 ) -> anyhow::Result<trusty_mpm::runtime::launch_spec::LaunchSpec> {
+    // #11353: the hook reads the launch model before any statusline render.
+    let mut env = mcp_env.to_vec();
+    env.push(trusty_mpm::core::session_profile::launch_model_env(
+        pm_model,
+    ));
     isolated_claude_spec(
         cwd,
         Some(pm_model),
         prompt_file,
         config_dir,
-        mcp_env,
+        &env,
         files,
         config_root,
     )

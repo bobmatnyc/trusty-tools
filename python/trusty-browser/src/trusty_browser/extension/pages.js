@@ -481,7 +481,7 @@ TrustyPages.commands = deps => {
   const {pageProbe, pageRead, pageClick, pageKeys, pageScroll, pageSelect, pageSetFiles, urlAllowed, keyAllowed,
     modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
-  const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
+  const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
