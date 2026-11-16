@@ -1563,3 +1563,31 @@ fn a_read_only_agent_in_a_linked_worktree_is_not_a_writer() {
             .is_empty()
     );
 }
+
+/// #11170: an isolated state seeds its project registry from the pinned test
+/// home's `config.yaml` only, never the real `~/.trusty-tools` one.
+#[tokio::test]
+async fn isolated_state_seeds_projects_only_from_its_pinned_home_11170() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let cfg = trusty_common::crate_config::crate_config_path_at(
+        &root.path().join("home"),
+        crate::core::trusty_tools_config::CRATE_NAME,
+    );
+    std::fs::create_dir_all(cfg.parent().expect("config dir")).expect("mkdir");
+    std::fs::write(
+        &cfg,
+        "projects:\n  - name: pinned-only\n    repo_url: https://github.com/acme/pinned-only\n",
+    )
+    .expect("write config");
+    let state = DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await;
+    let names: Vec<String> = state
+        .project_registry()
+        .await
+        .list()
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(names, vec!["pinned-only".to_string()]);
+}
