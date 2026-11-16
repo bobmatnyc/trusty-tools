@@ -633,6 +633,11 @@ pub(crate) enum Command {
         /// Always exits 0.
         #[arg(long)]
         standing_rules: bool,
+        /// Run in turn-task mode (#11398): on `UserPromptSubmit`, stamp
+        /// `Task: <id>@<MMDD>` from datg's `current` field. PM sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        turn_task: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).

@@ -448,6 +448,8 @@ pub mod stale_skills;
 pub mod standalone;
 // #10960: the Architect's standing-rules block, injected by `tm hook --standing-rules`.
 pub mod standing_rules;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg's `current`.
+pub mod turn_task_stamp;
 // #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
 // daemon's reap loop replays it — instead of the record sitting Running for the
 // six hours of `RUNNING_STALE_AFTER_SECS`.

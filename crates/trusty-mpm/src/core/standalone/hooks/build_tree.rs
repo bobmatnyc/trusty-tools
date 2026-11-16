@@ -82,6 +82,8 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     EGRESS_GUARD_SUFFIX,
     // #10960: the Architect's standing-rules injection.
     STANDING_RULES_SUFFIX,
+    // #11398: the PM's per-turn task stamp.
+    TURN_TASK_SUFFIX,
 ];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
@@ -144,6 +146,12 @@ pub(crate) const PROMPT_FEEDBACK_SUFFIX: &str = " hook --prompt-feedback";
 /// What: the literal suffix, including its leading space.
 /// Test: `architect_standing_rules_groups_are_architect_only`.
 pub(crate) const STANDING_RULES_SUFFIX: &str = " hook --standing-rules";
+
+/// The `hook --turn-task` argv tail (#11398): the PM writer, the strip
+/// predicate and [`TM_HOOK_ARGV_TAILS`] read this one string.
+///
+/// Test: `pm_sessions_register_the_turn_task_group_and_the_architect_does_not`.
+pub(crate) const TURN_TASK_SUFFIX: &str = " hook --turn-task";
 
 /// The `hook --egress-guard` argv tail (#8454 G3).
 ///
