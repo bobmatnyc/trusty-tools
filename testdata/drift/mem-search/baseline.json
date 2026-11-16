@@ -1,0 +1,156 @@
+{
+ "ts": "2026-11-16T00:43:38Z",
+ "versions": {
+  "trusty-search": "1.0.0",
+  "trusty-memory": "1.0.0"
+ },
+ "indexes": {
+  "architect": {
+   "chunks": 52098,
+   "disk_bytes": 329208581
+  },
+  "cto": {
+   "chunks": 170110,
+   "disk_bytes": 2354604989
+  },
+  "trusty-tools-4e2cf878": {
+   "chunks": 189651,
+   "disk_bytes": 2955232846
+  }
+ },
+ "palaces": {
+  "cto": {
+   "drawers": 1358
+  },
+  "supervisor": {
+   "drawers": 1329
+  }
+ },
+ "golden_sha256": {
+  "golden.public.json": "31bc8e20e3b3",
+  "golden.private.json": "e8e3e491737a"
+ },
+ "thresholds": {
+  "recall10_drop": 0.05,
+  "p95_x": 1.5,
+  "degraded_rise": 0.1,
+  "cold_share_tol": 0.25
+ },
+ "embed_cold_share": {
+  "search:as-called": 0.0,
+  "search:best-mode": 0.0,
+  "memory": null,
+  "memory:dated-rulings": null,
+  "overall": 0.0
+ },
+ "metrics": {
+  "search:as-called": {
+   "n": 30,
+   "recall5": 0.4667,
+   "recall10": 0.5,
+   "mrr": 0.2089,
+   "p50_ms": 28,
+   "p95_ms": 42,
+   "degraded_share": 0.0333,
+   "embed_cold_share": 0.0
+  },
+  "search:best-mode": {
+   "n": 30,
+   "recall5": 0.8333,
+   "recall10": 0.8333,
+   "mrr": 0.5494,
+   "p50_ms": 27,
+   "p95_ms": 41,
+   "degraded_share": 0.0,
+   "embed_cold_share": 0.0
+  },
+  "memory": {
+   "n": 42,
+   "recall5": 0.8333,
+   "recall10": 0.8571,
+   "mrr": 0.755,
+   "p50_ms": 4,
+   "p95_ms": 6,
+   "degraded_share": 0.0,
+   "embed_cold_share": null,
+   "rulings_degraded_share": 0.5
+  },
+  "memory:dated-rulings": {
+   "n": 12,
+   "recall5": 0.9167,
+   "recall10": 1.0,
+   "mrr": 0.809,
+   "p50_ms": 4,
+   "p95_ms": 7,
+   "degraded_share": 0.0,
+   "embed_cold_share": null,
+   "rulings_degraded_share": 0.5
+  },
+  "overall": {
+   "n": 72,
+   "recall5": 0.6806,
+   "recall10": 0.7083,
+   "mrr": 0.5274,
+   "p50_ms": 6,
+   "p95_ms": 39,
+   "degraded_share": 0.0139,
+   "embed_cold_share": 0.0
+  }
+ },
+ "dream": {
+  "ts": "2026-11-16T00:43:38Z",
+  "source_palace": "supervisor",
+  "seeded": 1329,
+  "before": {
+   "n": 21,
+   "recall5": 0.9524,
+   "recall10": 0.9524,
+   "mrr": 0.8968,
+   "p50_ms": 1,
+   "p95_ms": 1,
+   "degraded_share": 0.0,
+   "embed_cold_share": null,
+   "drawers": 1329,
+   "duplicates": 0,
+   "kg_triples": 8179
+  },
+  "after": {
+   "n": 21,
+   "recall5": 0.9524,
+   "recall10": 0.9524,
+   "mrr": 0.8968,
+   "p50_ms": 1,
+   "p95_ms": 1,
+   "degraded_share": 0.0,
+   "embed_cold_share": null,
+   "drawers": 1329,
+   "duplicates": 0,
+   "kg_triples": 8179
+  },
+  "drawers": {
+   "kept": 1329,
+   "removed": 0,
+   "merged": 0,
+   "added": 0
+  },
+  "dream_ms": 13,
+  "golden": {
+   "ids": 21,
+   "lost": 0,
+   "lost_sha": [],
+   "dropped_from_top10": []
+  },
+  "verdict": {
+   "no_golden_lost": true,
+   "recall10_within_threshold": true,
+   "duplicates_not_higher": true,
+   "rulings_intact": true
+  },
+  "max_age_days": 1,
+  "noop_pass": true,
+  "rulings": {
+   "checked": 5,
+   "intact": 5
+  }
+ }
+}
