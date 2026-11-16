@@ -2,7 +2,7 @@
 
 Accuracy and latency check of the live trusty-search and trusty-memory daemons (goal ar-G05).
 
-Run: `python3 -I scripts/drift_test_mem_search.py` (add `--dream` for the dream lane, `--no-record` to skip the results row, `--write-baseline` to replace `baseline.json`, `--selftest` for the offline checks).
+Run: `python3 -I scripts/drift_test_mem_search.py` (add `--dream` for the dream lane, `--no-record` to skip the results row, `--write-baseline` to replace `baseline.json`, `--selftest` for the offline checks, which run `scripts/test_drift_test_mem_search.py`). Any absent lane, missing golden file, failed seed or unverified delete is a finding with exit 2. At start the run deletes `drift-dream-test-*` palaces older than one hour that an earlier run leaked, and reports each.
 
 - `golden.public.json`: 14 search queries on the public trusty-tools index.
 - `golden.private.json` (NOT in this repo, which is public): 16 search queries on the `architect` and `cto` indexes, and 42 memory queries on the `supervisor` and `cto` palaces. Twelve of them (`"kind": "dated_ruling"`) target drawers that hold a dated, quoted owner ruling. It lives at `~/.trusty-tools/drift/mem-search/golden.private.json`; each run row records its sha256 prefix.
@@ -30,7 +30,7 @@ A first query against a parked index reloads it; warm-up latency is recorded sep
 
 ## Dream lane
 
-`--dream` (`--dream-source <palace>`, default `supervisor`) reuses the memory lane's test palace for that source, measures the source's memory golden queries, runs ONE `palace_dream` pass, and measures again. The palace is deleted with the others. A `PalaceGuard` refuses every write tool and `memory_recall` on a palace this run did not create; `--selftest` prints each refusal.
+`--dream` (`--dream-source <palace>`, default `supervisor`) reuses the memory lane's test palace for that source, measures the source's memory golden queries, runs ONE `palace_dream` pass, and measures again. The palace is deleted with the others. A `PalaceGuard` refuses every write tool and `memory_recall` on a palace this run did not create; `--selftest` checks the refusals.
 
 Pass: no golden drawer lost (a dedup-merged drawer counts through its survivor), recall@10 drop within 0.05, duplicates not higher, and 5 dated rulings (picked once into `golden.private.json` as `dream_rulings`) keep their date and quoted words byte-identical. The row is a `"lane": "dream"` line in the same `runs.jsonl`; `baseline.json` holds it under `dream`.
 
