@@ -1221,16 +1221,9 @@ impl DaemonState {
                 // Seed from config.yaml `projects:` list.
                 // #11170: a pinned test home reads its own config, never the
                 // real `~/.trusty-tools` one.
-                let config = match self.user_home.as_deref() {
-                    Some(home) => trusty_common::crate_config::load_or_default_at(
-                        &trusty_common::crate_config::crate_config_path_at(
-                            home,
-                            crate::core::trusty_tools_config::CRATE_NAME,
-                        ),
-                        crate::core::trusty_tools_config::CRATE_NAME,
-                    ),
-                    None => crate::core::trusty_tools_config::TrustyToolsConfig::load(),
-                };
+                let config = crate::core::trusty_tools_config::TrustyToolsConfig::load_under(
+                    self.user_home.as_deref(),
+                );
                 if !config.projects.is_empty() {
                     registry.seed_from_config(&config.projects).await;
                 }
