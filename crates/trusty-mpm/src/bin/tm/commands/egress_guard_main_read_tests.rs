@@ -211,15 +211,43 @@ fn every_listed_read_is_a_read_and_sends_are_writes_11273() {
     }
 }
 
-/// 🔴 #11273 criterion 3: a subagent's read stays denied under every launch
-/// role — an `agent_id` payload, or `CLAUDE_MPM_SUB_AGENT` — and audits
-/// nothing.
+/// The reads of [`READS`] in the Gmail and Google Workspace class (GP-043).
+const GWORKSPACE_CLASS: &[&str] = &[
+    "mcp__gworkspace-mcp__search_gmail_messages",
+    "mcp__gworkspace-mcp__list_message_attachments",
+    "mcp__gworkspace-mcp__get_gmail_message_content",
+    "mcp__gmail__read_email",
+];
+
+/// A call from a subagent: an `agent_id` payload, or `CLAUDE_MPM_SUB_AGENT`.
+fn subagent_calls(fx: &Fixture, tool: &str, env: &HookEnv) -> [(Value, HookEnv); 2] {
+    let mut dispatched = call(fx, tool);
+    dispatched["agent_id"] = json!("agent-7");
+    let nested = HookEnv {
+        sub_agent: true,
+        ..env.clone()
+    };
+    [(dispatched, env.clone()), (call(fx, tool), nested)]
+}
+
+/// 🔴 #11273 criterion 3: an Architect subagent's read stays denied in every
+/// family, and a PM subagent's outside the GP-043 Gmail/Workspace class, under
+/// an `agent_id` payload or `CLAUDE_MPM_SUB_AGENT`; nothing is audited.
 #[test]
 fn subagent_reads_stay_denied_11273() {
     let fx = fixture();
     let log = log_of(&fx);
-    for env in [pm_env(&fx), spoof_env(&fx), architect_env(&fx)] {
-        for tool in READS {
+    let pm_other: Vec<&str> = READS
+        .iter()
+        .copied()
+        .filter(|t| !GWORKSPACE_CLASS.contains(t))
+        .collect();
+    for (env, tools) in [
+        (pm_env(&fx), pm_other.as_slice()),
+        (spoof_env(&fx), READS),
+        (architect_env(&fx), READS),
+    ] {
+        for tool in tools {
             let mut dispatched = call(&fx, tool);
             dispatched["agent_id"] = json!("agent-7");
             let (check, _) = denied(run(&dispatched, &env, &log), "an agent_id read");
@@ -491,4 +519,66 @@ fn only_a_family_deny_is_judged_11273() {
         &pm_env(&fx),
     );
     assert_eq!((v, allowed), (first, None));
+}
+
+/// 🔴 GP-043 (owner ruling 2026-11-16): a PM main session and a PM subagent
+/// each pass a Gmail or Google Workspace read, each with one audit line.
+#[test]
+fn pm_subagent_gworkspace_reads_pass_gp_043() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let mut expected = 0;
+    for tool in GWORKSPACE_CLASS {
+        assert_eq!(
+            run(&call(&fx, tool), &pm_env(&fx), &log),
+            Verdict::Allow,
+            "pm {tool}"
+        );
+        expected += 1;
+        for (sub, env) in subagent_calls(&fx, tool, &pm_env(&fx)) {
+            assert_eq!(run(&sub, &env, &log), Verdict::Allow, "pm subagent {tool}");
+            expected += 1;
+        }
+    }
+    assert_eq!(lines(&log), expected);
+    let text = std::fs::read_to_string(&log).expect("audit");
+    assert!(text.contains("role=pm-subagent"), "{text}");
+    assert!(!text.contains(BODY), "{text}");
+}
+
+/// 🔴 GP-043: a PM subagent's Gmail/Workspace send or write stays denied, and
+/// so does an unknown or unlisted gworkspace tool (fail closed), as for the
+/// PM's main thread.
+#[test]
+fn pm_subagent_other_family_and_unlisted_reads_stay_denied_gp_043() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let gated = [
+        "mcp__gworkspace-mcp__compose_email",
+        "mcp__gworkspace-mcp__send_draft",
+        "mcp__gworkspace-mcp__modify_gmail_messages",
+        "mcp__gworkspace-mcp__download_gmail_attachment",
+        "mcp__gworkspace-mcp__send_notification_email",
+        "mcp__gmail__send_message",
+        // Unknown or unclassified: fail closed.
+        "mcp__gworkspace-mcp__get_gmail_everything",
+        "mcp__gworkspace-mcp__search_gmail_messages_v2",
+        "mcp__gworkspace-mcp__list_messages_and_reply",
+    ];
+    for tool in gated {
+        let (check, _) = denied(run(&call(&fx, tool), &pm_env(&fx), &log), tool);
+        assert_eq!(check, "egress-family", "pm {tool}");
+        for (sub, env) in subagent_calls(&fx, tool, &pm_env(&fx)) {
+            let (check, _) = denied(run(&sub, &env, &log), tool);
+            assert_eq!(check, "egress-family", "pm subagent {tool}");
+        }
+    }
+    let unstamped = HookEnv {
+        stamp: None,
+        ..pm_env(&fx)
+    };
+    for (sub, env) in subagent_calls(&fx, GWORKSPACE_CLASS[0], &unstamped) {
+        denied(run(&sub, &env, &log), "an unstamped subagent read");
+    }
+    assert_eq!(lines(&log), 0);
 }
