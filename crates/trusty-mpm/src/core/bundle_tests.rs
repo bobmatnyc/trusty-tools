@@ -3615,3 +3615,50 @@ fn briefs_name_sources_and_hand_back_read_lines_10573() {
         );
     }
 }
+
+/// Why: #10575 — a "goals only" document closed after one deleted row, and an
+/// invented word count cut owner rules, because Done had no non-code test.
+/// What: `completion-standard.md` carries `tm-workflow/criteria-quote-the-request`,
+/// `tm-workflow/evidence-map` (four lists) and `tm-workflow/no-proxy-targets`
+/// with `INVENTED_TARGET` and `OWNER-REQUESTED-LIMIT` as WARNING codes;
+/// `phases.md` carries `tm-workflow/docs-skip-keeps-evidence`; CORE names both.
+/// Mutation: delete a marker, a list label or a code and this fails.
+/// Test: this test.
+#[test]
+fn non_code_deliverables_quote_the_request_and_map_evidence_10575() {
+    let standard = skill_text("skills/tm-workflow/references/completion-standard.md");
+    for id in [
+        "tm-workflow/criteria-quote-the-request",
+        "tm-workflow/evidence-map",
+        "tm-workflow/no-proxy-targets",
+    ] {
+        assert!(has_rule(standard, id), "completion-standard lost `{id}`");
+    }
+    let flat = plain(standard);
+    for needle in [
+        "section headed `Evidence map`",
+        "- Verified —",
+        "- Helper-reported —",
+        "- Unfinished —",
+        "- Untested —",
+        "\"not finished: 12 of 24 rewritten, none checked yet\"",
+        "Size is never the measure",
+        "| `INVENTED_TARGET` | WARNING |",
+        "| `OWNER-REQUESTED-LIMIT: \"<owner's exact words>\"` | WARNING clears |",
+        "An unrecorded quote keeps `INVENTED_TARGET`",
+        "Owner ruling Dr8: these warn first and deny nothing",
+    ] {
+        assert!(flat.contains(needle), "completion-standard lost `{needle}`");
+    }
+    assert!(
+        !flat.contains("Cross-vendor") && !flat.contains("cross-vendor"),
+        "gap 4 is closed by ruling D5f; no cross-vendor reviewer here"
+    );
+    let phases = skill_text("skills/tm-workflow/references/phases.md");
+    assert!(has_rule(phases, "tm-workflow/docs-skip-keeps-evidence"));
+    assert!(plain(phases).contains("A skip drops the agent, never the evidence"));
+    assert!(
+        plain(instruction_text("sections/core.md"))
+            .contains("Non-code: criteria quote the request; add an evidence map.")
+    );
+}

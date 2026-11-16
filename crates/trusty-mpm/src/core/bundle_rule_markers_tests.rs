@@ -215,6 +215,18 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "content/skills/tm-workflow/references/completion-standard.md",
+        &[
+            "tm-workflow/criteria-quote-the-request",
+            "tm-workflow/evidence-map",
+            "tm-workflow/no-proxy-targets",
+        ],
+    ),
+    (
+        "content/skills/tm-workflow/references/phases.md",
+        &["tm-workflow/docs-skip-keeps-evidence"],
+    ),
+    (
         "content/skills/tm-workflow/references/worktree-discipline.md",
         &["tm-workflow/pre-pull-collision-pointer"],
     ),

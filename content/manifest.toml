@@ -672,7 +672,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-workflow.md"
-version = "2.2.0"
+version = "2.3.0"
 
 [[member]]
 path = "skills/tm.md"
