@@ -92,8 +92,8 @@ def test_pure():
     assert M.cold_share([{"embed_ms": 0}, {"embed_ms": 12}]) == 0.5 and M.cold_share([{}]) is None
     assert M.best_mode(["docs/a.md", "b.MD"]) == "text" and M.best_mode(["docs/a.md", "x.rs"]) == "code"
     assert M.dup_count(["A b", "a  B", "c"]) == 1
-    r = {"date": "2026-11-01", "quote": "never dream a live palace"}
-    assert M.ruling_intact(r, ['On 2026-11-01 Alice: "never dream a live palace".'])
+    r = {"date": "2000-01-01", "quote": "fixture text alpha"}
+    assert M.ruling_intact(r, ['On 2000-01-01 Alice: "fixture text alpha".'])
     resp = {"results": [], "rulings_degraded": True, "vector_unavailable": False}
     assert M.memory_degraded(resp) == [] and M.memory_degraded(dict(resp, lexical_only=True)) == ["lexical_only"]
     assert len(M.compare({"search:as-called": bad["search"]}, base, "t")) == 3, "old `search` lane skipped"

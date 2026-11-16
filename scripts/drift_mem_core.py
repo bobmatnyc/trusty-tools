@@ -24,8 +24,7 @@ SEARCH_LANES = ("search:as-called", "search:best-mode")
 PROSE_EXT = (".md", ".mdx", ".txt", ".rst")
 RULINGS_DEGRADED = "rulings_degraded"
 
-# Brief 2026-11-16 (dreaming section): dream ONE test palace this run created,
-# never a live one. Write tools are refused unless PalaceGuard owns the target.
+# Dream ONE test palace this run created, never a live one. Write tools are refused unless PalaceGuard owns the target.
 WRITE_TOOLS = {"palace_create", "memory_remember", "palace_dream", "palace_delete"}
 DREAM_TOOLS = WRITE_TOOLS | {"palace_list", "palace_info", "room_list", "memory_list", "memory_recall"}
 # #11348: recall raises access_count, so it is guarded like a write.

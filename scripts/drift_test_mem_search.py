@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Read-only accuracy and latency drift test for trusty-search and trusty-memory.
 
-Why: the Architect's standing goal ar-G05 needs an every-two-weeks check that
-retrieval has not regressed. This runs a fixed golden query set through the
+Why: an every-two-weeks check is needed that retrieval has not regressed. This runs a fixed golden query set through the
 live MCP surfaces (the same stdio servers Claude Code uses) and compares the
 result with a stored baseline and with the previous run.
 

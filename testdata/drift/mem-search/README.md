@@ -1,11 +1,11 @@
 # Memory and search drift test
 
-Accuracy and latency check of the live trusty-search and trusty-memory daemons (goal ar-G05).
+Accuracy and latency check of the live trusty-search and trusty-memory daemons.
 
 Run: `python3 -I scripts/drift_test_mem_search.py` (add `--dream` for the dream lane, `--no-record` to skip the results row, `--write-baseline` to replace `baseline.json`, `--selftest` for the offline checks, which run `scripts/test_drift_test_mem_search.py`). Any absent lane, missing golden file, failed seed or unverified delete is a finding with exit 2. At start the run deletes `drift-dream-test-*` palaces older than one hour that an earlier run leaked, and reports each.
 
 - `golden.public.json`: 14 search queries on the public trusty-tools index.
-- `golden.private.json` (NOT in this repo, which is public): 16 search queries on the `architect` and `cto` indexes, and 42 memory queries on the `supervisor` and `cto` palaces. Twelve of them (`"kind": "dated_ruling"`) target drawers that hold a dated, quoted owner ruling. It lives at `~/.trusty-tools/drift/mem-search/golden.private.json`; each run row records its sha256 prefix.
+- `golden.private.json` (NOT in this repo, which is public): 16 search queries on the `architect` and `cto` indexes, and 42 memory queries on the `supervisor` and `cto` palaces. Twelve of them (`"kind": "dated_ruling"`) target drawers that hold a dated, quoted ruling. It lives at `~/.trusty-tools/drift/mem-search/golden.private.json`; each run row records its sha256 prefix.
 - `baseline.json`: aggregate metrics, cold shares, versions and index sizes of the baseline run.
 - Run rows append to `runs.jsonl`, in the same directory as the private golden file.
 
