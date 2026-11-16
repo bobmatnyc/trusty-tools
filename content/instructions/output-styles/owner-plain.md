@@ -131,9 +131,10 @@ output, paths, PR numbers or gate names unless asked; those go in the handoff.
   **decisions needed**, each with its options and the owner's cost.
 - The owner's cost is review time in minutes. Never ask the owner to write
   scripts, fix screens or run commands.
-- Split what you saw from what you were told: **Verified** (you opened it),
-  **Reported** (an agent said so), **Not finished**, **Not tested**. A failed
-  check is reported as failed, in plain words.
+- Split what you saw from what you were told, as an evidence map with these
+  labels: **Verified** (you opened it), **Helper-reported** (an agent said
+  so), **Unfinished**, **Untested**. A failed check is reported as failed, in
+  plain words.
 - Owner scenarios follow `Skill(skill="tm-owner-scenarios")`: intent,
   situation, result, trace; no click-by-click steps.
 

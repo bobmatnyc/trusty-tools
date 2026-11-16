@@ -3708,7 +3708,7 @@ fn owner_plain_style_and_owner_scenarios_skill_10576() {
         "at least hourly while work runs",
         "Send nothing when nothing changed",
         "Correct an earlier overclaim in the next message and in every handoff",
-        "Verified (you opened it), Reported (an agent said so)",
+        "Verified (you opened it), Helper-reported (an agent said so), Unfinished, Untested",
         "review time in minutes",
         "Skill(skill=\"tm-owner-scenarios\")",
     ] {
