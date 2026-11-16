@@ -184,6 +184,21 @@ def add_page_tools(
         return call("page_navigate", lease=lease, url=url, request_id=request_id)
 
     @server.tool()
+    def page_back(lease: str, request_id: str) -> dict[str, Any]:
+        """Go back one entry in the leased tab's history; NoHistory when there is none."""
+        return call("page_back", lease=lease, request_id=request_id)
+
+    @server.tool()
+    def page_forward(lease: str, request_id: str) -> dict[str, Any]:
+        """Go forward one entry in the leased tab's history; NoHistory when there is none."""
+        return call("page_forward", lease=lease, request_id=request_id)
+
+    @server.tool()
+    def page_reload(lease: str, request_id: str) -> dict[str, Any]:
+        """Reload the leased tab's page."""
+        return call("page_reload", lease=lease, request_id=request_id)
+
+    @server.tool()
     def page_upload(
         lease: str, ref: str, paths: list[str], request_id: str
     ) -> dict[str, Any]:

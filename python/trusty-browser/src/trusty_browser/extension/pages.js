@@ -468,6 +468,7 @@ TrustyPages.commands = deps => {
     page_select:{tab, document:doc, ref, value:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
+    page_back:{tab}, page_forward:{tab}, page_reload:{tab},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -514,6 +515,28 @@ TrustyPages.commands = deps => {
     const wait = settle(tabId, 3000, true);
     if (!await loading()) { wait.cancel(); return; }
     if (!await wait.done) throw refuse("NavigationPending", {tab:tabId});
+  }
+
+  async function arrived(tabId, wait) {
+    const settled = await wait.done;
+    const {access, document, origin} = await probe(tabId);
+    return {access, document, origin, settled};
+  }
+
+  // Why: history and reload act on the explicit tab through chrome.tabs, so they need no page access and
+  //   no extension reload path (#11292). What: goBack/goForward reject when the tab has no such history
+  //   entry, which answers NoHistory with nothing changed; reload keeps the cache.
+  // Test: tests/test_worker.mjs `back, forward and reload report where the tab landed`.
+  async function step(tabId, method) {
+    const wait = settle(tabId);
+    try {
+      await (method === "reload" ? chrome.tabs.reload(tabId, {bypassCache:false}) : chrome.tabs[method](tabId));
+    } catch {
+      wait.cancel();
+      try { await chrome.tabs.get(tabId); } catch { throw refuse("TabNotFound", {tab:tabId}); }
+      throw refuse(method === "reload" ? "OutcomeUnknown" : "NoHistory", {tab:tabId});
+    }
+    return arrived(tabId, wait);
   }
 
   // Runs the injected type/press/scroll/select/upload only inside the lease's document; never reports work it
@@ -719,10 +742,11 @@ TrustyPages.commands = deps => {
         throw refuse("TabNotFound", {tab:req.tab});
       }
       await deps.remember(req.tab, new URL(req.url).origin);
-      const settled = await wait.done;
-      const {access, document, origin} = await probe(req.tab);
-      return {access, document, origin, settled};
+      return arrived(req.tab, wait);
     },
+    page_back:req => step(req.tab, "goBack"),
+    page_forward:req => step(req.tab, "goForward"),
+    page_reload:req => step(req.tab, "reload"),
   };
 
   async function command(req) {
@@ -753,7 +777,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate",
-        "page_upload"].includes(req.op);
+        "page_upload","page_back","page_forward","page_reload"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));
