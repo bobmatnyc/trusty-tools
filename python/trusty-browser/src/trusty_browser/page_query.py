@@ -107,6 +107,7 @@ KEEP_LEASE = {
     "NoSuchOption",
     "Obscured",
     "DebuggerBusy",
+    "NotDraggable",
     "InvalidUrl",
     "InvalidRequest",
     "InvalidOperation",

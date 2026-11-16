@@ -18,7 +18,8 @@ globalThis.TrustyPageRead = (() => {
   //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`,
   //   `test_read_scopes_bounds_and_truncates_in_viewport_order`,
   //   `test_read_and_act_inside_iframes_and_shadow_roots`, `test_scope_ref_and_find_cross_shadow_roots`,
-  //   `test_iframe_reads_measure_distance_in_top_coordinates`. Mode "find" is page_find (see find below).
+  //   `test_iframe_reads_measure_distance_in_top_coordinates`,
+  //   `test_drag_reaches_a_draggable_inside_an_open_shadow_root` (#11288). Mode "find" is page_find (see find below).
   function pageInspect(mode, reserve, options) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const epoch = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
@@ -37,7 +38,11 @@ globalThis.TrustyPageRead = (() => {
     const selector = "a[href],button,input:not([type=hidden]),select,textarea,summary," +
       "[contenteditable]:not([contenteditable=false])," +
       ["button","link","checkbox","radio","tab","menuitem","option","switch","textbox","combobox","searchbox"]
-        .map(role => "[role=" + role + "]").join(",");
+        .map(role => "[role=" + role + "]").join(",") +
+      ",[draggable=true],[aria-dropeffect]:not([aria-dropeffect=none]),[dropzone]";
+    // #11288: a drop zone is often a bare div. When the page offers something to drag, elements whose
+    // id or class names a drop target are reported too, so page_drag has a target ref.
+    const DROP_NAMED = "[id*=drop i],[class*=drop i],[data-drop],[data-dropzone]";
     function implicitRole(el) {
       const tag = el.localName, type = (el.getAttribute("type") || "text").toLowerCase();
       if (tag === "a") return "link";
@@ -124,6 +129,7 @@ globalThis.TrustyPageRead = (() => {
         if (el.options.length > 100) truncated = true;
       }
       if (el.disabled === true || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
+      if (el.getAttribute("draggable") === "true") entry.draggable = true;
       return entry;
     }
     const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
@@ -186,8 +192,16 @@ globalThis.TrustyPageRead = (() => {
         if (inner) yield* walk(inner);
       }
     }
+    // #11288: drop-named elements count once any walked node, light DOM, open shadow root or same-origin
+    // frame, is draggable; the check covers the whole document, so a scoped read sees the same set.
+    let reported = null;
+    const reports = el => {
+      reported ??= [...walk(document)].some(node => node.matches("[draggable=true]")) ?
+        selector + "," + DROP_NAMED : selector;
+      return el.matches(reported);
+    };
     // Reported elements under `root` (itself included), in document order.
-    const within = root => [...walk(root)].filter(el => el.matches(selector) && shown(el));
+    const within = root => [...walk(root)].filter(el => reports(el) && shown(el));
     // CSS pixels from the element's box to the top viewport; 0 when they overlap. #11290: a box inside a
     // same-origin frame is shifted by each frame element's content-box offset up the chain.
     function distance(el) {

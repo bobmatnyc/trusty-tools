@@ -36,6 +36,7 @@ CODE_TOOLS = {
     "page_scroll",
     "page_press",
     "page_select",
+    "page_drag",
     "page_navigate",
     "page_upload",
     "page_downloads",
@@ -263,6 +264,10 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             (
                 "page_select",
                 {"lease": "l", "ref": "1.0", "value": "", "request_id": "r"},
+            ),
+            (
+                "page_drag",
+                {"lease": "l", "ref": "1.0", "target": "1.1", "request_id": "r"},
             ),
             (
                 "page_navigate",
