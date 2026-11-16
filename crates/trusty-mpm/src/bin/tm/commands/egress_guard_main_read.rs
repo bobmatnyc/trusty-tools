@@ -17,18 +17,20 @@
 //! exactly and case-sensitively; every other tool of a family is a
 //! [`Access::Write`], so a new or renamed tool is treated as a send.
 //! FAIL-CLOSED: an unreadable payload, any other check (Bash included), an
-//! unknown or unlisted tool, a subagent, an unknown thread and a missing or
-//! unknown stamp keep the deny; an audit line that cannot be written denies.
+//! unknown or unlisted tool, a subagent (bar a PM subagent's Gmail or Google
+//! Workspace read, GP-043), an unknown thread and a missing or unknown stamp
+//! keep the deny; an audit line that cannot be written denies.
 //! Test: `egress_guard_main_read_tests.rs`.
 
 use std::path::Path;
 
 use serde_json::Value;
+use trusty_mpm::core::twin_identity::{ThreadKind, thread_kind};
 
 use crate::commands::egress_guard::{RESOURCE_TOOLS, Verdict};
 use crate::commands::egress_guard_architect::{audited_line, field};
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
-use crate::commands::egress_guard_pm_dm::{MainRole, main_thread_role};
+use crate::commands::egress_guard_pm_dm::{MainRole, main_thread_role, pm_launch_stamp};
 use crate::commands::hook_stdin::HookStdinError;
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 
@@ -202,6 +204,28 @@ fn family_of(tool: &str, payload: &Value, table: &FamilyTable) -> Option<String>
     }
 }
 
+/// The Gmail and Google Workspace families a PM subagent may read (GP-043).
+const SUBAGENT_READ_FAMILIES: &[&str] = &["gmail", "googlemail", "gworkspace"];
+
+/// Who may read `family` on this call, or `None` to keep the deny.
+///
+/// Why: GP-043 (owner ruling 2026-11-16) — a PM's subagents read Gmail and
+/// Google Workspace too; every other family keeps #11273's main-only rule.
+/// What: [`main_thread_role`] first; otherwise a [`ThreadKind::Subagent`]
+/// carrying the PM stamp, for a [`SUBAGENT_READ_FAMILIES`] family only, is
+/// [`MainRole::PmSubagent`]. An Architect subagent or unknown thread is `None`.
+/// Test: `pm_subagent_gworkspace_reads_pass_gp_043`,
+/// `pm_subagent_other_family_and_unlisted_reads_stay_denied_gp_043`.
+fn read_role(payload: &Value, env: &HookEnv, family: &str) -> Option<MainRole> {
+    if let Some(role) = main_thread_role(payload, env) {
+        return Some(role);
+    }
+    // GP-043: only a PM's subagent, only the Gmail and Workspace read class.
+    let subagent = thread_kind(payload, env.sub_agent) == ThreadKind::Subagent;
+    (subagent && pm_launch_stamp(env) && SUBAGENT_READ_FAMILIES.contains(&family))
+        .then_some(MainRole::PmSubagent)
+}
+
 /// Lift a family deny of a read tool for a PM or Architect main session.
 ///
 /// Why / What: see the module doc.
@@ -232,8 +256,8 @@ pub(crate) fn lift(
     if tool_access(tool, &family) != Access::Read {
         return (first, None);
     }
-    // #11273: a subagent, an unknown thread or an unknown stamp keeps the deny.
-    let Some(role) = main_thread_role(payload, env) else {
+    // #11273: an unknown thread or an unknown stamp keeps the deny.
+    let Some(role) = read_role(payload, env, &family) else {
         return (first, None);
     };
     let session = payload.get("session_id").and_then(Value::as_str);

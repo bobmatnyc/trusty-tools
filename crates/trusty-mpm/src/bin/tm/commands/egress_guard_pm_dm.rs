@@ -106,7 +106,7 @@ fn owner_dm_target(tool: &str, input: &Value) -> Option<Option<&'static str>> {
 /// exactly, as `architect_compat::is_architect_stamp` matches its stamp.
 /// Test: `pm_unstamped_main_thread_dm_send_stays_denied`,
 /// `pm_non_pm_stamped_main_thread_dm_send_stays_denied`.
-fn pm_launch_stamp(env: &HookEnv) -> bool {
+pub(crate) fn pm_launch_stamp(env: &HookEnv) -> bool {
     let (_, pm) = launch_env(SessionProfile::Pm);
     env.stamp.as_deref() == Some(std::ffi::OsStr::new(&pm))
 }
@@ -118,6 +118,8 @@ pub(crate) enum MainRole {
     Pm,
     /// A session carrying an Architect launch stamp, bound or not.
     Architect,
+    /// A subagent of a PM session: the PM stamp, a subagent thread (GP-043).
+    PmSubagent,
 }
 
 impl MainRole {
@@ -126,6 +128,7 @@ impl MainRole {
         match self {
             MainRole::Pm => "pm",
             MainRole::Architect => "architect",
+            MainRole::PmSubagent => "pm-subagent",
         }
     }
 }
