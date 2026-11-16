@@ -196,6 +196,7 @@ PAGE_ERRORS = UNFINISHED | {
     "TabNotFound",
     "PermissionNeeded",
     "DocumentChanged",
+    "NavigationPending",  # #11354: page_read before a navigation settled
     "StaleElement",
     "NotEditable",
     "NotSelectable",

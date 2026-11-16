@@ -522,20 +522,36 @@ TrustyPages.commands = deps => {
   }
   async function needed(tabId) { return refuse("PermissionNeeded", {tab:tabId, origin:await deps.originOf(tabId)}); }
 
-  function settle(tabId) {
+  // Resolves true at the tab's next "complete" (after a "loading" unless `loading` is already true),
+  // false after `ms` or on cancel.
+  function settle(tabId, ms = 5000, loading = false) {
     let finish;
     const done = new Promise(resolve => {
-      let loading = false;
       const listener = (id, info) => {
         if (id !== tabId) return;
         if (info.status === "loading") loading = true;
         if (loading && info.status === "complete") finish(true);
       };
-      const timer = setTimeout(() => finish(false), 5000);
+      const timer = setTimeout(() => finish(false), ms);
       finish = value => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(value); };
       chrome.tabs.onUpdated.addListener(listener);
     });
     return {done, cancel:() => finish(false)};
+  }
+
+  // Why: before a navigation commits, executeScript still runs in the old document, so a read would
+  //   return it as current (#11354).
+  // What: while the tab's status is "loading", waits up to 3 s for "complete"; still loading answers
+  //   NavigationPending. Listens before re-checking the status, so a completion between the two is not lost.
+  // Test: tests/test_worker.mjs `read during an unsettled navigation never returns the old document`.
+  async function landed(tabId) {
+    const loading = async () => {
+      try { return (await chrome.tabs.get(tabId)).status === "loading"; } catch { throw refuse("TabNotFound", {tab:tabId}); }
+    };
+    if (!await loading()) return;
+    const wait = settle(tabId, 3000, true);
+    if (!await loading()) { wait.cancel(); return; }
+    if (!await wait.done) throw refuse("NavigationPending", {tab:tabId});
   }
 
   // Runs the injected click/type/press/scroll only inside the lease's document; never reports work it did not do.
@@ -577,6 +593,7 @@ TrustyPages.commands = deps => {
     },
     page_tab:req => probe(req.tab),
     async page_read(req) {
+      await landed(req.tab);
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageRead, args:[512]});

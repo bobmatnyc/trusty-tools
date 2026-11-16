@@ -402,6 +402,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `TabNotFound` | `tab` | Profile grant: the tab does not exist; the grant stays |
 | `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`, `page_press`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
+| `NavigationPending` | `tab` | `page_read`: the tab is still loading a navigation 3 s after the read arrived, so the new document has not committed. The lease stays; read again (#11354) |
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |

@@ -48,6 +48,7 @@ TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
 KEEP_LEASE = {
     "PermissionNeeded",
     "DocumentChanged",
+    "NavigationPending",
     "StaleElement",
     "NotEditable",
     "NotSelectable",
