@@ -101,7 +101,7 @@ const PAIRED = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, 
 // A browser with explicit tabs, a fake broker behind both native hosts, and the real worker table.
 async function codeFixture({session:seed = {}, held = false, tabs:layout, live = [], local:localSeed = ENROLLED,
   ack, stamp:manifestStamp = null, incarnation:life = "epoch-1"} = {}) {
-  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [];
+  const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [], cdp = [];
   const timers = new Map(); let serial = 0, mintSerial = 0, generation = 0, reloads = 0;
   const tabs = new Map(Object.entries(layout || {
     7:{origin:"https://a.test", title:"Alpha", active:true},
@@ -197,10 +197,33 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       const result = func.name === "pageProbe" ? [t.origin, t.title]
         : func.name === "pageInspect" ? t.readResult ?? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
-        : t.result || {ok:true};
+        : t.result || {ok:true, x:10, y:20};
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
       return [{frameId:0, documentId:t.doc, result}];
     }},
+    // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press (`t.dialogFails` makes its
+    // answer fail); `t.busy` refuses attach; `t.moveAt` names an event type after which the tab gets
+    // `t.move` ({doc} or {origin}); `t.hang` names a method that answers only
+    // when the test calls `t.release`. Like Chrome, attach needs
+    // no host access.
+    debugger:{onEvent:{fns:new Set(), addListener(fn){this.fns.add(fn);}, removeListener(fn){this.fns.delete(fn);},
+        fire(...args){ for (const fn of [...this.fns]) fn(...args); }},
+      attach:async ({tabId}) => {
+        const t = tabs.get(tabId);
+        if (t?.busy) throw new Error("Another debugger is already attached");
+        cdp.push({tab:tabId, method:"attach"});
+      },
+      detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
+      sendCommand:async ({tabId}, method, params) => {
+        cdp.push({tab:tabId, method, params});
+        const t = tabs.get(tabId);
+        if (t.hang === method) return new Promise(done => { t.release = () => done({}); });
+        if (t.dialogFails && method === "Page.handleJavaScriptDialog") throw new Error("No dialog is showing");
+        if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
+          await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
+        if (t.moveAt && params?.type === t.moveAt) Object.assign(t, t.move);
+        return {};
+      }},
   };
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
@@ -220,6 +243,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   let seq = 0;
   const command = async (op, fields = {}) => {
     const id = "c" + ++seq;
+    // The broker always sends a dialog policy with a click (#11294).
+    if (op === "page_click" && !("dialog" in fields)) fields = {...fields, dialog:"dismiss"};
     await native.onMessage.fire({id, op, email, ...fields});
     await settle();
     return plain(sent.findLast(m => m.id === id));
@@ -235,7 +260,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     return plain(reply);
   });
   const table = () => plain(sessionStore.grants || {});
-  return {chrome, native, sent, ran, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
+  return {chrome, native, sent, ran, cdp, queries, updates, brokerCalls, alarms, badge, timers, tabs, perms, failures,
     sessionStore, localStore, command, popup, table, handshake, live:ok, fakeBroker, reloads:() => reloads,
     setBroker(fn){ broker = fn; },
     end:(grant, last, reason = "closed") => command("grant_end", {grant, reason, last}),
@@ -401,6 +426,113 @@ test("page_select relays changed and value, and its refusals", async () => {
   f.tabs.get(7).result = {ok:true};
   assert.equal((await choose("x")).error, "OutcomeUnknown");
   assert.equal((await f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value:5})).error, "InvalidRequest");
+});
+
+test("click drives trusted input and answers dialogs", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const click = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(click.result, {document:"doc-7"});
+  assert.deepEqual(plain(f.ran), [{tab:7, func:"pageTarget", args:["1.0"]}]);
+  const steps = f.cdp.map(c => c.method + (c.params?.type ? ":" + c.params.type : ""));
+  assert.deepEqual(steps, ["attach", "Page.enable", "Input.dispatchMouseEvent:mouseMoved",
+    "Input.dispatchMouseEvent:mousePressed", "Input.dispatchMouseEvent:mouseReleased", "Runtime.evaluate", "detach"]);
+  assert.deepEqual(plain(f.cdp[3].params), {type:"mousePressed", x:10, y:20, button:"left", clickCount:1, buttons:1});
+  for (const [type, policy, accepted] of [["alert","dismiss",true], ["confirm","dismiss",false], ["confirm","accept",true],
+    ["prompt","dismiss",false]]) {
+    f.tabs.get(7).dialog = {type, message:"Sure?"};
+    f.cdp.length = 0;
+    const reply = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:policy});
+    assert.deepEqual(reply.result, {document:"doc-7", dialog:{type, message:"Sure?", accepted}}, type + policy);
+    assert.deepEqual(plain(f.cdp.find(c => c.method === "Page.handleJavaScriptDialog").params), {accept:accepted});
+    assert.equal(f.cdp.at(-1).method, "detach");
+  }
+  f.tabs.get(7).dialog = null;
+  const bad = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"maybe"});
+  assert.equal(bad.error, "InvalidRequest");
+  f.tabs.get(7).busy = true;
+  f.cdp.length = 0;
+  const busy = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(busy, {id:busy.id, ok:false, error:"DebuggerBusy", tab:7});
+  assert.deepEqual(f.cdp, []);
+  f.tabs.get(7).busy = false;
+  f.tabs.get(7).result = {error:"Obscured"};
+  const covered = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(covered, {id:covered.id, ok:false, error:"Obscured", tab:7});
+  assert.equal(f.cdp.at(-1).method, "detach");
+  assert.ok(!f.cdp.some(c => c.method === "Input.dispatchMouseEvent"));
+});
+
+const cdpSteps = f => f.cdp.map(c => c.method + (c.params?.type ? ":" + c.params.type : ""));
+
+test("trusted input rechecks the document before every event", async () => {
+  for (const move of [{doc:"doc-7-next"}, {origin:"https://evil.test"}]) {
+    const f = await codeFixture();
+    const {grant} = await connectGrant(f);
+    Object.assign(f.tabs.get(7), {moveAt:"mousePressed", move});
+    const reply = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0"});
+    assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:true,
+      document:move.doc || "doc-7"}, JSON.stringify(move));
+    assert.ok(!cdpSteps(f).includes("Input.dispatchMouseEvent:mouseReleased"), cdpSteps(f).join());
+    assert.equal(f.cdp.at(-1).method, "detach");
+  }
+});
+
+test("a no-access tab is never debugger-attached", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true}}});
+  const minted = await connectGrant(f);
+  f.perms.held = false;
+  const reply = await f.command("page_click", {grant:minted.grant, tab:7, document:"doc-7", ref:"1.0"});
+  assert.deepEqual(reply, {id:reply.id, ok:false, error:"DocumentChanged", tab:7, access:false, document:null});
+  assert.deepEqual(f.cdp, []);
+});
+
+test("a failed dialog answer or a hung command answers OutcomeUnknown", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  Object.assign(f.tabs.get(7), {dialog:{type:"confirm", message:"Sure?"}, dialogFails:true});
+  const failed = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"accept"});
+  assert.deepEqual(failed, {id:failed.id, ok:false, error:"OutcomeUnknown"});
+  assert.ok(!cdpSteps(f).includes("Input.dispatchMouseEvent:mouseReleased"));
+  assert.equal(f.cdp.at(-1).method, "detach");
+  Object.assign(f.tabs.get(7), {dialog:null, dialogFails:false, hang:"Input.dispatchMouseEvent"});
+  f.cdp.length = 0;
+  const pending = f.native.onMessage.fire({id:"hung", op:"page_click", email, grant, tab:7, document:"doc-7", ref:"1.0",
+    dialog:"dismiss"});
+  await settle();
+  assert.equal(f.sent.find(m => m.id === "hung"), undefined);
+  assert.notEqual(f.cdp.at(-1).method, "detach");
+  const [key, bound] = [...f.timers].findLast(([, t]) => t.ms === 5000);
+  f.timers.delete(key);
+  bound.fn();
+  await pending;
+  await settle();
+  assert.deepEqual(plain(f.sent.find(m => m.id === "hung")), {id:"hung", ok:false, error:"OutcomeUnknown"});
+  assert.equal(f.cdp.at(-1).method, "detach");
+});
+
+// #11294: a timed-out click's leftover work must never send input through a later attachment.
+test("a timed-out click sends no input after a later attach", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const t = f.tabs.get(7);
+  t.hang = "Input.dispatchMouseEvent";
+  const pending = f.native.onMessage.fire({id:"late", op:"page_click", email, grant, tab:7, document:"doc-7", ref:"1.0",
+    dialog:"dismiss"});
+  await settle();
+  const [key, bound] = [...f.timers].findLast(([, x]) => x.ms === 5000);
+  f.timers.delete(key);
+  bound.fn();
+  await pending;
+  await settle();
+  assert.equal(f.sent.find(m => m.id === "late").error, "OutcomeUnknown");
+  const release = t.release;
+  t.hang = null;
+  assert.equal((await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"dismiss"})).ok, true);
+  const before = f.cdp.length;
+  release();
+  await settle();
+  assert.deepEqual(cdpSteps(f).slice(before), []);
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {

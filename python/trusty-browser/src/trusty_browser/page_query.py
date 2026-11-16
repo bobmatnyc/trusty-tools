@@ -1,4 +1,4 @@
-"""Optional controls of the read-only page queries; contract docs/activation-codes.md.
+"""Optional controls of the page queries and page_click; contract docs/activation-codes.md.
 
 Split from pages.py for the SLOC cap. Tests live in tests/test_page_ops.py.
 """
@@ -22,7 +22,14 @@ FIND_DEFAULTS: Frame = {
     "within_ref": None,
     "limit": 10,
 }
-DEFAULTS: dict[str, Frame] = {"page_read": READ_DEFAULTS, "page_find": FIND_DEFAULTS}
+# #11294: how a trusted click answers a native dialog it opens.
+CLICK_DEFAULTS: Frame = {"dialog": "dismiss"}
+DEFAULTS: dict[str, Frame] = {
+    "page_read": READ_DEFAULTS,
+    "page_find": FIND_DEFAULTS,
+    "page_click": CLICK_DEFAULTS,
+}
+DIALOG_TYPES = {"alert", "confirm", "prompt", "beforeunload"}
 TERMS = ("role", "name", "text")
 
 
@@ -63,4 +70,26 @@ def controls(request: Frame) -> Frame:
     for name in ("viewport_only", "include_text"):
         if name in fields and type(fields[name]) is not bool:
             raise Refusal("InvalidRequest")
+    if fields.get("dialog", "dismiss") not in ("accept", "dismiss"):
+        raise Refusal("InvalidRequest")
     return fields
+
+
+def clicked(raw: object) -> Frame:
+    """A click result: ``document``, plus ``dialog`` when one opened, else ``BrowserRefused``.
+
+    Test: `test_dialog_policy_is_forwarded_and_the_dialog_relayed`.
+    """
+    if not isinstance(raw, dict) or set(raw) - {"dialog"} != {"document"}:
+        raise Refusal("BrowserRefused")
+    if type(raw["document"]) is not str:
+        raise Refusal("BrowserRefused")
+    seen = raw.get("dialog", {"type": "alert", "message": "", "accepted": True})
+    kinds = {"type": str, "message": str, "accepted": bool}
+    if not isinstance(seen, dict) or set(seen) != set(kinds):
+        raise Refusal("BrowserRefused")
+    if any(type(seen[k]) is not v for k, v in kinds.items()):
+        raise Refusal("BrowserRefused")
+    if seen["type"] not in DIALOG_TYPES or len(seen["message"]) > 1024:
+        raise Refusal("BrowserRefused")
+    return raw

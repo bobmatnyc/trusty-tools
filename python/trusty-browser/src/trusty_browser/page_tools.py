@@ -81,9 +81,18 @@ def add_page_tools(
         )
 
     @server.tool()
-    def page_click(lease: str, ref: str, request_id: str) -> dict[str, Any]:
-        """Click the element a page_read returned as ``ref``. Reuse the request ID to retry."""
-        return call("page_click", lease=lease, ref=ref, request_id=request_id)
+    def page_click(
+        lease: str, ref: str, request_id: str, dialog: str = "dismiss"
+    ) -> dict[str, Any]:
+        """Click the element a page_read returned as ``ref`` with a trusted mouse click.
+
+        ``dialog`` ("accept" or "dismiss") answers a confirm, prompt or
+        beforeunload dialog the click opens; an alert is always acknowledged and
+        the reply names the dialog (#11294). Reuse the request ID to retry.
+        """
+        return call(
+            "page_click", lease=lease, ref=ref, request_id=request_id, dialog=dialog
+        )
 
     @server.tool()
     def page_type(lease: str, ref: str, text: str, request_id: str) -> dict[str, Any]:

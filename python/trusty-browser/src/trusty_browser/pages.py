@@ -19,7 +19,7 @@ from trusty_browser import codes
 from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
-from trusty_browser.page_query import controls, optional
+from trusty_browser.page_query import clicked, controls, optional
 from trusty_browser.protocol import (
     MUTATING,
     Claim,
@@ -56,6 +56,8 @@ KEEP_LEASE = {
     "TextDropped",
     "NotSelectable",
     "NoSuchOption",
+    "Obscured",
+    "DebuggerBusy",
     "InvalidUrl",
     "InvalidRequest",
     "InvalidOperation",
@@ -474,6 +476,8 @@ class Pages(Grants):
             args: Frame = {"url": request["url"]}
         else:
             args = {"document": claim.document, "ref": request["ref"]}
+            if op == "page_click":  # #11294: the dialog policy
+                args.update(controls(request))
             if op == "page_type":
                 args["text"] = request["text"]
             if op == "page_scroll":
@@ -500,7 +504,7 @@ class Pages(Grants):
             shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
             if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
                 shape = CUT
-            result = shaped(raw, shape)
+            result = clicked(raw) if op == "page_click" else shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}
