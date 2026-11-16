@@ -107,6 +107,24 @@ Unrelated bugs in different modules still get separate PRs. This is what "no
 two in-flight PRs share a module" means for a bug cluster: same module now
 means same PR, not a serialized queue of small ones.
 
+The issue-cluster rule (owner ruling 2026-11-16) applies this to every open
+issue, not only bugs:
+
+1. Before dispatching engineers, group open issues that touch the same files
+   or the same feature into clusters. Brief one engineer per cluster.
+2. One branch and one PR per cluster. Each issue gets its own commit, ending
+   `Refs #N`. The PR body lists every issue as `Refs #N`, never `Closes`.
+3. The PR squash-merges. The per-issue commits stay in the PR history, and
+   the squash commit message lists every issue.
+4. One critic round and one gate run per PR, never per issue.
+5. On merge, `ticketing` moves every issue in the cluster, and closes each
+   one only when it clears the project's close rule and the live-evidence bar.
+6. Keep agent slots full up to the band: dispatch the next cluster, not the
+   next single issue.
+7. Stack PRs only for a true dependency chain (owner ruling). A true
+   dependency chain stacks its PRs; independent clusters each branch from
+   `origin/main`.
+
 ## Where Each Task Lives
 
 This file holds the rules every delivery needs. Everything else sits in one file

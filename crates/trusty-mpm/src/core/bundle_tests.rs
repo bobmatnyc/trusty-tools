@@ -23,6 +23,10 @@ mod fix_bar_criterion;
 #[path = "bundle_data_design_tests.rs"]
 mod data_design;
 
+// Owner ruling 2026-11-16: the issue-cluster rule in the PM prompt and version-control.
+#[path = "bundle_issue_cluster_tests.rs"]
+mod issue_cluster;
+
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
 fn skill_text(path: &str) -> &'static str {
