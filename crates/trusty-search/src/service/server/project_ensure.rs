@@ -138,12 +138,15 @@ fn pick_id(
 /// exists). A request with an empty key or name is 400; a home or filesystem
 /// root is 409 `project_root_unindexable`; an overlapping root is 409
 /// `project_root_overlap` naming `overlapping_index_id`; the root gate
-/// (absolute, a directory, allowlist) is `validate_root_path`'s.
+/// (absolute, a directory, allowlist) is `validate_root_path`'s. #11417: a
+/// found index that is parked is re-activated (`unparked: true`, see
+/// `project_ensure_unpark`); a re-activation that fails is the call's error.
 /// Test: `ensure_creates_pins_and_queues_one_reindex`,
 /// `a_second_ensure_returns_the_same_id_and_queues_no_reindex`,
 /// `a_root_inside_a_registered_root_is_refused_with_its_id`,
 /// `a_root_enclosing_a_registered_root_is_refused_with_its_id`,
-/// `an_unindexable_or_empty_request_is_refused`.
+/// `an_unindexable_or_empty_request_is_refused`,
+/// `ensure_reactivates_a_cold_parked_root_and_records_its_identity`.
 pub(crate) async fn ensure_project_report(
     state: &Arc<SearchAppState>,
     req: EnsureProjectRequest,
@@ -168,11 +171,14 @@ pub(crate) async fn ensure_project_report(
     }
     let handles = state.registry.list_handles();
     let cold = state.cold_store.snapshot();
-    let found = find_root_path_collision(&handles, &cold, &root, None);
+    // #11417: a map park drops the cold entry, so look for its row as well.
+    let found = find_root_path_collision(&handles, &cold, &root, None)
+        .map(|id| id.0)
+        .or_else(|| super::project_ensure_unpark::parked_id_at_root(state, &root));
     let mut profile_note = None;
     let mut created_label: Option<String> = None;
     let (index_id, created) = match found {
-        Some(existing) => (existing.0, false),
+        Some(existing) => (existing, false),
         None => {
             match find_root_overlap(&handles, &cold, &root, None) {
                 Ok(None) => {}
@@ -237,6 +243,13 @@ pub(crate) async fn ensure_project_report(
             (id, won)
         }
     };
+    // #11417: a found index that is parked comes back live; a failure is an error.
+    let unparked = if created {
+        None
+    } else {
+        super::project_ensure_unpark::reactivate_parked(state, &index_id, &root, &req.project_key)
+            .await?
+    };
     // Idempotent: pins only a group that has no pin yet.
     let project_map_error =
         crate::service::rpc::project_map::pin_after_create(state, &index_id).await;
@@ -246,9 +259,13 @@ pub(crate) async fn ensure_project_report(
         "created": created,
         "root_path": root.display().to_string(),
         "reindex_queued": false,
+        "unparked": false,
         "profile": null,
         "profile_applied": false,
     });
+    if let (Some(serde_json::Value::Object(fields)), Some(o)) = (unparked, body.as_object_mut()) {
+        o.extend(fields);
+    }
     // The label the index carries (`std-v1@<hash>` or `custom@<hash>`). It is
     // "applied" only by the call that created the index.
     let label = created_label.or_else(|| {
@@ -287,3 +304,7 @@ pub(crate) async fn ensure_project_report(
 #[cfg(test)]
 #[path = "project_ensure_tests.rs"]
 mod project_ensure_tests;
+
+#[cfg(test)]
+#[path = "project_ensure_unpark_tests.rs"]
+mod project_ensure_unpark_tests;
