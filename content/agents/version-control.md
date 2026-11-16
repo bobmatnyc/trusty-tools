@@ -84,13 +84,15 @@ fix — PR #6894 did exactly that to #6888:
 grep -nEi '\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\b[[:space:]]*:?[[:space:]]*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+' <body-file>
 ```
 
+Check `command -v tm` first; if absent, use `gh pr create` with the same title, body and labels.
+
 On a Refs-only project (this repo, per its root `CLAUDE.md`) a hit is a stop. Rewrite the line to `Refs`
 and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
 the body onto an open PR, and do not arm auto-merge while a hit stands.
 `tm pr open` runs this check itself (exit 2); the grep covers the `gh`
 fallback and every later `gh pr edit`.
 
-🔴 **Check `command -v tm` first; if absent, use `gh pr create` with the same title, body and labels. Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
+🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
 contract against nine exact headings, verbatim (#7727): `## Outcome`,
 `## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Gates not run`,
