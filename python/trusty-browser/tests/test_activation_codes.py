@@ -776,6 +776,14 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
             },
             {"op": "page_click", "lease": lease, "request_id": "c", "ref": ref},
             {
+                "op": "page_press",
+                "lease": lease,
+                "request_id": "p",
+                "ref": ref,
+                "key": "Enter",
+                "modifiers": ["Shift"],
+            },
+            {
                 "op": "page_navigate",
                 "lease": lease,
                 "request_id": "n",
@@ -816,13 +824,15 @@ def test_audit_lines_carry_no_secret_path_or_page_text(short, clock):
                 "page_read",
                 "page_type",
                 "page_click",
+                "page_press",
                 "page_navigate",
                 "release",
             )
             for o in ("admitted", "ok")
         ]
         results = [e for e in lines if e["event"] == "operation"][1::2]
-        assert [e.get("tab") for e in results] == [7] * 6
+        assert [e.get("tab") for e in results] == [7] * 7
+        assert "Enter" not in text and "Shift" not in text  # #11286: no key is recorded
         assert stat.S_IMODE((rig.state / "audit.jsonl").stat().st_mode) == 0o600
 
     run(short, body)

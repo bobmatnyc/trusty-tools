@@ -31,6 +31,7 @@ CODE_TOOLS = {
     "page_click",
     "page_type",
     "page_scroll",
+    "page_press",
     "page_navigate",
     "page_upload",
     "page_downloads",
@@ -244,6 +245,7 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
+            ("page_press", {"lease": "l", "key": "Enter", "request_id": "r"}),
             (
                 "page_navigate",
                 {"lease": "l", "url": "https://a.test", "request_id": "r"},
@@ -672,6 +674,23 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 "page_scroll", lease=lease, to="bottom", request_id="s"
             )
             assert again == scrolled
+            # #11286: ref and modifiers are optional; the broker sends null and [].
+            pressed = await agent.ok(
+                "page_press", lease=lease, key="Enter", request_id="p"
+            )
+            assert pressed == {"ok": True, "tab": 7, "document": "d7-1"}
+            chord = await agent.ok(
+                "page_press",
+                lease=lease,
+                ref="1.0",
+                key="Tab",
+                modifiers=["Shift"],
+                request_id="p2",
+            )
+            assert chord["ok"]
+            assert [
+                (f["ref"], f["key"], f["modifiers"]) for f in rig.a.sent("page_press")
+            ] == [(None, "Enter", []), ("1.0", "Tab", ["Shift"])]
             landed = await agent.ok(
                 "page_navigate",
                 lease=lease,
@@ -683,6 +702,8 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 ("page_type", "1.0", "hello"),
                 ("page_click", "1.0", None),
                 ("page_scroll", "bottom", None, 1000),
+                ("page_press", None, None),
+                ("page_press", "1.0", None),
             ]
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert not broker.claims

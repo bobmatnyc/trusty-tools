@@ -138,6 +138,23 @@ def feed():
             browser.close()
 
 
+# #11286: key events and default actions, on the fixture the live check also serves.
+KEYS = Path(__file__).with_name("fixtures") / "keys.html"
+
+
+@pytest.fixture()
+def keys():
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch()
+        try:
+            tab = browser.new_page()
+            tab.set_content(KEYS.read_text())
+            tab.add_script_tag(path=str(SCRIPT))
+            yield tab
+        finally:
+            browser.close()
+
+
 # #11289: file selection and downloads against the loopback fixture.
 @pytest.fixture()
 def files_page():
@@ -257,3 +274,83 @@ def test_fixture_download_triggers_start_downloads(files_page):
         download = info.value
         assert download.suggested_filename == filename
         assert Path(download.path()).read_text() == body
+def press(tab, ref, key, modifiers=()):
+    return tab.evaluate("([r, k, m]) => TrustyPages.pagePress(r, k, m)", [ref, key, list(modifiers)])
+
+
+def log(tab):
+    """The fixture's page log since the last call."""
+    return tab.evaluate("() => window.keyLog.splice(0)")
+
+
+def test_type_emits_key_events_and_enter_submits_the_form(keys):
+    refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
+    assert keys.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [refs["User"], "aB\n"]) == {"ok": True}
+    assert log(keys) == [
+        "focus @user",
+        "keydown a @user", "keypress a @user", "keyup a @user",
+        "keydown Shift @user", "keydown Shift+B @user", "keypress Shift+B @user", "keyup Shift+B @user",
+        "keyup Shift @user",
+        # Implicit submission clicks the form's default button, as a browser does.
+        "keydown Enter @user", "keypress Enter @user", "click @submit", "submit user=aB", "keyup Enter @user",
+    ]
+    assert keys.evaluate("user.value") == "aB"
+
+
+def test_press_tab_and_shift_tab_follow_the_focus_order(keys):
+    refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
+    keys.evaluate("window.codes = []; addEventListener('keydown', e => codes.push([e.key, e.code, e.keyCode]))")
+    assert press(keys, refs["First"], "Tab") == {"ok": True}
+    assert log(keys) == ["focus @first", "keydown Tab @first", "focus @link", "keyup Tab @link"]
+    assert keys.evaluate("codes") == [["Tab", "Tab", 9]]
+    assert press(keys, None, "Tab") == {"ok": True}
+    assert keys.evaluate("document.activeElement.id") == "third"
+    log(keys)
+    assert press(keys, None, "Tab", ["Shift"]) == {"ok": True}
+    assert log(keys) == ["keydown Shift @third", "keydown Shift+Tab @third", "focus @link",
+                         "keyup Shift+Tab @link", "keyup Shift @link"]
+    # Backward from the first tabbable element wraps to the last one.
+    press(keys, refs["User"], "Tab", ["Shift"])
+    assert keys.evaluate("document.activeElement.id") == "editor"
+
+
+def test_press_edits_fields_and_honours_chords_and_prevent_default(keys):
+    refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
+
+    def value():
+        return keys.evaluate("third.value")
+
+    keys.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [refs["Third"], "abc"])
+    for key, expected in [("ArrowLeft", "abc"), ("Backspace", "ac"), ("Home", "ac"), ("Delete", "c"),
+                          ("End", "c"), ("d", "cd")]:
+        assert press(keys, None, key) == {"ok": True}
+        assert value() == expected, key
+    for chord in (["Control"], ["Meta"]):
+        press(keys, None, "a", chord)
+        press(keys, None, "x")
+        assert value() == "x", chord
+    log(keys)
+    press(keys, None, "Escape", ["Alt"])
+    assert log(keys) == ["keydown Alt @third", "keydown Alt+Escape @third", "keyup Alt+Escape @third",
+                         "keyup Alt @third"]
+    keys.evaluate("third.addEventListener('keydown', e => { if (e.key === 'q') e.preventDefault(); })")
+    press(keys, None, "q")
+    assert value() == "x"
+    # Enter inserts a line in a textarea and activates a link; Space types a space.
+    press(keys, refs["Notes"], "a")
+    press(keys, None, "Enter")
+    press(keys, None, "Space")
+    assert keys.evaluate("notes.value") == "a\n "
+    log(keys)
+    press(keys, refs["Link"], "Enter")
+    assert "click @link" in log(keys) and keys.evaluate("location.hash") == "#linked"
+    press(keys, refs["Editor"], "End")
+    press(keys, None, "!")
+    assert keys.evaluate("editor.innerText.trim()") == "hello!"
+
+
+def test_press_refuses_a_stale_ref_and_changes_nothing(keys):
+    refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
+    read(keys)
+    assert press(keys, refs["User"], "Enter") == {"error": "StaleElement"}
+    assert log(keys) == []
