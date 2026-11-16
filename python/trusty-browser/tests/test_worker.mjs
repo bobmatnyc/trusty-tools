@@ -94,7 +94,7 @@ const PAIRED = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, 
 
 // A browser with explicit tabs, a fake broker behind both native hosts, and the real worker table.
 async function codeFixture({session:seed = {}, held = false, tabs:layout, live = [], local:localSeed = ENROLLED,
-  ack, stamp:manifestStamp = null} = {}) {
+  ack, stamp:manifestStamp = null, incarnation:life = "epoch-1"} = {}) {
   const sent = [], ran = [], queries = [], updates = [], brokerCalls = [], alarms = [], badge = [];
   const timers = new Map(); let serial = 0, mintSerial = 0, generation = 0, reloads = 0;
   const tabs = new Map(Object.entries(layout || {
@@ -103,7 +103,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     9:{origin:"https://c.test", title:"Gamma", active:false},
   }).map(([id, t]) => [Number(id), {doc:"doc-" + id, ...t}]));
   const perms = {held, removed:0, requested:0};
-  const sessionStore = {incarnation:"epoch-1", ...structuredClone(seed)};
+  const sessionStore = {...(life === null ? {} : {incarnation:life}), ...structuredClone(seed)};
   const localStore = structuredClone(localSeed);
   const failures = {sessionSet:false};
   const listeners = new Set();
@@ -131,7 +131,9 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   const native = {onMessage:event(), onDisconnect:event(), postMessage(m){sent.push(m);}, disconnect(){this.closed = true;}};
   const chrome = {
     runtime:{id, onConnect:event(), onMessage:event(), onStartup:event(), onInstalled:event(),
-      getManifest:() => ({version:"0.2.0", version_name:"0.2.0+" + (manifestStamp ?? "")}), reload(){ reloads++; },
+      getManifest:() => ({version:"0.2.0", version_name:"0.2.0+" + (manifestStamp ?? "")}),
+      // Chrome clears storage.session on chrome.runtime.reload().
+      reload(){ reloads++; for (const k of Object.keys(sessionStore)) delete sessionStore[k]; },
       connectNative(name) {
         if (name === "com.trusty.browser") { native.closed = false; return native; }
         const port = {onMessage:event(), onDisconnect:event(), disconnect(){},
@@ -624,14 +626,30 @@ test("a stale asset stamp in the acknowledgement reloads the extension once", as
   const g = await codeFixture({stamp:"aaaaaaaaaaaaaaaa", ack:false});
   await g.handshake(undefined, {assets:"bbbbbbbbbbbbbbbb"});
   assert.equal(g.reloads(), 1);
-  assert.equal(g.sessionStore.reloaded_for, "bbbbbbbbbbbbbbbb");
-  // A reload that left the old assets in place never loops.
-  g.native.onDisconnect.fire();
-  await settle();
-  [...g.timers.values()].find(job => job.ms === 250).fn();
-  await settle();
+  assert.deepEqual(plain(g.sessionStore), {}, "the reload cleared storage.session");
+  // The reloaded worker still runs the old assets: a second mismatched ack must not reload again.
+  const after = await codeFixture({stamp:"aaaaaaaaaaaaaaaa", ack:false, incarnation:null, local:g.localStore});
+  await after.handshake(undefined, {assets:"bbbbbbbbbbbbbbbb"});
+  assert.equal(after.reloads(), 0);
+});
+
+test("a self-reload keeps the browser incarnation and a browser restart does not", async () => {
+  const g = await codeFixture({stamp:"aaaaaaaaaaaaaaaa", ack:false});
+  const before = g.sent.findLast(m => m.type === "hello").incarnation;
   await g.handshake(undefined, {assets:"bbbbbbbbbbbbbbbb"});
   assert.equal(g.reloads(), 1);
+  // The reloaded worker says hello with the same incarnation, so the broker rebinds the grant.
+  const reloaded = await codeFixture({stamp:"bbbbbbbbbbbbbbbb", ack:false, incarnation:null, local:g.localStore});
+  assert.equal(reloaded.sent.findLast(m => m.type === "hello").incarnation, before);
+  assert.equal(reloaded.localStore.reload_incarnation, undefined, "the handoff is consumed once");
+  // A later browser restart (storage.session empty, no handoff) gets a fresh incarnation.
+  const restarted = await codeFixture({ack:false, incarnation:null, local:reloaded.localStore});
+  assert.notEqual(restarted.sent.findLast(m => m.type === "hello").incarnation, before);
+  // A handoff left by a reload that never restarted the worker in time is not used.
+  const stale = await codeFixture({ack:false, incarnation:null,
+    local:{...ENROLLED, reload_incarnation:{incarnation:before, at:Date.now() - 120000}}});
+  assert.notEqual(stale.sent.findLast(m => m.type === "hello").incarnation, before);
+  assert.equal(stale.localStore.reload_incarnation, undefined);
 });
 
 test("page text, typed text and URLs stay inside the operation's reply", async () => {

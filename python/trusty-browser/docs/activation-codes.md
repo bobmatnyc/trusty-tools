@@ -226,7 +226,7 @@ The attached connection is the agent's session; every later frame uses it.
 Choosing among several connected profiles is explicit: `attach` without
 `profile` never picks one. `attach` writes the fail-closed `attach` audit
 line; a session that closes writes the best-effort `detach` line and leaves
-the grant standing. `{"op": "open", "workflow", "ticket"}` is unchanged.
+the grant standing. The workflow ticket `{"op": "open", "workflow", "ticket"}` is removed and answers `InvalidRequest`, like `redeem`.
 
 | Error | Cause |
 |---|---|
@@ -902,7 +902,7 @@ removed. `assets.py` publishes the extension into the real directory
 directory into a symlink to it (#11363); the published manifest carries the
 asset stamp in `version_name`, the hello acknowledgement carries it as
 `assets`, and a worker running another stamp calls `chrome.runtime.reload()`
-once per stamp.
+once per stamp. The once-per-stamp guard (`reloaded_for`) lives in `chrome.storage.local`, which the reload keeps. Just before the reload the worker writes a one-shot `reload_incarnation` handoff (incarnation and time) to `chrome.storage.local`; the next startup consumes and deletes it and reuses that incarnation when it is under 60 s old, so the broker rebinds the grant and no Connect click is needed. A browser restart finds no fresh handoff and gets a new incarnation, which ends the grant.
 
 ## Tests per side
 

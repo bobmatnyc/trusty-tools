@@ -366,15 +366,12 @@ class Broker(Pages):
                 await self.expire(codes.clock())
                 await write_frame(writer, {"ok": True, "profiles": self.profiles()})
                 return
-            if hello.get("op") == "attach":  # #11239: no code; Connect made the grant
-                session = await self.attach(hello)
-                ack = self.attached(session)
-            elif (
-                set(hello) != {"op", "workflow", "ticket"} or hello.get("op") != "open"
-            ):
+            if hello.get("op") != "attach":
+                # #11239: the workflow ticket `open`, like redeem, is removed; a leftover
+                # routes row must not open a grant-free, unaudited session.
                 raise Refusal("InvalidRequest")
-            else:
-                session, ack = Session(self.route(hello, False)), {"ok": True}
+            session = await self.attach(hello)  # no code; Connect made the grant
+            ack = self.attached(session)
             self.sessions[writer] = session
             await write_frame(writer, ack)
             while True:

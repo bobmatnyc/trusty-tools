@@ -26,8 +26,8 @@ CLOSED = (EOFError, asyncio.IncompleteReadError, ConnectionError)
 
 def test_profile_grant_never_reaches_another_profile(short, clock):
     async def body(rig):
-        _, travel = await rig.open(rig.beta)
-        beta_lease = (await travel({"op": "claim"}))["lease"]
+        _, travel = await session(rig, rig.beta)
+        beta_lease = (await travel({"op": "select", "tab": 7}))["lease"]
         seen = list(rig.b.frames)
         _, call = await session(rig)
         assert (await call({"op": "select", "tab": 7, "profile": rig.beta["profile"]}))[

@@ -10,10 +10,19 @@ let timer;
 let readyWaiters = [];
 
 const storageReady = chrome.storage.local.setAccessLevel({accessLevel:"TRUSTED_CONTEXTS"});
+// #11363: a self-reload clears storage.session; a one-shot storage.local handoff, written just before
+// chrome.runtime.reload() and consumed here, keeps the browser incarnation so the grant survives a
+// republish. A real browser restart finds no fresh handoff and gets a new incarnation.
+const HANDOFF_MS = 60000;
 const lifetime = (async () => {
   const {incarnation} = await chrome.storage.session.get("incarnation");
   if (incarnation) return incarnation;
-  const fresh = crypto.randomUUID();
+  await storageReady;
+  const {reload_incarnation:handoff} = await chrome.storage.local.get("reload_incarnation");
+  if (handoff !== undefined) await chrome.storage.local.remove("reload_incarnation");
+  const carried = typeof handoff?.incarnation === "string" && handoff.incarnation &&
+    Number.isFinite(handoff.at) && Date.now() - handoff.at >= 0 && Date.now() - handoff.at < HANDOFF_MS;
+  const fresh = carried ? handoff.incarnation : crypto.randomUUID();
   await chrome.storage.session.set({incarnation:fresh});
   return fresh;
 })();
@@ -54,13 +63,16 @@ function loadedAssets() {
   return typeof name === "string" && name.includes("+") ? name.split("+").pop() : null;
 }
 // Why: Chrome keeps running the code it loaded, so republished assets need a reload (#11363).
-// What: when the broker reports another stamp, reloads the extension at most once per stamp.
-// Test: tests/test_worker.mjs `a stale asset stamp in the acknowledgement reloads the extension once`.
+// What: when the broker reports another stamp, reloads the extension at most once per stamp. The guard is
+//   in storage.local, because the reload clears storage.session; the incarnation handoff is written last.
+// Test: tests/test_worker.mjs `a stale asset stamp in the acknowledgement reloads the extension once`,
+//   `a self-reload keeps the browser incarnation and a browser restart does not`.
 async function checkAssets(stamp) {
   if (typeof stamp !== "string" || !stamp || stamp === loadedAssets()) return;
-  const {reloaded_for:done} = await chrome.storage.session.get("reloaded_for");
+  const {reloaded_for:done} = await chrome.storage.local.get("reloaded_for");
   if (done === stamp) return;
-  await chrome.storage.session.set({reloaded_for:stamp});
+  await chrome.storage.local.set({reloaded_for:stamp});
+  await chrome.storage.local.set({reload_incarnation:{incarnation:await lifetime, at:Date.now()}});
   chrome.runtime.reload();
 }
 function schedule() {

@@ -541,6 +541,10 @@ def test_removed_enroll_and_code_ops_are_refused(short, clock):
         ] == "InvalidRequest"
         redeem = {"op": "redeem", "code": "tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA"}
         assert (await rig.once("agent.sock", redeem))["error"] == "InvalidRequest"
+        # A leftover routes row's ticket opens no grant-free, unaudited session.
+        ticket = {"op": "open", "workflow": "alpha", "ticket": rig.alpha["ticket"]}
+        assert await rig.once("agent.sock", ticket) == {"ok": False, "error": "InvalidRequest"}
+        assert not rig.broker.sessions
         assert not rig.broker.grants and rig.outcomes("mint") == []
 
     run(short, body)
@@ -957,23 +961,6 @@ def test_audit_log_rotates_and_keeps_two(tmp_path, monkeypatch):
     assert all(
         p.stat().st_size < audit.ROTATE_BYTES + longest for p in tmp_path.iterdir()
     )
-
-
-def test_open_path_works_beside_a_connected_session(short, clock):
-    async def body(rig):
-        opened, workflow = await rig.open(rig.alpha)
-        assert opened == {"ok": True}
-        _, coded = await session(rig)
-        held = await workflow({"op": "claim"})
-        assert (await coded({"op": "select", "tab": 7}))["error"] == "TabClaimed"
-        assert (await workflow({"op": "release", "lease": held["lease"]}))["ok"]
-        mine = await coded({"op": "select", "tab": 7})
-        assert (await workflow({"op": "claim"}))["error"] == "TabClaimed"
-        assert (await coded({"op": "page_read", "lease": mine["lease"]}))["ok"]
-        assert (await coded({"op": "claim"}))["error"] == "InvalidRequest"
-        assert (await workflow({"op": "tabs"}))["error"] == "InvalidRequest"
-
-    run(short, body)
 
 
 def test_the_worker_offline_quiet_matches_the_reconnect_grace():
