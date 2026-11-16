@@ -20,8 +20,8 @@ use anyhow::{Context as _, Result, bail};
 use colored::Colorize;
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 use trusty_common::linux_lifecycle::{
-    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, SignalDelivery, StopOutcome,
-    StoppedSignal,
+    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, ProcessTable, SignalDelivery,
+    StopOutcome, StoppedSignal,
 };
 
 /// The executable the module spawns from the install dir and requires of the
@@ -131,23 +131,26 @@ pub async fn start() -> Result<()> {
 
 /// `trusty-memory restart` on Linux (D1, P-b).
 ///
-/// What: [`restart_with`] through the kernel.
+/// What: [`restart_with`] through the kernel and `/proc`.
 /// Test: `restart_report_names_a_survivor_and_starts_nothing`.
 pub async fn restart() -> Result<()> {
-    restart_with(&descriptor()?, &KernelDelivery).await
+    restart_with(&descriptor()?, &KernelDelivery, &ProcessTable::system()).await
 }
 
-/// [`restart`] with the descriptor and signal delivery supplied.
+/// [`restart`] with the descriptor, signal delivery and process table supplied.
 ///
 /// What: `start.lock` held across the stop and the start; any stop error is
-/// returned before a spawn, and `NotRunning` proceeds to the start.
+/// returned before a spawn, and `NotRunning` proceeds to the start. The
+/// module's scans read `table`.
 /// Test: `restart_report_names_a_survivor_and_starts_nothing`.
 pub(crate) async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
+    // #11085: injectable so a test never scans the host's processes.
+    table: &ProcessTable,
 ) -> Result<()> {
     let _lock = take_start_lock().await?;
-    restart_report(lc::restart_with(desc, delivery).await)
+    restart_report(lc::restart_with_table(desc, delivery, table).await)
 }
 
 /// The exit status of a stop: `Ok(true)` stopped, `Ok(false)` never returned.

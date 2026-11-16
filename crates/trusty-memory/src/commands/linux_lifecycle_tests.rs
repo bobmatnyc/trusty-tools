@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
-    LifecycleError, PinnedProcess, Signal, SignalDelivery, StopOutcome, StoppedSignal,
+    LifecycleError, PinnedProcess, ProcessTable, Signal, SignalDelivery, StopOutcome, StoppedSignal,
 };
 
 use super::*;
@@ -236,6 +236,21 @@ fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) 
     child
 }
 
+/// A process table under `dir` holding only `pids`, each a link to its real
+/// `/proc` entry.
+///
+/// Why: #11085 — a scan of the live `/proc` fails closed on a host
+/// trusty-memory daemon whose environ it cannot read, which failed these
+/// tests on such a host.
+fn own_procs(dir: &std::path::Path, pids: &[u32]) -> ProcessTable {
+    std::fs::create_dir_all(dir).expect("proc table dir");
+    for pid in pids {
+        std::os::unix::fs::symlink(format!("/proc/{pid}"), dir.join(pid.to_string()))
+            .expect("link the proc entry");
+    }
+    ProcessTable::at(dir)
+}
+
 // AC2: a survivor fails the restart, names its pid, and nothing is started.
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_report_names_a_survivor_and_starts_nothing() {
@@ -258,7 +273,9 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     desc.install_dir = tmp.path().join("bin");
     desc.stop_grace = Duration::from_millis(300);
     desc.kill_wait = Duration::from_millis(500);
-    let result = restart_with(&desc, &DropKill).await;
+    // #11085: the scan sees the fixture (the serving pid it leaves out) only.
+    let procs = own_procs(&run.path().join("proc"), &[fixture.id()]);
+    let result = restart_with(&desc, &DropKill, &procs).await;
     // SAFETY: as above.
     unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
 
@@ -301,8 +318,10 @@ async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
     ]
     .map(String::from)
     .to_vec();
-    let stop = stop_report(lc::stop(&desc).await);
-    let restart = restart_with(&desc, &KernelDelivery).await;
+    // #11085: nothing of this test runs, so the scan sees an empty table.
+    let procs = own_procs(&run.path().join("proc"), &[]);
+    let stop = stop_report(lc::stop_with_table(&desc, &KernelDelivery, &procs).await);
+    let restart = restart_with(&desc, &KernelDelivery, &procs).await;
     // SAFETY: as above.
     unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
 
