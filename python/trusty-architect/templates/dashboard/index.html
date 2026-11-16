@@ -2202,7 +2202,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       }
       if (j) ["briefs_abs", "tailnet", "console"].forEach((k) => { if (typeof j[k] === "string") d[k] = j[k]; });
       if (j && j.features && typeof j.features === "object") d.features = j.features;   /* #10571: which optional backends this install has */
-      if (j && Array.isArray(j.warnings)) d.warnings = j.warnings.filter((w) => typeof w === "string" && w);   /* #10606: e.g. Python below 3.11 */
+      if (j && Array.isArray(j.warnings)) d.warnings = j.warnings.filter((w) => typeof w === "string" && w);   /* #10606: e.g. tmux not on PATH */
     } catch (_) { /* no config: architect mode */ }
     return d;
   })();
