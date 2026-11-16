@@ -3516,3 +3516,20 @@ fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
         "tm-session-resume.md must name the tmux-session resolution route"
     );
 }
+
+/// Why: #11390 — ops agents name the account and run its whoami before any
+/// permission ask, so no approval is requested of the wrong account.
+/// What: `BASE-OPS.md` carries the marker, and the rule names the whoami step
+/// and the stop-and-report outcome. Mutation: delete the marker and this fails.
+/// Test: this test.
+#[test]
+fn base_ops_names_the_account_before_a_permission_ask_11390() {
+    let base_ops = agent("BASE-OPS.md");
+    assert!(has_rule(base_ops, "base-ops/account-whoami"));
+    let rule = rule_sentence(base_ops, "base-ops/account-whoami").expect("rule text");
+    assert!(rule.contains("whoami"), "{rule}");
+    assert!(
+        plain(base_ops).contains("never log in or switch accounts"),
+        "BASE-OPS.md must say a mismatch is reported, not fixed"
+    );
+}

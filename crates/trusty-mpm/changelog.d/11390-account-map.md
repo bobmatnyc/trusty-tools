@@ -1,0 +1,3 @@
+Added
+- A dispatch of an ops agent (`role: ops`) now carries a `## Project accounts` block listing each service's account name, scope and read-only verify command from `[accounts.<service>]` in `.trusty-mpm.toml`, plus the rule to name the account and run its verify command before any permission request (#11390).
+- `.trusty-mpm.toml` accepts `[accounts.<service>]` with `account`, `scope` and `verify`. A value outside the allowed characters, shaped like a credential, or under an unknown key rejects only the account map, never the rest of the file, and the block then says the map was rejected (#11390).
