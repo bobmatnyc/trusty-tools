@@ -442,6 +442,18 @@ pub static TMUX_KILL_SERVER: GuardPolicy = policy(
     CHECKPOINT_FIRST,
 );
 
+/// #11353 (owner ruling Dq7): the Fable cap, applied where a live subagent's
+/// model is decided — the PM's `Agent`/`Task` dispatch.
+pub static FABLE_CAP: GuardPolicy = policy(
+    "GP-051",
+    "fable-cap",
+    "Only PM, engineer (incl. any *-engineer) and research agents run on a Fable model; any other dispatch that would is refused.",
+    "#11353 (owner ruling Dq7)",
+    PM_ARCHITECT,
+    false,
+    GUARD_STAYS_ON,
+);
+
 /// Every entry once, in id order.
 pub static POLICIES: &[&GuardPolicy] = &[
     &POLICY_LOOKUP_MISS,
@@ -495,4 +507,5 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &EGRESS_GUARD_PANIC,
     &GUARD_TIMEOUT,
     &TMUX_KILL_SERVER,
+    &FABLE_CAP,
 ];

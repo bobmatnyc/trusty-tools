@@ -103,6 +103,8 @@ mod tm_hook_pm_guard_build_lease;
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+// #11353: GP-051 on the live `Agent` dispatch path.
+mod tm_hook_pm_guard_fable_11353;
 // #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
 mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
