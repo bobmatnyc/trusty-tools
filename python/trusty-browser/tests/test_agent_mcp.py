@@ -27,6 +27,7 @@ CODE_TOOLS = {
     "browser_disconnect",
     "browser_tabs",
     "browser_select",
+    "browser_switch",
     "page_read",
     "page_find",
     "page_click",
@@ -252,6 +253,7 @@ def test_tools_before_connect_answer_not_connected(short, clock):
         for name, args in [
             ("browser_tabs", {}),
             ("browser_select", {"tab": 7}),
+            ("browser_switch", {"lease": "l"}),
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
@@ -298,6 +300,17 @@ def test_connect_needs_no_code_and_attaches_to_the_connected_profile(short, cloc
             lease = claim["lease"]
             read = await agent.ok("page_read", lease=lease)
             assert read["text"] == "page-secret-text"
+            clicked = await agent.ok(
+                "page_click", lease=lease, ref="1.0", request_id="c"
+            )
+            assert clicked == {"ok": True, "tab": 7, "document": "d7-1"}
+            # #11293: a profile grant may bring its own leased tab to the front.
+            assert await agent.ok("browser_switch", lease=lease) == {
+                "ok": True,
+                "tab": 7,
+                "window": 1,
+                "focused": True,
+            }
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             frame = await agent.refused("browser_connect")
             assert frame["error"] == "AlreadyConnected"

@@ -31,6 +31,11 @@ def add_page_tools(
         return call("select", tab=tab)
 
     @server.tool()
+    def browser_switch(lease: str) -> dict[str, Any]:
+        """Bring the leased tab to the front of its window and focus that window."""
+        return call("switch", lease=lease)
+
+    @server.tool()
     def page_read(
         lease: str,
         scope_ref: str | None = None,
