@@ -287,6 +287,14 @@ fn hook_rewrites_using_stdin_hook_event_name_without_env_var() {
     );
 }
 
+/// `rewritten` with its `tm compress` stage pointed at the built binary.
+fn with_the_built_tm(rewritten: &str) -> String {
+    rewritten.replace(
+        "| tm compress",
+        &format!("| '{}' compress", common::tm_bin()),
+    )
+}
+
 /// Run `script` under `/bin/sh` in `cwd` with the real `tm` on the filter
 /// stage and a scratch `$HOME`: (exit code, stdout, stderr).
 fn run_sh_in(cwd: &std::path::Path, script: &str) -> (Option<i32>, String, String) {
@@ -315,7 +323,6 @@ fn hook_rewrites_a_cd_prefixed_command_and_it_runs_like_the_original() {
     let root = root.path().canonicalize().expect("canonical temp dir");
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "alpha\nhi there\n").expect("write");
-    let bin = common::tm_bin();
     let rewrite = |command: &str| {
         let payload = serde_json::json!({
             "tool_name": "Bash",
@@ -334,7 +341,7 @@ fn hook_rewrites_a_cd_prefixed_command_and_it_runs_like_the_original() {
             rewritten.starts_with(&format!("{prefix}&& {{ ")),
             "the `cd` stays in front of the group: {rewritten}"
         );
-        rewritten.replace("| tm compress", &format!("| '{bin}' compress"))
+        with_the_built_tm(&rewritten)
     };
 
     let ok = "cd sub && grep -n hi marker.txt";
@@ -366,4 +373,72 @@ fn hook_stays_silent_for_a_cd_chain_it_does_not_accept() {
         let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
         assert_eq!(stdout.trim(), "", "{command:?} must not be rewritten");
     }
+}
+
+/// #10973: a safe chain is rewritten by the real binary, its compressed run
+/// appends a `compress` row for the session, and the 💸 footer then shows a
+/// number instead of `—`. On the pre-fix commit `tm hook` printed nothing for
+/// the chain, no row was written, and the footer read `💸—`.
+#[test]
+fn a_compressed_chain_writes_a_row_and_the_footer_shows_a_number() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let root = root.path().canonicalize().expect("canonical temp dir");
+    std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+    let big: String = (0..400)
+        .map(|i| format!("line {i} hit some repeated text value\n"))
+        .collect();
+    std::fs::write(root.join("sub/big.txt"), big).expect("write");
+    let command = "cd sub && grep -n hit big.txt && grep -c hit big.txt | head -5";
+    let payload = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": command },
+        "cwd": root.display().to_string(),
+    });
+    let stdout = run_hook_with_stdin("PreToolUse", &payload.to_string());
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("the safe chain must be rewritten ({e}): {stdout:?}"));
+    let rewritten = parsed["hookSpecificOutput"]["updatedInput"]["command"]
+        .as_str()
+        .expect("a rewritten command");
+    let rewritten = with_the_built_tm(rewritten);
+
+    let session = "footer-10973";
+    let home = tempfile::tempdir().expect("scratch home");
+    let mut shell = std::process::Command::new("/bin/sh");
+    common::isolate_spawned_tm(&mut shell, home.path());
+    let out = shell
+        .args(["-c", &rewritten])
+        .current_dir(&root)
+        .env(trusty_agents_common::compress::ENV_COMPRESS_NO_RTK, "1")
+        .env(
+            trusty_mpm::core::savings::CLAUDE_CODE_SESSION_ID_ENV,
+            session,
+        )
+        .output()
+        .expect("run the rewrite");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    let mut status = common::tm_command_in(home.path())
+        .arg("statusline")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn tm statusline");
+    let input = serde_json::json!({ "session_id": session }).to_string();
+    status
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = status.wait_with_output().expect("wait for tm statusline");
+    let footer = String::from_utf8(output.stdout).expect("utf8");
+    let figure = footer
+        .split('\u{1f4b8}')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no savings segment: {footer:?}"));
+    assert!(
+        figure.starts_with(|c: char| c.is_ascii_digit()),
+        "the footer must show a number, got {footer:?}"
+    );
 }

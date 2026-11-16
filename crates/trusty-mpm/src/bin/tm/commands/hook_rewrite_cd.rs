@@ -175,9 +175,9 @@ mod tests {
             "cd a",
             "cd a git diff",
             // a second `&&`, or another operator after the first
-            "cd a && git diff && ls -la",
+            // #10973: `cd a && git diff && ls -la` and `cd a && git diff | head`
+            // are now compressed (`a_safe_chain_is_compressed`).
             "cd a && git diff; ls -la",
-            "cd a && git diff | head",
             "cd a && git diff > out.txt",
             // subshells, substitution, expansion, redirects or operators in DIR
             "(cd a && git diff)",

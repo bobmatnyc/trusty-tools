@@ -135,7 +135,9 @@ mod tests {
             // D60: one leading `cd <dir> && ` compresses; a second `cd` or a pipe does not.
             ("cd /x && grep -n foo big.txt", SkipReason::Compressed),
             ("cd a && cd b && git diff", SkipReason::Chained),
-            ("git diff | head", SkipReason::Chained),
+            // #10973: a safe chain compresses; `||` stays refused.
+            ("git diff | head", SkipReason::Compressed),
+            ("git diff || head", SkipReason::Chained),
             ("grep -c '#include' f.c", SkipReason::Unwrappable),
             ("make build", SkipReason::Orchestrator),
             ("cat -n src/lib.rs", SkipReason::SourceRead),
