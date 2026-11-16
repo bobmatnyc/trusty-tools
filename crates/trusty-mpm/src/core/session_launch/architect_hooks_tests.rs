@@ -193,6 +193,16 @@ fn architect_hook_settings_golden() {
             turn_task.to_string().contains(" hook --turn-task"),
             "{turn_task}"
         );
+        // #10575: likewise the PM's completion-evidence group, its last `Stop` group.
+        let evidence = expected["hooks"]["Stop"]
+            .as_array_mut()
+            .expect("Stop")
+            .pop()
+            .expect("the PM completion-evidence group");
+        assert!(
+            evidence.to_string().contains(" hook --completion-evidence"),
+            "{evidence}"
+        );
         expected["hooks"]["PreToolUse"][0] = json!({
             "matcher": "",
             "hooks": [guard_entry(true)]

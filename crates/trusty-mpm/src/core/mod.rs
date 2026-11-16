@@ -450,6 +450,11 @@ pub mod standalone;
 pub mod standing_rules;
 // #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg's `current`.
 pub mod turn_task_stamp;
+// #10575: the completion-standard check behind `tm hook --completion-evidence`.
+pub mod completion_evidence;
+#[cfg(test)]
+#[path = "completion_evidence_tests.rs"]
+mod completion_evidence_tests;
 // #10574: the stale-copy guard's config and observed-version store.
 pub mod stale_copy;
 #[cfg(test)]

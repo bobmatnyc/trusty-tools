@@ -374,6 +374,8 @@ pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
 pub(crate) mod standing_rules_hook;
+// #10575: `tm hook --completion-evidence`, the warn-only Stop check.
+pub(crate) mod completion_evidence_hook;
 // #10574: the stale-copy guard for registered artifacts.
 pub(crate) mod pm_guard_stale_copy;
 // #11398: `tm hook --turn-task`, the PM's per-turn task stamp.

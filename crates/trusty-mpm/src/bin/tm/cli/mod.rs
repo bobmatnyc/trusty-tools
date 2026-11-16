@@ -638,6 +638,11 @@ pub(crate) enum Command {
         /// Always exits 0.
         #[arg(long)]
         turn_task: bool,
+        /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
+        /// final message claims completion with no evidence map or sets an
+        /// invented size target. Warn-only; always exits 0.
+        #[arg(long)]
+        completion_evidence: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
