@@ -345,8 +345,9 @@ fn compiled_prompt_location(dest: &Path) -> Option<(&Path, String)> {
     let harness = sessions.parent()?;
     let root = harness.parent()?;
     let named = |p: &Path, want: &str| p.file_name().is_some_and(|n| n == want);
-    if !(named(dest, COMPILED_PROMPT_FILE) && named(sessions, SESSIONS_DIR))
-        || !named(harness, HARNESS_DIR)
+    if !(named(dest, COMPILED_PROMPT_FILE)
+        && named(sessions, SESSIONS_DIR)
+        && named(harness, HARNESS_DIR))
     {
         return None;
     }
