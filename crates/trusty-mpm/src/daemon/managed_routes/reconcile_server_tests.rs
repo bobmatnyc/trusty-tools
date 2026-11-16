@@ -137,3 +137,29 @@ fn a_same_named_default_session_never_keeps_a_workspace_record_live_11222() {
         "stopped"
     );
 }
+
+/// #11071: a Stopped record whose workspace-server pane runs its runtime
+/// reads `active`, as `tm tui` shows it; the default server's idle shell of a
+/// same-named session never decides it.
+#[test]
+fn a_stopped_record_running_on_its_workspace_server_reads_active_11071() {
+    use crate::daemon::orphan_gc::AlwaysIdleProbe;
+    use crate::session_manager::tmux_route::observe_workspace_servers;
+    let tmux = ServersTmux::new(
+        server(&[], &["zsh"]),
+        &[("tm-ws-x", server(&["tm-ws-pm"], &["claude"]))],
+    );
+    let records = vec![ws_record(ManagedSessionState::Stopped)];
+    let mut summaries: Vec<_> = records.iter().map(record_to_summary).collect();
+    let live = observe_workspace_servers(&tmux, Default::default());
+    let attached = std::collections::HashSet::new();
+    super::summary::reconcile_live_state_with_probe(
+        &tmux,
+        &mut summaries,
+        &records,
+        &live,
+        &attached,
+        &AlwaysIdleProbe,
+    );
+    assert_eq!(summaries[0].state, "active");
+}

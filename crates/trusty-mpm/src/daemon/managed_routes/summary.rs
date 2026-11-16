@@ -275,8 +275,8 @@ pub(super) fn reconcile_live_state_with_probe<L: LiveSet + ?Sized>(
 /// `stopped`. A wrong idle answer is worse than the old one: `tm` then plans a
 /// `Restart`, and the daemon's reuse branch types a second launch into a
 /// session whose runtime still runs.
-/// What: lists every pane of `record.tmux_name` with
-/// [`ManagedTmuxDriver::session_panes`] and answers `true` only when the
+/// What: lists every pane of `record.tmux_name` on the record's own server
+/// (#11071) with [`ManagedTmuxDriver::session_panes`] and answers `true` only when the
 /// listing is non-empty, every pane carries a shell pid, and
 /// [`crate::daemon::runtime_reap::session_has_live_pane`] finds no live pane
 /// (the reaper's own test: an idle shell with no live child under `probe`).
@@ -287,14 +287,19 @@ pub(super) fn reconcile_live_state_with_probe<L: LiveSet + ?Sized>(
 /// `reconcile_live_state_suspended_runtime_keeps_a_stopped_record_active_8241`,
 /// `reconcile_live_state_split_pane_runtime_keeps_a_stopped_record_active_8241`,
 /// `reconcile_live_state_pane_list_error_keeps_a_stopped_record_active_8241`
-/// in `super::tests`.
+/// in `super::tests`;
+/// `a_stopped_record_running_on_its_workspace_server_reads_active_11071`.
 fn session_runtime_exited(
     tmux: &dyn ManagedTmuxDriver,
     record: &SessionRecord,
     probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
 ) -> bool {
     let name = &record.tmux_name;
-    let Ok(panes) = tmux.session_panes(name) else {
+    // #11071: the record's own server's panes; an unroutable one answers false.
+    let Ok(own) = route(tmux, record) else {
+        return false;
+    };
+    let Ok(panes) = own.session_panes(name) else {
         return false;
     };
     !panes.is_empty()
