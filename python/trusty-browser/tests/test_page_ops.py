@@ -534,7 +534,7 @@ def test_page_select_refusals_keep_the_lease_and_are_not_journaled(short, clock,
         reply = await call(mutating_frame("page_select", lease))
         assert reply == {"ok": False, "error": error, "tab": 7}
         assert len(rig.broker.claims) == 1
-        assert not rig.broker.grants[ack["grant"]].session.journal
+        assert not rig.broker.grants[ack["grant"]].sessions[0].journal
         del rig.a.refuse["page_select"]
         assert (await call(mutating_frame("page_select", lease)))["changed"] is True
 
