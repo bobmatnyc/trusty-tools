@@ -365,12 +365,18 @@ test("page_type and page_press inject pageKeys with their action", async () => {
     {tab:7, func:"pageKeys", args:[null, "press", {key:"Enter", modifiers:["Shift","Control"]}]},
     {tab:7, func:"pageKeys", args:["1.0", "press", {key:"a", modifiers:[]}]},
   ]);
-  // #11352: text the field refused is relayed with its counts, never as ok.
-  f.tabs.get(7).result = {error:"TextDropped", reason:"maxlength", typed:6, accepted:3, entered:"abc"};
-  const dropped = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"abcdef"});
-  assert.deepEqual(dropped, {id:dropped.id, ok:false, error:"TextDropped", tab:7, reason:"maxlength", typed:6,
-    accepted:3, entered:"abc"});
-  f.tabs.get(7).result = {error:"TextDropped", reason:"other", typed:6, accepted:3, entered:"abc"};
+  // #11352: a maxlength cut is a success with its counts; text a handler refused is relayed, never as ok.
+  f.tabs.get(7).result = {ok:true, truncated:true, typed:6, accepted:3};
+  const cut = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"abcdef"});
+  assert.deepEqual(cut, {id:cut.id, ok:true, email, tab:7,
+    result:{document:"doc-7", truncated:true, typed:6, accepted:3}});
+  f.tabs.get(7).result = {ok:true, truncated:true, typed:6};
+  assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"x"})).error,
+    "OutcomeUnknown");
+  f.tabs.get(7).result = {error:"TextDropped", typed:3, accepted:2, entered:"ab"};
+  const dropped = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"axb"});
+  assert.deepEqual(dropped, {id:dropped.id, ok:false, error:"TextDropped", tab:7, typed:3, accepted:2, entered:"ab"});
+  f.tabs.get(7).result = {error:"TextDropped", typed:"3", accepted:2, entered:"ab"};
   assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"x"})).error,
     "OutcomeUnknown");
   delete f.tabs.get(7).result;

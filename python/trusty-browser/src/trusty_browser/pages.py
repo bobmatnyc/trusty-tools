@@ -130,6 +130,8 @@ FOUND = {
     "truncated": (bool,),
 }
 DONE = {"document": (str,)}
+# #11352: a page_type or page_press whose text a maxlength cut still succeeds, with its counts.
+CUT = {**DONE, "truncated": (bool,), "typed": (int,), "accepted": (int,)}
 SCROLL_TO = ("down", "up", "top", "bottom", "element")
 SCROLLED = {
     **DONE,
@@ -496,6 +498,8 @@ class Pages(Grants):
             where = host(claim.origin)
         else:
             shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
+            if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
+                shape = CUT
             result = shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL

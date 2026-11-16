@@ -567,20 +567,39 @@ def test_page_find_relays_matches_and_refuses_bad_terms(short, clock):
     run(short, body)
 
 
+def test_maxlength_cut_is_a_truncated_success_and_journaled(short, clock):
+    # #11352: a maxlength cut answers ok with truncated, typed and accepted; a retry types nothing.
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        cut = {"document": "d7-1", "truncated": True, "typed": 6, "accepted": 3}
+        rig.a.refuse["page_type"] = cut
+        frame = {**mutating_frame("page_type", lease, "m"), "ref": "1.0", "text": "abcdef"}
+        assert await call(frame) == {"ok": True, "tab": 7, **cut}
+        del rig.a.refuse["page_type"]
+        assert await call(frame) == {"ok": True, "tab": 7, **cut}
+        assert len(rig.a.sent("page_type")) == 1
+        rig.a.refuse["page_type"] = {**cut, "typed": "6"}
+        bad = {**frame, "request_id": "n"}
+        assert await call(bad) == {"ok": False, "error": "BrowserRefused"}
+
+    run(short, body)
+
+
 def test_text_dropped_is_relayed_with_its_counts_and_journaled(short, clock):
     # #11352: the typing ran, so the refusal keeps the lease and a retry types nothing.
     async def body(rig):
         ack, call = await session(rig)
         lease = (await call({"op": "select", "tab": 7}))["lease"]
-        dropped = {"error": "TextDropped", "tab": 7, "reason": "maxlength", "typed": 6,
-                   "accepted": 3, "entered": "abc"}  # fmt: skip
+        dropped = {"error": "TextDropped", "tab": 7, "typed": 3, "accepted": 2,
+                   "entered": "ab"}  # fmt: skip
         rig.a.refuse["page_type"] = dropped
         frame = {
             "op": "page_type",
             "lease": lease,
             "request_id": "t",
             "ref": "1.0",
-            "text": "abcdef",
+            "text": "axb",
         }
         assert await call(frame) == {"ok": False, **dropped}
         assert len(rig.broker.claims) == 1

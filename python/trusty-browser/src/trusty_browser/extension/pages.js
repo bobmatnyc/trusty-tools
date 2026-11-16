@@ -35,7 +35,8 @@ globalThis.TrustyPages = (() => {
   //   `input.key` with `input.modifiers`. Each press fires modifier keydowns, keydown, keypress (printable
   //   keys and Enter without Control or Meta), the default action unless a handler cancelled, keyup, then
   //   modifier keyups. Self-contained: Chrome serializes this one function into the page.
-  //   Text a field refuses (maxlength, or a cancelled beforeinput) answers TextDropped (#11352).
+  //   Text a maxlength cut answers ok with truncated, typed and accepted; text a cancelled beforeinput
+  //   refused answers TextDropped with typed, accepted and entered (#11352).
   // Test: tests/test_pages_dom.py `test_type_emits_key_events_and_enter_submits_the_form`,
   //   `test_type_reports_text_dropped_by_maxlength_or_a_cancelled_beforeinput`,
   //   `test_press_tab_and_shift_tab_follow_the_focus_order`,
@@ -58,8 +59,8 @@ globalThis.TrustyPages = (() => {
     const MODS = {Control:["ControlLeft",17,"ctrlKey"], Alt:["AltLeft",18,"altKey"],
       Shift:["ShiftLeft",16,"shiftKey"], Meta:["MetaLeft",91,"metaKey"]};
     const raw = new Map(), dirty = new Set();
-    // #11352: text a maxlength or a cancelled beforeinput refused, so the reply never claims it landed.
-    const drops = {reason:null, typed:0, entered:""};
+    // #11352: text a maxlength cut or a cancelled beforeinput refused, so the reply never claims it landed.
+    const drops = {cut:false, cancelled:false, typed:0, entered:""};
     let whole = null;
     const describe = (key, shift) => {
       if (key === "Space" || key === " ") return {key:" ", code:"Space", keyCode:32, text:" "};
@@ -93,9 +94,9 @@ globalThis.TrustyPages = (() => {
     function edit(node, from, to, data, inputType) {
       const value = current(node), next = value.slice(0, from) + data + value.slice(to);
       if (data) drops.typed += [...data].length;
-      if (data && node.maxLength >= 0 && next.length > node.maxLength) { drops.reason ||= "maxlength"; return; }
+      if (data && node.maxLength >= 0 && next.length > node.maxLength) { drops.cut = true; return; }
       if (!node.dispatchEvent(new InputEvent("beforeinput", {bubbles:true, cancelable:true, composed:true,
-        inputType, data:data || null}))) { if (data) drops.reason ||= "cancelled"; return; }
+        inputType, data:data || null}))) { if (data) drops.cancelled = true; return; }
       drops.entered += data;
       const proto = node.localName === "textarea" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
       Object.getOwnPropertyDescriptor(proto, "value").set.call(node, next);
@@ -245,9 +246,12 @@ globalThis.TrustyPages = (() => {
     if (el && typeof el.focus === "function") el.focus();
     const active = document.activeElement;
     let node = el ?? (active && active !== document.body ? active : document.body);
-    // The reply: ok, or TextDropped naming the first cause, the characters typed and those that landed.
-    const outcome = () => drops.reason === null ? {ok:true} : {error:"TextDropped", reason:drops.reason,
-      typed:drops.typed, accepted:[...drops.entered].length, entered:drops.entered.slice(0, 8192)};
+    // The reply: ok (with the counts when maxlength cut the text), or TextDropped when a page handler refused text.
+    const outcome = () => {
+      const accepted = [...drops.entered].length;
+      if (drops.cancelled) return {error:"TextDropped", typed:drops.typed, accepted, entered:drops.entered.slice(0, 8192)};
+      return drops.cut ? {ok:true, truncated:true, typed:drops.typed, accepted} : {ok:true};
+    };
     if (action === "press") {
       pressOne(input.key, input.modifiers, node);
       return outcome();
@@ -401,8 +405,8 @@ globalThis.TrustyPages = (() => {
 TrustyPages.commands = deps => {
   const {pageProbe, pageInspect, pageClick, pageKeys, pageScroll, pageSelect, pageSetFiles, urlAllowed, keyAllowed,
     modifiersAllowed} = TrustyPages;
-  // #11352: a TextDropped refusal also says why and what landed.
-  const RELAYED = ["tab","origin","access","document","reason","typed","accepted","entered"];
+  // #11352: a TextDropped refusal also says what was typed and what landed.
+  const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","audit","closed","expired"];
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
@@ -501,12 +505,17 @@ TrustyPages.commands = deps => {
     }
     const result = hit?.result, error = result?.error;
     if (["StaleElement","NotEditable","NotSelectable","NoSuchOption"].includes(error)) throw refuse(error, {tab:req.tab});
-    if (error === "TextDropped" && ["maxlength","cancelled"].includes(result.reason) && Number.isInteger(result.typed) &&
-        Number.isInteger(result.accepted) && typeof result.entered === "string") {
-      throw refuse(error, {tab:req.tab, reason:result.reason, typed:result.typed, accepted:result.accepted,
+    const counts = Number.isInteger(result?.typed) && Number.isInteger(result?.accepted);
+    if (error === "TextDropped" && counts && typeof result.entered === "string") {
+      throw refuse(error, {tab:req.tab, typed:result.typed, accepted:result.accepted,
         entered:result.entered.slice(0, 8192)});
     }
     if (result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
+    // #11352: maxlength cut the typed text; the typing still succeeded.
+    if (func === pageKeys && result.truncated === true) {
+      if (!counts) throw refuse("OutcomeUnknown");
+      return {document:req.document, truncated:true, typed:result.typed, accepted:result.accepted};
+    }
     if (func !== pageSelect) return {document:req.document, ...(result.view || {})};
     // #11285: a select reply must say whether the value moved; anything else cannot show what ran.
     if (typeof result.changed !== "boolean" || typeof result.value !== "string") throw refuse("OutcomeUnknown");

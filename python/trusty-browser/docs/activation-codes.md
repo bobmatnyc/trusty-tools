@@ -262,9 +262,9 @@ answers `InvalidRequest`.
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
 | `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
-| `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
+| `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str; when a `maxlength` cut the text also `truncated` true, `typed` int, `accepted` int (#11352) |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
-| `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
+| `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
 | `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
@@ -421,9 +421,9 @@ Envelope:
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
 | `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
-| `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
+| `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
-| `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
+| `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |

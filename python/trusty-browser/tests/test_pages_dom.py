@@ -240,7 +240,7 @@ def test_type_sets_values_and_refuses_non_editable(page):
 
 
 def test_type_reports_text_dropped_by_maxlength_or_a_cancelled_beforeinput(page):
-    # #11352: a field that refuses typed text never answers ok.
+    # #11352: a maxlength cut answers ok with its counts; a cancelled beforeinput never answers ok.
     page.evaluate("""() => {
       const short = Object.assign(document.createElement("input"), {id:"short", maxLength:3});
       short.setAttribute("aria-label", "Short");
@@ -251,14 +251,13 @@ def test_type_reports_text_dropped_by_maxlength_or_a_cancelled_beforeinput(page)
     }""")
     result = read(page)
     typed = lambda name, text: page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [ref_of(result, name), text])
-    assert typed("Short", "abcdef") == {"error": "TextDropped", "reason": "maxlength", "typed": 6,
-                                        "accepted": 3, "entered": "abc"}
+    # A maxlength cut succeeds and says how much landed.
+    assert typed("Short", "abcdef") == {"ok": True, "truncated": True, "typed": 6, "accepted": 3}
     assert page.evaluate("short.value") == "abc"
-    assert typed("Guard", "axb") == {"error": "TextDropped", "reason": "cancelled", "typed": 3,
-                                     "accepted": 2, "entered": "ab"}
+    assert typed("Guard", "axb") == {"error": "TextDropped", "typed": 3, "accepted": 2, "entered": "ab"}
     assert page.evaluate("guard.value") == "ab"
     assert page.evaluate("([r, k]) => TrustyPages.pagePress(r, k, [])", [ref_of(result, "Short"), "z"]) == {
-        "error": "TextDropped", "reason": "maxlength", "typed": 1, "accepted": 0, "entered": ""}
+        "ok": True, "truncated": True, "typed": 1, "accepted": 0}
     assert typed("Short", "ab") == {"ok": True}
 
 

@@ -184,9 +184,9 @@ MUTATING = {
     "page_navigate",
     "page_upload",
 }
-# #11352: TextDropped also carries reason, typed, accepted and entered.
+# #11352: TextDropped also carries typed, accepted and entered.
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
-REFUSAL_FIELDS += ("reason", "typed", "accepted", "entered")
+REFUSAL_FIELDS += ("typed", "accepted", "entered")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
 PAGE_ERRORS = UNFINISHED | {
