@@ -125,12 +125,63 @@ fn env_passthrough_carries_the_token_file_path() {
         target.desc.env_passthrough.iter().any(|n| n == name),
         "{name} must reach the console"
     );
-    // The exception list holds that PATH and the webhook secret, nothing else.
+    // The exception list holds that PATH, the webhook secret and the two
+    // owner-approved credential pointers, nothing else.
     assert_eq!(
         CREDENTIAL_NAMED_EXCEPTIONS,
-        [name, crate::webhook::SECRET_ENV]
+        [
+            name,
+            crate::webhook::SECRET_ENV,
+            "SSH_AUTH_SOCK",
+            "AWS_CONFIG_FILE"
+        ]
     );
     assert!(EXCLUDED.iter().all(|(excluded, _)| *excluded != name));
+}
+
+// #11085 (owner decisions 2026-11-16 and the final review): the ssh agent
+// socket and the AWS config file pass as documented credential pointers, the
+// trusty-secrets server tunables and the AWS SDK settings pass, and
+// `AWS_ROLE_ARN` without its token-file partner does not.
+#[test]
+fn env_passthrough_applies_the_owner_decisions_and_final_review_lists() {
+    let target = target_in(Path::new("/tmp/c"), None);
+    let passed = |name: &str| target.desc.env_passthrough.iter().any(|n| n == name);
+    let excluded = |name: &str| EXCLUDED.iter().any(|(e, _)| *e == name);
+    // Collected, so one run names every wrong entry.
+    let mut wrong: Vec<String> = Vec::new();
+    for name in [
+        "SSH_AUTH_SOCK",
+        "AWS_CONFIG_FILE",
+        "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS",
+        "TRUSTY_SECRETS_IDLE_TIMEOUT_SECS",
+        "AWS_ENDPOINT_URL",
+        "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+        "AWS_USE_FIPS_ENDPOINT",
+        "AWS_USE_DUALSTACK_ENDPOINT",
+        "AWS_EC2_METADATA_DISABLED",
+        "AWS_MAX_ATTEMPTS",
+        "AWS_RETRY_MODE",
+    ] {
+        if !passed(name) {
+            wrong.push(format!("{name} must reach the console"));
+        }
+    }
+    for name in [
+        "AWS_ROLE_ARN",
+        "TRUSTY_SECRETS_SOCKET",
+        "TRUSTY_SECRETS_INDEX_DIR",
+    ] {
+        if passed(name) || !excluded(name) {
+            wrong.push(format!("{name} must be excluded with a reason"));
+        }
+    }
+    for name in ["SSH_AUTH_SOCK", "AWS_CONFIG_FILE"] {
+        if !CREDENTIAL_NAMED_EXCEPTIONS.contains(&name) {
+            wrong.push(format!("{name} must be a documented exception"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 // #11085 (owner decision): `serve` reads the webhook secret from its

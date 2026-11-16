@@ -12,9 +12,13 @@
 //! auto-start), and trusty-common's `passthrough::MEMORY_DAEMON` and
 //! `passthrough::SEARCH_DAEMON`, the lists those daemons' own verbs pass.
 //! [`EXCLUDED`] and [`EXCLUDED_PREFIXES`] name what is deliberately left out.
+//! Limit: the verbs spawn the console with cwd `/`, so a daemon its bridges
+//! start loads only the user-level `~/.env.local` tier, never the project tier
+//! a shell-started console finds from its own cwd.
 //! Test: `env_passthrough_carries_security_and_data_names_and_no_credential`,
 //! `env_passthrough_carries_the_token_file_path`,
 //! `env_passthrough_carries_the_webhook_secret`,
+//! `env_passthrough_applies_the_owner_decisions_and_final_review_lists`,
 //! `console_passthrough_carries_every_memory_and_search_name`,
 //! `every_clap_env_name_a_bridge_daemon_crate_reads_is_passed_or_excluded`.
 
@@ -83,9 +87,12 @@ pub(crate) const ENV_PASSTHROUGH: &[&str] = &[
 /// runtime paths read, and the trusty-common modules they call: literal and
 /// constant `env::var` / `var_os` reads, helper lookups over the process
 /// environment (`resolve_store_root(&process_env, ..)`, `from_env_with`), clap
-/// `env = "NAME"` attributes, and the AWS SDK chain behind the Bedrock
-/// provider. Credentials, credential pointers, caller-session identity and
-/// hook-time toggles are in [`EXCLUDED`] instead.
+/// `env = "NAME"` attributes, the non-credential AWS SDK settings behind the
+/// Bedrock provider (profile, region, config file, endpoints, FIPS and
+/// dual-stack, IMDS, retries), the `trusty-secrets serve` tunables, and the
+/// ssh agent socket. Credentials, every other credential pointer,
+/// caller-session identity and hook-time toggles are in [`EXCLUDED`] instead;
+/// the passed credential pointers are in [`CREDENTIAL_NAMED_EXCEPTIONS`].
 pub(crate) const BRIDGE_DAEMONS: &[&str] = &[
     // #11085: trusty-analyze `Cli::facts_path`, a clap `env` attribute. The
     // auto-start spawns plain `serve`, so this is the only route to the store.
@@ -169,16 +176,30 @@ pub(crate) const BRIDGE_DAEMONS: &[&str] = &[
     // #11085: tmux's `default-shell` for a tmux server the daemon starts.
     "SHELL",
     // #11085: the Bedrock provider. `core::sm::providers::resolve` probes the
-    // profile and role flags and the AWS-hosted markers; the aws-config
-    // default chain (trusty-common `chat::bedrock_impl`) picks the profile,
-    // region and config file from these.
+    // profile flag and the AWS-hosted markers; the aws-config default chain
+    // (trusty-common `chat::bedrock_impl`) picks the profile, region, config
+    // file, endpoint, FIPS and dual-stack mode, IMDS use and retries from these.
+    // `AWS_CONFIG_FILE` is a documented credential-pointer exception.
     "AWS_PROFILE",
-    "AWS_ROLE_ARN",
     "AWS_DEFAULT_REGION",
     "AWS_CONFIG_FILE",
     "AWS_EXECUTION_ENV",
     "ECS_CONTAINER_METADATA_URI",
     "ECS_CONTAINER_METADATA_URI_V4",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_BEDROCK_RUNTIME",
+    "AWS_USE_FIPS_ENDPOINT",
+    "AWS_USE_DUALSTACK_ENDPOINT",
+    "AWS_EC2_METADATA_DISABLED",
+    "AWS_MAX_ATTEMPTS",
+    "AWS_RETRY_MODE",
+    // #11085: the mpm daemon spawns `trusty-secrets serve` with its own
+    // environment (`mcp_backend`); that server's cache and idle tunables.
+    "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS",
+    "TRUSTY_SECRETS_IDLE_TIMEOUT_SECS",
+    // #11085 (owner decision): the mpm daemon's ssh git fetches keep the ssh
+    // agent, as under a shell-started console. A documented exception.
+    "SSH_AUTH_SOCK",
 ];
 
 /// The descriptor's passthrough: every list above, first occurrence kept.
@@ -204,15 +225,22 @@ pub(crate) fn effective_passthrough() -> Vec<String> {
     names
 }
 
-/// Passed names that look like credentials, each passed on purpose.
+/// Passed credentials and credential pointers, each passed on purpose.
 ///
 /// Why: #11085 — the passthrough refuses every KEY/TOKEN/SECRET/PASSWORD
-/// name. The token-file PATH must reach the console, or a restarted console
-/// drops its TCP token gate (#11074, #11089); the webhook secret must, or it
-/// refuses every webhook (owner decision).
+/// name and every other credential pointer. These four pass:
+/// - `TRUSTY_CONSOLE_TOKEN_FILE`: the token-file PATH, or a restarted console
+///   drops its TCP token gate (#11074, #11089).
+/// - `GITHUB_WEBHOOK_SECRET`: or the console refuses every webhook (owner).
+/// - `SSH_AUTH_SOCK`: bridge-started daemons keep ssh agent access (owner).
+/// - `AWS_CONFIG_FILE`: the Bedrock provider finds its profile (owner).
 #[cfg(test)]
-pub(crate) const CREDENTIAL_NAMED_EXCEPTIONS: &[&str] =
-    &["TRUSTY_CONSOLE_TOKEN_FILE", "GITHUB_WEBHOOK_SECRET"];
+pub(crate) const CREDENTIAL_NAMED_EXCEPTIONS: &[&str] = &[
+    "TRUSTY_CONSOLE_TOKEN_FILE",
+    "GITHUB_WEBHOOK_SECRET",
+    "SSH_AUTH_SOCK",
+    "AWS_CONFIG_FILE",
+];
 
 /// Names the console or its bridges' daemons read that are deliberately NOT
 /// passed, with why.
@@ -230,11 +258,11 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     ("TRUSTY_BUGREPORT_GITHUB_TOKEN", "credential (mpm)"),
     (
         "TRUSTY_BUGREPORT_TOKEN_FILE",
-        "credential-named; only the two exceptions pass",
+        "credential-named; only the documented exceptions pass",
     ),
     (
         "TRUSTY_BUGREPORT_GH_APP_KEY_FILE",
-        "credential-named; only the two exceptions pass",
+        "credential-named; only the documented exceptions pass",
     ),
     ("TMUX", "the caller's pane, not the daemon's"),
     ("TMUX_PANE", "the caller's pane, not the daemon's"),
@@ -281,19 +309,29 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
     ("AWS_SESSION_TOKEN", "credential (AWS SDK)"),
     (
         "AWS_WEB_IDENTITY_TOKEN_FILE",
-        "credential pointer; only the two exceptions pass",
+        "credential pointer; only the documented exceptions pass",
     ),
     (
         "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
-        "credential pointer; only the two exceptions pass",
+        "credential pointer; only the documented exceptions pass",
     ),
     (
         "AWS_SHARED_CREDENTIALS_FILE",
-        "credential pointer; only the two exceptions pass",
+        "credential pointer; only the documented exceptions pass",
     ),
     (
-        "SSH_AUTH_SOCK",
-        "credential pointer (the ssh agent); only the two exceptions pass",
+        "AWS_ROLE_ARN",
+        "useless without the excluded AWS_WEB_IDENTITY_TOKEN_FILE, yet \
+         `ProviderRegistry::from_env` counts it as AWS credentials, so \
+         auto_precedence would pick Bedrock and fail instead of OpenRouter",
+    ),
+    (
+        "TRUSTY_SECRETS_SOCKET",
+        "secrets: the console's secrets client dials the fixed socket",
+    ),
+    (
+        "TRUSTY_SECRETS_INDEX_DIR",
+        "secrets: the console's secrets client dials the fixed socket",
     ),
     ("GH_ENTERPRISE_TOKEN", "credential (mpm)"),
     ("GITHUB_ENTERPRISE_TOKEN", "credential (mpm)"),
