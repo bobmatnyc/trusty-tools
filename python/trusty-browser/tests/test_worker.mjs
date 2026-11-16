@@ -218,8 +218,13 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     await settle();
     return plain(sent.findLast(m => m.id === id));
   };
-  const popup = msg => new Promise(resolve =>
-    chrome.runtime.onMessage.fire(msg, {id, url:"chrome-extension://" + id + "/setup.html"}, resolve)).then(async reply => {
+  // #11239: a listener that does not claim the message never replies; Chrome then rejects
+  // sendMessage, so the fixture rejects too instead of leaving the test pending forever.
+  const popup = msg => new Promise((resolve, reject) => {
+    if (chrome.runtime.onMessage.fire(msg, {id, url:"chrome-extension://" + id + "/setup.html"}, resolve) !== true) {
+      reject(new Error("The message port closed before a response was received."));
+    }
+  }).then(async reply => {
     await settle();
     return plain(reply);
   });
@@ -323,7 +328,7 @@ test("page_type and page_press inject pageKeys with their action", async () => {
 // #11285: page_select relays whether the value moved and refuses without a usable answer.
 test("page_select relays changed and value, and its refusals", async () => {
   const f = await codeFixture();
-  const {grant} = await mintTab(f, 7);
+  const {grant} = await connectGrant(f);
   const choose = value => f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value});
   f.tabs.get(7).result = {ok:true, changed:false, value:"keep"};
   assert.deepEqual((await choose("other")).result, {document:"doc-7", changed:false, value:"keep"});
@@ -423,7 +428,7 @@ test("navigate reports access, document and settled", async () => {
 
 test("read during an unsettled navigation never returns the old document", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true}}});
-  const {grant} = await f.popup({type:"mint", scope:"tab", tab:7});
+  const {grant} = await f.popup({type:"connect"});
   const t = f.tabs.get(7);
   t.slow = true;
   const nav = f.native.onMessage.fire({id:"nav", op:"page_navigate", email, grant, tab:7, url:"https://a.test/slow"});
