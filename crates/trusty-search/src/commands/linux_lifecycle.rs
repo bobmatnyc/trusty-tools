@@ -21,8 +21,8 @@ use std::time::Duration;
 use anyhow::{bail, Context as _, Result};
 use colored::Colorize;
 use trusty_common::linux_lifecycle::{
-    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, SignalDelivery, StopOutcome,
-    StoppedSignal,
+    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, ProcessTable, SignalDelivery,
+    StopOutcome, StoppedSignal,
 };
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 
@@ -173,31 +173,34 @@ pub(crate) async fn start(
 
 /// `trusty-search restart` on Linux (D1, P-b, AC9).
 ///
-/// What: [`restart_with`] with the real systemd probe and the kernel.
+/// What: [`restart_with`] with the real systemd probe, the kernel and `/proc`.
 /// Test: `restart_refuses_while_the_systemd_unit_is_active`.
 pub async fn restart(args: LifecycleArgs) -> Result<()> {
     let desc = descriptor(args.data_dir.as_deref(), None)?;
-    restart_with(&desc, &KernelDelivery, || {
+    restart_with(&desc, &KernelDelivery, &ProcessTable::system(), || {
         systemd_unit_active(Path::new("systemctl"))
     })
     .await
 }
 
-/// [`restart`] with the descriptor, signal delivery and systemd probe supplied.
+/// [`restart`] with the descriptor, signal delivery, process table and systemd
+/// probe supplied.
 ///
 /// What: refuses before any signal while `probe` reports the unit active;
-/// otherwise the module's restart — any stop error is returned before a spawn,
-/// and `NotRunning` proceeds to the start.
+/// otherwise the module's restart, scanning `table` — any stop error is
+/// returned before a spawn, and `NotRunning` proceeds to the start.
 /// Test: `restart_refuses_while_the_systemd_unit_is_active`,
 /// `restart_names_a_survivor_and_starts_nothing`,
 /// `restart_of_a_daemon_that_is_not_running_goes_on_to_start`.
 pub(crate) async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
+    // #11085: injectable so a test never scans the host's processes.
+    table: &ProcessTable,
     probe: impl Fn() -> Option<UnitScope>,
 ) -> Result<()> {
     refuse_under_systemd(probe)?;
-    restart_report(lc::restart_with(desc, delivery).await)
+    restart_report(lc::restart_with_table(desc, delivery, table).await)
 }
 
 /// Which systemd scope runs the unit, when one does.

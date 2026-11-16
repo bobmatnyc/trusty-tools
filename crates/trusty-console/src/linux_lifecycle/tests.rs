@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use trusty_common::linux_lifecycle::{PinnedProcess, Signal};
+use trusty_common::linux_lifecycle::{PinnedProcess, ProcessTable, Signal};
 
 use super::addr_pid::{AddrLookup, Listener, lookup, parse_listener};
 use super::env::{CREDENTIAL_NAMED_EXCEPTIONS, EXCLUDED, EXCLUDED_PREFIXES};
@@ -696,14 +696,31 @@ impl Roots {
     }
 }
 
+/// A process table under `dir` holding only `pids`, each a link to its real
+/// `/proc` entry.
+///
+/// Why: #11085 — a scan of the live `/proc` fails closed on a host
+/// trusty-console whose environ it cannot read, which failed these tests on
+/// such a host. The fixture stays visible where the test needs the scan to
+/// find it.
+fn own_procs(dir: &Path, pids: &[u32]) -> ProcessTable {
+    std::fs::create_dir_all(dir).expect("proc table dir");
+    for pid in pids {
+        std::os::unix::fs::symlink(format!("/proc/{pid}"), dir.join(pid.to_string()))
+            .expect("link the proc entry");
+    }
+    ProcessTable::at(dir)
+}
+
 // AC10: the socket bind failed, so only `http_addr` finds the console.
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_finds_the_console_through_http_addr_when_its_socket_bind_failed() {
     let (root, data, dir) = fixture_root();
     let mut fixture = spawn_fixture(root.path(), &dir, &data, &[]);
     let target = target_in(&dir, Some(&data.clone().into_os_string()));
+    let procs = own_procs(&root.path().join("proc"), &[fixture.id()]);
 
-    let result = stop_with(&target, &KernelDelivery).await;
+    let result = stop_with(&target, &KernelDelivery, &procs).await;
     let exited = fixture.try_wait().expect("try_wait").is_some();
     let _ = fixture.kill();
     let _ = fixture.wait();
@@ -729,8 +746,9 @@ async fn stop_with_an_unserved_console_and_no_http_addr_signals_nothing() {
     let (root, data, dir) = fixture_root();
     let mut fixture = spawn_fixture(root.path(), &dir, &data, &[FIXTURE_NO_ADDR_ENV]);
     let target = target_in(&dir, Some(&data.clone().into_os_string()));
+    let procs = own_procs(&root.path().join("proc"), &[fixture.id()]);
 
-    let result = stop_with(&target, &KernelDelivery).await;
+    let result = stop_with(&target, &KernelDelivery, &procs).await;
     let alive = fixture.try_wait().expect("try_wait").is_none();
     let _ = fixture.kill();
     let _ = fixture.wait();
@@ -753,13 +771,15 @@ async fn stop_on_not_running_with_a_foreign_listener_in_http_addr_is_an_error() 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     std::fs::write(&target.addr_file, addr.to_string()).expect("write");
+    // No console of this test runs, so the scan sees an empty table.
+    let procs = own_procs(&dir.path().join("proc"), &[]);
 
-    let err = stop_with(&target, &KernelDelivery)
+    let err = stop_with(&target, &KernelDelivery, &procs)
         .await
         .expect_err("a foreign listener must not read as not running");
     assert!(format!("{err:#}").contains(BINARY), "{err:#}");
     drop(listener);
-    let (outcome, _) = stop_with(&target, &KernelDelivery)
+    let (outcome, _) = stop_with(&target, &KernelDelivery, &procs)
         .await
         .expect("a dead address is not running");
     assert_eq!(outcome, StopOutcome::NotRunning);
@@ -777,7 +797,8 @@ async fn restart_through_http_addr_reports_a_survivor_and_starts_nothing() {
     target.desc.stop_grace = Duration::from_millis(300);
     target.desc.kill_wait = Duration::from_millis(500);
 
-    let result = restart_report(restart_with(&target, &DropKill).await);
+    let procs = own_procs(&root.path().join("proc"), &[fixture.id()]);
+    let result = restart_report(restart_with(&target, &DropKill, &procs).await);
     let alive = fixture.try_wait().expect("try_wait").is_none();
     let _ = fixture.kill();
     let _ = fixture.wait();
@@ -805,9 +826,10 @@ async fn stop_on_nothing_running_exits_1_and_restart_reaches_start() {
     ];
     target.desc.spawn_args = args.map(String::from).to_vec();
 
-    let stop = stop_report(stop_with(&target, &KernelDelivery).await).expect_err("exit 1");
+    let procs = own_procs(&root.path().join("proc"), &[]);
+    let stop = stop_report(stop_with(&target, &KernelDelivery, &procs).await).expect_err("exit 1");
     assert!(format!("{stop:#}").contains("No trusty-console running"));
-    let restart = restart_report(restart_with(&target, &KernelDelivery).await);
+    let restart = restart_report(restart_with(&target, &KernelDelivery, &procs).await);
     let shown = format!("{:#}", restart.expect_err("the fixture exits at boot"));
     assert!(
         shown.contains("exited before serving the socket"),

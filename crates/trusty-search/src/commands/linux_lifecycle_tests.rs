@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
-    LifecycleError, PinnedProcess, Signal, SignalDelivery, StopOutcome, StoppedSignal,
+    LifecycleError, PinnedProcess, ProcessTable, Signal, SignalDelivery, StopOutcome, StoppedSignal,
 };
 
 use super::*;
@@ -400,6 +400,35 @@ fn spawn_sh_sibling(links: &Path, argv: &[&str], env: &[(&str, &OsString)]) -> C
     }
 }
 
+/// Show the scan `pid`'s real `/proc` entry in the table under `table`.
+///
+/// Why: #11085 — a test that scans the live `/proc` changes result with the
+/// host's processes; the table holds only the test's own.
+fn link_proc(table: &Path, pid: u32) {
+    std::os::unix::fs::symlink(format!("/proc/{pid}"), table.join(pid.to_string()))
+        .expect("link the proc entry");
+}
+
+/// A fake entry for a `trusty-search start --foreground` daemon of another
+/// uid whose `environ` cannot be read: the host process shape that failed
+/// AC6 with `InstanceUnreadable` (#11085). The scan must skip it by its uid.
+fn foreign_daemon_entry(table: &Path, pid: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = table.join(pid.to_string());
+    std::fs::create_dir_all(&dir).expect("foreign entry");
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() }.wrapping_add(1);
+    let status =
+        format!("Name:\t{BINARY}\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+    std::fs::write(dir.join("status"), status).expect("status");
+    let cmdline = format!("/usr/local/bin/{BINARY}\0start\0--foreground\0");
+    std::fs::write(dir.join("cmdline"), cmdline).expect("cmdline");
+    std::os::unix::fs::symlink(format!("/usr/local/bin/{BINARY}"), dir.join("exe")).expect("exe");
+    let environ = dir.join("environ");
+    std::fs::write(&environ, b"").expect("environ");
+    std::fs::set_permissions(&environ, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+}
+
 fn reap(mut child: Child) -> bool {
     let alive = child.try_wait().expect("try_wait").is_none();
     let _ = child.kill();
@@ -465,8 +494,9 @@ async fn restart_refuses_while_the_systemd_unit_is_active() {
         sent: AtomicUsize::new(0),
         deliver_term: true,
     };
-    let system = restart_with(&desc, &recorder, || Some(UnitScope::System)).await;
-    let user = restart_with(&desc, &recorder, || Some(UnitScope::User)).await;
+    let procs = ProcessTable::system();
+    let system = restart_with(&desc, &recorder, &procs, || Some(UnitScope::System)).await;
+    let user = restart_with(&desc, &recorder, &procs, || Some(UnitScope::User)).await;
     let alive = reap(fixture);
     let system = format!("{:#}", system.expect_err("refused"));
     assert!(system.contains("sudo systemctl restart trusty-search.service"));
@@ -502,7 +532,8 @@ async fn restart_names_a_survivor_and_starts_nothing() {
         sent: AtomicUsize::new(0),
         deliver_term: true,
     };
-    let result = restart_with(&desc, &recorder, || None).await;
+    // The `--data-dir` liveness arg keeps every host daemon out of the scan.
+    let result = restart_with(&desc, &recorder, &ProcessTable::system(), || None).await;
     let alive = reap(fixture);
     let shown = format!(
         "{:#}",
@@ -533,7 +564,7 @@ async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
     ];
     desc.spawn_args = fixture_args.map(String::from).to_vec();
     let stop = stop_report(lc::stop(&desc).await);
-    let restart = restart_with(&desc, &KernelDelivery, || None).await;
+    let restart = restart_with(&desc, &KernelDelivery, &ProcessTable::system(), || None).await;
     let stop = stop.expect_err("stop on a stopped daemon exits 1");
     assert!(format!("{stop:#}").contains("No daemon running"));
     let restart = format!("{:#}", restart.expect_err("the fixture exits at boot"));
@@ -549,11 +580,18 @@ async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
 // to the default data dir, tells it apart: `stop` of the default instance
 // answers NotRunning, and `restart` of a HEALTHY default daemon stops it and
 // starts a new one that serves, leaving the sibling running.
+// #11085: the scan reads a table of this test's own processes plus a
+// foreign-uid trusty-search daemon hiding its environ, so no host process
+// can change the result.
 #[tokio::test(flavor = "multi_thread")]
 #[serial_test::parallel]
 async fn ac6_a_sibling_without_trusty_data_dir_no_longer_blocks_the_default_instance() {
     let links = links_dir();
     let run = tempfile::tempdir().expect("run dir");
+    let procs_dir = run.path().join("proc");
+    std::fs::create_dir(&procs_dir).expect("proc table dir");
+    foreign_daemon_entry(&procs_dir, 4_194_401);
+    let procs = ProcessTable::at(&procs_dir);
     let sibling_dir = run.path().join("sibling");
     // A live daemon's data dir exists; an unresolvable path stays undecided.
     std::fs::create_dir(&sibling_dir).expect("sibling dir");
@@ -578,7 +616,8 @@ async fn ac6_a_sibling_without_trusty_data_dir_no_longer_blocks_the_default_inst
         &[(trusty_common::DATA_DIR_OVERRIDE_ENV, &key)],
     );
     wait_exec(sibling.id());
-    let stopped = lc::stop(&desc).await;
+    link_proc(&procs_dir, sibling.id());
+    let stopped = lc::stop_with_table(&desc, &KernelDelivery, &procs).await;
 
     // A healthy default daemon on the descriptor's socket. A spawned one gets
     // only the descriptor's environment, so the fixture keys go in
@@ -604,10 +643,11 @@ async fn ac6_a_sibling_without_trusty_data_dir_no_longer_blocks_the_default_inst
         Some(&socket),
     );
     let old_pid = old.id();
-    let restarted = restart_with(&desc, &KernelDelivery, || None).await;
+    link_proc(&procs_dir, old_pid);
+    let restarted = restart_with(&desc, &KernelDelivery, &procs, || None).await;
     let old_alive = reap(old);
     let serving = std::os::unix::net::UnixStream::connect(&socket).is_ok();
-    let cleanup = lc::stop(&desc).await;
+    let cleanup = lc::stop_with_table(&desc, &KernelDelivery, &procs).await;
     let sibling_alive = reap(sibling);
 
     assert_eq!(

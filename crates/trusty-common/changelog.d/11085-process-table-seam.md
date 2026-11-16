@@ -1,0 +1,2 @@
+Added
+- `linux_lifecycle::ProcessTable` and `stop_with_table`, `start_with_table`, `restart_with_table`, `stop_pid_with_table` and `restart_pid_with_table`: the liveness scan can read an injected process table instead of `/proc`, so a lifecycle test no longer depends on the host's processes (#11085). The existing entry points scan `/proc` as before, and a stop by pid still reads its pinned process in the real `/proc`.

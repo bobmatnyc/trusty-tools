@@ -32,8 +32,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 use trusty_common::linux_lifecycle::{
-    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, RestartOutcome, SignalDelivery,
-    StartOutcome, StopOutcome, StoppedSignal,
+    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, ProcessTable, RestartOutcome,
+    SignalDelivery, StartOutcome, StopOutcome, StoppedSignal,
 };
 
 use self::addr_pid::AddrLookup;
@@ -130,7 +130,7 @@ pub(crate) fn target_for(
 /// Test: `stop_report_maps_each_outcome_to_its_exit_status`.
 pub async fn stop() -> Result<()> {
     let target = target()?;
-    let stopped = stop_report(stop_with(&target, &KernelDelivery).await)?;
+    let stopped = stop_report(stop_with(&target, &KernelDelivery, &ProcessTable::system()).await)?;
     if stopped {
         let _ = std::fs::remove_file(&target.addr_file);
     }
@@ -149,7 +149,7 @@ pub async fn start() -> Result<()> {
 ///
 /// Test: `restart_through_http_addr_reports_a_survivor_and_starts_nothing`.
 pub async fn restart() -> Result<()> {
-    restart_report(restart_with(&target()?, &KernelDelivery).await)
+    restart_report(restart_with(&target()?, &KernelDelivery, &ProcessTable::system()).await)
 }
 
 /// Stop through the socket, or through `http_addr` when the socket does not
@@ -158,15 +158,17 @@ pub async fn restart() -> Result<()> {
 /// What: the module's stop. On `NotRunning` or `RunningUnserved`, the
 /// `http_addr` lookup: a pid goes to `stop_pid_with`, which signals only this
 /// console. No file, or nothing listening, keeps the module's answer. A
-/// lookup error is an error.
+/// lookup error is an error. The module's scans read `table`.
 /// Test: `stop_finds_the_console_through_http_addr_when_its_socket_bind_failed`,
 /// `stop_with_an_unserved_console_and_no_http_addr_signals_nothing`,
 /// `stop_on_not_running_with_a_foreign_listener_in_http_addr_is_an_error`.
 pub(crate) async fn stop_with(
     target: &Target,
     delivery: &dyn SignalDelivery,
+    // #11085: injectable so a test never scans the host's processes.
+    table: &ProcessTable,
 ) -> Result<(StopOutcome, Route)> {
-    let unserved = match lc::stop_with(&target.desc, delivery).await {
+    let unserved = match lc::stop_with_table(&target.desc, delivery, table).await {
         Ok(StopOutcome::NotRunning) => None,
         Err(e @ LifecycleError::RunningUnserved { .. }) => Some(e),
         other => return Ok((other?, Route::Socket)),
@@ -174,7 +176,7 @@ pub(crate) async fn stop_with(
     // #11085 AC10: a console whose socket bind failed is reachable only here.
     match fallback_pid(target, unserved.as_ref())? {
         Some(pid) => Ok((
-            lc::stop_pid_with(&target.desc, pid, delivery).await?,
+            lc::stop_pid_with_table(&target.desc, pid, delivery, table).await?,
             Route::HttpAddr(pid),
         )),
         None => match unserved {
@@ -189,17 +191,19 @@ pub(crate) async fn stop_with(
 /// What: the module's restart, which starts a console that is not running
 /// (P-b). On `RunningUnserved`, a pid behind `http_addr` goes to
 /// `restart_pid_with`; with none, the error stands. Every stop error returns
-/// before a spawn.
+/// before a spawn. The module's scans read `table`.
 /// Test: `restart_through_http_addr_reports_a_survivor_and_starts_nothing`,
 /// `stop_on_nothing_running_exits_1_and_restart_reaches_start`.
 pub(crate) async fn restart_with(
     target: &Target,
     delivery: &dyn SignalDelivery,
+    // #11085: injectable so a test never scans the host's processes.
+    table: &ProcessTable,
 ) -> Result<(RestartOutcome, Route)> {
-    match lc::restart_with(&target.desc, delivery).await {
+    match lc::restart_with_table(&target.desc, delivery, table).await {
         Err(e @ LifecycleError::RunningUnserved { .. }) => match fallback_pid(target, Some(&e))? {
             Some(pid) => Ok((
-                lc::restart_pid_with(&target.desc, pid, delivery).await?,
+                lc::restart_pid_with_table(&target.desc, pid, delivery, table).await?,
                 Route::HttpAddr(pid),
             )),
             None => Err(e.into()),

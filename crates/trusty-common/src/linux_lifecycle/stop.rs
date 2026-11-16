@@ -12,7 +12,7 @@ use std::io;
 
 use tokio::time::Instant;
 
-use super::liveness::refuse_unserved_daemon;
+use super::liveness::{ProcessTable, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial, exe_name};
 use super::{
     DaemonDescriptor, LifecycleError, POLL_INTERVAL, PROBE_TIMEOUT, StoppedSignal, lock_is_free,
@@ -96,9 +96,26 @@ pub async fn stop_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<StopOutcome, LifecycleError> {
+    stop_with_table(desc, delivery, &ProcessTable::system()).await
+}
+
+/// [`stop_with`], with the scan reading `table` instead of `/proc` (#11085).
+///
+/// Why: a test whose descriptor a host process could match must not depend on
+/// the host's processes; see [`ProcessTable`].
+/// What: [`stop_with`]'s steps; only the scan on the "socket does not serve"
+/// path reads `table`. The socket's peer is still pinned and identified in
+/// the real `/proc`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn stop_with_table(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<StopOutcome, LifecycleError> {
     desc.validate()?;
     let pid = match dial(&desc.socket).await {
-        Dial::NotServing => return not_running(desc),
+        Dial::NotServing => return not_running(desc, table),
         Dial::Inconclusive => {
             return Err(LifecycleError::ProbeInconclusive {
                 socket: desc.socket.clone(),
@@ -116,11 +133,11 @@ pub async fn stop_with(
     // own: nothing was signalled, so the answer is `NotRunning` once settled.
     let Some(target) = PinnedProcess::open(pid)? else {
         settle(desc, pid).await?;
-        return not_running(desc);
+        return not_running(desc, table);
     };
     if !identity_holds(desc, &target)? {
         settle(desc, pid).await?;
-        return not_running(desc);
+        return not_running(desc, table);
     }
     terminate(desc, delivery, &target).await
 }
@@ -153,8 +170,11 @@ pub(crate) async fn terminate(
 /// The socket does not serve: `NotRunning`, unless a lock signal's lock is
 /// held or a process still runs the daemon.
 // #11098: "socket absent ⇒ not running" let restart start a second daemon.
-fn not_running(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError> {
-    refuse_unserved_daemon(desc)?;
+fn not_running(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<StopOutcome, LifecycleError> {
+    refuse_unserved_daemon(desc, table)?;
     Ok(StopOutcome::NotRunning)
 }
 
