@@ -3301,6 +3301,25 @@ fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
     );
 }
 
+/// #8566: the rule named a `docs/research/` block that does not exist; the real
+/// Claude Code check refuses a subagent `Write` by file name, so a research
+/// agent asked for `findings.md` gave up and the PM saved the file itself.
+#[test]
+fn research_names_the_real_report_file_name_block_8566() {
+    let body = agent("research.md");
+    let rule = body
+        .lines()
+        .find(|line| line.contains("**Return Findings as Text**"))
+        .expect("research.md carries the report-carries-findings rule");
+    assert!(
+        !rule.contains("subagent writes under `docs/research/`"),
+        "research.md still names the nonexistent docs/research/ block"
+    );
+    for name in ["FINDINGS*.md", "REPORT*.md", "research-findings.md"] {
+        assert!(rule.contains(name), "research.md rule is missing `{name}`");
+    }
+}
+
 /// #8022: closing a sibling tab dropped the web-qa agent's MCP tab group,
 /// and the agent had no recovery step — a `computer` call on a still-open
 /// tab in that group then failed with a stale cross-extension error.
