@@ -688,3 +688,71 @@ fn project_default_model_still_loses_to_more_specific_settings() {
         "a per-agent pin must beat the project default"
     );
 }
+
+// #11353: Fable is reserved for PM, engineer and research roles.
+
+#[test]
+fn fable_gate_allows_pm_engineer_research() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(
+        dir.path(),
+        "[models]\ndefault = \"fable\"\n[models.agents]\npm = \"fable\"\n",
+    );
+    assert_eq!(
+        crate::core::model_inject::resolve_pm_model(&cfg, None),
+        "claude-fable-5-2"
+    );
+    assert_eq!(
+        resolve_agent_model_for_role(&cfg, "rust-engineer", Some("engineer"), Some("fable"), None),
+        "claude-fable-5-2"
+    );
+    // A language-engineer name with no known role is still an engineer.
+    assert_eq!(
+        resolve_agent_model(&cfg, "rust-engineer", Some("fable"), None),
+        "claude-fable-5-2"
+    );
+    assert_eq!(
+        resolve_agent_model_for_role(&cfg, "research", Some("research"), Some("fable"), None),
+        "claude-fable-5-2"
+    );
+}
+
+#[test]
+fn fable_gate_caps_other_roles_to_opus() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(
+        dir.path(),
+        "[models.agents]\nqa = \"fable\"\nticketing = \"claude-fable-5-2\"\n",
+    );
+    // Via config.
+    for agent in ["qa", "ticketing"] {
+        assert_eq!(
+            resolve_agent_model_for_role(&cfg, agent, Some(agent), None, None),
+            "claude-opus-4-5",
+            "{agent} via config"
+        );
+    }
+    // Via frontmatter.
+    let empty = MpmConfig::default();
+    for agent in ["qa", "ticketing"] {
+        assert_eq!(
+            resolve_agent_model_for_role(&empty, agent, Some(agent), Some("fable"), None),
+            "claude-opus-4-5",
+            "{agent} via frontmatter"
+        );
+    }
+    // Unknown role fails closed, even with an explicit request.
+    assert_eq!(
+        resolve_agent_model_for_role(&empty, "mystery", Some("mystery"), None, Some("fable")),
+        "claude-opus-4-5"
+    );
+    assert_eq!(
+        resolve_agent_model(&empty, "mystery", Some("fable"), None),
+        "claude-opus-4-5"
+    );
+    // A qa role on an engineer-sounding name is still qa.
+    assert_eq!(
+        resolve_agent_model_for_role(&empty, "code-critic", Some("qa"), Some("fable"), None),
+        "claude-opus-4-5"
+    );
+}
