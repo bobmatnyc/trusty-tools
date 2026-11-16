@@ -17,7 +17,7 @@ from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
 from trusty_browser.page_fields import MODIFIERS, key_allowed, valid_files
-from trusty_browser.page_query import clicked, controls, optional
+from trusty_browser.page_query import KEEP_LEASE, clicked, controls, optional
 from trusty_browser.protocol import (
     HISTORY,
     MUTATING,
@@ -34,6 +34,7 @@ OPS = {
     "select": {"op", "tab"},
     "page_read": {"op", "lease"},
     "page_click": {"op", "lease", "request_id", "ref"},
+    "page_hover": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
@@ -50,23 +51,6 @@ OPS = {
     "switch": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
-# Worker refusals after which the lease stays; any other drops it.
-KEEP_LEASE = {
-    "PermissionNeeded",
-    "DocumentChanged",
-    "NavigationPending",
-    "StaleElement",
-    "NotEditable",
-    "TextDropped",
-    "NotSelectable",
-    "NoSuchOption",
-    "Obscured",
-    "DebuggerBusy",
-    "InvalidUrl",
-    "InvalidRequest",
-    "InvalidOperation",
-    "NoHistory",
-}
 
 
 def remembered(request: Frame) -> Frame:

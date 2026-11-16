@@ -678,6 +678,7 @@ def mutating_frame(op, lease, rid="r"):
     base = {"op": op, "lease": lease, "request_id": rid}
     return {
         "page_click": {**base, "ref": "1.0"},
+        "page_hover": {**base, "ref": "1.0"},
         "page_type": {**base, "ref": "1.0", "text": "x"},
         "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_select": {**base, "ref": "1.0", "value": "x"},
@@ -797,6 +798,7 @@ def test_history_ops_refuse_outside_the_grant_and_send_nothing(short, clock, op)
     "op",
     [
         "page_click",
+        "page_hover",
         "page_type",
         "page_press",
         "page_select",

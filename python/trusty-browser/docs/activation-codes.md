@@ -275,6 +275,7 @@ answers `InvalidRequest`.
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
 | `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref`, optional `dialog` (`accept` or `dismiss`, default `dismiss`) | `tab` int, `document` str, `dialog` when one opened |
+| `page_hover` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str; when a `maxlength` cut the text also `truncated` true, `typed` int, `accepted` int (#11352) |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
@@ -447,6 +448,7 @@ Envelope:
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
 | `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref`, `dialog` | `{"document": str}`, plus `"dialog"` when one opened |
+| `page_hover` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
@@ -665,6 +667,17 @@ after they stop. `grew` is true when nodes were added and the document grew;
 feed is read by repeating `to: bottom` until `grew` is false, then `page_read`.
 The scroll moves the document's scrolling element only, not inner scroll
 containers; `to: element` reaches an element inside one.
+`page_hover` (#11287): `scrollIntoView` as `page_click`, then move the
+synthetic pointer from the element this document last hovered to the target:
+bubbling `pointerout` and `mouseout` on the old element, non-bubbling
+`pointerleave` and `mouseleave` on each old ancestor the target is not inside
+(innermost first), bubbling `pointerover` and `mouseover` on the target,
+non-bubbling `pointerenter` and `mouseenter` on each new ancestor (outermost
+first), then bubbling `pointermove` and `mousemove`, all at the target's
+centre. Hovering the same element again sends only the two moves. It clicks
+nothing and changes no focus. The events are untrusted, so CSS `:hover` does
+not match; a page that reveals content only through `:hover` needs trusted
+input (#11294). It is journaled like `page_click`.
 
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
@@ -806,6 +819,7 @@ only. A refusal's result line is best effort.
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
 | `page_find` | `page_find` | host of the read page | matches and their names |
 | `page_click` | `page_click` | host of the page | ref, element name |
+| `page_hover` | `page_hover` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
@@ -905,6 +919,7 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_find` | `lease: str`, `role`, `name`, `text`, `within_ref`: str or null, `limit: int` | The `page_find` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str`, `dialog: str = "dismiss"` | The `page_click` reply |
+| `page_hover` | `lease: str`, `ref: str`, `request_id: str` | The `page_hover` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
@@ -999,7 +1014,7 @@ failed write never blocks Disconnect.
 - A page border on code-session tabs; the badge is the indicator.
 - Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,
   `page_type`.
-- Drag and hover.
+- Drag.
 - File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
 - Browser-level shortcuts (`Meta`+`t`, `Control`+`w` and the like): a
   `page_press` chord reaches the page only.

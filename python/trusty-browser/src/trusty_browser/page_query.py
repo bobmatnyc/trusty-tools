@@ -93,3 +93,22 @@ def clicked(raw: object) -> Frame:
     if seen["type"] not in DIALOG_TYPES or len(seen["message"]) > 1024:
         raise Refusal("BrowserRefused")
     return raw
+
+
+# Worker refusals after which the lease stays; any other drops it.
+KEEP_LEASE = {
+    "PermissionNeeded",
+    "DocumentChanged",
+    "NavigationPending",
+    "StaleElement",
+    "NotEditable",
+    "TextDropped",
+    "NotSelectable",
+    "NoSuchOption",
+    "Obscured",
+    "DebuggerBusy",
+    "InvalidUrl",
+    "InvalidRequest",
+    "InvalidOperation",
+    "NoHistory",
+}

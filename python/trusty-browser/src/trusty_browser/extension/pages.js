@@ -401,6 +401,52 @@ globalThis.TrustyPages = (() => {
     return {ok:true, changed:el.value !== before, value:el.value};
   }
 
+  // Why: menus and tooltips open on pointer entry, and an agent had no way to move the pointer (#11287).
+  // What: resolves the ref, scrolls it into view and moves the synthetic pointer from the element this
+  //   page last hovered to it, across shadow roots and same-origin frames: out/leave on the old path, over/enter
+  //   on the new one (enter from the outermost ancestor down, leave from the innermost up), then
+  //   pointermove/mousemove at the centre. Each event's `view` is the window of its own target's document.
+  //   Hovering the same element again sends only the moves. The events are untrusted, so CSS `:hover` does
+  //   not match; that needs trusted input (#11294).
+  // Test: tests/test_pages_dom.py `test_hover_fires_enter_over_and_move_then_leaves_the_old_target`,
+  //   `test_hover_fixture_reveals_the_hover_action`,
+  //   `test_hover_reaches_an_element_inside_a_same_origin_iframe`.
+  function pageHover(ref) {
+    const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+    if (!el) return {error:"StaleElement"};
+    el.scrollIntoView({block:"center", inline:"center"});
+    const box = el.getBoundingClientRect();
+    const at = {cancelable:true, composed:true, pointerType:"mouse", isPrimary:true,
+      clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
+    const KEY = "__trustyBrowserHover";
+    let last = globalThis[KEY]?.deref();
+    if (last && !last.isConnected) last = null;
+    // #11300: the chain crosses shadow hosts and same-origin frame elements, so a move from the top page
+    // into a frame leaves only what the pointer left and enters the frame element and the target.
+    const parent = node => node.parentElement || node.parentNode?.host ||
+      (node.parentNode === node.ownerDocument ? node.ownerDocument.defaultView?.frameElement : null);
+    const path = node => { const out = []; for (; node; node = parent(node)) out.push(node); return out; };
+    const fire = (target, kinds, bubbles, relatedTarget) => {
+      const view = target.ownerDocument.defaultView;
+      for (const [Kind, type] of kinds)
+        target.dispatchEvent(new Kind(type, {...at, view, bubbles, relatedTarget}));
+    };
+    if (last !== el) {
+      const old = last ? path(last) : [], now = path(el);
+      if (last) {
+        fire(last, [[PointerEvent, "pointerout"], [MouseEvent, "mouseout"]], true, el);
+        for (const node of old.filter(n => !now.includes(n)))
+          fire(node, [[PointerEvent, "pointerleave"], [MouseEvent, "mouseleave"]], false, el);
+      }
+      fire(el, [[PointerEvent, "pointerover"], [MouseEvent, "mouseover"]], true, last);
+      for (const node of now.filter(n => !old.includes(n)).reverse())
+        fire(node, [[PointerEvent, "pointerenter"], [MouseEvent, "mouseenter"]], false, last);
+      globalThis[KEY] = new WeakRef(el);
+    }
+    fire(el, [[PointerEvent, "pointermove"], [MouseEvent, "mousemove"]], true, null);
+    return {ok:true};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -421,8 +467,8 @@ globalThis.TrustyPages = (() => {
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
   const {pageInspect, pageRead, pageFind} = globalThis.TrustyPageRead;
-  return {pageProbe, pageInspect, pageRead, pageFind, pageTarget, pageKeys, pageType, pagePress, pageScroll, pageSelect,
-    pageSetFiles, trusted, urlAllowed, keyAllowed, modifiersAllowed};
+  return {pageProbe, pageInspect, pageRead, pageFind, pageTarget, pageHover, pageKeys, pageType, pagePress,
+    pageScroll, pageSelect, pageSetFiles, trusted, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -430,7 +476,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageInspect, pageTarget, pageKeys, pageScroll, pageSelect, pageSetFiles, trusted, urlAllowed,
+  const {pageProbe, pageInspect, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, trusted, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
   const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
@@ -459,6 +505,7 @@ TrustyPages.commands = deps => {
     // #11357: at least one of role, name and text; within_ref limits the search to a subtree.
     page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || ref(v),
       limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
+    page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
     page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
@@ -540,7 +587,7 @@ TrustyPages.commands = deps => {
     return arrived(tabId, wait);
   }
 
-  // Runs the injected type/press/scroll/select/upload only inside the lease's document; never reports work it
+  // Runs the injected hover/type/press/scroll/select/upload only inside the lease's document; never reports work it
   //   did not do.
   async function inject(req, func, args) {
     if (req.document === null) {
@@ -735,6 +782,7 @@ TrustyPages.commands = deps => {
       return {origin:seen.origin, downloads};
     },
     page_select:req => inject(req, pageSelect, [req.ref, req.value]),
+    page_hover:req => inject(req, pageHover, [req.ref]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -786,7 +834,7 @@ TrustyPages.commands = deps => {
   // changed the page answers OutcomeUnknown, any other BrowserDisconnected.
   function failure(req, error) {
     if (!error?.fields) {
-      const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate",
+      const acting = ["page_click","page_hover","page_type","page_press","page_select","page_scroll","page_navigate",
         "page_upload","page_back","page_forward","page_reload"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }

@@ -31,6 +31,7 @@ CODE_TOOLS = {
     "page_read",
     "page_find",
     "page_click",
+    "page_hover",
     "page_type",
     "page_scroll",
     "page_press",
@@ -256,6 +257,7 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             ("browser_switch", {"lease": "l"}),
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
+            ("page_hover", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
             ("page_press", {"lease": "l", "key": "Enter", "request_id": "r"}),
             (
@@ -532,6 +534,11 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                     "changed": changed,
                     "value": "ca",
                 }
+            # #11287: hover runs on the lease like a click.
+            hovered = await agent.ok(
+                "page_hover", lease=lease, ref="1.0", request_id="h"
+            )
+            assert hovered == {"ok": True, "tab": 7, "document": "d7-1"}
             landed = await agent.ok(
                 "page_navigate",
                 lease=lease,
@@ -552,6 +559,7 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 ("page_press", "1.0", None),
                 ("page_select", "1.0", "ca"),
                 ("page_select", "1.0", "ca"),
+                ("page_hover", "1.0", None),
             ]
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert not broker.claims
