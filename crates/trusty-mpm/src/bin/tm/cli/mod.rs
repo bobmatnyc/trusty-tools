@@ -919,12 +919,13 @@ pub(crate) enum Command {
     /// The Architect's deterministic commands: the poller and its readers.
     ///
     /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
-    /// Architect's Python scripts with the same arguments and output.
-    // #9822. Test: `cli_parses_architect_verbs`.
+    /// Architect's Python scripts with the same arguments and output. With
+    /// no verb, `tm architect` is `tm architect up` plus attach.
+    // #9822, #11364. Test: `cli_parses_architect_verbs`.
     Architect {
-        /// Architect action to perform.
+        /// Architect action to perform; none means `up` and attach.
         #[command(subcommand)]
-        action: ArchitectAction,
+        action: Option<ArchitectAction>,
     },
     /// Prove you are at the Studio, so the Architect may write trust anchors.
     ///

@@ -1,0 +1,2 @@
+Added
+- `tm architect up` brings the Architect up from any state (no tmux server, no session, dead pane, pane at a shell) and attaches; bare `tm architect` does the same. It is idempotent, holds `<dir>/.trusty-mpm/architect-up.lock`, never stops a live `claude` (an unbound one is reported), and inside Claude Code only ensures a bound Architect. Flags `--no-attach`, `--dry-run`, `--json`; `tm architect attach` attaches only (#11364).
