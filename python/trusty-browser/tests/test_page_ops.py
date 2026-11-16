@@ -929,3 +929,33 @@ def test_a_late_outcome_unknown_from_the_old_peer_keeps_a_rebound_grant(short, c
         assert (await call({"op": "tabs"}))["ok"]
 
     run(short, body)
+
+
+def test_dialog_policy_is_forwarded_and_the_dialog_relayed(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        click = {"op": "page_click", "lease": lease, "ref": "1.0"}
+        assert (await call({**click, "request_id": "a"}))["ok"]
+        assert rig.a.sent("page_click")[-1]["dialog"] == "dismiss"
+        seen = {"type": "confirm", "message": "Delete it?", "accepted": True}
+        rig.a.dialog = seen
+        reply = await call({**click, "request_id": "b", "dialog": "accept"})
+        assert reply == {"ok": True, "tab": 7, "document": "d7-1", "dialog": seen}
+        assert rig.a.sent("page_click")[-1]["dialog"] == "accept"
+        bad = await call({**click, "request_id": "c", "dialog": "maybe"})
+        assert bad == {"ok": False, "error": "InvalidRequest"}
+        rig.a.dialog = {**seen, "type": "devtools"}
+        forged = await call({**click, "request_id": "d"})
+        assert forged["ok"] is False and forged["error"] == "BrowserRefused"
+        rig.a.dialog = None
+        rig.a.refuse["page_click"] = {"error": "Obscured", "tab": 7}
+        covered = await call({**click, "request_id": "e"})
+        assert covered == {"ok": False, "error": "Obscured", "tab": 7}
+        assert len(rig.broker.claims) == 1  # Obscured keeps the lease
+        # Option A: typing stays synthetic, so page_type takes no dialog policy.
+        typed = {"op": "page_type", "lease": lease, "ref": "1.0", "text": "x"}
+        refused = await call({**typed, "request_id": "f", "dialog": "accept"})
+        assert refused == {"ok": False, "error": "InvalidRequest"}
+
+    run(short, body)

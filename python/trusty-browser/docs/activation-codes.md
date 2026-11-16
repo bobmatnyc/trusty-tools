@@ -69,15 +69,23 @@ fields are refused.
 ## Build constraints
 
 - Manifest permissions stay exactly: `storage`, `nativeMessaging`, `identity`,
-  `identity.email`, `alarms`, `scripting`, `activeTab`, `downloads`. No
-  `host_permissions`. The optional `https://*/*` stays declared. The manifest
-  declares no content scripts (the site adapter is removed); the worker
-  unregisters any `site-*` script a profile registered under the removed
-  site enrollment.
+  `identity.email`, `alarms`, `scripting`, `activeTab`, `downloads` (#11289),
+  `debugger` (#11294). No `host_permissions`. The optional `https://*/*` stays
+  declared. Adding a permission requires one re-approval per install (owner
+  ruling 2026-11-15). The manifest declares no content scripts (the site
+  adapter is removed); the worker unregisters any `site-*` script a profile
+  registered under the removed site enrollment.
 - Page code runs only through `chrome.scripting.executeScript` in the default
   `ISOLATED` world, on the top frame, of a tab the worker names by explicit id.
   No operation looks up "the active tab".
-- Events dispatched into a page are synthetic (`isTrusted: false`).
+- `page_click` input is trusted (`isTrusted: true`, #11294):
+  the worker attaches `chrome.debugger` to the named tab for the one command,
+  sends DevTools Protocol `Input.*` events, and detaches. Chrome shows its
+  "started debugging this browser" bar while attached. `chrome.debugger` is
+  used for input and native dialogs only: no console, network or `Runtime`
+  access beyond one 100 ms in-page wait for late dialogs. Every other event
+  dispatched into a page, including typing and key presses, is synthetic
+  (`isTrusted: false`).
 - `chrome.tabs.update(tabId, {url})` navigates any tab; it needs no permission
   and is confined only by the checks in this contract.
 - Without the `tabs` permission, `chrome.tabs.query` returns no `url` or
@@ -247,7 +255,12 @@ time, held by a lease.
 Field types: `tab` is a non-negative integer. `lease`, `request_id` and `ref`
 are non-empty strings of at most 8192 characters (the existing `string` rule).
 `text` and `value` are strings of 0 to 8192 characters. `url` is a string of 1 to 8192
-characters. Every request carries exactly the fields listed. For `page_press`
+characters. Every request carries exactly the fields listed, except the optional
+`dialog` of `page_click` (#11294): `"accept"` or `"dismiss"` (the default),
+the answer to a confirm, prompt or beforeunload dialog the click opens. An
+alert is always acknowledged. When a dialog opened, the reply adds `dialog`:
+`{"type": "alert" | "confirm" | "prompt" | "beforeunload", "message": str (at
+most 1024 characters), "accepted": bool}` for the last one. For `page_press`
 (#11286), `ref` may also be null (the focused element); `key` is one of
 `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`,
 `ArrowLeft`, `ArrowRight`, `Home`, `End`, `PageUp`, `PageDown`, `Space`, or a
@@ -261,7 +274,7 @@ answers `InvalidRequest`.
 | `tabs` | `op` | `tabs`: list of tab entries |
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
 | `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
-| `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
+| `page_click` | `op`, `lease`, `request_id`, `ref`, optional `dialog` (`accept` or `dismiss`, default `dismiss`) | `tab` int, `document` str, `dialog` when one opened |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str; when a `maxlength` cut the text also `truncated` true, `typed` int, `accepted` int (#11352) |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
@@ -326,6 +339,8 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
+| `Obscured` | `tab` | `page_click`: another element covers the element's centre; nothing was clicked |
+| `DebuggerBusy` | `tab` | `page_click`: another debugger (such as open DevTools) holds the tab; nothing ran |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
@@ -420,7 +435,7 @@ Envelope:
 | `page_tabs` | none | `{"tabs": [tab entry, ...]}` |
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
 | `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
-| `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
+| `page_click` | `tab`, `document` (str or null), `ref`, `dialog` | `{"document": str}`, plus `"dialog"` when one opened |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
@@ -456,6 +471,8 @@ build:
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
 | `NotEditable`, `NotSelectable`, `NoSuchOption` | `tab` | See "Element addressing" |
+| `Obscured` | `tab` | See "Element addressing" |
+| `DebuggerBusy` | `tab` | `chrome.debugger.attach` failed while the lease's document is current |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_scroll`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
@@ -600,11 +617,31 @@ element entry plus `in`: the nearest `list` (`ul`, `ol`, `role=list`), `row`
 first heading, `legend` or `caption`. Its `ref` works as `within_ref` and
 `scope_ref`. `truncated` is true when more elements matched.
 
-`page_click`: `scrollIntoView({block: "center", inline: "center"})`, then
-dispatch bubbling `pointerdown`, `mousedown`, `pointerup`, `mouseup` at the
-element's centre, `focus()` when the element is focusable, then
-`element.click()`. The reply does not wait for any navigation the click
-starts.
+`page_click` runs in this order (#11294): probe the tab, and answer
+`DocumentChanged` without attaching when the worker lacks host access or the
+top document is not the lease's; attach `chrome.debugger` to the tab and enable
+`Page` dialog events; inject `pageTarget` into the lease's document; send
+trusted `Input.*` events at the point it returns; wait 100 ms in the page for a
+dialog a handler opens late; detach. A native dialog is answered with
+`Page.handleJavaScriptDialog` by the request's `dialog`. The attach comes
+before targeting because Chrome's debugging bar resizes the viewport.
+
+Before every `Input.*` event the worker probes again and stops with
+`DocumentChanged` when the top document or its origin is no longer the one
+probed at the start. A dialog answer Chrome rejects answers
+`OutcomeUnknown`, never a reply claiming the answer. The whole command is bounded
+at 5 s; past the bound it answers
+`OutcomeUnknown`. Every path detaches.
+
+`page_click`: `pageTarget` resolves the ref as above (`StaleElement` when it
+does not resolve), scrolls the element to the viewport centre
+(`scrollIntoView({block: "center", inline: "center", behavior: "instant"})`)
+and answers `Obscured`
+when `elementFromPoint` at its centre is neither the element nor inside it.
+The worker then sends `mouseMoved`, `mousePressed` and `mouseReleased` (left
+button, one click) at the centre, so the page sees trusted `pointerdown`,
+`mousedown`, `pointerup`, `mouseup` and `click` and gains user activation.
+The reply does not wait for any navigation the click starts.
 
 `page_scroll` (#11291): `to` is `down` or `up` (90% of the viewport), `top`,
 `bottom`, or `element`; `ref` is a string exactly when `to` is `element`, else
@@ -765,7 +802,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption`, `Obscured`, `DebuggerBusy` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -841,7 +878,7 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_select` | `tab: int` | The `select` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
 | `page_find` | `lease: str`, `role`, `name`, `text`, `within_ref`: str or null, `limit: int` | The `page_find` reply |
-| `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
+| `page_click` | `lease: str`, `ref: str`, `request_id: str`, `dialog: str = "dismiss"` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
@@ -923,10 +960,12 @@ failed write never blocks Disconnect.
 
 ## Not in this build
 
-- Any manifest change beyond the `downloads` permission (#11289).
-- Console, network or debugger access (`chrome.debugger`, devtools protocol,
-  request interception).
-- Trusted input events; every event is synthetic.
+- Any manifest change beyond the `downloads` (#11289) and `debugger`
+  (#11294) permissions.
+- Console or network access through the devtools protocol, or request
+  interception. `chrome.debugger` serves `page_click` input and dialogs only.
+- Trusted typing: `page_type`, `page_press` and `page_select` still use
+  synthetic events (`isTrusted: false`); only `page_click` is trusted.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
 - Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,

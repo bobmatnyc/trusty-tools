@@ -204,6 +204,8 @@ PAGE_ERRORS = UNFINISHED | {
     "TextDropped",  # #11352: a field refused some of the typed text
     "NotSelectable",
     "NoSuchOption",
+    "Obscured",
+    "DebuggerBusy",
     "InvalidUrl",
 }
 

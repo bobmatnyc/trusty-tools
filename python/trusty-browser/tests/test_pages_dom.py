@@ -1,11 +1,13 @@
-"""Exercise the injected page functions of pages.js on a static page in Chromium (#11239)."""
+"""Exercise the injected page functions of pages.js on a static page in Chromium (#11239, #11294)."""
 
+import asyncio
 import base64
 import json
 from pathlib import Path
 
 import pytest
 from file_io_fixture import DOWNLOAD_TEXT, file_site
+from playwright.async_api import async_playwright
 from playwright.sync_api import sync_playwright
 
 from trusty_browser import service
@@ -52,6 +54,82 @@ def page():
             yield tab
         finally:
             browser.close()
+
+
+# #11294: the trusted harness logs whether each event the page saw was trusted.
+TRUSTED_LOG = """() => {
+  window.events = [];
+  for (const kind of ["pointerdown","mousedown","pointerup","mouseup","click"])
+    document.addEventListener(kind, e => window.events.push(
+      kind + ":" + (e.target.id || e.target.localName) + (e.isTrusted ? "" : ":untrusted")), true);
+}"""
+
+
+class Tab:
+    """An async page whose CDP session plays the worker's chrome.debugger (#11294).
+
+    The async API is needed: a binding callback that sends CDP input deadlocks
+    the sync API while the page's evaluate is pending.
+    """
+
+    def __init__(self, page, cdp):
+        self.page, self.cdp, self.dialogs, self.policy = page, cdp, [], "dismiss"
+
+    def answer(self, params):
+        # The page is blocked until answered, so this mirrors trusted.accepts in Python.
+        accept = params["type"] == "alert" or self.policy == "accept"
+        self.dialogs.append((params["type"], params["message"], accept))
+        asyncio.ensure_future(self.cdp.send("Page.handleJavaScriptDialog", {"accept": accept}))
+
+    async def read(self):
+        return await self.page.evaluate("() => TrustyPages.pageRead(512, {include_text: true})")
+
+    async def click(self, ref):
+        """pageTarget then the trusted CDP click, as the worker's ``act`` runs them."""
+        return await self.page.evaluate("""async ref => {
+          const point = TrustyPages.pageTarget(ref);
+          if (!point.ok) return point;
+          await TrustyPages.trusted.click((method, params = {}) => window.__cdp(method, params), point);
+          return {ok:true};
+        }""", ref)
+
+
+def trusted(body, content=None):
+    """Run ``body(tab)`` against ``content`` (default PAGE) in a fresh Chromium, bounded to 60 s."""
+    async def main():
+        async with async_playwright() as driver:
+            browser = await driver.chromium.launch()
+            try:
+                page = await browser.new_page()
+                await page.set_content(content or PAGE)
+                await page.add_script_tag(path=str(SCRIPT.with_name("pages_read.js")))
+                await page.add_script_tag(path=str(SCRIPT))
+                cdp = await page.context.new_cdp_session(page)
+                await cdp.send("Page.enable")
+                tab = Tab(page, cdp)
+                cdp.on("Page.javascriptDialogOpening", tab.answer)
+                page.on("dialog", lambda _dialog: None)  # leave every dialog to the CDP session
+
+                async def send(method, params):
+                    return await cdp.send(method, params)
+
+                await page.expose_function("__cdp", send)
+                await page.evaluate(TRUSTED_LOG)
+                await body(tab)
+            finally:
+                await browser.close()
+
+    asyncio.run(asyncio.wait_for(main(), 60))
+
+
+def click(page, ref):
+    """pageTarget then a click at its point; the trusted CDP path is covered by `trusted`."""
+    return page.evaluate("""ref => {
+      const point = TrustyPages.pageTarget(ref);
+      if (!point.ok) return point;
+      document.elementFromPoint(point.x, point.y).click();
+      return {ok:true};
+    }""", ref)
 
 
 def read(page, **options):
@@ -181,20 +259,78 @@ def test_find_returns_matches_with_their_container(page):
     assert find(page, role="button", within_ref=row) == {"error": "StaleElement"}
 
 
-def test_click_and_type_refuse_stale_refs(page):
+def test_target_refuses_stale_refs_and_covered_points():
+    # #11355: refs survive reads, so a ref goes stale only when its element leaves or changes.
+    async def body(tab):
+        first = await tab.read()
+        go = ref_of(first, "Go now")
+        assert ref_of(await tab.read(), "Go now") == go
+        assert await tab.click("9.0") == {"error": "StaleElement"}
+        await tab.page.evaluate("""() => {
+          const cover = document.createElement("div"), box = go.getBoundingClientRect();
+          cover.id = "cover";
+          Object.assign(cover.style, {position:"fixed", left:box.left + "px", top:box.top + "px",
+            width:box.width + "px", height:box.height + "px", zIndex:9});
+          document.body.append(cover);
+        }""")
+        assert await tab.click(go) == {"error": "Obscured"}
+        assert await tab.page.evaluate("events") == []
+        await tab.page.evaluate("() => { cover.remove(); go.replaceWith(go.cloneNode(true)); }")
+        assert await tab.click(go) == {"error": "StaleElement"}
+        assert await tab.page.evaluate("events") == []
+    trusted(body)
+
+
+def test_target_reads_the_rect_after_an_instant_scroll_under_smooth_css(page):
+    """#11294: smooth scrolling must not leave the rect read mid-scroll."""
+    page.evaluate("""() => {
+      document.documentElement.style.scrollBehavior = "smooth";
+      const far = document.createElement("button");
+      far.id = "far";
+      far.textContent = "Far away";
+      far.style.cssText = "position:absolute; top:6000px; left:40px";
+      document.body.append(far);
+    }""")
+    far = ref_of(read(page), "Far away")
+    point = page.evaluate("ref => TrustyPages.pageTarget(ref)", far)
+    assert point.get("ok") is True, point
+    page.wait_for_timeout(600)  # a smooth scroll started by the call would finish here
+    final = page.evaluate("""() => { const b = far.getBoundingClientRect();
+      return {x:b.left + b.width / 2, y:b.top + b.height / 2}; }""")
+    assert (point["x"], point["y"]) == (final["x"], final["y"])
+
+
+def test_trusted_click_arrives_trusted():
+    async def body(tab):
+        result = await tab.read()
+        assert await tab.click(ref_of(result, "Go now")) == {"ok": True}
+        assert await tab.page.evaluate("events") == [
+            "pointerdown:go", "mousedown:go", "pointerup:go", "mouseup:go", "click:go"]
+    trusted(body)
+
+
+@pytest.mark.parametrize("policy", ["accept", "dismiss"])
+def test_native_alert_and_confirm_are_answered(policy):
+    async def body(tab):
+        tab.policy = policy
+        await tab.page.evaluate("""() => {
+          const ask = document.createElement("button");
+          ask.id = "ask"; ask.textContent = "Ask";
+          ask.onclick = () => { alert("Heads up"); window.answer = confirm("Delete it?"); };
+          document.body.prepend(ask);
+        }""")
+        result = await tab.read()
+        assert await tab.click(ref_of(result, "Ask")) == {"ok": True}
+        assert tab.dialogs == [("alert", "Heads up", True), ("confirm", "Delete it?", policy == "accept")]
+        assert await tab.page.evaluate("window.answer") is (policy == "accept")
+    trusted(body)
+
+
+def test_type_refuses_stale_refs(page):
     second = read(page)
-    fresh = ref_of(second, "Go now")
-    assert page.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"ok": True}
-    assert page.evaluate("events") == ["pointerdown:go", "mousedown:go", "pointerup:go", "mouseup:go", "click:go"]
-    page.evaluate("() => { window.events = []; document.getElementById('go').remove(); }")
-    assert page.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"error": "StaleElement"}
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", ref_of(second, "Email")) == {"ok": True}
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", "9.0") == {"error": "StaleElement"}
     assert page.evaluate("events") == ["input:email", "change:email"]
-
-
-def click(page, ref):
-    return page.evaluate("ref => TrustyPages.pageClick(ref)", ref)
 
 
 def test_refs_survive_reads_and_go_stale_when_the_element_changes(page):
@@ -412,15 +548,15 @@ def test_scroll_to_element_and_stale_refs_after_dom_change(feed):
     assert scroll(feed, "top", wait=0)["ok"] is True
     # Scrolling runs no read, so refs from the latest read keep working.
     assert scroll(feed, "element", last, wait=0)["view"]["scroll_y"] > 0
-    assert feed.evaluate("ref => TrustyPages.pageClick(ref)", replace) == {"ok": True}
+    assert click(feed, replace) == {"ok": True}
     # The replaced node's ref answers StaleElement, never a click on its successor.
-    assert feed.evaluate("ref => TrustyPages.pageClick(ref)", first) == {"error": "StaleElement"}
+    assert click(feed, first) == {"error": "StaleElement"}
     assert scroll(feed, "element", first, wait=0) == {"error": "StaleElement"}
-    assert feed.evaluate("ref => TrustyPages.pageClick(ref)", last) == {"ok": True}
+    assert click(feed, last) == {"ok": True}
     # A fresh read hands out a working ref for the new node.
     fresh = ref_of(read(feed), "Item 0")
     assert fresh != first
-    assert feed.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"ok": True}
+    assert click(feed, fresh) == {"ok": True}
 
 
 def b64(text):
@@ -480,7 +616,7 @@ def test_fixture_download_triggers_start_downloads(files_page):
     cases = [("Download report", "report.txt", DOWNLOAD_TEXT), ("Save blob", "generated.txt", "blob body")]
     for name, filename, body in cases:
         with tab.expect_download() as info:
-            clicked = tab.evaluate("ref => TrustyPages.pageClick(ref)", ref_of(result, name))
+            clicked = click(tab, ref_of(result, name))
             assert clicked == {"ok": True}
         download = info.value
         assert download.suggested_filename == filename
@@ -609,11 +745,9 @@ def test_read_and_act_inside_iframes_and_shadow_roots(page):
     def act(js, name, *rest):
         return page.evaluate(js, [ref_of(result, name), *rest])
 
-    for name in ("Shadow go", "Frame go"):
-        assert act("([r]) => TrustyPages.pageClick(r)", name) == {"ok": True}
     for name, text in (("Shadow note", "s"), ("Frame name", "f"), ("Deep label", "d")):
         assert act("([r, t]) => TrustyPages.pageType(r, t)", name, text) == {"ok": True}
-    assert page.evaluate("events") == ["click:sbtn", "click:fbtn", "input:snote", "change:snote",
+    assert page.evaluate("events") == ["input:snote", "change:snote",
                                        "input:fname", "change:fname", "input:deep", "change:deep"]
     assert page.evaluate("""() => {
       const f = document.getElementById("frame").contentDocument;
@@ -621,7 +755,30 @@ def test_read_and_act_inside_iframes_and_shadow_roots(page):
               f.getElementById("fname").value, f.getElementById("fhost").shadowRoot.getElementById("deep").value];
     }""") == ["s", "f", "d"]
     page.evaluate("() => document.getElementById('frame').remove()")
-    assert act("([r]) => TrustyPages.pageClick(r)", "Frame go") == {"error": "StaleElement"}
+    assert click(page, ref_of(result, "Frame go")) == {"error": "StaleElement"}
+
+
+def test_trusted_click_lands_inside_iframes_and_shadow_roots():
+    # #11294 on #11290: CDP takes top-viewport pixels, so pageTarget adds each frame's offset; a frame
+    # pushed down and right by margin, border and padding proves the offsets are summed.
+    framed = NESTED.replace('<iframe id="frame"', '<iframe id="frame" style="margin:40px 0 0 90px;'
+                            'border:7px solid;padding:11px 0 0 13px"')
+
+    async def body(tab):
+        await tab.page.evaluate(NESTED_SETUP)
+        await tab.page.evaluate("""() => { window.hits = [];
+          for (const doc of [document, document.getElementById("frame").contentDocument])
+            doc.addEventListener("click", e => hits.push(e.composedPath()[0].id + (e.isTrusted ? "" : "?")), true); }""")
+        result = await tab.read()
+        for name in ("Shadow go", "Frame go"):
+            assert await tab.click(ref_of(result, name)) == {"ok": True}
+        assert await tab.page.evaluate("hits") == ["sbtn", "fbtn"]
+        await tab.page.evaluate("""() => { const f = document.getElementById("frame").contentDocument,
+          cover = f.createElement("div");
+          cover.style.cssText = "position:fixed;inset:0;z-index:9"; f.body.append(cover); }""")
+        assert await tab.click(ref_of(result, "Frame go")) == {"error": "Obscured"}
+        assert await tab.page.evaluate("hits") == ["sbtn", "fbtn"]
+    trusted(body, framed)
 
 
 def test_resolve_refuses_an_element_whose_frame_or_host_left_the_document(page):

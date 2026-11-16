@@ -70,6 +70,7 @@ class FakeBrowser:
         self.arrived: dict[str, asyncio.Event] = {}
         self.refuse: dict[str, dict] = {}
         self.done: list[tuple] = []
+        self.dialog: object = None  # a click or type result's ``dialog`` (#11294)
         self.ack: dict = {}
         self.tabs = {
             7: {
@@ -211,6 +212,8 @@ class FakeBrowser:
                 "value": req["value"],
             }
         self.done.append((op, req.get("ref"), req.get("text")))
+        if self.dialog is not None:
+            return {"document": item["document"], "dialog": self.dialog}
         return {"document": item["document"]}
 
     async def answer(self, req):
