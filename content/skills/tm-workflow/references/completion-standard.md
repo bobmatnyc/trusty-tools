@@ -119,11 +119,11 @@ from briefs to the PM's own plan.
 | Code | Level | Raised when |
 |---|---|---|
 | `INVENTED_TARGET` | WARNING | A brief or plan pairs a number with words, lines, pages or percent and a cut verb (cut, trim, shorten, reduce, limit, cap, at most, under), and carries no recorded owner quote for it. |
-| `OWNER-REQUESTED-LIMIT: "<owner's exact words>"` | WARNING clears | The brief carries the owner's quote and the same string is in a recorded owner ruling or the project's owner-decisions record. An unrecorded quote keeps `INVENTED_TARGET`. |
+| `OWNER-REQUESTED-LIMIT: "<owner's exact words>"` | WARNING clears | The brief carries the owner's quote and the same string is in a recorded owner ruling or the project's owner-decisions record. The hook checks only that a quote is present; the owner-decisions check is deferred (Dr8). An unrecorded quote keeps `INVENTED_TARGET`. |
 
 On `INVENTED_TARGET`, drop the number and state the outcome test, or add the
-recorded quote. The string match proves the quote was recorded, not that the
-owner meant this use of it.
+recorded quote. The hook checks only that a quote is present (the owner-decisions
+check is deferred, Dr8); it never shows the owner meant this use of it.
 
 ## Deterministic Work
 
