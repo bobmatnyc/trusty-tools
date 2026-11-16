@@ -14,7 +14,9 @@
 #     list of outcomes;
 #   - fails a missing field, an empty Trace, a Trace ID absent from the matrix,
 #     and a file with no scenario (scan floor);
-#   - exits 2 on an unreadable matrix.
+#   - fails a prose-only heading block, a Trace ID that only prefix-matches the
+#     matrix (T10 vs T1), and numbered UI steps under a ### sub-heading;
+#   - exits 2 on an unreadable matrix or scenario file.
 # Usage: ./scripts/check_owner_scenarios_selftest.sh
 # Exit: 0 when every case matches; 1 otherwise, printing each mismatch.
 # Test: this IS the test.
@@ -154,6 +156,48 @@ cat > "$WORK/no-scenario.md" <<'EOF'
 Nothing here is a scenario.
 EOF
 check "a file with no scenario fails (scan floor)" 1 "$WORK/no-scenario.md" "no scenario found"
+
+# A prose-only heading block is never skipped silently (#10576).
+cat > "$WORK/prose-only.md" <<'EOF2'
+# Owner scenarios
+
+## S1 Add a product
+Intent: The owner adds a product.
+Situation: Signed in.
+Result: The product shows.
+Trace: T1
+
+## S2 prose only
+The owner might also rename a product, but this block has no fields.
+EOF2
+check "a prose-only heading block fails" 1 "$WORK/prose-only.md" "S2 prose only: heading block has body text"
+
+# Trace-ID boundary: T1 in the matrix must not satisfy a reference to T10.
+printf '| T1 | test 1 |\n' > "$WORK/matrix-t1.md"
+cat > "$WORK/boundary.md" <<'EOF2'
+## S8 Boundary
+Intent: The owner adds a product.
+Situation: Signed in.
+Result: The product shows.
+Trace: T10
+EOF2
+check "Trace T10 is not satisfied by matrix T1" 1 "$WORK/boundary.md" "Trace ID \`T10\` is not in the test matrix" "$WORK/matrix-t1.md"
+
+# Numbered UI steps under a ### sub-heading are still found.
+cat > "$WORK/subheading.md" <<'EOF2'
+## S9 Sub-heading steps
+Intent: The owner adds a product.
+Situation: Signed in.
+Result: The product shows.
+Trace: T1
+
+### How
+1. Click Add.
+2. Type the name.
+EOF2
+check "numbered UI steps after a ### sub-heading fail" 1 "$WORK/subheading.md" "numbered UI steps"
+
+check "an unreadable scenario file exits 2" 2 "$WORK/absent-scenarios.md" "cannot read"
 
 check "an unreadable matrix exits 2" 2 "$WORK/pass.md" "cannot read matrix" "$WORK/absent-matrix.md"
 

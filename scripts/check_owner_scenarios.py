@@ -8,8 +8,9 @@ Why: a click-by-click scenario form made a month of owner work and would have
 
 What: reads one or more Markdown scenario files and a test matrix. A scenario
   is a heading block (a `#` line through the next heading) that holds a field
-  label or a numbered list item; other heading blocks (a title, an intro) are
-  skipped. Each scenario must:
+  label or a numbered list item. The file's first heading, when it is a
+  level-1 title, may carry intro prose. Any other heading block that has body
+  text but is not a scenario fails (never skipped silently). Each scenario must:
     - carry non-empty `Intent:`, `Situation:`, `Result:` and `Trace:` lines
       (a list bullet and `**bold**` labels are accepted);
     - list at least one test ID on `Trace:`, each present as a whole word in
@@ -42,9 +43,11 @@ TRACE_SPLIT_RE = re.compile(r"[,;\s]+")
 
 
 class Scenario:
-    def __init__(self, heading, line):
+    def __init__(self, heading, line, level):
         self.heading = heading
         self.line = line
+        self.level = level
+        self.body_lines = 0
         self.fields = {}
         self.ui_steps = 0
         self.numbered = False
@@ -53,24 +56,45 @@ class Scenario:
         return bool(self.fields) or self.numbered
 
 
-def parse(text):
+def parse_blocks(text):
     """Split `text` into heading blocks and record fields and numbered steps."""
     blocks, current = [], None
     for lineno, raw in enumerate(text.splitlines(), start=1):
         heading = HEADING_RE.match(raw)
         if heading:
-            current = Scenario(heading.group(1), lineno)
+            level = len(raw.lstrip()) - len(raw.lstrip().lstrip("#"))
+            current = Scenario(heading.group(1), lineno, level)
             blocks.append(current)
             continue
         if current is None:
             continue
+        if raw.strip():
+            current.body_lines += 1
         field = FIELD_RE.match(raw)
         if field and field.group(1) not in current.fields:
             current.fields[field.group(1)] = field.group(2).strip().rstrip("*_").strip()
         if NUMBERED_ITEM_RE.match(raw):
             current.numbered = True
         current.ui_steps += len(UI_STEP_RE.findall(raw))
-    return [b for b in blocks if b.is_scenario()]
+    return blocks
+
+
+def parse(text):
+    """Return the scenario blocks of `text`."""
+    return [b for b in parse_blocks(text) if b.is_scenario()]
+
+
+def orphan_blocks(text):
+    """Return non-scenario blocks with body text, other than a leading `#` title."""
+    blocks = parse_blocks(text)
+    orphans = []
+    for index, block in enumerate(blocks):
+        if block.is_scenario() or not block.body_lines:
+            continue
+        if index == 0 and block.level == 1:
+            continue
+        orphans.append(block)
+    return orphans
 
 
 def trace_ids(value):
@@ -85,8 +109,13 @@ def in_matrix(test_id, matrix):
 def lint(path, text, matrix):
     findings = []
     scenarios = parse(text)
+    for o in orphan_blocks(text):
+        findings.append(
+            f"{path}:{o.line}: {o.heading}: heading block has body text but no scenario "
+            "fields or numbered list; make it a scenario or remove it"
+        )
     if not scenarios:
-        return [f"{path}:1: no scenario found (scan floor): a scenario is a heading block with Intent/Situation/Result/Trace"]
+        return findings + [f"{path}:1: no scenario found (scan floor): a scenario is a heading block with Intent/Situation/Result/Trace"]
     for s in scenarios:
         where = f"{path}:{s.line}: {s.heading}"
         for name in FIELDS:
