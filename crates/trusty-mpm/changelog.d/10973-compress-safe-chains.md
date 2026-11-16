@@ -1,2 +1,0 @@
-Fixed
-- `tm hook` now compresses chained Bash commands whose every segment is safe: `cargo build && cargo test`, `git diff; git log -3`, `cd <dir> && …` chains and a trailing `| head`/`tail`/`wc`/`grep`/`sort`/`uniq`/`cut`/`tr`. A destructive or unrecognised segment, `||`, a background `&`, a subshell, a substitution, a redirect or a heredoc still leaves the command uncompressed, and isolation worktrees still skip chains. Compressed chains write savings rows, so the 💸 footer shows a figure instead of `—` (#10973, #11037).

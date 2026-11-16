@@ -1,5 +1,6 @@
 crate   trusty-mpm
 version 1.14.7
-reason  Owner ruling 2026-09-26: a computed public-API break never forces a major bump. Both items come from the Fable tier added in #11353 (PR #11393); PR #11392 itself adds none.
+reason  Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26): trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field ProjectLevelConfig.accounts
 accept  constructible_struct_adds_field field TierAliases.fable
 accept  enum_variant_added variant ModelTier:Fable
