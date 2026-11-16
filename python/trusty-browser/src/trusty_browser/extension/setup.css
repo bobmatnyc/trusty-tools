@@ -13,8 +13,8 @@ h1 { margin: 0; text-align: center; font-size: 16px; font-weight: 650; }
   position: absolute; width: 10.06%; height: 11%; top: 46.63%;
   border-radius: 50%; overflow: hidden; pointer-events: none;
 }
-.eye.left { left: 33.08%; --eye-x: 36.60%; }
-.eye.right { left: 57.47%; --eye-x: 64.09%; }
+.eye.left { left: 34.60%; --eye-x: 38.31%; }
+.eye.right { left: 54.95%; --eye-x: 61.25%; }
 .iris {
   position: absolute; inset: -6%;
   background: url("icons/trusty-browser.webp") var(--eye-x) 52.43% / 887.53% 811.69% no-repeat;
