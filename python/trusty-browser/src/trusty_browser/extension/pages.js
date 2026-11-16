@@ -559,16 +559,23 @@ TrustyPages.commands = deps => {
   //   and refuses DocumentChanged if the document or origin moved. Any
   //   native dialog is answered by `req.dialog` (an alert is always acknowledged); an answer Chrome
   //   rejects, or a command outlasting its time bound, answers OutcomeUnknown. It waits 100 ms in the page
-  //   for a late dialog, then always detaches. The reply names the last dialog seen.
+  //   for a late dialog, then always detaches; after that its leftover work sends no CDP command. The
+  //   reply names the last dialog seen.
   // Test: tests/test_worker.mjs `click drives trusted input and answers dialogs`,
   //   `stale document refuses before the page runs`, `trusted input rechecks the document before every event`,
-  //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`.
+  //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`,
+  //   `a timed-out click sends no input after a later attach`.
   async function act(req, drive) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     if (req.document === null) throw changed(await probe(req.tab));
     const first = await probe(req.tab);
     if (!first.access || first.document !== req.document) throw changed(first);
-    const debuggee = {tabId:req.tab}, raw = (method, params = {}) => chrome.debugger.sendCommand(debuggee, method, params);
+    // #11294: once act returns, its leftover work must not reach a later attachment to this tab.
+    let aborted = false;
+    const debuggee = {tabId:req.tab}, raw = async (method, params = {}) => {
+      if (aborted) throw refuse("OutcomeUnknown");
+      return chrome.debugger.sendCommand(debuggee, method, params);
+    };
     // Every input event runs only while the lease's document and origin are still the tab's top document.
     const send = async (method, params = {}) => {
       if (method.startsWith("Input.")) {
@@ -598,6 +605,7 @@ TrustyPages.commands = deps => {
     try {
       await Promise.race([bound, steps()]);
     } finally {
+      aborted = true;
       clearTimeout(timer);
       chrome.debugger.onEvent.removeListener(answer);
       await chrome.debugger.detach(debuggee).catch(() => {});

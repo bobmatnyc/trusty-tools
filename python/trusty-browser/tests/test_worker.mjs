@@ -203,7 +203,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     }},
     // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press (`t.dialogFails` makes its
     // answer fail); `t.busy` refuses attach; `t.moveAt` names an event type after which the tab gets
-    // `t.move` ({doc} or {origin}); `t.hang` names a method that never answers. Like Chrome, attach needs
+    // `t.move` ({doc} or {origin}); `t.hang` names a method that answers only
+    // when the test calls `t.release`. Like Chrome, attach needs
     // no host access.
     debugger:{onEvent:{fns:new Set(), addListener(fn){this.fns.add(fn);}, removeListener(fn){this.fns.delete(fn);},
         fire(...args){ for (const fn of [...this.fns]) fn(...args); }},
@@ -216,7 +217,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       sendCommand:async ({tabId}, method, params) => {
         cdp.push({tab:tabId, method, params});
         const t = tabs.get(tabId);
-        if (t.hang === method) return new Promise(() => {});
+        if (t.hang === method) return new Promise(done => { t.release = () => done({}); });
         if (t.dialogFails && method === "Page.handleJavaScriptDialog") throw new Error("No dialog is showing");
         if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
           await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
@@ -508,6 +509,30 @@ test("a failed dialog answer or a hung command answers OutcomeUnknown", async ()
   await settle();
   assert.deepEqual(plain(f.sent.find(m => m.id === "hung")), {id:"hung", ok:false, error:"OutcomeUnknown"});
   assert.equal(f.cdp.at(-1).method, "detach");
+});
+
+// #11294: a timed-out click's leftover work must never send input through a later attachment.
+test("a timed-out click sends no input after a later attach", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const t = f.tabs.get(7);
+  t.hang = "Input.dispatchMouseEvent";
+  const pending = f.native.onMessage.fire({id:"late", op:"page_click", email, grant, tab:7, document:"doc-7", ref:"1.0",
+    dialog:"dismiss"});
+  await settle();
+  const [key, bound] = [...f.timers].findLast(([, x]) => x.ms === 5000);
+  f.timers.delete(key);
+  bound.fn();
+  await pending;
+  await settle();
+  assert.equal(f.sent.find(m => m.id === "late").error, "OutcomeUnknown");
+  const release = t.release;
+  t.hang = null;
+  assert.equal((await f.command("page_click", {grant, tab:7, document:"doc-7", ref:"1.0", dialog:"dismiss"})).ok, true);
+  const before = f.cdp.length;
+  release();
+  await settle();
+  assert.deepEqual(cdpSteps(f).slice(before), []);
 });
 
 test("without the all-https permission only the clicked tab is readable", async () => {
