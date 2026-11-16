@@ -9,14 +9,15 @@ globalThis.TrustyPages = (() => {
 
   // Why: a click must reach only the element a read of this document reported.
   // What: resolves the ref through the registry pageInspect installs (StaleElement when the element changed
-  //   or left the document, #11355), then dispatches synthetic pointer and mouse events and element.click().
+  //   or left the top document through any shadow host or frame, #11355, #11290), then dispatches synthetic
+  //   pointer and mouse events and element.click().
   // Test: tests/test_pages_dom.py `test_click_and_type_refuse_stale_refs`.
   function pageClick(ref) {
     const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
     if (!el) return {error:"StaleElement"};
     el.scrollIntoView({block:"center", inline:"center"});
     const box = el.getBoundingClientRect();
-    const at = {bubbles:true, cancelable:true, composed:true, view:window,
+    const at = {bubbles:true, cancelable:true, composed:true, view:el.ownerDocument.defaultView,
       clientX:box.left + box.width / 2, clientY:box.top + box.height / 2};
     el.dispatchEvent(new PointerEvent("pointerdown", at));
     el.dispatchEvent(new MouseEvent("mousedown", at));
@@ -73,7 +74,7 @@ globalThis.TrustyPages = (() => {
     const fire = (node, type, d, flags) => node.dispatchEvent(new KeyboardEvent(type, {...flags, key:d.key, code:d.code,
       keyCode:type === "keypress" ? (d.text ?? "\r").codePointAt(0) : d.keyCode, which:d.keyCode,
       charCode:type === "keypress" ? (d.text ?? "\r").codePointAt(0) : 0,
-      bubbles:true, cancelable:true, composed:true, view:window}));
+      bubbles:true, cancelable:true, composed:true, view:node.ownerDocument.defaultView}));
     // The key's next target: the element focus moved to during `step`, else the current one.
     const follow = (node, step) => {
       const before = document.activeElement, result = step();
@@ -108,13 +109,13 @@ globalThis.TrustyPages = (() => {
     }
     function insert(node, data) {
       if (!writable(node)) return;
-      if (node.isContentEditable) { document.execCommand("insertText", false, data); return; }
+      if (node.isContentEditable) { node.ownerDocument.execCommand("insertText", false, data); return; }
       const [from, to] = span(node);
       edit(node, from, to, data, "insertText");
     }
     function remove(node, backward) {
       if (!writable(node)) return;
-      if (node.isContentEditable) { document.execCommand(backward ? "delete" : "forwardDelete"); return; }
+      if (node.isContentEditable) { node.ownerDocument.execCommand(backward ? "delete" : "forwardDelete"); return; }
       let [from, to] = span(node);
       if (from === to) { if (backward) from = Math.max(0, from - 1); else to = Math.min(current(node).length, to + 1); }
       if (from !== to) edit(node, from, to, "", backward ? "deleteContentBackward" : "deleteContentForward");
@@ -258,11 +259,12 @@ globalThis.TrustyPages = (() => {
     }
     // "type": the text replaces the element's content, as one keystroke per character.
     if (el.isContentEditable) {
-      const range = document.createRange();
+      // #11290: an element inside an iframe is selected and edited through its own document.
+      const doc = el.ownerDocument, range = doc.createRange();
       range.selectNodeContents(el);
-      getSelection().removeAllRanges();
-      getSelection().addRange(range);
-      if (!input) document.execCommand("delete");
+      doc.getSelection().removeAllRanges();
+      doc.getSelection().addRange(range);
+      if (!input) doc.execCommand("delete");
     } else {
       whole = el;
       if (!input) edit(el, 0, el.value.length, "", "deleteContentBackward");

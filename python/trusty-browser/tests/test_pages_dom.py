@@ -565,3 +565,122 @@ def test_press_refuses_a_stale_ref_and_changes_nothing(keys):
     keys.evaluate("user.replaceWith(user.cloneNode())")
     assert press(keys, refs["User"], "Enter") == {"error": "StaleElement"}
     assert log(keys) == []
+
+
+NESTED = """
+<title>Nested QA</title>
+<button id="top">Top</button>
+<div id="host"></div>
+<div id="closed"></div>
+<iframe id="frame" srcdoc="<label>Frame name <input id='fname' value='old'></label>
+  <button id='fbtn'>Frame go</button><div id='fhost'></div>"></iframe>
+<iframe id="away" style="display:none" srcdoc="<button>Hidden frame</button>"></iframe>
+"""
+# Builds the open/closed shadow roots and logs every action event, at its real target, into one list.
+NESTED_SETUP = """async () => {
+  const frame = document.getElementById("frame");
+  if (frame.contentDocument?.readyState !== "complete" || !frame.contentDocument.getElementById("fhost"))
+    await new Promise(done => frame.addEventListener("load", done, {once:true}));
+  const open = document.getElementById("host").attachShadow({mode:"open"});
+  open.innerHTML = "<button id='sbtn'>Shadow go</button><textarea id='snote' aria-label='Shadow note'></textarea>";
+  document.getElementById("closed").attachShadow({mode:"closed"}).innerHTML = "<button>Closed go</button>";
+  const inner = frame.contentDocument.getElementById("fhost").attachShadow({mode:"open"});
+  inner.innerHTML = "<span id='lbl'>Deep label</span><input id='deep' aria-labelledby='lbl'>";
+  window.events = [];
+  for (const doc of [document, frame.contentDocument])
+    for (const kind of ["click","input","change"])
+      doc.addEventListener(kind, e => window.events.push(kind + ":" + e.composedPath()[0].id), true);
+  // A native change event is not composed, so a page logs it inside the shadow root.
+  for (const root of [open, inner])
+    root.addEventListener("change", e => window.events.push("change:" + e.target.id), true);
+}"""
+
+
+def test_read_and_act_inside_iframes_and_shadow_roots(page):
+    page.set_content(NESTED)
+    load(page)
+    page.evaluate(NESTED_SETUP)
+    result = read(page)
+    found = {e["name"]: e.get("within", "") for e in result["elements"]}
+    assert found == {"Top": "", "Shadow go": "shadow", "Shadow note": "shadow", "Frame name": "iframe",
+                     "Frame go": "iframe", "Deep label": "iframe/shadow"}
+    assert "Closed go" not in json.dumps(result) and "Hidden frame" not in json.dumps(result)
+
+    def act(js, name, *rest):
+        return page.evaluate(js, [ref_of(result, name), *rest])
+
+    for name in ("Shadow go", "Frame go"):
+        assert act("([r]) => TrustyPages.pageClick(r)", name) == {"ok": True}
+    for name, text in (("Shadow note", "s"), ("Frame name", "f"), ("Deep label", "d")):
+        assert act("([r, t]) => TrustyPages.pageType(r, t)", name, text) == {"ok": True}
+    assert page.evaluate("events") == ["click:sbtn", "click:fbtn", "input:snote", "change:snote",
+                                       "input:fname", "change:fname", "input:deep", "change:deep"]
+    assert page.evaluate("""() => {
+      const f = document.getElementById("frame").contentDocument;
+      return [document.getElementById("host").shadowRoot.getElementById("snote").value,
+              f.getElementById("fname").value, f.getElementById("fhost").shadowRoot.getElementById("deep").value];
+    }""") == ["s", "f", "d"]
+    page.evaluate("() => document.getElementById('frame').remove()")
+    assert act("([r]) => TrustyPages.pageClick(r)", "Frame go") == {"error": "StaleElement"}
+
+
+def test_resolve_refuses_an_element_whose_frame_or_host_left_the_document(page):
+    # #11290: an element inside a removed iframe or a detached shadow host is still isConnected in its own
+    # document or shadow tree; resolve() must answer StaleElement for every action, find and scope alike.
+    page.set_content(NESTED)
+    load(page)
+    page.evaluate(NESTED_SETUP)
+    result = read(page)
+    frame_btn, shadow_btn = ref_of(result, "Frame go"), ref_of(result, "Shadow go")
+    page.evaluate("() => { window.kept = document.getElementById('frame').contentDocument.getElementById('fbtn');"
+                  " document.getElementById('frame').remove(); document.getElementById('host').remove(); }")
+    assert page.evaluate("() => kept.isConnected") is True
+    assert click(page, frame_btn) == {"error": "StaleElement"}
+    assert page.evaluate("r => TrustyPages.pageType(r, 'x')", shadow_btn) == {"error": "StaleElement"}
+    assert read(page, scope_ref=frame_btn) == {"error": "StaleElement"}
+    assert find(page, within_ref=shadow_btn) == {"error": "StaleElement"}
+
+
+SHADOW_FORM = """
+<title>Shadow scope</title>
+<form aria-label="Signup"><button id="light">Light go</button><div id="host"></div></form>
+<button id="outside">Outside go</button>
+"""
+
+
+def test_scope_ref_and_find_cross_shadow_roots(page):
+    # #11290: scope_ref and within_ref reach into open shadow roots; labels resolve in the element's own root.
+    page.set_content(SHADOW_FORM)
+    load(page)
+    page.evaluate("""() => document.getElementById("host").attachShadow({mode:"open"}).innerHTML =
+      "<span id='navlbl'>Inner nav</span><nav aria-labelledby='navlbl'><button>Shadow go</button></nav>" +
+      "<span id='lbl'>Shadow field</span><input aria-labelledby='lbl'>" """)
+    form = find(page, name="Light go")["matches"][0]["in"]
+    assert form["role"] == "form" and form["name"] == "Signup"
+    scoped = read(page, scope_ref=form["ref"])
+    assert [(e["name"], e.get("within", "")) for e in scoped["elements"]] == [
+        ("Light go", ""), ("Shadow go", "shadow"), ("Shadow field", "shadow")]
+    inside = find(page, name="go", within_ref=form["ref"])["matches"]
+    assert [m["name"] for m in inside] == ["Light go", "Shadow go"]
+    assert inside[1]["within"] == "shadow" and inside[1]["in"]["role"] == "navigation"
+    assert inside[1]["in"]["name"] == "Inner nav"
+    assert click(page, inside[1]["ref"]) == {"ok": True}
+
+
+FRAMED = """
+<title>Framed distance</title>
+<iframe id="near" style="border:0;height:120px" srcdoc="<button>Near go</button>"></iframe>
+<div style="height:3000px"></div>
+<iframe id="far" style="border:0;height:120px" srcdoc="<button>Far go</button>"></iframe>
+"""
+
+
+def test_iframe_reads_measure_distance_in_top_coordinates(page):
+    # #11290: a button at the top of a frame 3000px down is far from the viewport, not at frame-local 0.
+    page.set_content(FRAMED)
+    page.wait_for_function("""() => [...document.querySelectorAll("iframe")]
+      .every(f => f.contentDocument?.readyState === "complete" && f.contentDocument.querySelector("button"))""")
+    load(page)
+    names = [(e["name"], e.get("within")) for e in read(page, viewport_only=True)["elements"]]
+    assert names == [("Near go", "iframe")]
+    assert [e["name"] for e in read(page)["elements"]] == ["Near go", "Far go"]
