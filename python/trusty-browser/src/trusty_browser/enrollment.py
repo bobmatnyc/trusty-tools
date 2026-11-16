@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from trusty_browser.vault import seal, unseal
-
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import sqlite3
 import stat
 import tempfile
-from urllib.parse import urlsplit
 import uuid
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from trusty_browser.vault import seal, unseal
 
 
 def private_directory(path: Path) -> None:
@@ -59,6 +59,9 @@ def database(path: Path) -> sqlite3.Connection:
     db.execute(
         "CREATE TABLE IF NOT EXISTS route_versions (workflow TEXT PRIMARY KEY, version TEXT NOT NULL, previous TEXT)"
     )
+    # #11239: one row per paired profile; the browser key is vault-sealed.
+    db.execute("""CREATE TABLE IF NOT EXISTS pairings (
+        profile TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, browser_key TEXT NOT NULL)""")
     # Initialize versions for the original enrollment schema without changing credentials.
     with db:
         db.execute("""INSERT INTO route_versions(workflow,version)
@@ -161,12 +164,16 @@ def validate(request: dict[str, object]) -> tuple[str, str, str, str, str, str]:
     return profile, email, workflow, url, account, key
 
 
-def resolve_workflow(db: sqlite3.Connection, request: dict[str, object]) -> dict[str, object]:
+def resolve_workflow(
+    db: sqlite3.Connection, request: dict[str, object]
+) -> dict[str, object]:
     """Select a workflow on the authenticated enrollment socket without changing grants."""
     if set(request) != {"op", "email", "url", "account"} or request["op"] != "resolve":
         raise ValueError("InvalidEnrollment")
     values = [request[k] for k in ("email", "url", "account")]
-    if not all(isinstance(v, str) and v and v.strip() == v and len(v) <= 8192 for v in values):
+    if not all(
+        isinstance(v, str) and v and v.strip() == v and len(v) <= 8192 for v in values
+    ):
         raise ValueError("InvalidEnrollment")
     email, url, account = map(str, values)
     email = email.casefold()
@@ -196,6 +203,8 @@ def register(
             "SELECT * FROM routes WHERE profile=? OR email=? OR workflow=?",
             (profile, email, workflow),
         ).fetchone()
+        if paired(db, profile, email):
+            raise ValueError("EnrollmentConflict")  # #11239: one credential kind
         if row is None:
             ticket = secrets.token_urlsafe(32)
             directory = state / "workflows"
@@ -401,7 +410,7 @@ def replace(
     proposal = {k: v for k, v in request.items() if k != "previous_version"}
     proposal["op"] = "enroll"
     fields = validate(proposal)
-    profile, email, workflow, url, account, key = fields
+    profile, email, workflow, _url, _account, key = fields
     proposal["email"] = email
     with db:
         db.execute("BEGIN IMMEDIATE")
@@ -421,6 +430,7 @@ def replace(
             raise ValueError("ReplacementStale")
         if (
             secrets.compare_digest(str(original["key"]), key)
+            or paired(db, profile, email)
             or db.execute(
                 "SELECT 1 FROM routes WHERE workflow<>? AND (profile=? OR email=?)",
                 (workflow, profile, email),
@@ -434,3 +444,13 @@ def replace(
         retire(db, old, original)
         insert_route(db, state, fields, secrets.token_urlsafe(32), expected)
     return str(old["profile"])
+
+
+# #11239: a paired profile holds no enrollment.
+def paired(db: sqlite3.Connection, profile: str, email: str) -> bool:
+    return (
+        db.execute(
+            "SELECT 1 FROM pairings WHERE profile=? OR email=?", (profile, email)
+        ).fetchone()
+        is not None
+    )

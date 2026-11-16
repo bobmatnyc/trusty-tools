@@ -31,6 +31,8 @@ class Leases:
         )
 
     async def clear(self, claim: Claim) -> None:
+        if not claim.indicator:
+            return
         with contextlib.suppress(Refusal):
             await self.indicator(claim, False)
 

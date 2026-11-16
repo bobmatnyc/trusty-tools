@@ -1,17 +1,22 @@
 """Length-framed JSON and peer authentication for Trusty Browser's Unix sockets."""
 
 from __future__ import annotations
+
 import asyncio
-from dataclasses import dataclass, field
-import secrets
-import sqlite3
-import uuid
 import hmac
 import json
 import os
+import secrets
 import socket
+import sqlite3
 import struct
 import sys
+import uuid
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from trusty_browser.codes import Grant
 
 Frame = dict[str, object]
 HEADER = struct.Struct("=I")
@@ -122,6 +127,71 @@ class Peer:
             k: observed.get(k) for k in ("email", "url", "account", "tab", "result")
         }
 
+    async def page(self, op: str, grant: str, **args: object) -> object:
+        """Send one page command (email expectation only) and return its ``result``.
+
+        Why: a paired profile has no site route, and a page refusal carries only
+        the fields the contract names (#11239). What: a lost reply is
+        ``OutcomeUnknown`` for a mutating op, else ``BrowserDisconnected``, and
+        so is a worker's own ``OutcomeUnknown`` or ``BrowserDisconnected``; an
+        unknown error name becomes ``BrowserRefused``.
+        Test: `test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried`,
+        `test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing`,
+        `test_document_changed_is_relayed_without_extra_fields_and_not_journaled`.
+        """
+        ident = secrets.token_urlsafe(18)
+        reply = asyncio.get_running_loop().create_future()
+        self.pending[ident] = reply
+        email = str(self.row["email"])
+        frame = {"id": ident, "op": op, "email": email, "grant": grant, **args}
+        try:
+            await write_frame(self.writer, frame)
+            observed = await asyncio.wait_for(reply, PAGE_WAIT)
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            self.writer.close()
+            raise Refusal(
+                "OutcomeUnknown" if op in MUTATING else "BrowserDisconnected"
+            ) from exc
+        finally:
+            self.pending.pop(ident, None)
+        if observed.get("ok") is not True:
+            code = observed.get("error")
+            if code not in PAGE_ERRORS:
+                raise Refusal("BrowserRefused")
+            if code in UNFINISHED:
+                # #11239: a click the worker could not finish may have run; a read is retry-safe.
+                raise Refusal(
+                    "OutcomeUnknown" if op in MUTATING else "BrowserDisconnected"
+                )
+            extra = {k: observed[k] for k in REFUSAL_FIELDS if k in observed}
+            raise Refusal(str(code), **extra)
+        if observed.get("email") != email:
+            raise Refusal("IdentityMismatch")
+        if "tab" in args and observed.get("tab") != args["tab"]:
+            raise Refusal("TabMismatch")
+        return observed.get("result")
+
+
+PAGE_WAIT = 8.0  # the worker answers within 7 s
+# #11291: a scroll can load content, so it is journaled like a click.
+MUTATING = {"page_click", "page_type", "page_scroll", "page_navigate", "page_upload"}
+REFUSAL_FIELDS = ("tab", "origin", "access", "document")
+# Worker names for a command it could not finish; relayed without fields.
+UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
+PAGE_ERRORS = UNFINISHED | {
+    "InvalidOperation",
+    "InvalidRequest",
+    "ProfileMismatch",
+    "UnknownGrant",
+    "OutOfScope",
+    "TabNotFound",
+    "PermissionNeeded",
+    "DocumentChanged",
+    "StaleElement",
+    "NotEditable",
+    "InvalidUrl",
+}
+
 
 @dataclass(eq=False)
 class Claim:
@@ -131,6 +201,10 @@ class Claim:
     token: str
     deadline: float
     busy: bool = False
+    # #11239: code-session leases show no indicator and track the last document.
+    indicator: bool = True
+    document: str | None = None
+    origin: str | None = None
 
 
 @dataclass
@@ -138,3 +212,5 @@ class Session:
     row: sqlite3.Row
     owner: str = field(default_factory=lambda: secrets.token_urlsafe(12))
     journal: dict[str, tuple[Frame, Frame]] = field(default_factory=dict)
+    # #11239: set when the session was opened by an activation code.
+    grant: Grant | None = None

@@ -2,6 +2,7 @@
 globalThis.TrustyControlIndicator = (() => {
   const claims = new Map();
   let pending = Promise.resolve();
+  let codeGrants = 0;
   function serialized(task) {
     const result = pending.then(task);
     pending = result.catch(() => {});
@@ -9,14 +10,19 @@ globalThis.TrustyControlIndicator = (() => {
   }
   async function badge() {
     const names = [...new Set([...claims.values()].map(item => item.workflow))];
-    if (names.length) {
+    const on = names.length > 0 || codeGrants > 0;
+    if (on) {
       await chrome.action.setBadgeBackgroundColor({color:"#963800"});
       await chrome.action.setBadgeTextColor({color:"#FFFFFF"});
     }
-    await chrome.action.setBadgeText({text:names.length ? "ON" : ""});
+    await chrome.action.setBadgeText({text:on ? "ON" : ""});
+    const granted = codeGrants ? "agent access granted" : "";
     await chrome.action.setTitle({title:names.length
-      ? "Trusty Browser controls " + names.join(", ") : "Trusty Browser"});
+      ? "Trusty Browser controls " + names.join(", ") + (granted && "; " + granted)
+      : granted ? "Trusty Browser: " + granted : "Trusty Browser"});
   }
+  // #11239: activation-code grants show the badge while the worker's grant table is not empty.
+  function grants(count) { return serialized(async () => { codeGrants = count; await badge(); }); }
   async function remove(tabId, claim) {
     const item = claims.get(tabId);
     if (!item || (claim && item.claim !== claim)) return;
@@ -51,5 +57,5 @@ globalThis.TrustyControlIndicator = (() => {
       await badge();
     });
   }
-  return {update, clear, clearAll};
+  return {update, clear, clearAll, grants};
 })();
