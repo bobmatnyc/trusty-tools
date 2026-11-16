@@ -9,7 +9,7 @@ dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /a
 /static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
-/config.json `warnings` lists why this interpreter degrades the page ([] on Python >= 3.11, #10606).
+/config.json `warnings` lists why this interpreter degrades the page ([] when tmux is on PATH, #10606).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
 owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is

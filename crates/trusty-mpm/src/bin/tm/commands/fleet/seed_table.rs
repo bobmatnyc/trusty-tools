@@ -306,6 +306,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_projects.py",
         false
     ),
+    // #10606: TOML on Python < 3.11; dashboard_projects imports it.
+    embedded!(
+        "scripts/dashboard_toml.py",
+        "scripts/dashboard_toml.py",
+        false
+    ),
     // #10896: the Projects view's watch state; dashboard_projects imports it.
     embedded!(
         "scripts/dashboard_watch.py",
