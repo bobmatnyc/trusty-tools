@@ -5,10 +5,13 @@
 //! ruling Dpg: restart is its own verb, refused unless a fresh Intent Ledger
 //! checkpoint exists and the box is idle. No bypass flag: the owner overrides
 //! with `tm fleet relaunch`.
-//! What: [`restart`] refuses inside Claude Code (#10033, exit 2); gates on
+//! What: [`restart`] refuses inside Claude Code (#10033, exit 2); takes the
+//! `up` lock ([`super::up::UP_LOCK`]) without waiting (exit 1 when held) and
+//! keeps it to the end; gates on
 //! [`trusty_architect::ledger::fresh::ready`] over `<dir>/local/il` (exit 4,
 //! nothing sent, a read error included); gates on 3 idle reads [`IDLE_GAP`]
-//! apart (exit 2, or keep trying until `--wait`); re-checks the ledger; then
+//! apart (exit 2, or keep trying until `--wait`); re-checks the ledger and
+//! reads idle once more; then
 //! runs [`super::relaunch::relaunch`] (stop, bound launch with resume and
 //! remote control, poller), types [`RESUME`] through `send_guarded`, and
 //! appends one line to `inbox/restart.log`.
@@ -84,7 +87,9 @@ impl RestartReport {
 /// `a_checkpoint_read_error_refuses_the_restart`,
 /// `a_busy_box_exits_2_and_touches_nothing`,
 /// `inside_claude_code_restart_is_refused`,
-/// `an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line`.
+/// `an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line`,
+/// `a_held_up_lock_refuses_the_restart_before_any_tmux_call`,
+/// `a_box_busy_just_before_relaunch_refuses`.
 pub(crate) fn restart(
     dir: &Path,
     names: &SessionNames,
@@ -103,6 +108,14 @@ pub(crate) fn restart(
             ],
         );
     }
+    // #11365: hold `up`'s lock for the whole live path, so `up` (which sees a
+    // shell during the relaunch) and a second `restart` never act on the pane.
+    let _lock = match super::up::lock_within(dir, Duration::ZERO) {
+        Ok(f) => f,
+        Err(e) => {
+            return RestartReport::done(1, vec![format!("FAILED  {e}; nothing sent")]);
+        }
+    };
     if let Some(r) = il_refusal(dir, session, ops) {
         return r;
     }
@@ -132,6 +145,14 @@ pub(crate) fn restart(
     // As `self-clear.sh`: the ledger may have changed during the idle wait.
     if let Some(r) = il_refusal(dir, session, ops) {
         return r;
+    }
+    if !idle(ops.tmux, &pane) {
+        return RestartReport::done(
+            2,
+            vec![format!(
+                "busy: tmux session {session} turned busy before the relaunch; nothing sent"
+            )],
+        );
     }
     let mut report = match (ops.relaunch)() {
         Ok(r) => RestartReport {

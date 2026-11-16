@@ -48,7 +48,12 @@ fn relaunched() -> anyhow::Result<RelaunchReport> {
     Ok(RelaunchReport {
         steps: vec![Step::Changed("started a new `claude`, bound".into())],
         session: "tm-architect".into(),
-        registration: None,
+        registration: Some(trusty_mpm::session_manager::ArchitectRegistration {
+            dir: "/arch".into(),
+            session: "tm-architect".into(),
+            poll_session: None,
+            collector_session: None,
+        }),
     })
 }
 
@@ -129,8 +134,9 @@ fn inside_claude_code_restart_is_refused() {
 fn an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line() {
     let tmp = tempfile::tempdir().expect("tmp");
     ledger(tmp.path(), READY, None);
-    // 3 idle reads, 1 box read, 1 pre-type reading, then the echo.
+    // 3 idle reads, 1 pre-relaunch read, 1 box read, 1 pre-type reading, then the echo.
     let tmux = ScriptedTmux::new()
+        .script("capture-pane", IDLE)
         .fallback("display-message", "%3\n")
         .fallback("send-keys", "")
         .script("capture-pane", IDLE)
@@ -141,6 +147,10 @@ fn an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line() {
         .fallback("capture-pane", ECHO);
     let (r, relaunches) = run(tmp.path(), &tmux, false);
     assert_eq!((r.exit, relaunches), (0, 1), "{:?}", r.lines);
+    assert!(
+        r.registration.is_some(),
+        "the relaunch's registration is passed on"
+    );
     let sends = tmux.sends();
     assert_eq!(sends.len(), 2, "{sends:?}");
     assert!(sends[0].iter().any(|a| a == RESUME), "{sends:?}");
@@ -148,4 +158,32 @@ fn an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line() {
     let log = std::fs::read_to_string(tmp.path().join("inbox/restart.log")).expect("log");
     assert_eq!(log.lines().count(), 1, "{log}");
     assert!(log.contains("exit=0 resume=sent"), "{log}");
+}
+
+#[test]
+fn a_held_up_lock_refuses_the_restart_before_any_tmux_call() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    ledger(tmp.path(), READY, None);
+    let _held = super::super::up::lock_within(tmp.path(), Duration::ZERO).expect("hold");
+    let tmux = idle_tmux();
+    let (r, relaunches) = run(tmp.path(), &tmux, false);
+    assert_eq!((r.exit, relaunches), (1, 0), "{:?}", r.lines);
+    assert!(tmux.calls().is_empty(), "{:?}", tmux.calls());
+    assert!(r.lines.iter().any(|l| l.contains("holds")), "{:?}", r.lines);
+}
+
+#[test]
+fn a_box_busy_just_before_relaunch_refuses() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    ledger(tmp.path(), READY, None);
+    let tmux = ScriptedTmux::new()
+        .fallback("display-message", "%3\n")
+        .fallback("send-keys", "")
+        .script("capture-pane", IDLE)
+        .script("capture-pane", IDLE)
+        .script("capture-pane", IDLE)
+        .fallback("capture-pane", DRAFT);
+    let (r, relaunches) = run(tmp.path(), &tmux, false);
+    assert_eq!((r.exit, relaunches), (2, 0), "{:?}", r.lines);
+    assert!(tmux.sends().is_empty());
 }

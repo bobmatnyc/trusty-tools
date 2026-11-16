@@ -307,6 +307,13 @@ pub(crate) fn up(
 
 /// Hold an exclusive `flock` on `dir/`[`UP_LOCK`], waiting up to [`LOCK_WAIT`].
 fn lock(dir: &Path) -> Result<File, String> {
+    lock_within(dir, LOCK_WAIT)
+}
+
+/// Hold an exclusive `flock` on `dir/`[`UP_LOCK`], waiting up to `wait`.
+/// `restart` passes zero, so it refuses at once while `up` or another
+/// `restart` acts on the pane (#11365).
+pub(crate) fn lock_within(dir: &Path, wait: Duration) -> Result<File, String> {
     let path = dir.join(UP_LOCK);
     let parent = path.parent().unwrap_or(dir);
     std::fs::create_dir_all(parent)
@@ -317,7 +324,7 @@ fn lock(dir: &Path) -> Result<File, String> {
         .write(true)
         .open(&path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
-    let deadline = Instant::now() + LOCK_WAIT;
+    let deadline = Instant::now() + wait;
     loop {
         match try_flock(&file) {
             Ok(true) => return Ok(file),
@@ -326,7 +333,7 @@ fn lock(dir: &Path) -> Result<File, String> {
             }
             Ok(false) => {
                 return Err(format!(
-                    "another `tm architect up` holds {}",
+                    "another `tm architect up` or `restart` holds {}",
                     path.display()
                 ));
             }
