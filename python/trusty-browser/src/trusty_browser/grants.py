@@ -13,7 +13,7 @@ from pathlib import Path
 
 from trusty_browser import codes, pairing
 from trusty_browser.audit import Audit
-from trusty_browser.codes import CODE_TTL, GRANT_IDLE, Grant, Lockout
+from trusty_browser.codes import CODE_TTL, RECONNECT_GRACE, Grant, Lockout
 from trusty_browser.enrollment import FIELDS, original_fields, registration_id
 from trusty_browser.leases import Leases
 from trusty_browser.protocol import Claim, Frame, Peer, Refusal, Session, string
@@ -65,18 +65,23 @@ class Grants(Leases):
                 del self.spent[digest]
 
     async def expire(self, now: float) -> None:
-        """Purge stale codes and end every grant idle for ``GRANT_IDLE`` or longer.
+        """Purge stale codes and end every grant whose reconnect grace ran out.
 
-        Why: an idle grant otherwise holds its tab slot and stays listed until
-        its own agent calls again (#11239). What: runs before every cap check
-        and grant listing.
-        Test: `test_idle_profile_grants_leave_the_grant_list`,
-        `test_idle_tab_grant_releases_the_tab_cap_even_without_audit`.
+        Why: a grant lasts until its browser closes (#11239 owner ruling), so
+        idleness never ends one; a worker that does not return within
+        ``RECONNECT_GRACE`` means the browser is gone. What: runs before every
+        cap check and grant listing, and from the deadline sweep.
+        Test: `test_idle_profile_grants_stay_listed_past_the_old_timeout`,
+        `test_a_grant_whose_worker_never_returns_ends_after_the_grace`.
         """
         self.purge(now)
         for grant in list(self.grants.values()):
-            if grant.state == "active" and now - grant.last_used >= GRANT_IDLE:
-                await self.end(grant, "idle")
+            if (
+                grant.state == "active"
+                and grant.grace_until is not None
+                and grant.grace_until <= now
+            ):
+                await self.end(grant, "browser_gone")
 
     def check_caps(
         self, generation: str | None, tab: int | None, me: Grant | None
@@ -161,6 +166,7 @@ class Grants(Leases):
             generation,
             digest,
             codes.clock() + CODE_TTL,
+            incarnation=peer.incarnation if peer else None,
         )
         self.record("mint", grant, outcome="ok")
         self.codes[digest] = grant
@@ -232,6 +238,7 @@ class Grants(Leases):
             raise
         self.consume(grant)
         grant.state, grant.generation = "active", peer.generation
+        grant.incarnation, grant.grace_until = peer.incarnation, None
         grant.session = Session(grant.row, grant=grant)
         grant.last_used = codes.clock()
         self.lockout.succeed()
@@ -241,7 +248,7 @@ class Grants(Leases):
     def redeemed(self, session: Session) -> Frame:
         grant = session.grant
         assert grant is not None
-        reply: Frame = {"ok": True, **grant.fields(), "idle_timeout_s": int(GRANT_IDLE)}
+        reply: Frame = {"ok": True, **grant.fields()}
         del reply["origin"]
         if grant.tab is None:
             del reply["tab"]
@@ -298,11 +305,12 @@ class Grants(Leases):
         task.add_done_callback(self.tasks.discard)
 
     def arm(self) -> None:
-        """Keep one loop callback at the earliest code or idle deadline (no thread).
+        """Keep one loop callback at the earliest code or reconnect-grace deadline (no thread).
 
-        Why: idle and code expiry must reach the worker without an agent call
-        (#11239, "All-https access"). What: called after mint, redeem (either
-        outcome) and every sweep; a no-op once ``halt`` ran.
+        Why: code expiry and a lost browser must reach the worker without an
+        agent call (#11239, "All-https access"). What: called after mint,
+        redeem (either outcome), a peer loss and every sweep; an active grant
+        with a connected browser has no deadline; a no-op once ``halt`` ran.
         Test: `test_a_refused_redeem_rearms_the_code_deadline`,
         `test_the_deadline_callback_never_runs_after_close`.
         """
@@ -311,10 +319,11 @@ class Grants(Leases):
             self.sweeper = None
         if self.halted:
             return
-        due = [
-            g.deadline if g.state == "code" else g.last_used + GRANT_IDLE
+        due = [g.deadline for g in self.grants.values() if g.state == "code"]
+        due += [
+            g.grace_until
             for g in self.grants.values()
-            if g.state in ("code", "active")
+            if g.state == "active" and g.grace_until is not None
         ]
         if not due:
             return
@@ -367,7 +376,7 @@ class Grants(Leases):
     async def end(self, grant: Grant, reason: str) -> None:
         """End a grant, then clear its indicators; a failed clear never stops a caller's loop.
 
-        Test: `test_a_failing_indicator_clear_cannot_stop_the_idle_sweep`.
+        Test: `test_a_failing_indicator_clear_cannot_stop_a_revoke_all`.
         """
         claims = self.retire(grant, reason)
         results = await asyncio.gather(
@@ -392,9 +401,66 @@ class Grants(Leases):
         self.tasks.clear()
 
     def peer_gone(self, peer: Peer) -> None:
+        """Start the reconnect grace for the lost peer's active grants.
+
+        Why: Chrome stops an idle MV3 service worker, which drops service.sock
+        while the browser stays open; the grant must outlive that (#11239
+        owner ruling). What: the grant stays active with ``grace_until`` set;
+        ``peer_back`` rebinds it or the sweep ends it ``browser_gone``. A grant
+        with no incarnation ends at once (fail closed).
+        Test: `test_a_grant_survives_a_worker_reconnect_within_the_grace`,
+        `test_a_grant_without_an_incarnation_does_not_persist`.
+        """
+        until = codes.clock() + RECONNECT_GRACE
         for grant in list(self.grants.values()):
-            if grant.state == "active" and grant.generation == peer.generation:
+            if grant.state != "active" or grant.generation != peer.generation:
+                continue
+            if grant.incarnation:
+                grant.grace_until = until
+            else:  # #11239: no incarnation to match on return, so no grace.
                 self.retire(grant, "browser_gone")
+        self.arm()
+
+    def peer_back(self, peer: Peer) -> None:
+        """Rebind the profile's grants to a new peer of the same browser incarnation.
+
+        Why: ``incarnation`` lives in ``chrome.storage.session``, which survives
+        a service-worker restart and is cleared when the browser closes. What:
+        same incarnation moves codes and active grants to the new generation
+        and audits ``grant_reuse``; a new or missing incarnation, or an audit
+        failure, ends them ``browser_gone``. Runs before the hello
+        acknowledgement, so its ``live`` list is current.
+        Test: `test_a_grant_survives_a_worker_reconnect_within_the_grace`,
+        `test_a_browser_restart_ends_the_grant_at_reconnect`,
+        `test_a_reconnect_after_the_grace_ends_the_grant_without_a_sweep`.
+        """
+        profile = str(peer.row["profile"])
+        for grant in list(self.grants.values()):
+            if (
+                grant.row["profile"] != profile
+                or grant.state not in ("code", "active")
+                or grant.generation in (None, peer.generation)
+            ):
+                continue
+            if (  # #11239: a lapsed grace ends the grant even before the sweep runs
+                grant.state == "active"
+                and grant.grace_until is not None
+                and grant.grace_until <= codes.clock()
+            ):
+                self.retire(grant, "browser_gone")
+                continue
+            # pair() refuses an empty incarnation (protocol.string); this guard
+            # keeps an unset one from ever matching.
+            if grant.incarnation and grant.incarnation == peer.incarnation:
+                try:  # fail closed: a rebind the audit cannot record ends the grant
+                    self.audit.write("grant_reuse", **grant.fields(), outcome="ok")
+                except OSError:
+                    self.retire(grant, "browser_gone")
+                    continue
+                grant.generation, grant.grace_until = peer.generation, None
+            elif grant.state == "active":  # a stale tab code fails redeem as TabClosed
+                self.retire(grant, "browser_gone")
+        self.arm()
 
     async def end_profile(self, profile: str) -> None:
         for grant in list(self.grants.values()):
@@ -413,9 +479,10 @@ class Grants(Leases):
         route = pairing.profile_row(self.db, profile)
         if grant.state != "active":
             return
-        if codes.clock() - grant.last_used >= GRANT_IDLE:
-            await self.end(grant, "idle")
-        elif peer is None or peer.generation != grant.generation:
+        if peer is None or peer.generation != grant.generation:
+            # #11239: inside the reconnect grace the grant waits for its worker.
+            if grant.grace_until is not None and codes.clock() < grant.grace_until:
+                raise Refusal("BrowserDisconnected")
             await self.end(grant, "browser_gone")
         elif route is None or any(
             route[k] != grant.row[k] for k in ("ticket", "browser_key")

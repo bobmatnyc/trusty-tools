@@ -294,22 +294,18 @@ def test_page_operations_relay_the_contract_shapes(short, clock):
     run(short, body)
 
 
-@pytest.mark.parametrize(
-    "route", ["operator", "popup", "idle", "tab_closed", "unknown_grant"]
-)
+@pytest.mark.parametrize("route", ["operator", "popup", "tab_closed", "unknown_grant"])
 def test_ended_grant_answers_grant_ended_and_sends_grant_end(short, clock, route):
     async def body(rig):
         tab = route == "tab_closed"
         ack, call = await session(rig, "tab" if tab else "profile", 7 if tab else None)
         lease = (await call({"op": "select", "tab": 7}))["lease"]
         frame = {"op": "page_read", "lease": lease}
-        reason = {"operator": "revoked", "popup": "revoked", "idle": "idle"}
+        reason = {"operator": "revoked", "popup": "revoked"}
         if route == "operator":
             await rig.operator(op="revoke_grant", grant=ack["grant"])
         elif route == "popup":
             await rig.popup(rig.alpha, "revoke_grant", grant=ack["grant"])
-        elif route == "idle":
-            clock[0] += codes.GRANT_IDLE
         elif route == "tab_closed":
             rig.a.tabs.pop(7)
             reason[route] = "tab_closed"
@@ -471,6 +467,9 @@ def test_lost_reply_on_click_type_navigate_is_outcome_unknown_and_not_retried(
         assert len(rig.a.sent(op)) == 1
         assert not rig.broker.claims
         await rig.a.task  # the broker dropped the silent browser
+        # #11239: the grant waits out the reconnect grace, then ends.
+        assert await call(frame) == {"ok": False, "error": "BrowserDisconnected"}
+        clock[0] += codes.RECONNECT_GRACE
         ended = await gone(call, frame)
         assert ended == {"ok": False, "error": "GrantEnded", "reason": "browser_gone"}
         assert len(rig.a.sent(op)) == 1
@@ -723,24 +722,23 @@ def test_worker_browser_disconnected_on_a_read_is_relayed_and_retry_runs_again(
     run(short, body)
 
 
-def test_a_failing_indicator_clear_cannot_stop_the_idle_sweep(short, clock, capsys):
+def test_a_failing_indicator_clear_cannot_stop_a_revoke_all(short, clock, capsys):
     async def body(rig):
         acks = []
         for tab in (7, 9):
             ack, call = await session(rig)
             assert (await call({"op": "select", "tab": tab}))["ok"]
             acks.append(ack["grant"])
-        clock[0] += codes.GRANT_IDLE
 
         async def broken(_claim):
             raise RuntimeError("indicator")
 
         rig.broker.clear = broken
-        rig.broker.sweep()
+        assert await rig.operator(op="revoke_grants") == {"ok": True, "revoked": 2}
         await settle(rig)
         assert not rig.broker.grants and not rig.broker.claims
         sent = [(f["grant"], f["reason"]) for f in rig.a.sent("grant_end")]
-        assert sorted(sent) == sorted((g, "idle") for g in acks)
+        assert sorted(sent) == sorted((g, "revoked") for g in acks)
         assert rig.broker.sweeper is None
         assert "indicator" in capsys.readouterr().err
 
@@ -876,5 +874,50 @@ def test_page_downloads_reports_the_workers_list_in_shape(short, clock):
         rig.a.refuse["page_downloads"] = {"origin": ORIGIN, "downloads": [{"id": 1}]}
         bad = await call({"op": "page_downloads", "lease": lease})
         assert bad == {"ok": False, "error": "BrowserRefused"}
+
+    run(short, body)
+
+
+def test_a_browser_drop_during_an_in_flight_op_leaves_the_grant_in_grace(
+    short, clock, monkeypatch
+):
+    monkeypatch.setattr(protocol, "PAGE_WAIT", 5.0)
+
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = {"op": "page_click", "lease": lease, "request_id": "r", "ref": "1.0"}
+        rig.a.hold["page_click"] = asyncio.Event()
+        pending = asyncio.ensure_future(call(frame))
+        for _ in range(200):
+            if rig.a.sent("page_click"):
+                break
+            await asyncio.sleep(0.01)
+        await rig.a.leave()  # the browser drops while the click is in flight
+        reply = await pending
+        assert reply["ok"] is False and reply["error"] != "GrantEnded"
+        grant = rig.broker.grants[ack["grant"]]
+        assert grant.state == "active" and grant.grace_until is not None
+
+    run(short, body)
+
+
+def test_a_late_outcome_unknown_from_the_old_peer_keeps_a_rebound_grant(short, clock):
+    async def body(rig):
+        ack, call = await session(rig)
+        grant = rig.broker.grants[ack["grant"]]
+        old = rig.broker.peers[rig.alpha["profile"]]
+        await rig.a.leave()
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()  # same incarnation: rebound
+        assert grant.generation != old.generation and grant.grace_until is None
+
+        async def late(*_a, **_k):
+            raise protocol.Refusal("OutcomeUnknown")
+
+        old.page = late  # the old peer's reply arrives after the rebind
+        with pytest.raises(protocol.Refusal):
+            await rig.broker.send(grant, None, old, "page_click")
+        assert grant.state == "active"
+        assert (await call({"op": "tabs"}))["ok"]
 
     run(short, body)

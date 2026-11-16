@@ -278,7 +278,6 @@ def test_connect_returns_grant_facts_and_tools_work_within_the_grant(short, cloc
                 "scope": "tab",
                 "profile": agent.rig.alpha["profile"],
                 "tab": 7,
-                "idle_timeout_s": int(codes.GRANT_IDLE),
             }
             assert broker.grants[minted["grant"]].state == "active"
             claim = await agent.ok("browser_select", tab=7)
@@ -403,8 +402,11 @@ def test_grant_ended_drops_the_session(short, clock):
                 "error": "GrantEnded",
                 "reason": "revoked",
             }
-            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
+            after = await agent.refused("browser_tabs")
+            assert after["error"] == "NotConnected" and after["reason"] == "revoked"
             assert (await agent.ok("browser_connect", code=await agent.mint()))["ok"]
+            await agent.ok("browser_disconnect")
+            assert "reason" not in await agent.refused("browser_tabs")
 
     drive(short, body)
 
@@ -631,7 +633,6 @@ def test_code_file_redeems_through_the_same_redeem_as_code(short, clock):
                 "scope": "tab",
                 "profile": agent.rig.alpha["profile"],
                 "tab": 7,
-                "idle_timeout_s": int(codes.GRANT_IDLE),
             }
             assert broker.grants[minted["grant"]].state == "active"
             assert (await agent.ok("browser_select", tab=7))["lease"]

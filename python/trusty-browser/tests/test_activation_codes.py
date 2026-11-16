@@ -661,14 +661,16 @@ def test_unenroll_ends_codes_and_grants_for_the_profile(short, clock):
     run(short, body)
 
 
-def test_idle_browser_loss_and_socket_close_end_the_grant(short, clock):
+# #11239 owner ruling: longer than the retired 30-minute idle timeout.
+LONG_IDLE = 35 * 60 + 1
+
+
+def test_browser_loss_and_socket_close_end_the_grant(short, clock):
     async def body(rig):
-        _, idle = await rig.redeem((await rig.mint(rig.alpha))["code"])
-        assert (await idle({"op": "tabs"}))["ok"]
-        clock[0] += codes.GRANT_IDLE
-        assert (await gone(idle))["reason"] == "idle"
         _, lost = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        assert (await lost({"op": "tabs"}))["ok"]
         await rig.a.leave()
+        clock[0] += codes.RECONNECT_GRACE
         assert (await gone(lost))["reason"] == "browser_gone"
         _reply, _closing = await rig.redeem((await rig.mint(rig.beta))["code"])
         rig.writers[-1].close()
@@ -677,61 +679,200 @@ def test_idle_browser_loss_and_socket_close_end_the_grant(short, clock):
                 break
             await asyncio.sleep(0)
         assert not rig.broker.grants
-        assert rig.outcomes("grant_end") == ["idle", "browser_gone", "closed"]
+        assert rig.outcomes("grant_end") == ["browser_gone", "closed"]
 
     run(short, body)
 
 
-def test_idle_profile_grants_leave_the_grant_list(short, clock):
+def test_idle_profile_grants_stay_listed_past_the_old_timeout(short, clock):
     async def body(rig):
         calls = []
         for _ in range(3):
             ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
-            assert ack["ok"]
+            assert ack["ok"] and "idle_timeout_s" not in ack
             calls.append(call)
-        clock[0] += codes.GRANT_IDLE - 1
-        assert len((await rig.operator(op="grants"))["grants"]) == 3
-        assert rig.outcomes("grant_end") == []
-        clock[0] += 1
-        assert (await rig.operator(op="grants")) == {"ok": True, "grants": []}
-        assert rig.outcomes("grant_end") == ["idle"] * 3
-        fresh = []
-        for _ in range(3):
-            ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
-            assert ack["ok"], ack
-            fresh.append(call)
-        assert len((await rig.operator(op="grants"))["grants"]) == 3
+        clock[0] += LONG_IDLE
+        listed = (await rig.operator(op="grants"))["grants"]
+        assert [g["state"] for g in listed] == ["active"] * 3
+        assert rig.broker.sweeper is None  # no idle deadline is armed
         for call in calls:
-            assert (await gone(call)) == {
-                "ok": False,
-                "error": "GrantEnded",
-                "reason": "idle",
-            }
-        assert (await fresh[0]({"op": "tabs"}))["ok"]
+            assert (await call({"op": "tabs"}))["ok"]
+        assert rig.outcomes("grant_end") == []
 
     run(short, body)
 
 
-def test_idle_tab_grant_releases_the_tab_cap_even_without_audit(
-    short, clock, monkeypatch
-):
+def test_an_idle_tab_grant_keeps_its_tab_cap_past_the_old_timeout(short, clock):
     async def body(rig):
-        _, stale = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
-        assert (await stale({"op": "select", "tab": 7}))["ok"]
-        clock[0] += codes.GRANT_IDLE
+        _, held = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        assert (await held({"op": "select", "tab": 7}))["ok"]
+        clock[0] += LONG_IDLE
+        assert (await rig.mint(rig.alpha, "tab", 7))["limit"] == "tab"
+        assert (await held({"op": "select", "tab": 7}))["ok"]
+        assert rig.outcomes("grant_end") == []
+
+    run(short, body)
+
+
+def test_a_grant_survives_a_worker_reconnect_within_the_grace(short, clock):
+    async def body(rig):
+        ack, whole = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        tab_ack, tab = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        await rig.a.leave()  # Chrome stopped the idle service worker
+        assert await whole({"op": "tabs"}) == {
+            "ok": False,
+            "error": "BrowserDisconnected",
+        }
+        clock[0] += codes.RECONNECT_GRACE - 1
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()  # same incarnation
+        assert {ack["grant"], tab_ack["grant"]} <= set(rig.a.ack["live"])
+        assert (await whole({"op": "tabs"}))["ok"]
+        assert (await tab({"op": "select", "tab": 7}))["ok"]
+        clock[0] += LONG_IDLE
+        assert len((await rig.operator(op="grants"))["grants"]) == 2
+        assert (await whole({"op": "tabs"}))["ok"]
+        assert rig.outcomes("grant_end") == []
+
+    run(short, body)
+
+
+def test_a_grant_outlives_lease_expiry_and_audits_create_reuse_and_end(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
+        assert (await call({"op": "select", "tab": 7}))["ok"]
+        for claim in rig.broker.claims.values():
+            claim.deadline = 0.0  # the lease expired
+        clock[0] += LONG_IDLE
+        assert (await call({"op": "select", "tab": 7}))["ok"]
+        await rig.a.leave()
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()
+        assert ack["grant"] in rig.a.ack["live"]
+        assert (await call({"op": "select", "tab": 7}))["ok"]
+        assert rig.outcomes("redeem") == ["ok"]
+        assert rig.outcomes("grant_reuse") == ["ok"]
+        await rig.operator(op="revoke_grant", grant=ack["grant"])
+        assert rig.outcomes("grant_end") == ["revoked"]
+
+    run(short, body)
+
+
+def test_revoke_inside_the_reconnect_grace_ends_the_grant_at_once(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
+        assert rig.broker.grants[ack["grant"]].grace_until is not None
+        await rig.operator(op="revoke_grant", grant=ack["grant"])
+        assert ack["grant"] not in rig.broker.grants
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()  # same incarnation
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "revoked"
+        assert rig.outcomes("grant_reuse") == []
+
+    run(short, body)
+
+
+def test_a_grant_without_an_incarnation_does_not_persist(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        rig.broker.grants[ack["grant"]].incarnation = None  # lookup failed
+        await rig.a.leave()
+        assert ack["grant"] not in rig.broker.grants  # no grace, no fail-open
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
+        assert rig.outcomes("grant_end") == ["browser_gone"]
+
+    run(short, body)
+
+
+def test_a_rebind_the_audit_cannot_record_ends_the_grant(short, clock, monkeypatch):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
         real = rig.broker.audit.write
 
-        def broken(*_a, **_k):
-            raise OSError("disk full")
+        def broken(event, **fields):
+            if event == "grant_reuse":
+                raise OSError("disk full")
+            return real(event, **fields)
 
         monkeypatch.setattr(rig.broker.audit, "write", broken)
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
+
+    run(short, body)
+
+
+def test_a_reconnect_after_the_grace_ends_the_grant_without_a_sweep(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
+        rig.broker.halt()  # no sweep runs; only the hello sees the lapsed grace
+        clock[0] += codes.RECONNECT_GRACE + 30
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()  # same incarnation
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert rig.outcomes("grant_reuse") == []
+        assert rig.outcomes("grant_end") == ["browser_gone"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
+
+    run(short, body)
+
+
+def test_a_browser_restart_ends_the_grant_at_reconnect(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
+        rig.a = await FakeBrowser(rig, rig.alpha).pair("boot-two")
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
+        assert rig.outcomes("grant_end") == ["browser_gone"]
+
+    run(short, body)
+
+
+@pytest.mark.parametrize("life", [None, ""])
+def test_a_hello_without_an_incarnation_gets_no_peer_so_no_mint_or_redeem(
+    short, clock, life
+):
+    async def body(rig):
+        await rig.a.leave()
+        reader, writer = await asyncio.open_unix_connection(rig.state / "service.sock")
+        hello = {
+            "type": "hello",
+            "profile": rig.alpha["profile"],
+            "email": rig.alpha["email"],
+            "incarnation": life,
+            "nonce": secrets.token_hex(32),
+        }
+        await service.write_frame(writer, hello)
+        assert await service.read_frame(reader) == {
+            "ok": False,
+            "error": "InvalidRequest",
+        }
+        writer.close()
+        assert rig.alpha["profile"] not in rig.broker.peers
+        tab = await rig.mint(rig.alpha, "tab", 7)
+        assert tab == {"ok": False, "error": "BrowserDisconnected"}
+        code = (await rig.mint(rig.alpha))["code"]
+        refused, _ = await rig.redeem(code)
+        assert refused == {"ok": False, "error": "BrowserDisconnected"}
+        assert not [g for g in rig.broker.grants.values() if g.state == "active"]
+
+    run(short, body)
+
+
+def test_a_grant_whose_worker_never_returns_ends_after_the_grace(short, clock):
+    async def body(rig):
+        _, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
+        assert rig.broker.sweeper is not None  # the grace deadline is armed
+        clock[0] += codes.RECONNECT_GRACE - 1
+        assert len((await rig.operator(op="grants"))["grants"]) == 1
+        clock[0] += 1
         assert (await rig.operator(op="grants")) == {"ok": True, "grants": []}
-        assert not rig.broker.claims
-        monkeypatch.setattr(rig.broker.audit, "write", real)
-        ack, _ = await rig.redeem((await rig.mint(rig.alpha, "tab", 7))["code"])
-        assert ack["ok"], ack
-        assert (await rig.mint(rig.alpha, "tab", 7))["limit"] == "tab"
-        assert (await gone(stale))["reason"] == "idle"
+        assert rig.outcomes("grant_end") == ["browser_gone"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
 
     run(short, body)
 
