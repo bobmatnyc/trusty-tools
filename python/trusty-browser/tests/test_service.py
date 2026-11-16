@@ -234,14 +234,13 @@ async def exercise():
                 url="https://qa.test/",
                 account="other",
             )
-            conflict = await broker.enrollment_request(destination)
-            assert not conflict["ok"]
-            approval = {
-                **destination,
-                "op": "replace",
-                "previous_version": conflict["previous"]["version"],
-            }
-            assert (await broker.enrollment_request(approval))["ok"]
+            # #11239: the enroll ops left enrollment.sock; drive the registry directly.
+            with pytest.raises(ValueError, match="EnrollmentConflict"):
+                enrollment.register(broker.db, state, destination)
+            previous = enrollment.inspect_conflict(broker.db, "travel")
+            approval = {**destination, "op": "replace", "previous_version": previous["version"]}
+            await broker.detach(enrollment.replace(broker.db, state, approval))
+            assert enrollment.register(broker.db, state, destination)["ok"]
             assert rows[1]["profile"] not in broker.peers
             assert not any(
                 claim.token == q["lease"] for claim in broker.claims.values()

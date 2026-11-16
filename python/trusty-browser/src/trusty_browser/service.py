@@ -14,18 +14,13 @@ import time  # noqa: F401 -- tests/test_service.py patches service.time
 from pathlib import Path
 from typing import BinaryIO, Self
 
-from trusty_browser import pairing
+from trusty_browser import assets, codes, pairing
 from trusty_browser.enrollment import (
     browser_key,
     database,
     digest,
     finish_removals,
-    inspect_conflict,
-    register,
     remove,
-    replace,
-    resolve_workflow,
-    status,
 )
 from trusty_browser.grants import OPERATOR_OPS, POPUP_OPS, RELAYED
 from trusty_browser.mac_peer import verify_chrome_host
@@ -214,39 +209,18 @@ class Broker(Pages):
 
     async def enrollment_request(self, request: Frame) -> Frame:
         assert self.db is not None
+        """The extension's ops on enrollment.sock: pair, unpair, connect, list and revoke.
+
+        #11239: the workflow enroll ops (resolve, status, enroll, replace,
+        unenroll) and code mint are gone; each answers ``InvalidRequest``.
+        Test: `test_removed_enroll_and_code_ops_are_refused`.
+        """
         op = string(request, "op")
-        if op == "mint":  # #11239: codes are minted only on this socket.
-            return await self.mint(request)
         if op in ("pair", "unpair"):
             return await self.pairing_request(request)
         if op in POPUP_OPS:
             return await self.popup_grants(request)
-        if op == "resolve":
-            return resolve_workflow(self.db, request)
-        workflow = string(request, "workflow")
-        if op == "status":
-            return status(self.db, self.state, request)
-        if op == "unenroll":
-            await self.revoke(workflow, request)
-            return {"ok": True, "workflow": workflow}
-        if op == "replace":
-            retired = replace(self.db, self.state, request)
-            if retired is not None:
-                await self.detach(retired)
-            request = {k: v for k, v in request.items() if k != "previous_version"}
-            request["op"] = "enroll"
-        try:
-            return register(self.db, self.state, request)
-        except ValueError as exc:
-            if op == "enroll" and str(exc) == "EnrollmentConflict":
-                prior = inspect_conflict(self.db, workflow)
-                if prior is not None:
-                    return {
-                        "ok": False,
-                        "error": "EnrollmentConflict",
-                        "previous": prior,
-                    }
-            raise
+        raise Refusal("InvalidRequest")
 
     async def pairing_request(self, request: Frame) -> Frame:
         """The extension's ``pair`` and ``unpair``; contract "pair".
@@ -356,6 +330,10 @@ class Broker(Pages):
             self.peer_back(peer)  # #11239: rebind grants across a worker restart.
             # #11239: ``live`` lets the worker prune grants whose end it missed.
             ack = {"ok": True, "generation": peer.generation, "live": self.live(name)}
+            # #11363: the worker reloads itself when it runs other assets than these.
+            stamp = assets.published(self.state)
+            if stamp is not None:
+                ack["assets"] = stamp
             await write_frame(writer, ack)
             while True:
                 reply = await read_frame(reader)
@@ -382,9 +360,15 @@ class Broker(Pages):
         try:
             verify_peer(writer)
             hello = await asyncio.wait_for(read_frame(reader), 5)
-            if hello.get("op") == "redeem":  # #11239
-                session = await self.redeem(hello)
-                ack = self.redeemed(session)
+            if hello.get("op") == "profiles":  # #11239: list, then close
+                if set(hello) != {"op"}:
+                    raise Refusal("InvalidRequest")
+                await self.expire(codes.clock())
+                await write_frame(writer, {"ok": True, "profiles": self.profiles()})
+                return
+            if hello.get("op") == "attach":  # #11239: no code; Connect made the grant
+                session = await self.attach(hello)
+                ack = self.attached(session)
             elif (
                 set(hello) != {"op", "workflow", "ticket"} or hello.get("op") != "open"
             ):
