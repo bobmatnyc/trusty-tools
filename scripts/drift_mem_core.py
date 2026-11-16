@@ -9,7 +9,7 @@ import json, math, queue, re, secrets, subprocess, threading, time
 from datetime import datetime, timezone
 
 ALLOWED_TOOLS = {"list_indexes", "index_status", "search", "palace_info"}
-# Thresholds (Architect brief 2026-11-16): a finding when recall@10 drops more
+# Thresholds: a finding when recall@10 drops more
 # than 5 points, p95 grows past 1.5x, or the degraded share rises 10 points.
 TH_RECALL10, TH_P95_X, TH_DEGRADED = 0.05, 1.5, 0.10
 # The p95 check runs only when |cold share - reference cold share| <= this.
