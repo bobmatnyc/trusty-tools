@@ -38,9 +38,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
-    DaemonDescriptor, LifecycleError, PinnedProcess, Signal, SignalDelivery, StopOutcome,
-    StoppedSignal, restart, restart_pid, restart_pid_with, restart_with, start, stop, stop_pid,
-    stop_pid_with, stop_with,
+    DaemonDescriptor, KernelDelivery, LifecycleError, PinnedProcess, ProcessTable, Signal,
+    SignalDelivery, StopOutcome, StoppedSignal, restart, restart_pid, restart_pid_with,
+    restart_with, restart_with_table, start, start_with_table, stop, stop_pid, stop_pid_with,
+    stop_with, stop_with_table,
 };
 
 const ROLE_DAEMON: &str = "tc-lc-role=daemon";
@@ -1582,6 +1583,140 @@ async fn stop_and_start_fail_closed_when_a_matching_process_hides_its_environmen
     );
     assert!(rec.sent().is_empty(), "no signal may be sent");
     assert!(is_alive(hidden.pid()), "the process is untouched");
+}
+
+// ─── injected process table (#11085) ────────────────────────────────────────
+
+/// A pid above any `pid_max`, so a fake entry never names a real process.
+const FAKE_PID: u32 = 4_194_401;
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Write a fake `<root>/<pid>` entry: a live process of `uid` that runs
+/// `desc`'s binary with its `liveness_args` and every `instance_env` value,
+/// so only the uid can rule it out. `environ` is mode 000 unless `readable`.
+fn fake_proc_entry(root: &Path, pid: u32, uid: u32, desc: &DaemonDescriptor, readable: bool) {
+    let dir = root.join(pid.to_string());
+    fs::create_dir_all(&dir).expect("fake entry dir");
+    let status = format!("Name:\tlc\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+    fs::write(dir.join("status"), status).expect("fake status");
+    let mut cmdline = desc.program().as_os_str().as_bytes().to_vec();
+    for arg in &desc.liveness_args {
+        cmdline.push(0);
+        cmdline.extend_from_slice(arg.as_bytes());
+    }
+    cmdline.push(0);
+    fs::write(dir.join("cmdline"), cmdline).expect("fake cmdline");
+    std::os::unix::fs::symlink(desc.program(), dir.join("exe")).expect("fake exe link");
+    let mut environ = Vec::new();
+    for (name, value) in &desc.instance_env {
+        if let Some(value) = value {
+            environ.extend_from_slice(format!("{name}=").as_bytes());
+            environ.extend_from_slice(value.as_bytes());
+            environ.push(0);
+        }
+    }
+    let path = dir.join("environ");
+    fs::write(&path, environ).expect("fake environ");
+    if !readable {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    }
+}
+
+// #11085: a matching process of another uid, readable or hiding its
+// environment as a foreign daemon does, is skipped by every scan: stop, start
+// and restart act as if it were absent. The same entry under this uid is this
+// instance, so the uid alone rules it out.
+#[tokio::test]
+async fn a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let mine = fx.path("mine-proc");
+    fake_proc_entry(&mine, FAKE_PID, euid(), &desc, true);
+    let foreign = fx.path("foreign-proc");
+    let other_uid = euid().wrapping_add(1);
+    fake_proc_entry(&foreign, FAKE_PID, other_uid, &desc, true);
+    fake_proc_entry(&foreign, FAKE_PID + 1, other_uid, &desc, false);
+    let table = ProcessTable::at(&foreign);
+    let rec = Recording::new(true);
+
+    let control = stop_with_table(&desc, &rec, &ProcessTable::at(&mine)).await;
+    let stopped = stop_with_table(&desc, &rec, &table).await;
+    let started = start_with_table(&desc, &table).await;
+    let restarted = restart_with_table(&desc, &KernelDelivery, &table).await;
+    let mut reaps = fx.reap_reported(&marker);
+
+    assert!(
+        matches!(&control, Err(LifecycleError::RunningUnserved { pids, .. }) if pids == &[FAKE_PID]),
+        "the same entry under this uid is this instance: {control:?}"
+    );
+    assert_eq!(stopped.expect("stop"), StopOutcome::NotRunning);
+    let first = started.expect("start").pid;
+    let restarted = restarted.expect("restart");
+    assert_eq!(
+        restarted.stop,
+        StopOutcome::Stopped {
+            pid: first,
+            forced: false
+        }
+    );
+    let second = restarted.start.pid;
+    assert_eq!(
+        stop_with_table(&desc, &KernelDelivery, &table)
+            .await
+            .expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: second,
+            forced: false
+        }
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    reaps.iter_mut().for_each(Reap::disarm);
+}
+
+// #11085: a matching process of this uid whose environment cannot be read
+// still fails every scan closed through an injected table, as through `/proc`
+// (#11098); so does a table that cannot be listed.
+#[tokio::test]
+async fn a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let proc = fx.path("proc");
+    fake_proc_entry(&proc, FAKE_PID, euid(), &desc, false);
+    let table = ProcessTable::at(&proc);
+    let rec = Recording::new(true);
+
+    let stopped = stop_with_table(&desc, &rec, &table).await;
+    let started = start_with_table(&desc, &table).await;
+    let restarted = restart_with_table(&desc, &rec, &table).await;
+    let unlisted = stop_with_table(&desc, &rec, &ProcessTable::at(fx.path("absent"))).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+
+    for (call, out) in [
+        ("stop", stopped.map(|o| format!("{o:?}"))),
+        ("start", started.map(|o| format!("{o:?}"))),
+        ("restart", restarted.map(|o| format!("{o:?}"))),
+    ] {
+        assert!(
+            matches!(&out, Err(LifecycleError::InstanceUnreadable { pid, source, .. })
+                if *pid == FAKE_PID && source.kind() == std::io::ErrorKind::PermissionDenied),
+            "{call}: expected InstanceUnreadable naming pid {FAKE_PID}, got {out:?}"
+        );
+    }
+    assert!(
+        matches!(&unlisted, Err(LifecycleError::Io { .. })),
+        "an unlistable table must fail closed: {unlisted:?}"
+    );
+    assert!(lines(&marker).is_empty(), "a daemon was spawned");
+    assert!(rec.sent().is_empty(), "no signal may be sent");
 }
 
 // #11098: a `/proc` read that fails for a reason other than a vanished

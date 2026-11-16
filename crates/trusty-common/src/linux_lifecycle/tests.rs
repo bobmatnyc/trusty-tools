@@ -210,17 +210,30 @@ fn read_error_is_skipped_only_for_a_vanished_or_foreign_entry() {
     // SAFETY: geteuid has no preconditions and cannot fail.
     let euid = unsafe { libc::geteuid() };
     let os = std::io::Error::from_raw_os_error;
-    assert!(liveness::skippable(&os(libc::ENOENT), me, euid));
-    assert!(liveness::skippable(&os(libc::ESRCH), me, euid));
+    let proc = ProcessTable::system();
+    assert!(liveness::skippable(&os(libc::ENOENT), &proc, me, euid));
+    assert!(liveness::skippable(&os(libc::ESRCH), &proc, me, euid));
     for errno in [libc::EMFILE, libc::ENFILE, libc::ENOMEM, libc::EIO] {
-        assert!(!liveness::skippable(&os(errno), me, euid), "errno {errno}");
+        assert!(
+            !liveness::skippable(&os(errno), &proc, me, euid),
+            "errno {errno}"
+        );
     }
     // EACCES on this uid's own entry is not hidepid at work: fail closed.
-    assert!(!liveness::skippable(&os(libc::EACCES), me, euid));
+    assert!(!liveness::skippable(&os(libc::EACCES), &proc, me, euid));
     // On another uid's entry (pid 1 is root's) it is.
     if euid != 0 {
-        assert!(liveness::skippable(&os(libc::EACCES), 1, euid));
+        assert!(liveness::skippable(&os(libc::EACCES), &proc, 1, euid));
     }
+}
+
+// #11085: every entry point without `_with_table` scans the real `/proc`.
+#[test]
+fn the_system_process_table_is_proc() {
+    assert_eq!(ProcessTable::system().root(), std::path::Path::new("/proc"));
+    assert_eq!(ProcessTable::default(), ProcessTable::system());
+    let fake = ProcessTable::at("/tmp/fake-proc");
+    assert_eq!(fake.root(), std::path::Path::new("/tmp/fake-proc"));
 }
 
 #[test]

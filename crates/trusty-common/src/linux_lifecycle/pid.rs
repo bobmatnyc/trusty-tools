@@ -22,11 +22,13 @@
 //! [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
 //! [`restart_pid_with`]: crate::linux_lifecycle::restart_pid_with()
 
-use super::liveness::{Instance, effective_uid, process_instance, refuse_other_instances};
+use super::liveness::{
+    Instance, ProcessTable, effective_uid, process_instance, refuse_other_instances,
+};
 use super::process::{Dial, PinnedProcess, dial};
-use super::start::{RestartOutcome, installed_program, restart_with, start};
+use super::start::{RestartOutcome, installed_program, restart_with_table, start_with_table};
 use super::stop::{
-    KernelDelivery, SignalDelivery, StopOutcome, identity_holds, stop_with, terminate,
+    KernelDelivery, SignalDelivery, StopOutcome, identity_holds, stop_with_table, terminate,
 };
 use super::{DaemonDescriptor, LifecycleError};
 
@@ -83,10 +85,29 @@ pub async fn stop_pid_with(
     pid: u32,
     delivery: &dyn SignalDelivery,
 ) -> Result<StopOutcome, LifecycleError> {
+    stop_pid_with_table(desc, pid, delivery, &ProcessTable::system()).await
+}
+
+/// [`stop_pid_with`], with the scan reading `table` instead of `/proc`
+/// (#11085).
+///
+/// What: [`stop_pid_with`]'s steps. `pid` itself is still pinned and checked
+/// in the real `/proc`; `table` is read only by the scan [`stop_with_table`]
+/// runs when `pid` is gone.
+/// Test: `stop_finds_the_console_through_http_addr_when_its_socket_bind_failed`.
+///
+/// [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
+/// [`stop_with_table`]: crate::linux_lifecycle::stop_with_table()
+pub async fn stop_pid_with_table(
+    desc: &DaemonDescriptor,
+    pid: u32,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<StopOutcome, LifecycleError> {
     validate_by_pid(desc)?;
     let Some(target) = identify(desc, pid)? else {
         // #11085: a stale pid proves nothing; the socket and the scan decide.
-        return stop_with(desc, delivery).await;
+        return stop_with_table(desc, delivery, table).await;
     };
     if let Some(peer) = other_socket_peer(desc, pid).await? {
         return Err(LifecycleError::ServedByAnother {
@@ -138,11 +159,29 @@ pub async fn restart_pid_with(
     pid: u32,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
+    restart_pid_with_table(desc, pid, delivery, &ProcessTable::system()).await
+}
+
+/// [`restart_pid_with`], with every scan reading `table` instead of `/proc`
+/// (#11085).
+///
+/// What: [`restart_pid_with`]'s steps. `pid` itself is still pinned and
+/// checked in the real `/proc`; the scan for another instance and the
+/// start's scan read `table`.
+/// Test: `restart_through_http_addr_reports_a_survivor_and_starts_nothing`.
+///
+/// [`restart_pid_with`]: crate::linux_lifecycle::restart_pid_with()
+pub async fn restart_pid_with_table(
+    desc: &DaemonDescriptor,
+    pid: u32,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<RestartOutcome, LifecycleError> {
     validate_by_pid(desc)?;
     // #11085: a missing binary found only at the start left the daemon down.
     installed_program(desc)?;
     let Some(target) = identify(desc, pid)? else {
-        return restart_with(desc, delivery).await;
+        return restart_with_table(desc, delivery, table).await;
     };
     // #11085: with another pid serving, the start after the stop would refuse.
     if let Some(peer) = other_socket_peer(desc, pid).await? {
@@ -152,9 +191,9 @@ pub async fn restart_pid_with(
             others: vec![peer],
         });
     }
-    refuse_other_instances(desc, &[pid])?;
+    refuse_other_instances(desc, &[pid], table)?;
     let stop = terminate(desc, delivery, &target).await?;
-    let start = start(desc).await?;
+    let start = start_with_table(desc, table).await?;
     Ok(RestartOutcome { stop, start })
 }
 
@@ -188,7 +227,9 @@ fn identify(desc: &DaemonDescriptor, pid: u32) -> Result<Option<PinnedProcess>, 
     if !identity_holds(desc, &target)? {
         return Ok(None);
     }
-    let instance = process_instance(pid, effective_uid(), desc)?;
+    // #11085: the pinned pid is read in the real `/proc`, never an injected
+    // table, so "alive after the reads" proves the reads saw it.
+    let instance = process_instance(pid, effective_uid(), desc, &ProcessTable::system())?;
     // Alive after the reads means they saw the pinned process.
     if target.has_exited() {
         return Ok(None);

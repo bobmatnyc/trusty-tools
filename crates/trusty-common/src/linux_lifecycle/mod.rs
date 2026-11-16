@@ -83,10 +83,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use error::LifecycleError;
-pub use pid::{restart_pid, restart_pid_with, stop_pid, stop_pid_with};
+pub use liveness::ProcessTable;
+pub use pid::{
+    restart_pid, restart_pid_with, restart_pid_with_table, stop_pid, stop_pid_with,
+    stop_pid_with_table,
+};
 pub use process::{PinnedProcess, Signal};
-pub use start::{RestartOutcome, StartOutcome, restart, restart_with, start};
-pub use stop::{KernelDelivery, SignalDelivery, StopOutcome, stop, stop_with};
+pub use start::{
+    RestartOutcome, StartOutcome, restart, restart_with, restart_with_table, start,
+    start_with_table,
+};
+pub use stop::{KernelDelivery, SignalDelivery, StopOutcome, stop, stop_with, stop_with_table};
 
 /// How long one connect attempt may take before the answer is "inconclusive".
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);

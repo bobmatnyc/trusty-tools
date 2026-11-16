@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::liveness::{refuse_other_instances, refuse_unserved_daemon};
+use super::liveness::{ProcessTable, refuse_other_instances, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial};
-use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with};
+use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with_table};
 use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL};
 
 /// A started daemon.
@@ -74,6 +74,19 @@ pub struct RestartOutcome {
 /// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
 /// `start_and_restart_start_a_stopped_instance_while_a_sibling_runs`.
 pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleError> {
+    start_with_table(desc, &ProcessTable::system()).await
+}
+
+/// [`start`], with the scan reading `table` instead of `/proc` (#11085).
+///
+/// What: [`start`]'s steps; only the pre-spawn scan for an unserved daemon
+/// reads `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn start_with_table(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<StartOutcome, LifecycleError> {
     desc.validate()?;
     let program = installed_program(desc)?;
     match dial(&desc.socket).await {
@@ -91,7 +104,7 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
         }
     }
     // #11098: a daemon whose socket is unlinked still runs; never start a second.
-    refuse_unserved_daemon(desc)?;
+    refuse_unserved_daemon(desc, table)?;
 
     let pid = spawn(desc, &program)?;
     // Not reaped until it fails, so an early exit stays a zombie and still pins.
@@ -280,12 +293,27 @@ pub async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
+    restart_with_table(desc, delivery, &ProcessTable::system()).await
+}
+
+/// [`restart_with`], with every scan reading `table` instead of `/proc`
+/// (#11085).
+///
+/// What: [`restart_with`]'s steps; the pre-stop scan for another instance,
+/// the stop's scan and the start's scan read `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn restart_with_table(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<RestartOutcome, LifecycleError> {
     desc.validate()?;
     // #11085: never stop a healthy daemon that the start would then refuse on.
     installed_program(desc)?;
-    refuse_restart_blockers(desc).await?;
-    let stop = stop_with(desc, delivery).await?;
-    let start = start(desc).await?;
+    refuse_restart_blockers(desc, table).await?;
+    let stop = stop_with_table(desc, delivery, table).await?;
+    let start = start_with_table(desc, table).await?;
     Ok(RestartOutcome { stop, start })
 }
 
@@ -297,9 +325,12 @@ pub async fn restart_with(
 /// find nothing. When nothing serves, or the dial does not decide, the stop's
 /// own checks answer.
 /// Test: `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
-async fn refuse_restart_blockers(desc: &DaemonDescriptor) -> Result<(), LifecycleError> {
+async fn refuse_restart_blockers(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<(), LifecycleError> {
     match dial(&desc.socket).await {
-        Dial::Peer(Some(peer)) => refuse_other_instances(desc, &[peer]),
+        Dial::Peer(Some(peer)) => refuse_other_instances(desc, &[peer], table),
         _ => Ok(()),
     }
 }
