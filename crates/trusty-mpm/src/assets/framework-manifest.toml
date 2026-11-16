@@ -307,6 +307,7 @@ universal = [
   "tm-init",
   "tm-issues-prune",
   "tm-memory-import",
+  "tm-owner-scenarios",
   "tm-postmortem",
   "tm-prose-style",
   "tm-secrets",

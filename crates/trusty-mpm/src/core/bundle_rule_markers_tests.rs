@@ -208,6 +208,14 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "content/skills/tm-owner-scenarios.md",
+        &[
+            "tm-owner-scenarios/four-fields",
+            "tm-owner-scenarios/no-numbered-ui-steps",
+            "tm-owner-scenarios/owner-cost-in-review-minutes",
+        ],
+    ),
+    (
         "content/skills/tm-workflow.md",
         &[
             "tm-workflow/auto-merge-read",

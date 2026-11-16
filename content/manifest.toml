@@ -339,6 +339,10 @@ path = "instructions/architect/skills/tm-fleet-check.md"
 version = "0.1.0"
 
 [[member]]
+path = "instructions/output-styles/owner-plain.md"
+version = "1.0.0"
+
+[[member]]
 path = "instructions/trusty-code/skills/api-design-patterns/SKILL.md"
 version = "1.0.0"
 
@@ -625,6 +629,10 @@ version = "1.2.0"
 [[member]]
 path = "skills/tm-memory-import.md"
 version = "1.0.0"
+
+[[member]]
+path = "skills/tm-owner-scenarios.md"
+version = "0.1.0"
 
 [[member]]
 path = "skills/tm-postmortem.md"

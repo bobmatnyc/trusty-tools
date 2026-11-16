@@ -709,19 +709,19 @@ fn every_bundled_style_reads_from_content() {
 }
 
 #[test]
-fn output_style_registry_has_four_distinct_ids() {
-    // HR-4 bundles three PM styles; #8453 adds the supervisor style. Ids and
-    // file names are distinct.
-    assert_eq!(OUTPUT_STYLES.len(), 4);
+fn output_style_registry_has_five_distinct_ids() {
+    // HR-4 bundles three PM styles; #10576 adds `owner-plain`; #8453 adds the
+    // supervisor style. Ids and file names are distinct.
+    assert_eq!(OUTPUT_STYLES.len(), 5);
     let mut ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 4, "style ids must be distinct");
+    assert_eq!(ids.len(), 5, "style ids must be distinct");
 
     let mut files: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
     files.sort_unstable();
     files.dedup();
-    assert_eq!(files.len(), 4, "style file names must be distinct");
+    assert_eq!(files.len(), 5, "style file names must be distinct");
 }
 
 #[test]
@@ -731,7 +731,12 @@ fn the_pm_styles_are_every_style_but_the_architect_style() {
     let pm: Vec<&str> = pm_output_styles().map(|s| s.id).collect();
     assert_eq!(
         pm,
-        ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
+        [
+            "trusty-mpm",
+            "trusty-mpm-teacher",
+            "trusty-mpm-research",
+            "owner-plain"
+        ]
     );
     assert!(OUTPUT_STYLES.iter().any(|s| s.id
         == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID
@@ -3661,4 +3666,64 @@ fn non_code_deliverables_quote_the_request_and_map_evidence_10575() {
         plain(instruction_text("sections/core.md"))
             .contains("Non-code: criteria quote the request; add an evidence map.")
     );
+}
+
+/// The style body after its frontmatter, without the `## ` sections named in
+/// `drop` (#10576: what `owner-plain` must share with the default).
+fn style_body_without(text: &str, drop: &[&str]) -> String {
+    let body = text.splitn(3, "---\n").nth(2).unwrap_or(text);
+    body.split("\n## ")
+        .filter(|s| !drop.iter().any(|d| s.starts_with(d)))
+        .collect::<Vec<_>>()
+        .join("\n## ")
+}
+
+/// Why: #10576 — click-by-click owner scenarios cost the owner a month, and
+/// reporting to a non-technical owner was optimistic and irregular.
+/// What: `[style] active = "owner-plain"` resolves a bundled style that equals
+/// the default outside `PM Response Format` and `Reporting to the Owner`, and
+/// carries the cadence, correction and verified-versus-reported rules; the
+/// `tm-owner-scenarios` skill pins `tm-owner-scenarios/four-fields`,
+/// `tm-owner-scenarios/no-numbered-ui-steps` and
+/// `tm-owner-scenarios/owner-cost-in-review-minutes`.
+/// Mutation: drop the registry row, edit another section, or delete a marker.
+/// Test: this test.
+#[test]
+fn owner_plain_style_and_owner_scenarios_skill_10576() {
+    let mut cfg = crate::core::config::MpmConfig::default();
+    cfg.style.active = Some("owner-plain".to_string());
+    let style = crate::core::output_style::resolve_active_style(&cfg, None)
+        .expect("`[style] active = \"owner-plain\"` selects a bundled style");
+    assert_eq!(style.id, "owner-plain");
+    let owner = style.content(rc());
+    assert!(owner.contains("\nname: owner-plain\n"));
+    let sections = ["PM Response Format", "Reporting to the Owner"];
+    assert_eq!(
+        style_body_without(owner, &sections),
+        style_body_without(instruction_text("output-styles/trusty-mpm.md"), &sections),
+        "owner-plain may differ from the default only in {sections:?}"
+    );
+    let flat = plain(owner);
+    for needle in [
+        "at least hourly while work runs",
+        "Send nothing when nothing changed",
+        "Correct an earlier overclaim in the next message and in every handoff",
+        "Verified (you opened it), Reported (an agent said so)",
+        "review time in minutes",
+        "Skill(skill=\"tm-owner-scenarios\")",
+    ] {
+        assert!(flat.contains(needle), "owner-plain lost `{needle}`");
+    }
+    let skill = skill_text("skills/tm-owner-scenarios.md");
+    for id in [
+        "tm-owner-scenarios/four-fields",
+        "tm-owner-scenarios/no-numbered-ui-steps",
+        "tm-owner-scenarios/owner-cost-in-review-minutes",
+    ] {
+        assert!(has_rule(skill, id), "tm-owner-scenarios lost `{id}`");
+    }
+    for needle in ["`Intent:`", "`Situation:`", "`Result:`", "`Trace:`"] {
+        assert!(skill.contains(needle), "tm-owner-scenarios lost {needle}");
+    }
+    assert!(skill.contains("scripts/check_owner_scenarios.py --matrix"));
 }
