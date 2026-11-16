@@ -21,7 +21,7 @@ use serde_json::Value;
 use trusty_mpm::core::content_source::AgentRoster;
 use trusty_mpm::core::dispatch_isolation::{agent_role, dispatch_agent};
 use trusty_mpm::core::project_accounts::{
-    ACCOUNT_BLOCK_HEADING, ProjectAccounts, account_block, accounts_for,
+    ACCOUNT_BLOCK_HEADING, AccountMap, account_block, accounts_for,
 };
 
 /// The only dispatch tool that receives the block; `Task` is left unchanged.
@@ -43,7 +43,7 @@ pub(crate) fn account_rewrite(
     if !is_ops_dispatch(roster, tool_name, tool_input) {
         return None;
     }
-    append_account_block(tool_input?, accounts_for(cwd).as_ref())
+    append_account_block(tool_input?, &accounts_for(cwd))
 }
 
 /// `updated` with the account block added when the dispatch is an ops one.
@@ -68,7 +68,7 @@ fn is_ops_dispatch(roster: Option<&AgentRoster>, tool_name: &str, input: Option<
 }
 
 /// `input` with the rendered block appended to its string `prompt`, once.
-fn append_account_block(input: &Value, accounts: Option<&ProjectAccounts>) -> Option<Value> {
+fn append_account_block(input: &Value, accounts: &AccountMap) -> Option<Value> {
     let prompt = input.get("prompt").and_then(Value::as_str)?;
     // #11390: idempotent — a re-evaluated dispatch never gets a second block.
     if prompt.contains(ACCOUNT_BLOCK_HEADING) {

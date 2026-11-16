@@ -246,11 +246,12 @@ pub struct ProjectLevelConfig {
     ///
     /// Why: an ops agent that asks for a permission on the wrong account wastes
     /// the owner's approval or grants the wrong one.
-    /// What: `[accounts.<service>]` tables; see
-    /// [`crate::core::project_accounts::ProjectAccounts`] for the validation.
-    /// Test: `accounts_table_parses_names_scope_and_verify`.
+    /// What: `[accounts.<service>]` tables, kept as raw TOML here and
+    /// validated by [`crate::core::project_accounts::accounts_for`], so a bad
+    /// entry drops only the accounts, never the rest of this file.
+    /// Test: `bad_accounts_keep_the_rest_of_the_config`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accounts: Option<crate::core::project_accounts::ProjectAccounts>,
+    pub accounts: Option<crate::core::project_accounts::RawAccounts>,
 }
 
 /// The `[style]` table of `.trusty-mpm.toml` (#8533).

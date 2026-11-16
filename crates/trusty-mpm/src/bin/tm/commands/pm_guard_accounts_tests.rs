@@ -113,7 +113,15 @@ fn secret_shaped_value_is_never_injected() {
     let out = account_rewrite(Some(r()), "Agent", Some(&dispatch("local-ops")), dir.path())
         .expect("rewritten");
     assert!(!prompt(&out).contains(&token));
-    assert!(prompt(&out).contains("No account map is configured"));
+    assert!(
+        prompt(&out).contains(
+            "The project account map was rejected (accounts.gh.account looks like a credential"
+        ),
+        "{}",
+        prompt(&out)
+    );
+    assert!(prompt(&out).contains("ask the PM before any account-scoped action"));
+    assert!(!prompt(&out).contains("No account map is configured"));
 }
 
 /// The #5814 in-place rewrite and the account block print as ONE input.

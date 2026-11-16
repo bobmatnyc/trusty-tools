@@ -12196,7 +12196,6 @@ dependencies = [
  "trusty-architect",
  "trusty-channels",
  "trusty-common",
- "trusty-delegation-guard",
  "trusty-mcp",
  "trusty-memory",
  "trusty-progress",

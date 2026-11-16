@@ -372,8 +372,6 @@ required-features = ["daemon"]
 # Required by the `core` and `client` library modules (compiled unconditionally).
 [dependencies]
 trusty-agents-common = { workspace = true }
-# #11390: `[accounts]` values are refused when this detector would redact them.
-trusty-delegation-guard = { workspace = true }
 # JSON-RPC / MCP primitives, extracted from `trusty_common::mcp` by ADR-0040 (#5803).
 # `memory_rpc` did NOT move — it arrives through `trusty-common/catchup` below.
 trusty-mcp = { path = "../trusty-mcp", version = "0.2.3" }

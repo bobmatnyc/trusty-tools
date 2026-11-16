@@ -5511,3 +5511,42 @@ fn pm_guard_appends_project_accounts_to_an_ops_dispatch_only_11390() {
         assert_eq!(out.trim(), "", "{tool} {agent}");
     }
 }
+
+/// #11390 review: a bad `[accounts]` value is reported as rejected — never as
+/// "no map" — and drops only the accounts: the same file's
+/// `agent_worktree = false` still turns a writer's grant into the in-place
+/// note. Before the fix the whole file was rejected, so the writer got
+/// `isolation: "worktree"` and the ops agent read "No account map".
+#[test]
+fn pm_guard_reports_a_rejected_account_map_and_keeps_the_worktree_setting_11390() {
+    let cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(cwd.path().join(".git")).expect("mkdir .git");
+    std::fs::write(
+        cwd.path().join(".trusty-mpm.toml"),
+        "agent_worktree = false\n[accounts.gh]\naccount = \"me\"\nverify = \"gh auth status `id`\"\n",
+    )
+    .expect("write config");
+    let payload = |agent: &str| {
+        format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+        )
+    };
+    let updated = |agent: &str| -> serde_json::Value {
+        let stdout = run_pm_guard_at(&payload(agent), UNREACHABLE_DAEMON, cwd.path());
+        let v: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("{agent}: one JSON object, got {stdout:?}: {e}"));
+        v["hookSpecificOutput"]["updatedInput"].clone()
+    };
+    let ops = updated("local-ops");
+    let prompt = ops["prompt"].as_str().expect("prompt");
+    assert!(
+        prompt.contains("The project account map was rejected (accounts.gh.verify"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("`id`"), "{prompt}");
+    assert!(!prompt.contains("No account map is configured"), "{prompt}");
+    let writer = updated("rust-engineer");
+    assert!(writer.get("isolation").is_none(), "{writer}");
+    let prompt = writer["prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("Worktree isolation is OFF"), "{prompt}");
+}

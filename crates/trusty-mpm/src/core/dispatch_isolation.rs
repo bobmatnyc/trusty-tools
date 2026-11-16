@@ -352,6 +352,13 @@ pub fn agent_write_risk(roster: Option<&AgentRoster>, agent: &str) -> AgentWrite
     })
 }
 
+/// The `role:` the roster declares for `agent`, if it names one (#11390).
+///
+/// Test: `ops_dispatch_gets_the_account_block`, `non_ops_dispatch_is_unchanged`.
+pub fn agent_role(roster: &AgentRoster, agent: &str) -> Option<String> {
+    bundled_agent_metadata(roster, agent).and_then(|meta| meta.role)
+}
+
 /// The declared frontmatter of the bundled agent named `agent`, if this binary
 /// ships one.
 ///
@@ -368,13 +375,6 @@ pub fn agent_write_risk(roster: Option<&AgentRoster>, agent: &str) -> AgentWrite
 /// invocation and passes it in; a process-lifetime cache would be global state.
 /// Test: `write_risk_separates_unknown_from_read_only`,
 /// `harness_builtins_are_known_names`.
-/// The `role:` the roster declares for `agent`, if it names one (#11390).
-///
-/// Test: `ops_dispatch_gets_the_account_block`, `non_ops_dispatch_is_unchanged`.
-pub fn agent_role(roster: &AgentRoster, agent: &str) -> Option<String> {
-    bundled_agent_metadata(roster, agent).and_then(|meta| meta.role)
-}
-
 fn bundled_agent_metadata(
     roster: &AgentRoster,
     agent: &str,

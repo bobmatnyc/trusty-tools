@@ -5,11 +5,12 @@
 //! know the account NAMES a project uses, so no permission is ever requested of
 //! the wrong account. The names are project facts, so they live in the
 //! committed project config, never in the machine-global deployed agent files.
-//! What: [`ProjectAccounts`] parses and validates the table — a name only, an
-//! optional scope and a read-only verify command, every value single-line,
-//! bounded, and refused when the credential detector would change it.
-//! [`account_block`] renders the `## Project accounts` block the pm-guard hook
-//! appends to an ops dispatch.
+//! What: the config keeps the table as raw TOML ([`RawAccounts`]), so a bad
+//! entry never fails the rest of the file. [`accounts_for`] validates it into
+//! an [`AccountMap`] — every value allowlisted by character, bounded, and
+//! refused when it is shaped like a credential — and [`account_block`]
+//! renders the `## Project accounts` block the pm-guard hook appends to an ops
+//! dispatch. No error or log line ever carries a value.
 //! Test: `project_accounts_tests.rs`.
 
 use std::collections::BTreeMap;
@@ -27,98 +28,168 @@ pub const ACCOUNT_RULE: &str = "Before any permission request or account-scoped 
      account and run its verify command; on a mismatch, stop and report to the PM, never log in \
      or switch accounts.";
 
-/// Most services one block lists; more is a config error, not a longer prompt.
-pub const MAX_ACCOUNTS: usize = 32;
+/// Most services one block lists; more rejects the map.
+pub const MAX_ACCOUNTS: usize = 16;
 
-/// Longest accepted service key or value, in bytes.
-pub const MAX_VALUE_LEN: usize = 200;
+/// Longest accepted service, account or scope, in bytes.
+pub const MAX_NAME_LEN: usize = 100;
 
-/// One `[accounts.<service>]` table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Longest accepted verify command, in bytes.
+pub const MAX_VERIFY_LEN: usize = 200;
+
+/// Prefixes of credential formats a name or verify word must not start with.
+const TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "github_pat_", "sk-", "xox", "AKIA", "eyJ"];
+
+/// An alphanumeric run this long reads as a key, not a name.
+const MAX_ALNUM_RUN: usize = 32;
+
+/// The raw `[accounts]` value as parsed from TOML, validated later.
+///
+/// Why: a strict parse would fail the whole `.trusty-mpm.toml` on one bad
+/// account value, silently reverting the worktree, session, style and model
+/// settings too (#11390 review).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RawAccounts(pub toml::Value);
+
+// A config value holds no float NaN in practice; `ProjectLevelConfig` is `Eq`.
+impl Eq for RawAccounts {}
+
+/// One validated `[accounts.<service>]` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountEntry {
     /// The account name the CLI must be acting as. Never a password or token.
     pub account: String,
     /// Team, org or project the account acts within, when the CLI has one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// A read-only command that prints the CLI's current account.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
 }
 
-/// The validated `[accounts]` map, keyed by service name.
-///
-/// Why: the file is committed and its values reach agent prompts, so a pasted
-/// token must fail at load rather than be injected (#11390).
-/// What: deserializes through [`ProjectAccounts::try_from`]; any rejected
-/// value fails the whole file, which `load_or_report` logs and then ignores.
-/// Test: `secret_shaped_account_value_rejects_the_file`,
-/// `unknown_account_key_rejects_the_file`, `multiline_value_is_rejected`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "BTreeMap<String, AccountEntry>")]
-pub struct ProjectAccounts(BTreeMap<String, AccountEntry>);
-
-impl ProjectAccounts {
-    /// The entries, ordered by service name.
-    pub fn entries(&self) -> &BTreeMap<String, AccountEntry> {
-        &self.0
-    }
+/// What the project says about its accounts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountMap {
+    /// No config, or no `[accounts]` table.
+    Absent,
+    /// The table failed validation; the reason names keys, never values.
+    Rejected(String),
+    /// The validated entries, ordered by service name.
+    Ok(BTreeMap<String, AccountEntry>),
 }
 
-impl TryFrom<BTreeMap<String, AccountEntry>> for ProjectAccounts {
-    type Error = String;
-
-    fn try_from(map: BTreeMap<String, AccountEntry>) -> Result<Self, Self::Error> {
-        if map.len() > MAX_ACCOUNTS {
+impl RawAccounts {
+    /// Validate the table.
+    ///
+    /// What: `Err(reason)` for a non-table, more than [`MAX_ACCOUNTS`]
+    /// services, a key other than `account`/`scope`/`verify`, a missing
+    /// `account`, a non-string value, or a value failing [`check_name`] /
+    /// [`check_verify`]. The reason quotes a service name only after it
+    /// passed [`check_name`].
+    /// Test: `secret_shaped_values_are_rejected_without_echo`,
+    /// `unknown_account_key_is_rejected`, `shell_metacharacters_in_verify_are_rejected`.
+    pub fn validate(&self) -> Result<BTreeMap<String, AccountEntry>, String> {
+        let table = self.0.as_table().ok_or("[accounts] must be a table")?;
+        if table.len() > MAX_ACCOUNTS {
             return Err(format!(
                 "[accounts] lists {} services; at most {MAX_ACCOUNTS} are allowed",
-                map.len()
+                table.len()
             ));
         }
-        for (service, entry) in &map {
-            check_value("accounts.<service> name", service)?;
-            let fields = [
-                ("account", Some(&entry.account)),
-                ("scope", entry.scope.as_ref()),
-                ("verify", entry.verify.as_ref()),
-            ];
-            for (field, value) in fields {
-                if let Some(value) = value {
-                    check_value(&format!("accounts.{service}.{field}"), value)?;
-                }
+        let mut out = BTreeMap::new();
+        for (service, value) in table {
+            check_name(service).map_err(|why| format!("a service name {why}"))?;
+            let at = format!("accounts.{service}");
+            let entry = value
+                .as_table()
+                .ok_or_else(|| format!("{at} must be a table"))?;
+            if let Some(_unknown) = entry
+                .keys()
+                .find(|k| !matches!(k.as_str(), "account" | "scope" | "verify"))
+            {
+                return Err(format!(
+                    "{at} has a key other than account, scope and verify"
+                ));
             }
+            let field = |name: &str| -> Result<Option<String>, String> {
+                match entry.get(name) {
+                    None => Ok(None),
+                    Some(toml::Value::String(s)) => Ok(Some(s.clone())),
+                    Some(_) => Err(format!("{at}.{name} must be a string")),
+                }
+            };
+            let account = field("account")?.ok_or_else(|| format!("{at}.account is missing"))?;
+            check_name(&account).map_err(|why| format!("{at}.account {why}"))?;
+            let scope = field("scope")?;
+            if let Some(scope) = &scope {
+                check_name(scope).map_err(|why| format!("{at}.scope {why}"))?;
+            }
+            let verify = field("verify")?;
+            if let Some(verify) = &verify {
+                check_verify(verify).map_err(|why| format!("{at}.verify {why}"))?;
+            }
+            out.insert(
+                service.clone(),
+                AccountEntry {
+                    account,
+                    scope,
+                    verify,
+                },
+            );
         }
-        Ok(Self(map))
+        Ok(out)
     }
 }
 
-/// Refuse a value that is empty, too long, multi-line or credential-shaped.
-///
-/// The error names the key, never the value: a rejected value may be a secret.
-fn check_value(key: &str, value: &str) -> Result<(), String> {
+/// Is `c` allowed in a service, account or scope name?
+fn name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '@' | ':' | '/' | ' ' | '-')
+}
+
+/// Accept a name of 1..=[`MAX_NAME_LEN`] bytes in `[A-Za-z0-9._@:/ -]`, not
+/// shaped like a credential. The error never includes the value.
+fn check_name(value: &str) -> Result<(), String> {
+    check_shape(value, MAX_NAME_LEN, name_char)
+}
+
+/// Accept a verify command: the name characters plus `=`. This rejects every
+/// shell metacharacter (`` ` `` `|` `;` `&` `$` `<` `>`), quotes and any
+/// non-ASCII character, U+202E and U+200B included.
+fn check_verify(value: &str) -> Result<(), String> {
+    check_shape(value, MAX_VERIFY_LEN, |c| name_char(c) || c == '=')
+}
+
+fn check_shape(value: &str, max: usize, allowed: impl Fn(char) -> bool) -> Result<(), String> {
     if value.trim().is_empty() {
-        return Err(format!("{key} is empty"));
+        return Err("is empty".into());
     }
-    if value.len() > MAX_VALUE_LEN {
-        return Err(format!("{key} is longer than {MAX_VALUE_LEN} bytes"));
+    if value.len() > max {
+        return Err(format!("is longer than {max} bytes"));
     }
-    if value.chars().any(char::is_control) {
-        return Err(format!("{key} must be one line with no control characters"));
+    if !value.chars().all(allowed) {
+        return Err("contains a character outside the allowed set".into());
     }
-    // #11390: the detector the delegation guard redacts prompts with.
-    if trusty_delegation_guard::redact::redact(value).redacted {
-        return Err(format!(
-            "{key} looks like a credential; [accounts] holds account NAMES only (value withheld)"
-        ));
+    if looks_like_credential(value) {
+        return Err("looks like a credential; [accounts] holds account NAMES only".into());
     }
     Ok(())
 }
 
-/// The nearest `.trusty-mpm.toml` at or above `cwd`, by directory.
+/// A word starting with a known token prefix, or an alphanumeric run of at
+/// least [`MAX_ALNUM_RUN`] characters.
+fn looks_like_credential(value: &str) -> bool {
+    let prefixed = value
+        .split([' ', '='])
+        .any(|word| TOKEN_PREFIXES.iter().any(|p| word.starts_with(p)));
+    let longest_run = value
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    prefixed || longest_run >= MAX_ALNUM_RUN
+}
+
+/// The nearest directory at or above `cwd` holding `.trusty-mpm.toml`.
 ///
-/// Why: a dispatch can be made from a subdirectory of the project.
-/// What: the first ancestor of `cwd` (itself included) holding the file.
 /// Test: `accounts_are_found_from_a_subdirectory`.
 pub fn project_dir_for(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
@@ -126,32 +197,43 @@ pub fn project_dir_for(cwd: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The validated account map for the project containing `cwd`, if any.
+/// The account map for the project containing `cwd`.
 ///
-/// What: `None` when no config is found, the file fails to parse (logged by
-/// `load_or_report`), or it has no `[accounts]` table.
-/// Test: `accounts_are_found_from_a_subdirectory`.
-pub fn accounts_for(cwd: &Path) -> Option<ProjectAccounts> {
-    load_or_report(&project_dir_for(cwd)?)?.accounts
+/// What: [`AccountMap::Absent`] with no config or no table (a file that fails
+/// to parse for another reason is logged by `load_or_report`);
+/// [`AccountMap::Rejected`], logged at `error`, when validation fails;
+/// otherwise [`AccountMap::Ok`].
+/// Test: `accounts_are_found_from_a_subdirectory`,
+/// `bad_accounts_keep_the_rest_of_the_config`.
+pub fn accounts_for(cwd: &Path) -> AccountMap {
+    let Some(raw) = project_dir_for(cwd)
+        .and_then(|dir| load_or_report(&dir))
+        .and_then(|cfg| cfg.accounts)
+    else {
+        return AccountMap::Absent;
+    };
+    match raw.validate() {
+        Ok(map) => AccountMap::Ok(map),
+        Err(reason) => {
+            tracing::error!("project account map rejected: {reason}");
+            AccountMap::Rejected(reason)
+        }
+    }
 }
 
 /// Render the `## Project accounts` block for an ops prompt.
 ///
 /// Why (#11390): the agent reads the names as data at dispatch time, so the
 /// deployed agent files stay project-free.
-/// What: a separator, the heading, one line per service (account, scope,
-/// verify command), or one line saying no map is configured, then
-/// [`ACCOUNT_RULE`]. Bounded by [`MAX_ACCOUNTS`] and [`MAX_VALUE_LEN`].
-/// Test: `block_lists_each_service_and_the_rule`, `block_without_a_map_says_so`.
-pub fn account_block(accounts: Option<&ProjectAccounts>) -> String {
+/// What: a separator, the heading, one line per service, or one line saying
+/// the map is absent or rejected, then [`ACCOUNT_RULE`].
+/// Test: `block_lists_each_service_and_the_rule`, `block_without_a_map_says_so`,
+/// `rejected_map_is_reported_as_rejected`.
+pub fn account_block(accounts: &AccountMap) -> String {
     let mut out = format!("\n\n---\n{ACCOUNT_BLOCK_HEADING}\n\n");
-    match accounts.filter(|a| !a.0.is_empty()) {
-        None => out.push_str(
-            "No account map is configured for this project (`[accounts]` in \
-             `.trusty-mpm.toml`); the rule below applies to each CLI's current account.\n",
-        ),
-        Some(accounts) => {
-            for (service, entry) in &accounts.0 {
+    match accounts {
+        AccountMap::Ok(map) if !map.is_empty() => {
+            for (service, entry) in map {
                 out.push_str(&format!("- `{service}`: account `{}`", entry.account));
                 if let Some(scope) = &entry.scope {
                     out.push_str(&format!(", scope `{scope}`"));
@@ -162,6 +244,14 @@ pub fn account_block(accounts: Option<&ProjectAccounts>) -> String {
                 }
             }
         }
+        AccountMap::Rejected(reason) => out.push_str(&format!(
+            "The project account map was rejected ({reason}); ask the PM before any \
+             account-scoped action.\n"
+        )),
+        AccountMap::Ok(_) | AccountMap::Absent => out.push_str(
+            "No account map is configured for this project (`[accounts]` in \
+             `.trusty-mpm.toml`); the rule below applies to each CLI's current account.\n",
+        ),
     }
     out.push('\n');
     out.push_str(ACCOUNT_RULE);
