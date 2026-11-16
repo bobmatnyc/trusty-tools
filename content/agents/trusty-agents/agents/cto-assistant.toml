@@ -96,7 +96,7 @@ allow = [
     "memory_write",
     "vector_search",
     # #472: CTO ops DB query tools — read-only SQLite over ~/Duetto/cto/data/cto.db.
-    # Registered in-process via `src/tools/cto_db.rs` and gated to this persona
+    # Backed by the "cto-db" Python skill (`.trusty-agents/skills/cto-db/`) and gated to this persona
     # in `ctrl::mod.rs` (sensitive HR/budget data; cto-assistant only).
     "query_headcount",
     "query_budget",

@@ -10480,7 +10480,6 @@ dependencies = [
  "tokio",
  "tracing",
  "trusty-common",
- "trusty-cto-db",
  "trusty-gworkspace",
 ]
 
@@ -11943,20 +11942,6 @@ dependencies = [
  "trusty-memory",
  "trusty-mpm",
  "trusty-review",
-]
-
-[[package]]
-name = "trusty-cto-db"
-version = "0.1.4"
-dependencies = [
- "anyhow",
- "dirs 5.0.1",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
 ]
 
 [[package]]

@@ -39,7 +39,6 @@
 
 - [trusty-embedderd](./trusty-embedderd/README.md)
 - [trusty-gworkspace](./trusty-gworkspace/README.md)
-- [trusty-cto-db](./trusty-cto-db/README.md)
 - [tc-services](./tc-services/README.md)
 - [trusty-agents-common](./trusty-agents-common/README.md)
 
