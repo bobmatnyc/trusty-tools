@@ -229,7 +229,7 @@ fn il_refusal(dir: &Path, session: &str, ops: &Ops<'_>) -> Option<RestartReport>
 
 /// The `%N` id of `session`'s pane.
 fn pane_id(tmux: &dyn Tmux, session: &str) -> Result<PaneId, String> {
-    let target = format!("={session}:");
+    let target = trusty_mpm::core::tmux::exact_window_target(session);
     let out = tmux
         .run(&["display-message", "-p", "-t", &target, "#{pane_id}"])
         .map_err(|e| format!("cannot read tmux session {session}: {e}"))?;
