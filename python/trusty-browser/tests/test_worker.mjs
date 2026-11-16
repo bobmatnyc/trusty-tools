@@ -320,6 +320,15 @@ test("page_type and page_press inject pageKeys with their action", async () => {
     {tab:7, func:"pageKeys", args:[null, "press", {key:"Enter", modifiers:["Shift","Control"]}]},
     {tab:7, func:"pageKeys", args:["1.0", "press", {key:"a", modifiers:[]}]},
   ]);
+  // #11352: text the field refused is relayed with its counts, never as ok.
+  f.tabs.get(7).result = {error:"TextDropped", reason:"maxlength", typed:6, accepted:3, entered:"abc"};
+  const dropped = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"abcdef"});
+  assert.deepEqual(dropped, {id:dropped.id, ok:false, error:"TextDropped", tab:7, reason:"maxlength", typed:6,
+    accepted:3, entered:"abc"});
+  f.tabs.get(7).result = {error:"TextDropped", reason:"other", typed:6, accepted:3, entered:"abc"};
+  assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"x"})).error,
+    "OutcomeUnknown");
+  delete f.tabs.get(7).result;
   f.tabs.get(7).throwAfterRun = true;
   const lost = await f.command("page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Tab", modifiers:[]});
   assert.deepEqual(lost, {id:lost.id, ok:false, error:"OutcomeUnknown"});

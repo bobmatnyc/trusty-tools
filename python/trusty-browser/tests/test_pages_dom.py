@@ -111,6 +111,29 @@ def test_type_sets_values_and_refuses_non_editable(page):
         "new@b.test", "", "new note", "fixed"]
 
 
+def test_type_reports_text_dropped_by_maxlength_or_a_cancelled_beforeinput(page):
+    # #11352: a field that refuses typed text never answers ok.
+    page.evaluate("""() => {
+      const short = Object.assign(document.createElement("input"), {id:"short", maxLength:3});
+      short.setAttribute("aria-label", "Short");
+      const guard = Object.assign(document.createElement("input"), {id:"guard"});
+      guard.setAttribute("aria-label", "Guard");
+      guard.addEventListener("beforeinput", e => { if (e.data === "x") e.preventDefault(); });
+      document.body.append(short, guard);
+    }""")
+    result = read(page)
+    typed = lambda name, text: page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [ref_of(result, name), text])
+    assert typed("Short", "abcdef") == {"error": "TextDropped", "reason": "maxlength", "typed": 6,
+                                        "accepted": 3, "entered": "abc"}
+    assert page.evaluate("short.value") == "abc"
+    assert typed("Guard", "axb") == {"error": "TextDropped", "reason": "cancelled", "typed": 3,
+                                     "accepted": 2, "entered": "ab"}
+    assert page.evaluate("guard.value") == "ab"
+    assert page.evaluate("([r, k]) => TrustyPages.pagePress(r, k, [])", [ref_of(result, "Short"), "z"]) == {
+        "error": "TextDropped", "reason": "maxlength", "typed": 1, "accepted": 0, "entered": ""}
+    assert typed("Short", "ab") == {"ok": True}
+
+
 FIXTURE = Path(__file__).with_name("fixtures") / "select.html"
 
 

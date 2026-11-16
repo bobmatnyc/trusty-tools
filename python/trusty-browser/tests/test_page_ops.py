@@ -525,6 +525,24 @@ def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_ke
     run(short, body)
 
 
+def test_text_dropped_is_relayed_with_its_counts_and_journaled(short, clock):
+    # #11352: the typing ran, so the refusal keeps the lease and a retry types nothing.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        dropped = {"error": "TextDropped", "tab": 7, "reason": "maxlength", "typed": 6,
+                   "accepted": 3, "entered": "abc"}  # fmt: skip
+        rig.a.refuse["page_type"] = dropped
+        frame = {"op": "page_type", "lease": lease, "request_id": "t", "ref": "1.0", "text": "abcdef"}
+        assert await call(frame) == {"ok": False, **dropped}
+        assert len(rig.broker.claims) == 1
+        del rig.a.refuse["page_type"]
+        assert await call(frame) == {"ok": False, **dropped}
+        assert len(rig.a.sent("page_type")) == 1
+
+    run(short, body)
+
+
 @pytest.mark.parametrize("error", ["NotSelectable", "NoSuchOption", "StaleElement"])
 def test_page_select_refusals_keep_the_lease_and_are_not_journaled(short, clock, error):
     async def body(rig):

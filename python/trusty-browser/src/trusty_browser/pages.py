@@ -51,6 +51,7 @@ KEEP_LEASE = {
     "NavigationPending",
     "StaleElement",
     "NotEditable",
+    "TextDropped",
     "NotSelectable",
     "NoSuchOption",
     "InvalidUrl",
@@ -467,7 +468,8 @@ class Pages(Grants):
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
-            if str(exc) == "OutcomeUnknown":
+            # #11352: TextDropped reports typing that ran, so a retry must not type again.
+            if str(exc) in ("OutcomeUnknown", "TextDropped"):
                 session.journal[rid] = (remembered(request), exc.response)
             raise
         if op == "page_navigate":
