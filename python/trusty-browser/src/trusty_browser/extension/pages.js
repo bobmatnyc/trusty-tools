@@ -1,104 +1,19 @@
 // Page operations for activation-code grants (#11239, docs/activation-codes.md).
-// The worker loads this file with importScripts; tests load it into a page. Top-level code touches no
-// `chrome` API. The `page*` function declarations are injected by chrome.scripting.executeScript, so each one
+// The worker loads this file with importScripts; tests load it into a page after pages_read.js, which holds
+// the read (#11355). Top-level code touches no `chrome` API. The `page*` function declarations are injected by chrome.scripting.executeScript, so each one
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
+if (!globalThis.TrustyPageRead && typeof importScripts === "function") importScripts("pages_read.js");
 globalThis.TrustyPages = (() => {
   // Returns [origin, title] and changes nothing; the InjectionResult supplies the documentId.
   function pageProbe() { return [location.origin, document.title]; }
 
-  // Why: an agent addresses elements by refs from its own latest read, never by selectors.
-  // What: walks the top document's light DOM, keeps ref -> WeakRef(element) in an isolated-world map that
-  //   replaces any earlier map, and returns the read result bounded to 262144 UTF-8 bytes.
-  // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`.
-  function pageRead(reserve) {
-    const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
-    const state = globalThis[KEY] || (globalThis[KEY] = {read:0, map:new Map()});
-    state.read += 1;
-    const read = state.read, map = new Map();
-    let truncated = false;
-    const cut = (value, max) => {
-      const text = String(value ?? "");
-      if (text.length <= max) return text;
-      truncated = true;
-      return text.slice(0, max);
-    };
-    const clean = value => String(value ?? "").replace(/\s+/g, " ").trim();
-    const selector = "a[href],button,input:not([type=hidden]),select,textarea,summary," +
-      "[contenteditable]:not([contenteditable=false])," +
-      ["button","link","checkbox","radio","tab","menuitem","option","switch","textbox","combobox","searchbox"]
-        .map(role => "[role=" + role + "]").join(",");
-    function implicitRole(el) {
-      const tag = el.localName, type = (el.getAttribute("type") || "text").toLowerCase();
-      if (tag === "a") return "link";
-      if (tag === "button" || tag === "summary") return "button";
-      if (tag === "select") return el.multiple || el.size > 1 ? "listbox" : "combobox";
-      if (tag === "textarea" || el.isContentEditable) return "textbox";
-      if (tag === "input") {
-        if (type === "checkbox" || type === "radio") return type;
-        if (type === "search") return "searchbox";
-        if (["button","submit","reset","image"].includes(type)) return "button";
-        return "textbox";
-      }
-      return "generic";
-    }
-    function accessibleName(el) {
-      const labelled = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
-        .map(id => document.getElementById(id)?.innerText || "").join(" ");
-      const labels = [...(el.labels || [])].map(label => label.innerText).join(" ");
-      for (const value of [el.getAttribute("aria-label"), labelled, labels, el.getAttribute("placeholder"),
-        el.innerText, el.getAttribute("title"), el.getAttribute("alt")]) {
-        const name = clean(value);
-        if (name) return name.slice(0, 200);
-      }
-      return "";
-    }
-    const elements = [];
-    for (const el of document.querySelectorAll(selector)) {
-      if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") continue;
-      if (elements.length === 500) { truncated = true; break; }
-      const ref = read + "." + elements.length, tag = el.localName;
-      const entry = {ref, tag, role:el.getAttribute("role") || implicitRole(el), name:accessibleName(el)};
-      if (tag === "input") entry.type = (el.getAttribute("type") || "text").toLowerCase();
-      if (["input","textarea","select"].includes(tag) && entry.type !== "password" &&
-          !["checkbox","radio","file"].includes(entry.type)) entry.value = cut(el.value, 512);
-      // #11289: a file input reports the names it holds, never Chrome's C:\fakepath value.
-      if (entry.type === "file") {
-        entry.files = [...(el.files || [])].slice(0, 20).map(file => cut(file.name, 255));
-        if (el.multiple) entry.multiple = true;
-        if (el.accept) entry.accept = cut(el.accept, 256);
-      }
-      if (tag === "a" && el.href) entry.href = cut(el.href, 2048);
-      if (entry.type === "checkbox" || entry.type === "radio") entry.checked = el.checked;
-      // #11285: a select lists its choices so page_select can name one.
-      if (tag === "select") {
-        entry.options = [...el.options].slice(0, 100).map(o => ({value:cut(o.value, 512), label:cut(clean(o.label), 200),
-          ...(o.selected ? {selected:true} : {}), ...(o.disabled ? {disabled:true} : {})}));
-        if (el.options.length > 100) truncated = true;
-      }
-      if (el.disabled === true || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
-      elements.push(entry);
-      map.set(ref, new WeakRef(el));
-    }
-    const result = {origin:location.origin, url:cut(location.href, 2048), title:cut(document.title, 200),
-      text:cut(document.body ? document.body.innerText : "", 65536), elements, truncated};
-    const size = () => new TextEncoder().encode(JSON.stringify(result)).length;
-    for (let over = size() - LIMIT; over > 0; over = size() - LIMIT) {
-      result.truncated = true;
-      if (result.text) result.text = result.text.slice(0, Math.max(0, result.text.length - over));
-      else map.delete(result.elements.pop().ref);
-    }
-    result.truncated = result.truncated || truncated;
-    state.map = map;
-    return result;
-  }
-
-  // Why: a click must reach only an element this document's latest read reported.
-  // What: resolves the ref, then dispatches synthetic pointer and mouse events and element.click().
+  // Why: a click must reach only the element a read of this document reported.
+  // What: resolves the ref through the registry pageInspect installs (StaleElement when the element changed
+  //   or left the document, #11355), then dispatches synthetic pointer and mouse events and element.click().
   // Test: tests/test_pages_dom.py `test_click_and_type_refuse_stale_refs`.
   function pageClick(ref) {
-    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
+    const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+    if (!el) return {error:"StaleElement"};
     el.scrollIntoView({block:"center", inline:"center"});
     const box = el.getBoundingClientRect();
     const at = {bubbles:true, cancelable:true, composed:true, view:window,
@@ -129,9 +44,8 @@ globalThis.TrustyPages = (() => {
   function pageKeys(ref, action, input) {
     let el = null;
     if (ref !== null) {
-      const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-      el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-      if (!el || !el.isConnected) return {error:"StaleElement"};
+      el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+      if (!el) return {error:"StaleElement"};
     }
     const KINDS = ["text","search","email","url","tel","password","number"];
     const typeOf = node => (node.getAttribute("type") || "text").toLowerCase();
@@ -363,7 +277,7 @@ globalThis.TrustyPages = (() => {
   // Why: offscreen content and infinite-scroll feeds load only when the page scrolls, and an agent needs
   //   to know when a feed has stopped growing (#11291).
   // What: `to` "down"/"up" scrolls the document by 90% of the viewport, "top"/"bottom" to an end, and
-  //   "element" brings `ref` (from the latest read, else StaleElement) to the centre. It then waits up to
+  //   "element" brings `ref` (StaleElement when its element changed) to the centre. It then waits up to
   //   `waitMs` for added nodes, returning 150 ms after they stop. The view reports the scroll position,
   //   whether the document grew and whether it now sits at the bottom. Refs stay valid: no read runs.
   // Test: tests/test_pages_dom.py `test_scroll_drives_an_infinite_feed_until_it_ends`,
@@ -371,9 +285,8 @@ globalThis.TrustyPages = (() => {
   async function pageScroll(to, ref, waitMs) {
     let el = null;
     if (to === "element") {
-      const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-      el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-      if (!el || !el.isConnected) return {error:"StaleElement"};
+      el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+      if (!el) return {error:"StaleElement"};
     }
     const root = document.scrollingElement || document.documentElement, before = root.scrollHeight;
     let added = false, quiet = null, finish;
@@ -408,9 +321,8 @@ globalThis.TrustyPages = (() => {
   // Test: tests/test_pages_dom.py `test_set_files_reaches_the_page_and_the_server`,
   //   `test_set_files_refuses_other_targets`.
   function pageSetFiles(ref, files) {
-    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
+    const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+    if (!el) return {error:"StaleElement"};
     const isFile = el.localName === "input" && (el.getAttribute("type") || "").toLowerCase() === "file";
     if (!isFile || el.disabled || (files.length > 1 && !el.multiple)) return {error:"NotEditable"};
     const transfer = new DataTransfer();
@@ -443,9 +355,8 @@ globalThis.TrustyPages = (() => {
   // Test: tests/test_pages_dom.py `test_select_sets_value_and_reports_no_effect`,
   //   `test_select_refuses_non_select_and_unknown_options`, `test_select_fixture_logs_the_change`.
   function pageSelect(ref, value) {
-    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
-    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
-    if (!el || !el.isConnected) return {error:"StaleElement"};
+    const el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+    if (!el) return {error:"StaleElement"};
     if (el.localName !== "select" || el.multiple || el.disabled || el.matches(":disabled")) return {error:"NotSelectable"};
     const options = [...el.options].filter(o => !o.disabled && !o.matches(":disabled"));
     const option = options.find(o => o.value === value) || options.find(o => o.label.trim() === value.trim());
@@ -478,7 +389,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSelect, pageSetFiles,
+  const {pageInspect, pageRead} = globalThis.TrustyPageRead;
+  return {pageProbe, pageInspect, pageRead, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSelect, pageSetFiles,
     urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
@@ -487,7 +399,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageKeys, pageScroll, pageSelect, pageSetFiles, urlAllowed, keyAllowed,
+  const {pageProbe, pageInspect, pageClick, pageKeys, pageScroll, pageSelect, pageSetFiles, urlAllowed, keyAllowed,
     modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says why and what landed.
   const RELAYED = ["tab","origin","access","document","reason","typed","accepted","entered"];
@@ -611,7 +523,7 @@ TrustyPages.commands = deps => {
       await landed(req.tab);
       let hit;
       try {
-        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageRead, args:[512]});
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect, args:["read", 512]});
       } catch { throw await needed(req.tab); }
       const result = hit?.result;
       if (!result || typeof hit.documentId !== "string" || typeof result.origin !== "string") throw await needed(req.tab);

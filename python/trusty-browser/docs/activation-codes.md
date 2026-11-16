@@ -321,7 +321,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`, `page_press`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
 | `NavigationPending` | `tab` | `page_read`: the tab is still loading a navigation 3 s after the read arrived, so the new document has not committed. The lease stays; read again (#11354) |
-| `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
+| `StaleElement` | `tab` | `ref` names no element of this document's registry, the element is no longer connected (the page removed or replaced it), or its role or name changed (#11355). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
@@ -503,22 +503,32 @@ the worker checks it again before `tabs.update`.
 An element is addressed by a `ref` that a `page_read` of the same document
 returned. The agent never writes a selector.
 
-- `page_read` runs one injected function in the isolated world of the tab's
-  top document. It walks the document, keeps the elements it reports in an
-  isolated-world `Map` from ref to `WeakRef(element)`, and replaces any earlier
-  map. The map dies with the document.
-- A ref is `"<read>.<n>"`: `read` is a per-document counter that the injected
-  function increments on each read, `n` the element's index in that read's
-  list. Both are decimal integers; the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`.
-- `page_click`, `page_type`, `page_press` and `page_scroll` inject into `documentIds: [document]` only. The
-  injected function answers `StaleElement` when the ref's `read` is not the
-  map's current counter, the ref is absent, the `WeakRef` is empty, or the
-  element is not connected. A scroll runs no read, so it leaves refs valid; a
-  ref is never re-resolved to a replacement node.
+- `page_read` runs one injected function (`pageInspect`, in
+  `extension/pages_read.js`) in the isolated world of the tab's top document.
+  It walks the document and keeps an isolated-world registry: a `Map` from ref
+  to `WeakRef(element)` and the element's signature, and a `WeakMap` from
+  element to ref. The registry dies with the document.
+- Refs are stable (#11355): an element keeps its ref across reads while its
+  signature holds. The signature is the element's role and accessible name;
+  for an `input`, `textarea`, `select` or contenteditable element the name
+  leaves out the element's own text, so typing into a field keeps its ref. An
+  element whose signature changed gets a new ref on the next read, and its old
+  ref is dropped.
+- A ref is `"<epoch>.<n>"`: `epoch` is a random integer drawn when the
+  registry is created, `n` a per-registry counter. Both are decimal integers;
+  the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`. The random epoch keeps a ref from
+  an earlier registry from naming an element of a new one.
+- `page_click`, `page_type`, `page_press`, `page_select`, `page_upload` and
+  `page_scroll` inject into `documentIds: [document]` only. The injected
+  function answers `StaleElement` when the ref is absent from the registry,
+  the `WeakRef` is empty, the element is not connected, or its signature no
+  longer matches. A ref is never re-resolved to a replacement node, even one
+  with the same role and name.
 
 Why this scheme: it needs no page mutation (no attributes are written into the
-site's DOM), no selector language, and no state outside the document, and a
-ref cannot reach a different document or an element from an older read.
+site's DOM), no selector language, and no state outside the document; a ref
+cannot reach a different document, and a ref whose element changed its role
+or name answers `StaleElement` instead of acting on it.
 
 `page_read` result fields:
 

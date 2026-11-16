@@ -64,8 +64,9 @@ def add_page_tools(
         element with ``ref`` from the latest page_read. The result carries
         scroll_y, scroll_height, viewport_height, grew (content was added) and
         at_end. For a feed, repeat ``to="bottom"`` until grew is false, then
-        page_read again: refs from an earlier read answer StaleElement, as does
-        a ref whose element the page removed. Reuse the request ID to retry.
+        page_read again. A ref survives reads while its element keeps its role
+        and name; a removed or changed element answers StaleElement (#11355).
+        Reuse the request ID to retry.
         Test: `test_end_to_end_page_session_through_the_mcp_server`.
         """
         return call(

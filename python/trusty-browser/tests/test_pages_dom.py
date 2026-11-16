@@ -11,6 +11,13 @@ from playwright.sync_api import sync_playwright
 from trusty_browser import service
 
 SCRIPT = Path(service.__file__).with_name("extension") / "pages.js"
+
+
+def load(tab):
+    """Add pages_read.js, then pages.js, as the worker's importScripts order does (#11355)."""
+    tab.add_script_tag(path=str(SCRIPT.with_name("pages_read.js")))
+    tab.add_script_tag(path=str(SCRIPT))
+
 PAGE = """
 <title>Pages QA</title>
 <main>
@@ -36,7 +43,7 @@ def page():
         try:
             tab = browser.new_page()
             tab.set_content(PAGE)
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             tab.evaluate("""() => {
               window.events = [];
               for (const kind of ["pointerdown","mousedown","pointerup","mouseup","click","input","change"])
@@ -59,11 +66,12 @@ def test_read_reports_elements_and_bounds_size(page):
     result = read(page)
     names = [e["name"] for e in result["elements"]]
     assert names == ["Next page", "Go now", "Email", "Password", "Fixed", "old note", "Bio"]
-    assert all(e["ref"].startswith("1.") for e in result["elements"])
+    epoch = result["elements"][0]["ref"].split(".")[0]
+    assert all(e["ref"].split(".")[0] == epoch for e in result["elements"])
     by_name = {e["name"]: e for e in result["elements"]}
     assert by_name["Next page"]["role"] == "link"
     assert by_name["Next page"]["href"].endswith("/next")
-    assert by_name["Email"] == {"ref": "1.2", "tag": "input", "role": "textbox", "name": "Email",
+    assert by_name["Email"] == {"ref": epoch + ".2", "tag": "input", "role": "textbox", "name": "Email",
                                 "type": "email", "value": "a@b.test"}
     assert "value" not in by_name["Password"]
     assert "hunter2" not in json.dumps(result) and "secret-hidden" not in json.dumps(result)
@@ -79,15 +87,12 @@ def test_read_reports_elements_and_bounds_size(page):
     assert big["truncated"] is True
     assert len(big["elements"]) <= 500
     assert len(json.dumps(big, separators=(",", ":"), ensure_ascii=False).encode()) <= 262144 - 512
-    assert all(e["ref"].startswith("2.") for e in big["elements"])
+    # #11355: an unchanged element keeps its ref across reads.
+    assert big["elements"][0]["ref"] == result["elements"][0]["ref"]
 
 
 def test_click_and_type_refuse_stale_refs(page):
-    first = read(page)
-    go = ref_of(first, "Go now")
     second = read(page)
-    assert page.evaluate("ref => TrustyPages.pageClick(ref)", go) == {"error": "StaleElement"}
-    assert page.evaluate("events") == []
     fresh = ref_of(second, "Go now")
     assert page.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"ok": True}
     assert page.evaluate("events") == ["pointerdown:go", "mousedown:go", "pointerup:go", "mouseup:go", "click:go"]
@@ -96,6 +101,39 @@ def test_click_and_type_refuse_stale_refs(page):
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", ref_of(second, "Email")) == {"ok": True}
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", "9.0") == {"error": "StaleElement"}
     assert page.evaluate("events") == ["input:email", "change:email"]
+
+
+def click(page, ref):
+    return page.evaluate("ref => TrustyPages.pageClick(ref)", ref)
+
+
+def test_refs_survive_reads_and_go_stale_when_the_element_changes(page):
+    # #11355: a ref outlives reads of an unchanged page; a changed or removed element answers StaleElement.
+    page.evaluate("""() => {
+      for (const label of ["Delete A", "Delete B"])
+        document.body.append(Object.assign(document.createElement("button"), {textContent:label}));
+    }""")
+    first = read(page)
+    go, a, b, note = (ref_of(first, n) for n in ("Go now", "Delete A", "Delete B", "old note"))
+    second = read(page)
+    assert [e["ref"] for e in second["elements"]] == [e["ref"] for e in first["elements"]]
+    assert click(page, go) == {"ok": True}
+    page.evaluate("() => { window.events = []; }")
+    # Swap the labels: neither old ref may click the button that now carries its name.
+    page.evaluate("""() => { const [x, y] = [...document.querySelectorAll("button")].slice(-2);
+      [x.textContent, y.textContent] = [y.textContent, x.textContent]; }""")
+    assert click(page, a) == {"error": "StaleElement"}
+    assert click(page, b) == {"error": "StaleElement"}
+    # An identical replacement node is a different element.
+    page.evaluate("go.replaceWith(go.cloneNode(true))")
+    assert click(page, go) == {"error": "StaleElement"}
+    assert page.evaluate("events") == []
+    third = read(page)
+    assert ref_of(third, "Delete A") not in (a, b) and ref_of(third, "Go now") != go
+    # Editing a field's own text keeps its ref.
+    assert page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [note, "new"]) == {"ok": True}
+    assert page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [note, "newer"]) == {"ok": True}
+    assert ref_of(read(page), "newer") == note
 
 
 def test_type_sets_values_and_refuses_non_editable(page):
@@ -144,7 +182,7 @@ def select_page():
         try:
             tab = browser.new_page()
             tab.goto(FIXTURE.as_uri())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -216,7 +254,7 @@ def feed():
         try:
             tab = browser.new_page(viewport={"width": 800, "height": 600})
             tab.goto(FEED.as_uri())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -233,7 +271,7 @@ def keys():
         try:
             tab = browser.new_page()
             tab.set_content(KEYS.read_text())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -247,7 +285,7 @@ def files_page():
         try:
             tab = browser.new_page(accept_downloads=True)
             tab.goto(site.origin + "/")
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab, site
         finally:
             browser.close()
@@ -435,6 +473,6 @@ def test_press_edits_fields_and_honours_chords_and_prevent_default(keys):
 
 def test_press_refuses_a_stale_ref_and_changes_nothing(keys):
     refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
-    read(keys)
+    keys.evaluate("user.replaceWith(user.cloneNode())")
     assert press(keys, refs["User"], "Enter") == {"error": "StaleElement"}
     assert log(keys) == []

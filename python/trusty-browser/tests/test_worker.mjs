@@ -7,6 +7,10 @@ import vm from "node:vm";
 const source = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
 const pagesSource = await readFile(new URL("../src/trusty_browser/extension/pages.js",import.meta.url),"utf8");
 const codesSource = await readFile(new URL("../src/trusty_browser/extension/codes.js",import.meta.url),"utf8");
+const readSource = await readFile(new URL("../src/trusty_browser/extension/pages_read.js",import.meta.url),"utf8");
+// importScripts by file name: pages.js loads pages_read.js itself (#11355); the indicator is stubbed.
+const scripts = {"pages.js":pagesSource, "pages_read.js":readSource, "codes.js":codesSource, "indicator.js":""};
+const loader = ctx => (...files) => { for (const file of files) vm.runInContext(scripts[file], ctx); };
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
 const profile = "example", email = "qa@example.org", secret = "a".repeat(64);
 const route = "http://127.0.0.1:1234/app";
@@ -32,7 +36,7 @@ async function fixture() {
       return {ok:true,url:route,account:"site-user",result:{count:0}};
     }},alarms:{onAlarm:event(),create(){}}};
   const ctx = vm.createContext({TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
-  ctx.importScripts = (...files) => { vm.runInContext(pagesSource,ctx); vm.runInContext(codesSource,ctx); };
+  ctx.importScripts = loader(ctx);
   vm.runInContext(source,ctx);
   for (let i=0;!sent.length && i<50;i++) await new Promise(r=>setImmediate(r));
   assert.equal(sent[0]?.type,"hello");
@@ -189,7 +193,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       if (target.documentIds && !target.documentIds.includes(t.doc)) throw new Error("No document with id");
       if (func.name !== "pageProbe") ran.push({tab:target.tabId, func:func.name, args});
       const result = func.name === "pageProbe" ? [t.origin, t.title]
-        : func.name === "pageRead" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
+        : func.name === "pageInspect" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
         : t.result || {ok:true};
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
@@ -199,7 +203,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
     setTimeout:(fn, ms) => { timers.set(++serial, {fn, ms}); return serial; }, clearTimeout:t => timers.delete(t)});
-  ctx.importScripts = () => { vm.runInContext(pagesSource, ctx); vm.runInContext(codesSource, ctx); };
+  ctx.importScripts = loader(ctx);
   vm.runInContext(source, ctx);
   await settle();
   // The broker's pairing acknowledgement; `liveIds` defaults to everything the fake broker lists.
