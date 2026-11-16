@@ -1,0 +1,119 @@
+{
+ "golden_version": 1,
+ "scope": "public",
+ "search": [
+  {
+   "id": "S01",
+   "index": "trusty-tools-4e2cf878",
+   "query": "how reciprocal rank fusion merges the BM25 and vector result lists",
+   "expected": [
+    "crates/trusty-search/src/core/search/rrf.rs"
+   ]
+  },
+  {
+   "id": "S02",
+   "index": "trusty-tools-4e2cf878",
+   "query": "maximal marginal relevance re-ranking to drop near-duplicate chunks",
+   "expected": [
+    "crates/trusty-search/src/core/mmr.rs"
+   ]
+  },
+  {
+   "id": "S03",
+   "index": "trusty-tools-4e2cf878",
+   "query": "retry a failed semantic stage once the embedder answers again",
+   "expected": [
+    "crates/trusty-search/src/service/embed_retry.rs"
+   ]
+  },
+  {
+   "id": "S04",
+   "index": "trusty-tools-4e2cf878",
+   "query": "detect whether a path lives on a network-mounted filesystem",
+   "expected": [
+    "crates/trusty-search/src/service/network_fs.rs"
+   ]
+  },
+  {
+   "id": "S05",
+   "index": "trusty-tools-4e2cf878",
+   "query": "the grammar that builds, validates and parses a chunk id",
+   "expected": [
+    "crates/trusty-search/src/core/chunk_id.rs"
+   ]
+  },
+  {
+   "id": "S06",
+   "index": "trusty-tools-4e2cf878",
+   "query": "self-heal index registrations whose git worktree root was deleted",
+   "expected": [
+    "crates/trusty-search/src/service/orphan_reaper.rs"
+   ]
+  },
+  {
+   "id": "S07",
+   "index": "trusty-tools-4e2cf878",
+   "query": "temporal decay of memory importance with a half-life",
+   "expected": [
+    "crates/trusty-memory/src/engine/decay.rs"
+   ]
+  },
+  {
+   "id": "S08",
+   "index": "trusty-tools-4e2cf878",
+   "query": "evict cold palace handles to disk when idle",
+   "expected": [
+    "crates/trusty-memory/src/idle_evict.rs"
+   ]
+  },
+  {
+   "id": "S09",
+   "index": "trusty-tools-4e2cf878",
+   "query": "election of the one process that runs maintenance for a data root",
+   "expected": [
+    "crates/trusty-memory/src/engine/maintenance_lease.rs"
+   ]
+  },
+  {
+   "id": "S10",
+   "index": "trusty-tools-4e2cf878",
+   "query": "how non-comment lines are counted for the source file size cap",
+   "expected": [
+    "docs/reference/sloc-cap.md"
+   ]
+  },
+  {
+   "id": "S11",
+   "index": "trusty-tools-4e2cf878",
+   "query": "changelog fragment categories and file naming per pull request",
+   "expected": [
+    "docs/reference/changelog-fragments.md"
+   ]
+  },
+  {
+   "id": "S12",
+   "index": "trusty-tools-4e2cf878",
+   "query": "decision to exclude superseded drawers from default recall",
+   "expected": [
+    "docs/adr/0074-exclude-superseded-drawers-from-default-recall.md"
+   ]
+  },
+  {
+   "id": "S13",
+   "index": "trusty-tools-4e2cf878",
+   "query": "runbook to install a new build on a machine with live managed sessions",
+   "expected": [
+    "docs/reference/install-checkpoint.md"
+   ]
+  },
+  {
+   "id": "S14",
+   "index": "trusty-tools-4e2cf878",
+   "query": "semver gate that checks cargo publish for breaking API changes",
+   "expected": [
+    "docs/reference/semver-gate.md"
+   ]
+  }
+ ],
+ "memory": []
+}
