@@ -81,3 +81,48 @@ fn an_owner_limit_without_a_quote_warns() {
         ["OWNER-REQUESTED-LIMIT"]
     );
 }
+
+#[test]
+fn a_percent_target_warns() {
+    assert_eq!(codes("Plan: cut it by 20%."), ["INVENTED_TARGET"]);
+}
+
+#[test]
+fn contracted_and_yet_negations_are_not_claims() {
+    for msg in [
+        "The rewrite isn't done.",
+        "The agent hasn't finished.",
+        "Section 3 is not yet done.",
+        "The migration is not finished.",
+    ] {
+        assert!(!claims_completion(msg), "{msg}");
+    }
+}
+
+#[test]
+fn unverified_does_not_satisfy_the_verified_category() {
+    let msg = "Done.\n\nEvidence map:\n- Unverified: S1\n- Helper-reported: lint\n\
+               - Unfinished: none\n- Untested: none\n";
+    assert_eq!(codes(msg), ["EVIDENCE_MAP_INCOMPLETE"]);
+    let spaced = FULL_MAP.replace("Helper-reported", "Helper reported");
+    assert!(
+        warnings_for(&spaced).is_empty(),
+        "{:?}",
+        warnings_for(&spaced)
+    );
+}
+
+#[test]
+fn a_bold_owner_limit_with_a_trailing_period_passes() {
+    for line in [
+        "**OWNER-REQUESTED-LIMIT:** \"one page\".",
+        "**OWNER-REQUESTED-LIMIT**: \"one page\"",
+    ] {
+        let msg = format!("Keep it under 1 page.\n{line}");
+        assert!(
+            warnings_for(&msg).is_empty(),
+            "{line}: {:?}",
+            warnings_for(&msg)
+        );
+    }
+}

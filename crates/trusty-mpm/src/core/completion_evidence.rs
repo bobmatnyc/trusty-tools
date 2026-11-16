@@ -31,7 +31,9 @@ pub const OWNER_LIMIT_LABEL: &str = "OWNER-REQUESTED-LIMIT";
 
 static CLAIM: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(not\s+|n't\s+|never\s+)?(done|complete|completed|finished|verified working|ready to merge|all set)\b",
+        // #10575: `n't` carries no leading `\b` ("isn't done"), and `yet` may sit
+        // between the negation and the claim ("not yet done").
+        r"(?i)(\b(?:not|never)\s+(?:yet\s+)?|n't\s+(?:yet\s+)?)?\b(done|complete|completed|finished|verified working|ready to merge|all set)\b",
     )
     .expect("claim regex")
 });
@@ -41,13 +43,25 @@ static MAP: LazyLock<Regex> =
 
 static TARGET: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(cut|trim|shorten|reduce|limit|cap|keep|under|within|at most|max(imum)?)\b[^\n]{0,60}?\b\d[\d,]*\s*(words?|lines?|pages?|characters?|chars|tokens?|%|percent)\b",
+        r"(?i)\b(cut|trim|shorten|reduce|limit|cap|keep|under|within|at most|max(imum)?)\b[^\n]{0,60}?\b\d[\d,]*\s*(%|(words?|lines?|pages?|characters?|chars|tokens?|percent)\b)",
     )
     .expect("target regex")
 });
 
 static OWNER_LIMIT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)OWNER-REQUESTED-LIMIT:\s*(.*)$"#).expect("owner-limit regex")
+    // #10575: markdown bold may wrap the label, before or after the colon.
+    Regex::new(r#"(?m)\**OWNER-REQUESTED-LIMIT\**:\**\s*(.*)$"#).expect("owner-limit regex")
+});
+
+/// One whole-word pattern per entry of [`CATEGORIES`]; `unverified` is not `verified`.
+static CATEGORY_WORDS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
+    [
+        r"\bverified\b",
+        r"\bhelper[- ]reported\b",
+        r"\bunfinished\b",
+        r"\buntested\b",
+    ]
+    .map(|p| Regex::new(p).expect("category regex"))
 });
 
 /// The prose of `message`, fenced blocks removed.
@@ -93,8 +107,9 @@ pub fn warnings_for(message: &str) -> Vec<String> {
                 let lowered = text[m.start()..].to_lowercase();
                 let missing: Vec<&str> = CATEGORIES
                     .iter()
-                    .copied()
-                    .filter(|c| !lowered.contains(c))
+                    .zip(CATEGORY_WORDS.iter())
+                    .filter(|(_, word)| !word.is_match(&lowered))
+                    .map(|(c, _)| *c)
                     .collect();
                 if !missing.is_empty() {
                     out.push(format!(
@@ -107,7 +122,8 @@ pub fn warnings_for(message: &str) -> Vec<String> {
     }
     let owner_lines: Vec<String> = OWNER_LIMIT
         .captures_iter(&text)
-        .map(|c| c[1].trim().to_string())
+        // #10575: a sentence-ending `.` after the closing quote is allowed.
+        .map(|c| c[1].trim().trim_end_matches('.').trim_end().to_string())
         .collect();
     for quote in &owner_lines {
         if !(quote.len() > 2 && quote.starts_with('"') && quote.ends_with('"')) {
