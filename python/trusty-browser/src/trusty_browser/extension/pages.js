@@ -69,6 +69,12 @@ globalThis.TrustyPages = (() => {
       }
       if (tag === "a" && el.href) entry.href = cut(el.href, 2048);
       if (entry.type === "checkbox" || entry.type === "radio") entry.checked = el.checked;
+      // #11285: a select lists its choices so page_select can name one.
+      if (tag === "select") {
+        entry.options = [...el.options].slice(0, 100).map(o => ({value:cut(o.value, 512), label:cut(clean(o.label), 200),
+          ...(o.selected ? {selected:true} : {}), ...(o.disabled ? {disabled:true} : {})}));
+        if (el.options.length > 100) truncated = true;
+      }
       if (el.disabled === true || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
       elements.push(entry);
       map.set(ref, new WeakRef(el));
@@ -418,6 +424,32 @@ globalThis.TrustyPages = (() => {
   const pageType = (ref, text) => pageKeys(ref, "type", text);
   const pagePress = (ref, key, modifiers) => pageKeys(ref, "press", {key, modifiers});
 
+  // Why: a native <select> ignores synthetic clicks on its options and is not a typing target, so an agent
+  //   had no way to choose a value (#11285).
+  // What: resolves the ref; a target that is not a single-choice, enabled select answers NotSelectable. Picks
+  //   the first enabled option whose value equals `value`, else whose label does; none answers NoSuchOption.
+  //   An option already selected dispatches nothing. Otherwise sets selectedIndex and dispatches bubbling
+  //   input and change. `changed` compares the value before and after, so a handler that reverts the choice
+  //   reports changed:false; `value` is the select's value afterwards.
+  // Test: tests/test_pages_dom.py `test_select_sets_value_and_reports_no_effect`,
+  //   `test_select_refuses_non_select_and_unknown_options`, `test_select_fixture_logs_the_change`.
+  function pageSelect(ref, value) {
+    const state = globalThis.__trustyBrowserRefs, [read] = ref.split(".");
+    const el = state && Number(read) === state.read ? state.map.get(ref)?.deref() : null;
+    if (!el || !el.isConnected) return {error:"StaleElement"};
+    if (el.localName !== "select" || el.multiple || el.disabled || el.matches(":disabled")) return {error:"NotSelectable"};
+    const options = [...el.options].filter(o => !o.disabled && !o.matches(":disabled"));
+    const option = options.find(o => o.value === value) || options.find(o => o.label.trim() === value.trim());
+    if (!option) return {error:"NoSuchOption"};
+    const before = el.value;
+    if (option.selected) return {ok:true, changed:false, value:before};
+    el.focus();
+    el.selectedIndex = option.index;
+    el.dispatchEvent(new Event("input", {bubbles:true, composed:true}));
+    el.dispatchEvent(new Event("change", {bubbles:true}));
+    return {ok:true, changed:el.value !== before, value:el.value};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -437,8 +469,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSetFiles, urlAllowed,
-    keyAllowed, modifiersAllowed};
+  return {pageProbe, pageRead, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSelect, pageSetFiles,
+    urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -446,7 +478,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageRead, pageClick, pageKeys, pageScroll, pageSetFiles, urlAllowed, keyAllowed,
+  const {pageProbe, pageRead, pageClick, pageKeys, pageScroll, pageSelect, pageSetFiles, urlAllowed, keyAllowed,
     modifiersAllowed} = TrustyPages;
   const RELAYED = ["tab","origin","access","document"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","idle","audit","closed","expired"];
@@ -471,6 +503,7 @@ TrustyPages.commands = deps => {
       wait_ms:v => Number.isInteger(v) && v >= 0 && v <= 5000},
     // #11286: `ref` null presses the key on the focused element.
     page_press:{tab, document:doc, ref:v => v === null || ref(v), key:keyAllowed, modifiers:modifiersAllowed},
+    page_select:{tab, document:doc, ref, value:v => typeof v === "string" && v.length <= 8192},
     page_navigate:{tab, url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
@@ -489,20 +522,36 @@ TrustyPages.commands = deps => {
   }
   async function needed(tabId) { return refuse("PermissionNeeded", {tab:tabId, origin:await deps.originOf(tabId)}); }
 
-  function settle(tabId) {
+  // Resolves true at the tab's next "complete" (after a "loading" unless `loading` is already true),
+  // false after `ms` or on cancel.
+  function settle(tabId, ms = 5000, loading = false) {
     let finish;
     const done = new Promise(resolve => {
-      let loading = false;
       const listener = (id, info) => {
         if (id !== tabId) return;
         if (info.status === "loading") loading = true;
         if (loading && info.status === "complete") finish(true);
       };
-      const timer = setTimeout(() => finish(false), 5000);
+      const timer = setTimeout(() => finish(false), ms);
       finish = value => { clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve(value); };
       chrome.tabs.onUpdated.addListener(listener);
     });
     return {done, cancel:() => finish(false)};
+  }
+
+  // Why: before a navigation commits, executeScript still runs in the old document, so a read would
+  //   return it as current (#11354).
+  // What: while the tab's status is "loading", waits up to 3 s for "complete"; still loading answers
+  //   NavigationPending. Listens before re-checking the status, so a completion between the two is not lost.
+  // Test: tests/test_worker.mjs `read during an unsettled navigation never returns the old document`.
+  async function landed(tabId) {
+    const loading = async () => {
+      try { return (await chrome.tabs.get(tabId)).status === "loading"; } catch { throw refuse("TabNotFound", {tab:tabId}); }
+    };
+    if (!await loading()) return;
+    const wait = settle(tabId, 3000, true);
+    if (!await loading()) { wait.cancel(); return; }
+    if (!await wait.done) throw refuse("NavigationPending", {tab:tabId});
   }
 
   // Runs the injected click/type/press/scroll only inside the lease's document; never reports work it did not do.
@@ -520,10 +569,13 @@ TrustyPages.commands = deps => {
       if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
-    const error = hit?.result?.error;
-    if (error === "StaleElement" || error === "NotEditable") throw refuse(error, {tab:req.tab});
-    if (hit?.result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
-    return {document:req.document, ...(hit.result.view || {})};
+    const result = hit?.result, error = result?.error;
+    if (["StaleElement","NotEditable","NotSelectable","NoSuchOption"].includes(error)) throw refuse(error, {tab:req.tab});
+    if (result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
+    if (func !== pageSelect) return {document:req.document, ...(result.view || {})};
+    // #11285: a select reply must say whether the value moved; anything else cannot show what ran.
+    if (typeof result.changed !== "boolean" || typeof result.value !== "string") throw refuse("OutcomeUnknown");
+    return {document:req.document, changed:result.changed, value:result.value.slice(0, 8192)};
   }
 
   const run = {
@@ -541,6 +593,7 @@ TrustyPages.commands = deps => {
     },
     page_tab:req => probe(req.tab),
     async page_read(req) {
+      await landed(req.tab);
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageRead, args:[512]});
@@ -580,6 +633,7 @@ TrustyPages.commands = deps => {
           started:String(d.startTime || "")}));
       return {origin:seen.origin, downloads};
     },
+    page_select:req => act(req, pageSelect, [req.ref, req.value]),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -621,7 +675,8 @@ TrustyPages.commands = deps => {
   // changed the page answers OutcomeUnknown, any other BrowserDisconnected.
   function failure(req, error) {
     if (!error?.fields) {
-      const acting = ["page_click","page_type","page_press","page_scroll","page_navigate","page_upload"].includes(req.op);
+      const acting = ["page_click","page_type","page_press","page_select","page_scroll","page_navigate",
+        "page_upload"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

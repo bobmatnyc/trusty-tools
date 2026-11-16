@@ -164,15 +164,20 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     },
     alarms:{onAlarm:event(), create(name, info){ alarms.push({name, ...info}); }},
     tabs:{
-      get:async tab => { if (!tabs.has(tab)) throw new Error("No tab with id: " + tab); return {id:tab}; },
+      get:async tab => { if (!tabs.has(tab)) throw new Error("No tab with id: " + tab); return {id:tab, status:tabs.get(tab).status || "complete"}; },
       query:async q => { queries.push(q); return [...tabs].map(([tid, t], index) => ({id:tid, windowId:1, index, active:t.active})); },
       update:async (tab, {url}) => {
         const t = tabs.get(tab);
         if (!t) throw new Error("No tab");
         updates.push({tab, url});
-        const next = new URL(url).origin;
-        if (next !== t.origin) t.activeTab = false;
-        t.origin = next; t.doc = "doc-" + tab + "-" + updates.length;
+        const next = new URL(url).origin, doc = "doc-" + tab + "-" + updates.length;
+        // #11354: a slow navigation keeps the old document current until `land` commits it.
+        const commit = () => { if (next !== t.origin) t.activeTab = false; t.origin = next; t.doc = doc; t.status = "complete"; };
+        if (t.slow) {
+          t.status = "loading";
+          setImmediate(() => { for (const l of [...listeners]) l(tab, {status:"loading"}); });
+          t.land = () => { commit(); for (const l of [...listeners]) l(tab, {status:"complete"}); };
+        } else commit();
         if (!t.slow) setImmediate(() => { for (const l of [...listeners]) l(tab, {status:"loading"}); for (const l of [...listeners]) l(tab, {status:"complete"}); });
         return {id:tab};
       },
@@ -309,6 +314,24 @@ test("page_type and page_press inject pageKeys with their action", async () => {
   assert.deepEqual(lost, {id:lost.id, ok:false, error:"OutcomeUnknown"});
 });
 
+// #11285: page_select relays whether the value moved and refuses without a usable answer.
+test("page_select relays changed and value, and its refusals", async () => {
+  const f = await codeFixture();
+  const {grant} = await mintTab(f, 7);
+  const choose = value => f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value});
+  f.tabs.get(7).result = {ok:true, changed:false, value:"keep"};
+  assert.deepEqual((await choose("other")).result, {document:"doc-7", changed:false, value:"keep"});
+  assert.equal(JSON.stringify(f.ran.at(-1)), JSON.stringify({tab:7, func:"pageSelect", args:["1.0", "other"]}));
+  for (const error of ["NotSelectable", "NoSuchOption"]) {
+    f.tabs.get(7).result = {error};
+    const reply = await choose("x");
+    assert.deepEqual(reply, {id:reply.id, ok:false, error, tab:7});
+  }
+  f.tabs.get(7).result = {ok:true};
+  assert.equal((await choose("x")).error, "OutcomeUnknown");
+  assert.equal((await f.command("page_select", {grant, tab:7, document:"doc-7", ref:"1.0", value:5})).error, "InvalidRequest");
+});
+
 test("without the all-https permission only the clicked tab is readable", async () => {
   const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
     9:{origin:"https://c.test", title:"C", active:false}}});
@@ -392,6 +415,29 @@ test("navigate reports access, document and settled", async () => {
   [...f.timers.values()].find(job => job.ms === 5000).fn();
   await pending; await settle();
   assert.equal(f.sent.findLast(m => m.id === "slow").result.settled, false);
+});
+
+test("read during an unsettled navigation never returns the old document", async () => {
+  const f = await codeFixture({tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true}}});
+  const {grant} = await f.popup({type:"mint", scope:"tab", tab:7});
+  const t = f.tabs.get(7);
+  t.slow = true;
+  const nav = f.native.onMessage.fire({id:"nav", op:"page_navigate", email, grant, tab:7, url:"https://a.test/slow"});
+  await settle();
+  // Unsettled past the bound: a typed refusal, never the previous document.
+  const read = f.native.onMessage.fire({id:"r1", op:"page_read", email, grant, tab:7, document:"doc-7"});
+  await settle();
+  [...f.timers.values()].find(job => job.ms === 3000)?.fn();
+  await read; await settle();
+  assert.deepEqual(plain(f.sent.findLast(m => m.id === "r1")), {id:"r1", ok:false, error:"NavigationPending", tab:7});
+  // Settling within the bound: the read waits and returns the new document.
+  const late = f.native.onMessage.fire({id:"r2", op:"page_read", email, grant, tab:7, document:"doc-7"});
+  await settle();
+  t.land();
+  await late; await nav; await settle();
+  const reply = f.sent.findLast(m => m.id === "r2");
+  assert.equal(reply.ok, true);
+  assert.equal(reply.result.document, "doc-7-1");
 });
 
 test("grant_end with last true removes the permission and last false keeps it", async () => {

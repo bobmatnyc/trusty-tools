@@ -341,7 +341,7 @@ fn runs_script(evaluator: &str, args: &[String]) -> bool {
         if let Some(long) = cluster.strip_prefix('-') {
             if ["rcfile", "init-file", "require"].contains(&long) {
                 words.next();
-            } else if !long.contains('=') && !(shell && SHELL_LONG_FLAGS.contains(&long)) {
+            } else if !(long.contains('=') || (shell && SHELL_LONG_FLAGS.contains(&long))) {
                 return false;
             }
             continue;

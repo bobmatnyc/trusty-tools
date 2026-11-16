@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- #11285: native dropdowns for page_select; the page logs what its own handlers saw. -->
+<title>Select QA</title>
+<main>
+  <label>Country
+    <select id="country" name="country">
+      <option value="">Choose one</option>
+      <option value="us">United States</option>
+      <option value="ca">Canada</option>
+      <option value="mx" disabled>Mexico</option>
+    </select>
+  </label>
+  <label>Locked <select id="locked" disabled><option value="a">A</option><option value="b">B</option></select></label>
+  <label>Sticky <select id="sticky"><option value="keep">Keep</option><option value="other">Other</option></select></label>
+  <label>Many <select id="many" multiple><option value="x">X</option></select></label>
+  <label>Name <input id="name" type="text"></label>
+  <ol id="log"></ol>
+</main>
+<script>
+  const log = text => { const li = document.createElement("li"); li.textContent = text; document.getElementById("log").append(li); };
+  for (const id of ["country", "sticky"]) {
+    const el = document.getElementById(id);
+    el.addEventListener("input", () => log(id + " input " + el.value));
+    el.addEventListener("change", () => log(id + " change " + el.value));
+  }
+  // A page handler that refuses every choice: page_select must report it had no effect.
+  document.getElementById("sticky").addEventListener("change", e => { e.target.value = "keep"; });
+</script>

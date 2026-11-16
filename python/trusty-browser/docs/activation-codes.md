@@ -328,7 +328,7 @@ time, held by a lease.
 
 Field types: `tab` is a non-negative integer. `lease`, `request_id` and `ref`
 are non-empty strings of at most 8192 characters (the existing `string` rule).
-`text` is a string of 0 to 8192 characters. `url` is a string of 1 to 8192
+`text` and `value` are strings of 0 to 8192 characters. `url` is a string of 1 to 8192
 characters. Every request carries exactly the fields listed. For `page_press`
 (#11286), `ref` may also be null (the focused element); `key` is one of
 `Enter`, `Tab`, `Escape`, `Backspace`, `Delete`, `ArrowUp`, `ArrowDown`,
@@ -347,6 +347,7 @@ answers `InvalidRequest`.
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
+| `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
@@ -401,8 +402,11 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `TabNotFound` | `tab` | Profile grant: the tab does not exist; the grant stays |
 | `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`, `page_press`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
+| `NavigationPending` | `tab` | `page_read`: the tab is still loading a navigation 3 s after the read arrived, so the new document has not committed. The lease stays; read again (#11354) |
 | `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
+| `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
+| `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
 | `BrowserDisconnected` | none | `tabs`, `select`, `page_read`: no reply from the browser, or the worker could not finish the read (existing). A read changes nothing, so a retry is safe |
@@ -503,6 +507,7 @@ Envelope:
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
+| `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
@@ -532,7 +537,7 @@ build:
 | `PermissionNeeded` | `tab`, `origin` | The probe or the operation's injection failed for lack of page access |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the top document differs from `document`, or `document` is null |
 | `StaleElement` | `tab` | See "Element addressing" |
-| `NotEditable` | `tab` | See "Element addressing" |
+| `NotEditable`, `NotSelectable`, `NoSuchOption` | `tab` | See "Element addressing" |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `OutcomeUnknown` | none | `page_click`, `page_type`, `page_press`, `page_scroll`, `page_navigate`: an unexpected exception, or a result that cannot show the command ran, after the page may have changed |
 | `BrowserDisconnected` | none | `page_tabs`, `page_tab`, `page_read`: an unexpected exception |
@@ -614,7 +619,10 @@ ref cannot reach a different document or an element from an older read.
 An element entry is `{"ref": str, "tag": str, "role": str, "name": str}` plus,
 when they apply, `"type": str` (input type), `"value": str` (at most 512
 characters; never for `type=password`), `"href": str` (absolute, at most 2048
-characters), `"checked": bool`, `"disabled": true`. `tag` is the lower-case
+characters), `"checked": bool`, `"disabled": true`, and for a `select`
+`"options"`: the first 100 options as `{"value": str, "label": str}` plus
+`"selected": true` and `"disabled": true` when they apply (more than 100 sets
+`truncated`). `tag` is the lower-case
 tag name. `role` is the `role` attribute, else the implicit role (`link`,
 `button`, `textbox`, `checkbox`, `radio`, `combobox`, `listbox`, `searchbox`,
 `generic`). `name` is the first non-empty of `aria-label`, `aria-labelledby`
@@ -696,6 +704,15 @@ It lists the 20 newest Chrome downloads whose referrer, URL or final URL has
 the tab's current origin; a `blob:` URL counts as its creator's origin. A
 `data:` URL download from a `no-referrer` page is not attributed to any tab.
 
+`page_select` (#11285): the target must be an enabled single-choice
+`select`; any other answers `NotSelectable`. `value` names the first enabled
+option whose value equals it, else whose label does; none answers
+`NoSuchOption`. Both refusals change nothing. An option already selected
+dispatches nothing and answers `changed: false`. Otherwise `focus()`, set
+`selectedIndex`, then dispatch bubbling `input` and `change`. `changed`
+compares the select's value before and after the events, so a page handler
+that reverts the choice answers `changed: false`; `value` is the value after.
+
 ## Tab incarnation and documentId
 
 - **Tab incarnation (broker)**: a lease is keyed by `(peer.generation, tab)`,
@@ -766,6 +783,7 @@ only. A refusal's result line is best effort.
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
+| `page_select` | `page_select` | host of the page | chosen value, ref, element name |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `page_upload` | `page_upload` | host of the page | file names, types and bytes |
 | `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
@@ -781,7 +799,7 @@ Grant and lease fate per refusal:
 | Refusal | Grant | Lease |
 |---|---|---|
 | `InvalidRequest`, `InvalidUrl`, `Conflict`, `SessionFull` | stays | stays |
-| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable` | stays | stays |
+| `PermissionNeeded`, `DocumentChanged`, `StaleElement`, `NotEditable`, `NotSelectable`, `NoSuchOption` | stays | stays |
 | `StaleLease` | stays | already gone |
 | `TabClaimed` | stays | none taken |
 | `OutOfScope` | stays | dropped when one was named |
@@ -877,6 +895,7 @@ Code mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
+| `page_select` | `lease: str`, `ref: str`, `value: str`, `request_id: str` | The `page_select` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply. The tool reads each path under `--upload-root` (see "Upload root"; a regular file, 512 KiB in total at most) and sends its basename, guessed MIME type and base64 bytes. Without `--upload-root` it is `UploadsDisabled`; a refused path is `FileRefused` naming the path and the reason |
 | `page_downloads` | `lease: str` | The `page_downloads` reply |
