@@ -77,17 +77,40 @@ CHROME_REQUIREMENT = 'anchor apple generic and identifier "com.google.Chrome" an
 ORIGIN = "chrome-extension://jabfhcolknbbdajilgpficniedhcfahc/"
 
 
+class HostRefused(PermissionError):
+    """A failed Chrome-host check; ``code`` is its audit reason (ruling Dqw 2026-11-16).
+
+    Test: `test_each_host_check_raises_its_reason_code`.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 def verify_chrome_host(sock: LocalSocket, state: Path) -> None:
+    """Raise ``HostRefused`` unless the peer is our native host under Chrome Stable."""
+    try:
+        check_chrome_host(sock, state)
+    except HostRefused:
+        raise
+    except subprocess.TimeoutExpired:
+        raise HostRefused("host_timeout", "codesign timed out") from None
+    except OSError as exc:  # the peer's identity could not be read at all
+        raise HostRefused("host_not_native_host", str(exc)) from None
+
+
+def check_chrome_host(sock: LocalSocket, state: Path) -> None:
     pid = kernel_pid(sock)
     parent = parent_pid(pid)
     host = Path(__file__).resolve().with_name("native_host.py")
     expected = [str(host), "--socket", str(state / "enrollment.sock"), ORIGIN]
-    if (
-        process_exe(pid) != process_exe(os.getpid())
-        or process_argv(pid)[1:] != expected
-        or process_exe(parent) != CHROME_EXE
-    ):
-        raise PermissionError("the enrolled Chrome native host is required")
+    if process_exe(pid) != process_exe(os.getpid()) or process_argv(pid)[1:] != expected:
+        raise HostRefused(
+            "host_not_native_host", "the enrolled Chrome native host is required"
+        )
+    if process_exe(parent) != CHROME_EXE:
+        raise HostRefused("host_parent_not_chrome", "the native host's parent is not Chrome")
     # An attacker can spawn another copy of the signed browser with a replacement
     # extension or profile directory. Enrollment is scoped to installed Chrome Stable.
     unsafe = (
@@ -98,7 +121,7 @@ def verify_chrome_host(sock: LocalSocket, state: Path) -> None:
         "--remote-debugging-pipe",
     )
     if any(arg.partition("=")[0] in unsafe for arg in process_argv(parent)[1:]):
-        raise PermissionError("expected the existing Chrome profile store")
+        raise HostRefused("host_unsafe_flag", "expected the existing Chrome profile store")
     # A numeric PID verifies the *running* guest code, not just the binary on disk.
     checked = subprocess.run(
         ["/usr/bin/codesign", "-v", "-R=" + CHROME_REQUIREMENT, str(parent)],
@@ -107,4 +130,4 @@ def verify_chrome_host(sock: LocalSocket, state: Path) -> None:
         stderr=subprocess.DEVNULL,
     )
     if checked.returncode or parent_pid(pid) != parent or kernel_pid(sock) != pid:
-        raise PermissionError("Chrome code identity could not be verified")
+        raise HostRefused("host_codesign", "Chrome code identity could not be verified")

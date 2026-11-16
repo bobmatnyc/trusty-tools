@@ -40,3 +40,5 @@ output:not(:empty) { margin-top: 12px; }
 @media (prefers-reduced-motion: reduce) {
   .iris { transform: none; transition: none; }
 }
+#online .forget { margin: 10px 0 0; text-align: center; font-size: 12px; }
+#online .forget a { color: #68361d; }

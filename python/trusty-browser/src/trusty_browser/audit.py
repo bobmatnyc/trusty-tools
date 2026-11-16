@@ -9,7 +9,17 @@ import stat
 import sys
 import time
 
-FIELDS = ("event", "grant", "scope", "profile", "op", "tab", "outcome", "origin")
+FIELDS = (
+    "event", "grant", "scope", "profile", "op", "tab", "outcome", "origin",
+    "site", "reason", "email_domain", "replaced",
+)  # fmt: skip
+# Refusal reason codes; contract in docs/activation-codes.md, "Refusal log".
+REASONS = frozenset({
+    "peer_uid", "host_not_native_host", "host_parent_not_chrome", "host_unsafe_flag",
+    "host_codesign", "host_timeout", "route_unknown", "ticket_mismatch", "proof_mismatch",
+    "key_rotated", "unpair_bad_credential", "enroll_conflict_route", "enroll_conflict_key",
+    "remove_unauthorized", "status_unauthorized",
+})  # fmt: skip
 ROTATE_BYTES = 5 * 1024 * 1024
 KEEP = 2
 
@@ -66,3 +76,39 @@ class Audit:
             self.write(event, **fields)
         except OSError as exc:
             sys.stderr.write(f"trusty-browser: audit write failed for {event}: {exc}\n")
+
+    def refuse(
+        self,
+        site: str,
+        reason: str,
+        profile: str | None = None,
+        email_domain: str | None = None,
+    ) -> None:
+        """Log one refusal to stderr and to the audit log; never raises.
+
+        Why: nobody could tell why a Connect failed (owner ruling Dqw 2026-11-16).
+        What: one stderr line and one ``refused`` audit line with the site, the
+        reason code, the profile id and the email domain only. A failed write
+        goes to stderr and the caller still refuses (fail closed).
+        Test: `test_each_refusal_site_writes_one_domain_only_audit_line`,
+        `test_a_refusal_whose_audit_write_fails_still_refuses`.
+        """
+        sys.stderr.write(
+            f"trusty-browser: refused site={site} reason={reason}"
+            f" profile={profile or '-'} domain={email_domain or '-'}\n"
+        )
+        try:
+            self.write(
+                "refused", site=site, reason=reason, profile=profile,
+                email_domain=email_domain, outcome="refused",
+            )  # fmt: skip
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"trusty-browser: audit write failed for refused: {exc}\n")
+
+
+def email_domain(email: object) -> str | None:
+    """The part of ``email`` after its last ``@``, lower-cased, else ``None``."""
+    if not isinstance(email, str) or "@" not in email:
+        return None
+    domain = email.rpartition("@")[2].strip().casefold()
+    return domain if 0 < len(domain) <= 253 else None

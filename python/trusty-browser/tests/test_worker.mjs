@@ -764,6 +764,85 @@ test("connect pairs an unpaired profile and records the broker's grant", async (
   assert.deepEqual(await f.popup({type:"status"}), {ok:true, email, profile:pairing.profile, connected:"g-000000000001"});
 });
 
+// Owner ruling Dqw 2026-11-16: after a fresh pair, Connect retries once when the native port is still
+// reconnecting. Fires the one retry wait if it was armed; reports whether it was.
+const PAIR_RETRY_MS = 750;
+async function fireRetry(f) {
+  for (let i = 0; i < 50; i++) {
+    const found = [...f.timers].find(([, job]) => job.ms === PAIR_RETRY_MS);
+    if (found) { f.timers.delete(found[0]); found[1].fn(); await settle(); return true; }
+    await settle();
+  }
+  return false;
+}
+const refuseConnects = (f, count) => {
+  let refused = 0;
+  f.setBroker(msg => msg.op === "connect" && refused++ < count ? {ok:false, error:"BrowserDisconnected"} : f.fakeBroker(msg));
+  return () => f.brokerCalls.filter(m => m.op === "connect").length;
+};
+
+test("connect after lost storage re-pairs and succeeds", async () => {
+  // The extension lost chrome.storage.local; the broker still holds the old pairing for this email.
+  const f = await codeFixture({local:{}});
+  const connects = refuseConnects(f, 1);
+  const pending = f.popup({type:"connect"});
+  for (let i = 0; i < 50 && !f.sent.some(m => m.type === "hello"); i++) await settle();
+  await f.handshake();
+  assert.equal(await fireRetry(f), true, "the retry wait was armed");
+  const reply = await pending;
+  const pairing = f.localStore.pairing;
+  assert.deepEqual(reply, {ok:true, grant:"g-000000000001", profile:pairing.profile});
+  assert.notEqual(pairing.profile, PAIRED.pairing.profile);
+  assert.deepEqual(f.brokerCalls.map(m => m.op), ["pair", "connect", "connect"]);
+  assert.equal(connects(), 2);
+  assert.deepEqual(f.table(), {"g-000000000001":{scope:"profile", tab:null}});
+});
+
+test("connect retries exactly once and only after a fresh pair", async () => {
+  const f = await codeFixture({local:{}});
+  const connects = refuseConnects(f, Infinity);
+  const pending = f.popup({type:"connect"});
+  for (let i = 0; i < 50 && !f.sent.some(m => m.type === "hello"); i++) await settle();
+  await f.handshake();
+  assert.equal(await fireRetry(f), true);
+  assert.equal((await pending).error, "BrowserDisconnected");
+  assert.equal(connects(), 2, "one retry, never more");
+  assert.equal(await fireRetry(f), false, "no second wait");
+  assert.deepEqual(f.table(), {});
+  // A profile that was already paired gets no retry: its port was up before the click.
+  const g = await codeFixture({local:PAIRED});
+  const once = refuseConnects(g, 1);
+  assert.equal((await connectGrant(g)).error, "BrowserDisconnected");
+  assert.equal(once(), 1);
+  assert.equal(await fireRetry(g), false);
+});
+
+test("disconnect keeps the pairing and forget unpairs", async () => {
+  const {profile:paired, key} = PAIRED.pairing;
+  const f = await codeFixture({local:PAIRED});
+  await connectGrant(f);
+  assert.equal((await f.popup({type:"revoke_grants"})).ok, true);
+  assert.deepEqual(f.localStore.pairing, PAIRED.pairing, "Disconnect keeps the pairing");
+  assert.ok(!f.brokerCalls.some(m => m.op === "unpair"));
+  // Connect again needs no new pair.
+  assert.equal((await connectGrant(f)).ok, true);
+  assert.equal(f.brokerCalls.filter(m => m.op === "pair").length, 0);
+  // Forget this profile: the worker's unpair removes the pairing.
+  assert.deepEqual(await f.popup({type:"unpair"}), {ok:true, profile:paired});
+  assert.deepEqual(f.brokerCalls.at(-1), {op:"unpair", profile:paired, email, key});
+  assert.equal(f.localStore.pairing, undefined);
+});
+
+test("a refusal carries the broker's reason code to the popup", async () => {
+  const f = await codeFixture({local:{}});
+  f.setBroker(msg => msg.op === "pair" ? {ok:false, error:"EnrollmentConflict", reason:"enroll_conflict_route"}
+    : f.fakeBroker(msg));
+  assert.deepEqual(await f.popup({type:"connect"}),
+    {ok:false, error:"EnrollmentConflict", reason:"enroll_conflict_route"});
+  f.setBroker(msg => msg.op === "pair" ? {ok:false, error:"Unauthorized", reason:"Not A Code!"} : f.fakeBroker(msg));
+  assert.deepEqual(await f.popup({type:"connect"}), {ok:false, error:"Unauthorized"}, "a malformed reason is dropped");
+});
+
 test("a connect whose grant creation fails records nothing", async () => {
   const f = await codeFixture();
   for (const refusal of [{ok:false, error:"AuditUnavailable"}, "disconnect", {ok:true, grant:"bad", scope:"profile", profile},

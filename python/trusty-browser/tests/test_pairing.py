@@ -88,16 +88,19 @@ def test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing(short,
     async def body(rig):
         cred, _ = await paired(rig)
         before = rows(rig.state)
+        # Ruling Dqw 2026-11-16: a new profile id for the same email now replaces
+        # (see the re-pair test); a route or a changed key on the profile still refuses.
         conflicts = [
-            {**cred, "key": secrets.token_hex(32)},
-            {**cred, "profile": str(uuid.uuid4())},
-            {**cred, "email": "other@example.test"},
-            {k: rig.alpha[k] for k in ("profile", "email", "key")},
+            ({**cred, "key": secrets.token_hex(32)}, "enroll_conflict_key"),
+            ({**cred, "email": "other@example.test"}, "enroll_conflict_key"),
+            ({k: rig.alpha[k] for k in ("profile", "email", "key")}, "enroll_conflict_route"),
+            ({**rig.credential("x"), "email": rig.alpha["email"]}, "enroll_conflict_route"),
         ]
-        for frame in conflicts:
+        for frame, reason in conflicts:
             assert await rig.pair(frame) == {
                 "ok": False,
                 "error": "EnrollmentConflict",
+                "reason": reason,
             }
         malformed = [
             {**cred, "extra": 1},
@@ -114,6 +117,39 @@ def test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing(short,
         reply = await rig.once("enrollment.sock", enroll)
         assert reply["error"] == "InvalidRequest"
         assert rows(rig.state) == before
+
+    run(short, body)
+
+
+def test_a_same_email_repair_replaces_the_old_pairing_and_ends_its_grants(short, clock):
+    async def body(rig):
+        old, browser = await paired(rig)
+        _, call = await session(rig, old)
+        # Lost extension storage: the same account pairs again under a new id and key.
+        new = {**rig.credential("gamma"), "email": old["email"]}
+        assert await rig.pair(new) == {"ok": True, "profile": new["profile"]}
+        assert [(r["profile"], r["email"]) for r in rows(rig.state)] == [
+            (new["profile"], new["email"])
+        ]
+        assert not rig.broker.grants
+        assert rig.outcomes("grant_end") == ["unenrolled"]
+        with pytest.raises((EOFError, asyncio.IncompleteReadError, ConnectionError)):
+            await call({"op": "tabs"})
+        await browser.task  # the old profile's native connection is dropped
+        assert old["profile"] not in rig.broker.peers
+        replaced = [line for line in rig.audit() if line["event"] == "pair_replaced"]
+        assert replaced == [
+            {
+                "ts": replaced[0]["ts"],
+                "event": "pair_replaced",
+                "profile": new["profile"],
+                "replaced": old["profile"],
+                "outcome": "ok",
+            }
+        ]
+        assert await rig.grant(old) == {"ok": False, "error": "NotEnrolled"}
+        await FakeBrowser(rig, new).pair()
+        assert (await rig.grant(new))["ok"]
 
     run(short, body)
 
@@ -176,6 +212,7 @@ def test_unpair_with_a_wrong_key_is_unauthorized_and_keeps_the_pairing(short, cl
             assert await rig.pair(frame, "unpair") == {
                 "ok": False,
                 "error": "Unauthorized",
+                "reason": "unpair_bad_credential",
             }
         assert (await rig.pair({**cred, "extra": 1}, "unpair"))[
             "error"

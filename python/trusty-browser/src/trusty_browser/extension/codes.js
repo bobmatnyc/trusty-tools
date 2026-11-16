@@ -7,6 +7,8 @@ globalThis.TrustyCodes = deps => {
   // RECONNECT_GRACE (45 s) plus a minute. A broker this worker has not reached for that long holds no grant of
   // the profile: a lost port ends every grant of its pairing generation after the grace.
   const QUIET_MS = 105000;
+  // The one wait before Connect retries after a fresh pair (owner ruling Dqw 2026-11-16).
+  const PAIR_RETRY_MS = 750;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const HEX64 = /^[0-9a-f]{64}$/;
   const object = value => value && typeof value === "object" ? value : {};
@@ -120,16 +122,25 @@ globalThis.TrustyCodes = deps => {
   // What: pairs first when the profile has no credential, waits for the native port's acknowledgement, then
   //   asks the broker for the standing profile grant and records it. Nothing is recorded unless the broker
   //   answered ok with a well-formed grant; a grant the table cannot hold is revoked again.
+  //   Right after a fresh pair the native port is still reconnecting, so a `BrowserDisconnected` answer is
+  //   retried once after PAIR_RETRY_MS (owner ruling Dqw 2026-11-16).
   // Test: tests/test_worker.mjs `connect pairs an unpaired profile and records the broker's grant`,
-  //   `a connect whose grant creation fails records nothing`.
+  //   `a connect whose grant creation fails records nothing`, `connect after lost storage re-pairs and succeeds`,
+  //   `connect retries exactly once and only after a fresh pair`.
   async function connectProfile() {
-    if (!(await stored()).credential) await pair();
+    const fresh = !(await stored()).credential;
+    if (fresh) await pair();
     const cred = await credential();
     minting++;
     let grant;
     try {
-      await online();
-      const reply = await bootstrap({op:"connect", ...cred});
+      const ask = async () => { await online(); return bootstrap({op:"connect", ...cred}); };
+      let reply;
+      try { reply = await ask(); } catch (error) {
+        if (!fresh || (error.response?.error || error.message) !== "BrowserDisconnected") throw error;
+        await new Promise(resolve => setTimeout(resolve, PAIR_RETRY_MS));
+        reply = await ask();
+      }
       grant = reply.grant;
       if (typeof grant !== "string" || !/^g-[0-9a-f]{1,64}$/.test(grant) || reply.scope !== "profile" ||
           reply.profile !== cred.profile) throw new Error("Invalid connect reply");
@@ -180,7 +191,7 @@ globalThis.TrustyCodes = deps => {
     reconnect();
     return {ok:true, profile:data.profile};
   }
-  // Why: Disconnect this profile ends every code and grant and the pairing itself (contract "pair").
+  // Why: the popup's "Forget this profile" ends every grant and the pairing itself (contract "pair").
   // What: marks the pairing before sending `unpair`, so a retry after a lost reply treats Unauthorized as
   //   done; then empties the table, removes the permission and the pairing, and reconnects.
   // Test: tests/test_worker.mjs `unpair removes the permission and the pairing record`.
