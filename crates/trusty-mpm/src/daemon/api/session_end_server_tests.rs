@@ -14,7 +14,7 @@ fn fake_tmux() -> (tempfile::TempDir, std::path::PathBuf) {
         if [ \"$1\" = \"-L\" ] && [ \"$2\" = \"tm-ws-proj-abc\" ]; then\n\
         printf 'tm-proj\\tclaude\\t4242\\t%%1\\t/tmp\\n'\n\
         fi\n";
-    trusty_common::exec_stub::write_executable(&bin, script.to_owned()).expect("fake tmux");
+    trusty_common::exec_stub::write_executable(&bin, script).expect("fake tmux");
     (dir, bin)
 }
 
