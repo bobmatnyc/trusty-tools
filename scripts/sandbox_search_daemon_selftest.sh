@@ -23,7 +23,7 @@
 #                 is refused and survives (the match is a whole token)
 #     signal      TERM to the launcher kills the child it spawned, removes
 #                 sandbox.pid, and the launcher reported the socket the daemon
-#                 bound at <dir>/data/trusty-search.sock
+#                 bound at <dir>/data/trusty-search/trusty-search.sock
 #     ignore-term a child that ignores TERM is ended by KILL, and a socket file
 #                 an earlier run left is removed first, so a child that binds
 #                 nothing is reported as not serving
@@ -71,7 +71,9 @@ fi
 LAUNCHER="$SCRIPT_DIR/sandbox_search_daemon.sh"
 PASSED=0
 FAILED=0
-TMP_ROOT="$(cd "$(mktemp -d)" && pwd -P)"
+# #10989: a short root, since the socket now sits one directory deeper and macOS
+# $TMPDIR (/var/folders/..) would push it past the 103-byte sun_path limit.
+TMP_ROOT="$(cd "$(mktemp -d /tmp/sbsd.XXXXXX)" && pwd -P)"
 DECOY_PID=""
 cleanup() {
   [ -z "$DECOY_PID" ] || kill "$DECOY_PID" 2>/dev/null || true
@@ -187,7 +189,7 @@ else
     pass allowlist-real-run
   fi
   ARGS2="$(tr '\n' ' ' < "$DIR2/home/stub-args" 2>/dev/null || true)"
-  if [ "$ARGS2" = "start --foreground --no-auto-discover --data-dir $DIR2/data " ]; then
+  if [ "$ARGS2" = "start --foreground --no-auto-discover --data-dir $DIR2/data/trusty-search " ]; then
     pass argv
   else
     fail argv "stub argv was [$ARGS2]"
@@ -202,7 +204,7 @@ expect_refusal no-port 2 "unknown argument: --port" \
 DIR4="$TMP_ROOT/case4"
 mkdir -p "$DIR4"
 cp "$HOLD" "$DIR4/holder"
-"$DIR4/holder" --data-dir "$DIR4/data" &
+"$DIR4/holder" --data-dir "$DIR4/data/trusty-search" &
 OWNED_PID=$!
 sleep 0.3
 echo "$OWNED_PID" > "$DIR4/sandbox.pid"
@@ -257,13 +259,23 @@ LAUNCH_PID=$!
 i=0
 while [ "$i" -lt 50 ] && [ ! -s "$DIR7/sandbox.pid" ]; do sleep 0.2; i=$((i + 1)); done
 i=0
-while [ "$i" -lt 50 ] && ! grep -qF "serving socket: $DIR7/data/trusty-search.sock" "$TMP_ROOT/case7.out" 2>/dev/null; do
+while [ "$i" -lt 50 ] && ! grep -qF "serving socket: $DIR7/data/trusty-search/trusty-search.sock" "$TMP_ROOT/case7.out" 2>/dev/null; do
   sleep 0.2; i=$((i + 1))
 done
-if grep -qF "serving socket: $DIR7/data/trusty-search.sock" "$TMP_ROOT/case7.out"; then
+if grep -qF "serving socket: $DIR7/data/trusty-search/trusty-search.sock" "$TMP_ROOT/case7.out"; then
   pass socket-reported
 else
-  fail socket-reported "no 'serving socket: $DIR7/data/trusty-search.sock' in: $(cat "$TMP_ROOT/case7.out")"
+  fail socket-reported "no 'serving socket: $DIR7/data/trusty-search/trusty-search.sock' in: $(cat "$TMP_ROOT/case7.out")"
+fi
+# #10989: the socket sits where tm resolves it, <dir>/data/trusty-search/
+# trusty-search.sock (daemon_socket_path under TRUSTY_DATA_DIR_OVERRIDE=<dir>/data),
+# in a real directory (no symlink) of mode 0700.
+TM_DIR7="$DIR7/data/trusty-search"
+MODE7="$(stat -c '%a' "$TM_DIR7" 2>/dev/null || stat -f '%Lp' "$TM_DIR7" 2>/dev/null || true)"
+if [ -S "$TM_DIR7/trusty-search.sock" ] && [ -d "$TM_DIR7" ] && [ ! -L "$TM_DIR7" ] && [ "$MODE7" = "700" ]; then
+  pass tm-socket-layout
+else
+  fail tm-socket-layout "socket at $TM_DIR7/trusty-search.sock: $([ -S "$TM_DIR7/trusty-search.sock" ] && echo yes || echo no), mode [$MODE7], symlink: $([ -L "$TM_DIR7" ] && echo yes || echo no)"
 fi
 CHILD7="$(tr -d ' \n' < "$DIR7/sandbox.pid" 2>/dev/null || true)"
 if [ -z "$CHILD7" ] || ! kill -0 "$CHILD7" 2>/dev/null; then
@@ -303,7 +315,7 @@ fi
 # 9. stop-sibling: a decoy whose argv names a sibling of DIR is not killed.
 DIR9="$TMP_ROOT/case9"
 mkdir -p "$DIR9" "$DIR9-other"
-for decoy_arg in "$DIR9-other/data" "$DIR9/data-old"; do
+for decoy_arg in "$DIR9-other/data/trusty-search" "$DIR9/data-old"; do
   cp "$HOLD" "$DIR9-other/decoy"
   "$DIR9-other/decoy" --data-dir "$decoy_arg" &
   DECOY_PID=$!
@@ -325,9 +337,9 @@ done
 # 10. ignore-term: KILL ends a TERM-ignoring child; a stale socket file from an
 # earlier run is removed first, so a child that binds nothing is not serving.
 DIR10="$TMP_ROOT/case10"
-mkdir -p "$DIR10/data"
+mkdir -p "$DIR10/data/trusty-search"
 "$PYTHON" -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' \
-  "$DIR10/data/trusty-search.sock"
+  "$DIR10/data/trusty-search/trusty-search.sock"
 (exec env -i PATH="$PATH" SANDBOX_SOCKET_WAIT_SECS=1 bash "$LAUNCHER" \
   --bin "$IGNORE" --dir "$DIR10") > "$TMP_ROOT/case10.out" 2>&1 &
 LAUNCH10=$!
@@ -436,19 +448,19 @@ fi
 # 12. live-dir (#9214): a start refuses while sandbox.pid names a live daemon
 # of this dir, and leaves that daemon and its socket in place.
 DIR12="$TMP_ROOT/case12"
-mkdir -p "$DIR12/data"
+mkdir -p "$DIR12/data/trusty-search"
 cp "$HOLD" "$DIR12/holder"
-"$DIR12/holder" --data-dir "$DIR12/data" &
+"$DIR12/holder" --data-dir "$DIR12/data/trusty-search" &
 DECOY_PID=$!
 sleep 0.3
 echo "$DECOY_PID" > "$DIR12/sandbox.pid"
-touch "$DIR12/data/trusty-search.sock"
+touch "$DIR12/data/trusty-search/trusty-search.sock"
 set +e
 OUT12="$(run_launcher --bin "$STUB" --dir "$DIR12" 2>&1)"
 S12=$?
 set -e
 if [ "$S12" -eq 1 ] && printf '%s' "$OUT12" | grep -qF "running sandbox daemon of this dir" \
-    && kill -0 "$DECOY_PID" 2>/dev/null && [ -e "$DIR12/data/trusty-search.sock" ]; then
+    && kill -0 "$DECOY_PID" 2>/dev/null && [ -e "$DIR12/data/trusty-search/trusty-search.sock" ]; then
   pass live-dir
 else
   fail live-dir "exit $S12: $OUT12"
@@ -459,8 +471,8 @@ DECOY_PID=""
 # 13. live-socket (#9214): no sandbox.pid, but a listener accepts on
 # <dir>/data's socket. The start refuses and unlinks nothing.
 DIR18="$TMP_ROOT/case18"
-SOCK18="$DIR18/data/trusty-search.sock"
-mkdir -p "$DIR18/data"
+SOCK18="$DIR18/data/trusty-search/trusty-search.sock"
+mkdir -p "$DIR18/data/trusty-search"
 "$PYTHON" -c 'import socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 s.bind(sys.argv[1])
@@ -489,10 +501,10 @@ DECOY_PID=""
 # stale socket from a live one. It refuses and leaves the socket file alone.
 # NOPY holds links to every other tool the launcher runs before that check.
 DIR19="$TMP_ROOT/case19"
-SOCK19="$DIR19/data/trusty-search.sock"
+SOCK19="$DIR19/data/trusty-search/trusty-search.sock"
 NOPY="$TMP_ROOT/nopy-bin"
-mkdir -p "$DIR19/data" "$NOPY"
-for tool in bash env id uname dscl getent cut sed tr ps mkdir rm; do
+mkdir -p "$DIR19/data/trusty-search" "$NOPY"
+for tool in bash env id uname dscl getent cut sed tr ps mkdir chmod rm; do
   t="$(command -v "$tool" || true)"
   [ -z "$t" ] || ln -s "$t" "$NOPY/$tool"
 done
@@ -587,6 +599,58 @@ elif leaks "$OUT22" || leaks "$(cat "$DIR22/home/stub-env")"; then
   fail perf-knobs "a fake secret value reached the daemon or the output"
 else
   pass perf-knobs
+fi
+
+# 17. symlinked-socket-dir (#10989): a <dir>/data/trusty-search symlink refuses
+# and the launcher starts nothing.
+DIR23="$TMP_ROOT/case23"
+mkdir -p "$DIR23/data" "$DIR23/elsewhere"
+ln -s "$DIR23/elsewhere" "$DIR23/data/trusty-search"
+set +e
+OUT23="$(run_launcher --bin "$STUB" --dir "$DIR23" 2>&1)"
+S23=$?
+set -e
+if [ "$S23" -eq 1 ] && printf '%s' "$OUT23" | grep -qF "is a symlink" && [ ! -e "$DIR23/sandbox.pid" ]; then
+  pass symlinked-socket-dir
+else
+  fail symlinked-socket-dir "exit $S23: $OUT23"
+fi
+
+# 18. default-dir-short (#10989): with no --dir and a long $TMPDIR the sandbox
+# dir still lands under /tmp, so the socket path fits sun_path.
+LONGTMP="$TMP_ROOT/$(printf 'long%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)"
+mkdir -p "$LONGTMP"
+set +e
+OUT24="$(env -i PATH="$PATH" TMPDIR="$LONGTMP/" bash "$LAUNCHER" --bin "$STUB" 2>&1)"
+S24=$?
+set -e
+DIR24="$(printf '%s\n' "$OUT24" | sed -n 's/^sandbox_search_daemon: sandbox dir: //p' | head -n 1)"
+SOCK24="$(printf '%s\n' "$OUT24" | sed -n 's/^sandbox_search_daemon: socket: //p' | head -n 1)"
+case "$DIR24" in
+  "$LONGTMP"/*) OK24=0 ;;
+  /tmp/ts-sandbox.*|/private/tmp/ts-sandbox.*) OK24=1 ;;
+  *) OK24=0 ;;
+esac
+if [ "$S24" -eq 0 ] && [ "$OK24" -eq 1 ] && [ "${#SOCK24}" -le 103 ]; then
+  pass default-dir-short
+else
+  fail default-dir-short "exit $S24, dir [$DIR24], socket length ${#SOCK24}: $OUT24"
+fi
+[ -z "$DIR24" ] || rm -rf "$DIR24"
+
+# 19. socket-path-too-long (#10989): an explicit --dir that pushes the socket
+# path over the limit dies, names --dir, and starts nothing.
+DIR25="$TMP_ROOT/$(printf 'deep%.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)"
+mkdir -p "$DIR25"
+set +e
+OUT25="$(run_launcher --bin "$STUB" --dir "$DIR25" 2>&1)"
+S25=$?
+set -e
+if [ "$S25" -eq 1 ] && printf '%s' "$OUT25" | grep -qF "unix-socket limit" \
+  && printf '%s' "$OUT25" | grep -qF -- "--dir" && [ ! -e "$DIR25/sandbox.pid" ] && [ ! -e "$DIR25/home" ]; then
+  pass socket-path-too-long
+else
+  fail socket-path-too-long "exit $S25: $OUT25"
 fi
 
 echo "sandbox_search_daemon selftest: $PASSED passed, $FAILED failed"

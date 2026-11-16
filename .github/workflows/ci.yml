@@ -300,6 +300,11 @@ jobs:
       - name: Sandbox-daemon launcher selftest (#9121)
         run: bash scripts/sandbox_daemon_selftest.sh
 
+      # #10989: the trusty-search sandbox launcher binds its socket where tm
+      # resolves it; stub binary, no build.
+      - name: Sandbox search launcher selftest (#10989)
+        run: bash scripts/sandbox_search_daemon_selftest.sh
+
       # #9793: the secrets + console sandbox launcher; stub binaries, no build.
       - name: Sandbox secrets+console launcher selftest (#9793)
         run: bash scripts/sandbox_secrets_console_selftest.sh
