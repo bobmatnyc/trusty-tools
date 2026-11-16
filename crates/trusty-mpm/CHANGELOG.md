@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.7] — 2026-11-16
+
+### Breaking
+
+- trusty-mpm 1.14.7 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.7.txt` (Refs #8699).
+
+### Added
+
+- Model resolution recognizes the Fable tier (`fable` alias, `[models.tiers] fable`, default `claude-fable-5-2`) and reserves it for PM sessions and engineer and research roles. Any other agent that asks for Fable, through `--model`, `[models.agents]`, frontmatter or `[models] default`, runs on Opus, and the substitution is logged with the agent, requested and resolved models. See #11353.
+- `tm hook --pm-guard` refuses a PM `Agent`/`Task` dispatch that would run any role other than PM, engineer (any `*-engineer`, including `data-engineer`) or research on a Fable model — whether the model comes from `CLAUDE_CODE_SUBAGENT_MODEL`, the dispatch's `model` argument, the deployed agent's frontmatter, or an `inherit` from a Fable PM session. When the model is unknown — `inherit` or no `model:` with no recorded parent model and no non-Fable `[models] default`, or an unreadable agent file — the dispatch is refused and asks for an explicit `model: "opus"`; `model: "inherit"` counts as inherit. `tm launch` and the Architect launch export the model they pass as `--model` as `TRUSTY_MPM_LAUNCH_MODEL`, which the guard reads after the statusline's session-model record, so a managed session's parent model is known before the first statusline render and in a headless session. New guard policy GP-051 `fable-cap`. See #11353.
+- `tm architect up` brings the Architect up from any state (no tmux server, no session, dead pane, pane at a shell) and attaches; bare `tm architect` does the same. It is idempotent, holds `<dir>/.trusty-mpm/architect-up.lock`, never stops a live `claude` (an unbound one is reported), and inside Claude Code only ensures a bound Architect. Flags `--no-attach`, `--dry-run`, `--json`; `tm architect attach` attaches only (#11364).
+- `tm architect restart` restarts the Architect only behind two gates: a fresh Intent Ledger checkpoint (else exit 4; a ledger it cannot read also refuses) and an idle box for 3 reads 5 s apart (else exit 2, or keep trying with `--wait <s>`). It then relaunches `claude` bound with resume, restores the poller, types one guarded resume line and appends one line to `inbox/restart.log`. It holds the `tm architect up` lock for the whole run and exits 1 at once if `up` or another `restart` holds it. Refused inside Claude Code; no bypass flag (#11365).
+- A dispatch of an ops agent (`role: ops`) now carries a `## Project accounts` block listing each service's account name, scope and read-only verify command from `[accounts.<service>]` in `.trusty-mpm.toml`, plus the rule to name the account and run its verify command before any permission request (#11390).
+- `.trusty-mpm.toml` accepts `[accounts.<service>]` with `account`, `scope` and `verify`. A value outside the allowed characters, shaped like a credential, or under an unknown key rejects only the account map, never the rest of the file, and the block then says the map was rejected (#11390).
+
+### Fixed
+
+- `tm hook` now compresses chained Bash commands whose every segment is safe: `cargo build && cargo test`, `git diff; git log -3`, `cd <dir> && …` chains and a trailing `| head`/`tail`/`wc`/`grep`/`sort`/`uniq`/`cut`/`tr`. A destructive or unrecognised segment, `||`, a background `&`, a subshell, a substitution, a redirect or a heredoc still leaves the command uncompressed, and isolation worktrees still skip chains. Compressed chains write savings rows, so the 💸 footer shows a figure instead of `—` (#10973, #11037).
+
+### Changed
+
+- The built-in `opus` tier default is now `claude-opus-5-5` (was `claude-opus-4-5`), held in one constant `OPUS_DEFAULT_MODEL_ID` that also backs the Fable cap's fallback. See #11353.
+
 ## [1.14.6] — 2026-11-16
 
 ### Added
