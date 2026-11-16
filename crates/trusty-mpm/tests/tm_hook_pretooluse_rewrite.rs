@@ -388,7 +388,7 @@ fn a_compressed_chain_writes_a_row_and_the_footer_shows_a_number() {
         .map(|i| format!("line {i} hit some repeated text value\n"))
         .collect();
     std::fs::write(root.join("sub/big.txt"), big).expect("write");
-    let command = "cd sub && grep -n hit big.txt && ls -la big.txt | head -5";
+    let command = "cd sub && grep -n hit big.txt && grep -c hit big.txt | head -5";
     let payload = serde_json::json!({
         "tool_name": "Bash",
         "tool_input": { "command": command },

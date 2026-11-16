@@ -29,22 +29,16 @@ fn a_safe_chain_is_compressed() {
             "cargo test",
         ),
         (
-            "git diff; git log -3",
+            "git diff; git diff --stat",
             "",
-            "git diff; git log -3",
-            "git log",
+            "git diff; git diff --stat",
+            "git diff",
         ),
         (
             "cargo test -p x | tail -40",
             "",
             "cargo test -p x | tail -40",
             "cargo test",
-        ),
-        (
-            "cd /repo && git diff HEAD~1 && ls -la | head -20",
-            "cd /repo && ",
-            "git diff HEAD~1 && ls -la | head -20",
-            "ls -la",
         ),
         (
             "export RUST_LOG=debug && cargo test",
@@ -85,6 +79,10 @@ fn a_destructive_segment_refuses_the_chain() {
         "git diff && make build",
         "git diff && cat src/lib.rs",
         "git diff && sudo ls",
+        "git grep -O foo && git diff",
+        "rg --pre ./x foo && ls",
+        "cargo test | sort --compress-program=x",
+        "cargo test | uniq in.txt out.txt",
         "git diff && catalog-rm x",
         "cargo clippy --fix && cargo test",
         "cargo fmt && cargo test",
@@ -124,6 +122,11 @@ fn an_ambiguous_shape_is_not_compressed() {
         "git diff;",
         "git diff && # note",
         "true && true",
+        // #10973 critic: one filter cannot serve two output classes.
+        "git diff; git log -3",
+        "cd /repo && git diff HEAD~1 && ls -la | head -20",
+        "cargo test && git diff",
+        "grep -rn foo src; git diff",
     ] {
         assert_eq!(
             rewrite_bash_command_for_compression(command),
@@ -141,7 +144,7 @@ fn an_isolation_worktree_refuses_every_chain() {
     let tree = Some(Path::new("/repo/.claude/worktrees/agent-a/crates/x"));
     for command in [
         "cargo build && cargo test",
-        "git diff; git log -3",
+        "git diff; git diff --stat",
         "cargo test | tail -40",
     ] {
         assert!(
@@ -188,15 +191,15 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
     )
     .expect("write filter");
     let cases = [
-        "cd sub && grep -n hi marker.txt && ls -la marker.txt",
-        "cd sub && grep -n nomatch marker.txt && ls -la marker.txt",
-        "grep -n nomatch sub/marker.txt; ls -la sub/marker.txt",
-        "ls -la no-such-file; grep -n hi sub/marker.txt",
-        "grep -n hi sub/marker.txt; ls -la no-such-file",
+        "cd sub && grep -n hi marker.txt && grep -c hi marker.txt",
+        "cd sub && grep -n nomatch marker.txt && grep -c hi marker.txt",
+        "grep -n nomatch sub/marker.txt; grep -c hi sub/marker.txt",
+        "grep -n hi no-such-file; grep -n hi sub/marker.txt",
+        "grep -n hi sub/marker.txt; grep -n hi no-such-file",
         "cd sub && grep -n hi marker.txt | head -1",
         "cd sub && grep -n nomatch marker.txt | wc -l",
-        "cd missing && grep -n hi marker.txt && ls -la",
-        "grep -n hi sub/marker.txt; ls -la no-such-file; ls -la sub",
+        "cd missing && grep -n hi marker.txt && grep -c hi marker.txt",
+        "grep -n hi sub/marker.txt; grep -n x no-such-file; grep -c hi sub/marker.txt",
     ];
     let lines = |s: &str| {
         s.lines()
@@ -231,6 +234,62 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
                 cwd.lines().last(),
                 rcwd.lines().last(),
                 "{shell}: cwd after `{command}`"
+            );
+        }
+        // #10973 critic: under `set -o pipefail` a failing producer piped to a
+        // reader keeps its status 1 through the rewrite too.
+        if run_in(shell, &root, "set -o pipefail").0 != Some(0) {
+            eprintln!("SKIP pipefail parity: {shell} has no pipefail");
+            continue;
+        }
+        for command in [
+            "grep -n nomatch sub/marker.txt | head -1",
+            "cd sub && grep -n nomatch marker.txt | tail -3",
+            "grep -n hi sub/marker.txt; grep -n nomatch sub/marker.txt | wc -l",
+        ] {
+            let rewritten = rewrite_bash_command_for_compression(command)
+                .unwrap_or_else(|| panic!("{command} must be rewritten"));
+            let (head, _tool) = rewritten
+                .split_once("| tm compress")
+                .expect("the rewrite ends in the compress stage");
+            let script = format!("set -o pipefail\n{head}| sh '{}'", filter.display());
+            let (code, out, _) = run_in(shell, &root, &format!("set -o pipefail\n{command}"));
+            let (rcode, rout, _) = run_in(shell, &root, &script);
+            assert_eq!(code, Some(1), "{shell}: pipefail status of `{command}`");
+            assert_eq!(code, rcode, "{shell}: pipefail status of `{script}`");
+            assert_eq!(lines(&out), lines(&rout), "{shell}: pipefail stdout");
+        }
+    }
+}
+
+/// #10973 critic: more than 30 diff lines followed by a log, run through the
+/// REAL `tm compress` filter, keep every diff line. On ffabca0644 the chain
+/// `git diff; git log -3` was compressed with the `git log` filter, which drops
+/// the diff past 30 lines; now a mixed-class chain is refused, and a same-class
+/// diff chain keeps every line.
+/// Test: itself.
+#[test]
+fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
+    use trusty_agents_common::compress::tool_output::compress_tool_output;
+    let diff: String = (0..40)
+        .map(|i| format!("+added line {i} of the patch\n"))
+        .collect();
+    let output = format!(
+        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,0 +1,40 @@\n{diff}\
+         commit 0123456789abcdef\nAuthor: a <a@b>\n\n    subject\n"
+    );
+    let command = "git diff; git log -3";
+    let tool = rewrite_bash_command_for_compression(command).and_then(|r| {
+        r.rsplit_once("--tool \"")
+            .map(|(_, t)| t.trim_end_matches('"').to_owned())
+    });
+    // Refused (the fix), or else the filter it would run must keep the diff.
+    if let Some(tool) = tool {
+        let filtered = compress_tool_output(&tool, &output);
+        for i in 0..40 {
+            assert!(
+                filtered.contains(&format!("+added line {i} of the patch")),
+                "`{command}` compressed with `{tool}` lost diff line {i}:\n{filtered}"
             );
         }
     }

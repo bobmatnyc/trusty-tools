@@ -215,7 +215,7 @@ mod tests {
         }
         // #10973: the brace rewrite now compresses a safe chain; the isolated
         // shape still cannot carry one.
-        for command in ["git diff | head", "git diff && ls"] {
+        for command in ["git diff | head", "git diff && git diff --stat"] {
             assert_eq!(isolated(command), None, "{command}");
             assert!(rewrite_bash_command_for_compression(command).is_some());
         }

@@ -570,6 +570,7 @@ fn has_unsafe_pipe_composition(command: &str) -> bool {
         || command.contains(';')
         || command.contains('>')
         || command.contains('<')
+        || command.contains('\n') // #10973 critic: a line break is a second command
 }
 
 /// Whether wrapping `command` in a brace group would change what runs.

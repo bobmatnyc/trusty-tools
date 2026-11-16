@@ -30,6 +30,7 @@ use std::path::Path;
 
 use super::hook_rewrite::{compressible_tool_decision, is_env_assignment, shlex_words};
 use super::pm_guard_bash::{evaluate_destructive_delete_command, split_shell_segments_raw};
+use trusty_agents_common::compress::tool_output::classify_tool;
 use trusty_mpm::core::savings_opportunity::SkipReason;
 
 /// The programs a trailing `|` may feed; each only reads stdin and prints.
@@ -49,8 +50,10 @@ const FIND_ACTIONS: &[&str] = &[
 /// false — the caller kept a `cd <dir> && ` prefix outside the group, and
 /// `cd x && a; b` parses as `(cd x && a); b`, which the group cannot mirror. A body segment refused by
 /// `compressible_tool_decision` refuses the chain with that segment's reason.
-/// `Ok` carries the tool name of the last filter-covered segment; a chain made
-/// only of `true`/`export` segments is `NoFilter`.
+/// Every filter-covered segment must share one `classify_tool` class (a mixed
+/// chain such as `git diff; git log` is `Chained`: one filter would drop the
+/// other's output). `Ok` carries the last covered segment's tool name; a chain
+/// made only of `true`/`export` segments is `NoFilter`.
 /// Test: `a_safe_chain_is_compressed`, `a_destructive_segment_refuses_the_chain`,
 /// `an_ambiguous_shape_is_not_compressed`.
 pub(crate) fn chain_tool_decision(
@@ -82,13 +85,21 @@ pub(crate) fn chain_tool_decision(
             continue; // the reader, checked above
         }
         if let Some(found) = body_segment(text)? {
-            tool = Some(found);
+            // #10973 critic: one filter reads the whole group's stdout, so every
+            // covered segment must share its class or output is lost.
+            let class = classify_tool(&found);
+            if tool.as_ref().is_some_and(|(_, c)| *c != class) {
+                return Err(SkipReason::Chained);
+            }
+            tool = Some((found, class));
         }
     }
-    tool.ok_or(SkipReason::NoFilter)
+    tool.map(|(t, _)| t).ok_or(SkipReason::NoFilter)
 }
 
 /// `Some(tool)` for a filter-covered segment, `None` for `true`/`export`.
+///
+/// Test: `a_safe_chain_is_compressed`, `a_destructive_segment_refuses_the_chain`.
 fn body_segment(text: &str) -> Result<Option<String>, SkipReason> {
     let words = shlex_words(text);
     match words.first().map(String::as_str) {
@@ -120,21 +131,27 @@ fn body_segment(text: &str) -> Result<Option<String>, SkipReason> {
 /// build/test verb in [`CARGO_VERBS`] (no `--fix`, `fmt` only with
 /// `--check`); `go test|build|vet`; `npm|pnpm|yarn test`; `pytest`; and the
 /// readers `ls`, `grep`, `rg`, `cat`, `diff`, `find` (no action primary).
-/// No argument may start with `--output`.
+/// No argument may start with `--output`; no `-O`/`--pre` program option.
+/// Test: `a_destructive_segment_refuses_the_chain`.
 fn is_safe_program(words: &[String]) -> bool {
     let verb = words.get(1).map(String::as_str).unwrap_or("");
     let has = |flag: &str| words.iter().any(|w| w == flag);
     if words.iter().any(|w| w.starts_with("--output")) {
         return false;
     }
+    // #10973 critic: options that run another program or a pager.
+    let runs_other = |w: &String| {
+        w.starts_with("-O") || w.starts_with("--open-files-in-pager") || w.starts_with("--pre")
+    };
     match words[0].as_str() {
-        "git" => GIT_READ_VERBS.contains(&verb),
+        "git" => GIT_READ_VERBS.contains(&verb) && !words.iter().any(runs_other),
+        "rg" => !words.iter().any(runs_other),
         "cargo" => {
             CARGO_VERBS.contains(&verb) && !has("--fix") && (verb != "fmt" || has("--check"))
         }
         "go" => matches!(verb, "test" | "build" | "vet"),
         "npm" | "pnpm" | "yarn" => verb == "test",
-        "pytest" | "ls" | "grep" | "rg" | "cat" | "diff" => true,
+        "pytest" | "ls" | "grep" | "cat" | "diff" => true,
         "find" => !words.iter().any(|w| FIND_ACTIONS.contains(&w.as_str())),
         _ => false,
     }
@@ -177,15 +194,23 @@ fn separator_after<'a>(inner: &'a str, segment: &str, next: &str) -> &'a str {
 }
 
 /// A trailing pipe stage that only reads stdin (no `sort -o`, no wrapper).
+///
+/// Test: `a_destructive_segment_refuses_the_chain`, `a_safe_chain_is_compressed`.
 fn is_reader(text: &str) -> bool {
     let words = shlex_words(text);
     let Some(program) = words.first() else {
         return false;
     };
-    let writes = words
-        .iter()
-        .any(|w| w.starts_with("-o") || w.starts_with("--output") || w.starts_with("--files0"));
-    READERS.contains(&program.as_str()) && !writes
+    let writes = words.iter().any(|w| {
+        w.starts_with("-o")
+            || w.starts_with("--output")
+            || w.starts_with("--files0")
+            || w.starts_with("--compress-program")
+    });
+    // #10973 critic: `uniq IN OUT` writes OUT.
+    let uniq_output =
+        program == "uniq" && words[1..].iter().filter(|w| !w.starts_with('-')).count() > 1;
+    READERS.contains(&program.as_str()) && !writes && !uniq_output
 }
 
 #[cfg(test)]
