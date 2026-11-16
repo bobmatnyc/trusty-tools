@@ -100,9 +100,11 @@ mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
 mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
+// #10574: the stale-copy guard, fixture F2.
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+mod tm_hook_pm_guard_stale_copy_10574;
 // #11353: GP-051 on the live `Agent` dispatch path.
 mod tm_hook_pm_guard_fable_11353;
 // #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.

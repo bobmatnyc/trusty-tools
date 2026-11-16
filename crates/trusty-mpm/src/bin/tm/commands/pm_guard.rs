@@ -242,9 +242,9 @@ use crate::commands::pm_guard_protected_paths::{ProtectedEnv, evaluate as protec
 use crate::commands::pm_guard_refusal::{emit, refuse};
 pub(crate) use crate::commands::pm_guard_response::build_pretooluse_context_response;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
-use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
+use crate::commands::{pm_guard_stale_copy, pm_guard_trust_anchor};
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::guard_policy;
@@ -369,7 +369,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // remainder runs here for every call; under a bypass so do the trust
     // anchors, `rm -rf` of a root and secret values, which the guarded path
     // reaches at their own sites below, in their original order.
-    let bypassed = std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_unrestricted();
+    let bypassed =
+        std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_guard_floor::pm_unrestricted();
     let architect = ArchitectGate::ambient(&payload);
     if pm_guard_floor::deny_floors(url, &payload, &hook_cwd, &architect, bypassed).await {
         return Ok(());
@@ -614,8 +615,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         return Ok(());
     }
     // #8878: the trust-anchor floor, ahead of Guards 1 and 4 — a subagent,
-    // even the Architect's, is "an agent" under the ruling.
-    if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
+    // even the Architect's, is "an agent" under the ruling. #10574: the
+    // stale-copy guard binds the same population, the Architect exempt.
+    if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await
+        || pm_guard_stale_copy::gate(&refused, &payload, &architect).await
+    {
         return Ok(());
     }
     // #8928 step 7: Write/Edit to settings, `.mcp.json`, git config or hooks,
@@ -1040,17 +1044,6 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // zero latency to every tool invocation.
     refuse(&refused, &guard_policy::PM_TOOL_POLICY, reason).await;
     Ok(())
-}
-
-/// Whether the `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass is active.
-///
-/// Why: split out so the exact-`"1"` matching rule has one definition.
-/// What: `true` only when [`PM_UNRESTRICTED_ENV`] is set to exactly `"1"`.
-/// Test: exercised via `tests/tm_hook_pm_guard.rs::pm_guard_bypass_env_allows_all`.
-fn pm_unrestricted() -> bool {
-    std::env::var(PM_UNRESTRICTED_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
 }
 
 /// Whether a `PreToolUse` payload originates from a native Claude Code

@@ -374,6 +374,8 @@ pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
 pub(crate) mod standing_rules_hook;
+// #10574: the stale-copy guard for registered artifacts.
+pub(crate) mod pm_guard_stale_copy;
 // #11398: `tm hook --turn-task`, the PM's per-turn task stamp.
 pub(crate) mod turn_task_hook;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
