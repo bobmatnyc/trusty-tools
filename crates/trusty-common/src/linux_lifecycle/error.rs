@@ -16,9 +16,11 @@ use super::Signal;
 /// Test: `tests/linux_lifecycle.rs` has a real-process test for
 /// `ProbeInconclusive`, `Unidentified`, `RunningUnserved`, `IdentityMismatch`,
 /// `IdentityUnreadable`, `InstanceUnreadable`, `Survivor`, `StoppedSignalNotReached`,
-/// `AlreadyRunning`, `ChildExited`, `NotReady` and `ChildUnpinned`; the unit
+/// `AlreadyRunning`, `ChildExited`, `NotReady`, `ChildUnpinned`,
+/// `RestartBlocked`, `NotThisInstance`, `InstanceUndecided`, `ServedByAnother`
+/// and `BinaryMissing`; the unit
 /// tests in `tests.rs` cover `InvalidDescriptor` and `NoInstallDir`.
-/// `NoPeerPid`, `Signal`, `BinaryMissing`, `Spawn` and `Io` have no test.
+/// `NoPeerPid`, `Signal`, `Spawn` and `Io` have no test.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum LifecycleError {
@@ -187,6 +189,70 @@ pub enum LifecycleError {
         binary: String,
         /// The read error.
         source: io::Error,
+    },
+    /// `restart` found the daemon running, but other processes are this
+    /// instance too, so the start after the stop would refuse (#11085).
+    ///
+    /// Nothing was signalled: the running daemon stays up.
+    #[error(
+        "pid(s) {} run `{binary}` for this instance, but pid(s) {} do as well; a start after \
+         the stop would refuse, so nothing was stopped",
+        pid_list(serving),
+        pid_list(others)
+    )]
+    RestartBlocked {
+        /// The running daemon's pids: the socket's peer and the caller's pid.
+        serving: Vec<u32>,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The other matching pids, ascending.
+        others: Vec<u32>,
+    },
+    /// The pid a caller named runs the daemon's binary but is not this
+    /// instance: its argv, environment or owner differs (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error(
+        "pid {pid} runs `{binary}` but is not this instance (its arguments, environment or \
+         owner differ); not signalled"
+    )]
+    NotThisInstance {
+        /// The named pid.
+        pid: u32,
+        /// The descriptor's binary name.
+        binary: String,
+    },
+    /// The pid a caller named runs the daemon's binary, arguments and
+    /// environment, but an `instance_path_args` flag of it has no value, or a
+    /// relative or unresolvable one, so whether it is this instance is
+    /// unknown (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error(
+        "pid {pid} runs `{binary}` with the daemon's arguments, but its `{flag}` value is \
+         missing, relative or unresolvable; cannot tell whether it is this instance; not signalled"
+    )]
+    InstanceUndecided {
+        /// The named pid.
+        pid: u32,
+        /// The descriptor's binary name.
+        binary: String,
+        /// The flag that did not decide.
+        flag: String,
+    },
+    /// `stop_pid` proved the named pid is this instance, but another pid
+    /// serves the socket, so a stop of the named pid could not reach the
+    /// stopped signal (#11085).
+    ///
+    /// Nothing was signalled.
+    #[error("pid {pid} is this instance, but pid {peer} serves {}; not signalled", socket.display())]
+    ServedByAnother {
+        /// The named pid.
+        pid: u32,
+        /// The socket's peer pid.
+        peer: u32,
+        /// The socket probed.
+        socket: PathBuf,
     },
 }
 
