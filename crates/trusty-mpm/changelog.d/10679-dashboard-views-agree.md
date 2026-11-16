@@ -1,2 +1,0 @@
-Fixed
-- The Architect dashboard store reads under a shared lock, so a read never lands between the files of one batch: after one write the task, session and header views agree, and `/api/meta` straight after a write serves the new values. Reading several collections together goes through one lock, and `/api/harness` reads its sessions, tasks, goals and settings that way. A read behind a writer that never lets go answers 503 after the same 10-second wait the Rust store uses, instead of hanging (#10679).

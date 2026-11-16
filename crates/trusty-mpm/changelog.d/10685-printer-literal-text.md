@@ -1,3 +1,0 @@
-Fixed
-- `tm hook --pm-guard` no longer refuses a command made only of `printf`/`echo` calls whose operands are literal text, such as a regex (`(secret|token|[.]env)`), a regex-escaped name (`process\.env\.TZ`) or Markdown emphasis. An operand made only of path characters (`echo .env`), any pipe, redirect, substitution or non-printer segment, and a CR or other control byte keep the refusal. A quoted emphasis fragment such as `echo '**A …**'` (no `$`, backtick, redirect or pipe) is now allowed, reversing that row of #7533 (#10685).
-- `tm hook --pm-guard` withdraws the `printf`/`echo` literal-text release from any command holding a shell comment, so a quote inside a comment can no longer hide a second line such as `dd if=.env` from the guard (#10685).
