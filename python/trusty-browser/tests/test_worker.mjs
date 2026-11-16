@@ -220,6 +220,14 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
         : t.result || (func.name === "pageDrag" ? {ok:true, dropped:true} : {ok:true, x:10, y:20});
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
+      // #11373: `t.moveAfterProbe` = n applies `t.move` right after the nth probe answers, as a navigation
+      // would, destroying the old document's execution context.
+      if (func.name === "pageProbe" && t.moveAfterProbe && ++t.probes === t.moveAfterProbe) {
+        const old = "u-" + t.doc;
+        Object.assign(t, t.move);
+        await chrome.debugger.onEvent.fire({tabId:target.tabId}, "Runtime.executionContextDestroyed",
+          {executionContextId:1, executionContextUniqueId:old});
+      }
       return [{frameId:0, documentId:t.doc, result}];
     }},
     // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press (`t.dialogFails` makes its
@@ -244,7 +252,14 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
           await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
         if (t.moveAt && params?.type === t.moveAt) Object.assign(t, t.move);
-        // #11373: `t.evaluated` is the CDP reply to Runtime.evaluate.
+        // #11373: one main frame whose default context is named by the tab's document; Runtime.evaluate
+        // in any other context fails as Chrome does. `t.evaluated` is the CDP reply to Runtime.evaluate.
+        if (method === "Page.getFrameTree") return {frameTree:{frame:{id:"main"}}};
+        if (method === "Runtime.enable") await chrome.debugger.onEvent.fire({tabId}, "Runtime.executionContextCreated",
+          {context:{id:1, uniqueId:"u-" + t.doc, auxData:{frameId:"main", isDefault:true}}});
+        if (method === "Runtime.evaluate" && params.uniqueContextId && params.uniqueContextId !== "u-" + t.doc) {
+          throw new Error("Cannot find context with specified id");
+        }
         if (method === "Runtime.evaluate" && t.evaluated) return t.evaluated;
         return {};
       }},
@@ -1178,9 +1193,11 @@ test("evaluate runs only in the lease's document and relays its value", async ()
   const done = await f.command("page_evaluate", req);
   assert.deepEqual(done.result, {document:"doc-7", type:"string", value:'"rgb(0, 0, 0)"', exception:null,
     truncated:false});
-  assert.deepEqual(cdpSteps(f), ["attach", "Page.enable", "Runtime.evaluate", "detach"]);
-  assert.deepEqual(plain(f.cdp[2].params), {expression:req.expression, returnByValue:true, awaitPromise:true,
-    userGesture:true});
+  assert.deepEqual(cdpSteps(f), ["attach", "Page.enable", "Page.getFrameTree", "Runtime.enable", "Runtime.evaluate",
+    "detach"]);
+  // #11373: bound to the lease document's context, and no user activation.
+  assert.deepEqual(plain(f.cdp[4].params), {expression:req.expression, returnByValue:true, awaitPromise:true,
+    uniqueContextId:"u-doc-7"});
   f.tabs.get(7).evaluated = {result:{type:"object", subtype:"error"},
     exceptionDetails:{text:"Uncaught", exception:{description:"TypeError: x is not a function"}}};
   assert.deepEqual((await f.command("page_evaluate", req)).result, {document:"doc-7", type:"exception", value:null,
@@ -1195,6 +1212,20 @@ test("evaluate runs only in the lease's document and relays its value", async ()
   assert.equal((await f.command("page_evaluate", req)).result.value, '"NaN"');
   for (const expression of ["", "x".repeat(8193), 5]) {
     assert.equal((await f.command("page_evaluate", {...req, expression})).error, "InvalidRequest");
+  }
+});
+
+test("evaluate never runs in a document that replaced the lease's after the probe", async () => {
+  for (const move of [{doc:"doc-7-next"}, {doc:"doc-evil", origin:"https://evil.test"}]) {
+    const f = await codeFixture();
+    const {grant} = await connectGrant(f);
+    const t = f.tabs.get(7);
+    // Probe 1 is the pre-attach check, probe 2 the re-check inside the attach; the tab navigates after it.
+    Object.assign(t, {probes:0, moveAfterProbe:2, move, evaluated:{result:{type:"string", value:"secret"}}});
+    const reply = await f.command("page_evaluate", {grant, tab:7, document:"doc-7", expression:"document.cookie"});
+    assert.equal(reply.ok, false, JSON.stringify(reply));
+    assert.equal(reply.error, "DocumentChanged", JSON.stringify(move));
+    assert.equal(f.cdp.at(-1).method, "detach");
   }
 });
 

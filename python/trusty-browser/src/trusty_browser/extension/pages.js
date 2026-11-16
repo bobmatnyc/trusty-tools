@@ -789,12 +789,14 @@ TrustyPages.commands = deps => {
 
   // Why: an agent sometimes needs page state that no other tool reads (#11373).
   // What: like `act`, probes and attaches chrome.debugger only to an accessible tab still on the lease's
-  //   document, re-probes after the attach (document and origin unchanged, else DocumentChanged and
-  //   nothing ran), then runs Runtime.evaluate in the page's main world, awaiting a promise. Any dialog
+  //   document, binds to the main frame's default execution context, re-probes (document and origin
+  //   unchanged, else DocumentChanged and nothing ran), then runs Runtime.evaluate in that context only,
+  //   awaiting a promise; a context gone before the run answers DocumentChanged (#11373). Any dialog
   //   it opens is dismissed. The value comes back as JSON text cut at 65536 characters (`truncated`), a
   //   thrown error as `exception` text. Over 5 s answers OutcomeUnknown; it always detaches.
   // Test: tests/test_worker.mjs `evaluate runs only in the lease's document and relays its value`,
-  //   `evaluate on a no-access or moved tab never attaches or runs`.
+  //   `evaluate on a no-access or moved tab never attaches or runs`,
+  //   `evaluate never runs in a document that replaced the lease's after the probe`.
   async function evaluate(req) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     if (req.document === null) throw changed(await probe(req.tab));
@@ -811,8 +813,14 @@ TrustyPages.commands = deps => {
       if (aborted) return Promise.reject(refuse("OutcomeUnknown"));
       return chrome.debugger.sendCommand(debuggee, method, params);
     };
-    const dismiss = (source, method) => {
-      if (source.tabId === req.tab && method === "Page.javascriptDialogOpening") {
+    // #11373: main-frame default contexts seen, and unique ids of contexts since destroyed.
+    const contexts = [], gone = new Set();
+    const dismiss = (source, method, params) => {
+      if (source.tabId !== req.tab) return;
+      if (method === "Runtime.executionContextCreated" && params?.context?.auxData?.isDefault) contexts.push(params.context);
+      if (method === "Runtime.executionContextDestroyed") gone.add(params?.executionContextUniqueId);
+      if (method === "Runtime.executionContextsCleared") contexts.forEach(c => gone.add(c.uniqueId));
+      if (method === "Page.javascriptDialogOpening") {
         send("Page.handleJavaScriptDialog", {accept:false}).catch(() => {});
       }
     };
@@ -828,11 +836,23 @@ TrustyPages.commands = deps => {
     }
 
     async function steps() {
+      await send("Page.enable");
+      const main = (await send("Page.getFrameTree"))?.frameTree?.frame?.id;
+      await send("Runtime.enable");
+      // #11373: the context is taken before the probe, so a probe naming the lease's document proves it
+      // belongs to that document; evaluating in it alone means a later navigation cannot redirect the run.
+      const context = contexts.findLast(c => c.auxData.frameId === main && !gone.has(c.uniqueId));
       const now = await probe(req.tab);
       if (!now.access || now.document !== req.document || now.origin !== first.origin) throw changed(now);
-      await send("Page.enable");
-      const out = await send("Runtime.evaluate", {expression:req.expression, returnByValue:true,
-        awaitPromise:true, userGesture:true});
+      if (!context || gone.has(context.uniqueId)) throw changed(await probe(req.tab));
+      let out;
+      try {
+        out = await send("Runtime.evaluate", {expression:req.expression, returnByValue:true, awaitPromise:true,
+          uniqueContextId:context.uniqueId});
+      } catch (err) {
+        if (/cannot find context/i.test(String(err?.message))) throw changed(await probe(req.tab));
+        throw refuse("OutcomeUnknown");
+      }
       const thrown = out?.exceptionDetails, value = out?.result || {};
       if (thrown) {
         const text = thrown.exception?.description || thrown.text || "Error";
