@@ -20,6 +20,7 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+pub(crate) mod architect_up; // #11364
 // #10063: `tm architect dashboard <verb>`, in-process under the store lock.
 pub(crate) mod architect_dashboard;
 // #9167: the poller's wakes as trusty-events `message` events.

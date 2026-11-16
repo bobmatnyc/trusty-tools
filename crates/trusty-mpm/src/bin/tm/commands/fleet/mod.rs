@@ -43,6 +43,7 @@ mod register;
 mod relaunch;
 mod seed;
 mod session_name;
+pub(crate) mod up; // #11364
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
 pub(crate) mod status;
 
@@ -64,6 +65,14 @@ pub(crate) use self::seed::wiring::{
     CHECK as SEED_WIRING_CHECK, doctor_row as seed_wiring_doctor_row,
 };
 pub(crate) use self::status::status;
+// #11364: what `tm architect up|attach|restart` reuse.
+pub(crate) use self::register::register as register_architect;
+pub(crate) use self::session_name::recorded_names;
+
+/// Whether this process runs inside a Claude Code session (#10033 markers).
+pub(crate) fn inside_claude_code() -> bool {
+    !inside_claude::present_markers(|name| std::env::var_os(name)).is_empty()
+}
 
 /// Dispatch `tm fleet <action>` against the process home.
 ///
