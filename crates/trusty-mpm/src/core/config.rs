@@ -756,7 +756,7 @@ impl MpmConfig {
                 .tiers
                 .opus
                 .as_deref()
-                .unwrap_or("claude-opus-4-5"),
+                .unwrap_or(OPUS_DEFAULT_MODEL_ID),
             // #11353: the Fable tier alias.
             "fable" => self
                 .models
@@ -804,6 +804,10 @@ pub fn resolve_agent_model(
     resolve_agent_model_for_role(config, agent_name, None, frontmatter_model, explicit)
 }
 
+/// The Opus model id used when `[models.tiers] opus` is unset, and the Fable
+/// cap's fallback when that tier is itself set to a Fable id (#11353, Dq7).
+pub const OPUS_DEFAULT_MODEL_ID: &str = "claude-opus-5-5";
+
 /// The Fable model id used when `[models.tiers] fable` is unset (#11353).
 pub const FABLE_DEFAULT_MODEL_ID: &str = "claude-fable-5-2";
 
@@ -850,7 +854,7 @@ pub fn resolve_agent_model_for_role(
     }
     let opus = config.expand_model_alias("opus");
     let capped = if is_fable_model(opus) {
-        "claude-opus-4-5"
+        OPUS_DEFAULT_MODEL_ID
     } else {
         opus
     };

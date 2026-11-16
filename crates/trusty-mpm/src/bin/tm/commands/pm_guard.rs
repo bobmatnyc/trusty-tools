@@ -757,6 +757,15 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             return Ok(());
         }
     };
+    // #11353 (Dq7): a PM dispatch that would run a non-complex agent on Fable.
+    if roster.is_some()
+        && let Some(reason) = crate::commands::pm_guard_fable::evaluate_fable_cap(
+            tool_name, tool_input, &hook_cwd, session_id,
+        )
+    {
+        refuse(&refused, &guard_policy::FABLE_CAP, &reason).await;
+        return Ok(());
+    }
     if let Some(roster) = roster.as_ref()
         && let Some(grant) = pm_guard_worktree_grant::evaluate_worktree_grant(
             roster, tool_name, tool_input, &hook_cwd,

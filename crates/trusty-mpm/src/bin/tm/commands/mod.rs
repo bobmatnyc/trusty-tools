@@ -248,6 +248,8 @@ pub(crate) mod repair_delegation_list;
 // #8547: which `subagent_type` names are known, and the refusal for the rest.
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
+// #11353: the Fable cap on the live dispatch path.
+pub(crate) mod pm_guard_fable;
 pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
