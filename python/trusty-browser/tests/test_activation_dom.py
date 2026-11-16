@@ -23,10 +23,12 @@ FAKE = """
         window.calls.push(m.type);
         if (m.type === 'status') return {ok:true, email:'qa@example.test', profile:grant ? 'p' : null, connected:grant};
         if (m.type === 'connect') {
+          if (window.refusal) return window.refusal;
           if (window.connectFails) return {ok:false, error:'AuditUnavailable'};
           grant = 'g-0000000000aa'; return {ok:true, grant, profile:'p'};
         }
         if (m.type === 'revoke_grants') { grant = null; return {ok:true, revoked:1}; }
+        if (m.type === 'unpair') { grant = null; return {ok:true, profile:'p'}; }
         throw Error('unexpected request ' + m.type);
       }}};
 """
@@ -74,6 +76,41 @@ def test_a_connect_whose_grant_creation_fails_does_not_show_connected():
             expect(page.get_by_role("button", name="Connect", exact=True)).to_be_enabled()
             # A held permission is not asked again.
             assert "permission" not in page.evaluate("window.calls")
+        finally:
+            browser.close()
+
+
+def test_a_refused_connect_shows_the_broker_reason_code():
+    # Owner ruling Dqw 2026-11-16: never a bare "Unauthorized".
+    with sync_playwright() as driver:
+        browser, page = popup(driver, held="true")
+        try:
+            page.evaluate(
+                "window.refusal = {ok:false, error:'Unauthorized', reason:'host_codesign'}"
+            )
+            page.get_by_role("button", name="Connect", exact=True).click()
+            expect(page.get_by_role("status")).to_have_text("Unauthorized (host_codesign)")
+            expect(page.locator("#online")).to_be_hidden()
+        finally:
+            browser.close()
+
+
+def test_forget_unpairs_and_disconnect_does_not():
+    with sync_playwright() as driver:
+        browser, page = popup(driver, held="true")
+        try:
+            connect = page.get_by_role("button", name="Connect", exact=True)
+            connect.click()
+            page.get_by_role("button", name="Disconnect").click()
+            expect(page.get_by_role("status")).to_have_text("Disconnected")
+            assert "unpair" not in page.evaluate("window.calls")
+            connect.click()
+            forget = page.get_by_role("link", name="Forget this profile")
+            expect(forget).to_be_visible()
+            forget.click()
+            expect(page.get_by_role("status")).to_have_text("Forgotten")
+            expect(connect).to_be_visible()
+            assert page.evaluate("window.calls").count("unpair") == 1
         finally:
             browser.close()
 

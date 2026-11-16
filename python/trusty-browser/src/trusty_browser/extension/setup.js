@@ -28,14 +28,20 @@ reduceMotion.addEventListener("change", centerEyes);
 // the broker for a standing profile grant; Disconnect revokes it at once. Contract "Popup states".
 async function request(message) {
   const reply = await chrome.runtime.sendMessage(message);
-  if (!reply?.ok) throw new Error(reply?.error || "Could not reach Trusty Browser.");
+  if (!reply?.ok) {
+    const error = new Error(reply?.error || "Could not reach Trusty Browser.");
+    if (typeof reply?.reason === "string") error.reason = reply.reason;
+    throw error;
+  }
   return reply;
 }
+// Owner ruling Dqw 2026-11-16: a refusal shows the broker's reason code, never a bare "Unauthorized".
+// Test: tests/test_activation_dom.py `test_a_refused_connect_shows_the_broker_reason_code`.
 function errorMessage(error) {
   if (/native messaging host|enrollment disconnected|BrowserDisconnected/i.test(error.message)) {
     return "Trusty Browser could not reach its local service. Start the service and try again.";
   }
-  return error.message;
+  return error.reason ? error.message + " (" + error.reason + ")" : error.message;
 }
 // Chrome needs permissions.request inside the click, so the popup tracks whether https://*/* is held.
 const ALL_HTTPS = {origins:["https://*/*"]};
@@ -103,6 +109,17 @@ $("disconnect").addEventListener("click", async () => {
     statusLine.textContent = "Disconnected";
   } catch (error) { statusLine.textContent = errorMessage(error); }
   finally { $("disconnect").disabled = false; }
+});
+// Forget this profile: the worker's `unpair` removes the pairing too; the next Connect pairs again.
+// Test: tests/test_activation_dom.py `test_forget_unpairs_and_disconnect_does_not`.
+$("forget").addEventListener("click", async event => {
+  event.preventDefault();
+  statusLine.textContent = "";
+  try {
+    await request({type:"unpair"});
+    render({connected:null});
+    statusLine.textContent = "Forgotten";
+  } catch (error) { statusLine.textContent = errorMessage(error); }
 });
 $("retry").addEventListener("click", () => { statusLine.textContent = ""; void load(); });
 void load();

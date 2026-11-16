@@ -92,6 +92,7 @@ def test_ordinary_client_cannot_enroll():
                 assert (await service.read_frame(r)) == {
                     "ok": False,
                     "error": "Unauthorized",
+                    "reason": "host_not_native_host",
                 }
                 w.close()
                 assert not broker.db.execute("SELECT * FROM routes").fetchall()
@@ -135,6 +136,7 @@ def test_host_with_genuine_argv_but_wrong_parent_is_explicitly_rejected():
                     assert json.loads(await child.stdout.readexactly(size)) == {
                         "ok": False,
                         "error": "Unauthorized",
+                        "reason": "host_parent_not_chrome",
                     }
                 finally:
                     child.stdin.close()

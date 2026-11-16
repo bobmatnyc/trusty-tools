@@ -232,7 +232,9 @@ const codes = TrustyCodes({bootstrap, identity, online, reconnect:() => reconnec
 const codeTypes = ["status","connect","pair","unpair","grants","revoke_grant","revoke_grants"];
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id || sender.url !== origin + "/setup.html" || !codeTypes.includes(msg?.type)) return;
-  storageReady.then(() => codes.setup(msg)).then(reply,error => reply({ok:false,error:error.message}));
+  // Owner ruling Dqw 2026-11-16: the broker's reason code reaches the popup.
+  const reason = error => /^[a-z_]{1,40}$/.test(error.response?.reason ?? "") ? {reason:error.response.reason} : {};
+  storageReady.then(() => codes.setup(msg)).then(reply,error => reply({ok:false,error:error.message,...reason(error)}));
   return true;
 });
 // #11239: a profile that used the removed site enrollment holds registered scripts naming content.js.

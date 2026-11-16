@@ -164,24 +164,41 @@ sealed with the vault (purpose `browser:<profile>`). `pair` with fields
 identical to a stored pairing answers `ok` and changes nothing. A definite
 refusal drops `pairing_pending`, so the next Connect starts fresh.
 
+**Newest same-email pairing wins** (owner ruling Dqw 2026-11-16). A profile
+that lost its extension storage pairs again under a new `profile` and `key`.
+When no workflow route matches the profile or email and exactly one pairing
+matches the email under another profile id, `pair` replaces that row in the
+same `BEGIN IMMEDIATE` transaction. The broker then detaches the old profile:
+its grants end with `GrantEnded.reason: unenrolled`, its agent sessions close
+and its `service.sock` peer is dropped. The best-effort `pair_replaced` audit
+line carries `profile` (new) and `replaced` (old). A matching route, or a
+stored profile with another email or key, still refuses `EnrollmentConflict`.
+
 `unpair` removes the pairing and ends every grant of the profile with
 `GrantEnded.reason: unenrolled`, closes their agent sessions and closes the
-profile's `service.sock` connection. The popup shows no unpair control; the
-worker op and the operator's `unpair` remain. A retried `unpair` after a lost
+profile's `service.sock` connection. The popup's **Forget this profile** link
+sends the worker `unpair`. **Disconnect** never does, so the pairing stays and
+the next Connect needs no new `pair`. The operator's `unpair` remains. A retried `unpair` after a lost
 `ok` reply answers `Unauthorized`, which the worker treats as done.
 
 | Error | Cause |
 |---|---|
 | `Unauthorized` | Peer or Chrome-host verification failed, or `unpair` presented a credential that matches no pairing |
 | `InvalidEnrollment` | Malformed frame |
-| `EnrollmentConflict` | The profile or email already holds a pairing with other fields, or a workflow enrollment |
+| `EnrollmentConflict` | A workflow route matches the profile or email, or the profile holds a pairing with another email or key |
+
+On `enrollment.sock` an `Unauthorized` or `EnrollmentConflict` reply also
+carries `reason`, the code from "Refusal log", and the popup shows it.
+`service.sock` and `agent.sock` replies never carry `reason`.
 
 ## connect — `enrollment.sock` only
 
 Sender: the extension worker, in the **Connect** click, after `pair` when the
 profile had no credential. The worker first waits up to 5 s for the native
 port's acknowledgement, so the broker sees the profile's browser; without one
-it answers `BrowserDisconnected` and sends nothing.
+it answers `BrowserDisconnected` and sends nothing. When this click paired the
+profile, a `BrowserDisconnected` answer is retried exactly once, after 750 ms,
+while the native port reconnects (owner ruling Dqw 2026-11-16).
 
 Request: `{"op": "connect", "profile", "email", "key"}`.
 
@@ -864,7 +881,8 @@ badge, and clears both when the table and the workflow leases are empty.
 
 The popup (`setup.html`) sends `chrome.runtime.sendMessage({type, ...})`. The
 worker accepts it only from its own `setup.html` and answers `{ok: true, ...}`
-or `{ok: false, error: <str>}`. The removed types (`mint`, `code_preview`,
+or `{ok: false, error: <str>, reason?: <code>}`. `reason` is the broker's
+refusal code when it sent one. The removed types (`mint`, `code_preview`,
 `activate`, `enroll`, `replace`, `cancel`, `preview`, `enable`, `unenroll`)
 get no answer.
 
@@ -884,7 +902,10 @@ get no answer.
 | Loading | Robot | none; sends `status` |
 | Unavailable | The reason, for example the service is unreachable | **Retry** sends `status` |
 | Not connected | "Let local agents use this Chrome profile" above **Connect** | **Connect** requests `https://*/*` when absent, then sends `connect`. Connected shows only after an `ok` reply; on failure the error shows and Connect stays |
-| Connected | The **Connected** badge, the profile's email, "Local agents can use every tab in this profile." | **Disconnect** sends `revoke_grants` and returns to Not connected |
+| Connected | The **Connected** badge, the profile's email, "Local agents can use every tab in this profile." | **Disconnect** sends `revoke_grants`, keeps the pairing and returns to Not connected. The **Forget this profile** link sends `unpair` |
+
+A failure shows the error name, then the broker's reason code in brackets
+when there is one, for example `Unauthorized (host_codesign)`.
 
 The toolbar badge reads `ON` while the worker's grant table is not empty. A
 browser restart ends the grant, so the next popup shows Not connected.
@@ -986,12 +1007,14 @@ directory as the root.
 `<state>/audit.jsonl`, mode 0600, opened `O_APPEND | O_NOFOLLOW`, rotated at
 5 MiB to `audit.jsonl.1` and `audit.jsonl.2` (two kept). One JSON object per
 line with only these keys: `ts`, `event`, `grant`, `scope`, `profile`, `op`,
-`tab`, `outcome`, `origin` (URL host only). It never carries a ticket, a lease token, a key, page content, typed text, a title, or a
+`tab`, `outcome`, `origin` (URL host only), `site`, `reason`,
+`email_domain`, `replaced`. It never carries a ticket, a lease token, a key, page content, typed text, a title, or a
 URL path, query or fragment.
 
 Events: `connect` (fail-closed), `attach` (fail-closed), `detach`
 (best-effort), `grant_reuse`, `pair` and `unpair` (outcome `ok` or the error
-name; best-effort), `revoke`, `grant_end` (outcome is the reason),
+name; best-effort), `pair_replaced`, `refused` (see "Refusal log"),
+`revoke`, `grant_end` (outcome is the reason),
 `operation` (outcome `admitted`, then a second line with `ok` or the error
 name; per-op fields in "Per-operation checks").
 
@@ -1001,6 +1024,32 @@ fail-closed: if the write fails the request is refused with
 the grant (`reason: audit`). Pair, unpair, detach, revoke and grant-end lines
 are best-effort, and a revoke ends the grant before its line is written, so a
 failed write never blocks Disconnect.
+
+### Refusal log
+
+Owner ruling Dqw 2026-11-16. Each refusal below writes one stderr line and one
+`refused` audit line through `Audit.refuse(site, reason, profile, email_domain)`.
+The line holds the profile id when the request named one, and the email
+domain only (the part after `@`). It never holds the email, a key, ticket,
+proof or nonce. A failed write goes to stderr and the request is still refused.
+
+| `reason` | `site` | Check |
+|---|---|---|
+| `peer_uid` | `service`, `agent`, `enrollment`, `operator` | `verify_peer`: the peer is another user |
+| `host_not_native_host` | `enrollment` | The peer is not our native host with its exact argv, or its identity could not be read |
+| `host_parent_not_chrome` | `enrollment` | The native host's parent is not Chrome Stable |
+| `host_unsafe_flag` | `enrollment` | Chrome runs with a profile-store or debugging flag |
+| `host_codesign` | `enrollment` | Chrome's live code signature failed |
+| `host_timeout` | `enrollment` | The host check or `codesign` timed out |
+| `route_unknown` | `service` | No route or pairing for the hello's profile |
+| `ticket_mismatch` | `agent` | A workflow ticket does not match its route |
+| `proof_mismatch` | `service` | The extension's pairing proof is wrong |
+| `key_rotated` | `service` | The pairing changed while the browser computed its proof |
+| `unpair_bad_credential` | `unpair` | `unpair` with a credential that matches no pairing |
+| `enroll_conflict_route` | `pair` | `pair` against a workflow route |
+| `enroll_conflict_key` | `pair` | `pair` of a stored profile with another email or key |
+| `remove_unauthorized` | `remove` | A workflow removal whose registration does not match |
+| `status_unauthorized` | `status` | A workflow status request that matches no route or revocation |
 
 ## Not in this build
 
@@ -1040,12 +1089,14 @@ once per stamp. The once-per-stamp guard (`reloaded_for`) lives in `chrome.stora
 
 Python: `tests/test_activation_codes.py` (connect, attach, profiles,
 Disconnect, grace and reuse, audit), `tests/test_page_ops.py` (page ops on an
-attached session), `tests/test_pairing.py`, `tests/test_agent_mcp.py` (the
+attached session), `tests/test_pairing.py` (including the same-email
+re-pair), `tests/test_refusals.py` (the refusal log and host reason codes),
+`tests/test_agent_mcp.py` (the
 MCP shim), `tests/test_cli.py` (operator verbs and asset publishing, including
 `test_republish_reaches_a_profile_holding_an_old_hash_path`).
 
 JavaScript: `tests/test_worker.mjs` (worker grant table, Connect, status,
 Disconnect, the permission signals, asset reload, page commands),
 `tests/test_indicator.mjs`. Playwright: `tests/test_activation_dom.py` (the
-popup's Connect and Disconnect), `tests/test_pages_dom.py`,
+popup's Connect, Disconnect, Forget and reason codes), `tests/test_pages_dom.py`,
 `tests/test_indicator_dom.py`.
