@@ -12,6 +12,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Linux: the known limit in the `restart` entry is fixed. A `start --foreground --data-dir X` sibling that runs without `TRUSTY_DATA_DIR` in its environment no longer blocks the default daemon: `stop` no longer refuses with `RunningUnserved`, and `restart` of a healthy default daemon stops it and starts a new one instead of leaving it down. `stop` and `restart` tell the sibling apart by its `--data-dir` argument, which names a directory other than the default data dir (#11085).
 - Linux: `start` and `restart` pass `RUST_LOG_BUFFER` to the daemon they spawn, so its in-memory log buffer keeps the filter a shell-started daemon would use (#11085).
+- `search.project.ensure` now re-activates a parked index it finds at the project root, instead of answering `created: false` and leaving it parked (#11417). A cold row or a project-map park whose root is present and is not a worktree is loaded through the same path as `search.project.unpark`, a map park row is cleared, `repo_identity` is recorded from `project_key` when the row has none, and a reindex is queued as an unpark queues one. The reply adds `unparked` (`true` when it re-activated the index) and `repo_identity_set`. A re-activation that cannot load the index is an error (`ensure_unpark_failed`), never a success. A worktree root or a missing root behaves as before.
 
 ### Changed
 
