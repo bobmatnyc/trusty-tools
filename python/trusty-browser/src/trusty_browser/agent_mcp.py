@@ -1,6 +1,6 @@
-"""Expose Trusty Browser to one agent over stdio MCP, by workflow ticket or activation code.
+"""Expose Trusty Browser to one agent over stdio MCP, by workflow ticket or a connected profile.
 
-Code mode contract (#11239): docs/activation-codes.md, "MCP tools".
+Connect mode contract (#11239): docs/activation-codes.md, "MCP tools".
 """
 
 from __future__ import annotations
@@ -18,10 +18,9 @@ import struct
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
-from typing import Annotated, Any, BinaryIO
+from typing import Any, BinaryIO
 
 from mcp.server.fastmcp import FastMCP
-from pydantic import Field, WithJsonSchema
 
 from trusty_browser import vault
 from trusty_browser.page_tools import add_page_tools
@@ -33,7 +32,7 @@ UNAVAILABLE = (
     "The Trusty Browser service is not reachable on agent.sock; "
     "start it, then call browser_connect again"
 )
-NOT_CONNECTED = "No activation code session; call browser_connect with a code first"
+NOT_CONNECTED = "No session; call browser_connect first"
 ALREADY_CONNECTED = "A session is already held; call browser_disconnect first"
 
 
@@ -123,7 +122,7 @@ def run(state: Path, credential: Path) -> None:
 
 
 class Refused(Exception):
-    """A tool error whose text is one compact JSON error frame, never a code."""
+    """A tool error whose text is one compact JSON error frame."""
 
     def __init__(self, frame: dict[str, Any]) -> None:
         super().__init__(json.dumps(frame, separators=(",", ":"), allow_nan=False))
@@ -134,11 +133,11 @@ def local(error: str, message: str) -> Refused:
 
 
 class CodeSession:
-    """At most one redeemed ``agent.sock`` connection, opened only by ``connect``.
+    """At most one attached ``agent.sock`` connection, opened only by ``connect``.
 
-    Why: code mode must start, list tools and recover with the broker down (#11239).
+    Why: connect mode must start, list tools and recover with the broker down (#11239).
     What: every socket failure drops the connection and answers
-    ``ServiceUnavailable``; a refused redeem or ``GrantEnded`` drops it too.
+    ``ServiceUnavailable``; a refused attach or ``GrantEnded`` drops it too.
     Test: `test_code_mode_starts_and_lists_tools_with_no_broker`,
     `test_broker_loss_mid_session_answers_unavailable_then_reconnects`.
     """
@@ -183,23 +182,49 @@ class CodeSession:
             self.drop()
             raise local("ServiceUnavailable", UNAVAILABLE) from None
 
-    def connect(self, code: str) -> dict[str, Any]:
+    def open(self) -> None:
+        wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        wire.settimeout(TIMEOUT)
+        try:
+            wire.connect(str(self.path))
+        except OSError:
+            wire.close()
+            raise local("ServiceUnavailable", UNAVAILABLE) from None
+        self.wire, self.stream = wire, wire.makefile("rb")
+
+    def profiles(self) -> dict[str, Any]:
+        """List the connected profiles on a one-shot connection; the session is untouched."""
+        with self.lock:
+            held = self.wire, self.stream
+            self.wire = self.stream = None
+            try:
+                self.open()
+                reply = self.exchange({"op": "profiles"})
+            finally:
+                self.drop()
+                self.wire, self.stream = held
+        if not reply["ok"]:
+            raise Refused(reply)
+        return reply
+
+    def connect(self, profile: str | None) -> dict[str, Any]:
+        """Attach to a profile the user connected in the popup; no code (#11239).
+
+        Test: `test_connect_needs_no_code_and_attaches_to_the_connected_profile`,
+        `test_connect_with_several_profiles_needs_an_explicit_choice`.
+        """
         with self.lock:
             if self.wire is not None and self.alive():
                 raise local("AlreadyConnected", ALREADY_CONNECTED)
             self.drop()
             self.ended = None  # a new attempt never reports the old grant's end
-            wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            wire.settimeout(TIMEOUT)
-            try:
-                wire.connect(str(self.path))
-            except OSError:
-                wire.close()
-                raise local("ServiceUnavailable", UNAVAILABLE) from None
-            self.wire, self.stream = wire, wire.makefile("rb")
-            reply = self.exchange({"op": "redeem", "code": code})
+            self.open()
+            hello: dict[str, Any] = {"op": "attach"}
+            if profile is not None:
+                hello["profile"] = profile
+            reply = self.exchange(hello)
             if not reply["ok"]:
-                self.drop()  # The broker closes a refused redeem; so do we.
+                self.drop()  # The broker closes a refused attach; so do we.
                 raise Refused(reply)
             return reply
 
@@ -229,83 +254,6 @@ class CodeSession:
             self.drop()
             self.ended = None
         return {"ok": True, "disconnected": held}
-
-
-class _Absent:
-    """Marks a ``browser_connect`` argument the caller left out (unlike ``null``)."""
-
-
-ABSENT: Any = _Absent()
-CODE_FILE_MAX = 1024
-ONE_INPUT = "Give exactly one of code or code_file"
-
-
-def _optional(description: str) -> Any:
-    # #11239: unvalidated, so a non-string value is never quoted back; a
-    # default_factory keeps the default out of the schema and tells absent from null.
-    return Annotated[
-        Any,
-        WithJsonSchema({"type": "string", "description": description}),
-        Field(default_factory=lambda: ABSENT),
-    ]
-
-
-CodeArg = _optional(
-    "The activation code itself. It lands in your transcript; prefer code_file."
-)
-CodeFileArg = _optional(
-    "Path to an owner-only file (mode 0600 or 0400, not a symlink) holding the"
-    " activation code. Preferred: the code never enters your transcript."
-)
-
-
-def code_from_file(raw: object) -> str:
-    """Read an activation code from an owner-only file without ever echoing it.
-
-    Why: a code is a secret; a path keeps it out of the agent's transcript (#11239).
-    What: refuses a symlink (``lstat`` and ``O_NOFOLLOW``), anything but a regular
-    file owned by this user with no group or other bits, and a missing,
-    unreadable, oversize, non-UTF-8 or blank file. Strips surrounding whitespace.
-    A refusal is ``CodeFileRefused`` naming the path and the reason only.
-    Test: `test_code_file_refusals_name_the_path_never_the_code`,
-    `test_code_file_redeems_through_the_same_redeem_as_code`.
-    """
-    if not isinstance(raw, str) or not raw:
-        raise local("InvalidRequest", "code_file must be a non-empty path string")
-
-    def refuse(reason: str) -> Refused:
-        return local("CodeFileRefused", f"code_file {raw}: {reason}")
-
-    try:
-        if stat.S_ISLNK(os.lstat(raw).st_mode):
-            raise refuse("is a symlink")
-        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except FileNotFoundError:
-        raise refuse("does not exist") from None
-    except OSError as error:
-        reason = "is a symlink" if error.errno == errno.ELOOP else "cannot be read"
-        raise refuse(reason) from None
-    with os.fdopen(fd, "rb") as handle:
-        attrs = os.fstat(handle.fileno())
-        if not stat.S_ISREG(attrs.st_mode):
-            raise refuse("is not a regular file")
-        if attrs.st_uid != os.getuid():
-            raise refuse("is not owned by the current user")
-        if attrs.st_mode & 0o077:
-            raise refuse("must be owner-only (mode 0600 or 0400)")
-        try:
-            data = handle.read(CODE_FILE_MAX + 1)
-        except OSError:
-            raise refuse("cannot be read") from None
-    if len(data) > CODE_FILE_MAX:
-        raise refuse(f"is larger than {CODE_FILE_MAX} bytes")
-    try:
-        code = data.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        raise refuse("is not UTF-8 text") from None
-    if not code:
-        raise refuse("is empty")
-    return code
 
 
 UPLOAD_MAX = 512 * 1024
@@ -444,7 +392,7 @@ def upload_files(paths: object, root: Path | None) -> list[dict[str, str]]:
 
 
 def run_codes(state: Path, root: Path | None = None) -> None:
-    """Serve code mode: no credential, no socket until ``browser_connect``.
+    """Serve connect mode: no credential, no socket until ``browser_connect``.
 
     ``root`` is the only directory ``page_upload`` may read; ``None`` refuses uploads.
     """
@@ -452,23 +400,24 @@ def run_codes(state: Path, root: Path | None = None) -> None:
     server = FastMCP("trusty-browser")
 
     @server.tool()
-    def browser_connect(code: CodeArg, code_file: CodeFileArg) -> dict[str, Any]:
-        """Redeem a one-use activation code (tb-...) from the Trusty Browser popup.
+    def browser_profiles() -> dict[str, Any]:
+        """List the Chrome profiles the user connected with the popup's Connect button."""
+        return session.profiles()
 
-        Give exactly one of code_file or code. Prefer code_file, the path of the
-        owner-only file the owner saved the code to, so the code stays secret.
+    @server.tool()
+    def browser_connect(profile: str | None = None) -> dict[str, Any]:
+        """Attach to a Chrome profile the user connected in the Trusty Browser popup.
+
+        No code is needed. With one connected profile, omit ``profile``. With
+        several, call browser_profiles and pass the chosen ``profile`` id.
         """
-        if (code is ABSENT) == (code_file is ABSENT):
-            raise local("InvalidRequest", ONE_INPUT)
-        if code_file is not ABSENT:
-            code = code_from_file(code_file)
-        elif not isinstance(code, str):
-            raise local("InvalidRequest", "code must be a string")
-        return session.connect(code)
+        if profile is not None and (not isinstance(profile, str) or not profile):
+            raise local("InvalidRequest", "profile must be a non-empty string")
+        return session.connect(profile)
 
     @server.tool()
     def browser_disconnect() -> dict[str, Any]:
-        """Close the session; the broker ends its grant."""
+        """Close this agent's session; the profile stays connected until the user disconnects it."""
         return session.disconnect()
 
     add_page_tools(server, session.call, root)
