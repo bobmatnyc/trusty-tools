@@ -286,9 +286,24 @@ static SWEEP_ONCE: Once = Once::new();
 /// Windows builds only; no test suite runs there) this falls back to
 /// `std::env::temp_dir()`, since Windows has no established TMPDIR-pollution
 /// pattern and no equivalent always-present hardcoded system path.
-/// What: returns `/tmp` on Unix, `std::env::temp_dir()` otherwise.
-/// Test: [`tests::real_system_tmp_ignores_tmpdir_env`].
+/// #10785: a dedicated `TM_TEST_TMP` (never `TMPDIR`) moves the root off a
+/// small `/tmp` tmpfs; [`guard_against_project_tree`] still checks it.
+/// What: returns `$TM_TEST_TMP` when set and non-empty, else `/tmp` on Unix,
+/// else `std::env::temp_dir()`.
+/// Test: [`tests::real_system_tmp_ignores_tmpdir_env`],
+/// [`tests::tm_test_tmp_override_sets_the_root_10785`].
 fn real_system_tmp() -> PathBuf {
+    resolve_test_tmp_root(std::env::var_os(TM_TEST_TMP_ENV))
+}
+
+/// The env var that overrides the hermetic test root (#10785).
+const TM_TEST_TMP_ENV: &str = "TM_TEST_TMP";
+
+/// Pure resolution behind [`real_system_tmp`], so tests need no env mutation.
+fn resolve_test_tmp_root(override_root: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(root) = override_root.filter(|r| !r.is_empty()) {
+        return PathBuf::from(root);
+    }
     #[cfg(unix)]
     {
         PathBuf::from("/tmp")
@@ -727,10 +742,24 @@ mod tests {
     fn real_system_tmp_ignores_tmpdir_env() {
         // Safety/portability note: this test only asserts the *return value*
         // is independent of TMPDIR; it does not mutate global env state.
-        let root = real_system_tmp();
+        let root = resolve_test_tmp_root(None);
         #[cfg(unix)]
         assert_eq!(root, PathBuf::from("/tmp"));
         assert!(root.exists(), "hermetic root must exist: {root:?}");
+    }
+
+    /// #10785: `TM_TEST_TMP` sets the root; an empty value falls back.
+    #[test]
+    fn tm_test_tmp_override_sets_the_root_10785() {
+        let chosen = std::ffi::OsString::from("/var/tmp/tm-tests");
+        assert_eq!(
+            resolve_test_tmp_root(Some(chosen)),
+            PathBuf::from("/var/tmp/tm-tests")
+        );
+        assert_eq!(
+            resolve_test_tmp_root(Some(std::ffi::OsString::new())),
+            resolve_test_tmp_root(None)
+        );
     }
 
     /// Why serial: reads `$HOME` (via `guard_against_project_tree`, indirectly
