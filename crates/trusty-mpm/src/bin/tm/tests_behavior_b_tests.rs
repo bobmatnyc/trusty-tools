@@ -2564,3 +2564,40 @@ fn launch_claude_spec_follows_the_configured_renderer() {
         assert!(line.contains(want), "want {want:?} in: {line}");
     }
 }
+
+/// #11353: the `tm launch` spec carries its `--model` as the launch-model
+/// stamp, and that stamp decides an `inherit` dispatch of a capped role.
+#[test]
+fn a_managed_launch_stamps_its_model_for_the_fable_cap() {
+    let cwd = std::path::Path::new("/work/p");
+    let config = trusty_mpm::core::config::MpmConfig::default();
+    for (model, refused) in [("claude-opus-5-5", false), ("claude-fable-5-2", true)] {
+        let spec = crate::commands::launch::launch_claude_spec(
+            cwd,
+            None,
+            model,
+            None,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .expect("a PM spec builds");
+        let stamp = spec
+            .env_set
+            .iter()
+            .find(|(k, _)| k == trusty_mpm::core::session_profile::LAUNCH_MODEL_ENV)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(stamp, Some(model), "the stamp names the launch model");
+        let deny = crate::commands::pm_guard_fable::fable_cap_refusal(
+            &config,
+            "qa",
+            Some("qa"),
+            crate::commands::pm_guard_fable::DispatchModel {
+                frontmatter: Some("inherit"),
+                parent: stamp,
+                ..Default::default()
+            },
+        );
+        assert_eq!(deny.is_some(), refused, "{model}: {deny:?}");
+    }
+}

@@ -168,6 +168,8 @@ const CHILD_STATE_ENV: &[&str] = &[
     "REPOS_ROOT",
     "GH_CONFIG_DIR",
     "TRUSTY_MPM_SESSION_PROFILE",
+    // #11353: a managed launch's model stamp decides the Fable cap.
+    "TRUSTY_MPM_LAUNCH_MODEL",
     "CLAUDE_MPM_SUB_AGENT",
 ];
 

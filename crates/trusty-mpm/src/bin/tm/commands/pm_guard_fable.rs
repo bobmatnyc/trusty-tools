@@ -147,7 +147,8 @@ pub(crate) fn fable_cap_refusal(
 /// What: `None` for a non-dispatch tool. Otherwise reads `subagent_type` and
 /// `model` from `tool_input`, the agent's role and frontmatter `model:` from the
 /// first deployed tier that defines it ([`deployed_agent_dirs`]), the env
-/// override, and the parent model the statusline recorded for `session_id`.
+/// override, and the parent model the statusline recorded for `session_id`,
+/// else the managed launch's `TRUSTY_MPM_LAUNCH_MODEL` stamp.
 /// Test: `evaluate_reads_role_and_model_from_a_deployed_tier`.
 pub(crate) fn evaluate_fable_cap(
     tool_name: &str,
@@ -163,6 +164,12 @@ pub(crate) fn evaluate_fable_cap(
         .ok()
         .and_then(|paths| {
             trusty_mpm::core::session_model::read_session_model(&paths.root, session_id)
+        })
+        // #11353: a managed launch stamps the model it passed as `--model`.
+        .or_else(|| {
+            std::env::var(trusty_mpm::core::session_profile::LAUNCH_MODEL_ENV)
+                .ok()
+                .filter(|m| !m.trim().is_empty())
         });
     evaluate_in(
         &MpmConfig::load_default(),
