@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 use trusty_architect::ledger::fresh::{fresh, ready, state_dir};
 
 type R = Result<(), Box<dyn std::error::Error>>;
+/// (name, store dir, expected fresh code, expected ready code).
+type Case = (String, PathBuf, i32, i32);
 
 /// pm-small's `written_epoch`.
 const WRITTEN: i64 = 1_792_573_814;
@@ -63,7 +65,7 @@ fn edit_state(dir: &Path, f: impl FnOnce(&mut Value)) -> R {
 }
 
 /// Builds every case: (name, dir, expected fresh code, expected ready code).
-fn cases(root: &Path) -> Result<Vec<(String, PathBuf, i32, i32)>, Box<dyn std::error::Error>> {
+fn cases(root: &Path) -> Result<Vec<Case>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
     for (store, f, r) in [
         ("pm-medium", 0, 0),
