@@ -29,7 +29,7 @@ column.
 |---|---|---|
 | Map a shape of work to an agent chain; pick the deploy agent for a platform | "Full-Stack Feature", "API-Only Development", "Web UI Only", "Local Development / Infra", "Bug Fix", "Platform-Specific Deploy" | [references/workflow-chains.md](references/workflow-chains.md) |
 | Size a task as one delegation or several; collapse split delegations; batch bug fixes | "Task Complexity: One Delegation or Several", "Batching: the Anti-Patterns" | [references/sizing-and-batching.md](references/sizing-and-batching.md) |
-| Keep the mechanism out of a brief; relay a reviewer's fix; write criteria a wrong implementation fails; surface agent suggestions | "What a Brief Carries — and What It Must Not", "Acceptance Criteria a Wrong Implementation Fails", "Architecture Suggestions From Agents", "Delegation Best Practices" | [references/briefs-and-criteria.md](references/briefs-and-criteria.md) |
+| Keep the mechanism out of a brief; name sources and check the hand-back; relay a reviewer's fix; write criteria a wrong implementation fails; surface agent suggestions | "What a Brief Carries — and What It Must Not", "Sources and Hand-back", "Acceptance Criteria a Wrong Implementation Fails", "Architecture Suggestions From Agents", "Delegation Best Practices" | [references/briefs-and-criteria.md](references/briefs-and-criteria.md) |
 | Choose the model for a dispatch; set per-agent defaults | "Per-Agent Model Overrides and the Cost Model" | [references/models.md](references/models.md) |
 | Decide whether a change earns a `code-critic` round; brief the critic | "code-critic Dispatch Standard" | [references/code-critic.md](references/code-critic.md) |
 | Declare `isolation: "worktree"`; salvage a dead agent's tree; write a claim drawer; declare file ownership for concurrent dispatches | "Worktree Isolation on a Dispatch", "Salvaging a Dead Agent's Worktree", "Cross-Workstream Coordination (memory claim drawers, DOC-53)", "Concurrent Dispatch: Declare File Ownership" | [references/worktree-isolation.md](references/worktree-isolation.md) |
@@ -119,13 +119,26 @@ Agent: [deployed subagent_type]
 Requirements:
   Objective: [Measurable outcome]
   Findings: [What is already known, with its evidence — not a chosen mechanism]
+  Sources (path @ revision, role): [Each file the agent must open first, and why]
+  Preserve: [What must not change: behaviour, files, text]
   Shared-behaviour paths: [Bug fix only: other callers and data states]
   Success Criteria: [Conditions a wrong implementation fails]
   Testing: MANDATORY - Provide logs
   Constraints: [Performance, security, timeline]
   Time Box / Token Box: [N minutes / M tokens]
   Verification: Evidence of criteria met
+  Hand-back: Read / Not found / Not read, one line each per source
 ```
+
+<!-- rule:tm-delegation-patterns/brief-sources-preserve-fields -->
+**Sources, Preserve and Hand-back, every brief.** Name each file the agent must
+read first as `path @ revision` plus its role (owner persona, spec, prior
+output). The brief may be the only thing the agent receives, so a file it is not
+named does not exist for it. `Preserve` names what the change must leave alone.
+The agent ends its report with `Read:`, `Not found:` and `Not read:` lines
+covering every source. The PM checks them before accepting (see
+[references/briefs-and-criteria.md](references/briefs-and-criteria.md), "Sources
+and Hand-back").
 
 **`Shared-behaviour paths`, bug-fix briefs only.** Lists the other callers and
 data states of the changed behaviour, from the sweep in the Bug Fix chain

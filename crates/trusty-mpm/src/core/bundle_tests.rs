@@ -3568,3 +3568,50 @@ fn bug_fix_chain_sweeps_related_paths_10577() {
     assert!(check.contains("Shared-behaviour paths` lists the other callers"));
     assert!(check.contains("Skip the check for a Low-risk text edit"));
 }
+
+/// Why: #10573 — helpers drafted owner scenarios without the owner-persona
+/// file because a brief named no sources and no hand-back reported them.
+/// What: the brief template carries `Sources (path @ revision, role)`,
+/// `Preserve` and the hand-back line; `briefs-and-criteria` carries the
+/// `Read` / `Not found` / `Not read` lines and the PM's check before accepting.
+/// Mutation: delete a field, a marker or a hand-back heading and this fails.
+/// Test: this test.
+#[test]
+fn briefs_name_sources_and_hand_back_read_lines_10573() {
+    let patterns = skill_text("skills/tm-delegation-patterns.md");
+    assert!(has_rule(
+        patterns,
+        "tm-delegation-patterns/brief-sources-preserve-fields"
+    ));
+    let template = plain(patterns);
+    for needle in [
+        "Sources (path @ revision, role):",
+        "Preserve:",
+        "Hand-back: Read / Not found / Not read",
+        "Shared-behaviour paths: [Bug fix only",
+    ] {
+        assert!(
+            template.contains(needle),
+            "the brief template lost `{needle}`"
+        );
+    }
+    let brief = skill_text("skills/tm-delegation-patterns/references/briefs-and-criteria.md");
+    assert!(has_rule(
+        brief,
+        "tm-delegation-patterns/handback-source-check"
+    ));
+    let check = plain(brief);
+    for needle in [
+        "Read: docs/owner-persona.md @",
+        "Not found:",
+        "Not read:",
+        "PM check before accepting",
+        "a source is on no line",
+        "line is a claim, not proof",
+    ] {
+        assert!(
+            check.contains(needle),
+            "the hand-back check lost `{needle}`"
+        );
+    }
+}

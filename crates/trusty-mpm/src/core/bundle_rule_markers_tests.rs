@@ -161,7 +161,12 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
             "tm-delegation-patterns/pm-re-engagement",
             "tm-delegation-patterns/worktree-check-first",
             "tm-delegation-patterns/no-blind-poll",
+            "tm-delegation-patterns/brief-sources-preserve-fields",
         ],
+    ),
+    (
+        "content/skills/tm-delegation-patterns/references/briefs-and-criteria.md",
+        &["tm-delegation-patterns/handback-source-check"],
     ),
     (
         "content/skills/tm-delegation-patterns/references/workflow-chains.md",
