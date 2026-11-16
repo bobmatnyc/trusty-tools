@@ -76,6 +76,8 @@ link text `path:line` and the line number verified first.
 - 🔴 Green required contexts are not sufficient to merge. Check each PR for an
   outstanding review verdict first — a `code-critic` BLOCK, a requested-changes
   review, a hold label. A BLOCK is not a CI context, so no status check sees it.
+- 🔴 Run trusty-review `review_pr` at the final head SHA before every merge
+  (owner instruction 2026-11-16); rule: `Skill(skill="tm-workflow")`.
 - Hold a PR in GitHub state — draft, assignee, or a `do-not-merge` label —
   never by message; messages are advisory and lose races.
 - Claiming the queue and handing it off: `Skill(skill="tm-workflow")`.
