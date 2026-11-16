@@ -94,7 +94,8 @@ pub async fn stop_pid_with(
 /// What: [`stop_pid_with`]'s steps. `pid` itself is still pinned and checked
 /// in the real `/proc`; `table` is read only by the scan [`stop_with_table`]
 /// runs when `pid` is gone.
-/// Test: `stop_finds_the_console_through_http_addr_when_its_socket_bind_failed`.
+/// Test: `stop_pid_of_a_pid_that_is_gone_answers_as_stop_does`,
+/// `stop_pid_stops_a_daemon_whose_socket_bind_failed` (through [`stop_pid_with`]).
 ///
 /// [`stop_pid_with`]: crate::linux_lifecycle::stop_pid_with()
 /// [`stop_with_table`]: crate::linux_lifecycle::stop_with_table()
@@ -168,7 +169,9 @@ pub async fn restart_pid_with(
 /// What: [`restart_pid_with`]'s steps. `pid` itself is still pinned and
 /// checked in the real `/proc`; the scan for another instance and the
 /// start's scan read `table`.
-/// Test: `restart_through_http_addr_reports_a_survivor_and_starts_nothing`.
+/// Test: `restart_pid_refuses_before_any_signal_when_another_process_is_this_instance`,
+/// `restart_pid_restarts_a_daemon_whose_socket_bind_failed` (through
+/// [`restart_pid_with`]).
 ///
 /// [`restart_pid_with`]: crate::linux_lifecycle::restart_pid_with()
 pub async fn restart_pid_with_table(
