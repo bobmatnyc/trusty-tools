@@ -9,9 +9,14 @@ globalThis.TrustyPageRead = (() => {
   //   role-and-name signature holds, and the registry installs `resolve(ref)`, which answers the element only
   //   when it is connected and its signature still matches, else null. A ref is "<epoch>.<n>"; the random
   //   epoch keeps a ref from an earlier registry (an extension reload) from naming a new element.
+  //   `options` (#11356): `scope_ref` reads one element's subtree (StaleElement when it changed),
+  //   `viewport_only` keeps elements overlapping the viewport, `include_text` adds the scope's innerText, and
+  //   `max_chars` bounds the encoded result. Elements fill the bound in order of distance from the viewport,
+  //   then text takes what is left; any cut sets `truncated`.
   // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`,
-  //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`.
-  function pageInspect(mode, reserve) {
+  //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`,
+  //   `test_read_scopes_bounds_and_truncates_in_viewport_order`.
+  function pageInspect(mode, reserve, options) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const epoch = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
     let state = globalThis[KEY];
@@ -103,24 +108,52 @@ globalThis.TrustyPageRead = (() => {
       if (el.disabled === true || el.getAttribute("aria-disabled") === "true") entry.disabled = true;
       return entry;
     }
-    const elements = [];
-    for (const el of document.querySelectorAll(selector)) {
-      if (!el.getClientRects().length || getComputedStyle(el).visibility !== "visible") continue;
-      if (elements.length === 500) { truncated = true; break; }
-      elements.push(describe(el));
+    const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
+    // Reported elements under `root` (itself included), in document order.
+    function within(root) {
+      const found = [...root.querySelectorAll(selector)];
+      if (root.matches?.(selector)) found.unshift(root);
+      return found.filter(shown);
     }
+    // CSS pixels from the element's box to the viewport; 0 when they overlap.
+    function distance(el) {
+      const box = el.getBoundingClientRect();
+      return Math.hypot(Math.max(0, box.left - innerWidth, -box.right), Math.max(0, box.top - innerHeight, -box.bottom));
+    }
+    // #11356: scope_ref, max_chars, viewport_only and include_text bound what a read returns.
+    const scope = options.scope_ref == null ? null : resolve(options.scope_ref);
+    if (options.scope_ref != null && !scope) return {error:"StaleElement"};
+    const budget = Math.min(LIMIT, options.max_chars ?? LIMIT);
+    const ordered = within(scope ?? document).map((el, index) => ({el, index, far:distance(el)}))
+      .filter(c => !options.viewport_only || c.far === 0)
+      .sort((a, b) => a.far - b.far || a.index - b.index);
     const result = {origin:location.origin, url:cut(location.href, 2048), title:cut(document.title, 200),
-      text:cut(document.body ? document.body.innerText : "", 65536), elements, truncated};
-    const size = () => new TextEncoder().encode(JSON.stringify(result)).length;
-    for (let over = size() - LIMIT; over > 0; over = size() - LIMIT) {
-      result.truncated = true;
+      text:"", elements:[], truncated:false};
+    // Elements fill the budget nearest the viewport first, then return in document order.
+    let used = bytes(result);
+    const kept = [];
+    for (const {el, index} of ordered) {
+      if (kept.length === 500) { truncated = true; break; }
+      const entry = describe(el), cost = bytes(entry) + 1;
+      if (used + cost > budget) { truncated = true; break; }
+      used += cost;
+      kept.push([index, entry]);
+    }
+    result.elements = kept.sort((a, b) => a[0] - b[0]).map(([, entry]) => entry);
+    if (options.include_text) {
+      const source = scope ?? document.body;
+      result.text = cut(source ? source.innerText : "", 65536);
+    }
+    for (let over = bytes(result) - budget; over > 0; over = bytes(result) - budget) {
+      truncated = true;
       if (result.text) result.text = result.text.slice(0, Math.max(0, result.text.length - over));
       else result.elements.pop();
     }
-    result.truncated = result.truncated || truncated;
+    result.truncated = truncated;
     return result;
   }
   // In-page entry point for tests and the live check; the worker injects pageInspect itself.
-  const pageRead = reserve => pageInspect("read", reserve);
+  const pageRead = (reserve, options = {}) => pageInspect("read", reserve, options);
   return {pageInspect, pageRead};
 })();

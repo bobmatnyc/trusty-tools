@@ -408,6 +408,7 @@ TrustyPages.commands = deps => {
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
+  const bool = v => typeof v === "boolean";
   const SCROLL_TO = ["down","up","top","bottom","element"];
   // #11289: at most 10 files and 700000 base64 characters, so a frame stays under the 1 MiB native limit.
   const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -418,7 +419,10 @@ TrustyPages.commands = deps => {
       typeof f.type === "string" && f.type.length <= 255 &&
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const SPECS = {
-    page_tabs:{}, page_tab:{tab}, page_read:{tab, document:doc}, page_click:{tab, document:doc, ref},
+    page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref},
+    // #11356: the broker always sends every read control.
+    page_read:{tab, document:doc, scope_ref:v => v === null || ref(v), viewport_only:bool, include_text:bool,
+      max_chars:v => Number.isInteger(v) && v >= 1000 && v <= 250000},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
     page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
@@ -523,9 +527,12 @@ TrustyPages.commands = deps => {
       await landed(req.tab);
       let hit;
       try {
-        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect, args:["read", 512]});
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect,
+          args:["read", 512, {scope_ref:req.scope_ref, max_chars:req.max_chars, viewport_only:req.viewport_only,
+            include_text:req.include_text}]});
       } catch { throw await needed(req.tab); }
       const result = hit?.result;
+      if (result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
       if (!result || typeof hit.documentId !== "string" || typeof result.origin !== "string") throw await needed(req.tab);
       await deps.remember(req.tab, result.origin);
       return {document:hit.documentId, origin:result.origin, url:result.url, title:result.title,

@@ -54,8 +54,8 @@ def page():
             browser.close()
 
 
-def read(page):
-    return page.evaluate("() => TrustyPages.pageRead(512)")
+def read(page, **options):
+    return page.evaluate("o => TrustyPages.pageRead(512, o)", {"include_text": True, **options})
 
 
 def ref_of(result, name):
@@ -89,6 +89,45 @@ def test_read_reports_elements_and_bounds_size(page):
     assert len(json.dumps(big, separators=(",", ":"), ensure_ascii=False).encode()) <= 262144 - 512
     # #11355: an unchanged element keeps its ref across reads.
     assert big["elements"][0]["ref"] == result["elements"][0]["ref"]
+
+
+def test_read_scopes_bounds_and_truncates_in_viewport_order(page):
+    # #11356: scope, viewport and size controls; truncation keeps the elements nearest the viewport.
+    page.set_viewport_size({"width": 800, "height": 600})
+    page.evaluate("""() => {
+      const list = Object.assign(document.createElement("ul"), {id:"rows"});
+      for (let i = 0; i < 60; i++) {
+        const li = document.createElement("li");
+        li.innerHTML = "<span>Row " + i + "</span> <button>Edit " + i + "</button>";
+        list.append(li);
+      }
+      document.body.append(list);
+    }""")
+    whole = read(page, include_text=False)
+    assert whole["text"] == "" and whole["truncated"] is False
+    rows = whole["elements"]
+    edit = lambda n: next(e["ref"] for e in rows if e["name"] == "Edit " + str(n))
+    page.evaluate("() => scrollTo(0, document.querySelectorAll('#rows button')[30].offsetTop - 280)")
+    near = read(page, include_text=False, max_chars=1500)
+    names = [e["name"] for e in near["elements"]]
+    assert near["truncated"] is True and "Edit 30" in names and "Next page" not in names
+    assert len(json.dumps(near, separators=(",", ":"), ensure_ascii=False).encode()) <= 1500
+    # The kept elements are the nearest ones, returned in document order.
+    numbers = [int(n.split()[1]) for n in names]
+    assert numbers == sorted(numbers) and numbers[-1] - numbers[0] == len(numbers) - 1
+    on_screen = read(page, include_text=False, viewport_only=True)
+    shown = [int(e["name"].split()[1]) for e in on_screen["elements"]]
+    assert 30 in shown and 0 not in shown and 59 not in shown and on_screen["truncated"] is False
+    scope = page.evaluate("""() => { const s = document.querySelector("#rows li:nth-child(8)");
+      s.setAttribute("role", "button"); s.setAttribute("aria-label", "Row seven"); return true; }""")
+    assert scope
+    row_ref = ref_of(read(page, include_text=False), "Row seven")
+    scoped = read(page, scope_ref=row_ref)
+    assert [e["name"] for e in scoped["elements"]] == ["Row seven", "Edit 7"]
+    assert scoped["text"] == "Row 7 Edit 7"
+    assert edit(7) == ref_of(scoped, "Edit 7")
+    page.evaluate("() => document.querySelector('#rows li:nth-child(8)').remove()")
+    assert read(page, scope_ref=row_ref) == {"error": "StaleElement"}
 
 
 def test_click_and_type_refuse_stale_refs(page):

@@ -19,6 +19,7 @@ from test_activation_codes import (  # noqa: F401
     short,
 )
 
+from trusty_browser.page_query import READ_DEFAULTS
 from trusty_browser import codes, protocol
 
 CLOSED = (EOFError, asyncio.IncompleteReadError, ConnectionError)
@@ -525,6 +526,25 @@ def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_ke
     run(short, body)
 
 
+def test_page_read_sends_its_controls_and_refuses_bad_ones(short, clock):
+    # #11356: absent controls take their defaults; a bad one sends nothing.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        assert (await call({"op": "page_read", "lease": lease}))["ok"]
+        scoped = {"scope_ref": "4.1", "max_chars": 2000, "include_text": True}
+        assert (await call({"op": "page_read", "lease": lease, **scoped}))["ok"]
+        sent = [{k: f[k] for k in READ_DEFAULTS} for f in rig.a.sent("page_read")]
+        assert sent == [READ_DEFAULTS, {**READ_DEFAULTS, **scoped}]
+        for bad in ({"max_chars": 999}, {"max_chars": True}, {"scope_ref": ""},
+                    {"viewport_only": "yes"}, {"include_text": 1}, {"limit": 3}):  # fmt: skip
+            reply = await call({"op": "page_read", "lease": lease, **bad})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, bad
+        assert len(rig.a.sent("page_read")) == 2
+
+    run(short, body)
+
+
 def test_text_dropped_is_relayed_with_its_counts_and_journaled(short, clock):
     # #11352: the typing ran, so the refusal keeps the lease and a retry types nothing.
     async def body(rig):
@@ -533,7 +553,13 @@ def test_text_dropped_is_relayed_with_its_counts_and_journaled(short, clock):
         dropped = {"error": "TextDropped", "tab": 7, "reason": "maxlength", "typed": 6,
                    "accepted": 3, "entered": "abc"}  # fmt: skip
         rig.a.refuse["page_type"] = dropped
-        frame = {"op": "page_type", "lease": lease, "request_id": "t", "ref": "1.0", "text": "abcdef"}
+        frame = {
+            "op": "page_type",
+            "lease": lease,
+            "request_id": "t",
+            "ref": "1.0",
+            "text": "abcdef",
+        }
         assert await call(frame) == {"ok": False, **dropped}
         assert len(rig.broker.claims) == 1
         del rig.a.refuse["page_type"]
@@ -629,13 +655,22 @@ def test_page_press_validates_key_and_modifiers_before_sending(short, clock):
         assert len(rig.a.sent("page_press")) == 3
 
     run(short, body)
+
+
 FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
 
 
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
 @pytest.mark.parametrize(
     "op",
-    ["page_click", "page_type", "page_press", "page_select", "page_navigate", "page_upload"],
+    [
+        "page_click",
+        "page_type",
+        "page_press",
+        "page_select",
+        "page_navigate",
+        "page_upload",
+    ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error

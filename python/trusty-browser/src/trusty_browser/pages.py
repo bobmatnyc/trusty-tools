@@ -19,6 +19,7 @@ from trusty_browser import codes
 from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
+from trusty_browser.page_query import controls, optional
 from trusty_browser.protocol import (
     MUTATING,
     Claim,
@@ -204,8 +205,11 @@ def key_allowed(key: object) -> bool:
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
-    if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
+    if not isinstance(op, str) or op not in OPS:
         raise Refusal("InvalidRequest")
+    if not OPS[op] <= set(request) <= OPS[op] | optional(op):
+        raise Refusal("InvalidRequest")
+    controls(request)  # #11356
     for name in ("lease", "request_id", "ref"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
         # #11286: page_press takes a null ref for the focused element.
@@ -428,7 +432,13 @@ class Pages(Grants):
         if op == "page_read":
             result = shaped(
                 await self.send(
-                    grant, claim, claim.peer, op, tab=tab, document=claim.document
+                    grant,
+                    claim,
+                    claim.peer,
+                    op,
+                    tab=tab,
+                    document=claim.document,
+                    **controls(request),
                 ),
                 READ,
             )

@@ -260,7 +260,7 @@ answers `InvalidRequest`.
 |---|---|---|
 | `tabs` | `op` | `tabs`: list of tab entries |
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
-| `page_read` | `op`, `lease` | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
+| `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
@@ -418,7 +418,7 @@ Envelope:
 |---|---|---|
 | `page_tabs` | none | `{"tabs": [tab entry, ...]}` |
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
-| `page_read` | `tab`, `document` (str or null: the lease's last document) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
+| `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
@@ -538,7 +538,7 @@ or name answers `StaleElement` instead of acting on it.
 | `origin` | str | `location.origin` |
 | `url` | str | `location.href`, at most 2048 characters |
 | `title` | str | `document.title`, at most 200 characters |
-| `text` | str | `document.body.innerText`, at most 65536 characters; empty when there is no body |
+| `text` | str | With `include_text`, the scope's `innerText` (`document.body` without `scope_ref`), at most 65536 characters; else empty |
 | `elements` | list | At most 500 element entries, in document order |
 | `truncated` | bool | True when any field or the list was cut |
 
@@ -562,9 +562,16 @@ any element whose `role` is `button`, `link`, `checkbox`, `radio`, `tab`,
 element is reported only when `getClientRects().length > 0` and its computed
 `visibility` is `visible`. Only the top document's light DOM is walked.
 
-Size bound: the JSON encoding of `result` is at most 262144 bytes of UTF-8.
-The injected function measures it; over the bound it shortens `text` first,
-then drops elements from the end of the list, and sets `truncated: true`.
+Read controls (#11356): `scope_ref` reads only that element and its subtree;
+a ref that does not resolve (see refs above) answers `StaleElement`.
+`viewport_only` keeps only elements whose box overlaps the viewport.
+`include_text` adds `text`. `max_chars` bounds the result.
+
+Size bound: the JSON encoding of `result` is at most `max_chars` and at most
+262144 bytes of UTF-8, both measured as UTF-8 bytes. Elements fill the bound
+in order of distance from the viewport (0 for an element on screen, nearest
+first, document order on ties) and the list returns in document order; `text`
+takes what is left. A cut field, element or list sets `truncated: true`.
 
 `page_click`: `scrollIntoView({block: "center", inline: "center"})`, then
 dispatch bubbling `pointerdown`, `mousedown`, `pointerup`, `mouseup` at the
