@@ -30,9 +30,9 @@ use crate::integrations::search_client::{IndexIdentity, SearchClient, SearchClie
 ///
 /// Why: a missing index is a caller-fixable condition, not an outage; the
 /// message must say which repo and which index id were looked up.
-/// What: one variant per failure; each `Display` names the repo. `Registry`
-/// is the only variant `review_pr` may degrade on (search not required).
-/// Test: `missing_index_error_names_the_repo_and_the_index_id`,
+/// What: one variant per failure; each `Display` names the repo. `review_pr`
+/// may degrade on `Registry` and, #11409, on `NoIndex` (search not required).
+/// Test: `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoIndexError {
@@ -270,7 +270,7 @@ pub(crate) fn check_pin(
 /// the repo.
 ///
 /// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
-/// `missing_index_error_names_the_repo_and_the_index_id`,
+/// `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
 /// `owner_named_unknown_owner_sentinel_is_invalid`,
