@@ -161,6 +161,22 @@ def test_document_changed_is_relayed_without_extra_fields_and_not_journaled(
     run(short, body)
 
 
+def test_navigation_pending_is_relayed_and_keeps_the_lease(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        rig.a.refuse["page_read"] = {"error": "NavigationPending", "tab": 7}
+        read = {"op": "page_read", "lease": lease}
+        assert await call(read) == {"ok": False, "error": "NavigationPending", "tab": 7}
+        assert len(rig.broker.claims) == 1
+        del rig.a.refuse["page_read"]
+        rig.a.tabs[7]["document"] = "d7-2"
+        landed = await call(read)
+        assert landed["document"] == "d7-2" and landed["document_changed"] is True
+
+    run(short, body)
+
+
 def test_permission_needed_is_relayed_and_keeps_grant_and_lease(short, clock):
     async def body(rig):
         ack, call = await session(rig)
