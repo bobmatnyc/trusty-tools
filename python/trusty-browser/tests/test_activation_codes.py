@@ -794,6 +794,21 @@ def test_a_rebind_the_audit_cannot_record_ends_the_grant(short, clock, monkeypat
     run(short, body)
 
 
+def test_a_reconnect_after_the_grace_ends_the_grant_without_a_sweep(short, clock):
+    async def body(rig):
+        ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])
+        await rig.a.leave()
+        rig.broker.halt()  # no sweep runs; only the hello sees the lapsed grace
+        clock[0] += codes.RECONNECT_GRACE + 30
+        rig.a = await FakeBrowser(rig, rig.alpha).pair()  # same incarnation
+        assert ack["grant"] not in rig.a.ack["live"]
+        assert rig.outcomes("grant_reuse") == []
+        assert rig.outcomes("grant_end") == ["browser_gone"]
+        assert (await gone(call, {"op": "tabs"}))["reason"] == "browser_gone"
+
+    run(short, body)
+
+
 def test_a_browser_restart_ends_the_grant_at_reconnect(short, clock):
     async def body(rig):
         ack, call = await rig.redeem((await rig.mint(rig.alpha))["code"])

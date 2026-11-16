@@ -431,7 +431,8 @@ class Grants(Leases):
         failure, ends them ``browser_gone``. Runs before the hello
         acknowledgement, so its ``live`` list is current.
         Test: `test_a_grant_survives_a_worker_reconnect_within_the_grace`,
-        `test_a_browser_restart_ends_the_grant_at_reconnect`.
+        `test_a_browser_restart_ends_the_grant_at_reconnect`,
+        `test_a_reconnect_after_the_grace_ends_the_grant_without_a_sweep`.
         """
         profile = str(peer.row["profile"])
         for grant in list(self.grants.values()):
@@ -440,6 +441,13 @@ class Grants(Leases):
                 or grant.state not in ("code", "active")
                 or grant.generation in (None, peer.generation)
             ):
+                continue
+            if (  # #11239: a lapsed grace ends the grant even before the sweep runs
+                grant.state == "active"
+                and grant.grace_until is not None
+                and grant.grace_until <= codes.clock()
+            ):
+                self.retire(grant, "browser_gone")
                 continue
             # pair() refuses an empty incarnation (protocol.string); this guard
             # keeps an unset one from ever matching.
