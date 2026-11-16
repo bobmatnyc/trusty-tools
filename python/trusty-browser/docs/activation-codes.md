@@ -269,6 +269,7 @@ answers `InvalidRequest`.
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
+| `page_find` | `op`, `lease`; optional `role`, `name`, `text` (str of 1-200 characters or null; at least one set), `within_ref` str or null, `limit` int 1-50 (default 10) | `tab` int, `document` str, `document_changed` bool, `origin` str, `matches` list, `truncated` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
 `files` (#11289) is a list of 1 to 10 `{"name", "type", "data"}` objects:
@@ -427,6 +428,7 @@ Envelope:
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
+| `page_find` | `tab`, `document`, `role`, `name`, `text`, `within_ref`, `limit` (the broker fills defaults) | `{"document", "origin", "matches", "truncated"}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, or `closed`), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -573,6 +575,19 @@ in order of distance from the viewport (0 for an element on screen, nearest
 first, document order on ties) and the list returns in document order; `text`
 takes what is left. A cut field, element or list sets `truncated: true`.
 
+`page_find` (#11357): the same injected function in find mode, run like
+`page_read`. It matches the reported elements (see above) under `within_ref`
+(its descendants only; a ref that does not resolve answers `StaleElement`):
+`role` exactly, `name` as a case-insensitive substring of the accessible name,
+and `text` as a case-insensitive substring of the element's own `innerText` or
+its container's. It returns at most `limit` matches in document order, each an
+element entry plus `in`: the nearest `list` (`ul`, `ol`, `role=list`), `row`
+(`tr`, `role=row`), `dialog`, `form`, `navigation` or `main` ancestor as
+`{"role", "name", "ref"}`, or null. The container's name is its
+`aria-label` or `aria-labelledby` text, else for a row its own text, else its
+first heading, `legend` or `caption`. Its `ref` works as `within_ref` and
+`scope_ref`. `truncated` is true when more elements matched.
+
 `page_click`: `scrollIntoView({block: "center", inline: "center"})`, then
 dispatch bubbling `pointerdown`, `mousedown`, `pointerup`, `mouseup` at the
 element's centre, `focus()` when the element is focusable, then
@@ -694,6 +709,7 @@ steps do not run.
 | `tabs` | Grant generation is the peer's; tab grant: the reply list is filtered to the grant's tab | Grant known; tab grant: list only the grant's tab. Probes each listed tab for `access`, `origin`, `title` |
 | `select` | Generation; tab grant: `tab` equals the grant's tab; `TabClaimed` check | Check order, then the read-only probe |
 | `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame; failure is `PermissionNeeded` |
+| `page_find` | As `page_read` | As `page_read` |
 | `page_click`, `page_type`, `page_press` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
@@ -715,6 +731,7 @@ only. A refusal's result line is best effort.
 | `tabs` | `tabs` | absent | tab titles, origins |
 | `select` | `select` | host of the probed page when `access` | title |
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
+| `page_find` | `page_find` | host of the read page | matches and their names |
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
@@ -810,6 +827,7 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
+| `page_find` | `lease: str`, `role`, `name`, `text`, `within_ref`: str or null, `limit: int` | The `page_find` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |

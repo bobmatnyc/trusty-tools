@@ -182,6 +182,11 @@ class FakeBrowser:
             }
         if op == "page_downloads":
             return {"origin": ORIGIN, "downloads": [dict(DOWNLOAD)]}
+        if op == "page_find":  # #11357
+            match = {"ref": "1.0", "tag": "button", "role": "button", "name": "Delete"}
+            match["in"] = {"role": "row", "name": "Alice Delete", "ref": "1.1"}
+            return {"document": item["document"], "origin": ORIGIN,
+                    "matches": [match], "truncated": False}  # fmt: skip
         if req.get("document") != item["document"]:
             # ``secret`` is a field the broker must drop before relaying.
             return {

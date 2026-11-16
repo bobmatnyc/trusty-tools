@@ -130,6 +130,47 @@ def test_read_scopes_bounds_and_truncates_in_viewport_order(page):
     assert read(page, scope_ref=row_ref) == {"error": "StaleElement"}
 
 
+def find(page, **terms):
+    return page.evaluate("t => TrustyPages.pageFind(t)", terms)
+
+
+def test_find_returns_matches_with_their_container(page):
+    # #11357: ten identical Delete buttons come back distinguishable by row.
+    page.evaluate("""() => {
+      const table = document.createElement("table");
+      table.innerHTML = "<caption>People</caption>" + Array.from({length:10}, (_, i) =>
+        "<tr><td>Person " + i + "</td><td><button>Delete</button></td></tr>").join("");
+      const nav = document.createElement("nav");
+      nav.setAttribute("aria-label", "Site");
+      nav.innerHTML = "<a href='/home'>Home</a><button>Delete</button>";
+      document.body.append(table, nav);
+    }""")
+    rows = find(page, role="button", name="delete", limit=50)
+    assert rows["truncated"] is False and len(rows["matches"]) == 11
+    assert [m["in"]["name"] for m in rows["matches"][:10]] == ["Person %d Delete" % i for i in range(10)]
+    assert {m["in"]["role"] for m in rows["matches"][:10]} == {"row"}
+    assert rows["matches"][10]["in"] == {"role": "navigation", "name": "Site", "ref": rows["matches"][10]["in"]["ref"]}
+    assert len({m["ref"] for m in rows["matches"]}) == 11
+    assert [m["name"] for m in find(page, name="Go")["matches"]] == ["Go now"]
+    # text matches the container's text, so this is the Delete button in Person 4's row.
+    four = find(page, role="button", text="person 4")["matches"]
+    assert len(four) == 1 and four[0]["in"]["name"] == "Person 4 Delete"
+    assert click(page, four[0]["ref"]) == {"ok": True}
+    assert page.evaluate("events").count("click:button") == 1
+    # within_ref never returns an element outside its subtree.
+    row = four[0]["in"]["ref"]
+    inside = find(page, role="button", within_ref=row)
+    assert [m["ref"] for m in inside["matches"]] == [four[0]["ref"]]
+    nav = rows["matches"][10]["in"]["ref"]
+    assert [m["name"] for m in find(page, name="e", within_ref=nav)["matches"]] == ["Home", "Delete"]
+    assert find(page, role="link", within_ref=row)["matches"] == []
+    limited = find(page, role="button", name="Delete", limit=3)
+    assert len(limited["matches"]) == 3 and limited["truncated"] is True
+    assert find(page, name="no such thing") == {"origin": "null", "matches": [], "truncated": False}
+    page.evaluate("() => document.querySelectorAll('tr')[4].remove()")
+    assert find(page, role="button", within_ref=row) == {"error": "StaleElement"}
+
+
 def test_click_and_type_refuse_stale_refs(page):
     second = read(page)
     fresh = ref_of(second, "Go now")

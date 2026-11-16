@@ -19,7 +19,7 @@ from test_activation_codes import (  # noqa: F401
     short,
 )
 
-from trusty_browser.page_query import READ_DEFAULTS
+from trusty_browser.page_query import FIND_DEFAULTS, READ_DEFAULTS
 from trusty_browser import codes, protocol
 
 CLOSED = (EOFError, asyncio.IncompleteReadError, ConnectionError)
@@ -541,6 +541,28 @@ def test_page_read_sends_its_controls_and_refuses_bad_ones(short, clock):
             reply = await call({"op": "page_read", "lease": lease, **bad})
             assert reply == {"ok": False, "error": "InvalidRequest"}, bad
         assert len(rig.a.sent("page_read")) == 2
+
+    run(short, body)
+
+
+def test_page_find_relays_matches_and_refuses_bad_terms(short, clock):
+    # #11357: absent terms take their defaults; a find needs role, name or text.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        found = await call({"op": "page_find", "lease": lease, "name": "Delete"})
+        assert found["ok"] and found["matches"][0]["in"]["role"] == "row"
+        assert found["document_changed"] is False and found["truncated"] is False
+        sent = rig.a.sent("page_find")[0]
+        assert {k: sent[k] for k in FIND_DEFAULTS} == {
+            **FIND_DEFAULTS,
+            "name": "Delete",
+        }
+        for bad in ({}, {"name": ""}, {"name": "x", "limit": 0}, {"name": "x", "limit": 51},
+                    {"role": 3}, {"name": "x", "within_ref": ""}, {"name": "x", "max_chars": 2000}):  # fmt: skip
+            reply = await call({"op": "page_find", "lease": lease, **bad})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, bad
+        assert len(rig.a.sent("page_find")) == 1
 
     run(short, body)
 

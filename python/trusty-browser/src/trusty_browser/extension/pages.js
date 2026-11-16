@@ -389,8 +389,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  const {pageInspect, pageRead} = globalThis.TrustyPageRead;
-  return {pageProbe, pageInspect, pageRead, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSelect, pageSetFiles,
+  const {pageInspect, pageRead, pageFind} = globalThis.TrustyPageRead;
+  return {pageProbe, pageInspect, pageRead, pageFind, pageClick, pageKeys, pageType, pagePress, pageScroll, pageSelect, pageSetFiles,
     urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
@@ -409,6 +409,7 @@ TrustyPages.commands = deps => {
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
   const bool = v => typeof v === "boolean";
+  const term = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 200);
   const SCROLL_TO = ["down","up","top","bottom","element"];
   // #11289: at most 10 files and 700000 base64 characters, so a frame stays under the 1 MiB native limit.
   const B64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -423,6 +424,9 @@ TrustyPages.commands = deps => {
     // #11356: the broker always sends every read control.
     page_read:{tab, document:doc, scope_ref:v => v === null || ref(v), viewport_only:bool, include_text:bool,
       max_chars:v => Number.isInteger(v) && v >= 1000 && v <= 250000},
+    // #11357: at least one of role, name and text; within_ref limits the search to a subtree.
+    page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || ref(v),
+      limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
     page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
@@ -537,6 +541,22 @@ TrustyPages.commands = deps => {
       await deps.remember(req.tab, result.origin);
       return {document:hit.documentId, origin:result.origin, url:result.url, title:result.title,
         text:result.text, elements:result.elements, truncated:result.truncated};
+    },
+    // #11357: a read like page_read, of matches only.
+    async page_find(req) {
+      if (req.role === null && req.name === null && req.text === null) throw refuse("InvalidRequest");
+      await landed(req.tab);
+      let hit;
+      try {
+        [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect,
+          args:["find", 512, {role:req.role, name:req.name, text:req.text, within_ref:req.within_ref, limit:req.limit}]});
+      } catch { throw await needed(req.tab); }
+      const result = hit?.result;
+      if (result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
+      if (!result || typeof hit.documentId !== "string" || typeof result.origin !== "string" ||
+          !Array.isArray(result.matches)) throw await needed(req.tab);
+      await deps.remember(req.tab, result.origin);
+      return {document:hit.documentId, origin:result.origin, matches:result.matches, truncated:result.truncated === true};
     },
     page_click:req => act(req, pageClick, [req.ref]),
     page_type:req => act(req, pageKeys, [req.ref, "type", req.text]),

@@ -42,6 +42,7 @@ OPS = {
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
+    "page_find": {"op", "lease"},  # #11357: terms are optional fields
     "release": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
@@ -120,6 +121,12 @@ READ = {
     "title": (str,),
     "text": (str,),
     "elements": (list,),
+    "truncated": (bool,),
+}
+FOUND = {
+    "document": (str,),
+    "origin": (str,),
+    "matches": (list,),
     "truncated": (bool,),
 }
 DONE = {"document": (str,)}
@@ -429,7 +436,7 @@ class Pages(Grants):
             self.drop(claim)
             return {"ok": True}, claim.tab, None
         tab = claim.tab
-        if op == "page_read":
+        if op in ("page_read", "page_find"):
             result = shaped(
                 await self.send(
                     grant,
@@ -440,7 +447,7 @@ class Pages(Grants):
                     document=claim.document,
                     **controls(request),
                 ),
-                READ,
+                READ if op == "page_read" else FOUND,
             )
             changed = result["document"] != claim.document
             claim.document, claim.origin = (

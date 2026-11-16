@@ -330,6 +330,27 @@ test("page_read passes its controls to the page and relays a stale scope", async
   assert.deepEqual(stale, {id:stale.id, ok:false, error:"StaleElement", tab:7});
 });
 
+// #11357: page_find injects pageInspect in find mode with its terms; it needs a term and relays a stale scope.
+test("page_find passes its terms to the page and relays its matches", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const terms = {role:"button", name:"Delete", text:null, within_ref:"3.1", limit:5};
+  const match = {ref:"3.2", tag:"button", role:"button", name:"Delete", in:{role:"row", name:"Ann Delete", ref:"3.1"}};
+  f.tabs.get(7).readResult = {origin:"https://a.test", matches:[match], truncated:false};
+  const found = await f.command("page_find", {grant, tab:7, document:null, ...terms});
+  assert.deepEqual(plain(found.result), {document:"doc-7", origin:"https://a.test", matches:[match], truncated:false});
+  assert.equal(JSON.stringify(f.ran.at(-1)), JSON.stringify({tab:7, func:"pageInspect", args:["find", 512, terms]}));
+  const ran = f.ran.length;
+  for (const bad of [{role:null, name:null}, {limit:0}, {limit:51}, {text:""}, {within_ref:"row"}]) {
+    const reply = await f.command("page_find", {grant, tab:7, document:null, ...terms, ...bad});
+    assert.equal(reply.error, "InvalidRequest", JSON.stringify(bad));
+  }
+  assert.equal(f.ran.length, ran);
+  f.tabs.get(7).readResult = {error:"StaleElement"};
+  const stale = await f.command("page_find", {grant, tab:7, document:null, ...terms});
+  assert.deepEqual(stale, {id:stale.id, ok:false, error:"StaleElement", tab:7});
+});
+
 // #11286: typing and key presses inject the one key engine into the lease's document only.
 test("page_type and page_press inject pageKeys with their action", async () => {
   const f = await codeFixture();

@@ -55,6 +55,32 @@ def add_page_tools(
         )
 
     @server.tool()
+    def page_find(
+        lease: str,
+        role: str | None = None,
+        name: str | None = None,
+        text: str | None = None,
+        within_ref: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Find elements by ``role`` (exact), ``name`` and ``text`` (substrings, any case).
+
+        Give at least one of role, name and text. ``text`` matches the
+        element's own text or its container's; ``within_ref`` searches only
+        inside that element. Each match carries ``in``: its nearest list, row,
+        dialog, form, navigation or main, with name and ref (#11357).
+        """
+        return call(
+            "page_find",
+            lease=lease,
+            role=role,
+            name=name,
+            text=text,
+            within_ref=within_ref,
+            limit=limit,
+        )
+
+    @server.tool()
     def page_click(lease: str, ref: str, request_id: str) -> dict[str, Any]:
         """Click the element a page_read returned as ``ref``. Reuse the request ID to retry."""
         return call("page_click", lease=lease, ref=ref, request_id=request_id)

@@ -15,7 +15,7 @@ globalThis.TrustyPageRead = (() => {
   //   then text takes what is left; any cut sets `truncated`.
   // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`,
   //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`,
-  //   `test_read_scopes_bounds_and_truncates_in_viewport_order`.
+  //   `test_read_scopes_bounds_and_truncates_in_viewport_order`. Mode "find" is page_find (see find below).
   function pageInspect(mode, reserve, options) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const epoch = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
@@ -109,6 +109,50 @@ globalThis.TrustyPageRead = (() => {
       return entry;
     }
     const bytes = value => new TextEncoder().encode(JSON.stringify(value)).length;
+    // #11357: the container kinds a match reports, nearest ancestor first.
+    const CONTAINERS = [["list","ul,ol,[role=list]"], ["row","tr,[role=row]"],
+      ["dialog","dialog,[role=dialog],[role=alertdialog]"], ["form","form,[role=form]"],
+      ["navigation","nav,[role=navigation]"], ["main","main,[role=main]"]];
+    const ANY_CONTAINER = CONTAINERS.map(([, css]) => css).join(",");
+    // A container's name: its label, else a row's own text, else its first heading, legend or caption.
+    function containerName(box, kind) {
+      const labelled = (box.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
+        .map(id => document.getElementById(id)?.innerText || "").join(" ");
+      const heading = kind === "row" ? box : box.querySelector("h1,h2,h3,h4,h5,h6,legend,caption,[role=heading]");
+      for (const value of [box.getAttribute("aria-label"), labelled, heading?.innerText]) {
+        const name = clean(value);
+        if (name) return name.slice(0, 200);
+      }
+      return "";
+    }
+    function container(el) {
+      const box = el.parentElement?.closest(ANY_CONTAINER);
+      if (!box) return null;
+      const [kind] = CONTAINERS.find(([, css]) => box.matches(css));
+      return {role:kind, name:containerName(box, kind), ref:refOf(box)};
+    }
+    // Why: an agent needs one element (the Delete button in the row for X), not the whole page (#11357).
+    // What: matches the reported elements under `within_ref` (descendants only; StaleElement when it does not
+    //   resolve) by exact `role`, and case-insensitive substrings of `name` and of `text` (the element's own
+    //   text or its container's). Returns at most `limit` matches in document order, each with `in`, its nearest
+    //   container, and `truncated` when more matched.
+    function find() {
+      const fold = value => clean(value).toLowerCase();
+      const scope = options.within_ref == null ? null : resolve(options.within_ref);
+      if (options.within_ref != null && !scope) return {error:"StaleElement"};
+      const result = {origin:location.origin, matches:[], truncated:false};
+      for (const el of within(scope ?? document)) {
+        if (el === scope) continue;
+        if (options.role != null && roleOf(el) !== options.role) continue;
+        if (options.name != null && !fold(accessibleName(el)).includes(fold(options.name))) continue;
+        const box = el.parentElement?.closest(ANY_CONTAINER);
+        if (options.text != null && ![el, box].some(n => n && fold(n.innerText).includes(fold(options.text)))) continue;
+        if (result.matches.length === options.limit) { result.truncated = true; break; }
+        result.matches.push({...describe(el), in:container(el)});
+      }
+      while (bytes(result) > LIMIT) { result.truncated = true; result.matches.pop(); }
+      return result;
+    }
     const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
     // Reported elements under `root` (itself included), in document order.
     function within(root) {
@@ -121,6 +165,7 @@ globalThis.TrustyPageRead = (() => {
       const box = el.getBoundingClientRect();
       return Math.hypot(Math.max(0, box.left - innerWidth, -box.right), Math.max(0, box.top - innerHeight, -box.bottom));
     }
+    if (mode === "find") return find();
     // #11356: scope_ref, max_chars, viewport_only and include_text bound what a read returns.
     const scope = options.scope_ref == null ? null : resolve(options.scope_ref);
     if (options.scope_ref != null && !scope) return {error:"StaleElement"};
@@ -155,5 +200,7 @@ globalThis.TrustyPageRead = (() => {
   }
   // In-page entry point for tests and the live check; the worker injects pageInspect itself.
   const pageRead = (reserve, options = {}) => pageInspect("read", reserve, options);
-  return {pageInspect, pageRead};
+  const pageFind = options => pageInspect("find", 512, {role:null, name:null, text:null, within_ref:null, limit:10,
+    ...options});
+  return {pageInspect, pageRead, pageFind};
 })();
