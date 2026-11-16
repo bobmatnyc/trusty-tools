@@ -130,6 +130,16 @@ def test_read_scopes_bounds_and_truncates_in_viewport_order(page):
     assert read(page, scope_ref=row_ref) == {"error": "StaleElement"}
 
 
+def test_read_cuts_a_long_url_to_fit_a_small_budget(page):
+    # #11356: url and title alone over max_chars are cut to fit; the trim loop used to spin forever.
+    page.goto("data:text/html,<title>" + "T" * 150 + "</title><button>Go</button>#" + "u" * 3000)
+    load(page)
+    small = read(page, max_chars=1000)
+    assert small["truncated"] is True and small["text"] == "" and small["elements"] == []
+    assert len(json.dumps(small, separators=(",", ":"), ensure_ascii=False).encode()) <= 1000
+    assert small["url"].startswith("data:text/html,") and len(small["url"]) < 1000
+
+
 def find(page, **terms):
     return page.evaluate("t => TrustyPages.pageFind(t)", terms)
 

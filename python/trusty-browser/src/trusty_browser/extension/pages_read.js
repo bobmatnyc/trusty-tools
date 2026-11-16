@@ -192,8 +192,11 @@ globalThis.TrustyPageRead = (() => {
     }
     for (let over = bytes(result) - budget; over > 0; over = bytes(result) - budget) {
       truncated = true;
-      if (result.text) result.text = result.text.slice(0, Math.max(0, result.text.length - over));
-      else result.elements.pop();
+      // #11356: text goes first, then elements, then the title and url, so the loop always ends.
+      if (!result.text && result.elements.length) { result.elements.pop(); continue; }
+      const key = ["text", "title", "url"].find(k => result[k]);
+      if (!key) break;
+      result[key] = result[key].slice(0, Math.max(0, result[key].length - over));
     }
     result.truncated = truncated;
     return result;
