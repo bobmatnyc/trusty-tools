@@ -118,9 +118,12 @@ issue, not only bugs:
    the squash commit message lists every issue.
 4. One critic round and one gate run per PR, never per issue.
 5. On merge, `ticketing` moves every issue in the cluster, and closes each
-   one under the project's close rule.
+   one only when it clears the project's close rule and the live-evidence bar.
 6. Keep agent slots full up to the band: dispatch the next cluster, not the
    next single issue.
+7. Stack PRs only for a true dependency chain (owner ruling). A true
+   dependency chain stacks its PRs; independent clusters each branch from
+   `origin/main`.
 
 ## Where Each Task Lives
 

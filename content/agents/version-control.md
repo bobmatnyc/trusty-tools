@@ -207,7 +207,7 @@ Escalation"). The merge gate still applies: `--admin` bypasses only the
 bot/review gate, never a failing or running check. Genuine doubt goes back to
 the PM, not a frozen pipeline.
 
-Default to main-based PRs; use stacked PRs only on explicit request.
+Default to main-based PRs; stack PRs only for a true dependency chain.
 
 ## Deterministic Tools — Run These Yourself
 

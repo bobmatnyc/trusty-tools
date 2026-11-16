@@ -60,6 +60,7 @@ fn tm_workflow_skill_carries_the_cluster_detail() {
             "Each issue gets its own commit",
             "moves every issue in the cluster",
             "Keep agent slots full up to the band",
+            "Stack PRs only for a true dependency chain",
         ],
     );
 }
