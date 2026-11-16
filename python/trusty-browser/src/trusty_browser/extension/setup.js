@@ -42,6 +42,7 @@ function active(name, route) {
   $("account").textContent = route.account;
   $("workflow").textContent = name;
   statusLine.textContent = "Extension active";
+  void loadAccess();
 }
 async function refresh() {
   preview = await request({type:"preview"});
@@ -55,7 +56,7 @@ function errorMessage(error) {
 }
 async function submit(replace = false) {
   activate.disabled = $("replace").disabled = $("cancel").disabled = true;
-  activate.textContent = "Activating…";
+  activate.textContent = "Enrolling…";
   statusLine.textContent = "";
   try {
     if (!preview) await refresh();
@@ -98,7 +99,7 @@ async function submit(replace = false) {
     try { await refresh(); } catch { /* Preserve the activation error for retry. */ }
   } finally {
     activate.disabled = $("replace").disabled = $("cancel").disabled = false;
-    activate.textContent = "Activate Extension";
+    activate.textContent = "Enroll this site's workflow";
   }
 }
 activate.addEventListener("click", () => submit());
@@ -127,5 +128,193 @@ remove.addEventListener("click", async () => {
   } catch (error) { statusLine.textContent = errorMessage(error); }
   finally { remove.disabled = false; }
 });
-refresh().catch(error => { statusLine.textContent = errorMessage(error); })
+
+// #11239: activation codes. The code lives only in this page's memory; closing the popup discards it.
+// The target tab is read once, at load, and every request names it explicitly.
+const targetTab = (async () => {
+  const [found] = await chrome.tabs.query({active:true, currentWindow:true});
+  return Number.isInteger(found?.id) && found.id >= 0 ? found.id : null;
+})().catch(() => null);
+let tab = null, code = null, codeGrant = null, expiresAt = 0, ticker = null, poller = null, accessShown = false;
+// Chrome needs permissions.request inside the click, so the popup tracks whether https://*/* is held.
+// #11239: the worker removes it on its own signals, so the popup follows Chrome's add/remove events and
+// re-reads it after every revoke and grant poll; a mint click then sees the state at click time.
+const ALL_HTTPS = {origins:["https://*/*"]};
+let httpsHeld = false;
+async function checkHttps() {
+  try { httpsHeld = await chrome.permissions.contains(ALL_HTTPS) === true; } catch { httpsHeld = false; }
+}
+const coversAllHttps = change => change?.origins?.includes("https://*/*");
+try {
+  chrome.permissions.onRemoved?.addListener(change => { if (coversAllHttps(change)) httpsHeld = false; });
+  chrome.permissions.onAdded?.addListener(change => { if (coversAllHttps(change)) httpsHeld = true; });
+} catch { /* checkHttps still refreshes the state. */ }
+function askHttps() {
+  try { return chrome.permissions.request(ALL_HTTPS).catch(() => false); } catch { return Promise.resolve(false); }
+}
+const clock = seconds => {
+  const s = Math.max(0, Math.ceil(seconds));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
+function show(state) {
+  for (const name of ["choose","shown","expired"]) $(name).hidden = name !== state;
+}
+function forgetCode() {
+  clearInterval(ticker);
+  code = codeGrant = null;
+  $("code").value = "";
+}
+function countdown() {
+  const left = expiresAt - Date.now() / 1000;
+  if (left <= 0) {
+    forgetCode();
+    show("expired");
+    return;
+  }
+  $("countdown").textContent = clock(left);
+}
+function scopeLabel(entry) { return entry.scope === "tab" ? "This tab" : "Whole profile"; }
+function renderGrants(entries) {
+  const list = $("grants");
+  list.replaceChildren(...entries.map(entry => {
+    const row = document.createElement("li");
+    const where = [entry.origin, entry.title].filter(Boolean).join(" — ");
+    const state = entry.state === "code"
+      ? "waiting for agent, " + clock(entry.expires_in_s) + " left"
+      : "agent connected, idle " + clock(entry.idle_s);
+    row.textContent = scopeLabel(entry) + (where ? ": " + where : "") + " · " + state;
+    const disconnect = document.createElement("button");
+    disconnect.className = "secondary";
+    disconnect.textContent = "Disconnect";
+    disconnect.addEventListener("click", () => revoke({type:"revoke_grant", grant:entry.grant}));
+    row.append(document.createElement("br"), disconnect);
+    return row;
+  }));
+  $("disconnect-all").hidden = entries.length === 0;
+}
+async function loadGrants() {
+  try { renderGrants((await request({type:"grants"})).grants); }
+  catch (error) { statusLine.textContent = errorMessage(error); }
+  await checkHttps();
+}
+async function revoke(message) {
+  try {
+    await request(message);
+    if (message.type === "revoke_grants" || message.grant === codeGrant) {
+      forgetCode();
+      show("choose");
+    }
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  await loadGrants();
+}
+function unavailable(error) {
+  $("access").hidden = true;
+  $("retry").hidden = false;
+  statusLine.textContent = errorMessage(error);
+}
+// Contract "Popup states": no credential is Not paired; a pairing hides the workflow controls.
+function pairedView(preview) {
+  for (const id of ["activate","transfer","details"]) $(id).hidden = true;
+  $("paired-email").textContent = preview.email;
+  $("paired").hidden = false;
+}
+async function loadAccess() {
+  $("retry").hidden = true;
+  try {
+    tab = await targetTab;
+    const preview = await request({type:"code_preview", tab});
+    await checkHttps();
+    $("unpaired").hidden = preview.profile !== null;
+    if (preview.paired) pairedView(preview); else $("paired").hidden = true;
+    if (preview.profile === null) {
+      clearInterval(poller);
+      $("access").hidden = true;
+      return preview;
+    }
+    const target = preview.target;
+    $("mint-tab").disabled = !target?.access;
+    $("target").textContent = target?.access
+      ? [target.origin, target.title].filter(Boolean).join(" — ")
+      : "Open a web page and click Trusty Browser on it";
+    $("access").hidden = false;
+    if (!accessShown) show("choose");
+    accessShown = true;
+    clearInterval(poller);
+    poller = setInterval(loadGrants, 5000);
+    await loadGrants();
+    return preview;
+  } catch (error) { unavailable(error); }
+}
+function mint(scope) {
+  // Contract "All-https access": a profile mint asks inside this click when the permission is absent.
+  // See #11239 (owner ruling Dki, tab scope by default): a tab mint relies on activeTab only and never asks,
+  // because Chrome's all-sites prompt closes the popup and no code is issued.
+  const permission = scope === "tab" || httpsHeld ? Promise.resolve(true) : askHttps();
+  $("mint-tab").disabled = $("mint-profile").disabled = true;
+  statusLine.textContent = "";
+  void (async () => {
+    try {
+      await permission;
+      const reply = await request(scope === "tab" ? {type:"mint", scope, tab} : {type:"mint", scope});
+      code = reply.code;
+      codeGrant = reply.grant;
+      expiresAt = reply.expires_at;
+      $("code").value = code;
+      $("code-scope").textContent = scope === "tab" ? "This tab" : "Whole profile (every tab in this profile)";
+      show("shown");
+      countdown();
+      clearInterval(ticker);
+      ticker = setInterval(countdown, 1000);
+    } catch (error) {
+      statusLine.textContent = errorMessage(error);
+    } finally {
+      $("mint-profile").disabled = false;
+      await loadAccess();
+    }
+  })();
+}
+$("mint-tab").addEventListener("click", () => mint("tab"));
+$("mint-profile").addEventListener("click", () => mint("profile"));
+$("copy").addEventListener("click", async () => {
+  if (!code) return;
+  try {
+    await navigator.clipboard.writeText(code);
+    statusLine.textContent = "Code copied";
+  } catch { statusLine.textContent = "Could not copy the code."; }
+});
+$("cancel-code").addEventListener("click", () => codeGrant && revoke({type:"revoke_grant", grant:codeGrant}));
+$("new-code").addEventListener("click", () => { show("choose"); void checkHttps(); });
+$("disconnect-all").addEventListener("click", () => revoke({type:"revoke_grants"}));
+$("retry").addEventListener("click", () => loadAccess());
+// #11239: contract "All-https access" — Pair this profile sends `pair` only; the profile mint click asks for https://*/*.
+$("pair").addEventListener("click", async () => {
+  $("pair").disabled = true;
+  statusLine.textContent = "";
+  try {
+    await request({type:"pair"});
+    // Owner ruling Dmt, 2026-11-14: confirm the pairing; loadAccess shows its own error and returns nothing.
+    const paired = await loadAccess();
+    if (paired?.paired) statusLine.textContent = "Profile paired" + (paired.email ? ": " + paired.email : "");
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  finally { $("pair").disabled = false; }
+});
+$("unpair").addEventListener("click", async () => {
+  $("unpair").disabled = true;
+  try {
+    await request({type:"unpair"});
+    clearInterval(poller);
+    forgetCode();
+    accessShown = false;
+    activate.hidden = false;
+    $("access").hidden = $("paired").hidden = true;
+    await start();
+  } catch (error) { statusLine.textContent = errorMessage(error); }
+  finally { $("unpair").disabled = false; }
+});
+async function start() {
+  const preview = await loadAccess();
+  if (preview?.paired) return;
+  await refresh();
+}
+start().catch(error => { statusLine.textContent = errorMessage(error); })
   .finally(() => { activate.disabled = false; });

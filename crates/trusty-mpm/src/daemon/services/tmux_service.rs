@@ -336,15 +336,59 @@ impl TmuxService {
             crate::daemon::spawn_command::gui_spawn_line(workdir, &std::env::temp_dir())
                 .map_err(|e| DaemonError::Internal(format!("{e:#}")))?;
 
+        let root = crate::runtime::architect_bind::home_root();
+        Self::start_gui_claude(&driver, tmux_name, workdir, &line, profile, root.as_deref())
+    }
+
+    /// Create `tmux_name` on `driver`, type the GUI `line` and bind an
+    /// Architect it started, under `root` (`~/.trusty-mpm`).
+    ///
+    /// Why (#11270): a GUI Architect typed into a running session, or left
+    /// unbound, ran as the Architect with no launch record.
+    /// What: a session already running refuses an Architect
+    /// ([`crate::runtime::architect_bind::refuse_reused`]) before anything is
+    /// created or typed. An Architect session is created exclusively, so a
+    /// session someone else made after the probe refuses rather than attaches;
+    /// a PM keeps the `-A` create. A failed send kills the session (#1456).
+    /// Then [`Self::bind_gui_spawn`].
+    /// Test: `a_gui_architect_spawn_into_a_running_session_types_nothing_11270`,
+    /// `a_gui_architect_spawn_creates_exclusively_and_an_unbound_one_is_killed_11270`.
+    pub(crate) fn start_gui_claude(
+        driver: &TmuxDriver,
+        tmux_name: &str,
+        workdir: &Path,
+        line: &str,
+        profile: crate::core::session_profile::SessionProfile,
+        root: Option<&Path>,
+    ) -> Result<(), DaemonError> {
+        use crate::runtime::architect_bind::refuse_reused;
         // #8878: `-A` below attaches to a session already of this name; only a
         // `claude` this spawn started in a session it created is bound.
         let already_running = driver.pane_id(tmux_name).is_some();
+        // #11270: an Architect typed into a running session cannot be bound;
+        // refused before the create, so the GUI shows the remedy.
+        if already_running {
+            refuse_reused(profile.is_architect(), tmux_name).map_err(DaemonError::Unprocessable)?;
+        }
         let workdir_str = workdir.to_string_lossy().into_owned();
-        driver
-            .create_session(tmux_name, Some(&workdir_str))
-            .map_err(|e| {
-                DaemonError::Internal(format!("tmux new-session for {tmux_name} failed: {e}"))
-            })?;
+        let failed = |e: crate::core::Error| {
+            DaemonError::Internal(format!("tmux new-session for {tmux_name} failed: {e}"))
+        };
+        if profile.is_architect() {
+            // #11270: never attach an Architect launch to a session it did not make.
+            match driver.create_session_exclusive(tmux_name, Some(&workdir_str)) {
+                Ok(crate::daemon::tmux::ExclusiveCreate::Created) => {}
+                Ok(crate::daemon::tmux::ExclusiveCreate::NameTaken) => {
+                    let why = refuse_reused(true, tmux_name).err().unwrap_or_default();
+                    return Err(DaemonError::Unprocessable(why));
+                }
+                Err(e) => return Err(failed(e)),
+            }
+        } else {
+            driver
+                .create_session(tmux_name, Some(&workdir_str))
+                .map_err(failed)?;
+        }
 
         // Start `claude` in the new session's first pane. A failure here is
         // not the request's fault — the tmux host was created — so we surface
@@ -357,14 +401,13 @@ impl TmuxService {
         // may already be gone); the original `send_line` error still propagates
         // to the caller — the rollback never masks it.
         let target = TmuxTarget::session(tmux_name);
-        if let Err(e) = driver.send_line(&target, &line) {
-            Self::kill_best_effort(tmux_name);
+        if let Err(e) = driver.send_line(&target, line) {
+            let _ = driver.kill_session(tmux_name);
             return Err(DaemonError::Internal(format!(
                 "failed to launch claude in {tmux_name}: {e}"
             )));
         }
-        Self::bind_gui_spawn(&driver, tmux_name, workdir, profile, already_running);
-        Ok(())
+        Self::bind_gui_spawn(driver, tmux_name, workdir, profile, already_running, root)
     }
 
     /// Bind an Architect `claude` the GUI spawn started (#8878).
@@ -372,36 +415,36 @@ impl TmuxService {
     /// Why: a GUI-spawned Architect (#10459) wrote no launch record, so the
     /// floor refused its anchor writes.
     /// What: for a session this spawn created,
-    /// [`crate::runtime::architect_bind::bind_profile`] under the process home,
-    /// finding the `claude` under the session's pane shell on `driver`'s
-    /// server; a session that was already running is not re-bound. Not bound
-    /// is a warning in the daemon log.
-    /// Test: `every_architect_spawn_site_binds_8878`.
+    /// [`crate::runtime::architect_bind::bind_profile`] under `root`, finding
+    /// the `claude` under the session's pane shell on `driver`'s server; a
+    /// session that was already running holds no Architect launch (refused in
+    /// [`Self::start_gui_claude`], #11270) and binds nothing. #11270: not bound
+    /// kills the session, logs at ERROR and is an error response
+    /// ([`crate::runtime::architect_bind::require_bound`]).
+    /// Test: `every_architect_spawn_site_binds_8878`,
+    /// `a_gui_architect_spawn_creates_exclusively_and_an_unbound_one_is_killed_11270`.
     fn bind_gui_spawn(
         driver: &TmuxDriver,
         tmux_name: &str,
         workdir: &Path,
         profile: crate::core::session_profile::SessionProfile,
         already_running: bool,
-    ) {
-        use crate::runtime::architect_bind::{
-            bind_profile, bind_reused, find_claude_with, home_root,
-        };
-        let architect = profile.is_architect();
-        let binding = if already_running {
-            bind_reused(architect)
-        } else {
-            bind_profile(
-                home_root().as_deref(),
-                architect,
-                workdir,
-                tmux_name,
-                || find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok()),
-            )
-        };
-        if let Some(warning) = binding.warning(tmux_name) {
-            tracing::warn!("{warning}");
+        root: Option<&Path>,
+    ) -> Result<(), DaemonError> {
+        use crate::runtime::architect_bind::{bind_profile, find_claude_with, require_bound};
+        if already_running {
+            return Ok(()); // #11270: a non-Architect launch; nothing to bind.
         }
+        let binding = bind_profile(root, profile.is_architect(), workdir, tmux_name, || {
+            find_claude_with(|| driver.pane_pid(&driver.pane_id(tmux_name)?).ok())
+        });
+        let stop = || driver.kill_session(tmux_name).map_err(|e| e.to_string());
+        require_bound(binding, tmux_name, stop)
+            .map(drop)
+            .map_err(|why| {
+                tracing::error!("{why}");
+                DaemonError::Internal(why)
+            })
     }
 
     /// Snapshot a session's pane output.
@@ -997,3 +1040,8 @@ mod holder_tests;
 #[cfg(test)]
 #[path = "tmux_service_routing_tests.rs"]
 mod routing_tests;
+
+// #11270: the GUI Architect spawn refuses, creates exclusively and binds or stops.
+#[cfg(test)]
+#[path = "tmux_service_11270_tests.rs"]
+mod architect_spawn_tests;

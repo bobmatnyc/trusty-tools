@@ -961,6 +961,9 @@ pub struct ManagedActivityResponse {
     /// Proposed default answer to the pending decision.
     #[serde(default)]
     pub proposed_default: Option<String>,
+    /// #8407: the pane's input box, `None` when unreadable or an older daemon.
+    #[serde(default)]
+    pub input_box: Option<crate::core::input_box::InputBox>,
 }
 
 /// Per-project session group from `GET /api/v1/sessions/managed/fleet`.

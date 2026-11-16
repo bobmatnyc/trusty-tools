@@ -555,6 +555,42 @@ impl TmuxDriver {
         })
     }
 
+    /// Capture the last `lines` of a pane WITH escape codes, for the input-box
+    /// classifier (#8407).
+    ///
+    /// Why: only an escaped capture tells Claude Code's dim suggestion from a
+    /// typed draft, and the shared `TmuxCommand::CapturePane` has no `-e` flag.
+    /// What: `tmux [-L <server>] -u capture-pane -t <target> -p -e -S -<lines>`
+    /// on this driver's server; an invalid target, a spawn error or a non-zero
+    /// exit is `Err`.
+    /// Test: `managed_output_classifies_the_input_box_8407` (through the fake);
+    /// the argv runs live only.
+    pub fn capture_escaped(&self, target: &TmuxTarget, lines: u32) -> Result<String> {
+        target
+            .validate()
+            .map_err(|e| Error::Protocol(format!("tmux capture target refused: {e}")))?;
+        let command = [
+            "-u".to_string(),
+            "capture-pane".to_string(),
+            "-t".to_string(),
+            target.as_target(),
+            "-p".to_string(),
+            "-e".to_string(),
+            "-S".to_string(),
+            format!("-{lines}"),
+        ];
+        let argv = crate::core::tmux_server::server_argv(self.server.as_deref(), command);
+        let output = crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?;
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        } else {
+            Err(Error::Protocol(format!(
+                "tmux capture-pane -e failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
     /// Durably publish `key=value` into the tmux SESSION environment (#2157 item 1).
     ///
     /// Why: `runtime::claude_code::session_id_export_prefix` exports

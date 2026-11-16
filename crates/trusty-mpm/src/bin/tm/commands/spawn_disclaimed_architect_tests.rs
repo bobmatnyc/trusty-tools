@@ -59,6 +59,11 @@ impl Home {
 
     /// A spec for `session_id` in `cwd` that touches [`Self::marker`].
     fn spec(&self, session_id: &str, cwd: &Path) -> PathBuf {
+        self.spec_with(session_id, cwd, Vec::new())
+    }
+
+    /// [`Self::spec`] that sets `env_set` (#11270: the profile stamp).
+    fn spec_with(&self, session_id: &str, cwd: &Path, env_set: Vec<(String, String)>) -> PathBuf {
         let spec = LaunchSpec {
             session_id: session_id.to_owned(),
             launch_id: "aaaabbbbccccddddeeeeffff00009092".to_owned(),
@@ -69,7 +74,7 @@ impl Home {
                 format!("touch '{}'", self.marker().display()),
             ],
             env_unset: Vec::new(),
-            env_set: Vec::new(),
+            env_set,
         };
         spec.write_in(&self.specs()).expect("write spec")
     }
@@ -77,7 +82,7 @@ impl Home {
     /// Run the shim on `spec` under this home, as an operator pane would
     /// with the Claude Code markers stripped (`env -u CLAUDECODE ...`).
     fn launch(&self, spec: &Path) -> anyhow::Result<(i32, Option<i32>)> {
-        launch_from_spec(spec, Some(&self.root()))
+        launch_from_spec(spec, Some(&self.root()), None)
     }
 
     /// Files in the launch-record directory; none when it is absent.
@@ -162,4 +167,63 @@ fn an_unreadable_store_refuses_a_spec_that_names_a_session_9092() {
     let (status, _) = h.launch(&h.spec("", &h.project())).expect("no session id");
     assert_eq!(status, 0);
     assert!(h.marker().exists());
+}
+
+/// The Architect stamp the spawned `claude` would carry.
+fn architect_stamp() -> Vec<(String, String)> {
+    use trusty_mpm::core::session_profile::{SessionProfile, launch_env};
+    vec![launch_env(SessionProfile::Architect)]
+}
+
+/// #11270 (Fail-Open Check): an Architect-stamped spec that no binding launch
+/// path granted is refused before exec, naming `tm fleet relaunch`, whether
+/// the stamp is the spec's own or the pane's; a PM spec still launches.
+#[test]
+fn an_architect_spec_without_a_grant_is_refused_before_exec_11270() {
+    let h = Home::new("ordinary");
+    let err = h
+        .launch(&h.spec_with("", &h.project(), architect_stamp()))
+        .expect_err("an ungranted Architect spec is refused");
+    assert!(format!("{err:#}").contains("tm fleet relaunch"), "{err:#}");
+    assert!(!h.marker().exists(), "the Architect claude started");
+
+    let stamp = architect_stamp().remove(0).1;
+    let inherited = Some(std::ffi::OsStr::new(stamp.as_str()));
+    let err = launch_from_spec(&h.spec("", &h.project()), Some(&h.root()), inherited)
+        .expect_err("an inherited Architect stamp is refused too");
+    assert!(format!("{err:#}").contains("tm fleet relaunch"), "{err:#}");
+    assert!(!h.marker().exists(), "the Architect claude started");
+
+    let pm = vec![trusty_mpm::core::session_profile::launch_env(
+        trusty_mpm::core::session_profile::SessionProfile::Pm,
+    )];
+    let (status, _) = h
+        .launch(&h.spec_with("", &h.project(), pm))
+        .expect("a PM spec");
+    assert_eq!(status, 0);
+    assert!(h.marker().exists(), "the PM claude did not run");
+}
+
+/// #11270: the grant a binding path issued for the exact spec lets it run
+/// once; a replay of the same spec is refused.
+#[test]
+fn a_granted_architect_spec_launches_once_11270() {
+    let h = Home::new("ordinary");
+    let path = h.spec_with("", &h.project(), architect_stamp());
+    let spec = LaunchSpec::verify(&path).expect("the spec");
+    trusty_mpm::runtime::architect_grant::issue(&h.root(), &spec).expect("grant");
+    let (status, _) = h.launch(&path).expect("a granted Architect spec runs");
+    assert_eq!(status, 0);
+    assert!(h.marker().exists(), "the granted claude did not run");
+
+    std::fs::remove_file(h.marker()).expect("reset marker");
+    spec.write_in(&h.specs()).expect("replay");
+    let replay = std::fs::read_dir(h.specs())
+        .expect("specs")
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .expect("the replayed spec");
+    assert!(h.launch(&replay).is_err(), "a grant starts one claude");
+    assert!(!h.marker().exists());
 }

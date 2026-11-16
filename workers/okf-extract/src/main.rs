@@ -106,7 +106,7 @@ mod tests {
     use super::*;
 
     /// Why: the host checks every `hello` field and refuses unknown ones.
-    /// What: the reply names protocol 1, this crate's version, xberg 1.3.10
+    /// What: the reply names protocol 1, this crate's version, xberg 1.4.0
     /// (equal to the `=` pin in Cargo.toml), the four formats, the three
     /// features, `deterministic: true`, and exactly the nine Appendix B keys.
     /// Test: self-contained.
@@ -116,7 +116,7 @@ mod tests {
         let keys: Vec<&str> = h.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys.len(), 9, "{keys:?}");
         assert_eq!(h["protocol"], 1);
-        assert_eq!(h["xberg_version"], "1.3.10");
+        assert_eq!(h["xberg_version"], "1.4.0");
         assert_eq!(h["deterministic"], true);
         assert_eq!(h["formats"], json!(["pdf", "docx", "xlsx", "pptx"]));
         let manifest = include_str!("../Cargo.toml");

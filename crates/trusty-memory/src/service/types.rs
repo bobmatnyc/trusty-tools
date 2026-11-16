@@ -383,6 +383,12 @@ pub enum ServiceError {
     /// gate.
     #[error("{0}")]
     Forbidden(String),
+    /// The palace is still opening; the open goes on, retry shortly (#11255).
+    ///
+    /// Why: a recall that gave up waiting on a cold open must be told apart
+    /// from a failure and from "no memories".
+    #[error("{0}")]
+    PalaceOpening(crate::tools::recall_open::PalaceOpening),
 }
 
 impl ServiceError {

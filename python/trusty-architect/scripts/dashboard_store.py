@@ -9,8 +9,10 @@ local/owner-queue, the ArtifactData mirror). A file holds the document body plus
 integer "version"; a file with no "version" (the old mirror shape) counts as version 1.
 Every write takes an exclusive flock on <root>/.lock, checks the optional if_version
 (0 = must not exist), bumps the version and replaces files with temp file + os.replace.
+The store stamps "created"/"updated" from its own clock; a client value for either is ignored (#10678).
 batch() stages every operation in memory first and restores the previous bytes if a write
-fails midway, so it is all-or-nothing. Reads take no lock (replace is atomic).
+fails midway, so it is all-or-nothing. Reads take a shared flock on the same file, so a read never lands between
+the files of one batch (#10679); snapshot() reads several collections under one shared lock.
 Format: DASHBOARD_FORMAT=dir (default, the layout above) or jsonl (one canonical <coll>.jsonl per collection plus
 changes.jsonl, see dashboard_jsonl.py). A jsonl write renders the whole collection file and validates every touched
 document against schemas/dashboard/ (DASHBOARD_SCHEMA=off|warn|enforce; default warn for jsonl, off for dir).
@@ -18,7 +20,7 @@ A store of the other format is refused loudly, never read as empty.
 A set or update carrying meta/settings.technical_level or an item's level_override outside the six levels is refused
 (technical_level.refusal, #11064), whatever the schema mode.
 No network, no secrets.
-Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py
+Test: tests/test_dashboard_store.py, tests/test_dashboard_jsonl.py, tests/test_dashboard_views_agree.py
 """
 import copy
 import fcntl
@@ -26,8 +28,9 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -48,6 +51,12 @@ class StoreError(Exception):
     """Invalid request (bad id, bad body)."""
     status = 400
     code = "invalid_argument"
+
+
+class Unavailable(StoreError):
+    """The lock stayed held by a writer past LOCK_WAIT: answer 503, never hang and never read unlocked (#10679)."""
+    status = 503
+    code = "unavailable"
 
 
 class NotFound(StoreError):
@@ -71,6 +80,7 @@ class SchemaInvalid(StoreError):
 
 
 FORMATS = ("dir", "jsonl")
+LOCK_WAIT = 10.0   # #10679: seconds a read waits for a writer; the Rust store's LOCK_WAIT
 
 
 def default_format(env=None):
@@ -118,6 +128,22 @@ def normalize_timestamps(value, key=None):
     if isinstance(value, str) and key and (key in _TS_KEYS or key.endswith("_at")) and _MINUTE_TS.match(value):
         return value[:-1] + ":00Z"
     return value
+
+
+def _stamp_write(data, old, now):
+    """Return data with the store's own write times in created/updated (#10678).
+    Why: a client clock or a hand-typed value must not decide when a document was written.
+    What: a document that carries "updated" gets now; one that carries "created" keeps the stored document's
+    created, else gets now. A field the document lacks is not added (several schemas forbid it). Event fields
+    (at, done_at, answered_at, ...) are the client's: they record when something happened, not when it was stored.
+    Test: tests/test_dashboard_store_guards.py::test_store_stamps_created_and_updated_and_ignores_client_values"""
+    out = dict(data)
+    if "updated" in out:
+        out["updated"] = now
+    if "created" in out:
+        prior = (old or {}).get("created")
+        out["created"] = prior if prior is not None else now
+    return out
 
 
 def _render(version, data):
@@ -177,6 +203,7 @@ class Store:
         self.actor = actor or os.environ.get("DASHBOARD_ACTOR") or "unknown"
         self.schema_mode = schema_mode or dsch.mode() or ("warn" if self.fmt == "jsonl" else "off")
         self.clock = clock
+        self.lock_wait = LOCK_WAIT
         self._cache = {}     # jsonl: coll -> ((mtime_ns, size, inode), {id: (version, data)})
 
     # ---- paths and reads -------------------------------------------------
@@ -231,8 +258,37 @@ class Store:
         self._cache[coll] = (sig, docs)
         return docs
 
+    @contextmanager
+    def _read_lock(self):
+        """Shared flock on <root>/.lock for the length of a read.
+        Why: a batch replaces one file per document (dir) or per collection (jsonl) in turn; an unlocked read between
+        two of them saw the new task beside the old session and header (#10679).
+        What: LOCK_SH on the writers' lock file, so a read waits for a batch in progress, never for another read.
+        The wait is bounded by self.lock_wait; past it the read raises Unavailable (HTTP 503).
+        A read never creates the lock file: none yet means no batch has ever run, so there is nothing to wait for.
+        Test: tests/test_dashboard_views_agree.py"""
+        path = os.path.join(self.root, ".lock")
+        if not os.path.exists(path):   # writers never delete the lock file once made
+            yield
+            return
+        with open(path, "r") as lf:   # closing the file releases the flock
+            deadline = time.monotonic() + self.lock_wait
+            while True:   # #10679: bounded, so a hung writer cannot hang every dashboard GET
+                try:
+                    fcntl.flock(lf, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise Unavailable(f"{self.root}/.lock is held by a writer (waited {self.lock_wait}s)") from None
+                    time.sleep(0.01)
+            yield
+
     def get(self, coll, doc_id):
         """Return {"id","version","data"}; raise NotFound when absent."""
+        with self._read_lock():   # #10679: never between the files of one batch
+            return self._get(coll, doc_id)
+
+    def _get(self, coll, doc_id):
         if self.fmt == "jsonl":
             _check_id("doc id", doc_id)
             found = self._jcoll(coll).get(doc_id)
@@ -270,6 +326,15 @@ class Store:
 
     def list_docs(self, coll, status=None, order_by=None, desc=False, limit=None):
         """Documents of a collection (empty when it is absent), id order by default."""
+        with self._read_lock():   # #10679: never between the files of one batch
+            return self._list_docs(coll, status, order_by, desc, limit)
+
+    def snapshot(self, colls):
+        """{coll: list_docs(coll)} for every coll, read under one shared lock so they come from the same batch (#10679)."""
+        with self._read_lock():
+            return {c: self._list_docs(c) for c in colls}
+
+    def _list_docs(self, coll, status=None, order_by=None, desc=False, limit=None):
         self._guard(coll)
         if self.fmt == "jsonl":
             cur = self._jcoll(coll)
@@ -311,7 +376,7 @@ class Store:
                 raise StoreError(str(e))
         return fresh[coll].get(doc_id)
 
-    def _stage(self, staged, op, fresh):
+    def _stage(self, staged, op, fresh, now):
         kind = op.get("op")
         if kind not in ("set", "update", "delete"):
             raise StoreError(f"unknown op {kind!r}: use set, update or delete")
@@ -346,7 +411,8 @@ class Store:
             data = {**cur["data"], **data}
         if coll == "items" and cur["exists"] and (cur["data"] or {}).get("status") == "brief_pending":
             data = _restore_on_brief(data)
-        cur.update(exists=True, data=dict(data), dirty=True, version=cur["version"] + 1)
+        data = _stamp_write(data, cur["data"] if cur["exists"] else None, now)   # #10678: the store owns write times
+        cur.update(exists=True, data=data, dirty=True, version=cur["version"] + 1)
         return {"collection": coll, "id": doc_id, "version": cur["version"]}
 
     def _commit(self, staged):
@@ -397,7 +463,7 @@ class Store:
             sys.stderr.write(f"dashboard-store: schema warning: {e}\n")
         return errs
 
-    def _commit_jsonl(self, staged, fresh, actor, op_of):
+    def _commit_jsonl(self, staged, fresh, actor, op_of, now):
         warnings = self._check_schema(staged)
         by_coll = {}
         for (coll, doc_id), st in staged.items():
@@ -433,7 +499,7 @@ class Store:
                 if mine:
                     e["warnings"] = mine
         try:
-            dj.append_changes(self.root, entries, self.clock())
+            dj.append_changes(self.root, entries, now)   # #10678: the documents' own write time
         except (OSError, ValueError) as e:
             sys.stderr.write(f"dashboard-store: change log not written: {e}\n")
 
@@ -468,14 +534,15 @@ class Store:
         _refuse_live_write_under_test(self.root)
         with self._lock():
             staged, results, fresh, op_of = {}, [], {}, {}
+            now = self.clock()   # #10678: one store-side write time for every document in the batch
             for op in ops:
                 if not isinstance(op, dict):
                     raise StoreError("each batch op must be an object")
-                results.append(self._stage(staged, op, fresh))
+                results.append(self._stage(staged, op, fresh, now))
                 op_of[(op.get("collection"), op.get("id"))] = op.get("op")
             self._log_pruned(staged, actor or self.actor)   # fail closed: no log line, no delete
             if self.fmt == "jsonl":
-                self._commit_jsonl(staged, fresh, actor or self.actor, op_of)
+                self._commit_jsonl(staged, fresh, actor or self.actor, op_of, now)
             else:
                 self._commit(staged)
         return results
@@ -496,11 +563,12 @@ class Store:
 
     # ---- seed ------------------------------------------------------------
     def seed_meta(self, state_md=DEFAULT_STATE_MD, owner_name="the owner"):
-        """Create meta/state when absent (owner_name only; next ids are computed from the store). True if created."""
+        """Create meta/state (owner_name) and meta/settings ({updated}) when absent; never overwrite. True if meta/state was created."""
         # state_md is kept for callers; the NEXT IDS line is no longer read (scripts/dashboard_ids.py, the page).
-        body = {"owner_name": owner_name, "updated": now_iso()}
+        with suppress(Conflict):  # #10752: the page polls meta/settings; absent = a 404 per poll
+            self.set("meta", "settings", {"updated": now_iso()}, if_version=0)
         try:
-            self.set("meta", "state", body, if_version=0)
+            self.set("meta", "state", {"owner_name": owner_name, "updated": now_iso()}, if_version=0)
             return True
         except Conflict:
             return False

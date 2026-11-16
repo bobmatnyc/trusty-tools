@@ -2253,7 +2253,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const noteOpen = new Set(), noteDrafts = new Map();
   const confirmRm = new Set();        /* goal ids showing the inline "Confirm / Cancel" step */
   const optimisticRm = new Map();     /* goal id -> removal doc id written by this viewer, until the store echoes it */
-  let accounts = [], items = [], ghTrack = null, meta = null, settings = null, optimisticState = null, goals = [], sessions = [], fleet = null, priorities = [], reorders = [];
+  let accounts = [], items = [], meta = null, settings = null, optimisticState = null, goals = [], sessions = [], fleet = null, priorities = [], reorders = [];
   const optimisticRank = new Map();   /* goal id -> rank written by this viewer, until the store echoes it */
   const localReorderAt = {};          /* kind -> ISO time of this viewer's last reorder */
   let savingOrder = false, drag = null, renderPending = false;
@@ -5986,19 +5986,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       });
       if (arr.length) sumParts.push(g.label() + " " + arr.length);
     });
-    const gl = $("sessions-gh");
-    const g = ghTrack && typeof ghTrack === "object" ? ghTrack : null;
-    gl.hidden = !g || num(g.prs_open) == null;
-    if (!gl.hidden) {
-      const bp = num(g.bugs_p1);
-      const gp = [txt(g.repo).split("/").pop() + ": " + num(g.prs_open) + " open PRs (cap " + (num(g.prs_cap) != null ? num(g.prs_cap) : 15) + ")",
-        (num(g.bugs) || 0) + " bugs" + (bp ? " (P1 " + bp + ")" : "")];
-      if (num(g.merged_7d) != null) gp.push("merged " + (num(g.merged_24h) || 0) + " (24h) · " + num(g.merged_7d) + (g.merged_7d_capped ? "+" : "") + " (7d)");
-      if (num(g.merged_open)) gp.push("merged-but-open " + num(g.merged_open));
-      if (g.at) gp.push("checked " + hm(g.at));
-      gl.textContent = gp.join(" · ");
-      gl.title = "Open PRs by state: " + Object.keys(g.prs_by_state || {}).map((k) => k + " " + g.prs_by_state[k]).join(", ");
-    }
+    $("sessions-gh").hidden = true;   // #10752: no repo-totals writer ships, so the page neither polls nor shows them
     $("sessions-empty").hidden = list.length > 0;
     $("sessions-empty").textContent = "No sessions recorded yet. The Architect writes one row per managed session on its next pass.";
     $("n-sessions").textContent = String(list.length);
@@ -6426,7 +6414,6 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (!SESSION) db.collection("sessions").onSnapshot(live((snap) => { sessions = rows(snap).map((r) => withCommand(r, optimisticCmd)); trackDocs("sessions", sessions); }), stopped("session list"));
     db.collection("priorities").onSnapshot(live((snap) => { priorities = rows(snap); trackDocs("priorities", priorities); }), stopped("priority list"));
     db.doc("meta/state").onSnapshot(live((snap) => { meta = snap.exists ? bodyOf(snap) : null; }), () => {});
-    if (!SESSION) db.doc("meta/gh_track").onSnapshot(live((snap) => { ghTrack = snap.exists ? bodyOf(snap) : null; }), () => {});
     if (!SESSION) db.doc("meta/settings").onSnapshot(live((snap) => { settings = snap.exists ? bodyOf(snap) : null; optimisticState = null; paintSettings(); }, true), () => {});
   }
 

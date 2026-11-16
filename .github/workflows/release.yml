@@ -26,7 +26,7 @@
 #
 # LINUX BINARY PORTABILITY (issue #2037):
 #   Historically the Linux x86_64 leg ran a bare `cargo build` on the
-#   `ubuntu-latest` runner (Ubuntu 24.04, glibc 2.39), so every released
+#   `ubuntu-24.04` runner (pinned, #11061; glibc 2.39), so every released
 #   binary carried a `GLIBC_2.39` floor and failed to even execute on
 #   Debian 12 (2.36), Ubuntu 22.04 LTS (2.35), RHEL 9 / AL2023 (2.34), etc.
 #   There was also no Linux arm64 build at all.
@@ -182,7 +182,7 @@ env:
 jobs:
   setup:
     name: Parse tag / resolve crate config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       crate:    ${{ steps.parse.outputs.crate }}
       # Why (#1128): the ORIGINAL tag prefix before alias canonicalization. Used
@@ -596,7 +596,7 @@ jobs:
       # linux-zigbuild variants (issue #2037 — portable glibc 2.17 baseline,
       # built via `cargo zigbuild --target <triple>.2.17`; see the file-header
       # comment for the full rationale):
-      #   { runner: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
+      #   { runner: ubuntu-24.04,    target: x86_64-unknown-linux-gnu,  variant: linux-zigbuild, best_effort: false }
       #   { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, variant: linux-zigbuild, best_effort: false }
       #   (2533: aarch64 builds NATIVELY on an arm64 runner — it is no longer
       #    cross-compiled and no longer best-effort; for ORT-bundling crates it
@@ -604,7 +604,7 @@ jobs:
       #    since bundled-ort has no aarch64 build-time binary to download)
       #
       # AL2023 variant (crates with AL2023_VARIANT=true: trusty-search, trusty-analyze):
-      #   { runner: ubuntu-latest, target: x86_64-unknown-linux-gnu,  variant: al2023   }
+      #   { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu,  variant: al2023   }
       #   (built inside an amazonlinux:2023 container; named …-x86_64-linux-al2023)
       #
       # `best_effort: true` legs run with `continue-on-error` at the job level —
@@ -663,13 +663,13 @@ jobs:
           ZIG_GLIBC = "2.17"
 
           # 2533: each Linux leg builds on a runner of its OWN architecture —
-          # amd64 targets on `ubuntu-latest`, arm64 targets on
+          # amd64 targets on `ubuntu-24.04`, arm64 targets on
           # `ubuntu-24.04-arm` — so HOST == TARGET and pkg-config-dependent
           # `-sys` build scripts (openssl-sys) work. `host_multiarch` is the
           # runner's Debian multiarch directory name, consumed by HOST_CFLAGS
           # in the build step; it tracks the RUNNER's arch, not the target's.
           LINUX_RUNNERS = {
-              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",   "x86_64-linux-gnu"),
+              "x86_64-unknown-linux-gnu":  ("ubuntu-24.04",   "x86_64-linux-gnu"),
               "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-gnu"),
           }
 
@@ -848,7 +848,7 @@ jobs:
           # from this very matrix, so a missing arm64 AL2023 asset produces a
           # `::warning` annotation and a `DROPPED` row automatically.
           AL2023_RUNNERS = {
-              "x86_64-unknown-linux-gnu":  ("ubuntu-latest",    "x86_64-linux-al2023"),
+              "x86_64-unknown-linux-gnu":  ("ubuntu-24.04",    "x86_64-linux-al2023"),
               "aarch64-unknown-linux-gnu": ("ubuntu-24.04-arm", "aarch64-linux-al2023"),
           }
 
@@ -926,7 +926,7 @@ jobs:
   preflight:
     name: Verify tag ancestry + resolve publish identity (issue #3366)
     needs: setup
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       pkg_name:     ${{ steps.pkg.outputs.pkg_name }}
@@ -1018,7 +1018,7 @@ jobs:
   # Produces: one .tar.gz + one .tar.gz.sha256 per matrix entry.
   #
   # AL2023 entries run inside an amazonlinux:2023 container (glibc 2.34).
-  # linux-zigbuild entries cross/native-compile on the ubuntu-latest runner via
+  # linux-zigbuild entries cross/native-compile on the ubuntu-24.04 runner via
   # `cargo zigbuild` against a pinned old-glibc baseline (issue #2037; see the
   # file-header comment). Standard (macOS) entries run natively, no linker
   # tricks needed.
@@ -1085,7 +1085,7 @@ jobs:
         # `standard` here means an ORT-bundling-crate native Linux leg (see
         # native_linux_entry in the matrix-generation step); the OTHER
         # `standard` entry is macOS, which the runner check guards out.
-        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-latest`,
+        # 2533: keyed off the runner PREFIX, not the literal `ubuntu-24.04`,
         # so the arm64 runner (`ubuntu-24.04-arm`) is covered too — matching on
         # the exact string silently skipped apt on the whole arm64 leg.
         if: matrix.container == '' && startsWith(matrix.runner, 'ubuntu')
@@ -1523,7 +1523,7 @@ jobs:
       !cancelled() &&
       needs.setup.outputs.bundled != 'true' &&
       needs.build.result != 'skipped'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # continue-on-error: with zero artifacts (every leg failed) the download
@@ -1668,7 +1668,7 @@ jobs:
     # (`publish = false`, e.g. trusty-agents-common's INTERNAL sibling crates,
     # the Tauri GUIs) — there is nothing to dry-run.
     if: needs.preflight.outputs.publishable == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - name: Checkout repository
@@ -1699,7 +1699,7 @@ jobs:
     # available here — but see the "ASSET-COMPLETENESS GATE" note below for why
     # it is deliberately NOT gated on in this `if:`.
     needs: [setup, build, release-completeness-audit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # TOLERATED-FAILURE BEHAVIOR (issue #3540):
     #
     # `needs.build.result` is 'failure' whenever ANY non-continue-on-error
@@ -2057,7 +2057,7 @@ jobs:
   homebrew-bump:
     name: "Homebrew tap update"
     needs: [setup, release]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Only run on real tag releases (not dry-runs) and only when the tap is enabled.
     # HOMEBREW_TAP_ENABLED must be set to 'true' as a repository/org variable AND
     # HOMEBREW_TAP_TOKEN must be configured as a secret before this job does anything.

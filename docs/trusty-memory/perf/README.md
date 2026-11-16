@@ -48,7 +48,7 @@ Command shapes (from the plan, `.trusty-mpm/plans/memory-perf-analysis-plan.md` 
 
 - Latency profile: `evo cargo +1.99.0 test -p trusty-memory --release --test recall_supersession recall_supersession_latency_profile -- --nocapture`. The test is inert unless `TRUSTY_RECALL_SUPERSESSION_PROFILE` is set. On EVO pass it with `--config 'env.TRUSTY_RECALL_SUPERSESSION_PROFILE="1"'`.
 - `concurrent_perf`: `--release` with `--include-ignored --nocapture`.
-- Slice/embed measure: `--release --lib -- --ignored --exact <full test path above>`.
+- Slice/embed measure: `--release --lib -- --ignored --exact <full test path above>`. The test skips unless `TRUSTY_MEMORY_SLICE_MEASURE` is set ([#10802](https://github.com/bobmatnyc/trusty-tools/issues/10802)), and panics when a mock embedder was seeded first. On EVO pass it with `--config 'env.TRUSTY_MEMORY_SLICE_MEASURE="1"'`.
 - Eval: debug build, `--nocapture`, `--include-ignored`. Both recall eval tests are `#[ignore]`. Without `--include-ignored` the run executes 0 eval tests and prints no ranks. Stderr lines `recall-eval [mechanisms on] qNN rank=...` give the ranks.
 
 Report the median of the runs. Each run uses fresh temp dirs and no daemon.

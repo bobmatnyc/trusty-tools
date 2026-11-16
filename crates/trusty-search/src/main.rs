@@ -464,8 +464,34 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search stop
+    #[cfg(not(target_os = "linux"))]
     #[command(display_order = 21)]
     Stop,
+
+    /// Stop the daemon serving this data dir's socket (#11085)
+    ///
+    /// Signals only a proven `trusty-search` peer; exits 1 when none runs or a
+    /// process survives SIGKILL.
+    ///
+    /// Examples:
+    ///   trusty-search stop
+    ///   trusty-search stop --data-dir /tmp/test-daemon
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 21)]
+    Stop(commands::linux_lifecycle::LifecycleArgs),
+
+    /// Stop the daemon, confirm it stopped, then start the installed binary
+    ///
+    /// A daemon that is not running is started. Refuses while the
+    /// trusty-search.service systemd unit is active (#11085).
+    ///
+    /// Respawns as `start --foreground [--data-dir]`: `--auto-discover` and
+    /// `--no-auto-discover` are not carried over; `--device` and the fan-out
+    /// cap survive through daemon.env. A daemon started with `--socket` is
+    /// refused as unidentified by `stop` and `restart`.
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 22)]
+    Restart(commands::linux_lifecycle::LifecycleArgs),
 
     /// Start the MCP server over stdio
     ///
@@ -1218,7 +1244,13 @@ async fn run() -> Result<()> {
         // #9214: the flags live in `commands::start::StartArgs`.
         Commands::Start { args } => commands::start::handle_start(args, cli.verbose).await?,
 
+        #[cfg(not(target_os = "linux"))]
         Commands::Stop => commands::stop::handle_stop().await?,
+        // #11085: Linux stop/restart on trusty_common::linux_lifecycle.
+        #[cfg(target_os = "linux")]
+        Commands::Stop(args) => commands::linux_lifecycle::stop(args).await?,
+        #[cfg(target_os = "linux")]
+        Commands::Restart(args) => commands::linux_lifecycle::restart(args).await?,
 
         Commands::Serve {
             with_http,

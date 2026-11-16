@@ -82,6 +82,14 @@ def test_pending_watch_changes_lists_new_requests_only():
         {"id": "w2", "kind": "watch_change", "at": "2026-11-10T10:05:00Z", "text": "unwatch proj-b", "key": "proj-b", "action": "unwatch"}]
 
 
+def test_an_other_answer_carries_the_typed_answer_note():
+    """#10765: the "answered" entry shows the owner's typed answer_note after the button label."""
+    items = [doc("Q1", status="answered", answer="Other", answer_note="  use the staging bucket "),
+             doc("Q2", status="answered", answer="Yes"), doc("Q3", status="answered", answer="No", answer_note="  ")]
+    got = {e["id"]: e["text"] for e in dv.pending({"items": items}, NOW) if e["kind"] == "answered"}
+    assert got == {"Q1": "Other: use the staging bucket", "Q2": "Yes", "Q3": "No"}
+
+
 def test_ordered_by_rank_then_id():
     docs = [doc("B", rank=2), doc("A", rank=2), doc("Z", rank=1), doc("N")]
     assert [d["id"] for d in dv.ordered(docs)] == ["Z", "A", "B", "N"]

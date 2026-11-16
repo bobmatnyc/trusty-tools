@@ -11675,7 +11675,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "libc",
  "serde",
@@ -11688,7 +11688,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-channels"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -12086,7 +12086,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "0.36.8"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12136,7 +12136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.5"
+version = "1.14.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12292,7 +12292,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "0.64.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",

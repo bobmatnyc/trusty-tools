@@ -30,7 +30,9 @@ pub use super::evidence::{TaskExpectation, scan_evidence};
 /// any captured evidence in one value so the orchestrator can build a single
 /// goal-store update. Crucially, `Verified` is only ever reached WITH evidence —
 /// the verification gate (§3.5) — so this type couples them: a `Verified` state
-/// always carries `Some(evidence)`.
+/// always carries `Some(evidence)`. The goal store enforces it (#10722): an
+/// update to `Verified` without non-blank evidence is refused and the link keeps
+/// its prior state.
 /// What: `state` is the interpreted [`SessionTaskState`]; `evidence` is the
 /// gate-satisfying snippet (PR URL / test output / diff) when one was observed,
 /// else `None`.

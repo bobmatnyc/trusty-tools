@@ -7,16 +7,16 @@
 # What: two jobs.
 #   - `exclusion` runs the exclusion guard: the root workspace must not absorb
 #     the worker directory.
-#   - `build-test` builds and tests the worker through `--manifest-path` on its
-#     MSRV (1.94, `rust-version` in its Cargo.toml) and on its pinned toolchain
-#     (1.98.1, its `rust-toolchain.toml`).
+#   - `build-test` builds and tests the worker through `--manifest-path` on
+#     Rust 1.99, both its `rust-version` and its `rust-toolchain.toml` pin
+#     (#11154: xberg 1.4.0 needs 1.99; owner ruling Dnw).
 #   This workflow runs no audit or deny. The worker lock's coverage lives where
 #   the root lock's does, and like it never runs on a PR:
 #   `cargo audit --file workers/okf-extract/Cargo.lock` in `cargo-audit.yml`
 #   (weekly cron) and `pre-publish.yml` Gate 2, under the root
 #   `.cargo/audit.toml`; `cargo deny --manifest-path` in Gate 3, under the root
-#   `deny.toml`. RUSTSEC-2026-0436 (vendored calamine 0.36.1) is waived in both
-#   files until 2026-12-12 (owner ruling Dgp).
+#   `deny.toml`. The worker carries no waiver of its own: #11154 moved it to
+#   calamine 0.38 and dropped RUSTSEC-2026-0436 from both files.
 #
 # TRIGGERS. No `paths:` filter and no job-level `if:`: the worker's tests
 #   compile `crates/trusty-okf` and its path dependencies, so a change far from
@@ -59,7 +59,7 @@ jobs:
       - name: Worker directory is excluded from the root workspace
         run: bash scripts/check_worker_dir_excluded.sh
 
-  # #11094: build and test the worker on its MSRV and its pinned toolchain.
+  # #11094: build and test the worker. #11154: on 1.99 only, its MSRV and pin.
   build-test:
     name: okf-extract build + test (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
@@ -67,11 +67,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 1.94: the crate's `rust-version`. 1.98.1: its `rust-toolchain.toml`.
-        toolchain: ["1.94", "1.98.1"]
+        # 1.99: the crate's `rust-version` and its `rust-toolchain.toml` (#11154).
+        toolchain: ["1.99.0"]
     env:
-      # The worker's `rust-toolchain.toml` would pick 1.98.1 for any cargo run
-      # from inside its directory. RUSTUP_TOOLCHAIN outranks the file, so each
+      # RUSTUP_TOOLCHAIN outranks the worker's `rust-toolchain.toml`, so the
       # leg builds on the toolchain its name says.
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:

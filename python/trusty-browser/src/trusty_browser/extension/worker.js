@@ -1,4 +1,4 @@
-importScripts("indicator.js");
+importScripts("indicator.js", "pages.js", "codes.js");
 const origin = "chrome-extension://" + chrome.runtime.id;
 const documents = new Map();
 let connection = null;
@@ -105,7 +105,8 @@ async function connect() {
   const generation = epoch;
   try {
     await storageReady;
-    const {enrollment} = await chrome.storage.local.get("enrollment");
+    // #11239: a pairing credential says hello exactly as an enrollment one does.
+    const {credential:enrollment} = await codes.stored();
     if (!enrollment) return;
     const email = await identity();
     const hello = {type:"hello", profile:enrollment.profile, email, incarnation:await lifetime,
@@ -118,10 +119,14 @@ async function connect() {
     const valid = () => connection === port && epoch === generation;
     let phase = "challenge";
     const timeout = setTimeout(() => drop(), 5000);
+    // Mints recorded after this hello survive the acknowledgement's prune.
+    const fresh = codes.watchMints();
+    const lost = () => { codes.unwatch(fresh); void codes.offline.lost(); };
     function drop() {
       if (connection !== port) return;
       connection = null;
       void TrustyControlIndicator.clearAll();
+      lost();
       clearTimeout(timeout);
       port.disconnect();
       schedule();
@@ -131,6 +136,7 @@ async function connect() {
       if (connection === port) {
         connection = null;
         void TrustyControlIndicator.clearAll();
+        lost();
         clearTimeout(timeout);
         void report("Disconnected. Retrying…");
         schedule();
@@ -153,17 +159,23 @@ async function connect() {
           return;
         }
         if (phase === "ready") {
-          if (msg.ok !== true || typeof msg.generation !== "string" || !msg.generation) throw new Error("Pairing refused");
+          if (msg.ok !== true || typeof msg.generation !== "string" || !msg.generation ||
+              !Array.isArray(msg.live) || !msg.live.every(g => typeof g === "string")) throw new Error("Pairing refused");
           phase = "active";
           retryMs = 250;
           clearTimeout(timeout);
+          await codes.acknowledged(msg.live, fresh);
           await report("Connected as " + enrollment.profile);
           return;
         }
         if (phase !== "active" || !["string","number"].includes(typeof msg.id)) throw new Error("Unexpected message");
         let reply;
-        try { reply = await dispatch(msg, valid); }
-        catch (error) { reply = {id:msg.id, ok:false, error:error.message}; }
+        if (pageOps().handles(msg.op)) {
+          try { reply = await pageOps().command(msg); } catch (error) { reply = pageOps().failure(msg, error); }
+        } else {
+          try { reply = await dispatch(msg, valid); }
+          catch (error) { reply = {id:msg.id, ok:false, error:error.message}; }
+        }
         if (valid()) port.postMessage(reply);
       } catch (error) {
         if (valid()) { void report(error.message); drop(); }
@@ -182,6 +194,7 @@ async function connect() {
 function reconnect() {
   epoch++;
   void TrustyControlIndicator.clearAll();
+  void codes.offline.lost();
   const port = connection;
   connection = null;
   port?.disconnect();
@@ -233,9 +246,9 @@ function bootstrap(request) {
     const timeout = setTimeout(() => finish(null,"Enrollment timed out. Reopen the popup to retry."),8000);
     port.onDisconnect.addListener(() => finish(null,chrome.runtime.lastError?.message || "Enrollment disconnected"));
     port.onMessage.addListener(reply => {
-      if (reply?.ok === true && (request.op === "resolve"
+      if (reply?.ok === true && (CODE_OPS.has(request.op) || (request.op === "resolve"
           ? typeof reply.workflow === "string" && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(reply.workflow)
-          : reply.workflow === request.workflow)) return finish(reply,null);
+          : reply.workflow === request.workflow))) return finish(reply,null);
       const error = new Error(typeof reply?.error === "string" ? reply.error : "Invalid enrollment reply");
       // Only the verified enrollment host can report a definitive protocol refusal.
       if (reply?.ok === false && typeof reply.error === "string") error.response = reply;
@@ -244,6 +257,29 @@ function bootstrap(request) {
     port.postMessage(request);
   });
 }
+
+// #11239: activation-code grants, the all-https permission and the pairing live in codes.js.
+const CODE_OPS = new Set(["mint","grants","revoke_grant","revoke_grants","pair","unpair"]);
+let originChain = Promise.resolve();
+const origins = {
+  remember(tab, value) {
+    const step = originChain.then(async () => {
+      const {origins:map = {}} = await chrome.storage.session.get("origins");
+      await chrome.storage.session.set({origins:{...map, [tab]:value}});
+    });
+    originChain = step.catch(() => {});
+    return step.catch(() => {});
+  },
+  async originOf(tab) {
+    const {origins:map} = await chrome.storage.session.get("origins");
+    return typeof map?.[tab] === "string" ? map[tab] : null;
+  },
+};
+let pageCommands;
+const pageOps = () => pageCommands ||= TrustyPages.commands({identity, ended:(grant, last) => codes.ended(grant, last),
+  grant:async grant => (await codes.readTable())[grant] || null, ...origins});
+const codes = TrustyCodes({bootstrap, identity, pageOps, reconnect:() => reconnect()});
+const codeTypes = ["code_preview","pair","unpair","mint","grants","revoke_grant","revoke_grants"];
 let enrollmentBusy = false;
 let replacement = null;
 const definiteRefusals = new Set(["WorkflowCredentialOccupied","InvalidEnrollment","InvalidRequest","Unauthorized","EnrollmentConflict",
@@ -263,7 +299,11 @@ async function setup(msg) {
     if (replacement?.id === msg.confirmation) replacement = null;
     return {ok:true};
   }
-  const {enrollment,pending} = await chrome.storage.local.get(["enrollment","pending"]);
+  const {enrollment,pending,pairing} = await chrome.storage.local.get(["enrollment","pending","pairing"]);
+  // #11239: no workflow enroll, activate or replace while a pairing holds this profile.
+  if (pairing && ["activate","enroll","replace"].includes(msg.type)) {
+    throw new Error("This profile is activated for activation codes. Disconnect it first.");
+  }
   if (msg.type === "preview" && enrollment) {
     const {email,url,account} = enrollment;
     if (await identity() !== email) throw new Error("The enrolled profile changed.");
@@ -354,13 +394,17 @@ async function setup(msg) {
 }
 chrome.runtime.onMessage.addListener((msg,sender,reply) => {
   if (sender.id !== chrome.runtime.id || sender.url !== origin + "/setup.html" ||
-      !["activate","enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
-  setup(msg).then(reply,error => reply({ok:false,error:error.message}));
+      ![...codeTypes,"activate","enroll","replace","cancel","preview","enable","unenroll"].includes(msg.type)) return;
+  (codeTypes.includes(msg.type) ? storageReady.then(() => codes.setup(msg)) : setup(msg)).then(reply,error => reply({ok:false,error:error.message}));
   return true;
 });
 chrome.identity.onSignInChanged.addListener(reconnect);
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === "reconnect") void connect(); });
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === "reconnect") { void connect(); void codes.tick().catch(() => {}); }
+});
 chrome.alarms.create("reconnect", {periodInMinutes:1});
+// A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
+void codes.offline.lost();
 void connect();

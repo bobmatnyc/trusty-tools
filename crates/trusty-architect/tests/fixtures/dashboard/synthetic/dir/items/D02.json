@@ -1,5 +1,5 @@
 {
-  "created": "2026-10-11T04:00:00Z",
+  "created": "2026-10-21T10:00:00Z",
   "due": null,
   "goal": "lorem ipsum dol",
   "kind": "question",
@@ -13,6 +13,6 @@
   "session": "pm-1",
   "status": "open",
   "title": "lorem ipsum ",
-  "updated": "2026-10-11T04:00:00Z",
+  "updated": "2026-10-21T10:00:00Z",
   "version": 1
 }

@@ -78,6 +78,9 @@ pub struct FakeTmuxDriver {
     pub send_calls: Mutex<Vec<(String, String)>>,
     pub kill_calls: Mutex<Vec<String>>,
     pub capture_responses: Mutex<HashMap<String, String>>,
+    /// #8407: escaped captures keyed BY PANE ID; a missing key is a capture
+    /// failure, so a test can drive the unreadable-pane arm.
+    pub escaped_capture_responses: Mutex<HashMap<String, String>>,
     /// Names to return from `list_sessions`.
     pub seeded_names: Mutex<Vec<String>>,
     /// Records `(session_name, workdir)` for every `create_session` call.
@@ -174,6 +177,7 @@ impl FakeTmuxDriver {
             send_calls: Mutex::new(Vec::new()),
             kill_calls: Mutex::new(Vec::new()),
             capture_responses: Mutex::new(HashMap::new()),
+            escaped_capture_responses: Mutex::new(HashMap::new()),
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
@@ -501,6 +505,21 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .get(pane_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    /// #8407: the seeded escaped capture for `pane_id`, or a capture failure.
+    fn capture_pane_escaped(
+        &self,
+        _name: &str,
+        pane_id: &str,
+        _lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.escaped_capture_responses
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .cloned()
+            .ok_or_else(|| ManagedError::TmuxUnavailable(format!("no pane {pane_id}")))
     }
 }
 

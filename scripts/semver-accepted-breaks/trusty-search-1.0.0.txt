@@ -1,0 +1,5 @@
+# Computed against the latest published release, trusty-search 0.63.1.
+crate   trusty-search
+version 1.0.0
+reason  Owner ruling Dnx: 1.0.0 stability release. A major bump permits the break: the exhaustive enum ParkReason gains the variant Decommissioned.
+accept  enum_variant_added  ParkReason Decommissioned

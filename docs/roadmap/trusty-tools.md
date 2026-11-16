@@ -46,9 +46,10 @@ trusty-agents and trusty-analyze record what they do as typed events on one
 event bus. The bus moves out of the console into `trusty-events`, a crate for
 trusty components only, run as its own launchd-supervised daemon over a Unix
 socket ([ADR-0065](../adr/0065-trusty-events-process-placement.md)). The
-console reads from it. `trusty-events` is published to crates.io because it
-ships its own binary, and ADR-0043 allows installs from the registry only. It
-makes no stability promise to outside users, and no other crate links it.
+console reads from it. `trusty-events` is internal and not published to
+crates.io (owner ruling 2026-10-02, #10130), so `tctl install` and `tctl
+upgrade` skip it; it is built from a checkout. It makes no stability promise
+to outside users, and no other crate links it.
 
 **4. trusty-mpm 2.0.0 — the architect.** Anticipated ship date 2026-11-27, the
 due date of the GitHub milestone "trusty-mpm 2.0.0" (#97). See "What 2.0.0

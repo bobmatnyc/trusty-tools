@@ -5,6 +5,8 @@ import test from "node:test";
 import vm from "node:vm";
 
 const worker = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
+const pages = await readFile(new URL("../src/trusty_browser/extension/pages.js",import.meta.url),"utf8");
+const codes = await readFile(new URL("../src/trusty_browser/extension/codes.js",import.meta.url),"utf8");
 const id="jabfhcolknbbdajilgpficniedhcfahc", origin="chrome-extension://"+id;
 const email="user@example.org", url="http://127.0.0.1:1234/app", account="site-user";
 const plain = value => JSON.parse(JSON.stringify(value));
@@ -35,8 +37,10 @@ async function fixture() {
       set:async data=>Object.assign(stored,data),remove:async keys=>{for (const k of [keys].flat()) delete stored[k];}}},
     identity:{getProfileUserInfo:async()=>({email}),onSignInChanged:event()},
     alarms:{onAlarm:event(),create(){}}};
-  vm.runInNewContext(worker,{chrome,crypto:webcrypto,TextEncoder,URL,importScripts(){},
+  const ctx = vm.createContext({chrome,crypto:webcrypto,TextEncoder,URL,
     TrustyControlIndicator:{clearAll(){},clear(){}},clearTimeout(){},setTimeout(){return 0;}});
+  ctx.importScripts = (...files) => { vm.runInContext(pages,ctx); vm.runInContext(codes,ctx); };
+  vm.runInContext(worker,ctx);
   const open=(tab,documentId)=>runtime.onConnect.fire({name:"qa-document",
     sender:{id,url,frameId:0,documentId,tab:{id:tab}},onDisconnect:event()});
   open(1,"D");

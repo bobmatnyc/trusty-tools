@@ -13,7 +13,7 @@ Moved from the crate README (#8454). `slack-mcp` builds only with the
 | `slack_send_message`         | Post a message (or thread reply) to a channel | `chat:write` |
 | `slack_read_channel`         | Read recent messages from a channel, cursor-paginated | `channels:history` (+ `groups:`/`im:`/`mpim:history`) |
 | `slack_read_thread`          | Read all replies in a thread, cursor-paginated | same as `slack_read_channel` |
-| `slack_list_channels`        | List visible channels | `channels:read` (+ `groups:`/`im:`/`mpim:read`) |
+| `slack_list_channels`        | List one page of visible channels, cursor-paginated (see below) | `channels:read` (+ `groups:`/`im:`/`mpim:read`) |
 | `slack_search_messages`      | Search messages across the workspace, with a `scope` param for public-only vs. public+private | `search:read` (**user token**) |
 | `slack_search_channels`      | Search channels by name/topic (client-side filter — no server-side channel search) | `channels:read` |
 | `slack_list_users`           | List workspace users | `users:read` |
@@ -47,6 +47,24 @@ private channel/DM/group DM). This is a courtesy on the failure path, not a
 hard requirement — without the scope the lookup itself fails and the error
 degrades to the bare `channel_canvas_already_exists` slug, same as before.
 
+**`slack_list_channels` types and paging:** with no `types` argument the tool
+asks for `public_channel,private_channel`, so private channels the bot is a
+member of are listed. A token without `groups:read` gets `missing_scope` for
+that set; the tool then repeats the request once with `public_channel` and
+returns the public listing. The result's `types` field names the set actually
+listed. An explicit `types` is sent unchanged, and a `missing_scope` for it is
+returned as the error. Each call returns one page: pass the result's
+`next_cursor` back as `cursor`, together with its `types`, until `next_cursor`
+is `null`.
+
+**`slack_read_channel` / `slack_read_thread` after `channel_not_found`:**
+Slack returns `channel_not_found` both for a wrong channel id and for a
+private channel the bot is not in. The tool then calls `auth.test` (no scope
+needed) to name the bot user in the error, with the `/invite` step. The lookup
+makes one attempt, with no rate-limit retry, and is abandoned after 3 seconds.
+If it fails, is rate-limited or times out, the error is the bare
+`channel_not_found` slug. Any other read error triggers no lookup.
+
 **Not implemented:** `slack_send_message_draft` — Slack has no public API to
 create an editable message draft (`chat.postMessage` sends immediately,
 `chat.scheduleMessage` schedules a send; neither creates something the user
@@ -61,9 +79,13 @@ markdown.
 
 ## Read-only allowlist under the egress guard
 
-`tm hook --egress-guard` (#8454) refuses every Slack MCP tool in a
-tm-launched session, reads included. The host `config.yaml` may grant one
-project two read tools (#10387):
+`tm hook --egress-guard` (#8454) refuses every Slack MCP tool to a
+subagent, reads included. Since #11273 a PM's or the Architect's main
+session may call the `slack-mcp` read, search and list tools; a send or
+write needs the Architect's tm launch record (#10447), bar a PM's send to
+the owner's DM (#11194). No PM launch record exists yet. The host
+`config.yaml` may grant one project two read tools for every caller,
+subagents included (#10387):
 
 ```yaml
 channels:

@@ -12,10 +12,12 @@
 //! that many seconds and exits 0. No host `sleep` is involved.
 //!
 //! This file compiles into two targets through a `#[path]` include: the `tm`
-//! binary's unit tests (`commands::fleet::relaunch::tests`) and the
-//! `integration` target (`tm_fleet`). It names only `std`, so one spelling
+//! binary's unit tests (`commands::fleet::relaunch::tests`), the
+//! `integration` target (`tm_fleet`) and the lib's `test_support`. It names only `std`, so one spelling
 //! compiles in both.
-//! Test: `stop_claude_ends_a_claude_process`, and every `tm_fleet::` test.
+//! Test: `stop_claude_ends_a_claude_process`, every `tm_fleet::` test,
+//! `a_real_foreign_compiler_is_counted`, and
+//! `a_resume_rebind_reads_the_claude_on_the_grants_own_server`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,7 +28,13 @@ pub(crate) const SECS_ENV: &str = "TM_FAKE_CLAUDE_SECS";
 
 /// Symlink this test binary as `claude-sleep` in `dir` and return the path.
 pub(crate) fn sleeper(dir: &Path) -> PathBuf {
-    let path = dir.join("claude-sleep");
+    sleeper_named(dir, "claude-sleep")
+}
+
+/// Symlink this test binary as `name` in `dir` and return the path; the
+/// process it starts is named `name` (#11061).
+pub(crate) fn sleeper_named(dir: &Path, name: &str) -> PathBuf {
+    let path = dir.join(name);
     let exe = std::env::current_exe().expect("the test binary's path");
     std::os::unix::fs::symlink(exe, &path).expect("fake claude process");
     path

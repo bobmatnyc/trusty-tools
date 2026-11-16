@@ -57,6 +57,19 @@ test("expiry, renewal, and disconnect preserve unrelated leases", async () => {
   assert.equal(timers.size,0);
 });
 
+test("code grants show the badge until the grant table and workflow leases are both empty", async () => {
+  const {control,view} = profile();
+  await control.grants(1);
+  assert.deepEqual([view.badge,view.title],["ON","Trusty Browser: agent access granted"]);
+  await control.update(7,"doc-a",state("a","travel"));
+  assert.equal(view.title,"Trusty Browser controls travel; agent access granted");
+  await control.grants(0);
+  assert.deepEqual([view.badge,view.title],["ON","Trusty Browser controls travel"]);
+  await control.clear(7,"a");
+  assert.deepEqual([view.badge,view.title],["","Trusty Browser"]);
+  assert.ok(!view.messages.some(m => m.action === "show" && m.tab !== 7), "code grants draw no page border");
+});
+
 test("an unavailable content script prevents reporting active control", async () => {
   const {control,view} = profile();
   view.refuse = true;

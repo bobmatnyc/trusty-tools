@@ -439,17 +439,19 @@ mod tests {
         assert!(foreign_groups(&table, &[holder(20, None)]).is_empty());
     }
 
-    /// A real process named `rustc` (a symlink to `sleep`) under this test is
+    /// A real process named `rustc` (a link to the test binary) under this test is
     /// counted foreign, and stops being counted when a holder record names
     /// this test process as its `tm build-lease`.
     #[test]
     #[serial_test::serial(build_slot_fds)] // #8736: spawns; see `slots::tests`.
     fn a_real_foreign_compiler_is_counted() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let fake = tmp.path().join("rustc");
-        std::os::unix::fs::symlink("/bin/sleep", &fake).expect("symlink");
+        // #11061: not a `/bin/sleep` link, which uutils `sleep` refuses.
+        use crate::test_support::fake_claude;
+        let fake = fake_claude::sleeper_named(tmp.path(), "rustc");
         let mut child = std::process::Command::new(&fake)
-            .arg("30")
+            .args(fake_claude::argv())
+            .env(fake_claude::SECS_ENV, "30")
             .spawn()
             .expect("spawn the fake compiler");
         let sampler = SysinfoSampler::new();

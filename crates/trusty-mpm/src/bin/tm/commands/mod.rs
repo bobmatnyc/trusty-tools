@@ -47,6 +47,8 @@ pub(crate) mod dbatg;
 pub(crate) mod delete;
 // #10991: `tm session archive`.
 pub(crate) mod session_archive;
+// #10992: `tm session delete --project-dir`.
+pub(crate) mod session_delete_dir;
 #[cfg(test)]
 pub(crate) mod socket_mock_tests;
 // #6887: the bulk-read diversion hook and its cheap worker.
@@ -55,12 +57,16 @@ pub(crate) mod divert_check;
 pub(crate) mod divert_worker;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 pub(crate) mod egress_guard;
-// #10447: the Architect main-thread allow arm.
+// #10447: the bound Architect's main-thread allow arm and its audit.
 pub(crate) mod egress_guard_architect;
 // #8454 S3: the Bash arm — a family host or program in a Bash command.
 pub(crate) mod egress_guard_bash;
+// #11273: Bash commands that only mention a family host as inert text.
+pub(crate) mod egress_guard_bash_mention;
 pub(crate) mod egress_guard_families;
-// #11194: a main thread's Slack send to the owner's DM.
+// #11273: a PM or Architect main session's family read.
+pub(crate) mod egress_guard_main_read;
+// #11194: a main thread's Slack send to the owner's DM; #11273: the main-session role.
 pub(crate) mod egress_guard_pm_dm;
 pub(crate) mod egress_guard_slack_read;
 // #8433 P0: the channel-taint arm of the egress guard.
@@ -293,6 +299,8 @@ pub(crate) mod pm_guard_secret_consumers;
 pub(crate) mod pm_guard_secret_search_loop;
 // #8093, #8110, #8520, #8660: same-class copies, tokeninfo URLs, refusal hints.
 pub(crate) mod pm_guard_secret_handling;
+// #10685: the inert operands of a command that only prints.
+pub(crate) mod pm_guard_secret_printed_text;
 // #8879: the credential rules over the body of a script a command runs.
 pub(crate) mod pm_guard_secret_script;
 pub(crate) mod pm_guard_secret_script_read;
