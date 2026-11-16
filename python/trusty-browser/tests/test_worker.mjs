@@ -215,20 +215,22 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       if (!accessible(t)) throw new Error("Cannot access contents of the page");
       if (target.documentIds && !target.documentIds.includes(t.doc)) throw new Error("No document with id");
       if (func.name !== "pageProbe") ran.push({tab:target.tabId, func:func.name, args});
+      const documentId = t.doc;
       const result = func.name === "pageProbe" ? [t.origin, t.title]
         : func.name === "pageInspect" ? t.readResult ?? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
         : t.result || (func.name === "pageDrag" ? {ok:true, dropped:true} : {ok:true, x:10, y:20});
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
-      // #11373: `t.moveAfterProbe` = n applies `t.move` right after the nth probe answers, as a navigation
-      // would, destroying the old document's execution context.
-      if (func.name === "pageProbe" && t.moveAfterProbe && ++t.probes === t.moveAfterProbe) {
+      // #11373: `t.moveAfterProbe` applies `t.move` right after a probe made while the debugger is attached
+      // answers, as a navigation would, destroying the old document's execution context.
+      if (func.name === "pageProbe" && t.moveAfterProbe && t.attached) {
+        t.moveAfterProbe = false;
         const old = "u-" + t.doc;
         Object.assign(t, t.move);
         await chrome.debugger.onEvent.fire({tabId:target.tabId}, "Runtime.executionContextDestroyed",
           {executionContextId:1, executionContextUniqueId:old});
       }
-      return [{frameId:0, documentId:t.doc, result}];
+      return [{frameId:0, documentId, result}];
     }},
     // #11294: CDP input. `t.dialog` opens one native dialog at the mouse press (`t.dialogFails` makes its
     // answer fail); `t.busy` refuses attach; `t.moveAt` names an event type after which the tab gets
@@ -241,9 +243,10 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         const t = tabs.get(tabId);
         if (t?.busy) throw new Error("Another debugger is already attached");
         cdp.push({tab:tabId, method:"attach"});
+        if (t) t.attached = true;
         if (t?.moveAt === "attach") Object.assign(t, t.move);  // #11373
       },
-      detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
+      detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); const t = tabs.get(tabId); if (t) t.attached = false; },
       sendCommand:async ({tabId}, method, params) => {
         cdp.push({tab:tabId, method, params});
         const t = tabs.get(tabId);
@@ -1220,8 +1223,8 @@ test("evaluate never runs in a document that replaced the lease's after the prob
     const f = await codeFixture();
     const {grant} = await connectGrant(f);
     const t = f.tabs.get(7);
-    // Probe 1 is the pre-attach check, probe 2 the re-check inside the attach; the tab navigates after it.
-    Object.assign(t, {probes:0, moveAfterProbe:2, move, evaluated:{result:{type:"string", value:"secret"}}});
+    // The tab navigates right after the re-check probe made inside the attach.
+    Object.assign(t, {moveAfterProbe:true, move, evaluated:{result:{type:"string", value:"secret"}}});
     const reply = await f.command("page_evaluate", {grant, tab:7, document:"doc-7", expression:"document.cookie"});
     assert.equal(reply.ok, false, JSON.stringify(reply));
     assert.equal(reply.error, "DocumentChanged", JSON.stringify(move));
