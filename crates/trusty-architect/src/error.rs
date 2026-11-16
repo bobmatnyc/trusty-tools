@@ -70,6 +70,12 @@ pub enum SendError {
     /// The box accepted input, but the tmux call failed.
     #[error(transparent)]
     Tmux(#[from] TmuxError),
+    /// #11365: the typed line did not echo in the box, so Enter was not pressed.
+    #[error("the line typed into {pane} did not echo; Enter not pressed")]
+    NotEchoed {
+        /// The pane the line was typed into.
+        pane: String,
+    },
 }
 
 /// Why the poller's wake did not complete (#9171 A3b-1).

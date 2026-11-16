@@ -2056,3 +2056,61 @@ fn architect_up_inside_claude_code_starts_nothing() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(!env.has_session("tm-architect"), "{}", text(&out));
 }
+
+// --- #11365: `tm architect restart` gates against the private tmux server ---
+
+/// Writes the Architect's Intent Ledger under `dir/local/il`, written at
+/// `written` epoch seconds, plus a stamp when `changed` is given.
+fn write_il(dir: &Path, written: u64, changed: Option<u64>) {
+    let d = dir.join("local/il/.trusty-mpm/datg");
+    std::fs::create_dir_all(&d).expect("datg dir");
+    let state = serde_json::json!({
+        "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
+        "goals": [{"id": "ar-G01", "status": "active"}],
+        "session": {"written_at": "2026-10-21T10:00Z", "written_epoch": written,
+            "task": "ship the restart verb", "next": "run the gates", "owed": [], "crons": []}
+    });
+    std::fs::write(d.join("state.json"), state.to_string()).expect("state");
+    if let Some(c) = changed {
+        std::fs::write(d.join("stamp.json"), format!("{{\"changed_epoch\": {c}}}")).expect("stamp");
+    }
+}
+
+/// #11365 closure: a stale IL exits 4 and the running `claude` survives.
+#[test]
+fn architect_restart_with_a_stale_checkpoint_exits_4_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    write_il(&dir, 1_792_576_800, Some(1_792_576_900));
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert!(!dir.join("inbox/restart.log").exists());
+}
+
+/// #11365 closure: a box that is not idle exits 2 and the `claude` survives.
+#[test]
+fn architect_restart_on_a_busy_box_exits_2_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    // Fresh: no stamp. The fake `claude` draws no input box, so it is never idle.
+    write_il(&dir, 1_792_576_800, None);
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert_eq!(env.launches(2).len(), 1, "restart launched a claude");
+}

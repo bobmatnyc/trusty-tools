@@ -41,6 +41,7 @@ mod quiet_list;
 mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
 mod relaunch;
+pub(crate) mod restart; // #11365
 mod seed;
 mod session_name;
 pub(crate) mod up; // #11364

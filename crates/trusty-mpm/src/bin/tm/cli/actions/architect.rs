@@ -90,6 +90,20 @@ pub(crate) enum ArchitectAction {
     Up(UpArgs),
     /// Attach to the Architect's tmux session (switch-client inside tmux).
     Attach,
+    /// Restart the Architect behind the checkpoint gate (#11365).
+    ///
+    /// Refuses unless the Intent Ledger checkpoint is fresh (exit 4) and the
+    /// box is idle for 3 reads 5 s apart (exit 2). Then stops `claude`,
+    /// relaunches it bound with resume, restores the poller and types one
+    /// resume line. Refused inside Claude Code. No bypass flag.
+    Restart {
+        /// Keep waiting for idle up to this many seconds.
+        #[arg(long)]
+        wait: Option<u64>,
+        /// The Architect directory (default: the one `tm fleet init` recorded).
+        #[arg(long)]
+        dir: Option<String>,
+    },
 }
 
 /// `tm architect up` flags (#11364).

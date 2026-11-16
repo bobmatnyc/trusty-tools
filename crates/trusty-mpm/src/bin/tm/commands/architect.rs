@@ -28,6 +28,9 @@ pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
         None => super::architect_up::up(crate::cli::UpArgs::default()).await,
         Some(ArchitectAction::Up(args)) => super::architect_up::up(args).await,
         Some(ArchitectAction::Attach) => super::architect_up::attach(),
+        Some(ArchitectAction::Restart { wait, dir }) => {
+            super::architect_up::restart(wait, dir).await
+        }
         Some(other) => run(other),
     }
 }
@@ -97,11 +100,12 @@ fn execute(
             };
             dir.and_then(|d| verbs::self_ctx(&d))
         }
-        ArchitectAction::Dashboard(_) | ArchitectAction::Up(_) | ArchitectAction::Attach => {
-            Err(VerbError::Usage(
-                "dashboard, up and attach run through `run_any`, never `execute`".to_owned(),
-            ))
-        }
+        ArchitectAction::Dashboard(_)
+        | ArchitectAction::Up(_)
+        | ArchitectAction::Attach
+        | ArchitectAction::Restart { .. } => Err(VerbError::Usage(
+            "dashboard, up and attach run through `run_any`, never `execute`".to_owned(),
+        )),
     };
     match result {
         Ok(stdout) => Output {

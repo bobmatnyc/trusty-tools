@@ -68,6 +68,37 @@ pub(crate) fn attach() -> i32 {
     attach_to(names.architect(), fleet::inside_claude_code())
 }
 
+/// `tm architect restart` (#11365); returns the exit code (0, 1, 2 or 4).
+pub(crate) async fn restart(wait: Option<u64>, dir: Option<String>) -> i32 {
+    let Some(home) = dirs::home_dir() else {
+        eprintln!("tm architect: cannot resolve the home directory");
+        return 1;
+    };
+    let resolved = fleet::resolve_dir(dir.as_deref(), &home).and_then(|d| {
+        let names = fleet::recorded_names(&home).map_err(anyhow::Error::msg)?;
+        Ok((std::fs::canonicalize(&d).unwrap_or(d), names))
+    });
+    let (dir, names) = match resolved {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("tm architect: {e:#}");
+            return 2;
+        }
+    };
+    let wait = wait.map(std::time::Duration::from_secs);
+    let inside = fleet::inside_claude_code();
+    let mut report = fleet::restart::restart_live(&dir, &home, &names, inside, wait);
+    if let Some(reg) = report.registration.take() {
+        let step = fleet::register_architect(&reg).await;
+        report.lines.push(step.render_line().trim().to_owned());
+    }
+    for line in &report.lines {
+        println!("  {line}");
+    }
+    println!("tm architect restart: exit {}", report.exit);
+    report.exit
+}
+
 /// Attach (or switch-client inside tmux); inside Claude Code only print the command.
 fn attach_to(session: &str, inside: bool) -> i32 {
     if inside {

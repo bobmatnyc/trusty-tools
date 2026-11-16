@@ -1,0 +1,2 @@
+Added
+- `tm architect restart` restarts the Architect only behind two gates: a fresh Intent Ledger checkpoint (else exit 4; a ledger it cannot read also refuses) and an idle box for 3 reads 5 s apart (else exit 2, or keep trying with `--wait <s>`). It then relaunches `claude` bound with resume, restores the poller, types one guarded resume line and appends one line to `inbox/restart.log`. Refused inside Claude Code; no bypass flag (#11365).
