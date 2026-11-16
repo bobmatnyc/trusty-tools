@@ -19,6 +19,7 @@ from test_activation_codes import (  # noqa: F401
     short,
 )
 
+from trusty_browser.page_query import FIND_DEFAULTS, READ_DEFAULTS
 from trusty_browser import codes, protocol
 
 CLOSED = (EOFError, asyncio.IncompleteReadError, ConnectionError)
@@ -525,6 +526,90 @@ def test_worker_refusals_apply_the_contract_fate(short, clock, refusal, lease_ke
     run(short, body)
 
 
+def test_page_read_sends_its_controls_and_refuses_bad_ones(short, clock):
+    # #11356: absent controls take their defaults; a bad one sends nothing.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        assert (await call({"op": "page_read", "lease": lease}))["ok"]
+        scoped = {"scope_ref": "4.1", "max_chars": 2000, "include_text": True}
+        assert (await call({"op": "page_read", "lease": lease, **scoped}))["ok"]
+        sent = [{k: f[k] for k in READ_DEFAULTS} for f in rig.a.sent("page_read")]
+        assert sent == [READ_DEFAULTS, {**READ_DEFAULTS, **scoped}]
+        for bad in ({"max_chars": 999}, {"max_chars": True}, {"scope_ref": ""},
+                    {"viewport_only": "yes"}, {"include_text": 1}, {"limit": 3}):  # fmt: skip
+            reply = await call({"op": "page_read", "lease": lease, **bad})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, bad
+        assert len(rig.a.sent("page_read")) == 2
+
+    run(short, body)
+
+
+def test_page_find_relays_matches_and_refuses_bad_terms(short, clock):
+    # #11357: absent terms take their defaults; a find needs role, name or text.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        found = await call({"op": "page_find", "lease": lease, "name": "Delete"})
+        assert found["ok"] and found["matches"][0]["in"]["role"] == "row"
+        assert found["document_changed"] is False and found["truncated"] is False
+        sent = rig.a.sent("page_find")[0]
+        assert {k: sent[k] for k in FIND_DEFAULTS} == {
+            **FIND_DEFAULTS,
+            "name": "Delete",
+        }
+        for bad in ({}, {"name": ""}, {"name": "x", "limit": 0}, {"name": "x", "limit": 51},
+                    {"role": 3}, {"name": "x", "within_ref": ""}, {"name": "x", "max_chars": 2000}):  # fmt: skip
+            reply = await call({"op": "page_find", "lease": lease, **bad})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, bad
+        assert len(rig.a.sent("page_find")) == 1
+
+    run(short, body)
+
+
+def test_maxlength_cut_is_a_truncated_success_and_journaled(short, clock):
+    # #11352: a maxlength cut answers ok with truncated, typed and accepted; a retry types nothing.
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        cut = {"document": "d7-1", "truncated": True, "typed": 6, "accepted": 3}
+        rig.a.refuse["page_type"] = cut
+        frame = {**mutating_frame("page_type", lease, "m"), "ref": "1.0", "text": "abcdef"}
+        assert await call(frame) == {"ok": True, "tab": 7, **cut}
+        del rig.a.refuse["page_type"]
+        assert await call(frame) == {"ok": True, "tab": 7, **cut}
+        assert len(rig.a.sent("page_type")) == 1
+        rig.a.refuse["page_type"] = {**cut, "typed": "6"}
+        bad = {**frame, "request_id": "n"}
+        assert await call(bad) == {"ok": False, "error": "BrowserRefused"}
+
+    run(short, body)
+
+
+def test_text_dropped_is_relayed_with_its_counts_and_journaled(short, clock):
+    # #11352: the typing ran, so the refusal keeps the lease and a retry types nothing.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        dropped = {"error": "TextDropped", "tab": 7, "typed": 3, "accepted": 2,
+                   "entered": "ab"}  # fmt: skip
+        rig.a.refuse["page_type"] = dropped
+        frame = {
+            "op": "page_type",
+            "lease": lease,
+            "request_id": "t",
+            "ref": "1.0",
+            "text": "axb",
+        }
+        assert await call(frame) == {"ok": False, **dropped}
+        assert len(rig.broker.claims) == 1
+        del rig.a.refuse["page_type"]
+        assert await call(frame) == {"ok": False, **dropped}
+        assert len(rig.a.sent("page_type")) == 1
+
+    run(short, body)
+
+
 @pytest.mark.parametrize("error", ["NotSelectable", "NoSuchOption", "StaleElement"])
 def test_page_select_refusals_keep_the_lease_and_are_not_journaled(short, clock, error):
     async def body(rig):
@@ -611,13 +696,22 @@ def test_page_press_validates_key_and_modifiers_before_sending(short, clock):
         assert len(rig.a.sent("page_press")) == 3
 
     run(short, body)
+
+
 FILE = {"name": "a.txt", "type": "text/plain", "data": "aGVsbG8="}
 
 
 @pytest.mark.parametrize("worker_error", ["OutcomeUnknown", "BrowserDisconnected"])
 @pytest.mark.parametrize(
     "op",
-    ["page_click", "page_type", "page_press", "page_select", "page_navigate", "page_upload"],
+    [
+        "page_click",
+        "page_type",
+        "page_press",
+        "page_select",
+        "page_navigate",
+        "page_upload",
+    ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
     short, clock, op, worker_error

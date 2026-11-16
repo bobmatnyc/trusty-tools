@@ -11,6 +11,13 @@ from playwright.sync_api import sync_playwright
 from trusty_browser import service
 
 SCRIPT = Path(service.__file__).with_name("extension") / "pages.js"
+
+
+def load(tab):
+    """Add pages_read.js, then pages.js, as the worker's importScripts order does (#11355)."""
+    tab.add_script_tag(path=str(SCRIPT.with_name("pages_read.js")))
+    tab.add_script_tag(path=str(SCRIPT))
+
 PAGE = """
 <title>Pages QA</title>
 <main>
@@ -36,7 +43,7 @@ def page():
         try:
             tab = browser.new_page()
             tab.set_content(PAGE)
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             tab.evaluate("""() => {
               window.events = [];
               for (const kind of ["pointerdown","mousedown","pointerup","mouseup","click","input","change"])
@@ -47,8 +54,8 @@ def page():
             browser.close()
 
 
-def read(page):
-    return page.evaluate("() => TrustyPages.pageRead(512)")
+def read(page, **options):
+    return page.evaluate("o => TrustyPages.pageRead(512, o)", {"include_text": True, **options})
 
 
 def ref_of(result, name):
@@ -59,11 +66,12 @@ def test_read_reports_elements_and_bounds_size(page):
     result = read(page)
     names = [e["name"] for e in result["elements"]]
     assert names == ["Next page", "Go now", "Email", "Password", "Fixed", "old note", "Bio"]
-    assert all(e["ref"].startswith("1.") for e in result["elements"])
+    epoch = result["elements"][0]["ref"].split(".")[0]
+    assert all(e["ref"].split(".")[0] == epoch for e in result["elements"])
     by_name = {e["name"]: e for e in result["elements"]}
     assert by_name["Next page"]["role"] == "link"
     assert by_name["Next page"]["href"].endswith("/next")
-    assert by_name["Email"] == {"ref": "1.2", "tag": "input", "role": "textbox", "name": "Email",
+    assert by_name["Email"] == {"ref": epoch + ".2", "tag": "input", "role": "textbox", "name": "Email",
                                 "type": "email", "value": "a@b.test"}
     assert "value" not in by_name["Password"]
     assert "hunter2" not in json.dumps(result) and "secret-hidden" not in json.dumps(result)
@@ -79,15 +87,102 @@ def test_read_reports_elements_and_bounds_size(page):
     assert big["truncated"] is True
     assert len(big["elements"]) <= 500
     assert len(json.dumps(big, separators=(",", ":"), ensure_ascii=False).encode()) <= 262144 - 512
-    assert all(e["ref"].startswith("2.") for e in big["elements"])
+    # #11355: an unchanged element keeps its ref across reads.
+    assert big["elements"][0]["ref"] == result["elements"][0]["ref"]
+
+
+def test_read_scopes_bounds_and_truncates_in_viewport_order(page):
+    # #11356: scope, viewport and size controls; truncation keeps the elements nearest the viewport.
+    page.set_viewport_size({"width": 800, "height": 600})
+    page.evaluate("""() => {
+      const list = Object.assign(document.createElement("ul"), {id:"rows"});
+      for (let i = 0; i < 60; i++) {
+        const li = document.createElement("li");
+        li.innerHTML = "<span>Row " + i + "</span> <button>Edit " + i + "</button>";
+        list.append(li);
+      }
+      document.body.append(list);
+    }""")
+    whole = read(page, include_text=False)
+    assert whole["text"] == "" and whole["truncated"] is False
+    rows = whole["elements"]
+    edit = lambda n: next(e["ref"] for e in rows if e["name"] == "Edit " + str(n))
+    page.evaluate("() => scrollTo(0, document.querySelectorAll('#rows button')[30].offsetTop - 280)")
+    near = read(page, include_text=False, max_chars=1500)
+    names = [e["name"] for e in near["elements"]]
+    assert near["truncated"] is True and "Edit 30" in names and "Next page" not in names
+    assert len(json.dumps(near, separators=(",", ":"), ensure_ascii=False).encode()) <= 1500
+    # The kept elements are the nearest ones, returned in document order.
+    numbers = [int(n.split()[1]) for n in names]
+    assert numbers == sorted(numbers) and numbers[-1] - numbers[0] == len(numbers) - 1
+    on_screen = read(page, include_text=False, viewport_only=True)
+    shown = [int(e["name"].split()[1]) for e in on_screen["elements"]]
+    assert 30 in shown and 0 not in shown and 59 not in shown and on_screen["truncated"] is False
+    scope = page.evaluate("""() => { const s = document.querySelector("#rows li:nth-child(8)");
+      s.setAttribute("role", "button"); s.setAttribute("aria-label", "Row seven"); return true; }""")
+    assert scope
+    row_ref = ref_of(read(page, include_text=False), "Row seven")
+    scoped = read(page, scope_ref=row_ref)
+    assert [e["name"] for e in scoped["elements"]] == ["Row seven", "Edit 7"]
+    assert scoped["text"] == "Row 7 Edit 7"
+    assert edit(7) == ref_of(scoped, "Edit 7")
+    page.evaluate("() => document.querySelector('#rows li:nth-child(8)').remove()")
+    assert read(page, scope_ref=row_ref) == {"error": "StaleElement"}
+
+
+def test_read_cuts_a_long_url_to_fit_a_small_budget(page):
+    # #11356: url and title alone over max_chars are cut to fit; the trim loop used to spin forever.
+    page.goto("data:text/html,<title>" + "T" * 150 + "</title><button>Go</button>#" + "u" * 3000)
+    load(page)
+    small = read(page, max_chars=1000)
+    assert small["truncated"] is True and small["text"] == "" and small["elements"] == []
+    assert len(json.dumps(small, separators=(",", ":"), ensure_ascii=False).encode()) <= 1000
+    assert small["url"].startswith("data:text/html,") and len(small["url"]) < 1000
+
+
+def find(page, **terms):
+    return page.evaluate("t => TrustyPages.pageFind(t)", terms)
+
+
+def test_find_returns_matches_with_their_container(page):
+    # #11357: ten identical Delete buttons come back distinguishable by row.
+    page.evaluate("""() => {
+      const table = document.createElement("table");
+      table.innerHTML = "<caption>People</caption>" + Array.from({length:10}, (_, i) =>
+        "<tr><td>Person " + i + "</td><td><button>Delete</button></td></tr>").join("");
+      const nav = document.createElement("nav");
+      nav.setAttribute("aria-label", "Site");
+      nav.innerHTML = "<a href='/home'>Home</a><button>Delete</button>";
+      document.body.append(table, nav);
+    }""")
+    rows = find(page, role="button", name="delete", limit=50)
+    assert rows["truncated"] is False and len(rows["matches"]) == 11
+    assert [m["in"]["name"] for m in rows["matches"][:10]] == ["Person %d Delete" % i for i in range(10)]
+    assert {m["in"]["role"] for m in rows["matches"][:10]} == {"row"}
+    assert rows["matches"][10]["in"] == {"role": "navigation", "name": "Site", "ref": rows["matches"][10]["in"]["ref"]}
+    assert len({m["ref"] for m in rows["matches"]}) == 11
+    assert [m["name"] for m in find(page, name="Go")["matches"]] == ["Go now"]
+    # text matches the container's text, so this is the Delete button in Person 4's row.
+    four = find(page, role="button", text="person 4")["matches"]
+    assert len(four) == 1 and four[0]["in"]["name"] == "Person 4 Delete"
+    assert click(page, four[0]["ref"]) == {"ok": True}
+    assert page.evaluate("events").count("click:button") == 1
+    # within_ref never returns an element outside its subtree.
+    row = four[0]["in"]["ref"]
+    inside = find(page, role="button", within_ref=row)
+    assert [m["ref"] for m in inside["matches"]] == [four[0]["ref"]]
+    nav = rows["matches"][10]["in"]["ref"]
+    assert [m["name"] for m in find(page, name="e", within_ref=nav)["matches"]] == ["Home", "Delete"]
+    assert find(page, role="link", within_ref=row)["matches"] == []
+    limited = find(page, role="button", name="Delete", limit=3)
+    assert len(limited["matches"]) == 3 and limited["truncated"] is True
+    assert find(page, name="no such thing") == {"origin": "null", "matches": [], "truncated": False}
+    page.evaluate("() => document.querySelectorAll('tr')[4].remove()")
+    assert find(page, role="button", within_ref=row) == {"error": "StaleElement"}
 
 
 def test_click_and_type_refuse_stale_refs(page):
-    first = read(page)
-    go = ref_of(first, "Go now")
     second = read(page)
-    assert page.evaluate("ref => TrustyPages.pageClick(ref)", go) == {"error": "StaleElement"}
-    assert page.evaluate("events") == []
     fresh = ref_of(second, "Go now")
     assert page.evaluate("ref => TrustyPages.pageClick(ref)", fresh) == {"ok": True}
     assert page.evaluate("events") == ["pointerdown:go", "mousedown:go", "pointerup:go", "mouseup:go", "click:go"]
@@ -96,6 +191,39 @@ def test_click_and_type_refuse_stale_refs(page):
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", ref_of(second, "Email")) == {"ok": True}
     assert page.evaluate("ref => TrustyPages.pageType(ref, 'x')", "9.0") == {"error": "StaleElement"}
     assert page.evaluate("events") == ["input:email", "change:email"]
+
+
+def click(page, ref):
+    return page.evaluate("ref => TrustyPages.pageClick(ref)", ref)
+
+
+def test_refs_survive_reads_and_go_stale_when_the_element_changes(page):
+    # #11355: a ref outlives reads of an unchanged page; a changed or removed element answers StaleElement.
+    page.evaluate("""() => {
+      for (const label of ["Delete A", "Delete B"])
+        document.body.append(Object.assign(document.createElement("button"), {textContent:label}));
+    }""")
+    first = read(page)
+    go, a, b, note = (ref_of(first, n) for n in ("Go now", "Delete A", "Delete B", "old note"))
+    second = read(page)
+    assert [e["ref"] for e in second["elements"]] == [e["ref"] for e in first["elements"]]
+    assert click(page, go) == {"ok": True}
+    page.evaluate("() => { window.events = []; }")
+    # Swap the labels: neither old ref may click the button that now carries its name.
+    page.evaluate("""() => { const [x, y] = [...document.querySelectorAll("button")].slice(-2);
+      [x.textContent, y.textContent] = [y.textContent, x.textContent]; }""")
+    assert click(page, a) == {"error": "StaleElement"}
+    assert click(page, b) == {"error": "StaleElement"}
+    # An identical replacement node is a different element.
+    page.evaluate("go.replaceWith(go.cloneNode(true))")
+    assert click(page, go) == {"error": "StaleElement"}
+    assert page.evaluate("events") == []
+    third = read(page)
+    assert ref_of(third, "Delete A") not in (a, b) and ref_of(third, "Go now") != go
+    # Editing a field's own text keeps its ref.
+    assert page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [note, "new"]) == {"ok": True}
+    assert page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [note, "newer"]) == {"ok": True}
+    assert ref_of(read(page), "newer") == note
 
 
 def test_type_sets_values_and_refuses_non_editable(page):
@@ -111,6 +239,28 @@ def test_type_sets_values_and_refuses_non_editable(page):
         "new@b.test", "", "new note", "fixed"]
 
 
+def test_type_reports_text_dropped_by_maxlength_or_a_cancelled_beforeinput(page):
+    # #11352: a maxlength cut answers ok with its counts; a cancelled beforeinput never answers ok.
+    page.evaluate("""() => {
+      const short = Object.assign(document.createElement("input"), {id:"short", maxLength:3});
+      short.setAttribute("aria-label", "Short");
+      const guard = Object.assign(document.createElement("input"), {id:"guard"});
+      guard.setAttribute("aria-label", "Guard");
+      guard.addEventListener("beforeinput", e => { if (e.data === "x") e.preventDefault(); });
+      document.body.append(short, guard);
+    }""")
+    result = read(page)
+    typed = lambda name, text: page.evaluate("([r, t]) => TrustyPages.pageType(r, t)", [ref_of(result, name), text])
+    # A maxlength cut succeeds and says how much landed.
+    assert typed("Short", "abcdef") == {"ok": True, "truncated": True, "typed": 6, "accepted": 3}
+    assert page.evaluate("short.value") == "abc"
+    assert typed("Guard", "axb") == {"error": "TextDropped", "typed": 3, "accepted": 2, "entered": "ab"}
+    assert page.evaluate("guard.value") == "ab"
+    assert page.evaluate("([r, k]) => TrustyPages.pagePress(r, k, [])", [ref_of(result, "Short"), "z"]) == {
+        "ok": True, "truncated": True, "typed": 1, "accepted": 0}
+    assert typed("Short", "ab") == {"ok": True}
+
+
 FIXTURE = Path(__file__).with_name("fixtures") / "select.html"
 
 
@@ -121,7 +271,7 @@ def select_page():
         try:
             tab = browser.new_page()
             tab.goto(FIXTURE.as_uri())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -193,7 +343,7 @@ def feed():
         try:
             tab = browser.new_page(viewport={"width": 800, "height": 600})
             tab.goto(FEED.as_uri())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -210,7 +360,7 @@ def keys():
         try:
             tab = browser.new_page()
             tab.set_content(KEYS.read_text())
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab
         finally:
             browser.close()
@@ -224,7 +374,7 @@ def files_page():
         try:
             tab = browser.new_page(accept_downloads=True)
             tab.goto(site.origin + "/")
-            tab.add_script_tag(path=str(SCRIPT))
+            load(tab)
             yield tab, site
         finally:
             browser.close()
@@ -412,6 +562,6 @@ def test_press_edits_fields_and_honours_chords_and_prevent_default(keys):
 
 def test_press_refuses_a_stale_ref_and_changes_nothing(keys):
     refs = {e["name"]: e["ref"] for e in read(keys)["elements"]}
-    read(keys)
+    keys.evaluate("user.replaceWith(user.cloneNode())")
     assert press(keys, refs["User"], "Enter") == {"error": "StaleElement"}
     assert log(keys) == []

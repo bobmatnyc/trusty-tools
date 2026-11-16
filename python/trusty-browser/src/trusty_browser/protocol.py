@@ -184,7 +184,9 @@ MUTATING = {
     "page_navigate",
     "page_upload",
 }
+# #11352: TextDropped also carries typed, accepted and entered.
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
+REFUSAL_FIELDS += ("typed", "accepted", "entered")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
 PAGE_ERRORS = UNFINISHED | {
@@ -199,6 +201,7 @@ PAGE_ERRORS = UNFINISHED | {
     "NavigationPending",  # #11354: page_read before a navigation settled
     "StaleElement",
     "NotEditable",
+    "TextDropped",  # #11352: a field refused some of the typed text
     "NotSelectable",
     "NoSuchOption",
     "InvalidUrl",

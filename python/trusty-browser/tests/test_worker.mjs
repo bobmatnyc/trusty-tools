@@ -7,7 +7,13 @@ import vm from "node:vm";
 const source = await readFile(new URL("../src/trusty_browser/extension/worker.js",import.meta.url),"utf8");
 const pagesSource = await readFile(new URL("../src/trusty_browser/extension/pages.js",import.meta.url),"utf8");
 const codesSource = await readFile(new URL("../src/trusty_browser/extension/codes.js",import.meta.url),"utf8");
+const readSource = await readFile(new URL("../src/trusty_browser/extension/pages_read.js",import.meta.url),"utf8");
+// importScripts by file name: pages.js loads pages_read.js itself (#11355); the indicator is stubbed.
+const scripts = {"pages.js":pagesSource, "pages_read.js":readSource, "codes.js":codesSource, "indicator.js":""};
+const loader = ctx => (...files) => { for (const file of files) vm.runInContext(scripts[file], ctx); };
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
+// #11356: every page_read frame carries its read controls.
+const READ = {scope_ref:null, max_chars:50000, viewport_only:false, include_text:false};
 const profile = "example", email = "qa@example.org", secret = "a".repeat(64);
 const route = "http://127.0.0.1:1234/app";
 
@@ -32,7 +38,7 @@ async function fixture() {
       return {ok:true,url:route,account:"site-user",result:{count:0}};
     }},alarms:{onAlarm:event(),create(){}}};
   const ctx = vm.createContext({TrustyControlIndicator:{clear(){},clearAll(){}},chrome,crypto:webcrypto,TextEncoder,URL,setTimeout:(fn,ms)=>{timers.set(++serial,{fn,ms});return serial;},clearTimeout:id=>timers.delete(id)});
-  ctx.importScripts = (...files) => { vm.runInContext(pagesSource,ctx); vm.runInContext(codesSource,ctx); };
+  ctx.importScripts = loader(ctx);
   vm.runInContext(source,ctx);
   for (let i=0;!sent.length && i<50;i++) await new Promise(r=>setImmediate(r));
   assert.equal(sent[0]?.type,"hello");
@@ -189,7 +195,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
       if (target.documentIds && !target.documentIds.includes(t.doc)) throw new Error("No document with id");
       if (func.name !== "pageProbe") ran.push({tab:target.tabId, func:func.name, args});
       const result = func.name === "pageProbe" ? [t.origin, t.title]
-        : func.name === "pageRead" ? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
+        : func.name === "pageInspect" ? t.readResult ?? {origin:t.origin, url:t.origin + "/secret-path?q=1", title:t.title,
           text:"private page text", elements:[{ref:"1.0", tag:"button", role:"button", name:"Go"}], truncated:false}
         : t.result || {ok:true};
       if (t.throwAfterRun && func.name !== "pageProbe") throw new Error("script error");
@@ -199,7 +205,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
   const ctx = vm.createContext({chrome, crypto:webcrypto, TextEncoder, URL,
     TrustyControlIndicator:{clear(){}, clearAll(){}, grants:async n => { badge.push(n); }},
     setTimeout:(fn, ms) => { timers.set(++serial, {fn, ms}); return serial; }, clearTimeout:t => timers.delete(t)});
-  ctx.importScripts = () => { vm.runInContext(pagesSource, ctx); vm.runInContext(codesSource, ctx); };
+  ctx.importScripts = loader(ctx);
   vm.runInContext(source, ctx);
   await settle();
   // The broker's pairing acknowledgement; `liveIds` defaults to everything the fake broker lists.
@@ -256,7 +262,7 @@ test("a tab row never reaches another tab", async () => {
     8:{origin:"https://b.test", title:"B", active:false}}});
   const grant = seedRow(f, "g-0000000000a7", "tab", 7);
   const before = {ran:f.ran.length, updates:f.updates.length};
-  for (const [op, extra] of [["page_tab",{}], ["page_read",{document:null}], ["page_click",{document:"doc-8", ref:"1.0"}],
+  for (const [op, extra] of [["page_tab",{}], ["page_read",{document:null, ...READ}], ["page_click",{document:"doc-8", ref:"1.0"}],
     ["page_type",{document:"doc-8", ref:"1.0", text:"x"}], ["page_navigate",{url:"https://b.test/next"}],
     ["page_press",{document:"doc-8", ref:null, key:"Enter", modifiers:[]}]]) {
     const reply = await f.command(op, {grant, tab:8, ...extra});
@@ -269,7 +275,7 @@ test("a tab row never reaches another tab", async () => {
     result:{access:true, document:"doc-7", origin:"https://a.test", title:"A"}});
   const listed = await f.command("page_tabs", {grant});
   assert.deepEqual(listed.result.tabs.map(t => t.tab), [7]);
-  assert.equal((await f.command("page_read", {grant, tab:7, document:null})).ok, true);
+  assert.equal((await f.command("page_read", {grant, tab:7, document:null, ...READ})).ok, true);
   assert.ok(f.queries.every(q => !("active" in q)), JSON.stringify(f.queries));
 });
 
@@ -306,6 +312,45 @@ test("scroll runs in the lease's document and relays its view", async () => {
   assert.deepEqual(gone, {id:gone.id, ok:false, error:"StaleElement", tab:7});
 });
 
+// #11356: the read controls reach pageInspect unchanged; a bad one refuses before the page runs.
+test("page_read passes its controls to the page and relays a stale scope", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const controls = {scope_ref:"5.2", max_chars:2000, viewport_only:true, include_text:true};
+  assert.equal((await f.command("page_read", {grant, tab:7, document:null, ...controls})).ok, true);
+  assert.equal(JSON.stringify(f.ran.at(-1)), JSON.stringify({tab:7, func:"pageInspect", args:["read", 512, controls]}));
+  const ran = f.ran.length;
+  for (const bad of [{max_chars:999}, {max_chars:250001}, {scope_ref:"x"}, {viewport_only:1}, {include_text:null}]) {
+    const reply = await f.command("page_read", {grant, tab:7, document:null, ...READ, ...bad});
+    assert.equal(reply.error, "InvalidRequest", JSON.stringify(bad));
+  }
+  assert.equal(f.ran.length, ran);
+  f.tabs.get(7).readResult = {error:"StaleElement"};
+  const stale = await f.command("page_read", {grant, tab:7, document:null, ...controls});
+  assert.deepEqual(stale, {id:stale.id, ok:false, error:"StaleElement", tab:7});
+});
+
+// #11357: page_find injects pageInspect in find mode with its terms; it needs a term and relays a stale scope.
+test("page_find passes its terms to the page and relays its matches", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const terms = {role:"button", name:"Delete", text:null, within_ref:"3.1", limit:5};
+  const match = {ref:"3.2", tag:"button", role:"button", name:"Delete", in:{role:"row", name:"Ann Delete", ref:"3.1"}};
+  f.tabs.get(7).readResult = {origin:"https://a.test", matches:[match], truncated:false};
+  const found = await f.command("page_find", {grant, tab:7, document:null, ...terms});
+  assert.deepEqual(plain(found.result), {document:"doc-7", origin:"https://a.test", matches:[match], truncated:false});
+  assert.equal(JSON.stringify(f.ran.at(-1)), JSON.stringify({tab:7, func:"pageInspect", args:["find", 512, terms]}));
+  const ran = f.ran.length;
+  for (const bad of [{role:null, name:null}, {limit:0}, {limit:51}, {text:""}, {within_ref:"row"}]) {
+    const reply = await f.command("page_find", {grant, tab:7, document:null, ...terms, ...bad});
+    assert.equal(reply.error, "InvalidRequest", JSON.stringify(bad));
+  }
+  assert.equal(f.ran.length, ran);
+  f.tabs.get(7).readResult = {error:"StaleElement"};
+  const stale = await f.command("page_find", {grant, tab:7, document:null, ...terms});
+  assert.deepEqual(stale, {id:stale.id, ok:false, error:"StaleElement", tab:7});
+});
+
 // #11286: typing and key presses inject the one key engine into the lease's document only.
 test("page_type and page_press inject pageKeys with their action", async () => {
   const f = await codeFixture();
@@ -320,6 +365,21 @@ test("page_type and page_press inject pageKeys with their action", async () => {
     {tab:7, func:"pageKeys", args:[null, "press", {key:"Enter", modifiers:["Shift","Control"]}]},
     {tab:7, func:"pageKeys", args:["1.0", "press", {key:"a", modifiers:[]}]},
   ]);
+  // #11352: a maxlength cut is a success with its counts; text a handler refused is relayed, never as ok.
+  f.tabs.get(7).result = {ok:true, truncated:true, typed:6, accepted:3};
+  const cut = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"abcdef"});
+  assert.deepEqual(cut, {id:cut.id, ok:true, email, tab:7,
+    result:{document:"doc-7", truncated:true, typed:6, accepted:3}});
+  f.tabs.get(7).result = {ok:true, truncated:true, typed:6};
+  assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"x"})).error,
+    "OutcomeUnknown");
+  f.tabs.get(7).result = {error:"TextDropped", typed:3, accepted:2, entered:"ab"};
+  const dropped = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"axb"});
+  assert.deepEqual(dropped, {id:dropped.id, ok:false, error:"TextDropped", tab:7, typed:3, accepted:2, entered:"ab"});
+  f.tabs.get(7).result = {error:"TextDropped", typed:"3", accepted:2, entered:"ab"};
+  assert.equal((await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"x"})).error,
+    "OutcomeUnknown");
+  delete f.tabs.get(7).result;
   f.tabs.get(7).throwAfterRun = true;
   const lost = await f.command("page_press", {grant, tab:7, document:"doc-7", ref:null, key:"Tab", modifiers:[]});
   assert.deepEqual(lost, {id:lost.id, ok:false, error:"OutcomeUnknown"});
@@ -349,11 +409,11 @@ test("without the all-https permission only the clicked tab is readable", async 
   const connected = await f.popup({type:"connect"});
   assert.equal(connected.ok, true);
   const {grant} = connected;
-  assert.deepEqual((await f.command("page_read", {grant, tab:9, document:null})),
+  assert.deepEqual((await f.command("page_read", {grant, tab:9, document:null, ...READ})),
     {id:"c1", ok:false, error:"PermissionNeeded", tab:9, origin:null});
-  assert.equal((await f.command("page_read", {grant, tab:7, document:null})).ok, true);
+  assert.equal((await f.command("page_read", {grant, tab:7, document:null, ...READ})).ok, true);
   await f.command("page_navigate", {grant, tab:7, url:"https://elsewhere.test/a/b?c=d"});
-  const lost = await f.command("page_read", {grant, tab:7, document:null});
+  const lost = await f.command("page_read", {grant, tab:7, document:null, ...READ});
   assert.deepEqual(lost, {id:lost.id, ok:false, error:"PermissionNeeded", tab:7, origin:"https://elsewhere.test"});
 });
 
@@ -377,9 +437,9 @@ test("malformed commands are refused before any page work", async () => {
   const {grant} = await connectGrant(f);
   const cases = [
     ["page_shout", {grant, tab:7}, "InvalidOperation"],
-    ["page_read", {grant, tab:7, document:null, extra:1}, "InvalidRequest"],
+    ["page_read", {grant, tab:7, document:null, extra:1, ...READ}, "InvalidRequest"],
     ["page_read", {grant, tab:7}, "InvalidRequest"],
-    ["page_read", {grant, tab:"7", document:null}, "InvalidRequest"],
+    ["page_read", {grant, tab:"7", document:null, ...READ}, "InvalidRequest"],
     ["page_click", {grant, tab:7, document:"doc-7", ref:"#go"}, "InvalidRequest"],
     ["page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:5}, "InvalidRequest"],
     // #11291: page_scroll names a ref exactly when it scrolls to an element.
@@ -434,13 +494,13 @@ test("read during an unsettled navigation never returns the old document", async
   const nav = f.native.onMessage.fire({id:"nav", op:"page_navigate", email, grant, tab:7, url:"https://a.test/slow"});
   await settle();
   // Unsettled past the bound: a typed refusal, never the previous document.
-  const read = f.native.onMessage.fire({id:"r1", op:"page_read", email, grant, tab:7, document:"doc-7"});
+  const read = f.native.onMessage.fire({id:"r1", op:"page_read", email, grant, tab:7, document:"doc-7", ...READ});
   await settle();
   [...f.timers.values()].find(job => job.ms === 3000)?.fn();
   await read; await settle();
   assert.deepEqual(plain(f.sent.findLast(m => m.id === "r1")), {id:"r1", ok:false, error:"NavigationPending", tab:7});
   // Settling within the bound: the read waits and returns the new document.
-  const late = f.native.onMessage.fire({id:"r2", op:"page_read", email, grant, tab:7, document:"doc-7"});
+  const late = f.native.onMessage.fire({id:"r2", op:"page_read", email, grant, tab:7, document:"doc-7", ...READ});
   await settle();
   t.land();
   await late; await nav; await settle();
@@ -660,7 +720,7 @@ test("a self-reload keeps the browser incarnation and a browser restart does not
 test("page text, typed text and URLs stay inside the operation's reply", async () => {
   const f = await codeFixture();
   const {grant} = await connectGrant(f);
-  const read = await f.command("page_read", {grant, tab:7, document:null});
+  const read = await f.command("page_read", {grant, tab:7, document:null, ...READ});
   assert.equal(read.result.text, "private page text");
   await f.command("page_type", {grant, tab:7, document:"doc-7", ref:"1.0", text:"typed secret"});
   await f.command("page_navigate", {grant, tab:7, url:"https://a.test/nav-path?token=1"});

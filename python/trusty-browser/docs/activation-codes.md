@@ -260,15 +260,16 @@ answers `InvalidRequest`.
 |---|---|---|
 | `tabs` | `op` | `tabs`: list of tab entries |
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
-| `page_read` | `op`, `lease` | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
+| `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
 | `page_click` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
-| `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str |
+| `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str; when a `maxlength` cut the text also `truncated` true, `typed` int, `accepted` int (#11352) |
 | `page_scroll` | `op`, `lease`, `request_id`, `to`, `ref`, `wait_ms` | `tab` int, `document` str, `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
-| `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str |
+| `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
 | `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
+| `page_find` | `op`, `lease`; optional `role`, `name`, `text` (str of 1-200 characters or null; at least one set), `within_ref` str or null, `limit` int 1-50 (default 10) | `tab` int, `document` str, `document_changed` bool, `origin` str, `matches` list, `truncated` bool |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 
 `files` (#11289) is a list of 1 to 10 `{"name", "type", "data"}` objects:
@@ -321,7 +322,7 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `PermissionNeeded` | `tab`, `origin` | `page_read`, `page_click`, `page_type`, `page_press`: the tab has no page access. `origin` is the origin the user must activate when the extension knows it, else null |
 | `DocumentChanged` | `tab`, `access`, `document` | `page_click`, `page_type`, `page_press`: the tab's top document is not the one this lease last read; `document` is the current one when `access` is true, else null |
 | `NavigationPending` | `tab` | `page_read`: the tab is still loading a navigation 3 s after the read arrived, so the new document has not committed. The lease stays; read again (#11354) |
-| `StaleElement` | `tab` | `ref` does not name an element of this document's latest read, or the element is no longer connected (the page removed or replaced it). Call `page_read` and use its refs |
+| `StaleElement` | `tab` | `ref` names no element of this document's registry, the element is no longer connected (the page removed or replaced it), or its role or name changed (#11355). Call `page_read` and use its refs |
 | `NotEditable` | `tab` | `page_type`: the element is not a supported editable target |
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
@@ -418,15 +419,16 @@ Envelope:
 |---|---|---|
 | `page_tabs` | none | `{"tabs": [tab entry, ...]}` |
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
-| `page_read` | `tab`, `document` (str or null: the lease's last document) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
+| `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
 | `page_click` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
-| `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}` |
+| `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_scroll` | `tab`, `document` (str or null), `to`, `ref` (str or null), `wait_ms` | `{"document": str}` plus `scroll_y` int, `scroll_height` int, `viewport_height` int, `grew` bool, `at_end` bool |
-| `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}` |
+| `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
+| `page_find` | `tab`, `document`, `role`, `name`, `text`, `within_ref`, `limit` (the broker fills defaults) | `{"document", "origin", "matches", "truncated"}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, or `closed`), `last` bool | `"ended"` |
 
 `grant_end` carries no `tab`, and the broker does not wait for its reply
@@ -503,22 +505,32 @@ the worker checks it again before `tabs.update`.
 An element is addressed by a `ref` that a `page_read` of the same document
 returned. The agent never writes a selector.
 
-- `page_read` runs one injected function in the isolated world of the tab's
-  top document. It walks the document, keeps the elements it reports in an
-  isolated-world `Map` from ref to `WeakRef(element)`, and replaces any earlier
-  map. The map dies with the document.
-- A ref is `"<read>.<n>"`: `read` is a per-document counter that the injected
-  function increments on each read, `n` the element's index in that read's
-  list. Both are decimal integers; the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`.
-- `page_click`, `page_type`, `page_press` and `page_scroll` inject into `documentIds: [document]` only. The
-  injected function answers `StaleElement` when the ref's `read` is not the
-  map's current counter, the ref is absent, the `WeakRef` is empty, or the
-  element is not connected. A scroll runs no read, so it leaves refs valid; a
-  ref is never re-resolved to a replacement node.
+- `page_read` runs one injected function (`pageInspect`, in
+  `extension/pages_read.js`) in the isolated world of the tab's top document.
+  It walks the document and keeps an isolated-world registry: a `Map` from ref
+  to `WeakRef(element)` and the element's signature, and a `WeakMap` from
+  element to ref. The registry dies with the document.
+- Refs are stable (#11355): an element keeps its ref across reads while its
+  signature holds. The signature is the element's role and accessible name;
+  for an `input`, `textarea`, `select` or contenteditable element the name
+  leaves out the element's own text, so typing into a field keeps its ref. An
+  element whose signature changed gets a new ref on the next read, and its old
+  ref is dropped.
+- A ref is `"<epoch>.<n>"`: `epoch` is a random integer drawn when the
+  registry is created, `n` a per-registry counter. Both are decimal integers;
+  the ref matches `^[0-9]{1,9}\.[0-9]{1,6}$`. The random epoch keeps a ref from
+  an earlier registry from naming an element of a new one.
+- `page_click`, `page_type`, `page_press`, `page_select`, `page_upload` and
+  `page_scroll` inject into `documentIds: [document]` only. The injected
+  function answers `StaleElement` when the ref is absent from the registry,
+  the `WeakRef` is empty, the element is not connected, or its signature no
+  longer matches. A ref is never re-resolved to a replacement node, even one
+  with the same role and name.
 
 Why this scheme: it needs no page mutation (no attributes are written into the
-site's DOM), no selector language, and no state outside the document, and a
-ref cannot reach a different document or an element from an older read.
+site's DOM), no selector language, and no state outside the document; a ref
+cannot reach a different document, and a ref whose element changed its role
+or name answers `StaleElement` instead of acting on it.
 
 `page_read` result fields:
 
@@ -528,7 +540,7 @@ ref cannot reach a different document or an element from an older read.
 | `origin` | str | `location.origin` |
 | `url` | str | `location.href`, at most 2048 characters |
 | `title` | str | `document.title`, at most 200 characters |
-| `text` | str | `document.body.innerText`, at most 65536 characters; empty when there is no body |
+| `text` | str | With `include_text`, the scope's `innerText` (`document.body` without `scope_ref`), at most 65536 characters; else empty |
 | `elements` | list | At most 500 element entries, in document order |
 | `truncated` | bool | True when any field or the list was cut |
 
@@ -552,9 +564,29 @@ any element whose `role` is `button`, `link`, `checkbox`, `radio`, `tab`,
 element is reported only when `getClientRects().length > 0` and its computed
 `visibility` is `visible`. Only the top document's light DOM is walked.
 
-Size bound: the JSON encoding of `result` is at most 262144 bytes of UTF-8.
-The injected function measures it; over the bound it shortens `text` first,
-then drops elements from the end of the list, and sets `truncated: true`.
+Read controls (#11356): `scope_ref` reads only that element and its subtree;
+a ref that does not resolve (see refs above) answers `StaleElement`.
+`viewport_only` keeps only elements whose box overlaps the viewport.
+`include_text` adds `text`. `max_chars` bounds the result.
+
+Size bound: the JSON encoding of `result` is at most `max_chars` and at most
+262144 bytes of UTF-8, both measured as UTF-8 bytes. Elements fill the bound
+in order of distance from the viewport (0 for an element on screen, nearest
+first, document order on ties) and the list returns in document order; `text`
+takes what is left. A cut field, element or list sets `truncated: true`.
+
+`page_find` (#11357): the same injected function in find mode, run like
+`page_read`. It matches the reported elements (see above) under `within_ref`
+(its descendants only; a ref that does not resolve answers `StaleElement`):
+`role` exactly, `name` as a case-insensitive substring of the accessible name,
+and `text` as a case-insensitive substring of the element's own `innerText` or
+its container's. It returns at most `limit` matches in document order, each an
+element entry plus `in`: the nearest `list` (`ul`, `ol`, `role=list`), `row`
+(`tr`, `role=row`), `dialog`, `form`, `navigation` or `main` ancestor as
+`{"role", "name", "ref"}`, or null. The container's name is its
+`aria-label` or `aria-labelledby` text, else for a row its own text, else its
+first heading, `legend` or `caption`. Its `ref` works as `within_ref` and
+`scope_ref`. `truncated` is true when more elements matched.
 
 `page_click`: `scrollIntoView({block: "center", inline: "center"})`, then
 dispatch bubbling `pointerdown`, `mousedown`, `pointerup`, `mouseup` at the
@@ -677,6 +709,7 @@ steps do not run.
 | `tabs` | Grant generation is the peer's; tab grant: the reply list is filtered to the grant's tab | Grant known; tab grant: list only the grant's tab. Probes each listed tab for `access`, `origin`, `title` |
 | `select` | Generation; tab grant: `tab` equals the grant's tab; `TabClaimed` check | Check order, then the read-only probe |
 | `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame; failure is `PermissionNeeded` |
+| `page_find` | As `page_read` | As `page_read` |
 | `page_click`, `page_type`, `page_press` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
 | `release` | Lease valid and owned (existing) | Not sent to the worker |
@@ -698,6 +731,7 @@ only. A refusal's result line is best effort.
 | `tabs` | `tabs` | absent | tab titles, origins |
 | `select` | `select` | host of the probed page when `access` | title |
 | `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
+| `page_find` | `page_find` | host of the read page | matches and their names |
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
 | `page_scroll` | `page_scroll` | host of the page | ref, scroll position |
@@ -793,6 +827,7 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `browser_tabs` | none | The `tabs` reply: `ok`, `tabs` |
 | `browser_select` | `tab: int` | The `select` reply |
 | `page_read` | `lease: str` | The `page_read` reply |
+| `page_find` | `lease: str`, `role`, `name`, `text`, `within_ref`: str or null, `limit: int` | The `page_find` reply |
 | `page_click` | `lease: str`, `ref: str`, `request_id: str` | The `page_click` reply |
 | `page_type` | `lease: str`, `ref: str`, `text: str`, `request_id: str` | The `page_type` reply |
 | `page_scroll` | `lease: str`, `request_id: str`, `to: str` (default `down`), `ref: str` (optional), `wait_ms: int` (default 1000) | The `page_scroll` reply |

@@ -19,6 +19,7 @@ from trusty_browser import codes
 from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
+from trusty_browser.page_query import controls, optional
 from trusty_browser.protocol import (
     MUTATING,
     Claim,
@@ -41,6 +42,7 @@ OPS = {
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
+    "page_find": {"op", "lease"},  # #11357: terms are optional fields
     "release": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
@@ -51,6 +53,7 @@ KEEP_LEASE = {
     "NavigationPending",
     "StaleElement",
     "NotEditable",
+    "TextDropped",
     "NotSelectable",
     "NoSuchOption",
     "InvalidUrl",
@@ -120,7 +123,15 @@ READ = {
     "elements": (list,),
     "truncated": (bool,),
 }
+FOUND = {
+    "document": (str,),
+    "origin": (str,),
+    "matches": (list,),
+    "truncated": (bool,),
+}
 DONE = {"document": (str,)}
+# #11352: a page_type or page_press whose text a maxlength cut still succeeds, with its counts.
+CUT = {**DONE, "truncated": (bool,), "typed": (int,), "accepted": (int,)}
 SCROLL_TO = ("down", "up", "top", "bottom", "element")
 SCROLLED = {
     **DONE,
@@ -203,8 +214,11 @@ def key_allowed(key: object) -> bool:
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
-    if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
+    if not isinstance(op, str) or op not in OPS:
         raise Refusal("InvalidRequest")
+    if not OPS[op] <= set(request) <= OPS[op] | optional(op):
+        raise Refusal("InvalidRequest")
+    controls(request)  # #11356
     for name in ("lease", "request_id", "ref"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
         # #11286: page_press takes a null ref for the focused element.
@@ -424,12 +438,18 @@ class Pages(Grants):
             self.drop(claim)
             return {"ok": True}, claim.tab, None
         tab = claim.tab
-        if op == "page_read":
+        if op in ("page_read", "page_find"):
             result = shaped(
                 await self.send(
-                    grant, claim, claim.peer, op, tab=tab, document=claim.document
+                    grant,
+                    claim,
+                    claim.peer,
+                    op,
+                    tab=tab,
+                    document=claim.document,
+                    **controls(request),
                 ),
-                READ,
+                READ if op == "page_read" else FOUND,
             )
             changed = result["document"] != claim.document
             claim.document, claim.origin = (
@@ -467,7 +487,8 @@ class Pages(Grants):
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
-            if str(exc) == "OutcomeUnknown":
+            # #11352: TextDropped reports typing that ran, so a retry must not type again.
+            if str(exc) in ("OutcomeUnknown", "TextDropped"):
                 session.journal[rid] = (remembered(request), exc.response)
             raise
         if op == "page_navigate":
@@ -477,6 +498,8 @@ class Pages(Grants):
             where = host(claim.origin)
         else:
             shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
+            if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
+                shape = CUT
             result = shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL

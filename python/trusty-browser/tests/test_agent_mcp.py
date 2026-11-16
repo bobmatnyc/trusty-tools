@@ -28,6 +28,7 @@ CODE_TOOLS = {
     "browser_tabs",
     "browser_select",
     "page_read",
+    "page_find",
     "page_click",
     "page_type",
     "page_scroll",

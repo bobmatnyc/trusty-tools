@@ -31,9 +31,54 @@ def add_page_tools(
         return call("select", tab=tab)
 
     @server.tool()
-    def page_read(lease: str) -> dict[str, Any]:
-        """Read the leased tab's page: text and elements with refs for click and type."""
-        return call("page_read", lease=lease)
+    def page_read(
+        lease: str,
+        scope_ref: str | None = None,
+        max_chars: int = 50000,
+        viewport_only: bool = False,
+        include_text: bool = False,
+    ) -> dict[str, Any]:
+        """Read the leased tab's page: elements with refs for click and type.
+
+        ``scope_ref`` reads only that element's subtree; ``viewport_only`` keeps
+        elements on screen; ``include_text`` adds the page (or scope) text;
+        ``max_chars`` (1000-250000) bounds the reply. Elements nearest the
+        viewport are kept first and ``truncated`` reports any cut (#11356).
+        """
+        return call(
+            "page_read",
+            lease=lease,
+            scope_ref=scope_ref,
+            max_chars=max_chars,
+            viewport_only=viewport_only,
+            include_text=include_text,
+        )
+
+    @server.tool()
+    def page_find(
+        lease: str,
+        role: str | None = None,
+        name: str | None = None,
+        text: str | None = None,
+        within_ref: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Find elements by ``role`` (exact), ``name`` and ``text`` (substrings, any case).
+
+        Give at least one of role, name and text. ``text`` matches the
+        element's own text or its container's; ``within_ref`` searches only
+        inside that element. Each match carries ``in``: its nearest list, row,
+        dialog, form, navigation or main, with name and ref (#11357).
+        """
+        return call(
+            "page_find",
+            lease=lease,
+            role=role,
+            name=name,
+            text=text,
+            within_ref=within_ref,
+            limit=limit,
+        )
 
     @server.tool()
     def page_click(lease: str, ref: str, request_id: str) -> dict[str, Any]:
@@ -64,8 +109,9 @@ def add_page_tools(
         element with ``ref`` from the latest page_read. The result carries
         scroll_y, scroll_height, viewport_height, grew (content was added) and
         at_end. For a feed, repeat ``to="bottom"`` until grew is false, then
-        page_read again: refs from an earlier read answer StaleElement, as does
-        a ref whose element the page removed. Reuse the request ID to retry.
+        page_read again. A ref survives reads while its element keeps its role
+        and name; a removed or changed element answers StaleElement (#11355).
+        Reuse the request ID to retry.
         Test: `test_end_to_end_page_session_through_the_mcp_server`.
         """
         return call(
