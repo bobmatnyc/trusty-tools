@@ -90,7 +90,7 @@ the body onto an open PR, and do not arm auto-merge while a hit stands.
 `tm pr open` runs this check itself (exit 2); the grep covers the `gh`
 fallback and every later `gh pr edit`.
 
-🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
+🔴 **Check `command -v tm` first; if absent, use `gh pr create` with the same title, body and labels. Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
 contract against nine exact headings, verbatim (#7727): `## Outcome`,
 `## Changes`, `## Risk`, `## Tests`, `## Baseline`, `## Gates not run`,
@@ -105,9 +105,8 @@ attribution footer (a missing one exits 2; it never appends one) and attaches
 `--assignee @me --label trusty-mpm --label ws/<session>` itself — you never
 type them. Before spawning `gh` it runs `scripts/check_changelog_fragment.sh`
 (`--docs-only` skips it for a PR touching no crate source); a rung 1
-(docs-only) branch must pass `--docs-only` or the gate refuses. Any failed check exits 2 before `gh` runs.
+(docs-only) branch must pass `--docs-only` or the gate refuses.
 `--issue N` emits `Refs #N`; fix PRs here never pass `--closes`.
-Hand-run `gh pr create` only on a host without `tm`.
 
 ## Issue clusters
 
