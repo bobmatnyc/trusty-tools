@@ -32,7 +32,7 @@ SPIN = "✻ Running PreToolUse hook… (2m 20s)"
 def tm_bin(tmp_path, monkeypatch):
     tm = tmp_path / "tm"
     tm.write_text("#!/bin/sh\n")
-    monkeypatch.setattr(fp, "TM_BIN", str(tm))
+    monkeypatch.setattr(fp, "TM_BIN", str(tm), raising=False)  # raising=False: the pre-#11367 poller has none
     monkeypatch.setattr(fp, "tmux", lambda *a: pytest.fail(f"raw tmux call {a}"))
     return str(tm)
 
