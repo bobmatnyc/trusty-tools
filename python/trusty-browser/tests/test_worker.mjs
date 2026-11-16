@@ -233,6 +233,7 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         const t = tabs.get(tabId);
         if (t?.busy) throw new Error("Another debugger is already attached");
         cdp.push({tab:tabId, method:"attach"});
+        if (t?.moveAt === "attach") Object.assign(t, t.move);  // #11373
       },
       detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
       sendCommand:async ({tabId}, method, params) => {
@@ -243,6 +244,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")
           await chrome.debugger.onEvent.fire({tabId}, "Page.javascriptDialogOpening", t.dialog);
         if (t.moveAt && params?.type === t.moveAt) Object.assign(t, t.move);
+        // #11373: `t.evaluated` is the CDP reply to Runtime.evaluate.
+        if (method === "Runtime.evaluate" && t.evaluated) return t.evaluated;
         return {};
       }},
   };
@@ -1144,4 +1147,86 @@ test("back, forward and reload report where the tab landed", async () => {
   }
   assert.equal(f.tabs.get(9).past, undefined);
   assert.equal(f.tabs.get(9).reloads, undefined);
+});
+
+// #11373: computed styles run pageStyles in the lease's document and relay only document and styles.
+test("styles read in the lease's document by ref or selector", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const base = {grant, tab:7, document:"doc-7", ref:null, selector:"body", properties:["background-color"]};
+  f.tabs.get(7).result = {ok:true, styles:{"background-color":"rgb(1, 2, 3)"}, extra:"dropped"};
+  const read = await f.command("page_styles", base);
+  assert.deepEqual(read.result, {document:"doc-7", styles:{"background-color":"rgb(1, 2, 3)"}});
+  assert.equal(JSON.stringify(f.ran.at(-1)),
+    JSON.stringify({tab:7, func:"pageStyles", args:[null, "body", ["background-color"]]}));
+  for (const bad of [{ref:"1.0"}, {selector:null}, {properties:[]}, {properties:["a", "a"]}, {properties:["x;y"]}]) {
+    assert.equal((await f.command("page_styles", {...base, ...bad})).error, "InvalidRequest", JSON.stringify(bad));
+  }
+  for (const error of ["NoMatch", "StaleElement", "InvalidRequest"]) {
+    f.tabs.get(7).result = {error};
+    const reply = await f.command("page_styles", base);
+    assert.deepEqual(reply, {id:reply.id, ok:false, error, tab:7});
+  }
+  assert.equal((await f.command("page_styles", {...base, document:"doc-old"})).error, "DocumentChanged");
+});
+
+test("evaluate runs only in the lease's document and relays its value", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const req = {grant, tab:7, document:"doc-7", expression:"getComputedStyle(document.body).color"};
+  f.tabs.get(7).evaluated = {result:{type:"string", value:"rgb(0, 0, 0)"}};
+  const done = await f.command("page_evaluate", req);
+  assert.deepEqual(done.result, {document:"doc-7", type:"string", value:'"rgb(0, 0, 0)"', exception:null,
+    truncated:false});
+  assert.deepEqual(cdpSteps(f), ["attach", "Page.enable", "Runtime.evaluate", "detach"]);
+  assert.deepEqual(plain(f.cdp[2].params), {expression:req.expression, returnByValue:true, awaitPromise:true,
+    userGesture:true});
+  f.tabs.get(7).evaluated = {result:{type:"object", subtype:"error"},
+    exceptionDetails:{text:"Uncaught", exception:{description:"TypeError: x is not a function"}}};
+  assert.deepEqual((await f.command("page_evaluate", req)).result, {document:"doc-7", type:"exception", value:null,
+    exception:"TypeError: x is not a function", truncated:false});
+  f.tabs.get(7).evaluated = {result:{type:"string", value:"x".repeat(70000)}};
+  const big = (await f.command("page_evaluate", req)).result;
+  assert.equal(big.truncated, true);
+  assert.equal(big.value.length, 65536);
+  f.tabs.get(7).evaluated = {result:{type:"undefined"}};
+  assert.equal((await f.command("page_evaluate", req)).result.value, null);
+  f.tabs.get(7).evaluated = {result:{type:"number", unserializableValue:"NaN"}};
+  assert.equal((await f.command("page_evaluate", req)).result.value, '"NaN"');
+  for (const expression of ["", "x".repeat(8193), 5]) {
+    assert.equal((await f.command("page_evaluate", {...req, expression})).error, "InvalidRequest");
+  }
+});
+
+test("evaluate on a no-access or moved tab never attaches or runs", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const req = {grant, tab:7, document:"doc-7", expression:"1"};
+  const stale = await f.command("page_evaluate", {...req, document:"doc-old"});
+  assert.equal(stale.error, "DocumentChanged");
+  assert.deepEqual(f.cdp, []);
+  for (const move of [{doc:"doc-7-next"}, {origin:"https://evil.test"}]) {
+    const g = await codeFixture();
+    const minted = await connectGrant(g);
+    Object.assign(g.tabs.get(7), {moveAt:"attach", move});
+    const reply = await g.command("page_evaluate", {...req, grant:minted.grant});
+    assert.equal(reply.error, "DocumentChanged", JSON.stringify(move));
+    assert.ok(!cdpSteps(g).includes("Runtime.evaluate"), cdpSteps(g).join());
+    assert.equal(g.cdp.at(-1).method, "detach");
+  }
+  f.tabs.get(7).busy = true;
+  const busy = await f.command("page_evaluate", req);
+  assert.deepEqual(busy, {id:busy.id, ok:false, error:"DebuggerBusy", tab:7});
+  f.tabs.get(7).busy = false;
+  f.perms.held = false;
+  f.cdp.length = 0;
+  assert.equal((await f.command("page_evaluate", req)).error, "DocumentChanged");
+  assert.deepEqual(f.cdp, []);
+  // A tab grant never evaluates in another tab.
+  const h = await codeFixture({held:true, tabs:{7:{origin:"https://a.test", title:"A", active:true, activeTab:true},
+    8:{origin:"https://b.test", title:"B", active:false}}});
+  const row = seedRow(h, "g-0000000000a7", "tab", 7);
+  const out = await h.command("page_evaluate", {...req, grant:row, tab:8, document:"doc-8"});
+  assert.deepEqual(out, {id:out.id, ok:false, error:"OutOfScope", tab:8});
+  assert.deepEqual(h.cdp, []);
 });

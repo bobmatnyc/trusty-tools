@@ -298,6 +298,8 @@ answers `InvalidRequest`.
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
 | `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_drag` | `op`, `lease`, `request_id`, `ref`, `target` | `tab` int, `document` str, `dropped` bool |
+| `page_styles` | `op`, `lease`, `properties` (1-50 distinct CSS property names of at most 100 characters, custom properties allowed); exactly one of optional `ref` str and `selector` (str of 1-1024 characters) | `tab` int, `document` str, `styles`: object mapping each requested property to its computed value (#11373) |
+| `page_evaluate` | `op`, `lease`, `request_id`, `expression` (str of 1-8192 characters) | `tab` int, `document` str, `type` str, `value` JSON text or null, `exception` str or null, `truncated` bool (#11373) |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
@@ -369,8 +371,9 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
 | `Obscured` | `tab` | `page_click`: another element covers the element's centre; nothing was clicked |
-| `DebuggerBusy` | `tab` | `page_click`: another debugger (such as open DevTools) holds the tab; nothing ran |
+| `DebuggerBusy` | `tab` | `page_click`, `page_evaluate`: another debugger (such as open DevTools) holds the tab; nothing ran |
 | `NotDraggable` | `tab` | `page_drag`: `target` is `ref` itself or lies inside it |
+| `NoMatch` | `tab` | `page_styles`: `selector` matches no element of the lease's top document; the lease stays (#11373) |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `NoHistory` | `tab` | `page_back`, `page_forward`: the tab has no history entry in that direction; nothing changed and the lease stays |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
@@ -473,6 +476,8 @@ Envelope:
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_drag` | `tab`, `document` (str or null), `ref`, `target` | `{"document": str, "dropped": bool}` |
+| `page_styles` | `tab`, `document` (str or null), `ref` (str or null), `selector` (str or null), `properties` | `{"document": str, "styles": {property: str}}` |
+| `page_evaluate` | `tab`, `document` (str or null), `expression` | `{"document", "type", "value", "exception", "truncated"}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
@@ -699,6 +704,28 @@ nothing and changes no focus. The events are untrusted, so CSS `:hover` does
 not match; a page that reveals content only through `:hover` needs trusted
 input (#11294). It is journaled like `page_click`.
 
+`page_styles` (#11373): injects into `documentIds: [document]` only and reads
+`getComputedStyle` of the element `ref` names, or of the first match of
+`selector` in the top document, then `getPropertyValue` of each requested
+property (each value cut at 4096 characters). A selector the browser cannot
+parse answers `InvalidRequest`, one that matches nothing `NoMatch`. It is a
+read: not journaled, and a lost reply answers `BrowserDisconnected`.
+
+`page_evaluate` (#11373): runs `expression` in the page's main world over
+`chrome.debugger` (`Runtime.evaluate` with `returnByValue`, `awaitPromise` and
+`userGesture`), so Chrome shows its debugging bar for the length of the call.
+Like `page_click`, it attaches only to an accessible tab still on the lease's
+document, re-probes after the attach and answers `DocumentChanged` (nothing
+ran) when the document or origin moved, answers `DebuggerBusy` when another
+debugger holds the tab, dismisses any dialog the expression opens, answers
+`OutcomeUnknown` after 5 s, and always detaches. `value` is the result as JSON
+text (an unserializable number such as `NaN` as a JSON string; `undefined` or
+a non-serializable value as null), cut at 65536 characters with `truncated`
+true. A thrown error answers success with `type` `exception` and its
+description in `exception` (at most 1024 characters). The expression can
+change the page, so it is journaled like `page_click`. Its audit lines record
+the op, tab and host; never the expression or the value.
+
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
 element; any other target, or a disabled or read-only one, answers
@@ -866,6 +893,8 @@ only. A refusal's result line is best effort.
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
 | `page_select` | `page_select` | host of the page | chosen value, ref, element name |
 | `page_drag` | `page_drag` | host of the page | refs, element names |
+| `page_styles` | `page_styles` | host of the page | ref, selector, properties, values |
+| `page_evaluate` | `page_evaluate` | host of the page | expression, value, exception text |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `page_upload` | `page_upload` | host of the page | file names, types and bytes |
 | `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
@@ -971,6 +1000,8 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
 | `page_select` | `lease: str`, `ref: str`, `value: str`, `request_id: str` | The `page_select` reply |
 | `page_drag` | `lease: str`, `ref: str`, `target: str`, `request_id: str` | The `page_drag` reply |
+| `page_styles` | `lease: str`, `properties: list[str]`, optional `ref: str`, optional `selector: str` (exactly one) | The `page_styles` reply |
+| `page_evaluate` | `lease: str`, `expression: str`, `request_id: str` | The `page_evaluate` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply; see "Upload root" |
 | `page_downloads` | `lease: str` | The `page_downloads` reply |

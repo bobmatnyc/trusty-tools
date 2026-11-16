@@ -488,6 +488,26 @@ globalThis.TrustyPages = (() => {
     return {ok:true};
   }
 
+  // Why: a visual check must read the colours and sizes the page really renders (#11373).
+  // What: getComputedStyle of the ref's element, or of the first match of `selector` in this document,
+  //   for each requested property. A ref that no longer resolves answers StaleElement, a selector that
+  //   matches nothing NoMatch, and one the browser cannot parse InvalidRequest. Reads only.
+  // Test: tests/test_pages_dom.py `test_styles_read_computed_values_for_a_ref_and_a_selector`.
+  function pageStyles(ref, selector, properties) {
+    let el;
+    if (ref !== null) {
+      el = globalThis.__trustyBrowserRefs?.resolve?.(ref);
+      if (!el) return {error:"StaleElement"};
+    } else {
+      try { el = document.querySelector(selector); } catch { return {error:"InvalidRequest"}; }
+      if (!el) return {error:"NoMatch"};
+    }
+    const computed = el.ownerDocument.defaultView.getComputedStyle(el);
+    const styles = {};
+    for (const name of properties) styles[name] = String(computed.getPropertyValue(name)).slice(0, 4096);
+    return {ok:true, styles};
+  }
+
   // URL floor: https any host, or http on 127.0.0.1; no credentials; at most 8192 characters.
   function urlAllowed(url) {
     if (typeof url !== "string" || !url || url.length > 8192) return false;
@@ -509,7 +529,7 @@ globalThis.TrustyPages = (() => {
     new Set(value).size === value.length;
   const {pageInspect, pageRead, pageFind} = globalThis.TrustyPageRead;
   return {pageProbe, pageInspect, pageRead, pageFind, pageTarget, pageHover, pageKeys, pageType, pagePress,
-    pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed, keyAllowed, modifiersAllowed};
+    pageScroll, pageSelect, pageSetFiles, pageDrag, pageStyles, trusted, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
 // Why: the broker's page commands must be confined by the worker alone, whatever Chrome would allow.
@@ -517,8 +537,8 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageInspect, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
-    keyAllowed, modifiersAllowed} = TrustyPages;
+  const {pageProbe, pageInspect, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, pageStyles, trusted,
+    urlAllowed, keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
   const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
   const REASONS = ["revoked","tab_closed","browser_gone","unenrolled","audit","closed","expired"];
@@ -538,6 +558,7 @@ TrustyPages.commands = deps => {
       typeof f.type === "string" && f.type.length <= 255 &&
       typeof f.data === "string" && f.data.length % 4 === 0 && B64.test(f.data));
   const dialog = v => v === "accept" || v === "dismiss";
+  const PROPERTY = /^(--|-)?[A-Za-z][A-Za-z0-9-]*$/;
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
@@ -548,6 +569,12 @@ TrustyPages.commands = deps => {
     page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || ref(v),
       limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
     page_hover:{tab, document:doc, ref},
+    // #11373: exactly one of ref and selector; 1-50 distinct property names.
+    page_styles:{tab, document:doc, ref:v => v === null || ref(v),
+      selector:v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 1024),
+      properties:v => Array.isArray(v) && v.length >= 1 && v.length <= 50 && new Set(v).size === v.length &&
+        v.every(n => typeof n === "string" && n.length <= 100 && PROPERTY.test(n))},
+    page_evaluate:{tab, document:doc, expression:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
     // #11291: `ref` is a string exactly when `to` is "element"; `wait_ms` bounds the wait for new content.
     page_scroll:{tab, document:doc, to:v => SCROLL_TO.includes(v), ref:v => v === null || ref(v),
@@ -646,7 +673,8 @@ TrustyPages.commands = deps => {
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
     const result = hit?.result, error = result?.error;
-    if (["StaleElement","NotEditable","NotSelectable","NoSuchOption","NotDraggable"].includes(error)) {
+    if (["StaleElement","NotEditable","NotSelectable","NoSuchOption","NotDraggable","NoMatch","InvalidRequest"]
+      .includes(error)) {
       throw refuse(error, {tab:req.tab});
     }
     const counts = Number.isInteger(result?.typed) && Number.isInteger(result?.accepted);
@@ -659,6 +687,10 @@ TrustyPages.commands = deps => {
     if (func === pageKeys && result.truncated === true) {
       if (!counts) throw refuse("OutcomeUnknown");
       return {document:req.document, truncated:true, typed:result.typed, accepted:result.accepted};
+    }
+    if (func === pageStyles) {  // #11373
+      if (!result.styles || typeof result.styles !== "object") throw refuse("OutcomeUnknown");
+      return {document:req.document, styles:result.styles};
     }
     if (func === pageDrag) {
       if (typeof result.dropped !== "boolean") throw refuse("OutcomeUnknown");
@@ -755,6 +787,67 @@ TrustyPages.commands = deps => {
     }
   }
 
+  // Why: an agent sometimes needs page state that no other tool reads (#11373).
+  // What: like `act`, probes and attaches chrome.debugger only to an accessible tab still on the lease's
+  //   document, re-probes after the attach (document and origin unchanged, else DocumentChanged and
+  //   nothing ran), then runs Runtime.evaluate in the page's main world, awaiting a promise. Any dialog
+  //   it opens is dismissed. The value comes back as JSON text cut at 65536 characters (`truncated`), a
+  //   thrown error as `exception` text. Over 5 s answers OutcomeUnknown; it always detaches.
+  // Test: tests/test_worker.mjs `evaluate runs only in the lease's document and relays its value`,
+  //   `evaluate on a no-access or moved tab never attaches or runs`.
+  async function evaluate(req) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    if (req.document === null) throw changed(await probe(req.tab));
+    const first = await probe(req.tab);
+    if (!first.access || first.document !== req.document) throw changed(first);
+    const debuggee = {tabId:req.tab};
+    try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
+      const now = await probe(req.tab);
+      if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
+      throw changed(now);
+    }
+    let aborted = false, timer;
+    const send = (method, params = {}) => {
+      if (aborted) return Promise.reject(refuse("OutcomeUnknown"));
+      return chrome.debugger.sendCommand(debuggee, method, params);
+    };
+    const dismiss = (source, method) => {
+      if (source.tabId === req.tab && method === "Page.javascriptDialogOpening") {
+        send("Page.handleJavaScriptDialog", {accept:false}).catch(() => {});
+      }
+    };
+    chrome.debugger.onEvent.addListener(dismiss);
+    const bound = new Promise((_, reject) => { timer = setTimeout(() => reject(refuse("OutcomeUnknown")), 5000); });
+    try {
+      return await Promise.race([bound, steps()]);
+    } finally {
+      aborted = true;
+      clearTimeout(timer);
+      chrome.debugger.onEvent.removeListener(dismiss);
+      await chrome.debugger.detach(debuggee).catch(() => {});
+    }
+
+    async function steps() {
+      const now = await probe(req.tab);
+      if (!now.access || now.document !== req.document || now.origin !== first.origin) throw changed(now);
+      await send("Page.enable");
+      const out = await send("Runtime.evaluate", {expression:req.expression, returnByValue:true,
+        awaitPromise:true, userGesture:true});
+      const thrown = out?.exceptionDetails, value = out?.result || {};
+      if (thrown) {
+        const text = thrown.exception?.description || thrown.text || "Error";
+        return {document:req.document, type:"exception", value:null, exception:String(text).slice(0, 1024),
+          truncated:false};
+      }
+      let json = null;
+      if ("unserializableValue" in value) json = JSON.stringify(String(value.unserializableValue));
+      else if ("value" in value) json = JSON.stringify(value.value) ?? null;
+      const truncated = json !== null && json.length > 65536;
+      return {document:req.document, type:String(value.type || "undefined"), value:truncated ? json.slice(0, 65536) : json,
+        exception:null, truncated};
+    }
+  }
+
   const run = {
     async page_tabs(req, row) {
       let tabs;
@@ -832,6 +925,12 @@ TrustyPages.commands = deps => {
     page_select:req => inject(req, pageSelect, [req.ref, req.value]),
     page_hover:req => inject(req, pageHover, [req.ref]),
     page_drag:req => inject(req, pageDrag, [req.ref, req.target]),
+    // #11373: computed styles read inside the lease's document; evaluate runs over chrome.debugger.
+    page_styles(req) {
+      if ((req.ref === null) === (req.selector === null)) throw refuse("InvalidRequest");
+      return inject(req, pageStyles, [req.ref, req.selector, req.properties]);
+    },
+    page_evaluate:req => evaluate(req),
     async page_navigate(req) {
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const wait = settle(req.tab);
@@ -884,7 +983,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_hover","page_type","page_press","page_select","page_scroll","page_navigate",
-        "page_upload","page_back","page_forward","page_reload","page_drag"].includes(req.op);
+        "page_upload","page_back","page_forward","page_reload","page_drag","page_evaluate"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));
