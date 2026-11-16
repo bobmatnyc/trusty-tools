@@ -45,6 +45,7 @@ def add_page_tools(
         """Replace the text of an editable element named by ``ref``, one keystroke per character.
 
         A newline presses Enter (a single-line field submits its form) and a tab presses Tab.
+        For a dropdown use page_select.
         """
         return call("page_type", lease=lease, ref=ref, text=text, request_id=request_id)
 
@@ -101,6 +102,25 @@ def add_page_tools(
             key=key,
             modifiers=modifiers or [],
             request_id=request_id,
+        )
+
+    @server.tool()
+    def page_select(
+        lease: str, ref: str, value: str, request_id: str
+    ) -> dict[str, Any]:
+        """Choose an option of the native ``<select>`` named by ``ref``.
+
+        Why: a native dropdown ignores clicks on its options and is not a
+        typing target (#11285). What: ``value`` matches an option's value,
+        else its label, from the ``options`` page_read lists. The reply's
+        ``changed`` is false when the option was already selected or a page
+        handler reverted it, and ``value`` is the select's value afterwards.
+        ``NotSelectable`` and ``NoSuchOption`` refuse without changing the
+        page. Reuse the request ID to retry.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call(
+            "page_select", lease=lease, ref=ref, value=value, request_id=request_id
         )
 
     @server.tool()

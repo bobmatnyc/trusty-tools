@@ -195,6 +195,16 @@ class FakeBrowser:
             self.done.append((op, req["to"], req["ref"], req["wait_ms"]))
             view = {"scroll_y": 540, "scroll_height": 4000, "viewport_height": 600}
             return {"document": item["document"], **view, "grew": True, "at_end": False}
+        if op == "page_select":
+            # #11285: the fake select starts at "" and moves to any new value.
+            self.done.append((op, req["ref"], req["value"]))
+            changed = item.get("selected", "") != req["value"]
+            item["selected"] = req["value"]
+            return {
+                "document": item["document"],
+                "changed": changed,
+                "value": req["value"],
+            }
         self.done.append((op, req.get("ref"), req.get("text")))
         return {"document": item["document"]}
 

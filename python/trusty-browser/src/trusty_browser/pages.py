@@ -37,6 +37,7 @@ OPS = {
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
+    "page_select": {"op", "lease", "request_id", "ref", "value"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
@@ -49,6 +50,8 @@ KEEP_LEASE = {
     "DocumentChanged",
     "StaleElement",
     "NotEditable",
+    "NotSelectable",
+    "NoSuchOption",
     "InvalidUrl",
     "InvalidRequest",
     "InvalidOperation",
@@ -126,6 +129,8 @@ SCROLLED = {
     "grew": (bool,),
     "at_end": (bool,),
 }
+# #11285: page_select says whether the value moved and what it is now.
+SELECTED = {"document": (str,), "changed": (bool,), "value": (str,)}
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -227,10 +232,11 @@ def validate(request: Frame) -> str:
         tab = request["tab"]
         if type(tab) is not int or tab < 0:
             raise Refusal("InvalidRequest")
-    if "text" in request:
-        text = request["text"]
-        if not isinstance(text, str) or len(text) > 8192:
-            raise Refusal("InvalidRequest")
+    for name in ("text", "value"):
+        if name in request:
+            item = request[name]
+            if not isinstance(item, str) or len(item) > 8192:
+                raise Refusal("InvalidRequest")
     if "files" in request and not valid_files(request["files"]):
         raise Refusal("InvalidRequest")
     if "url" in request:
@@ -450,6 +456,8 @@ class Pages(Grants):
                 args["files"] = request["files"]
             if op == "page_press":  # #11286
                 args.update(key=request["key"], modifiers=request["modifiers"])
+            if op == "page_select":
+                args["value"] = request["value"]
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
@@ -462,7 +470,8 @@ class Pages(Grants):
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
             where = host(claim.origin)
         else:
-            result = shaped(raw, SCROLLED if op == "page_scroll" else DONE)
+            shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
+            result = shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}
