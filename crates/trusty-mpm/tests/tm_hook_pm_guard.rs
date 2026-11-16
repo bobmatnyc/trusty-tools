@@ -5470,3 +5470,44 @@ fn pm_guard_refuses_a_dispatch_when_no_content_is_installed() {
         assert!(stdout.contains("tm content update"), "{stdout}");
     }
 }
+
+/// #11390: the real binary appends the project's account names to an ops
+/// dispatch as one `updatedInput`, and leaves a non-ops or `Task` dispatch
+/// silent. Before the fix every case printed nothing.
+#[test]
+fn pm_guard_appends_project_accounts_to_an_ops_dispatch_only_11390() {
+    let cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        cwd.path().join(".trusty-mpm.toml"),
+        "[accounts.gh]\naccount = \"octo-user\"\nverify = \"gh auth status\"\n",
+    )
+    .expect("write config");
+    let payload = |tool: &str, agent: &str| {
+        format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+        )
+    };
+    let stdout = run_pm_guard_at(
+        &payload("Agent", "local-ops"),
+        UNREACHABLE_DAEMON,
+        cwd.path(),
+    );
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    let input = &v["hookSpecificOutput"]["updatedInput"];
+    let prompt = input["prompt"].as_str().expect("prompt");
+    assert!(prompt.starts_with("go"), "{prompt}");
+    assert!(prompt.contains("## Project accounts"), "{prompt}");
+    assert!(
+        prompt.contains("`gh`: account `octo-user`; verify: `gh auth status`"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("never log in or switch accounts"),
+        "{prompt}"
+    );
+    assert_eq!(input["subagent_type"], "local-ops");
+    for (tool, agent) in [("Agent", "research"), ("Task", "local-ops")] {
+        let out = run_pm_guard_at(&payload(tool, agent), UNREACHABLE_DAEMON, cwd.path());
+        assert_eq!(out.trim(), "", "{tool} {agent}");
+    }
+}

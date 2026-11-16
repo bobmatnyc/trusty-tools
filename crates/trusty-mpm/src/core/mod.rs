@@ -314,6 +314,10 @@ pub mod policy_labels;
 pub mod pr_cleanup;
 pub mod process;
 pub mod project;
+/// `[accounts]` in `.trusty-mpm.toml` and the ops-prompt block it renders (#11390).
+pub mod project_accounts;
+#[cfg(test)]
+mod project_accounts_tests;
 pub mod project_aliases;
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;

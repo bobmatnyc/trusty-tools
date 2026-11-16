@@ -241,6 +241,16 @@ pub struct ProjectLevelConfig {
     /// Test: `project_config_parses_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+
+    /// The account NAME each third-party CLI must be acting as (#11390).
+    ///
+    /// Why: an ops agent that asks for a permission on the wrong account wastes
+    /// the owner's approval or grants the wrong one.
+    /// What: `[accounts.<service>]` tables; see
+    /// [`crate::core::project_accounts::ProjectAccounts`] for the validation.
+    /// Test: `accounts_table_parses_names_scope_and_verify`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<crate::core::project_accounts::ProjectAccounts>,
 }
 
 /// The `[style]` table of `.trusty-mpm.toml` (#8533).

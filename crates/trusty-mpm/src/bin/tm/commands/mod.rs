@@ -310,6 +310,7 @@ pub(crate) mod pm_guard_secret_substitution_read;
 pub(crate) mod pm_guard_protected_hooks;
 pub(crate) mod pm_guard_protected_paths;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
+pub(crate) mod pm_guard_accounts;
 pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod pm_guard_trust_anchor_paths;
 pub(crate) mod pm_guard_worktree_grant;

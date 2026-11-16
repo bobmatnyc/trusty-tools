@@ -214,6 +214,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
+use crate::commands::pm_guard_accounts;
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DeleteTarget, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     deny_linked_worktree_head_move, deny_main_checkout_head_move, docs_commit_deny_reason,
@@ -778,8 +779,14 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         refuse(&refused, &guard_policy::WORKTREE_GRANT_DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
+                    // #11390: one `updatedInput` carries the grant and the accounts.
                     None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
-                        &updated_input,
+                        &pm_guard_accounts::compose(
+                            Some(roster),
+                            tool_name,
+                            updated_input,
+                            &hook_cwd,
+                        ),
                     )),
                 }
             }
@@ -804,8 +811,14 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         refuse(&refused, &guard_policy::DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
+                    // #11390: one `updatedInput` carries the grant and the accounts.
                     None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
-                        &updated_input,
+                        &pm_guard_accounts::compose(
+                            Some(roster),
+                            tool_name,
+                            updated_input,
+                            &hook_cwd,
+                        ),
                     )),
                 }
             }
@@ -955,9 +968,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // exempt, and every ABSOLUTE guard above has already run for it.
     let Some(reason) = pm_guard_profile::verdict(tool_name, tool_input) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies —
-        // unless #8261's lease rule rewrote a heavy build the PM may run.
+        // unless #8261's lease rule rewrote a heavy build the PM may run, or
+        // #11390 appends the project's account names to an ops dispatch.
         if let Some(rewrite) = lease_rewrite {
             emit(rewrite);
+        } else if let Some(input) =
+            pm_guard_accounts::account_rewrite(roster.as_ref(), tool_name, tool_input, &hook_cwd)
+        {
+            emit(pm_guard_worktree_grant::build_worktree_grant_response(
+                &input,
+            ));
         }
         return Ok(());
     };
