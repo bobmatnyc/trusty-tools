@@ -264,6 +264,23 @@ pub(crate) async fn reindex_after_unpark(
     index_id: &str,
     entry: Option<PersistedIndex>,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    reload_after_unpark(state, index_id, entry).await?;
+    super::reindex_handlers::reindex_report(state, index_id, None).await
+}
+
+/// The load half of [`reindex_after_unpark`]: register cold, lazy-load, and
+/// restart the watcher.
+///
+/// Why: #11417 — `search.project.ensure` re-activates a parked index through
+/// this same path rather than a second one.
+/// What: `Err` is the load path's own refusal; the index is then not live.
+/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `ensure_reports_an_unpark_that_cannot_load_as_an_error`.
+pub(crate) async fn reload_after_unpark(
+    state: &Arc<SearchAppState>,
+    index_id: &str,
+    entry: Option<PersistedIndex>,
+) -> Result<(), (StatusCode, serde_json::Value)> {
     let id = IndexId::new(index_id);
     if state.registry.get(&id).is_none() {
         let Some(entry) = entry else {
@@ -281,7 +298,7 @@ pub(crate) async fn reindex_after_unpark(
     if let Some(handle) = state.registry.get(&id) {
         state.watcher_manager.spawn_for_index(&handle).await;
     }
-    super::reindex_handlers::reindex_report(state, index_id, None).await
+    Ok(())
 }
 
 /// Unregister `id` through the project map (#9169).
