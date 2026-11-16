@@ -523,8 +523,9 @@ returned. The agent never writes a selector.
 - `page_click`, `page_type`, `page_press`, `page_select`, `page_upload` and
   `page_scroll` inject into `documentIds: [document]` only. The injected
   function answers `StaleElement` when the ref is absent from the registry,
-  the `WeakRef` is empty, the element is not connected, or its signature no
-  longer matches. A ref is never re-resolved to a replacement node, even one
+  the `WeakRef` is empty, the element is no longer connected to the top
+  document (through every shadow host and frame element above it, #11290), or
+  its signature no longer matches. A ref is never re-resolved to a replacement node, even one
   with the same role and name.
 
 Why this scheme: it needs no page mutation (no attributes are written into the
@@ -547,14 +548,17 @@ or name answers `StaleElement` instead of acting on it.
 An element entry is `{"ref": str, "tag": str, "role": str, "name": str}` plus,
 when they apply, `"type": str` (input type), `"value": str` (at most 512
 characters; never for `type=password`), `"href": str` (absolute, at most 2048
-characters), `"checked": bool`, `"disabled": true`, and for a `select`
-`"options"`: the first 100 options as `{"value": str, "label": str}` plus
-`"selected": true` and `"disabled": true` when they apply (more than 100 sets
-`truncated`). `tag` is the lower-case
+characters), `"checked": bool`, `"disabled": true`, `"within": str`, and for a
+`select` `"options"`: the first 100 options as `{"value": str, "label": str}`
+plus `"selected": true` and `"disabled": true` when they apply (more than 100
+sets `truncated`). `within` is the hop path from the top document's light DOM
+to the element, one `iframe` or `shadow` per hop joined by `/`
+(`"iframe/shadow"`); it is absent for an element in the top light DOM. `tag`
+is the lower-case
 tag name. `role` is the `role` attribute, else the implicit role (`link`,
 `button`, `textbox`, `checkbox`, `radio`, `combobox`, `listbox`, `searchbox`,
 `generic`). `name` is the first non-empty of `aria-label`, `aria-labelledby`
-text, associated `<label>` text, `placeholder`, `innerText`, `title`, `alt`,
+text (ids resolved in the element's own document or shadow root), associated `<label>` text, `placeholder`, `innerText`, `title`, `alt`,
 with whitespace collapsed, at most 200 characters.
 
 Reported elements: `a[href]`, `button`, `input` other than `type=hidden`,
@@ -562,7 +566,15 @@ Reported elements: `a[href]`, `button`, `input` other than `type=hidden`,
 any element whose `role` is `button`, `link`, `checkbox`, `radio`, `tab`,
 `menuitem`, `option`, `switch`, `textbox`, `combobox` or `searchbox`. An
 element is reported only when `getClientRects().length > 0` and its computed
-`visibility` is `visible`. Only the top document's light DOM is walked.
+`visibility` is `visible`. The walk is in document order and descends into
+each open shadow root (after its host) and each visible same-origin
+`iframe` or `frame` (#11290). Closed shadow roots and cross-origin frames
+are not walked: page script cannot reach them. Refs keep the same
+`<epoch>.<n>` form; the registry holds the element itself, wherever it lives.
+`scope_ref` and `within_ref` descend the same way, so a container's ref
+reaches into its open shadow roots and same-origin frames. Viewport distance
+for an element inside a frame is measured in top-document coordinates (the
+frame elements' offsets are added up the chain).
 
 Read controls (#11356): `scope_ref` reads only that element and its subtree;
 a ref that does not resolve (see refs above) answers `StaleElement`.
@@ -614,7 +626,8 @@ form; `\t` presses `Tab` and later characters go to the newly focused element.
 An upper-case ASCII letter is pressed with `Shift`. A field's text is changed
 through the prototype's native `value` setter with bubbling `beforeinput` and
 `input` (`inputType` `insertText` or `deleteContent*`); a contenteditable
-element uses `document.execCommand("insertText")`. When the typing ends, every
+element uses its own document's `execCommand("insertText")`; `input` is
+composed, so it leaves a shadow root, as a native one does (#11290). When the typing ends, every
 field it changed gets a bubbling `change`.
 
 `page_press` (#11286): the worker injects `pageKeys(ref, "press", {key,
@@ -916,8 +929,9 @@ failed write never blocks Disconnect.
 - Trusted input events; every event is synthetic.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
-- Iframes and shadow-DOM content in `page_read`, `page_click`, `page_type`.
-- Choosing an option in a `<select>`, drag and hover.
+- Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,
+  `page_type`.
+- Drag and hover.
 - File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
 - Browser-level shortcuts (`Meta`+`t`, `Control`+`w` and the like): a
   `page_press` chord reaches the page only.

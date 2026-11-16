@@ -4,7 +4,7 @@
 globalThis.TrustyPageRead = (() => {
   // Why: an agent addresses elements by refs, never by selectors, and must be able to reuse a ref across
   //   reads of an unchanged page (#11355).
-  // What: walks the top document's light DOM and returns the read result bounded to 262144 - `reserve` UTF-8
+  // What: walks the top document, its open shadow roots and same-origin frames (#11290), and returns the read result bounded to 262144 - `reserve` UTF-8
   //   bytes. Refs live in an isolated-world registry per document: an element keeps its ref while its
   //   role-and-name signature holds, and the registry installs `resolve(ref)`, which answers the element only
   //   when it is connected and its signature still matches, else null. A ref is "<epoch>.<n>"; the random
@@ -12,10 +12,13 @@ globalThis.TrustyPageRead = (() => {
   //   `options` (#11356): `scope_ref` reads one element's subtree (StaleElement when it changed),
   //   `viewport_only` keeps elements overlapping the viewport, `include_text` adds the scope's innerText, and
   //   `max_chars` bounds the encoded result. Elements fill the bound in order of distance from the viewport,
-  //   then text takes what is left; any cut sets `truncated`.
+  //   then text takes what is left; any cut sets `truncated`. An entry outside the top light DOM carries
+  //   `within`, its hop path ("iframe/shadow"); viewport distance is measured in top-document coordinates.
   // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`,
   //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`,
-  //   `test_read_scopes_bounds_and_truncates_in_viewport_order`. Mode "find" is page_find (see find below).
+  //   `test_read_scopes_bounds_and_truncates_in_viewport_order`,
+  //   `test_read_and_act_inside_iframes_and_shadow_roots`, `test_scope_ref_and_find_cross_shadow_roots`,
+  //   `test_iframe_reads_measure_distance_in_top_coordinates`. Mode "find" is page_find (see find below).
   function pageInspect(mode, reserve, options) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const epoch = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
@@ -53,7 +56,7 @@ globalThis.TrustyPageRead = (() => {
     // `own` false skips the element's own text: a field's content is what an agent edits, not its identity.
     function accessibleName(el, own = true) {
       const labelled = (el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
-        .map(id => document.getElementById(id)?.innerText || "").join(" ");
+        .map(id => el.getRootNode().getElementById?.(id)?.innerText || "").join(" ");
       const labels = [...(el.labels || [])].map(label => label.innerText).join(" ");
       for (const value of [el.getAttribute("aria-label"), labelled, labels, el.getAttribute("placeholder"),
         own ? el.innerText : "", el.getAttribute("title"), el.getAttribute("alt")]) {
@@ -64,9 +67,23 @@ globalThis.TrustyPageRead = (() => {
     }
     const editable = el => ["input","textarea","select"].includes(el.localName) || el.isContentEditable;
     const signature = el => roleOf(el) + "\n" + accessibleName(el, !editable(el));
+    // #11290: the hop path from the top document's light DOM to `el` ("", "shadow", "iframe/shadow"), or null
+    // when `el` is not connected to the top document through every shadow host and frame element above it.
+    function hops(el) {
+      const path = [];
+      for (let node = el; node.isConnected;) {
+        const root = node.getRootNode();
+        if (root === document) return path.join("/");
+        const frame = root.host ? null : root.defaultView?.frameElement;
+        if (!root.host && !frame) return null;
+        path.unshift(root.host ? "shadow" : "iframe");
+        node = root.host || frame;
+      }
+      return null;
+    }
     function resolve(ref) {
       const entry = state.refs.get(ref), el = entry?.el.deref();
-      if (el && el.isConnected && signature(el) === entry.sig) return el;
+      if (el && hops(el) !== null && signature(el) === entry.sig) return el;
       if (entry) state.refs.delete(ref);
       return null;
     }
@@ -83,11 +100,12 @@ globalThis.TrustyPageRead = (() => {
     state.resolve = resolve;
     for (const [ref, entry] of [...state.refs]) {
       const el = entry.el.deref();
-      if (!el || !el.isConnected) state.refs.delete(ref);
+      if (!el || hops(el) === null) state.refs.delete(ref);
     }
     function describe(el) {
       const tag = el.localName;
-      const entry = {ref:refOf(el), tag, role:roleOf(el), name:accessibleName(el)};
+      const entry = {ref:refOf(el), tag, role:roleOf(el), name:accessibleName(el)}, path = hops(el);
+      if (path) entry.within = path;
       if (tag === "input") entry.type = (el.getAttribute("type") || "text").toLowerCase();
       if (["input","textarea","select"].includes(tag) && entry.type !== "password" &&
           !["checkbox","radio","file"].includes(entry.type)) entry.value = cut(el.value, 512);
@@ -117,7 +135,7 @@ globalThis.TrustyPageRead = (() => {
     // A container's name: its label, else a row's own text, else its first heading, legend or caption.
     function containerName(box, kind) {
       const labelled = (box.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)
-        .map(id => document.getElementById(id)?.innerText || "").join(" ");
+        .map(id => box.getRootNode().getElementById?.(id)?.innerText || "").join(" ");
       const heading = kind === "row" ? box : box.querySelector("h1,h2,h3,h4,h5,h6,legend,caption,[role=heading]");
       for (const value of [box.getAttribute("aria-label"), labelled, heading?.innerText]) {
         const name = clean(value);
@@ -153,17 +171,36 @@ globalThis.TrustyPageRead = (() => {
       while (bytes(result) > LIMIT) { result.truncated = true; result.matches.pop(); }
       return result;
     }
-    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility === "visible";
-    // Reported elements under `root` (itself included), in document order.
-    function within(root) {
-      const found = [...root.querySelectorAll(selector)];
-      if (root.matches?.(selector)) found.unshift(root);
-      return found.filter(shown);
+    const shown = el => el.getClientRects().length > 0 &&
+      el.ownerDocument.defaultView.getComputedStyle(el).visibility === "visible";
+    // #11290: `root` (itself included) and everything under it in document order, descending into each open
+    // shadow root after its host and each shown same-origin frame. A closed shadow root is invisible to page
+    // script and a cross-origin frame's contentDocument is null, so both are skipped.
+    function* walk(root) {
+      for (const el of root.nodeType === 1 ? [root, ...root.querySelectorAll("*")] : root.querySelectorAll("*")) {
+        yield el;
+        if (el.shadowRoot) yield* walk(el.shadowRoot);
+        if (el.localName !== "iframe" && el.localName !== "frame" || !shown(el)) continue;
+        let inner = null;
+        try { inner = el.contentDocument; } catch { inner = null; }
+        if (inner) yield* walk(inner);
+      }
     }
-    // CSS pixels from the element's box to the viewport; 0 when they overlap.
+    // Reported elements under `root` (itself included), in document order.
+    const within = root => [...walk(root)].filter(el => el.matches(selector) && shown(el));
+    // CSS pixels from the element's box to the top viewport; 0 when they overlap. #11290: a box inside a
+    // same-origin frame is shifted by each frame element's content-box offset up the chain.
     function distance(el) {
-      const box = el.getBoundingClientRect();
-      return Math.hypot(Math.max(0, box.left - innerWidth, -box.right), Math.max(0, box.top - innerHeight, -box.bottom));
+      let {left, right, top, bottom} = el.getBoundingClientRect();
+      for (let frame = el.ownerDocument.defaultView?.frameElement; frame && el.ownerDocument !== document;) {
+        const at = frame.getBoundingClientRect(), css = frame.ownerDocument.defaultView.getComputedStyle(frame);
+        const dx = at.left + frame.clientLeft + parseFloat(css.paddingLeft);
+        const dy = at.top + frame.clientTop + parseFloat(css.paddingTop);
+        [left, right, top, bottom] = [left + dx, right + dx, top + dy, bottom + dy];
+        el = frame;
+        frame = frame.ownerDocument.defaultView?.frameElement;
+      }
+      return Math.hypot(Math.max(0, left - innerWidth, -right), Math.max(0, top - innerHeight, -bottom));
     }
     if (mode === "find") return find();
     // #11356: scope_ref, max_chars, viewport_only and include_text bound what a read returns.
