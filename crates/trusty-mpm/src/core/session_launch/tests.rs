@@ -1903,9 +1903,9 @@ fn deploy_output_style_writes_all_styles() {
         let written = std::fs::read_to_string(&path).expect("style file readable");
         assert_eq!(written, style.content(rc()), "{} content matches", style.id);
     }
-    // Sanity: exactly the four bundled styles are written (#8453 added the
-    // supervisor style).
-    assert_eq!(crate::core::bundle::OUTPUT_STYLES.len(), 4);
+    // Sanity: exactly the five bundled styles are written (#8453 added the
+    // supervisor style, #10576 `owner-plain`).
+    assert_eq!(crate::core::bundle::OUTPUT_STYLES.len(), 5);
 }
 
 #[test]

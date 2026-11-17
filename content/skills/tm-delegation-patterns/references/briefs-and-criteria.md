@@ -34,6 +34,37 @@ real problem and usually names a remedy too. Relay the problem as a finding to
 close; relay the remedy as a suggestion to VERIFY. Case 1 was a critic reasoning
 from source and still wrong about the fix.
 
+## Sources and Hand-back
+
+<!-- rule:tm-delegation-patterns/handback-source-check -->
+A helper that never opened the owner-persona file drafted owner scenarios
+without it, and the owner had to ask. The brief is often the only carrier of
+context, so it lists the sources and the agent reports what it did with them.
+
+**In the brief.** `Sources (path @ revision, role)` names every file the agent
+must read before it acts: the file, the revision (commit, tag or "working
+tree"), and its role. `Preserve` names what must not change. Never write "see
+the docs"; name the file.
+
+**In the hand-back.** The agent ends its report with one line per source under
+each heading that applies:
+
+```
+Read: docs/owner-persona.md @ 3f2a1c9 — persona for the scenarios
+Not found: docs/persona-v2.md — named in Sources, absent at that revision
+Not read: docs/product-plan.md — out of time box
+```
+
+**PM check before accepting.** Compare the hand-back with the brief's Sources.
+Send it back, or re-dispatch with a corrected brief, when:
+
+- a source is on no line;
+- any line is `Not found:` or `Not read:` for a source the task needs;
+- a `Read:` line sits beside output that shows no sign of the file. Ask for a
+  quote from it. A `Read:` line is a claim, not proof.
+
+A `Not read:` the task does not need, with a reason, is acceptable.
+
 ## Acceptance Criteria a Wrong Implementation Fails
 
 Before stating a criterion, ask: what implementation would pass this and still be
