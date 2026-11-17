@@ -104,6 +104,11 @@ impl Registry {
         &self.path
     }
 
+    /// Hand the connection to the broker, which owns it from here on.
+    pub fn into_connection(self) -> Connection {
+        self.conn
+    }
+
     /// The raw connection, for callers that need their own queries.
     pub fn connection(&self) -> &Connection {
         &self.conn

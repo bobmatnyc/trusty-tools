@@ -1,3 +1,5 @@
 Added
 - New `trusty-browser` crate skeleton (0.7.0) with parity fixtures captured from the Python 0.7.0 broker and MCP server, and a test target that parses every fixture
 - Library layer of the `trusty-browser` port: Python-exact JSON (`pyjson`), the length-framed codec, refusal types, the pairing HMAC proof, the `audit.jsonl` writer with 5 MiB rotation, the `registry.sqlite3` schema and pairing rows, and the AES-GCM vault with a pluggable Keychain store; parity tests compare each against the Python 0.7.0 fixtures byte for byte
+- Broker of the `trusty-browser` port: the four Unix sockets with Python's paths, 0600 modes and `service.lock`, same-user peer authentication (`LOCAL_PEERCRED`/`SO_PEERCRED`) and the Darwin enrollment checks (libproc, `KERN_PROCARGS2`, live `codesign`), the pairing handshake, pair/unpair/connect/grants/revoke and operator ops, standing grants with the 45 s reconnect grace, and the `native-host` subcommand; replies, audit lines and registry rows replay byte-identically against the Python 0.7.0 capture
+- Email case folding now matches Python `str.casefold` on every code point (full Unicode table generated from Python 3.12)

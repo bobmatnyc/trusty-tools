@@ -229,29 +229,12 @@ impl Audit {
 /// Test: `email_domain_matches_python`.
 pub fn email_domain(email: &str) -> Option<String> {
     let (_, domain) = email.rsplit_once('@')?;
-    let domain = casefold(domain.trim());
+    let domain = casefold(crate::casefold::py_strip(domain));
     let n = domain.chars().count();
     (n > 0 && n <= 253).then_some(domain)
 }
 
-/// Python `str.casefold` for the characters where it differs from lowercasing
-/// in practice (`ß`, `ẞ`, `ſ`, final sigma, Latin ligatures); everything else
-/// uses Unicode lowercase. Rare full-folding cases outside this list may differ.
+/// Python `str.casefold`; see [`crate::casefold`].
 pub fn casefold(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            'ß' | 'ẞ' => out.push_str("ss"),
-            'ſ' => out.push('s'),
-            'ς' => out.push('σ'),
-            'ﬀ' => out.push_str("ff"),
-            'ﬁ' => out.push_str("fi"),
-            'ﬂ' => out.push_str("fl"),
-            'ﬃ' => out.push_str("ffi"),
-            'ﬄ' => out.push_str("ffl"),
-            'ﬅ' | 'ﬆ' => out.push_str("st"),
-            c => out.extend(c.to_lowercase()),
-        }
-    }
-    out
+    crate::casefold::casefold(s)
 }
