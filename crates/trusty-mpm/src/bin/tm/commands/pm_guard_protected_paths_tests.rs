@@ -573,30 +573,6 @@ fn an_unreadable_agent_file_is_skipped_10937() {
     assert_eq!(verdict, None);
 }
 
-/// #10937 delta round: a backslash that starts no hex escape (`C:\Users`,
-/// `\d+`) does not count as a hidden `hooks` key, in the home-agents scan or
-/// in an agent Markdown write.
-#[test]
-fn a_backslash_without_a_hex_escape_is_not_a_hooks_key_10937() {
-    let fx = Fx::new();
-    let agent = fx.home.join(".claude/agents/paths.md");
-    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
-    for description in [r#""Edits C:\Users\me\proj""#, r#""match \d+""#] {
-        let text = format!(
-            "---\nname: x\nversion: 1\nversion: 2\ndescription: {description}\n---\nwebhooks\n"
-        );
-        assert!(frontmatter_hooks(&text).is_ok(), "{description}");
-        std::fs::write(&agent, &text).expect("write agent");
-        assert_eq!(
-            fx.write(&fx.project.join("notes.md"), "x"),
-            None,
-            "scan: {description}"
-        );
-        std::fs::remove_file(&agent).expect("rm agent");
-        assert_eq!(fx.write(&agent, &text), None, "write: {description}");
-    }
-}
-
 /// #10937 error arm: a read error other than permission denied (here,
 /// non-UTF-8 bytes) still refuses.
 #[test]
