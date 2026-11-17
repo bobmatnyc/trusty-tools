@@ -1,0 +1,34 @@
+# trusty-browser parity fixtures
+
+Captured from the Python trusty-browser 0.7.0 (branch `feat/trusty-browser-pypi-0.7.0`)
+by `capture.py`, run through `capture.sh`. Versions are in `../manifest.json`.
+
+Regenerate (macOS only):
+
+```sh
+uv venv /tmp/tb-venv --python 3.12
+VIRTUAL_ENV=/tmp/tb-venv uv pip install <checkout>/python/trusty-browser
+crates/trusty-browser/tests/fixtures/capture/capture.sh /tmp/tb-venv/bin/python crates/trusty-browser/tests/fixtures
+```
+
+A rerun writes identical bytes: nonces, ids, AES-GCM nonces, uuid4 and the audit
+clock come from a seeded stream.
+
+Safety:
+
+- The Python process runs under a scratch `HOME` and a temp state dir. The live
+  `~/.trusty/browser` and launchd `com.trusty.browser` are never touched.
+- `capture.sh` creates a throwaway keychain in a temp dir and deletes it on exit.
+  Every `security` call names that file explicitly. The default and search
+  keychain lists are never read or changed, and the login keychain is never used.
+  Python `keyring`'s macOS backend cannot target a keychain file (keyring #623),
+  so the vault's `Keyring` is replaced by a `/usr/bin/security` bridge; the
+  vault's own decode and AES-GCM code run unchanged.
+- The only key material is throwaway: the AES key in `vault.json` and the
+  browser keys there and in `proof_vectors.json` are derived from a fixed seed.
+
+Contents: `registry.sqlite3` (two pairings, one non-ASCII email), `vault.json`
+(test service name, AES key, pairing credentials), `proof_vectors.json` (HMAC
+transcript bytes, key, MAC for both roles), `frames/` (one length-prefixed frame
+per file, `index.json` names socket, direction and message), `refusals.json`,
+`audit.jsonl`, `mcp/` (`initialize` and `tools/list` in connect and workflow mode).
