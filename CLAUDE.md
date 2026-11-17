@@ -54,7 +54,7 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   the Mac: macOS-gated tests, the Apple release build, signing. Rung 3 and 4
   gates follow it: `check` and `clippy` now, `test` once the failing-test-name
   and ci_result conditions are deployed. Run from a clean committed worktree
-  with `scripts/evo` (MPM-Utils), logged by `evo-gate-log`. Scope is the crate
+  with the `evo` wrapper (MPM-Utils), logged by `evo-gate-log`. Scope is the crate
   (rung 3) or the crate plus direct dependents (rung 4). CI stays the gate of
   record.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
