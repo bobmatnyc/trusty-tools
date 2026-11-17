@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use super::facts::{Cmd, Word, parse_bash};
+use super::facts::{Cmd, parse_bash};
 use super::paths::{canon, is_trust_anchor, resolve};
 use super::rules_git::{r2_destructive, r3_cross_repo};
 
@@ -82,12 +82,18 @@ fn r1_tool_write(input: &Value, env: &GuardEnv) -> Option<Hit> {
     let path = input["file_path"]
         .as_str()
         .or_else(|| input["notebook_path"].as_str())?;
-    let path = resolve(&env.cwd, path);
+    let real = canon(&resolve(&env.cwd, path));
+    // Decide on the canonical path first; only a project-tier settings file is read.
+    if is_trust_anchor(&real, &env.home, true) {
+        return r1_path(&real, env, true, None);
+    }
+    if !is_trust_anchor(&real, &env.home, false) {
+        return None;
+    }
     // A project-tier settings write is a rule-1 fact only when it touches a guard entry.
-    let mentions = |v: &Value| v.to_string().contains("--pm-guard");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let no_guard_entry = !mentions(input) && !existing.contains("--pm-guard");
-    r1_path(&path, env, no_guard_entry, None)
+    let existing = std::fs::read_to_string(&real).unwrap_or_default();
+    let touches = input.to_string().contains("--pm-guard") || existing.contains("--pm-guard");
+    r1_path(&real, env, !touches, None)
 }
 
 fn r1_path(path: &Path, env: &GuardEnv, no_guard_entry: bool, cmd: Option<&Cmd>) -> Option<Hit> {
@@ -210,13 +216,42 @@ pub(crate) fn r5_delete(cmd: &Cmd, env: &GuardEnv) -> Option<Hit> {
     })
 }
 
-/// The logged fact for a command: argv[0], flags and positional args only.
+/// The logged fact for a command; never an argument value.
+///
+/// Why: an argument can carry a credential (`https://u:tok@host/..`,
+/// `--token=X`, `-H "Authorization: .."`), and the log must hold none
+/// (#11431 review).
+/// What: `argv0`; `subcommand`, the first bare lowercase word among the
+/// first two positionals (`push`, `api`, `delete`); flag NAMES only, long
+/// flags cut at `=` and short flags at two characters (`-XDELETE` → `-X`);
+/// and the count of positional words. Rules add their own derived facts
+/// (`target`, `branch`, repo slugs).
+/// Test: `the_log_holds_no_argument_values`.
 pub(crate) fn argv_fact(cmd: &Cmd) -> Value {
-    let show = |w: &Word| w.lit().unwrap_or("<dynamic>").to_owned();
-    let rest: Vec<String> = cmd.argv.iter().skip(1).map(show).collect();
-    let (flags, args): (Vec<String>, Vec<String>) =
-        rest.into_iter().partition(|a| a.starts_with('-'));
-    json!({ "argv0": cmd.name(), "flags": flags, "args": args, "unparsed": cmd.unparsed })
+    let mut flags = Vec::new();
+    let mut positional = Vec::new();
+    for word in cmd.argv.iter().skip(1) {
+        match word.lit() {
+            Some(f) if f.starts_with("--") && f.len() > 2 => {
+                flags.push(f.split('=').next().unwrap_or(f).to_owned());
+            }
+            Some(f) if f.starts_with('-') && f.len() > 1 => flags.push(f.chars().take(2).collect()),
+            other => positional.push(other),
+        }
+    }
+    let bare = |w: &&Option<&str>| {
+        w.is_some_and(|s| {
+            !s.is_empty() && s.len() <= 32 && s.chars().all(|c| c.is_ascii_lowercase() || c == '-')
+        })
+    };
+    let subcommand = positional.iter().take(2).find(bare).copied().flatten();
+    json!({
+        "argv0": cmd.name(),
+        "subcommand": subcommand,
+        "flags": flags,
+        "positional_count": positional.len(),
+        "unparsed": cmd.unparsed,
+    })
 }
 
 #[cfg(test)]

@@ -88,3 +88,63 @@ fn the_r5_allow_list_is_per_session_and_empty_by_default() {
     std::fs::write(&path, "not = = toml").unwrap();
     assert!(r5_allow(&path, "s-1").is_empty());
 }
+
+/// #11431 review: no argument value reaches the log, only names and counts.
+#[test]
+fn the_log_holds_no_argument_values() {
+    let home = tempfile::tempdir().unwrap();
+    for (cmd, rule) in [
+        ("git push --force https://u:ghp_X@github.com/o/r main", "R2"),
+        ("kubectl delete pod p --token=abc", "R5"),
+        (
+            "gh api -X DELETE -H \"Authorization: token X\" repos/o/r",
+            "R5",
+        ),
+    ] {
+        let raw =
+            json!({ "session_id": "s", "tool_name": "Bash", "tool_input": { "command": cmd } });
+        let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).expect(cmd);
+        assert_eq!(line["rule"], rule, "{cmd}");
+        let text = line.to_string();
+        for secret in [
+            "ghp_X",
+            "u:",
+            "abc",
+            "Authorization",
+            "token X",
+            "o/r",
+            "DELETE",
+        ] {
+            assert!(!text.contains(secret), "{secret:?} leaked by {cmd}: {text}");
+        }
+    }
+    let raw =
+        json!({ "tool_name": "Bash", "tool_input": { "command": "git push --force origin main" } });
+    let line = judge(raw.to_string().as_bytes(), home.path(), &test_env).unwrap();
+    assert_eq!(line["fact"]["branch"], "main");
+    assert_eq!(line["fact"]["subcommand"], "push");
+    assert_eq!(line["fact"]["flags"], json!(["--force"]));
+    assert_eq!(line["fact"]["positional_count"], 3);
+}
+
+/// #11431 review: the log is 0600 in a 0700 directory and rotates once past 10 MiB.
+#[test]
+fn the_log_is_private_and_rotates_at_the_cap() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(LOG_PATH);
+    append_log(home.path(), &json!({ "rule": "R2" }));
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(MAX_LOG_BYTES + 1)
+        .unwrap();
+    append_log(home.path(), &json!({ "rule": "R5" }));
+    assert!(path.with_extension("jsonl.1").exists(), "rotated once");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+    assert_eq!(mode(&path), 0o600);
+}

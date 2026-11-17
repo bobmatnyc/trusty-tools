@@ -31,6 +31,8 @@ pub(crate) use rules::{GuardEnv, Hit};
 const MAX_PAYLOAD: u64 = 1 << 20;
 /// The would-refuse log, under the home dir.
 const LOG_PATH: &str = ".trusty-mpm/guard/shadow.jsonl";
+/// The log size that triggers its one rotation.
+const MAX_LOG_BYTES: u64 = 10 << 20;
 /// The per-session rule-5 allow list, under the home dir.
 const ALLOW_PATH: &str = ".trusty-mpm/guard/shadow.toml";
 
@@ -146,21 +148,38 @@ pub(crate) fn r5_allow(path: &Path, session: &str) -> Vec<String> {
 }
 
 /// Append `line` to the log; best effort, a failure is dropped.
+///
+/// Why: the log names paths and repos a session touched, so only the user
+/// may read it, and a runaway session must not fill the disk (#11431 review).
+/// What: the directory is created 0700 and the file 0600 (an existing file is
+/// re-tightened to 0600). Past [`MAX_LOG_BYTES`] the file rotates once to
+/// `shadow.jsonl.1`, replacing an older `.1`. Every error is dropped.
+/// Test: `the_log_is_private_and_rotates_at_the_cap`, `an_unwritable_log_is_dropped`.
 pub(crate) fn append_log(home: &Path, line: &Value) {
     use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
     let path = home.join(LOG_PATH);
-    let _ = path
-        .parent()
-        .map(std::fs::create_dir_all)
-        .and_then(Result::ok)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .ok()
-        })
-        .map(|mut f| writeln!(f, "{line}"));
+    let Some(dir) = path.parent() else { return };
+    if std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .is_err()
+    {
+        return;
+    }
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+        let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path);
+    if let Ok(mut f) = file {
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 #[cfg(test)]

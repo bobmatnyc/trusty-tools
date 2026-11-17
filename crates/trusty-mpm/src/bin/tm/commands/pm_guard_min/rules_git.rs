@@ -157,7 +157,12 @@ pub(crate) fn r2_destructive(cmd: &Cmd, env: &GuardEnv) -> Option<Hit> {
             discards && is_main_checkout(&cwd)
         }
         "restore" => !long.contains(&"staged") && !short.contains('S') && is_main_checkout(&cwd),
-        "push" => force_push_to_protected(rest, &cwd),
+        "push" => {
+            let branch = forced_protected_branch(rest, &cwd)?;
+            let mut found = hit(None)?;
+            found.fact["branch"] = json!(branch);
+            return Some(found);
+        }
         "worktree" if pos.first() == Some(&"remove") => {
             if short.contains('f') || long.contains(&"force") {
                 return hit(None);
@@ -215,10 +220,9 @@ fn raw_disk_write(cmd: &Cmd) -> bool {
     }
 }
 
-fn force_push_to_protected(rest: &[Word], cwd: &Path) -> bool {
-    let (short, long) = flag_set(rest);
-    // Options that take a separate value; the value is not a refspec.
-    let mut refspecs = Vec::new();
+/// `git push` positionals: the remote, then refspecs; option values skipped.
+fn push_positionals(rest: &[Word]) -> Vec<&str> {
+    let mut out = Vec::new();
     let mut skip = false;
     for w in rest {
         let Some(w) = w.lit() else { continue };
@@ -230,9 +234,16 @@ fn force_push_to_protected(rest: &[Word], cwd: &Path) -> bool {
         ) {
             skip = true;
         } else if !w.starts_with('-') {
-            refspecs.push(w);
+            out.push(w);
         }
     }
+    out
+}
+
+/// The protected branch a forced push rewrites (`*` for `--all`/`--mirror`).
+fn forced_protected_branch(rest: &[Word], cwd: &Path) -> Option<String> {
+    let (short, long) = flag_set(rest);
+    let refspecs = push_positionals(rest);
     let plus = refspecs.iter().skip(1).any(|r| r.starts_with('+'));
     let force = plus
         || short.contains('f')
@@ -240,26 +251,27 @@ fn force_push_to_protected(rest: &[Word], cwd: &Path) -> bool {
             .iter()
             .any(|l| *l == "force" || l.starts_with("force-with-lease"));
     if !force {
-        return false;
+        return None;
     }
     if long
         .iter()
         .any(|l| matches!(*l, "all" | "mirror" | "branches"))
     {
-        return true;
+        return Some("*".to_owned());
     }
-    let current = || git_probe(cwd, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    let protected = |b: String| PROTECTED_BRANCHES.contains(&b.as_str()).then_some(b);
+    let current = || git_probe(cwd, &["symbolic-ref", "--short", "-q", "HEAD"]).and_then(protected);
     if refspecs.len() <= 1 {
-        return current().is_some_and(|b| PROTECTED_BRANCHES.contains(&b.as_str()));
+        return current();
     }
-    refspecs[1..].iter().any(|r| {
+    refspecs[1..].iter().find_map(|r| {
         let r = r.trim_start_matches('+');
         let dst = r.rsplit_once(':').map_or(r, |(_, d)| d);
         let dst = dst.strip_prefix("refs/heads/").unwrap_or(dst);
         if dst == "HEAD" {
-            current().is_some_and(|b| PROTECTED_BRANCHES.contains(&b.as_str()))
+            current()
         } else {
-            PROTECTED_BRANCHES.contains(&dst)
+            protected(dst.to_owned())
         }
     })
 }
@@ -286,8 +298,9 @@ fn protected_paths(env: &GuardEnv, cwd: &Path) -> Vec<PathBuf> {
 /// Rule 3: a `git push` whose remote is not the session's repository.
 ///
 /// Why: a push to another repo publishes work where the session has no mandate.
-/// What: the remote is the first positional (a URL, or a name resolved with
-/// `git remote get-url`), default `origin`; the session repo is `origin` of
+/// What: the remote is the first positional after option values (a URL, or
+/// a name resolved with `git remote get-url`), default `origin`; a local
+/// path is not a cross-repo push; the session repo is `origin` of
 /// `CLAUDE_PROJECT_DIR` (else the payload cwd). Both normalise to
 /// `owner/repo`; an unknown on either side is no fact, so no hit.
 /// Test: `r3_flags_a_push_to_another_repo`, `r3_allows_a_push_to_the_session_repo`.
@@ -296,8 +309,12 @@ pub(crate) fn r3_cross_repo(cmd: &Cmd, env: &GuardEnv) -> Option<Hit> {
     if sub != "push" {
         return None;
     }
-    let remote = positionals(rest).first().copied().unwrap_or("origin");
-    let url = if remote.contains("://") || remote.contains(':') || remote.starts_with('/') {
+    let remote = push_positionals(rest).first().copied().unwrap_or("origin");
+    // A local-path remote publishes nothing off this machine.
+    if remote.starts_with(['/', '.', '~']) || remote.starts_with("file://") {
+        return None;
+    }
+    let url = if remote.contains("://") || remote.contains(':') {
         remote.to_owned()
     } else {
         git_probe(&cwd, &["remote", "get-url", remote])?
@@ -314,7 +331,7 @@ pub(crate) fn r3_cross_repo(cmd: &Cmd, env: &GuardEnv) -> Option<Hit> {
     Some(Hit { rule: "R3", fact })
 }
 
-/// `owner/repo` of a git URL, lowercased, without `.git`.
+/// `owner/repo` of a git URL, lowercased, without `.git`; userinfo never survives.
 pub(crate) fn repo_slug(url: &str) -> String {
     let trimmed = url
         .trim()

@@ -201,6 +201,9 @@ fn r3_allows_a_push_to_the_session_repo() {
         ..env_in(h.path(), &session)
     };
     assert_eq!(bash("git push origin feat/x", &env), None);
+    assert_eq!(bash("git push -o ci.skip origin feat/x", &env), None);
+    assert_eq!(bash("git push ../mirror feat/x", &env), None);
+    assert_eq!(bash("git push /srv/backup.git feat/x", &env), None);
     assert_eq!(
         bash("git push https://github.com/owner/repo.git feat/x", &env),
         None
