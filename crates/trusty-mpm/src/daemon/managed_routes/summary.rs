@@ -28,6 +28,7 @@ use crate::session_manager::{
 };
 
 use super::SessionSummary;
+use crate::session_manager::tmux_route::{LiveSet, observe_workspace_servers, route};
 
 /// Serialize a [`SessionRecord`] to the flat JSON shape the MCP tools return.
 ///
@@ -205,11 +206,11 @@ pub(crate) fn record_to_summary(r: &SessionRecord) -> SessionSummary {
 /// `reconcile_live_state_pane_query_error_does_not_flip_live_record_to_stopped`
 /// in `super::tests`; end-to-end coverage in the `session_lifecycle`
 /// integration suite.
-pub(super) fn reconcile_live_state(
+pub(super) fn reconcile_live_state<L: LiveSet + ?Sized>(
     tmux: &dyn ManagedTmuxDriver,
     summaries: &mut [SessionSummary],
     records: &[SessionRecord],
-    live: &std::collections::HashSet<String>,
+    live: &L,
     attached: &std::collections::HashSet<String>,
 ) {
     let probe = crate::daemon::orphan_gc::ProcessTreeProbe;
@@ -223,19 +224,23 @@ pub(super) fn reconcile_live_state(
 /// What: the reconcile loop documented on [`reconcile_live_state`].
 /// Test: `reconcile_live_state_keeps_a_stopped_record_on_an_idle_shell_stopped_8241`,
 /// `reconcile_live_state_suspended_runtime_keeps_a_stopped_record_active_8241`.
-pub(super) fn reconcile_live_state_with_probe(
+pub(super) fn reconcile_live_state_with_probe<L: LiveSet + ?Sized>(
     tmux: &dyn ManagedTmuxDriver,
     summaries: &mut [SessionSummary],
     records: &[SessionRecord],
-    live: &std::collections::HashSet<String>,
+    live: &L,
     attached: &std::collections::HashSet<String>,
     probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
 ) {
     for (summary, record) in summaries.iter_mut().zip(records.iter()) {
         let name = &record.tmux_name;
-        let name_live = live.contains(name);
-        let is_live = match record.pane_id.as_deref() {
-            Some(pane_id) if name_live => match tmux.pane_exists_checked(name, pane_id) {
+        // #11222: judged on the record's own (server, session), never the
+        // default server alone.
+        let name_live = live.holds(record);
+        let own = route(tmux, record).ok();
+        let is_live = match (record.pane_id.as_deref(), own.as_deref()) {
+            (Some(pane_id), Some(own)) if name_live => match own.pane_exists_checked(name, pane_id)
+            {
                 Some(alive) => alive,
                 // Query failed — "could not determine" is NOT "confirmed
                 // absent"; fall back to the name-only signal rather than
@@ -270,8 +275,8 @@ pub(super) fn reconcile_live_state_with_probe(
 /// `stopped`. A wrong idle answer is worse than the old one: `tm` then plans a
 /// `Restart`, and the daemon's reuse branch types a second launch into a
 /// session whose runtime still runs.
-/// What: lists every pane of `record.tmux_name` with
-/// [`ManagedTmuxDriver::session_panes`] and answers `true` only when the
+/// What: lists every pane of `record.tmux_name` on the record's own server
+/// (#11071) with [`ManagedTmuxDriver::session_panes`] and answers `true` only when the
 /// listing is non-empty, every pane carries a shell pid, and
 /// [`crate::daemon::runtime_reap::session_has_live_pane`] finds no live pane
 /// (the reaper's own test: an idle shell with no live child under `probe`).
@@ -282,14 +287,19 @@ pub(super) fn reconcile_live_state_with_probe(
 /// `reconcile_live_state_suspended_runtime_keeps_a_stopped_record_active_8241`,
 /// `reconcile_live_state_split_pane_runtime_keeps_a_stopped_record_active_8241`,
 /// `reconcile_live_state_pane_list_error_keeps_a_stopped_record_active_8241`
-/// in `super::tests`.
+/// in `super::tests`;
+/// `a_stopped_record_running_on_its_workspace_server_reads_active_11071`.
 fn session_runtime_exited(
     tmux: &dyn ManagedTmuxDriver,
     record: &SessionRecord,
     probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
 ) -> bool {
     let name = &record.tmux_name;
-    let Ok(panes) = tmux.session_panes(name) else {
+    // #11071: the record's own server's panes; an unroutable one answers false.
+    let Ok(own) = route(tmux, record) else {
+        return false;
+    };
+    let Ok(panes) = own.session_panes(name) else {
         return false;
     };
     !panes.is_empty()
@@ -311,11 +321,12 @@ fn session_runtime_exited(
 /// NOT collapse to "zero live sessions" (which would reconcile every Active
 /// record to `stopped` and offer fleet-wide destructive restarts). On error we
 /// SKIP reconciliation entirely and serve the persisted state unchanged.
-/// What: calls [`ManagedTmuxDriver::list_sessions`]; on `Ok`, gathers the live +
-/// attached name sets and applies [`reconcile_live_state`]; on `Err`, logs a
+/// What: calls [`ManagedTmuxDriver::list_sessions`]; on `Ok`, adds every live
+/// workspace server's sessions (#11222), gathers the live + attached sets and applies [`reconcile_live_state`]; on `Err`, logs a
 /// warning and leaves `summaries` at their persisted state.
 /// Test: `reconcile_against_tmux_fails_closed_on_enumeration_error` in
-/// `super::tests` (the fail-closed path); the success path is covered by
+/// `super::tests` (the fail-closed path);
+/// `a_live_session_on_its_workspace_server_reads_active_11222`; the success path is covered by
 /// `reconcile_live_state_flips_stopped_to_active_when_alive` and end-to-end by
 /// the `session_lifecycle` integration suite.
 pub(super) fn reconcile_against_tmux(
@@ -325,7 +336,8 @@ pub(super) fn reconcile_against_tmux(
 ) {
     match tmux.list_sessions() {
         Ok(names) => {
-            let live: std::collections::HashSet<String> = names.into_iter().collect();
+            // #11222: add every live workspace server's sessions.
+            let live = observe_workspace_servers(tmux, names.into_iter().collect());
             let attached: std::collections::HashSet<String> =
                 tmux.attached_session_names().into_iter().collect();
             reconcile_live_state(tmux, summaries, records, &live, &attached);
