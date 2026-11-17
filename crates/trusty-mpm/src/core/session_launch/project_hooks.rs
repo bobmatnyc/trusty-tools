@@ -35,6 +35,10 @@ use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedb
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
 // #11398: the PM-only per-turn task stamp.
 use super::turn_task_hooks::{is_turn_task_hook_command, push_turn_task_group};
+// #10575: the PM-only warn-only completion-evidence `Stop` check.
+use super::completion_evidence_hooks::{
+    is_completion_evidence_hook_command, push_completion_evidence_group,
+};
 // #8454: the egress-guard group, written whatever the toggles say.
 use crate::core::standalone::hooks::egress::{
     is_egress_guard_hook_command, push_egress_guard_group,
@@ -282,6 +286,8 @@ pub(super) fn project_managed_hook_additions_for_profile(
     // #11398: the turn-task stamp, PM sessions only, appended last.
     if let (None, Some(hooks_obj)) = (architect, hooks.as_object_mut()) {
         push_turn_task_group(hooks_obj, &exe);
+        // #10575: appended last onto `Stop`.
+        push_completion_evidence_group(hooks_obj, &exe);
     }
 
     Ok(serde_json::json!({ "hooks": hooks }))
@@ -380,6 +386,8 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         || is_standing_rules_hook_command(cmd)
         // #11398: replaced on relaunch, stripped on a flip to the Architect.
         || is_turn_task_hook_command(cmd)
+        // #10575: replaced on relaunch, stripped on a flip to the Architect.
+        || is_completion_evidence_hook_command(cmd)
 }
 
 /// Recognise a hook command only the PROJECT tier ever writes.

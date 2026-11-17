@@ -1880,7 +1880,8 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             prompt_feedback: false,
             egress_guard: false,
             standing_rules: false,
-            turn_task: false
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 

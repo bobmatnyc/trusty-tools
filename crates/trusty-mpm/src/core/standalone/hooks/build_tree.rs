@@ -84,6 +84,8 @@ const TM_HOOK_ARGV_TAILS: &[&str] = &[
     STANDING_RULES_SUFFIX,
     // #11398: the PM's per-turn task stamp.
     TURN_TASK_SUFFIX,
+    // #10575: the PM's warn-only completion-evidence check.
+    COMPLETION_EVIDENCE_SUFFIX,
 ];
 
 /// The `statusLine.command` argv tail (`#4492`, `#7262`).
@@ -152,6 +154,12 @@ pub(crate) const STANDING_RULES_SUFFIX: &str = " hook --standing-rules";
 ///
 /// Test: `pm_sessions_register_the_turn_task_group_and_the_architect_does_not`.
 pub(crate) const TURN_TASK_SUFFIX: &str = " hook --turn-task";
+
+/// The `hook --completion-evidence` argv tail (#10575): the PM writer, the
+/// strip predicate and [`TM_HOOK_ARGV_TAILS`] read this one string.
+///
+/// Test: `architect_hook_settings_golden`.
+pub(crate) const COMPLETION_EVIDENCE_SUFFIX: &str = " hook --completion-evidence";
 
 /// The `hook --egress-guard` argv tail (#8454 G3).
 ///

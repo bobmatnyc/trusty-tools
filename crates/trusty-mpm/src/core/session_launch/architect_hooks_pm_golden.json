@@ -103,6 +103,16 @@
           }
         ],
         "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --completion-evidence",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "SubagentStop": [

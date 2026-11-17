@@ -32,6 +32,7 @@ pub(crate) async fn run(
         egress_guard,
         standing_rules,
         turn_task,
+        completion_evidence,
     } = hook
     else {
         anyhow::bail!("hook_mode::run was handed a command that is not `tm hook`");
@@ -54,6 +55,10 @@ pub(crate) async fn run(
     // #11398: fail-open task stamp; never relays to the daemon.
     } else if turn_task {
         crate::commands::turn_task_hook::turn_task_hook();
+        Ok(())
+    // #10575: warn-only completion check; never relays to the daemon.
+    } else if completion_evidence {
+        crate::commands::completion_evidence_hook::completion_evidence_hook();
         Ok(())
     } else {
         crate::commands::misc::hook(client, url).await

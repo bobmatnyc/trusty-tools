@@ -454,6 +454,29 @@ pub static FABLE_CAP: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
+/// #10574: a replacing write to a registered artifact (`[stale_copy] paths`)
+/// starts from the version last observed, or is refused (owner ruling Dr8 B).
+pub static STALE_INPUT_HASH: GuardPolicy = policy(
+    "GP-052",
+    "stale-input-hash",
+    "No replacing write to a registered artifact that changed since it was last read, was never read, or whose record store cannot be read.",
+    "#10574 (owner ruling Dr8)",
+    PM_AGENT,
+    false,
+    None,
+);
+
+/// #10574: a `[stale_copy] locked` artifact refuses every write.
+pub static LOCKED_PATH_WRITE: GuardPolicy = policy(
+    "GP-053",
+    "locked-path-write",
+    "No write to a locked artifact, whatever its hash.",
+    "#10574 (owner ruling Dr8)",
+    PM_AGENT,
+    false,
+    None,
+);
+
 /// Every entry once, in id order.
 pub static POLICIES: &[&GuardPolicy] = &[
     &POLICY_LOOKUP_MISS,
@@ -508,4 +531,6 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &GUARD_TIMEOUT,
     &TMUX_KILL_SERVER,
     &FABLE_CAP,
+    &STALE_INPUT_HASH,
+    &LOCKED_PATH_WRITE,
 ];
