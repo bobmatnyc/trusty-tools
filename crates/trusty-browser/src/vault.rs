@@ -67,6 +67,8 @@ pub trait KeyStore: Send + Sync {
     fn get(&self, service: &str, account: &str) -> Result<Option<String>, VaultError>;
     /// Create or replace the value.
     fn set(&self, service: &str, account: &str, value: &str) -> Result<(), VaultError>;
+    /// Remove the value; `Ok(false)` when there was none.
+    fn delete(&self, service: &str, account: &str) -> Result<bool, VaultError>;
 }
 
 /// An in-memory store for tests and fixtures.
@@ -100,6 +102,15 @@ impl KeyStore for MemoryKeyStore {
         items.insert((service.to_owned(), account.to_owned()), value.to_owned());
         Ok(())
     }
+    fn delete(&self, service: &str, account: &str) -> Result<bool, VaultError> {
+        let mut items = self
+            .items
+            .lock()
+            .map_err(|_| VaultError::Store("poisoned".into()))?;
+        Ok(items
+            .remove(&(service.to_owned(), account.to_owned()))
+            .is_some())
+    }
 }
 
 /// The macOS login Keychain through the `keyring` crate.
@@ -127,6 +138,15 @@ impl KeyStore for KeyringStore {
         entry
             .set_password(value)
             .map_err(|e| VaultError::Store(e.to_string()))
+    }
+    fn delete(&self, service: &str, account: &str) -> Result<bool, VaultError> {
+        let entry =
+            keyring::Entry::new(service, account).map_err(|e| VaultError::Store(e.to_string()))?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(VaultError::Store(e.to_string())),
+        }
     }
 }
 

@@ -41,3 +41,19 @@ scripted fake `agent.sock` (no broker, vault or keychain) and writes
 ```sh
 /tmp/tb-venv/bin/python -I crates/trusty-browser/tests/fixtures/capture/capture_mcp.py --out crates/trusty-browser/tests/fixtures
 ```
+
+Install layout (phase 4): `install/` holds Python 0.7.0's output under a scratch
+`HOME=/tmp/p4-cap/home` (never the real one; `install-service` was not run).
+`launchd-plist` gives `python.plist`; `install-host` gives the two launchers and
+the two manifests; `extension-path` publishes the tree that `install_tree.py`
+lists into `assets_fresh.tsv` (assets/ and extension/ lines only).
+`install_scenario.py` builds the old `extension -> assets/<hash>` layout;
+`extension-path` over it gives `assets_migrated.tsv`:
+
+```sh
+HOME=/tmp/p4-cap/home trusty-browser --state /tmp/p4-cap/home/.trusty/browser extension-path
+python -I install_tree.py /tmp/p4-cap/home/.trusty/browser
+python -I install_scenario.py /tmp/p4-cap/mig/state
+HOME=/tmp/p4-cap/mig trusty-browser --state /tmp/p4-cap/mig/state extension-path
+python -I install_tree.py /tmp/p4-cap/mig/state
+```

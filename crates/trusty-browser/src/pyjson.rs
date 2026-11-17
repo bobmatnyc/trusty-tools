@@ -103,6 +103,11 @@ impl Json {
         self.dumps_style(Style::INDENT2, false)
     }
 
+    /// `json.dumps(self, indent=2)` (ASCII-escaped): the published extension manifest.
+    pub fn dumps_indent2_ascii(&self) -> Result<String, NonFinite> {
+        self.dumps_style(Style::INDENT2, true)
+    }
+
     fn dumps_style(&self, style: Style, ascii: bool) -> Result<String, NonFinite> {
         let mut out = String::new();
         self.write(&mut out, style, ascii, 0)?;

@@ -13,16 +13,25 @@
 //! [`mcp_server`] (JSON-RPC lines), [`mcp_tools`] (tool table and results),
 //! [`mcp_args`] (FastMCP/pydantic argument rules), [`mcp_session`]
 //! (`agent.sock` client), [`mcp_upload`] and [`mcp_mime`] (upload root).
+//! Phase 4 adds the embedded extension and its publication ([`assets`]), the
+//! Chrome host registration ([`install_host`]), the launchd job ([`launchd`]),
+//! the CLI ([`cli`], [`cli_operator`]) and [`keychain_migrate`].
 
+pub mod assets;
 pub mod audit;
 pub mod broker;
 mod broker_agent;
 mod broker_enroll;
 mod broker_service;
 pub mod casefold;
+pub mod cli;
+pub mod cli_operator;
 pub mod entropy;
 pub mod frame;
 pub mod grants;
+pub mod install_host;
+pub mod keychain_migrate;
+pub mod launchd;
 pub mod leases;
 mod legacy;
 pub mod mcp_args;

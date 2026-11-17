@@ -108,6 +108,13 @@ impl KeyStore for SecurityCliStore {
             ))
         }
     }
+    fn delete(&self, service: &str, account: &str) -> Result<bool, VaultError> {
+        let out = self.run(
+            &["delete-generic-password", "-s", service, "-a", account],
+            service,
+        )?;
+        Ok(out.status.success())
+    }
 }
 
 fn exists(p: &Path) -> bool {

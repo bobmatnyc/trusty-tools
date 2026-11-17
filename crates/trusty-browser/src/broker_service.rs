@@ -140,10 +140,7 @@ impl Core {
 
 /// The published extension's asset stamp (`assets.published`).
 pub fn published(state: &std::path::Path) -> Option<String> {
-    let raw = std::fs::read(state.join("extension").join("manifest.json")).ok()?;
-    let manifest = Json::parse(&raw).ok()?;
-    let value = manifest.get("version_name")?.as_str()?;
-    value.rsplit_once('+').map(|(_, stamp)| stamp.to_owned())
+    crate::assets::published(state)
 }
 
 async fn register(
