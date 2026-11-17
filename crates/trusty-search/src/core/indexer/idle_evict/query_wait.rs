@@ -14,6 +14,7 @@
 //! Test: `a_query_during_a_slow_bm25_build_answers_degraded_within_the_wait`,
 //! `lane_degraded_flag_sets_on_exhausted_retries_and_clears_on_rehydrate`.
 
+use std::cell::Cell;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -36,9 +37,24 @@ pub(super) const QUERY_REHYDRATE_WAIT_MS: u64 = 500;
 /// most this long, not the whole budget.
 const QUERY_WAIT_SLICE: Duration = Duration::from_millis(50);
 
-tokio::task_local! {
+/// One query's rehydrate deadline, and the time its lanes waited (#10195).
+struct QueryRehydrate {
     /// The instant this query's rehydrate wait ends, shared by every lane.
-    static QUERY_REHYDRATE_DEADLINE: Instant;
+    deadline: Instant,
+    /// Wall time the lanes spent in [`CodeIndexer::await_corpus_for_query`].
+    waited: Cell<Duration>,
+}
+
+tokio::task_local! {
+    static QUERY_REHYDRATE: QueryRehydrate;
+}
+
+/// Milliseconds the enclosing query's lanes waited for a rehydrate; `0`
+/// outside [`CodeIndexer::with_query_rehydrate_deadline`] (#10195).
+pub(crate) fn query_rehydrate_waited_ms() -> u64 {
+    QUERY_REHYDRATE
+        .try_with(|q| u64::try_from(q.waited.get().as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// The per-query rehydrate budget: [`QUERY_REHYDRATE_WAIT_MS`], or the
@@ -57,8 +73,11 @@ impl CodeIndexer {
     /// checks, so a deleted or migrating index scans nothing.
     /// Test: `a_query_during_a_slow_bm25_build_answers_degraded_within_the_wait`.
     pub(crate) async fn with_query_rehydrate_deadline<F: Future>(&self, fut: F) -> F::Output {
-        let deadline = Instant::now() + query_rehydrate_wait();
-        QUERY_REHYDRATE_DEADLINE.scope(deadline, fut).await
+        let scope = QueryRehydrate {
+            deadline: Instant::now() + query_rehydrate_wait(),
+            waited: Cell::new(Duration::ZERO),
+        };
+        QUERY_REHYDRATE.scope(scope, fut).await
     }
 
     /// Wait for an evicted corpus to rehydrate, up to the query's deadline.
@@ -75,9 +94,21 @@ impl CodeIndexer {
     /// Test: `a_query_during_a_slow_bm25_build_answers_degraded_within_the_wait`,
     /// `bm25_search_survives_reclaim_race_between_ensure_and_read`.
     pub(crate) async fn await_corpus_for_query(&self) -> bool {
-        let deadline = QUERY_REHYDRATE_DEADLINE
-            .try_with(|d| *d)
-            .unwrap_or_else(|_| Instant::now() + query_rehydrate_wait());
+        // #10195: a corpus that is not evicted waits for nothing; skip the clock.
+        if !self.corpus_evicted() {
+            return true;
+        }
+        let started = Instant::now();
+        let deadline = QUERY_REHYDRATE
+            .try_with(|q| q.deadline)
+            .unwrap_or_else(|_| started + query_rehydrate_wait());
+        let ready = self.wait_for_rehydrate_until(deadline).await;
+        let _ = QUERY_REHYDRATE.try_with(|q| q.waited.set(q.waited.get() + started.elapsed()));
+        ready
+    }
+
+    /// The wait loop behind [`Self::await_corpus_for_query`].
+    async fn wait_for_rehydrate_until(&self, deadline: Instant) -> bool {
         loop {
             let Some(notify) = self.begin_corpus_rehydrate() else {
                 return true;

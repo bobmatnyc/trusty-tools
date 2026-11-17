@@ -242,6 +242,7 @@ mod tests {
             deleted: false,
             auto_resume_parked: None,
             kind: None,
+            parent_session_id: None,
         };
         let items = vec![summary("m-1", "tmpm-red-owl"), summary("m-2", "api")];
         assert_eq!(

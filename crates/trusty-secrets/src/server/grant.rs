@@ -521,7 +521,8 @@ fn new_token() -> Result<(GrantToken, TokenHash), GrantError> {
     Ok((token, hash))
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// `bytes` as lowercase hex.
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {

@@ -36,7 +36,16 @@ use super::{
 /// target links the library without `cfg(test)`, so it has no staged source;
 /// the prompts are read from a fake checkout of the runtime checkout's
 /// `content/instructions/trusty-review/prompts/` and handed to the pipeline.
+/// The principles addendum is read from that checkout later, when a review
+/// builds its voice config (#9991), so the checkout lives for the process.
 pub(super) fn checkout_prompts() -> Arc<ReviewerPrompts> {
+    static CHECKOUT: std::sync::OnceLock<(tempfile::TempDir, Arc<ReviewerPrompts>)> =
+        std::sync::OnceLock::new();
+    Arc::clone(&CHECKOUT.get_or_init(fake_prompt_checkout).1)
+}
+
+/// Builds the fake checkout [`checkout_prompts`] serves and loads its prompts.
+fn fake_prompt_checkout() -> (tempfile::TempDir, Arc<ReviewerPrompts>) {
     use trusty_common::content::{DEV_CLASS_SOURCES, DevOverride, ResolveOptions, resolve};
     let repo = trusty_common::test_harness::test_repo_root().expect("resolve the checkout");
     let root = tempfile::tempdir().expect("fake checkout");
@@ -53,8 +62,9 @@ pub(super) fn checkout_prompts() -> Arc<ReviewerPrompts> {
         std::fs::copy(repo.join(&rel), root.path().join(&rel)).expect("copy a prompt");
     }
     let options = ResolveOptions::new(root.path(), DevOverride::At(root.path().to_path_buf()));
-    let content = resolve(&options).expect("the fake checkout resolves");
-    Arc::new(ReviewerPrompts::from_content(&content).expect("the checkout's prompts load"))
+    let content = Arc::new(resolve(&options).expect("the fake checkout resolves"));
+    let loaded = ReviewerPrompts::from_content(&content).expect("the checkout's prompts load");
+    (root, Arc::new(loaded))
 }
 
 // ── fakes ───────────────────────────────────────────────────────────────────

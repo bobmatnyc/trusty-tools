@@ -73,6 +73,9 @@ pub mod palace_ops;
 // #9881: which served recall hits record an access, per owning palace.
 #[cfg(feature = "server")]
 pub(crate) mod recall_access;
+// #11255: the single-palace recall's bounded, off-worker palace open.
+#[cfg(feature = "server")]
+pub mod recall_open;
 #[cfg(feature = "server")]
 pub mod recall_ops;
 #[cfg(feature = "server")]
@@ -85,6 +88,10 @@ pub mod recall_rulings;
 // #9421: `superseded_by` demotion, read from the palace KG.
 #[cfg(feature = "server")]
 pub(crate) mod recall_supersede;
+// #10609 (ADR-0074): default exclusion of superseded drawers, and its opt-in.
+// Server-gated like `recall_supersede`, whose types it consumes.
+#[cfg(feature = "server")]
+pub(crate) mod recall_supersede_view;
 // #9143 AC2: the rank floor that keeps an answering ruling inside `top_k`.
 #[cfg(feature = "server")]
 pub(crate) mod recall_rulings_floor;
@@ -332,3 +339,6 @@ mod tests;
 // descriptor/router consistency the enforcement table owns.
 #[cfg(all(test, feature = "server"))]
 mod byte_cap_tests;
+// #10643: the near-duplicate window gate against Tier C slot rewrites.
+#[cfg(all(test, feature = "server"))]
+mod slot_gate_tests;

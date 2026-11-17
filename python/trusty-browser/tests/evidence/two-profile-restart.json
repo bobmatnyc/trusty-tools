@@ -1,0 +1,258 @@
+{
+  "site": "one local QA origin and exact URL for both profiles",
+  "phases": {
+    "before-restart": {
+      "workflows": {
+        "personal": {
+          "site_account": "personal-fixture",
+          "same_expected_url": true,
+          "incarnation": "29ae0d98-7931-445a-85ba-516726f5c859",
+          "generation": "378f86b3-c0e8-4ad5-96cf-b6851edfcf30",
+          "tab": 1402959798,
+          "committed_marker": "personal-before-restart",
+          "foreign_lease": "StaleLease",
+          "explicit_foreign_tab": "InvalidRequest",
+          "chrome_signed_in_identity_matches_enrollment": true
+        },
+        "travel": {
+          "site_account": "travel-fixture",
+          "same_expected_url": true,
+          "incarnation": "2f506792-5a4e-4fb4-aa1a-b2fed546aaf1",
+          "generation": "d5f02a8e-0584-4372-b1ae-e49aac2e125f",
+          "tab": 1402959800,
+          "committed_marker": "travel-before-restart",
+          "foreign_lease": "StaleLease",
+          "explicit_foreign_tab": "InvalidRequest",
+          "chrome_signed_in_identity_matches_enrollment": true
+        }
+      },
+      "transport": {
+        "browser_pid": 24634,
+        "debug_switch": false,
+        "devtools_port_file": false,
+        "native_host_pids": [
+          41275,
+          42220
+        ],
+        "service_pid": 26747,
+        "agent_pid": 42589,
+        "descriptor_counts": {
+          "41275": {
+            "unix_fds": 1,
+            "tcp_fds": 0
+          },
+          "42220": {
+            "unix_fds": 1,
+            "tcp_fds": 0
+          },
+          "26747": {
+            "unix_fds": 10,
+            "tcp_fds": 0
+          },
+          "42589": {
+            "unix_fds": 2,
+            "tcp_fds": 0
+          }
+        }
+      }
+    },
+    "after-restart": {
+      "workflows": {
+        "personal": {
+          "site_account": "personal-fixture",
+          "same_expected_url": true,
+          "incarnation": "c52a8828-6122-4822-8d7f-8f69ae16ca04",
+          "generation": "8798fd68-1f5f-4250-aceb-a59142eedb5e",
+          "tab": 1402960027,
+          "committed_marker": "personal-after-restart",
+          "foreign_lease": "StaleLease",
+          "explicit_foreign_tab": "InvalidRequest",
+          "chrome_signed_in_identity_matches_enrollment": true
+        },
+        "travel": {
+          "site_account": "travel-fixture",
+          "same_expected_url": true,
+          "incarnation": "c84592ff-314d-49b4-b097-9e74c2dc8bf8",
+          "generation": "23869250-85ca-4ca5-b07b-35d6e1e1a813",
+          "tab": 1402960051,
+          "committed_marker": "travel-after-restart",
+          "foreign_lease": "StaleLease",
+          "explicit_foreign_tab": "InvalidRequest",
+          "chrome_signed_in_identity_matches_enrollment": true
+        }
+      },
+      "transport": {
+        "browser_pid": 60186,
+        "debug_switch": false,
+        "devtools_port_file": false,
+        "native_host_pids": [
+          62988,
+          63017
+        ],
+        "service_pid": 26747,
+        "agent_pid": 42589,
+        "descriptor_counts": {
+          "62988": {
+            "unix_fds": 1,
+            "tcp_fds": 0
+          },
+          "63017": {
+            "unix_fds": 1,
+            "tcp_fds": 0
+          },
+          "26747": {
+            "unix_fds": 10,
+            "tcp_fds": 0
+          },
+          "42589": {
+            "unix_fds": 2,
+            "tcp_fds": 0
+          }
+        }
+      }
+    }
+  },
+  "old_lease": {
+    "personal": "StaleLease",
+    "travel": "StaleLease"
+  },
+  "previous_processes_exited": true,
+  "crossed_workflow_tickets": "Unauthorized",
+  "visible_controls": {
+    "during_claim": {
+      "personal": {
+        "banner": true,
+        "workflow_in_banner": true,
+        "toolbar_claim": true
+      },
+      "travel": {
+        "banner": true,
+        "workflow_in_banner": true,
+        "toolbar_claim": true
+      }
+    },
+    "unclaimed_tab": {
+      "unclaimed_tab_banner_absent": true,
+      "profile_toolbar_still_shows_other_claim": false
+    },
+    "release_and_disconnect_cleared_both": true
+  },
+  "enrollment": {
+    "chrome_popup_in_both_profiles": true,
+    "only_manual_field": "workflow name",
+    "scoped_ticket_file_modes": [
+      "0600",
+      "0600"
+    ]
+  },
+  "fixture_journal": {
+    "personal-fixture": [
+      "personal-before-restart",
+      "personal-after-restart",
+      "personal-model"
+    ],
+    "travel-fixture": [
+      "travel-before-restart",
+      "travel-after-restart",
+      "travel-model"
+    ]
+  },
+  "independent_web_qa_models": [
+    {
+      "marker": "personal-model",
+      "web_qa_pid": 91303,
+      "calls": [
+        "mcp__qa__browser_claim",
+        "mcp__qa__browser_snapshot",
+        "mcp__qa__browser_click",
+        "mcp__qa__browser_snapshot",
+        "mcp__qa__browser_release"
+      ],
+      "all_tools_succeeded": true
+    },
+    {
+      "marker": "travel-model",
+      "web_qa_pid": 91295,
+      "calls": [
+        "mcp__qa__browser_claim",
+        "mcp__qa__browser_snapshot",
+        "mcp__qa__browser_click",
+        "mcp__qa__browser_snapshot",
+        "mcp__qa__browser_release"
+      ],
+      "all_tools_succeeded": true
+    }
+  ],
+  "site_account_switch": {
+    "old_dom_cookie_changed": true,
+    "old_lease_refused": "SiteAccountMismatch",
+    "other_route_verified": true,
+    "same_document_recovered": true,
+    "zero_wrong_commits": true,
+    "both_released_indicators_cleared": true
+  },
+  "broker_only_restart": {
+    "chrome_pid_unchanged": true,
+    "service_pids": [
+      26747,
+      13002
+    ],
+    "old_new_native_host_pids": [
+      [
+        62988,
+        63017
+      ],
+      [
+        25337,
+        25338
+      ]
+    ],
+    "both_incarnations_unchanged": true,
+    "both_generations_changed": true,
+    "both_prior_leases_refused": true,
+    "disconnect_cleared_indicators": true
+  },
+  "ui_revocation": {
+    "personal": {
+      "both_popups_confirmed": true,
+      "ticket_deleted": true,
+      "original_lease": "SessionClosed",
+      "old_credential": "Unauthorized",
+      "banner_and_toolbar_cleared": true,
+      "other_profile_stayed_available": true
+    },
+    "travel": {
+      "both_popups_confirmed": true,
+      "ticket_deleted": true,
+      "original_lease": "SessionClosed",
+      "old_credential": "Unauthorized",
+      "banner_and_toolbar_cleared": true
+    }
+  },
+  "cleanup": {
+    "both_extensions_removed": true,
+    "both_site_cookies_cleared_and_refused": true,
+    "travel_developer_mode_restored": true,
+    "test_host_manifests_removed": true,
+    "all_fixture_tabs_closed": true
+  },
+  "installed_wheel_smoke": {
+    "installed_wheel": "0.1.0",
+    "profile_matches": true,
+    "fixture_account_matches": true,
+    "mcp_tools": [
+      "browser_claim",
+      "browser_snapshot",
+      "browser_release"
+    ],
+    "claimed_banner_and_toolbar_verified": true,
+    "release_cleared_claim": true,
+    "temporary_enrollment_removed": true,
+    "native_manifests_removed": true,
+    "fixture_cookie_cleared": true,
+    "test_window_closed": true
+  },
+  "browser_version": "Google Chrome 157.0.8103.51",
+  "transport": "Chrome native-messaging stdio to distinct native hosts, AF_UNIX to service. The local QA website used HTTP.",
+  "navigation_restore": "Every pre-restart URL present in the immediate restart baseline was restored, counting duplicate URLs."
+}

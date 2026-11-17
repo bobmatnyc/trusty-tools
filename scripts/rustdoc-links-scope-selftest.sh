@@ -105,7 +105,15 @@ assert_eq "multi-line assembly subject, body below" release \
 
 echo "rustdoc-links-scope: other events"
 assert_eq "workflow_dispatch" release "$(scope workflow_dispatch false '' '' '')"
-assert_eq "unknown event fails closed" release "$(scope merge_group true '' '' '')"
+assert_eq "unknown event fails closed" release "$(scope schedule true '' '' '')"
+
+echo "rustdoc-links-scope: merge_group"
+assert_eq "queued release commit" release \
+  "$(scope merge_group true '' '' 'chore(release): assemble trusty-mpm 1.7.7 changelog (#8681)')"
+assert_eq "queued docs-only commit skips" skip \
+  "$(scope merge_group true '' '' 'docs: x (#3)')"
+assert_eq "queued code commit runs the ordinary scope" ordinary \
+  "$(scope merge_group false '' '' 'fix: y (#4)')"
 
 echo "rustdoc-links-scope: GITHUB_OUTPUT"
 out="$(mktemp)"

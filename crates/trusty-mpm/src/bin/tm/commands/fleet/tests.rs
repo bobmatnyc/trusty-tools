@@ -82,6 +82,7 @@ fn cli_parses_fleet_init() {
                     dir,
                     no_launch,
                     session,
+                    ..
                 },
         } => {
             assert_eq!(dir.as_deref(), Some("/x/a"));
@@ -116,6 +117,58 @@ fn cli_parses_fleet_relaunch() {
         Command::Fleet {
             action: FleetAction::Relaunch { dir: None, session: Some(s) }
         } if s == "tm-sup"
+    ));
+}
+
+#[test]
+fn cli_parses_fleet_bind() {
+    // #8878 PR2a.
+    let cli = Cli::try_parse_from(["tm", "fleet", "bind"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Fleet {
+            action: FleetAction::Bind
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_presence_local() {
+    // #8878 PR2a.
+    let cli = Cli::try_parse_from(["tm", "presence", "local"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Presence {
+            action: crate::cli::PresenceAction::Local
+        }
+    ));
+}
+
+#[test]
+fn cli_parses_presence_device_verbs_8878() {
+    use crate::cli::{DevicesAction, PresenceAction};
+    // #8878 PR2b-1b.
+    let parse = |args: &[&str]| match Cli::try_parse_from(args).unwrap().command.unwrap() {
+        Command::Presence { action } => action,
+        other => panic!("{other:?}"),
+    };
+    assert!(matches!(
+        parse(&["tm", "presence", "request"]),
+        PresenceAction::Request { .. }
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "wait", "--timeout", "2m", "--request", "ab"]),
+        PresenceAction::Wait { timeout, request: Some(r) } if timeout == "2m" && r == "ab"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "add", "iphone"]),
+        PresenceAction::Devices { action: DevicesAction::Add { name } } if name == "iphone"
+    ));
+    assert!(matches!(
+        parse(&["tm", "presence", "devices", "revoke", "c1"]),
+        PresenceAction::Devices {
+            action: DevicesAction::Revoke { .. }
+        }
     ));
 }
 
@@ -159,7 +212,9 @@ fn a_second_run_changes_nothing() {
         std::fs::read(fx.dir().join(".trusty-mpm.toml")).unwrap(),
         project_before
     );
-    assert_eq!(fx.config().matches(&canonical(&fx.dir())).count(), 1);
+    // #10885: quoted, so the `[notification_hook] inbox` below the dir is not counted.
+    let entry = format!("\"{}\"", canonical(&fx.dir()));
+    assert_eq!(fx.config().matches(&entry).count(), 1);
 }
 
 /// The fail-open guard: a config tm cannot parse is never rewritten or reset,
@@ -294,7 +349,9 @@ fn dir_overrides_the_default() {
     );
     init(&other, fx.home(), false, NO_TMUX).unwrap();
     assert!(other.join(".trusty-mpm.toml").exists());
-    let default = fx.home().join(DEFAULT_DIR);
+    let default = fx
+        .home()
+        .join(trusty_mpm::core::architect_store::DEFAULT_ARCHITECT_DIR);
     assert!(!default.exists(), "the default directory was created");
     assert!(fx.config().contains(&canonical(&other)));
 }
@@ -565,6 +622,8 @@ const LOCAL_TEMPLATES: &[&str] = &[
     "local/mandates/example.toml",
     // See #10161: the instance config seed.
     "local/architect.json",
+    // #10571 Phase 2: the IL cadence jobs and clear thresholds.
+    "local/il-schedule.json",
 ];
 
 /// The checkout's Architect seed, read from content once (#9132).
@@ -814,6 +873,8 @@ fn the_relay_scripts_and_the_voice_guide_are_seeded() {
         ("scripts/relay.sh", true),
         ("scripts/posted.sh", true),
         ("scripts/relay-marker.py", false),
+        ("scripts/relay_provenance.py", false),   // #10780
+        ("scripts/relay_supersession.py", false), // #10960
         ("docs/architect/voice.md", false),
     ] {
         let meta = std::fs::metadata(dir.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
@@ -1197,7 +1258,9 @@ fn a_resume_fails_only_on_a_proven_absent_claude() {
         project_dir: PathBuf::from("/arch"),
         armed_at: String::new(),
     });
-    let unbound = Err("no `claude` process appeared".to_owned());
+    let unbound = Err(launch::Unbound::NoClaude(
+        "no `claude` process appeared".to_owned(),
+    ));
     let exited = || {
         let secs = RESUME_SETTLE.as_secs();
         ResumeCheck::Failed(format!("`claude` exited within {secs} s of starting"))
@@ -1395,6 +1458,48 @@ fn an_uncheckable_stale_dir_is_a_warning() {
     assert!(warning.starts_with("cannot check"), "{warning}");
 }
 
+/// Why: #11117 lets the Architect edit `AGENTS.md` on its own initiative, so
+/// no seeded file may still ban the write or limit it to an owner's order.
+/// What: scans every file `tm fleet init` seeds, line breaks folded, for the
+/// old ban and owner-order wording, and checks `local/instance.md` still keeps
+/// the owner's instructions in `AGENTS.md`.
+/// Test: `seeded_files_carry_no_agents_md_write_ban`.
+#[test]
+fn seeded_files_carry_no_agents_md_write_ban() {
+    // #10911: the old wording in instance.md, CLAUDE.md and architect-workflow.
+    const BANS: &[&str] = &[
+        "never writes `AGENTS.md`",
+        "you never write it",
+        "The owner writes it; you never do",
+        // #11117: the owner-order limit is gone too.
+        "only when the owner orders a specific edit",
+    ];
+    let files = seeded_files();
+    for file in &files {
+        let flat = file
+            .contents
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for ban in BANS {
+            assert!(!flat.contains(ban), "{}: still says {ban:?}", file.dest);
+        }
+    }
+    let instance = files
+        .iter()
+        .find(|f| f.dest == "local/instance.md")
+        .expect("local/instance.md is seeded");
+    let flat = instance
+        .contents
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        flat.contains("The owner's own instructions go in `AGENTS.md`, never here."),
+        "{flat}"
+    );
+}
+
 /// #9997: every template asset is seeded byte-equal, so a template added
 /// under `src/assets/architect/templates/` without a `template!` row fails.
 #[test]
@@ -1584,3 +1689,23 @@ fn a_seed_with_one_more_skill_seeds_it() {
     assert_eq!(row.contents, "---\nname: tm-probe-extra\n---\n");
     assert!(!row.executable);
 }
+
+/// #10571: the refresh of unedited seeds and the bundle provenance.
+#[path = "seed_refresh_tests.rs"]
+mod seed_refresh_tests;
+
+/// #11058: the wiring list and the `fleet_seed_wiring` doctor row.
+#[path = "seed_wiring_tests.rs"]
+mod seed_wiring_tests;
+
+/// #10571: every seeded script passes the pm-guard credential rules.
+#[path = "seed_guard_tests.rs"]
+mod seed_guard_tests;
+
+/// #10571/#10579: the Intent Ledger and its hooks on install and upgrade.
+#[path = "il_init_tests.rs"]
+mod il_init_tests;
+
+/// #10571 P1b: the dashboard LaunchAgent, its guard and the takeover.
+#[path = "dashboard_agent_tests.rs"]
+mod dashboard_agent_tests;

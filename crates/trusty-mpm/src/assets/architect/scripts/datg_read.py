@@ -1,9 +1,12 @@
 """datg_read.py: the read-only datg side: summary, dispatch check, freshness, stamp, digest.
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
-What: summary, dispatch_mode/check_dispatch, log_hook_warning, op_fresh, turn_tools,
+What: summary, dispatch_mode/check_dispatch (goal and, #11101, Task token), log_hook_warning, op_fresh, turn_tools,
 stamp_turn (the Stop hook's stale_il record) and build_digest. datg.py re-exports every name.
-Test: tests/test_datg.py
+#10780: the digest splits answered items by item.source and flags unsourced owner claims (unsourced_claim,
+provenance_flags). #10800: the SESSION section carries the G1/G3 guard flags (datg_guards.guard_lines).
+#10960 G-3: the RECONCILE block checks the handoff and local/standing-rules.md against the ledger (reconcile_lines).
+Test: tests/test_datg.py, tests/test_datg_guards.py, tests/test_datg_reconcile.py
 """
 import json
 import os
@@ -12,7 +15,10 @@ import sys
 import time
 from datetime import datetime, timezone
 
+from datg_guards import guard_lines, owner_rulings
 from datg_log import append_log
+from datg_ops import OWED_MAX
+from datg_task import task_mode, task_problem
 from datg_store import (DEFAULT_BLOCK_AFTER, SIZE_WARN, DatgError, Locked, _atomic_write, _jl, _size, load_state,
                         now_iso, parse_iso, parse_ts, paths, per_pm_session, read_log)
 
@@ -44,18 +50,37 @@ def dispatch_mode(st, now=None):
 
 
 def check_dispatch(st, prompt, now=None):
-    """Return (decision, message); decision is allow|warn|block. Pure."""
+    """Return (decision, message); decision is allow|warn|block. Pure.
+
+    The goal check keeps its date/config mode. #11101: the Task check warns unless the task mode is refuse,
+    then it follows the same dispatch mode (block after the block date).
+    Test: tests/test_datg.py TaskTagCase
+    """
     active = {g["id"] for g in st["goals"] if g["status"] == "active"}
     if not active:
         return "allow", ""
     code = st["code"]
     m = re.search(rf"Goal:\s*({re.escape(code)}-G[0-9a-f]{{2}})\b", prompt or "")
-    if m and m.group(1) in active:
+    parts, decs = [], []
+    if not (m and m.group(1) in active):
+        top = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])[0]
+        why = f"names non-active goal {m.group(1)}" if m else "names no goal id"
+        parts.append(f"dispatch {why}. Start the prompt with 'Goal: {top['id']}' (top) or another active goal.")
+        decs.append(dispatch_mode(st, now))
+    tp = task_problem(st, prompt)
+    if tp:
+        parts.append(f"dispatch {tp}.")
+        decs.append(dispatch_mode(st, now) if task_mode(st) == "refuse" else "warn")
+    if not parts:
         return "allow", ""
-    top = sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])[0]
-    why = f"names non-active goal {m.group(1)}" if m else "names no goal id"
-    msg = f"DATG: dispatch {why}. Start the prompt with 'Goal: {top['id']}' (top) or another active goal."
-    return dispatch_mode(st, now), msg
+    return ("block" if "block" in decs else "warn"), "DATG: " + " ".join(parts)
+
+
+def goal_named(st, prompt):
+    """True when no goal is active or the prompt names an active goal: the goal half of check_dispatch (#11101)."""
+    active = {g["id"] for g in st["goals"] if g["status"] == "active"}
+    m = re.search(rf"Goal:\s*({re.escape(st['code'])}-G[0-9a-f]{{2}})\b", prompt or "")
+    return not active or bool(m and m.group(1) in active)
 
 
 def log_hook_warning(project, msg):
@@ -183,6 +208,235 @@ def stamp_turn(project, payload, now=None):
     return new
 
 
+# ---- provenance (#10780) ----------------------------------------------------------
+
+# An owner claim: an owner label, "ruling", or a "(<Name> HH:MMZ)" attribution. The name is data, never a list.
+OWNER_CLAIM = re.compile(r"\b(?:user|owner)\s+(?:ruling|instruction)s?\b|\bruling\b|\([A-Z][\w.-]* \d{2}:\d[\dx]Z\)",
+                         re.I)
+OWNER_CITE = re.compile(r"owner turn:\s*(?:chat|dashboard)\s+\S", re.I)   # round 2: a palace cite never clears
+
+
+CITED = re.compile(r'((?:"[^"\n]+"\s*(?:…|\.\.\.)?\s*)+)\(owner turn:\s*([^()\n]{1,80})\)')
+
+
+def _cite_verified(text):
+    """True when every `"<quote>" (owner turn: <cite>)` in `text` checks out (critic H3: a cite alone is not enough)."""
+    found = CITED.findall(text)
+    if not found:
+        return False
+    try:
+        import relay_provenance
+        for quotes, cite in found:
+            relay_provenance.verify(cite.strip(), re.findall(r'"([^"\n]+)"', quotes))
+    except Exception:  # noqa: BLE001 - a refusal, a missing module or an unreachable store keeps the flag
+        return False
+    return True
+
+
+def unsourced_claim(text):
+    """True when `text` claims an owner ruling without a verified `"<quote>" (owner turn: <cite>)`.
+
+    Test: tests/test_datg_provenance.py
+    """
+    t = str(text or "")
+    return bool(OWNER_CLAIM.search(t)) and not (OWNER_CITE.search(t) and _cite_verified(t))
+
+
+def provenance_flags(path):
+    """[(line number, line)] of a handoff file whose lines claim an owner ruling with no source; OSError unreadable."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return [(n, ln.rstrip("\n")) for n, ln in enumerate(f, 1) if unsourced_claim(ln)]
+
+
+def _handoff_path(project, value):
+    for p in (value, os.path.join(project, value), os.path.join(os.getcwd(), value)):
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _flag(where, text):
+    return f"  FLAG unsourced owner claim (not an owner ruling until cited; confirm first): {where}: {_short(text, 160)}"
+
+
+# ---- reconcile (#10960 G-3) -----------------------------------------------------------
+
+RECONCILE_HEAD = "RECONCILE (handoff + standing rules vs ledger; FLAG lines only, the ledger value applies)"
+RECONCILE_MAX = 12   # flag lines shown; an unreadable source is always shown, never cut
+CITE_OF = re.compile(r"\(owner turn:\s*([^()\n]{1,80})\)", re.I)
+SUCCESSOR_HOPS = 8
+RULES_FILE = "standing-rules.md"
+
+
+def standing_rules_path(project):
+    """The standing-rules file `tm hook --standing-rules` injects for this ledger (core/standing_rules.rs), or None.
+
+    $ARCHITECT_STANDING_RULES wins; else <project>/local/standing-rules.md; else, for the Architect ledger at
+    <dir>/local/il, <dir>/local/standing-rules.md. A path that exists but is not a readable file is returned.
+    """
+    if os.environ.get("ARCHITECT_STANDING_RULES"):
+        return os.environ["ARCHITECT_STANDING_RULES"]
+    proj = os.path.abspath(project)
+    cands = [os.path.join(proj, "local", RULES_FILE)]
+    if os.path.basename(proj) == "il" and os.path.basename(os.path.dirname(proj)) == "local":
+        cands.append(os.path.join(os.path.dirname(proj), RULES_FILE))
+    return next((c for c in cands if os.path.lexists(c)), None)
+
+
+def _read_lines(path):
+    """[(n, line)]; OSError, or ValueError for a file that is not UTF-8 (the Rust hook refuses it too)."""
+    with open(path, encoding="utf-8") as f:
+        return [(n, ln.rstrip("\n")) for n, ln in enumerate(f, 1)]
+
+
+def _rule_line(text):
+    """True for a standing-rules line that states a rule: not blank, a heading, a comment or a divider."""
+    s = text.strip()
+    return bool(s) and not s.startswith(("#", "<!--")) and not set(s) <= set("-*_= ")
+
+
+def _norm(v):
+    return " ".join(str(v or "").split()).lower()
+
+
+def _refs(text, owned):
+    """Owner-sourced ledger items `text` names, by item id or by the cite of a `(owner turn: <cite>)`."""
+    cites = {_norm(c) for c in CITE_OF.findall(text)}
+    return [i for i in owned if re.search(rf"(?<![\w-]){re.escape(str(i['id']))}(?![\w-])", text)
+            or _norm(i["source"].get("cite")) in cites]
+
+
+def _ruling(i):
+    return f'{i["id"]} "{_short(i["source"].get("quote"), 100)}" (owner turn: {i["source"].get("cite")})'
+
+
+def _stale_ref(where, item, by_id, cur):
+    """The FLAG for a line citing a ruling that is not current: superseded (the ledger's successor named) or expired."""
+    if "superseded_by" not in item:
+        return f"  FLAG reconcile: {where} cites {item['id']}, EXPIRED at {item['source'].get('until')}, not applied"
+    succ, hops = by_id.get(item["superseded_by"]), 0
+    while succ is not None and "superseded_by" in succ and hops < SUCCESSOR_HOPS:   # #10960 G-4: the chain's end
+        succ, hops = by_id.get(succ["superseded_by"]), hops + 1
+    if succ is not None and succ.get("id") in cur:
+        now_rule = f"ledger applies {_ruling(succ)}"
+    else:
+        now_rule = f"successor {item['superseded_by']} is not a current owner ruling; ask the owner"
+    return f"  FLAG reconcile: {where} cites {item['id']}, SUPERSEDED, not applied; {now_rule}"
+
+
+def reconcile_failed(err):
+    """The RECONCILE block when the ledger itself cannot be read: it says nothing was reconciled."""
+    return [RECONCILE_HEAD, f"  FLAG reconcile: ledger unreadable ({_short(err, 160)}); NOTHING RECONCILED, "
+                            "treat every handoff and standing-rules line as unverified"]
+
+
+def reconcile_lines(project, st, now=None):
+    """#10960 G-3: the RECONCILE block of the digest. Reports only: it never raises, blocks or sets an exit code.
+
+    Why: a handoff or standing-rules line outlives the ruling it repeats, so a resumed session applied an expired
+    or reversed rule, or lost a ruling the handoff left out (DOC-87 X7-X9).
+    What: each handoff line that cites or claims an owner ruling, and each standing-rules rule line, is looked up
+    in the ledger by item id or `(owner turn: <cite>)`. A superseded or expired cite is flagged with the ledger
+    value; a line with no ledger record is flagged; a current owner ruling a present source omits is restored. A
+    superseded ruling is history, never missing; its successor is still restored per source that omits it. The
+    cap keeps stale, then missing, then no-source lines, so a no-source line never displaces the other two. An
+    unreadable source or ledger is flagged, never "all reconciled".
+    Test: tests/test_datg_reconcile.py
+    """
+    try:
+        return _reconcile(project, st, now or datetime.now(timezone.utc))
+    except Exception as e:  # noqa: BLE001 - fail open, but loudly
+        return reconcile_failed(e)
+
+
+def _reconcile(project, st, now):
+    items = st["items"]
+    by_id = {i.get("id"): i for i in items}
+    owned = [i for i in items if i.get("status") == "answered" and isinstance(i.get("source"), dict)
+             and i["source"].get("by") == "owner"]
+    current = owner_rulings(st, now)
+    cur = {i["id"] for i, _ in current}
+    loud, stale, unsourced, note, seen, ok = [], [], [], [], {}, []
+
+    def chain_end(i):   # the last successor id of a superseded ruling, or None
+        succ, hops = by_id.get(i.get("superseded_by")), 0
+        while succ is not None and "superseded_by" in succ and hops < SUCCESSOR_HOPS:
+            succ, hops = by_id.get(succ["superseded_by"]), hops + 1
+        return succ.get("id") if succ is not None else None
+
+    srcs = [("handoff", r["value"], _handoff_path(project, r["value"]))
+            for r in (st.get("session") or {}).get("refs") or [] if r.get("key") == "handoff"]
+    if not srcs:
+        note.append("  handoff: none recorded")
+    rp = standing_rules_path(project)
+    if rp and os.path.lexists(rp):
+        srcs.append((RULES_FILE, RULES_FILE, rp))
+    else:
+        note.append(f"  {RULES_FILE}: none")
+    for kind, label, path in srcs:
+        try:
+            if path is None:
+                raise OSError("not found")
+            lines = _read_lines(path)
+        except (OSError, ValueError) as e:
+            loud.append(f"  FLAG reconcile: {kind} {label} UNREADABLE ({_short(e, 80)}); not reconciled against it")
+            seen[kind] = None
+            continue
+        if seen.get(kind, set()) is None:
+            continue   # one unreadable handoff makes the whole handoff unknown
+        seen.setdefault(kind, set())
+        ok.append(label)
+        for n, ln in lines:
+            refs = _refs(ln, owned)
+            live = {i["id"] for i in refs if i["id"] in cur}
+            seen[kind] |= live
+            if refs:   # #11191: per ref; only a ref whose chain-end successor is on the line is exempt
+                stale += [_stale_ref(f"{label}:{n}", i, by_id, cur) for i in refs
+                          if i["id"] not in cur and chain_end(i) not in live]
+            elif _rule_line(ln) if kind == RULES_FILE else (OWNER_CLAIM.search(ln) or CITE_OF.search(ln)):
+                unsourced.append(f"  FLAG reconcile: {label}:{n} has no ledger source (not an owner ruling until the "
+                             f"ledger holds it): {_short(ln, 120)}")
+    missing = []
+    for i, _ in current:
+        miss = [k for k, ids in seen.items() if ids is not None and i["id"] not in ids]
+        if miss:   # #10960 ruling (b): per source, even when a SUPERSEDED line names it as the applied successor
+            missing.append(f"  FLAG reconcile: owner ruling active in the ledger, missing from {' and '.join(miss)}; "
+                         f"restored: {_ruling(i)}")
+    flags = stale + missing + unsourced   # #10960 critic: the cap cuts no-source lines first, never X7-X9 lines
+    out = [RECONCILE_HEAD] + loud + flags[:RECONCILE_MAX]
+    if len(flags) > RECONCILE_MAX:
+        out.append(f"  +{len(flags) - RECONCILE_MAX} more reconcile flags not shown")
+    if not loud and not flags:
+        out.append(f"  all reconciled: {len(cur)} active owner rulings vs {', '.join(ok)}" if ok
+                   else f"  nothing to reconcile against: {len(cur)} active owner rulings")
+    return out + note
+
+
+def _ruling_sections(items, now):
+    """Answered items split by item.source: owner rulings (current, then expired), Architect inferences, unsourced."""
+    cur, old, inf, uns = (["OWNER RULINGS (with source)"], ["OWNER RULINGS EXPIRED (history only, not current)"],
+                          ["ARCHITECT INFERENCES (not owner rulings)"],
+                          ["UNSOURCED ANSWERS (not owner rulings; confirm the source before acting)"])
+    for i in items:
+        if i.get("status") != "answered":
+            continue
+        src = i.get("source") if isinstance(i.get("source"), dict) else {}
+        line = f"  {i['id']} {i['title']} | answer: {i.get('answer', '')}"
+        if src.get("by") == "owner":   # #10780 H3: the owner's words are the ruling; the answer is our reading
+            until = parse_ts(src.get("until")) if src.get("until") else None
+            gone = "superseded_by" in i   # #10960 G-4: a superseded ruling is history, with its successor named
+            (old if gone or (until and until <= now) else cur).append(
+                f'  {i["id"]} {i["title"]} | ruling: "{src.get("quote")}" (owner turn: {src.get("cite")})'
+                + (f" | until {src['until']}" if until else "")
+                + (f" | superseded by {i['superseded_by']}" if gone else "")
+                + f" | Architect reading: {i.get('answer', '')}")
+        elif src.get("by") == "architect":
+            inf.append(line + f" | basis: {src.get('basis')}")
+        else:
+            uns.append(line)
+    return [ln for sec in (cur, old, inf, uns) if len(sec) > 1 for ln in sec]
+
+
 def _short(v, n):
     v = " ".join(str(v or "").split())
     return v if len(v) <= n else v[:n - 1] + "…"
@@ -200,14 +454,16 @@ def _digest_sections(project, st):
     if size > SIZE_WARN:
         head.append(f"SIZE: state.json {size} B over the {SIZE_WARN} B bar; run datg.py prune")
     sess = ["SESSION"]
-    if not ses.get("task") and not ses.get("next"):
+    if not ses.get("task") or not ses.get("next"):   # #10579: a HOLD is an extra line, never a substitute
         sess.append("  none recorded")
-    for k in ("task", "next"):
+    for k in ("hold", "merge_hold", "task", "next"):   # #10579: the holds are read first
         if ses.get(k):
             sess.append(f"  {k}: {ses[k]}")
     for w in ses.get("waiting_on") or []:
         sess.append(f"  waiting_on {w.get('who')}: {w.get('what')} (since {w.get('since')})")
     if "owed" in ses:
+        if ses["owed"]:   # #11101: how full the owed list is
+            sess.append(f"  owed ({len(ses['owed'])}/{OWED_MAX}):")
         for o in ses["owed"]:
             sess.append(f"  owed: {o['check']} = {o['expect']} @ {o.get('ref', '')}")
         if not ses["owed"]:
@@ -226,15 +482,29 @@ def _digest_sections(project, st):
     cu = ses.get("ctx_use")
     if cu:
         sess.append(f"  ctx_use: active {cu['active']}% stale {cu['stale']}% ctx {cu['ctx']} at {cu['at']} keep: {cu['keep']}")
+    # #10780: a session field or handoff line claiming an owner ruling with no cite is flagged, never restored as one.
+    texts = [(k, ses.get(k)) for k in ("hold", "merge_hold", "task", "next")]
+    texts += [("waiting_on", w.get("what")) for w in ses.get("waiting_on") or []]
+    texts += [(t["id"], t["title"]) for t in st["tasks"] if t["status"] != "done"]
+    sess += [_flag(k, v) for k, v in texts if v and unsourced_claim(v)]
+    for r in ses.get("refs") or []:
+        hp = _handoff_path(project, r["value"]) if r.get("key") == "handoff" else None
+        try:
+            sess += [_flag(f"{r['value']}:{n}", ln) for n, ln in (provenance_flags(hp) if hp else [])][:8]
+        except OSError as e:
+            sess.append(f"  FLAG handoff {r['value']} unreadable ({e})")
+    sess += guard_lines(project, st)   # #10800 G1, G3: policy-file conflicts and delivery flags, beside the holds
+    sess += reconcile_lines(project, st)   # #10960 G-3: handoff + standing rules vs the ledger, flags only
     goals = ["GOALS"] + [f"  {g['id']} r{g['rank']} {g['title']}" + (f" -> {g['finish']}" if g.get("finish") else "")
                          for g in sorted((g for g in st["goals"] if g["status"] == "active"), key=lambda g: g["rank"])]
-    items = ["ITEMS (open/answered)"]
+    items = ["ITEMS (open)"]
     for i in st["items"]:
-        if i["status"] in ("open", "answered"):
+        if i["status"] == "open":
             rec = next((o["l"] for o in i.get("opts") or [] if o.get("rec")), "")
             items.append(f"  {i['id']} [{i['status']}]{' esc' if i.get('esc') else ''} {i['title']}"
                          + (f" | answer: {i['answer']}" if i.get("answer") else "")
-                         + (f" | rec: {rec}" if rec and i["status"] == "open" else ""))
+                         + (f" | rec: {rec}" if rec else ""))
+    items += _ruling_sections(st["items"], datetime.now(timezone.utc))   # #10780: owner vs Architect, by source
     tasks = [f"  {t['id']} [{t['status']}] {t['goal']} {t['title']}" for t in st["tasks"] if t["status"] != "done"]
     recent = [x for x in read_log(project, 262144) if x[1] in ("escalated", "answered", "done", "drift")][-10:]
     log = ["RECENT"] + [f"  {r.get('t') or r.get('ts')} {r.get('id', '')} {k} {_short(r.get('note') or r.get('text'), 80)}"

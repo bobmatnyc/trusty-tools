@@ -78,6 +78,9 @@ pub struct FakeTmuxDriver {
     pub send_calls: Mutex<Vec<(String, String)>>,
     pub kill_calls: Mutex<Vec<String>>,
     pub capture_responses: Mutex<HashMap<String, String>>,
+    /// #8407: escaped captures keyed BY PANE ID; a missing key is a capture
+    /// failure, so a test can drive the unreadable-pane arm.
+    pub escaped_capture_responses: Mutex<HashMap<String, String>>,
     /// Names to return from `list_sessions`.
     pub seeded_names: Mutex<Vec<String>>,
     /// Records `(session_name, workdir)` for every `create_session` call.
@@ -174,6 +177,7 @@ impl FakeTmuxDriver {
             send_calls: Mutex::new(Vec::new()),
             kill_calls: Mutex::new(Vec::new()),
             capture_responses: Mutex::new(HashMap::new()),
+            escaped_capture_responses: Mutex::new(HashMap::new()),
             seeded_names: Mutex::new(Vec::new()),
             create_cwd_calls: Mutex::new(Vec::new()),
             graceful_stop_calls: Mutex::new(Vec::new()),
@@ -502,6 +506,21 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
             .cloned()
             .unwrap_or_default())
     }
+
+    /// #8407: the seeded escaped capture for `pane_id`, or a capture failure.
+    fn capture_pane_escaped(
+        &self,
+        _name: &str,
+        pane_id: &str,
+        _lines: usize,
+    ) -> Result<String, ManagedError> {
+        self.escaped_capture_responses
+            .lock()
+            .unwrap()
+            .get(pane_id)
+            .cloned()
+            .ok_or_else(|| ManagedError::TmuxUnavailable(format!("no pane {pane_id}")))
+    }
 }
 
 pub(super) async fn make_manager(dir: &TempDir) -> (SessionManager, Arc<FakeTmuxDriver>) {
@@ -731,7 +750,7 @@ async fn manager_create_store_failure_reaps_orphan() {
     );
 }
 
-// `manager_naming_convention` (full `tm-<leaf>-NN` format assertion) lives in
+// `manager_naming_convention` (full `tm-<leaf>[-NN]` format assertion) lives in
 // `naming_tests.rs` alongside the rest of the #1955 naming-scheme coverage —
 // this file is at the 1500-SLOC test cap (see naming_tests.rs's module doc).
 
@@ -752,7 +771,8 @@ async fn manager_name_hint_overrides() {
         .await
         .expect("create");
 
-    assert_eq!(record.tmux_name, "tm-ticket-1234-01");
+    // #10478: the first session for a hint is bare.
+    assert_eq!(record.tmux_name, "tm-ticket-1234");
 }
 
 /// `stop` must kill the runtime but KEEP the workspace directory and record,
@@ -1311,6 +1331,8 @@ async fn decommission_full_still_terminates_the_runtime() {
 pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp"),
@@ -1337,6 +1359,7 @@ pub(crate) fn make_active_test_record(tmux_name: &str, task: &str, ws_path: &str
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1447,6 +1470,8 @@ async fn manager_reconcile_skips_decommissioned() {
 
     let tombstone = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-decomm".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1473,6 +1498,7 @@ async fn manager_reconcile_skips_decommissioned() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1515,6 +1541,8 @@ async fn manager_reconcile_skips_deleted() {
 
     let deleted = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-deleted".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1541,6 +1569,7 @@ async fn manager_reconcile_skips_deleted() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1591,6 +1620,8 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
 
     let stale = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-stale-decision".into(),
         cwd: PathBuf::from("/tmp"),
@@ -1619,6 +1650,7 @@ async fn manager_reconcile_backfills_stale_pending_decision_on_terminal_record()
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -2182,6 +2214,8 @@ pub(super) async fn seed_record(
     );
     let record = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id,
         tmux_name: tmux_name.clone(),
         cwd: root.path().to_path_buf(),
@@ -2208,6 +2242,7 @@ pub(super) async fn seed_record(
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -2711,6 +2746,8 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
         std::fs::create_dir_all(&ws).expect("mk ws");
         let record = SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: format!("tmpm-aged-{id}"),
             cwd: root.path().to_path_buf(),
@@ -2737,6 +2774,7 @@ async fn reap_aged_ephemeral_picks_old_ephemeral_only() {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -2807,6 +2845,8 @@ async fn manager_decommission_unowned_skips_deletion() {
     let id = ManagedSessionId::new();
     let record = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id,
         tmux_name: format!("tmpm-local-{id}"),
         cwd: repo_path.clone(),
@@ -2834,6 +2874,7 @@ async fn manager_decommission_unowned_skips_deletion() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -3006,60 +3047,6 @@ async fn fake_driver_graceful_stop_without_pid() {
     assert!(
         gs_calls.iter().any(|(n, p)| n == tmux_name && p.is_none()),
         "graceful_stop_calls must record (name, None) when no pid supplied"
-    );
-}
-
-/// `SessionManager::shutdown` signals and kills an owned Active session.
-///
-/// Why: the trait-level unit tests above call the driver directly, bypassing
-/// the `SessionManager::shutdown` orchestration.
-/// What: builds a manager with one Active session whose pane `%1` is on the
-/// fake's server, calls `mgr.shutdown()`, and asserts one Ctrl-C reached that
-/// pane and the session was killed. #9101: by session id after an ownership
-/// re-check, no longer by name. The grace window in test builds is 0 s
-/// (`SIGTERM_GRACE_SECS = 0` under `#[cfg(test)]`).
-/// Test: this is the test.
-#[tokio::test]
-async fn shutdown_stops_an_owned_active_session() {
-    let dir = crate::test_support::hermetic_temp_dir();
-    let fake = fake_with_pane();
-    let mgr = SessionManager::new(dir.path(), fake.clone())
-        .await
-        .expect("manager");
-
-    let record = mgr
-        .create(
-            "shutdown-integration-task".into(),
-            Some(PathBuf::from("/tmp/wt-shutdown")),
-            Some("shutdown-integ".into()),
-            None,
-            None,
-            None,
-        )
-        .await
-        .expect("create");
-    assert_eq!(record.tmux_server.as_deref(), Some(FAKE_TMUX_SERVER));
-    {
-        let mut store = mgr.store.write().await;
-        let mut r = record.clone();
-        r.state = ManagedSessionState::Active;
-        store.upsert(r).await.expect("upsert active");
-    }
-    let tmux_name = record.tmux_name.clone();
-
-    mgr.shutdown().await;
-
-    assert_eq!(
-        fake.pane_interrupt_calls.lock().unwrap().as_slice(),
-        [(tmux_name.clone(), "%1".to_string())],
-        "shutdown signals the owned pane once"
-    );
-    // #9101: the fake records a kill by id as the id, a kill by name as the
-    // name, so this tells the two apart.
-    assert_eq!(
-        fake.kill_calls.lock().unwrap().as_slice(),
-        [FAKE_SESSION_ID.to_string()],
-        "shutdown must kill every owned Active session by its session id"
     );
 }
 

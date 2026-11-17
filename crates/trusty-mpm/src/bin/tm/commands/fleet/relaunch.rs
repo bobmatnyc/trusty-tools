@@ -11,8 +11,9 @@
 //! whose `claude` it cannot locate, and a launch that cannot be prepared
 //! ([`launch::prepare_restart`], the launch path `init` uses). Then it stops
 //! the pane's `claude` ([`stop_claude`]), proves the pane holds none, and
-//! starts and records the new one. A new `claude` that is
-//! not recorded is a [`Step::Failed`]. Last it removes this session's replaced
+//! starts and records the new one. A new `claude` that is not recorded is
+//! stopped and the run fails (#10448). A bound one gets its poller back when
+//! that is absent (#10357). Last it removes this session's replaced
 //! launch records ([`prune_replaced`]); `fleet::run` then re-registers the
 //! Architect with the daemon (#8942).
 //! Test: `relaunch_tests.rs`; `tests/tm_fleet.rs` (`fleet_relaunch_*`).
@@ -32,7 +33,7 @@ use trusty_mpm::session_manager::ArchitectRegistration;
 
 use super::launch::{self, PaneState};
 use super::session_name::SessionNames;
-use super::{Probe, Step, TMUX, register, status};
+use super::{Probe, Step, TMUX, poller, register, status};
 
 /// How long a stopped `claude` gets after SIGTERM before SIGKILL.
 const STOP_GRACE: Duration = Duration::from_secs(10);
@@ -42,6 +43,10 @@ const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// The pause between two "is it gone" reads.
 const STOP_POLL: Duration = Duration::from_millis(100);
+
+/// How long a stopped `claude`'s pane gets to read [`PaneClaude::Absent`]
+/// (#11068); it is read every [`STOP_POLL`].
+const PANE_SETTLE: Duration = Duration::from_secs(5);
 
 /// What [`relaunch`] reads and does; production passes [`LIVE`].
 ///
@@ -61,6 +66,8 @@ pub(crate) struct Ops {
     /// Prepare a new `claude`, touching no tmux session; the returned
     /// [`launch::Pending`] starts and records it. See [`launch::prepare_restart`].
     pub(crate) prepare: fn(&Path, &Path, &str) -> anyhow::Result<launch::Pending>,
+    /// Start the poller session; see [`poller::start`] (#10357).
+    pub(crate) start_poller: poller::StartFn,
 }
 
 /// The real tmux server, process table and launch path.
@@ -71,6 +78,7 @@ pub(crate) const LIVE: Ops = Ops {
     pane_claude: process::pane_claude,
     stop: stop_claude,
     prepare: launch::prepare_restart,
+    start_poller: poller::start,
 };
 
 /// The steps one `relaunch` run took.
@@ -118,18 +126,22 @@ impl RelaunchReport {
 /// runs, is located under the pane shell; the new launch is prepared
 /// (`ops.prepare`), so each launch-path refusal comes before any stop; the
 /// old `claude` is stopped, and the pane must then still be the only one and
-/// hold no `claude`; the new `claude` is started and recorded; this
-/// session's replaced launch records are removed. Every refusal before the
+/// hold no `claude`; the new `claude` is started and recorded; the poller
+/// is started when absent ([`poller::step_with`], #10357); this session's
+/// replaced launch records are removed. Every refusal before the
 /// stop says nothing was stopped; every failure after it names the stopped
-/// PID. A failed record is a [`Step::Failed`] with no registration.
-/// Test: `relaunch_refuses_an_absent_session_and_names_init`,
+/// PID. #10448: a failed record stops the new `claude` ([`stop_unbound`])
+/// and is `Err`.
+/// Test: `relaunch_restores_a_missing_poller_once`,
+/// `relaunch_never_starts_a_poller_unless_the_architect_is_bound`,
+/// `relaunch_refuses_an_absent_session_and_names_init`,
 /// `relaunch_refuses_before_any_change_when_the_pane_cannot_be_read`,
 /// `relaunch_refuses_a_session_with_more_than_one_pane`,
 /// `relaunch_stops_nothing_when_the_launch_cannot_be_prepared`,
 /// `relaunch_names_the_stopped_pid_when_the_new_claude_fails`,
 /// `relaunch_stops_the_old_claude_before_the_new_one_starts`,
 /// `relaunch_never_types_into_a_pane_that_still_holds_a_claude`,
-/// `relaunch_reports_an_unrecorded_claude_as_failed`,
+/// `relaunch_stops_an_unrecorded_claude_and_fails`,
 /// `fleet_relaunch_restarts_the_architect_and_rebinds_it`.
 pub(crate) fn relaunch(
     dir: &Path,
@@ -188,13 +200,8 @@ pub(crate) fn relaunch(
     };
     let record = match binding {
         Ok(record) => record,
-        Err(err) => {
-            report.steps.push(Step::Failed(format!(
-                "started a new `claude` in tmux session {session}, but it is NOT bound ({err}), \
-                 so its anchor writes will be denied"
-            )));
-            return Ok(report);
-        }
+        // #10448: never leave an unrecorded Architect running.
+        Err(err) => return Err(stop_unbound(session, &err.to_string(), ops)).with_context(stopped),
     };
     report.steps.push(Step::Changed(format!(
         "started a new `claude` in tmux session {session} on the `opus` alias, bound to claude \
@@ -202,6 +209,15 @@ pub(crate) fn relaunch(
         record.pid,
         conversation.describe()
     )));
+    // #10357: only a bound Architect gets its poller back, before the
+    // registration that records it.
+    report.steps.push(poller::step_with(
+        &dir,
+        true,
+        ops.probe,
+        names,
+        ops.start_poller,
+    ));
     let root = home.join(".trusty-mpm");
     report.steps.extend(prune_replaced(
         &root,
@@ -212,6 +228,35 @@ pub(crate) fn relaunch(
     ));
     report.registration = Some(register::registration(&dir, names));
     Ok(report)
+}
+
+/// Stop the new `claude` in `session` that could not be recorded (#10448).
+///
+/// Why: an unrecorded Architect is denied every anchor write, and in #10447
+/// one ran so for hours while it looked set up.
+/// What: finds the pane's `claude` (`ops.probe.claude`), stops it
+/// (`ops.stop`) and proves the pane holds none (`ops.pane_claude`). Always
+/// returns the error to report: `why` the record failed, and whether the new
+/// `claude` is gone or may still run unbound.
+/// Test: `relaunch_stops_an_unrecorded_claude_and_fails`,
+/// `fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded`.
+fn stop_unbound(session: &str, why: &str, ops: Ops) -> anyhow::Error {
+    let head = format!("the new `claude` in tmux session {session} is NOT bound ({why})");
+    let kill = format!("stop it with `tmux kill-session -t ={session}`");
+    let outcome = match (ops.probe.claude)(session) {
+        Some(pid) => match (ops.stop)(pid) {
+            Err(err) => format!("could NOT stop claude pid {pid} ({err}); {kill}"),
+            Ok(()) if (ops.pane_claude)(session) == PaneClaude::Absent => {
+                format!("stopped claude pid {pid}, so no Architect runs unbound")
+            }
+            Ok(()) => format!("stopped claude pid {pid}, but a `claude` may still run; {kill}"),
+        },
+        None if (ops.pane_claude)(session) == PaneClaude::Absent => {
+            "no `claude` runs in its pane".to_owned()
+        }
+        None => format!("a `claude` may run unbound in its pane; {kill}"),
+    };
+    anyhow!("{head}; {outcome}")
 }
 
 /// `Ok` when `session` runs with a live pane in `dir`; else why not.
@@ -317,7 +362,8 @@ fn stop_pane_claude(
         )
     })?;
     // #9092: never type the launch line into a pane where a `claude` reads it.
-    if (ops.pane_claude)(session) != PaneClaude::Absent {
+    // #11068: a loaded host may not have settled the pane yet, so wait.
+    if pane_settles(session, ops) != PaneClaude::Absent {
         bail!(
             "stopped claude pid {pid}, but tmux session {session} still holds a `claude`, or \
              cannot say; nothing new was started"
@@ -326,6 +372,28 @@ fn stop_pane_claude(
     Ok(Step::Changed(format!(
         "stopped {was} `claude` pid {pid} in tmux session {session}"
     )))
+}
+
+/// Read `session`'s pane until it holds no `claude`, for up to [`PANE_SETTLE`].
+///
+/// Why: #11068 — the stopped `claude` has left the process table, but under
+/// CPU load one read of the pane straight after can still say `Present` or
+/// `Unknown`, and the relaunch failed.
+/// What: reads `ops.pane_claude` at once and then every [`STOP_POLL`]; the
+/// first `Absent` returns `Absent`. At the deadline the last read is
+/// returned, so a pane that keeps a `claude` still reads `Present`. At most
+/// `PANE_SETTLE / STOP_POLL + 1` reads.
+/// Test: `relaunch_waits_for_the_pane_to_settle_after_the_stop`,
+/// `relaunch_never_types_into_a_pane_that_still_holds_a_claude`.
+fn pane_settles(session: &str, ops: Ops) -> PaneClaude {
+    let deadline = Instant::now() + PANE_SETTLE;
+    loop {
+        let read = (ops.pane_claude)(session);
+        if read == PaneClaude::Absent || Instant::now() >= deadline {
+            return read;
+        }
+        std::thread::sleep(STOP_POLL);
+    }
 }
 
 /// Stop the `claude` at `pid`: SIGTERM, then SIGKILL, waiting for it to go.

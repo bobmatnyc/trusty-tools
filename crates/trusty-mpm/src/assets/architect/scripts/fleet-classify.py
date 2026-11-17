@@ -4,12 +4,14 @@ Why: fleet-poll.py grew past the 500-SLOC production cap (#8891). Its pure half
 splits off cleanly: nothing here calls tmux, reads a file, or sends keys.
 What: parse_pane() turns one pane capture into a dict of facts (input box via
 scripts/input-state.py `classify`, dialog, question, ctx, plan, limit,
-errors). evaluate() and fleet_plan_alerts() turn those facts into alert
+errors, and `turn_active`: a running spinner or a current-turn WAITING line,
+never an agent row; turn-active.py reads it, #10579). evaluate() and fleet_plan_alerts() turn those facts into alert
 dicts; dedup() splits alerts into new and suppressed. context_bar() reads the
 one context bar (#9997): CONTEXT_BAR_TOKENS, default 250000, against
 CONTEXT_WINDOW_TOKENS, default 1000000, for panes that show only a percent. fleet-poll.py loads this
 file by path and re-exports these names, so its callers see no change.
-Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports)
+Test: tests/test_fleet_poll.py (through fleet-poll.py's re-exports),
+tests/test_fleet_poll_idle.py, tests/test_turn_active.py
 """
 import hashlib
 import importlib.util
@@ -22,8 +24,11 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 IDLE_AFTER = 600          # seconds an idle pane waits before it alerts
-REEMIT = {"idle": 1800, "ctx": 1800, "load": 1800, "disk": 1800, "swap": 1800,
-          "self_ctx": 1800}
+# #10857: load, disk and swap are keyed kind|severity|bucket (fleet_alert_dedupe.py) and only remind daily.
+REEMIT = {"idle": 1800, "ctx": 1800, "load": 86400, "disk": 86400, "swap": 86400,
+          "self_ctx": 1800, "architect_dead": 1800, "architect_silent": 1800,
+          "architect_frozen": 1800,  # #10571: the watchdog's alerts re-emit as the prototype's do
+          "owner_answer": 1800}  # #10670: until owner_answers.pending stops listing it
 # #9997: one context bar in tokens; a pane's `ctx N%` is converted against the
 # window. "approaching" fires at 90% of the bar, "bar" at the bar.
 CONTEXT_BAR_DEFAULT = 250_000
@@ -42,6 +47,7 @@ def _load_by_path(name, filename):
 
 
 input_state = _load_by_path("input_state", "input-state.py")
+alert_dedupe = _load_by_path("fleet_alert_dedupe", "fleet_alert_dedupe.py")  # #10857
 
 # --- pane parsing (pure) ----------------------------------------------------
 
@@ -83,15 +89,79 @@ def find_box(lines):
     """(top_rule, bottom_rule) indexes of Claude Code's input box, or None.
 
     The box is the last ❯ line that sits directly under a horizontal rule and
-    is not a dialog's numbered-option cursor.
+    is not a dialog's numbered-option cursor. The box ends at the first plain
+    rule below it. With no plain bottom rule (#10670) the box runs to the
+    end of the screen, so every row under the ❯ counts as box text, footer rows included.
+    A draft on the next row is then never mistaken for an empty box. wake()
+    reads the end-of-screen bottom as "no bottom rule" and sends no keys: on
+    such a pane every wake skips, a stall rather than a typed-over draft.
     """
     for i in range(len(lines) - 1, 0, -1):
         if (lines[i].lstrip().startswith("❯") and not OPTION.match(lines[i])
                 and BOX_TOP_RULE.match(lines[i - 1])):
             bottom = next((j for j in range(i + 1, len(lines)) if RULE.match(lines[j])),
-                          len(lines) - 1)
+                          len(lines))  # #10670: no rule -> every row below the ❯ is box text
             return i - 1, bottom
     return None
+
+
+SGR_SEQ = re.compile(r"\x1b\[([0-9;]*)m")
+_ANSI_SPLIT = re.compile(f"({ANSI.pattern})")
+
+
+def _apply_sgr(params, dim, inverse):
+    """(dim, inverse) after one SGR sequence's parameters; colour arguments are skipped."""
+    codes, i = (params.split(";") if params else ["0"]), 0
+    while i < len(codes):
+        c = int(codes[i] or 0)
+        if c in (38, 48, 58):  # 38;5;n or 38;2;r;g;b: the arguments are not codes
+            i += 3 if codes[i + 1:i + 2] == ["5"] else 5
+            continue
+        if c == 0:
+            dim = inverse = False
+        dim = True if c == 2 else False if c == 22 else dim
+        inverse = True if c == 7 else False if c == 27 else inverse
+        i += 1
+    return dim, inverse
+
+
+def box_is_suggestion(capture):
+    """True when every non-blank cell of the input box is dim (SGR 2) or inverse (SGR 7),
+    and at least one is dim.
+
+    Why: classify() calls a ❯ row a suggestion on any literal SGR 2, so a typed `/review`
+    with a dim hint after it, or a dim row over an undimmed draft, read as a suggestion,
+    and a dim row whose SGR 2 shares a sequence with another code did not (#10670).
+    What: walks the capture from its first row, carrying SGR state across rows as
+    `capture-pane -e` does (a wrapped dim row repeats no escape), and checks each cell
+    between find_box()'s rules, skipping blanks and the ❯ glyph. An inverse cell is the
+    cursor. False with no box, or with no dim cell.
+    Test: test_a_box_is_a_suggestion_only_when_every_cell_is_dim_or_inverse,
+    test_a_typed_cell_anywhere_in_the_box_is_not_a_suggestion,
+    test_a_suggestion_wakes_only_when_the_whole_box_is_dim
+    """
+    rows = capture.splitlines()
+    box = find_box(_screen_lines(capture))
+    if not box:
+        return False
+    top, bottom = box
+    dim = inverse = seen = False
+    for n, row in enumerate(rows[:bottom]):
+        glyph = n == top + 1  # the ❯ row's first ❯ is the prompt, not text
+        for piece in _ANSI_SPLIT.split(row):
+            if (sgr := SGR_SEQ.fullmatch(piece)):
+                dim, inverse = _apply_sgr(sgr.group(1), dim, inverse)
+                continue
+            if n <= top or ANSI.fullmatch(piece):
+                continue
+            for ch in piece:
+                if glyph and ch == "❯":
+                    glyph = False
+                elif not ch.isspace():
+                    if not (dim or inverse):
+                        return False
+                    seen = seen or dim
+    return seen
 
 
 def find_dialog(lines, bottom):
@@ -127,6 +197,26 @@ def current_status(lines, top):
             continue
         return l if SPINNER.match(l) else ""
     return ""
+
+
+# A finished turn's summary line: "✻ Brewed for 42s · done 1:13 AM" (#10579).
+COMPLETED = re.compile(r"^[·✢✳✶✻✽*∗] .*\bfor \d+\s*[smh]\b|· done ")
+
+
+def current_waiting(lines, top):
+    """True when the newest "Waiting for N background agent" line is of the current turn.
+
+    Why: the capture carries scrollback, so stale WAITING lines made idle panes read busy.
+    What: a WAITING line counts only if no completed-turn line and no submitted
+    "❯ " turn (above the input box) follows it.
+    Test: test_stale_waiting_lines_are_not_busy, test_newest_waiting_line_is_busy
+    """
+    end = top if top is not None else len(lines)
+    w = max((i for i in range(end) if WAITING.search(lines[i])), default=None)
+    if w is None:
+        return False
+    return not any(COMPLETED.search(l) or l.lstrip().startswith("❯")
+                   for l in lines[w + 1:end])
 
 
 def last_question(lines, top):
@@ -238,7 +328,7 @@ def parse_pane(capture):
     dialog = find_dialog(lines, bottom)
     status = current_status(lines, top) if box else ""
     agents = sum(1 for l in footer if AGENT_ROW.match(l))
-    waiting = bool(WAITING.search(status))
+    waiting = bool(WAITING.search(status)) or current_waiting(lines, top)
     spinning = bool(status) and bool(ACTIVE.search(status))
     busy = agents > 0 or waiting or spinning
     ftext = "\n".join(footer)
@@ -251,6 +341,7 @@ def parse_pane(capture):
         "status": status,
         "agents": agents,
         "busy": busy,
+        "turn_active": spinning or waiting,  # #10579: agent rows never make a turn running
         "ctx": _pct(r"\bctx (\d+)%", ftext),
         "ctx_tokens": _footer_tokens(ftext),
         "plan5h": _pct(r"⏳\s*(\d+)%", ftext),
@@ -330,25 +421,12 @@ def fleet_plan_alerts(infos, now):
     return out
 
 
-def dedup(state, candidates, now):
+def dedup(state, candidates, now, held=False):
     """Split candidates into (new, suppressed_count) and update state['alerts'].
 
     Key = session|pane|kind|fingerprint. A key absent this cycle is cleared, so
     its next appearance is new. A kind in REEMIT re-emits after its interval.
+    load, disk and swap follow fleet_alert_dedupe.dedup (ar-T8a): key kind|severity|bucket,
+    a two-cycle clear, and no reminder while `held`.
     """
-    seen = state.get("alerts", {})
-    active, new, suppressed = {}, [], 0
-    for a in candidates:
-        k = "|".join((a["session"], a["pane"], a["kind"], a["fingerprint"]))
-        if k in active:
-            continue
-        prev = seen.get(k)
-        every = REEMIT.get(a["kind"])
-        if prev is None or (every and now - prev["last"] >= every):
-            new.append(a)
-            active[k] = {"first": prev["first"] if prev else now, "last": now}
-        else:
-            suppressed += 1
-            active[k] = prev
-    state["alerts"] = active
-    return new, suppressed
+    return alert_dedupe.dedup(state, candidates, now, REEMIT, held)

@@ -117,6 +117,52 @@ pub(crate) fn record_deny(ctx: &DenyContext<'_>, check: &str, reason: &str) -> b
     }
 }
 
+/// File name of the log-only store, beside the denial store (#10665).
+pub(crate) const WOULD_REFUSE_FILE: &str = "pm-guard-would-refuse.jsonl";
+
+/// Record a floor finding the owner keeps log-only: the call is NOT refused.
+///
+/// Why (#10665, owner ruling Dac): one tmux-kill rule enforces; every other
+/// rule that change adds records what it would have refused, so its false
+/// positives can be measured before it is turned on.
+/// What: one stderr line, and one [`denial_record`] line (check
+/// `<rule>:would-refuse`, message `pm-guard would refuse …`) appended to
+/// [`WOULD_REFUSE_FILE`] beside the context's denial store, or the ambient
+/// one. A write failure is reported on stderr; the decision never changes.
+/// Test: `every_other_finding_is_logged_and_allowed` (integration).
+pub(crate) fn record_would_refuse(ctx: &DenyContext<'_>, rule: &str, reason: &str) {
+    eprintln!("tm pm-guard: log-only, would refuse `{rule}`: {reason}");
+    let Some(path) = ctx
+        .store
+        .clone()
+        .or_else(pm_guard_denials_path)
+        .map(|p| p.with_file_name(WOULD_REFUSE_FILE))
+    else {
+        eprintln!("tm pm-guard: could not record would-refuse `{rule}`: no data directory");
+        return;
+    };
+    let check = format!("{rule}:would-refuse");
+    let call = DeniedCall {
+        check: &check,
+        tool: ctx.tool_name,
+        command: ctx.command,
+        cwd: &ctx.cwd,
+        session_id: ctx.session_id,
+        reason,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut record = denial_record(&call, now);
+    record.message = format!("pm-guard would refuse {} [{rule}]", ctx.tool_name);
+    if let Err(err) = append_denial(&path, &record) {
+        eprintln!(
+            "tm pm-guard: could not record would-refuse `{rule}` to {}: {err}",
+            path.display()
+        );
+    }
+}
+
 /// Record a denied tool call, then POST its best-effort audit.
 ///
 /// Why: the one call every deny site makes before printing its deny, so a new

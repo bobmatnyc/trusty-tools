@@ -9,6 +9,69 @@ Sections are rolled up from `content/changelog.d/` by
 
 ---
 
+## [2.4.0] — 2026-11-10
+
+### Added
+
+- The Architect core and `BASE-AGENT.md` carry a simplicity rule: prefer the simplest working solution, and add a component, service, config surface, state or abstraction only when nothing simpler works and the user has given an informed OK (owner ruling 2026-11-08).
+- The `architect-strategy` skill tells factory sessions to review open GitHub Discussions at each board check and raise each unraised one as an Intent Ledger task titled `<owner>/<repo> discussion #<n>: <title>`; board sweeps cover open Discussions too (owner instruction 2026-11-09, discussion #580).
+
+### Fixed
+
+- `tm-architect-setup` no longer names a `tm fleet add` command, which does not exist; it documents the two `[notification_hook]` keys in `~/.trusty-mpm/config.toml`, that `tm fleet init` writes them, and `tm doctor --fix --only notification_hook --yes` as the step after editing them by hand (#10885).
+
+### Changed
+
+- The generated `tm-capabilities` skill lists the new `tm fleet bind` and `tm local` commands (71 top-level commands, was 70).
+- The `tm-ticketing` milestones-and-projects reference says never to page `gh project item-list` to find one issue's project item, which spends the primary GraphQL rate limit; ask the issue's `projectItems` through `gh api graphql` instead (#10550).
+- Architect and supervisor relay rules: a `User ruling` / `User instruction` label carries only the owner's verbatim words and the cited turn; pacing changes the model mix and queue order, never the helper count or scope; handoffs split "Owner rulings (with source)" from "Architect inferences" (#10780).
+- The trusty-review stock and coverage-gating reviewer prompts ask for a verbatim `quoted_snippet` per finding and a `questions` list for notes with no code to quote, and no longer say low-confidence findings will be hedged (#10782).
+- The PM and Architect fix bar now blocks a finding of any severity that directly fails a stated acceptance criterion of the brief or issue; its fix uses the one fix round (DOC-88, #10803).
+- `code-review-standards` adds the `criterion-fail:` citation tag and a BLOCK verdict for a tagged finding after the 80% confidence filter.
+- `code-review-standards` drops its "What NOT To Do" and Handoff lines that repeated rules stated earlier in the skill, so `code-critic` stays inside its resident skill budget.
+- The Architect `CLAUDE.md` template's watch-set line is now `` `tm-<project>`: `<absolute project path>` ``, with no `<goal>` field; the section points to `local/goals.md`, where the goal rules and `tm-fleet-check` read goals. An existing Architect's `CLAUDE.md` is not rewritten (#10855).
+- The Architect's watch set is the list `tm fleet project list` prints, not the `## Watch set` lines of its `CLAUDE.md`. The `CLAUDE.md` template's section points at the commands, rule r-067 provisions a project with `tm fleet project add`, and `tm-fleet-check` step 1 runs `tm fleet project list` and replaces a still-populated hand-written list with the pointer once the list shows each entry (#10895).
+- `tm-architect-setup` documents `tm fleet project add|remove|list`; `architect.md`, the supervisor identity, `architect-workflow` and `architect-project-provision` no longer say `CLAUDE.md` holds the watch set (#10895).
+- `tm-fleet-check` step 1 runs `scripts/watch-apply.py` before `tm fleet project list`, so the owner's dashboard Watch and Unwatch requests are applied through the CLI at the start of each pass; a `failed` request is a finding (#10896).
+- `architect-dashboard` lists the `watch_changes` collection and its `watch_change` owner event, and says to apply it only through `watch-apply.py`, never by editing `local/watch.json` (#10896).
+- The Architect core, the `CLAUDE.md` template and the `architect-workflow` skill say the Architect edits `AGENTS.md` only when the owner orders a specific edit, instead of never writing it (#10911).
+- The Architect core's Simplicity rule now applies the owner's principle: name the simplest option first in every clearance, relay, brief and decision option, and an option that adds a component, service, config surface, state or abstraction states the surface it adds and why nothing simpler works, and needs the owner's informed OK (#10929).
+- `BASE-AGENT.md`'s Simplicity rule is worded for an engineer: make the simplest change that meets the criteria, add no component, abstraction, config surface or state the brief did not ask for, and report one that seems needed instead of adding it silently (#10929).
+- `BASE-AGENT.md` drops a clause that repeated "soft preference" in Native-First Connector Routing, so every composed agent stays inside its resident byte budget.
+- The `tm-capabilities` CLI reference shows the `tm project init` and `tm project list` deprecation help text, which points to `tm projects register` and `tm projects list` (#10586).
+- `tm-capabilities` doctor reference: the `egress_guard` row now says the guard denies outbound-channel MCP tools of native servers and Bash egress to those hosts, and that the claude.ai connectors (`claude_ai_*`) are exempt except for write tools in a tainted session (#10735).
+
+### Documentation
+
+- The Architect `CLAUDE.md` template names the quiet list's location, `local/quiet-sessions.txt` under the Architect directory, and the `tm architect quiet` command that prints it (#10861).
+
+## [2.3.4] — 2026-11-07
+
+### Added
+
+- The `architect-strategy` skill (0.2.0) says each factory board gets one GitHub Projects v2 status update per day, posted by a single owning session when several share the board, and that sweeps check the latest update's date before posting.
+- `prototype-then-port` skill (0.1.0): prototype in Python while the shape changes, then port the settled parts to Rust. The entry point gives the port trigger (stable, measured cost, named consumer), an eight-step path and a checklist; references cover type mapping, idioms, parity and shadow runs, PyO3 versus a whole binary, and silent behavior changes. Owner ruling 2026-10-30.
+- The Architect instructions carry rule r-192 (self-improvement is a routine task; the daily pass checks that every scheduled routine ran, `architect-improvements` 0.2.0) and rule r-193 (every owner ask is classified as Throwaway, Q&A, Task, Decision or Goal; answers go to the `questions/Q..` collection in `architect-dashboard`).
+- `instructions/trusty-review/prompts/principles_addendum.md`: trusty-review's review-principles addendum, moved out of the `trusty-review` binary byte for byte. Like the other reviewer prompts it carries no frontmatter, because the file is sent to the model verbatim, and it declares no version, so it is not a manifest member (#9991).
+- `neon-postgres` skill (1.0.0): rules first (never hand-set the Neon integration's `DATABASE_URL`, `DATABASE_URL_UNPOOLED` or preview-branch variables), how the Vercel integration and preview-branch databases work, pooled vs direct strings, drizzle migrate/push/baseline against Neon, read-only inspection, and gated production changes.
+
+### Fixed
+
+- The `tm-capabilities` doctor reference describes the `events` row as it now behaves: it warns on a host without the trusty-events bus, and its not-running remedy is `tctl start trusty-events` only, not `tctl install trusty-events` (#10151).
+
+### Changed
+
+- The ticketing agent runs `tm issue board add <N>` after `gh issue create` instead of passing `--project` or `--add-project`, and the Architect provisioning checklist runs `tm issue board check` (#10277).
+- The `tm-architect-setup` skill says `tm fleet status` also exits 1 when its `binding` row is `UNBOUND` (#10448).
+- The tm-secrets skill and the secrets-manager agent say an agent may `set`, `import` and locally `copy` a key with no deny, and name the new `agent_key_denied` refusal beside `agent_use_refused` (#10459).
+- The tm-capabilities MCP tool catalog lists the optional `parent_session_id` argument of `session_new`, which the `tm serve --stdio` bridge sets (#10476).
+- The trusty-mpm output styles, the session-management skill and the sessions architecture doc state the new session-name rule: bare `tm-<project>` first, a `-02`, `-03`, … counter only on a duplicate (#10478).
+- The tm-capabilities CLI catalog describes `tm tui` as opening on the console home screen, with one tile per service and Enter on MPM opening the projects dashboard (#10491).
+- The seeded Architect `CLAUDE.md` says every reply the user reads ends with the dashboard footer that `scripts/dashboard-db.py footer` prints, with addresses from `local/architect.json`, never typed by hand (#10579).
+- The seeded Architect `CLAUDE.md` tells the Architect to work out an Intent Ledger task or next that reads `needs owner input:` from its goals, state, owed items and scheduled jobs, and write it itself, never asking the user (#10579).
+- `tm-context-refresh` describes the `scripts/self-clear.sh` gate as built: it runs `datg.py --project <ROOT>/local/il ready` before the dry run and again after the idle wait, only exit 0 allows a clear, and only `turn-active.py` exit 10 counts as idle (#10599).
+- `tm-session-pause` and the `tm-capabilities` workflows reference say the session-ref push now happens only on a GitHub-confirmed private `origin` (#10614). A public, non-GitHub or unconfirmed `origin` gets no push and a `ref_error`; the agent reports it and never pushes the ref by hand.
+
 ## [2.3.0] — 2026-10-24
 
 ### Added
@@ -36,12 +99,18 @@ Sections are rolled up from `content/changelog.d/` by
   - The skill no longer references repository-specific documents or an ADR-standard spec outside the skill; the layout-ADR paragraph is removed.
 - The `architect-dashboard` Architect skill: the served dashboard page, its data model, the per-pass update, the owner answer flow and the page controls; the Architect manual indexes it and rule r-181 points at it (#10161).
 - Architect skills: six more skills ship in trusty-tools form - `architect-review`, `architect-drift-check`, `architect-project-provision`, `architect-macos`, `architect-improvements` and `architect-host-admin`. The operating manual indexes them, and the improvement, resource, subsystem-health, provisioning, review, drift and mandate rules point at them (#10161).
+- The `tm-capabilities` skill's `references/workflows.md` gains section 6, the field reference for `session_context_pause` and `session_context_catchup`, moved out of their MCP descriptions (#10300).
+- `data-design` skill (0.1.0): a decision table from data type and question to chart form, encoding, colour and interaction, nine hard rules, and progressive references for chart selection, colour, encoding and labels, hierarchy, time/flow/network/geo, empty and missing data, and accessibility.
+- `data-design` ships `scripts/check_palette.py`, a stdlib-only offline palette checker (CVD simulation, OKLCH lightness band, WCAG contrast), and vendored ColorBrewer hex subsets (Apache-2.0) with provenance and the retained notice.
+- `data-designer` agent (0.1.0): extends `base-agent`, has no web tools, and returns a design spec for an engineer; chart data never leaves the host.
 
 ### Fixed
 
 - `version-control` and `tm-workflow` read the auto-merge setting with `gh api repos/<owner>/<repo> --jq .allow_auto_merge`. The previous `gh repo view` field is rejected by gh 2.98, so every read failed. An empty answer means the token cannot read the setting and counts as `false` (#9747).
 - `tm-session-management` 1.2.1 and `tm-init` 1.0.1 teach `tm session catchup --full --all-projects` for the cross-project digest, since `--all-projects` alone is now refused, and describe the lean default (the resolved snapshot plus live `git status`) (#9883).
 - The `security` agent's credential scan treats the required `Claude-Session: https://claude.ai/code/session_<id>` commit trailer as attribution, not a leak. Only that exact line, once, in a commit message's last paragraph is allowed; the same URL in a diff, a body line or a credential-shaped value still fails (#10056).
+- The `version-control` agent's fallback line now reads "Fallback without `tm` (this path has no merge gate):"; "which" wrongly referred to `tm` ([#10104](https://github.com/bobmatnyc/trusty-tools/issues/10104)).
+- The `secrets-manager` agent now checks `command -v tm` before it names `tm hook --pm-guard`, and says what to do when `tm` is absent, so the probe-then-degrade lint passes now that it reads wrapped spans ([#10104](https://github.com/bobmatnyc/trusty-tools/issues/10104)).
 
 ### Changed
 
@@ -84,6 +153,13 @@ Sections are rolled up from `content/changelog.d/` by
 - The Architect manual (`instructions/architect/architect.md`) renames the owner's "asks" to "actions" in rules r-039 and r-181, defines the D, A and Q id prefixes, sends every decision to the dashboard instead of chat, and has r-181 link a readable brief from each non-trivial dashboard item (#10161).
 - Architect skills: in `architect-operating-rules`, owner "asks" become "actions" and D/A/Q are defined. `architect-workflow` and `tm-context-refresh` name the Intent Ledger digest as the Architect's handoff, through `scripts/self-clear.sh --live`. `architect-strategy` adds the factory issue-tracking rule (#10161).
 - Architect core: the verified checkpoint for a session with an Intent Ledger is a fresh ledger digest. For any other session it is a verified `/tm-session-pause` snapshot (#10161).
+- The `tm-capabilities` skill lists 79 `tm doctor` checks; its doctor reference describes the new `gh_account_dir_tokens` row, which flags a gh token stored in a per-account `hosts.yml` (#10037).
+- The `tm-capabilities` skill lists 80 `tm doctor` checks; its doctor reference describes the new `claude_json_secrets` row, which flags a credential value in an `mcpServers.<server>.env` block of the managed `.claude.json` (#10041).
+- The tm-capabilities skill and its CLI and MCP tool references list `tm architect dashboard` and the `architect_dashboard` tool, regenerated for #10063.
+- The `architect-project-provision` skill tells the PM to write hook commands as `/bin/bash "<abs>/scripts/notify-supervisor.sh"` and `/bin/sh "<abs>/scripts/datg-hook.sh" <session>`, never a bare script path (D73).
+- The `tm-capabilities` CLI reference lists `tm issue board` and its verbs `init`, `apply`, `check`, `show` and `add` (#10276).
+- `tm-capabilities` CLI reference: `tm supervisor` is now described as a 24/7 observer only; auto-resume moved to the daemon.
+- `tm-secrets` (1.5.0) and `secrets-manager` (0.3.0) describe the #10386 rule: an agent may use every in-scope key unless the operator denied it; `set`, `delete`, `copy` and removing a deny are operator-only, and `agent_use_refused` covers both cases.
 
 ### Documentation
 

@@ -752,6 +752,26 @@ fn lazy_python_adapter_reports_wire_device() {
     );
 }
 
+/// #9284: before any spawn the adapter reports no window and no tokenizer,
+/// so the embed pass counts nothing instead of inventing a window.
+/// Test: this test.
+#[test]
+fn lazy_adapter_without_a_window_has_no_tokenizer() {
+    use crate::core::Embedder as _;
+    use crate::service::embedder_supervisor::{LazyEmbedderHandle, SupervisorConfig};
+
+    let handle = std::sync::Arc::new(LazyEmbedderHandle::new(
+        std::path::PathBuf::from("/nonexistent/trusty-embedderd"),
+        SupervisorConfig::default(),
+    ));
+    let adapter = LazySlotEmbedderAdapter {
+        handle,
+        is_python: false,
+    };
+    assert_eq!(adapter.input_window(), None);
+    assert!(matches!(adapter.chunking_tokenizer(), Ok(None)));
+}
+
 /// Why (review finding, PR #3560 HIGH fix): `supervisor_gave_up()` must
 /// forward to `LazyEmbedderHandle::supervisor_gave_up()` rather than falling
 /// through to the trait-default `false` unconditionally — this is what lets

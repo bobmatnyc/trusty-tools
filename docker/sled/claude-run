@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# claude-run ARGS... — run the Claude Code CLI. With no secret file it uses the
+# stored interactive login (/data/home/.claude/.credentials.json) and handles no
+# token. With a secret file it passes the OAuth token from that read-only file. The token goes into this one process's environment and
+# nothing else: no echo, no log, no `set -x`, not in the daemons' environment
+# (they were started by entrypoint.sh, which never reads the file). Copied from
+# docker/cloudtest. Refs #11054 #11073
+set -uo pipefail
+
+SECRET_FILE="${CLAUDE_SECRET_FILE:-/run/secrets/claude.env}"
+if [ ! -e "${SECRET_FILE}" ]; then
+    exec claude "$@"
+fi
+if [ ! -r "${SECRET_FILE}" ]; then
+    echo "claude-run: secret file ${SECRET_FILE} is unreadable" >&2
+    exit 2
+fi
+IFS= read -r line < "${SECRET_FILE}" || [ -n "${line}" ]
+case "${line}" in
+    CLAUDE_CODE_OAUTH_TOKEN=?*) ;;
+    *) echo "claude-run: ${SECRET_FILE} is not a CLAUDE_CODE_OAUTH_TOKEN=<value> line" >&2; exit 2 ;;
+esac
+export CLAUDE_CODE_OAUTH_TOKEN="${line#CLAUDE_CODE_OAUTH_TOKEN=}"
+unset line
+exec claude "$@"

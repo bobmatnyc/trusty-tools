@@ -117,6 +117,9 @@ pub struct ResumeGrant {
     pub tmux_name: String,
     /// The record's own `%N` pane, when known.
     pub pane_id: Option<String>,
+    /// The record's tmux server socket; `None` for the default server
+    /// (#10101).
+    pub tmux_socket: Option<PathBuf>,
     /// Unix seconds, taken before the launch line was sent.
     pub issued_at: u64,
 }

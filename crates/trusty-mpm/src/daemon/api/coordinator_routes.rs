@@ -227,11 +227,17 @@ pub async fn coordinator_chat_op(
     // is part of the SM's degraded surface too, §5.3).
     if let Some((session_name, command)) = parse_session_prefix(&body.message, &context.sessions) {
         let session = SessionService::new(state).command_target(&session_name)?;
-        TmuxService::send_command(&session, &command);
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // #10101: a line that reached no pane is reported, never "Sent to".
+        let reply = match TmuxService::send_command(&session, &command) {
+            Ok(()) => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                format!("Sent to {session_name}: {command}")
+            }
+            Err(e) => format!("Not delivered to {session_name}: {e}"),
+        };
         let output = TmuxService::capture(&session, 100);
         return Ok(CoordinatorChatResponse {
-            reply: format!("Sent to {session_name}: {command}"),
+            reply,
             routed_to_session: Some(session_name),
             command_output: Some(output),
             cost: None,

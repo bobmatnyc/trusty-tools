@@ -456,6 +456,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -611,6 +614,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 

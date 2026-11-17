@@ -79,7 +79,8 @@ pub struct InstallOutcome {
     /// derivation and the human summary's skip-vs-fail wording.
     pub required: bool,
     /// `false` ONLY when this member's prebuilt artifact failed SHA-256
-    /// verification (#5518). Unlike every other field here, it is NOT filtered
+    /// verification (#5518), or the install refused to replace a newer or
+    /// unreadable installed build (#10584). Unlike every other field here, it is NOT filtered
     /// by `required`: an optional member's routine install failure is a
     /// graceful degrade, but an optional member's TAMPERED download is still a
     /// tampered download, and a run that exits 0 after seeing one has not
@@ -138,6 +139,10 @@ pub struct InstallReport {
     /// `None` when trusty-mpm was not placed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentStepOutcome>,
+    /// #10607: what the machine holds against what install placed; `None` when
+    /// `--no-verify` skipped the audit and the record was written.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deployment: Option<crate::commands::deployment_record::DeploymentAudit>,
 }
 
 impl InstallReport {
@@ -199,7 +204,40 @@ impl InstallReport {
             all_ok,
             verify: None,
             content: None,
+            deployment: None,
         }
+    }
+
+    /// Fold the deployment audit into this report (#10607).
+    ///
+    /// Why: an install must not exit 0 over a deployed set it left stale or mixed.
+    /// What: attaches `audit`; one that blocks an install flips `all_ok`.
+    /// Test: `tests::a_deployment_drift_flips_all_ok`.
+    pub(super) fn with_deployment(
+        mut self,
+        audit: Option<crate::commands::deployment_record::DeploymentAudit>,
+    ) -> Self {
+        if audit.as_ref().is_some_and(|a| a.blocks_install()) {
+            self.all_ok = false;
+        }
+        self.deployment = audit;
+        self
+    }
+
+    /// Records what the install placed and folds the audit in (#10607).
+    ///
+    /// Why: the seam `tctl install` calls, so removing the record-and-audit
+    /// step fails a test rather than shipping an install that never compares.
+    /// What: runs `finish` over `placements`, auditing unless `no_verify`, then
+    /// [`Self::with_deployment`].
+    /// Test: `tests::install_records_and_audits_what_it_placed_10607`.
+    pub(super) fn finish_deployment(
+        self,
+        placements: &[crate::commands::deployment_record::Placement],
+        no_verify: bool,
+        finish: &crate::commands::deployment_record::Finisher<'_>,
+    ) -> Self {
+        self.with_deployment(finish(placements, !no_verify))
     }
 
     /// Fold the content step's outcome into this report (#9396).
@@ -595,17 +633,39 @@ pub(super) fn summary_lines(report: &InstallReport) -> SummaryLines {
 /// Why: one place orders the two — the step runs after every member's own
 /// steps finished, and its failure only adds to the report.
 /// What: [`InstallReport::build`] then [`InstallReport::with_content`] over
-/// [`crate::commands::content_step::run_if_mpm_placed`].
+/// [`crate::commands::content_step::run_content_steps`].
 /// Test: `install_runs_content_update_after_tm_lands`,
-/// `a_failed_content_update_keeps_the_install_and_exits_non_zero`.
+/// `a_failed_content_update_keeps_the_install_and_exits_non_zero`,
+/// `install_fails_when_content_is_older_than_a_placed_binary`.
 pub(super) fn report_with_content(
     outcomes: Vec<InstallOutcome>,
     placed: &[(String, std::path::PathBuf)],
     runner: &dyn CommandRunner,
     json: bool,
 ) -> InstallReport {
-    let content = crate::commands::content_step::run_if_mpm_placed(placed, runner, json);
+    // #10588: the update, then a check that the content serves each placed binary.
+    let content = crate::commands::content_step::run_content_steps(placed, runner, json);
     InstallReport::build(outcomes).with_content(content)
+}
+
+/// Shorten an install error to a single-line reason for the live checklist row.
+///
+/// Why: `install_one`'s `anyhow::Error` chains can be long / multi-line (a
+/// health-gate mismatch message embeds a raw `--version` output); a checklist
+/// row must stay one line so the block keeps reading cleanly.
+/// What: Takes the first line of `e`'s `Display` output, truncated to 80
+/// chars (with a `…` marker) if still too long.
+/// Test: `tests::short_reason_truncates_long_and_multiline_errors`.
+pub(super) fn short_reason(e: &anyhow::Error) -> String {
+    const MAX: usize = 80;
+    let first_line = e.to_string();
+    let first_line = first_line.lines().next().unwrap_or_default();
+    if first_line.chars().count() > MAX {
+        let truncated: String = first_line.chars().take(MAX).collect();
+        format!("{truncated}…")
+    } else {
+        first_line.to_owned()
+    }
 }
 
 /// Print the human-readable install summary footer.

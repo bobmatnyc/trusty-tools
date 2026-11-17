@@ -1,3 +1,5 @@
 # Poller runtime state: alerts, events, dedup state and its log.
 inbox/
 __pycache__/
+# The watch list's lock sidecar, written by `tm fleet project`.
+local/watch.json.lock

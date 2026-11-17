@@ -22,7 +22,8 @@ use super::{
     memory_panel_lines, palace_activity, palace_index_tab_lines, render, search_panel_lines,
     service_name, spinner_frame, tab_bar,
 };
-use ratatui::{Terminal, backend::TestBackend, style::Color};
+use crate::tui::theme::palette;
+use ratatui::{Terminal, backend::TestBackend};
 
 /// Test-only stand-in for the trusty-memory daemon address: a port nobody
 /// binds, used wherever a test previously relied on the removed
@@ -1034,7 +1035,7 @@ fn spinner_frame_cycles_through_dreaming_frames() {
 
 #[test]
 fn activity_colour_is_distinct_per_state() {
-    assert_eq!(activity_color(PalaceActivity::Idle), Color::Reset);
+    assert_eq!(activity_color(PalaceActivity::Idle), palette().text);
     let colours = [
         activity_color(PalaceActivity::Indexing),
         activity_color(PalaceActivity::Dreaming),
@@ -1042,7 +1043,7 @@ fn activity_colour_is_distinct_per_state() {
         activity_color(PalaceActivity::Error),
     ];
     for c in &colours {
-        assert_ne!(*c, Color::Reset);
+        assert_ne!(*c, palette().text);
     }
     let mut sorted = colours.to_vec();
     sorted.sort_by_key(|c| format!("{c:?}"));

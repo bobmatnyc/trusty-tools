@@ -254,7 +254,7 @@ const MENU_KEY_WIDTH: usize = 18;
 /// without driving a real TTY loop.
 /// What: `launch_slot` is `None` for the no-sessions menu (bare Enter is the
 /// launch key, and the delete/rename rows have nothing to target) and
-/// `Some(slot)` for the populated one. The `n` row spells out `tm-<name>-NN`
+/// `Some(slot)` for the populated one. The `n` row spells out `tm-<name>[-NN]`
 /// because the adjacent `r<N> <new-name>` row takes a VERBATIM full session
 /// name — without it the two `<name>` arguments read as interchangeable and
 /// are not.
@@ -276,7 +276,7 @@ pub(crate) fn command_legend(launch_slot: Option<u32>) -> Vec<String> {
     // rather than a second action.
     lines.push(row(
         "[n <name>]".to_string(),
-        "launch new session as tm-<name>-NN (e.g. n auth-refactor; \
+        "launch new session as tm-<name>[-NN] (e.g. n auth-refactor; \
          add --worktree to run it in its own worktree)",
     ));
     if launch_slot.is_some() {

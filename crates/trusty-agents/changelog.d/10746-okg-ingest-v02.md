@@ -1,0 +1,2 @@
+Changed
+- The OKG ingest tools write through trusty-okf (#10746): a re-ingest keeps a concept's `status`, `supersedes`, `superseded_by`, `stale_after` and `verified` keys, a content change moves `verified` to the verification record, and a key a connector supplies that only the engine may set (`trust`, `verified`, `source_status`, …) is kept under `source_fields` instead of being written or dropped.

@@ -112,7 +112,7 @@ fn upsert_does_not_clobber_colocated_flag_of_other_entries() {
 ///
 /// What: pins the behaviour of `remove_index_registry_entry_at` (persistence
 /// layer) and `remove_root_at` (roots layer) independently to confirm they both
-/// do what the `delete_index_handler` fix now calls.  The actual HTTP handler
+/// do what the `delete_index_report` fix now calls.  The actual HTTP handler
 /// integration is covered by manual QA (see PR description).
 ///
 /// Test: this test.
@@ -148,7 +148,7 @@ fn remove_entry_and_root_independent_regression() {
     assert_eq!(load_index_registry_at(idx_tmp.path()).unwrap().len(), 2);
     assert_eq!(load_roots_at(roots_tmp.path()).unwrap().len(), 2);
 
-    // Simulate delete_index_handler: remove from indexes.toml AND roots.toml.
+    // Simulate delete_index_report: remove from indexes.toml AND roots.toml.
     remove_index_registry_entry_at(idx_tmp.path(), "drop-idx").unwrap();
     remove_root_at(roots_tmp.path(), std::path::Path::new("/repos/drop")).unwrap();
 

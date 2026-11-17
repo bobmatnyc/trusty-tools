@@ -196,10 +196,14 @@ async fn grep_fixture() -> (tempfile::TempDir, Arc<SearchAppState>, RpcRouter) {
     (tmp, state, rpc)
 }
 
-/// Drop `latency_ms`, which both sides sample from the host clock (#6358).
+/// Drop `latency_ms`, which both sides sample from the host clock (#6358),
+/// and `meta.timings`, sampled from the same clock (#10195).
 fn without_latency(mut body: serde_json::Value) -> serde_json::Value {
     if let Some(obj) = body.as_object_mut() {
         obj.remove("latency_ms");
+        if let Some(meta) = obj.get_mut("meta").and_then(|m| m.as_object_mut()) {
+            meta.remove("timings");
+        }
     }
     body
 }

@@ -238,7 +238,8 @@ async fn nothing_listening_is_only_an_absent_or_stale_socket() {
     );
     assert!(absent.socket_absent() && !absent.dial_refused(), "{absent}");
 
-    drop(trusty_common::uds::bind_hardened(&socket).expect("bind"));
+    // #10026: wait out a listener fd a concurrent test's fork inherited.
+    crate::test_support::stale_socket::bind_stale(&socket);
     let stale = DaemonClient::over_socket(&socket)
         .get("/health")
         .send()

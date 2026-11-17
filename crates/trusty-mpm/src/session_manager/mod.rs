@@ -32,6 +32,10 @@ mod harness_gate;
 pub(crate) mod provisioning_ledger;
 // #4743: the single capability every destructive index DELETE must hold.
 mod index_delete_guard;
+// #10989: the non-destructive door decommission parks and unloads through.
+pub mod index_shutdown;
+// #10989: a new session unparks its project's decommission park.
+pub mod index_restore;
 pub mod injection_status;
 // #9167 AC5: the inject path's `message` record.
 pub mod inject_record;
@@ -50,11 +54,18 @@ pub mod pane_rebind;
 pub mod prune;
 // #7619: the stop signal both destructive prune loops read between candidates.
 pub mod prune_progress;
+// #10988: stop a project's sessions, keep its workspaces and indexes.
+pub mod project_decommission;
+// #10991: move a session's project directory to the 0700 archive.
+pub mod archive_move;
+// #10992: remove a session's project directory behind destructive guards.
+pub mod project_dir_delete;
 pub mod reactivate;
 mod reconcile;
 pub mod record;
 pub mod relaunch;
 pub mod rename;
+pub mod session_archive;
 // #9238: a record follows its own pane through a `tmux rename-session`.
 pub mod rename_follow;
 pub mod residency_state;
@@ -70,17 +81,22 @@ pub mod retention;
 mod runtime_exit_guard;
 /// #8935: whether a live tmux session is a record's own, by its `%N` pane.
 pub mod runtime_identity;
+// #10101: route a record's tmux calls to the server it lives on.
+pub mod launch_server;
 pub mod search_gc;
 pub mod session_guard;
 pub mod session_kind;
 pub mod setters;
 pub mod slots;
 pub mod snapshot;
+pub(crate) mod tmux_route;
 // #8942: the lifecycle paths' refusals for the Architect's sessions.
 pub mod architect;
 pub mod architect_floor;
 // #8942: `tm fleet init`'s registration of the Architect's sessions.
 pub mod architect_register;
+// #9092: whether a launch spec names the supervisor session (the shim refuses it).
+pub mod architect_spawn;
 // #6194: `stop` / `stop_with_cause`, split out of `manager.rs` at its SLOC cap.
 pub mod stop;
 pub mod store;
@@ -238,6 +254,10 @@ mod decommission_owned_ledger_tests;
 #[cfg(test)]
 mod provisioning_ledger_fifo_tests;
 
+// #11221: a spawn-provisioned workspace passes the dirt and ignored-output checks.
+#[cfg(test)]
+mod provisioned_dirt_tests;
+
 // #8534 critic round 2: the gitignored-output gate, route by route.
 #[cfg(test)]
 mod worktree_ignored_output_route_tests;
@@ -261,6 +281,9 @@ mod rename_race_tests;
 
 #[cfg(test)]
 mod rename_follow_tests;
+
+#[cfg(test)]
+mod doctor_server_probe_tests;
 
 #[cfg(test)]
 mod liveness_tests;
@@ -328,6 +351,10 @@ mod send_input_gate_tests;
 // #6194: a stop somebody asked for must survive both automatic resume paths.
 #[cfg(test)]
 mod stop_cause_tests;
+
+// #10476: the bridge-recorded parent link loads, persists and re-saves cleanly.
+#[cfg(test)]
+mod parent_session_tests;
 
 // #8935: a stale record never tears down a live session that reused its name.
 #[cfg(test)]

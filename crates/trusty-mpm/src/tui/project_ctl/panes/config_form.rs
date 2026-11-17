@@ -13,10 +13,11 @@
 //! Test: `tests` covers `body_lines`' field rendering, the changed-marker,
 //! and the inline-error line.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -29,7 +30,7 @@ use crate::tui::project_ctl::state::ConfigFormView;
 /// helper in `deliverables_view.rs` — each overlay module keeps its own
 /// three-line copy rather than sharing across modules (see that module's doc
 /// for the rationale, which applies unchanged here).
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
     Rect {
@@ -124,14 +125,14 @@ pub fn render(frame: &mut Frame, view: &ConfigFormView) {
     let title = Line::from(vec![Span::styled(
         format!("Config — {}", view.project_name),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     )]);
     let body = body_lines(view).join("\n");
     let footer = "\n[Tab] next field  [Enter] submit  [Esc] cancel";
     frame.render_widget(
         Paragraph::new(format!("{body}{footer}"))
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
@@ -157,6 +158,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 

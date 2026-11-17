@@ -11,7 +11,9 @@
 //! user-level `~/.trusty-mpm/config.toml`; [`apply_notification_hook`] writes
 //! (opt-in on) or removes (off) tm's own `Notification` entry and nothing else;
 //! [`repair_notification_hook`] is the `tm doctor --fix` step over the same
-//! plan; [`resolve_push_target`] names the inbox `tm hook` appends to.
+//! plan; [`probe_notification_hook`] reads that plan without writing, for the
+//! `tm doctor` row ([`notification_hook_row`]) and `tm fleet` (#10885);
+//! [`resolve_push_target`] names the inbox `tm hook` appends to.
 //! Test: `notification_tests.rs`.
 
 use std::ffi::OsString;
@@ -295,22 +297,139 @@ pub fn repair_notification_hook(
         what: what.to_string(),
         status,
     };
+    // #10885: the doctor check and `tm fleet status` read this same probe.
+    match probe_notification_hook(settings_path, exe_override, enabled) {
+        HookSync::InSync => Vec::new(),
+        HookSync::Refused(e) => vec![step(StepStatus::Refused(e))],
+        HookSync::Pending if mode == RepairMode::DryRun => vec![step(StepStatus::Planned)],
+        HookSync::Pending => match apply_notification_hook(settings_path, exe_override, enabled) {
+            Ok(_) => vec![step(StepStatus::Applied { backup: None })],
+            Err(e) => vec![step(StepStatus::Failed(e.to_string()))],
+        },
+    }
+}
+
+/// The fix command an operator runs once `[notification_hook]` says what they want.
+pub const NOTIFICATION_HOOK_FIX: &str = "tm doctor --fix --only notification_hook --yes";
+
+/// Whether the managed settings match the `[notification_hook]` opt-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookSync {
+    /// The file already says what the opt-in asks for; the repair has no step.
+    InSync,
+    /// The repair would write (opt-in on) or remove (off) tm's entry.
+    Pending,
+    /// The repair would refuse: no stable `tm` binary, or a file
+    /// [`read_settings_object`] cannot edit. The string says why.
+    Refused(String),
+}
+
+/// Read-only: what [`repair_notification_hook`] would do to `settings_path`.
+///
+/// Why (#10885): `tm doctor`'s `notification_hook` row, `tm fleet status`'s
+/// row and the `tm fleet init` step must agree with the repair, so all of
+/// them, and the repair itself, read this one probe.
+/// What: [`HookSync::InSync`] when the opt-in is off and the file is absent,
+/// or when [`plan_notification_hook`] plans no change; [`HookSync::Refused`]
+/// when the hook command does not resolve (opt-in on) or the plan refuses
+/// the file; otherwise [`HookSync::Pending`]. Writes nothing.
+/// Test: `the_probe_tracks_the_repair_from_pending_to_in_sync`,
+/// `the_probe_refuses_what_the_repair_refuses`.
+pub fn probe_notification_hook(
+    settings_path: &Path,
+    exe_override: Option<&Path>,
+    enabled: bool,
+) -> HookSync {
     if !enabled && !settings_path.exists() {
-        return Vec::new();
+        return HookSync::InSync;
     }
     let additions = match enabled.then(|| notification_hook_additions_with_exe(exe_override)) {
-        Some(Err(e)) => return vec![step(StepStatus::Refused(e.to_string()))],
+        Some(Err(e)) => return HookSync::Refused(e.to_string()),
         Some(Ok(v)) => Some(v),
         None => None,
     };
     match plan_notification_hook(settings_path, additions.as_ref()) {
-        Ok(None) => Vec::new(),
-        Err(e) => vec![step(StepStatus::Refused(e.to_string()))],
-        Ok(Some(_)) if mode == RepairMode::DryRun => vec![step(StepStatus::Planned)],
-        Ok(Some(_)) => match apply_notification_hook(settings_path, exe_override, enabled) {
-            Ok(_) => vec![step(StepStatus::Applied { backup: None })],
-            Err(e) => vec![step(StepStatus::Failed(e.to_string()))],
-        },
+        Ok(None) => HookSync::InSync,
+        Ok(Some(_)) => HookSync::Pending,
+        Err(e) => HookSync::Refused(e.to_string()),
+    }
+}
+
+/// The `tm doctor` `notification_hook` row (#10885).
+///
+/// Why: `tm doctor --fix --only notification_hook` existed with no check, so
+/// an opt-in that never reached the managed settings went unreported.
+/// What: from [`probe_notification_hook`] over `settings_path` and
+/// `config.enabled`: in sync is `Ok` (naming the inbox when on); pending is
+/// `Warn` naming [`NOTIFICATION_HOOK_FIX`]; refused is `Unknown` with the
+/// reason, because whether the entry is there cannot be told.
+/// Test: `the_doctor_row_warns_until_the_repair_applies_the_hook`,
+/// `the_doctor_row_is_unknown_for_a_refused_file`.
+pub fn notification_hook_check(
+    settings_path: &Path,
+    exe_override: Option<&Path>,
+    config: &NotificationHookConfig,
+) -> crate::core::doctor::DoctorCheck {
+    use crate::core::doctor::{CheckStatus, DoctorCheck};
+    let file = settings_path.display();
+    let (status, message) =
+        match probe_notification_hook(settings_path, exe_override, config.enabled) {
+            HookSync::InSync if config.enabled => {
+                let inbox = config.inbox.as_ref().map_or_else(
+                    || "no inbox set".to_owned(),
+                    |p| format!("inbox {}", p.display()),
+                );
+                (CheckStatus::Ok, format!("on, applied to {file}; {inbox}"))
+            }
+            HookSync::InSync => (
+                CheckStatus::Ok,
+                "off ([notification_hook] enabled is not true)".to_owned(),
+            ),
+            HookSync::Pending if config.enabled => (
+                CheckStatus::Warn,
+                format!("enabled but not applied to {file}; run `{NOTIFICATION_HOOK_FIX}`"),
+            ),
+            HookSync::Pending => (
+                CheckStatus::Warn,
+                format!("off, but tm's entry is still in {file}; run `{NOTIFICATION_HOOK_FIX}`"),
+            ),
+            HookSync::Refused(why) => (
+                CheckStatus::Unknown,
+                format!("cannot tell whether the hook is applied: {why}"),
+            ),
+        };
+    DoctorCheck::new(NOTIFICATION_HOOK_CHECK, status, message)
+}
+
+/// The `tm doctor` `notification_hook` row, reading the opt-in from
+/// `<config_root>/config.toml`.
+///
+/// Why (#10885): `MpmConfig::load` reads a `config.toml` that does not parse
+/// as the defaults (opt-in off), so with tm's entry present the row would
+/// recommend the fix that removes a working hook.
+/// What: parses the config strictly
+/// ([`crate::core::twin_arming::load_user_config_strict`]; an absent file is
+/// the defaults). A read or parse error is `Unknown` naming the file and no
+/// fix; otherwise [`notification_hook_check`].
+/// Test: `the_doctor_row_is_unknown_when_the_config_does_not_parse`.
+pub fn notification_hook_row(
+    settings_path: &Path,
+    exe_override: Option<&Path>,
+    config_root: &Path,
+) -> crate::core::doctor::DoctorCheck {
+    use crate::core::doctor::{CheckStatus, DoctorCheck};
+    match crate::core::twin_arming::load_user_config_strict(config_root) {
+        Ok(config) => {
+            notification_hook_check(settings_path, exe_override, &config.notification_hook)
+        }
+        Err(why) => DoctorCheck::new(
+            NOTIFICATION_HOOK_CHECK,
+            CheckStatus::Unknown,
+            format!(
+                "cannot tell whether the hook should be on: {why}; fix that file, then re-run \
+                 `tm doctor`"
+            ),
+        ),
     }
 }
 

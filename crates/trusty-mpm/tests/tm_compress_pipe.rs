@@ -287,6 +287,38 @@ fn tm_compress_shrinks_piped_cargo_test_output() {
     );
 }
 
+/// #10973: the run mode is what an isolation worktree gets instead of the
+/// pipeline, so it must compress the same way AND hand back the program's own
+/// exit status — a failing `cargo test` run through it must still fail.
+#[test]
+fn tm_compress_run_mode_compresses_and_keeps_the_exit_status() {
+    let payload = repetitive_cargo_test_payload();
+    let script = "printf '%s' \"$0\"; printf 'to stderr' >&2; exit 3";
+    let output = common::tm_command()
+        .args([
+            "compress",
+            "--tool",
+            "cargo test",
+            "--",
+            "sh",
+            "-c",
+            script,
+            &payload,
+        ])
+        .env(ENV_COMPRESS_NO_RTK, "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("failed to run `tm compress --`");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert_eq!(output.status.code(), Some(3), "the program's status, not 0");
+    assert!(stdout.len() < payload.len(), "compressed: {stdout}");
+    assert!(stdout.contains("test result"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("to stderr"),
+        "the program's stderr passes through untouched"
+    );
+}
+
 #[test]
 fn tm_compress_passes_through_unmatched_tool_name_unchanged() {
     // A tool name outside compress_tool_output's dispatch coverage (e.g. a

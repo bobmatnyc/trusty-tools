@@ -475,7 +475,7 @@ fn plant_row(id: &str, root: impl Into<std::path::PathBuf>) {
 /// #6369: `IsolatedDataDir` plus `#[serial]` is not isolation for a registry
 /// census. `#[serial]` excludes only other `#[serial]` tests, and this binary
 /// holds ~70 tests that write an `indexes.toml` row through
-/// `create_index_handler` without carrying the attribute. Their rows landed in
+/// `create_index_report` without carrying the attribute. Their rows landed in
 /// this test's tempdir — the census read a `total` of 4 or 5 where it planted
 /// 3, naming `index-a` (`server::tests_2336`) and `skip-kg-reregister`
 /// (`server::tests_2984`) as the intruders.

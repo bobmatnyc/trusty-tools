@@ -1,0 +1,35 @@
+crate   trusty-mpm
+version 1.12.1
+reason  Accepted under the 2026-09-26 versioning ruling (a public-API break never forces a major version), per Architect D4 A (df-G01). cargo semver-checks against baseline 1.12.0 computes 11 major lints from three changes. (1) tmux_socket routing, Refs #10101: ed04279554, #10790, #10845, #10850, #10854 and #10880 add Session, RegisterSession and NameDrift .tmux_socket, add CommandResponse.send_error, add a socket parameter to the core::tmux send_line, send_command_line and send_launch_line helpers, to runtime::cli_launch::send_spec_launch, to daemon spawn_pid_capture and to DaemonState::grant_resumed_session. (2) project_ctl TUI session-pane rework, #10774 (with #10790 and #10841): the two-column MPM pane adds Pane::Sessions, the PendingAction session variants and HitMap.session_rows, replaces the details pane (session_details::render, DETAILS_KEYS, the open_details, close_details and details_session methods, TreeView.details, HitMap.details and details_focus) and reworks TreeRowKind and NodeId (Session and Anchor removed, Project.expanded removed), shifts Pane::Activity from 1 to 2, and changes panes::tree::render and row_line arity. Refs #10882.
+accept  constructible_struct_adds_field        field HitMap.session_rows
+accept  constructible_struct_adds_field        field CommandResponse.send_error
+accept  constructible_struct_adds_field        field RegisterSession.tmux_socket
+accept  constructible_struct_adds_field        field NameDrift.tmux_socket
+accept  constructible_struct_adds_field        field Session.tmux_socket
+accept  enum_no_repr_variant_discriminant_changed Pane::Activity
+accept  enum_struct_variant_field_missing      field expanded TreeRowKind::Project
+accept  enum_variant_added                     PendingAction:OpenSession
+accept  enum_variant_added                     PendingAction:RenameSession
+accept  enum_variant_added                     PendingAction:NewSession
+accept  enum_variant_added                     PendingAction:DeleteSession
+accept  enum_variant_added                     Pane:Sessions
+accept  enum_variant_missing                   variant TreeRowKind::Session
+accept  enum_variant_missing                   variant TreeRowKind::Anchor
+accept  enum_variant_missing                   variant NodeId::Session
+accept  enum_variant_missing                   variant NodeId::Anchor
+accept  function_missing                       trusty_mpm::tui::project_ctl::panes::session_details::render
+accept  function_parameter_count_changed       trusty_mpm::core::tmux::send_line
+accept  function_parameter_count_changed       trusty_mpm::core::tmux::send_command_line
+accept  function_parameter_count_changed       trusty_mpm::core::tmux::send_launch_line
+accept  function_parameter_count_changed       trusty_mpm::runtime::cli_launch::send_spec_launch
+accept  function_parameter_count_changed       trusty_mpm::daemon::services::session_service::spawn_pid_capture
+accept  function_parameter_count_changed       trusty_mpm::tui::project_ctl::panes::tree::render
+accept  function_parameter_count_changed       trusty_mpm::tui::project_ctl::panes::tree::row_line
+accept  inherent_method_missing                ProjectCtlState::open_details
+accept  inherent_method_missing                ProjectCtlState::close_details
+accept  inherent_method_missing                ProjectCtlState::details_session
+accept  method_parameter_count_changed         DaemonState::grant_resumed_session
+accept  pub_module_level_const_missing         DETAILS_KEYS
+accept  struct_pub_field_missing               field details struct TreeView
+accept  struct_pub_field_missing               field details struct HitMap
+accept  struct_pub_field_missing               field details_focus struct HitMap

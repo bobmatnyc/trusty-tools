@@ -30,9 +30,9 @@ use crate::integrations::search_client::{IndexIdentity, SearchClient, SearchClie
 ///
 /// Why: a missing index is a caller-fixable condition, not an outage; the
 /// message must say which repo and which index id were looked up.
-/// What: one variant per failure; each `Display` names the repo. `Registry`
-/// is the only variant `review_pr` may degrade on (search not required).
-/// Test: `missing_index_error_names_the_repo_and_the_index_id`,
+/// What: one variant per failure; each `Display` names the repo. `review_pr`
+/// may degrade on `Registry` and, #11409, on `NoIndex` (search not required).
+/// Test: `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`.
 #[derive(Debug, thiserror::Error)]
 pub enum RepoIndexError {
@@ -57,11 +57,13 @@ pub enum RepoIndexError {
         /// The listing failure.
         source: SearchClientError,
     },
-    /// No registered index belongs to the repo.
+    /// No live registered index belongs to the repo.
+    ///
+    /// #11417: `detail` ends with the remedy — `ensure_project` for a parked
+    /// id, `trusty-search index <path>` otherwise (see `no_index_remedy`).
     #[error(
         "no trusty-search index for {repo}: looked up index {index_id:?} and repo_identity \
-         {repo:?} across {registered} registered index(es); {detail}. Index a checkout of \
-         {repo} with `trusty-search index <path>`, then retry"
+         {repo:?} across {registered} registered index(es); {detail}"
     )]
     NoIndex {
         /// Canonical `owner/repo`.
@@ -70,7 +72,7 @@ pub enum RepoIndexError {
         index_id: String,
         /// How many indexes the daemon listed.
         registered: usize,
-        /// Why the looked-up id did not qualify.
+        /// Why the looked-up id did not qualify, and what to do about it.
         detail: String,
     },
     /// #8651: an operator-pinned index is recorded for another repository.
@@ -270,7 +272,7 @@ pub(crate) fn check_pin(
 /// the repo.
 ///
 /// Test: `two_repos_resolve_to_their_own_indexes_in_one_server`,
-/// `missing_index_error_names_the_repo_and_the_index_id`,
+/// `missing_index_is_an_error_when_search_is_required`,
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
 /// `owner_named_unknown_owner_sentinel_is_invalid`,
@@ -297,14 +299,45 @@ pub(crate) async fn resolve_repo_index(
         return Ok(id);
     }
     let indexes = client.list_index_identities(None).await.map_err(registry)?;
-    select_repo_index(&indexes, &repo_key, &index_id, pinned).map_err(|detail| {
-        RepoIndexError::NoIndex {
-            repo: repo_key.clone(),
-            index_id: index_id.clone(),
-            registered: indexes.len(),
-            detail,
-        }
+    let detail = match select_repo_index(&indexes, &repo_key, &index_id, pinned) {
+        Ok(id) => return Ok(id),
+        Err(detail) => detail,
+    };
+    // #11417: a parked id needs `ensure_project`, not a reindex.
+    let remedy = no_index_remedy(client, &repo_key, &index_id).await;
+    Err(RepoIndexError::NoIndex {
+        repo: repo_key.clone(),
+        index_id: index_id.clone(),
+        registered: indexes.len(),
+        detail: format!("{detail}. {remedy}"),
     })
+}
+
+/// The remedy a [`RepoIndexError::NoIndex`] ends with (#11417).
+///
+/// Why: a parked index is registered but not live, so it is missing from the
+/// list `review_pr` reads; telling the operator to index the checkout sends
+/// them to a reindex, which never clears a park.
+/// What: when the daemon lists `index_id` as parked, name the park and point
+/// at trusty-search `ensure_project`; otherwise, or when the parked list
+/// cannot be read (the miss is already an error), the index remedy.
+/// Test: `no_index_names_a_parked_id_and_points_at_ensure_project`,
+/// `no_index_for_an_unknown_id_keeps_the_index_remedy`.
+async fn no_index_remedy(client: &dyn SearchClient, repo_key: &str, index_id: &str) -> String {
+    let parked = client
+        .list_parked_index_ids()
+        .await
+        .inspect_err(|e| warn!(repo = %repo_key, "review_pr: parked indexes unreadable: {e}"))
+        .is_ok_and(|ids| ids.iter().any(|id| id == index_id));
+    if parked {
+        format!(
+            "Index {index_id:?} is registered but is parked, so it is not live. Re-activate \
+             it with trusty-search `ensure_project` (search.project.ensure) for its checkout \
+             of {repo_key}, then retry; a reindex does not clear a park"
+        )
+    } else {
+        format!("Index a checkout of {repo_key} with `trusty-search index <path>`, then retry")
+    }
 }
 
 /// The canonical identity an index records, or `None` when absent/unparseable.
@@ -414,3 +447,7 @@ pub(crate) fn select_repo_index(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "repo_index_parked_tests.rs"]
+mod repo_index_parked_tests;

@@ -44,6 +44,8 @@ mod optimizer;
 mod overseer;
 // #6653: `tm pr` — the deterministic PR-open and merge-queue gates.
 mod pr;
+// #8878 PR2a: `tm presence local`.
+mod presence;
 mod project;
 mod projects;
 mod repair;
@@ -60,7 +62,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
-pub(crate) use architect::ArchitectAction;
+pub(crate) use architect::{ArchitectAction, UpArgs};
 pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
@@ -73,7 +75,7 @@ pub(crate) use deliverables::{
 };
 pub(crate) use divert::DivertAction;
 pub(crate) use env::EnvAction;
-pub(crate) use fleet::FleetAction;
+pub(crate) use fleet::{FleetAction, FleetProjectAction};
 pub(crate) use generate::GenerateAction;
 pub(crate) use hooks::HooksAction;
 pub(crate) use issue::{BoardCmd, EpicCmd, IssueCmd};
@@ -83,6 +85,7 @@ pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
 pub(crate) use pr::{PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
+pub(crate) use presence::{DevicesAction, PresenceAction};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,

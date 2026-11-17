@@ -1,4 +1,4 @@
-//! Handler-level tests for the embed-only catch-up trigger (#8148).
+//! Report-level tests for the embed-only catch-up trigger (#8148).
 //!
 //! Why: an index registered over an `index.redb` whose chunks carry no vectors
 //! already has `skip_vector: false`, so `resolve_component_toggle` reported no
@@ -7,7 +7,7 @@
 //! the boot re-arm fires only on the `deferred_embed_pending` marker a reindex
 //! leaves — so the semantic stage stayed `Pending` forever and a full reindex
 //! was the only route to vectors.
-//! What: two handler-level tests differing in ONE input, the semantic stage's
+//! What: two report-level tests differing in ONE input, the semantic stage's
 //! status, so what is under test is the DECISION and not a literal. They live
 //! here rather than in `tests_components` because that file sits at the
 //! 500-SLOC production cap (`check_line_cap.sh` counts a `tests_*.rs`
@@ -15,12 +15,10 @@
 //! them.
 //! Test: this module. Run with `cargo test -p trusty-search tests_8148`.
 
-use super::index_config::{patch_index_config_handler, PatchIndexConfigRequest};
-use super::tests_components::{body_json, poll_stages, state_with_index, IsolatedDataDir};
+use super::index_config::{patch_index_config_report, PatchIndexConfigRequest};
+use super::tests_components::{poll_stages, state_with_index, IsolatedDataDir};
 use crate::core::registry::{IndexId, StageStatus};
-use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::Json;
 use std::sync::Arc;
 
 /// #8148: `PATCH { vector: true }` on an index whose vector lane is ALREADY
@@ -52,18 +50,16 @@ async fn patch_vector_true_runs_the_catch_up_when_semantic_never_built() {
         "sanity: nothing has embedded this corpus yet"
     );
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-8148-pending".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-8148-pending",
+        PatchIndexConfigRequest {
             vector: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(
         body["components"]["catch_up_started"].as_bool(),
         Some(true),
@@ -95,18 +91,16 @@ async fn patch_vector_true_is_a_no_op_once_semantic_is_ready() {
         stages.semantic.status = StageStatus::Ready;
     }
 
-    let resp = patch_index_config_handler(
-        State(Arc::clone(&state)),
-        Path("comp-8148-ready".to_string()),
-        Json(PatchIndexConfigRequest {
+    let body = patch_index_config_report(
+        &state,
+        "comp-8148-ready",
+        PatchIndexConfigRequest {
             vector: Some(true),
             ..Default::default()
-        }),
+        },
     )
-    .await;
-
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
+    .await
+    .expect("PATCH is accepted");
     assert_eq!(
         body["components"]["catch_up_started"].as_bool(),
         Some(false),
@@ -157,12 +151,9 @@ async fn patch_without_vector_true_or_against_in_progress_changes_nothing() {
         let handle = state.registry.get(&IndexId::new(id)).expect("handle");
         handle.stages.write().await.semantic.status = start;
 
-        let resp =
-            patch_index_config_handler(State(Arc::clone(&state)), Path(id.to_string()), Json(req))
-                .await;
-
-        assert_eq!(resp.status(), StatusCode::OK, "{id}");
-        let body = body_json(resp).await;
+        let body = patch_index_config_report(&state, id, req)
+            .await
+            .unwrap_or_else(|e| panic!("{id}: PATCH refused: {e:?}"));
         assert_eq!(
             body["components"]["catch_up_started"].as_bool(),
             Some(false),
@@ -181,17 +172,19 @@ async fn patch_vector_true(
     state: &Arc<crate::service::server::SearchAppState>,
     id: &str,
 ) -> (StatusCode, serde_json::Value) {
-    let resp = patch_index_config_handler(
-        State(Arc::clone(state)),
-        Path(id.to_string()),
-        Json(PatchIndexConfigRequest {
+    let outcome = patch_index_config_report(
+        state,
+        id,
+        PatchIndexConfigRequest {
             vector: Some(true),
             ..Default::default()
-        }),
+        },
     )
     .await;
-    let status = resp.status();
-    (status, body_json(resp).await)
+    match outcome {
+        Ok(body) => (StatusCode::OK, body),
+        Err(refused) => refused,
+    }
 }
 
 /// #8148 review finding 1: re-arm PATCHes across different indexes queue

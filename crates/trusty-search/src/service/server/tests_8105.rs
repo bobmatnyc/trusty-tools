@@ -14,7 +14,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
@@ -23,7 +22,7 @@ use crate::core::registry::{IndexHandle, IndexId, IndexRegistry};
 use crate::service::persistence::PersistedIndex;
 use crate::service::persistence_loader::build_indexer_from_entry;
 
-use super::reindex_handlers::reindex_handler;
+use super::reindex_handlers::reindex_report;
 use super::state::SearchAppState;
 
 /// Register one colocated index rooted at `root`, built by the production loader.
@@ -69,15 +68,11 @@ async fn reindex_of_a_write_quarantined_index_is_refused_with_409() {
             .expect("the kind is recorded with the flag")
     };
 
-    let refused = reindex_handler(
-        State(Arc::clone(&state)),
-        AxumPath(index_id.0.clone()),
-        None,
-    )
-    .await
-    .expect_err("#8105: a write-quarantined index must not accept a reindex");
+    let refused = reindex_report(&state, &index_id.0, None)
+        .await
+        .expect_err("#8105: a write-quarantined index must not accept a reindex");
 
-    let (status, axum::Json(body)) = refused;
+    let (status, body) = refused;
     assert_eq!(status, StatusCode::CONFLICT, "body: {body}");
     assert_eq!(body["error"], "index_write_quarantined");
     assert_eq!(body["index_id"], "quarantined-8105");
@@ -118,14 +113,10 @@ async fn reindex_of_a_healthy_index_is_still_queued() {
         "precondition: the control index must open its corpus"
     );
 
-    let axum::Json(body) = reindex_handler(
-        State(Arc::clone(&state)),
-        AxumPath(index_id.0.clone()),
-        None,
-    )
-    .await
-    .map_err(|(status, axum::Json(body))| format!("{status}: {body}"))
-    .expect("a healthy index must accept a reindex");
+    let body = reindex_report(&state, &index_id.0, None)
+        .await
+        .map_err(|(status, body)| format!("{status}: {body}"))
+        .expect("a healthy index must accept a reindex");
 
     assert_eq!(body["queued"], true, "body: {body}");
     assert!(

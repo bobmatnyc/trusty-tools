@@ -237,6 +237,7 @@ async fn mcp_session_new_refuses_a_remote_repo_url() {
         None,
         None,
         Some(true),
+        None,
     )
     .await
     .expect_err("a remote repo_url must fail the MCP tool");

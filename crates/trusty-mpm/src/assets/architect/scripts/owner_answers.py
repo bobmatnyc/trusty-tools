@@ -18,17 +18,21 @@ An open item whose resume_request is a dict with `at` (the Resume button on a pa
 resume_request null) and relays to the PM.
 An open item whose brief_request is a dict with `at` and that has no `brief` (the "Ask for a brief" button on a decision or ask)
 yields {id, kind: "brief_request", at: brief_request.at, text: title}; the Architect writes the brief, sets `brief` to
-"<project>/docs/briefs/<file>.md" on the item, and the request stops being reported.
+"<project>/docs/briefs/<file>.md" on the item, and the request stops being reported. A goal doc with brief_request {at} and no `brief`
+yields the same kind with the goal id. "Refresh briefing" (item or goal that already has `brief`) writes brief_request {at, by, refresh: true}
+and is reported until the Architect regenerates the brief and sets brief_request to null.
 Each `steer_requests` entry {text, at, by} on a task without `relayed_at` (the Steer button) yields
 {id, kind: "steer", at: entry.at, text: entry.text}, whatever the item's status. The Architect relays it to the
-owning PM as `User instruction (the owner): <text>`, then sets that entry's relayed_at (ISO time) with
+owning PM as `User instruction (the owner): "<text>" (owner turn: dashboard <id>)`, then sets that entry's relayed_at (ISO time) with
 `dashboard-db.py update items <id> --json '{"steer_requests": [...all entries, this one with relayed_at...]}' --if-version <v>`.
 A doc in <root>/il_steers with status "new" (the Steer button on an Intent Ledger task row in the Architect IL pane) yields
 {id: doc id, kind: "steer", at, text, task: the IL task id, session}. The Architect relays it to that session's PM as
-`User instruction (the owner): <text>` and sets status "relayed" (and relayed_at) with `dashboard-db.py update il_steers <id> --json '{...}'`.
+`User instruction (the owner): "<text>" (owner turn: dashboard <id>)` and sets status "relayed" (and relayed_at) with `dashboard-db.py update il_steers <id> --json '{...}'`.
 A session doc (<root>/sessions) whose command.status is "new" (the Activate, Prioritize, Park and Restart
 buttons) yields {id, kind: "owner_command", at: command.at, text, type, goal}; text is the activate text
 or the note (prioritize, park, restart). The Architect sets command.status "applied" once it has relayed and recorded it.
+A doc in <root>/watch_changes with status "new" (Watch / Unwatch in the Projects view) yields {id, kind: "watch_change", at: created,
+text: "<action> <key>", key, action}; the Architect's pass runs scripts/watch-apply.py, which sets applied or failed (#10896).
 A doc in <root>/effort_tunes with status "new" (the More/Less Effort goal tuner) yields {id, kind: "effort",
 at, text: "<goal> effort <direction> (bias <+n>)", goal, direction, bias}; the Architect sets status "applied" once handled.
 An open item whose status_request is a dict with `at` (the Status Update button) also yields {id, kind: "status_request",
@@ -48,9 +52,17 @@ text: "<title>" or "<title> — <done_note>"}; the Architect sets done_ack to an
 Reads only through dashboard_store (either format); the rules live in dashboard_derive. Raises StoreError on an unreadable collection.
 Qualified ids (ar-T44): resolve_id(root, ref) maps "S0c:D01" or a bare id to the local id (NotFound when the S id is not this store's own session); qualified(root, entries) adds a derived `qid` ("<S id>:<id>", bare when unknown) to pending entries, so a relay or log line can name the
 entry fleet-wide. Stored ids stay bare.
-Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py
+refuse_owner_answer_change(store, verb, id, data) is dashboard-db.py's guard: the Architect never rewrites the owner's answer.
+Read-back (#10680): read_back(root, ref, kind, at, text=None) re-reads one item from the store (a fresh Store, never a
+cached list, /api/meta or the HTTP server) and returns its pending entry of `kind` plus the doc `version`, only when that
+entry is still pending with the same `at` (and the same `text`, when given). The Architect relays the returned text, never
+the value in hand, and writes `relayed` with --if-version <version>, so an answer saved after the read-back conflicts and
+stays pending. A failed read raises ReadBackError(reason "unreadable"); an item that is gone, no longer pending,
+re-answered or changed raises ReadBackError(reason "mismatch").
+Test: tests/test_dashboard_derive.py, tests/test_dashboard_qualified.py, tests/test_dashboard_answer_close.py, tests/test_owner_answer_read_back.py
 """
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
@@ -61,19 +73,91 @@ import dashboard_derive as derive  # noqa: E402
 import dashboard_qual as dq  # noqa: E402
 import dashboard_store as ds  # noqa: E402
 
-COLLECTIONS = ("items", "sessions", "effort_tunes", "il_steers", "goals")
+COLLECTIONS = ("items", "sessions", "effort_tunes", "il_steers", "goals", "watch_changes")   # #10896: a new watch request wakes the Architect
 
 
-def pending(root=None, now=None):
+def pending(root=None, now=None, colls=COLLECTIONS):
+    """colls limits which collections are read: a caller that wants only item answers (#10670) is not stopped by a bad document elsewhere."""
     now = now or datetime.now(timezone.utc)
     store = ds.Store(root or ds.DEFAULT_ROOT)
-    return derive.pending(derive.snapshot(store, COLLECTIONS), now)
+    return derive.pending(derive.snapshot(store, colls), now)
 
 
 def resolve_id(root, ref):
     return dq.resolve(ds.Store(root or ds.DEFAULT_ROOT), "items", ref)
 
 
+class ReadBackError(Exception):
+    """The saved answer could not be confirmed; the caller must not act. reason: "unreadable" or "mismatch"."""
+
+    def __init__(self, reason, detail):
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+
+
+def read_back(root, ref, kind, at, text=None, now=None):
+    """#10680: confirm the saved answer from the store before acting on it; never fails open."""
+    now = now or datetime.now(timezone.utc)
+    store = ds.Store(root or ds.DEFAULT_ROOT)
+    try:
+        doc_id = dq.resolve(store, "items", ref)
+        doc = store.get("items", doc_id)
+    except ds.NotFound as e:
+        raise ReadBackError("mismatch", f"{ref} is not in the store ({e})") from e
+    except (OSError, ds.StoreError) as e:
+        raise ReadBackError("unreadable", f"{ref}: {e}") from e
+    found = [e for e in derive.pending_items([doc], now) if e["kind"] == kind]
+    if not found:
+        raise ReadBackError("mismatch", f"{doc_id} has no pending {kind} (status {doc['data'].get('status')!r})")
+    entry = next((e for e in found if e["at"] == at), None)
+    if entry is None:
+        raise ReadBackError("mismatch", f"{doc_id} {kind} was saved at {found[0]['at']}, not {at}")
+    if text is not None and entry["text"] != text:
+        raise ReadBackError("mismatch", f"{doc_id} {kind} text differs from the stored answer")
+    return dict(entry, id=doc_id, version=doc["version"])
+
+
 def qualified(root, entries):
     sid = dq.store_sid(ds.Store(root or ds.DEFAULT_ROOT))
     return [dict(e, qid=e["id"] if e.get("kind") == "owner_command" else dq.qualify(sid, e["id"])) for e in entries]
+
+
+# #10711: the notes r-183 ("Relayed HH:MMZ") and r-189 ("Acknowledged HH:MMZ: <what>") generated before `relayed`;
+# the time may also be a full ISO date-time ("Relayed 2026-11-05T23:15Z tm-api"). Anything else is the owner's.
+ARCHITECT_MARK = re.compile(r"(?:Relayed|Acknowledged) (?:\d{4}-\d{2}-\d{2}T)?(?:[01]\d|2[0-3]):[0-5]\dZ(?!\w)")
+
+
+def is_architect_mark(note):
+    """True when `note` has the Architect's generated shape: marker word, a space, then an HH:MMZ or ISO time."""
+    return isinstance(note, str) and ARCHITECT_MARK.match(note) is not None
+
+
+def _cleared(value):
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def refuse_owner_answer_change(store, verb, doc_id, data):
+    """Refuse an items set/update that changes the owner's stored `answer` or `answer_note`.
+
+    Why: a close wrote "Relayed HH:MMZ" over the text the owner typed for an "Other" answer (#10711).
+    What: raises StoreError naming each field the stored doc holds as a non-empty string that the doc after the write
+    changes. A reopen (status open) may also clear either field to empty, never set a new value. An `answer_note` with
+    the Architect's generated shape (is_architect_mark) is exempt. An empty stored `answer_note` is unguarded: it holds
+    no owner text. A missing doc passes; any other read failure propagates.
+    Test: test_close_that_overwrites_an_owner_answer_field_is_refused_10711, test_owner_note_that_starts_with_a_marker_word_is_refused_10711,
+    test_reopen_cannot_launder_an_owner_note_10711, test_reopen_and_architect_marker_notes_stay_writable_10711
+    """
+    if not isinstance(data, dict):
+        return
+    try:
+        cur = store.get("items", doc_id)["data"]
+    except ds.NotFound:
+        return
+    new = {**cur, **data} if verb == "update" else data
+    reopen = new.get("status") == "open"
+    hit = [f for f in ("answer", "answer_note") if isinstance(cur.get(f), str) and cur[f].strip() and new.get(f) != cur[f]
+           and not (reopen and _cleared(new.get(f))) and not (f == "answer_note" and is_architect_mark(cur[f]))]
+    if hit:
+        holds, changes = ("holds", "changes") if len(hit) == 1 else ("hold", "change")
+        raise ds.StoreError(f"item {doc_id}: {' and '.join(hit)} {holds} the owner's answer and never {changes}; "
+                            "record the relay in `relayed` (\"<iso> <session>\") instead")

@@ -1,4 +1,5 @@
-//! `tm fleet init|status` through the built binary (#8436).
+//! `tm fleet init|status` through the built binary (#8436), and `tm fleet
+//! project` against a fixture `TRUSTY_MPM_ROOT` (#10895).
 //!
 //! Why: the unit tests in `commands::fleet::tests` never start a session. Only
 //! the binary proves that `init` starts `tm-architect` detached with the
@@ -15,6 +16,10 @@ use std::process::{Command, Output};
 
 use crate::common;
 
+// #11061: the fake `claude` process, shared with the `tm` unit tests.
+#[path = "common/fake_claude.rs"]
+mod fake_claude;
+
 /// A scratch home, a private tmux server directory and a fake `claude`.
 struct FleetEnv {
     home: tempfile::TempDir,
@@ -27,25 +32,31 @@ impl FleetEnv {
         let bin = tempfile::tempdir().expect("fake bin dir");
         let claude = bin.path().join("claude");
         // #8878 ruling A: `tm fleet init` finds its claude by process name, so
-        // the fake execs a `sleep` whose name contains `claude`. A symlink, not
-        // a copy: macOS kills an unsigned copy of a system binary.
-        let sleeper = bin.path().join("claude-sleep");
-        std::os::unix::fs::symlink("/bin/sleep", &sleeper).expect("fake claude process");
+        // the fake execs a process whose name contains `claude`. #11061: not
+        // a `/bin/sleep` symlink, which a multicall `sleep` exits at once.
+        let sleeper = fake_claude::sleeper(bin.path());
         // #8981: each start appends its argv, one line per launch. While the
         // RESUME_FAILS marker exists, a `--resume` start dies after 1 s, as
         // a `claude` that cannot load its conversation does. #9092: each start
         // also appends its PID, which `exec` keeps.
+        // #10459: `--version` prints the CLAUDE_VERSION file, else a version
+        // the Architect gate accepts, and exits 1 while VERSION_FAILS exists.
         let sleeper = sleeper.display().to_string();
+        let (secs, args) = (fake_claude::SECS_ENV, fake_claude::argv().join(" "));
         // See #10248
         trusty_common::exec_stub::write_executable(
             &claude,
             format!(
-                "#!/bin/sh\necho \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ncase \" $* \" in \
-                 *\" --resume \"*) [ -e {:?} ] && exec {sleeper:?} 1;; esac\nexec {sleeper:?} \
-                 600\n",
+                "#!/bin/sh\nif [ \"$1\" = --version ]; then [ -e {fails:?} ] && exit 1; \
+                 cat {version:?} 2>/dev/null || echo '2.1.312 (Claude Code)'; exit 0; fi\n\
+                 echo \"$$ $*\" >> {:?}\necho \"$*\" >> {:?}\ns=\ncase \" $* \" in \
+                 *\" --resume \"*) [ -e {:?} ] && s=1;; esac\nexport {secs}=${{s:-600}}\n\
+                 exec {sleeper:?} {args}\n",
                 bin.path().join(PID_LOG).display().to_string(),
                 bin.path().join(ARGV_LOG).display().to_string(),
                 bin.path().join(RESUME_FAILS).display().to_string(),
+                fails = bin.path().join(VERSION_FAILS).display().to_string(),
+                version = bin.path().join(CLAUDE_VERSION).display().to_string(),
             ),
         )
         .expect("fake claude");
@@ -332,6 +343,12 @@ const RESUME_FAILS: &str = "resume-fails";
 
 /// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a pane pid read.
 const PANE_UNREADABLE: &str = "pane-unreadable";
+
+/// The file whose text the fake `claude --version` prints (#10459).
+const CLAUDE_VERSION: &str = "claude-version";
+
+/// The marker that makes the fake `claude --version` exit 1 (#10459).
+const VERSION_FAILS: &str = "version-fails";
 
 /// The marker that makes [`FleetEnv::wrap_tmux`]'s tmux fail a kill-session.
 const KILL_FAILS: &str = "kill-fails";
@@ -934,6 +951,35 @@ fn fleet_init_refuses_an_invalid_session_name_before_writing() {
     }
 }
 
+/// #10459 (DOC-86 §5): `tm fleet init` refuses the Architect on a Claude Code
+/// older than v2.1.295, and on a version it cannot read or parse, before it
+/// writes the project's hooks or starts a session.
+#[test]
+fn fleet_init_refuses_an_old_claude_code() {
+    for (setup, cause) in [
+        (Some("2.1.294 (Claude Code)\n"), "older than v2.1.295"),
+        (Some("Claude Code\n"), "printed no version"),
+        (None, "cannot read the Claude Code version"),
+    ] {
+        let env = FleetEnv::new();
+        match setup {
+            Some(version) => {
+                std::fs::write(env.bin.path().join(CLAUDE_VERSION), version).unwrap();
+            }
+            None => env.mark(VERSION_FAILS),
+        }
+        let dir = env.dir();
+        let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+        assert!(!out.status.success(), "{cause}: {}", text(&out));
+        assert!(text(&out).contains(cause), "{cause}: {}", text(&out));
+        assert!(!env.has_session("tm-architect"), "{cause}: {}", text(&out));
+        assert!(
+            !dir.join(".claude/settings.json").exists(),
+            "{cause}: hooks were written before the refusal"
+        );
+    }
+}
+
 /// #8436 P4, fail closed: a poller that does not start is a FAILED step and
 /// exit 1, never an ok report. Two arms: the start script fails, and it exits
 /// 0 without starting a session. An edited script is kept, so each arm plants
@@ -990,50 +1036,101 @@ fn fleet_init_fails_when_the_poller_pane_is_dead() {
     }
 }
 
-/// #8436 P4 fix, item 8: an Architect that cannot be bound to its `claude`
-/// (#8878 ruling A) is a warning and exit 0, because an npm/node `claude`
-/// never binds. The summary names it, instead of only "Architect set up".
-/// A file where the launch record directory goes makes the record fail.
+/// A read-only launch record directory under `root`, restored on drop.
+///
+/// #11270: the shim's grant lives in `architect-launch/launch-grants`, so a
+/// file in place of the record directory now fails the grant before
+/// `claude` starts. A writable grant directory under a read-only record
+/// directory fails only the record write, after `claude` starts.
+struct ReadOnlyRecords(PathBuf);
+
+impl ReadOnlyRecords {
+    fn new(root: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        let records = root.join("architect-launch");
+        std::fs::create_dir_all(records.join("launch-grants")).unwrap();
+        std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o500)).unwrap();
+        Self(records)
+    }
+}
+
+impl Drop for ReadOnlyRecords {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// #10448 Fail-Open Check: a launch record that cannot be written fails
+/// `init` with the record path and the OS error, and kills the session, so no
+/// Architect runs unbound. It was a warning and exit 0, and the unbound
+/// Architect ran on. A read-only launch record directory makes the write fail.
 #[test]
-fn fleet_init_names_an_unbound_architect_in_the_summary() {
+fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() {
     let env = FleetEnv::new();
     let dir = env.dir();
     let root = env.home.path().join(".trusty-mpm");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("architect-launch"), "not a directory\n").unwrap();
+    let _records = ReadOnlyRecords::new(&root);
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", text(&out));
-    assert!(stdout.contains("NOT bound to its claude"), "{}", text(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains(
-            "Architect set up (NOT bound: anchor writes will be denied; see the warning above)"
-        ),
+        stderr.contains("the Architect was started but NOT bound"),
         "{}",
         text(&out)
     );
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("the Architect process was NOT recorded"),
+        stderr.contains("cannot write the Architect launch record")
+            && stderr.contains(&format!("{}/", root.join("architect-launch").display()))
+            && stderr.contains("os error"),
         "{}",
         text(&out)
     );
+    assert!(
+        stderr.contains("killed tmux session tm-architect, so no Architect runs unbound"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !env.has_session("tm-architect"),
+        "the unbound session runs on"
+    );
+    assert!(!env.has_session("tm-architect-poll"), "the poller started");
+    let pid = launch_pids(&env).pop().expect("the fake claude started");
+    wait_gone(pid);
+}
 
-    // #8878 R1 critic MEDIUM: a re-run finds the session running unbound
-    // and says so, never "Nothing changed".
+/// #11270: a launch grant that cannot be written fails `init` before the
+/// `claude` line is typed, and kills the session it created, so no Architect
+/// runs ungranted or unbound. A file in place of the grant directory makes
+/// the grant write fail; the record directory itself stays writable.
+#[test]
+fn fleet_init_fails_and_stops_the_architect_when_its_grant_cannot_be_written_11270() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let records = env.home.path().join(".trusty-mpm/architect-launch");
+    std::fs::create_dir_all(&records).unwrap();
+    std::fs::write(records.join("launch-grants"), "not a directory\n").unwrap();
     let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stdout.contains("tmux session tm-architect is running but is not a bound Architect"),
+        stderr.contains("the Architect launch could not be granted")
+            && stderr.contains("the Architect launch grant could not be written"),
         "{}",
         text(&out)
     );
     assert!(
-        stdout.contains("Architect set up (NOT bound"),
-        "{}",
+        !env.has_session("tm-architect"),
+        "the ungranted session runs on: {}",
         text(&out)
     );
-    assert!(!stdout.contains("Nothing changed"), "{}", text(&out));
+    assert!(!env.has_session("tm-architect-poll"), "the poller started");
+    let pids = launch_pids(&env);
+    for &pid in &pids {
+        wait_gone(pid);
+    }
+    assert!(pids.is_empty(), "claude started without a grant: {pids:?}");
 }
 
 /// #8436: `--dir` goes through the same preflight as the default, so the
@@ -1283,6 +1380,75 @@ fn fleet_relaunch_binds_when_no_prior_record_exists() {
     assert_eq!(env.status_json()["binding"]["ok"], true);
 }
 
+/// #10357: a reboot leaves neither session; `init` starts the Architect and
+/// its poller and registers both, and a second `init` starts no second poller.
+#[test]
+fn fleet_init_restores_the_poller_after_a_reboot() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let daemon = FakeDaemon::start(env.tmux_dir.path().join("d.sock"));
+    let init = ["fleet", "init", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+
+    env.kill_session("tm-architect");
+    env.kill_session("tm-architect-poll");
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("started poller session tm-architect-poll"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.has_session("tm-architect-poll"));
+    let requests = daemon.requests();
+    assert_eq!(
+        requests[1]["poll_session"], "tm-architect-poll",
+        "{requests:?}"
+    );
+
+    let out = env.tm_with_socket(&init, Some(&daemon.socket));
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// #10357 regression: the poller died with the reboot while the Architect
+/// came back; `relaunch` binds the Architect and restarts its poller once, so
+/// the registration that follows records the `tm-architect-poll` helper.
+#[test]
+fn fleet_relaunch_restores_a_missing_poller() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = env.tm(&["fleet", "init", "--dir", dir_arg(&dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    env.kill_session("tm-architect-poll");
+
+    let relaunch = ["fleet", "relaunch", "--dir", dir_arg(&dir)];
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("started poller session tm-architect-poll"),
+        "{}",
+        text(&out)
+    );
+    assert!(env.has_session("tm-architect-poll"), "{}", text(&out));
+
+    let out = env.tm(&relaunch);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout)
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        text(&out)
+    );
+}
+
 /// #9092 ruling Q3: `relaunch` never starts an absent session; it exits 1
 /// naming `tm fleet init`, and writes nothing.
 #[test]
@@ -1323,9 +1489,9 @@ fn fleet_relaunch_refuses_a_pm_dir() {
     assert!(env.recorded_pids().is_empty());
 }
 
-/// #9092 failure path: a new `claude` that cannot be recorded is a FAILED
-/// step and exit 1, and `status` reads it as unbound. A file where the
-/// launch record directory goes makes the record fail.
+/// #9092 failure path: a new `claude` that cannot be recorded is exit 1, and
+/// `status` reads it as unbound. #10448: the new `claude` is stopped. A
+/// read-only launch record directory makes the record fail.
 #[test]
 fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     let env = FleetEnv::new();
@@ -1334,19 +1500,57 @@ fn fleet_relaunch_exits_1_when_the_new_claude_cannot_be_recorded() {
     assert!(out.status.success(), "{}", text(&out));
     let records = env.home.path().join(".trusty-mpm/architect-launch");
     std::fs::remove_dir_all(&records).unwrap();
-    std::fs::write(&records, "not a directory\n").unwrap();
+    let _records = ReadOnlyRecords::new(&env.home.path().join(".trusty-mpm"));
 
     let out = env.tm(&["fleet", "relaunch", "--dir", dir_arg(&dir)]);
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("FAILED"), "{}", text(&out));
-    assert!(stdout.contains("but it is NOT bound"), "{}", text(&out));
+    // #10448: the error names the record and the OS error, and the new
+    // `claude` is stopped instead of running unbound.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is NOT bound"), "{}", text(&out));
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("tm fleet relaunch failed"),
+        stderr.contains(&format!("{}/", records.display())) && stderr.contains("os error"),
         "{}",
         text(&out)
     );
-    assert_eq!(env.status_json()["binding"]["ok"], false);
+    let new = *launch_pids(&env).last().expect("the new claude started");
+    assert!(
+        stderr.contains(&format!(
+            "stopped claude pid {new}, so no Architect runs unbound"
+        )),
+        "{}",
+        text(&out)
+    );
+    wait_gone(new);
+    assert!(
+        env.has_session("tm-architect"),
+        "relaunch keeps the session"
+    );
+    let status = env.status_json();
+    assert_eq!(status["binding"]["ok"], false);
+    assert_eq!(status["complete"], false);
+}
+
+/// The PIDs of the fake `claude`'s Architect launches, in start order.
+fn launch_pids(env: &FleetEnv) -> Vec<u32> {
+    std::fs::read_to_string(env.bin.path().join(PID_LOG))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.split_whitespace().any(|w| w == "--model"))
+        .filter_map(|l| l.split_whitespace().next()?.parse().ok())
+        .collect()
+}
+
+/// Wait up to 10 s for `pid` to exit; panics when it still runs.
+fn wait_gone(pid: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while trusty_mpm::core::process::is_process_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        !trusty_mpm::core::process::is_process_alive(pid),
+        "claude pid {pid} still runs"
+    );
 }
 
 /// The one launch record's PID; panics unless there is exactly one.
@@ -1468,4 +1672,445 @@ fn fleet_relaunch_keeps_the_session_when_the_resume_fails() {
     let third = env.launches(3).get(2).cloned().unwrap_or_default();
     assert_eq!(flag_value(&third, "--resume"), None, "{third:?}");
     assert_eq!(env.status_json()["binding"]["ok"], true);
+}
+
+// ── `tm fleet project` (#10895) ─────────────────────────────────────────────
+
+/// A fixture managed root for `tm fleet project`: `alpha` and `beta` in the
+/// registry with checkouts beside the root; `beta`'s session alias is
+/// `beta-fork`, found by its path. Returns the root.
+fn project_root(env: &FleetEnv) -> PathBuf {
+    let base = env.home.path().join("fx");
+    let root = base.join("root");
+    std::fs::create_dir_all(root.join("project-registry")).expect("registry dir");
+    for name in ["alpha", "beta"] {
+        std::fs::create_dir_all(base.join(name)).expect("checkout");
+    }
+    let row = |name: &str| serde_json::json!({ "name": name, "repo_url": base.join(name), "default_branch": "main" });
+    let projects =
+        serde_json::json!({ "projects": { "alpha": row("alpha"), "beta": row("beta") } });
+    std::fs::write(
+        root.join("project-registry/projects.json"),
+        serde_json::to_vec(&projects).expect("registry json"),
+    )
+    .expect("projects.json");
+    let aliases = serde_json::json!([
+        { "alias": "alpha", "path": base.join("alpha") },
+        { "alias": "beta-fork", "path": base.join("beta") },
+    ]);
+    std::fs::write(
+        root.join("project-paths.json"),
+        serde_json::to_vec(&aliases).expect("alias json"),
+    )
+    .expect("project-paths.json");
+    root
+}
+
+/// `tm fleet project <args> --dir <dir>` against the fixture root.
+fn fleet_project(env: &FleetEnv, root: &Path, dir: &Path, args: &[&str]) -> Output {
+    let mut all = vec!["fleet", "project"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--dir", dir_arg(dir)]);
+    env.tm_with_env(&all, "TRUSTY_MPM_ROOT", root)
+}
+
+/// The keys of `<dir>/local/watch.json`.
+fn watched(dir: &Path) -> Vec<String> {
+    let raw = std::fs::read(dir.join("local/watch.json")).expect("watch.json");
+    let file: serde_json::Value = serde_json::from_slice(&raw).expect("watch.json parses");
+    assert_eq!(file["version"], 1);
+    file["projects"]
+        .as_array()
+        .expect("projects array")
+        .iter()
+        .map(|e| e["key"].as_str().expect("key").to_owned())
+        .collect()
+}
+
+#[test]
+fn fleet_project_add_of_an_unregistered_project_writes_nothing() {
+    // AC1 through the binary: no list and an empty CLAUDE.md watch set.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let out = fleet_project(&env, &root, &dir, &["add", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("gamma is not a registered project"),
+        "{}",
+        text(&out)
+    );
+    assert!(stderr.contains("tm projects register"), "{}", text(&out));
+    assert!(!dir.join("local/watch.json").exists());
+    assert!(!dir.join("local/projects").exists());
+}
+
+#[test]
+fn fleet_project_list_without_a_registry_refuses_and_writes_nothing() {
+    // #10895 review: a root with no `projects.json` must not use up the import.
+    let env = FleetEnv::new();
+    let root = env.home.path().join("wrong-root");
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let claude = "# Fleet\n\n## Watch set\n\n- `tm-alpha`: `/x/alpha`\n";
+    std::fs::write(dir.join("CLAUDE.md"), claude).expect("CLAUDE.md");
+    let out = fleet_project(&env, &root, &dir, &["list"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let registry = root.join("project-registry/projects.json");
+    assert!(
+        stderr.contains(&registry.display().to_string()),
+        "{}",
+        text(&out)
+    );
+    assert!(stderr.contains("TRUSTY_MPM_ROOT"), "{}", text(&out));
+    assert!(!dir.join("local/watch.json").exists(), "{}", text(&out));
+}
+
+#[test]
+fn fleet_project_concurrent_adds_keep_both_entries() {
+    // AC3 through the binary: two `tm` processes at once.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    std::fs::write(
+        dir.join("local/watch.json"),
+        r#"{"version": 1, "projects": []}"#,
+    )
+    .expect("empty list");
+    let outs: Vec<Output> = std::thread::scope(|s| {
+        let handles: Vec<_> = ["alpha", "beta"]
+            .map(|key| {
+                let (env, root, dir) = (&env, &root, &dir);
+                s.spawn(move || fleet_project(env, root, dir, &["add", key]))
+            })
+            .into_iter()
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("add thread"))
+            .collect()
+    });
+    for out in &outs {
+        assert!(out.status.success(), "{}", text(out));
+    }
+    let mut keys = watched(&dir);
+    keys.sort();
+    assert_eq!(keys, ["alpha", "beta"]);
+}
+
+#[test]
+fn fleet_project_flow_migrates_adds_refuses_removes_and_lists() {
+    // AC9 (and AC2, AC5, AC6, AC7) against the built binary.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let base = root.parent().expect("fixture base").to_path_buf();
+    let dir = env.dir();
+    std::fs::create_dir_all(dir.join("local")).expect("architect dir");
+    let claude = format!(
+        "# Fleet\n\n## Watch set\n\nOne line each.\n\n\
+         - `tm-<project>`: `<absolute project path>`\n\
+         - `tm-alpha`: `{}` — keep it green\n\
+         - `tm-gamma`: `/nowhere/gamma`\n\n## Cadence\n",
+        base.join("alpha").display()
+    );
+    std::fs::write(dir.join("CLAUDE.md"), &claude).expect("CLAUDE.md");
+
+    // The first command imports the hand-written list and leaves CLAUDE.md.
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        json(&out).as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        text(&out)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipped") && stderr.contains("tm-gamma"),
+        "{}",
+        text(&out)
+    );
+    assert!(!stderr.contains("<project>"), "{}", text(&out));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("CLAUDE.md")).unwrap(),
+        claude
+    );
+    assert_eq!(watched(&dir), ["alpha"]);
+
+    // A second command imports nothing.
+    let out = fleet_project(&env, &root, &dir, &["list"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(out.stderr.is_empty(), "{}", text(&out));
+
+    // Add two projects: beta by its directory, alpha to write its record.
+    let beta_dir = base.join("beta");
+    let out = fleet_project(&env, &root, &dir, &["add", dir_arg(&beta_dir)]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("added beta"),
+        "{}",
+        text(&out)
+    );
+    let out = fleet_project(&env, &root, &dir, &["add", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        dir.join("local/projects/alpha.md").exists(),
+        "{}",
+        text(&out)
+    );
+    let out = fleet_project(&env, &root, &dir, &["add", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "unchanged: alpha is already watched\n"
+    );
+
+    // Refuse one unregistered project, and an unlisted remove; nothing changes.
+    let before = std::fs::read(dir.join("local/watch.json")).unwrap();
+    let out = fleet_project(&env, &root, &dir, &["add", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let out = fleet_project(&env, &root, &dir, &["remove", "gamma"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
+
+    // Remove one: the record is kept and marked.
+    let out = fleet_project(&env, &root, &dir, &["remove", "alpha"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let record = std::fs::read_to_string(dir.join("local/projects/alpha.md")).unwrap();
+    assert!(record.contains("\n- Watch: removed 20"), "{record}");
+    assert_eq!(watched(&dir), ["beta"]);
+
+    // The list matches.
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let rows = json(&out);
+    assert_eq!(
+        rows,
+        serde_json::json!([{
+            "key": "beta",
+            "path": beta_dir.display().to_string(),
+            "path_exists": true,
+            "registered": true,
+            "session_alias": "beta-fork",
+            "alias_mismatch": true,
+            "live_sessions": 0,
+            "record_present": true,
+        }]),
+        "{}",
+        text(&out)
+    );
+
+    // Emptied, the list stays empty: no second import.
+    let out = fleet_project(&env, &root, &dir, &["remove", "beta"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(json(&out), serde_json::json!([]), "{}", text(&out));
+    assert!(out.stderr.is_empty(), "{}", text(&out));
+}
+
+#[test]
+fn fleet_init_seeds_the_watch_list_from_live_sessions() {
+    // #11012 AC6: `init` seeds the list from the live `tm-*` sessions on the
+    // private server, `list --json` shows it, and a second `init` leaves it.
+    let env = FleetEnv::new();
+    let root = project_root(&env);
+    let dir = env.dir();
+    for (name, cwd) in [("tm-alpha", "/tmp"), ("tm-stray", "/tmp")] {
+        let started = Command::new("tmux")
+            .args(["new-session", "-d", "-s", name, "-c", cwd, "sleep 600"])
+            .env("TMUX_TMPDIR", env.tmux_dir.path())
+            .env_remove("TMUX")
+            .env_remove("TMUX_SOCKET")
+            .status()
+            .expect("run tmux");
+        assert!(started.success(), "tmux new-session {name}");
+    }
+    let init = ["fleet", "init", "--no-launch", "--dir", dir_arg(&dir)];
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("tmux session tm-stray not watched"),
+        "{stdout}"
+    );
+    assert_eq!(watched(&dir), ["alpha"]);
+    let out = fleet_project(&env, &root, &dir, &["list", "--json"]);
+    assert!(out.status.success(), "{}", text(&out));
+    let keys: Vec<serde_json::Value> = json(&out)
+        .as_array()
+        .expect("rows")
+        .iter()
+        .map(|row| row["key"].clone())
+        .collect();
+    assert_eq!(keys, [serde_json::json!("alpha")], "{}", text(&out));
+    let before = std::fs::read(dir.join("local/watch.json")).expect("watch.json");
+    let out = env.tm_with_env(&init, "TRUSTY_MPM_ROOT", &root);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("init leaves it as is"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
+}
+
+// --- #11364: `tm architect up` against the private tmux server ---
+
+/// `tm architect up --no-attach --dir <dir>`.
+fn up(env: &FleetEnv, dir: &Path) -> Output {
+    env.tm(&["architect", "up", "--no-attach", "--dir", dir_arg(dir)])
+}
+
+/// #11364: from no session, `up` starts a bound Architect; a second `up`
+/// launches nothing more.
+#[test]
+fn architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(env.has_session("tm-architect"), "{}", text(&out));
+    assert_eq!(env.recorded_pids().len(), 1, "{}", text(&out));
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("the Architect runs bound"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(env.launches(2).len(), 1, "a second up launched again");
+}
+
+/// #11364 closure: two concurrent `up` calls leave one session and one launch.
+#[test]
+fn architect_up_racing_a_second_up_yields_one_architect() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(&dir).expect("dir");
+    let outs: Vec<Output> = std::thread::scope(|s| {
+        let a = s.spawn(|| up(&env, &dir));
+        let b = s.spawn(|| up(&env, &dir));
+        vec![a.join().expect("a"), b.join().expect("b")]
+    });
+    for out in &outs {
+        assert!(out.status.success(), "{}", text(out));
+    }
+    assert_eq!(env.launches(2).len(), 1, "two launches: {}", text(&outs[1]));
+    assert_eq!(env.recorded_pids().len(), 1);
+}
+
+/// #11364: a pane at a shell gets a bound `claude`.
+#[test]
+fn architect_up_launches_bound_into_a_pane_at_a_shell() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [first] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    kill_and_wait(first);
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(env.launches(2).len(), 2, "{}", text(&out));
+    assert_eq!(env.status_json()["binding"]["ok"], true, "{}", text(&out));
+}
+
+/// #11364 closure: a live unbound `claude` is reported and never killed.
+#[test]
+fn architect_up_reports_and_never_kills_an_unbound_claude() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [first] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    kill_and_wait(first);
+    let fake = env.bin.path().join("claude").display().to_string();
+    env.send_line("tm-architect", &format!("{fake} --replaced"));
+    let replaced = env.claude_pid_with("--replaced").expect("replacing claude");
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("unbound: guard exemptions are off"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::is_process_alive(replaced),
+        "up killed it"
+    );
+}
+
+/// #11364 closure: from inside Claude Code, `up` neither starts nor stops `claude`.
+#[test]
+fn architect_up_inside_claude_code_starts_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let args = ["architect", "up", "--no-attach", "--dir", dir_arg(&dir)];
+    let out = env.tm_in_session(&args, None, &[("CLAUDECODE", OsStr::new("1"))]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(!env.has_session("tm-architect"), "{}", text(&out));
+}
+
+// --- #11365: `tm architect restart` gates against the private tmux server ---
+
+/// Writes the Architect's Intent Ledger under `dir/local/il`, written at
+/// `written` epoch seconds, plus a stamp when `changed` is given.
+fn write_il(dir: &Path, written: u64, changed: Option<u64>) {
+    let d = dir.join("local/il/.trusty-mpm/datg");
+    std::fs::create_dir_all(&d).expect("datg dir");
+    let state = serde_json::json!({
+        "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
+        "goals": [{"id": "ar-G01", "status": "active"}],
+        "session": {"written_at": "2026-10-21T10:00Z", "written_epoch": written,
+            "task": "ship the restart verb", "next": "run the gates", "owed": [], "crons": []}
+    });
+    std::fs::write(d.join("state.json"), state.to_string()).expect("state");
+    if let Some(c) = changed {
+        std::fs::write(d.join("stamp.json"), format!("{{\"changed_epoch\": {c}}}")).expect("stamp");
+    }
+}
+
+/// #11365 closure: a stale IL exits 4 and the running `claude` survives.
+#[test]
+fn architect_restart_with_a_stale_checkpoint_exits_4_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    write_il(&dir, 1_792_576_800, Some(1_792_576_900));
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert!(!dir.join("inbox/restart.log").exists());
+}
+
+/// #11365 closure: a box that is not idle exits 2 and the `claude` survives.
+#[test]
+fn architect_restart_on_a_busy_box_exits_2_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    // Fresh: no stamp. The fake `claude` draws no input box, so it is never idle.
+    write_il(&dir, 1_792_576_800, None);
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert_eq!(env.launches(2).len(), 1, "restart launched a claude");
 }

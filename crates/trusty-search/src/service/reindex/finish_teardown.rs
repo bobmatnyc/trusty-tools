@@ -94,6 +94,10 @@ pub(super) async fn stop_pollers(
 /// covers the refusal and
 /// `super::live_corpus_lock_tests::a_rename_failure_quarantines_and_is_not_reported_as_a_deferral`
 /// covers the rename arm that must NOT borrow that status.
+/// #10738: a rollback, a memory abort and a promotion that did not land each
+/// raise the index generation, since puts taken during the run are gone from
+/// the corpus a restart attaches; `a_rollback_that_discards_a_put_raises_the_generation`
+/// and `a_deferred_promotion_raises_the_generation` cover them.
 // #7004 pushed this to 8 parameters; `rebuild_kg` below carries the same allow.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn resolve_corpus_swap(
@@ -115,10 +119,30 @@ pub(super) async fn resolve_corpus_swap(
             // run's terminal status.
             promotion_deferred =
                 !promoted && handle.indexer.read().await.promotion_deferred().is_some();
+            if !promoted {
+                // #10738: staging stays attached (deferral, unresolvable path) or
+                // nothing is; either way the corpus a restart attaches lacks the
+                // puts this run took, and its stamp still matches. No stamp here:
+                // the restart's attach sees the mismatch and bumps again.
+                crate::service::index_identity::bump_with_pending(
+                    &index_id.0,
+                    None,
+                    "promotion_not_landed",
+                );
+            }
             // #7004: force stages an EMPTY corpus and skips the prune pass, so
             // the warm map, BM25 and vector store still hold the rebuild's
             // obsolete chunks.
             if force && promoted {
+                // #10738: the promoted corpus started empty; raise the generation
+                // before the warm reconcile drops the obsolete chunks.
+                // #10738: pending marker in the promoted corpus first.
+                let corpus = handle.indexer.read().await.corpus_store();
+                crate::service::index_identity::bump_with_pending(
+                    &index_id.0,
+                    corpus.as_deref(),
+                    "force_promotion",
+                );
                 super::prune::reconcile_warm_state_to_promoted_corpus(handle, index_id).await;
             }
             // #9169: only a promoted corpus records a reindex commit.
@@ -134,13 +158,11 @@ pub(super) async fn resolve_corpus_swap(
                 );
             }
         } else {
-            if let staging::StagingResolution::Rollback { reason } = staging_resolution {
-                tracing::warn!(
-                    "reindex[{}]: rolling back staged corpus — {reason}",
-                    index_id.0,
-                );
-            }
-            abort_staged_corpus_swap(handle, index_id, tmp_path).await;
+            let reason = match staging_resolution {
+                staging::StagingResolution::Rollback { reason } => Some(reason.as_str()),
+                staging::StagingResolution::Commit => None,
+            };
+            rollback_staged_corpus_swap(handle, index_id, tmp_path, reason).await;
         }
     } else if reindex_outcome.is_ready() && !memory_aborted {
         if let Err(e) = handle.write_indexed_root(canonical_root).await {
@@ -153,6 +175,41 @@ pub(super) async fn resolve_corpus_swap(
         stamp_reindex_commit(handle, index_id).await;
     }
     promotion_deferred
+}
+
+/// Discard a staged corpus, re-attach live, and raise the generation.
+///
+/// Why: the one rollback path, shared by `resolve_corpus_swap` and by the
+/// termination guard of a staged run that died mid-run (#10738). The
+/// discarded staging corpus held every put this run took, and the
+/// re-attached live corpus still carries the stored stamp, so its attach
+/// does not bump.
+/// What: logs `reason` when given, runs `abort_staged_corpus_swap` (which
+/// quarantines when live cannot be reopened), then bumps the generation with
+/// the pending marker in the attached corpus first. Returns whether the bump
+/// succeeded.
+/// Test: `a_rollback_that_discards_a_put_raises_the_generation`,
+/// `a_staged_run_dropped_mid_batch_refuses_or_rolls_back`,
+/// `a_dropped_runs_rollback_whose_bump_fails_keeps_refusing_puts`.
+pub(super) async fn rollback_staged_corpus_swap(
+    handle: &IndexHandle,
+    index_id: &IndexId,
+    tmp_path: &Path,
+    reason: Option<&str>,
+) -> bool {
+    if let Some(reason) = reason {
+        tracing::warn!(
+            "reindex[{}]: rolling back staged corpus — {reason}",
+            index_id.0,
+        );
+    }
+    abort_staged_corpus_swap(handle, index_id, tmp_path).await;
+    let corpus = handle.indexer.read().await.corpus_store();
+    crate::service::index_identity::bump_with_pending(
+        &index_id.0,
+        corpus.as_deref(),
+        "staged_corpus_discarded",
+    )
 }
 
 /// Record in the live corpus that a reindex just committed it (#9169).

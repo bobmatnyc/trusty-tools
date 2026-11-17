@@ -23,6 +23,8 @@ mod auth_cost;
 mod daemon_serve_drain;
 // #9121: a test daemon's environment carries no inherited secret.
 mod architect_floor_host;
+// #10459: every Architect launch seam refuses an old Claude Code before any write.
+mod architect_version_refusal_10459;
 mod daemon_env_isolation;
 mod inproject_cold_start;
 mod inproject_git_failure;
@@ -33,10 +35,14 @@ mod owner_config_8988;
 mod owner_launch_config_8988;
 mod pane_launch_line_8233;
 mod prompt_refusal_before_post_8286;
+// #8878 PR2a: `TRUSTY_SANDBOX=1` alone keeps the presence key in the Keychain.
+mod presence_key_sandbox_8878;
 mod scratch_home_tmux_gate;
 mod scratch_root_tmux_gate;
 mod session_manager_mvp;
 mod session_new_requires_a_local_path;
+// #10476: a bridge-spawned session records its parent; a bad parent is dropped.
+mod session_parent_link_10476;
 mod standalone_isolation;
 mod test_session_lifecycle;
 mod worktree_disk_usage_gate;

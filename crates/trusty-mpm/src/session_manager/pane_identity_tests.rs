@@ -1,6 +1,6 @@
 //! Tests for #9004's pane identity: the strict parse and the capture.
 
-use super::{PaneIdentity, capture};
+use super::{PaneFacts, PaneIdentity, capture};
 use crate::session_manager::{ManagedError, ManagedTmuxDriver};
 
 #[test]
@@ -41,6 +41,28 @@ fn a_missing_pane_answer_is_rejected() {
             PaneIdentity::parse("%3", line).is_err(),
             "{line:?} parsed as an identity"
         );
+    }
+}
+
+/// #10442: a whole facts line parses, a path may hold `|`, and a missing
+/// pane's empty fields or any malformed field is an `Err`.
+#[test]
+fn a_pane_facts_line_parses_only_when_whole() {
+    let facts = PaneFacts::parse("%3", "$2|1791300000|/tmp/a|b\n").expect("parses");
+    assert_eq!(
+        (facts.session_id.as_str(), facts.session_created),
+        ("$2", 1_791_300_000)
+    );
+    assert_eq!(facts.current_path, std::path::PathBuf::from("/tmp/a|b"));
+    for line in [
+        "||",
+        "",
+        "$2|1791300000|",
+        "2|1791300000|/tmp",
+        "$2|x|/tmp",
+        "$2|/tmp",
+    ] {
+        assert!(PaneFacts::parse("%3", line).is_err(), "{line:?} parsed");
     }
 }
 
@@ -85,13 +107,17 @@ fn capture_pairs_the_pane_with_its_server() {
     };
     assert_eq!(
         capture(&tmux, "s"),
-        (Some("%7".into()), Some("4242:1790954333".into()))
+        (
+            Some("%7".into()),
+            Some("4242:1790954333".into()),
+            Some("$1".into())
+        )
     );
     let none = CaptureDriver {
         pane: None,
         identity: Some("%7|$1|4242:1790954333|s"),
     };
-    assert_eq!(capture(&none, "s"), (None, None));
+    assert_eq!(capture(&none, "s"), (None, None, None));
 }
 
 /// A failed or malformed server read stores the pane with no server, so the
@@ -111,7 +137,7 @@ fn capture_without_a_readable_server_stores_no_server() {
         };
         assert_eq!(
             capture(&tmux, "s"),
-            (Some("%7".into()), None),
+            (Some("%7".into()), None, None),
             "{identity:?}"
         );
     }
@@ -144,7 +170,7 @@ fn the_real_driver_reads_a_live_pane_identity() {
         &trusty_common::tmux::exact_window_target(&name),
         "#{pane_id} #{pid}:#{start_time}",
     ]);
-    let (pane, live_server) = capture(&driver, &name);
+    let (pane, live_server, _) = capture(&driver, &name);
 
     let pane = pane.expect("the live session has a pane");
     assert_eq!(
@@ -155,4 +181,8 @@ fn the_real_driver_reads_a_live_pane_identity() {
     assert_eq!(identity.session_name, name);
     assert!(identity.session_id.starts_with('$'), "{identity:?}");
     assert!(driver.pane_identity("%999999").is_err());
+    // #10442: the facts name the same session, read by pane id.
+    let facts = driver.pane_facts(&pane).expect("a live pane's facts");
+    assert_eq!(facts.session_id, identity.session_id);
+    assert!(driver.pane_facts("%999999").is_err());
 }

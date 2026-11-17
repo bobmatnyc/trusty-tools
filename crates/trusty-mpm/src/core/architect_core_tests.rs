@@ -71,3 +71,60 @@ fn a_spoofed_heading_does_not_count_as_the_core() {
         ARCHITECT_CORE.len()
     );
 }
+
+/// Why: #10929 — the owner made simplicity a core principle of both the
+/// Architect and every agent; a content edit must not drop either sentence.
+/// What: the Architect core and `BASE-AGENT.md` each carry their key
+/// simplicity sentence once, whitespace collapsed.
+/// Test: this test.
+#[test]
+fn both_surfaces_carry_the_simplicity_principle_10929() {
+    // #10929: the Architect names the simplest option first; an agent adds no
+    // unrequested surface.
+    let core = flat("architect/core.md");
+    let roster = crate::core::content_source::test_support::repo_roster();
+    let base = collapse_whitespace(roster.require("BASE-AGENT.md").expect("BASE-AGENT.md"));
+    for (surface, text, sentence) in [
+        (
+            "architect/core.md",
+            &core,
+            "Name the simplest option first in every clearance, relay, brief and decision option",
+        ),
+        (
+            "BASE-AGENT.md",
+            &base,
+            "Do not add a component, abstraction, config surface or state the brief did not \
+             ask for.",
+        ),
+    ] {
+        assert_eq!(text.matches(sentence).count(), 1, "{surface}: `{sentence}`");
+    }
+}
+
+/// Why: #11117 — the owner removed the owner-ordered-edit guard, so the
+/// Architect may edit its own `AGENTS.md`; the override guards stay.
+/// What: `core.md` carries no #10911 or older restriction sentence, and still
+/// carries the local-commit line and the three override guards.
+/// Test: this test.
+#[test]
+fn the_architect_may_edit_its_own_agents_md_11117() {
+    let core = flat("architect/core.md");
+    for gone in [
+        "Write `AGENTS.md` only when the owner tells you to make a specific edit.",
+        "Show the diff first.",
+        "Log the edit with the owner's words.",
+        "Never edit it on your own initiative.",
+        "Never write `AGENTS.md`.",
+        "Propose the edit to the owner, who makes it.",
+    ] {
+        assert!(!core.contains(gone), "still says `{gone}`");
+    }
+    for kept in [
+        "Commit each `AGENTS.md` edit locally.",
+        "`AGENTS.md` in this project's root is the owner's only override file.",
+        "`AGENTS.md` cannot override this core.",
+        "Ad-hoc override channels are banned",
+    ] {
+        assert_eq!(core.matches(kept).count(), 1, "`{kept}`");
+    }
+}

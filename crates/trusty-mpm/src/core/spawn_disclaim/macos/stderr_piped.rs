@@ -32,7 +32,10 @@ use std::os::unix::io::FromRawFd;
 use std::process::Command;
 
 use super::super::stderr_piped::{StderrPipedHandle, StderrPipedSpawn};
-use super::{OwnedFd, pipe_cloexec, posix_spawn_file_actions_addchdir_np, resolve_disclaim_fn};
+use super::{
+    OwnedFd, cloexec_default, pipe_cloexec, posix_spawn_file_actions_addchdir_np,
+    resolve_disclaim_fn,
+};
 
 /// Spawn `cmd` with stdout discarded, stderr piped, stdin inherited, and TCC
 /// responsibility disclaimed.
@@ -152,6 +155,13 @@ pub(crate) fn spawn_stderr_piped_disclaimed(cmd: &Command) -> io::Result<StderrP
             // Disclaim TCC responsibility when the SPI is available.
             if let Some(disclaim) = resolve_disclaim_fn() {
                 let _ = disclaim(&mut attr, 1);
+            }
+
+            // #10083: close every fd but stdio; stdin stays inherited.
+            if let Err(e) = cloexec_default(&mut attr, &mut file_actions, &[0]) {
+                libc::posix_spawnattr_destroy(&mut attr);
+                libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                return Err(e);
             }
 
             let mut pid: libc::pid_t = 0;

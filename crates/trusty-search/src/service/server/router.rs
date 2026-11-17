@@ -132,6 +132,10 @@ pub struct CreateIndexRequest {
     /// Glob patterns to exclude on top of the built-in ignores.
     #[serde(default)]
     pub exclude_globs: Option<Vec<String>>,
+    /// Exclude profile name (#10532). Absent: `std-v1`. Used only when
+    /// `exclude_globs` is empty or absent; any other name is `400`.
+    #[serde(default)]
+    pub profile: Option<String>,
     /// Extension allow-list (e.g. `["rs", "py"]`, without leading dot).
     #[serde(default)]
     pub extensions: Option<Vec<String>>,

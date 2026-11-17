@@ -66,6 +66,8 @@ struct Scene {
 fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::for_adopted_tmux_name(tmux_name),
         tmux_name: tmux_name.to_owned(),
         cwd: workspace.map(Path::to_path_buf).unwrap_or_default(),
@@ -94,6 +96,7 @@ fn record(tmux_name: &str, workspace: Option<&Path>) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

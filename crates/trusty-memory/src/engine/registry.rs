@@ -34,6 +34,9 @@ use std::time::Duration;
 #[path = "registry_rename.rs"]
 mod rename;
 pub use rename::PalaceRenameError;
+// #10989: an unload answers unloaded only once the palace's files are closed.
+#[cfg(feature = "server")]
+pub(crate) use rename::await_files_closed;
 #[cfg(feature = "server")]
 pub(crate) use rename::{DEFAULT_RENAME_BUSY_WAIT, RenameOptions, RenameOutcome};
 
@@ -80,6 +83,27 @@ pub(crate) fn max_open_palaces_from_env() -> usize {
 /// What: A compile-time constant; overridable per-instance.
 /// Test: `lru_evicts_least_recently_used` forces eviction below this limit.
 pub(crate) const DEFAULT_MAX_OPEN_PALACES: usize = 64;
+
+/// A palace open gave up waiting for the palace's open lock (#3992).
+///
+/// Why (#11255): a recall that joined a shared open must tell this bound,
+/// which says "the palace is busy, try again", apart from a real open failure.
+/// What: the wait that elapsed, under the same message the untyped error had.
+/// Test: `a_joiner_past_the_open_queue_bound_answers_palace_opening`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "palace '{palace}' open queue timed out after {waited:?} \
+     waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
+     another process may be holding the lock persistently — stop it, or raise \
+     TRUSTY_OPEN_QUEUE_TIMEOUT_SECS (and TRUSTY_WRITE_OP_BUDGET_SECS, which caps \
+     the whole operation — issue #4002) if this is expected under heavy contention"
+)]
+pub(crate) struct OpenQueueTimeout {
+    /// The palace whose open lock was contended.
+    pub(crate) palace: PalaceId,
+    /// The queue wait that elapsed.
+    pub(crate) waited: Duration,
+}
 
 /// Concurrent palace registry with LRU-bounded open-handle cache (issue #463).
 ///
@@ -713,15 +737,13 @@ impl PalaceRegistry {
         // `open_palace_within`, `queue_wait` is what the operation's joint
         // budget has left after the write-lock leg, so the two waits no longer
         // sum.
-        let _open_guard = open_lock.try_lock_for(queue_wait).ok_or_else(|| {
-            anyhow::anyhow!(
-                "palace '{effective_id}' open queue timed out after {queue_wait:?} \
-                 waiting behind other callers retrying a redb write-lock conflict (issue #3992); \
-                 another process may be holding the lock persistently — stop it, or raise \
-                 TRUSTY_OPEN_QUEUE_TIMEOUT_SECS (and TRUSTY_WRITE_OP_BUDGET_SECS, which caps \
-                 the whole operation — issue #4002) if this is expected under heavy contention"
-            )
-        })?;
+        // #11255: typed, so a recall joiner can answer it as retryable.
+        let _open_guard = open_lock
+            .try_lock_for(queue_wait)
+            .ok_or_else(|| OpenQueueTimeout {
+                palace: effective_id.clone(),
+                waited: queue_wait,
+            })?;
         // Re-check under the open lock: another racer may have opened it while
         // we waited for the lock.
         if let Some(h) = self.get(&effective_id) {

@@ -26,6 +26,17 @@ impl TmuxDriver {
         )
     }
 
+    /// The raw [`PANE_FACTS_FORMAT`] line tmux prints for `pane_id`
+    /// (#10442); `Err` as [`Self::pane_identity_line`] does.
+    ///
+    /// [`PANE_FACTS_FORMAT`]: crate::session_manager::pane_identity::PANE_FACTS_FORMAT
+    pub fn pane_facts_line(&self, pane_id: &str) -> Result<String> {
+        self.pane_display_line(
+            pane_id,
+            crate::session_manager::pane_identity::PANE_FACTS_FORMAT,
+        )
+    }
+
     /// The process tmux reports in the foreground of pane `pane_id` (#9566).
     ///
     /// What: `display-message -t %N -p '#{pane_current_command}'`, trimmed;
@@ -60,14 +71,15 @@ impl TmuxDriver {
     /// spawn failure, a non-zero exit, or a listing that does not parse whole.
     /// Test: `parse_session_panes_accepts_only_a_whole_listing`.
     pub fn session_panes(&self, name: &str) -> Result<Vec<crate::daemon::orphan_gc::PaneInfo>> {
-        let argv = [
+        // See #10101: the listing goes to this driver's server.
+        let argv = self.server_argv([
             "list-panes".to_owned(),
             "-s".to_owned(),
             "-t".to_owned(),
             crate::core::tmux::exact_window_target(name),
             "-F".to_owned(),
             SESSION_PANES_FORMAT.to_owned(),
-        ];
+        ]);
         let output = crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?;
         if !output.status.success() {
             return Err(Error::Protocol(format!(
@@ -92,7 +104,11 @@ impl TmuxDriver {
         // #9004: a pane id is exact without a session, so the session part of
         // the target is never rendered.
         let target = TmuxTarget::pane("", pane_id);
-        let argv = crate::core::tmux::display_message_argv(Some(&target), format);
+        // See #10101: the read goes to this driver's server.
+        let argv = self.server_argv(crate::core::tmux::display_message_argv(
+            Some(&target),
+            format,
+        ));
         let output = crate::core::tmux::run_tmux_argv_with_bin(&self.tmux_path, &argv)?;
         if !output.status.success() {
             return Err(Error::Protocol(format!(

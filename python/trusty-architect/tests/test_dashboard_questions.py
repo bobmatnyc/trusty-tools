@@ -34,6 +34,7 @@ def run(page, body, whole=False):
     src = open(page, encoding="utf-8").read()
     pure = re.search(r"/\* BEGIN questions \*/(.*?)/\* END questions \*/", src, re.S).group(1)
     pure += re.search(r"/\* BEGIN docPaths \*/(.*?)/\* END docPaths \*/", src, re.S).group(1)
+    pure += re.search(r"/\* BEGIN brief \*/(.*?)/\* END brief \*/", src, re.S).group(1)   # briefSlot
     pure += re.search(r"/\* BEGIN planView \*/(.*?)/\* END planView \*/", src, re.S).group(1)   # groupSources / groupInto for grouped links
     ui = ""
     if whole:
@@ -46,8 +47,11 @@ const linkify = (p, t) => { p.appendChild(el("span", null, t)); return p; };
 const docOf = (r) => { const m = /^([^/]+)\/(docs\/briefs\/.+\.md)$/.exec(txt(r)); return m ? { project: m[1], path: m[2] } : null; };
 const fillList = (box, nodes) => { box.children = nodes; };
 let readOnly = false, written = [];
+const paneQ = {}, paneFilter = () => () => true;   /* the pane filter, unset here (test_dashboard_pane_filter.py covers it) */
 const window = { DocReader: { open: () => {} } };
-const rows = { "list-ques": el("div"), "list-quz": el("div") };
+const document = { createElementNS: (ns, t) => new N(t), querySelectorAll: () => [] }; const fetch = () => new Promise(() => {});
+N.prototype.querySelector = function (s) { return this.find((n) => n.className === s.slice(1))[0]; }; N.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+const rows = { "list-ques": el("div"), "list-quz": el("div"), "list-qpd": el("div") };
 const $ = (id) => rows[id] || el("span");
 const db = { collection: () => ({ doc: (id) => ({ get: async () => ({ version: 5 }), update: async (p, o) => { written.push([id, p, o]); } }) }) };
 """ + pure + "\n" + ui + "\n" + body
@@ -78,21 +82,25 @@ class TestQuestionsPage(unittest.TestCase):
         const docs = [
           { id: "Q00", status: "open", answered_at: "2026-10-14T01:00:00Z" },
           { id: "Q01", status: "open", answered_at: "2026-10-14T03:00:00Z" },
-          { id: "Q02", status: "cleared", cleared_at: "2026-10-14T02:00:00Z" }];
+          { id: "Q02", status: "cleared", cleared_at: "2026-10-14T02:00:00Z" },
+          { id: "Q03", status: "answered", answered_at: "2026-10-14T05:00:00Z" },
+          { id: "Q04", status: "pending", asked_at: "2026-10-14T06:00:00Z" },
+          { id: "Q05", status: "pending", asked_at: "2026-10-14T07:00:00Z" }];
         for (let i = 0; i < 25; i++) docs.push({ id: "Q" + (16 + i).toString(16), status: "cleared", cleared_at: "2026-10-13T00:" + String(i).padStart(2, "0") + ":00Z" });
         const L = questionLists(docs);
         console.log(JSON.stringify([L.open.map((q) => q.id), L.cleared.length, L.cleared[0].id,
           mdSplit("see [the doc](https://x.io/a?b=1) now, [bad](javascript:alert(1))"),
-          clearPatch(new Date(0)), restorePatch(new Date(0))]));"""
+          clearPatch(new Date(0)), restorePatch(new Date(0)), L.pending.map((q) => q.id)]));"""
         for r in self.each(body):
-            self.assertEqual(r[0], ["Q01", "Q00"])           # newest answered_at first, cleared docs excluded
+            self.assertEqual(r[0], ["Q03", "Q01", "Q00"])     # answered + legacy open, newest answered_at first, pending and cleared excluded
+            self.assertEqual(r[6], ["Q05", "Q04"])           # Pending: newest asked first
             self.assertEqual(r[1], 20)                        # Cleared bucket keeps the last 20
             self.assertEqual(r[2], "Q02")
             self.assertEqual(r[3][1], {"t": "the doc", "href": "https://x.io/a?b=1"})
             self.assertTrue(all("href" not in p or p["href"].startswith("https://") for p in r[3]))
             self.assertEqual(r[3][2]["t"], " now, [bad](javascript:alert(1))")   # a non-http target stays text
             self.assertEqual(r[4], {"status": "cleared", "cleared_at": "1970-01-01T00:00:00.000Z", "updated": "1970-01-01T00:00:00.000Z"})
-            self.assertEqual(r[5], {"status": "open", "cleared_at": "", "updated": "1970-01-01T00:00:00.000Z"})
+            self.assertEqual(r[5], {"status": "answered", "cleared_at": "", "updated": "1970-01-01T00:00:00.000Z"})
 
     def test_row_render_and_clear_restore_writes(self):
         body = """
@@ -104,18 +112,30 @@ class TestQuestionsPage(unittest.TestCase):
         const open = rows["list-ques"].children, cleared = rows["list-quz"].children;
         const anchors = open[0].find((n) => n.tagName === "a");
         const btn = (card, label) => card.find((n) => n.tagName === "button" && n.textContent === label)[0];
-        btn(open[0], "Clear").listeners.click();
-        btn(cleared[0], "Restore").listeners.click();
+        btn(open[0], "Mark read").listeners.click();
+        btn(cleared[0], "Mark unread").listeners.click();
         setTimeout(() => console.log(JSON.stringify([open.length, cleared.length, open[0].textContent.includes("where is the flyr doc?"),
-          anchors.map((a) => [a.href, a.target, a.rel]), btn(open[0], "Read brief") ? 1 : 0, written])), 10);"""
+          anchors.map((a) => [a.href, a.target, a.rel]), btn(open[0], "Read brief") ? 1 : 0, open[0].find((n) => n.className.includes("brief-slot-btn")).length, written])), 10);"""
         for r in self.each(body, whole=True):
             self.assertEqual((r[0], r[1], r[2]), (1, 1, True))
             self.assertEqual(r[3], [["https://docs.google.com/d/1", "_blank", "noopener"]] * 2)   # answer link + Doc button; javascript: dropped
-            self.assertEqual(r[4], 1)
-            (cid, cp, co), (rid, rp, ro) = r[5]
+            self.assertEqual(r[4], 0)   # the old "Read brief" button is gone
+            self.assertEqual(r[5], 1)   # the brief slot button replaces it
+            (cid, cp, co), (rid, rp, ro) = r[6]
             self.assertEqual((cid, cp["status"], co), ("Q00", "cleared", {"if_version": 5}))
             self.assertTrue(cp["cleared_at"].endswith("Z"))
-            self.assertEqual((rid, rp["status"], ro), ("Q01", "open", {"if_version": 5}))
+            self.assertEqual((rid, rp["status"], ro), ("Q01", "answered", {"if_version": 5}))
+
+    def test_pending_row_renders_in_pending_bucket_and_clear_all_skips_it(self):
+        body = """
+        questions = [
+          { id: "Q00", status: "pending", asked: "why?", answer: "holding note", asked_at: "2026-10-14T04:20:00Z" },
+          { id: "Q01", status: "answered", asked: "where?", answer: "here", answered_at: "2026-10-14T04:20:00Z" }];
+        renderQuestions();
+        console.log(JSON.stringify([rows["list-qpd"].children.length, rows["list-ques"].children.length,
+          rows["list-qpd"].children[0].textContent.includes("pending"), questionLists(questions).open.map((q) => q.id)]));"""
+        for r in self.each(body, whole=True):
+            self.assertEqual(r, [1, 1, True, ["Q01"]])   # Clear all (questionLists().open) acts on Answered only
 
     def test_open_question_card_is_not_faded(self):
         for page in PAGES:
@@ -140,6 +160,8 @@ class TestStoreSide(unittest.TestCase):
     def test_schema_accepts_and_rejects(self):
         ok = self.doc(links=[{"label": "Doc", "url": "https://x.io"}], brief="architect/docs/briefs/x.md", cleared_at="", session="tm-x", asked_at=ISO)
         self.assertEqual(schema.validate("questions", "Q00", ok), [])
+        for good in (self.doc(status="pending", answered_at=""), self.doc(status="answered"), self.doc(status="cleared"), self.doc(status="open")):
+            self.assertEqual(schema.validate("questions", "Q00", good), [], good)   # "open" is the legacy spelling of answered
         for bad in (self.doc(status="done"), self.doc(links=[{"label": "d", "url": "javascript:x"}]), self.doc(extra=1)):
             self.assertTrue(schema.validate("questions", "Q00", bad))
 
@@ -170,6 +192,7 @@ def test_tally_suffix_only_when_answers_wait(tmp_path, capsys):
     _put(tmp_path, "questions", "Q00", status="open")
     _put(tmp_path, "questions", "Q01", status="open")
     _put(tmp_path, "questions", "Q02", status="cleared")
+    _put(tmp_path, "questions", "Q03", status="pending")   # pending is no answer waiting
     assert db.main(["--root", str(tmp_path), "tally"]) == 0
     assert capsys.readouterr().out == "1 open dashboard item: 1 question, 0 actions, 0 tasks, 2 answers waiting\n"
 

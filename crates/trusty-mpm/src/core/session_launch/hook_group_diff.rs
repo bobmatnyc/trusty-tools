@@ -65,7 +65,7 @@ pub(crate) fn project_hook_additions_for(
 ) -> Result<Value, StableHookExeError> {
     let config = crate::core::config::MpmConfig::load(&fw.root);
     let plan = crate::core::mcp_session_env::resolve_plan(fw, project_dir);
-    super::project_hooks::project_managed_hook_additions_with_pm_guard(
+    super::project_hooks::project_managed_hook_additions_for_profile(
         exe_override,
         config.hooks.prompt_context,
         plan.divert_enabled,
@@ -79,6 +79,8 @@ pub(crate) fn project_hook_additions_for(
         ),
         // #9018: `[pm_guard] enabled`, from the same `fw.root` config.
         config.pm_guard.enabled,
+        // #10459: the Architect's resume and doctor expect what its launch wrote.
+        super::architect_hooks::ArchitectHooks::for_project(project_dir, &config),
     )
 }
 
@@ -249,8 +251,9 @@ fn event_commands(val: &Value, event: &str) -> Vec<String> {
                 .iter()
                 .filter_map(|group| group.get("hooks").and_then(Value::as_array))
                 .flatten()
-                .filter_map(|entry| entry.get("command").and_then(Value::as_str))
-                .map(str::to_string)
+                // #10459: an exec-form entry reads as its joined argv.
+                .filter_map(crate::core::standalone::hooks::hook_entry_command_line)
+                .map(std::borrow::Cow::into_owned)
                 .collect()
         })
         .unwrap_or_default()

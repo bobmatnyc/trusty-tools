@@ -11,31 +11,35 @@
 //! `verbs[]` (from `<binary> version --json`), then spawn the binary with the
 //! forwarded args and DOC-5 §4.2 `--json` flag.
 //!
-//! Test: `run(&["trusty-search", "doctor"], false)` does not panic;
-//! `run(&[], false)` prints the usage-error message (exit 3 in Phase 1).
+//! Test: `every_stub_path_returns_not_implemented`;
+//! `health_passthrough_stub_exits_non_zero` (tests/passthrough_stub_exit.rs).
 
 use crate::output;
+
+/// Exit code for a passthrough that is not implemented yet.
+// #10585: a stub that exits 0 reads as a passing check to install validation.
+pub const EXIT_NOT_IMPLEMENTED: i32 = 2;
 
 /// Handle the generic passthrough `tctl <tool> <verb> [args]`.
 ///
 /// Why: Phase-0 entry point that confirms the passthrough slot is wired in the
-/// dispatcher.
+/// dispatcher, without letting a caller mistake the stub for success (#10585).
 ///
 /// What: `args[0]` is the member id; `args[1]` is the verb; remaining tokens
-/// are forwarded as-is. In Phase 0, any non-empty call returns a stub result.
-/// An empty `args` slice indicates a usage error.
+/// are forwarded as-is. In Phase 0 every call prints the stub result and
+/// returns [`EXIT_NOT_IMPLEMENTED`] for the process exit code.
 ///
-/// Test: Call with `args = ["trusty-search", "doctor"]`; should not panic.
-/// Call with `args = []`; should print a usage-error message.
-pub fn run(args: &[String], json: bool) {
+/// Test: `every_stub_path_returns_not_implemented`.
+pub fn run(args: &[String], json: bool) -> i32 {
     if args.len() < 2 {
         output::print_not_yet_implemented("passthrough (usage: tctl <tool> <verb> [args])", json);
-        return;
+        return EXIT_NOT_IMPLEMENTED;
     }
     let tool = &args[0];
     let verb = &args[1];
     let label = format!("{tool} {verb} (passthrough)");
     output::print_not_yet_implemented(&label, json);
+    EXIT_NOT_IMPLEMENTED
 }
 
 #[cfg(test)]
@@ -43,17 +47,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn two_args_does_not_panic() {
-        run(&["trusty-search".to_owned(), "doctor".to_owned()], false);
-    }
-
-    #[test]
-    fn empty_args_does_not_panic() {
-        run(&[], false);
-    }
-
-    #[test]
-    fn json_mode_does_not_panic() {
-        run(&["trusty-memory".to_owned(), "health".to_owned()], true);
+    fn every_stub_path_returns_not_implemented() {
+        let two = ["trusty-search".to_owned(), "doctor".to_owned()];
+        assert_eq!(run(&two, false), EXIT_NOT_IMPLEMENTED);
+        assert_eq!(run(&two, true), EXIT_NOT_IMPLEMENTED);
+        assert_eq!(run(&[], false), EXIT_NOT_IMPLEMENTED);
+        assert_ne!(EXIT_NOT_IMPLEMENTED, 0);
     }
 }

@@ -18,12 +18,12 @@
 
 use std::collections::BTreeSet;
 
+use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use trusty_gworkspace::api::client::BaseClient;
-use trusty_kb::okg::ingest::{IngestReport, SourceItem};
-use trusty_kb::okg::ledger::Ledger;
-use trusty_kb::okg::registry::{Locator, SourceSpec};
+use trusty_okf::build::ingest::{IngestReport, SourceItem};
+use trusty_okf::build::ledger::Ledger;
 
 use crate::tools::okg::gapi;
 use crate::tools::okg::{arg_str, now_iso, ok_json, require_str, resolve_store, with_root};
@@ -228,13 +228,9 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
     report.scanned = files.len();
 
     // Make the downloaded files findable — fail-open, never silent (#3892).
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

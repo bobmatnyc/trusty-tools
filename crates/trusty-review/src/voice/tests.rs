@@ -9,6 +9,12 @@
 
 use super::{loader::VoiceLoader, principles::principles_addendum, types::*};
 
+/// The checkout's principles addendum, read from the staged content (#9991).
+fn principles() -> String {
+    principles_addendum(&crate::runtime_content::test_support::staged())
+        .expect("the checkout ships the principles")
+}
+
 // ── VoicePackage serde round-trip ─────────────────────────────────────────────
 
 /// Verify a hand-crafted TOML round-trips through VoicePackage correctly.
@@ -153,10 +159,10 @@ fn effective_addendum_custom_replace() {
 /// Why: a silent empty principles layer would silently degrade review quality
 /// without triggering any error.
 /// What: asserts the principles text covers the key concepts from #756.
-/// Test: no network, no filesystem.
+/// Test: reads the staged content (#9991); no network.
 #[test]
 fn principles_addendum_is_non_empty() {
-    let p = principles_addendum();
+    let p = principles();
     assert!(!p.is_empty(), "principles addendum must not be empty");
     assert!(p.len() > 100, "principles addendum must be substantive");
 }
@@ -170,7 +176,7 @@ fn principles_addendum_is_non_empty() {
 /// Test: no network.
 #[test]
 fn principles_contains_key_concepts() {
-    let p = principles_addendum();
+    let p = principles();
     // Priority ordering (design/correctness first).
     assert!(
         p.contains("correctness") || p.contains("design"),
@@ -209,7 +215,7 @@ fn principles_contains_key_concepts() {
 /// Test: no network.
 #[test]
 fn principles_contains_do_not_flag_guardrails() {
-    let p = principles_addendum();
+    let p = principles();
     assert!(
         p.contains("Do NOT flag"),
         "principles must carry the do-not-flag section"

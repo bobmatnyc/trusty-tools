@@ -293,6 +293,74 @@ fn status_binding_needs_the_record_and_the_same_session() {
     unbound(binding(None, LIVE_ME), "could not be read");
 }
 
+/// #10448: a running, stamped session whose `claude` has no launch record is
+/// UNBOUND, and the setup is not `complete`; the record makes it complete.
+#[test]
+fn status_is_complete_only_when_the_architect_is_bound() {
+    use trusty_mpm::core::session_profile::ARCHITECT_WRITTEN_PROFILE_ID;
+    const STAMPED_HERE: Probe = Probe {
+        stamp: |_| Some(ARCHITECT_WRITTEN_PROFILE_ID.to_owned()),
+        ..LIVE_HERE
+    };
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("init");
+    let canonical = std::fs::canonicalize(h.dir()).expect("canonical dir");
+    HERE.with(|here| *here.borrow_mut() = canonical);
+
+    let report = h.status(None, STAMPED_HERE);
+    let text = report.render();
+    assert!(report.checks.iter().all(|c| c.ok), "{text}");
+    assert!(!report.binding.ok, "{text}");
+    assert!(
+        !report.complete,
+        "an unbound Architect is not complete: {text}"
+    );
+    assert!(text.contains("UNBOUND  binding"), "{text}");
+    assert!(
+        text.contains("incomplete: the Architect is not bound"),
+        "{text}"
+    );
+
+    let root = h.home().join(".trusty-mpm");
+    record_launch(&root, std::process::id(), &h.dir(), "tm-architect").expect("record");
+    let report = h.status(None, STAMPED_HERE);
+    let text = report.render();
+    assert!(report.binding.ok, "{text}");
+    assert!(report.complete, "{text}");
+    assert!(text.contains("ok       binding"), "{text}");
+    assert!(text.ends_with("\ncomplete\n"), "{text}");
+}
+
+/// #9092: a live session whose `claude` has no launch record prints a
+/// warning naming the PID; the record silences it, and so does a session
+/// with no `claude` or no live pane.
+#[test]
+fn status_warns_when_the_live_claude_has_no_launch_record_9092() {
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("init");
+    let me = std::process::id();
+
+    let report = h.status(None, LIVE_ME);
+    let text = report.render();
+    let warning = report.unrecorded.as_deref().expect("a warning");
+    assert!(warning.contains(&format!("pid {me}")), "{text}");
+    assert!(warning.contains(&format!("{me}.architect")), "{text}");
+    assert!(text.contains("WARNING: the live `claude` pid"), "{text}");
+
+    let no_claude = Probe {
+        claude: |_| None,
+        ..LIVE_ME
+    };
+    assert!(h.status(None, no_claude).unrecorded.is_none());
+    assert!(h.status(None, NO_TMUX).unrecorded.is_none());
+
+    let root = h.home().join(".trusty-mpm");
+    record_launch(&root, me, &h.dir(), "tm-architect").expect("record");
+    let report = h.status(None, LIVE_ME);
+    assert!(report.unrecorded.is_none(), "{}", report.render());
+    assert!(!report.render().contains("WARNING"), "{}", report.render());
+}
+
 thread_local! {
     /// The directory a [`LIVE_HERE`] session runs in.
     static HERE: RefCell<PathBuf> = const { RefCell::new(PathBuf::new()) };
@@ -346,6 +414,36 @@ fn a_running_unbound_session_is_reported_by_init() {
         "{}",
         bound.render()
     );
+}
+
+/// #10357 fail closed: `init` with launch on, beside a running Architect no
+/// launch record binds, starts no poller and says why. The poller's pane
+/// reads `Unknown`, so pre-fix code fails the step without reaching tmux.
+#[test]
+fn an_unbound_init_never_starts_the_poller() {
+    const UNBOUND_HERE: Probe = Probe {
+        pane: |name| {
+            if name.ends_with("-poll") {
+                PaneState::Unknown("the test reaches no tmux".to_owned())
+            } else {
+                PaneState::Live(HERE.with(|h| h.borrow().clone()))
+            }
+        },
+        ..LIVE_HERE
+    };
+    let h = Home::new();
+    init(&h.dir(), h.home(), false, NO_TMUX).expect("first init");
+    let canonical = std::fs::canonicalize(h.dir()).expect("canonical dir");
+    HERE.with(|here| *here.borrow_mut() = canonical);
+
+    let report = init_with_session(&h.dir(), h.home(), true, UNBOUND_HERE, None).expect("init");
+    let text = report.render();
+    assert!(report.unbound && !report.failed(), "{text}");
+    assert!(
+        text.contains("the Architect is not bound, so tm-architect-poll was not started"),
+        "{text}"
+    );
+    assert!(report.registration.is_none(), "{text}");
 }
 
 /// Item 5: a rename refuses while only the recorded poller session exists.

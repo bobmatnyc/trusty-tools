@@ -93,7 +93,8 @@ struct MdAgentFrontmatter {
 /// serde_yaml, and uses the post-frontmatter body as the system prompt. Missing
 /// fields fall back to sane defaults: `role = "agent"`, generic model, runner
 /// = Subprocess. The resolver still applies `TAGENT_MODEL_*` / default env
-/// overrides through `resolve_model`.
+/// overrides through `resolve_model`. A non-`extends` agent a provider lock
+/// refuses is an error (#10978).
 /// Test: `md_agent_file_parses_frontmatter_and_body`,
 /// `registry_picks_up_md_files_alongside_toml`.
 pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
@@ -139,7 +140,7 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     let resolved_model = if fm.extends.is_some() {
         agent_model_raw
     } else {
-        crate::agents::resolve_model(&name, &agent_model_raw, None).0
+        crate::agents::resolve_model(&name, &agent_model_raw, None)?.0
     };
     let runner = match fm.runner.as_deref() {
         Some("claude-code") => RunnerKind::ClaudeCode,
@@ -174,7 +175,8 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         (0.2, 8192)
     };
 
-    Ok(AgentConfig {
+    let has_extends = fm.extends.is_some();
+    let cfg = AgentConfig {
         agent: AgentInfo {
             name,
             role: fm.role.unwrap_or_else(|| "agent".to_string()),
@@ -245,5 +247,12 @@ pub(crate) fn parse_md_agent(path: &Path) -> anyhow::Result<AgentConfig> {
         permissions: crate::agents::PermissionsConfig::default(),
         // #4026: no cross-product grants from an .md-sourced agent yet.
         subagents: crate::agents::SubagentsConfig::default(),
-    })
+    };
+    // #10978: this projection skips `apply_provider_pin`, so the lock is
+    // checked here. An `extends` child is checked after its merge, in
+    // `AgentConfig::finalize_extends`.
+    if !has_extends {
+        cfg.enforce_provider_lock(&crate::llm::provider_lock::active())?;
+    }
+    Ok(cfg)
 }

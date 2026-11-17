@@ -54,6 +54,7 @@ use super::pm_guard_deny_log::{DenyContext, audit_denied_tool};
 use super::pm_guard_response::{
     RewriteDecision, build_pm_guard_deny_response, build_rewrite_response,
 };
+use trusty_mpm::core::guard_policy;
 
 /// What the lease rule decided for one tool call.
 ///
@@ -126,17 +127,8 @@ pub(crate) fn decide_rewrite(
 ) -> (LeaseRewrite, Option<RewriteDecision>) {
     let lease = BuildLeaseConfig::load_default();
     let heavy = lease.effective_heavy_build_commands();
-    let rules = permission_rules(cwd);
-    if matches_any(command, &rules.deny) {
+    let Some(permission) = rewrite_permission(command, cwd) else {
         return (LeaseRewrite::None, None);
-    }
-    // #8261 round 3 (critic finding 3): an ask rule keeps the lease and asks.
-    let permission = if matches_any(command, &rules.ask) {
-        Some(RewriteDecision::Ask)
-    } else if matches_every_segment(command, &rules.allow) {
-        Some(RewriteDecision::Allow)
-    } else {
-        None
     };
     let mut prefix = format!("{} build-lease", tm_program_word());
     if let Some(wait) = wait_for_call(tool_input, lease.effective_lease_wait().as_secs()) {
@@ -149,6 +141,33 @@ pub(crate) fn decide_rewrite(
     let base = Some(cwd).filter(|c| c.is_absolute());
     let prefix_at = |at| lease_prefix(&prefix, text, at, base);
     (rewrite_for_lease_with(text, &heavy, &prefix_at), permission)
+}
+
+/// The permission decision a program-word rewrite of `command` carries.
+///
+/// Why: Claude Code matches its Bash permission rules against the rewritten
+/// command, whose first word is no longer the original program (module doc).
+/// #10973: the isolation-worktree compression rewrite has the same problem, so
+/// both rewrites decide from the original through this one function.
+/// What: `None` when the original matches a `deny` rule — the caller must not
+/// rewrite. Otherwise `Some(Ask)` on an `ask` match, `Some(Allow)` when every
+/// segment matches an `allow` rule, `Some(None)` when no rule decides.
+/// Test: `a_deny_rule_on_the_original_skips_the_rewrite`,
+/// `an_ask_rule_keeps_the_lease_and_asks`,
+/// `an_isolated_rewrite_skips_a_denied_command_and_keeps_an_allow`.
+pub(crate) fn rewrite_permission(command: &str, cwd: &Path) -> Option<Option<RewriteDecision>> {
+    let rules = permission_rules(cwd);
+    if matches_any(command, &rules.deny) {
+        return None;
+    }
+    // #8261 round 3 (critic finding 3): an ask rule keeps the lease and asks.
+    if matches_any(command, &rules.ask) {
+        Some(Some(RewriteDecision::Ask))
+    } else if matches_every_segment(command, &rules.allow) {
+        Some(Some(RewriteDecision::Allow))
+    } else {
+        Some(None)
+    }
 }
 
 /// The `updatedInput` response carrying `tool_input` with `command` replaced.
@@ -204,13 +223,15 @@ pub(crate) fn emit_allow(payload: &Value, cost_notice: Option<String>, rewrite: 
         return;
     };
     let context = cost_notice.filter(|_| super::pm_guard_cost::claim_warn_notice(payload));
-    println!(
-        "{}",
-        super::pm_guard_worktree_grant::with_additional_context(&rewrite, context.as_deref())
-    );
+    // #10600: recorded as printed, so a later guard failure adds no object.
+    super::pm_guard_refusal::emit(super::pm_guard_worktree_grant::with_additional_context(
+        &rewrite,
+        context.as_deref(),
+    ));
 }
 
-/// The check slug a build-lease refusal is recorded under (#8722).
+/// The check slug a build-lease refusal is recorded under (#8722); the
+/// [`guard_policy::BUILD_LEASE`] entry's rule (#10641).
 pub(crate) const DENY_CHECK: &str = "build-lease";
 
 /// Record a build-lease refusal, then render its deny response for stdout.
@@ -222,7 +243,7 @@ pub(crate) const DENY_CHECK: &str = "build-lease";
 /// Test: `a_lease_refusal_is_recorded_before_it_is_printed`.
 pub(crate) async fn deny_response(refused: &DenyContext<'_>, reason: &str) -> String {
     audit_denied_tool(refused, DENY_CHECK, reason).await;
-    build_pm_guard_deny_response(reason).to_string()
+    build_pm_guard_deny_response(&guard_policy::BUILD_LEASE, reason).to_string()
 }
 
 /// The Bash permission patterns, by kind.

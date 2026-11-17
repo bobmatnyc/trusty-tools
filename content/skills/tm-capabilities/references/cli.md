@@ -2,12 +2,13 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-70 top-level commands.
+71 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
+  - `attach` — Attach to the Architect's tmux session (switch-client inside tmux)
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
   - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
     - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
@@ -25,7 +26,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
+  - `restart` — Restart the Architect behind the checkpoint gate (#11365)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
+  - `up` — Bring the Architect up from any state, then attach (#11364)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present
@@ -71,7 +74,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `events` — Show the recent hook-event feed
 - `f` — Find a session by NAME, filtering as you type — `tm f [pattern]`
 - `fleet` — Set up and inspect the Architect, the one fleet supervisor per user
+  - `bind` — Bind the running Architect `claude` this command runs under (#8878)
   - `init` — Set up the Architect project and start its session
+  - `project` — Add, remove or list the projects the Architect watches (#10895)
+    - `add` — Watch a registered project: write its record, then add it to the list
+    - `list` — List the watched projects with their path, alias and live sessions
+    - `remove` — Stop watching a project; its record is kept and marked removed
   - `relaunch` — Restart the Architect's `claude` in its running session and bind it
   - `status` — Report whether the Architect is set up and running (read-only)
 - `generate` — Regenerate derived, committed artifacts from live harness surfaces (issue #2913)
@@ -140,16 +148,25 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `merge` — Squash-merge a PR with its validated body as the commit message
   - `open` — Validate a PR body against the nine-field contract, then open the PR
   - `queue-check` — Report, per open PR on a base branch, whether it is mergeable
+- `presence` — Prove you are at the Studio, so the Architect may write trust anchors
+  - `devices` — Enrolled presence devices (passkeys)
+    - `add` — Start enrolling a passkey device (INCOMPLETE until #8878 PR2b-2: no browser path finishes the ceremony yet)
+    - `list` — List enrolled devices
+    - `revoke` — Revoke a device: removes its record and every grant it approved. Needs Touch ID or the login password at the Studio first
+  - `local` — Approve the Architect's trust-anchor writes with Touch ID or the login password at this Mac
+  - `request` — Ask an enrolled device to approve this session's next trust-anchor write. Asks only; grants nothing. The action text is shown to the approver labelled "unverified origin". Approving needs the console page (#8878 PR2b-2)
+  - `wait` — Wait until this session holds a valid presence grant
 - `project` — Define and manage projects (registered working directories)
   - `info` — Show the current project's registered info and config
-  - `init` — Register a working directory as a trusty-mpm project
-  - `list` — List all registered projects with their status
+  - `init` — Register a working directory as a trusty-mpm project (deprecated: use `tm projects register`)
+  - `list` — List all registered projects with their status (deprecated: use `tm projects list`)
   - `trust` — Grant (or revoke) consent for a project's `[session] plugins` opt-ins
 - `projects` — Manage the project registry (registry B) and its Deliverable/Milestone ledger
   - `config` — View or edit a project's deterministic config (§3.1/§6, #2120)
     - `set` — Set a field to a new value
     - `tags` — Add and/or remove tags in one call (§6: "no free-text replace-whole-list footgun" — there is no plain tags-replace form)
     - `unset` — Clear (unset) a field back to absent
+  - `decommission` — Decommission a project: stop its running sessions and mark it decommissioned (#10988)
   - `deliverables` — Manage a project's Deliverables (§10.8)
     - `add` — Create a Deliverable (starts in `proposed`)
     - `list` — List a project's Deliverables (optionally filtered by status)
@@ -175,9 +192,10 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
-- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`. No verb prints a value
+- `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
-  - `copy` — Copy this project's keys from one backend to another
+  - `assign` — Copy one key of any trusty vault into a named project's scope
+  - `copy` — Copy keys into this project's scope from a backend
   - `doctor` — Report socket and backend reachability, never a value
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
@@ -205,6 +223,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
@@ -241,6 +260,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `activity` — Show recent activity for a managed session
   - `adopt-worktree` — Take over a worktree whose owning session or agent is dead (#6497)
   - `answer` — Answer a managed session's pending decision
+  - `archive` — Move a session's project directory to ~/.trusty-tools/archive (#10991)
   - `attach` — Print the tmux attach command for a managed session
   - `breakers` — Show every agent's circuit-breaker state
   - `catchup` — Print this session's resume context: the resolved snapshot plus live git status, or with `--full` the full catch-up digest (DOC-28 cutover bridge)
@@ -288,7 +308,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `status` — Show Telegram bot pairing status
   - `stop` — Stop the Telegram bot process if running
 - `ticket` — One-shot issue → branch → PR → close workflow (#1237)
-- `tui` — Launch the ratatui multipane TUI dashboard (projects / sessions / activity / actions)
+- `tui` — Launch the ratatui TUI on the console home screen (one tile per service; Enter on MPM opens the projects dashboard)
 - `update` — Refresh a loaded alias — pull latest and re-deploy managed config (DOC-24)
 - `validate` — Validate a workspace's deployed `.claude/{agents,skills}` payload and `settings.json` against the canonical bundled roster (issue #2158)
 - `wait` — Wait for a condition, in-turn, without blocking past the harness ceiling

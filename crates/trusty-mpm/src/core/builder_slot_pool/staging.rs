@@ -474,19 +474,7 @@ pub fn pool_status(root: &Path) -> Vec<RepoStatus> {
     let mut repos: Vec<RepoStatus> = repo_dirs(root)
         .into_iter()
         .map(|dir| {
-            let mut slots: Vec<(u32, bool)> = std::fs::read_dir(&dir)
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter_map(|e| {
-                            let name = e.file_name();
-                            let index = name.to_str()?.strip_prefix("slot-")?.parse().ok()?;
-                            Some((index, marker_reads_seeded(&e.path())))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            slots.sort_unstable();
+            let slots = repo_slots(&dir);
             let staging = staging_entries(&dir);
             RepoStatus {
                 dir,
@@ -497,6 +485,28 @@ pub fn pool_status(root: &Path) -> Vec<RepoStatus> {
         .collect();
     repos.sort_by(|a, b| a.dir.cmp(&b.dir));
     repos
+}
+
+/// Each `slot-<n>` under one repo's pool directory, by index, with whether
+/// its seed has committed. Read-only; an unreadable directory lists none.
+/// Test: `pool_status_lists_a_seed_in_progress_and_slot_states`,
+/// `only_seeded_slots_are_searched_10835`.
+#[must_use]
+pub fn repo_slots(repo_dir: &Path) -> Vec<(u32, bool)> {
+    let mut slots: Vec<(u32, bool)> = std::fs::read_dir(repo_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name();
+                    let index = name.to_str()?.strip_prefix("slot-")?.parse().ok()?;
+                    Some((index, marker_reads_seeded(&e.path())))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    slots.sort_unstable();
+    slots
 }
 
 #[cfg(test)]

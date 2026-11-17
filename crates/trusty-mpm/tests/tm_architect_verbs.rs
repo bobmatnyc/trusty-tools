@@ -259,6 +259,62 @@ fn quiet_binary_lists_names_and_fails_closed() {
     assert_eq!(stdout(&out), "tm-a\ntm-b\n");
 }
 
+/// `tm architect quiet` with no `ARCHITECT_PROJECT_DIR`, run from `cwd`.
+fn quiet_from(env: &VerbEnv, cwd: &Path) -> Output {
+    let mut cmd = env.command(&panes(), &["quiet"]);
+    cmd.env_remove("ARCHITECT_PROJECT_DIR").current_dir(cwd);
+    cmd.output().expect("run tm")
+}
+
+/// #10861: with no `ARCHITECT_PROJECT_DIR` and no recorded Architect, the
+/// list is `~/trusty-mpm-projects/architect/local/quiet-sessions.txt` from
+/// every cwd — the file the pollers read — never `<cwd>/local/...`.
+#[test]
+fn quiet_reads_the_architect_list_from_any_cwd() {
+    let env = VerbEnv::new();
+    let local = env.home.path().join("trusty-mpm-projects/architect/local");
+    std::fs::create_dir_all(&local).expect("local");
+    std::fs::write(local.join("quiet-sessions.txt"), "tm-b\ntm-a\n").expect("list");
+    let (one, two) = (
+        tempfile::tempdir().expect("cwd"),
+        tempfile::tempdir().expect("cwd"),
+    );
+    // A decoy list where the pre-#10861 rule looked.
+    std::fs::create_dir_all(one.path().join("local")).expect("decoy dir");
+    std::fs::write(one.path().join("local/quiet-sessions.txt"), "tm-decoy\n").expect("decoy");
+    for cwd in [one.path(), two.path()] {
+        let out = quiet_from(&env, cwd);
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+        assert_eq!(stdout(&out), "tm-a\ntm-b\n", "{}", text(&out));
+    }
+}
+
+/// #10861 error arm: a missing list fails closed (exit 1) and names the
+/// Architect's absolute path, not the cwd's.
+#[test]
+fn quiet_missing_list_names_the_architect_path_not_the_cwd() {
+    let env = VerbEnv::new();
+    let cwd = tempfile::tempdir().expect("cwd");
+    let out = quiet_from(&env, cwd.path());
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert_eq!(stdout(&out), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let want = env
+        .home
+        .path()
+        .join("trusty-mpm-projects/architect/local/quiet-sessions.txt");
+    assert!(
+        stderr.contains(&want.display().to_string()),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        !stderr.contains(&cwd.path().display().to_string()),
+        "{}",
+        text(&out)
+    );
+}
+
 #[test]
 fn self_ctx_binary_prints_tokens_and_fails_closed() {
     let env = VerbEnv::new();

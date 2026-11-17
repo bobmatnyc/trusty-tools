@@ -18,6 +18,9 @@ fn project(name: &str, repo_url: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -30,6 +33,8 @@ fn session(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tm-test".to_string(),
         cwd: PathBuf::from("/tmp"),
@@ -56,6 +61,7 @@ fn session(
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

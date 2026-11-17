@@ -53,24 +53,39 @@ pub(crate) async fn project(
 ) -> anyhow::Result<()> {
     match action {
         ProjectAction::Init { dir } => {
+            // #10586: deprecated (owner ruling 2026-10-31); stderr keeps stdout stable.
+            eprintln!("note: `tm project init` is deprecated; use `tm projects register`");
             let path = resolve_dir(dir)?;
-            let body: serde_json::Value =
-                trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
-                    .post("/projects")
-                    .json(&serde_json::json!({ "path": path }))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json()
-                    .await?;
+            let resp = trusty_mpm::client::DaemonClient::with_client(client.clone(), url)
+                .post("/projects")
+                .json(&serde_json::json!({ "path": path }))
+                .send()
+                .await?;
+            // #10586: a refused init (no `origin` remote) names its fix.
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let detail = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                    .unwrap_or(text);
+                anyhow::bail!("tm project init failed ({status}): {detail}");
+            }
+            let body: trusty_mpm::core::project::RegisterProjectResponse = resp.json().await?;
             let report = scaffold_project_dir(&path)?;
             for line in &report {
                 println!("  {line}");
             }
-            let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+            let name = &body.info.name;
             println!("registered project '{name}' at {}", path.display());
+            // #10586: a kept record is named, never reported as a silent write.
+            if let Some(kept) = &body.kept_existing {
+                println!("project registry: {}", kept.notice());
+            }
         }
         ProjectAction::List => {
+            // #10586: deprecated (owner ruling 2026-10-31).
+            eprintln!("note: `tm project list` is deprecated; use `tm projects list`");
             // #5994: rows come from the persistent registry, not the daemon's
             // in-memory session-derived project map.
             for row in list_rows(client, url).await? {

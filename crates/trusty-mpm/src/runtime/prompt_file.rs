@@ -122,6 +122,11 @@ pub(super) fn build_prompt_file_in(
         project_dir,
         &crate::core::config::MpmConfig::load(framework_root),
     );
+    // #10459: the adapter's spawn, resume and in-place relaunch of an Architect
+    // all build their prompt here; an old or unreadable Claude Code refuses them.
+    if let Err(err) = crate::core::architect_claude_version::require_for_profile(profile) {
+        return (Err(RuntimeError::Spawn(err.to_string())), profile);
+    }
     // #9012: the PM instructions are runtime content; none refuses the spawn.
     let content = match crate::core::content_source::framework_content_for(project_dir) {
         Ok(content) => content,

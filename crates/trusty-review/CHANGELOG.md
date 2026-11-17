@@ -6,6 +6,82 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.0] — 2026-11-16
+
+### Fixed
+
+- A `review_pr` miss on an index the trusty-search daemon lists as parked now says the index is parked and points at trusty-search `ensure_project`, instead of telling the operator to index the checkout (#11417). `SearchClient` gains `list_parked_index_ids`, which defaults to none.
+
+### Changed
+
+- MCP `review_pr` on a repo with no trusty-search index now returns a DEGRADED diff-only review (banner, `degraded_reason`, search `unavailable` in `context_sources`) instead of an error, unless `TRUSTY_REVIEW_REQUIRE_SEARCH=true`. The webhook and CLI GitHub-PR runs still fail closed (#11409).
+
+## [0.41.0] — 2026-11-11
+
+### Breaking
+
+- `ParsedReview` gains the public `questions` field and is not `#[non_exhaustive]`, so a caller that builds one with a struct literal must add `questions`. This is why the release is 0.41.0 and not 0.40.3. `cargo-semver-checks` against 0.40.2 reports `constructible_struct_adds_field` (#10782).
+
+### Added
+
+- Each finding in the `review_diff` / `review_pr` result and the CLI JSON now carries `quoted_snippet`, the code it quotes from its cited `file` at `line`. The reviewer schema requires it; a reply from a reviewer that omits it takes the first code the finding body quotes (#10782).
+- The reviewer schema has a top-level `questions` array for "confirm / check / verify X" notes with no code to quote. The result reports them as `questions`, absent when empty; no gate, grade or verdict reads them (#10782).
+- A finding with no quote is withheld before grading and the line-citation gate, under the new reason class `no_quote_pregate`, so `withheld_by_reason` and the withheld headline still count it. An APPROVE with no surviving finding whose only withholds are `no_quote_pregate` reads `verdict_status: parsed`, not `all_withheld`, and carries the new `pregate_only_approve: true` (absent when false). Any gate withhold, alone or beside pregate drops, keeps `all_withheld` on APPROVE; a blocking review keeps `suppressed_reject` whatever the reason. Each review logs one info event with the pregate and gate-withhold counts (#10782).
+- The line-citation gate places a finding that carries `quoted_snippet` on that quote alone: the cited line must hold it, or the finding moves to its one occurrence, or is withheld. A quote absent from the file is withheld, and every other snippet the finding quotes must still be in the file. A quote that is only a bare identifier (`step_4`, `run()`) or a path is no quote, by the same rule as a backtick span: the finding takes its body's quote, or is withheld `no_quote_pregate` (#10782).
+
+### Fixed
+
+- The line-citation gate and the citation-integrity check no longer withhold a finding for a backtick span in its body or consequence that it labels as an exploit payload, an example input or a proposed fix ("a payload such as `' OR '1'='1' --`", "e.g.", "suggest", "replace with", "should be", "Fix:", "… `x` instead"), or that equals its own `suggested_replacement`. The finding still needs a quote of the cited file that places it; a payload-only finding, an unlabelled quote absent from the file, and a cue in another sentence still withhold it (Refs #10964).
+- Citation integrity drops two findings on one line as a mutual contradiction only when they make the same defect claim (title) and their file quotes conflict: `quoted_snippet` when present, else the unlabelled backtick spans. Apostrophes in prose and quote marks inside SQL are no longer read as citations, and an unterminated quote mark no longer opens a span to the end of the text (Refs #10964).
+- The reviewer schema now says backticks in `body` quote the file, and that a proposed fix goes in `suggested_replacement` or a payload is labelled (Refs #10964).
+
+## [0.40.2] — 2026-11-08
+
+### Fixed
+
+- Inline review comments no longer drop a hunk when a removed line starts with `-- ` (a SQL or Lua comment, shown as `--- …`) or an added line starts with `++ ` (shown as `+++ …`). The diff walker now reads each hunk by its `@@` line counts before it looks for file headers, so findings on the later lines of such a hunk anchor on the correct side instead of reading `off_diff` (#10762).
+
+## [0.40.1] — 2026-11-07
+
+### Security
+
+- Release 0.40.1 supersedes 0.40.0, which was tagged but never published: its pre-publish gate failed on RUSTSEC-2026-0436 (`calamine`, bumped 0.37 to 0.38) and RUSTSEC-2026-0429 (`zip`, ignore row expires 2026-12-07). `trusty-review` does not depend on `calamine`; no `trusty-review` source changed since 0.40.0 (#10788).
+
+## [0.40.0] — 2026-11-07
+
+Not published: pre-publish gate failed on RUSTSEC-2026-0436/0429; superseded by 0.40.1.
+
+### Breaking
+
+- `pipeline::prompt_templates::SYSTEM_PROMPT_STOCK` and `SYSTEM_PROMPT_COVERAGE_GATING` are removed. The prompt builders `reviewer_system_prompt`, `reviewer_system_prompt_with_coverage`, `build_system_prompt`, `build_system_prompt_with_coverage`, `build_review_prompt` and `build_review_prompt_with_coverage` take the prompts as a new first argument, `&ReviewerPrompts`, read with `ReviewerPrompts::load` or `ReviewerPrompts::from_content`. `mapreduce::MapContext` gains a `prompts` field. `pipeline::ReviewerPrompts`, `pipeline::PromptContentError` and `ReviewOptions::with_prompts` are new (#9015).
+- `pipeline::build_voice_config` (and `pipeline::voice_config::build_voice_config`) returns `Result<VoiceConfig, PromptContentError>`. `review_template::ReviewTemplateError` and `voice::VoiceLoaderError` gain a `Content(PromptContentError)` variant; neither enum is `#[non_exhaustive]`, so an exhaustive `match` needs the arm (#9015).
+- New module `runtime_content`: `CONTENT_DIR`, `CHECKOUT_ENV`, `REMEDY`, `content_path`, `describe_source`, `dev_override`, `resolve_with`, `resolve_for_process`, `require_text` and `PromptContentError`, which moved here and gains a `CheckoutOverride` variant; `pipeline::prompt_templates` re-exports `PromptContentError`, `REMEDY` and `describe_source`. `report::ReportError` gains a `Content` variant and `report::TemplateLoader` gains `with_content` (#9015).
+
+### Added
+
+- `trusty-review content check` reads every file this binary needs from the installed content and exits 1 naming each missing or empty one, with the remedy; `tctl install` and `tctl upgrade` run it after `tm content update`. Public API: `runtime_content::REQUIRED_FILES` and `runtime_content::check_required` (#10588).
+- Every finding and withheld finding now lands in exactly one of `inline_comments` or the new `unanchored` list. An `unanchored` entry is `{finding_index, reason}`, with `reason` one of `off_diff`, `no_line`, `deleted_line`, `nit_cap` or `withheld:<class>`; nits past the inline cap are named as `nit_cap` and still render in the summary (#10762).
+- Each `inline_comments` entry now carries `side` (`RIGHT`), `severity`, `category` and `finding_index`, plus an optional `start_line` and `subject_type`. `finding_index` counts `findings` first, then `withheld_findings`. All new fields are additive, so 0.39 JSON still parses (#10762).
+- A finding at a removed line with no new-side match now anchors inline with `side: LEFT` at its old-side line number; a removed line that cannot anchor for another reason reads `deleted_line` in `unanchored`, not `off_diff` (#10762).
+- A finding with a file but no line, where the diff names that file, now anchors inline with `subject_type: file` and `line: 0`; a no-line finding on any other file stays `no_line` (#10762).
+- The map-reduce "assessed no files" abort now partitions its withheld findings into `unanchored`, like a completed review (#10762).
+
+### Fixed
+
+- `--source-root` no longer overrides an explicit `TRUSTY_REVIEW_REQUIRE_SEARCH=true` (or `[context] require_search = true`) when trusty-search is unreachable or has no index for the directory; the review now ends Skipped instead of returning a context-free verdict (#10226).
+- The review POST now sends each inline comment's real `side`, so a `LEFT` anchor posts on the old side; a multi-line anchor also sends `start_line` and `start_side` (#10762).
+- A file-level (`subject_type: file`) or `line: 0` anchor is no longer sent in the review's `comments[]`, where GitHub rejects it and fails the whole review; its finding is listed once in the summary body instead. `inline_comments` in the `ReviewResult` JSON is unchanged (#10762).
+
+### Changed
+
+- `trusty-review` no longer compiles in any instructional content. The stock and coverage-gating reviewer prompts, the `report-technical-dd` and `report-technical-dd-cast` report templates, the `strict-security` review template and the `duetto` voice package are read from content `instructions/trusty-review/` (`prompts/`, `templates/`, `templates/review/`, `voices/duetto/voice.toml`) in the installed content bundle. The cwd is never a content source, so the code under review cannot supply its own prompt; a trusty-tools checkout serves content only when `TRUSTY_REVIEW_CONTENT_CHECKOUT` names its root as an absolute path, and a relative or untrusted value is refused (#9015).
+- `run`, `compare` and `calibrate` refuse to start without the prompts, exiting non-zero with the error and its remedy (`tm content update`, or the offline `tm content install --from`) on stderr, whatever `RUST_LOG` says. `mcp` and `webhook-listen` print the same line on stderr and start; each review then ends `Skipped`/UNKNOWN with `error` set and `isError: true` on the MCP envelope, before any PR fetch, dedup claim or model call. A content release that lacks a prompt, or carries an empty one, fails the same way naming the file. Content released before this change does not carry the prompts: run `tm content update` (#9015).
+- A configured voice package or review template that the content ships but cannot supply (absent, empty, or a voice that does not parse) now ends the review the same way, naming the file, instead of reviewing without that layer; an unknown name still degrades with a warning. `report` refuses before walking any repository when the content lacks or empties the template it renders (#9015).
+- Release order: publish the content release `content-v2.3.4` or later before this `trusty-review`. That release ships `instructions/trusty-review/`, including `prompts/principles_addendum.md` (#9015, #9991).
+- The review-principles addendum is no longer compiled into the binary. With principles on (the default), trusty-review reads `instructions/trusty-review/prompts/principles_addendum.md` from the content it already resolves for the reviewer prompts; an absent file refuses the review as `PromptContentError::Missing` and an empty one as `Invalid`, each naming the path and the remedy. There is no fallback text. With `TRUSTY_REVIEW_PRINCIPLES=false` the file is never read, so a content release without it still runs (#9991).
+- Public API: `voice::principles::principles_addendum` (re-exported as `voice::principles_addendum`) takes `&ResolvedContent` and returns `Result<String, PromptContentError>`; `voice::principles::PRINCIPLES_FILE` and `principles_path` are new. `VoiceConfig::default_production` takes `&ResolvedContent` and returns `Result<VoiceConfig, PromptContentError>`. `pipeline::build_voice_config` takes the `&ReviewerPrompts` as a second argument. `ReviewerPrompts::from_content` takes `&Arc<ResolvedContent>`, keeps that source, and gains `principles()` (#9991).
+- A Degraded (non-authoritative) review whose model verdict is APPROVE now emits APPROVE_WITH_RESERVATIONS; the grade, the `degraded` status and the NOT AUTHORITATIVE banner are kept (#10226).
+
 ## [0.38.5] — 2026-10-10
 
 ### Fixed

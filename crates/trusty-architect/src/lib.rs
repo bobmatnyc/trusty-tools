@@ -57,7 +57,9 @@ pub use error::{
     SendError, StateError, TmuxError, UsageError, WakeError,
 };
 pub use fake::FakeTmux;
-pub use input::{InputState, SendReading, UnknownInputState, classify_input, send_guarded};
+pub use input::{
+    InputState, SendReading, UnknownInputState, classify_input, send_guarded, send_line_guarded,
+};
 pub use pyjson::to_python_json;
 pub use scripted::ScriptedTmux;
 pub use tmux::{Keys, NamedKey, PaneId, Permit, SystemTmux, TMUX_TIMEOUT, Tmux};

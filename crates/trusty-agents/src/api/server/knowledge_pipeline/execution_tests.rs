@@ -61,6 +61,10 @@ async fn extraction_checkpoint_retries_publication_without_repeating_inference()
             if method == trusty_common::search_rpc::METHOD_INDEXES_LIST {
                 return Ok(json!({"indexes":[{"id":index,"root_path":root}]}));
             }
+            // #10740: every bind checks for indexed bookkeeping files.
+            if method == "search.chunks.list" {
+                return Ok(json!({"chunks":[]}));
+            }
             if method == "search.index.config.get" {
                 return Ok(json!({"extensions":["md"]}));
             }
@@ -71,6 +75,11 @@ async fn extraction_checkpoint_retries_publication_without_repeating_inference()
                 return Err(crate::uds_mock::RpcError::internal(
                     "synthetic index failure",
                 ));
+            }
+            // #10746 S12: trusty-okf's feed counts a put only on the
+            // daemon's `indexed: true` reply (SPEC-OKF-01 §5.4 F4).
+            if method == "search.index.file.put" {
+                return Ok(json!({"indexed": true}));
             }
             Ok(params)
         })
@@ -172,6 +181,7 @@ fn host_identity_scopes_equal_names_to_the_source_item() {
         timestamp: None,
         body: "Maya leads Atlas.".into(),
         fields: BTreeMap::new(),
+        frontmatter: Default::default(),
         volatile: false,
     };
     let one = entities("source-one", &input, &output(), "fixture");

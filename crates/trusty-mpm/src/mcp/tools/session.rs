@@ -37,7 +37,8 @@ use super::tool;
 /// tab drives. The PM pause/resume context tools are a different concept and
 /// live in [`super::session_context`] (#10300: split to hold the SLOC cap).
 /// What: returns the ten descriptors in catalog order. `session_new` takes the
-/// repo/ref/task spawn inputs (plus optional `ephemeral`); the per-session tools
+/// repo/ref/task spawn inputs (plus optional `ephemeral` and the
+/// bridge-stamped `parent_session_id`, #10476); the per-session tools
 /// take a `session_id` (`session_delete` also takes optional `force`);
 /// `session_delete_records` takes a non-empty `session_ids` array;
 /// `session_decommission_ephemeral` takes no args; `session_prune` takes a
@@ -45,7 +46,8 @@ use super::tool;
 /// `additionalProperties: false` so the
 /// driver gets a clear error on a typo.
 /// Test: `super::tests::session_tools_present`,
-/// `super::tests::catalog_names_match_constant`.
+/// `super::tests::catalog_names_match_constant`,
+/// `super::tests::session_new_schema_lists_parent_and_keeps_additional_properties_false`.
 pub(super) fn session_tools() -> Vec<Value> {
     vec![
         tool(
@@ -89,6 +91,10 @@ pub(super) fn session_tools() -> Vec<Value> {
                     "ephemeral": {
                         "type": "boolean",
                         "description": "Tag this as an EPHEMERAL (test/throwaway) session eligible for bulk teardown and age-based auto-reap. Defaults to false (a durable session the automatic teardown paths never touch)."
+                    },
+                    "parent_session_id": {
+                        "type": "string",
+                        "description": "Managed id of the calling session. The `tm serve --stdio` bridge sets this from its TM_MANAGED_SESSION_ID and overwrites any value a caller sends; callers must not set it. An unknown or invalid id is ignored."
                     }
                 },
                 "required": ["repo_url", "ref", "task"],
@@ -207,6 +213,40 @@ pub(super) fn session_tools() -> Vec<Value> {
                     }
                 },
                 "required": ["session_ids"],
+                "additionalProperties": false
+            }),
+        ),
+        // #10991: owner ruling D8b.
+        tool(
+            "session_archive",
+            "Move a managed session's project directory (its workspace, else \
+             its start directory) to the owner-only archive \
+             `~/.trusty-tools/archive` (mode 0700), with a manifest recording \
+             the origin path so it can be restored. A same-filesystem move is a \
+             rename; across filesystems the copy must verify before the source \
+             is removed. FAIL-CLOSED: a session still running in the directory \
+             is REFUSED unless `force` is true, which stops it first; an \
+             Architect session is always refused. `dry_run` runs the same checks \
+             and returns the plan without changing anything. Session records \
+             are kept; the project is marked archived until a new session runs. \
+             Returns `{ dry_run, plan, stopped, manifest }`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "Managed session id (UUID)."
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Report the plan only. Defaults to false."
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Stop sessions running in the directory instead of refusing. Defaults to false."
+                    }
+                },
+                "required": ["session_id"],
                 "additionalProperties": false
             }),
         ),

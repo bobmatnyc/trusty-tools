@@ -164,6 +164,7 @@ pub fn envelope(record: &HookEventRecord, message: MessageEvent, parent: EventId
         payload: HarnessPayload::Message(message),
         id: EventId::new(),
         parent_id: Some(parent),
+        project: None,
     }
 }
 

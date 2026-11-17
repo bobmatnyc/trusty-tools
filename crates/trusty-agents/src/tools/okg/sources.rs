@@ -69,8 +69,6 @@ impl ToolExecutor for OkgSourcesTool {
 /// The fallible body — any `Err` becomes an error result.
 fn run(args: &Value) -> anyhow::Result<ToolResult> {
     let store = resolve_store(args)?;
-    let sources = store.okg_sources()?;
-    let pending: usize = sources.iter().map(|s| s.index.pending).sum();
     // Resolution is pure config + path work (no daemon call), so naming the
     // bound index — or saying why there is none — costs this read nothing.
     let bound = crate::stores::bound_index_for_tree(
@@ -79,6 +77,14 @@ fn run(args: &Value) -> anyhow::Result<ToolResult> {
         &store.root,
         crate::tools::okg::arg_str(args, "agent"),
     );
+    // #10746 S12: coverage is this machine's index state for the bound index;
+    // with no binding (or no data area) every entity reads pending.
+    let state = bound
+        .as_ref()
+        .ok()
+        .and_then(|b| crate::kb::okg::index_state::IndexStateRef::machine_local(&b.index).ok());
+    let sources = store.okg_sources(state.as_ref())?;
+    let pending: usize = sources.iter().map(|s| s.index.pending).sum();
     let index = match &bound {
         Ok(b) => {
             json!({ "index": b.index, "store": b.store, "agent": b.agent, "pending": pending })

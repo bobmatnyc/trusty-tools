@@ -19,6 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 import datg  # noqa: E402
+import datg_store  # noqa: E402  (#11101: _STATE_DIR lives here)
 
 HOOK = os.path.join(SCRIPTS, "datg-hook.sh")
 BEFORE = datetime(2026, 10, 10, tzinfo=timezone.utc)
@@ -34,6 +35,11 @@ class Base(unittest.TestCase):
         datg.write_ops(self.p, [{"op": "add", "kind": "G", "title": "mobile UI", "maps": "G0c"}])
         self.sp = datg.paths(self.p)[1]
         self.lp = datg.paths(self.p)[2]
+        # #11101: Task-miss and WIP-cap records land in this test's own inbox, in warn mode
+        self._env = mock.patch.dict(os.environ, {"ARCHITECT_INBOX_DIR": os.path.join(self.p, "inbox")})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        os.environ.pop("TASK_TAG_MODE", None)
 
     def state(self):
         with open(self.sp) as f:
@@ -123,7 +129,7 @@ class DispatchCase(Base):
         st = datg.load_state(self.p)
         self.assertEqual(datg.check_dispatch(st, "do it", BEFORE)[0], "warn")
         self.assertEqual(datg.check_dispatch(st, "do it", AFTER)[0], "block")
-        self.assertEqual(datg.check_dispatch(st, "Goal: th-G01\ndo it", AFTER)[0], "allow")
+        self.assertEqual(datg.check_dispatch(st, "Goal: th-G01 Task: T93\ndo it", AFTER)[0], "allow")
 
     def test_config_mode_overrides_date(self):
         st = datg.load_state(self.p)
@@ -137,7 +143,7 @@ class DispatchCase(Base):
         datg.write_ops(self.p, [{"op": "add", "kind": "G", "title": "other"}])
         st = datg.load_state(self.p)
         self.assertEqual(datg.check_dispatch(st, "Goal: th-G01", AFTER)[0], "block")
-        self.assertEqual(datg.check_dispatch(st, "Goal: th-G02", AFTER)[0], "allow")
+        self.assertEqual(datg.check_dispatch(st, "Goal: th-G02 Task: T93", AFTER)[0], "allow")
 
 
 class HookCase(Base):
@@ -162,8 +168,9 @@ class HookCase(Base):
         out = json.loads(r.stdout)["hookSpecificOutput"]
         self.assertEqual(out["permissionDecision"], "deny")
         self.assertLess(len(r.stdout.encode()), 400)
-        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",
-                        "tool_input": {"prompt": "Goal: th-G01 go"}})
+        datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "go", "goal": "th-G01"}])
+        ok = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task",   # #10800 G2: goal and card
+                        "tool_input": {"prompt": "Goal: th-G01 Task: th-T01 go"}})   # #11101: Task:, not Card:
         self.assertEqual(ok.stdout, "")
 
     def test_other_tools_and_subagents_silent(self):
@@ -184,7 +191,12 @@ class HookCase(Base):
             with open(self.sp, "w") as f:
                 f.write("garbage")
             r = self.hook(payload)
-            self.assertEqual((r.returncode, r.stdout), (0, ""))
+            self.assertEqual(r.returncode, 0)
+            if payload["hook_event_name"] == "SessionStart":   # #10960 G-3: said in the context, never a decision
+                self.assertNotIn("permissionDecision", r.stdout)
+                self.assertIn("ledger unreadable", r.stdout)
+            else:
+                self.assertEqual(r.stdout, "")
             os.unlink(self.sp)
             r = self.hook(payload)
             self.assertEqual((r.returncode, r.stdout), (0, ""))
@@ -207,6 +219,24 @@ class HookCase(Base):
         r = self.hook({"hook_event_name": "PreToolUse", "tool_name": "Task", "tool_input": {"prompt": "no goal"}},
                       env={"PYTHONSAFEPATH": "1"})
         self.assertEqual(json.loads(r.stdout or "{}").get("hookSpecificOutput", {}).get("permissionDecision"), "deny")
+
+
+class ProjectArgCase(Base):
+    """datg-hook.sh <session> <project>: arg 2 selects the ledger dir (the Architect's IL is local/il)."""
+
+    def test_project_arg_overrides_session_cwd(self):
+        sub = os.path.join(self.p, "il")
+        bare = os.path.join(self.p, "bare")
+        os.makedirs(sub)
+        os.makedirs(bare)
+        subprocess.run(["python3", os.path.join(SCRIPTS, "datg.py"), "--project", sub, "init", "--code", "ar"],
+                       check=True, capture_output=True, text=True)
+        e = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "DATG_SESSION", "TMUX_PANE")}
+        payload = json.dumps({"hook_event_name": "SessionStart", "source": "startup", "cwd": bare})
+        none = subprocess.run([HOOK, "", bare], input=payload, capture_output=True, text=True, env=e, timeout=60)
+        self.assertEqual(none.stdout, "")  # bare has no ledger of its own
+        got = subprocess.run([HOOK, "", sub], input=payload, capture_output=True, text=True, env=e, timeout=60)
+        self.assertIn("additionalContext", got.stdout)
 
 
 class SessionFilterCase(Base):
@@ -277,6 +307,7 @@ class EscalationNotifyCase(Base):
         env = self.stub_cmd('printf "%s\\n" "$@" > "' + self.rec + '"\necho queued\n')
         r = self.run_datg(["update", "th-D01", "--esc", "architect"], env)
         self.assertEqual((r.returncode, r.stderr), (0, ""))
+        self.assertEqual(r.stdout, "th-D01\n")
         args = open(self.rec).read().split("\n")
         self.assertEqual(args[:4], ["--kind", "decision", "--session", "tm-pilot"])
         self.assertIn("th-D01", args[4])
@@ -293,13 +324,15 @@ class EscalationNotifyCase(Base):
         self.assertEqual(r.returncode, 0)
         self.assertEqual(open(self.rec).read(), "called\n")
 
-    def test_notify_failure_does_not_fail_update_and_is_logged(self):
+    def test_notify_failure_reports_partial_success_and_is_logged(self):
         for body in ("echo boom >&2\nexit 3\n", None):
             env = self.stub_cmd(body or "")
             if body is None:
                 env["DATG_NOTIFY_CMD"] = os.path.join(self.p, "no-such-notify")
             r = self.run_datg(["update", "th-D01", "--esc", "architect"], env)
-            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(r.returncode, 3, r.stderr)
+            self.assertIn("ledger saved", r.stderr)
+            self.assertIn("do not replay", r.stderr)
             self.assertIn("pm-notify", r.stderr)
             self.assertEqual(self.state()["items"][0]["esc"], "architect")
             fails = [x for x in self.log() if x.get("kind") == "notify_failure"]
@@ -351,7 +384,7 @@ class HookWarningLogCase(Base):
         self.set_mode("warn")
         n = len(self.log())
         self.hook({"hook_event_name": "SessionStart"})
-        self.hook(dict(self.PAYLOAD, tool_input={"prompt": "Goal: th-G01 go"}))
+        self.hook(dict(self.PAYLOAD, tool_input={"prompt": "Goal: th-G01 Task: T93 go"}))
         self.set_mode("block")
         self.hook(self.PAYLOAD)
         self.assertEqual(self.log()[n:], [])
@@ -401,6 +434,11 @@ class SessionRecordCase(Base):
             r = run_cli(self.p, ["session", "set"] + args)
             self.assertEqual(r.returncode, 2, args)
         self.assertEqual(before, (open(self.sp).read(), open(self.lp).read()))
+
+    def test_owed_over_cap_error_names_cap(self):
+        ops = [{"op": "session", "owed": [{"check": "c", "expect": "e1", "ref": "r"}] * 9}]
+        with self.assertRaisesRegex(datg.DatgError, "cap of 8"):
+            datg.write_ops(self.p, ops)
 
     def test_session_record_over_2kb_refused(self):
         ops = [{"op": "session", "waiting_on": [{"who": "ci", "what": "w" * 120}] * 5,
@@ -491,7 +529,7 @@ class SizeAndRotateCase(Base):
     def test_write_over_16kb_is_refused_with_largest_items_named(self):
         before = open(self.sp).read()
         ops = [{"op": "add", "kind": "D", "title": "q", "goal": "th-G01",
-                "opts": [{"l": "o" * 160, "rec": False}] * 4} for _ in range(30)]
+                "opts": [{"l": "o" * 160, "rec": False}] * 4} for _ in range(120)]
         with self.assertRaises(datg.DatgError) as cm:
             datg.write_ops(self.p, ops)
         self.assertIn("largest", str(cm.exception))
@@ -499,10 +537,12 @@ class SizeAndRotateCase(Base):
         self.assertEqual(run_cli(self.p, ["batch"], stdin=json.dumps(ops)).returncode, 2)
 
     def test_crossing_8kb_logs_size_warning_once(self):
+        # #10571: the bars are caps (default 32 KB warn / 64 KB refuse, D74); land between them, whatever they are
+        n = (datg.SIZE_WARN + datg.SIZE_REFUSE) // 2 // 880
         ops = [{"op": "add", "kind": "D", "title": "q", "goal": "th-G01", "opts": [{"l": "o" * 160, "rec": False}] * 4}
-               for _ in range(14)]
+               for _ in range(n)]
         datg.write_ops(self.p, ops)
-        self.assertGreater(os.path.getsize(self.sp), 8192)
+        self.assertGreater(os.path.getsize(self.sp), datg.SIZE_WARN)
         datg.write_ops(self.p, [{"op": "update", "id": "th-D01", "title": "again"}])
         self.assertEqual(len([x for x in self.log() if x.get("kind") == "size_warning"]), 1)
 
@@ -521,6 +561,45 @@ class SizeAndRotateCase(Base):
         self.assertEqual(sorted(k for _, k, _ in datg.read_log(self.p)), ["digest", "open"])
 
 
+class StateDirAndSizeReportCase(Base):
+    """#11101 (prototype 2026-11-01): --state-dir / $DATG_STATE_DIR pin the directory; size_report names the field.
+
+    The split keeps `_STATE_DIR` in datg_store (as `_SESSION`, #10161), so the test pins it there.
+    """
+
+    def test_state_dir_flag_and_env_pin_the_directory_over_resolution(self):
+        other = os.path.join(self.p, "elsewhere")
+        os.makedirs(other)
+        datg_store._STATE_DIR = other
+        try:
+            self.assertEqual(datg.datg_dir(self.p), other)
+        finally:
+            datg_store._STATE_DIR = None
+        with mock.patch.dict(os.environ, {"DATG_STATE_DIR": other}):
+            self.assertEqual(datg.paths(self.p)[1], os.path.join(other, "state.json"))
+        self.assertNotEqual(datg.datg_dir(self.p), other)   # off again: the legacy resolution
+        sub = os.path.join(self.p, "pm")
+        os.makedirs(sub)
+        subprocess.run(["python3", os.path.join(SCRIPTS, "datg.py"), "--state-dir", sub, "--project", self.p,
+                        "init", "--code", "pm"], check=True, capture_output=True, text=True)
+        self.assertTrue(os.path.isfile(os.path.join(sub, "state.json")))
+        add = subprocess.run(["python3", os.path.join(SCRIPTS, "datg.py"), "--state-dir", sub, "--project", self.p,
+                              "add", "G", "--title", "pinned"], capture_output=True, text=True)
+        self.assertEqual(add.returncode, 0, add.stderr)
+        with open(os.path.join(sub, "state.json")) as f:
+            self.assertEqual([g["id"] for g in json.load(f)["goals"]], ["pm-G01"])
+        self.assertNotIn("pinned", json.dumps(self.state()))   # the project's own state is untouched
+
+    def test_size_report_names_collection_field_and_item(self):
+        datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "t" * 100, "goal": "th-G01"}
+                                for _ in range(6)])
+        rep = datg.size_report(self.state())
+        self.assertIn("tasks", rep)
+        self.assertIn("6 open", rep)
+        self.assertIn("biggest field tasks[].title", rep)
+        self.assertIn("th-T0", rep)   # the largest items are named
+
+
 class DigestFreshCase(Base):
     """B4: digest and fresh."""
 
@@ -535,7 +614,7 @@ class DigestFreshCase(Base):
         self.fill(2)
         r = run_cli(self.p, ["digest"])
         self.assertEqual(r.returncode, 0, r.stderr)
-        for want in ("IL DIGEST", "task: th-T01 go", "owed: sha = abc @ u", "th-G01 r1 mobile UI", "rec: pg", "th-T02",
+        for want in ("IL DIGEST", "task: th-T01 go", "owed (1/8):", "owed: sha = abc @ u", "th-G01 r1 mobile UI", "rec: pg", "th-T02",
                      "brief: local/briefs/2026-10-17-x.md", "archive:"):
             self.assertIn(want, r.stdout)
         self.assertNotIn("TRUNCATED", r.stdout)
@@ -561,6 +640,17 @@ class DigestFreshCase(Base):
         self.assertEqual(before, open(self.sp).read())
         run_cli(self.p, ["session", "set", "--ref", "none"])
         self.assertEqual(refs(), [])
+
+    def test_ref_key_none_removes_only_that_key(self):
+        def refs():
+            return self.state()["session"].get("refs")
+        run_cli(self.p, ["session", "set", "--task", "th-T01 x", "--ref", "doc=u1", "--ref", "marker=m1"])
+        r = run_cli(self.p, ["session", "set", "--ref", "doc=none"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(refs(), [{"key": "marker", "value": "m1"}])
+        r = run_cli(self.p, ["session", "set", "--ref", "absent=none"])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(refs(), [{"key": "marker", "value": "m1"}])
 
     def test_digest_prints_refs_first_and_keeps_them_past_the_pointer_cut(self):
         run_cli(self.p, ["session", "set", "--task", "th-T01 x", "--next", "n", "--owe", "none", "--ref", "doc=https://docs/x"])
@@ -665,7 +755,7 @@ class StopHookCase(Base):
     def test_large_digest_stays_under_the_hook_limit(self):
         # #10109: Claude Code caps additionalContext at 10,000 chars; a cut digest points at the full one.
         datg.write_ops(self.p, [{"op": "session", "task": "big", "next": "keep going"}])
-        for kind, n in (("D", 40), ("T", 30)):  # near the 16 KB state bar
+        for kind, n in (("D", 50), ("T", 40)):  # well under the 64 KB state bar; ~2.4 KB over the limit at a 0-char path
             datg.write_ops(self.p, [{"op": "add", "kind": kind, "title": f"{kind} {i:02d} " + "w" * 105,
                                      "goal": "th-G01"} for i in range(n)])
         self.assertGreater(len(datg.RULES) + len(datg.build_digest(self.p)), 10000)  # uncut, over the limit
@@ -683,7 +773,8 @@ class StopHookCase(Base):
         with open(self.sp, "w") as f:
             f.write("garbage")
         r = self.hook({"hook_event_name": "SessionStart", "source": "clear"})
-        self.assertEqual((r.returncode, r.stdout), (0, ""))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("NOTHING RECONCILED", r.stdout)   # #10960 G-3: the model is told, not only the operator
         self.assertIn("datg hook: failed open", r.stderr)
 
     def test_per_pm_directory_and_legacy_coexist(self):
@@ -703,6 +794,107 @@ class StopHookCase(Base):
         out2 = SessionFilterCase.run_hook(self, ev, "tm-other", arg="tm-other").stdout
         self.assertIn("TOP th-G01", out2)  # no per-PM dir for that name: the legacy layout answers
         self.assertEqual(run_cli(self.p, ["init", "--code", "bad"], session="../x").returncode, 2)
+
+
+class TaskTagCase(Base):
+    """ar-Tf5 / #11101: the Task token in a dispatch prompt (warn by default, D09), the creation stamp, the WIP cap."""
+
+    def add_task(self):
+        datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "t", "goal": "th-G01"}])
+        return datg.load_state(self.p)["tasks"][-1]
+
+    def mmdd(self, t):
+        return datg.task_mmdd(t)
+
+    def test_missing_task_warns_even_after_block_date(self):
+        st = datg.load_state(self.p)
+        dec, msg = datg.check_dispatch(st, "Goal: th-G01 go", AFTER)
+        self.assertEqual(dec, "warn")
+        self.assertIn("names no task id", msg)
+
+    def test_refuse_mode_blocks_missing_unknown_and_reused_id(self):
+        t = self.add_task()
+        st = datg.load_state(self.p)
+        st["config"]["task_mode"] = "refuse"
+        ok = f"Goal: th-G01 Task: {t['id']}@{self.mmdd(t)}"
+        self.assertEqual(datg.check_dispatch(st, ok, AFTER)[0], "allow")
+        self.assertEqual(datg.check_dispatch(st, "Goal: th-G01 go", AFTER)[0], "block")
+        dec, msg = datg.check_dispatch(st, "Goal: th-G01 Task: th-T7f", AFTER)
+        self.assertEqual(dec, "block")
+        self.assertIn("unknown or closed task th-T7f", msg)
+        dec, msg = datg.check_dispatch(st, f"Goal: th-G01 Task: {t['id']}@0101", AFTER)
+        self.assertEqual((dec, "reused id" in msg), ("block", True))
+        self.assertEqual(datg.check_dispatch(st, "Goal: th-G01 Task: T93 Task: ms-T12@1110", AFTER)[0], "allow")  # foreign: format only
+
+    def test_closed_task_is_unknown(self):
+        t = self.add_task()
+        datg.write_ops(self.p, [{"op": "close", "id": t["id"], "outcome": "ok"}])
+        self.assertIn("unknown or closed", datg.check_dispatch(datg.load_state(self.p), f"Goal: th-G01 Task: {t['id']}")[1])
+
+    def test_subagent_new_task_syntax_is_not_a_task(self):
+        self.assertIn("names no task id", datg.check_dispatch(datg.load_state(self.p), "Goal: th-G01 Task: new:fire-drill")[1])
+
+    def test_hook_logs_compliance_miss(self):
+        self.hook({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_input": {"prompt": "Goal: th-G01 go"}})
+        with open(os.path.join(self.p, "inbox", "task-compliance.jsonl")) as f:
+            rec = json.loads(f.readline())
+        self.assertEqual(rec["kind"], "dispatch")
+
+    def test_task_gets_created_stamp_and_rules_name_the_tag(self):
+        self.assertRegex(self.add_task()["created"], r"^\d{4}-\d{2}-\d{2}T")
+        ctx = json.loads(self.hook({"hook_event_name": "SessionStart"}).stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Task: th-Txx@MMDD", ctx)
+
+    def test_wip_cap_warns_then_refuses_and_parked_does_not_count(self):
+        st = datg.load_state(self.p)
+        st["config"]["wip_cap"] = 2
+        with open(self.sp, "w") as f:
+            json.dump(st, f)
+        a, b = self.add_task(), self.add_task()
+        del datg.WARNINGS[:]
+        self.add_task()                                   # third active: warn, still added
+        self.assertEqual(len(datg.WARNINGS), 1)
+        self.assertEqual(len(datg.load_state(self.p)["tasks"]), 3)
+        for t in (a, b):
+            datg.write_ops(self.p, [{"op": "update", "id": t["id"], "status": "parked"}])
+        del datg.WARNINGS[:]
+        self.add_task()                                   # 1 parked pair does not count: 2 active, no warning
+        self.assertEqual(datg.WARNINGS, [])
+        st = datg.load_state(self.p)
+        st["config"]["task_mode"] = "refuse"
+        with open(self.sp, "w") as f:
+            json.dump(st, f)
+        with self.assertRaises(datg.DatgError):
+            self.add_task()
+
+    def test_wip_cap_default_is_8(self):
+        self.assertEqual(datg.wip_cap(datg.load_state(self.p)), 8)
+
+
+class NextIdCase(unittest.TestCase):
+    """_next_id wraps past ff and recycles free low ids."""
+
+    @staticmethod
+    def st(used, nxt):
+        return {"code": "th", "goals": [], "items": [],
+                "tasks": [{"id": f"th-T{i:02x}"} for i in used], "next": {"T": nxt}}
+
+    def test_wraps_to_free_low_id_and_pointer_follows(self):
+        st = self.st(range(0x10, 0x100), "ff")
+        self.assertEqual(datg._next_id(st, "T"), "th-T01")
+        self.assertEqual(st["next"]["T"], "02")
+
+    def test_scans_up_before_wrapping(self):
+        st = self.st([0xfe], "fe")
+        self.assertEqual(datg._next_id(st, "T"), "th-Tff")
+        self.assertEqual(st["next"]["T"], "01")  # ff wraps to 01
+
+    def test_error_only_when_all_255_used(self):
+        st = self.st(range(1, 256), "80")
+        with self.assertRaises(datg.DatgError):
+            datg._next_id(st, "T")
+        st = self.st([i for i in range(1, 256) if i != 0x05], "ff")
+        self.assertEqual(datg._next_id(st, "T"), "th-T05")
 
 
 if __name__ == "__main__":

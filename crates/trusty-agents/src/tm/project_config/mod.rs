@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 /// `claude-code` review pane, etc.); each gets its own startup command and
 /// adapter so `tell <project>:<harness>` can find the right session.
 /// What: `name` is the harness label folded into the managed session name
-/// (`tm-<project>-<harness>-NN`, see `next_session_name`) and used by
+/// (`tm-<project>-<harness>[-NN]`, see `next_session_name`) and used by
 /// `tell <project>:<harness>`; `adapter` maps to `AdapterType::from_id`.
 /// Test: `test_roundtrip_with_harnesses`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -346,12 +346,13 @@ pub fn default_startup_command_for(adapter_id: &str) -> &'static str {
 /// gap-reusing per-leaf serial allocation.
 /// What: builds the leaf `<project>-<harness>`, then delegates to
 /// [`trusty_common::session_naming::build_session_name`], which sanitises the
-/// leaf, allocates the lowest free two-digit serial (`01`-`99`, reusing gaps
-/// left by decommissioned sessions) by scanning `existing_names`, and returns
-/// `tm-<project>-<harness>-NN`. Errors with
+/// leaf (stripping a leading `tm-` and trailing `-NN`, #10478) and returns
+/// bare `tm-<project>-<harness>` for the first session. A duplicate gets the
+/// lowest free two-digit counter (`-02`-`-99`, reusing gaps left by
+/// decommissioned sessions) found by scanning `existing_names`. Errors with
 /// [`trusty_common::session_naming::SessionNameError::SerialExhausted`] if all
-/// 99 serials for this `(project, harness)` are in use.
-/// Test: `test_next_session_name`.
+/// of them for this `(project, harness)` are in use.
+/// Test: `test_next_session_name`, `test_next_session_name_strips_tm_prefix`.
 pub fn next_session_name(
     project: &str,
     harness: &str,

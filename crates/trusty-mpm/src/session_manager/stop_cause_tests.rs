@@ -44,6 +44,8 @@ fn record_at(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: workspace.path().to_path_buf(),
@@ -70,6 +72,7 @@ fn record_at(
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

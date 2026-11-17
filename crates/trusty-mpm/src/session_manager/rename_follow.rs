@@ -10,17 +10,21 @@
 //! `%N` pane, and accepts the answer only on the server the record captured
 //! the pane on (#9004, #9101). [`SessionManager::name_drifts`] reports every
 //! such record; [`SessionManager::follow_tmux_renames`] rewrites the
-//! non-terminal ones to the current name. Nothing here renames, kills or
-//! signals a tmux session.
+//! non-terminal ones to the current name. A record on a workspace (`-L`)
+//! server is followed on that server only (#10101). Nothing here renames,
+//! kills or signals a tmux session.
 //! Test: `rename_follow_tests.rs`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use tracing::{info, warn};
 
 use super::manager::{ManagedError, ManagedTmuxDriver, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
 use super::rename::validate_session_name;
+use super::tmux_route::{self, RoutedTmux};
 
 /// One record whose own pane is live under a tmux name it does not record.
 ///
@@ -41,6 +45,9 @@ pub struct NameDrift {
     pub pane_id: String,
     /// The name of the live tmux session that holds the pane.
     pub current: String,
+    /// The record's stored tmux socket; `None` is the default server
+    /// (#10101: the follow writes only a record still on this server).
+    pub tmux_socket: Option<PathBuf>,
 }
 
 /// The live session name holding `record`'s own pane, when that name is not
@@ -74,35 +81,184 @@ pub(crate) fn live_name_by_pane(
     moved.then_some(identity.session_name)
 }
 
+/// The [`NameDrift`] for `record`, read against `live` on `tmux`'s server.
+fn drift_of(
+    record: SessionRecord,
+    live: &HashSet<String>,
+    tmux: &dyn ManagedTmuxDriver,
+) -> Option<NameDrift> {
+    let current = live_name_by_pane(&record, live, tmux)?;
+    Some(NameDrift {
+        id: record.id,
+        state: record.state,
+        recorded: record.tmux_name,
+        pane_id: record.pane_id?,
+        current,
+        tmux_socket: record.tmux_socket,
+    })
+}
+
+/// The drifts of `records`, all on workspace servers, each read on its own
+/// server (#10101).
+///
+/// Why: a workspace server's pane ids and session names are its own; the
+/// default server's listing says nothing about them, and may hold a
+/// same-named session or the same `%N` id for another pane.
+/// What: groups the records by stored socket, so each server is listed at
+/// most once. Per server, one [`crate::core::tmux_server::bounded_probe`]
+/// keyed on the socket lists its sessions and reads each record's pane there,
+/// within [`crate::core::tmux_server::PROBE_BUDGET`]. A server that cannot be
+/// routed to, whose listing fails, that does not answer in time, or that
+/// another probe holds yields no drift for any of its records: they are left
+/// as they are this pass, and its socket is in the returned skip set so the
+/// reaper holds them too — except a failed listing whose socket is gone: that
+/// server exited, and its records are left to the reaper's own judgement. The
+/// default server is never asked.
+/// Test: `a_renamed_workspace_server_record_is_followed_on_its_own_server`,
+/// `the_reaper_holds_a_pm_whose_server_the_follow_could_not_probe`,
+/// `a_pm_whose_server_socket_is_gone_is_still_stopped_deliberate`,
+/// `a_same_named_session_on_another_server_does_not_hide_a_rename`,
+/// `a_hung_workspace_server_is_skipped_and_its_records_kept`,
+/// `an_unreachable_or_failing_workspace_server_is_skipped_never_defaulted`.
+fn workspace_drifts(
+    tmux: &dyn ManagedTmuxDriver,
+    records: Vec<SessionRecord>,
+) -> (Vec<NameDrift>, HashSet<PathBuf>) {
+    use crate::core::tmux_server::{PROBE_BUDGET, bounded_probe};
+    let mut skipped = HashSet::new();
+    let mut servers: BTreeMap<PathBuf, (Arc<dyn ManagedTmuxDriver>, Vec<SessionRecord>)> =
+        BTreeMap::new();
+    for record in records {
+        let Some(socket) = record.tmux_socket.clone() else {
+            continue;
+        };
+        let driver = match tmux_route::route(tmux, &record) {
+            Ok(RoutedTmux::Named(driver)) => driver,
+            // A stored socket always routes to a named server or refuses.
+            Ok(RoutedTmux::Default(_)) => {
+                warn!(id = %record.id, "rename follow skipped for this record: its socket routed to the default server (#10101)");
+                skipped.insert(socket);
+                continue;
+            }
+            Err(e) => {
+                warn!(id = %record.id, "rename follow skipped for this record: {e} (#10101)");
+                skipped.insert(socket);
+                continue;
+            }
+        };
+        servers
+            .entry(socket)
+            .or_insert_with(|| (driver, Vec::new()))
+            .1
+            .push(record);
+    }
+    let mut drifts = Vec::new();
+    for (socket, (driver, records)) in servers {
+        let count = records.len();
+        let key = socket.clone();
+        let probe = bounded_probe(&key, PROBE_BUDGET, move || {
+            let live: HashSet<String> = driver.list_sessions()?.into_iter().collect();
+            Ok::<_, ManagedError>(
+                records
+                    .into_iter()
+                    .filter_map(|r| drift_of(r, &live, driver.as_ref()))
+                    .collect::<Vec<_>>(),
+            )
+        });
+        match probe {
+            Some(Ok(found)) => drifts.extend(found),
+            Some(Err(e)) => {
+                warn!(
+                    socket = %key.display(),
+                    "rename follow skipped {count} record(s): their tmux server could not be listed ({e}) (#10101)"
+                );
+                // #10101: an exited server removes its socket and its listing
+                // errors; that is gone (ruling arm a), not held. The same test
+                // `LiveSet::server_lost` uses.
+                if key.symlink_metadata().is_ok() {
+                    skipped.insert(key);
+                }
+            }
+            None => {
+                warn!(
+                    socket = %key.display(),
+                    "rename follow skipped {count} record(s): their tmux server did not answer within {}s or is already being probed (#10101)",
+                    PROBE_BUDGET.as_secs_f32()
+                );
+                skipped.insert(key);
+            }
+        }
+    }
+    (drifts, skipped)
+}
+
+/// The stored sockets of `records`: every workspace server they name.
+fn sockets_of(records: &[SessionRecord]) -> HashSet<PathBuf> {
+    records
+        .iter()
+        .filter_map(|r| r.tmux_socket.clone())
+        .collect()
+}
+
 impl SessionManager {
     /// Every record whose own pane is live under another tmux name (#9238).
     ///
     /// Why: `tm doctor` reports these, and [`Self::follow_tmux_renames`]
     /// repairs the non-terminal ones.
-    /// What: one `list-sessions`, then [`live_name_by_pane`] per record, of
-    /// any state. No store lock is held across a tmux call (#3698).
+    /// What: one default-server `list-sessions`, then [`live_name_by_pane`]
+    /// per default-server record, of any state; then the workspace-server
+    /// records through [`workspace_drifts`], off the async executor. No store
+    /// lock is held across a tmux call (#3698).
     ///
     /// # Errors
     ///
-    /// The `list-sessions` failure, so a caller never reads "tmux could not be
-    /// asked" as "nothing drifted".
-    /// Test: `the_doctor_row_flags_a_live_pane_under_another_name`.
+    /// The default server's `list-sessions` failure, so a caller never reads
+    /// "tmux could not be asked" as "nothing drifted". A workspace server that
+    /// cannot be read drops only its own records from the answer.
+    /// Test: `the_doctor_row_flags_a_live_pane_under_another_name`,
+    /// `a_renamed_workspace_server_record_is_followed_on_its_own_server`.
     pub async fn name_drifts(&self) -> Result<Vec<NameDrift>, ManagedError> {
+        Ok(self.name_drifts_skipping().await?.0)
+    }
+
+    /// [`Self::name_drifts`], with the sockets of the workspace servers whose
+    /// records it could not read (#10101).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::name_drifts`].
+    async fn name_drifts_skipping(
+        &self,
+    ) -> Result<(Vec<NameDrift>, HashSet<PathBuf>), ManagedError> {
         let live: HashSet<String> = self.tmux.list_sessions()?.into_iter().collect();
-        let records = self.list().await;
-        Ok(records
+        // #10101: a named-server record's pane is never looked up in the
+        // default server's `live`; it is read on its own server.
+        let (default, named): (Vec<_>, Vec<_>) = self
+            .list()
+            .await
             .into_iter()
-            .filter_map(|r| {
-                let current = live_name_by_pane(&r, &live, self.tmux.as_ref())?;
-                Some(NameDrift {
-                    id: r.id,
-                    state: r.state,
-                    recorded: r.tmux_name,
-                    pane_id: r.pane_id?,
-                    current,
-                })
-            })
-            .collect())
+            .partition(|r| r.tmux_socket.is_none());
+        let mut drifts: Vec<NameDrift> = default
+            .into_iter()
+            .filter_map(|r| drift_of(r, &live, self.tmux.as_ref()))
+            .collect();
+        let mut skipped = HashSet::new();
+        if !named.is_empty() {
+            let sockets = sockets_of(&named);
+            let tmux = Arc::clone(&self.tmux);
+            match tokio::task::spawn_blocking(move || workspace_drifts(tmux.as_ref(), named)).await
+            {
+                Ok((found, unread)) => {
+                    drifts.extend(found);
+                    skipped = unread;
+                }
+                Err(e) => {
+                    warn!("rename follow skipped workspace-server records ({e}) (#10101)");
+                    skipped = sockets;
+                }
+            }
+        }
+        Ok((drifts, skipped))
     }
 
     /// Rewrite each non-terminal record whose pane moved to another tmux
@@ -114,21 +270,36 @@ impl SessionManager {
     /// What: [`Self::name_drifts`], then, under one store write guard, sets
     /// `tmux_name` to the current name for each non-terminal record that still
     /// carries the recorded name and pane. A record is skipped, with a
-    /// `warn`, when another non-terminal record already holds the name or the
-    /// name is not one tm can target. The state is never changed. A tmux or
+    /// `warn`, when another non-terminal record already holds the name, on
+    /// any server, or the name is not one tm can target. The state is never
+    /// changed. A tmux or
     /// store failure is logged and leaves every record as it was. Returns the
     /// records it rewrote.
     /// Test: `a_renamed_session_is_followed_by_its_pane_and_listed_live`,
     /// `attach_cmd_targets_the_current_tmux_name`,
     /// `the_reaper_follows_a_rename_instead_of_stopping_the_session`,
     /// `boot_reconcile_keeps_a_renamed_session_active`,
-    /// `a_name_another_record_holds_is_not_taken`.
+    /// `a_name_another_record_holds_is_not_taken`,
+    /// `the_reaper_follows_a_workspace_server_rename_instead_of_stopping_it`.
     pub async fn follow_tmux_renames(&self) -> Vec<NameDrift> {
-        let drifts = match self.name_drifts().await {
+        self.follow_tmux_renames_skipping().await.0
+    }
+
+    /// [`Self::follow_tmux_renames`], with the sockets of the workspace
+    /// servers whose records it did not follow this pass (#10101).
+    ///
+    /// Why: a skipped server's renamed PM still carries its old name, so a
+    /// reaper that then lists that server would stop it as `Deliberate`.
+    /// What: the skip set holds every server [`workspace_drifts`] could not
+    /// read, every workspace server when the default server or the store could
+    /// not be read, and none on a full pass.
+    /// Test: `the_reaper_holds_a_pm_whose_server_the_follow_could_not_probe`.
+    pub(crate) async fn follow_tmux_renames_skipping(&self) -> (Vec<NameDrift>, HashSet<PathBuf>) {
+        let (drifts, skipped) = match self.name_drifts_skipping().await {
             Ok(d) => d,
             Err(e) => {
                 warn!("rename follow skipped: tmux could not be listed ({e}) (#9238)");
-                return Vec::new();
+                return (Vec::new(), sockets_of(&self.list().await));
             }
         };
         let mut drifts: Vec<NameDrift> = drifts
@@ -136,14 +307,15 @@ impl SessionManager {
             .filter(|d| !d.state.is_terminal())
             .collect();
         if drifts.is_empty() {
-            return drifts;
+            return (drifts, skipped);
         }
         let mut store = self.store.write().await;
         let mut records = match store.all().await {
             Ok(r) => r,
             Err(e) => {
                 warn!("rename follow skipped: the store could not be read ({e}) (#9238)");
-                return Vec::new();
+                drop(store);
+                return (Vec::new(), sockets_of(&self.list().await));
             }
         };
         let mut followed = Vec::new();
@@ -152,6 +324,8 @@ impl SessionManager {
                 warn!(id = %drift.id, name = %drift.current, "rename follow: tmux name is not one tm can target; record left as is (#9238)");
                 continue;
             }
+            // #10101: names are unique across servers (create and `rename`
+            // check every record), so a holder on any server refuses.
             let held = records.iter().any(|r| {
                 r.id != drift.id && !r.state.is_terminal() && r.tmux_name == drift.current
             });
@@ -160,6 +334,8 @@ impl SessionManager {
                     && !r.state.is_terminal()
                     && r.tmux_name == drift.recorded
                     && r.pane_id.as_deref() == Some(drift.pane_id.as_str())
+                    // #10101: still on the server the pane was read on.
+                    && r.tmux_socket == drift.tmux_socket
             }) else {
                 continue;
             };
@@ -177,6 +353,6 @@ impl SessionManager {
             info!(id = %drift.id, from = %drift.recorded, to = %drift.current, pane_id = %drift.pane_id, "rename follow: record now carries the tmux session's current name (#9238)");
             followed.push(drift);
         }
-        followed
+        (followed, skipped)
     }
 }

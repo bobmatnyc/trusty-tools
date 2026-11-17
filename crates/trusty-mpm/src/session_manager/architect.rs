@@ -32,6 +32,8 @@ pub enum ProtectedVerb {
     Resume,
     /// `tm sessions delete`.
     Delete,
+    /// `tm session archive` (#10991).
+    Archive,
 }
 
 impl ProtectedVerb {
@@ -41,6 +43,8 @@ impl ProtectedVerb {
             Self::Decommission => ("decommission", "exit claude in its pane to stop it"),
             Self::Resume => ("resume", "relaunch it with `tm fleet init`"),
             Self::Delete => ("delete", "`tm fleet init` replaces its record"),
+            // #10991
+            Self::Archive => ("archive", "exit claude in its pane to stop it"),
         }
     }
 }
@@ -92,7 +96,6 @@ pub(crate) fn refuse_protected(
 ///
 /// What: `true`, logged at debug, when [`refuses_verbs`] holds.
 /// Test: `idle_reaper_never_stops_an_architect_record`,
-/// `shutdown_skips_an_architect_session`,
 /// `prune_include_active_never_decommissions_an_architect_record`.
 pub(crate) fn skip_protected(record: &SessionRecord, path: &str) -> bool {
     let skip = refuses_verbs(record.kind, &record.state);

@@ -74,6 +74,31 @@ struct LlmOutputBlock {
     // #4491: accepts a double-encoded findings string as well as a real array.
     #[serde(default, deserialize_with = "deserialize_findings")]
     findings: Vec<LlmFinding>,
+    /// #10782: notes with nothing to quote. Any JSON shape parses, so a
+    /// malformed list never fails the reply; `question_texts` reads it.
+    #[serde(default)]
+    questions: serde_json::Value,
+}
+
+/// The non-blank question texts of a reply's `questions` value (#10782).
+///
+/// What: an array's strings, trimmed, and any other element as its JSON
+/// text; a lone string is one question; anything else is none.
+/// Test: `parse_questions_are_kept_apart_from_findings`.
+fn question_texts(value: serde_json::Value) -> Vec<String> {
+    let items = match value {
+        serde_json::Value::Array(items) => items,
+        serde_json::Value::String(s) => vec![serde_json::Value::String(s)],
+        _ => Vec::new(),
+    };
+    items
+        .into_iter()
+        .map(|v| match v {
+            serde_json::Value::String(s) => s.trim().to_string(),
+            other => other.to_string(),
+        })
+        .filter(|q| !q.is_empty() && q != "null")
+        .collect()
 }
 
 /// Prefix of the error a double-encoded findings string raises when it does
@@ -199,6 +224,10 @@ struct LlmFinding {
     /// parse and are treated as non-escalation-eligible unless cited.
     #[serde(default)]
     code_provable: bool,
+    /// #10782: code copied from `file` at `line`. `None` when omitted or
+    /// null, so a reply from a model that predates the field still parses.
+    #[serde(default)]
+    quoted_snippet: Option<String>,
 }
 
 // ─── Parsed output ────────────────────────────────────────────────────────────
@@ -229,6 +258,8 @@ pub struct ParsedReview {
     pub summary: String,
     /// Parsed findings (may be empty).
     pub findings: Vec<Finding>,
+    /// #10782: the reply's non-postable `questions`, blanks dropped.
+    pub questions: Vec<String>,
     /// True if the parser failed and fell back to the fail-safe UNKNOWN default.
     pub is_fail_safe: bool,
     /// Human-readable reason for the fail-safe, if `is_fail_safe` is true.
@@ -252,6 +283,7 @@ impl ParsedReview {
             grade_pre_floor: None,
             summary: String::new(),
             findings: Vec::new(),
+            questions: Vec::new(),
             is_fail_safe: true,
             fail_safe_reason: Some(reason.into()),
         }
@@ -477,6 +509,7 @@ fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
         grade_pre_floor: None,
         summary: block.summary,
         findings,
+        questions: question_texts(block.questions), // #10782
         is_fail_safe: false,
         fail_safe_reason: None,
     }
@@ -679,6 +712,8 @@ fn convert_llm_finding(f: LlmFinding) -> Finding {
     // floor uses it (OR a source_citation) to decide whether a High finding may
     // drive the BLOCK floor.
     finding.code_provable = f.code_provable;
+    // #10782: a blank quote is no quote; `quote_admission` decides what it means.
+    finding.quoted_snippet = f.quoted_snippet.filter(|q| !q.trim().is_empty());
     finding
 }
 

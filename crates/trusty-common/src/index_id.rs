@@ -88,6 +88,11 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
 
 /// Derive the trusty-search index id for a project root.
 ///
+/// LEGACY (#10530): this basename rule remains only to resolve ids that already
+/// exist and for roots no tm registry project owns. A registered project's id
+/// comes from `crate::registry_index_id::derive_registry_index_id`, which does
+/// not change on `mv` or a repo rename.
+///
 /// Why: the index id is the stable handle every search/grep call targets. It
 /// MUST be derived identically wherever it is computed (trusty-mpm's
 /// register-and-pin at launch, trusty-search's `detect_project`) or a session

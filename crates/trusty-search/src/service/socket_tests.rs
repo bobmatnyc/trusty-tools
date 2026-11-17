@@ -245,6 +245,10 @@ fn every_family_method_is_spliced_into_the_socket_method_list() {
         ("warm", crate::service::rpc::warm::METHODS),
         ("project", crate::service::rpc::project::METHODS),
         ("project_map", crate::service::rpc::project_map::METHODS),
+        (
+            "project_ensure",
+            crate::service::rpc::project_ensure::METHODS,
+        ),
         ("file", crate::service::rpc::file::METHODS),
     ] {
         for method in names {

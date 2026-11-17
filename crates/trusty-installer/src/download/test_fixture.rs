@@ -127,3 +127,20 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     h.update(bytes);
     format!("{:x}", h.finalize())
 }
+
+/// Write a 0755 shell script at `dir/name` whose body is `body` (#10584).
+///
+/// Why: the no-downgrade guard reads an installed binary's `--version`, so its
+/// tests need a stand-in installed build that prints, or fails, on demand.
+#[cfg(unix)]
+pub(crate) fn write_fake_binary(
+    dir: &std::path::Path,
+    name: &str,
+    body: &str,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}

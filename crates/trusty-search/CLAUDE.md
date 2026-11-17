@@ -260,7 +260,7 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
 
 - **Schema 1.** `[[projects]] {key, index_id, root_path, pinned_by =
   migration|create|operator, pinned_unix}` and `[[parked]] {index_id, key,
-  root_path, reason = worktree|orphaned|operator, parked_unix}`. `key` is the
+  root_path, reason = worktree|orphaned|operator|decommissioned, parked_unix}`. `key` is the
   resolver's group key: the repo identity, or `root:<path>` for a
   subdirectory index.
 - **Migration.** The first boot with no map pins every group to the index
@@ -289,9 +289,17 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   `data.error = "park_refused"`. A parked index keeps its corpus and its
   `indexes.toml` row; it is unloaded and is not warm-loaded, watched,
   reindexed, or searched by `search.query.all`.
-- `search.project.unpark {index_id}` → `{index_id, unparked, reindex_queued,
-  reindex | reindex_error}`: clears the row, reloads the index, queues a
-  reindex.
+- `search.project.park {index_id, decommission: true}` (#10989) is tm's
+  project decommission. Any registered index parks, a main checkout and the
+  group's live index included, with `reason = decommissioned`. If the unload
+  is refused (a reindex runs), the park is rolled back (row removed, dropped
+  pins restored) and the call fails `-32009` with
+  `data.error = "park_unload_refused"` and `data.rolled_back`. Unpark
+  reloads it as for any park.
+- `search.project.unpark {index_id}` → `{index_id, unparked, watching,
+  reindex_queued, reindex | reindex_error}`: clears the row, reloads the
+  index, restarts its watcher (#10989), queues a reindex. tm unparks a
+  `decommissioned` park when a new session starts for the project.
 - `search.project.pin {index_id}` → `{index_id, key, pinned_by, previous}`.
   A worktree, orphaned or parked index is refused.
 - A request naming a parked index (`search.query`, reindex, file reads and
@@ -301,6 +309,51 @@ Socket-only, free lane. The map sits next to `indexes.toml` (with a
   under the map (`null` when it has none), never a parked or unregistered id.
 - Deleting an index drops its park row and pins from the map, so an index
   registered again at the same root is not parked.
+- `search.project.ensure {project_key, name, root, profile?}` (#10531) →
+  `{index_id, project_key, created, root_path, reindex_queued, reindex |
+  reindex_error, profile, profile_applied, project_map_error?}`. Find-or-create
+  the one index of a tm project; MCP tool `ensure_project`. Socket-only, free
+  lane. An index already registered at that exact tree is returned
+  (`created: false`, no reindex). Otherwise a root that contains, or sits
+  inside, any registered root (live or parked, additional roots included) is
+  refused `-32009` with `data.error = "project_root_overlap"`, `data.overlap`
+  (`inside_existing_root` or `encloses_existing_root`) and
+  `data.overlapping_index_id`. A home or filesystem root is
+  `project_root_unindexable`. A new index takes the id
+  `trusty_common::index_id_for_root` names (the root basename until
+  `REGISTRY_IDS_ADOPTED` flips), or the registry-derived id when that basename
+  is registered at another tree (`project_id_taken` when that is taken too).
+  It pins the group (as `search.index.create` does) and queues the first
+  reindex. Excludes (#10532): the checkout's `.trusty-search.yaml`
+  `exclude` list, else the request's `exclude` (the tm registry override), else
+  `profile` (default `std-v1`, the only one defined; another name is
+  `400 unknown_profile`). The response's `profile` is the stored `name@hash`
+  (`std-v1@3fa2c9d1`, or `custom@<hash>` for a caller list),
+  `profile_source` is `Profile`, `Registry` or `RepoConfig`, and
+  `profile_applied` is `true` on the call that created the index.
+  `repo_config_error` reports a `.trusty-search.yaml` that did not parse.
+
+##### Exclude profile `std-v1` (#10532)
+
+`core::profile::STD_V1_GLOBS` is the standard exclude set: record directories
+(`owner-queue`, `owner-queue-archive`), archives, `.worktrees`, `*.db`,
+`*.sqlite*`, `*.lock`, `dashboard*.log`, `logs`, `checkpoints`, `backups`,
+`actions.md`, `local/usage` and `local/dashboard*/**/*.json`. Paths fall into
+the `code`, `docs` (`*.md *.mdx *.rst *.adoc *.txt`) or excluded class
+(`core::profile::classify`).
+
+- `POST /indexes` / `search.index.create`: an empty or absent `exclude_globs`
+  applies `profile` (default `std-v1`); a non-empty list wins and is stored as
+  `custom`. The response carries `profile`.
+- `PATCH /indexes/:id/config`: `profile: "std-v1"` replaces the list with the
+  profile; `exclude_globs` replaces it with exactly that list (`custom`); both
+  together is `400 profile_and_exclude_globs`. Indexed files the new list
+  excludes and the old one did not are removed in place with the
+  `search.index.files.remove` machinery; no reindex runs. The body carries
+  `profile` and `profile_purge` (`files_removed`, `chunks_removed`,
+  `rebuilt: false`, or `error`).
+- `GET /indexes/:id/status`: `profile` is `std-v1@<hash>` or `custom@<hash>`,
+  `null` for an index persisted before profiles existed.
 - `search.index.create` pins a new index's group when it has no pin
   (`pinned_by = create`); a pin that cannot be written is reported as
   `project_map_error` and the index stays registered.
@@ -665,9 +718,12 @@ Per-index stats.
     window applies to whose length could not be counted (no tokenizer, a
     tokenizer error, or a failed count task). `window: null` means either no
     embed pass has run since the daemon started, or the embedder reports no
-    window (every sidecar embedder today, since no window crosses the wire);
+    window (a sidecar that predates the optional `result.window` field, #9284);
     in the second case nothing is counted, and `0` does not mean nothing was
-    cut. Each embed pass logs one WARN per affected file for at most 8 files,
+    cut. A sidecar reports its window on its first answer, so a lazy sidecar's
+    first pass learns it after its first wave and counts from there. Counts
+    need the MiniLM tokenizer in the fastembed cache; without it the chunks
+    are `unmeasured`, not `truncated`. Each embed pass logs one WARN per affected file for at most 8 files,
     then one summary.
 - **Response 404 / 503**: see the index-scoped error contract above.
 
@@ -807,6 +863,18 @@ Hybrid search (BM25 + vector + KG expansion + RRF fusion).
     installs its embedder. The `search.query.all` fan-out carries the same
     object as a top-level `embedder`. Whether the index's own vectors are
     built is a separate signal: `vector_unavailable` and `search_capabilities`.
+  - `meta.timings` (#10195): milliseconds per stage — `resolve_ms` (index
+    lookup, including a cold lazy load), `lock_ms` (the index read lock),
+    `embed_ms` (query and `refine_query` embeds), `vector_ms`, `lexical_ms`,
+    `ripgrep_ms` (grep lane, grep fallback, exact-match lane), `fusion_ms` (RRF,
+    MMR, KG, score adjustments, materialisation), `rehydrate_wait_ms` (inside
+    `lexical_ms` and `ripgrep_ms`) and `total_ms`, equal to `latency_ms`, which now starts
+    before the index is resolved. `rehydrate_ran` / `hnsw_promoted` say
+    whether the query started a corpus rehydrate or ran while the vector index
+    promoted its mmap view. The `search` log line carries the same fields. A
+    search the query deadline cancels logs one `query_timeout` line at WARN
+    with `index_id`, `query`, `stage` and `elapsed_ms`; `search_all` logs one
+    `info` line naming its target indexes.
   - `meta.dropped` / `meta.dropped_total` (#2203): how many candidates this
     query retrieved and then discarded, per site. Without it a short `results`
     array was indistinguishable from a small match set. Sites:
@@ -1089,6 +1157,38 @@ unchanged.
   A retry finishes the job, including vectors whose rows the failed call
   already deleted and hashes it did not forget.
 
+##### `search.index.embed_missing` (#10551)
+
+Embed only the chunks that have no vector, and settle the semantic stage.
+Socket-only (no HTTP twin); MCP tool `embed_missing`; CLI `trusty-search index
+embed-missing [--dry-run]`. Use it on an index that reads `degraded` after an
+embedder fault (`embedder stdio IPC error: child closed stdout`) with
+`semantic_coverage.vectors_present` below `chunk_count`; a full reindex is not
+needed.
+
+- **Request body**: `{ "dry_run": false }`. `dry_run: true` reports the gap and
+  queues nothing.
+- **Response 200**: `{ "index_id", "dry_run", "action", "chunks", "missing",
+  "vectors_rejected", "semantic" }`. `action` is `queued` (the missing chunks
+  went to the deferred-embed pass; poll `status` until `semantic` is `ready`),
+  `would_queue` (dry run), `already_running`, `noop` (nothing missing), or
+  `settled` (nothing missing and a `failed` stage was set `ready`). `missing`
+  is measured by chunk id; chunks the store durably refused
+  (`vectors_rejected`, #8884) are not a gap. A repeat run is a `noop`.
+- **Response 409** `embed_missing_not_applicable` (`retryable: false`): the
+  vector lane is off (`skip_vector`, `lexical_only`, serve-only) or no embedder
+  is wired. `embed_missing_busy` (`retryable: true`): a reindex holds the index.
+- **Response 503** `embed_missing_embedder_unavailable` and
+  `embed_missing_unreadable` (`retryable: true`): the embedder failed a probe
+  embed, or the vector store or corpus could not be read. The stage is not
+  touched.
+- **Auto-retry**: the daemon runs the same operation by itself for every index
+  whose semantic stage is `failed`. A ticker wakes every 30 s; per index it
+  waits 30 s, then 60 s, doubling to 15 min, and probes the embedder before it
+  resumes. A dead embedder is probed at the 15 min cap indefinitely; a resume
+  that was queued and failed again counts against a cap of 5, after which the
+  ticker leaves the index to an operator.
+
 ##### `POST /indexes/:id/reindex`
 
 Fire-and-forget full reindex. Returns immediately with an SSE stream URL; poll
@@ -1260,7 +1360,7 @@ server or `OPENROUTER_API_KEY` in the daemon's environment.
 ### MCP Tools
 
 <!-- BEGIN GENERATED: mcp-tools -->
-The MCP server registers **22 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
+The MCP server registers **24 tools**. Authoritative source: `trusty_search::mcp::tools::tool_descriptors` —
 this table is generated from it, not maintained by hand.
 
 | Tool | Arguments | Summary |
@@ -1270,6 +1370,8 @@ this table is generated from it, not maintained by hand.
 | `console_metrics` | — | Return a ConsoleMetricsReport with daemon health and index aggregate statistics (index_count, warm_boot_degraded, index list with… |
 | `create_index` | `id`, `root_path`, `exclude_globs?`, `follow_links?` | Register a new (empty) index. |
 | `delete_index` | `index_id`, `delete_data?` | Delete a registered index and all its on-disk data. |
+| `embed_missing` | `index_id`, `dry_run?` | Embed only the chunks of an index that have no vector, then settle its semantic stage. |
+| `ensure_project` | `project_key`, `name`, `root`, `exclude?`, `profile?` | Find or create the one index of a trusty-mpm project and pin it for its group. |
 | `get_call_chain` | `entry_point`, `direction?`, `full?`, `include_source?`, `index_id?`, `max_bytes?`, `max_depth?`, `project?` | Annotated call tree for a function entry point (issue #76). |
 | `grep` | `pattern`, `case_insensitive?`, `context?`, `context_after?`, `context_before?`, `files_with_matches?`, `fixed_strings?`, `full?`, `glob?`, `index_id?`, `invert_match?`, `max_bytes?`, `max_count?`, `max_results?`, `multiline?`, `project?`, `word_regexp?` | Search indexed files using regex/literal patterns with ripgrep-compatible options. |
 | `index_file` | `index_id`, `path`, `content` | Add or update one file in an index. |

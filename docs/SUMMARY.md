@@ -6,6 +6,7 @@
 
 - [Getting Started](./getting-started/README.md)
   - [Install and Run `tm`](./getting-started/install-and-run-tm.md)
+  - [Let `tm` Create Your Project Clones](./getting-started/canonical-clones.md)
   - [Claude MPM and Trusty MPM](./getting-started/claude-mpm-vs-trusty-mpm.md)
 - [Workspace Package and Code Map](./reference/crate-map.md)
 - [Documentation Layout and Authority](./reference/documentation-layout.md)
@@ -38,7 +39,6 @@
 
 - [trusty-embedderd](./trusty-embedderd/README.md)
 - [trusty-gworkspace](./trusty-gworkspace/README.md)
-- [trusty-cto-db](./trusty-cto-db/README.md)
 - [tc-services](./tc-services/README.md)
 - [trusty-agents-common](./trusty-agents-common/README.md)
 

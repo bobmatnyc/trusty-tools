@@ -56,6 +56,7 @@
 use tracing::{info, warn};
 
 use crate::daemon::orphan_gc::{ChildLivenessProbe, PaneInfo, is_idle_shell};
+use crate::daemon::orphan_gc_servers::ServerPanes;
 use crate::daemon::tmux::TmuxDriver;
 use crate::session_manager::{
     ManagedSessionId, ManagedSessionState, SessionManager, SessionRecord,
@@ -145,6 +146,29 @@ pub fn find_runtime_exited(
         .collect()
 }
 
+/// [`find_runtime_exited`] with each record matched only against its own
+/// tmux server's panes, keyed by (server, session) (#10101).
+///
+/// What: a record whose server's panes are unknown
+/// ([`ServerPanes::panes_of`] is `None`) is skipped, never selected.
+/// Test: `a_named_pm_whose_claude_exited_is_stopped_on_its_own_server`,
+/// `a_default_pane_with_a_named_records_name_never_stops_it`.
+pub(crate) fn find_runtime_exited_on(
+    records: &[SessionRecord],
+    panes: &ServerPanes,
+    probe: &dyn ChildLivenessProbe,
+) -> Vec<ManagedSessionId> {
+    records
+        .iter()
+        .filter(|r| {
+            panes.panes_of(r).is_some_and(|own| {
+                !find_runtime_exited(std::slice::from_ref(*r), own, probe).is_empty()
+            })
+        })
+        .map(|r| r.id)
+        .collect()
+}
+
 /// Reconcile step: mark every runtime-exited `Active` session `Stopped`.
 ///
 /// Why: this is the self-healing action for #1814. Per #2023 A it routes
@@ -167,8 +191,18 @@ pub async fn stop_runtime_exited(
     panes: &[PaneInfo],
     probe: &(dyn ChildLivenessProbe + Sync),
 ) -> usize {
+    stop_runtime_exited_on(manager, &ServerPanes::default_only(panes.to_vec()), probe).await
+}
+
+/// [`stop_runtime_exited`] over every server's panes (#10101).
+/// Test: `a_named_pm_whose_claude_exited_is_stopped_on_its_own_server`.
+pub(crate) async fn stop_runtime_exited_on(
+    manager: &SessionManager,
+    panes: &ServerPanes,
+    probe: &(dyn ChildLivenessProbe + Sync),
+) -> usize {
     let records = manager.list().await;
-    let exited = find_runtime_exited(&records, panes, probe);
+    let exited = find_runtime_exited_on(&records, panes, probe);
     let mut stopped = 0usize;
     for id in exited {
         match manager.mark_runtime_exited_stopped(&id).await {
@@ -202,7 +236,8 @@ pub async fn stop_runtime_exited(
 /// adapter enumerates the host's managed panes (name + `pane_current_command` +
 /// shell PID) and hands them to the pure [`stop_runtime_exited`] step, keeping the
 /// tmux subprocess call out of the testable core.
-/// What: runs [`TmuxDriver::list_managed_panes`]; on failure logs a warning and
+/// What: runs [`TmuxDriver::list_managed_panes`], then lists every live
+/// workspace server's panes (#10101); on a default-server failure logs a warning and
 /// reaps nothing this tick (fail-safe — better a stale `Active` record than a
 /// wrongly-stopped live session). Otherwise delegates to [`stop_runtime_exited`]
 /// with the production [`crate::daemon::orphan_gc::ProcessTreeProbe`] and returns
@@ -215,6 +250,21 @@ pub async fn reap_runtime_exited_managed(
     driver: &TmuxDriver,
     probe: &(dyn ChildLivenessProbe + Sync),
 ) -> usize {
+    let socket_dir = crate::core::tmux_server::ambient_socket_dir();
+    reap_runtime_exited_managed_in(manager, driver, &socket_dir, probe).await
+}
+
+/// [`reap_runtime_exited_managed`] with the workspace servers in
+/// `socket_dir` (#10101): each server's panes are listed through the bounded
+/// probe, and a server that cannot be listed stops none of its records.
+/// Test: `a_named_pm_whose_claude_exited_is_stopped_on_its_own_server`,
+/// `a_default_pane_with_a_named_records_name_never_stops_it`.
+pub(crate) async fn reap_runtime_exited_managed_in(
+    manager: &SessionManager,
+    driver: &TmuxDriver,
+    socket_dir: &std::path::Path,
+    probe: &(dyn ChildLivenessProbe + Sync),
+) -> usize {
     let panes = match driver.list_managed_panes() {
         Ok(p) => p,
         Err(e) => {
@@ -222,8 +272,13 @@ pub async fn reap_runtime_exited_managed(
             return 0;
         }
     };
-    stop_runtime_exited(manager, &panes, probe).await
+    let panes = ServerPanes::list(driver, socket_dir, panes);
+    stop_runtime_exited_on(manager, &panes, probe).await
 }
+
+#[cfg(test)]
+#[path = "runtime_reap_servers_tests.rs"]
+mod server_tests;
 
 #[cfg(test)]
 mod tests {

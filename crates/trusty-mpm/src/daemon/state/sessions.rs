@@ -410,10 +410,13 @@ impl DaemonState {
     /// housekeeping loop calls this periodically, and `DELETE /sessions/dead`
     /// calls it on demand.
     /// What: discovers the live tmux session names via `driver.list_sessions()`,
-    /// then delegates to [`reap_against`](Self::reap_against). A failed tmux
-    /// listing reaps nothing (returns a zeroed [`ReapResult`]) rather than
-    /// wrongly deleting every session.
-    /// Test: `reap_dead_sessions`, `reap_marks_stopped_when_pid_dead`.
+    /// then delegates to [`reap_against_servers`](Self::reap_against_servers).
+    /// A failed tmux listing reaps nothing (returns a zeroed [`ReapResult`])
+    /// rather than wrongly deleting every session. #10101: when a session
+    /// records a workspace server's socket, the workspace servers are listed
+    /// too, so that session is judged on its own server.
+    /// Test: `reap_dead_sessions`, `reap_marks_stopped_when_pid_dead`,
+    /// `the_legacy_reaper_judges_a_socket_session_on_its_own_server_10101`.
     pub fn reap_dead_sessions(&self, driver: &TmuxDriver) -> ReapResult {
         let live: std::collections::HashSet<String> = match driver.list_sessions() {
             Ok(sessions) => sessions.into_iter().map(|s| s.name).collect(),
@@ -422,7 +425,19 @@ impl DaemonState {
                 return ReapResult::default();
             }
         };
-        self.reap_against(&live)
+        let named = self
+            .sessions
+            .iter()
+            .any(|e| e.value().tmux_socket.is_some())
+            .then(|| {
+                let real = crate::session_manager::RealTmuxDriver::from_driver(driver.clone());
+                crate::session_manager::tmux_route::observe_workspace_servers(&real, live.clone())
+            });
+        self.reap_against_servers(
+            &live,
+            named.as_ref(),
+            super::session_claude_liveness::claude_liveness,
+        )
     }
 
     /// Remove dead tmux sessions and mark Stopped ones with a dead process.
@@ -452,6 +467,7 @@ impl DaemonState {
     /// `a_sealed_registry_reaps_nothing_8980`,
     /// `a_settled_session_whose_claude_exited_is_reaped_9010`,
     /// `a_settled_session_with_a_recent_event_is_kept_9010`.
+    #[cfg(test)] // #10101: production reaps through reap_against_servers
     pub(super) fn reap_against(&self, live: &std::collections::HashSet<String>) -> ReapResult {
         self.reap_against_with(live, super::session_claude_liveness::claude_liveness)
     }
@@ -460,9 +476,30 @@ impl DaemonState {
     ///
     /// Test: `an_unanswered_probe_keeps_a_settled_session_9010`,
     /// `a_session_rebound_during_the_reap_is_kept_9010`.
+    #[cfg(test)] // #10101: production reaps through reap_against_servers
     pub(super) fn reap_against_with(
         &self,
         live: &std::collections::HashSet<String>,
+        probe: impl Fn(ClaudeProcess) -> super::session_claude_liveness::ClaudeLiveness,
+    ) -> ReapResult {
+        self.reap_against_servers(live, None, probe)
+    }
+
+    /// [`Self::reap_against_with`] with the workspace servers' live sets
+    /// (#10101).
+    ///
+    /// What: a session with no socket is live when `live` (the default
+    /// server) holds its name. A session with a socket is live when `named`
+    /// holds it on that server
+    /// ([`crate::session_manager::tmux_route::LiveSessions::holds_session`]),
+    /// and is kept when `named` is `None`: a server that was not observed is
+    /// never read as the default server.
+    /// Test: `the_legacy_reaper_judges_a_socket_session_on_its_own_server_10101`,
+    /// `a_socket_session_is_kept_when_no_server_was_observed_10101`.
+    pub(super) fn reap_against_servers(
+        &self,
+        live: &std::collections::HashSet<String>,
+        named: Option<&crate::session_manager::tmux_route::LiveSessions>,
         probe: impl Fn(ClaudeProcess) -> super::session_claude_liveness::ClaudeLiveness,
     ) -> ReapResult {
         use crate::core::session::{SessionHost, SessionStatus};
@@ -486,7 +523,12 @@ impl DaemonState {
             if session.origin != SessionHost::Tmux {
                 continue;
             }
-            if !live.contains(&session.tmux_name) {
+            let alive = match (session.tmux_socket.as_deref(), named) {
+                (None, _) => live.contains(&session.tmux_name),
+                (Some(_), None) => true, // #10101: its server was not observed
+                (socket, Some(named)) => named.holds_session(&session.tmux_name, socket),
+            };
+            if !alive {
                 dead.push(*entry.key());
             } else if session.status != SessionStatus::Stopped
                 && let Some(pid) = session.pid
@@ -1209,128 +1251,5 @@ impl DaemonState {
             d.status = status;
             d.ended_at = Some(chrono::Utc::now());
         })
-    }
-
-    /// Reap managed sessions whose tmux session has disappeared.
-    ///
-    /// Why (#1744): the 60-second reap loop only handled legacy in-memory
-    /// sessions. Managed sessions that exit ungracefully (terminal kill, tmux pane
-    /// close) would stay `Active` in the store for up to 60 seconds. Running this
-    /// in the reap loop transitions them to `Stopped` as soon as their tmux session
-    /// disappears (detected via `driver.list_sessions()`). The `SessionEnd` hook
-    /// handles the common case immediately; this is the safety net for the rare
-    /// cases where the hook did not fire (daemon restart race, hook misconfiguration).
-    /// What: calls `driver.list_sessions()` to build a live-name set, then
-    /// delegates to [`Self::reap_managed_against`]. On driver error logs a warning
-    /// and returns without touching the store (fail-safe: better to leave a stale
-    /// Active record than to incorrectly mark a running session Stopped).
-    /// Test: `reap_dead_managed_sessions_marks_stopped` in `super::tests` via
-    /// `reap_managed_against`.
-    pub async fn reap_dead_managed_sessions(&self, driver: &TmuxDriver) {
-        let live: std::collections::HashSet<String> = match driver.list_sessions() {
-            Ok(s) => s.into_iter().map(|s| s.name).collect(),
-            Err(e) => {
-                tracing::warn!("managed reap skipped — tmux list-sessions failed: {e}");
-                return;
-            }
-        };
-        self.reap_managed_against(&live).await;
-    }
-
-    /// Core of the managed-session reaper: stop every Active session not in `live`.
-    ///
-    /// Why: extracted from [`Self::reap_dead_managed_sessions`] so tests can
-    /// exercise the stop logic with a pre-built live set without requiring a real
-    /// `TmuxDriver` or tmux binary. The outer function handles the tmux call;
-    /// this method is the deterministic, testable heart.
-    /// What: for every Active managed session whose `tmux_name` is absent from
-    /// `live`, calls `SessionManager::stop_with_cause` (best-effort kill + mark
-    /// Stopped). Failures are logged and swallowed so the caller's reap loop
-    /// continues.
-    ///
-    /// #6194 — WHICH cause, and why the empty set is its own case. An EMPTY
-    /// `live` means no tmux session of any kind exists on this host, because
-    /// `TmuxDriver::list_sessions` maps "no server running" to `Ok(vec![])`.
-    /// That is a whole-server loss — `tmux kill-server`, a crash, an upgrade, a
-    /// logout — and it is not attributable to anyone's decision about any
-    /// individual session, so those records are stopped as
-    /// [`StopCause::Unexpected`] and stay auto-resumable, which is how the
-    /// supervisor recovered such a fleet before #6194. A NON-EMPTY `live` means
-    /// the tmux server is up and other sessions are running, so a record whose
-    /// own name is missing was killed on purpose:
-    /// [`StopCause::Deliberate`], and no automatic path revives it. The
-    /// one-session host is genuinely ambiguous — tmux exits its server when the
-    /// last session dies, so killing the only session and killing the server
-    /// produce the identical observation — and it is resolved toward restoring
-    /// the fleet, the more recoverable of the two mistakes (`tm session stop`
-    /// still records Deliberate on that host and still sticks).
-    ///
-    /// #8233 — a session whose resume is IN FLIGHT is skipped entirely. See the
-    /// guard's own comment in the body for why a missing `tmux_name` proves
-    /// nothing while a resume is recreating that very session.
-    ///
-    /// #8942 — a protected-kind record goes `Stopped` record-only
-    /// ([`crate::session_manager::SessionManager::mark_stopped_record_only`]).
-    ///
-    /// Test: `the_tmux_gone_reaper_marks_an_architect_record_stopped_without_teardown`,
-    /// `reap_dead_managed_sessions_marks_stopped`,
-    /// `reap_marks_a_targeted_kill_deliberate`,
-    /// `reap_leaves_a_whole_server_loss_auto_resumable`,
-    /// `reap_managed_against_skips_a_session_whose_resume_is_in_flight` in
-    /// `super::tests`.
-    pub(crate) async fn reap_managed_against(&self, live: &std::collections::HashSet<String>) {
-        let mgr = self.session_manager().await;
-        // #9238: a session renamed in tmux keeps its pane; follow it first,
-        // so the name check below never stops it.
-        mgr.follow_tmux_renames().await;
-        let records = mgr.list().await;
-        // #6194: an empty live set is a lost tmux SERVER, not N killed sessions.
-        let cause = if live.is_empty() {
-            crate::session_manager::StopCause::Unexpected
-        } else {
-            crate::session_manager::StopCause::Deliberate
-        };
-        for r in records {
-            if matches!(r.state, crate::session_manager::ManagedSessionState::Active)
-                && !live.contains(&r.tmux_name)
-            {
-                // #8233 acceptance item 4: `resume_inner`'s recreate branch
-                // KILLS and rebuilds this tmux session, so a `live` set snapshot
-                // taken before that kill reports the name missing while the
-                // resume is still mid-flight. Stopping here kills the pane the
-                // resume just made and stamps `Deliberate`, which no automatic
-                // path ever revives. The claim is not a lock this sweep can
-                // take (it must decline, not queue), so it reads it — the same
-                // rule `mark_runtime_exited_stopped` follows.
-                if mgr.is_resume_in_flight(&r.id) {
-                    tracing::info!(
-                        id = %r.id,
-                        name = %r.tmux_name,
-                        "reaper: a resume is in flight for this session; leaving it alone (#8233)"
-                    );
-                    continue;
-                }
-                // #8942: the Architect's pane is gone, so its record says so,
-                // but no teardown runs for it.
-                let stopped = if r.kind.is_protected() {
-                    mgr.mark_stopped_record_only(&r.id, cause).await
-                } else {
-                    mgr.stop_with_cause(&r.id, cause).await
-                };
-                match stopped {
-                    Ok(_) => tracing::info!(
-                        id = %r.id,
-                        name = %r.tmux_name,
-                        cause = ?cause,
-                        "reaper: marked managed session Stopped (tmux gone, #1744)"
-                    ),
-                    Err(e) => tracing::warn!(
-                        id = %r.id,
-                        name = %r.tmux_name,
-                        "reaper: failed to mark managed session Stopped: {e}"
-                    ),
-                }
-            }
-        }
     }
 }

@@ -22,6 +22,9 @@ pub(crate) use google_bare_id::*;
 // #9748: GitHub Projects v2 node ids, admitted by exact shape.
 mod github_node_id;
 pub(crate) use github_node_id::*;
+// #9748: `:line` file references and credentials inside a URL.
+mod locators;
+pub(crate) use locators::*;
 // #8623: span-level detection and the rule set, shared with trusty-memory.
 mod private_key;
 mod spans;
@@ -1352,6 +1355,12 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
     // through to the entropy heuristics and is flagged.
     // Exception: RHS that is pure `=` padding is non-structural (base64).
     if token.contains('=') {
+        // #9748: each `=` below recurses on the text after it, so a long
+        // `a=b&a=b&...` query overflowed the stack. Past the cap the token is
+        // not structural and falls to the entropy heuristics.
+        if token.bytes().filter(|&b| b == b'=').count() > MAX_STRUCTURAL_EQUALS {
+            return false;
+        }
         let parts: Vec<&str> = token.splitn(2, '=').collect();
         if parts.len() == 2 {
             let lhs = parts[0];
@@ -1442,7 +1451,14 @@ pub(crate) fn is_structural_token(token: &str) -> bool {
 /// `structural_tokens_are_not_flagged`,
 /// `vercel_deployment_ids_are_not_flagged`,
 /// `prefixed_provider_keys_are_blocked_after_7549`,
-/// `github_project_node_ids_are_accepted_after_9748`.
+/// `github_project_node_ids_are_accepted_after_9748`,
+/// `ordinary_paths_and_urls_are_accepted_after_9748`,
+/// `secrets_inside_paths_and_urls_are_refused_after_9748`.
+///
+/// #9748: after the provider-key test, a URL whose userinfo, query or fragment
+/// carries a credential ([`url_carries_secret`]) is a secret, and a
+/// `file.ext:LINE` reference gets the verdict of its text without the suffix
+/// ([`strip_file_line_suffix`]).
 pub(crate) fn looks_like_secret(token: &str) -> bool {
     // Allowlist git SHAs first — the whole point of issue #1481.
     if is_git_sha_like(token) {
@@ -1462,6 +1478,16 @@ pub(crate) fn looks_like_secret(token: &str) -> bool {
     // offset 0 — a lowercase segment typed in front used to hide the whole key.
     if is_provider_key(token) {
         return true;
+    }
+    // #9748: a credential in a URL's userinfo, query or fragment is refused
+    // whatever the rest of the URL reads as.
+    if url_carries_secret(token) {
+        return true;
+    }
+    // #9748: `path/file.ext:LINE[:COL]` is judged without its digits-only
+    // line suffix; the rest still gets every rule below.
+    if let Some(base) = strip_file_line_suffix(token) {
+        return looks_like_secret(base);
     }
     // #7482: a vendor-issued PUBLIC resource id (a Vercel `dpl_` deployment id)
     // has a credential's character-class profile but is not a credential. Placed
@@ -1732,3 +1758,6 @@ pub(crate) fn redact_token(token: &str) -> String {
 // #9278: #9748's gate tests, moved in-crate once the gate became crate-only.
 #[cfg(test)]
 mod pvt_9748_tests;
+// #9748: the paths-and-URLs half of the issue.
+#[cfg(test)]
+mod paths_urls_9748_tests;

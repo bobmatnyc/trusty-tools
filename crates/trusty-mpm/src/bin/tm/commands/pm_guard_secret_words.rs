@@ -35,6 +35,8 @@
 //! `pm_guard_secret_read`'s `tests` submodule, which owns every caller of this
 //! layer.
 
+use crate::commands::pm_guard_secret_brackets::widen_brackets;
+
 /// Every reading of `text` the word scan must screen.
 ///
 /// Why: a shell can read one string more than one way, and round 8 established
@@ -117,32 +119,14 @@ pub(crate) fn is_path_byte(c: char) -> bool {
 /// exactly one character, so `?` is its faithful stand-in, and `?` is a
 /// WIDENING of it — every string the class reaches, `?` reaches too — which
 /// puts the approximation on the deny side.
-/// What: a balanced non-empty `[…]` becomes `?`; a stray `[` or `]` is dropped,
-/// so a malformed class falls back to the name around it (`cat .env]` still
-/// denies) rather than shielding it.
+/// What: a bracket expression becomes `?`; a stray `[` or `]` is dropped, so a
+/// malformed class falls back to the name around it (`cat .env]` still denies)
+/// rather than shielding it.
 /// Test: `normalize_bracket_classes_collapses_a_class_and_drops_a_stray`,
 /// `denies_a_glob_that_expands_onto_a_secret_file`.
 pub(crate) fn normalize_bracket_classes(name: &str) -> String {
-    let chars: Vec<char> = name.chars().collect();
-    let mut out = String::with_capacity(name.len());
-    let mut i = 0;
-    while i < chars.len() {
-        match chars[i] {
-            '[' => match chars[i + 1..].iter().position(|c| *c == ']') {
-                Some(close) if close > 0 => {
-                    out.push('?');
-                    i += close + 2;
-                }
-                _ => i += 1,
-            },
-            ']' => i += 1,
-            c => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    out
+    // #10761: the POSIX parse, so `[!]x]` is one class, not `[!]` plus `x]`.
+    widen_brackets(name, "")
 }
 /// The operator spellings that separate a `${…}` parameter's NAME from the
 /// word the expansion can produce, longest spelling first.

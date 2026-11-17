@@ -31,9 +31,9 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
-  per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
-  a skill, `docs/`, or memory. The test is frequency of need, not format.
+- `CLAUDE.md` is resident in EVERY prompt: each line costs every turn.
+  Needed on every prompt → `CLAUDE.md`. Needed only sometimes → a skill,
+  `docs/`, or memory.
 
 ## Completion Standard
 
@@ -43,13 +43,17 @@ Ship and close. Work beyond this needs an explicit user request.
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
-  or a broken gate or CI. All else is ONE comment on the PR or issue: no new
-  review round, issue or fix round.
+  or a broken gate or CI. A finding of any severity that directly fails a
+  stated acceptance criterion of the brief or issue blocks; its fix uses the
+  one fix round (no extra round). All else is ONE comment on the PR or issue:
+  no new review round, issue or fix round.
 - **Limits:** after the first review, at most one fix round and one delta
-  review; a blocker left after that goes to the Architect. Never widen scope.
+  review; a blocker left after that goes to the Architect. A criterion-fail
+  fix uses that one round. Never widen scope.
   Detail: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)

@@ -64,25 +64,34 @@ impl ServedHits {
     pub(crate) fn record(self, state: &AppState, handle: &PalaceHandle) {
         handle.record_accesses(&self.lane);
         for (palace, ids) in group(self.rulings) {
-            record_in_palace(state, &palace, &ids);
+            record_in_palace(state, &palace, &ids, true);
         }
     }
 }
 
 /// Record the lane hits a cross-palace recall served, each in its own palace.
 ///
-/// Why (Q4): `memory_recall_all` counts per owning palace.
+/// Why (Q4): `memory_recall_all` counts per owning palace. #11255: a walk that
+/// hit its deadline must not start more palace opens after its reply, so the
+/// caller passes `reopen: false` and a non-resident palace's bump is skipped.
 /// What: groups the cut results' lane hits by `palace_id` and hands each
-/// group to [`record_in_palace`].
-/// Test: `recall_all_records_each_hit_in_its_own_palace`.
-pub(crate) fn record_served_across(state: &AppState, results: &[CrossPalaceResult]) {
+/// group to [`record_in_palace`]. Returns how many detached reopens it
+/// scheduled.
+/// Test: `recall_all_records_each_hit_in_its_own_palace`,
+/// `no_reopen_is_scheduled_when_reopen_is_off`.
+pub(crate) fn record_served_across(
+    state: &AppState,
+    results: &[CrossPalaceResult],
+    reopen: bool,
+) -> usize {
     let hits = results
         .iter()
         .filter(|r| r.result.layer >= FIRST_COUNTED_LAYER)
         .map(|r| (r.palace_id.clone(), r.result.drawer.id));
-    for (palace, ids) in group(hits) {
-        record_in_palace(state, &palace, &ids);
-    }
+    group(hits)
+        .into_iter()
+        .filter(|(palace, ids)| record_in_palace(state, palace, ids, reopen))
+        .count()
 }
 
 /// Group `(palace, id)` pairs by palace.
@@ -105,16 +114,23 @@ fn group(pairs: impl IntoIterator<Item = (String, Uuid)>) -> HashMap<String, Vec
 /// What: a resident handle records in memory only and keeps its debounced
 /// flush. Otherwise the reopen, the record and the release run on the
 /// blocking pool, detached: the recall does not wait for them. Outside a
-/// tokio runtime they run inline.
+/// tokio runtime they run inline. #11255: with `reopen` false a non-resident
+/// palace is skipped instead. Returns `true` only when it scheduled a reopen.
 /// Test: `recall_all_scope_all_records_into_a_released_palace`,
-/// `recall_all_records_each_hit_in_its_own_palace`.
+/// `recall_all_records_each_hit_in_its_own_palace`,
+/// `no_reopen_is_scheduled_when_reopen_is_off`.
 ///
 /// [`open_palaces_blocking`]: crate::service::helpers::open_palaces_blocking
-fn record_in_palace(state: &AppState, palace: &str, ids: &[Uuid]) {
+fn record_in_palace(state: &AppState, palace: &str, ids: &[Uuid], reopen: bool) -> bool {
     let id = PalaceId::new(palace);
     if let Some(handle) = state.registry.peek(&id) {
         handle.record_accesses(ids);
-        return;
+        return false;
+    }
+    if !reopen {
+        // #11255: the walk hit its deadline; the advisory bump is skipped.
+        tracing::debug!(palace = %id, "#11255: access bump skipped after the deadline");
+        return false;
     }
     let (state, ids) = (state.clone(), ids.to_vec());
     let work = move || reopen_and_record(&state, &id, &ids);
@@ -124,6 +140,7 @@ fn record_in_palace(state: &AppState, palace: &str, ids: &[Uuid]) {
         }
         Err(_) => work(),
     }
+    true
 }
 
 /// Open `id`, record `ids`, and release it again if nothing else holds it.

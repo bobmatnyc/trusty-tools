@@ -21,7 +21,12 @@
 //! Universal on every path since #9001: a tmux target that does not resolve
 //! exactly to an existing pane, window or session
 //! (`pm_guard_bash::evaluate_tmux_exact_target`); since #10033, any
-//! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`).
+//! `tm fleet relaunch` (`pm_guard_bash::evaluate_fleet_relaunch`); since
+//! #10665, a tmux kill of the fleet's server or of a `tm-` session
+//! (`pm_guard_bash::kill_server`); since #8878 PR2a, a write of the presence
+//! key's Keychain item (`pm_guard_presence_key`); its other findings are log-only (ruling
+//! Dac): [`ArchitectGate::record_would_refuse`] keeps one, and
+//! [`deny_floors`] records it.
 //! [`ArchitectGate`] is the one
 //! identity answer for the D4 remainder and the D5 call sites in `pm_guard`;
 //! it asks [`architect_main_thread`] at most once, and only when a rule
@@ -48,14 +53,22 @@ use crate::commands::pm_guard_architect_reason::{
 use crate::commands::pm_guard_bash::fleet_relaunch::{
     FLEET_RELAUNCH_RULE, evaluate_fleet_relaunch,
 };
+use crate::commands::pm_guard_bash::kill_server::{
+    KillVerdict, ServerEnv, TMUX_KILL_SERVER_RULE, evaluate_tmux_kill_server,
+};
 use crate::commands::pm_guard_bash::{
     ARCHITECT_PANE_RULE, GitProbe, LiveGit, LivePanes, PaneProbe, TMUX_TARGET_RULE,
     evaluate_architect_pane, evaluate_d4_floor, evaluate_destructive_delete_command,
     evaluate_tmux_exact_target, unclassifiable_reason,
 };
-use crate::commands::pm_guard_deny_log::{DenyContext, audit_denied_tool};
-use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use crate::commands::pm_guard_deny_log::{DenyContext, record_would_refuse};
+use crate::commands::pm_guard_presence::evaluate_presence_verbs;
+use crate::commands::pm_guard_presence_key::evaluate_presence_key_write;
+use crate::commands::pm_guard_refusal::refuse;
+use crate::commands::pm_guard_secret_script::presence_key::evaluate_script_body_presence_key;
+use crate::commands::pm_guard_secret_script::tmux_kill::evaluate_script_body_tmux_kill;
 use crate::commands::pm_guard_trust_anchor::{self, HookEnv, TRUST_ANCHOR_RULE};
+use trusty_mpm::core::guard_policy;
 
 /// The rule name recorded with a D4-remainder deny.
 pub(crate) const D4_FLOOR_RULE: &str = "d4-floor";
@@ -76,6 +89,8 @@ pub(crate) struct ArchitectGate<'a> {
     config: Box<dyn Fn() -> MpmConfig + 'a>,
     verdict: OnceCell<Result<(), NotArchitect>>,
     envfile: OnceCell<EnvfileCall>,
+    /// #10665 (ruling Dac): the first log-only floor finding of this run.
+    would_refuse: OnceCell<FloorDeny>,
 }
 
 impl<'a> ArchitectGate<'a> {
@@ -96,6 +111,7 @@ impl<'a> ArchitectGate<'a> {
             config: Box::new(config),
             verdict: OnceCell::new(),
             envfile: OnceCell::new(),
+            would_refuse: OnceCell::new(),
         }
     }
 
@@ -117,6 +133,17 @@ impl<'a> ArchitectGate<'a> {
     /// The env-file call the #8939 exemption let through, if any.
     pub(crate) fn envfile(&self) -> Option<&EnvfileCall> {
         self.envfile.get()
+    }
+
+    /// Keep the first log-only floor finding: the call runs, the hook records
+    /// it (#10665, ruling Dac).
+    pub(crate) fn record_would_refuse(&self, rule: &'static str, reason: String) {
+        let _ = self.would_refuse.set(FloorDeny { rule, reason });
+    }
+
+    /// The log-only floor finding [`Self::record_would_refuse`] kept, if any.
+    pub(crate) fn would_refuse(&self) -> Option<&FloorDeny> {
+        self.would_refuse.get()
     }
 
     /// Whether the call is the Architect's main thread (#8878, ruling A).
@@ -156,18 +183,28 @@ pub(crate) async fn deny_floors(
         git: &LiveGit,
         panes: &LivePanes::ambient(),
     };
-    let Some(deny) = evaluate_floors(payload, hook_cwd, gate, &probes, bypassed) else {
+    let found = evaluate_floors(payload, hook_cwd, gate, &probes, bypassed);
+    // #10665 (ruling Dac): a log-only finding is recorded, never refused.
+    if let Some(seen) = gate.would_refuse() {
+        record_would_refuse(
+            &DenyContext::from_payload(url, payload),
+            seen.rule,
+            &seen.reason,
+        );
+    }
+    let Some(deny) = found else {
         // #8939: an env-file exemption granted under a bypass is audited here.
         audit_envfile_allow(&DenyContext::from_payload(url, payload), gate).await;
         return false;
     };
-    audit_denied_tool(
+    // #10641: the label names the policy entry; a miss is still a refusal (GP-000).
+    let policy = guard_policy::for_rule(deny.rule);
+    refuse(
         &DenyContext::from_payload(url, payload),
-        deny.rule,
+        policy,
         &deny.reason,
     )
     .await;
-    println!("{}", build_pm_guard_deny_response(&deny.reason));
     true
 }
 
@@ -208,6 +245,29 @@ pub(crate) fn evaluate_floors(
             reason: with_identity(reason, why),
         });
     }
+    // #10665: an inherited `$TMUX` beats `TMUX_TMPDIR` (not `-L`/`-S`), so a
+    // kill of the fleet's server or a `tm-` session is refused for every
+    // caller. Ruling Dac: every other finding, script bodies included, is a
+    // would-refuse the hook records while the call runs.
+    if let Some(c) = command {
+        let env = ServerEnv::from_process();
+        match evaluate_tmux_kill_server(c, &env) {
+            Some(KillVerdict::Refuse(reason)) => {
+                return Some(FloorDeny {
+                    rule: TMUX_KILL_SERVER_RULE,
+                    reason,
+                });
+            }
+            Some(KillVerdict::LogOnly(reason)) => {
+                gate.record_would_refuse(TMUX_KILL_SERVER_RULE, reason);
+            }
+            None => {
+                if let Some(reason) = evaluate_script_body_tmux_kill(c, hook_cwd, &env) {
+                    gate.record_would_refuse(TMUX_KILL_SERVER_RULE, reason);
+                }
+            }
+        }
+    }
     // #8902: no tmux verb aimed at the Architect's pane; the Architect is exempt.
     if let Some(reason) = command.and_then(|c| evaluate_architect_pane(c, probes.panes))
         && let Err(why) = gate.identity()
@@ -229,6 +289,27 @@ pub(crate) fn evaluate_floors(
     if let Some(reason) = command.and_then(evaluate_fleet_relaunch) {
         return Some(FloorDeny {
             rule: FLEET_RELAUNCH_RULE,
+            reason,
+        });
+    }
+    // #8878 PR2a: `tm presence` and `tm fleet bind` are anchor writes for PMs
+    // and agents; the Architect's main thread runs them bound or unbound.
+    if let Some(reason) = command.and_then(evaluate_presence_verbs)
+        && let Err(why) = gate.identity()
+        && !matches!(why, NotArchitect::Launch(_))
+    {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
+            reason: with_identity(reason, why),
+        });
+    }
+    // #8878 PR2a critic HIGH: no hooked caller, the Architect included,
+    // writes the presence key's Keychain item, inline or from a script.
+    if let Some(reason) = command.and_then(|c| {
+        evaluate_presence_key_write(c).or_else(|| evaluate_script_body_presence_key(c, hook_cwd))
+    }) {
+        return Some(FloorDeny {
+            rule: TRUST_ANCHOR_RULE,
             reason,
         });
     }
@@ -274,6 +355,17 @@ fn universal_floor(
     // as the guarded path, so the Architect's `tm env` exemption holds here.
     // #8625: the deny carries its own label (`kuzu-store-read`, ruling Q7).
     evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate)
+}
+
+/// Whether the `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass is active.
+///
+/// Why: split out (moved here from `pm_guard.rs` for its line cap, #10574) so the exact-`"1"` matching rule has one definition.
+/// What: `true` only when [`super::pm_guard::PM_UNRESTRICTED_ENV`] is set to exactly `"1"`.
+/// Test: exercised via `tests/tm_hook_pm_guard.rs::pm_guard_bypass_env_allows_all`.
+pub(crate) fn pm_unrestricted() -> bool {
+    std::env::var(super::pm_guard::PM_UNRESTRICTED_ENV)
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

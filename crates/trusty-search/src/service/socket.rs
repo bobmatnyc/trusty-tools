@@ -62,7 +62,7 @@ use tokio::net::UnixListener;
 use trusty_common::uds::server::{serve_until, RpcRouter, RpcServeOptions};
 
 use crate::service::rpc::{
-    admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+    admin, chat, file, project, project_ensure, project_map, queries, reads, streams, warm, writes,
 };
 use crate::service::server::SearchAppState;
 
@@ -97,11 +97,15 @@ pub const METHODS: &[&str] = &[
     reads::METHOD_INDEX_STATUS,
     reads::METHOD_INDEX_CONFIG_GET,
     reads::METHOD_CONFIG_GET,
+    // #10739
+    reads::METHOD_INDEX_PATH_ADMITS,
     reads::METHOD_CHUNKS_LIST,
     reads::METHOD_GRAPH_GET,
     reads::METHOD_GRAPH_STATS,
     reads::METHOD_GRAPH_NEIGHBORS,
     reads::METHOD_CALL_CHAIN,
+    // #10738: per-file revision evidence.
+    reads::METHOD_INDEX_FILE_STATUS,
     // #6285 slice 3 — the query surface.
     queries::METHOD_QUERY,
     queries::METHOD_QUERY_ALL,
@@ -117,6 +121,8 @@ pub const METHODS: &[&str] = &[
     writes::METHOD_INDEX_FILE_REMOVE,
     // #10110 — the batch removal.
     writes::METHOD_INDEX_FILES_REMOVE,
+    // #10551
+    writes::METHOD_INDEX_EMBED_MISSING,
     writes::METHOD_INDEX_REINDEX,
     writes::METHOD_GRAPH_INGEST,
     // #6524 — the embedding pause pair and its file-change stream. Socket-only:
@@ -156,6 +162,8 @@ pub const METHODS: &[&str] = &[
     project_map::METHOD_PROJECT_PARK,
     project_map::METHOD_PROJECT_UNPARK,
     project_map::METHOD_PROJECT_PIN,
+    // #10531 — find-or-create the index of a tm project. Socket-only, free lane.
+    project_ensure::METHOD_PROJECT_ENSURE,
     // #9029 — one indexed file and its diff. Socket-only and in the free lane.
     file::METHOD_FILE_GET,
 ];
@@ -275,6 +283,7 @@ fn build_router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = warm::register(router, state);
     let router = project::register(router, state);
     let router = project_map::register(router, state);
+    let router = project_ensure::register(router, state);
     let router = file::register(router, state);
     streams::register(router, state)
 }

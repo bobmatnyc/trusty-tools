@@ -2,13 +2,16 @@
 //!
 //! Why: S1 denies the outbound-channel MCP tools, but a Bash command reaches
 //! the same services with `curl`, a mail client or a channel binary. This arm
-//! is a tripwire for those direct forms, for every tm-launched session; S5's
-//! `permissions.deny` and an OS sandbox are the boundary. It reads no bypass
-//! variable and no `agent_id`.
+//! is a tripwire for those direct forms; S5's `permissions.deny` and an OS
+//! sandbox are the boundary. It reads no bypass variable and no `agent_id`:
+//! only the #10447 launch-record lift in `egress_guard_architect` passes a
+//! channel deny, so it binds subagents, PMs and an unbound Architect.
 //! What: [`bash_egress_deny`] names why the Bash arm denies a command — the
-//! first outbound-channel token it carries, or a spent walk budget. A family
-//! host denies in any word; a family program denies only in command position,
-//! so `grep mail f` is allowed. A command over
+//! first outbound-channel token it carries, or a spent walk budget. #11273: a
+//! command `egress_guard_bash_mention` finds mention-only (text programs,
+//! local `git`, and `gh` naming a host only in prose) is no hit. Otherwise a
+//! family host denies in any word; a family program denies only in command
+//! position, so `grep mail f` is allowed. A command over
 //! [`MAX_COMMAND_BYTES`] is denied unread, and so is one whose walk reads past
 //! [`WALK_BYTE_BUDGET`] (#9699). It reuses the pm-guard shell
 //! parsers — `shell_segments_map` for segments, wrappers and nested bodies,
@@ -33,6 +36,7 @@
 
 use std::cell::{Cell, OnceCell};
 
+use crate::commands::egress_guard_bash_mention::mention_only;
 use crate::commands::pm_guard_bash::{
     Decoded, MAX_SUBSTITUTION_DEPTH, UnplaceableWrite, decode_ansi_c, decode_ansi_c_lenient,
     keyword_words, shell_segments_map, split_heredoc_bodies, tokenize,
@@ -264,9 +268,11 @@ pub(crate) fn bash_oversize_reason(command: &str) -> Option<String> {
 pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
     match deny {
         BashDeny::Channel(hit) => format!(
-            "tm hook --egress-guard denies this Bash command: it reaches {} ({}) outside the \
-             owner channel, and no tm-launched session, PM or subagent may message Slack, \
-             Gmail, Notion or Google Chat directly (#8454). Ask the operator instead.",
+            "tm hook --egress-guard denies this Bash command: it reaches {} ({}), and only \
+             the Architect's main session bound to its tm launch record may message Slack, \
+             Gmail, Notion or Google Chat directly (#10447, #11273); a PM, a subagent, or a \
+             call whose thread the guard cannot establish may not (#8454). A family host \
+             named only as inert text is not this deny's subject. Ask the operator instead.",
             hit.service, hit.token
         ),
         BashDeny::WalkBudget => format!(
@@ -282,7 +288,8 @@ pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
 /// [`host_hit`] over the raw text, then [`segment_hits`] over every segment
 /// and nested body within one [`Walk`]'s budgets.
 ///
-/// What: a walk that spends [`WALK_BYTE_BUDGET`] denies, naming the first hit
+/// What: a text `egress_guard_bash_mention::mention_only` accepts is no hit
+/// (#11273). Otherwise a walk that spends [`WALK_BYTE_BUDGET`] denies, naming the first hit
 /// it found if any (#9699); a text the walk cannot parse, or one that spends
 /// [`CALL_BUDGET`], denies on the first hit it found, else falls back to
 /// [`raw_hit`] (#9710).
@@ -290,6 +297,10 @@ pub(crate) fn bash_deny_reason(deny: &BashDeny) -> String {
 /// `bash_egress_names_a_hit_found_before_the_walk_budget_ran_out_9699`,
 /// `bash_egress_keeps_a_walk_hit_when_the_call_budget_runs_out_9710`.
 fn text_hit(text: &str) -> Option<BashDeny> {
+    // #11273: a command that only mentions a family host reaches nothing.
+    if mention_only(text, &|word: &str| host_hit(word).is_some()) {
+        return None;
+    }
     if let Some(found) = host_hit(text) {
         return Some(BashDeny::Channel(found));
     }

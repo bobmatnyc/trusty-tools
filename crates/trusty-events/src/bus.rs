@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 use trusty_common::control_bus::{EventId, HarnessEvent};
 
+use super::breakdown::Breakdown;
 use super::log::DurableLog;
 
 /// Default ring capacity (DOC-73 §4.3: "an in-memory ring, capacity
@@ -81,16 +82,13 @@ impl Default for EventBusConfig {
 
 /// The counters this and the prior slice make observable (issues #6848).
 ///
-/// Why: a later slice serves these over a metrics route; today they exist so
-/// the bus's own behavior — dedup, eviction, durable-write backpressure — is
-/// provable from outside the lock rather than only inferable from ring
-/// contents.
+/// Why: `events.health` serves these (#10901), so the bus's own behavior —
+/// dedup, eviction, durable-write backpressure — is provable from outside the
+/// lock rather than only inferable from ring contents.
 /// What: a plain snapshot, one `Ordering::Relaxed` load per field — these are
 /// independent counters, not a transaction, so relaxed ordering is sufficient
-/// and matches how trusty-console's pollers read their own gauges.
-// Reserved for the metrics route a later slice adds (#6850); exercised today
-// only by this module's own tests.
-#[allow(dead_code)]
+/// and matches how trusty-console's pollers read their own gauges. None of
+/// the reads takes the ring lock, so a health probe never waits on ingest.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct EventBusMetrics {
     /// Frames accepted into the ring (excludes dedup hits).
@@ -104,6 +102,10 @@ pub(crate) struct EventBusMetrics {
     /// a permanent gap `super::log::ReplayItem::Gap` will surface on the next
     /// replay across it.
     pub log_dropped: u64,
+    /// Open live receivers, from `broadcast::Sender::receiver_count` (#10901).
+    pub subscribers: u64,
+    /// The last `seq` assigned, read without the ring lock (#10901).
+    pub head_seq: u64,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +157,9 @@ struct Ring {
     ids: HashSet<EventId>,
     // #9075: set by `EventBus::close`; read under the same lock as `seq`.
     closed: bool,
+    // #10906: counted under the lock that accepts the event, so a dedup hit
+    // or a refused frame is never counted.
+    breakdown: Breakdown,
 }
 
 /// What [`EventBus::attach`] hands a new subscription.
@@ -217,6 +222,7 @@ impl EventBus {
                 events: VecDeque::with_capacity(capacity),
                 ids: HashSet::with_capacity(capacity),
                 closed: false,
+                breakdown: Breakdown::default(),
             }),
             counters: Counters::default(),
             sender,
@@ -285,6 +291,7 @@ impl EventBus {
             ring.ids.remove(&evicted.id);
             self.counters.evicted.fetch_add(1, Ordering::Relaxed);
         }
+        ring.breakdown.record(&event);
         ring.events.push_back(event.clone());
         self.counters.ingested.fetch_add(1, Ordering::Relaxed);
 
@@ -447,17 +454,28 @@ impl EventBus {
     /// A snapshot of the counters as of this call.
     ///
     /// Test: `super::tests::duplicate_id_is_deduped`,
-    /// `super::tests::eviction_at_capacity_drops_the_oldest`.
-    // Reserved for the metrics route a later slice adds (#6850); exercised
-    // today only by this module's own tests.
-    #[allow(dead_code)]
+    /// `super::tests::eviction_at_capacity_drops_the_oldest`,
+    /// `super::serve_tests::events_health_reports_the_bus_counters`.
+    // See #10901: served by `events.health`; lock-free so it never waits on
+    // ingest.
     pub(crate) fn metrics(&self) -> EventBusMetrics {
         EventBusMetrics {
             ingested: self.counters.ingested.load(Ordering::Relaxed),
             deduped: self.counters.deduped.load(Ordering::Relaxed),
             evicted: self.counters.evicted.load(Ordering::Relaxed),
             log_dropped: self.counters.log_dropped.load(Ordering::Relaxed),
+            subscribers: u64::try_from(self.sender.receiver_count()).unwrap_or(u64::MAX),
+            head_seq: self.next_seq.load(Ordering::Relaxed).saturating_sub(1),
         }
+    }
+
+    /// A copy of the per-source and per-project counters (#10906).
+    ///
+    /// Why: `events.console_metrics` renders them; a copy keeps the ring lock
+    /// for the clone only, not for building the reply.
+    /// Test: `super::serve_tests::events_console_metrics_reports_by_source_messages_and_by_project`.
+    pub(crate) fn breakdown(&self) -> Breakdown {
+        self.lock_ring().breakdown.clone()
     }
 
     /// How many events the ring currently holds. Test-only introspection —

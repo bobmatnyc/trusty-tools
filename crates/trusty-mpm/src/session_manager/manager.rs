@@ -169,7 +169,7 @@ pub enum ManagedError {
     #[error("tmux session already adopted/registered: {0}")]
     AlreadyAdopted(String),
 
-    /// A session-name derivation failure (currently: all 99 `tm-<leaf>-NN`
+    /// A session-name derivation failure (currently: all 99 `tm-<leaf>[-NN]`
     /// serials for a project are in use).
     ///
     /// Why (#1955, renamed in the #1966 review follow-up): the serial-numbered
@@ -374,6 +374,9 @@ pub struct SessionManager {
     /// #9167 AC5: where each delivered inject is recorded. Installed by a
     /// process with a bus producer only; see `inject_record.rs`.
     pub(crate) inject_recorder: std::sync::OnceLock<Arc<dyn super::inject_record::InjectRecorder>>,
+    /// #10989: a test's trusty-search stand-in for the post-start restore.
+    #[cfg(test)]
+    pub(crate) index_restore_socket: std::sync::OnceLock<PathBuf>,
 }
 
 impl std::fmt::Debug for SessionManager {
@@ -423,6 +426,8 @@ impl SessionManager {
             taint_dir: std::sync::OnceLock::new(),
             removal_recorder: std::sync::OnceLock::new(),
             inject_recorder: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            index_restore_socket: std::sync::OnceLock::new(),
         })
     }
 
@@ -431,7 +436,7 @@ impl SessionManager {
     /// Why: `POST /api/v1/sessions/managed` needs the full create-name-record-spawn
     /// flow in one operation so the HTTP handler stays thin.
     /// What: derives the tmux name via [`Self::resolve_session_name`]
-    /// (`tm-<project-leaf>-NN`, #1955), creates the tmux session via the driver,
+    /// (`tm-<project-leaf>[-NN]`, #1955), creates the tmux session via the driver,
     /// persists a [`SessionRecord`] in state `Provisioning`, and returns it.
     /// The runtime backend defaults to [`crate::runtime::RuntimeKind::ClaudeCode`]
     /// so callers that do not care about the backend keep the pre-#1203 behavior.
@@ -500,7 +505,7 @@ impl SessionManager {
         }
         let pane = self.owned_pane(id, &record)?;
         let claimed = self.claim_decision(id, claim).await?;
-        self.deliver_answer(id, &record.tmux_name, Ok(pane), answer, claimed)
+        self.deliver_answer(id, &record, Ok(pane), answer, claimed)
             .await
     }
 
@@ -682,7 +687,7 @@ impl SessionManager {
         text: &str,
         submit: Submit,
     ) -> Result<(String, String), ManagedError> {
-        let mut record = self.get(id).await?;
+        let record = self.get(id).await?;
         if matches!(
             record.state,
             ManagedSessionState::Stopped | ManagedSessionState::Decommissioned
@@ -692,17 +697,20 @@ impl SessionManager {
                 record.tmux_name, record.state
             )));
         }
-        let pane = self.owned_pane(id, &record)?;
+        // #10442: a gone recorded pane is re-resolved to the session's live one.
+        let (mut record, pane) = self.live_owned_pane(id, record).await?;
         // #10127: a pane whose harness exited is a shell; type nothing there.
         // Ctrl-C stays ungated: it stops, it never runs text.
         if !matches!(submit, Submit::Interrupt) {
             self.require_live_harness(&record, &pane)?;
         }
         let name = record.tmux_name.as_str();
+        // See #10101: type on the server the gate proved the pane on.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
         let result = match submit {
-            Submit::Enter => self.tmux.send_line_to_pane(name, &pane, text),
-            Submit::NoSubmit => self.tmux.send_keys_literal_to_pane(name, &pane, text),
-            Submit::Interrupt => self.tmux.send_interrupt_to_pane(name, &pane),
+            Submit::Enter => tmux.send_line_to_pane(name, &pane, text),
+            Submit::NoSubmit => tmux.send_keys_literal_to_pane(name, &pane, text),
+            Submit::Interrupt => tmux.send_interrupt_to_pane(name, &pane),
         };
         result.map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))?;
         // #9167 AC5: typed text is one `message` event; Ctrl-C carries none.
@@ -742,11 +750,12 @@ impl SessionManager {
     ) -> Result<crate::core::sm::control::RawObservation, ManagedError> {
         let record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
-        let raw_pane = self
-            .tmux
+        // See #10101: the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        let raw_pane = tmux
             .capture_pane(&record.tmux_name, &pane, lines)
             .unwrap_or_default();
-        let runtime_active = self.tmux.session_exists(&record.tmux_name);
+        let runtime_active = tmux.session_exists(&record.tmux_name);
         Ok(crate::core::sm::control::RawObservation {
             raw_pane,
             runtime_active,
@@ -884,7 +893,10 @@ impl SessionManager {
         // session holds the name now, so it never pairs the pane with a
         // server: the record stays unverifiable and every pane gate refuses.
         if record.pane_id.is_none() {
-            record.pane_id = self.tmux.get_pane_id(&record.tmux_name);
+            // See #10101: read on the record's own server, or not at all.
+            record.pane_id = super::tmux_route::route(self.tmux.as_ref(), &record)
+                .ok()
+                .and_then(|tmux| tmux.get_pane_id(&record.tmux_name));
         }
         // #9034: re-check under a fresh guard; a failed re-check writes nothing.
         let mut guard = self.store.write().await;
@@ -926,12 +938,11 @@ impl SessionManager {
         // `tmux show-environment` even though the process-env export never
         // landed. Best-effort — never fails the reap. #9101: never into a
         // session whose pane is not proven this record's.
+        // See #10101: the record's own server; an unreachable one is skipped.
         if owned.is_some()
-            && let Err(e) = self.tmux.set_environment(
-                &record.tmux_name,
-                "TM_MANAGED_SESSION_ID",
-                &id.to_string(),
-            )
+            && let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), &record)
+            && let Err(e) =
+                tmux.set_environment(&record.tmux_name, "TM_MANAGED_SESSION_ID", &id.to_string())
         {
             warn!(
                 id = %id,
@@ -1075,7 +1086,15 @@ impl SessionManager {
         // branch below KILLS the session and rebuilds the pane, so an
         // undeterminable probe answering `false` destroyed a live pane. Refuse
         // the resume instead — the operator can retry once tmux answers.
-        if self.tmux.session_exists_checked(&record.tmux_name)? {
+        // See #10101: probe, and recreate, on the record's own server.
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        // #10101: a crashed workspace server leaves a socket that refuses
+        // (ECONNREFUSED); `start-server` replaces it with an empty server, so
+        // the probe below reads "no session" and the pane is recreated.
+        if tmux.is_named() {
+            tmux.ensure_server_up()?;
+        }
+        if tmux.session_exists_checked(&record.tmux_name)? {
             // Sibling-window hijack fix (follow-up to #2456): `session_exists`
             // only proves SOME pane in this tmux session is alive — it says
             // nothing about whether it is the SPECIFIC pane this record is
@@ -1101,11 +1120,7 @@ impl SessionManager {
             // Create a fresh tmux session rooted at the EXISTING workspace, then
             // verify tmux didn't silently fall back to $HOME (#2250). No
             // re-clone — workspace_path is reused as-is.
-            resume_workdir::create_and_verify_pane(
-                self.tmux.as_ref(),
-                &record.tmux_name,
-                &workdir,
-            )?;
+            resume_workdir::create_and_verify_pane(&*tmux, &record.tmux_name, &workdir)?;
             // #2453 review finding 1 (round 2): the recreated pane is a BRAND
             // NEW tmux pane — the record's previously-captured `pane_id` now
             // refers to the DESTROYED pane and must be refreshed, or the
@@ -1114,8 +1129,8 @@ impl SessionManager {
             // heals it. Best-effort — `None` on failure, consistent with
             // every other `get_pane_id` call site.
             // #9004: the new pane with the server it was read on.
-            (record.pane_id, record.tmux_server) =
-                super::pane_identity::capture(self.tmux.as_ref(), &record.tmux_name);
+            (record.pane_id, record.tmux_server, record.tmux_session_id) =
+                super::pane_identity::capture(&*tmux, &record.tmux_name);
             info!(
                 id = %id,
                 name = %record.tmux_name,
@@ -1186,7 +1201,7 @@ impl SessionManager {
     /// allocation (issue #1955).
     ///
     /// Why: [`crate::core::names::build_session_name`] must know which
-    /// `tm-<leaf>-NN` serials are taken so it can pick the lowest free one. A
+    /// `tm-<leaf>[-NN]` serials are taken so it can pick the lowest free one. A
     /// DECOMMISSIONED record's serial must be free for immediate reuse (the
     /// ticket's gap-reuse requirement — "sessions 01,02,03 exist, 02 gets
     /// decommissioned, next new session reuses 02"), so this deliberately
@@ -1228,6 +1243,22 @@ impl SessionManager {
         self.tmux.clone()
     }
 
+    /// The driver on `record`'s own tmux server (#10101): the default
+    /// driver for a default-server record.
+    ///
+    /// # Errors
+    ///
+    /// [`ManagedError::TmuxUnavailable`] when the record's server cannot be
+    /// reached; never the default server in its place.
+    ///
+    /// Test: `a_fresh_launch_creates_its_session_on_the_workspace_server`.
+    pub fn tmux_driver_for(
+        &self,
+        record: &SessionRecord,
+    ) -> Result<Arc<dyn ManagedTmuxDriver>, ManagedError> {
+        super::tmux_route::route_arc(&self.tmux, record)
+    }
+
     /// Capture the last `lines` of the session's RECORDED harness pane.
     ///
     /// Why: activity classification (`managed_routes/activity`), the MCP
@@ -1250,7 +1281,8 @@ impl SessionManager {
     /// `capture_pane_refuses_when_stored_pane_gone`,
     /// `capture_pane_refuses_a_legacy_record_without_pane_id` in
     /// `pane_scoped_tests.rs`;
-    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`.
+    /// `a_stale_record_after_a_server_restart_never_reads_the_pane`,
+    /// `capturing_a_named_server_record_reads_its_own_server_10101`.
     pub async fn capture_pane(
         &self,
         id: &ManagedSessionId,
@@ -1258,9 +1290,46 @@ impl SessionManager {
     ) -> Result<String, ManagedError> {
         let record = self.get(id).await?;
         let pane = self.owned_pane(id, &record)?;
-        self.tmux
+        // #10101: read the pane on the server `owned_pane` proved it on.
+        super::tmux_route::route(self.tmux.as_ref(), &record)?
             .capture_pane(&record.tmux_name, &pane, lines)
             .map_err(|e| ManagedError::TmuxUnavailable(e.to_string()))
+    }
+
+    /// Classify the input box of the record's own pane (#8407).
+    ///
+    /// Why: a supervisor reading a managed pane must know whether the box holds
+    /// a human's draft without parsing escape codes itself.
+    /// What: proves the pane with [`Self::owned_pane`], captures its last
+    /// 30 rows with escape codes on the record's own
+    /// server, and runs
+    /// [`classify_input_box`](crate::core::input_box::classify_input_box). Any
+    /// refusal or capture failure is `None` (unknown), logged at debug — never
+    /// a guessed `Empty`.
+    /// Test: `managed_output_classifies_the_input_box_8407`,
+    /// `managed_output_unreadable_pane_is_unknown_8407`.
+    pub async fn input_box(
+        &self,
+        id: &ManagedSessionId,
+    ) -> Option<crate::core::input_box::InputBox> {
+        // The box and its footer sit at the pane's bottom (as `TmuxService`).
+        const INPUT_BOX_PROBE_LINES: usize = 30;
+        let read = async {
+            let record = self.get(id).await?;
+            let pane = self.owned_pane(id, &record)?;
+            super::tmux_route::route(self.tmux.as_ref(), &record)?.capture_pane_escaped(
+                &record.tmux_name,
+                &pane,
+                INPUT_BOX_PROBE_LINES,
+            )
+        };
+        match read.await {
+            Ok(capture) => crate::core::input_box::classify_input_box(&capture),
+            Err(e) => {
+                tracing::debug!("#8407: input box of {id} unreadable: {e}");
+                None
+            }
+        }
     }
 
     /// Capture the recorded harness pane for the LIVE managed session whose tmux
@@ -1300,7 +1369,9 @@ impl SessionManager {
         let text = match record {
             Some(record) => {
                 let pane = self.owned_pane(&record.id, &record).ok()?;
-                self.tmux.capture_pane(tmux_name, &pane, lines).ok()?
+                // See #10101: the record's own server.
+                let tmux = super::tmux_route::route(self.tmux.as_ref(), &record).ok()?;
+                tmux.capture_pane(tmux_name, &pane, lines).ok()?
             }
             None => self.tmux.capture(tmux_name, lines).ok()?,
         };

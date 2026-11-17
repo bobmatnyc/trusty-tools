@@ -16,8 +16,8 @@
 //! component OFF is instantaneous (soft-disable); turning one ON spawns a
 //! background catch-up job (issue #2984 Phase 1, see `super::components`).
 //!
-//! What: `index_config_handler` (GET), `patch_index_config_handler` (PATCH),
-//! their transport-free cores `index_config_report` / `patch_index_config_report`
+//! What: the transport-free cores `index_config_report` (GET) /
+//! `patch_index_config_report` (PATCH)
 //! — which `service::rpc` serves as `search.index.config.get` and
 //! `search.index.config.set` (#6285 slices 2 and 5.5) — and the serde
 //! request/response types. The component-toggle decision logic and catch-up
@@ -28,13 +28,6 @@
 //! the socket halves in `service::rpc::admin`'s `admin_tests.rs`.
 
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{
-    extract::{Path, State},
-    response::{IntoResponse, Response},
-    Json,
-};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -70,6 +63,14 @@ pub struct IndexConfigView {
     /// the index is held — it indexes nothing until a PATCH fixes them.
     #[serde(default)]
     pub invalid_exclude_globs: Vec<String>,
+    /// #10739: the subtrees the index is narrowed to, relative to its root
+    /// (`.` for the root itself). Empty = the whole root. Reported so a caller
+    /// can prove from this reply alone which paths the binding admits.
+    #[serde(default)]
+    pub include_paths: Vec<String>,
+    /// #10739: the issue #111 immediate-subdirectory glob filter. Empty = off.
+    #[serde(default)]
+    pub path_filter: Vec<String>,
     /// Whether prose docs (`*.md`, CHANGELOG, …) are indexed.
     pub include_docs: bool,
     /// Whether the walk honours `.gitignore` / `.ignore` / `.rgignore`.
@@ -88,7 +89,8 @@ impl IndexConfigView {
     /// Why: both GET and the PATCH echo-back need the same projection of the
     /// handle's hygiene + component fields.
     /// What: clones the relevant handle fields into the wire struct.
-    /// Test: `get_returns_current_config` in `tests_index_config`.
+    /// Test: `get_returns_current_config` in `tests_index_config`,
+    /// `config_get_reports_include_paths_and_path_filter`.
     fn from_handle(handle: &IndexHandle) -> Self {
         Self {
             extra_skip_dirs: handle.extra_skip_dirs.clone(),
@@ -98,6 +100,8 @@ impl IndexConfigView {
             invalid_exclude_globs: crate::core::repo_config::invalid_exclude_globs(
                 &handle.exclude_globs,
             ),
+            include_paths: relative_include_paths(handle),
+            path_filter: handle.path_filter.clone(),
             include_docs: handle.include_docs,
             respect_gitignore: handle.respect_gitignore,
             kg: !handle.skip_kg,
@@ -124,6 +128,17 @@ pub struct PatchIndexConfigRequest {
     pub extensions: Option<Vec<String>>,
     #[serde(default)]
     pub exclude_globs: Option<Vec<String>>,
+    /// #10532: apply a named exclude profile (`std-v1`) as the whole list.
+    /// Refused together with `exclude_globs`. Files the new list excludes are
+    /// removed from the index in place; nothing is rebuilt.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// #10739: replace the subtree allowlist, root-relative. `Some([])` clears
+    /// it, so the whole root is admitted again. Files the new list refuses are
+    /// removed in place; files it newly admits are indexed by the next reindex
+    /// (or a watcher event for that file), never by this PATCH.
+    #[serde(default)]
+    pub include_paths: Option<Vec<String>>,
     #[serde(default)]
     pub include_docs: Option<bool>,
     #[serde(default)]
@@ -143,25 +158,6 @@ pub struct PatchIndexConfigRequest {
     pub vector: Option<bool>,
 }
 
-/// `GET /indexes/:id/config` — return the index's current hygiene config.
-///
-/// Why: lets the CLI / dashboard show the active hygiene settings before
-/// editing them.
-/// What: looks up the handle, projects its hygiene fields into
-/// `IndexConfigView`, returns `200` with the JSON body or `404` for an unknown
-/// id.
-/// Test: `get_returns_current_config`, `get_unknown_index_404`.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn index_config_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-) -> Response {
-    match index_config_report(&state, &id) {
-        Ok(view) => Json(view).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
-}
-
 /// The view `GET /indexes/{id}/config` serves, without the transport
 /// (#6285 slice 2).
 ///
@@ -170,7 +166,8 @@ pub(super) async fn index_config_handler(
 /// that shares [`IndexConfigView`].
 /// What: the handle lookup plus [`IndexConfigView::from_handle`]. Returns the
 /// typed view rather than a `Value` so both transports serialise one struct.
-/// Test: `index_config_over_the_socket_matches_the_http_body`.
+/// Test: `get_returns_current_config`, `get_unknown_index_404`,
+/// `index_config_over_the_socket_matches_the_http_body`.
 pub(crate) fn index_config_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -185,50 +182,6 @@ pub(crate) fn index_config_report(
         ));
     };
     Ok(IndexConfigView::from_handle(&handle))
-}
-
-/// `PATCH /indexes/:id/config` — update the index's hygiene config and/or
-/// runtime component (KG/vector) state.
-///
-/// Why: applies an operator's hygiene edit to the running daemon and persists
-/// it so the change survives a restart. Hygiene fields don't auto-reindex —
-/// the response's `reindex_required: true` hint tells the caller a reindex is
-/// needed for the new filters to take effect on already-indexed files.
-/// Issue #2984 Phase 1: `kg`/`vector` toggle the KG and vector/semantic
-/// components at runtime without a full reindex or index recreation — turning
-/// a component OFF is instantaneous (soft-disable, on-disk data untouched);
-/// turning one ON spawns a background catch-up job (`components` field in the
-/// response reports `catch_up_started`).
-/// What: validates inputs (rejects `data_file_max_bytes == 0`), resolves the
-/// component transition and — when a catch-up is needed — acquires THIS
-/// index's per-index mutual-exclusion semaphore up front so a concurrent
-/// reindex or another catch-up ON THE SAME INDEX returns `409 Conflict`
-/// before ANY state is mutated (issue #2984 Phase 1 CRITICAL finding 2; see
-/// `service::reindex::index_semaphore`).
-/// Rebuilds the in-memory handle with the merged fields (preserving the live
-/// indexer and all Arc-shared state), re-registers it, applies the immediate
-/// component side effects (stage flip + in-memory KG drop on disable), then
-/// upserts the matching `indexes.toml` entry and spawns the catch-up task (if
-/// any; an embed-only re-arm is queued behind the background permit, #8148).
-/// A persistence failure returns **500** with a clear error body so the
-/// UI never claims success while `indexes.toml` silently went stale.
-/// #9059: a PATCH that releases a held index starts a catch-up reindex and
-/// reports it as `catch_up_reindex`.
-/// Test: `a_valid_patch_catches_up_what_the_hold_refused`,
-/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
-/// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
-/// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
-/// for the component-toggle paths.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn patch_index_config_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Path(id): Path<String>,
-    Json(req): Json<PatchIndexConfigRequest>,
-) -> Response {
-    match patch_index_config_report(&state, &id, req).await {
-        Ok(body) => Json(body).into_response(),
-        Err((status, body)) => (status, Json(body)).into_response(),
-    }
 }
 
 /// Refuse an `exclude_globs` list holding a pattern that does not parse (#8922).
@@ -270,7 +223,23 @@ pub(crate) fn reject_invalid_globs(
 /// catch-up the PATCH asked for starts even when the persist fails, because the
 /// in-memory config it serves is live (#8148 review).
 ///
-/// Test: `index_config_set_over_the_socket_matches_the_http_body`,
+/// Hygiene fields do not auto-reindex: the body's `reindex_required: true`
+/// tells the caller a reindex is needed for the new filters to reach files
+/// already indexed. `kg`/`vector` toggle the components at runtime (#2984
+/// Phase 1): off is instantaneous, on spawns a catch-up (`catch_up_started`),
+/// and a PATCH that releases a held index starts a catch-up reindex (#9059).
+/// #10739: `include_paths` reconciles like `exclude_globs` (#10532): files the
+/// new list refuses are purged in place; newly admitted files wait for the
+/// next reindex.
+///
+/// Test: `config_set_clears_include_paths_and_refused_paths_become_admissible`,
+/// `setting_include_paths_purges_newly_refused_files`,
+/// `a_valid_patch_catches_up_what_the_hold_refused`,
+/// `patch_updates_only_supplied_fields`, `patch_rejects_zero_cap`,
+/// `patch_persists_to_toml`, `patch_persist_failure_returns_500`,
+/// `patch_unknown_index_404` (hygiene); `service::server::tests_components`
+/// for the component-toggle paths;
+/// `index_config_set_over_the_socket_matches_the_http_body`,
 /// `service::server::tests_8148::a_persist_failure_still_runs_the_rearm_and_a_retry_succeeds`,
 /// `a_zero_data_cap_is_refused_and_changes_no_config_on_either_transport`,
 /// `a_config_set_against_an_unknown_index_is_refused_and_registers_nothing`.
@@ -281,6 +250,10 @@ pub(crate) async fn patch_index_config_report(
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
     let index_id = IndexId::new(id);
     reject_invalid_globs(req.exclude_globs.as_deref())?;
+    // #10532: resolved before anything mutates, so a refusal changes nothing.
+    let sanitized_globs = req.exclude_globs.clone().map(sanitize_dirs);
+    let stamp =
+        super::profile_apply::resolve_patch(sanitized_globs.as_deref(), req.profile.as_deref())?;
 
     // Validate: a zero (or absurd) data cap would prune every data file.
     if matches!(req.data_file_max_bytes, Some(0)) {
@@ -298,6 +271,12 @@ pub(crate) async fn patch_index_config_report(
             serde_json::json!({ "error": format!("unknown index '{}'", index_id.0) }),
         ));
     };
+    // #10739: resolved before anything mutates, so a refusal changes nothing.
+    let new_include_paths = req
+        .include_paths
+        .as_deref()
+        .map(|paths| resolve_include_paths(&existing.root_path, paths))
+        .transpose()?;
 
     // #3049 round 3: hold this id's teardown-lock SHARED side across the whole
     // PATCH, then hand it to the catch-up task exactly as `permit` is handed
@@ -335,7 +314,11 @@ pub(crate) async fn patch_index_config_report(
         components::should_rearm_vector_catch_up(&transition, req.vector, semantic_status);
     // The per-index permit is still the 409 guard for a re-arm: a reindex in
     // flight on this index answers 409 exactly as for a toggle.
-    let permit = if transition.needs_catch_up() || rearm {
+    // #10532: a changed exclude list takes the permit too, so a reindex walking
+    // with the old globs cannot re-add the files the purge below removes.
+    // #10739: so does a changed include_paths list, for the same reason.
+    let reconcile = stamp.is_some() || new_include_paths.is_some();
+    let permit = if transition.needs_catch_up() || rearm || reconcile {
         match crate::service::reindex::index_semaphore(&index_id).try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => {
@@ -369,9 +352,9 @@ pub(crate) async fn patch_index_config_report(
         .extensions
         .map(sanitize_extensions)
         .unwrap_or_else(|| existing.extensions.clone());
-    let exclude_globs = req
-        .exclude_globs
-        .map(sanitize_dirs)
+    let exclude_globs = stamp
+        .as_ref()
+        .map(|s| s.globs.clone())
         .unwrap_or_else(|| existing.exclude_globs.clone());
     let include_docs = req.include_docs.unwrap_or(existing.include_docs);
     let respect_gitignore = req.respect_gitignore.unwrap_or(existing.respect_gitignore);
@@ -390,7 +373,10 @@ pub(crate) async fn patch_index_config_report(
         root_path: existing.root_path.clone(),
         // #7434: a config PATCH does not touch the root table.
         additional_roots: existing.additional_roots.clone(),
-        include_paths: existing.include_paths.clone(),
+        // #10739: config.set can now replace or clear the allowlist.
+        include_paths: new_include_paths
+            .clone()
+            .unwrap_or_else(|| existing.include_paths.clone()),
         exclude_globs,
         extensions,
         domain_terms: existing.domain_terms.clone(),
@@ -454,12 +440,49 @@ pub(crate) async fn patch_index_config_report(
         view.data_file_max_bytes,
         &view.extensions,
         &view.exclude_globs,
+        new_include_paths
+            .as_ref()
+            .map(|_| view.include_paths.as_slice()),
         view.include_docs,
         view.respect_gitignore,
         transition.new_skip_kg,
         transition.new_skip_vector,
         existing.serve_only,
+        stamp.as_ref(),
     );
+
+    // #10532: files the new globs exclude leave the index now, through the batch removal; no reindex runs. Before the
+    // catch-up below, which takes over the teardown guard.
+    // Whenever the request names the list, not only when it changed: the new
+    // globs are already stored, so a retry after a failed purge sees no change.
+    // #10739: a named include_paths list purges the files outside it the same way.
+    let mut include_skip: Option<String> = None;
+    let purge = if reconcile {
+        let roots = (new_include_paths.is_some() && !registered.include_paths.is_empty())
+            .then(|| crate::service::index_admission::configured_roots(&registered))
+            .transpose();
+        // #10739: an unresolvable include root skips include-list pruning
+        // entirely; the reply reports the skip and nothing is deleted for it.
+        let roots = match roots {
+            Ok(roots) => roots,
+            Err(err) => {
+                include_skip = Some(err.to_string());
+                None
+            }
+        };
+        Some(
+            super::profile_apply::purge_newly_excluded(
+                &registered,
+                &index_id,
+                &view.exclude_globs,
+                roots.as_deref(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let include_named = new_include_paths.is_some();
 
     // Issue #2984 Phase 1: spawn the background catch-up. `permit` (held since
     // the semaphore acquisition above) moves into the task and is released
@@ -528,6 +551,13 @@ pub(crate) async fn patch_index_config_report(
                 "catch_up_started": catch_up_started,
             },
         });
+        with_profile(
+            &mut body,
+            stamp.as_ref(),
+            include_named,
+            purge.as_ref(),
+            include_skip.as_deref(),
+        );
         with_catch_up_reindex(&mut body, catch_up_reindex);
         return Err((StatusCode::INTERNAL_SERVER_ERROR, body));
     }
@@ -547,8 +577,128 @@ pub(crate) async fn patch_index_config_report(
             "catch_up_started": catch_up_started,
         },
     });
+    with_profile(
+        &mut body,
+        stamp.as_ref(),
+        include_named,
+        purge.as_ref(),
+        include_skip.as_deref(),
+    );
     with_catch_up_reindex(&mut body, catch_up_reindex);
     Ok(body)
+}
+
+/// Add `profile` and `profile_purge` to a PATCH body when it changed the excludes (#10532).
+///
+/// What: a PATCH that touched neither leaves the body as it was. #10739: a
+/// PATCH naming `include_paths` reports the same purge as `include_paths_purge`,
+/// or `{skipped: true, reason}` when `include_skip` says the include-list
+/// pruning did not run.
+fn with_profile(
+    body: &mut serde_json::Value,
+    stamp: Option<&crate::core::profile::ResolvedProfile>,
+    include_named: bool,
+    purge: Option<&Result<(usize, usize), String>>,
+    include_skip: Option<&str>,
+) {
+    let Some(map) = body.as_object_mut() else {
+        return;
+    };
+    if let Some(stamp) = stamp {
+        map.insert("profile".into(), stamp.label().into());
+    }
+    let Some(purge) = purge else { return };
+    if stamp.is_some() {
+        map.insert(
+            "profile_purge".into(),
+            super::profile_apply::purge_body(purge),
+        );
+    }
+    if include_named {
+        // #10739: a skipped include-list pruning is reported, not shown as 0 removed.
+        let body = match include_skip {
+            Some(reason) => serde_json::json!({
+                "skipped": true, "reason": reason, "rebuilt": false,
+            }),
+            None => super::profile_apply::purge_body(purge),
+        };
+        map.insert("include_paths_purge".into(), body);
+    }
+}
+
+/// The root-relative form of an index's `include_paths` (#10739).
+///
+/// What: strips the primary root; the root itself is `.`; a subtree outside
+/// the root (a relocated pre-#10739 row) is reported absolute.
+fn relative_include_paths(handle: &IndexHandle) -> Vec<String> {
+    handle
+        .include_paths
+        .iter()
+        .map(|p| match p.strip_prefix(&handle.root_path) {
+            Ok(rel) if rel.as_os_str().is_empty() => ".".to_string(),
+            Ok(rel) => rel.to_string_lossy().into_owned(),
+            Err(_) => p.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+/// Resolve a PATCH's root-relative `include_paths` to absolute subtrees (#10739).
+///
+/// Why: create resolves the list the same way (`indexes.rs`); a `..` segment
+/// or an absolute path outside the root would let a binding admit files the
+/// index root does not hold.
+/// What: trims, drops blanks and `.` (both mean the whole root), joins the
+/// rest to `root`, de-duplicates. `400 invalid_include_path` names the first
+/// entry that escapes the root.
+/// Test: `config_set_refuses_an_include_path_outside_the_root`,
+/// `config_set_refuses_an_include_path_symlinked_outside_the_root`.
+fn resolve_include_paths(
+    root: &std::path::Path,
+    paths: &[String],
+) -> Result<Vec<std::path::PathBuf>, (StatusCode, serde_json::Value)> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for raw in paths {
+        let p = raw.trim();
+        if p.is_empty() || p == "." {
+            continue;
+        }
+        let given = std::path::Path::new(p);
+        // #10739: also refuse a path whose real target leaves the root.
+        let abs = root.join(given);
+        let escapes = given
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+            || (given.is_absolute() && !given.starts_with(root))
+            || !really_inside(root, &abs);
+        if escapes {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "error": "invalid_include_path",
+                    "message": format!("include path '{p}' is outside the index root"),
+                }),
+            ));
+        }
+        if !out.contains(&abs) {
+            out.push(abs);
+        }
+    }
+    Ok(out)
+}
+
+/// Does an existing include path `abs` really resolve under `root` (#10739)?
+///
+/// What: a path that does not exist yet passes (the walk re-checks it); one
+/// that exists, even as a dangling link, must canonicalise under the root.
+/// Any other I/O error refuses.
+/// Test: `config_set_refuses_an_include_path_symlinked_outside_the_root`.
+fn really_inside(root: &std::path::Path, abs: &std::path::Path) -> bool {
+    // #10739: the lexical check alone admitted a symlink to outside the root.
+    match std::fs::symlink_metadata(abs) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(_) => crate::service::index_admission::resolves_inside_root(root, abs).unwrap_or(false),
+    }
 }
 
 /// Add `catch_up_reindex` to a PATCH body when the PATCH released a hold (#9059).
@@ -614,11 +764,13 @@ fn persist_hygiene_update(
     data_file_max_bytes: u64,
     extensions: &[String],
     exclude_globs: &[String],
+    include_paths: Option<&[String]>,
     include_docs: bool,
     respect_gitignore: bool,
     skip_kg: bool,
     skip_vector: bool,
     serve_only: bool,
+    stamp: Option<&crate::core::profile::ResolvedProfile>,
 ) -> anyhow::Result<()> {
     use crate::service::persistence::{
         load_index_registry, upsert_index_registry_entry, PersistedIndex,
@@ -649,9 +801,17 @@ fn persist_hygiene_update(
     entry.data_file_max_bytes = Some(data_file_max_bytes);
     entry.extensions = extensions.to_vec();
     entry.exclude_globs = exclude_globs.to_vec();
+    // #10739: only a PATCH that names the list rewrites the stored allowlist.
+    if let Some(include_paths) = include_paths {
+        entry.include_paths = include_paths.to_vec();
+    }
     entry.include_docs = include_docs;
     entry.respect_gitignore = respect_gitignore;
     entry.skip_kg = skip_kg;
     entry.skip_vector = skip_vector;
+    if let Some(stamp) = stamp {
+        entry.profile = Some(stamp.name.clone());
+        entry.profile_hash = Some(stamp.hash.clone());
+    }
     upsert_index_registry_entry(entry)
 }

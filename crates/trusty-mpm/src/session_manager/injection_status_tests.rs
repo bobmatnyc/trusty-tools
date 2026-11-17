@@ -48,6 +48,8 @@ fn record_without_injection_status_field_defaults_to_not_applicable() {
 fn record_round_trips_injection_status() {
     let mut record = SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-injected".into(),
         cwd: PathBuf::from("/tmp"),
@@ -74,6 +76,7 @@ fn record_round_trips_injection_status() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: InjectionStatus::Pending,
         worktree_owner: None,
         terminal_at: None,

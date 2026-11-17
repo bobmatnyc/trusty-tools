@@ -1225,3 +1225,39 @@ fn safe_data_message_rejects_an_unterminated_field_name() {
     assert_eq!(safe_data_message("missing field `body"), None);
     assert_eq!(safe_data_message("duplicate field `title"), None);
 }
+
+/// #10782: `quoted_snippet` is carried onto the finding (a blank one is
+/// none), `questions` are kept apart from `findings`, and a malformed
+/// `questions` value never fails the reply.
+#[test]
+fn parse_questions_are_kept_apart_from_findings() {
+    let body = r#"{
+        "verdict":"APPROVE",
+        "summary":"ok",
+        "questions":["Confirm getMetricContext is imported in context.ts.", "  ", {"q":1}],
+        "findings":[
+            {"title":"a","body":"b","file":"src/a.rs","line":3,"quoted_snippet":"let x = y?;"},
+            {"title":"c","body":"d","file":"src/a.rs","line":4,"quoted_snippet":"  "},
+            {"title":"e","body":"f","file":"src/a.rs","line":5,"quoted_snippet":null}
+        ]
+    }"#;
+    let parsed = parse_review_response(body);
+    assert!(!parsed.is_fail_safe, "{:?}", parsed.fail_safe_reason);
+    assert_eq!(parsed.findings.len(), 3);
+    assert_eq!(
+        parsed.findings[0].quoted_snippet.as_deref(),
+        Some("let x = y?;")
+    );
+    assert_eq!(parsed.findings[1].quoted_snippet, None);
+    assert_eq!(parsed.findings[2].quoted_snippet, None);
+    assert_eq!(
+        parsed.questions,
+        [
+            "Confirm getMetricContext is imported in context.ts.".to_string(),
+            r#"{"q":1}"#.to_string()
+        ]
+    );
+    let odd = r#"{"verdict":"APPROVE","summary":"ok","questions":7,"findings":[]}"#;
+    let parsed = parse_review_response(odd);
+    assert!(!parsed.is_fail_safe && parsed.questions.is_empty());
+}

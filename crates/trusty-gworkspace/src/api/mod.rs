@@ -7,6 +7,7 @@
 //! Test: Module-level tests cover token model + storage round-trips.
 
 pub mod auth;
+pub mod bulk;
 pub mod client;
 pub mod constants;
 pub mod services;

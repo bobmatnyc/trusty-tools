@@ -15,7 +15,7 @@
 //! relieves pressure on the admission limiter by shrinking the window in
 //! which new inbound requests can pile up. This is a single-large-fan-out
 //! fix, not a process-global concurrency bound — see the residual-limitation
-//! note on `global_search_handler` in `search_global.rs`.
+//! note on `global_search_report` in `search_global.rs`.
 //! What: pure resolution of the effective per-fan-out concurrency cap from
 //! (1) a per-request override, (2) the `TRUSTY_SEARCH_FANOUT_CONCURRENCY` env
 //! var, or (3) a conservative built-in default. `--serial` (or a request

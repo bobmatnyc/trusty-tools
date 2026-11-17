@@ -180,8 +180,15 @@ pub fn ensure_base_facet_indexed(worktree_path: &Path) -> BaseFacetOutcome {
 
     // #5069: the base checkout owns the embedding lane, so `skip_vector` stays
     // at its `false` default here — the opposite of the worktree's own index.
-    let report =
-        trusty_common::search_index::ensure_project_indexed_reporting(&base, base_facet_options());
+    // #10530: the base checkout is a registry project's checkout, so its id
+    // derives from the stored key, matching what the residency set publishes.
+    let registered =
+        super::session_launch::registered_project_for(&base, &crate::project::registry_data_dir());
+    let report = trusty_common::search_index::ensure_project_indexed_reporting_as(
+        &base,
+        registered.as_ref(),
+        base_facet_options(),
+    );
 
     let Some(index_id) = report.index_id else {
         return BaseFacetOutcome::EmptyIndexId;

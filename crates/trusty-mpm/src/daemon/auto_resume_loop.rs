@@ -229,6 +229,7 @@ pub fn resume_parked_event(records: &[SessionRecord], notice: &str) -> Option<Ha
         },
         id: EventId::new(),
         parent_id: None,
+        project: None,
     })
 }
 

@@ -343,7 +343,8 @@ fn published_under(lease: &LspLease, root: &Path) -> Result<Vec<FileDiagnostics>
 /// Test: `analysed_at_is_ready_once_the_version_is_published`,
 /// `analysed_at_times_out_with_the_version_seen`,
 /// `analysed_at_accepts_an_unversioned_publication_after_the_sync`,
-/// `a_workspace_that_failed_to_load_is_refused`.
+/// `a_workspace_that_failed_to_load_is_refused`,
+/// `analysed_at_timeout_finishes_as_timed_out_not_ok`.
 pub async fn lsp_analysed_at(
     state: &AnalyzerAppState,
     req: LspAnalysedAtRequest,
@@ -389,6 +390,22 @@ pub async fn lsp_analysed_at(
         })
     };
     let result = run.await;
-    call.finish(&result, |r| stamps(None, r.document_version, &r.snapshot));
+    // #10087: a timed-out barrier is an answer, not readiness; the terminal
+    // event says `timed_out` (outcome and `state`) so a subscriber never
+    // reads Finished + `document_version` as "analysed".
+    call.finish_as(&result, |r| {
+        let mut attrs = stamps(None, r.document_version, &r.snapshot);
+        match &r.state {
+            BarrierState::Ready => {
+                attrs.push(("state", json!("ready")));
+                ("ok", attrs)
+            }
+            BarrierState::TimedOut { version_seen } => {
+                attrs.push(("state", json!("timed_out")));
+                attrs.push(("version_seen", json!(version_seen)));
+                ("timed_out", attrs)
+            }
+        }
+    });
     result.map_err(lsp_rpc_error)
 }

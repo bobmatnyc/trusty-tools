@@ -39,7 +39,7 @@ pub(crate) mod map;
 pub(crate) mod routes;
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{StatusCode, header};
@@ -219,6 +219,9 @@ pub(crate) enum MemoryRpcError {
     },
     /// The daemon answered, but with neither a result nor an error.
     Malformed(String),
+    /// The daemon speaks a memory protocol this console does not support, or
+    /// answered the protocol check unreadably (#9538). No frame was sent.
+    ProtocolMismatch(String),
 }
 
 impl MemoryRpcError {
@@ -232,9 +235,10 @@ impl MemoryRpcError {
     /// Test: `error_status_maps_every_documented_code`.
     pub(crate) fn status(&self) -> StatusCode {
         match self {
-            Self::Unresolved(_) | Self::Unreachable(_) | Self::Malformed(_) => {
-                StatusCode::BAD_GATEWAY
-            }
+            Self::Unresolved(_)
+            | Self::Unreachable(_)
+            | Self::Malformed(_)
+            | Self::ProtocolMismatch(_) => StatusCode::BAD_GATEWAY,
             Self::Refused { code, .. } => match *code {
                 CODE_NOT_FOUND => StatusCode::NOT_FOUND,
                 CODE_REFUSED => StatusCode::CONFLICT,
@@ -249,7 +253,10 @@ impl MemoryRpcError {
     /// The daemon's own words, or the console's account of why it heard none.
     pub(crate) fn message(&self) -> &str {
         match self {
-            Self::Unresolved(m) | Self::Unreachable(m) | Self::Malformed(m) => m,
+            Self::Unresolved(m)
+            | Self::Unreachable(m)
+            | Self::Malformed(m)
+            | Self::ProtocolMismatch(m) => m,
             Self::Refused { message, .. } => message,
         }
     }
@@ -289,6 +296,53 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
         .map_err(|e| format!("could not resolve the {MEMORY_SERVICE} socket path: {e:#}"))
 }
 
+/// What is left of `budget` since `started`.
+///
+/// Why: #9538 added a handshake before the frame, and giving each the caller's
+/// whole timeout let a cold call wait twice as long as asked. One deadline,
+/// spent by the handshake first, keeps the total at `budget`.
+/// Test: `call_keeps_the_handshake_and_the_frame_inside_one_timeout`.
+pub(crate) fn remaining(budget: Duration, started: Instant) -> Duration {
+    budget.saturating_sub(started.elapsed())
+}
+
+/// Refuse a trusty-memory daemon whose wire protocol this console does not speak.
+///
+/// Why: #9288 added `memory.protocol` and #9538 makes every first-party client
+/// ask before its first call, so a daemon from another release is refused by
+/// name instead of having its replies misparsed. This crate frames its own
+/// requests, so it does not pass through the shared checked call path.
+/// What: `trusty_common::memory_rpc::ensure_memory_protocol_at` (cached per
+/// socket for a few seconds; a pre-handshake daemon stays callable). An
+/// unsupported or unreadable handshake is [`MemoryRpcError::ProtocolMismatch`]
+/// and is logged; a handshake that could not run is
+/// [`MemoryRpcError::Unreachable`], as any other transport failure, naming
+/// `method` (the call the caller was about to make).
+///
+/// # Errors
+///
+/// The two arms above.
+///
+/// Test: `call_refuses_an_incompatible_daemon_without_sending_the_frame`,
+/// `call_refuses_a_daemon_with_no_protocol_version`.
+pub(crate) async fn ensure_protocol(
+    socket: &Path,
+    method: &str,
+    timeout: Duration,
+) -> Result<(), MemoryRpcError> {
+    use trusty_common::memory_rpc::{MemoryProtocolError, ensure_memory_protocol_at};
+    match ensure_memory_protocol_at(socket, timeout).await {
+        Ok(_) => Ok(()),
+        Err(e @ MemoryProtocolError::HandshakeFailed { .. }) => Err(MemoryRpcError::Unreachable(
+            format!("{MEMORY_SERVICE} did not answer {method}: {e}"),
+        )),
+        Err(e) => {
+            tracing::warn!("{MEMORY_SERVICE} refused by the protocol check (#9538): {e}");
+            Err(MemoryRpcError::ProtocolMismatch(e.to_string()))
+        }
+    }
+}
+
 /// One unary JSON-RPC exchange with trusty-memory.
 ///
 /// Why here rather than at each call site: the envelope, the framing, the
@@ -296,7 +350,10 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
 /// identical for every method, and a second copy of them is how one caller
 /// starts reading an `error` frame as a success while another does not.
 ///
-/// What: one framed request, then the envelope check. A response carrying
+/// What: the protocol check ([`ensure_protocol`]; nothing is sent to a daemon
+/// it refuses), then one framed request, then the envelope check. `timeout` is
+/// ONE deadline across the handshake and the frame: the handshake may use all
+/// of it, and the frame gets only what is left (see [`remaining`]). A response carrying
 /// `error` is [`MemoryRpcError::Refused`] with the daemon's code and message; a
 /// response carrying neither half is [`MemoryRpcError::Malformed`], never an
 /// empty success.
@@ -307,13 +364,18 @@ pub(crate) fn socket_path() -> Result<PathBuf, String> {
 ///
 /// Test: `call_reports_a_dead_socket_as_unreachable`,
 /// `call_reports_a_jsonrpc_error_with_the_http_status_it_came_from`,
-/// `call_reports_an_empty_answer_as_malformed`, `call_returns_the_daemon_result`.
+/// `call_reports_an_empty_answer_as_malformed`, `call_returns_the_daemon_result`,
+/// `call_keeps_the_handshake_and_the_frame_inside_one_timeout`,
+/// `call_stays_callable_on_a_daemon_that_predates_the_handshake`.
 pub(crate) async fn call(
     socket: &Path,
     method: &str,
     params: Value,
     timeout: Duration,
 ) -> Result<Value, MemoryRpcError> {
+    let started = Instant::now();
+    ensure_protocol(socket, method, timeout).await?;
+    let timeout = remaining(timeout, started);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -371,6 +433,9 @@ pub(crate) async fn open_stream(
     params: Value,
     open_timeout: Duration,
 ) -> Result<FramedStream<Value>, MemoryRpcError> {
+    let started = Instant::now();
+    ensure_protocol(socket, method, open_timeout).await?;
+    let open_timeout = remaining(open_timeout, started);
     let request = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -422,5 +487,7 @@ pub(crate) fn json_response(value: &Value) -> Response {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod protocol_stub;
 #[cfg(test)]
 mod tests;

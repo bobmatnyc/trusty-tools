@@ -1,0 +1,103 @@
+[package]
+name = "trusty-okf"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Builds and maintains OKF (Open Knowledge Format) bundles: format, profiles, bundle operations, build pipeline and import."
+# #10746: not published, per SPEC-OKF-01 §3 (h) A. The OKF schema is still
+# moving; trusty-kb, which this crate replaces, is `publish = false` too.
+publish = false
+
+# #10746: no `[[bin]]` table. #10746 S8: the one binary is `src/main.rs`, the
+# `trusty-okf` CLI (SPEC-OKF-01 §4.10, 3g B). The crate has no MCP surface and
+# no stdio server (§2.7.1 B7); scripts/check_okf_boundary.sh enforces it.
+
+[features]
+# Both features are off by default. The core is network-free (B8) and never
+# links an extraction backend (B9).
+default = []
+# Push loop to trusty-search and `search.query` retrieval (SPEC-OKF-01 §5).
+# #10746 S7: the socket client and its async runtime come only with this
+# feature, so `--no-default-features` stays network-free (B8).
+search-feed = ["dep:async-trait", "dep:tokio", "dep:trusty-common"]
+# Client for the out-of-process extraction worker (SPEC-OKF-01 §2.16, App. B).
+# #10746 S10: `nix` sends the process-group signals of the kill sequence; the
+# crate forbids `unsafe`, so it has no raw `libc` call of its own.
+# #10746 S9+S10 merge: `nix` is no longer behind this feature; the CLI's
+# SIGINT waiter cancels an adapter import in every build.
+extract-worker = []
+
+[dependencies]
+# #10746 S2: the format and profile modules moved from trusty-kb. None of these
+# is an async runtime, socket client, credential or extraction crate (B6-B9).
+# `v0.2` instants (`generated.at`, `verified[].at`, `stale_after`).
+chrono = { workspace = true }
+# `Finding` serialises; trusty-kb's `kb_validate` returns it as JSON.
+serde = { workspace = true }
+# #10746 S3: one JSON line per verification-record event under `_sources/`
+# (SPEC-OKF-01 §2.10, 3d C).
+serde_json = { workspace = true }
+# #10746 S8: the import's include and exclude globs (SPEC-OKF-01 §2.14 rule
+# 9). Pure matching; no I/O, no network (B8).
+globset = { workspace = true }
+# Frontmatter parse and render; workspace-standard 0.9 line.
+serde_yaml = { workspace = true }
+# #10746 S3: the §2.10 content hash and the stale-write check (A1).
+sha2 = { workspace = true }
+# `OkfError` (SPEC-OKF-01 §4.4).
+thiserror = { workspace = true }
+# #10746 S4: `_sources/registry.toml`, moved with the build layer from
+# trusty-kb (SPEC-OKF-01 §2.7.2). Pure parsing; no network (B8).
+toml = { workspace = true }
+# #10746 S3: NFC form of the §2.11 fold key (fold_collision).
+unicode-normalization = { workspace = true }
+# #10746 S4: the doc-store walk (`build::docstore`), moved from trusty-kb.
+walkdir = { workspace = true }
+
+# #10746 S7: feature `search-feed` only (B8). The trusty-search socket client
+# (`trusty_common::search_rpc`, SPEC-OKF-01 §5.1), the `IndexFeed` seam's
+# async trait, and the runtime its client and the feed tests run on.
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "rt"] }
+# #10746 S8: `knowledge-document` lets the `search-feed` tests pin the local
+# §4.8 tombstone rule (`format::tombstone`) to trusty-common's `is_tombstone`.
+# The core still links no trusty-common (owner decision D4b open).
+trusty-common = { workspace = true, optional = true, features = ["uds", "knowledge-document"] }
+
+# #10746 S9: the import fetch resolves every path component with `openat`
+# and `O_NOFOLLOW` (no symlink followed), and the adapter's process group is
+# killed as one. Safe wrappers; `fs` and `process` only, no network (B8).
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+# #10746 S10: `killpg` for the worker's process group (SPEC-OKF-01 §2.16
+# "Cancellation, kill and reap"). S9+S10 merge (Architect ruling
+# 2c9381bdbdc9): also the CLI's one SIGINT waiter (`sigwait`), which cancels
+# an adapter import with or without the `extract-worker` feature, so it is no
+# longer optional. The 0.29 line trusty-mpm and trusty-search already pin; no
+# network, no runtime.
+nix = { version = "0.29", features = ["signal"] }
+
+# #10746 S7: the feed criteria need the `feed` module.
+[[test]]
+name = "feed_criteria"
+path = "tests/feed_criteria.rs"
+required-features = ["search-feed"]
+
+# #10746 S8: the import feed criteria need the `feed` module and the CLI's
+# feed paths.
+[[test]]
+name = "import_feed_criteria"
+path = "tests/import_feed_criteria.rs"
+required-features = ["search-feed"]
+
+# #10746 S10: the worker criteria need the worker client.
+[[test]]
+name = "worker_criteria"
+path = "tests/worker_criteria.rs"
+required-features = ["extract-worker"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

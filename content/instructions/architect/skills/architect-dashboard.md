@@ -1,9 +1,9 @@
 ---
 name: architect-dashboard
-description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow and the owner controls. Architect only.
+description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow, the owner controls and the technical level of item text. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.3.1"
 category: monitoring
 tags: [architect, dashboard, owner, store]
 effort: medium
@@ -42,8 +42,10 @@ search box above the sections. The main sections are, in order:
 2. **Questions**: one row per open `questions` doc, newest answer first, with
    Clear, Clear all and a collapsed Cleared bucket with Restore. Every answer
    the Architect gives to an owner question (terminal, voice relay or Remote
-   Control) goes here in the same pass, as well as in the reply. Only the owner
-   clears; the Architect never sets `cleared`.
+   Control) goes here in the same pass, as well as in the reply. The Q&A
+   collection `questions/Q..` is the home for every answer to an owner
+   question; an answer that exists only in chat is a miss (r-193). Only the
+   owner clears; the Architect never sets `cleared`.
 3. **Actions**: items whose id starts with A, T or R, open first, then
    answered, then a collapsed Done list.
 4. **Goals**: directed then standing, one row per goal (id, title, rank chip).
@@ -82,9 +84,13 @@ control, and the Live page follows it.
     add the answer to the item's `updates`, and the item returns to the open
     list.
   - `brief` ("<project>/docs/briefs/<file>.md"): every D or A item that is not
-    truly simple links a readable brief when it is created; the Architect's own
-    briefs go to `local/briefs/`. An item without one offers "Ask for a brief",
+    truly simple, and every item written below `senior-engineer` (see
+    Technical level below), links a readable brief when it is created; the
+    Architect's own briefs go to `local/briefs/`. An item without one offers "Ask for a brief",
     which writes `brief_request`: write the brief the same pass and set `brief`.
+  - `level_override` (one of the six technical levels): set by a "more
+    detail" request on this item and removed when it closes; see
+    Technical level below.
   - Owner cancel: status `cancelled` written by the page is the owner's ruling
     to stop that task. Stop the work, relay it to any PM involved, record it in
     `local/actions.md`, and never reopen it without asking.
@@ -110,6 +116,9 @@ control, and the Live page follows it.
   allowed), links, brief, session, status (open|cleared), answered_at,
   cleared_at, updated. When an answer changes later, update the doc in place.
 - `goal_reorders`, `goal_removals`: written by the page (status `new`).
+- `watch_changes/<id>`: key, action (watch|unwatch), status
+  (new|applied|failed|dismissed), created, by, done_at, message. Written by the
+  page; only `scripts/watch-apply.py` sets `applied` or `failed`.
 - `meta/state`: fleet_usage, updated, fleet_line, owner_name.
 
 ## Rules
@@ -138,6 +147,10 @@ control, and the Live page follows it.
   serves any `.md` under that root and refuses dot segments, node_modules,
   target and secret, credential or .env names. An addendum is never its own
   spec: the main brief links it.
+- **Brief reader links.** Every brief link the Architect gives the owner
+  (dashboard fields, Q&A links, chat) uses the dashboard reader
+  `<dashboard>/#doc/<project>/<rel path>`, never a GitHub blob URL. A project
+  missing from the reader allowlist is a finding.
 - **Long text.** No dashboard field holds more than one paragraph. Write longer
   text to a brief and link it.
 - **Media.** The right pane lists briefs, diagrams and images under the doc
@@ -150,6 +163,83 @@ control, and the Live page follows it.
 - **Page changes.** The page is code: an engineer agent edits
   `templates/dashboard/index.html` with a brief, and the change ships through
   trusty-tools. Never publish a second dashboard URL.
+
+## Technical level
+
+Item text is written at the reader's technical level (r-194 in
+`architect-operating-rules`; spec DOC-91). Read the level from the
+`TECH LEVEL:` line in hook context; with none, write at `pm`.
+
+- **What follows the level.** An item's `title`, `detail` and each option's
+  `label` and `desc`, and a `questions` answer. Relays to PMs, the outcome
+  you record in `local/actions.md`, and the body of a linked brief stay
+  technical.
+- **Brief link.** An item written below `senior-engineer` sets `brief` to a
+  brief that holds the full technical text, written at `engineer` or higher.
+- **Lint warnings.** `dashboard-db.py` prints a warning, never a refusal, for
+  each path, `file:line`, SHA, backticked identifier, flag or job name in
+  item text at `non-technical`, `vibe-coder` or `pm`. Rewrite the item in the
+  same pass.
+- **More detail on one item.** When the reader asks for more detail, the code
+  view, the engineer view or a named level on one item, rewrite that item
+  once at the next level up (or the named level) and set `level_override` to
+  that level in the same write. The setting `meta/settings.technical_level`
+  does not change. The item's text then follows `level_override` until the
+  item closes; every other item follows the setting.
+- **Clear the override when the item closes.** When the item goes `done`,
+  `cancelled` or `wont_do`, remove `level_override`: `get` the item, delete
+  the `level_override` key from its `data`, and write that whole `data` back
+  with `set items <id> --json <data> --if-version <version>`. Never send
+  `update` with `{"level_override": null}`: the store refuses a null level.
+- **Secondary users.** A `questions` answer to a secondary user is written at
+  that user's level, never the owner's.
+
+### The six levels
+
+<!-- #11064: the same block, byte for byte, in architect-operating-rules,
+     architect-dashboard and architect-strategy; DOC-91 section 2 is the source. -->
+Every level states the same decision and the same recommendation. Only
+vocabulary, evidence and length change. A level never hides a risk; it
+restates the risk in that level's terms. An unset or unknown level is `pm`,
+never a higher one.
+
+- **non-technical.** Reader: a business owner who does not build software.
+  Everyday words, no code terms: "the system" or "the website", not "server
+  slot" or "config". Leave out all paths, line numbers, SHAs, flags, tool
+  names and job names; they go to the linked brief. Say what changes for the
+  business, what it costs in time or money, and what goes wrong on the wrong
+  pick. 2 to 3 sentences; 2 options at most, one sentence each.
+- **vibe-coder.** Reader: builds with AI tools; knows what an app, a deploy
+  and a repo are, not how they work inside. Product words (app, deploy, test,
+  repo, bug); name a tool only when the reader uses it. Leave out line
+  numbers, SHAs, CI internals and flag names; they go to the linked brief. Say
+  what the user sees, how hard the change is to undo, and whether a deploy is
+  needed. 3 to 4 sentences; each option one sentence.
+- **pm.** Reader: runs delivery; knows scope, risk, schedule, dependencies
+  and environments, not the code. Project terms (environment, release,
+  rollback, owner, blocker); component names yes, code identifiers no. Leave
+  out file paths, line numbers, SHAs, flag names and job names; issue and PR
+  links stay. Say the outcome, the cost (effort, delay), the risk, how
+  reversible it is, and what the owner must supply. 4 to 6 sentences.
+- **engineer.** Reader: writes and reviews code in this stack. Full technical
+  terms, function and module names, issue and PR links. Leave out raw logs
+  and long diffs; a path appears as a module name or a short relative path; a
+  SHA only when it decides the question. Say the behaviour, the root cause,
+  the trade-off between the options and the test evidence. 6 to 10 sentences
+  with a short evidence list.
+- **senior-engineer.** Reader: owns design across components. Everything in
+  engineer, plus failure modes, invariants, contracts, concurrency and
+  migration. Leave out only noise: path and line references stay, and the
+  blast radius is stated. Say the design trade-offs, failure modes,
+  compatibility, and the rollout and rollback plan. As long as the decision
+  needs, with evidence by `file:line`.
+- **cto.** Reader: accountable for the system and the team; decides on risk
+  and investment; reads code on request. Technical terms serve the decision,
+  not the mechanism: name the component and the contract at stake. Leave out
+  line numbers, SHAs and job names; they sit one click away in the linked
+  brief. Say the risk to production and customers, the cost, how reversible
+  it is, the precedent for other services, and your recommendation. 4 to 8
+  sentences.
 
 ## "dashboard" call
 
@@ -174,8 +264,15 @@ Seed `goals` from `local/goals.md` and `sessions` from the first full poll.
 Each pass, list what the owner wrote and act on it in the same pass:
 `python3 scripts/dashboard-db.py list items --status answered` (and
 `cancelled`, `wont_do`), plus the `goal_reorders`, `goal_removals`,
-`effort_tunes` and `il_steers` docs with status `new`. `scripts/owner_answers.py`
-holds the full list of kinds the page writes.
+`effort_tunes`, `il_steers` and `watch_changes` docs with status `new`.
+`scripts/owner_answers.py` holds the full list of kinds the page writes.
+
+- `watch_changes` (status `new`, kind `watch_change`) is the owner's Watch or
+  Unwatch of a registered project. Do not apply it by hand and never edit
+  the watch list file: run `scripts/watch-apply.py`, which runs
+  `tm fleet project add|remove` once per key and records `applied` or `failed`
+  with the CLI's message (`tm-fleet-check` step 1). A `failed` request waits
+  for the owner's Retry or Dismiss.
 
 - `goal_removals` (status `new`) is the owner's ruling to remove a goal: set the
   goal `status: "removed"`, update `local/goals.md` and the palace, then set the
@@ -202,10 +299,19 @@ holds the full list of kinds the page writes.
 ## Owner answers are relayed within one pass
 <!-- rule:r-183 -->
 Before every reply to the owner and on every wake, list the answered and
-cancelled items whose `answer_note` does not start with "Relayed". Relay each
-one in the same turn, store the ruling (`memory_remember`, tag `ruling`), then
-set `answer_note` "Relayed HH:MMZ". Then set it `done` with `done_at` and a
-one-line verified `outcome`. Prune done items older than 7 days with
+cancelled items with no `relayed` whose `answer_note` does not start with
+"Relayed". Before acting on one, read it back from the store:
+`python3 scripts/pending-answers.py --read-back <id> --kind <kind> --at <at>`.
+Relay the text it prints, never the hook line, `/api/meta` or a cached page
+view. Any non-zero exit (3: changed, gone or already relayed; 2: unreadable;
+or any other) means do not relay and do not act: list again and start over.
+Relay each one in the same turn, store the ruling (`memory_remember`, tag
+`ruling`), then set `relayed` "<ISO time> <session>" with `--if-version` set
+to the integer in the read-back's fourth column; a version conflict means the
+owner saved again, so list again. Only after a successful `relayed` write, set
+it `done` with `done_at` and a one-line verified `outcome`. Never
+change `answer` or `answer_note`: they hold the owner's words, and
+`dashboard-db.py` refuses a write that changes them. Prune done items older than 7 days with
 `scripts/il-archive.py`.
 
 ## Sessions are current

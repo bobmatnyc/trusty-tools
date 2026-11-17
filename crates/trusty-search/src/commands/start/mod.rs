@@ -25,6 +25,7 @@ pub(crate) mod args;
 mod daemon;
 mod embedder;
 mod embedder_fallback;
+mod embedder_split;
 mod graceful_bootstrap;
 // #8149 / #8176: the two isolation decisions `handle_start` used to make as
 // inline branches no test could reach — which data dir every per-instance path
@@ -85,6 +86,9 @@ mod swap_back_cycle_soak_tests;
 // Public entry point consumed by `commands/mod.rs`.
 pub use args::StartArgs;
 pub use daemon::handle_start;
+// #11085: the Linux lifecycle resolves the data dir with start's own rule.
+#[cfg(target_os = "linux")]
+pub(crate) use isolation::{resolve_data_dir_override, DATA_DIR_ENV};
 
 // Re-exports that formerly lived at the top of `start.rs` and are consumed by
 // the test module below (via `use super::*`) and by service::lazy_loader /

@@ -67,6 +67,15 @@ pub struct CodeChunk {
     /// Issue #75: short label explaining why this chunk was archive-downranked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_reason: Option<String>,
+
+    /// #10498: the BM25 engine's own score for this chunk, before fusion.
+    ///
+    /// `Some` only when the chunk came from the BM25 lane; a vector-only,
+    /// KG-only or ripgrep-only hit carries `None` and the key is absent from
+    /// the JSON. Instrumentation: `score` stays the fused, adjusted rank score
+    /// and ranking never reads this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bm25_raw: Option<f32>,
 }
 
 /// File-type filter mode for the unified search tool (issue #77).

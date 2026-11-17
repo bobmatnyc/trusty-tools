@@ -15,7 +15,7 @@
 //! Test: this file is the test.
 
 use super::*;
-use crate::tui::project_ctl::state::ProjectRow;
+use crate::tui::project_ctl::state::{NodeId, ProjectRow, SessionColRow};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -44,6 +44,9 @@ fn full_project(name: &str) -> crate::project::Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -84,11 +87,30 @@ fn seeded_state() -> ProjectCtlState {
             proposed_default: None,
             deliverable_id: None,
             unresumable: false,
+            ..Default::default()
         }],
     );
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    // #10476: open on the alpha project node — the old Projects-pane default.
+    state.select_node(project_node("alpha"));
+    // #10476: tree starts expanded (Bob 11-05 17:30Z); these tests drive the
+    // open/close keys, so alpha starts closed here.
+    state.tree.collapsed.insert(project_node("alpha"));
+    state.rebuild_tree();
     state
+}
+
+/// The tree node of project `name` (owner `acme`).
+fn project_node(name: &str) -> NodeId {
+    NodeId::Project {
+        owner: "acme".to_string(),
+        name: name.to_string(),
+    }
+}
+
+/// Select alpha's lone session in the right column, focusing that column
+/// (#10754: two-column MPM pane).
+fn on_session(state: &mut ProjectCtlState) {
+    assert!(state.focus_session("sess-1"));
 }
 
 #[test]
@@ -105,52 +127,260 @@ fn quit_on_bare_q_and_ctrl_c() {
 #[test]
 fn tab_cycles_focus_forward_and_back() {
     let mut state = seeded_state();
-    assert_eq!(state.focus, Pane::Projects);
+    assert_eq!(state.focus, Pane::Tree);
+    // #10754: two-column MPM pane (Bob 11-06)
     handle_key(&mut state, key(KeyCode::Tab));
     assert_eq!(state.focus, Pane::Sessions);
     handle_key(&mut state, key(KeyCode::Tab));
+    assert_eq!(state.focus, Pane::Activity);
+    handle_key(&mut state, key(KeyCode::Tab));
+    assert_eq!(state.focus, Pane::Tree);
+    handle_key(&mut state, key(KeyCode::BackTab));
     assert_eq!(state.focus, Pane::Activity);
     handle_key(&mut state, key(KeyCode::BackTab));
     assert_eq!(state.focus, Pane::Sessions);
 }
 
 #[test]
-fn arrow_keys_move_projects_selection_and_reset_sessions() {
+fn arrow_keys_move_the_tree_selection() {
+    // Rows: acme, alpha (selected, collapsed), beta.
     let mut state = seeded_state();
-    state.sessions_nav.down(); // no-op (only one session), but exercises the path
     handle_key(&mut state, key(KeyCode::Down));
     assert_eq!(state.selected_project().unwrap().name, "beta");
-    assert_eq!(state.sessions_nav.selected(), 0);
+    handle_key(&mut state, key(KeyCode::Up));
+    handle_key(&mut state, key(KeyCode::Up));
+    assert_eq!(state.selected_node(), Some(&NodeId::Owner("acme".into())));
 }
 
 #[test]
-fn enter_on_projects_pane_drills_into_sessions() {
+fn arrow_keys_do_nothing_in_the_activity_pane() {
     let mut state = seeded_state();
-    handle_key(&mut state, key(KeyCode::Enter));
-    assert_eq!(state.focus, Pane::Sessions);
+    state.focus = Pane::Activity;
+    handle_key(&mut state, key(KeyCode::Down));
+    assert_eq!(state.selected_project().unwrap().name, "alpha");
 }
 
+/// #10754: a project is a leaf of the left column; Enter on it moves focus
+/// into the session column, which then selects the project's first session.
 #[test]
-fn enter_on_sessions_pane_is_a_noop() {
+fn enter_on_owner_toggles_and_on_project_enters_sessions() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
     assert!(handle_key(&mut state, key(KeyCode::Enter)).is_none());
-    assert_eq!(state.focus, Pane::Sessions);
+    assert_eq!(state.focus, Pane::Sessions, "Enter enters the sessions");
+    assert_eq!(
+        state.selected_session().map(|s| s.id.as_str()),
+        Some("sess-1")
+    );
+    assert_eq!(state.selected_node(), Some(&project_node("alpha")));
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "entering opens no details"
+    );
+    state.focus = Pane::Tree;
+
+    let acme = NodeId::Owner("acme".to_string());
+    state.select_node(acme.clone());
+    handle_key(&mut state, key(KeyCode::Enter));
+    assert!(!state.tree.is_expanded(&acme));
+    assert_eq!(
+        state.tree.rows.len(),
+        1,
+        "a closed owner hides its projects"
+    );
+    handle_key(&mut state, key(KeyCode::Enter));
+    assert!(state.tree.is_expanded(&acme));
+    assert!(
+        state.session_col.expanded.is_empty(),
+        "toggling never opens details"
+    );
+}
+
+/// REGRESSION (#10476): before the tree, Enter on a session did nothing
+/// (`events/mod.rs` bound Enter on the Projects pane only). #10754: De1 key
+/// map (Bob 11-06) — Right expands the session in place; Enter opens it.
+#[test]
+fn right_on_session_expands_details_and_returns_no_pending_action() {
+    let mut state = seeded_state();
+    on_session(&mut state);
+    let action = handle_key(&mut state, key(KeyCode::Right));
+    assert!(action.is_none(), "details are read-only: {action:?}");
+    assert!(state.session_col.expanded.contains("sess-1"));
+    assert!(
+        state
+            .session_col
+            .rows
+            .iter()
+            .any(|r| matches!(r, SessionColRow::Detail { id, text, .. }
+                if id == "sess-1" && text == "project:     alpha")),
+        "the details follow the row"
+    );
+    assert!(state.pending_confirm.is_none());
 }
 
 #[test]
-fn launch_requires_sessions_focus_and_a_selected_project() {
+fn esc_collapses_details() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
-    let action = handle_key(&mut state, key(KeyCode::Char('l')));
-    assert_eq!(action, Some(PendingAction::Launch("alpha".to_string())));
+    on_session(&mut state);
+    handle_key(&mut state, key(KeyCode::Right));
+    assert!(handle_key(&mut state, key(KeyCode::Esc)).is_none());
+    assert!(state.session_col.expanded.is_empty());
+    assert_eq!(state.selected_session().unwrap().id, "sess-1");
+    assert_eq!(state.focus, Pane::Sessions, "Esc keeps the column");
+}
+
+#[test]
+fn f_on_an_expanded_session_returns_focus() {
+    let mut state = seeded_state();
+    on_session(&mut state);
+    handle_key(&mut state, key(KeyCode::Right));
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('f'))),
+        Some(PendingAction::Focus("alpha-session".to_string()))
+    );
+    assert!(
+        state.session_col.expanded.contains("sess-1"),
+        "focus leaves the details open"
+    );
+}
+
+#[test]
+fn f_on_a_session_node_returns_focus_and_on_a_project_does_nothing() {
+    let mut state = seeded_state();
+    assert!(handle_key(&mut state, key(KeyCode::Char('f'))).is_none());
+    assert_eq!(state.notice.as_deref(), Some("select a session first"));
+    on_session(&mut state);
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('f'))),
+        Some(PendingAction::Focus("alpha-session".to_string()))
+    );
+}
+
+/// #10754: an expanded session that leaves the poll leaves the expanded set,
+/// and returns closed.
+#[test]
+fn expanded_session_drops_out_when_it_leaves() {
+    let mut state = seeded_state();
+    on_session(&mut state);
+    handle_key(&mut state, key(KeyCode::Right));
+    let rows = state.sessions_by_project["alpha"].clone();
+    let other = SessionRow {
+        id: "sess-2".to_string(),
+        name: "other".to_string(),
+        ..Default::default()
+    };
+    state
+        .sessions_by_project
+        .insert("alpha".to_string(), vec![other]);
+    state.rebuild_tree();
+    assert!(state.session_col.expanded.is_empty());
+    state.sessions_by_project.insert("alpha".to_string(), rows);
+    state.rebuild_tree();
+    assert!(state.session_col.expanded.is_empty(), "returns closed");
+}
+
+#[test]
+fn expanded_session_keeps_the_session_verbs() {
+    let mut state = seeded_state();
+    on_session(&mut state);
+    handle_key(&mut state, key(KeyCode::Right));
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('a'))),
+        Some(PendingAction::Attach("sess-1".to_string()))
+    );
+    handle_key(&mut state, key(KeyCode::Char('d')));
+    assert_eq!(
+        state.pending_confirm.as_ref().map(|c| c.kind),
+        Some(ConfirmKind::Decommission)
+    );
+}
+
+#[test]
+fn g_toggles_worker_indentation() {
+    let mut state = seeded_state();
+    handle_key(&mut state, key(KeyCode::Char('g')));
+    assert!(state.tree.flat_workers);
+    handle_key(&mut state, key(KeyCode::Char('g')));
+    assert!(!state.tree.flat_workers, "default is indented");
+}
+
+/// See #10754: `l` opens the launch form on the node's project, never a
+/// new session; on an owner bar it is a notice and opens nothing.
+#[test]
+fn l_opens_the_launch_form_for_the_selected_nodes_project() {
+    let mut state = seeded_state();
+    on_session(&mut state);
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('l'))), None);
+    let form = state.launch.take().expect("l opens the launch form");
+    assert_eq!(form.project, "alpha");
+
+    state.select_node(project_node("beta"));
+    assert_eq!(handle_key(&mut state, key(KeyCode::Char('l'))), None);
+    let form = state.launch.take().expect("l opens the launch form");
+    assert_eq!(form.project, "beta");
+
+    state.select_node(NodeId::Owner("acme".to_string()));
+    assert!(handle_key(&mut state, key(KeyCode::Char('l'))).is_none());
+    assert!(state.launch.is_none(), "no project, no form");
+    assert_eq!(state.notice.as_deref(), Some("no project selected"));
+}
+
+#[test]
+fn kill_resume_decommission_attach_on_bar_or_project_act_on_nothing() {
+    for node in [NodeId::Owner("acme".to_string()), project_node("alpha")] {
+        for verb in ['k', 'r', 'd', 'a'] {
+            let mut state = seeded_state();
+            state.select_node(node.clone());
+            let action = handle_key(&mut state, key(KeyCode::Char(verb)));
+            assert!(action.is_none(), "{verb} on {node:?} returned {action:?}");
+            assert!(
+                state.pending_confirm.is_none(),
+                "{verb} on {node:?} opened a gate"
+            );
+            assert_eq!(state.notice.as_deref(), Some("select a session first"));
+        }
+    }
+}
+
+#[test]
+fn existing_bindings_unchanged() {
+    // Every pre-tree verb still produces what it did, on the node kind that
+    // stands in for its old pane.
+    let mut state = seeded_state();
+    handle_key(&mut state, key(KeyCode::Char('c')));
+    assert_eq!(state.config_form.take().unwrap().project_name, "alpha");
+    handle_key(&mut state, key(KeyCode::Char('v')));
+    assert_eq!(state.deliverable_view.take().unwrap().project_name, "alpha");
+
+    on_session(&mut state);
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('R'))),
+        Some(PendingAction::Resume("sess-1".to_string()))
+    );
+    assert_eq!(
+        handle_key(&mut state, key(KeyCode::Char('a'))),
+        Some(PendingAction::Attach("sess-1".to_string()))
+    );
+    handle_key(&mut state, key(KeyCode::Char('k')));
+    assert_eq!(
+        state.pending_confirm.take().map(|c| c.kind),
+        Some(ConfirmKind::Kill)
+    );
+    handle_key(&mut state, key(KeyCode::Char('d')));
+    assert_eq!(
+        state.pending_confirm.take().map(|c| c.kind),
+        Some(ConfirmKind::Decommission)
+    );
+    state.set_notice("x");
+    handle_key(&mut state, key(KeyCode::Esc));
+    assert!(state.notice.is_none());
+    handle_key(&mut state, key(KeyCode::Char('q')));
+    assert!(state.should_exit);
 }
 
 #[test]
 fn kill_without_selection_sets_notice_and_returns_none() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
-    state.projects_nav.down(); // select "beta", which has no sessions
+    state.select_node(project_node("beta")); // beta has no sessions
     let action = handle_key(&mut state, key(KeyCode::Char('k')));
     assert!(action.is_none());
     assert_eq!(state.notice.as_deref(), Some("select a session first"));
@@ -162,9 +392,9 @@ fn resume_and_attach_target_selected_session_immediately() {
     // Neither verb is destructive, so DOC-35 §5.2's confirm gate does not
     // apply — both fire on the first keypress.
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, key(KeyCode::Char('R'))),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.pending_confirm.is_none());
@@ -175,7 +405,7 @@ fn resume_and_attach_target_selected_session_immediately() {
     assert!(state.pending_confirm.is_none());
 }
 
-/// #2595: `r` on a session flagged `unresumable` must NOT fire
+/// #2595: `R` (#10754: De1 key map (Bob 11-06), `r` before) on a session flagged `unresumable` must NOT fire
 /// `PendingAction::Resume` — its workspace is gone for good, so the daemon
 /// round trip can only 422 (#2594). Mirrors the CLI picker's
 /// `PickerDecision::Unresumable` guard, adapted to the TUI's notice idiom: no
@@ -183,10 +413,10 @@ fn resume_and_attach_target_selected_session_immediately() {
 #[test]
 fn resume_on_unresumable_session_is_blocked() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     state.sessions_by_project.get_mut("alpha").unwrap()[0].unresumable = true;
 
-    let action = handle_key(&mut state, key(KeyCode::Char('r')));
+    let action = handle_key(&mut state, key(KeyCode::Char('R')));
     assert!(
         action.is_none(),
         "a dead session must never produce PendingAction::Resume"
@@ -209,9 +439,11 @@ fn resume_on_unresumable_session_is_blocked() {
 #[test]
 fn resume_on_healthy_session_fires_immediately() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
+    // A terminal reports `R` with SHIFT held.
+    let shifted = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
     assert_eq!(
-        handle_key(&mut state, key(KeyCode::Char('r'))),
+        handle_key(&mut state, shifted),
         Some(PendingAction::Resume("sess-1".to_string()))
     );
     assert!(state.notice.is_none());
@@ -240,9 +472,9 @@ fn c_without_a_selected_project_sets_notice_and_opens_nothing() {
 }
 
 #[test]
-fn c_is_ignored_outside_the_projects_pane() {
+fn c_is_ignored_on_a_session_node() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     assert!(handle_key(&mut state, key(KeyCode::Char('c'))).is_none());
     assert!(state.config_form.is_none());
 }
@@ -279,7 +511,7 @@ fn config_form_tab_cycles_field_focus_not_pane_focus() {
         ConfigFormFocus::Description
     );
     // The outer pane focus must NOT have moved — Tab is captured by the modal.
-    assert_eq!(state.focus, Pane::Projects);
+    assert_eq!(state.focus, Pane::Tree);
 }
 
 #[test]
@@ -350,9 +582,21 @@ fn config_form_swallows_quit_and_pane_keys() {
 #[test]
 fn lettered_actions_are_ignored_outside_their_pane() {
     let mut state = seeded_state();
-    // Projects pane focused: Sessions-only verbs are ignored (no notice).
-    assert!(handle_key(&mut state, key(KeyCode::Char('l'))).is_none());
-    assert!(state.notice.is_none());
+    on_session(&mut state);
+    // #10754: the Activity pane binds only `n`/`l`; every other verb acts on
+    // nothing and says how to leave, instead of dropping silently.
+    state.focus = Pane::Activity;
+    for verb in ['k', 'r', 'd', 'a', 'c', 'v', 'f', 'g'] {
+        state.clear_notice();
+        assert!(handle_key(&mut state, key(KeyCode::Char(verb))).is_none());
+        let notice = state.notice.as_deref().unwrap_or_default();
+        assert!(
+            notice.contains("Tab to the projects or sessions pane"),
+            "{verb}"
+        );
+    }
+    assert!(state.pending_confirm.is_none());
+    assert!(!state.tree.flat_workers);
 }
 
 #[test]
@@ -369,7 +613,7 @@ fn esc_clears_notice() {
 fn kill_on_active_session_opens_confirm_gate_instead_of_firing() {
     // seeded_state's lone session is "active".
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     let action = handle_key(&mut state, key(KeyCode::Char('k')));
     assert!(action.is_none(), "must not fire on the first keypress");
     let confirm = state.pending_confirm.expect("confirm gate should be open");
@@ -381,7 +625,7 @@ fn kill_on_active_session_opens_confirm_gate_instead_of_firing() {
 fn kill_on_non_active_session_fires_immediately() {
     let mut state = seeded_state();
     state.sessions_by_project.get_mut("alpha").unwrap()[0].state = "stopped".to_string();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     let action = handle_key(&mut state, key(KeyCode::Char('k')));
     assert_eq!(action, Some(PendingAction::Kill("sess-1".to_string())));
     assert!(state.pending_confirm.is_none());
@@ -392,7 +636,7 @@ fn decommission_always_opens_confirm_gate_regardless_of_state() {
     for state_word in ["active", "stopped", "provisioning", "errored"] {
         let mut state = seeded_state();
         state.sessions_by_project.get_mut("alpha").unwrap()[0].state = state_word.to_string();
-        state.focus = Pane::Sessions;
+        on_session(&mut state);
         let action = handle_key(&mut state, key(KeyCode::Char('d')));
         assert!(action.is_none(), "must not fire for state {state_word}");
         let confirm = state
@@ -406,7 +650,7 @@ fn decommission_always_opens_confirm_gate_regardless_of_state() {
 #[test]
 fn confirm_gate_y_resolves_to_the_real_action_and_clears() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Char('d'))); // open the gate
     assert!(state.pending_confirm.is_some());
 
@@ -422,7 +666,7 @@ fn confirm_gate_y_resolves_to_the_real_action_and_clears() {
 fn confirm_gate_uppercase_y_and_enter_also_confirm() {
     for confirm_key in [key(KeyCode::Char('Y')), key(KeyCode::Enter)] {
         let mut state = seeded_state();
-        state.focus = Pane::Sessions;
+        on_session(&mut state);
         handle_key(&mut state, key(KeyCode::Char('d')));
         let action = handle_key(&mut state, confirm_key);
         assert_eq!(
@@ -440,7 +684,7 @@ fn confirm_gate_n_or_esc_cancels_and_sets_notice() {
         key(KeyCode::Esc),
     ] {
         let mut state = seeded_state();
-        state.focus = Pane::Sessions;
+        on_session(&mut state);
         handle_key(&mut state, key(KeyCode::Char('d')));
         let action = handle_key(&mut state, cancel_key);
         assert!(action.is_none());
@@ -452,7 +696,7 @@ fn confirm_gate_n_or_esc_cancels_and_sets_notice() {
 #[test]
 fn confirm_gate_swallows_unrelated_keys_and_stays_open() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Char('d')));
     assert!(state.pending_confirm.is_some());
 
@@ -468,7 +712,7 @@ fn confirm_gate_swallows_unrelated_keys_and_stays_open() {
 #[test]
 fn confirm_gate_blocks_quit_keys_matching_the_spec_not_in_a_modal_rule() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Char('d')));
 
     handle_key(&mut state, key(KeyCode::Char('q')));
@@ -486,7 +730,7 @@ fn confirm_gate_blocks_quit_keys_matching_the_spec_not_in_a_modal_rule() {
 #[test]
 fn quit_still_works_once_the_gate_is_resolved() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     handle_key(&mut state, key(KeyCode::Char('d')));
     handle_key(&mut state, key(KeyCode::Esc)); // cancel — gate closes
     assert!(state.pending_confirm.is_none());
@@ -514,9 +758,9 @@ fn v_without_a_selected_project_sets_notice_and_opens_nothing() {
 }
 
 #[test]
-fn v_is_ignored_outside_the_projects_pane() {
+fn v_is_ignored_on_a_session_node() {
     let mut state = seeded_state();
-    state.focus = Pane::Sessions;
+    on_session(&mut state);
     assert!(handle_key(&mut state, key(KeyCode::Char('v'))).is_none());
     assert!(state.deliverable_view.is_none());
 }

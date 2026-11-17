@@ -234,7 +234,7 @@ async fn index_status_on_unindexed_pin_returns_index_not_ready() {
 
 /// `list_chunks` reports the same state as its `index_status` neighbour.
 ///
-/// Why: routing it is only safe because `get_index_chunks_handler` now rules
+/// Why: routing it is only safe because `index_chunks_report` now rules
 /// out the cold store before it 404s — see `service::server::tests_4715`.
 #[tokio::test]
 async fn list_chunks_on_unindexed_pin_returns_index_not_ready() {

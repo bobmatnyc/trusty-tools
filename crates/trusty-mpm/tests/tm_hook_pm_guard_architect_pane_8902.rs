@@ -192,7 +192,10 @@ fn a_pm_is_denied_the_architect_pane_under_each_bypass() {
         let env: Vec<(&str, &str)> = bypass.into_iter().collect();
         for command in &denied {
             let out = fx.guard(command, &env);
-            assert!(out.contains("#8902"), "{bypass:?} {command}: {out}");
+            assert!(out.contains("\"deny\""), "{bypass:?} {command}: {out}");
+            // #10665: a `tm-` session kill is refused first by its own floor.
+            let floor = out.contains("#8902") || out.contains("#10665");
+            assert!(floor, "{bypass:?} {command}: {out}");
         }
         for command in allowed {
             let out = fx.guard(command, &env);

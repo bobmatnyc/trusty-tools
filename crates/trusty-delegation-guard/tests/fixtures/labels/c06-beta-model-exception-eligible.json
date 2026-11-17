@@ -1,0 +1,8 @@
+{
+  "case_id": "c06-beta-model-exception-eligible",
+  "expected_verdict": "allow",
+  "binding_rule_ids": [
+    "beta-model-1"
+  ],
+  "label_note": "LABEL-ONLY-c06-beta-model-exception-eligible"
+}

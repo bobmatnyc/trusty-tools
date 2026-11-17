@@ -46,6 +46,8 @@ pub mod warm;
 /// Registration for project-to-index resolution (#9169).
 pub mod project;
 
+/// Registration for `search.project.ensure`: find-or-create a project's index (#10531).
+pub mod project_ensure;
 /// Registration for the project map: map, park, unpark, pin (#9169 PR-B1).
 pub mod project_map;
 
@@ -61,6 +63,10 @@ mod lanes_tests;
 /// The HTTP-side adapters every family's parity tests share (#9535).
 #[cfg(test)]
 mod test_support;
+
+// #10738: index identity, the put reply's hash and `search.index.file.status`.
+#[cfg(test)]
+mod identity_10738_tests;
 
 /// Restore both process-global memory limits when a test that touches them ends.
 ///

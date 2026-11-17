@@ -6,7 +6,8 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{
-    GH_SHIM_ENV, LaunchSeams, PinnedCredential, find_real_gh, launch_pinned_login, prefixed_path,
+    GH_SHIM_ENV, LaunchSeams, PinnedCredential, RATE_LIMIT_REFUSAL_MARKER,
+    RATE_LIMIT_RESET_EPOCH_OPEN, REAP_FN, find_real_gh, launch_pinned_login, prefixed_path,
     shim_dir, shim_root, shim_script, write_gh_shim,
 };
 use crate::core::gh_account::PinnedGhIdentity;
@@ -813,4 +814,425 @@ fn a_refused_pinned_relaunch_is_the_launch_refusal() {
         err,
         crate::core::gh_login_verify::launch_refusal("octo", "github.com", "printed no token")
     );
+}
+
+/// A fake real gh for the #10550 rate-limit arm: `auth token` prints a token,
+/// `api rate_limit` runs `reset_step`, every other call runs `call_step`.
+#[cfg(unix)]
+fn rate_limit_shim(reset_step: &str, call_step: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let gh_dir = tmp.path().join("gh-config");
+    let real = tmp.path().join("bin").join("gh");
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = auth ] && [ \"$2\" = token ]; then echo tok; exit 0; fi\n\
+         if [ \"$1\" = api ] && [ \"$2\" = rate_limit ]; then {reset_step}; fi\n\
+         {call_step}\n"
+    );
+    write_script(&real, &body);
+    let dir =
+        write_gh_shim(tmp.path(), &verified("github.com", &gh_dir), &real, 5).expect("written");
+    (tmp, dir)
+}
+
+/// Run `<shim_dir>/gh <args>` with piped stdout and stderr.
+#[cfg(unix)]
+fn run_shim_args(shim_dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = std::process::Command::new(shim_dir.join("gh"));
+    cmd.args(args).stdin(std::process::Stdio::null());
+    output_past_etxtbsy(&mut cmd)
+}
+
+/// A gh call GitHub refused on its primary GraphQL limit: a partial stdout
+/// body, gh's error line, exit 1.
+#[cfg(unix)]
+const GRAPHQL_REFUSAL: &str = "printf '{\"data\":null}\\n'; \
+     echo 'GraphQL: API rate limit already exceeded for user ID 1.' >&2; exit 1";
+
+/// 🔴 #10550: a primary GraphQL rate-limit refusal is one stderr line naming
+/// the limit and its reset (epoch and UTC), exit 1, and no partial stdout. The
+/// reset lookup asks `.resources.graphql.reset`, and nothing is retried.
+#[cfg(unix)]
+#[test]
+fn a_graphql_rate_limit_refusal_is_one_line_with_the_reset_and_no_stdout() {
+    let calls = tempfile::NamedTempFile::new().expect("call log");
+    let log = calls.path().display();
+    let reset =
+        "[ \"$3 $4\" = '--jq .resources.graphql.reset' ] || exit 7; echo 1767225600; exit 0";
+    let call = format!("echo call >> '{log}'; {GRAPHQL_REFUSAL}");
+    let (_tmp, dir) = rate_limit_shim(reset, &call);
+    let out = run_shim_args(&dir, &["pr", "list"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "partial stdout leaked: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    for part in [
+        "primary GraphQL rate limit",
+        "2026-01-01 00:00:00 UTC",
+        "1767225600",
+    ] {
+        assert!(stderr.contains(part), "{part} missing: {stderr}");
+    }
+    // #10550: `tm wait` reads the line through these two constants.
+    assert!(stderr.starts_with(RATE_LIMIT_REFUSAL_MARKER), "{stderr}");
+    let epoch = format!("{RATE_LIMIT_RESET_EPOCH_OPEN}1767225600)");
+    assert!(stderr.contains(&epoch), "{epoch} missing: {stderr}");
+    // #10550 item 5: zero retries — the refused call ran once.
+    let ran = std::fs::read_to_string(calls.path()).expect("call log");
+    assert_eq!(ran, "call\n", "the refused call was retried");
+}
+
+/// 🔴 #10550: a reset lookup that fails still names the primary GraphQL limit,
+/// says the reset is unknown, and exits 1.
+#[cfg(unix)]
+#[test]
+fn a_failed_reset_lookup_still_names_the_limit_and_exits_1() {
+    let (_tmp, dir) = rate_limit_shim("echo 'HTTP 502' >&2; exit 1", GRAPHQL_REFUSAL);
+    let out = run_shim_args(&dir, &["api", "graphql", "-f", "query=x"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("primary GraphQL rate limit"), "{stderr}");
+    assert!(stderr.contains("reset time is unknown"), "{stderr}");
+}
+
+/// 🔴 #10550: a call that is not a primary GraphQL refusal keeps its stdout,
+/// stderr and exit status byte for byte — including a REST rate limit (any
+/// `HTTP <status>`: 403 or 429), which is a different quota.
+#[cfg(unix)]
+#[test]
+fn a_call_with_no_rate_limit_passes_output_and_status_through_unchanged() {
+    let cases: [(&str, &[u8], &[u8], i32); 4] = [
+        (
+            "printf 'a\\tb\\n\\001no-newline'; printf 'warn: x\\n' >&2; exit 3",
+            b"a\tb\n\x01no-newline",
+            b"warn: x\n",
+            3,
+        ),
+        (
+            "printf 'body\\n'; echo 'GraphQL: Could not resolve to a Repository' >&2; exit 1",
+            b"body\n",
+            b"GraphQL: Could not resolve to a Repository\n",
+            1,
+        ),
+        (
+            "echo 'gh: API rate limit exceeded for user ID 1. (HTTP 403)' >&2; exit 1",
+            b"",
+            b"gh: API rate limit exceeded for user ID 1. (HTTP 403)\n",
+            1,
+        ),
+        (
+            "printf 'partial\\n'; echo 'gh: API rate limit exceeded for user ID 1. (HTTP 429)' >&2; exit 1",
+            b"partial\n",
+            b"gh: API rate limit exceeded for user ID 1. (HTTP 429)\n",
+            1,
+        ),
+    ];
+    for (call, stdout, stderr, code) in cases {
+        let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", call);
+        let out = run_shim_args(&dir, &["api", "user"]);
+        assert_eq!(out.status.code(), Some(code), "{call}: {out:?}");
+        assert_eq!(out.stdout, stdout, "{call}: {out:?}");
+        assert_eq!(out.stderr, stderr, "{call}: {out:?}");
+    }
+}
+
+/// 🔴 #10550: a GraphQL error that is not a rate limit — the auto-merge
+/// refusal GitHub returned at 13:28Z — keeps stderr byte for byte, an empty
+/// stdout and exit 1.
+#[cfg(unix)]
+#[test]
+fn a_non_rate_limit_graphql_error_passes_through_unchanged() {
+    // #10550: the shim's exit-1 arm must not rewrite a GraphQL error that lacks the rate-limit text.
+    const REFUSAL: &str = "GraphQL: Failed to add PR #10842: expected head oid does not match \
+                           the current head oid (enablePullRequestAutoMerge)";
+    let call = format!("echo '{REFUSAL}' >&2; exit 1");
+    let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", &call);
+    let out = run_shim_args(&dir, &["pr", "merge", "10842", "--auto", "--squash"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert_eq!(out.stderr, format!("{REFUSAL}\n").as_bytes(), "{out:?}");
+}
+
+/// #10550 item 4: a large buffered output (`--paginate` on a big set) comes
+/// through whole — the buffer is a temp file, so no size bound drops bytes.
+#[cfg(unix)]
+#[test]
+fn a_large_buffered_output_passes_through_whole() {
+    let call = "awk 'BEGIN { for (i = 0; i < 300000; i++) printf \"%09d\\n\", i }'; exit 0";
+    let (_tmp, dir) = rate_limit_shim("exit 1", call);
+    let out = run_shim_args(&dir, &["api", "--paginate", "repos/o/r/issues"]);
+    assert!(out.status.success(), "{:?}", out.status);
+    assert_eq!(out.stdout.len(), 3_000_000);
+    assert!(out.stdout.ends_with(b"000299999\n"));
+}
+
+/// 🔴 #10550 item 4: a watch command keeps the plain `exec` path, so its
+/// streamed stdout is never held back — not even on a rate-limit exit.
+#[cfg(unix)]
+#[test]
+fn a_watch_command_keeps_the_exec_path() {
+    let (_tmp, dir) = rate_limit_shim("echo 1767225600; exit 0", GRAPHQL_REFUSAL);
+    for args in [
+        &["run", "watch", "7"][..],
+        &["pr", "checks", "--watch"][..],
+        &["pr", "checks", "9", "--watch=true"][..],
+    ] {
+        let out = run_shim_args(&dir, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {out:?}");
+        assert_eq!(out.stdout, b"{\"data\":null}\n", "{args:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.starts_with("GraphQL: API rate limit"), "{stderr}");
+    }
+}
+
+/// 🔴 #10550 item 3: a tty stdout keeps the plain `exec` path — gh itself sees
+/// the terminal.
+#[cfg(unix)]
+#[test]
+fn a_tty_stdout_keeps_the_exec_path() {
+    let call = "[ -t 1 ] && echo stdout-is-tty >&2; exit 0";
+    let (_tmp, dir) = rate_limit_shim("exit 1", call);
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty writes two fds into the out-params.
+    let rc = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(rc, 0, "openpty");
+    // SAFETY: both fds were just opened and are owned here.
+    let (master, slave) = unsafe {
+        use std::os::fd::FromRawFd;
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["pr", "list"])
+        .stdin(std::process::Stdio::null())
+        .stdout(slave);
+    let out = output_past_etxtbsy(&mut cmd);
+    drop(master);
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("stdout-is-tty"), "{stderr}");
+}
+
+/// `cmd.spawn()` with HUP, INT and TERM at their default disposition, retried
+/// while the exec fails with ETXTBSY (see `output_past_etxtbsy`).
+///
+/// Why: a shell cannot trap a signal ignored on entry, so a test runner under
+/// `nohup` would hide the trap under test; a real supervisor starts the shim
+/// with default dispositions.
+#[cfg(unix)]
+fn spawn_past_etxtbsy(cmd: &mut std::process::Command) -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `signal` is async-signal-safe, and nothing else runs post-fork.
+    unsafe {
+        cmd.pre_exec(|| {
+            for sig in [libc::SIGHUP, libc::SIGINT, libc::SIGTERM] {
+                libc::signal(sig, libc::SIG_DFL);
+            }
+            Ok(())
+        });
+    }
+    for _ in 0..100 {
+        match cmd.spawn() {
+            // #10176: see `output_past_etxtbsy`.
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other.expect("the shim spawns"),
+        }
+    }
+    panic!("the shim stayed busy (ETXTBSY) for 2 s");
+}
+
+/// Poll `done` every 20 ms; `true` once it holds, `false` after `bound`.
+#[cfg(unix)]
+fn holds_within(bound: std::time::Duration, mut done: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if done() {
+            return true;
+        }
+        if started.elapsed() >= bound {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// 🔴 #10550: HUP, INT or TERM sent to the shim pid alone reaches the buffered
+/// gh at once. The shim reaps gh, removes its buffer dir and exits 129, 130 or
+/// 143 — so a supervisor's KILL after a 2 s grace finds no gh left to orphan.
+#[cfg(unix)]
+#[test]
+fn a_signal_to_the_shim_reaps_gh_and_removes_the_buffer_dir() {
+    use std::time::Duration;
+    let cases = [
+        (libc::SIGTERM, 143),
+        (libc::SIGINT, 130),
+        (libc::SIGHUP, 129),
+    ];
+    for (signal, code) in cases {
+        let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+        let call = format!("echo $$ > '{}'; exec sleep 30", pid_file.path().display());
+        let (tmp, dir) = rate_limit_shim("exit 1", &call);
+        let buffers = tmp.path().join("buffers");
+        std::fs::create_dir(&buffers).expect("buffer root");
+        let mut cmd = std::process::Command::new(dir.join("gh"));
+        cmd.args(["api", "user"])
+            .env("TMPDIR", &buffers)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut shim = spawn_past_etxtbsy(&mut cmd);
+        let gh = pid_written_to(pid_file.path());
+        let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
+        // SAFETY: plain kill(2) on the shim pid this test spawned.
+        unsafe { libc::kill(shim_pid, signal) };
+        let exited = holds_within(Duration::from_secs(2), || {
+            shim.try_wait().expect("try_wait").is_some()
+        });
+        if !exited {
+            shim.kill().expect("KILL the shim after its grace");
+        }
+        let status = shim.wait().expect("the shim is reaped");
+        let gh_gone = gone_within(gh, Duration::from_secs(5));
+        assert!(gh_gone, "signal {signal}: gh pid {gh} outlived the shim");
+        assert_eq!(status.code(), Some(code), "signal {signal}: {status:?}");
+        let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
+        assert!(
+            left.is_empty(),
+            "signal {signal}: buffer dir leaked: {left:?}"
+        );
+    }
+}
+
+/// #10550: the buffered gh, now a background child, still reads the caller's
+/// stdin (`--body-file -`, `--input -`) rather than `/dev/null`.
+#[cfg(unix)]
+#[test]
+fn a_buffered_call_still_reads_the_callers_stdin() {
+    use std::io::Write as _;
+    let (_tmp, dir) = rate_limit_shim("exit 1", "cat; exit 0");
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["api", "graphql", "--input", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut shim = spawn_past_etxtbsy(&mut cmd);
+    shim.stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"{\"query\":\"x\"}\n")
+        .expect("write stdin");
+    let out = shim.wait_with_output().expect("the shim runs");
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(out.stdout, b"{\"query\":\"x\"}\n", "{out:?}");
+}
+
+/// Read the pid a fake gh wrote to `path`, waiting up to 10 s for it.
+#[cfg(unix)]
+fn pid_written_to(path: &Path) -> libc::pid_t {
+    let mut pid: libc::pid_t = 0;
+    let written = holds_within(std::time::Duration::from_secs(10), || {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        pid = text.trim().parse().unwrap_or(0);
+        pid > 0
+    });
+    assert!(written, "no pid was written to {}", path.display());
+    pid
+}
+
+/// `true` once `pid` is gone, within `bound`; otherwise KILL it (a pid this
+/// test recorded) and answer `false`.
+#[cfg(unix)]
+fn gone_within(pid: libc::pid_t, bound: std::time::Duration) -> bool {
+    // SAFETY: kill(2) with signal 0 only probes whether `pid` exists.
+    let gone = holds_within(bound, || unsafe { libc::kill(pid, 0) != 0 });
+    if !gone {
+        // SAFETY: KILL a process this test started and recorded.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    gone
+}
+
+/// 🔴 #10550: a gh that ignores TERM is KILLed once the shim's 5 s grace
+/// passes, so TERM to the shim pid alone still leaves no gh, exit 143 and no
+/// buffer dir.
+#[cfg(unix)]
+#[test]
+fn a_gh_that_ignores_term_is_killed_within_the_grace() {
+    use std::time::Duration;
+    let pid_file = tempfile::NamedTempFile::new().expect("pid file");
+    let call = format!(
+        "trap '' TERM; echo $$ > '{}'; exec sleep 30",
+        pid_file.path().display()
+    );
+    let (tmp, dir) = rate_limit_shim("exit 1", &call);
+    let buffers = tmp.path().join("buffers");
+    std::fs::create_dir(&buffers).expect("buffer root");
+    let mut cmd = std::process::Command::new(dir.join("gh"));
+    cmd.args(["api", "user"])
+        .env("TMPDIR", &buffers)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut shim = spawn_past_etxtbsy(&mut cmd);
+    let gh = pid_written_to(pid_file.path());
+    let shim_pid = libc::pid_t::try_from(shim.id()).expect("pid fits");
+    // SAFETY: plain kill(2) on the shim pid this test spawned.
+    unsafe { libc::kill(shim_pid, libc::SIGTERM) };
+    // The grace is 5 s; 2 s of slack.
+    let gh_gone = gone_within(gh, Duration::from_secs(7));
+    if !holds_within(Duration::from_secs(1), || {
+        shim.try_wait().expect("try_wait").is_some()
+    }) {
+        shim.kill().expect("KILL the shim");
+    }
+    let status = shim.wait().expect("the shim is reaped");
+    assert!(gh_gone, "a TERM-ignoring gh pid {gh} outlived the grace");
+    assert_eq!(status.code(), Some(143), "{status:?}");
+    let left: Vec<_> = std::fs::read_dir(&buffers).expect("buffer root").collect();
+    assert!(left.is_empty(), "buffer dir leaked: {left:?}");
+}
+
+/// 🔴 #10550: a trap that fires after gh is forked but before `child=$!` runs
+/// still reaps gh, through `$!`. The window cannot be hit on demand from
+/// outside, so this runs [`REAP_FN`] itself with `child` empty and `$!` set.
+#[cfg(unix)]
+#[test]
+fn reap_falls_back_to_the_forked_pid_when_child_is_unset() {
+    use std::time::Duration;
+    let scratch = tempfile::tempdir().expect("scratch");
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "{REAP_FN}child=\nsleep 30 &\necho $! > '{}'\nreap 143 TERM\n",
+        pid_file.display()
+    );
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", &script])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut sh = spawn_past_etxtbsy(&mut cmd);
+    let forked = pid_written_to(&pid_file);
+    if !holds_within(Duration::from_secs(10), || {
+        sh.try_wait().expect("try_wait").is_some()
+    }) {
+        sh.kill().expect("KILL the sh");
+    }
+    let status = sh.wait().expect("the sh is reaped");
+    let forked_gone = gone_within(forked, Duration::from_secs(2));
+    assert!(forked_gone, "the forked pid {forked} outlived reap");
+    assert_eq!(status.code(), Some(143), "{status:?}");
 }

@@ -20,6 +20,7 @@ pub mod auth;
 pub mod firewall;
 pub mod inline;
 pub mod posting;
+mod posting_anchors;
 pub mod pr;
 
 pub use auth::{AuthStrategy, RunMode, mint_app_jwt, resolve_token_for_mode};

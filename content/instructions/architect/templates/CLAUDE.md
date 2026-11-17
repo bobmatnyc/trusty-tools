@@ -10,17 +10,28 @@ edit it freely.
 - Name, for the relay marker `[<Name> Architect HH:MMZ]`: **<Name>**
 - Reach the user in this session. Put every decision as options, the
   recommended one first.
+- If the Intent Ledger's task or next starts with `needs owner input:`, work
+  them out from `local/goals.md`, `local/state.md`, what is owed and the
+  scheduled jobs, and write them with
+  `python3 scripts/datg.py --project local/il session set --task ... --next ...`.
+  Do not ask the user for them.
+- End every reply the user reads with the dashboard footer: the line
+  `python3 scripts/dashboard-db.py footer` prints, quoted as it is. It reads
+  `Dashboard: [local](<this install's address>)`, then
+  ` · [tail](<tailnet address>)` only when a tailnet address is set, then the
+  count of open items. The addresses come from `dashboard_port` and
+  `tailnet_url` in `local/architect.json`; never type an address yourself or
+  copy one from another machine.
 
 ## Watch set
 
-The projects whose PM sessions you supervise. One line each: the tmux
-session, the project path, and what the user wants from it.
+`tm fleet project list` prints the projects whose PM sessions you supervise;
+`tm fleet project add` and `tm fleet project remove` change that list. Goals
+live in `local/goals.md`.
 
-- `tm-<project>`: `<absolute project path>`: <goal>
-
-The poller watches every `tm-*` session. This list says which ones you act on.
-A session named in `quiet-sessions.txt`, one name per line, raises no idle
-alerts.
+The poller watches every `tm-*` session. The list says which ones you act on.
+A session named in `local/quiet-sessions.txt` under this directory, one name
+per line, raises no idle alerts. `tm architect quiet` prints that list.
 
 ## Cadence and thresholds
 
@@ -65,12 +76,12 @@ and the tail of `local/actions.md` at the start of every pass.
   queue.
 - `local/actions.md`: one dated entry per pass, newest last: the mode, what
   you sent and where, and what is still pending.
-- `local/projects/<project>.md`: one file per watched project, started from
-  `local/projects/_template.md`: its state, its rulings, its snapshots, each
-  fact labelled reported or verified.
+- `local/projects/<project>.md`: one file per watched project, which
+  `tm fleet project add` starts from `local/projects/_template.md`: its state,
+  its rulings, its snapshots, each fact labelled reported or verified.
 - `local/owner/`: the owner model; `local/owner/README.md` gives the format.
 - `local/mandates/`: the institutional mandates the user supplies;
   `local/mandates/README.md` gives the schema.
 
-The owner writes `AGENTS.md`; you never write it. Commit `local/` at the end
+Commit `local/` at the end
 of every pass. The repository is local: never add a remote.

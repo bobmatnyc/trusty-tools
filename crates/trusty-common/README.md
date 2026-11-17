@@ -11,7 +11,7 @@ following have all been absorbed here behind feature flags: `trusty-mcp-core`
 `symgraph-parser`), `trusty-memory-core` (`memory-core`), `trusty-tickets`
 (`tickets`), and `trusty-monitor-tui` (`monitor-tui`). The memory engine has
 since moved to `trusty-memory` as `trusty_memory::engine` (#9271), and the
-`memory-core` feature was removed in 0.66.0 (#9272).
+`memory-core` feature was removed in 0.67.0 (#9272, #10334).
 
 Each subsystem is feature-gated so consumers only pay for what they use.
 

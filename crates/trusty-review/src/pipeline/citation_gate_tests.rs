@@ -800,3 +800,278 @@ fn log_excerpt_caps_a_long_fragment() {
     assert_eq!(verdict::log_excerpt(&long).chars().count(), 121);
     assert_eq!(verdict::log_excerpt("short"), "short");
 }
+
+// ─── #10782: the structured quote places the finding ─────────────────────────
+
+/// A finding carrying `quoted_snippet`, with `body` as its prose.
+fn quoted(line: Option<u32>, quote: &str, body: &str) -> Finding {
+    let mut f = finding("src/billing.rs", line, body);
+    f.quoted_snippet = Some(quote.to_string());
+    f
+}
+
+/// #10782: a quote that holds its cited line keeps the finding, though the
+/// body quotes nothing.
+#[test]
+fn a_quote_on_its_cited_line_keeps_the_finding() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "let total = amounts.iter().sum::<u64>();",
+        "This total can overflow on large invoices.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
+    assert_eq!(findings[0].line, Some(SUM_LINE));
+}
+
+/// #10782 error arm: a quote absent from the file withholds the finding,
+/// naming the quote, even when the body quotes the cited line's code.
+#[test]
+fn a_quote_absent_from_the_file_is_withheld_naming_it() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "ledger.flush_all().await?;",
+        SUM_QUOTE,
+    )];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(report.withheld_findings.len(), 1);
+    let withheld = &report.withheld_findings[0];
+    assert_eq!(
+        withheld.missing_fragment.as_deref(),
+        Some("ledger.flush_all().await?;")
+    );
+    assert_eq!(
+        crate::pipeline::withheld_contract::reason_class(&withheld.reason),
+        "line_citation"
+    );
+}
+
+/// #10782 error arm: the cited line holds a body snippet but not the quote,
+/// which occurs on several lines; the quote alone places the finding, so it
+/// is withheld rather than held by the other snippet.
+#[test]
+fn a_quote_off_its_cited_line_is_not_held_by_another_snippet() {
+    let mut findings = vec![quoted(Some(SUM_LINE), "let value_", SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
+}
+
+/// #10782: a quote that occurs once elsewhere moves the finding there.
+#[test]
+fn a_quote_cited_off_by_n_moves_to_its_line() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE - 7),
+        "amounts.iter().sum::<u64>()",
+        "This total can overflow.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 1));
+    assert_eq!(findings[0].line, Some(SUM_LINE));
+}
+
+/// #10782 error arm: a quote too short to be specific places nothing, so the
+/// finding is withheld as quoting no code, whatever the cited line holds.
+#[test]
+fn an_unspecific_quote_does_not_place_a_finding() {
+    let mut findings = vec![quoted(Some(SUM_LINE), "();", SUM_QUOTE)];
+    assert_eq!(gate(&mut findings, &billing_index()), (1, 0));
+}
+
+/// #10782 keeps #9188 B: beside a quote that holds, a body snippet absent
+/// from the file still withholds the finding.
+#[test]
+fn a_body_snippet_absent_beside_a_holding_quote_is_withheld() {
+    let mut findings = vec![quoted(
+        Some(SUM_LINE),
+        "amounts.iter().sum::<u64>()",
+        "`ledger.flush_all()` drops the total.",
+    )];
+    let report = enforce_line_citations(&mut findings, &billing_index());
+    assert!(findings.is_empty());
+    assert_eq!(
+        report.withheld_findings[0].missing_fragment.as_deref(),
+        Some("ledger.flush_all()")
+    );
+}
+
+/// #10782 keeps #9188 E: a bare-identifier quote places nothing, even on a
+/// line that holds the identifier, so the gate withholds the finding.
+#[test]
+fn a_bare_identifier_quote_on_its_cited_line_places_nothing() {
+    for (line, quote) in [(4, "step_4"), (4, "step_4()"), (SUM_LINE, "amounts")] {
+        let mut findings = vec![quoted(Some(line), quote, "Confirm it is pure.")];
+        assert_eq!(gate(&mut findings, &billing_index()), (1, 0), "{quote:?}");
+    }
+}
+
+/// #10782: a real code quote on that same cited line still holds.
+#[test]
+fn a_code_quote_on_a_bare_identifier_line_still_holds() {
+    let mut findings = vec![quoted(
+        Some(4),
+        "let value_4 = step_4(input);",
+        "Confirm it is pure.",
+    )];
+    assert_eq!(gate(&mut findings, &billing_index()), (0, 0));
+    assert_eq!(findings[0].line, Some(4));
+}
+
+// ─── #10964: payload and proposed-fix quotes are not file citations ─────────
+
+/// `login.py`: a query built from form input, a bare `except` and a
+/// fail-open return. Line 6 holds the query, line 9 the `except`.
+fn login_index() -> LineIndex {
+    let lines = lines(&[
+        "+import sqlite3",
+        "+",
+        "+def login(db, form):",
+        "+    user = form[\"user\"]",
+        "+    pw = form[\"password\"]",
+        "+    q = \"SELECT pw FROM users WHERE name = '\" + user + \"' AND pw = '\" + pw + \"'\"",
+        "+    try:",
+        "+        row = db.execute(q).fetchone()",
+        "+    except:",
+        "+        return True",
+        "+    authed = row",
+        "+    return authed",
+    ]);
+    let login = file(
+        "login.py",
+        FileDisposition::Kept,
+        vec![hunk("@@ -0,0 +1,12 @@", lines)],
+    );
+    LineIndex::from_filtered(&diff(vec![login]))
+}
+
+/// The query line's code, as a reviewer quotes it.
+const QUERY_QUOTE: &str = "q = \"SELECT pw FROM users WHERE name = '\" + user";
+
+fn login_finding(line: u32, quote: Option<&str>, body: &str) -> Finding {
+    let mut f = finding("login.py", Some(line), body);
+    f.quoted_snippet = quote.map(str::to_string);
+    f
+}
+
+/// #10964 (TRUE 1, 2): a backtick span the body labels as an exploit payload,
+/// an example input or a proposed fix need not be in the file; the placed
+/// `quoted_snippet` keeps the finding.
+#[test]
+fn a_labelled_payload_or_fix_quote_does_not_withhold_a_placed_finding() {
+    let cases = [
+        (
+            6,
+            QUERY_QUOTE,
+            "The name is concatenated into SQL; a payload such as `' OR '1'='1' --` logs in as anyone.",
+        ),
+        (
+            6,
+            QUERY_QUOTE,
+            "An input such as `' OR '1'='1' --` bypasses the password check.",
+        ),
+        (
+            6,
+            QUERY_QUOTE,
+            "Attacker-controlled input (e.g. `' OR '1'='1' --`) reaches the query.",
+        ),
+        (
+            9,
+            "except:",
+            "Bare except hides errors. Suggest `except sqlite3.Error:`.",
+        ),
+        (
+            11,
+            "authed = row",
+            "Fail-open: the check should be `authed = row is not None`.",
+        ),
+        (
+            11,
+            "authed = row",
+            "Fix: `if row is not None` before returning.",
+        ),
+        (
+            8,
+            "row = db.execute(q).fetchone()",
+            "The cursor leaks; replace with `contextlib.closing(db.cursor())`.",
+        ),
+        (
+            8,
+            "row = db.execute(q).fetchone()",
+            "The cursor leaks; use `contextlib.closing` instead.",
+        ),
+    ];
+    for (line, quote, body) in cases {
+        let mut findings = vec![login_finding(line, Some(quote), body)];
+        let report = enforce_line_citations(&mut findings, &login_index());
+        assert_eq!(report.dropped, 0, "{body}: {:?}", report.withheld_findings);
+        assert_eq!(findings[0].line, Some(line), "{body}");
+    }
+}
+
+/// #10964: the consequence is scanned by the same rule as the body.
+#[test]
+fn a_labelled_payload_in_the_consequence_does_not_withhold_the_finding() {
+    let mut f = login_finding(6, Some(QUERY_QUOTE), "The name is concatenated into SQL.");
+    f.consequence = "An input such as `' OR '1'='1' --` logs in as any user.".to_string();
+    let mut findings = vec![f];
+    assert_eq!(gate(&mut findings, &login_index()), (0, 0));
+}
+
+/// #10964: with no structured quote, a payload span does not stop a body
+/// quote from placing the finding, and the fallback quote skips the payload.
+#[test]
+fn a_payload_span_is_never_the_quote_that_places_a_finding() {
+    let body = "A payload such as `' OR '1'='1' --` reaches `row = db.execute(q).fetchone()`.";
+    let f = login_finding(8, None, body);
+    assert_eq!(
+        text_quote(&f).as_deref(),
+        Some("row = db.execute(q).fetchone()")
+    );
+    let mut findings = vec![f];
+    assert_eq!(gate(&mut findings, &login_index()), (0, 0));
+}
+
+/// #10964 fail-open guard: an unlabelled quote absent from the file still
+/// withholds the finding beside a placed `quoted_snippet`.
+#[test]
+fn an_unlabelled_absent_quote_still_withholds_a_placed_finding() {
+    let body = "`db.execute(q, trusted=True)` runs the raw query.";
+    let mut findings = vec![login_finding(6, Some(QUERY_QUOTE), body)];
+    let report = enforce_line_citations(&mut findings, &login_index());
+    assert!(findings.is_empty(), "{findings:?}");
+    assert_eq!(
+        report.withheld_findings[0].missing_fragment.as_deref(),
+        Some("db.execute(q, trusted=True)")
+    );
+}
+
+/// #10964 fail-open guard: the cue must sit next to the span. A cue word in
+/// an earlier sentence does not exempt a fabricated quote.
+#[test]
+fn a_cue_in_another_sentence_does_not_exempt_a_quote() {
+    let body = "This is a classic payload. `db.execute(q, trusted=True)` runs it.";
+    let mut findings = vec![login_finding(6, Some(QUERY_QUOTE), body)];
+    assert_eq!(gate(&mut findings, &login_index()), (1, 0));
+}
+
+/// #10964 fail-open guard: a payload cue never places a finding. With no
+/// file quote, or a structured quote that is not in the file, it is withheld.
+#[test]
+fn a_payload_cue_without_a_placed_file_quote_still_withholds() {
+    let body = "A payload such as `' OR '1'='1' --` bypasses the login.";
+    for quote in [None, Some("cur.execute(q, user_input)")] {
+        let mut findings = vec![login_finding(6, quote, body)];
+        assert_eq!(gate(&mut findings, &login_index()), (1, 0), "{quote:?}");
+    }
+    assert_eq!(text_quote(&login_finding(6, None, body)), None);
+}
+
+/// #10964 fail-open guard: a finding that quotes nothing verifiable is
+/// withheld; a fabricated unlabelled quote alone is withheld.
+#[test]
+fn a_finding_with_no_verifiable_quote_still_withholds() {
+    for body in [
+        "The login check fails open.",
+        "`return authed or True` fails open.",
+    ] {
+        let mut findings = vec![login_finding(11, None, body)];
+        assert_eq!(gate(&mut findings, &login_index()), (1, 0), "{body}");
+    }
+}

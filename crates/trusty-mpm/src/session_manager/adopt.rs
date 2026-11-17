@@ -286,7 +286,7 @@ impl SessionManager {
         // the signal that tells a same-name collision below apart from a
         // recycled one.
         // #9004: with the server it was read on, or the record never owns it.
-        let (pane_id, tmux_server) =
+        let (pane_id, tmux_server, tmux_session_id) =
             super::pane_identity::capture(self.tmux_driver().as_ref(), tmux_name);
 
         // Live-tmux snapshot BEFORE the guard (#3698 round-2 HIGH-A):
@@ -301,6 +301,8 @@ impl SessionManager {
         // and recycled-name arms below cannot drift apart on any field.
         let build_record = |final_name: String| SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: tmux_session_id.clone(),
             id: ManagedSessionId::new(),
             tmux_name: final_name,
             cwd: cwd.clone(),
@@ -330,6 +332,7 @@ impl SessionManager {
             deliverable_id: None,
             pane_id: pane_id.clone(),
             tmux_server: tmux_server.clone(),
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -529,6 +532,8 @@ mod tests {
     fn make_record_with_workspace(workspace: PathBuf) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-test".into(),
             cwd: workspace.clone(),
@@ -555,6 +560,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -566,6 +572,8 @@ mod tests {
     fn make_record_unknown_cwd() -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tmpm-external".into(),
             cwd: PathBuf::from("/unknown"),
@@ -592,6 +600,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,

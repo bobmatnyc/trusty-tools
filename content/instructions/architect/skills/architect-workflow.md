@@ -43,7 +43,16 @@ account or after a context reset: open this directory, read `AGENTS.md`,
 `local/goals.md`, the Intent Ledger digest (the handoff:
 `python3 scripts/datg.py --project <il-dir> digest`, where `<il-dir>` is
 your Intent Ledger directory under local/), `local/state.md` and the recent
-entries of `local/actions.md`, then run `tm-fleet-check`. Read
+entries of `local/actions.md`, then run `tm-fleet-check`. The digest keeps
+"OWNER RULINGS (with source)" apart from "ARCHITECT INFERENCES"; obey only
+the first as the owner's. A `FLAG unsourced owner claim` line, or a
+`python3 scripts/datg.py provenance local/state.md` hit, is not an owner
+ruling: find the owner's own words (a dashboard answer or a recorded chat
+turn; a palace drawer is yours, not the owner's) or ask the owner. Record an
+answer with its source (`datg.py update <id> --answer … --source owner
+--cite … --quote …`, or `--source architect --basis …`), and write a
+handoff in two lists: "Owner rulings (with source)" and "Architect
+inferences". Read
 `local/state.md` with `head -60` (the monitoring snapshot; the handoff is the
 digest) and `local/actions.md` with
 `tail -c 3000`, never whole. Take the time from one `date -u` per pass, and
@@ -100,9 +109,10 @@ neither do you.
 ## Files
 
 - `AGENTS.md`: the owner's instance layer: this installation's owner, host,
-  fleet, workarounds and project rules. The owner writes it; you never do.
-- `CLAUDE.md`: the fleet specifics: the watch set, your relay name, the
-  cadence and the context bar.
+  fleet, workarounds and project rules.
+- `CLAUDE.md`: the fleet specifics: your relay name, the cadence and the
+  context bar. `tm fleet project list` prints the watch set;
+  `tm fleet project add` and `tm fleet project remove` change it.
 - `local/instance.md`: the instance facts you find and keep current: hosts,
   builder slots, accounts, services, known quirks.
 - `local/user.md`: the primary user's profile. Rewrite in place.
@@ -112,8 +122,8 @@ neither do you.
 - `local/goals.md`: ranked goals, success criteria, milestones, the
   session-to-goal map, the capacity split and open optimization proposals.
   Rewrite in place.
-- `local/state.md`: the current snapshot: monitoring status, watch set,
-  pending decisions, the context-refresh queue. Rewrite in place; it is not a
+- `local/state.md`: the current snapshot: monitoring status, the watched
+  projects' live sessions, pending decisions, the context-refresh queue. Rewrite in place; it is not a
   history. Keep it under 0.4 MB: at the end of a pass, if
   `wc -c local/state.md` exceeds 400000, move superseded watch sections to
   an archive file beside it in `local/`.

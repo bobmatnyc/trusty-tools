@@ -37,8 +37,11 @@ use super::model::{Goal, GoalStatus, SessionLink, SessionTaskState};
 /// decision/blocker note. Bundling those into one optional-field struct keeps the
 /// update API a single call (and a single dual-write) rather than several.
 /// What: a `session_id` selecting the link, plus optional `state` / `evidence` /
-/// `note`. `None` fields are left unchanged; a `note` is appended to the goal.
-/// Test: `update_sets_state_and_evidence`, `update_appends_note`.
+/// `note`. A `Some(state)` replaces the link's evidence with `evidence`, so a
+/// `None` there clears it (#10722); with no `state`, a `Some(evidence)` replaces
+/// it and a `None` leaves it. A `note` is appended to the goal.
+/// Test: `update_sets_state_evidence_and_note`,
+/// `state_change_replaces_evidence_and_none_clears_it`.
 #[derive(Debug, Clone, Default)]
 pub struct SessionUpdate {
     /// The linked session to mutate (must already be linked to the goal).
@@ -134,7 +137,7 @@ impl SmGoalStore {
                     // Skip an individual unparseable entry rather than failing the
                     // whole rebuild — one corrupt drawer must not hide every goal.
                     if let Ok(goal) = serde_json::from_str::<Goal>(&json) {
-                        store.goals.insert(goal.id.clone(), goal);
+                        store.insert_loaded(goal);
                     }
                 }
                 // Re-derive the cache so it matches the palace-derived truth.
@@ -144,11 +147,61 @@ impl SmGoalStore {
                 // Palace unavailable → fall back to the last-written cache. This is
                 // graceful degradation: the SM keeps the goals it last cached.
                 for goal in store.cache.load()? {
-                    store.goals.insert(goal.id.clone(), goal);
+                    store.insert_loaded(goal);
                 }
             }
         }
         Ok(store)
+    }
+
+    /// Index one goal read from the palace or cache, re-deriving its progress.
+    ///
+    /// Why: #10722 — an older build could persist a `Verified` link with no
+    /// evidence, and a `progress` that counted it. No stored link may be
+    /// `Verified` without evidence, so load applies the same rule as the writers.
+    /// What: each `Verified` link without non-blank evidence becomes `Running`
+    /// (observed, not verified) with a warning. A `Done` goal that then fails the
+    /// [`Goal::all_verified`] gate is reopened with a warning: `InProgress` when it
+    /// has links, `Pending` when it has none. Then [`Goal::recompute_progress`]
+    /// runs and the goal is inserted by id; `updated` is not bumped. Only the
+    /// `goals.json` cache is rewritten by [`SmGoalStore::load`]; the palace entry
+    /// keeps its old form until the goal's next mutation.
+    /// Test: `legacy_verified_without_evidence_does_not_allow_done`,
+    /// `legacy_done_without_evidence_is_reopened_on_load`,
+    /// `legacy_done_with_evidence_stays_done`,
+    /// `legacy_done_without_links_is_reopened_as_pending`.
+    fn insert_loaded(&mut self, mut goal: Goal) {
+        for link in &mut goal.sessions {
+            // #10722: fail closed on legacy evidence-less Verified links.
+            if link.state == SessionTaskState::Verified && !link.has_evidence() {
+                tracing::warn!(
+                    goal_id = %goal.id,
+                    session_id = %link.session_id,
+                    "goal store: loaded Verified link has no evidence; reading it as Running"
+                );
+                link.state = SessionTaskState::Running;
+            }
+        }
+        // #10722: a loaded Done goal must pass the same gate as `set_status(Done)`.
+        if goal.status == GoalStatus::Done && !goal.all_verified() {
+            let reopened = if goal.sessions.is_empty() {
+                GoalStatus::Pending
+            } else {
+                GoalStatus::InProgress
+            };
+            tracing::warn!(
+                goal_id = %goal.id,
+                from = "done",
+                to = reopened.label(),
+                verified = goal.verified_count(),
+                total = goal.sessions.len(),
+                "goal store: loaded Done goal fails the verification gate \
+                 (not every link is Verified with evidence); reopening it"
+            );
+            goal.status = reopened;
+        }
+        goal.recompute_progress();
+        self.goals.insert(goal.id.clone(), goal);
     }
 
     /// Create a goal from operator intent and dual-persist it (§9.2 create).
@@ -190,8 +243,11 @@ impl SmGoalStore {
     /// `InProgress`, recomputes `progress`, bumps `updated`, then dual-writes. The
     /// prior goal is snapshotted first; on persist failure it is RESTORED so a
     /// failed link leaves the goal byte-identical to before the call.
-    /// Returns the updated goal. Unknown id → [`SmGoalError::NotFound`].
+    /// Returns the updated goal. Unknown id → [`SmGoalError::NotFound`]; a link
+    /// that is `Verified` without non-blank evidence →
+    /// [`SmGoalError::VerifiedWithoutEvidence`], goal unchanged.
     /// Test: `link_updates_progress`, `link_unknown_goal_is_not_found`,
+    /// `link_verified_without_evidence_is_rejected`,
     /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn link(&mut self, goal_id: &str, link: SessionLink) -> SmGoalResult<Goal> {
         let prior = self
@@ -199,6 +255,13 @@ impl SmGoalStore {
             .get(goal_id)
             .cloned()
             .ok_or_else(|| SmGoalError::NotFound(goal_id.to_string()))?;
+        // #10722: no path may store a Verified link without evidence.
+        if link.state == SessionTaskState::Verified && !link.has_evidence() {
+            return Err(SmGoalError::VerifiedWithoutEvidence {
+                goal_id: goal_id.to_string(),
+                session_id: link.session_id,
+            });
+        }
         {
             let goal = self.goals.get_mut(goal_id).expect("present");
             goal.sessions.push(link);
@@ -217,14 +280,21 @@ impl SmGoalStore {
     /// Why: as the SM observes and verifies sessions (§3.4 phases 4-5) it records
     /// the new verification state and the captured evidence, and may append a
     /// decision/blocker note; progress is re-derived from the updated states.
-    /// What: finds the [`SessionLink`] by `session_id`, applies the supplied
-    /// non-`None` fields, appends any `note` to the goal, recomputes `progress`,
-    /// bumps `updated`, then dual-writes. The prior goal is snapshotted first; on
-    /// persist failure it is RESTORED so a failed update leaves the goal
-    /// byte-identical to before the call. Returns the updated goal. Unknown goal or
-    /// session → [`SmGoalError::NotFound`] (and the goal is left unchanged).
+    /// What: finds the [`SessionLink`] by `session_id`. A supplied `state` is set
+    /// and the link's evidence is REPLACED by `upd.evidence` (a `None` clears it);
+    /// with no `state`, a supplied `evidence` is set alone. A link left `Verified`
+    /// without non-blank evidence is refused with
+    /// [`SmGoalError::VerifiedWithoutEvidence`] and the goal is restored. Then
+    /// appends any `note`, recomputes `progress`, bumps `updated`, and dual-writes.
+    /// The prior goal is snapshotted first; on persist failure it is RESTORED so a
+    /// failed update leaves the goal byte-identical to before the call. Returns the
+    /// updated goal. Unknown goal or session → [`SmGoalError::NotFound`] (and the
+    /// goal is left unchanged).
     /// Test: `update_sets_state_evidence_and_note`,
     /// `update_unknown_session_is_not_found`,
+    /// `update_to_verified_without_evidence_is_rejected`,
+    /// `rejected_update_leaves_goal_unchanged_in_memory_and_on_disk`,
+    /// `state_change_replaces_evidence_and_none_clears_it`,
     /// `failed_mutation_leaves_existing_goal_unchanged`.
     pub async fn update(&mut self, goal_id: &str, upd: SessionUpdate) -> SmGoalResult<Goal> {
         let prior = self
@@ -249,9 +319,19 @@ impl SmGoalStore {
             };
             if let Some(state) = upd.state {
                 link.state = state;
-            }
-            if let Some(evidence) = upd.evidence {
+                // #10722: a state change is a fresh observation, so its evidence
+                // REPLACES the old (None clears it) rather than inheriting it.
+                link.evidence = upd.evidence;
+            } else if let Some(evidence) = upd.evidence {
                 link.evidence = Some(evidence);
+            }
+            // #10722: Verified only with non-blank evidence; refuse and restore.
+            if link.state == SessionTaskState::Verified && !link.has_evidence() {
+                self.goals.insert(goal_id.to_string(), prior);
+                return Err(SmGoalError::VerifiedWithoutEvidence {
+                    goal_id: goal_id.to_string(),
+                    session_id: upd.session_id,
+                });
             }
             if let Some(note) = upd.note {
                 goal.notes.push(note);
@@ -314,11 +394,8 @@ impl SmGoalStore {
             let goal = self.goals.get_mut(goal_id).expect("present");
             if status == GoalStatus::Done && !goal.all_verified() {
                 let total = goal.sessions.len();
-                let verified = goal
-                    .sessions
-                    .iter()
-                    .filter(|s| s.state.is_verified())
-                    .count();
+                // #10722: count with the gate's own definition (state + evidence).
+                let verified = goal.verified_count();
                 // Gate failure happens BEFORE any mutation, so the goal is already
                 // unchanged; just reject.
                 return Err(SmGoalError::VerificationGate {

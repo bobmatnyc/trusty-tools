@@ -809,11 +809,13 @@ Orphan-GC findings are logged at WARN level and reported in `GET /health`.
 On daemon SIGTERM (the connection-safe restart convention, CLAUDE.md #534):
 
 1. Stop accepting new `tm run` commands.
-2. Send graceful `Stop` command to all live `SessionActor`s.
-3. Wait up to `shutdown_drain_timeout_secs` (default: `30`) for all actors to reach
-   `Stopped`.
-4. Force-stop any actors that have not stopped within the timeout.
-5. Exit with code 0.
+2. Leave every managed session running: no signal, no kill, no registry
+   change. A restarted daemon re-adopts the live sessions at boot.
+3. Exit with code 0.
+
+A managed session ends only on an explicit stop request (`tm session stop`,
+`DELETE /sessions/{id}`), the orphan-GC (§10.3), or a spawn rollback. Owner
+ruling D82 (#10597) replaced the earlier stop-every-session shutdown (#1455).
 
 The `--stdio` MCP proxy reconnects automatically with exponential backoff during daemon
 restart (existing behavior, unchanged).

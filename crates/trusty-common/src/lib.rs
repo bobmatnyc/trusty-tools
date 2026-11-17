@@ -118,9 +118,9 @@ pub mod chat;
 pub mod claude_config;
 
 /// Which Claude models reject `temperature` (#9318); shared by every request
-/// builder that sets it.
+/// builder that sets it, in this crate and downstream (#10939).
 #[cfg(any(feature = "bedrock", feature = "inference-client"))]
-pub(crate) mod claude_temperature;
+pub mod claude_temperature;
 
 /// Codex CLI MCP-server registration (`~/.codex/config.toml`).
 ///
@@ -388,6 +388,15 @@ pub mod spawn_retry;
 #[cfg(unix)]
 pub mod exec_stub;
 
+/// Keep a spawned child from inheriting the parent's sockets (#10083).
+///
+/// Why: macOS sets `FD_CLOEXEC` on a new socket in a second step, so a child
+/// forked in between holds a dropped connection open.
+/// What: `child_fds::seal_inherited` installs a `pre_exec` hook that marks
+/// every inherited descriptor close-on-exec. macOS only; a no-op elsewhere.
+/// Test: `cargo test -p trusty-common --features unconditional-only child_fds`.
+pub mod child_fds;
+
 /// Parent-death linkage for spawned processes (#7085, #3734).
 ///
 /// Why: a `Child` handle reaps only in `Drop`, which a SIGKILL of the parent
@@ -440,6 +449,15 @@ pub mod server;
 /// Test: `cargo test -p trusty-common --features memory-rpc`.
 #[cfg(feature = "memory-rpc")]
 pub mod memory_rpc;
+
+/// The wire vocabulary of trusty-console's own Unix socket (#10902).
+///
+/// Why: the TUI in trusty-mpm decodes the console's `console.health` and
+/// `console.fleet_status` answers and has no Cargo edge on trusty-console.
+/// What: method names and serde types only, so it is ungated; its `metrics`
+/// submodule (#10942) needs `console-metrics` + `host-metrics`.
+/// Test: `cargo test -p trusty-common --features uds console_rpc`.
+pub mod console_rpc;
 
 /// The active-project residency contract shared by every producer and
 /// consumer daemon (#7087 slice 1a).
@@ -942,6 +960,25 @@ pub mod redb_cache;
 pub mod slug;
 pub use slug::slugify_string;
 
+/// The one index id derived from a tm registry project's stored key (#10530).
+///
+/// Why: registration, tm's published active set and `tm doctor` derived three
+/// different ids for one project, and two of them moved on `mv` or a repo
+/// rename. One function over a key stored once removes the drift.
+/// What: exposes [`registry_index_id::derive_registry_index_id`],
+/// [`registry_index_id::index_id_for_root`] and
+/// [`registry_index_id::RegisteredProject`]. Gated behind `registry-index-id`
+/// (implied by `search-index`) because the digest is SHA-256.
+/// Test: `cargo test -p trusty-common --features registry-index-id --
+/// registry_index_id`.
+#[cfg(feature = "registry-index-id")]
+pub mod registry_index_id;
+#[cfg(feature = "registry-index-id")]
+pub use registry_index_id::{
+    REGISTRY_IDS_ADOPTED, RegisteredProject, derive_registry_index_id, index_id_for_root,
+    registry_id_for_root,
+};
+
 /// Canonical trusty-search index-id derivation from a project path (issue #1373).
 ///
 /// Why: trusty-mpm (register-and-pin at session launch) and trusty-search
@@ -1338,6 +1375,18 @@ pub mod local_probe;
 #[cfg(feature = "daemon-token")]
 pub mod daemon_token;
 
+/// The trusty-console token file loader the console and its TCP clients share
+/// (#11074, DOC-90 §4).
+///
+/// Why: the console enforces the token and its clients send it; both must
+/// agree on the file and its validity rules.
+/// What: `console_token::load_from_env` (`TRUSTY_CONSOLE_TOKEN_FILE`) and the
+/// redacted, constant-time `ConsoleToken`. Behind `daemon-token`, whose
+/// `credentials_match` it compares with.
+/// Test: `cargo test -p trusty-common --features daemon-token -- console_token`.
+#[cfg(feature = "daemon-token")]
+pub mod console_token;
+
 /// The single HTTP-client constructor for loopback/daemon targets (#4392).
 ///
 /// Why: reqwest 0.12 routes `127.0.0.1` through an exported `HTTP_PROXY` /
@@ -1375,6 +1424,11 @@ pub mod http_client;
 /// unification from `trusty-embedderd` and `trusty-bm25-daemon`.
 #[cfg(all(unix, feature = "uds"))]
 pub mod uds;
+
+/// Linux daemon start/stop/restart from a caller-built descriptor (#11084).
+/// Test: `tests/linux_lifecycle.rs` runs it against real processes.
+#[cfg(all(target_os = "linux", feature = "uds"))]
+pub mod linux_lifecycle;
 
 /// A stand-in trusty-* daemon on a Unix socket, for this crate's own tests
 /// (#7237). Never compiled outside `cargo test`.

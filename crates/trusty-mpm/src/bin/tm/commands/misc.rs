@@ -9,9 +9,7 @@
 //! Test: `cli_parses_*` parse tests for each command in `tests.rs`.
 
 use crate::cli::{CliCompressionLevel, OptimizerAction, OverseerAction};
-use crate::commands::hook_rewrite::{
-    build_pretooluse_rewrite_response, hook_cwd, rewrite_bash_command_unless_isolated,
-};
+use crate::commands::hook_rewrite::hook_cwd;
 use crate::formatters::session::short_id;
 use crate::types::EventRow;
 
@@ -129,12 +127,27 @@ pub(crate) async fn events(client: &reqwest::Client, url: &str) -> anyhow::Resul
 /// calls `prepare_session_with_repo_url`, the same pipeline `spawn_managed`
 /// uses) before printing the final verdict. Exits the process with status `1`
 /// when the final report is incomplete, `0` otherwise.
-/// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`
-/// cover parsing; the diff/repair logic itself is covered by
-/// `core::deploy_validate`'s own unit tests.
-pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> anyhow::Result<()> {
+/// #10425: `dry_run` (with `repair`) prints the gaps and the repair
+/// [`trusty_mpm::core::deploy_validate::ValidationReport::repair_plan`] selects,
+/// and writes nothing; the exit code is the plain validate's.
+/// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`,
+/// `cli_parses_validate_repair_dry_run` cover parsing;
+/// `tm_validate_repair_dry_run_changes_nothing` drives the binary; the
+/// diff/repair logic itself is covered by `core::deploy_validate`'s tests.
+/// It takes the whole `Command::Validate` so `main.rs` stays one line under
+/// its SLOC cap; any other variant is an `Err`.
+pub(crate) async fn validate(cmd: crate::cli::Command) -> anyhow::Result<()> {
     use trusty_mpm::core::deploy_validate::{validate_and_repair, validate_workspace};
     use trusty_mpm::core::paths::FrameworkPaths;
+
+    let crate::cli::Command::Validate {
+        path,
+        repair,
+        dry_run,
+    } = cmd
+    else {
+        anyhow::bail!("`validate` was dispatched a non-validate command");
+    };
 
     let workspace = match path {
         Some(p) => p,
@@ -144,7 +157,13 @@ pub(crate) async fn validate(path: Option<std::path::PathBuf>, repair: bool) -> 
 
     println!("tm validate: {}", workspace.display());
 
-    let complete = if repair {
+    let complete = if repair && dry_run {
+        let report = validate_workspace(&fw);
+        println!("repair dry run — nothing will be written");
+        print_gaps(&report.gaps);
+        println!("  would {}", report.repair_plan().describe());
+        report.is_complete()
+    } else if repair {
         let outcome = validate_and_repair(&fw, &workspace, None);
         // #4781: an attempt ran exactly when the pre-repair report had gaps;
         // `repaired` now reports whether it SUCCEEDED, so it can no longer gate
@@ -416,26 +435,19 @@ async fn detect_idle_parking_from_payload_in(
 /// build the guard refuses gets no rewrite here; the guard's deny decides it.
 /// What: the lease response for a heavy build, the compression-only response
 /// (#1956) otherwise, `None` when neither applies. Inside an isolation
-/// worktree, or with an unreadable cwd, neither response compresses (#7477) —
-/// the lease itself still applies there.
+/// worktree, or with an unreadable cwd, a heavy build is leased uncompressed
+/// (#7477) and any other covered command takes the one-command compression
+/// shape (#10973, `hook_rewrite_isolated`).
 /// Test: `hook_emits_the_guards_lease_rewrite_for_a_heavy_build` in
-/// `tests/tm_hook_pm_guard_build_lease.rs`.
+/// `tests/tm_hook_pm_guard_build_lease.rs`;
+/// `hook_compresses_a_filter_covered_command_inside_an_isolation_worktree`.
 fn pretooluse_bash_rewrite(
     cmd: &str,
     tool_input: Option<&serde_json::Value>,
     cwd: Option<&std::path::Path>,
 ) -> Option<String> {
-    use super::pm_guard_bash::build_lease_rewrite::LeaseRewrite;
-    let cwd = cwd.unwrap_or(std::path::Path::new(""));
-    match super::pm_guard_build_lease::decide_rewrite(cmd, tool_input, cwd) {
-        (LeaseRewrite::Rewrite(new), permission) => Some(
-            super::pm_guard_build_lease::rewrite_response(tool_input, &new, permission),
-        ),
-        (LeaseRewrite::Refuse(_), _) => None,
-        // #7477: never inside an isolation worktree, whose classifier refuses the wrap.
-        (LeaseRewrite::None, _) => rewrite_bash_command_unless_isolated(cmd, Some(cwd))
-            .map(|rewritten| build_pretooluse_rewrite_response(&rewritten).to_string()),
-    }
+    // #10973: one decision, shared with the opportunity observer's skip reason.
+    super::hook_bash_decision::pretooluse_bash_decision(cmd, tool_input, cwd).ok()
 }
 
 /// `hook` subcommand — handle a Claude Code lifecycle hook event.
@@ -509,7 +521,8 @@ fn pretooluse_bash_rewrite(
 /// `tm_hook_pretooluse_rewrite` integration test exercise the stdin-driven
 /// event detection end to end through the real binary. The #6556 delivery split
 /// is covered by `a_stop_delivered_on_the_third_attempt_logs_every_one` and
-/// `a_daemon_that_never_answers_exhausts_the_attempts`.
+/// `a_daemon_that_never_answers_exhausts_the_attempts`. The #10973
+/// opportunity observer: `a_subagent_result_and_an_mcp_result_each_append_an_opportunity_row`.
 pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<()> {
     // Guard 1: suppress inside MPM-spawned sub-agents.
     if std::env::var_os(SUB_AGENT_ENV).is_some() {
@@ -575,6 +588,12 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     {
         println!("{response}");
         return Ok(());
+    }
+
+    // #10973: measure every tool result and subagent result for compression
+    // opportunity. Bounded and fail-open; prints nothing to stdout.
+    if event == "PostToolUse" || event == SUBAGENT_STOP_EVENT {
+        super::hook_observer::observe(&event, stdin_payload.as_ref(), &session_id);
     }
 
     // #2610: on turn-end events (main agent Stop / delegated SubagentStop),
@@ -827,7 +846,9 @@ pub(crate) async fn attach_cmd(
             // #6288: `url` is the socket locator `main` resolved; re-discovery
             // resolves the same socket, so nothing needs pinning.
             let daemon = trusty_mpm::client::DaemonClient::new(url);
-            trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane).await
+            // #10476: the projects view captures the mouse unless `TM_TUI_MOUSE=0`.
+            let mouse = trusty_mpm::tui::terminal::mouse_from_env(false);
+            trusty_mpm::tui::run_initial_view_with(daemon, 1000, Some(id), single_pane, mouse).await
         }
         ResolveResult::Ambiguous(ids) => {
             eprintln!(

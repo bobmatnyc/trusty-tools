@@ -59,6 +59,8 @@ const PATH_LOCK_STRIPES: usize = 64;
 #[derive(Debug)]
 pub(crate) struct PathWriteLocks {
     stripes: Vec<tokio::sync::Mutex<()>>,
+    /// #10738: path writes finished, counted as each guard drops.
+    released: std::sync::atomic::AtomicU64,
 }
 
 impl Default for PathWriteLocks {
@@ -67,22 +69,69 @@ impl Default for PathWriteLocks {
             stripes: (0..PATH_LOCK_STRIPES)
                 .map(|_| tokio::sync::Mutex::new(()))
                 .collect(),
+            released: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }
 
 impl PathWriteLocks {
     /// Lock the stripe that `path` hashes to.
-    pub(crate) async fn lock(&self, path: &str) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn lock(&self, path: &str) -> PathWriteGuard<'_> {
         use std::hash::{Hash as _, Hasher as _};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         path.hash(&mut hasher);
         let stripe = usize::try_from(hasher.finish() % PATH_LOCK_STRIPES as u64).unwrap_or(0);
-        self.stripes[stripe].lock().await
+        PathWriteGuard {
+            _stripe: self.stripes[stripe].lock().await,
+            released: &self.released,
+        }
+    }
+}
+
+/// The guard [`CodeIndexer::lock_path_for_write`] returns (#10738).
+///
+/// Why: an incremental reindex copies the live corpus, then swaps staging in;
+/// a path write that lands between the two is missing from staging (#839).
+/// What: holds the path's stripe; on drop, counts one finished path write, so
+/// the swap can tell whether one finished after its copy began.
+/// Test: `a_write_in_the_carryover_window_raises_the_generation`.
+pub(crate) struct PathWriteGuard<'a> {
+    _stripe: tokio::sync::MutexGuard<'a, ()>,
+    released: &'a std::sync::atomic::AtomicU64,
+}
+
+impl Drop for PathWriteGuard<'_> {
+    fn drop(&mut self) {
+        // #10738: counted while the stripe is still held, before the caller's
+        // indexer guard can drop, so a swap under the write lock sees it.
+        self.released
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl CodeIndexer {
+    /// Take `path`'s write lock: the one every incremental write to it holds.
+    ///
+    /// Why (#10738): the put core keeps the path's content hash in step with
+    /// its chunks, so it holds this lock across forget, write and record.
+    /// What: locks the stripe `path` hashes to; not reentrant, so the holder
+    /// writes through [`Self::index_file_outcome_path_locked`].
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`.
+    pub(crate) async fn lock_path_for_write(&self, path: &str) -> PathWriteGuard<'_> {
+        self.path_write_locks.lock(path).await
+    }
+
+    /// Path writes finished on this indexer since it was built (#10738).
+    ///
+    /// Why: every path write holds the indexer's read guard for its whole call,
+    /// so a reader of this under the write guard sees every finished write.
+    /// Test: `a_write_in_the_carryover_window_raises_the_generation`.
+    pub(crate) fn path_writes_finished(&self) -> u64 {
+        self.path_write_locks
+            .released
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Chunk ids the corpus holds for `file_path` that `fresh` does not reuse.
     ///
     /// What: the file's current ids minus `fresh`'s ids. `file_chunk_ids`
@@ -151,6 +200,61 @@ impl CodeIndexer {
         Ok(())
     }
 
+    /// Remove one file's chunks, entity list and content hash, redb first, in
+    /// ONE redb write transaction (#11087).
+    ///
+    /// Why: the chunks and the hash left redb in separate transactions, so a
+    /// process exit between them committed a hash with no chunks, and the
+    /// next reindex hash-skipped the file forever.
+    /// What: under the rehydrate fence, deletes `ids`, the entity row and the
+    /// hash row of `file_path` in one transaction. A failure is an `Err` with
+    /// every store unchanged. On success it drops the ids, the entity list and
+    /// the in-process hash from memory. No corpus wired: memory only.
+    /// Test: `a_term_between_a_batch_delete_and_insert_leaves_the_file_served_after_resume`;
+    /// the refused arm by `a_refused_prune_delete_keeps_the_file_and_withholds_the_stamps`;
+    /// a fault inside the transaction by
+    /// `a_prune_fault_inside_the_delete_txn_keeps_rows_and_hash_11087`.
+    pub(crate) async fn remove_file_rows_and_hash(
+        &self,
+        file_path: &str,
+        ids: &[String],
+    ) -> Result<()> {
+        let _fence = self.rehydrate_write_fence().await; // #10209
+        #[cfg(test)]
+        if TEST_FAIL_CHUNK_DELETE
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected redb chunk delete failure (#8959 test seam)");
+        }
+        if let Some(corpus) = self.corpus.clone() {
+            // #11087: the forget seam fails the one transaction after its
+            // removes and before its commit, as `try_delete_file_rows_from_redb`.
+            #[cfg(test)]
+            let fail_in_txn = crate::service::reindex::hash::TEST_FAIL_FORGET_HASH
+                .lock()
+                .is_ok_and(|f| f.contains(&self.index_id));
+            let (ids, file) = (ids.to_vec(), vec![file_path.to_string()]);
+            tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if fail_in_txn {
+                    return corpus.delete_chunk_entity_and_hash_rows_failing_before_commit(
+                        &ids, &file, &file,
+                    );
+                }
+                corpus.delete_chunk_entity_and_hash_rows(&ids, &file, &file)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("redb file-row delete task failed: {e}"))?
+            .map_err(|e| e.context("redb file-row delete"))?;
+        }
+        self.drop_chunk_ids_from_memory(ids).await;
+        self.entities.write().await.remove(file_path);
+        let id = crate::core::registry::IndexId::new(self.index_id.as_str());
+        crate::service::reindex::hash::hashes_for(&id).remove(std::path::Path::new(file_path));
+        Ok(())
+    }
+
     /// Delete chunk ids from the durable redb corpus, reporting failure.
     ///
     /// What: `CorpusStore::delete_chunks` on a blocking worker. No corpus
@@ -174,5 +278,44 @@ impl CodeIndexer {
             .await
             .map_err(|e| anyhow::anyhow!("redb chunk delete task failed: {e}"))?
             .map_err(|e| e.context("redb chunk delete"))
+    }
+
+    /// Delete a file's chunk `ids` and its file-hash row in one redb commit.
+    ///
+    /// What: `CorpusStore::delete_file_rows` on a blocking worker. Runs with
+    /// empty `ids` too, so the hash row still goes. No corpus wired is `Ok`.
+    /// The #8959 chunk-delete seam refuses before redb; the #9236 forget seam
+    /// fails inside the transaction, before its commit.
+    pub(crate) async fn try_delete_file_rows_from_redb(
+        &self,
+        ids: &[String],
+        file: &str,
+    ) -> Result<()> {
+        #[cfg(test)]
+        if TEST_FAIL_CHUNK_DELETE
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id))
+        {
+            anyhow::bail!("injected redb chunk delete failure (#8959 test seam)");
+        }
+        let Some(corpus) = self.corpus.clone() else {
+            return Ok(());
+        };
+        #[cfg(test)]
+        let fail_in_txn = crate::service::reindex::hash::TEST_FAIL_FORGET_HASH
+            .lock()
+            .is_ok_and(|f| f.contains(&self.index_id));
+        let (ids, file) = (ids.to_vec(), file.to_string());
+        // #11096: chunks and hash leave in one transaction, or neither does.
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if fail_in_txn {
+                return corpus.delete_file_rows_failing_before_commit(&ids, &file);
+            }
+            corpus.delete_file_rows(&ids, &file)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("redb file rows delete task failed: {e}"))?
+        .map_err(|e| e.context("redb file rows delete"))
     }
 }

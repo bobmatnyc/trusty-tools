@@ -15,7 +15,8 @@
 //!    registration — the same logic `tctl ensure` runs (reused directly via
 //!    [`super::ensure::mcp_patch`] / [`super::ensure::project_setup`], not
 //!    reimplemented; only the CLI-level render is skipped so `--json` install
-//!    output stays a single JSON object).
+//!    output stays a single JSON object). Skipped with a warning when run as
+//!    root (#10320), so no root-owned project files are written.
 //! 2. Probes health for every selected daemon member.
 //! 3. For any CONFIRMED-down LAUNCHD daemon (the #2498 failure signature:
 //!    `launchctl bootstrap` succeeds but `RunAtLoad` doesn't fire), issues one
@@ -733,6 +734,33 @@ fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
     verify_one_with(m, remaining_budget, &RealKickstarter)
 }
 
+/// Run the install tail's project stages unless `euid` is root (#10320).
+///
+/// Why: under `sudo tctl install`, the `.mcp.json` patch and project setup
+/// wrote root-owned files into the user's project and dialled root's sockets.
+/// Install must still work as root, so the stages are skipped, not refused.
+/// What: when [`super::ensure::root_guard::check`] refuses `euid`, prints
+/// [`super::ensure::root_guard::INSTALL_ROOT_SKIP`] to stderr and returns
+/// `true`, so the skip leaves the install exit code unchanged. Otherwise
+/// patches `<root>/.mcp.json`, runs the index/palace stages, and returns the
+/// ensure report's `all_ok`.
+/// Test: `root_install_tail_writes_no_mcp_json`.
+fn project_stages(euid: Option<u32>, root: &std::path::Path) -> bool {
+    use super::ensure::{mcp_patch, project_setup, report::EnsureReport, root_guard};
+    use super::runtime::block_on;
+
+    if root_guard::check(euid).is_err() {
+        eprintln!("{}", root_guard::INSTALL_ROOT_SKIP);
+        return true;
+    }
+    let mcp_members = mcp_patch::patch_all_in(root);
+    let stages = block_on(project_setup::run_stages(root));
+    // `wait`/`ready` are not evaluated here — `install`'s verify tail uses its
+    // own targeted daemon health + kickstart retry instead of `ensure --wait`'s
+    // generic readiness poll.
+    EnsureReport::build(mcp_members, stages, false, false).all_ok
+}
+
 /// Run the post-install verify tail over the selected members (#2560).
 ///
 /// Why: THE entry point `install::run` calls (unless `--no-verify`) right
@@ -744,17 +772,9 @@ fn verify_one(m: &StableMember, remaining_budget: Duration) -> VerifyRow {
 /// Test: side-effecting (filesystem + network + subprocess); the pure pieces
 /// it composes (`needs_kickstart`, `VerifyTailReport::build`) are unit tested.
 pub fn run_verify_tail(selected: &[StableMember]) -> VerifyTailReport {
-    use super::ensure::{mcp_patch, project_setup, report::EnsureReport};
-    use super::runtime::block_on;
-
     let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mcp_members = mcp_patch::patch_all();
-    let stages = block_on(project_setup::run_stages(&root));
-    // `wait`/`ready` are not evaluated here — `install`'s verify tail uses its
-    // own targeted daemon health + kickstart retry instead of `ensure --wait`'s
-    // generic readiness poll.
-    let ensure_report = EnsureReport::build(mcp_members, stages, false, false);
-    let ensure_ok = ensure_report.all_ok;
+    // #10320: as root, skip the project stages; install itself still runs.
+    let ensure_ok = project_stages(super::ensure::root_guard::effective_uid(), &root);
 
     // #3836 MEDIUM fix: `verify_one` folds sequentially over every daemon
     // member, and each one's poll wait can run up to ~55s — an AGGREGATE

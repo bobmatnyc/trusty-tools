@@ -122,6 +122,8 @@ fn stub_record(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.to_owned(),
         cwd: std::path::PathBuf::from("/tmp/project"),
@@ -142,6 +144,7 @@ fn stub_record(
         last_cwd: None, deliverable_id: None,
         pane_id: None, injection_status: Default::default(),
         tmux_server: None,
+        tmux_socket: None,
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,
@@ -389,7 +392,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
 }
 
 /// Issue #2032: [`reserve_inproject_worktree`] must name the per-session
-/// worktree/branch after the SEMANTIC tmux name (`tm-<repo>-NN`), not the
+/// worktree/branch after the SEMANTIC tmux name (`tm-<repo>[-NN]`), not the
 /// raw session UUID — and the returned name must be the exact name used
 /// for both the worktree directory and (via `create_session_worktree`)
 /// the `session/<name>` branch.
@@ -483,8 +486,9 @@ async fn reserve_inproject_worktree_uses_semantic_name_not_uuid() {
     .expect("reserve_inproject_worktree must succeed against a real git repo");
 
     assert_eq!(
-        reserved_name, "tm-trusty-tools-01",
-        "the resolved name must be the SEMANTIC tm-<repo>-NN form, not the raw session UUID"
+        reserved_name, "tm-trusty-tools",
+        "the resolved name must be the SEMANTIC tm-<repo> form (#10478: bare first name), \
+         not the raw session UUID"
     );
     assert!(
         worktree.ends_with(&reserved_name),
@@ -597,7 +601,8 @@ async fn reserve_inproject_worktree_records_the_created_tree() {
     let entry = &state.live[&ledger_key(&worktree)];
     assert_eq!(entry.origin, Origin::TmDaemon);
     assert_eq!(entry.repo, ledger_key(base.path()));
-    assert_eq!(entry.branch.as_deref(), Some("session/tm-trusty-tools-01"));
+    // #10478: the first session name is bare.
+    assert_eq!(entry.branch.as_deref(), Some("session/tm-trusty-tools"));
 }
 
 /// Why (#2158): the adopted-session sentinel `/unknown` (and any
@@ -1152,4 +1157,111 @@ fn spawn_managed_on_main_warns_on_concurrent_main_checkout_session() {
         has_concurrent_main_checkout_session(&[], checkout).is_none(),
         "no sessions means no collision"
     );
+}
+
+// ── #10988: a new session reactivates its decommissioned project ────────────
+
+/// Guards and directories one decommission-spawn test holds until it ends.
+struct WidgetFixture {
+    state: Arc<DaemonState>,
+    checkout: std::path::PathBuf,
+    _dirs: [tempfile::TempDir; 3],
+    _home: HomeGuard,
+    _root: crate::core::trusty_tools_config::WorkspaceRootEnv,
+}
+
+/// A GitHub checkout AT the managed path, so the launch-on-main route runs
+/// there without cloning, and a daemon whose registry holds `widget`
+/// (`acme/widget`) marked decommissioned.
+async fn decommissioned_widget_on_main() -> WidgetFixture {
+    let home = tempfile::TempDir::new().expect("tmp home");
+    let home_guard = set_home(home.path());
+    let root = tempfile::TempDir::new().expect("workspace root");
+    let root_guard = crate::core::trusty_tools_config::WorkspaceRootEnv::pin(root.path());
+    let checkout = crate::core::repo_paths::base_clone_path("acme", "widget");
+    std::fs::create_dir_all(&checkout).expect("checkout dir");
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["remote", "add", "origin", "https://github.com/acme/widget"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&checkout)
+            .args(args)
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git {args:?}");
+    }
+    let data = tempfile::TempDir::new().expect("data root");
+    let state = Arc::new(DaemonState::with_root_isolated_managed(data.path().to_path_buf()).await);
+    let registry = state.project_registry().await;
+    registry
+        .seed_from_config(&[crate::core::trusty_tools_config::ProjectConfig {
+            name: "widget".into(),
+            repo_url: "https://github.com/acme/widget".into(),
+            ..Default::default()
+        }])
+        .await;
+    registry
+        .mark_decommissioned("widget", chrono::Utc::now())
+        .await
+        .expect("mark");
+    WidgetFixture {
+        state,
+        checkout,
+        _dirs: [home, root, data],
+        _home: home_guard,
+        _root: root_guard,
+    }
+}
+
+fn on_main_params(checkout: &std::path::Path) -> SpawnParams {
+    SpawnParams {
+        repo_url: checkout.to_string_lossy().into_owned(),
+        git_ref: "main".into(),
+        task: String::new(),
+        name_hint: None,
+        runtime: None,
+        ephemeral: Some(true),
+        mcp_initiated: false,
+        inject_task: None,
+        deliverable_id: None,
+        force_new: true,
+        worktree: false,
+    }
+}
+
+/// #10988 criterion 1: a new session on the default launch-on-main route
+/// (#5274) clears the project's decommissioned state.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_launch_on_main_spawn_reactivates_a_decommissioned_project() {
+    let fx = decommissioned_widget_on_main().await;
+    let params = on_main_params(&fx.checkout);
+    let record = spawn_managed(&fx.state, ManagedSessionId::new(), params)
+        .await
+        .expect("launch-on-main spawn");
+    assert_eq!(record.cwd, fx.checkout, "the launch-on-main route ran");
+    let widget = fx.state.project_registry().await.get("widget").await;
+    assert!(
+        !widget.expect("get").is_decommissioned(),
+        "a new launch-on-main session left the project decommissioned"
+    );
+}
+
+/// #10988: a registry the spawn cannot read when it clears the state is an
+/// error the caller sees, not a `warn!` behind a successful spawn.
+/// Test: itself.
+#[tokio::test]
+#[serial_test::serial]
+async fn a_spawn_reports_a_failed_reactivation() {
+    let fx = decommissioned_widget_on_main().await;
+    let dir = crate::project::registry_data_dir_under(fx.state.framework_root());
+    std::fs::write(dir.join("projects.json"), "{ not json").expect("corrupt projects.json");
+    let params = on_main_params(&fx.checkout);
+    let err = spawn_managed(&fx.state, ManagedSessionId::new(), params)
+        .await
+        .expect_err("a failed reactivation must reach the caller");
+    assert!(err.contains("still reads decommissioned"), "{err}");
 }

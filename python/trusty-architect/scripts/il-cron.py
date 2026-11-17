@@ -31,7 +31,9 @@ ROOT = os.path.dirname(HERE)
 CYCLE_EVERY = 3500       # seconds between scheduler cycles (the poller wakes more often)
 MAX_FAILS = 3
 JOB_TIMEOUT = 300
-SIZE_WARN = 8 * 1024
+if HERE not in sys.path:   # python3 -I drops the script directory
+    sys.path.insert(0, HERE)
+from datg_store import SIZE_WARN  # noqa: E402  (#10571: the ledger's own warn bar, caps.datg_size_warn; 32 KB by default)
 
 
 def _load(name, filename):
@@ -47,7 +49,8 @@ parse_iso, iso = ctx_watch.parse_iso, ctx_watch.iso
 
 def state_path():
     return os.environ.get("IL_CRON_STATE") or os.path.join(
-        os.environ.get("SUPERVISOR_INBOX_DIR") or os.path.join(ROOT, "inbox"), "il-cron-state.json")
+        os.environ.get("ARCHITECT_INBOX_DIR") or os.environ.get("SUPERVISOR_INBOX_DIR")  # #10571
+        or os.path.join(ROOT, "inbox"), "il-cron-state.json")
 
 
 def datg_cmd():
@@ -116,7 +119,8 @@ def job_size_check(sched, now):
             continue
         if size > SIZE_WARN:
             big.append(f"{e['name']} {size}B")
-    return (not big), ("state.json over 8 KB: " + ", ".join(big)) if big else "all within 8 KB"
+    bar = f"{SIZE_WARN // 1024} KB"
+    return (not big), (f"state.json over {bar}: " + ", ".join(big)) if big else f"all within {bar}"
 
 
 def read_log(path):

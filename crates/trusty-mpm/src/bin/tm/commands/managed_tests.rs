@@ -35,8 +35,22 @@ use super::super::managed_render::{
     truncate,
 };
 use super::{session_activity, session_decommission, session_resume, session_stop};
+use crate::commands::tmux_attach_server::with_holder_socket_dir;
 use crate::test_support::tmux_session::{PrivateTmuxServer, ScratchTmuxSession};
 use trusty_mpm::core::tmux::{exact_session_target, with_tmux_binary};
+
+/// A socket directory no other test in this process uses, for
+/// [`with_holder_socket_dir`].
+///
+/// Why: `resume_liveness` probes the default server under the in-flight key
+/// `<socket dir>/default`, and lists every `tm-ws-*` socket there. With the
+/// process's ambient directory, a concurrent test's probe of that key, or its
+/// hung workspace socket, makes the lookup refuse and the plan read the
+/// session as live (#11223).
+/// What: a fresh, empty temp directory; the guard removes it on drop.
+fn own_holder_socket_dir() -> tempfile::TempDir {
+    tempfile::tempdir().expect("holder socket dir")
+}
 
 #[test]
 fn truncate_clips_and_appends_ellipsis() {
@@ -505,11 +519,16 @@ async fn session_resume_headless_active_live_tmux_skips_restart_and_attach() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = with_tmux_binary(
-        shim.into(),
-        session_resume(
-            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
-            id.to_string(),
+    // #11223: its own probe keys; see `own_holder_socket_dir`.
+    let holder_dir = own_holder_socket_dir();
+    let result = with_holder_socket_dir(
+        holder_dir.path().to_path_buf(),
+        with_tmux_binary(
+            shim.into(),
+            session_resume(
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+                id.to_string(),
+            ),
         ),
     )
     .await;
@@ -767,11 +786,16 @@ async fn session_resume_headless_dead_runtime_reconciles_and_restarts() {
     let url = format!("http://{addr}");
     let client = reqwest::Client::new();
 
-    let result = with_tmux_binary(
-        shim.into(),
-        session_resume(
-            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
-            id.to_string(),
+    // #11223: its own probe keys, so no concurrent test can refuse the lookup.
+    let holder_dir = own_holder_socket_dir();
+    let result = with_holder_socket_dir(
+        holder_dir.path().to_path_buf(),
+        with_tmux_binary(
+            shim.into(),
+            session_resume(
+                &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+                id.to_string(),
+            ),
         ),
     )
     .await;
@@ -929,9 +953,15 @@ async fn session_resume_zombie_active_tmux_absent_reconciles_and_restarts() {
     // this zombie instead of dead-ending on the daemon's raw 409. The
     // eventual runtime spawn is environment-dependent (see doc above), so
     // only the ABSENCE of the specific 409 dead-end text is asserted here.
-    if let Err(e) = session_resume(
-        &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
-        id.to_string(),
+    // #11223: its own probe keys; a refused lookup reads the zombie as live
+    // and skips the reconcile this test is about.
+    let holder_dir = own_holder_socket_dir();
+    if let Err(e) = with_holder_socket_dir(
+        holder_dir.path().to_path_buf(),
+        session_resume(
+            &trusty_mpm::client::DaemonClient::with_client(client.clone(), url.to_string()),
+            id.to_string(),
+        ),
     )
     .await
     {
@@ -1502,6 +1532,7 @@ fn ls_session(name: &str, slot: u32) -> trusty_mpm::client::ManagedSessionSummar
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 
@@ -1575,6 +1606,28 @@ fn ls_row_plain_when_color_disabled() {
     let tomb_plain = format_tombstone_row(7, false);
     assert!(!tomb_plain.contains('\u{1b}'));
     assert_eq!(strip_ansi(&format_tombstone_row(7, true)), tomb_plain);
+}
+
+/// Why: #10476 — `parent_session_id` is data for `tm tui`, not a column; the
+/// `tm sessions ls` row and the `tm ls` picker row must be byte-identical
+/// whether or not a session has a parent.
+/// Test: this test.
+#[test]
+fn ls_rows_are_unchanged_by_a_parent_session_id() {
+    use crate::commands::session_picker_render::format_session_row;
+    let plain = ls_session("tm-trusty-tools-01", 7);
+    let mut child = plain.clone();
+    child.parent_session_id = Some("00000000-0000-0000-0000-000000000001".into());
+    for color in [false, true] {
+        assert_eq!(
+            format_ls_row(&child, color, 14, None),
+            format_ls_row(&plain, color, 14, None)
+        );
+        assert_eq!(
+            format_session_row(7, &child, color),
+            format_session_row(7, &plain, color)
+        );
+    }
 }
 
 /// Why: `{:<5}`/`{:<24}` measure the formatted value, so an ANSI-wrapped column

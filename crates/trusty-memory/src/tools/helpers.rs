@@ -392,6 +392,21 @@ pub(crate) fn apply_tier_c(
     }
 }
 
+/// Whether a write still goes through the near-duplicate window gate.
+///
+/// Why: #10643 — a slot rewrite that differs from the occupant by a few
+/// characters (a step number) scored above the Jaro-Winkler threshold and was
+/// dropped, so recall kept the stale occupant. A keyed slot write is a
+/// deliberate replacement and is idempotent per slot (the retry retires what
+/// the first attempt left), so the burst gate has nothing to protect there.
+/// What: `false` for `force` and for an admitted Tier C slot; `true` for every
+/// other write, including a refused key that degrades to Tier E.
+/// Test: `slot_rewrite_that_near_duplicates_the_occupant_replaces_it`,
+/// `near_duplicate_without_an_admitted_slot_is_still_skipped`.
+pub(crate) fn dedup_gate_applies(admission: &TierCAdmission, force: bool) -> bool {
+    !force && !matches!(admission, TierCAdmission::Admitted { .. })
+}
+
 /// Reverse of `RoomType::parse`: produce a stable label for KG `in-room`
 /// extraction.
 ///
@@ -862,14 +877,20 @@ pub(crate) fn skipped_envelope(palace_id: &str, reason: &str) -> Value {
 /// Test: covered indirectly by `dispatch_remember_then_recall` and
 /// `auto_kg_extraction_hooks_into_memory_remember`.
 pub(crate) fn parse_tags(args: &Value) -> Vec<String> {
-    args.get("tags")
+    let mut tags: Vec<String> = args
+        .get("tags")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|t| t.as_str().map(|s| s.to_string()))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // #10609: the `superseded-by:` namespace is reserved to the retirement
+    // commit; a caller-supplied one would hide a live drawer from recall.
+    let palace = args.get("palace").and_then(Value::as_str).unwrap_or("");
+    crate::engine::retired_marker::strip_retirement_tags(&mut tags, palace);
+    tags
 }
 
 /// Attach the MCP attribution tags (`creator:*` and the bare-UUID session

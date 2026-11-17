@@ -64,6 +64,22 @@ class TestInputHold(unittest.TestCase):
             self.assertEqual(r["at"], {"ran": True, "render": False})   # quiet entries ask for no re-render
             self.assertEqual([r["got"], r["secs"]], [["a"], 0])
 
+    def test_recent_keystroke_keeps_update_waiting_past_the_deadline_until_idle_or_blur(self):
+        body = """let open = true, typed = true, t = 0, got = [];
+        const h = makeHold(() => open, () => t, 60000, () => typed);
+        h.offer(() => got.push("a"), true);
+        t = 61000; const typing = h.settle();
+        typed = false; const idle = h.settle();
+        open = true; typed = true; h.offer(() => got.push("b"), true); t = 130000; const again = h.settle();
+        open = false; const blur = h.settle();
+        console.log(JSON.stringify({ typing, idle, again, blur, got }));"""
+        for r in self.each(body):
+            self.assertEqual(r["typing"], {"ran": False, "render": False})
+            self.assertTrue(r["idle"]["ran"])
+            self.assertFalse(r["again"]["ran"])
+            self.assertTrue(r["blur"]["ran"])
+            self.assertEqual(r["got"], ["a", "b"])
+
     def test_a_throwing_update_does_not_lose_the_rest(self):
         body = """let got = [];
         const h = makeHold(() => false, () => 0, 1); console.error = () => {};
@@ -104,7 +120,7 @@ class TestInputHold(unittest.TestCase):
             with self.subTest(page=page):
                 src = open(page, encoding="utf-8").read()
                 self.assertNotRegex(src, r"onSnapshot\(\(snap\)")   # every store snapshot goes through live()
-                self.assertEqual(len(re.findall(r"\.onSnapshot\(live\(", src)), 14)
+                self.assertEqual(len(re.findall(r"\.onSnapshot\(live\(", src)), 13)   # #10752: meta/gh_track is no longer polled
                 for needle in ("hold.settle();", "paintHold();", "setInterval(tickHold, 1000)", 'claimForm("cancel"', 'claimForm("wd"', 'claimForm("fb"',
                                'claimForm("cmd"', 'claimForm("note"', 'claimForm("steer"', 'claimForm("", "")', ".hold-note"):
                     self.assertIn(needle, src)

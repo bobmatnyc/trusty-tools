@@ -578,6 +578,7 @@ fn review_schema_is_openai_strict_compliant() {
             "consequence",
             "file",
             "line",
+            "quoted_snippet", // #10782
             "severity",
             "suggested_replacement",
             "title"
@@ -748,4 +749,47 @@ fn both_system_prompts_contain_rust_fp_guardrail() {
             "{label} system prompt must say DO NOT flag for the guardrail"
         );
     }
+}
+
+/// #10782: every finding requires a non-null `quoted_snippet` string, and the
+/// top-level `questions` array is required beside `findings`.
+#[test]
+fn review_schema_requires_a_quote_and_offers_questions() {
+    let schema = review_response_schema().schema;
+    let quote = &schema["properties"]["findings"]["items"]["properties"]["quoted_snippet"];
+    assert_eq!(quote["type"], "string", "{quote}");
+    assert_eq!(schema["properties"]["questions"]["type"], "array");
+    assert_eq!(schema["properties"]["questions"]["items"]["type"], "string");
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("top-level required")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(required.contains(&"questions"), "{required:?}");
+}
+
+/// #10964: the schema tells the reviewer that backticks in `body` quote the
+/// file, and that a payload or fix goes in `suggested_replacement` or is
+/// labelled with a cue the citation checks read.
+#[test]
+fn review_schema_says_body_backticks_quote_the_file() {
+    let schema = review_response_schema().schema;
+    let items = &schema["properties"]["findings"]["items"]["properties"];
+    let body = items["body"]["description"].as_str().unwrap_or_default();
+    for phrase in [
+        "Text in backticks means code copied verbatim from `file`",
+        "suggested_replacement",
+        "a payload such as",
+        "Fix:",
+    ] {
+        assert!(body.contains(phrase), "{phrase:?} missing from {body:?}");
+    }
+    let consequence = items["consequence"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        consequence.contains("Backticks follow the `body` rule"),
+        "{consequence}"
+    );
 }

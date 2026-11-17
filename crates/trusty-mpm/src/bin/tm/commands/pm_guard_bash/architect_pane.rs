@@ -107,6 +107,10 @@ pub(crate) fn evaluate_architect_pane(command: &str, probe: &dyn PaneProbe) -> O
         .flatten();
     let mut listed: Vec<(&[String], Listing)> = Vec::new();
     for hit in &hits {
+        // #10665 r3: the kill floor, run first, owns this whole-server kill.
+        if super::kill_server::owned_by_kill_floor(hit) {
+            continue;
+        }
         if let Some(why) = hit.opaque {
             return Some(unresolved(hit, "", why));
         }

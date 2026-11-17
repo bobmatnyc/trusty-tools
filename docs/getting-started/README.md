@@ -10,9 +10,13 @@ This directory contains onboarding guides for engineers new to trusty-tools and 
 - **[claude-mpm vs trusty-mpm — Differences & Install](claude-mpm-vs-trusty-mpm.md)**
   For Python `claude-mpm` users. Explains the structural differences (language, daemons, session model, MCP architecture), what's familiar, and the migration path.
 
+- **[Let `tm` Create Your Project Clones](canonical-clones.md)**
+  Why `tm run <owner>/<repo>` owns the clone at `~/trusty-mpm-projects/<owner>/<repo>`, and what to do with a flat or legacy checkout.
+
 ## Quick Links
 
 - **I want to install:** → [Install and Run trusty-mpm](install-and-run-tm.md)
+- **I have a flat or legacy checkout:** → [Canonical clones](canonical-clones.md)
 - **I'm coming from claude-mpm:** → [Differences & Install](claude-mpm-vs-trusty-mpm.md)
 - **I want to understand architecture:** → [WHAT-IS-TRUSTY-MPM.md](../../content/instructions/docs/WHAT-IS-TRUSTY-MPM.md) and [ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md](../../content/instructions/docs/ARCHITECTURE-MEMORY-SESSIONS-SEARCH.md)
 - **I want the full crate index:** → [Root README](../../README.md#installation)

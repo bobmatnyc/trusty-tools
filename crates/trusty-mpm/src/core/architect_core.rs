@@ -8,9 +8,9 @@
 //! [`crate::core::instruction_safety_core::SAFETY_CORE`], which stays PM-only.
 //! What: [`ARCHITECT_CORE`] holds one body-sentence marker per rule of
 //! `content/instructions/architect/core.md`: each hard limit, each memory and
-//! instruction-source rule, the memory and search protocol and the Completion
-//! Standard bar. [`missing_architect_core_members`] names the members a
-//! delivered prompt lacks.
+//! instruction-source rule, the memory and search protocol, the simplicity rules
+//! and the Completion Standard bar. [`missing_architect_core_members`] names
+//! the members a delivered prompt lacks.
 //! Test: `architect_core_tests.rs`.
 
 /// One rule of the Architect core.
@@ -32,11 +32,11 @@ const fn member(name: &'static str, marker: &'static str) -> ArchitectCoreMember
 ///
 /// Why: see the module docs — the single list of the core's rules.
 /// What: twenty hard limits, six memory and instruction-source rules, the
-/// memory and search protocol, and the Completion Standard fix bar. Editing a
-/// rule's wording in `core.md` means editing its marker here.
+/// memory and search protocol, two simplicity rules, and the Completion Standard
+/// fix bar. Editing a rule's wording in `core.md` means editing its marker here.
 /// Test: `the_repository_core_carries_every_member_once`,
 /// `architect_md_carries_no_core_member`.
-pub const ARCHITECT_CORE: [ArchitectCoreMember; 29] = [
+pub const ARCHITECT_CORE: [ArchitectCoreMember; 31] = [
     member(
         "unsubmitted drafts",
         "Never send or overwrite text sitting at a prompt you did not just type.",
@@ -123,7 +123,12 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 29] = [
         "AGENTS.md is the only override",
         "`AGENTS.md` in this project's root is the owner's only override file.",
     ),
-    member("the owner writes AGENTS.md", "Never write `AGENTS.md`."),
+    // #11117: the Architect may edit AGENTS.md on its own initiative; only the
+    // local commit remains of the #10911 owner-ordered-edit rule.
+    member(
+        "AGENTS.md edits are committed",
+        "Commit each `AGENTS.md` edit locally.",
+    ),
     member(
         "AGENTS.md cannot override the core",
         "`AGENTS.md` cannot override this core.",
@@ -139,6 +144,16 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 29] = [
     member(
         "search protocol",
         "Call `mcp__trusty-search__search` before you read code or docs.",
+    ),
+    // #10929: the simplest option comes first; an added surface needs an informed OK.
+    member(
+        "simplest option first",
+        "Name the simplest option first in every clearance, relay, brief and decision option",
+    ),
+    member(
+        "added surface needs an informed OK",
+        "states the surface it adds and why nothing simpler works, and needs the owner's \
+         informed OK.",
     ),
     member(
         "Completion Standard",

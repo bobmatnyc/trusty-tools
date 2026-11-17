@@ -20,35 +20,39 @@
 //! exercised by launching the TUI.
 
 pub mod actions;
+mod drive;
 pub mod events;
 pub mod layout;
 pub mod panes;
 pub mod poll;
+// See #10754: the `l` launch form's dispatch.
+mod launch_ops;
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+mod session_ops;
+#[cfg(test)]
+mod session_ops_tests;
 pub mod state;
+mod trace;
 
 #[cfg(test)]
 mod tests;
+// #10754: two-column MPM pane (Bob 11-06)
+#[cfg(test)]
+mod two_column_tests;
 
 use std::io::Stdout;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crossterm::event::{self, Event};
 use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::client::DaemonClient;
-use events::handle_key;
 use poll::project_ctl_poll_daemon;
 use state::ProjectCtlState;
+use trace::TuiTrace;
 
 // #7224: the panic-safe terminal guard moved to `tui::terminal`, shared with
 // the coordinator screen and the `tm ls` session TUI.
 use crate::tui::terminal::TerminalGuard;
-
-/// How long [`run_loop`] blocks waiting for a key before redrawing.
-///
-/// Why: matches the coordinator/dashboard screens' input cadence — short
-/// enough to feel responsive, independent of the daemon refresh cadence.
-const KEY_POLL: Duration = Duration::from_millis(50);
 
 /// Launch the `tm projects` 4-pane TUI against `url`, polling every `interval_ms`.
 ///
@@ -83,15 +87,17 @@ pub async fn run_focused(
     interval_ms: u64,
     focus_id: Option<String>,
 ) -> anyhow::Result<()> {
-    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id).await
+    let mouse = crate::tui::terminal::mouse_from_env(false);
+    run_focused_with_client(DaemonClient::new(url), interval_ms, focus_id, mouse).await
 }
 
 /// [`run_focused`] against a caller-built client, so a pinned URL (#9556)
-/// reaches the poll loop.
+/// reaches the poll loop. `mouse` turns capture on (#10476).
 pub(crate) async fn run_focused_with_client(
     mut client: DaemonClient,
     interval_ms: u64,
     focus_id: Option<String>,
+    mouse: bool,
 ) -> anyhow::Result<()> {
     let mut state = ProjectCtlState::default();
     project_ctl_poll_daemon(&mut state, &mut client).await;
@@ -110,55 +116,68 @@ pub(crate) async fn run_focused_with_client(
     // panic unwind — so it is the SOLE teardown (no manual cleanup follows
     // `run_loop`).
     // #7224: setup and guard both come from `tui::terminal`.
-    let mut terminal = crate::tui::terminal::enter()?;
+    let mut terminal = crate::tui::terminal::enter_mouse(mouse)?;
     let _guard = TerminalGuard;
 
     run_loop(&mut terminal, &mut client, state, interval_ms).await
     // `_guard` drops here (or during an unwind), restoring the terminal.
 }
 
+/// Run the projects view inside a terminal the caller already owns.
+///
+/// Why (#10491): the console home screen opens this view on Enter and gets
+/// the terminal back when the operator leaves it, so it must not enter or
+/// restore the terminal itself.
+/// What: the priming poll [`run_focused_with_client`] does, then [`run_loop`]
+/// until `q` / Ctrl-C. #10476: with `mouse` set, capture is on for this view
+/// only, so the home screen gets the terminal back uncaptured on a normal or
+/// error return; on a panic the caller's `TerminalGuard` turns it off.
+/// Test: exercised by the home-screen smoke run; the loop is unchanged.
+pub(crate) async fn run_in_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    client: &mut DaemonClient,
+    interval_ms: u64,
+    mouse: bool,
+) -> anyhow::Result<()> {
+    let mut state = ProjectCtlState::default();
+    project_ctl_poll_daemon(&mut state, client).await;
+    terminal.clear()?;
+    if mouse {
+        crate::tui::terminal::enable_capture(terminal)?;
+    }
+    let result = run_loop(terminal, client, state, interval_ms).await;
+    if mouse {
+        // The loop's own error, if any, is the one worth reporting.
+        let disabled = crate::tui::terminal::disable_capture(terminal);
+        return result.and(disabled.map_err(Into::into));
+    }
+    result
+}
+
 /// The live render + poll + input loop.
 ///
 /// Why: kept separate from [`run`] so terminal setup/teardown wraps it
-/// cleanly and the loop body stays focused on draw → poll-key → dispatch →
-/// maybe-repoll.
-/// What: each iteration draws the frame, polls the keyboard for [`KEY_POLL`]
-/// and routes any key through [`handle_key`], awaiting
-/// [`actions::dispatch`] for any returned [`events::PendingAction`]. Re-polls
-/// the daemon immediately after a successful mutating action (via
-/// [`ProjectCtlState::take_repoll`]) or once at least `interval_ms` has
-/// elapsed since the last poll. Exits once `should_exit` is set (`q` /
-/// Ctrl-C).
+/// cleanly; the loop itself lives in [`drive::drive`] so a test can drive it
+/// without a terminal.
+/// What: binds [`drive::drive`] to this terminal's draw, the crossterm event
+/// source, the off-loop [`poll::tick::fetch_tick`] (#10476) and the
+/// `TM_TUI_TRACE` trace.
+/// Test: `keypress_redraws_while_poll_in_flight_10476` drives the same loop.
 async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     client: &mut DaemonClient,
-    mut state: ProjectCtlState,
+    state: ProjectCtlState,
     interval_ms: u64,
 ) -> anyhow::Result<()> {
-    let interval = Duration::from_millis(interval_ms);
-    let mut last_poll = Instant::now();
-
-    loop {
-        terminal.draw(|frame| layout::render(frame, &mut state))?;
-
-        if event::poll(KEY_POLL)?
-            && let Event::Key(key) = event::read()?
-        {
-            if let Some(action) = handle_key(&mut state, key) {
-                actions::dispatch(&mut state, client, action).await;
-            }
-            if state.should_exit {
-                return Ok(());
-            }
-        }
-
-        // A requested repoll (post-mutation) or the timer elapsing both mean
-        // the same thing: refresh now and restart the interval clock. Merged
-        // into one branch (rather than an if/else-if with duplicate bodies)
-        // to satisfy clippy::if_same_then_else.
-        if state.take_repoll() || last_poll.elapsed() >= interval {
-            project_ctl_poll_daemon(&mut state, client).await;
-            last_poll = Instant::now();
-        }
-    }
+    // #10754: one value draws AND lends the terminal out around an attach.
+    drive::drive(
+        &mut drive::TerminalScreen(terminal),
+        &mut drive::TerminalEvents,
+        poll::tick::fetch_tick,
+        client,
+        state,
+        Duration::from_millis(interval_ms),
+        &mut TuiTrace::from_env(),
+    )
+    .await
 }

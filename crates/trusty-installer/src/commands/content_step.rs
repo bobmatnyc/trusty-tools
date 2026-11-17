@@ -11,10 +11,17 @@
 //! into the exit code; a failure names [`REMEDY`] and never rolls back or
 //! aborts anything — the binaries stay placed and every other step has
 //! already run. [`dry_run_command`] is what `--dry-run` reports instead.
+//! #10588: [`run_content_steps`] then runs each placed [`CONTENT_CHECKS`]
+//! member's check verb, so content older than a placed binary fails the run
+//! naming the missing file.
 //! Test: `content_step_tests.rs`, and the report folding in `install_tests.rs`
 //! and `upgrade_tests.rs`.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -48,22 +55,131 @@ pub trait CommandRunner {
     fn run(&self, program: &Path, args: &[&str]) -> std::io::Result<RunOutput>;
 }
 
-/// The production [`CommandRunner`]: a real subprocess, stdin closed.
-pub struct ProcessRunner;
+/// How long a `--version` or content-check probe may run (#10607). Same bound
+/// as `trusty_common::update::verify_installed_binary_at_path`.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long `tm content update` may run: it fetches a release over the network.
+pub const FETCH_DEADLINE: Duration = Duration::from_secs(300);
+
+/// The production [`CommandRunner`]: a real subprocess, stdin closed, killed at
+/// its deadline.
+///
+/// Why: #10607 — a member binary that hangs on `--version` stalled
+/// `stack health`, `install` and `upgrade` with no output, because the probe
+/// waited on `Command::output()` forever.
+/// What: [`bounded_run`] with the runner's deadline; a run past it is an
+/// `ErrorKind::TimedOut` error, which every caller reports as a failed check.
+/// Test: `deployment_probe_tests::a_hung_member_is_a_failed_check_not_a_stall_10607`.
+pub struct ProcessRunner {
+    limit: Duration,
+}
+
+impl ProcessRunner {
+    /// A runner for a version or content probe ([`PROBE_DEADLINE`]).
+    pub const fn probe() -> Self {
+        Self::with_deadline(PROBE_DEADLINE)
+    }
+
+    /// A runner for `tm content update` ([`FETCH_DEADLINE`]).
+    pub const fn fetch() -> Self {
+        Self::with_deadline(FETCH_DEADLINE)
+    }
+
+    /// A runner with an explicit deadline.
+    pub const fn with_deadline(limit: Duration) -> Self {
+        Self { limit }
+    }
+}
 
 impl CommandRunner for ProcessRunner {
     fn run(&self, program: &Path, args: &[&str]) -> std::io::Result<RunOutput> {
-        let out = std::process::Command::new(program)
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        Ok(RunOutput {
-            success: out.status.success(),
-            code: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
+        bounded_run(program, args, self.limit)
     }
+}
+
+/// Runs `program` to completion or kills it at `limit` (#10607).
+///
+/// What: pipes stdout and stderr to reader threads so a chatty child cannot
+/// block on a full pipe, polls the child until it exits, and kills and reaps it
+/// at the deadline. Output still held open by a grandchild past the deadline
+/// counts as a timeout too. Errors: the spawn error, or `TimedOut`.
+/// Test: `deployment_probe_tests::a_hung_member_is_a_failed_check_not_a_stall_10607`,
+/// `deployment_probe_tests::a_bounded_run_returns_what_the_child_printed_10607`.
+fn bounded_run(program: &Path, args: &[&str], limit: Duration) -> std::io::Result<RunOutput> {
+    let deadline = Instant::now() + limit;
+    let timed_out = || {
+        std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!(
+                "did not exit within {}s and was killed",
+                limit.as_secs_f32()
+            ),
+        )
+    };
+    let mut child = spawn_piped(program, args)?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(timed_out());
+        }
+        std::thread::sleep(POLL);
+    };
+    // A reader that has not finished yet gets what is left of the deadline,
+    // and at least POLL, so a child exiting at the deadline is not misread.
+    let wait = || deadline.saturating_duration_since(Instant::now()).max(POLL);
+    let stdout = stdout.recv_timeout(wait()).map_err(|_| timed_out())?;
+    let stderr = stderr.recv_timeout(wait()).map_err(|_| timed_out())?;
+    Ok(RunOutput {
+        success: status.success(),
+        code: status.code(),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+    })
+}
+
+/// How often [`bounded_run`] checks whether the child exited.
+const POLL: Duration = Duration::from_millis(10);
+
+/// Spawns with piped output, retrying the ETXTBSY window a just-written
+/// binary can hit (#6231) on the same bounded backoff `fresh_exec` uses.
+fn spawn_piped(program: &Path, args: &[&str]) -> std::io::Result<std::process::Child> {
+    let spawn = || {
+        std::process::Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+    };
+    for ms in crate::download::fresh_exec::ETXTBSY_BACKOFF_MS {
+        match spawn() {
+            Err(e) if crate::download::fresh_exec::is_etxtbsy(&e) => {
+                std::thread::sleep(Duration::from_millis(ms));
+            }
+            other => return other,
+        }
+    }
+    spawn()
+}
+
+/// Reads `pipe` to its end on its own thread; the receiver yields the bytes.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        let _ = tx.send(buf);
+    });
+    rx
 }
 
 /// The content step's result, in the `--json` report.
@@ -158,8 +274,108 @@ pub fn run_if_mpm_placed(
     Some(outcome)
 }
 
+/// Members that read runtime content, and the verb that checks the installed
+/// content against the placed binary (#10588).
+pub const CONTENT_CHECKS: [(&str, [&str; 2]); 1] = [("trusty-review", ["content", "check"])];
+
+/// The content step of an install or upgrade: `tm content update`, then a
+/// check that the content serves every placed binary that reads it.
+///
+/// Why: #10588 — the newest content release (2.3.0) predated a prompt
+/// trusty-review 0.39.0 reads, so the update pinned it, the install reported
+/// success, and the first review exited 1. tctl cannot deploy content no
+/// release has, so it fails naming the missing file instead.
+/// What: runs [`run_if_mpm_placed`]; a failed update is the outcome and no
+/// check runs. Then each placed [`CONTENT_CHECKS`] member runs its check verb
+/// (the placed binary, by path); the first failure is the outcome, its detail
+/// carrying the member's last stderr line, which names the missing file.
+/// Otherwise the update's outcome, else the last check's; `None` when
+/// neither ran.
+/// Test: `install_fails_when_content_is_older_than_a_placed_binary`,
+/// `install_passes_when_content_serves_every_placed_binary`,
+/// `a_failed_content_update_skips_the_content_check`,
+/// `a_placed_trusty_review_alone_checks_the_installed_content`,
+/// `upgrade_fails_when_content_is_older_than_a_placed_binary`.
+pub fn run_content_steps(
+    placed: &[(String, PathBuf)],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> Option<ContentStepOutcome> {
+    let update = run_if_mpm_placed(placed, runner, json);
+    if update.as_ref().is_some_and(|u| !u.ok) {
+        return update;
+    }
+    let mut checked = None;
+    for (name, args) in &CONTENT_CHECKS {
+        let Some((_, binary)) = placed.iter().find(|(member, _)| member == name) else {
+            continue;
+        };
+        let outcome = run_check(name, binary, args, runner, json);
+        if !outcome.ok {
+            return Some(outcome);
+        }
+        checked = Some(outcome);
+    }
+    update.or(checked)
+}
+
+/// Runs one member's content check verb and narrates the result (#10588).
+fn run_check(
+    name: &str,
+    binary: &Path,
+    args: &[&str],
+    runner: &dyn CommandRunner,
+    json: bool,
+) -> ContentStepOutcome {
+    let command = format!("{} {}", binary.display(), args.join(" "));
+    let narr = narrator(json);
+    let _ = narr.info(&format!(
+        "checking {name}'s instructional content: {command}"
+    ));
+    let failed = |why: String| ContentStepOutcome {
+        ok: false,
+        command: command.clone(),
+        detail: format!(
+            "{why}; the binaries are installed, but {name} cannot run until content that \
+             serves it is installed"
+        ),
+    };
+    let outcome = match runner.run(binary, args) {
+        Ok(out) if out.success => ContentStepOutcome {
+            ok: true,
+            command: command.clone(),
+            detail: last_line(&out.stdout)
+                .unwrap_or("content serves it")
+                .to_owned(),
+        },
+        // A release older than the verb: clap's usage error, exit 2. It
+        // predates #10588, so there is no manifest to check it against.
+        Ok(out) if out.code == Some(2) && out.stderr.contains(UNKNOWN_VERB) => ContentStepOutcome {
+            ok: true,
+            command: command.clone(),
+            detail: format!("not checked: this {name} predates `{}`", args.join(" ")),
+        },
+        Ok(out) => {
+            let why = last_line(&out.stderr)
+                .or_else(|| last_line(&out.stdout))
+                .unwrap_or("no output");
+            failed(format!("`{command}` failed: {why}"))
+        }
+        Err(e) => failed(format!("could not run `{command}`: {e}")),
+    };
+    if outcome.ok {
+        let _ = narr.info(&format!("content: {}", outcome.detail));
+    } else {
+        let _ = narr.error(&format!("content: {}", outcome.detail));
+    }
+    outcome
+}
+
+/// What clap prints for a subcommand the binary does not have.
+pub(super) const UNKNOWN_VERB: &str = "unrecognized subcommand";
+
 /// The last non-blank line of `text`, trimmed.
-fn last_line(text: &str) -> Option<&str> {
+pub(super) fn last_line(text: &str) -> Option<&str> {
     text.lines().map(str::trim).rfind(|l| !l.is_empty())
 }
 

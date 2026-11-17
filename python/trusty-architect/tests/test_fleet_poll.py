@@ -34,6 +34,12 @@ def _no_context_bar_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_self_clear(monkeypatch):
+    """#10599: a self-clear.sh running on this host must not change what wake() does here."""
+    monkeypatch.setattr(fp, "self_clear_running", lambda arch_dir: False)
+
+
 def screen(body, box="", dim=False, agents=(), ctx=10, plan=(30, 40), status=None,
            ctx_field=None):
     """A pane capture: transcript, optional status line, input box, footer.
@@ -143,6 +149,30 @@ def test_dialog_words_in_transcript_above_the_box_are_not_a_dialog():
 # Architect even while genuinely idle (poll-state.json: wake_pending > 0,
 # no wake sent for a day). #10627: its operator figures are synthetic.
 
+RUST_IDLE_PANE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "crates",
+    "trusty-architect", "tests", "fixtures", "idle-pane-labeled-rule.txt")
+
+
+def test_idle_pane_fixture_carries_only_synthetic_operator_values():
+    """#10627: every spend, count, issue ref, time and date label in the
+    captured pane is a fixed synthetic value, in the Python fixture and in the
+    Rust crate's copy, and the two copies are byte-identical."""
+    import re
+    with open(os.path.join(FIXTURES, "idle-pane-labeled-rule.txt")) as f:
+        cap = f.read()
+    with open(RUST_IDLE_PANE) as f:
+        rust_cap = f.read()
+    assert rust_cap == cap, "the Rust fixture copy drifted from the Python one"
+    for text in (cap, rust_cap):
+        assert set(re.findall(r"\$\d[\d.,]*", text)) == {"$12.34"}
+        assert set(re.findall(r"#(\d+)", text)) <= {"1234", "5678"}
+        assert set(re.findall(r"\b\d{1,2}:\d{2}Z\b", text)) <= {"09:00Z"}
+        assert set(re.findall(r"\b(\d+) alerts\b", text)) <= {"42"}
+        assert set(re.findall(r"\b\d+k\b", text)) <= {"500k", "50k"}
+        assert set(re.findall(r"\b\d{1,2}:\d{2} (?:AM|PM)\b", text)) <= {"9:00 AM"}
+
+
 def test_labeled_top_rule_is_still_recognized_as_the_box():
     with open(os.path.join(FIXTURES, "idle-pane-labeled-rule.txt")) as f:
         cap = f.read()
@@ -189,8 +219,12 @@ def test_busy_pane_is_neither_idle_nor_question(agents, status):
 
 
 def test_old_waiting_line_above_a_newer_turn_is_not_busy():
+    # #10579: a WAITING line counts until a finished-turn summary or a submitted ❯ turn follows it
+    # (prototype current_waiting); a newer turn ends with its "· done" summary.
     body = ["✻ Waiting for 1 background agent to finish"] + PM_TURN
-    assert not fp.parse_pane(screen(body))["busy"]
+    info = fp.parse_pane(screen(body, status="✻ Cooked for 23s · done 7:36 AM"))
+    assert not info["busy"] and not info["turn_active"]
+    assert fp.parse_pane(screen(body))["turn_active"]   # no summary yet: the wait is still current
 
 
 def test_question_is_last_pm_line_ending_in_question_mark():
@@ -604,6 +638,7 @@ def _cycle_env(monkeypatch, tmp_path, panes, quiet_lines=""):
     monkeypatch.setattr(fp, "capture", lambda pid: captures[pid])
     monkeypatch.setattr(fp, "host_alerts", lambda now: [])
     monkeypatch.setattr(fp, "self_ctx_alerts", lambda now, dry_run: [])
+    monkeypatch.setattr(fp, "watchdog_alerts", lambda *a: ([], ""))   # no Architect in these fleets
     events = tmp_path / "events.jsonl"
     events.write_text("")
     monkeypatch.setattr(fp, "EVENTS", str(events))
@@ -692,8 +727,9 @@ def test_load_factor_is_env_overridable(monkeypatch):
     assert [a for a in fp.host_alerts(0.0) if a["kind"] == "load"] == []
 
 
-def test_load_reemit_interval_is_unchanged_at_1800s():
-    assert fp.REEMIT["load"] == 1800
+def test_load_reminder_is_24h_under_its_severity_bucket_key():
+    """ar-T8a (Architect Q5): load is keyed kind|severity|bucket like swap; it reminds once a day."""
+    assert fp.REEMIT["load"] == fp.REEMIT["disk"] == fp.REEMIT["swap"] == 86400
 
 
 def test_send_refuses_any_pane_outside_the_architect(monkeypatch):

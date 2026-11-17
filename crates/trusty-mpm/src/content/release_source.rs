@@ -66,7 +66,8 @@ pub trait ReleaseSource {
     /// that cannot be read in full is an error; an empty one is `Ok`.
     fn content_tags(&self) -> Result<Vec<String>, FetchError>;
     /// The release of `tag`. A tag with no release, or whose release is a
-    /// draft (GitHub answers 404 for one), is an error.
+    /// draft (GitHub answers 404 for one), is an error with `status:
+    /// Some(404)`; the latest-release search passes it over (#10749).
     fn release(&self, tag: &str) -> Result<Release, FetchError>;
 }
 

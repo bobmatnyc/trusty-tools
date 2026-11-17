@@ -1,0 +1,3 @@
+Security
+- A read-only consent (`setup --scopes readonly`, `add_account {scopes:"readonly"}`) now checks the scopes Google granted against the read-only preset. A grant with any other scope is refused, nothing is stored, and the error names the extra scopes. A token response with an absent or empty `scope` is refused too (#10873). Full-scope consent is unchanged.
+- A read-only consent now requires a `--profile` (`add_account`: `profile`) other than the default `gworkspace-mcp`. Without one, or with the default, it is refused before any side effect, so the default profile keeps its full-scope token (#10873).

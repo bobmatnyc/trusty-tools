@@ -6,6 +6,151 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.2] — 2026-11-16
+
+### Added
+
+- `linux_lifecycle::passthrough::MEMORY_DAEMON` and `SEARCH_DAEMON`: the non-credential variables a Linux-started trusty-memory or trusty-search daemon keeps. Both daemons' descriptors and trusty-console's read them, so a daemon a console bridge auto-starts gets the same settings as one its own `start` spawns (#11085). Both lists carry `RUST_LOG_BUFFER`, the log-buffer filter both daemons read through `tracing_init`.
+- `linux_lifecycle::stop_pid`, `stop_pid_with`, `restart_pid` and `restart_pid_with` stop or restart a daemon the caller identified by pid, such as a trusty-console whose socket bind failed. The pid is pinned with a pidfd and must be proven this instance (binary, `liveness_args`, `instance_env`, `instance_path_args`) before any signal; a pid that is gone falls back to the socket path, and a live pid that is not this instance is the new `LifecycleError::NotThisInstance` (#11085).
+- Before any signal, `stop_pid` and `restart_pid` also refuse: a descriptor with empty `liveness_args` (`InvalidDescriptor`); a pid whose `instance_path_args` flag has no value, or a relative or unresolvable one (the new `LifecycleError::InstanceUndecided`); a socket served by another pid (the new `LifecycleError::ServedByAnother` for `stop_pid`, `RestartBlocked` naming that pid for `restart_pid`); and a socket that cannot be probed (`ProbeInconclusive`). `restart_pid` returns `BinaryMissing` before its stop when the install binary is absent (#11085).
+- `DaemonDescriptor::instance_path_args` declares argv flags, such as `--data-dir`, whose value names the instance's directory. A process that gives such a flag only values naming another path is a sibling and no longer blocks `stop`, `start` or `restart`; a relative or unresolvable value still counts as this instance for that scan. Descriptors that leave it empty behave as before (#11085).
+- `linux_lifecycle::ProcessTable` and `stop_with_table`, `start_with_table`, `restart_with_table`, `stop_pid_with_table` and `restart_pid_with_table`: the liveness scan can read an injected process table instead of `/proc`, so a lifecycle test no longer depends on the host's processes (#11085). The existing entry points scan `/proc` as before, and a stop by pid still reads its pinned process in the real `/proc`.
+
+### Fixed
+
+- `linux_lifecycle::restart` no longer stops a healthy daemon that its start would then refuse to replace. While the daemon serves, another process that the `/proc` scan reads as this instance now fails the restart with the new `LifecycleError::RestartBlocked` before any signal, and the running daemon stays up (#11085).
+- `linux_lifecycle::restart` checks that the install binary exists before it stops anything, so a restart during an upgrade that briefly removed the binary returns `BinaryMissing` and leaves the running daemon up instead of stopping it and starting nothing (#11085).
+
+## [0.70.0] — 2026-11-12
+
+### Added
+
+- `console_token` (behind `daemon-token`): the one loader for the trusty-console token file named by `TRUSTY_CONSOLE_TOKEN_FILE` (#11074). It refuses a missing file, a non-regular file, a file with a group or other permission bit, and a token shorter than 32 bytes, longer than 4 KiB or holding a byte outside visible ASCII. Errors name the path and the problem, never the content. `ConsoleToken` has a redacted `Debug` and compares in constant time.
+- Registered the per-user Trusty Browser LaunchAgent under its canonical service label.
+
+### Fixed
+
+- `running_under_test_harness()` recognises test binaries again under rustc 1.100, whose cargo writes them to `target/<profile>/build/<crate>/<hash>/out/<name>-<hash>` instead of `target/<profile>/deps/`; the daemon guards had stopped skipping, and test processes sent real requests to live daemons (#11138)
+  - detection now fails closed: an unreadable executable path, or a name carrying cargo's 16-hex metadata hash in an unknown layout, counts as a test process; a binary without the hash (`target/<profile>/<name>`, `~/.cargo/bin/<name>`) still counts as production, and `TRUSTY_ALLOW_PRODUCTION_STATE=1` still overrides
+  - a Linux `/proc/self/exe` path ending in ` (deleted)`, left when a concurrent build replaces the running test binary, is read without that suffix and still counts as a test process
+
+## [0.69.3] — 2026-11-12
+
+### Added
+
+- `console_rpc` gains the method names `console.machine_status` and `console.history` (#10942), and a `console_rpc::metrics` submodule, gated on `console-metrics` + `host-metrics`, with their request types `MachineStatusRequest` and `HistoryRequest` and response types `ConsoleMachineStatus` (`ready` plus the `MachineStatus` body) and `HistorySnapshot`. The request types accept absent, `null`, an object or `[]` and refuse anything else.
+- `HistorySnapshot`, `ServiceSample`, `ServiceTransition`, `ServiceState` and `MACHINE_HISTORY_SCHEMA_VERSION` moved here from trusty-console, so a client without a trusty-console dependency can decode the history, including the per-service CPU/RSS rings in `service_samples` (#10943). Every `HistorySnapshot` field now defaults on decode.
+- `ServiceStatus` gains an `Unknown` variant, and an unrecognised `ServiceStatus` or `ServiceState` string now decodes to `Unknown` instead of failing the whole answer, so an older `tm tui` still reads a newer console (#10996).
+
+### Fixed
+
+- A failed git step in `catchup::session_refs` now names the child's exit code, or the signal that killed it, and says when stderr was empty (#10667).
+- `linux_lifecycle::stop`, `start` and `restart` no longer read an unlinked or unanswering socket as "not running": a process of the daemon's binary that carries the descriptor's new `liveness_args` makes them fail with `LifecycleError::RunningUnserved`, so `restart` never starts a second daemon beside a running one (#11098).
+- `linux_lifecycle::start` spawns the daemon in the descriptor's new `working_dir` (default `/`), never the caller's cwd, and with a cleared environment holding only `DaemonDescriptor::BASE_ENV` plus the descriptor's new `env_passthrough` names, so a start from inside a checkout cannot load its `.env.local` or hand the daemon the caller's tokens (#11098).
+- The `linux_lifecycle` liveness scan counts only processes of this daemon instance: the descriptor's new `instance_env` names the variables, and their values, that identify the instance (default: the caller's `TRUSTY_DATA_DIR_OVERRIDE`), and `start` spawns the daemon with exactly those values. A sibling instance with the same binary and argv but another data dir, such as a sandbox, no longer makes `stop`, `start` or `restart` refuse, so `restart` brings the daemon back and a stopped daemon is started (#11098).
+- The scan fails closed: a matching process whose environment cannot be read is the new `LifecycleError::InstanceUnreadable`, and a `/proc` read error other than a vanished process or another uid's hidden entry (for example `EMFILE`), or a `/proc/<pid>/status` that cannot be parsed, is an error instead of "not running" (#11098).
+- The `linux_lifecycle` liveness scan reads `/proc/<pid>/status` as bytes, so a process anywhere on the host whose name is not valid UTF-8 no longer makes `stop`, `start` or `restart` fail for an unrelated daemon (#11098).
+
+## [0.69.1] — 2026-11-12
+
+### Added
+
+- New Linux-only `linux_lifecycle` module (feature `uds`): `stop`, `start` and `restart` for a daemon described by a caller-built `DaemonDescriptor`. `stop` identifies the listener by the socket's `SO_PEERCRED` pid and its `/proc/<pid>/exe` name, signals it through a pidfd (SIGTERM, then SIGKILL after the grace), and returns `Stopped` only once the pid has exited and the descriptor's stopped signal holds; a pid that outlives SIGKILL is a `Survivor` error. `start` spawns `<install dir>/<binary>` detached and succeeds only when the spawned pid serves the socket; when it fails after the spawn it kills and reaps the child, and `NotReady` and `ChildUnpinned` (no pidfd for the child) carry `killed`. `restart` starts only after a `Stopped` or `NotRunning` stop ([#11084](https://github.com/bobmatnyc/trusty-tools/issues/11084))
+
+## [0.69.0] — 2026-11-10
+
+### Added
+
+- `search_rpc::METHOD_INDEX_FILE_STATUS`, `IndexIdentity` and `IndexFileStatus` decode the trusty-search index identity and per-file status replies (#10738).
+- `control_bus::METHOD_EVENTS_HEALTH` (`"events.health"`) with its `EventsHealthParams` request and `EventsHealth` reply (`status`, `service`, `version`, `uptime_secs`, `ingested`, `deduped`, `evicted`, `log_dropped`, `subscribers`, `head_seq`), the health half of the trusty-events socket contract (#10901).
+- New ungated module `console_rpc` (#10902): the method names `console.health` and `console.fleet_status`, their response types `ConsoleHealth` and `ConsoleFleetStatus`, and the per-service row types `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` (moved from trusty-console), so a client without a trusty-console dependency can decode the console socket's answers. No type uses `deny_unknown_fields`.
+- `control_bus::METHOD_EVENTS_CONSOLE_METRICS` (`"events.console_metrics"`), `EventsConsoleMetricsParams`, and the reserved `by_project` keys `UNATTRIBUTED_PROJECT` and `OVERFLOW_PROJECT` (#10906).
+- `console_metrics::by_convention`: the contract note for the `<svc>.console_metrics` UDS method and the `by_*` breakdown convention, with `check_by_convention` to test a payload against it (#10906).
+- `HarnessSource::as_str` and `MessageDirection::as_str`, the wire strings without serialising (#10906).
+
+### Changed
+
+- `HarnessEvent` gains an optional `project` field (`serde(default)`, omitted when `None`), wire-compatible both ways. A struct literal must now name it (#10906).
+- `claude_temperature::accepts_temperature` is now public (behind the `bedrock` or `inference-client` feature), so downstream request builders reuse the Opus/Sonnet 5.5 temperature rule (#10939).
+
+## [0.67.6] — 2026-11-09
+
+### Security
+
+- Bump `rusqlite` to 0.41 so the bundled `libsqlite3-sys` is 0.39 or later, which fixes RUSTSEC-2026-0459.
+
+## [0.67.5] — 2026-11-07
+
+### Added
+
+- `search_rpc::METHOD_PROJECT_ENSURE`, `ensure_project_params` and `ensure_project_blocking` call the daemon's `search.project.ensure` (#10531).
+- `search_index::best_effort_trigger_reindex` is public, so a caller that found an index through `search.project.ensure` can run the freshness-gated reindex trigger (#10531).
+- `FastEmbedder::fallback_reason` returns the primary model's init error when the embedder fell back to the other model, and the fp32 reference test prints it (#10639).
+- `embedder::retry_transient_init` and `embedder::InitRetryPolicy`, moved from trusty-agents so `FastEmbedder` and the trusty-agents embedder share one transient-error classifier and backoff (#10662).
+
+### Fixed
+
+- `bind_singleton_hardened` now releases its bind lock explicitly, so a child forked during the bind no longer leaves the next binder refused with `BindInProgress` (#10661).
+- `FastEmbedder` no longer loads the other model when the primary model's init fails on an error the classifier treats as transient: a held hf-hub blob lock, HTTP 429, 500, 502, 503 or 504, a timeout, or a reset, refused or failed connection, a failed DNS lookup or unresolved host, an unreachable network, no route to host, or a stalled body read. It makes up to 5 attempts, then fails with a named `embedder init failed` error (#10662).
+- An offline host with only the INT8 model cached now fails with that error after its attempts instead of loading INT8. If connects hang rather than fail fast, a daemon's `TRUSTY_EMBEDDER_INIT_TIMEOUT_SECS` bound (default 180 s) can fire first (#10662).
+- Any other init error, including HTTP 401, 403 and 404 and a CoreML hang, is not retried and takes the same fallback path as before (#10662).
+
+## [0.67.4] — 2026-10-30
+
+### Added
+
+- `derive_registry_index_id(name, project_key)`, `registry_id_for_root`, `index_id_for_root` and `RegisteredProject` (feature `registry-index-id`, implied by `search-index`) derive an index id, `<slug(name)>-<8 hex of sha256("v2:" + project_key)>`, from a key tm stores once. `ensure_project_indexed_reporting_as` and `ensure_project_indexed_with_as` take the registry project. Index naming stays the legacy `derive_index_id` basename until `REGISTRY_IDS_ADOPTED` flips, so tm and trusty-code keep naming one index (#10530)
+
+### Security
+
+- `ChunkTokenizer::for_fastembed_model` and `for_fastembed_model_in` now reject a model-cache `refs/main` revision that is empty, contains `/`, `\` or `..`, or uses a character outside `[A-Za-z0-9._-]`, returning the new `ChunkError::InvalidRevision` before any tokenizer file is read (#10514)
+
+## [0.67.3] — 2026-10-30
+
+### Fixed
+
+- `build_session_name` strips a leaf's own leading `tm-` and trailing `-NN` before adding the prefix, so a hint of `tm-mpm-bugs-01` gives `tm-mpm-bugs`, not `tm-tm-mpm-bugs-01-01`. `leaf_slug_from_hint` applies the same strip, so the picker preview matches the daemon (#10478).
+- The first session for a leaf is bare `tm-<leaf>`. A `-02`, `-03`, … counter is added only when a taken name already holds `tm-<leaf>` or `tm-<leaf>-NN`; an existing `-01` counts as holding the base. Existing sessions keep their names (#10478).
+
+## [0.67.2] — 2026-10-30
+
+### Added
+
+- `EmbedderClient::last_reported_window`, read by `StdioEmbedderClient` from the optional `result.window` field of the first success frame that carries it; an earlier error or orphan frame no longer blocks it (#9284).
+- `PushClient::drain_buffered` removes and returns every buffered frame, oldest first, so a producer can hand undelivered events to a fallback store at shutdown (#10412).
+
+### Fixed
+
+- A child process no longer inherits the parent's sockets on macOS. `mio` sets close-on-exec on a new socket in a second step, so a child forked in that window kept a dropped connection open (511 of 20,000 in the issue's model). The new `child_fds::seal_inherited` hook marks every inherited descriptor close-on-exec before `exec`, and `git::command*`, `GhCommand`, `daemon_guard` detached spawns and the UDS supervisor child use it (#10083).
+
+## [0.67.1] — 2026-10-29
+
+### Security
+
+- The workspace lockfile moves libz-sys from 1.1.28 to 1.1.31, fixing RUSTSEC-2026-0418 (libz-sys build script leaks environment variables in the build directory), which failed the pre-publish `cargo audit` and `cargo deny` gates.
+- 0.67.0 was tagged (`trusty-common-v0.67.0`) but never published to crates.io, and its tag cannot move. 0.67.1 carries the 0.67.0 changes and is the first published release of that line.
+
+## [0.67.0] — 2026-10-29
+
+### Breaking
+
+- The `memory-core` feature, a no-op since the Memory Palace engine moved to trusty-memory in 0.64.0, is removed. A manifest that still names `trusty-common/memory-core` no longer resolves: drop it, depend on `trusty-memory` for the engine, and name `embedder`, `credentials`, `redb-open` or `chat-attachments` directly for what it used to imply ([#9272](https://github.com/bobmatnyc/trusty-tools/issues/9272))
+
+### Added
+
+- `credentials::resolve_env_var_bounded_store_first` and its hermetic core `resolve_provider_bounded_store_first_with` resolve a credential from the bounded store first, then the process environment (which reflects `.env.local`). A store read failure is returned as `Timeout` or `Store`, never answered from the environment. `resolve_env_var_bounded` keeps its env-first order (#9936).
+- `exec_stub::write_executable(path, contents)` writes a mode-0755 executable through a `/bin/cp` child, so this process never holds a write fd to it and a sibling fork cannot make the later exec fail with ETXTBSY. Every test that writes and then execs a stub uses it (#10248).
+- `stdio_mcp_client::capped_line::read_capped_line`, the cancel-safe 16 MiB-capped line reader, is public, with `MAX_LINE_BYTES` and `log_field`, so other stdio JSON-RPC clients share the same framing rules (#10360).
+
+### Fixed
+
+- `memory_rpc::call_memory_tool_at_with_timeout` (and so `call_memory_tool`, `call_memory_tool_at`, the monitor memory client and catch-up `fetch_recent_palace_drawers`) now runs the cached `memory.protocol` check before every call and refuses a daemon from another release with a downcastable `MemoryProtocolError` instead of misreading its replies. The check costs at most one extra round trip per socket per ten seconds; on a cache miss the handshake and the call each get the full timeout, so the worst case is twice the budget. Added `call_memory_tool_at_raw_with_timeout`, the explicit unchecked call for the handshake itself and for a probe that must report rather than refuse (#9538).
+- `claude_config::write_json_atomic` keeps an existing file's permission bits, creates a new file at 0600, and creates its staging file at 0600 before any byte is written. It used to publish every rewrite at the umask default, so a `.claude.json` tightened to 0600 went back to 0644 on the next write (#10041).
+- `StdioMcpClient` keeps the partial bytes of a stdout line when a call times out mid-line, so the next call resumes that line instead of failing with "parsing JSON-RPC frame" on its tail. A skipped frame that carries the awaited id now logs at `warn` with its id and method (#10360).
+- `stdio_mcp_client::is_response_to` is now public, so other stdio JSON-RPC clients apply the same response rule (#10360).
+- `StdioMcpClient` caps a buffered stdout line at 16 MiB. A longer line fails the call with an error naming the cap, and its remaining bytes are discarded up to the next newline. Logged frame ids, methods and unparsable lines are cut to 64 characters (#10360).
+- `StdioMcpClient` returns a frame as a call's result only when it is a response (`result` or `error`, no `method`) to the in-flight request id. A server request such as `roots/list` that reused the id was returned as the result, and `respawn` restarted ids at 1, so a frame carrying an id from the earlier process lifetime matched a request of the new one. Ids now keep counting across a respawn (#10360).
+
 ## [0.66.0] — 2026-10-26
 
 ### Breaking

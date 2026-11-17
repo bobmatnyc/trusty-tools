@@ -123,7 +123,8 @@ pub(crate) use architect_pane_probe::LivePanes;
 mod tmux_exact_target;
 #[cfg(test)]
 pub(crate) use tmux_exact_target::TmuxObject;
-pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target};
+// #10665: `kill_server` — no whole-server tmux kill without a scratch `-S`.
+pub(crate) use tmux_exact_target::{TMUX_TARGET_RULE, evaluate_tmux_exact_target, kill_server};
 // #10033: no hooked session runs `tm fleet relaunch`, the Architect included.
 pub(crate) mod fleet_relaunch;
 // #8878: the D4-remainder floor — uploads, disk tools, force-push to the default.
@@ -166,9 +167,10 @@ pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // #7839, #7738, #7744: the shared classifier the secret-read guard asks which
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
+// #10685: and whether a printer-only command can run anything nested.
 pub(crate) use bash_tokens::{
-    TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices, tokenize,
-    without_glob_metacharacters,
+    TEXT_PRINTERS, TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices,
+    runs_a_nested_command, tokenize, without_glob_metacharacters,
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.
@@ -218,8 +220,8 @@ use shell_lex::QuoteScan;
 use credential_print::is_evaluator;
 // #8756: the secret rules read substitution bodies through the same scanner.
 pub(crate) use substitutions::{
-    MAX_SUBSTITUTION_DEPTH, Substitution, command_substitutions, segment_substitution_spans,
-    without_inert_heredoc_bodies,
+    MAX_SUBSTITUTION_DEPTH, Substitution, blank_shell_comments, command_substitutions,
+    heredoc_expansions, segment_substitution_spans, without_inert_heredoc_bodies,
 };
 
 /// Deny reason for editing files through a shell tool (sed/awk/patch/git apply/redirection).
@@ -485,7 +487,9 @@ fn expand_shell_segments(command: &str, depth: usize, out: &mut Vec<String>) {
 /// `continuation_tests::split_shell_segments_keep_a_continued_command_whole_9180`,
 /// `split_shell_segments_still_splits_an_unterminated_heredoc`,
 /// `split_shell_segments_still_splits_a_shell_heredoc_body`.
-fn split_shell_segments_raw(command: &str) -> Vec<&str> {
+// #10672: crate-visible so the script rule reads the separators between
+// segments as written, with no wrapper descent.
+pub(crate) fn split_shell_segments_raw(command: &str) -> Vec<&str> {
     let scan = QuoteScan::new(command);
     let quoted = |i: usize| scan.balanced && !scan.is_unquoted(i);
     let bodies = heredoc::HeredocBodies::scan(command);

@@ -34,6 +34,8 @@ pub(crate) mod body;
 // #8614: the failing/running checks gate `tm pr merge` applies.
 pub(crate) mod check_gate;
 pub(crate) mod cleanup;
+// #10724: the code-critic BLOCK gate `tm pr merge` applies.
+pub(crate) mod critic_verdict;
 pub(crate) mod merge;
 pub(crate) mod metadata;
 pub(crate) mod metadata_apply;
@@ -44,6 +46,8 @@ pub(crate) mod phase_title;
 pub(crate) mod queue_check;
 // #8638: one latest-run rule for every rollup reader (queue-check, wait).
 pub(crate) mod rollup;
+// Dr4: the `rung:N` label `tm pr open` writes and `tm pr queue-check` reads.
+pub(crate) mod rung_label;
 
 #[cfg(test)]
 #[path = "tests.rs"]

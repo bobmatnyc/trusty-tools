@@ -79,6 +79,22 @@ pub enum ProjectStoreError {
     /// remedy (stale sidecar, permissions) is distinguishable from a data fault.
     #[error("project store lock error: {0}")]
     Lock(String),
+
+    /// A NEW project name carried a key another record already holds.
+    #[error("project key {key} already belongs to project {existing}; refusing to register {name}")]
+    DuplicateProjectKey {
+        key: String,
+        existing: String,
+        name: String,
+    },
+
+    /// A `~`-spelled `repo_url` could not be resolved to a readable checkout,
+    /// so no key is minted for it (#10604).
+    #[error("cannot register {repo_url}: {reason}")]
+    UnresolvableHomePath {
+        repo_url: String,
+        reason: &'static str,
+    },
 }
 
 /// Map the shared locked-RMW failure modes onto the store's own error type.
@@ -292,13 +308,57 @@ impl ProjectStore {
     /// Insert or update a project record, keyed by `project.name`.
     ///
     /// Why: registration is idempotent — re-registering a project with the same
-    /// name updates its fields rather than creating a duplicate.
+    /// name updates its fields rather than creating a duplicate. #10530: it is
+    /// also the one place a `project_key` is minted, so the key is stored once
+    /// and the trusty-search index id derived from it never moves.
     /// What: inserts or replaces the record keyed by `name` inside a single
-    /// [`Self::mutate`] critical section, so a concurrent writer in another
-    /// process can neither be lost nor lose this one.
-    /// Test: `store_upsert_idempotent`.
-    pub async fn upsert(&mut self, project: Project) -> Result<(), ProjectStoreError> {
+    /// [`Self::mutate`] critical section. The stored record's key always wins
+    /// over the incoming one; a record with none gets the incoming key or a
+    /// freshly minted one. A NEW name whose key another record already holds is
+    /// refused with [`ProjectStoreError::DuplicateProjectKey`]; updating an
+    /// existing record never is. A stored `decommissioned_at` survives an
+    /// incoming `None` (#10988).
+    /// Test: `store_upsert_idempotent`, `upsert_assigns_a_key_once_and_keeps_it`,
+    /// `upsert_refuses_a_second_project_with_the_same_key`,
+    /// `upsert_keeps_a_stored_decommissioned_state`.
+    pub async fn upsert(&mut self, mut project: Project) -> Result<(), ProjectStoreError> {
         self.mutate(move |projects| {
+            let is_new = !projects.contains_key(&project.name);
+            let stored = projects
+                .get(&project.name)
+                .and_then(|p| p.project_key.clone());
+            // #10988: a re-register (config seed, `project_register`) must not
+            // re-list a decommissioned project; only `update_with` clears it.
+            if project.decommissioned_at.is_none() {
+                project.decommissioned_at = projects
+                    .get(&project.name)
+                    .and_then(|p| p.decommissioned_at);
+            }
+            // #10991: the same for an archived project.
+            if project.archived_at.is_none() {
+                project.archived_at = projects.get(&project.name).and_then(|p| p.archived_at);
+            }
+            // Lazy: an absolute-path `repo_url` shells out to git, so mint only
+            // when neither the store nor the caller supplied a key.
+            // #10604: an unresolvable `~` checkout is refused, not keyed `local:`.
+            let key = match stored.or(project.project_key.take()) {
+                Some(key) => key,
+                None => super::project_key::assign_project_key(&project.repo_url)?,
+            };
+            // #10530: only a NEW name can be refused; an existing record
+            // (including a legacy one sharing a repo) is always updatable.
+            if is_new
+                && let Some(other) = projects
+                    .values()
+                    .find(|p| p.project_key.as_deref() == Some(key.as_str()))
+            {
+                return Err(ProjectStoreError::DuplicateProjectKey {
+                    key,
+                    existing: other.name.clone(),
+                    name: project.name.clone(),
+                });
+            }
+            project.project_key = Some(key);
             projects.insert(project.name.clone(), project);
             Ok(())
         })
@@ -327,7 +387,10 @@ impl ProjectStore {
                 .get(&name)
                 .cloned()
                 .ok_or(ProjectStoreError::NotFound(name))?;
-            let updated = f(current);
+            // #10530: the key is stored once; an edit closure cannot move it.
+            let key = current.project_key.clone();
+            let mut updated = f(current);
+            updated.project_key = key;
             projects.insert(updated.name.clone(), updated.clone());
             Ok(updated)
         })
@@ -359,6 +422,41 @@ impl ProjectStore {
         self.reload_if_changed().await?;
         Ok(self.data.projects.values().cloned().collect())
     }
+}
+
+/// Read the registry's projects without a lock or a runtime (#10530).
+///
+/// Why: session launch and `tm doctor` derive an index id from a sync context
+/// and need the owning project's stored key. Reads are safe unlocked because
+/// every publish is an atomic rename (see the module `Concurrency` note).
+/// What: parses `<data_dir>/projects.json`; `None` when absent or unparseable,
+/// so a caller falls back to the legacy id rather than failing.
+/// Test: `index_id_matches_between_registration_publication_and_trusty_code`.
+pub(super) fn read_projects_blocking(data_dir: &Path) -> Option<Vec<Project>> {
+    let path = data_dir.join("projects.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let data: StoredData = serde_json::from_slice(&bytes)
+        .inspect_err(|e| tracing::warn!(path = %path.display(), "projects.json unparseable: {e}"))
+        .ok()?;
+    Some(data.projects.into_values().collect())
+}
+
+/// Read the registry's projects without a lock or a runtime, failing closed.
+///
+/// Why: #10368 — a secrets resolver must tell "no such project" from "the
+/// registry could not be read"; [`read_projects_blocking`] answers `None` for both.
+/// What: an absent `projects.json` is an empty list, as in [`ProjectStore::load`];
+/// any other read error and any parse error is returned.
+/// Test: `session_start_registration_failure_is_an_error_not_a_registration`.
+pub(super) fn read_projects(data_dir: &Path) -> Result<Vec<Project>, ProjectStoreError> {
+    let bytes = match std::fs::read(data_dir.join("projects.json")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(ProjectStoreError::Io(e)),
+    };
+    let data: StoredData =
+        serde_json::from_slice(&bytes).map_err(|e| ProjectStoreError::Serialize(e.to_string()))?;
+    Ok(data.projects.into_values().collect())
 }
 
 #[cfg(test)]

@@ -15,6 +15,10 @@
 //! - Helper functions [`make_report`] (service side, build a report) and
 //!   [`parse_report`] (console side, decode a raw MCP tool result).
 //!
+//! - The `<svc>.console_metrics` UDS method and the `by_*` breakdown
+//!   convention for `metrics`, in [`by_convention`] (#10906, D95), with its
+//!   checker [`check_by_convention`].
+//!
 //! What: Gated behind the `console-metrics` feature flag in `trusty-common`.
 //! Depends on `stdio-mcp-client` (same feature group) for the client types
 //! used by console pollers.
@@ -33,6 +37,13 @@ use serde_json::Value;
 // console enables both features.
 #[cfg(feature = "host-metrics")]
 pub mod machine_status;
+
+// #10906: the UDS method and `by_*` contract every `<svc>.console_metrics` follows.
+pub mod by_convention;
+#[cfg(test)]
+mod by_convention_tests;
+
+pub use by_convention::{BY_PREFIX, ByConventionViolation, check_by_convention};
 
 /// The MCP tool name a local service exposes (no arguments) so a console can
 /// poll it uniformly.

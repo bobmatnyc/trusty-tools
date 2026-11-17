@@ -33,7 +33,7 @@ SILENT_MINUTES_DEFAULT = 45
 FROZEN_MIN_DEFAULT = 15    # minutes of transcript silence under a running turn
 RELAUNCH_DEBOUNCE = 1800   # seconds between relaunch attempts
 MAX_FAILURES = 2           # failed relaunches before the watchdog gives up
-RELAUNCH_TIMEOUT = 300     # seconds session-relaunch.sh may take
+RELAUNCH_TIMEOUT = 300     # seconds one `tm architect up` may take (#11367)
 
 
 def silent_minutes():
@@ -69,7 +69,8 @@ def classify(panes, session, shells, wake_at, transcript_mtime, now, silent_min,
     test_classify_frozen_by_identical_spinner, test_classify_not_frozen_when_idle,
     test_classify_not_frozen_when_spinner_changes
     """
-    mine = [p for p in panes if p["session"] == session]
+    # #10101: a same-named session on a workspace server is not this one.
+    mine = [p for p in panes if p["session"] == session and not p.get("server")]
     if not mine:
         return "dead", f"tmux session {session} is missing"
     if all(p["cmd"] in shells or p["cmd"].startswith("-") for p in mine):

@@ -21,11 +21,16 @@ use super::super::shell_groups::is_brace_expansion;
 use super::super::write_targets::input_redirect;
 use crate::cli::Cli;
 
+/// The `tm` subcommand paths a floor names, each outermost first; a path
+/// that starts with one runs it (#8878 PR2a: the relaunch floor and the
+/// presence verbs share the walk).
+pub(crate) type Verbs = &'static [&'static [&'static str]];
+
 /// What one `tm` argv runs, as far as the guard can tell.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Reading {
-    /// `tm fleet relaunch`.
-    Relaunch,
+    /// A subcommand the floor names.
+    Matched,
     /// Any other subcommand, help or version output.
     Other,
     /// A word the shell expands sits where the subcommand is chosen.
@@ -127,17 +132,18 @@ fn is_pattern(word: &str) -> bool {
 /// are: errors ignored, the subcommand path clap reached decides. A path
 /// that already chose a leaf subcommand, or a group other than `fleet`,
 /// cannot reach `fleet relaunch`; an expanded word at the top level or under
-/// `fleet` is [`Reading::Unresolved`].
+/// `fleet` is [`Reading::Unresolved`]. #8878 PR2a: for any `verbs`, an
+/// expanded word is unresolved where the path is a strict prefix of one.
 /// Test: `an_expanded_word_where_the_subcommand_goes_denies`,
 /// `an_expanded_word_after_another_subcommand_passes`,
 /// `shell_syntax_around_a_relaunch_does_not_hide_it`.
-pub(super) fn read_tm_args(args: &[Word]) -> Reading {
+pub(super) fn read_tm_args(args: &[Word], verbs: Verbs) -> Reading {
     let first_dynamic = args.iter().position(|w| w.dynamic);
     let fixed = &args[..first_dynamic.unwrap_or(args.len())];
     let argv = || std::iter::once("tm").chain(fixed.iter().map(|w| w.text.as_str()));
     if first_dynamic.is_none() {
         match Cli::command().try_get_matches_from(argv()) {
-            Ok(m) if subcommand_path(&m) == ["fleet", "relaunch"] => return Reading::Relaunch,
+            Ok(m) if names_verb(&subcommand_path(&m), verbs) => return Reading::Matched,
             Ok(_) => return Reading::Other,
             Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
                 return Reading::Other;
@@ -152,12 +158,26 @@ pub(super) fn read_tm_args(args: &[Word]) -> Reading {
         .try_get_matches_from(argv())
         .map(|m| subcommand_path(&m))
         .unwrap_or_default();
-    let path: Vec<&str> = path.iter().map(String::as_str).collect();
-    match (path.as_slice(), first_dynamic) {
-        (["fleet", "relaunch"], _) => Reading::Relaunch,
-        ([] | ["fleet"], Some(at)) => Reading::Unresolved(args[at].text.clone()),
+    if names_verb(&path, verbs) {
+        return Reading::Matched;
+    }
+    let reachable = |verb: &&[&str]| verb.len() > path.len() && starts_with(verb, &path);
+    match first_dynamic {
+        Some(at) if verbs.iter().any(reachable) => Reading::Unresolved(args[at].text.clone()),
         _ => Reading::Other,
     }
+}
+
+/// Whether `path` starts with one of `verbs`.
+fn names_verb(path: &[String], verbs: Verbs) -> bool {
+    verbs
+        .iter()
+        .any(|verb| path.len() >= verb.len() && starts_with(path, verb))
+}
+
+/// Whether the first `min(len)` names of `a` and `b` agree.
+fn starts_with(a: &[impl AsRef<str>], b: &[impl AsRef<str>]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x.as_ref() == y.as_ref())
 }
 
 /// The chain of subcommand names `m` selected, outermost first.

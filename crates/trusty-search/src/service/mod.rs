@@ -27,6 +27,8 @@ pub mod grep;
 pub mod grep_glob;
 pub(crate) mod index_admission;
 pub mod index_budget;
+// #10738: the persisted `(instance_id, generation)` index identity.
+pub mod index_identity;
 pub mod indexed_files;
 pub mod lazy_loader;
 pub(crate) mod lazy_restore;
@@ -70,6 +72,11 @@ pub mod stall_tracker;
 pub(crate) mod storage_layout;
 pub mod timeout_recovery;
 pub mod ui;
+// #10551: embed only the chunks with no vector, by hand or on a backoff.
+pub mod embed_missing;
+#[cfg(test)]
+pub(crate) mod embed_missing_support_tests;
+pub mod embed_retry;
 // #8726: demote a `ready` semantic stage short of vectors and queue its backfill.
 pub mod vector_gap;
 pub mod walker;

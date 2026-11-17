@@ -33,7 +33,6 @@ use colored::Colorize;
 use commands::convert::ConvertTarget;
 use commands::explicit_target::index_id_source;
 use commands::index_action::IndexAction;
-use commands::index_remove::handle_index_remove;
 use commands::monitor::MonitorTarget;
 use commands::service::ServiceAction;
 use std::io;
@@ -465,8 +464,34 @@ enum Commands {
     ///
     /// Examples:
     ///   trusty-search stop
+    #[cfg(not(target_os = "linux"))]
     #[command(display_order = 21)]
     Stop,
+
+    /// Stop the daemon serving this data dir's socket (#11085)
+    ///
+    /// Signals only a proven `trusty-search` peer; exits 1 when none runs or a
+    /// process survives SIGKILL.
+    ///
+    /// Examples:
+    ///   trusty-search stop
+    ///   trusty-search stop --data-dir /tmp/test-daemon
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 21)]
+    Stop(commands::linux_lifecycle::LifecycleArgs),
+
+    /// Stop the daemon, confirm it stopped, then start the installed binary
+    ///
+    /// A daemon that is not running is started. Refuses while the
+    /// trusty-search.service systemd unit is active (#11085).
+    ///
+    /// Respawns as `start --foreground [--data-dir]`: `--auto-discover` and
+    /// `--no-auto-discover` are not carried over; `--device` and the fan-out
+    /// cap survive through daemon.env. A daemon started with `--socket` is
+    /// refused as unidentified by `stop` and `restart`.
+    #[cfg(target_os = "linux")]
+    #[command(display_order = 22)]
+    Restart(commands::linux_lifecycle::LifecycleArgs),
 
     /// Start the MCP server over stdio
     ///
@@ -1168,33 +1193,7 @@ async fn run() -> Result<()> {
             no_kg,
             action,
         } => match action {
-            // #6422: the on-disk data goes by default; `--keep-data` opts out.
-            Some(IndexAction::Remove {
-                path: rm_path,
-                keep_data,
-                yes,
-            }) => {
-                handle_index_remove(rm_path, cli.index, index_source, keep_data, yes).await?;
-            }
-            Some(IndexAction::Add {
-                path: add_path,
-                name: add_name,
-                allow_sensitive_path: add_allow_sensitive,
-            }) => {
-                commands::index_allowlist::handle_allowlist_add(
-                    add_path,
-                    add_name,
-                    add_allow_sensitive,
-                )
-                .await?;
-            }
-            Some(IndexAction::List { json }) => {
-                commands::index_allowlist::handle_allowlist_list(json).await?;
-            }
-            Some(IndexAction::Relocate { to }) => {
-                commands::index_relocate::handle_index_relocate(&cli.index, index_source, to)
-                    .await?;
-            }
+            Some(action) => action.run(cli.index, index_source, cli.json).await?,
             None => {
                 commands::index::handle_index(
                     path,
@@ -1245,7 +1244,13 @@ async fn run() -> Result<()> {
         // #9214: the flags live in `commands::start::StartArgs`.
         Commands::Start { args } => commands::start::handle_start(args, cli.verbose).await?,
 
+        #[cfg(not(target_os = "linux"))]
         Commands::Stop => commands::stop::handle_stop().await?,
+        // #11085: Linux stop/restart on trusty_common::linux_lifecycle.
+        #[cfg(target_os = "linux")]
+        Commands::Stop(args) => commands::linux_lifecycle::stop(args).await?,
+        #[cfg(target_os = "linux")]
+        Commands::Restart(args) => commands::linux_lifecycle::restart(args).await?,
 
         Commands::Serve {
             with_http,

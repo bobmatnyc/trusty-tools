@@ -6,6 +6,112 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.1] — 2026-11-16
+
+### Fixed
+
+- Linux: `start` and `restart` pass `RUST_LOG_BUFFER` to the daemon they spawn, so its in-memory log buffer keeps the filter a shell-started daemon would use (#11085).
+
+### Changed
+
+- The Linux lifecycle restart tests scan an injected process table of their own processes, so a host trusty-memory daemon no longer changes their result (#11085). `restart` behaviour is unchanged.
+
+## [1.0.0] — 2026-11-15
+
+### Fixed
+
+- `memory_recall` and `memory_recall_deep` open a cold palace on the blocking pool and wait at most `TRUSTY_RECALL_OPEN_WAIT_SECS` (15 s); past that they answer a retryable `palace_opening` error (JSON-RPC code `-32007`, `error.data` with `kind`, `retryable`, `palace`, `waited_ms`) while the open goes on, so a retry finds the palace (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a `memory_recall_all` `scope: "all"` walk stops at `TRUSTY_RECALL_ALL_DEADLINE_SECS` (20 s) and returns the results gathered so far; every response carries `deadline_exceeded` and `palaces_not_reached`, unreached palaces count under the `deadline` reason, and no detached reopen runs after a deadline hit (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- the chat `recall_memories` tool and the per-message chat context use the same bounded open: the tool answers `{error, kind: "palace_opening", retryable: true, palace, waited_ms}`, and the context says the palace is still opening (or that the recall failed) instead of reading as "no relevant memories" (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- recalls of one palace that miss the cache together share one open, so callers and retries no longer each park a blocking thread on it; a failed open reaches every caller waiting on it and the next call tries again, and a caller whose shared open hit the open-queue bound waits out its own open wait and answers `palace_opening` instead of an internal error (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a zero, negative or non-numeric `TRUSTY_RECALL_OPEN_WAIT_SECS` / `TRUSTY_RECALL_ALL_DEADLINE_SECS` falls back to its default; the open wait is capped at three quarters of `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` and the deadline at 3600 s, so no value can panic the daemon (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+
+### Changed
+
+- trusty-memory 1.0.0: stability release; the public API surface, wire formats and on-disk formats are now covered by Semantic Versioning, so a breaking change needs a major version from here on (owner ruling Dnx)
+
+## [0.36.8] — 2026-11-14
+
+### Added
+
+- `memory.palace_unload {palace_id}`, a socket method (not an MCP tool) that releases one palace's open handles and caches and keeps its data on disk (#10989). It waits up to 10 s for an in-flight write, flushes the palace's BM25 index, drops its session store and registry handle, and answers `{palace_id, canonical_id, exists, was_resident, unloaded, data_kept}`. A busy palace is refused (`-32006`) and nothing is released; a palace not on disk answers `exists: false`. The next use reopens the palace from disk. tm's project decommission calls it.
+- `memory.palace_unload` answers unloaded only after the palace's redb files are closed, waiting up to the same 10 s (#10989). The next use then reopens the palace writable, never on a read-only snapshot. A file still open after the wait is refused (`-32006`).
+- On Linux, `trusty-memory start`, `stop` and a new `restart` run on the shared Linux lifecycle (#11085): `stop` stops only the daemon serving this data dir's socket and fails while a process survives SIGKILL; `restart` stops, confirms the stop, then starts the installed binary, and starts a daemon that is not running. The daemon they start gets a cleared environment that keeps every non-credential setting it reads (multi-tenant mode, embedder model and caches, BM25, timeouts) and leaves API keys out. A non-UTF-8 or blank `TRUSTY_DATA_DIR_OVERRIDE` is refused. macOS is unchanged.
+
+### Fixed
+
+- the room-counts console metrics test waits for the evicted palace's KgWriter task before it reads the disk, which removes a flaky failure (Refs [#11080](https://github.com/bobmatnyc/trusty-tools/issues/11080))
+
+## [0.36.7] — 2026-11-10
+
+### Changed
+
+- Requires trusty-common 0.69; no library source change (Refs #10735).
+
+### Fixed
+
+- The `umask_000_end_to_end_export_is_owner_only_and_leaks_nothing` test no longer flakes: its 4-char leak scan now ignores the random characters of temp-dir names, which could match a token window by chance (#10549).
+
+## [0.36.6] — 2026-11-09
+
+### Security
+
+- Bump `rusqlite` to 0.41 so the bundled `libsqlite3-sys` is 0.39 or later, which fixes RUSTSEC-2026-0459.
+
+## [0.36.5] — 2026-11-07
+
+### Fixed
+
+- the uncached-palace console metrics test waits for the aborted KgWriter task before it reads the disk, which removes a flaky failure (Refs [#10515](https://github.com/bobmatnyc/trusty-tools/issues/10515))
+- `memory_note` and `memory_remember` no longer skip a `fact_key` slot rewrite as a near-duplicate. A new value that differs from the slot's occupant by a few characters, such as a step number, now replaces the occupant instead of leaving the stale value in recall. Writes without an admitted slot keep the 5-minute near-duplicate window (#10643).
+- A malformed `expires_at` on either tool is now an error even when the content would also trip a content gate; it no longer returns a "skipped" success envelope (#10643).
+- An HNSW operation abandoned at its budget is now counted before the store's breaker trips, so any reader that sees the breaker tripped also sees `abandoned_ops` at least 1. Before, a health read or test could catch the tripped breaker with a count of 0 (#10707).
+
+### Documentation
+
+- The ignored test `engine::retrieval::chunk_backfill_measure_tests::slice_defaults_and_recall_contention_measured` was not run in the 1.12.0 release gate. It exceeds 16 GB RSS and exhausts the gate host's memory ([#10802](https://github.com/bobmatnyc/trusty-tools/issues/10802)).
+  - The owner chose to ship without it (decision Dec, 2026-11-07).
+  - All other trusty-memory tests, including ignored ones, passed in the gate.
+
+## [0.36.4] — 2026-10-31
+
+### Changed
+
+- Default recall (`memory_recall`, `memory_recall_deep`, `memory_recall_all`, and the in-process `MemoryService` recall used by the chat tools) now leaves out superseded drawers, so a retired `fact_key` slot occupant no longer appears at a halved score with no marker ([#10609](https://github.com/bobmatnyc/trusty-tools/issues/10609), [ADR-0074](docs/adr/0074-exclude-superseded-drawers-from-default-recall.md), owner ruling D83)
+  - Retire-on-write stamps a `superseded-by:<id>` tag on the incumbent in the same atomic commit, so a slot retiree is excluded from its own row even when the KG edge lookup fails or runs late
+  - A supersession known only from a `superseded_by` KG edge is excluded when the lookup answers; when it fails or exceeds its budget the response carries `supersession_unverified: true`
+  - New optional `include_superseded: true` on the three recall tools is the historical search: it returns the superseded drawers, each tagged `superseded: true` and `superseded_by`, below their replacement
+  - Dream dedup merges no longer copy a retirement marker onto the surviving drawer
+  - The in-memory drawer table now carries the marker as well as the stored row, so a running daemon excludes a retired occupant at once rather than after the palace reopens, and a later rewrite of the drawer (chunk split, dream merge) keeps it
+  - `superseded-by:*` is a reserved tag namespace: writes (`memory_remember`, `memory_note`, `task_add` and the engine write pipeline) strip a caller-supplied one and log a WARN, and recall and `memory_list` no longer show the marker among a drawer's tags (a historical search reports it as `superseded_by`)
+  - A share-file import that merges into an existing drawer never imports a `superseded-by:*` tag, so a crafted file cannot hide a live drawer
+
+## [0.36.2] — 2026-10-30
+
+### Performance
+
+- An upsert into a vector index at or below the exhaustive-scan threshold (24,576 points) no longer re-tests stranded graph points, which cost 3.5-4.5x the insert and is unread at that size. The upsert that takes the index past the threshold rebuilds the stranded set as open does; above it nothing changes ([#10271](https://github.com/bobmatnyc/trusty-tools/issues/10271))
+
+## [0.36.1] — 2026-10-30
+
+### Added
+
+- `memory_recall`, `memory_recall_all` and `memory_list` rows now carry `access_count`, `accumulated_boost` and `last_accessed_at` (#9881). The fields are additive. A recall row shows the count as of before its own access.
+
+### Fixed
+
+- `memory_remember` and `memory_note` accept a file reference with a `:line` or `:line:column` suffix, such as `architect/.claude/skills/instance-evo/SKILL.md:38`. The digits-only suffix is removed and the rest of the path is judged by the same rules as any path, so a credential-shaped file name is still refused. `SECRET_FILTER_VERSION` is now 3, so a kuzu-import review verdict recorded under version 2 refuses its row until the row is exported and reviewed again. Memories already stored are untouched ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+- The secret gate no longer overflows the stack on a token with thousands of `=`, such as a 100 KB `a=b&a=b&...` query string. Past 64 `=` the token is judged by the entropy rules instead of the key=value rule ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+- A palace loaded from disk (restart, idle evict and reload, restore) now builds its closet keyword index on open. Before, the index stayed empty until the next write or dream cycle, and every recall lost the 0.15 closet tag boost in that window (#10377).
+
+### Changed
+
+- The HNSW op-budget watcher reads its start time from tokio's clock instead of `std::time::Instant` (#10335). Behaviour is unchanged: tokio's clock is the system clock unless a test pauses it. The op-budget progress tests now run on a paused clock and no longer trip a progressing group when the host is under load.
+
+### Security
+
+- The secret gate refuses a URL that carries a credential in its userinfo (`https://user:pass@host/path?x=1`, including a password holding a raw `#` or `?`), its query string or its fragment. A parameter is a credential by name, matched after lowercasing and reading `-` as `_`: a name ending in `token`, `signature` or `credential` (value of 8 bytes or more), a name ending in `password`, `passwd`, `pwd` or `secret` (any value, so `?password=hunter2` is refused), or `sig`, `key` or `auth` as a whole word (`x-api-key`, `secret_key`, and the camelCase and dotted spellings `clientKey` and `api.key`; `key` and `auth` need 16 or more letters and digits, so `?sort_key=asc` and `?keyword=rust` stay accepted). Any parameter value that is itself credential-shaped is refused too. Before, a `?`, `&` or `#` in the URL let these through ([#9748](https://github.com/bobmatnyc/trusty-tools/issues/9748))
+
 ## [0.36.0] — 2026-10-26
 
 ### Breaking

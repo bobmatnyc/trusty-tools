@@ -12,10 +12,15 @@
 # refuses (exit 1, NOT-OURS, no Enter) unless the box is `typed` and starts
 # with the same marker; only then sends Enter as a separate call. Text it
 # typed and could not confirm stays in the box for the next pass to see.
+# #10780: before the box is touched, refuses (exit 3, NO-OWNER-CITE) a
+# `User ruling (<name>):` or `User instruction (<name>):` label that is not
+# the owner's quoted words plus `(owner turn: <cite>)` verified against the
+# owner-turn record (scripts/relay_provenance.py, which logs every check).
 # Usage: scripts/relay.sh <session> <text>
 #   <session> is the tmux session name; every call uses the exact target
 #   '=<session>:'. Works from any directory. Honours TMUX_SOCKET.
 #   Exit 0: sent. Exit 1: refused, nothing submitted. Exit 2: usage error.
+#   Exit 3: an owner label without a verified owner citation; nothing typed.
 # Test: tests/test_relay.py (a stub tmux on PATH).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -40,6 +45,13 @@ if [ -z "$mark" ]; then
   echo "$s NO-MARKER: the text must start with [<Name> Architect HH:MMZ]"
   exit 1
 fi
+# #10780: an owner label needs the owner's cited words; refuse before typing.
+prov="$(python3 "$HERE/relay_provenance.py" check "$s" "$text")"
+case $? in
+  0) ;;
+  3) echo "$s ${prov}"; exit 3 ;;
+  *) echo "$s PROVENANCE input=error; nothing typed"; exit 1 ;;
+esac
 
 # Prints "<state>|<box text>" from input-state.py's "<pane> <state> | <text>".
 box_state() {

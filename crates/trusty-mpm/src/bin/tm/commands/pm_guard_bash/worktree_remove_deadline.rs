@@ -36,10 +36,11 @@ use super::worktree_remove_rechecks::{
     CHECK_CLEAN_TREE, CHECK_LOCAL_ONLY_COMMITS, CHECK_MERGED_PULL_REQUEST, CHECK_SOLE_OWNER,
     CHECK_UNPUSHED_COMMITS, evaluate_removal_rechecks, recheck_deny,
 };
-use crate::commands::pm_guard::build_pm_guard_deny_response;
 use crate::commands::pm_guard_deny_log::{DenyContext, post_deny_audit, record_deny};
 use crate::commands::pm_guard_dispatch;
-use std::io::Write;
+use crate::commands::pm_guard_refusal::emit;
+use crate::commands::pm_guard_response::build_pm_guard_deny_response;
+use trusty_mpm::core::guard_policy;
 
 /// By when, from PROCESS START, the re-checks must have decided (#7889).
 ///
@@ -114,9 +115,12 @@ pub(crate) async fn print_deny_then_audit(
     reason: &str,
     started: Instant,
 ) {
-    println!("{}", build_pm_guard_deny_response(reason));
-    // Nothing useful can be done with a flush error; the deny is written.
-    let _ = std::io::stdout().flush();
+    // #10641: the check names the policy entry; a miss still refuses (GP-000).
+    // `emit` flushes and records the printed decision (#10600).
+    emit(build_pm_guard_deny_response(
+        guard_policy::for_rule(check),
+        reason,
+    ));
     record_deny(refused, check, reason);
     let left = remaining(DECISION_DEADLINE, started);
     if left.is_zero() {

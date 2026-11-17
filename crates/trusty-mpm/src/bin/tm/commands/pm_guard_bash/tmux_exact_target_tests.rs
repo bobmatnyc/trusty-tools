@@ -733,3 +733,46 @@ fn an_unknown_evaluator_option_is_no_script_operand_9053() {
         assert_eq!(denied(&fake(), command), None, "{command}");
     }
 }
+
+/// A probe whose one server, named by its `-L`/`-S` words, holds `tm-pm`;
+/// every other server lists nothing.
+struct OnServer(Vec<String>);
+
+impl PaneProbe for OnServer {
+    fn architect_live(&self) -> Result<bool, String> {
+        Ok(false)
+    }
+    fn panes(&self, _server: &[String]) -> Result<Vec<Pane>, String> {
+        Ok(Vec::new())
+    }
+    fn current_pane(&self) -> Option<String> {
+        Some("%2".into())
+    }
+    fn objects(&self, server: &[String]) -> Result<Vec<TmuxObject>, String> {
+        Ok(if server == self.0.as_slice() {
+            vec![row((2, "tm-pm"), (2, "0", "zsh", true), (2, "0"))]
+        } else {
+            Vec::new()
+        })
+    }
+}
+
+/// #10101: the argv tm now emits for a workspace server (`-L tm-ws-…`, or
+/// `-S <socket>`) is judged on that server: an exact target it lists passes,
+/// a prefix still denies, and the same target is not taken from another
+/// server. Nothing is loosened.
+#[test]
+fn a_workspace_server_argv_is_judged_on_its_own_server() {
+    let socket = "/private/tmp/tmux-501/tm-ws-repo-0123";
+    for server in [
+        vec!["-L".to_owned(), "tm-ws-repo-0123".to_owned()],
+        vec!["-S".to_owned(), socket.to_owned()],
+    ] {
+        let probe = OnServer(server.clone());
+        let on = |target: &str| aimed(&format!("{} send-keys", server.join(" ")), target);
+        assert_eq!(denied(&probe, &on("=tm-pm")), None, "{server:?}");
+        assert!(denied(&probe, &on("tm-p")).is_some(), "{server:?}");
+        // The default server lists nothing, so the bare form denies.
+        assert!(denied(&probe, &aimed("send-keys", "=tm-pm")).is_some());
+    }
+}

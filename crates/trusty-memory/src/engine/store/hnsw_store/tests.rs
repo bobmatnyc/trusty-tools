@@ -1580,27 +1580,85 @@ fn replay_leaves_no_point_without_neighbours() {
     let live: Vec<(Vec<f32>, usize)> = (0..n)
         .map(|i| (spread_vec(dim, 55_000 + i as u64), i))
         .collect();
-    let mut bad_builds = Vec::new();
-    for build in 0..200 {
-        let index = replay::new_index();
-        replay::replay(&index, &live).expect("replay");
-        assert_eq!(index.get_nb_point(), n, "build {build}: point count");
-        let orphans = points_without_neighbours(&index);
-        if !orphans.is_empty() {
-            bad_builds.push((
-                build,
-                orphans.len(),
-                orphans[..orphans.len().min(10)].to_vec(),
-            ));
+    let (tick, ticks) = std::sync::mpsc::channel::<usize>();
+    // A pool of its own: on rayon's global pool, other tests' replays queued
+    // ahead of a build for minutes, which the per-build guard cannot tell from
+    // a hang.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(REPLAY_POOL_THREADS)
+        .build()
+        .expect("replay pool");
+    let body = std::thread::spawn(move || {
+        let mut bad_builds = Vec::new();
+        for build in 0..REPLAY_BUILDS {
+            let index = replay::new_index();
+            pool.install(|| replay::replay(&index, &live))
+                .expect("replay");
+            assert_eq!(index.get_nb_point(), n, "build {build}: point count");
+            let orphans = points_without_neighbours(&index);
+            if !orphans.is_empty() {
+                bad_builds.push((
+                    build,
+                    orphans.len(),
+                    orphans[..orphans.len().min(10)].to_vec(),
+                ));
+            }
+            let _ = tick.send(build);
         }
-    }
+        bad_builds
+    });
+    watch_replay_builds(&ticks);
+    let bad_builds = body
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     assert!(
         bad_builds.is_empty(),
-        "{} of 200 builds left points with no layer-0 neighbours; first \
-         (build, count, first ids): {:?}",
+        "{} of {REPLAY_BUILDS} builds left points with no layer-0 neighbours; \
+         first (build, count, first ids): {:?}",
         bad_builds.len(),
         bad_builds.first()
     );
+}
+
+/// Builds `replay_leaves_no_point_without_neighbours` runs.
+const REPLAY_BUILDS: usize = 200;
+
+/// Threads in the test's own replay pool; a 4-vCPU CI runner's count, so the
+/// inserts still race.
+const REPLAY_POOL_THREADS: usize = 4;
+
+/// Longest one replay build may take before the test calls it hung.
+///
+/// Why: on a 4-vCPU CI runner the 200 builds took ~27 minutes in total, about
+/// 8 s each, and a CI leg sat silent past that. A bound on the whole test
+/// would have to clear 27 minutes; a bound on each build fails a stalled build
+/// within minutes. Alone on EVO with 4 threads a build takes 3.6 s; the bound
+/// is ~35 times the CI per-build time.
+/// What: [`watch_replay_builds`] waits at most this long for each build.
+const REPLAY_BUILD_HANG_GUARD: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Wait for one tick per replay build; panic, naming the build, if a build
+/// takes longer than [`REPLAY_BUILD_HANG_GUARD`].
+///
+/// Why: a hang inside `hnsw_rs`'s `parallel_insert_slice` otherwise stalls the
+/// whole test binary with no result line until the CI job times out.
+/// What: returns when the body thread has sent [`REPLAY_BUILDS`] ticks or has
+/// ended (the caller's `join` then reports its panic). The stalled body thread
+/// is left behind; the harness exits the process after its last test.
+/// Test: `replay_leaves_no_point_without_neighbours`.
+fn watch_replay_builds(ticks: &std::sync::mpsc::Receiver<usize>) {
+    use std::sync::mpsc::RecvTimeoutError;
+    for expected in 0..REPLAY_BUILDS {
+        match ticks.recv_timeout(REPLAY_BUILD_HANG_GUARD) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => panic!(
+                "replay_leaves_no_point_without_neighbours: build {expected} of \
+                 {REPLAY_BUILDS} did not finish within {REPLAY_BUILD_HANG_GUARD:?}; \
+                 the replay's parallel insert is stalled"
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2079,6 +2137,152 @@ fn transitive_strand(pre_record: bool) {
         hit_uuids(&store, &behind, 10).contains(&"behind".to_string()),
         "behind, stranded transitively by a later upsert, is missing from its \
          own top 10 with no reopen"
+    );
+}
+
+/// #10271: a store whose graph holds exactly the threshold, filled by upserts
+/// that must skip stranded upkeep, the last of which strand `probe` unrecorded.
+///
+/// What: the #9174 geometry of
+/// `an_upsert_that_strands_an_existing_drawer_still_finds_it`, seeded short of
+/// the threshold by the probe and the 32 drawers that evict it. Asserts those
+/// upserts ran no stranded search, and that the graph alone no longer reaches
+/// the probe while the set does not record it. Returns the seeded store (kept
+/// alive), the reopened store, and the probe's vector and id.
+fn strand_below_threshold() -> (tempfile::TempDir, HnswStore, HnswStore, Vec<f32>, u64) {
+    let dim = 20;
+    let near = 2 * HNSW_MAX_NB_CONNECTION;
+    let flat = |seed: u64| {
+        let mut v = spread_vec(dim - 1, seed);
+        v.push(0.0);
+        v
+    };
+    let entry = flat(424_242);
+    let mut pool = vec![entry.clone()];
+    pool.extend(
+        (0..exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS - 2 - near).map(|i| {
+            let v = flat(700_000 + i as u64);
+            let dot: f32 = v.iter().zip(&entry).map(|(a, b)| a * b).sum();
+            let sign = if dot < 0.0 { -1.0 } else { 1.0 };
+            v.into_iter().map(|x| sign * x).collect()
+        }),
+    );
+    let (dir, seeded) = open_store(dim);
+    seed_rows(&seeded.db, &pool);
+    let store = HnswStore::open(Arc::clone(&seeded.db), dim).expect("reopen");
+
+    let searches = || stranded::UPKEEP_SEARCHES.with(|c| c.get());
+    let at_start = searches();
+    let probe = step_off(&entry, dim - 1);
+    let probe_id = store.upsert("probe", &probe).expect("upsert probe");
+    for (j, v) in around(&entry, &[&probe], 0.02, near).iter().enumerate() {
+        store.upsert(&format!("near-{j}"), v).expect("upsert");
+    }
+    assert_eq!(
+        store.index.read().get_nb_point(),
+        exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+        "precondition: the graph sits exactly at the threshold"
+    );
+    assert_eq!(
+        searches() - at_start,
+        0,
+        "upserts at or below the threshold ran stranded searches"
+    );
+    assert!(
+        !graph_reaches(&store, probe_id, &probe) && !is_stranded(&store, probe_id),
+        "precondition: the upserts strand the probe and record it nowhere; \
+         in-neighbours left: {:?}",
+        in_edges(&store.index.read(), probe_id)
+    );
+    (dir, seeded, store, probe, probe_id)
+}
+
+/// Why (#10271): each upsert re-tested stranded points at 3.5-4.5x the cost of
+/// the insert, yet only the graph arm, above the exhaustive threshold, reads
+/// the stranded set.
+/// What: [`strand_below_threshold`] proves the upserts up to the threshold
+/// skip the upkeep and strand a real point. A record planted before the
+/// crossing upsert must be gone after it, the set must equal what open
+/// computes and hold the probe, and the probe must be in its own top 10. The
+/// next upsert, above the threshold, must run the per-upsert searches again.
+/// Test: this test itself is the verification.
+#[test]
+fn upsert_skips_stranded_upkeep_until_the_graph_crosses_the_threshold() {
+    let (_dir, _seeded, store, probe, probe_id) = strand_below_threshold();
+    let dim = probe.len();
+    let searches = || stranded::UPKEEP_SEARCHES.with(|c| c.get());
+
+    // A record no search would make: the crossing rebuild must drop it.
+    stranded::add_stranded(
+        &mut store.stranded.write(),
+        &spread_vec(dim, 990_000),
+        u64::MAX,
+    );
+    store
+        .upsert("crossing", &far_from(&probe, 950_000))
+        .expect("upsert");
+    let expected = stranded::stranded_points(&store.index.read());
+    assert!(
+        is_stranded(&store, probe_id) && *store.stranded.read() == expected,
+        "the crossing upsert left a stranded set unlike the one open computes, \
+         or one without the stranded probe"
+    );
+    assert!(
+        hit_uuids(&store, &probe, 10).contains(&"probe".to_string()),
+        "the stranded probe is missing from its own top 10 after the crossing"
+    );
+
+    let above = searches();
+    store
+        .upsert("above", &far_from(&probe, 950_001))
+        .expect("upsert");
+    assert!(
+        searches() > above,
+        "an upsert above the threshold skipped its stranded searches"
+    );
+}
+
+/// Why (#10271): `ranked` picked the graph arm on the live row count, but
+/// upserts keep the stranded set only once the graph passes the threshold. A
+/// committed row ahead of its graph insert (a group mid-loop, a failed insert)
+/// put the live count over while the graph sat at the threshold, and the graph
+/// arm then read a set missing every point stranded since open.
+/// What: [`strand_below_threshold`], then an upsert parked on the insert gate
+/// after its row commits, so the live count is one over the threshold and the
+/// graph is at it. A search for the probe in that state must find it.
+/// Test: this test itself is the verification.
+#[test]
+fn a_row_committed_ahead_of_the_graph_never_hides_a_stranded_drawer() {
+    let (_dir, _seeded, store, probe, _) = strand_below_threshold();
+    // Wide enough that the parked upsert never trips the breaker.
+    store
+        .op_breaker()
+        .set_budget_for_test(std::time::Duration::from_secs(120));
+    let live = || store.keys.get(&store.db).expect("keys").reverse.len();
+    let gate = store.park_insert_gate_for_test();
+    let found = std::thread::scope(|s| {
+        let pending = s.spawn(|| store.upsert("pending", &far_from(&probe, 960_000)));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while live() <= exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the pending row never committed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            store.index.read().get_nb_point(),
+            exhaustive::EXHAUSTIVE_SCAN_MAX_POINTS,
+            "precondition: the parked upsert has not reached the graph"
+        );
+        let found = hit_uuids(&store, &probe, 10).contains(&"probe".to_string());
+        drop(gate);
+        pending.join().expect("join").expect("pending upsert");
+        found
+    });
+    assert!(
+        found,
+        "a row committed ahead of the graph hid the stranded probe from its own top 10"
     );
 }
 

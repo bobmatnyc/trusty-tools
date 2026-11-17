@@ -7,8 +7,9 @@
 //! release installed there is nothing at all. Each must stop the review with a
 //! non-zero exit and the remedy on stderr — visible even with tracing off — and
 //! never review on a missing or empty system prompt. A voice or review
-//! template the config names is content too: a release that lacks it stops
-//! the review the same way. The code under review is a trusted-looking
+//! template the config names is content too, and so is the principles
+//! addendum while it is on (#9991): a release that lacks it stops the review
+//! the same way, and one that lacks the principles still runs with them off. The code under review is a trusted-looking
 //! checkout (`gh pr checkout N`), so the cwd must never be a content source;
 //! only `TRUSTY_REVIEW_CONTENT_CHECKOUT` names one.
 //! What: spawns the built binary with a scratch `$HOME` and cwd, stages each
@@ -25,7 +26,8 @@ use std::process::{Command, Output, Stdio};
 mod content;
 
 use content::{
-    CONTENT_DIR, STOCK_PATH, Staged, VOICE_PATH, fake_checkout, repo_content, stage_bundle,
+    CONTENT_DIR, PRINCIPLES_PATH, STOCK_PATH, Staged, VOICE_PATH, fake_checkout, repo_content,
+    stage_bundle,
 };
 
 const BIN: &str = env!("CARGO_BIN_EXE_trusty-review");
@@ -223,28 +225,51 @@ fn the_named_checkout_is_the_only_checkout_source() {
 }
 
 /// A content release that has the prompts but lacks the voice or review
-/// template the config names: `run` refuses naming the file and the remedy,
-/// rather than reviewing without that layer or with a compiled-in copy.
+/// template the config names, or the principles addendum the default config
+/// layers in: `run` refuses naming the file and the remedy, rather than
+/// reviewing without that layer or with a compiled-in copy.
 #[test]
 fn a_stale_release_without_the_configured_voice_or_template_refuses_run() {
     let template = format!("{CONTENT_DIR}/templates/review/strict-security.md");
-    let cases = [
+    type Envs<'a> = &'a [(&'a str, &'a str)];
+    let cases: [(&str, &str, Envs<'_>); 3] = [
         (
             "voice",
             VOICE_PATH,
-            ("TRUSTY_REVIEW_VOICE_PACKAGE", "duetto"),
+            &[("TRUSTY_REVIEW_VOICE_PACKAGE", "duetto")],
         ),
         (
             "template",
             template.as_str(),
-            ("TRUSTY_REVIEW_TEMPLATE", "strict-security"),
+            &[("TRUSTY_REVIEW_TEMPLATE", "strict-security")],
         ),
+        // #9991: principles are on by default, so no variable is set.
+        ("principles", PRINCIPLES_PATH, &[]),
     ];
-    for (case, path, env) in cases {
+    for (case, path, envs) in cases {
         let home = tempfile::tempdir().expect("scratch home");
         stage_bundle(home.path(), Staged::Without(path));
         let cwd = tempfile::tempdir().expect("scratch cwd");
-        let out = run_review_at(home.path(), cwd.path(), &[env]);
+        let out = run_review_at(home.path(), cwd.path(), envs);
         assert_failed(case, &out, &["not reviewed: ", path, "tm content update"]);
     }
+}
+
+/// #9991: with the principles layer off, a release without the principles
+/// addendum still runs: the review gets past content loading, and nothing
+/// names the absent file.
+#[test]
+fn a_release_without_the_principles_still_runs_with_principles_off() {
+    let home = tempfile::tempdir().expect("scratch home");
+    stage_bundle(home.path(), Staged::Without(PRINCIPLES_PATH));
+    let cwd = tempfile::tempdir().expect("scratch cwd");
+    let off = [("TRUSTY_REVIEW_PRINCIPLES", "false")];
+    let out = run_review_at(home.path(), cwd.path(), &off);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    println!(
+        "principles off: exit {:?}\nstderr:\n{stderr}",
+        out.status.code()
+    );
+    assert!(!stderr.contains(PRINCIPLES_PATH), "{stderr}");
+    assert!(!stderr.contains("not reviewed: "), "{stderr}");
 }

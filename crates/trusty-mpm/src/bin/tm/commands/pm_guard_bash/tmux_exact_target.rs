@@ -32,6 +32,10 @@ use super::architect_pane_parse::{Hit, Target, UNPARSED, may_run_tmux, tmux_hits
 use super::architect_pane_probe::Listed;
 use super::architect_pane_reach::without_data_bodies;
 
+// #10665: the whole-server kill floor shares this parser and file family.
+#[path = "tmux_kill_server.rs"]
+pub(crate) mod kill_server;
+
 /// The rule name recorded with an exact-target deny.
 pub(crate) const TMUX_TARGET_RULE: &str = "tmux-target-unresolved";
 
@@ -93,6 +97,11 @@ pub(crate) fn evaluate_tmux_exact_target(command: &str, probe: &dyn PaneProbe) -
     for hit in &hits {
         // #9001 critic r1: #8902 judges an opaque hit only while an Architect
         // is live; this floor binds every caller.
+        // #10665 r3: a whole-server kill in a moved or reset environment is
+        // judged by the kill floor, which runs first; it names no target here.
+        if kill_server::owned_by_kill_floor(hit) {
+            continue;
+        }
         if let Some(why) = hit.opaque {
             // #9001 critic r2: a here-document body is not a tmux mention.
             if why != UNPARSED || may_run_tmux(&without_data_bodies(command), 0) {

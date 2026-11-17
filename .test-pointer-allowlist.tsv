@@ -263,7 +263,6 @@ crates/trusty-console/src/mcp_handle/mod.rs	mcp_handle_degraded_when_console_met
 crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_absent_binary_returns_503
 crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_no_index_returns_400
 crates/trusty-console/src/server/mod.rs	test_services_route_daemon_version_overlay
-crates/trusty-cto-db/src/lib.rs	open_readonly_rejects_writes
 crates/trusty-embedderd/src/stdio_server.rs	stdio_eof_terminates_cleanly
 crates/trusty-gworkspace/src/api/services/calendar.rs	build_event_body_attendees_*
 crates/trusty-installer/src/commands/plist_bootstrap.rs	resolve_uid_returns_nonzero
@@ -446,8 +445,6 @@ crates/trusty-mpm/src/core/sm/goals/model.rs	session_state_serde_roundtrip
 crates/trusty-mpm/src/core/sm/goals/model.rs	status_default_is_pending
 crates/trusty-mpm/src/core/sm/goals/store.rs	create_dual_persists
 crates/trusty-mpm/src/core/sm/goals/store.rs	note_appends_and_persists
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_appends_note
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_sets_state_and_evidence
 crates/trusty-mpm/src/core/sm/providers/resolve.rs	resolve_tests
 crates/trusty-mpm/src/core/standalone/registry.rs	test_alias_validation
 crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure
@@ -901,7 +898,6 @@ crates/trusty-mpm/src/core/tmux.rs	send_keys_literal_argv
 crates/trusty-mpm/src/daemon/bug_report/ratelimit.rs	fingerprint_stamp_persists
 crates/trusty-mpm/src/daemon/bug_report/token.rs	mock_token_exchange
 crates/trusty-mpm/src/daemon/managed_routes/inproject.rs	create_session_worktree_writes_owner_sentinel
-crates/trusty-mpm/src/daemon/services/tmux_service.rs	send_command_returns_output_shape
 crates/trusty-mpm/src/daemon/state/overseer.rs	new_builds_audit_logger
 crates/trusty-mpm/src/daemon/tmux.rs	list_panes_argv
 crates/trusty-mpm/src/daemon/tmux.rs	list_windows_argv
@@ -949,7 +945,6 @@ crates/trusty-search/src/service/server/state.rs	status_changed
 crates/trusty-search/src/service/server/state_impl.rs	chat_provider_endpoint_returns_payload
 crates/trusty-search/src/service/server/state_impl.rs	health_includes_embedderd_rss_field
 crates/trusty-search/src/service/server/state_impl.rs	start_brings_pool_online
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_filters
 crates/trusty-search/src/service/server/tickers.rs	status_changed
 crates/trusty-search/src/service/shutdown_flush.rs	shutdown_flush_skips_external_volume_index
 #
@@ -976,5 +971,3 @@ crates/trusty-search/src/commands/start/embedder.rs	resolve_expected_python_prov
 crates/trusty-search/src/core/indexer/archive.rs	archive_downranking_*
 crates/trusty-search/src/core/indexer/docs_penalty.rs	test_doc_score_penalty_*
 crates/trusty-search/src/mcp/tools/search.rs	search_*_tool_routes_to_*_stage
-crates/trusty-search/src/service/server/files.rs	test_call_chain_handler_*
-crates/trusty-search/src/service/server/status.rs	test_graph_handler_*

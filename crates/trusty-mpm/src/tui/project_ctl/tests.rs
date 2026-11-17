@@ -12,9 +12,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::events::{PendingAction, handle_key};
-use super::panes::{actions_bar, projects, sessions};
+use super::panes::{actions_bar, sessions, tree};
 use super::poll::{project_ctl_poll_daemon, project_to_row, session_to_row};
-use super::state::{ConfirmKind, DeliverableLinkState, Pane, ProjectCtlState};
+use super::state::{ConfirmKind, DeliverableLinkState, NodeId, Pane, ProjectCtlState};
 use crate::client::{DaemonClient, FleetProjectGroupWire, ManagedSessionSummary};
 use crate::project::Project;
 
@@ -32,6 +32,9 @@ fn project(name: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -63,6 +66,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 
@@ -76,6 +80,7 @@ fn seeded_state() -> ProjectCtlState {
         project_name: "trusty-tools".to_string(),
         repo_url: trusty_tools.repo_url.clone(),
         sessions: vec![summary("a1b2c3d4e5f6", "active")],
+        decommissioned: false,
     };
 
     let mut state = ProjectCtlState {
@@ -95,8 +100,16 @@ fn seeded_state() -> ProjectCtlState {
         "trusty-tools".to_string(),
         group.sessions.into_iter().map(session_to_row).collect(),
     );
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    // #10476: open on the trusty-tools project node, as the tree would.
+    let project = NodeId::Project {
+        owner: "acme".to_string(),
+        name: "trusty-tools".to_string(),
+    };
+    state.select_node(project.clone());
+    // #10476: tree starts expanded (Bob 11-05 17:30Z); these tests drive the
+    // open/close keys, so the project starts closed here.
+    state.tree.collapsed.insert(project);
+    state.rebuild_tree();
     state
 }
 
@@ -107,15 +120,20 @@ fn seeded_state_renders_live_project_and_its_session() {
     assert_eq!(state.selected_project().unwrap().name, "trusty-tools");
     assert_eq!(state.current_sessions().len(), 1);
 
-    let projects_line = projects::project_line(&state.projects[0]);
-    let text: String = projects_line
+    let row = state
+        .tree
+        .rows
+        .iter()
+        .find(|r| r.id.project_name() == Some("trusty-tools"))
+        .expect("the project row");
+    let text: String = tree::row_line(row)
         .spans
         .iter()
         .map(|s| s.content.as_ref())
         .collect();
     assert!(
-        text.starts_with("●1"),
-        "expected a live glyph+count: {text}"
+        text.contains("trusty-tools  1 session, 1 live"),
+        "expected the live counter: {text}"
     );
 
     let session_line = sessions::session_line(
@@ -137,14 +155,21 @@ fn seeded_state_renders_live_project_and_its_session() {
 }
 
 #[test]
-fn drilling_in_then_killing_an_active_session_requires_confirmation() {
+fn expanding_then_killing_an_active_session_requires_confirmation() {
     // The seeded session is "active", so DOC-35 §5.2's confirm gate applies:
-    // `k` alone must not fire — it takes drill-in, `k`, THEN `y` to reach the
-    // real PendingAction.
+    // `k` alone must not fire — it takes Enter, select, `k`, THEN `y` to
+    // reach the real PendingAction (#10754: Enter on the project node enters
+    // the session column).
     let mut state = seeded_state();
     let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
     assert!(handle_key(&mut state, enter).is_none());
+    let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    assert!(handle_key(&mut state, down).is_none());
     assert_eq!(state.focus, Pane::Sessions);
+    assert_eq!(
+        state.selected_session().map(|s| s.id.as_str()),
+        Some("a1b2c3d4e5f6")
+    );
 
     let kill = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
     assert!(
@@ -366,5 +391,238 @@ async fn project_ctl_decommission_prunes_stale_worktree_bookkeeping() {
         !git(&base, &["worktree", "list", "--porcelain"]).contains(leaf),
         "the TUI's [d] decommission left a stale worktree entry for {leaf} — it \
          is not routed through the shared implementation"
+    );
+}
+
+// ---- #10476: the poll runs off the UI loop ----
+//
+// These tests run on a paused tokio clock with turn-scripted events, so no
+// assertion depends on real time (the first version bounded wall-clock and
+// missed on a loaded CI runner). On a current-thread runtime the spawned poll
+// gets no turn until `drive` yields, and an inline `.await` of the poll would
+// auto-advance the paused clock past its delay: so "the key was drawn before
+// the poll completed" is an ordering fact, not a race.
+
+/// Replays one scripted entry per `next_event` call, then sends `q`.
+struct ScriptedEvents {
+    script: std::collections::VecDeque<Option<KeyCode>>,
+}
+
+impl ScriptedEvents {
+    fn new(script: Vec<Option<KeyCode>>) -> Self {
+        Self {
+            script: script.into(),
+        }
+    }
+}
+
+impl super::drive::EventSource for ScriptedEvents {
+    fn next_event(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<Option<crossterm::event::Event>> {
+        let code = self.script.pop_front().unwrap_or(Some(KeyCode::Char('q')));
+        Ok(code.map(|c| crossterm::event::Event::Key(KeyEvent::new(c, KeyModifiers::NONE))))
+    }
+}
+
+/// Poll counters: `started` when `drive` calls the poller, `completed` when
+/// its future finishes.
+#[derive(Default)]
+struct PollCounts {
+    started: std::sync::atomic::AtomicUsize,
+    completed: std::sync::atomic::AtomicUsize,
+}
+
+/// A poller whose future sleeps `delay` on the tokio clock and then returns
+/// the seeded fleet unchanged.
+fn slow_poller(
+    delay: std::time::Duration,
+    counts: std::sync::Arc<PollCounts>,
+) -> impl Fn(
+    DaemonClient,
+    super::poll::tick::PollRequest,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = super::poll::tick::PollOutcome> + Send>,
+> {
+    move |client, _req| {
+        counts
+            .started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let counts = counts.clone();
+        let seed = seeded_state();
+        Box::pin(async move {
+            tokio::time::sleep(delay).await;
+            counts
+                .completed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            super::poll::tick::PollOutcome {
+                client,
+                result: super::poll::tick::PollResult {
+                    core: super::poll::tick::CoreFetch {
+                        reachable: true,
+                        fleet: Some((seed.projects, seed.sessions_by_project, seed.projects_full)),
+                    },
+                    ..Default::default()
+                },
+                timing: super::poll::tick::TickTiming {
+                    started: std::time::Instant::now(),
+                    calls: vec![],
+                    total: delay,
+                },
+            }
+        })
+    }
+}
+
+/// The 2 s delay of the scripted poll.
+const SLOW_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What one scripted [`super::drive::drive`] run observed.
+struct SlowRun {
+    /// Per draw: the selected project and how many polls had completed.
+    frames: Vec<(Option<String>, usize)>,
+    /// Paused-clock time the run took.
+    virtual_elapsed: std::time::Duration,
+    counts: std::sync::Arc<PollCounts>,
+}
+
+/// Run [`super::drive::drive`] over `script` with a [`SLOW_POLL`] poller.
+/// Call it on a paused clock.
+async fn drive_with_slow_poller(script: Vec<Option<KeyCode>>) -> SlowRun {
+    let counts = std::sync::Arc::new(PollCounts::default());
+    let start = tokio::time::Instant::now();
+    let mut frames = Vec::new();
+    let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
+        frames.push((
+            state.selected_project().map(|p| p.name.clone()),
+            counts.completed.load(std::sync::atomic::Ordering::SeqCst),
+        ));
+        Ok(())
+    };
+    // Never dialled: the poller is fake and the scripted keys dispatch no
+    // action, so this skips `dead_loopback_url`'s blocking connect probe.
+    let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());
+    super::drive::drive(
+        &mut draw,
+        &mut ScriptedEvents::new(script),
+        slow_poller(SLOW_POLL, counts.clone()),
+        &mut client,
+        seeded_state(),
+        std::time::Duration::ZERO,
+        &mut super::trace::TuiTrace::disabled(),
+    )
+    .await
+    .expect("drive returns Ok on q");
+    SlowRun {
+        frames,
+        virtual_elapsed: start.elapsed(),
+        counts,
+    }
+}
+
+/// Plays back whole events, then `q`.
+struct ScriptedRawEvents(std::collections::VecDeque<Option<crossterm::event::Event>>);
+
+impl super::drive::EventSource for ScriptedRawEvents {
+    fn next_event(
+        &mut self,
+        _timeout: std::time::Duration,
+    ) -> std::io::Result<Option<crossterm::event::Event>> {
+        Ok(self.0.pop_front().unwrap_or_else(|| {
+            Some(crossterm::event::Event::Key(KeyEvent::new(
+                KeyCode::Char('q'),
+                KeyModifiers::NONE,
+            )))
+        }))
+    }
+}
+
+/// #10476: the loop routes a mouse event, drawn against the frame before it. A
+/// click on the project row opens it. Without the loop's mouse arm it stays shut.
+#[tokio::test(start_paused = true)]
+async fn click_reaches_the_tree_through_the_loop_10476() {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+
+    // #10754: a project is a leaf now; the owner bar is what a click opens
+    // and shuts.
+    let owner = NodeId::Owner("acme".to_string());
+    let row = seeded_state()
+        .tree
+        .rows
+        .iter()
+        .position(|r| r.id == owner)
+        .expect("the owner row") as u16;
+    let click = Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 5,
+        // One border row above the list; offset 0 in an 80x24 frame.
+        row: row + 1,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).expect("test backend");
+    let mut opened = Vec::new();
+    let mut draw = |state: &mut ProjectCtlState| -> anyhow::Result<()> {
+        terminal.draw(|f| super::layout::render(f, state))?;
+        opened.push(state.tree.is_expanded(&owner));
+        Ok(())
+    };
+    let mut client = DaemonClient::new("http://127.0.0.1:1".to_string());
+    super::drive::drive(
+        &mut draw,
+        &mut ScriptedRawEvents(vec![None, Some(click), None].into()),
+        slow_poller(SLOW_POLL, std::sync::Arc::new(PollCounts::default())),
+        &mut client,
+        seeded_state(),
+        std::time::Duration::from_secs(3600),
+        &mut super::trace::TuiTrace::disabled(),
+    )
+    .await
+    .expect("drive returns Ok on q");
+    assert_eq!(opened.first(), Some(&true), "the owner starts open");
+    assert_eq!(opened.last(), Some(&false), "the click shut it: {opened:?}");
+}
+
+/// #10476: a key pressed while a poll is in flight is drawn before that poll
+/// completes, and `q` exits without waiting for it.
+#[tokio::test(start_paused = true)]
+async fn keypress_redraws_while_poll_in_flight_10476() {
+    // Turn 0 starts the poll (zero interval); turn 1 presses Down.
+    let run = drive_with_slow_poller(vec![None, Some(KeyCode::Down), None]).await;
+
+    let (_, completed_at_draw) = run
+        .frames
+        .iter()
+        .find(|(project, _)| project.as_deref() == Some("genealogy"))
+        .expect("the Down key must reach a drawn frame");
+    assert_eq!(
+        *completed_at_draw, 0,
+        "the Down frame was drawn after the poll completed: the frame waited on the poll"
+    );
+    let completed = run
+        .counts
+        .completed
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(completed, 0, "q must exit without waiting for the poll");
+    assert!(
+        run.virtual_elapsed < SLOW_POLL,
+        "the loop ran {:?} of tokio time: it slept through the {SLOW_POLL:?} poll",
+        run.virtual_elapsed
+    );
+    let started = run.counts.started.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(started, 1, "one poll, started on the first turn");
+}
+
+/// #10476: while one poll is in flight no second poll starts, even though a
+/// zero interval makes every loop turn due.
+#[tokio::test(start_paused = true)]
+async fn only_one_poll_in_flight_10476() {
+    let run = drive_with_slow_poller(vec![None; 8]).await;
+    let started = run.counts.started.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        started, 1,
+        "a second poll started while the first was in flight"
     );
 }

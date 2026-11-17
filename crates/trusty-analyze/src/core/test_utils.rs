@@ -115,6 +115,65 @@ pub(crate) fn chunks_from_dir(dir: &Path, ext: &str) -> anyhow::Result<Vec<CodeC
     Ok(out)
 }
 
+/// Block a synchronous fake reply for `delay`, so the client's call times out.
+///
+/// Why: a plain `thread::sleep` keeps the worker's queued tasks — the
+/// client's retry included — behind the sleep. `block_in_place` hands them
+/// to another worker first. Call it only on an [`IsolatedFake`].
+pub(crate) fn stall_reply(delay: std::time::Duration) {
+    tokio::task::block_in_place(|| std::thread::sleep(delay));
+}
+
+/// A fake trusty-search socket served on its own runtime (#10781).
+///
+/// Why: a fake reply that sleeps to simulate a slow page blocks the worker it
+/// runs on. On the test's own runtime that worker can own the timer the
+/// client's call timeout waits on, so the timeout never fires and the test
+/// proves nothing.
+/// What: builds a separate two-worker runtime, starts the fake on it, and
+/// shuts that runtime down in the background on drop.
+/// Test: `a_page_that_times_out_once_still_completes_the_walk`.
+pub(crate) struct IsolatedFake {
+    fake: Option<crate::core::fake_search::FakeSearchSocket>,
+    rt: Option<tokio::runtime::Runtime>,
+}
+
+impl IsolatedFake {
+    pub(crate) fn serve(
+        reply: impl Fn(&str, &serde_json::Value) -> crate::core::fake_search::Reply
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("fake search runtime");
+        let fake = {
+            let _guard = rt.enter();
+            crate::core::fake_search::FakeSearchSocket::serve(reply)
+        };
+        Self {
+            fake: Some(fake),
+            rt: Some(rt),
+        }
+    }
+
+    pub(crate) fn get(&self) -> &crate::core::fake_search::FakeSearchSocket {
+        self.fake.as_ref().expect("fake present until drop")
+    }
+}
+
+impl Drop for IsolatedFake {
+    fn drop(&mut self) {
+        drop(self.fake.take());
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

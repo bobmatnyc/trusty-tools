@@ -58,17 +58,23 @@ impl Handoff {
     /// Why: the one point where `tm launch` either takes the terminal or
     /// returns; a caller that disarms its session guard after this call keeps
     /// the session in both cases.
-    /// What: `Attach` runs [`crate::commands::tmux_attach::tmux_attach`].
-    /// `Detach` reads the session's pane id and prints [`detached_line`]; a pane
-    /// id it cannot read is an error, because the caller asked for it.
+    /// What: `Attach` runs [`crate::commands::tmux_attach::tmux_attach`],
+    /// which finds the one server holding `name` (#10101 Dc3). `Detach` reads
+    /// the session's pane id on `host`, the server it was launched on
+    /// (#10101), and prints [`detached_line`]; a pane id it cannot read is an
+    /// error, because the caller asked for it.
     /// Test: `detach_reports_the_session_and_never_attaches`,
     /// `attach_attaches_and_prints_no_line`,
     /// `detach_fails_when_the_pane_id_cannot_be_read`.
-    pub(crate) fn hand_over(self, name: &str) -> anyhow::Result<()> {
+    pub(crate) fn hand_over(
+        self,
+        host: &crate::commands::launch_host::LaunchHost,
+        name: &str,
+    ) -> anyhow::Result<()> {
         self.hand_over_with(
             name,
             |n| crate::commands::tmux_attach::tmux_attach(n).map(drop),
-            tmux_stdout,
+            |argv| host.stdout(argv),
             &mut std::io::stdout(),
         )
     }
@@ -116,15 +122,6 @@ fn session_pane_id_with(
     let argv = trusty_mpm::core::tmux::display_message_argv(Some(&target), "#{pane_id}");
     let pane = tmux(&argv)?.trim().to_string();
     (pane.starts_with('%') && trusty_mpm::core::tmux::is_immutable_id(&pane)).then_some(pane)
-}
-
-/// Run one tmux argv; its stdout on a zero exit, `None` otherwise.
-fn tmux_stdout(argv: &[String]) -> Option<String> {
-    let output = trusty_mpm::core::tmux::run_tmux_argv(argv).ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

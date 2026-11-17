@@ -10,9 +10,9 @@
 //! optionally tombstoned, never silently dropped.
 //! Test: `super::tests::docstore_tool_ingests_and_is_idempotent`.
 
+use crate::kb::okg::registry::{Locator, SourceSpec};
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use trusty_kb::okg::registry::{Locator, SourceSpec};
 
 use crate::tools::okg::{arg_str, now_iso, ok_json, require_str, resolve_store, with_root};
 use crate::tools::traits::{ToolExecutor, ToolResult};
@@ -80,8 +80,8 @@ async fn run(args: &Value) -> anyhow::Result<ToolResult> {
 /// invoking this shared engine; model tools still use resolve_store above.
 pub(crate) async fn ingest_into_store(
     args: &Value,
-    store: trusty_kb::store::KbStore,
-    policy: &trusty_kb::okg::policy::DocStorePolicy,
+    store: crate::kb::store::KbStore,
+    policy: &trusty_okf::build::policy::DocStorePolicy,
 ) -> anyhow::Result<ToolResult> {
     let source_id = require_str(args, "source_id")?;
     let now = now_iso();
@@ -153,13 +153,9 @@ pub(crate) async fn ingest_into_store(
     // Then make it findable. The tree write above is the durable record; this
     // step is fail-open but never silent — see `tools::okg::index_feed`.
     let spec = store.okg_source(&registered.id)?;
-    let index = crate::tools::okg::index_feed::feed_bound_index(
-        &store,
-        &spec,
-        arg_str(args, "agent"),
-        &now,
-    )
-    .await;
+    let index =
+        crate::tools::okg::index_feed::feed_bound_index(&store, &spec, arg_str(args, "agent"))
+            .await;
 
     Ok(ok_json(&json!({
         "source": registered,

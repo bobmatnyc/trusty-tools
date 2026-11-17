@@ -58,3 +58,7 @@ pub mod dbatg;
 
 /// #10063: the Architect dashboard store, `mpm.architect.dashboard.*`.
 pub mod architect_dashboard;
+
+/// #8878 PR2b-1b: presence-device requests, approvals and enrolment,
+/// `mpm.presence.*`.
+pub mod presence;

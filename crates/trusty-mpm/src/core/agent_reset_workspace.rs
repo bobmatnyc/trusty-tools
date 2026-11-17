@@ -314,6 +314,8 @@ mod tests {
     fn bare_session(tmux_name: &str) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: tmux_name.to_string(),
             cwd: PathBuf::from("/tmp"),
@@ -340,6 +342,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,
@@ -356,6 +359,8 @@ mod tests {
     fn intact_session(tmux_name: &str, workspace: &Path) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             workspace_path: Some(workspace.to_path_buf()),
             state: ManagedSessionState::Active,
             workspace_owned: true,

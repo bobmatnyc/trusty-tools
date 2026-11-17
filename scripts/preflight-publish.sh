@@ -35,12 +35,22 @@
 #       from a checkout that was never merged). Only ever set it when you can
 #       point at the specific reason origin/main equality doesn't apply.
 #
-#   CHECK 2 (identity): `gh auth status` must report the ACTIVE account is
-#     `bobmatnyc`. Any other active account (including a valid, logged-in,
-#     but wrong, account such as a personal/work alias) fails with the exact
-#     remedy `gh auth switch --user bobmatnyc`. No override exists for this
-#     check — identity is never something a release should "trust the
-#     operator" on.
+#   CHECK 2 (identity, #10587): `gh api --hostname github.com user` must
+#     answer that the credential gh is using authenticates as `bobmatnyc`. Any
+#     other login (including a valid, logged-in, but wrong, account such as a
+#     personal/work alias) fails with the remedy
+#     `gh auth switch --user bobmatnyc`, and so does a credential GitHub
+#     rejects, no credential at all, or an unreadable answer. No override
+#     exists for this check — identity is never something a release should
+#     "trust the operator" on. `scripts/preflight-check2-selftest.sh` drives
+#     every arm.
+#
+#     WHY NOT `gh auth status`: with a token in GH_TOKEN, which is how the tm gh
+#     shim supplies one, gh learns the login through GraphQL. Any GraphQL
+#     failure, including an exhausted GraphQL rate limit, then prints "The token
+#     in GH_TOKEN is invalid." and exits 1 while REST calls with that same token
+#     succeed. It also exits 1 when an inactive account in the same config dir
+#     has a bad token. Neither says who is about to publish.
 #
 #   CHECK 3 (clean tree): `git status --porcelain` must be empty. Gitignored
 #     paths never appear in default `git status --porcelain` output, so a
@@ -297,17 +307,15 @@
 #   Verified by construction:
 #     (a) FAIL mode — run from an unmerged feature branch (HEAD != origin/main)
 #         to demonstrate check 1 failing.
-#     (b) The identity-check string-compare logic
-#         (`[[ "$active_account" == "bobmatnyc" ]]`) was exercised standalone
-#         by feeding a faked `gh auth status`-shaped transcript containing a
-#         DIFFERENT active account through the same parsing loop and
-#         confirming it reports FAIL with the exact remedy text — without
+#     (b) BOTH modes for check 2 (#10587), via
+#         scripts/preflight-check2-selftest.sh: a fake gh covers a wrong login,
+#         a rejected credential, no credential and an unreadable answer without
 #         ever running `gh auth switch` against the real, logged-in account.
 #     (c) FAIL mode — pointed at a crate + version that IS already live on
 #         crates.io, to demonstrate check 4 failing.
 #     (d) PASS-mode — demonstrated per-check via a mix of a scratch checkout
 #         at true origin/main (or PREFLIGHT_ALLOW_DETACHED=1, explicitly
-#         labeled) for check 1, real `gh auth status` output for check 2, a
+#         labeled) for check 1, a real `gh api user` answer for check 2, a
 #         clean tree for check 3, and a not-yet-published version for check 4.
 #     (e) BOTH modes for check 5 (#5149), against real source rather than a
 #         synthetic break: `fix/5064-redb-flock-collision`'s trusty-review
@@ -497,52 +505,34 @@ check1_merged_main() {
 }
 
 # ===========================================================================
-# CHECK 2 — identity (gh auth status must show bobmatnyc as the active account)
+# CHECK 2 — identity (the credential gh is using must authenticate as bobmatnyc)
 # ===========================================================================
+# #10587: asks over REST which login the credential authenticates as. See the
+# header for why `gh auth status` cannot answer that.
 check2_identity() {
-  local gh_output
-  if ! gh_output="$(gh auth status 2>&1)"; then
-    # gh auth status exits nonzero when NOT logged in to any account at all;
-    # its output (captured above) still explains why, so surface it.
-    echo "[FAIL] identity: 'gh auth status' reported no active session:" >&2
-    echo "${gh_output}" | sed 's/^/       /' >&2
-    echo "       Remedy: gh auth switch --user bobmatnyc" >&2
+  local err login rc=0
+  if ! err="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.identity.XXXXXX")"; then
+    echo "[FAIL] identity: could not create a temp file to read gh's answer." >&2
     return 1
   fi
-  identity_active_account_from_status "$gh_output"
-  if [ "$IDENTITY_ACTIVE_ACCOUNT" = "bobmatnyc" ]; then
-    echo "[PASS] identity: active gh account is bobmatnyc" >&2
+  # stdout and stderr stay apart: a warning on stderr must not change the login,
+  # and on failure stdout holds the raw API body, which is never printed.
+  login="$(gh api --hostname github.com user --jq .login 2>"$err")" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "[FAIL] identity: 'gh api user' could not confirm who this credential is (exit ${rc}):" >&2
+    sed 's/^/       /' "$err" >&2
+    rm -f "$err"
+    echo "       Remedy: gh auth switch --user bobmatnyc, or fix whatever supplies GH_TOKEN." >&2
+    return 1
+  fi
+  rm -f "$err"
+  if [ "$login" = "bobmatnyc" ]; then
+    echo "[PASS] identity: gh credential authenticates as bobmatnyc" >&2
     return 0
   fi
-  echo "[FAIL] identity: active gh account is '${IDENTITY_ACTIVE_ACCOUNT:-<none found>}', not bobmatnyc." >&2
-  echo "       Remedy: gh auth switch --user bobmatnyc" >&2
+  echo "[FAIL] identity: gh credential authenticates as '${login:-<none found>}', not bobmatnyc." >&2
+  echo "       Remedy: gh auth switch --user bobmatnyc, or fix whatever supplies GH_TOKEN." >&2
   return 1
-}
-
-# identity_active_account_from_status: parse `gh auth status` transcript text
-# and set IDENTITY_ACTIVE_ACCOUNT to the login of whichever account block has
-# "Active account: true". Isolated as its own function (rather than inlined)
-# specifically so it can be exercised standalone against a faked transcript —
-# see CHECK 2 verification in the header comment above.
-IDENTITY_ACTIVE_ACCOUNT=""
-identity_active_account_from_status() {
-  local transcript="$1"
-  local current="" active=""
-  local line
-  while IFS= read -r line; do
-    case "$line" in
-      *"Logged in to"*"account"*)
-        # e.g. "  ✓ Logged in to github.com account bobmatnyc (keyring)"
-        current="$(printf '%s\n' "$line" | sed -E 's/.*account[[:space:]]+([^[:space:]]+).*/\1/')"
-        ;;
-      *"Active account: true"*)
-        active="$current"
-        ;;
-    esac
-  done <<EOF_TRANSCRIPT
-$transcript
-EOF_TRANSCRIPT
-  IDENTITY_ACTIVE_ACCOUNT="$active"
 }
 
 # ===========================================================================

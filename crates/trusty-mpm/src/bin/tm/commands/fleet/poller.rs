@@ -32,12 +32,41 @@ pub(crate) const START_SCRIPT: &str = "scripts/start-fleet-poll.sh";
 /// How long a started poller must survive before `init` calls it running.
 const SETTLE: Duration = Duration::from_secs(1);
 
+/// Starts the poller for an Architect directory; production passes [`start`].
+pub(crate) type StartFn = fn(&Path, Probe, &SessionNames) -> anyhow::Result<()>;
+
 /// The poller step of `tm fleet init` in `dir`; see the module doc.
 ///
 /// Test: `fleet_init_launches_the_architect_and_status_is_complete`,
 /// `a_dead_or_unreadable_poller_pane_is_a_failed_step`,
 /// `fleet_init_fails_when_the_poller_pane_is_dead`.
 pub(crate) fn step(dir: &Path, launch: bool, probe: Probe, names: &SessionNames) -> Step {
+    step_with(dir, launch, probe, names, start)
+}
+
+/// The step `init` or `relaunch` takes for an Architect that is not bound.
+///
+/// Why: #10357 fail closed — a poller beside a `claude` no launch record
+/// names would wake an Architect that cannot write its anchors.
+/// Test: `an_unbound_init_never_starts_the_poller`.
+pub(crate) fn unbound(names: &SessionNames) -> Step {
+    Step::Skipped(format!(
+        "poller start: the Architect is not bound, so {} was not started; bind it with \
+         `tm fleet relaunch`, which starts the poller",
+        names.poll()
+    ))
+}
+
+/// [`step`] with the start named, so `relaunch`'s tests start no script.
+///
+/// Test: `relaunch_restores_a_missing_poller_once`.
+pub(crate) fn step_with(
+    dir: &Path,
+    launch: bool,
+    probe: Probe,
+    names: &SessionNames,
+    start: StartFn,
+) -> Step {
     let poll = names.poll();
     if !launch {
         return Step::Skipped(format!(

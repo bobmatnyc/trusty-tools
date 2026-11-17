@@ -3,7 +3,8 @@
 //! Why: the Architect's poller and skills ran five Python scripts; #9171 A4
 //! swaps them for this binary with the same arguments, stdout and exit codes.
 //! What: [`run`] resolves the Architect directory (`ARCHITECT_PROJECT_DIR`,
-//! else the current directory), the home directory and the tmux server
+//! else the current directory; for `quiet`, else the recorded Architect,
+//! #10861), the home directory and the tmux server
 //! (`TMUX_SOCKET`), calls `trusty_architect::verbs`, prints the verb's stdout
 //! as-is, and on an error prints `tm architect: <reason>` to stderr and
 //! returns the exit code: 2 for a bad argument, 1 for input it cannot read,
@@ -20,6 +21,19 @@ use trusty_architect::SystemTmux;
 use trusty_architect::verbs::{self, InputTarget, Output, PollArgs, VerbError};
 
 use crate::cli::ArchitectAction;
+
+/// `tm architect [verb]`: no verb is `up` plus attach (#11364); returns the exit code.
+pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
+    match action {
+        None => super::architect_up::up(crate::cli::UpArgs::default()).await,
+        Some(ArchitectAction::Up(args)) => super::architect_up::up(args).await,
+        Some(ArchitectAction::Attach) => super::architect_up::attach(),
+        Some(ArchitectAction::Restart { wait, dir }) => {
+            super::architect_up::restart(wait, dir).await
+        }
+        Some(other) => run(other),
+    }
+}
 
 /// Runs `action` against this process's environment; returns the exit code.
 pub(crate) fn run(action: ArchitectAction) -> i32 {
@@ -74,7 +88,8 @@ fn execute(
         ArchitectAction::Quiet { file } => {
             let path = match file {
                 Some(file) => Ok(file),
-                None => config(get).map(|c| c.quiet_sessions),
+                // #10861: the Architect's list, never `<cwd>/local/...`.
+                None => architect_config(get).map(|c| c.quiet_sessions),
             };
             path.and_then(|p| verbs::quiet(&p))
         }
@@ -85,8 +100,11 @@ fn execute(
             };
             dir.and_then(|d| verbs::self_ctx(&d))
         }
-        ArchitectAction::Dashboard(_) => Err(VerbError::Usage(
-            "dashboard runs through `run`, never `execute`".to_owned(),
+        ArchitectAction::Dashboard(_)
+        | ArchitectAction::Up(_)
+        | ArchitectAction::Attach
+        | ArchitectAction::Restart { .. } => Err(VerbError::Usage(
+            "dashboard, up and attach run through `run_any`, never `execute`".to_owned(),
         )),
     };
     match result {
@@ -107,10 +125,40 @@ fn config(
 ) -> Result<trusty_architect::poller::Config, VerbError> {
     let cwd = std::env::current_dir()
         .map_err(|e| VerbError::Failed(format!("cannot read the current directory: {e}")))?;
-    let home = dirs::home_dir()
-        .ok_or_else(|| VerbError::Failed("cannot find the home directory".to_owned()))?;
+    let home = home_dir()?;
     let root = verbs::project_root(get, &cwd);
     verbs::poll_config(&root, &home, get)
+}
+
+/// The poller configuration rooted at the Architect directory, whatever the
+/// current directory is.
+///
+/// Why: #10861 — `tm architect quiet` run outside the Architect directory
+/// read `<cwd>/local/quiet-sessions.txt`, a file the pollers never read.
+/// What: the root is `ARCHITECT_PROJECT_DIR` when set and not empty, else the
+/// Architect `tm fleet init` recorded, else `~/trusty-mpm-projects/architect`
+/// (`fleet::resolve_dir`). More than one recorded Architect is a usage error.
+/// Test: `quiet_reads_the_architect_list_from_any_cwd`,
+/// `quiet_missing_list_names_the_architect_path_not_the_cwd`.
+fn architect_config(
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<trusty_architect::poller::Config, VerbError> {
+    let home = home_dir()?;
+    let root = match get("ARCHITECT_PROJECT_DIR").filter(|v| !v.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        // #10861: the fleet config's Architect, not the cwd.
+        None => super::fleet::resolve_dir(None, &home).map_err(|e| {
+            VerbError::Usage(format!(
+                "{e:#}; or set ARCHITECT_PROJECT_DIR, or pass --file"
+            ))
+        })?,
+    };
+    verbs::poll_config(&root, &home, get)
+}
+
+/// The home directory, or the verb error a caller reports.
+fn home_dir() -> Result<PathBuf, VerbError> {
+    dirs::home_dir().ok_or_else(|| VerbError::Failed("cannot find the home directory".to_owned()))
 }
 
 /// `input-state.py <targets>`: every target is checked before any capture.
@@ -159,7 +207,9 @@ mod tests {
         let mut argv = vec!["tm", "architect"];
         argv.extend_from_slice(args);
         match Cli::try_parse_from(argv).map(|c| c.command) {
-            Ok(Some(Command::Architect { action })) => action,
+            Ok(Some(Command::Architect {
+                action: Some(action),
+            })) => action,
             other => panic!("expected tm architect, got {other:?}"),
         }
     }

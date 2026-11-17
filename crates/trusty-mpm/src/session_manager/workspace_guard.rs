@@ -271,6 +271,8 @@ mod tests {
     ) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: format!("tm-foreign-claim-{id}"),
             cwd: PathBuf::from("/tmp/unrelated-cwd"),
@@ -297,6 +299,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,

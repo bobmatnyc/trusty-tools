@@ -58,14 +58,34 @@ impl DaemonClient {
     /// Test: `managed_fleet_response_deserializes` in `tests.rs`; live HTTP via
     /// `fleet_route_groups_by_project` in `tests/session_manager_mvp.rs`.
     pub async fn fleet_managed_sessions(&self) -> anyhow::Result<Vec<FleetProjectGroupWire>> {
+        self.fleet_managed_sessions_with(false).await
+    }
+
+    /// [`Self::fleet_managed_sessions`] without the stale-assets probe (#10476).
+    ///
+    /// Why: the probe is ~0.9 s of a ~1.1 s fleet call, and the tui polls this
+    /// every tick without reading `stale_assets`.
+    /// What: sends `?slim=true`; every `stale_assets` comes back `false`
+    /// ("not computed"), `unresumable` is still computed. An older daemon
+    /// ignores the flag and probes as before. Only a caller that never reads
+    /// `stale_assets` may use it.
+    /// Test: `tui_fleet_fetch_sends_slim_and_other_callers_do_not`.
+    pub async fn fleet_managed_sessions_slim(&self) -> anyhow::Result<Vec<FleetProjectGroupWire>> {
+        self.fleet_managed_sessions_with(true).await
+    }
+
+    async fn fleet_managed_sessions_with(
+        &self,
+        slim: bool,
+    ) -> anyhow::Result<Vec<FleetProjectGroupWire>> {
         let url = "/api/v1/sessions/managed/fleet".to_string();
-        let body: FleetByProjectWireResponse = self
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
+        let mut req = self.get(&url);
+        if slim {
+            // #10476: omitted entirely otherwise, so the default request is
+            // byte-for-byte what it was.
+            req = req.query(&[("slim", true)]);
+        }
+        let body: FleetByProjectWireResponse = req.send().await?.error_for_status()?.json().await?;
         Ok(body.projects)
     }
 
@@ -397,5 +417,27 @@ impl DaemonClient {
             .await
             .context("decoding record-only decommission response body")?;
         Ok(outcome)
+    }
+
+    /// Archive a session's project directory via
+    /// `POST /api/v1/sessions/managed/{id}/archive` (#10991).
+    ///
+    /// Why: backs `tm session archive`. What: POSTs `{dry_run, force}` and
+    /// returns the report; a refusal (running session, Architect, unknown id,
+    /// failed move) is an `Err` carrying the daemon's message.
+    /// Test: `cli_parses_session_archive`; the route body in
+    /// `daemon::session_archive`'s tests.
+    pub async fn archive_managed_session(
+        &self,
+        id: &str,
+        opts: crate::session_manager::session_archive::ArchiveOptions,
+    ) -> anyhow::Result<crate::session_manager::session_archive::SessionArchiveReport> {
+        let url = format!("/api/v1/sessions/managed/{id}/archive");
+        let resp = self.post(&url).json(&opts).send().await?;
+        response_or_body_error(resp)
+            .await?
+            .json()
+            .await
+            .context("decoding archive report")
     }
 }

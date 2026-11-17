@@ -246,6 +246,7 @@ fn grep_search(root: &Path, term: &str, top_k: usize) -> (Vec<CodeChunk>, u128) 
                 index_id: None,
                 on_branch: false,
                 archive_reason: None,
+                bm25_raw: None,
             })
         })
         .collect();

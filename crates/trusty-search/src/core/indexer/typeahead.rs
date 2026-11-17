@@ -206,6 +206,7 @@ mod tests {
             index_id: None,
             on_branch: false,
             archive_reason: None,
+            bm25_raw: None,
         };
         let hit = TypeaheadHit::from_chunk(&chunk, "lexical");
         assert_eq!(hit.label, "authenticate");
@@ -235,6 +236,7 @@ mod tests {
             index_id: None,
             on_branch: false,
             archive_reason: None,
+            bm25_raw: None,
         };
         let hit = TypeaheadHit::from_chunk(&chunk, "lexical");
         assert_eq!(hit.label, "auth.rs");

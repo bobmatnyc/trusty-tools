@@ -1,0 +1,2 @@
+Changed
+- An `Actor::Human` value alone no longer counts as explicit human confirmation (SPEC-OKF-01 §2.4, #10746). `Bundle::verify` refuses a `human:` verifier with `Conflict { reason: "human_not_confirmed" }`, and `Bundle::put` refuses a `human:` actor that moves `stale_after` later on a human-reviewed concept with `stale_after_extension`; neither changes a file. The new `Bundle::verify_confirmed` and `Bundle::put_confirmed` take a `HumanConfirmation` token, built only by `HumanConfirmation::explicit()`, for a call a person confirmed.

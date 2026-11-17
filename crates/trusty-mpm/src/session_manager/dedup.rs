@@ -74,6 +74,7 @@ use tracing::{info, warn};
 
 use super::manager::{ManagedError, SessionManager};
 use super::record::{ManagedSessionId, ManagedSessionState, SessionRecord};
+use super::tmux_route::{LiveSessions, LiveSet, live_sessions_of};
 
 impl SessionManager {
     /// Live managed tmux session names, or an error when tmux could not be
@@ -105,8 +106,10 @@ impl SessionManager {
     /// `dedup_refuses_when_the_tmux_server_cannot_be_started`,
     /// `dedup_refuses_on_the_noop_driver_rather_than_reading_zero_as_dead`,
     /// `reconcile_refuses_to_stop_sessions_when_tmux_cannot_be_observed`.
-    pub(super) fn observed_live_managed_names(&self) -> Result<HashSet<String>, ManagedError> {
-        live_managed_names_of(self.tmux.as_ref())
+    /// #10101: keyed by (server, session) — every live workspace server is
+    /// listed too, and any listing failure is this `Err`.
+    pub(super) fn observed_live_managed_names(&self) -> Result<LiveSessions, ManagedError> {
+        live_sessions_of(self.tmux.as_ref())
     }
 }
 
@@ -167,7 +170,7 @@ impl SessionManager {
         to_resume: &mut Vec<ManagedSessionId>,
     ) -> Result<Vec<ManagedSessionId>, ManagedError> {
         // #5856: an unobservable tmux is not an empty tmux. Skip the pass.
-        let live_names: HashSet<String> = match self.observed_live_managed_names() {
+        let live_names: LiveSessions = match self.observed_live_managed_names() {
             Ok(names) => names,
             Err(e) => {
                 warn!(
@@ -244,7 +247,7 @@ impl SessionManager {
                     );
                     continue;
                 }
-                if live_names.contains(&current.tmux_name) {
+                if live_names.holds(&current) {
                     warn!(
                         id = %id,
                         name = %current.tmux_name,
@@ -293,7 +296,7 @@ impl SessionManager {
                         continue;
                     }
                 };
-                if live_names.contains(&current.tmux_name) {
+                if live_names.holds(&current) {
                     warn!(
                         id = %id,
                         name = %current.tmux_name,
@@ -408,7 +411,7 @@ fn by_recency(a: &SessionRecord, b: &SessionRecord) -> Ordering {
 /// Test: the `plan_dedup_*` tests in `dedup_tests.rs`.
 pub(crate) fn plan_dedup(
     records: &[SessionRecord],
-    live_names: &HashSet<String>,
+    live_names: &impl LiveSet,
 ) -> Vec<ManagedSessionId> {
     let mut groups: HashMap<String, Vec<&SessionRecord>> = HashMap::new();
     for record in records {
@@ -427,7 +430,7 @@ pub(crate) fn plan_dedup(
         }
         // Live-group guard: if ANY member has a live tmux session, the live one
         // is authoritative — never touch a group that is not fully quiesced.
-        if members.iter().any(|r| live_names.contains(&r.tmux_name)) {
+        if members.iter().any(|r| live_names.holds(r)) {
             continue;
         }
 
@@ -534,7 +537,7 @@ fn same_identity(a: &SessionRecord, b: &SessionRecord) -> bool {
 /// `reconcile_dedup_keeps_concurrent_sessions_sharing_one_checkout` (#10351).
 pub(crate) fn plan_workspace_duplicates(
     records: &[SessionRecord],
-    live_names: &HashSet<String>,
+    live_names: &impl LiveSet,
 ) -> Vec<ManagedSessionId> {
     let mut groups: HashMap<PathBuf, Vec<&SessionRecord>> = HashMap::new();
     for record in records {
@@ -574,7 +577,7 @@ pub(crate) fn plan_workspace_duplicates(
             losers.extend(
                 unowned
                     .iter()
-                    .filter(|r| !live_names.contains(&r.tmux_name))
+                    .filter(|r| !live_names.holds(r))
                     .filter(|r| same_identity(r, survivor))
                     .map(|r| r.id),
             );
@@ -588,7 +591,7 @@ pub(crate) fn plan_workspace_duplicates(
         let live_candidates: Vec<&SessionRecord> = unowned
             .iter()
             .copied()
-            .filter(|r| live_names.contains(&r.tmux_name))
+            .filter(|r| live_names.holds(r))
             .collect();
         let survivor = match live_candidates.as_slice() {
             [] => unowned.iter().copied().max_by(|a, b| by_recency(a, b)),

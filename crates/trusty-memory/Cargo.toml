@@ -68,7 +68,8 @@ name = "trusty-memory"
 # 0.32.1 (Refs #9544): patch by owner ruling (VERSIONING 2026-09-26) — palace_rename; DaemonEvent gains PalaceRenamed and #[non_exhaustive], a SemVer break for exhaustive matchers outside the crate.
 # 0.35.0 (Refs #9275): minor by owner ruling Dfa — palace format 2; trusty-common floor moves 0.60 -> 0.61; 0.34.0 skipped on purpose and never published (0.33.0 is live on crates.io).
 # 0.36.0 (Refs #9271): minor — owns the engine (`trusty_memory::engine` is a module, no longer a re-export of `trusty_common::memory_core`); trusty-common floor moves 0.63 -> 0.64; adds `embedder-test-support` and `memory-core-test-support`; subsumes the unpublished 0.35.1 (0.35.0 is live on crates.io).
-version = "0.36.1"
+# 1.0.0: stability release (owner ruling Dnx); replaces the 0.36.9 line.
+version = "1.0.1"
 edition.workspace = true
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -159,7 +160,7 @@ trusty-mcp = { workspace = true, optional = true }
 # serving surface needs is switched on by `server` below (`config-cli` is what
 # pulls in clap). #9271: the engine moved here from trusty-common's
 # `memory-core`, so this names the trusty-common features it used to imply.
-trusty-common = { path = "../trusty-common", version = "0.67", default-features = false, features = [
+trusty-common = { path = "../trusty-common", version = "0.70.2", default-features = false, features = [
     "embedder",
     "embedder-bundled-ort",
     "credentials",
@@ -259,6 +260,10 @@ libc = { workspace = true }
 image = { workspace = true }
 tower = { workspace = true }
 serial_test = { workspace = true }
+# replay_leaves_no_point_without_neighbours builds on a pool of its own, so
+# other tests' work on rayon's global pool cannot queue ahead of its builds.
+# Already in the graph through hnsw_rs; this adds no new crate.
+rayon = "1.12"
 # #8729: capture the user-forget log line in `service::core_tests`. Already a
 # normal dependency of trusty-common, so this adds no crate to the build.
 tracing-subscriber = { workspace = true }
@@ -275,7 +280,7 @@ git2 = { workspace = true }
 # of this migration are proven to agree.
 # #9271: `test-support` exposes the trusty-common test helpers the engine's
 # tests share (`capture_logs`, `ReadOnlyDir`, `EnvVarGuard`).
-trusty-common = { path = "../trusty-common", version = "0.67", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
+trusty-common = { path = "../trusty-common", version = "0.70", default-features = false, features = ["embedder-test-support", "docgen", "memory-rpc", "test-support"] }
 # #9271: this crate's own test-support features, for `tests/*`. A path-only
 # self dev-dependency: Cargo turns the features on for test builds only, and
 # `cargo publish` strips the entry. `default-features = false` keeps it from

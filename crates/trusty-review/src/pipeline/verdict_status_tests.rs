@@ -70,7 +70,7 @@ fn withheld_outcome_maps_every_reviewer_verdict() {
     ];
     for (model, current, expected) in cases {
         assert_eq!(
-            withheld_outcome(&model, &current, &[], 2),
+            withheld_outcome(&model, &current, &[], 2, 0),
             expected,
             "model {model}, gates {current}"
         );
@@ -85,32 +85,64 @@ fn withheld_outcome_maps_every_reviewer_verdict() {
 fn withheld_outcome_keeps_the_gates_verdict_with_supporting_survivors() {
     let blocker = [finding(Effort::High, true)];
     assert_eq!(
-        withheld_outcome(&Verdict::Block, &Verdict::Block, &blocker, 1),
+        withheld_outcome(&Verdict::Block, &Verdict::Block, &blocker, 1, 0),
         None
     );
     let advisory = [finding(Effort::Low, false)];
     assert_eq!(
-        withheld_outcome(&Verdict::RequestChanges, &Verdict::Unknown, &advisory, 1),
+        withheld_outcome(&Verdict::RequestChanges, &Verdict::Unknown, &advisory, 1, 0),
         Some((Verdict::RequestChanges, VerdictStatus::SuppressedReject))
     );
     let (verdict, status) =
-        withheld_outcome(&Verdict::Approve, &Verdict::Unknown, &advisory, 1).expect("mapped");
+        withheld_outcome(&Verdict::Approve, &Verdict::Unknown, &advisory, 1, 0).expect("mapped");
     assert!(
         matches!(verdict, Verdict::Approve | Verdict::ApproveWithReservations),
         "{verdict}"
     );
     assert_eq!(status, VerdictStatus::Parsed);
     assert_eq!(
-        withheld_outcome(&Verdict::Approve, &Verdict::Approve, &advisory, 1),
+        withheld_outcome(&Verdict::Approve, &Verdict::Approve, &advisory, 1, 0),
         None
     );
+}
+
+/// #10782 (Architect ruling 09:02Z): an APPROVE with no survivor whose only
+/// withholds are pregate drops is `Parsed`; any gate withhold beside them
+/// keeps `AllWithheld`; a blocking verdict stays `SuppressedReject` whatever
+/// the withhold reason.
+#[test]
+fn withheld_outcome_counts_pregate_drops_apart_from_gate_withholds() {
+    for model in [Verdict::Approve, Verdict::ApproveWithReservations] {
+        assert_eq!(
+            withheld_outcome(&model, &model, &[], 3, 3),
+            Some((model.clone(), VerdictStatus::Parsed)),
+            "pregate-only {model}"
+        );
+        assert_eq!(
+            withheld_outcome(&model, &model, &[], 3, 2),
+            Some((model.clone(), VerdictStatus::AllWithheld)),
+            "mixed {model}"
+        );
+        assert_eq!(
+            withheld_outcome(&model, &model, &[], 3, 0),
+            Some((model.clone(), VerdictStatus::AllWithheld)),
+            "gate-only {model}"
+        );
+    }
+    for model in [Verdict::RequestChanges, Verdict::Block] {
+        assert_eq!(
+            withheld_outcome(&model, &model, &[], 2, 2),
+            Some((Verdict::RequestChanges, VerdictStatus::SuppressedReject)),
+            "pregate-only {model}"
+        );
+    }
 }
 
 /// #9310: with nothing withheld the mapping never changes a verdict.
 #[test]
 fn withheld_outcome_is_none_when_nothing_was_withheld() {
     for model in [Verdict::Approve, Verdict::RequestChanges, Verdict::Block] {
-        assert_eq!(withheld_outcome(&model, &Verdict::Unknown, &[], 0), None);
+        assert_eq!(withheld_outcome(&model, &Verdict::Unknown, &[], 0, 0), None);
     }
 }
 

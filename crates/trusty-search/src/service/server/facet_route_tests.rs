@@ -16,7 +16,6 @@ use crate::core::registry::{
     IndexHandle, IndexId, IndexRegistry, IndexStages, StageState, StageStatus,
 };
 use crate::service::persistence::PersistedIndex;
-use axum::extract::State;
 use axum::http::StatusCode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -120,13 +119,9 @@ fn two_facet_state(
 #[serial_test::parallel]
 async fn pinned_semantic_on_a_worktree_routes_to_the_base_facet() {
     let (_dirs, state) = two_facet_state("acme/widget", "acme/widget");
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("wt".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect("the repo's vector-carrying facet must serve the declared semantic lane");
+    let body = super::search_report(&state, "wt", semantic_query())
+        .await
+        .expect("the repo's vector-carrying facet must serve the declared semantic lane");
 
     assert_eq!(
         body["meta"]["served_by_index"], "base",
@@ -155,13 +150,9 @@ async fn pinned_semantic_on_a_worktree_routes_to_the_base_facet() {
 #[serial_test::parallel]
 async fn semantic_routing_does_not_cross_repo_identities() {
     let (_dirs, state) = two_facet_state("acme/widget", "acme/unrelated");
-    let (code, axum::Json(body)) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("wt".to_string()),
-        axum::Json(semantic_query()),
-    )
-    .await
-    .expect_err("another repo's vectors cannot answer this repo's question");
+    let (code, body) = super::search_report(&state, "wt", semantic_query())
+        .await
+        .expect_err("another repo's vectors cannot answer this repo's question");
 
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "vector_unavailable");
@@ -183,13 +174,9 @@ async fn an_unpinned_query_is_not_routed_to_the_base_facet() {
     let unpinned: crate::core::indexer::SearchQuery =
         serde_json::from_value(serde_json::json!({ "text": "how does authentication work" }))
             .expect("unpinned SearchQuery");
-    let axum::Json(body) = super::search::search_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("wt".to_string()),
-        axum::Json(unpinned),
-    )
-    .await
-    .expect("an unpinned query still degrades to the lexical lane");
+    let body = super::search_report(&state, "wt", unpinned)
+        .await
+        .expect("an unpinned query still degrades to the lexical lane");
 
     assert!(
         body["meta"]["served_by_index"].is_null(),

@@ -254,6 +254,8 @@ pub fn run_bounded_with_input(
     };
     // #6867: BEFORE the spawn — a group cannot be joined retroactively.
     isolate_process_group(&mut cmd);
+    // #10083: a socket tm is mid-creating must not reach the probe child.
+    trusty_common::child_fds::seal_inherited(&mut cmd);
     if input.is_some() {
         cmd.stdin(Stdio::piped());
     }

@@ -216,6 +216,7 @@ async fn every_scoped_route_has_a_method() {
         "mpm.managed.reactivate",
         "mpm.managed.decommission",
         "mpm.managed.delete",
+        "mpm.managed.archive", // #10991
         "mpm.control.list",
         "mpm.control.run",
         "mpm.control.connect",
@@ -1184,6 +1185,98 @@ async fn managed_fleet_parity() {
     assert_parity("mpm.managed.fleet", &http, &rpc);
 }
 
+/// #10476: `slim` on the fleet route skips ONLY the stale-assets probe, on both
+/// transports, and every other request shape — no query, `slim=false`, an
+/// unknown key — still probes. The observable is `stale_assets_unchecked`: an
+/// `Errored` session is probed in a full call (`false`) and left unchecked in a
+/// slim one (`true`). `unresumable` is computed either way.
+#[tokio::test]
+async fn managed_fleet_slim_skips_only_the_stale_assets_probe() {
+    let (state, dir) = test_state().await;
+    let repo_url = "https://github.com/acme/widget".to_string();
+    state
+        .project_registry()
+        .await
+        .register(crate::project::Project {
+            name: "widget".into(),
+            repo_url: repo_url.clone(),
+            default_branch: "main".into(),
+            stack_hint: None,
+            tags: vec![],
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
+        })
+        .await
+        .expect("register project");
+    let mgr = state.session_manager().await;
+    let id = crate::session_manager::ManagedSessionId::new();
+    let gone = dir.path().join("never-created"); // unresumable: no workdir
+    mgr.create_with_id(
+        id,
+        "fleet slim".to_string(),
+        Some(gone.clone()),
+        None,
+        Some(gone),
+        Some(repo_url),
+        Some("main".to_string()),
+        crate::runtime::RuntimeKind::default(),
+        false,
+        false,
+    )
+    .await
+    .expect("seed");
+    mgr.mark_errored(&id, "fixture").await.expect("errored");
+
+    let row = |body: &Value| -> (bool, bool) {
+        // The registry also seeds from the operator's config.yaml, so find ours.
+        let widget = body["projects"]
+            .as_array()
+            .and_then(|ps| ps.iter().find(|p| p["project_name"] == "widget"))
+            .unwrap_or_else(|| panic!("widget group missing: {body}"));
+        let s = &widget["sessions"][0];
+        assert_eq!(s["id"].as_str(), Some(id.to_string().as_str()), "{body}");
+        let unchecked = s["stale_assets_unchecked"].as_bool().expect("unchecked");
+        (unchecked, s["unresumable"].as_bool().expect("unresumable"))
+    };
+    let http = |uri: &'static str| {
+        let router = http_router(Arc::clone(&state));
+        async move {
+            let a = http_call(router, Method::GET, uri, None).await;
+            assert_eq!(a.status, 200, "{uri}: {}", a.text);
+            a.json.expect("json")
+        }
+    };
+    let base = "/api/v1/sessions/managed/fleet";
+    // (unchecked, unresumable): probed → (false, true); slim → (true, true).
+    for (uri, want) in [
+        ("/api/v1/sessions/managed/fleet?slim=true", (true, true)),
+        ("/api/v1/sessions/managed/fleet?slim=1", (true, true)),
+        (base, (false, true)),
+        ("/api/v1/sessions/managed/fleet?slim=false", (false, true)),
+        ("/api/v1/sessions/managed/fleet?bogus=1", (false, true)),
+    ] {
+        assert_eq!(row(&http(uri).await), want, "{uri}");
+    }
+
+    for (params, want) in [
+        (json!({"slim": true}), (true, true)),
+        (json!({}), (false, true)),
+        (json!({"bogus": 1}), (false, true)),
+    ] {
+        let rpc = rpc_call(&rpc_router(&state), "mpm.managed.fleet", params.clone()).await;
+        let result = rpc.result.clone().expect("rpc result");
+        assert_eq!(row(&result), want, "{params}");
+    }
+}
+
 #[tokio::test]
 async fn managed_sync_assets_all_parity() {
     let (state, _dir) = test_state().await;
@@ -1947,7 +2040,12 @@ async fn managed_output_returns_pane_text_for_a_managed_session_9162() {
     let body = http.json.clone().expect("json body");
     assert_eq!(body["output"], "line one\nline two\n");
     assert_eq!(body["lines"], 20);
-    assert_eq!(body["input_box"], Value::Null, "Q2: never classified");
+    // #8407: no escaped capture is seeded, so the box reads unknown, not empty.
+    assert_eq!(
+        body["input_box"],
+        Value::Null,
+        "an unreadable box is unknown"
+    );
     let rpc = rpc_call(
         &rpc_router(&state),
         "mpm.managed.output",
@@ -1981,6 +2079,85 @@ async fn managed_output_returns_pane_text_for_a_managed_session_9162() {
         calls.iter().all(|(_, pane)| pane == "%77"),
         "only the owned pane is captured: {calls:?}"
     );
+}
+
+/// #8407: an escaped capture of a Claude Code pane whose box holds `input`.
+fn escaped_pane_8407(input: &str) -> String {
+    const RULE: &str = "────────────────────────────────────────";
+    format!("● Done.\n\n{RULE}\n❯ {input}\n{RULE}\n  ? for shortcuts\n")
+}
+
+/// #8407: GET the managed output and activity bodies for `id`, asserting the
+/// output route agrees over the socket.
+async fn output_and_activity_8407(state: &Arc<DaemonState>, id: &str) -> (Value, Value) {
+    let http = http_call(
+        http_router(Arc::clone(state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/output"),
+        None,
+    )
+    .await;
+    assert_eq!(http.status, 200, "body={:?}", http.text);
+    let rpc = rpc_call(&rpc_router(state), "mpm.managed.output", json!({"id": id})).await;
+    assert_parity("mpm.managed.output (input box)", &http, &rpc);
+    let activity = http_call(
+        http_router(Arc::clone(state)),
+        Method::GET,
+        &format!("/api/v1/sessions/managed/{id}/activity"),
+        None,
+    )
+    .await;
+    assert_eq!(activity.status, 200, "body={:?}", activity.text);
+    (
+        http.json.expect("output json"),
+        activity.json.expect("activity json"),
+    )
+}
+
+/// #8407: the managed output and activity routes classify the owned pane's
+/// input box as empty, suggestion or typed. Red on a9e9fa6a90: always `null`.
+#[tokio::test]
+async fn managed_output_classifies_the_input_box_8407() {
+    let cases = [
+        ("", "empty"),
+        ("\u{1b}[2myes to both, go ahead\u{1b}[22m", "suggestion"),
+        ("ship it\u{1b}[7m \u{1b}[0m", "typed"),
+    ];
+    for (input, want) in cases {
+        let (state, _dir, fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+        fake.escaped_capture_responses
+            .lock()
+            .expect("lock")
+            .insert("%77".to_owned(), escaped_pane_8407(input));
+        let (output, activity) = output_and_activity_8407(&state, &id).await;
+        assert_eq!(output["input_box"], want, "output for {input:?}: {output}");
+        assert_eq!(
+            activity["input_box"], want,
+            "activity for {input:?}: {activity}"
+        );
+    }
+}
+
+/// #8407: a pane whose escaped capture fails reads as unknown (`null`) on
+/// both routes — never a guessed `empty` (fail-closed).
+#[tokio::test]
+async fn managed_output_unreadable_pane_is_unknown_8407() {
+    let (state, _dir, _fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+    let (output, activity) = output_and_activity_8407(&state, &id).await;
+    assert_eq!(
+        output["output"], "plain\n",
+        "the text capture still answers"
+    );
+    assert_eq!(output["input_box"], Value::Null, "{output}");
+    assert_eq!(activity["input_box"], Value::Null, "{activity}");
+    // A pane with no `❯` line is unknown too, not empty.
+    let (state, _dir, fake, id) = managed_output_fixture(Some("%77"), "plain\n").await;
+    fake.escaped_capture_responses
+        .lock()
+        .expect("lock")
+        .insert("%77".to_owned(), "$ ls\n".to_owned());
+    let (output, _) = output_and_activity_8407(&state, &id).await;
+    assert_eq!(output["input_box"], Value::Null, "{output}");
 }
 
 /// #9162 (criterion 4): a record with no owned pane is refused on both

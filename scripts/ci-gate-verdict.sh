@@ -18,6 +18,10 @@
 #     - each context's job must be `success`, or `skipped` when — and only
 #       when — the row names a relevance output and `changes` set it to
 #       `false`. A skip the classifier did not ask for is a failure.
+#     - a row whose relevance is `pr_skip` may be `skipped` only when
+#       $EVENT_NAME is `pull_request` or `merge_group` (the queue commit runs
+#       the PR-time suite); any other value, unset or empty included, fails
+#       the skip (#10631: the pre-publish `test` aggregate runs only off PRs).
 #     - a context whose job key is absent from `needs` is a failure: the
 #       workflow and this table have drifted apart.
 #   Prints one table row per context and, when $GITHUB_STEP_SUMMARY is set,
@@ -25,6 +29,8 @@
 #
 # Env:
 #   NEEDS_JSON             required; `${{ toJSON(needs) }}`
+#   EVENT_NAME             optional; `${{ github.event_name }}`, read by
+#                          `pr_skip` rows only
 #   GITHUB_STEP_SUMMARY    optional; the Markdown summary file
 #
 # Exit: 0 when every context passes; 1 when any fails; 2 on unusable input.
@@ -34,7 +40,7 @@
 
 set -uo pipefail
 
-# `<job key>|<context name>|<relevance output that may skip it, or ->`.
+# `<job key>|<context name>|<relevance output that may skip it, `pr_skip`, or ->`.
 # The ONLY list of what `CI gate` covers. ci-gate-selftest.sh asserts it equals
 # the ci-gate job's `needs:` (minus `changes`) and each job's `name:`.
 CONTEXTS="
@@ -49,11 +55,14 @@ search-daemon-smoke|trusty-search daemon smoke test|-
 rustdoc-links|Rustdoc intra-doc links|-
 teardown-guard|Durable writes hold the teardown guard|teardown_guard_relevant
 tmux-exact-targets|Every tmux -t target is exact|tmux_targets_relevant
+sled-static|Sled tailscaled isolation (static)|sled_static_relevant
 parity-selftest|Parity gate self-test (must catch a drifted tag)|-
 check5-decision|CHECK 5 decision self-test (0 compared must never print PASS)|-
 check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gated)|-
+fastembed-cache-selftest|Fastembed cache check self-test|-
 website-corpus|Website content corpus|-
 changelog-fragment|Per-PR changelog fragment|-
+test|Rust tests (pre-publish gate)|pr_skip
 "
 
 if [ "${1:-}" = "--list" ]; then
@@ -100,7 +109,17 @@ while IFS='|' read -r key context relevance; do
   case "$result" in
     success) verdict="ok" ;;
     skipped)
-      if [ "$relevance" != "-" ] &&
+      if [ "$relevance" = "pr_skip" ]; then
+        case "${EVENT_NAME:-}" in
+          pull_request | merge_group)
+            verdict="ok"
+            note="skipped: pre-publish only, event=${EVENT_NAME}"
+            ;;
+          *)
+            note="skipped on event '${EVENT_NAME:-unset}'; runs off pull_request and merge_group"
+            ;;
+        esac
+      elif [ "$relevance" != "-" ] &&
         [ "$(need ".changes.outputs.${relevance}")" = "false" ]; then
         verdict="ok"
         note="skipped: ${relevance}=false"

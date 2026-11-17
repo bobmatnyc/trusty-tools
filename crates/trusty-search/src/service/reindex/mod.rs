@@ -248,6 +248,11 @@ pub(crate) use defer_embed::run_embed_catch_up;
 /// Test: `commands::start_restore::markers_tests::restore_rearms_an_interrupted_deferred_embed_pass`.
 pub(crate) use defer_embed::spawn_deferred_embed_pass;
 
+/// The #4707 honesty gate a settle runs before it publishes `Ready`; the
+/// #10551 resume reuses it so it never promotes a stage over a broken store.
+/// Test: `a_failed_stage_with_every_vector_present_is_settled_ready`.
+pub(crate) use stages::semantic_health_reason;
+
 /// Re-export the two public entry points for kicking off a reindex task.
 ///
 /// Why: `reindex_handlers.rs` calls `spawn_reindex_with_cleanup`; a handful of
@@ -299,6 +304,10 @@ mod tests;
 #[cfg(test)]
 mod hash_withhold_tests;
 
+// #10738: a force reindex raises the index generation.
+#[cfg(test)]
+mod identity_10738_tests;
+
 // #6524: the embedding pause, end to end.
 #[cfg(test)]
 mod embed_pause_tests;
@@ -338,3 +347,9 @@ mod completion_tests;
 // #9169: a reindex commit stamps its corpus; a load never does.
 #[cfg(test)]
 mod reindex_stamp_tests;
+// #10481: the split on the full-reindex parse path, and the hash skip over it.
+#[cfg(test)]
+mod window_split_10481_tests;
+// #10504: the same, on the default deferred-embed path.
+#[cfg(test)]
+mod window_split_10504_tests;

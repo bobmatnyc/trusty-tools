@@ -101,7 +101,8 @@ pub async fn run_tui<H: ReplHandler + 'static>(
     {
         let update_tx = tx.clone();
         tokio::spawn(async move {
-            if let Some(info) = crate::update::check_for_update().await {
+            // #11075: the automatic check honours TRUSTY_NO_UPDATE_CHECK / CI.
+            if let Some(info) = crate::update::check_for_update_on_startup().await {
                 let msg = format!(
                     "Update available: trusty-agents v{} (you have v{}) — run /update to upgrade",
                     info.latest_version,

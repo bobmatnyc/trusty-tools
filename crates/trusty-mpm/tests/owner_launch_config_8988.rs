@@ -131,8 +131,12 @@ impl Fixture {
         std::fs::create_dir_all(&bin).expect("mkdir bin");
         let exe = bin.join("claude");
         // See #10248
-        trusty_common::exec_stub::write_executable(&exe, b"#!/bin/sh\nexit 0\n")
-            .expect("write fake claude");
+        // #10459: an Architect launch probes `claude --version` first.
+        trusty_common::exec_stub::write_executable(
+            &exe,
+            b"#!/bin/sh\n[ \"$1\" = --version ] && echo '2.1.312 (Claude Code)'\nexit 0\n",
+        )
+        .expect("write fake claude");
         let repos_root = home.join("projects");
         let project = repos_root.join("acme").join("widget");
         std::fs::create_dir_all(&project).expect("mkdir project");
@@ -185,36 +189,60 @@ impl Fixture {
         .expect("write user config");
     }
 
+    /// Whether [`Self::make_architect`] ran for this fixture.
+    fn is_architect(&self) -> bool {
+        self.project.join(".trusty-mpm.toml").exists()
+    }
+
+    /// Settle one launch `result` and read back the argv `tmux` typed.
+    ///
+    /// #11270: the recorder runs no `claude`, so an Architect launch is typed
+    /// and then fails its bind and is killed, naming `tm fleet relaunch`. A PM
+    /// launch must succeed.
+    fn settle<T, E: std::fmt::Debug>(
+        &self,
+        result: Result<T, E>,
+        path: &str,
+        tmux: &Recorder,
+    ) -> Vec<String> {
+        if self.is_architect() {
+            let err = result.err().unwrap_or_else(|| {
+                panic!("the {path} path bound an Architect with no claude running")
+            });
+            assert!(format!("{err:?}").contains("tm fleet relaunch"), "{err:?}");
+        } else {
+            result
+                .unwrap_or_else(|e| panic!("the {path} path must run with claude on PATH: {e:?}"));
+        }
+        launched_args(tmux)
+    }
+
     /// The argv of one fresh spawn in the project.
     fn spawn_args(&self) -> Vec<String> {
         let tmux = Arc::new(Recorder::default());
-        self.adapter(&tmux)
-            .spawn(
-                "tm-acme-01",
-                &self.project,
-                "t",
-                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
-                &[],
-            )
-            .expect("the spawn path must run with claude on PATH");
-        launched_args(&tmux)
+        let result = self.adapter(&tmux).spawn(
+            "tm-acme-01",
+            &self.project,
+            "t",
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        );
+        self.settle(result, "spawn", &tmux)
     }
 
     /// The argv of one resume in the project.
     fn resume_args(&self) -> Vec<String> {
         let tmux = Arc::new(Recorder::default());
-        self.adapter(&tmux)
-            .spawn_resume(
-                "tm-acme-01",
-                Some("%7"),
-                &self.project,
-                "t",
-                None,
-                "c342df68-3e15-4b50-93fc-f24bcbae76c2",
-                &[],
-            )
-            .expect("the resume path must run with claude on PATH");
-        launched_args(&tmux)
+        let result = self.adapter(&tmux).spawn_resume(
+            "tm-acme-01",
+            Some("%7"),
+            &self.project,
+            "t",
+            None,
+            "c342df68-3e15-4b50-93fc-f24bcbae76c2",
+            &[],
+        );
+        self.settle(result, "resume", &tmux)
     }
 
     /// The argv of one in-place relaunch in the project.
@@ -278,7 +306,7 @@ fn settings_file(args: &[String]) -> (PathBuf, serde_json::Value) {
 }
 
 /// #10127: an Architect's ONE `--settings` is inline JSON — the owner file's
-/// `[mcp]` part merged with the lockdown deny and the connector switch.
+/// `[mcp]` part merged with the lockdown deny; #10735: no connector switch.
 fn assert_architect_payload(args: &[String]) {
     use trusty_mpm::core::architect_lockdown::{ARCHITECT_DENY_GLOBS, capitalised};
     let values: Vec<&String> = args
@@ -292,7 +320,7 @@ fn assert_architect_payload(args: &[String]) {
         body["deniedMcpServers"],
         serde_json::json!([{"serverName": "heygen"}])
     );
-    assert_eq!(body["disableClaudeAiConnectors"], true);
+    assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
     assert!(body.get("skillOverrides").is_none(), "{body}");
     let mut want: Vec<String> = ARCHITECT_DENY_GLOBS
         .iter()

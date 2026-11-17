@@ -44,6 +44,7 @@
 //! (#1299).
 
 mod decision;
+mod evidence;
 mod observe;
 mod verify;
 
@@ -61,7 +62,7 @@ use crate::core::sm::providers::{LlmRequest, SmModelTier};
 use super::SessionManagerAgent;
 
 pub use decision::{SmDecision, TaskSpec, parse_decision};
-use observe::interpret_session;
+use observe::{TaskExpectation, interpret_session};
 use verify::redirect_direct_work;
 
 /// Generation cap for the SM's DECOMPOSE decision reply.
@@ -463,12 +464,16 @@ impl SessionManagerAgent {
     /// Why: phases 4–5 interpret each launched session's pane (deterministically,
     /// no LLM) and fold the result into the goal store so progress is DERIVED from
     /// observed state and a link reaches `Verified` ONLY with evidence (§3.5).
-    /// What: for each session id, calls `control.get`, interprets it via
-    /// [`interpret_session`], and applies a [`SessionUpdate`] (state + evidence)
-    /// through `store.update` — which recomputes goal progress. A `get` failure or
-    /// an update failure is noted (best-effort) but does not abort the whole sweep.
+    /// What: for each session id, reads the linked task text from the goal store
+    /// (the [`TaskExpectation`] evidence must match — #10721), calls `control.get`,
+    /// interprets it via [`interpret_session`], and applies a [`SessionUpdate`]
+    /// (state + evidence) through `store.update` — which recomputes goal progress.
+    /// A missing link yields an empty expectation (no PR URL can verify). A `get`
+    /// failure or an update failure is noted (best-effort) but does not abort the
+    /// whole sweep.
     /// Test: `delegate_tests.rs::delegate_observes_and_updates_progress`,
-    /// `delegate_gate_blocks_without_evidence`.
+    /// `delegate_gate_blocks_without_evidence`,
+    /// `delegate_verifies_and_closes_with_evidence`.
     async fn observe_and_verify(
         &self,
         launched: &[String],
@@ -477,8 +482,18 @@ impl SessionManagerAgent {
         goals: &Arc<Mutex<SmGoalStore>>,
     ) -> Result<(), DelegationError> {
         for session_id in launched {
+            // #10721 W1: evidence is judged against the task this session was given.
+            // The lock is released before the `control.get` await below.
+            let expect = {
+                let store = goals.lock().await;
+                store
+                    .get(goal_id)
+                    .and_then(|g| g.sessions.iter().find(|s| &s.session_id == session_id))
+                    .map(|s| TaskExpectation::from_task(&s.task))
+                    .unwrap_or_default()
+            };
             let observed = match control.get(session_id).await {
-                Ok(json) => interpret_session(&json),
+                Ok(json) => interpret_session(&json, &expect),
                 Err(e) => {
                     let mut store = goals.lock().await;
                     let _ = store
@@ -497,8 +512,14 @@ impl SessionManagerAgent {
                     .map(|e| format!("verified {session_id}: {e}")),
             };
             let mut store = goals.lock().await;
+            // #10722: a refused update (e.g. Verified without evidence) leaves the
+            // link at its prior state; the warning carries the error's cause.
             if let Err(e) = store.update(goal_id, update).await {
                 tracing::warn!(%session_id, %goal_id, "delegate: goal update failed: {e}");
+                // #10722: record the refusal on the goal, as the observe arm does.
+                let _ = store
+                    .note(goal_id, format!("update {session_id} failed: {e}"))
+                    .await;
             }
         }
         Ok(())
@@ -544,11 +565,8 @@ impl SessionManagerAgent {
         let Some(goal) = store.get(goal_id) else {
             return format!("Goal {goal_id}: launched {} session(s).", launched.len());
         };
-        let verified = goal
-            .sessions
-            .iter()
-            .filter(|s| s.state.is_verified())
-            .count();
+        // #10722: count with the gate's definition (state AND evidence).
+        let verified = goal.verified_count();
         let total = goal.sessions.len();
         if goal_done {
             format!(

@@ -1484,3 +1484,88 @@ fn extends_unions_channels_by_id() {
         "the child's entry replaces the base's in place"
     );
 }
+
+/// #11043: a child's `[agent].provider_id` pin survives the merge, and a
+/// child that omits it inherits the base's.
+///
+/// Why: the pin fails closed only if it reaches the loader; an `extends`
+/// overlay that dropped it ran on the ambient provider instead.
+#[test]
+fn extends_child_provider_id_wins_and_omitted_inherits() {
+    let base = |pin: &str| {
+        cfg(&format!(
+            r#"
+[agent]
+name = "base"
+role = "r"
+model = "m"
+description = "d"
+{pin}
+[llm]
+temperature = 0.7
+max_tokens = 1024
+[system_prompt]
+content = "b"
+"#
+        ))
+    };
+    let pinned_child = cfg(r#"
+[agent]
+name = "child"
+role = "agent"
+model = ""
+description = ""
+extends = "base"
+provider_id = "bedrock"
+[llm]
+temperature = 0.0
+max_tokens = 1024
+[system_prompt]
+content = "c"
+"#);
+    let merged = merge_extends(base(""), pinned_child);
+    assert_eq!(
+        merged.agent.provider_id.as_deref(),
+        Some("bedrock"),
+        "a child's own pin must survive the merge over an unpinned base"
+    );
+
+    let merged = merge_extends(
+        base(r#"provider_id = "openrouter""#),
+        child("child", "base", "c"),
+    );
+    assert_eq!(
+        merged.agent.provider_id.as_deref(),
+        Some("openrouter"),
+        "a child with no pin inherits the base's"
+    );
+}
+
+/// #11043: the bundled `cto-assistant` package keeps its Bedrock pin (#7878)
+/// after it merges over the bundled `assistant` it extends.
+#[test]
+fn bundled_cto_assistant_keeps_its_bedrock_pin_through_extends() {
+    let dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    // #11043: a directory package keeps its prompt in persona.md, so stand in
+    // a placeholder `system_prompt.content` before the strict parse.
+    let read = |rel: &str| {
+        let raw = std::fs::read_to_string(dir.join(rel)).expect("read a bundled agent template");
+        let mut table: toml::Table = toml::from_str(&raw).expect("bundled agent TOML parses");
+        let prompt = table
+            .entry("system_prompt")
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        if let Some(prompt) = prompt.as_table_mut() {
+            prompt
+                .entry("content")
+                .or_insert_with(|| toml::Value::String("placeholder".to_string()));
+        }
+        toml::to_string(&table).expect("re-serialize bundled agent TOML")
+    };
+    let base = cfg(&read("assistant/agent.toml"));
+    let cto = cfg(&read("cto-assistant/agent.toml"));
+    assert_eq!(cto.agent.extends.as_deref(), Some("assistant"));
+    let merged = merge_extends(base, cto);
+    assert_eq!(merged.agent.provider_id.as_deref(), Some("bedrock"));
+}

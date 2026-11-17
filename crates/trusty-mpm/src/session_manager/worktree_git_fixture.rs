@@ -109,13 +109,27 @@ impl Drop for RestoreMode {
 
 /// `chmod 000 <path>`, restored when the returned guard drops (#4732).
 pub(crate) fn deny_all(path: &Path) -> RestoreMode {
+    chmod_restorable(path, 0o000)
+}
+
+/// `chmod 555 <path>`, restored when the returned guard drops.
+///
+/// Why: a directory git can still read but nobody can unlink from. Since
+/// #11221 a `chmod 000` directory makes git warn, which fails the dirt checks
+/// before `remove_dir_all` is reached; this mode lets the guards pass and the
+/// removal fail part-way.
+pub(crate) fn deny_writes(path: &Path) -> RestoreMode {
+    chmod_restorable(path, 0o555)
+}
+
+/// Set `path`'s mode to `new`, returning a guard that restores the old one.
+fn chmod_restorable(path: &Path, new: u32) -> RestoreMode {
     use std::os::unix::fs::PermissionsExt;
     let mode = std::fs::symlink_metadata(path)
         .expect("fixture: stat before chmod")
         .permissions()
         .mode();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000))
-        .expect("fixture: chmod 000");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(new)).expect("fixture: chmod");
     RestoreMode {
         path: path.to_path_buf(),
         mode,

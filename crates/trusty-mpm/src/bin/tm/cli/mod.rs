@@ -18,6 +18,9 @@
 use clap::{Parser, Subcommand};
 
 mod actions;
+// #10569: guard against a subcommand arg reusing a global arg id.
+#[cfg(test)]
+mod arg_id_tests;
 
 pub(crate) use actions::*;
 
@@ -373,7 +376,8 @@ pub(crate) enum Command {
     /// What: prints every gap found, or a completeness confirmation, and
     /// exits non-zero when the workspace is incomplete (after an optional
     /// `--repair` attempt still leaves gaps).
-    /// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`.
+    /// Test: `cli_parses_validate`, `cli_parses_validate_with_path_and_repair`,
+    /// `cli_parses_validate_repair_dry_run`.
     Validate {
         /// Workspace directory to validate. Defaults to the current directory.
         #[arg(long)]
@@ -383,6 +387,9 @@ pub(crate) enum Command {
         /// before reporting the final verdict.
         #[arg(long)]
         repair: bool,
+        /// With `--repair`, print the planned repairs and change nothing (#10425).
+        #[arg(long, requires = "repair")]
+        dry_run: bool,
     },
     /// Project-settings hook hygiene: detect and remove tm hook contamination
     /// (issue #2940).
@@ -440,13 +447,12 @@ pub(crate) enum Command {
     },
     /// Report daemon health: reachability, catalog freshness, and a fleet summary.
     Health,
-    /// Launch the ratatui multipane TUI dashboard (projects / sessions /
-    /// activity / actions).
+    /// Launch the ratatui TUI on the console home screen (one tile per service; Enter on MPM opens the projects dashboard).
     ///
-    /// Why: #6483 — this used to open the single-pane coordinator chat, which
-    /// is now behind `--single-pane`. The multipane `project_ctl` dashboard is
-    /// the default surface.
-    /// What: routes through `trusty_mpm::tui::initial_view`.
+    /// Why: #10491 — `tm tui` starts at the console's service roster; the
+    /// multipane `project_ctl` dashboard (#6483) is one Enter away. The
+    /// single-pane coordinator chat stays behind `--single-pane`.
+    /// What: routes through `trusty_mpm::tui::home::tui_entry`.
     /// Test: `cli_parses_tui_defaults`, `cli_parses_tui_single_pane_opt_in`.
     Tui {
         /// Base URL of the trusty-mpm daemon. `Option<String>`, no
@@ -461,6 +467,15 @@ pub(crate) enum Command {
         /// dashboard (#6483 opt-in).
         #[arg(long)]
         single_pane: bool,
+        /// Keep the terminal's own mouse handling: the projects view does not
+        /// capture clicks or the wheel. `TM_TUI_MOUSE=0` does the same (#10476).
+        #[arg(long)]
+        no_mouse: bool,
+        /// The Architect dashboard store root the Architect view reads
+        /// (`a` on the home screen). Optional: without it the daemon resolves
+        /// the root (#10944); given, it overrides that (#10966).
+        #[arg(long, env = "TM_ARCHITECT_STORE")]
+        architect_store: Option<std::path::PathBuf>,
     },
     /// Manage the Telegram remote-management bot (pair, status, start, stop).
     Telegram {
@@ -612,6 +627,22 @@ pub(crate) enum Command {
         /// Gmail, Notion and Google Chat MCP tool, for every caller.
         #[arg(long)]
         egress_guard: bool,
+        /// Run in standing-rules mode (#10960): on `SessionStart` /
+        /// `UserPromptSubmit`, inject the Architect's
+        /// `local/standing-rules.md` into context. Architect sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        standing_rules: bool,
+        /// Run in turn-task mode (#11398): on `UserPromptSubmit`, stamp
+        /// `Task: <id>@<MMDD>` from datg's `current` field. PM sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        turn_task: bool,
+        /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
+        /// final message claims completion with no evidence map or sets an
+        /// invented size target. Warn-only; always exits 0.
+        #[arg(long)]
+        completion_evidence: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -675,12 +706,18 @@ pub(crate) enum Command {
     /// `trusty_agents_common::compress::compress_tool_output_async_with_path`
     /// (hoisted from `trusty-agents` in issue #1959), logs a structured
     /// stats line, and writes the compressed text to stdout.
+    /// #10973: with a command after `--`, runs it and compresses its stdout
+    /// instead of reading stdin, exiting with the command's own status — the
+    /// one-command shape an isolation worktree's classifier accepts.
     /// Test: `cli_parses_compress` plus `commands::compress`'s unit tests
     /// and the `tm_compress_pipe` integration test.
     Compress {
         /// Tool name used to select the compression filter (e.g. "cargo test").
         #[arg(long)]
         tool: String,
+        /// #10973: the program and arguments to run; empty reads stdin.
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     /// Wait for a condition, in-turn, without blocking past the harness ceiling.
     ///
@@ -713,6 +750,7 @@ pub(crate) enum Command {
     /// under `~/.trusty-mpm/build-slots/`, sets `CARGO_TARGET_DIR` to the
     /// slot's pool directory unless one is pinned, runs the command and exits
     /// with its status; exits 75 naming the holders when no slot frees.
+    /// `tm build-lease where <bin>` prints the freshest built binary (#10835).
     /// Test: `tests/tm_build_lease.rs`.
     BuildLease(crate::commands::build_lease::BuildLeaseArgs),
     /// List the worktrees the machine-wide ledger records (#8994).
@@ -764,6 +802,13 @@ pub(crate) enum Command {
         /// allowlist).
         #[arg(long)]
         sandbox: bool,
+        /// Admit exactly one provider credential into the sandbox (#10721):
+        /// `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, read once from the
+        /// environment and then removed from it. Any other name, or the
+        /// variable unset, refuses. The sandbox launcher's `--credential`
+        /// sets it through `tm secrets exec`; requires `--sandbox`.
+        #[arg(long, value_name = "NAME", requires = "sandbox")]
+        sandbox_credential: Option<String>,
     },
     /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
@@ -807,8 +852,8 @@ pub(crate) enum Command {
         dir: Option<String>,
         /// Active output style id for this launch (HR-4). Overrides the
         /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
-        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
-        /// to the default.
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`, `owner-plain`. An
+        /// unknown id falls back to the default.
         #[arg(long)]
         style: Option<String>,
         /// Run this session in its own git worktree instead of the project's
@@ -884,12 +929,22 @@ pub(crate) enum Command {
     /// The Architect's deterministic commands: the poller and its readers.
     ///
     /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
-    /// Architect's Python scripts with the same arguments and output.
-    // #9822. Test: `cli_parses_architect_verbs`.
+    /// Architect's Python scripts with the same arguments and output. With
+    /// no verb, `tm architect` is `tm architect up` plus attach.
+    // #9822, #11364. Test: `cli_parses_architect_verbs`.
     Architect {
-        /// Architect action to perform.
+        /// Architect action to perform; none means `up` and attach.
         #[command(subcommand)]
-        action: ArchitectAction,
+        action: Option<ArchitectAction>,
+    },
+    /// Prove you are at the Studio, so the Architect may write trust anchors.
+    ///
+    /// `local` asks for Touch ID or the login password.
+    // #8878 PR2a. Test: `cli_parses_presence_local`.
+    Presence {
+        /// Presence action to perform.
+        #[command(subcommand)]
+        action: PresenceAction,
     },
     /// The PM ledger: `init`, `add`, `update`, `close`, `batch`, `prune`, `show`.
     ///
@@ -906,7 +961,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`.
+    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
@@ -1148,7 +1203,8 @@ pub(crate) enum Command {
     /// (`.../tree/main`, `.../pull/123`) and relative paths are refused.
     /// Persists `{alias, url}` to `<root>/registry.json` and prints
     /// `registered <alias> → <url>`.
-    /// Test: `register_args_tests.rs`.
+    /// Test: `register_args_tests.rs`; parsing in
+    /// `register_owner_repo_does_not_fill_cli_url`.
     Register {
         /// Repo to register: `<owner>/<repo>` (GitHub assumed), or a full URL
         /// such as `https://github.com/<owner>/<repo>` or
@@ -1156,6 +1212,8 @@ pub(crate) enum Command {
         ///
         /// #4912: this position also accepts the legacy alias-first form; the
         /// repo is detected by shape, so `tm register <alias> <url>` still works.
+        // #10569: own id, so the value never lands in the global `Cli.url`.
+        #[arg(id = "repo_spec", value_name = "URL")]
         url: String,
         /// Short alias identifier (e.g. `my-project`).
         ///
@@ -1858,6 +1916,35 @@ pub struct DoctorFlags {
     /// `--quarantine-mcp` from a dry run to an applied run.
     #[arg(long, requires = "writes")]
     pub yes: bool,
+
+    /// State the preview explicitly: run the selected repairs as a DRY RUN.
+    ///
+    /// Why (#10425): a preview was only the absence of `--yes`, so a script or
+    /// operator could not ask for one and be refused if it would write.
+    /// What: every write action stays a dry run; it conflicts with `--yes`.
+    /// A repair whose effect cannot be determined prints `NOT EVALUATED`,
+    /// never "no change".
+    /// Test: `cli_parses_doctor_fix_dry_run_and_only`, `tm_doctor_fix_dry_run`.
+    #[arg(long, requires = "writes", conflicts_with = "yes")]
+    pub dry_run: bool,
+
+    /// With `--fix`, run only the named check's repair. Repeatable.
+    ///
+    /// Why (#10425): `--fix --yes` applied the whole plan, so one check's
+    /// repair could not be applied without every other one.
+    /// What: the ids are the `[check]` tags `--fix` prints; the repairs still
+    /// run in their fixed dependency order. An unknown id is an error.
+    /// Test: `cli_parses_doctor_fix_dry_run_and_only`,
+    /// `cli_rejects_an_unknown_doctor_only_id`.
+    #[arg(
+        long,
+        value_name = "CHECK",
+        requires = "fix",
+        value_parser = clap::builder::PossibleValuesParser::new(
+            crate::commands::doctor_fix_run::FIX_REPAIR_IDS
+        )
+    )]
+    pub only: Vec<String>,
 
     /// Quarantine one specific stray `.mcp.json` by path. DRY RUN unless
     /// `--yes`.

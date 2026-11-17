@@ -21,6 +21,7 @@ use crate::pipeline::citation_check::{
     BRACKET_CITATION_RE, CODE_CITATION_RE, MIN_SPAN_LEN, collect_delimited, line_suffix_span,
     normalize, normalize_path,
 };
+use crate::pipeline::citation_payload::split_backtick_spans;
 
 /// An identifier-shaped word: `name`, `a::b::c`, optionally followed by `(`.
 static IDENT_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -110,19 +111,25 @@ impl Anchors {
         }
     }
 
-    /// Classify one backtick span as a path, a bare identifier, or code; only
-    /// code is kept. #9188 E (Architect ruling): a bare identifier such as
-    /// `step_4` or `run()` names code without quoting it, so it anchors nothing.
+    /// Keep one backtick span or structured quote only when it quotes code
+    /// ([`quotes_code`]).
     fn add_code_span(&mut self, span: String) {
-        if span.len() < 2 || is_path_like(&span) {
-            return;
-        }
-        let bare = span.strip_suffix("()").unwrap_or(&span);
-        let is_ident = IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len());
-        if !is_ident {
+        if quotes_code(&span) {
             self.add_snippet(span);
         }
     }
+}
+
+/// Classify a span as a path, a bare identifier, or code; only code is a
+/// quote. #9188 E (Architect ruling): a bare identifier such as `step_4` or
+/// `run()` names code without quoting it, so it anchors nothing.
+/// Test: `a_bare_identifier_quote_counts_as_no_quote`.
+fn quotes_code(span: &str) -> bool {
+    if span.len() < 2 || is_path_like(span) {
+        return false;
+    }
+    let bare = span.strip_suffix("()").unwrap_or(span);
+    !IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len())
 }
 
 /// #8905 row 3: a snippet anchors a citation only when it is long enough to be
@@ -161,8 +168,15 @@ pub(super) fn same_file(a: &str, b: &str) -> bool {
 /// suggestion, which is the proposed fix and need not be in the diff.
 /// #8905 row 6: a `[code: …]` excerpt anchors only its own file, so it counts
 /// here only when its locator names `f.file`.
+/// #10964: a backtick span labelled as a payload, an example input or a fix
+/// (`citation_payload`) is neither required nor a placing anchor.
 pub(super) fn finding_anchors(f: &Finding) -> Anchors {
     let mut anchors = Anchors::default();
+    // #10782: the structured quote is classified like a backtick span, so a
+    // bare identifier or path quotes nothing (#9188 E).
+    if let Some(quote) = f.quoted_snippet.as_deref() {
+        anchors.add_code_span(normalize(quote));
+    }
     for text in [f.description.as_str(), f.consequence.as_str()] {
         for caps in CODE_CITATION_RE.captures_iter(text) {
             let locator = caps.get(1).map_or("", |m| m.as_str());
@@ -175,9 +189,11 @@ pub(super) fn finding_anchors(f: &Finding) -> Anchors {
             }
         }
         let prose = BRACKET_CITATION_RE.replace_all(text, " ");
-        let mut spans = Vec::new();
-        collect_delimited(&prose, '`', &mut spans);
-        spans.into_iter().for_each(|s| anchors.add_code_span(s));
+        // #10964: a labelled payload or proposed fix is not a quote of the file.
+        split_backtick_spans(f, &prose)
+            .file
+            .into_iter()
+            .for_each(|s| anchors.add_code_span(s));
         let outside_backticks: String = prose.split('`').step_by(2).collect::<Vec<_>>().join(" ");
         // #8949 fix 3: pair quotes outside backticks only, so a string literal
         // inside a code span never opens a prose quote.
@@ -191,6 +207,49 @@ pub(super) fn finding_anchors(f: &Finding) -> Anchors {
         // #9188 E: identifier-shaped prose words are no longer anchors.
     }
     anchors
+}
+
+/// The anchors that place a finding on its line (#10782).
+///
+/// What: the structured quote alone when the finding carries one, so the
+/// cited line must hold THAT code; otherwise every anchor of the finding, as
+/// before #10782. A quote too short to be specific, a bare identifier or a
+/// path places nothing, and the gate drops the finding as quoting no code.
+/// Test: `a_quote_off_its_cited_line_is_not_held_by_another_snippet`,
+/// `a_bare_identifier_quote_on_its_cited_line_places_nothing`.
+pub(super) fn placing_anchors(f: &Finding, all: Anchors) -> Anchors {
+    let Some(quote) = f.quoted_snippet.as_deref() else {
+        return all;
+    };
+    let mut placing = Anchors::default();
+    placing.add_code_span(normalize(quote)); // #10782: same rule as a backtick span
+    placing
+}
+
+/// The first code a finding's text quotes, for a reviewer that left
+/// `quoted_snippet` out (#10782).
+///
+/// What: the first specific backtick or `[code: …]` snippet, else the first
+/// prose quote; `None` when the text quotes no code. The structured quote is
+/// ignored, so this reads only `body` and `consequence`.
+/// Test: `a_reply_without_the_field_takes_its_quote_from_the_body`.
+pub(crate) fn text_quote(f: &Finding) -> Option<String> {
+    let mut text_only = f.clone();
+    text_only.quoted_snippet = None;
+    let anchors = finding_anchors(&text_only);
+    anchors
+        .snippets
+        .into_iter()
+        .chain(anchors.prose_quotes)
+        .next()
+}
+
+/// Whether `quote` is code specific enough to place a finding (#10782).
+/// #10782: a bare identifier or path is no quote ([`quotes_code`]).
+/// Test: `a_bare_identifier_quote_counts_as_no_quote`.
+pub(crate) fn is_usable_quote(quote: &str) -> bool {
+    let quote = normalize(quote);
+    quotes_code(&quote) && is_specific(&quote)
 }
 
 /// The snippets a `[code: …]` bracket quotes after its locator. #8905 row 3:

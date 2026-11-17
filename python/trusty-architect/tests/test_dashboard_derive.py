@@ -70,6 +70,26 @@ def test_goal_sessions_links_both_ways_and_skips_parked_and_unknown():
     assert dv.goal_sessions(goals, sessions) == ({"G01": ["tm-a"], "G03": ["tm-a", "tm-b"]}, {"tm-a": ["G01", "G03"], "tm-b": ["G03"]})
 
 
+def test_pending_watch_changes_lists_new_requests_only():
+    """#10896: a `new` watch_changes doc is an owner event; applied, failed and dismissed ones are not."""
+    snap = {"watch_changes": [doc("w2", key="proj-b", action="unwatch", status="new", created="2026-11-10T10:05:00Z", by="o"),
+                              doc("w1", key="proj-a", action="watch", status="new", created="2026-11-10T10:00:00Z", by="o"),
+                              doc("w3", key="proj-c", action="watch", status="applied", created="2026-11-10T09:00:00Z", by="o"),
+                              doc("w4", key="proj-d", action="watch", status="failed", created="2026-11-10T09:00:00Z", by="o"),
+                              doc("w5", key="proj-e", action="watch", status="dismissed", created="2026-11-10T09:00:00Z", by="o")]}
+    assert dv.pending(snap, NOW) == [
+        {"id": "w1", "kind": "watch_change", "at": "2026-11-10T10:00:00Z", "text": "watch proj-a", "key": "proj-a", "action": "watch"},
+        {"id": "w2", "kind": "watch_change", "at": "2026-11-10T10:05:00Z", "text": "unwatch proj-b", "key": "proj-b", "action": "unwatch"}]
+
+
+def test_an_other_answer_carries_the_typed_answer_note():
+    """#10765: the "answered" entry shows the owner's typed answer_note after the button label."""
+    items = [doc("Q1", status="answered", answer="Other", answer_note="  use the staging bucket "),
+             doc("Q2", status="answered", answer="Yes"), doc("Q3", status="answered", answer="No", answer_note="  ")]
+    got = {e["id"]: e["text"] for e in dv.pending({"items": items}, NOW) if e["kind"] == "answered"}
+    assert got == {"Q1": "Other: use the staging bucket", "Q2": "Yes", "Q3": "No"}
+
+
 def test_ordered_by_rank_then_id():
     docs = [doc("B", rank=2), doc("A", rank=2), doc("Z", rank=1), doc("N")]
     assert [d["id"] for d in dv.ordered(docs)] == ["Z", "A", "B", "N"]

@@ -26,6 +26,10 @@ mod flag_tests;
 #[path = "agent_default_tests.rs"]
 mod agent_default_tests;
 
+// #10459 P1: the Architect exemption for `set` and a local `copy`.
+#[path = "architect_tests.rs"]
+mod architect_tests;
+
 // #9066: S3a, the console bridge's verdict; it shares this module's helpers.
 #[path = "bridge_tests.rs"]
 mod bridge_tests;
@@ -41,6 +45,10 @@ mod granted_client_tests;
 // #9069: `copy` to a write-only sync target; it shares this module's helpers.
 #[path = "sync_target_tests.rs"]
 mod sync_target_tests;
+
+// #10998: `copy` from a named source; it shares this module's helpers.
+#[path = "copy_source_tests.rs"]
+mod copy_source_tests;
 
 /// The project vault of the fixture's `Acme/Web` remote.
 const PROJECT_VAULT: &str = "trusty/acme/web";
@@ -233,7 +241,7 @@ async fn grant_by_agent_ancestor_cannot_name_denied_key() {
 
     assert_eq!(
         fixed_error(&refused, method::GRANT),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert!(refused.result.is_none());
     assert_eq!(grants.has_unexpired(), Ok(false), "nothing was minted");
@@ -244,7 +252,7 @@ async fn grant_by_agent_ancestor_cannot_name_denied_key() {
         (
             AuditMethod::Grant,
             AuditDecision::Deny,
-            Some("agent_use_refused"),
+            Some("agent_key_denied"),
             Some("API_KEY")
         )
     );
@@ -479,7 +487,7 @@ async fn resolve_by_agent_descendant_of_denied_key_is_refused() {
 
     assert_eq!(
         fixed_error(&response, method::RESOLVE),
-        ErrorKind::AgentUseRefused
+        ErrorKind::AgentKeyDenied
     );
     assert_no_value(&response);
     let resolves: Vec<_> = records(&fx)
@@ -500,7 +508,7 @@ async fn resolve_by_agent_descendant_of_denied_key_is_refused() {
             (
                 AuditMethod::Resolve,
                 AuditDecision::Deny,
-                Some("agent_use_refused"),
+                Some("agent_key_denied"),
                 Some("API_KEY")
             ),
         ]

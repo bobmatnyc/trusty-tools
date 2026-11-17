@@ -245,6 +245,8 @@ mod tests {
     fn make_record(workspace: Option<PathBuf>, cwd: PathBuf) -> SessionRecord {
         SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tm-test".to_string(),
             cwd,
@@ -271,6 +273,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None,
             terminal_at: None,

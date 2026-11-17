@@ -202,7 +202,8 @@ fn lockdown_settings_file(prompt_file: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// Compose and write the GUI spawn's PM prompt for `workdir`, then return the
-/// line that hands it to `claude` (#8286).
+/// line that hands it to `claude` (#8286), with the profile it stamps (#8878:
+/// the caller binds an Architect).
 ///
 /// Why: a GUI session used to start a bare `claude` with no PM instructions.
 /// What: one [`crate::core::session_launch::cli_launch`] resolution gives the
@@ -217,11 +218,13 @@ fn lockdown_settings_file(prompt_file: &std::path::Path) -> std::path::PathBuf {
 pub(crate) fn gui_spawn_line(
     workdir: &std::path::Path,
     prompt_dir: &std::path::Path,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, crate::core::session_profile::SessionProfile)> {
     // #9012: the PM instructions are runtime content; none refuses the spawn.
     let content = crate::core::content_source::framework_content_for(workdir)
         .map_err(|err| anyhow::anyhow!("cannot compose the PM instructions: {err}"))?;
     let cli = crate::core::session_launch::cli_launch(&content, workdir, None);
+    // #10459: a GUI-spawned Architect needs Claude Code v2.1.295 (`onFailure`).
+    crate::core::architect_claude_version::require_for_profile(cli.profile)?;
     let file = crate::core::model_inject::write_pm_prompt_file_in(
         prompt_dir,
         &cli.prompt,
@@ -239,6 +242,7 @@ pub(crate) fn gui_spawn_line(
         settings.file.as_deref(),
         &crate::core::architect_lockdown::Lockdown::PRODUCTION,
     )
+    .map(|line| (line, cli.profile))
     .inspect_err(|_| {
         // #10127: no prompt or payload file outlives a refused spawn.
         let _ = std::fs::remove_file(lockdown_settings_file(&file));
@@ -322,7 +326,7 @@ mod tests {
             let (deny, body) = payload(&out);
             assert!(deny.contains(&"mcp__*slack*".to_owned()), "{deny:?}");
             assert!(deny.contains(&"mcp__*Slack*".to_owned()), "{deny:?}");
-            assert_eq!(body["disableClaudeAiConnectors"], true);
+            assert!(body.get("disableClaudeAiConnectors").is_none(), "{body}"); // #10735
             // #10127: the payload file is created new, so the next line needs its path free.
             std::fs::remove_file(&out).expect("remove the payload");
         }
@@ -454,7 +458,7 @@ mod tests {
     fn gui_spawn_line_writes_the_prompt_it_names() {
         let project = tempfile::tempdir().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let line = gui_spawn_line(project.path(), dir.path()).unwrap();
+        let (line, _) = gui_spawn_line(project.path(), dir.path()).unwrap();
         let written: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().path())

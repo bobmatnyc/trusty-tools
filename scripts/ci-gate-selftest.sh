@@ -11,7 +11,7 @@
 # What: asserts
 #   ci-gate-relevance: each mode's inputs, non-inputs, self-inclusion and
 #                      every fail-closed arm;
-#   ci-gate-verdict:   pass, fail, ordered skip, unordered skip, failed
+#   ci-gate-verdict:   pass, fail, ordered skip, unordered skip, PR-only skip, failed
 #                      classifier, missing need, unusable input;
 #   ci.yml wiring:     the ci-gate job's `needs:` equals the verdict table,
 #                      each job carries the context name the table claims,
@@ -64,6 +64,18 @@ assert_eq "tmux: docs only"                     "false" "$(rel tmux-targets 'doc
 README.md')"
 assert_eq "tmux: node_modules is not scanned"   "false" "$(rel tmux-targets 'website/node_modules/x/y.js')"
 assert_eq "tmux: website content"               "false" "$(rel tmux-targets 'website/src/content/tools/x.md')"
+assert_eq "sled: its Dockerfile (#11156)"       "true"  "$(rel sled-static 'docker/sled/Dockerfile')"
+assert_eq "sled: its proxy config"              "true"  "$(rel sled-static 'docker/sled/proxy/squid.conf')"
+assert_eq "sled: the static check"              "true"  "$(rel sled-static 'scripts/check_sled_tailscale_isolation.sh')"
+assert_eq "sled: the launch test"               "true"  "$(rel sled-static 'scripts/check_sled_launch.sh')"
+assert_eq "sled: the launch test's stub docker" "true"  "$(rel sled-static 'scripts/test-data/sled-launch/docker')"
+assert_eq "sled: other test data"               "false" "$(rel sled-static 'scripts/test-data/doc-paths/x')"
+assert_eq "sled: the hosting workflow"          "true"  "$(rel sled-static '.github/workflows/ci.yml')"
+assert_eq "sled: B3 gateway test (#11156)"      "true"  "$(rel sled-static 'scripts/check_sled_v1_gateway.sh')"
+assert_eq "sled: B4 tarball test (#11156)"      "true"  "$(rel sled-static 'scripts/check_sled_pinned_tarballs.sh')"
+assert_eq "sled: cloudtest Dockerfile (B4 reads)" "true" "$(rel sled-static 'docker/cloudtest/Dockerfile')"
+assert_eq "sled: cloudtest entrypoint is not read" "false" "$(rel sled-static 'docker/cloudtest/entrypoint.sh')"
+assert_eq "sled: docs only"                     "false" "$(rel sled-static 'docs/a.md')"
 assert_eq "C-quoted path (fail closed)"         "true"  "$(rel teardown-guard '"crates/caf\303\251.rs"')"
 assert_eq "empty change set (fail closed)"      "true"  "$(rel tmux-targets '')"
 assert_eq "no usable base (fail closed)" "true" \
@@ -102,8 +114,14 @@ needs_json() {
   done
   printf '%s' "$json"
 }
-# env -u: a fixture verdict must not append its table to the real job summary.
-verdict() { env -u GITHUB_STEP_SUMMARY NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
+# env -u: a fixture verdict must not append its table to the real job summary,
+# and must not read the CI runner's own EVENT_NAME (unset is the fail-closed
+# default). verdict_on <event> pins the event.
+verdict() { env -u GITHUB_STEP_SUMMARY -u EVENT_NAME NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"; }
+verdict_on() {
+  local ev="$1"; shift
+  env -u GITHUB_STEP_SUMMARY EVENT_NAME="$ev" NEEDS_JSON="$(needs_json "$@")" bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?"
+}
 
 assert_eq "every context succeeded"                     "0" "$(verdict)"
 assert_eq "clippy failed (probe 7)"                     "1" "$(verdict clippy=failure)"
@@ -117,6 +135,21 @@ assert_eq "teardown skipped, classifier said nothing"   "1" "$(verdict teardown-
 assert_eq "tmux skipped under the teardown verdict"     "1" "$(verdict tmux-exact-targets=skipped out:teardown_guard_relevant=false)"
 assert_eq "an unfiltered job skipped (Clippy)"          "1" "$(verdict clippy=skipped out:docs_only=true)"
 assert_eq "a covered job missing from needs"            "1" "$(verdict drop:website-corpus)"
+# #10631: the pre-publish `test` aggregate runs only off pull_request.
+assert_eq "test succeeded on push"                      "0" "$(verdict_on push test=success)"
+assert_eq "test failed on push"                         "1" "$(verdict_on push test=failure)"
+assert_eq "test failed on pull_request"                 "1" "$(verdict_on pull_request test=failure)"
+assert_eq "test cancelled on push"                      "1" "$(verdict_on push test=cancelled)"
+assert_eq "test missing from needs"                     "1" "$(verdict_on push drop:test)"
+assert_eq "test skipped on push"                        "1" "$(verdict_on push test=skipped)"
+assert_eq "test skipped on workflow_dispatch"           "1" "$(verdict_on workflow_dispatch test=skipped)"
+assert_eq "test skipped on pull_request (by design)"    "0" "$(verdict_on pull_request test=skipped)"
+assert_eq "test skipped on merge_group (by design)"     "0" "$(verdict_on merge_group test=skipped)"
+assert_eq "test failed on merge_group"                  "1" "$(verdict_on merge_group test=failure)"
+assert_eq "test skipped on an unknown event"            "1" "$(verdict_on schedule test=skipped)"
+assert_eq "clippy skipped on merge_group (not pr_skip)" "1" "$(verdict_on merge_group clippy=skipped)"
+assert_eq "test skipped, EVENT_NAME unset (fail closed)" "1" "$(verdict test=skipped)"
+assert_eq "test skipped, EVENT_NAME empty (fail closed)" "1" "$(verdict_on '' test=skipped)"
 assert_eq "NEEDS_JSON not an object"                    "2" \
   "$(env -u GITHUB_STEP_SUMMARY NEEDS_JSON='[]' bash scripts/ci-gate-verdict.sh >/dev/null 2>&1; echo "$?")"
 assert_eq "NEEDS_JSON unset"                            "2" \
@@ -145,6 +178,9 @@ assert_eq "ci-gate runs whatever its needs did" "1" \
   "$(printf '%s\n' "$gate_job" | grep -c '^    if: \${{ always() }}$')"
 assert_eq "ci-gate reports as \"CI gate\"" "1" \
   "$(printf '%s\n' "$gate_job" | grep -c '^    name: CI gate$')"
+# shellcheck disable=SC2016  # a literal `${{ }}` expression, matched as text
+assert_eq "ci-gate verdict reads the event name (#10631)" "1" \
+  "$(printf '%s\n' "$gate_job" | grep -c '^          EVENT_NAME: \${{ github\.event_name }}$')"
 mismatch=""
 while IFS='|' read -r key context _; do
   [ -n "$key" ] || continue
@@ -158,13 +194,16 @@ assert_eq "teardown-guard skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.teardown_guard_relevant != 'false' }}" "$ci")"
 assert_eq "tmux-exact-targets skips only on an explicit false" "1" \
   "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.tmux_targets_relevant != 'false' }}" "$ci")"
-assert_eq "changes exports both relevance outputs" "2" \
-  "$(grep -cE '^      (teardown_guard|tmux_targets)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
+assert_eq "sled-static skips only on an explicit false" "1" \
+  "$(grep -cF "if: \${{ !cancelled() && needs.changes.outputs.sled_static_relevant != 'false' }}" "$ci")"
+assert_eq "changes exports all three relevance outputs" "3" \
+  "$(grep -cE '^      (teardown_guard|tmux_targets|sled_static)_relevant: \$\{\{ steps\.detect-shell-gates\.outputs\.' "$ci")"
 # Owner ruling 2026-09-27: trusty-common is tested by its coverage lanes and
 # nowhere else, so no single `-p trusty-common` run can pass for the crate.
 lanes_job="$(sed -n '/^  trusty-common-lanes:$/,/^  # ----/p' "$ci")"
 assert_eq "trusty-common-lanes runs the lanes script" "1" \
   "$(printf '%s\n' "$lanes_job" | grep -c '^        run: \./scripts/test_trusty_common_lanes\.sh$')"
+# shellcheck disable=SC2016  # a literal `${{ }}` expression, matched as text
 assert_eq "trusty-common-lanes steps read the plan's trusty_common" "1" \
   "$(printf '%s\n' "$lanes_job" | grep -c 'SELECTED: \${{ needs\.affected-plan\.outputs\.trusty_common }}')"
 assert_eq "no single cargo test -p trusty-common step remains" "0" \
@@ -187,7 +226,20 @@ assert_eq "every changelog-fragment step runs on pull_request" "0" \
   "$(printf '%s\n' "$cf_job" | grep -E '^        if: ' | grep -vc "github.event_name == 'pull_request'")"
 assert_eq "no changelog-fragment step carries continue-on-error" "0" \
   "$(printf '%s\n' "$cf_job" | grep -c 'continue-on-error')"
-for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment; do
+# #10639: this selftest in a job that skips PRs lets a diverged cache key merge
+# green and then fail every main shard.
+fc_job="$(sed -n '/^  fastembed-cache-selftest:$/,/^  website-corpus:$/p' "$ci")"
+assert_eq "fastembed-cache-selftest row allows no skip" "1" \
+  "$(bash scripts/ci-gate-verdict.sh --list | grep -cx 'fastembed-cache-selftest|Fastembed cache check self-test|-')"
+assert_eq "fastembed-cache-selftest has no job-level if or needs" "0" \
+  "$(printf '%s\n' "$fc_job" | grep -cE '^    (if|needs):')"
+assert_eq "fastembed-cache-selftest runs the selftest" "1" \
+  "$(printf '%s\n' "$fc_job" | grep -c 'run: bash scripts/check_fastembed_cache_selftest\.sh$')"
+assert_eq "no other ci.yml job runs the fastembed selftest" "1" \
+  "$(grep -c 'run: .*check_fastembed_cache_selftest\.sh$' "$ci")"
+assert_eq "ci.yml triggers carry no path filter" "0" \
+  "$(sed -n '/^on:$/,/^[a-z]/p' "$ci" | grep -cE '^[[:space:]]+paths(-ignore)?:')"
+for moved in teardown-guard tmux-exact-targets tag-publish-parity changelog-fragment sled-static; do
   assert_eq "${moved}.yml is gone (one check run per name)" "0" \
     "$([ -e ".github/workflows/${moved}.yml" ] && echo 1 || echo 0)"
 done

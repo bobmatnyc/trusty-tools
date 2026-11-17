@@ -83,12 +83,14 @@ session name first, and the worktree is named after it:
 
 1. **Semantic tmux session name derivation:** The [`SessionManager::resolve_session_name`](../../../crates/trusty-mpm/src/session_manager/naming.rs)
    method applies a priority-ordered derivation:
-   - Explicit `name_hint` (if provided) → `tm-<hint-slug>-NN`
-   - GitHub-parseable `repo_url` → `tm-<repo-name>-NN`
-   - `cwd` basename otherwise → `tm-<cwd-basename>-NN`
+   - Explicit `name_hint` (if provided) → `tm-<hint-slug>`
+   - GitHub-parseable `repo_url` → `tm-<repo-name>`
+   - `cwd` basename otherwise → `tm-<cwd-basename>`
    
-   The `-NN` suffix is a per-project serial (e.g., `-01`, `-02`) so concurrent
-   sessions for the same project get distinguishable names. A candidate name is
+   The first session for a project gets the bare name. A `-NN` counter (`-02`,
+   `-03`, …) is added only when that name is already held, so concurrent
+   sessions for the same project get distinguishable names (#10478). A leaf's own
+   leading `tm-` and trailing `-NN` are stripped first. A candidate name is
    rejected if it collides with a live tmux session or (for in-project spawns) with
    an existing `.worktrees/<name>` directory or `session/<name>` branch.
 
@@ -105,11 +107,11 @@ session name first, and the worktree is named after it:
    or documentation.
 
 **Practical impact:**
-- A human operator can read a worktree path like `.worktrees/tm-trusty-tools-01/`
+- A human operator can read a worktree path like `.worktrees/tm-trusty-tools/`
   and know immediately which session it belongs to, without consulting a database.
 - Session names are stable across restarts (same derivation logic), so a session
   resumed from a previous state gets the same name.
-- Guidance can reference semantic names (`"the session is in .worktrees/tm-foo-01"`)
+- Guidance can reference semantic names (`"the session is in .worktrees/tm-foo"`)
   instead of UUIDs.
 
 **See also:**

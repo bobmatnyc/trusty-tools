@@ -448,15 +448,15 @@ async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
     let corpus = tmp.join("corpus");
     std::fs::create_dir_all(&corpus).unwrap();
     std::fs::write(corpus.join("one.md"), "a note").unwrap();
-    let store = trusty_kb::store::KbStore::new(
+    let store = crate::kb::store::KbStore::new(
         tmp.join("izzie"),
-        trusty_kb::schema::Profile::default_profile(),
+        trusty_okf::profile::Profile::default_profile(),
     );
     store
-        .okg_register_source(trusty_kb::okg::registry::SourceSpec::new(
+        .okg_register_source(crate::kb::okg::registry::SourceSpec::new(
             "corpus",
             Some("notes"),
-            trusty_kb::okg::registry::Locator::DocStore {
+            crate::kb::okg::registry::Locator::DocStore {
                 path: corpus.to_string_lossy().to_string(),
                 extensions: vec![],
                 recursive: true,
@@ -467,8 +467,8 @@ async fn reports_the_unsearchable_backlog_for_a_bound_tree() {
     store
         .okg_ingest_docstore(
             "corpus",
-            &trusty_kb::okg::policy::DocStorePolicy::new(vec![tmp.canonicalize().unwrap()]),
-            "t0",
+            &trusty_okf::build::policy::DocStorePolicy::new(vec![tmp.canonicalize().unwrap()]),
+            "2026-07-24T00:00:00Z",
         )
         .unwrap();
 

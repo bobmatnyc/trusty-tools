@@ -1,0 +1,4 @@
+boto3>=1.35
+fastapi>=0.115
+uvicorn>=0.32
+sqlalchemy>=2.0

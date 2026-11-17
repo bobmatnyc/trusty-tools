@@ -150,8 +150,14 @@ fn a_credential_print_bypass_from_8677_is_denied_and_recorded() {
         std::fs::create_dir(&data).expect("mkdir data");
 
         let (stdout, _) = run_guard(&data, tmp.path(), command);
+        // #8878: the presence-key floor runs first and denies `security -i`.
+        let (rule, check) = if command.contains("security -i") {
+            ("#8878", "check=trust-anchor-write")
+        } else {
+            ("#8596", "check=secret-file-read")
+        };
         assert!(
-            stdout.contains(r#""permissionDecision":"deny""#) && stdout.contains("#8596"),
+            stdout.contains(r#""permissionDecision":"deny""#) && stdout.contains(rule),
             "`{command}` must deny: {stdout}"
         );
 
@@ -161,7 +167,7 @@ fn a_credential_print_bypass_from_8677_is_denied_and_recorded() {
             .find(|e| e.record.crate_target == "trusty_mpm::pm_guard")
             .unwrap_or_else(|| panic!("no pm-guard record for `{command}` among {errors:#?}"));
         let fields = &deny.record.fields;
-        for part in ["check=secret-file-read", fragment, "session=s-8722"] {
+        for part in [check, fragment, "session=s-8722"] {
             assert!(fields.contains(part), "{part} missing from {fields}");
         }
     }

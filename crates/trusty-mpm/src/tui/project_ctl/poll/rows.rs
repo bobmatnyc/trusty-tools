@@ -51,6 +51,29 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
     }
 }
 
+/// The MPM pane's project rows: one per repo, archived projects hidden.
+///
+/// Why: #10991 — an archived project's directory is gone from its origin, so
+/// it leaves the active view; `tm projects list` and the registry still show
+/// it, and a new session for it brings it back (`reactivate_for_session`).
+/// What: [`crate::project::one_project_per_repo`] in registry order, minus
+/// every project with `archived_at` set, each projected by [`project_to_row`]
+/// with its matching fleet group.
+/// Test: `visible_project_rows_hides_archived_projects`.
+pub(crate) fn visible_project_rows(
+    projects: &[Project],
+    groups: &[FleetProjectGroupWire],
+) -> Vec<ProjectRow> {
+    crate::project::one_project_per_repo(projects)
+        .into_iter()
+        .filter(|p| !p.is_archived())
+        .map(|p| {
+            let group = groups.iter().find(|g| g.project_name == p.name);
+            project_to_row(p, group)
+        })
+        .collect()
+}
+
 /// Project one fleet group's sessions into Sessions-pane rows, dropping
 /// decommissioned (tombstoned) ones (#2476).
 ///
@@ -68,8 +91,8 @@ pub(crate) fn project_to_row(p: &Project, group: Option<&FleetProjectGroupWire>)
 /// #2476's own analysis, confirmed here: decommissioned rows were reachable
 /// through [`session_to_row`]/[`crate::tui::project_ctl::panes::sessions::state_glyph`]
 /// but no caller ever dropped them). Filtering here — once, at the
-/// projection step — means every downstream consumer (`sessions_nav`'s
-/// selection model, the Sessions pane render, the `(N)` header) sees only
+/// projection step — means every downstream consumer (the tree's selection
+/// model and session rows, its counters) sees only
 /// live rows and never has to special-case a dead one.
 /// What: keeps every session whose `state` is not TERMINAL (`decommissioned`
 /// OR `deleted`, #2012) and projects each survivor via [`session_to_row`]. The
@@ -108,10 +131,11 @@ pub(crate) fn live_session_rows(sessions: Vec<ManagedSessionSummary>) -> Vec<Ses
 /// What: derives the 8-hex short id via [`session_short_id`] and copies the
 /// rest through unchanged, including `deliverable_id` (DOC-35 §10.6, #2383 —
 /// drives the Sessions-pane deliverable glyph) and `unresumable` (#2595 —
-/// gates the `r` resume key).
+/// gates the `R` resume key, #10754 De1).
 /// Test: `session_to_row_derives_short_id_and_copies_fields`,
 /// `session_to_row_carries_deliverable_id`,
-/// `session_to_row_carries_unresumable_flag`.
+/// `session_to_row_carries_unresumable_flag`,
+/// `session_to_row_carries_parent_session_id`.
 pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
     let short_id = session_short_id(&s.id);
     SessionRow {
@@ -125,6 +149,11 @@ pub(crate) fn session_to_row(s: ManagedSessionSummary) -> SessionRow {
         proposed_default: s.proposed_default,
         deliverable_id: s.deliverable_id,
         unresumable: s.unresumable,
+        // #10476: the tree indents workers by this link; the inline details
+        // shows the other two.
+        parent_session_id: s.parent_session_id,
+        workspace_path: s.workspace_path,
+        last_activity_at: s.last_activity_at,
     }
 }
 
@@ -191,6 +220,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -222,6 +254,7 @@ mod tests {
             deleted: false,
             auto_resume_parked: None,
             kind: None,
+            parent_session_id: None,
         }
     }
 
@@ -236,11 +269,25 @@ mod tests {
                 summary("b2222222", "provisioning"),
                 summary("c3333333", "stopped"),
             ],
+            decommissioned: false,
         };
         let row = project_to_row(&p, Some(&group));
         assert_eq!(row.live_count, 2);
         assert_eq!(row.total_count, 3);
         assert_eq!(row.name, "widget");
+    }
+
+    /// #10991: an archived project is not offered in the MPM pane.
+    #[test]
+    fn visible_project_rows_hides_archived_projects() {
+        let live = project("widget");
+        let archived = Project {
+            archived_at: Some(chrono::Utc::now()),
+            ..project("gadget")
+        };
+        let rows = visible_project_rows(&[live, archived], &[]);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["widget"]);
     }
 
     #[test]
@@ -288,6 +335,22 @@ mod tests {
         assert!(
             !healthy_row.unresumable,
             "a healthy session must copy through as false"
+        );
+    }
+
+    #[test]
+    fn session_to_row_carries_parent_session_id() {
+        // #10476: the tree's worker indentation reads this link.
+        let mut s = summary("child001", "active");
+        s.parent_session_id = Some("parent01".to_string());
+        assert_eq!(
+            session_to_row(s).parent_session_id.as_deref(),
+            Some("parent01")
+        );
+        assert!(
+            session_to_row(summary("solo0001", "active"))
+                .parent_session_id
+                .is_none()
         );
     }
 
@@ -381,6 +444,7 @@ mod tests {
             classification: None,
             pending_decision: Some("write to ci.yml?".to_string()),
             proposed_default: Some("yes".to_string()),
+            input_box: None,
         }
     }
 

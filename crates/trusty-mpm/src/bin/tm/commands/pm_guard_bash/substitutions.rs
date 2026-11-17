@@ -105,6 +105,114 @@ pub(crate) fn segment_substitution_spans(segment: &str) -> Vec<(Range<usize>, Su
     )
 }
 
+/// `text` with each shell comment blanked to spaces, newlines kept (#10566).
+///
+/// Why: a comment that quotes code in backticks holds pairs the shell never
+/// runs, and an apostrophe in a comment (`# the crate's gate`) desyncs a
+/// comment-blind quote map for every line after it; both made the
+/// script-body rule refuse this repository's own gate scripts.
+/// What: one pass tracking quotes, backslashes, backticks, `${ }` brace depth
+/// and paren depth. A `#` opens a comment only when it is unquoted, starts a
+/// word, and every depth is 0 (`${x:- #}` and `$(a # b)` open none). When the
+/// pass ends inside a quote, a backtick or an open depth, the reading after
+/// the last line start where all of them were closed is unclear: there only
+/// full-line comments are blanked ([`full_line_comments_blanked`]) and every
+/// trailing comment stays, the over-reading direction (#10622: the text
+/// before that point keeps the pass's reading). An ANSI-C `$'…'` string
+/// ends only at an unescaped `'` (#10622).
+/// Test: `a_substitution_in_a_comment_is_not_run_10566`,
+/// `an_ansi_c_string_keeps_the_comment_scanner_in_step_10622`,
+/// `the_comment_fallback_keeps_a_line_that_runs_code_10622`,
+/// `a_pid_expansion_before_a_plain_string_keeps_the_scanner_in_step_10622`.
+pub(crate) fn blank_shell_comments(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = bytes.to_vec();
+    let (mut single, mut ansi, mut double, mut tick) = (false, false, false, false);
+    let (mut brace, mut paren) = (0usize, 0usize);
+    let (mut i, mut checkpoint) = (0, 0);
+    while let Some(&c) = bytes.get(i) {
+        let next = bytes.get(i + 1).copied();
+        match c {
+            _ if single => single = c != b'\'',
+            // #10622: in `$'…'` a backslash escapes the next byte, `\'` included.
+            b'\\' if ansi => i += 1,
+            _ if ansi => ansi = c != b'\'',
+            b'\\' => i += 1,
+            b'"' => double = !double,
+            _ if double => {}
+            // #10622: `$$` is the pid parameter; a `'` after it opens a plain string.
+            b'$' if next == Some(b'$') => i += 1,
+            b'$' if next == Some(b'\'') => {
+                ansi = true;
+                i += 1;
+            }
+            b'\'' => single = true,
+            b'`' => tick = !tick,
+            b'$' if matches!(next, Some(b'{' | b'(')) => {
+                if next == Some(b'{') {
+                    brace += 1
+                } else {
+                    paren += 1
+                }
+                i += 1;
+            }
+            b'}' if brace > 0 => brace -= 1,
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'#' if brace == 0 && paren == 0 && !tick && word_start(bytes, i) => {
+                while out.get(i).is_some_and(|b| *b != b'\n') {
+                    out[i] = b' ';
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        let open = single || ansi || double || tick || brace > 0 || paren > 0;
+        if c == b'\n' && !open {
+            checkpoint = i + 1;
+        }
+        i += 1;
+    }
+    let open = single || ansi || double || tick || brace > 0 || paren > 0;
+    // #10622: only the text after the last closed line start falls back.
+    let cut = if open { checkpoint } else { bytes.len() };
+    out.truncate(cut);
+    match (String::from_utf8(out), text.get(cut..)) {
+        (Ok(mut head), Some(tail)) => {
+            head.push_str(&full_line_comments_blanked(tail));
+            head
+        }
+        _ => full_line_comments_blanked(text),
+    }
+}
+
+/// The fallback when [`blank_shell_comments`] cannot read `text`: each line
+/// whose first word starts with `#` is blanked, unless it carries
+/// command-substitution syntax (`$(`, a backtick, `<(`, `>(`) — a `#` line
+/// inside a string the scan lost track of still runs those (#10622).
+/// Test: `the_comment_fallback_keeps_a_line_that_runs_code_10622`.
+fn full_line_comments_blanked(text: &str) -> String {
+    text.split_inclusive('\n')
+        .map(|line| {
+            // #10622: keep every line that may run a substitution.
+            let runs = ["$(", "`", "<(", ">("].iter().any(|s| line.contains(s));
+            let comment = line.trim_start().starts_with('#') && !runs;
+            match (comment, line.ends_with('\n')) {
+                (true, true) => "\n",
+                (true, false) => "",
+                (false, _) => line,
+            }
+        })
+        .collect()
+}
+
+/// Whether byte `i` starts a shell word: at the start, or after whitespace
+/// or an operator byte.
+fn word_start(bytes: &[u8], i: usize) -> bool {
+    i == 0 || matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b';' | b'&' | b'|')
+}
+
 /// The substitution walk shared by argv text and here-document bodies.
 ///
 /// What: with `honour_escapes`, an opener behind an odd run of backslashes

@@ -946,3 +946,17 @@ fn any_budget_exhausted_detects_any_row() {
         exhausted
     ]));
 }
+
+/// Why: #10320 — `sudo tctl install` must not leave a root-owned `.mcp.json`.
+/// What: runs the tail's project stages with uid 0 against a temp project dir
+/// and asserts no `.mcp.json` appears and the skip keeps `ensure_ok = true`.
+#[test]
+fn root_install_tail_writes_no_mcp_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ok = project_stages(Some(0), dir.path());
+    assert!(
+        !dir.path().join(".mcp.json").exists(),
+        "uid 0 wrote .mcp.json from the install tail"
+    );
+    assert!(ok, "the root skip must not change the install verdict");
+}

@@ -308,6 +308,10 @@ fn reason_class_names_every_producer() {
         ),
         ("#4044 self-negated (marker \"x\")", "self_negated"),
         ("#1873 refuted absence claim: a.rs", "absence_claim"),
+        (
+            crate::pipeline::quote_admission::NO_QUOTE_PREGATE_REASON,
+            "no_quote_pregate",
+        ), // #10782
         (DUPLICATE_REASON, "duplicate"),
         (OVER_MAX_FINDINGS_REASON, "over_max_findings"),
         (REFUTED_REASON, "refuted"),

@@ -135,6 +135,9 @@ pub(crate) struct RulingsHits {
     pub hits: Vec<RecallResult>,
     /// `superseded -> replacement` among `hits`, from this palace's KG.
     pub superseded: Supersessions,
+    /// #10609: this palace's edge read failed or ran late, so `superseded` is
+    /// incomplete.
+    pub superseded_unverified: bool,
     /// #9881 (Q3): the palace that owns `hits`; empty in fixtures.
     pub palace: String,
 }
@@ -547,10 +550,11 @@ fn search_palace(
         }
         // #9421: read while the handle is open; never past the leg's bound.
         let budget = edge_read_budget(deadline, Instant::now());
-        let superseded = supersessions_for_within(&handle, &hits, budget).await;
+        let lookup = supersessions_for_within(&handle, &hits, budget).await;
         Ok(RulingsHits {
             hits,
-            superseded,
+            superseded: lookup.edges,
+            superseded_unverified: lookup.unverified,
             palace: handle.id.as_str().to_string(),
         })
     })
@@ -566,6 +570,8 @@ pub(crate) struct RulingsFold {
     pub floored: Vec<Uuid>,
     /// `superseded -> replacement` edges the rulings palaces reported (#9421).
     pub superseded: Supersessions,
+    /// #10609: some rulings palace's edge read was incomplete.
+    pub superseded_unverified: bool,
     /// #9881 (Q3): each folded ruling's owning palace, keyed by drawer id.
     pub owners: HashMap<Uuid, String>,
 }
@@ -601,16 +607,19 @@ pub(crate) fn fold_rulings(
     let mut hashes: HashSet<_> = results.iter().map(|r| r.drawer.content_hash()).collect();
     let mut rulings = Vec::new();
     let mut superseded = Supersessions::new();
+    let mut superseded_unverified = false;
     for outcome in outcomes {
         match outcome {
             Err(failed) => degraded.push(failed),
             Ok(RulingsHits {
                 hits,
                 superseded: edges,
+                superseded_unverified: unverified,
                 palace,
             }) => {
                 // #9421: drawer ids are UUIDs, so palaces' maps never collide.
                 superseded.extend(edges);
+                superseded_unverified |= unverified;
                 for hit in hits {
                     let admitted = is_ruling(&hit.drawer)
                         && min_score.is_none_or(|floor| hit.score >= floor)
@@ -642,6 +651,7 @@ pub(crate) fn fold_rulings(
         degraded,
         floored,
         superseded,
+        superseded_unverified,
         owners,
     }
 }

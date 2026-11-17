@@ -29,7 +29,11 @@ fn full_pipeline_with_duetto_voice() {
     );
 
     let vc = VoiceConfig {
-        principles: Some(principles_addendum().to_string()),
+        // #9991: the principles addendum is runtime content.
+        principles: Some(
+            principles_addendum(&crate::runtime_content::test_support::staged())
+                .expect("the checkout ships the principles"),
+        ),
         voice_addendum: Some(addendum.clone()),
         voice_name: Some("duetto".to_string()),
         ..Default::default()

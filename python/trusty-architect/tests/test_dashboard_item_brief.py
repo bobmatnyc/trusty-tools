@@ -1,7 +1,7 @@
 """Dashboard briefs on decisions and asks (owner 2026-10-14 03:36Z), on both HTML files (node, no browser).
 
 Why: long decisions link to a brief instead of carrying a paragraph; the standalone Briefs section is gone.
-What: no sec-briefs section; "Read brief" / chip when `brief` is set; "Ask for a brief" writes brief_request;
+What: no sec-briefs section; "Brief" link next to a "Request update" button when `brief` is set; "Request brief" writes brief_request;
 the schema accepts both fields; pending-answers reports brief_request until `brief` is set; the fleet project
 names resolve in the /doc allow-list.
 Test: scripts/test_dashboard_item_brief.py
@@ -33,7 +33,12 @@ def run(page, body):
 const askKind = (it) => (/^([DAT])/.exec(it.id) || [])[1];
 const readerButton = (label, fn) => { const b = el("button", "read-btn", label); b.listeners.click = fn; return b; };
 let db = { collection: () => ({ doc: () => ({ get: async () => ({ version: 7 }) }) }) }, readOnly = false;
-const userName = () => "owner";
+N.prototype.insertBefore = function (c) { this.children.unshift(c); }; N.prototype.classList = { add() {} };
+Object.defineProperty(N.prototype, "firstChild", { get() { return this.children[0] || null; } });
+const document = { createElementNS: (ns, t) => new N(t), querySelectorAll: () => [] };
+N.prototype.querySelector = function (s) { return this.find((n) => n.className === s.slice(1))[0]; }; N.prototype.removeAttribute = function (k) { delete this.attrs[k]; };
+const fetch = () => new Promise(() => {});
+const userName = () => "owner"; const errFor = () => ({});
 let opened = null; const window = { DocReader: { open: (p, f) => { opened = [p, f]; } } };
 let written = null; async function write(id, patch, opts) { written = { id, patch, opts }; return true; }
 """ + docof + brief + "\n" + body
@@ -56,12 +61,29 @@ class TestItemBrief(unittest.TestCase):
             self.assertNotIn("renderBriefs", src)
             self.assertNotIn('collection("briefs")', src)
 
-    def test_brief_set_shows_read_button_that_opens_reader(self):
+    def test_brief_set_shows_slot_button_that_opens_reader(self):
         body = """const body = el("div"); const it = { id: "D01", status: "open", brief: "mcp-services/docs/briefs/2191-x.md" };
-        briefControl(body, it); const btns = body.find((n) => n.tagName === "button"); btns[0].listeners.click();
-        console.log(JSON.stringify([btns.map((b) => b.textContent), opened, !!briefDoc(it)]));"""
+        briefControl(body, it); const btns = body.find((n) => n.tagName === "button"); const slot = briefSlot(it.brief), sb = slot.find((n) => n.tagName === "button")[0]; sb.listeners.click({ preventDefault() {}, stopPropagation() {} });
+        console.log(JSON.stringify([btns.map((b) => b.textContent), opened, !!briefDoc(it), sb.textContent, sb.attrs.title || sb.title, slot.className]));"""
         for out in self.each(body):
-            self.assertEqual(out, [["Read brief"], ["mcp-services", "docs/briefs/2191-x.md"], True])
+            self.assertEqual(out, [["Request update"], ["mcp-services", "docs/briefs/2191-x.md"], True, "2191-x", "mcp-services/docs/briefs/2191-x.md", "brief-slot"])
+
+    def test_brief_link_carries_a_labelled_document_icon(self):
+        body = """const slot = briefSlot("architect/local/briefs/x.md"); const b = slot.find((n) => n.tagName === "button")[0]; const svg = b.find((n) => n.tagName === "svg")[0];
+        console.log(JSON.stringify([b.textContent, b.children[0].tagName, b.children[1].className, b.children[1].children.map((c) => c.className), svg.attrs["aria-hidden"], b.attrs["aria-label"], briefSlot("not-a-brief")]));"""
+        for out in self.each(body):
+            self.assertEqual(out, ["x", "svg", "brief-txt", ["brief-id", "brief-t"], "true", "Read the brief: x", None])
+
+    def test_brief_slot_shows_id_above_title_only_when_present(self):
+        body = """const slot = briefSlot("architect/local/briefs/x.md"), b = slot.find((n) => n.tagName === "button")[0];
+        const idEl = b.find((n) => n.className === "brief-id")[0], tEl = b.find((n) => n.className === "brief-t")[0], tx = b.find((n) => n.className === "brief-txt")[0];
+        const none = [idEl.textContent, idEl.hidden, b.title];
+        briefTitles.set("architect/local/briefs/x.md", { title: "Nice", brief_id: "MB0b78" }); briefSlotFill(b);
+        console.log(JSON.stringify([none, [idEl.textContent, idEl.hidden, tEl.textContent, b.title], tx.children.map((c) => c.className)]));"""
+        for out in self.each(body):
+            self.assertEqual(out[0], ["", True, "architect/local/briefs/x.md"])                     # no id: nothing shown
+            self.assertEqual(out[1], ["MB0b78", False, "Nice", "architect/local/briefs/x.md \u00b7 MB0b78"])
+            self.assertEqual(out[2], ["brief-id", "brief-t"])                                       # id above (before) the title
 
     def test_missing_brief_offers_request_and_writes_brief_request(self):
         body = """const body = el("div"); const it = { id: "A02", status: "open" };
@@ -71,7 +93,7 @@ class TestItemBrief(unittest.TestCase):
           Object.keys(written.patch.brief_request).sort(), written.patch.brief_request.by, written.opts]));"""
         body = "(async () => {" + body + "})();"
         for out in self.each(body):
-            self.assertEqual(out, ["Ask for a brief", "Brief requested", True, "A02", ["brief_request", "updated"], ["at", "by"], "owner", {"if_version": 7}])
+            self.assertEqual(out, ["Request brief", "Brief requested", True, "A02", ["brief_request", "status", "updated"], ["at", "by"], "owner", {"if_version": 7}])
 
     def test_no_button_when_requested_task_or_not_open(self):
         body = """const f = (it) => { const b = el("div"); briefControl(b, it); return b.find((n) => n.tagName === "button").map((x) => [x.textContent, x.disabled]); };
@@ -80,7 +102,35 @@ class TestItemBrief(unittest.TestCase):
         for out in self.each(body):
             self.assertEqual(out[0], [["Brief requested", True]])
             self.assertEqual(out[1:3], [[], []])
-            self.assertEqual(out[3], [["Ask for a brief", False]])   # an invalid brief path counts as none
+            self.assertEqual(out[3], [["Request brief", False]])   # an invalid brief path counts as none
+
+    def test_refresh_and_goal_requests(self):
+        body = """(async () => { const out = [];
+        const it = { id: "D01", status: "open", brief: "mcp-services/docs/briefs/2191-x.md" };
+        const b = el("div"); briefControl(b, it); const r = b.find((n) => n.tagName === "button")[0];
+        r.listeners.click(); await new Promise((x) => setTimeout(x, 20));
+        out.push([r.textContent, r.disabled, written.id, Object.keys(written.patch).sort(), written.patch.brief_request.refresh]);
+        const done = el("div"); briefControl(done, Object.assign({}, it, { brief_request: { at: "t", by: "o", refresh: true } }));
+        out.push(done.find((n) => n.tagName === "button").map((x) => [x.textContent, x.disabled]));
+        let gw = null; db = { collection: (c) => ({ doc: (i) => ({ get: async () => ({ version: 3 }), update: async (p, o) => { gw = [c, i, Object.keys(p).sort(), o]; } }) }) };
+        const bar = el("div"); briefControl(bar, { id: "G01", status: "active" }, bar, "directed");
+        const gb = bar.find((n) => n.tagName === "button")[0]; const gl = gb.textContent; gb.listeners.click(); await new Promise((x) => setTimeout(x, 20));
+        out.push([gl, gw]);
+        console.log(JSON.stringify(out)); })();"""
+        for out in self.each(body):
+            self.assertEqual(out[0], ["Update requested", True, "D01", ["brief_request", "updated"], True])
+            self.assertEqual(out[1], [["Update requested", True]])
+            self.assertEqual(out[2], ["Request brief", ["goals", "G01", ["brief_request", "updated"], {"if_version": 3}]])
+
+    def test_brief_set_beats_stray_request_object_and_local_briefs_resolve(self):
+        # A2f 2026-10-29: brief_request {__delete__: true} (no `at`) is not a request; architect/local/briefs/ links open the reader.
+        body = """const f = (it) => { const b = el("div"); briefControl(b, it); return b.find((n) => n.tagName === "button").map((x) => [x.textContent, x.disabled]); };
+        console.log(JSON.stringify([f({ id: "A2f", status: "open", brief: "architect/local/briefs/x.md", brief_request: { __delete__: true } }),
+          f({ id: "A2f", status: "open", brief_request: { __delete__: true } }), docOf("architect/local/briefs/x.md")]));"""
+        for out in self.each(body):
+            self.assertEqual(out[0], [["Request update", False]])
+            self.assertEqual(out[1], [["Request brief", False]])
+            self.assertEqual(out[2], {"project": "architect", "path": "local/briefs/x.md"})
 
     def test_schema_accepts_brief_fields(self):
         base = {"session": "tm-x", "goal": None, "rank": 1, "kind": "question", "status": "open", "title": "t", "created": "2026-10-14T00:00:00Z", "updated": "2026-10-14T00:00:00Z"}
@@ -134,3 +184,34 @@ class TestItemBrief(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("node"), "node not installed")
+class TestReaderDocId(unittest.TestCase):
+    """MB id in the reader header chip and above the title; nothing without an id (the owner 2026-10-29)."""
+    def run_js(self, page, body):
+        src = open(page, encoding="utf-8").read()
+        blk = re.search(r"/\* BEGIN docid \*/(.*?)/\* END docid \*/", src, re.S).group(1)
+        js = FAKE + "const nodes = { 'rd-id': el('button'), 'rd-idline': el('div'), 'rd-title': el('span') }; const $ = (i) => nodes[i];\n" + blk + "\n" + body
+        r = subprocess.run(["node", "-e", js], capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout)
+
+    def test_chip_and_line_show_id_and_hide_without_one(self):
+        body = """const lib = { briefs: [{ project: "p", path: "a.md", brief_id: "MB0b78" }, { project: "p", path: "b.md" }], media: [{ project: "p", path: "c.png", id: "MB0001" }] };
+        const ids = [["p", "a.md"], ["p", "b.md"], ["p", "c.png"], ["p", "zz.md"]].map((x) => docIdFor(lib, x[0], x[1]));
+        setDocId(ids[0]); const on = [$("rd-id").textContent, $("rd-id").hidden, $("rd-idline").textContent, $("rd-idline").hidden];
+        setDocId(ids[1]); const off = [$("rd-id").textContent, $("rd-id").hidden, $("rd-idline").textContent, $("rd-idline").hidden];
+        console.log(JSON.stringify([ids, on, off]));"""
+        for page in PAGES:
+            with self.subTest(page=page):
+                ids, on, off = self.run_js(page, body)
+                self.assertEqual(ids, ["MB0b78", "", "MB0001", ""])
+                self.assertEqual(on, ["MB0b78", False, "MB0b78", False])
+                self.assertEqual(off, ["", True, "", True])
+
+    def test_markup_places_chip_in_bar_and_line_above_article(self):
+        for page in PAGES:
+            src = open(page, encoding="utf-8").read()
+            self.assertTrue(re.search(r'class="rd-bar">.*?id="rd-id".*?class="rd-title"', src, re.S))
+            self.assertRegex(src, r'id="rd-idline" hidden></div><article class="md" id="rd-md"')

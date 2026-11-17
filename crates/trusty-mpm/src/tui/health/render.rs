@@ -9,10 +9,11 @@
 //! Test: line content is unit-tested via the pure builders in `screen` /
 //! `format`; this glue is exercised by `render_health_smoke`.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, HighlightSpacing, List, ListItem, ListState, Paragraph},
 };
@@ -28,7 +29,7 @@ use crate::tui::health::types::{Daemon, HealthScreen, HealthTab, PalaceActivity}
 /// Why: the single entry point the event loop calls when screen `[2]` is
 /// active; keeps all the ratatui widget assembly in one place.
 /// What: a vertical layout — a one-line title, a body split horizontally into
-/// the two daemon panels (the focused one gets a bold cyan border), and the
+/// the two daemon panels (the focused one gets a bold accent border), and the
 /// shared status bar is drawn by the caller. Panel bodies come from the pure
 /// `*_panel_lines` helpers.
 /// Test: line content is unit-tested via `search_panel_lines` /
@@ -72,7 +73,7 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Health
         Daemon::Memory => screen.memory.is_online(),
     };
     let lines = header_lines(screen);
-    let title_color = if online { Color::Green } else { Color::Red };
+    let title_color = if online { palette().ok } else { palette().err };
     let body: Vec<Line> = lines.into_iter().map(Line::from).collect();
     frame.render_widget(
         Paragraph::new(body).block(
@@ -96,7 +97,7 @@ fn render_header(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Health
 /// the search-vs-memory title label.
 /// What: draws a stateful `List` inside a bordered block titled
 /// `COLLECTIONS (n)` for search or `PALACES (n)` for memory. The selected row
-/// uses bold white-on-blue via `highlight_style`, which (unlike a manually
+/// uses the bold theme selection via `highlight_style`, which (unlike a manually
 /// padded `Paragraph` row) is applied by ratatui across every inner cell of
 /// the row regardless of the underlying text length — that is what eliminates
 /// the unstyled "right gutter" the manual-padding fix struggled with.
@@ -146,17 +147,12 @@ fn render_collections(frame: &mut Frame, area: ratatui::layout::Rect, screen: &H
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         title,
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     ));
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::White)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(palette().selection().add_modifier(Modifier::BOLD))
         // `HighlightSpacing::Always` keeps every row aligned regardless of
         // whether a `highlight_symbol` is set; without it, unselected rows
         // would shift one column left when the selection changes.
@@ -172,12 +168,12 @@ fn render_collections(frame: &mut Frame, area: ratatui::layout::Rect, screen: &H
 ///
 /// Why: keeps the per-tab body switch in one place.
 /// What: draws the tab bar on the first body line; the active tab is bold
-/// cyan, others dimmed. Below the bar, dispatches to a per-tab renderer.
+/// accent, others dimmed. Below the bar, dispatches to a per-tab renderer.
 fn render_tab_panel(frame: &mut Frame, area: ratatui::layout::Rect, screen: &HealthScreen) {
     let block = Block::default().borders(Borders::ALL).title(Span::styled(
         " DETAILS ",
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     ));
     let inner = block.inner(area);
@@ -193,11 +189,11 @@ fn render_tab_panel(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Hea
     for (label, active) in tab_bar(screen.tab) {
         let style = if active {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette().accent)
                 .add_modifier(Modifier::BOLD)
                 .add_modifier(Modifier::REVERSED)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(palette().muted)
         };
         spans.push(Span::styled(label, style));
         spans.push(Span::raw("  "));
@@ -230,7 +226,7 @@ fn render_logs_tab(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Heal
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 hint,
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette().muted),
             ))),
             area,
         );
@@ -258,7 +254,7 @@ fn render_search_tab(frame: &mut Frame, area: ratatui::layout::Rect, screen: &He
         vec![
             Line::from(Span::styled(
                 "Type a query in the search bar below.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(palette().muted),
             )),
             Line::from(""),
             Line::from(match screen.focus {
@@ -283,7 +279,7 @@ fn render_search_tab(frame: &mut Frame, area: ratatui::layout::Rect, screen: &He
 ///
 /// Why: kept separate so [`render_tab_panel`]'s match arm stays one line.
 /// What: draws the `index_tab_lines` as a `Paragraph`. Section headers (`-- … --`)
-/// render in cyan to match the existing HEALTH-tab section style.
+/// render in the accent to match the existing HEALTH-tab section style.
 fn render_index_tab(frame: &mut Frame, area: ratatui::layout::Rect, screen: &HealthScreen) {
     let lines: Vec<Line> = index_tab_lines(screen)
         .into_iter()
@@ -292,7 +288,7 @@ fn render_index_tab(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Hea
                 Line::from(Span::styled(
                     l,
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(palette().accent)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
@@ -313,7 +309,7 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Health
     let input_line = format!("{prompt} {}{cursor}", screen.search_query);
     let input_style = if screen.search_input_focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(palette().warn)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -331,7 +327,7 @@ fn render_footer(frame: &mut Frame, area: ratatui::layout::Rect, screen: &Health
 /// Why: the two panels share their bordered-block + line-list layout; only the
 /// title, body, and highlight differ.
 /// What: draws a bordered [`Paragraph`] whose title carries the panel name,
-/// coloured by liveness; a focused panel gets a bold cyan border.
+/// coloured by liveness; a focused panel gets a bold accent border.
 /// Kept for callers that want the legacy side-by-side panel; the new
 /// per-service render uses its own header / collections / tab helpers.
 #[allow(dead_code)]
@@ -343,13 +339,13 @@ fn render_panel(
     online: bool,
     focused: bool,
 ) {
-    let title_color = if online { Color::Green } else { Color::Red };
+    let title_color = if online { palette().ok } else { palette().err };
     let border_style = if focused {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette().muted)
     };
     let body: Vec<Line> = lines.iter().map(|l| Line::from(l.clone())).collect();
     frame.render_widget(

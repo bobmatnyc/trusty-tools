@@ -404,21 +404,12 @@ pub(crate) mod tests {
     /// Mirrors the stub the memory connector's own tests use, so both exercise
     /// the same framing the daemon speaks.
     fn stub_memory_daemon(dir: &std::path::Path, reply: impl Into<String>) -> PathBuf {
-        let socket = dir.join("sockets").join("memory.sock");
-        let reply = reply.into();
-        let listener = trusty_common::uds::bind_hardened(&socket).expect("bind");
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-            let Ok((mut conn, _)) = listener.accept().await else {
-                return;
-            };
-            let mut sink = Vec::new();
-            let _ = conn.read_to_end(&mut sink).await;
-            let _ = conn.write_all(reply.as_bytes()).await;
-            let _ = conn.write_all(b"\n").await;
-            let _ = conn.flush().await;
-        });
-        socket
+        crate::memory_uds::protocol_stub::spawn(
+            dir,
+            crate::memory_uds::protocol_stub::supported(),
+            reply,
+        )
+        .0
     }
 
     /// Wrap a tool payload in the `tools/call` envelope trusty-memory answers.

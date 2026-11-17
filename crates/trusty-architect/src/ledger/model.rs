@@ -112,6 +112,39 @@ pub struct Item {
     pub outcome: String,
     /// `architect` when escalated; written as `null` otherwise.
     pub esc: Option<String>,
+    /// Who the answer came from (#10780); absent on an unsourced answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AnswerSource>,
+    /// Unknown keys.
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// An answer's provenance (#10780): the owner's cited words, or the
+/// Architect's inference with its basis.
+///
+/// Why: after a /clear a fresh session restored an Architect inference as an
+/// owner ruling; the record now says which it is.
+/// What: `{by: owner, cite, quote, until?}` or `{by: architect, basis}`, in
+/// the prototype's key order. The Rust writer writes only the Architect
+/// shape (`ops::source`); an owner source is read and kept as stored.
+/// Test: `ledger_writer_matches_prototype_bytes`, `ledger_answer_source_round_trips_and_refuses_bad_shapes`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnswerSource {
+    /// `owner` or `architect`.
+    pub by: String,
+    /// The owner turn: `chat <ISO>`, `dashboard <id>` or `palace <drawer>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cite: Option<String>,
+    /// The owner's words, verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// When an owner ruling stops being current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// What an Architect inference rests on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
     /// Unknown keys.
     #[serde(flatten)]
     pub extra: Extra,
@@ -284,18 +317,56 @@ macro_rules! row {
     };
 }
 
-row!(/// `waiting_on` row: `who` is owner, architect, ci, agent or other.
-    WaitingOn { who: String, what: String, since: String });
-row!(/// `owed` row: an exact expected value, never a vague word.
-    Owed { check: String, expect: String, #[serde(rename = "ref")] reference: String });
-row!(/// `agents` row.
-    Agent { id: String, goal: String, what: String });
-row!(/// `crons` row.
-    Cron { id: String, schedule: String, prompt: String });
-row!(/// `refs` row: a named pointer.
-    SessionRef { key: String, value: String });
-row!(/// `ctx_use`: self-reported context use at a boundary.
-    CtxUse { at: String, active: u8, stale: u8, ctx: u64, keep: String });
+row!(
+    /// `waiting_on` row: `who` is owner, architect, ci, agent or other.
+    WaitingOn {
+        who: String,
+        what: String,
+        since: String
+    }
+);
+row!(
+    /// `owed` row: an exact expected value, never a vague word.
+    Owed {
+        check: String,
+        expect: String,
+        #[serde(rename = "ref")]
+        reference: String
+    }
+);
+row!(
+    /// `agents` row.
+    Agent {
+        id: String,
+        goal: String,
+        what: String
+    }
+);
+row!(
+    /// `crons` row.
+    Cron {
+        id: String,
+        schedule: String,
+        prompt: String
+    }
+);
+row!(
+    /// `refs` row: a named pointer.
+    SessionRef {
+        key: String,
+        value: String
+    }
+);
+row!(
+    /// `ctx_use`: self-reported context use at a boundary.
+    CtxUse {
+        at: String,
+        active: u8,
+        stale: u8,
+        ctx: u64,
+        keep: String
+    }
+);
 
 /// One `archive.jsonl` line: a closed record, written before its removal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

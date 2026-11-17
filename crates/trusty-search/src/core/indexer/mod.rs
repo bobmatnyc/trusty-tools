@@ -54,6 +54,7 @@ pub use idle_evict::WriteCooldownPersist;
 mod ingest;
 // #9284: named in `embed_window_stats`, read by the status report.
 pub(crate) use ingest::truncation::EmbedWindowStats;
+pub use ingest::window_split::deferred_split_enabled;
 pub(crate) mod migration_state;
 pub(crate) mod migrations;
 mod persist;
@@ -78,6 +79,8 @@ mod warm;
 pub(crate) use warm::warm_corpus;
 
 pub(crate) use ingest::deferred::VectorCoverage;
+/// #10294: the per-wave deferred-embed driver `service::reindex` runs.
+pub(crate) use ingest::deferred_stream::run_deferred_embed;
 /// Re-export for `EmbedPool::with_autotune`'s inflight-aware worker floor
 /// (issue #3748 PR #3784 review finding 3) — see
 /// `ingest::embed::resolve_embed_inflight`'s doc comment.
@@ -163,6 +166,9 @@ pub use search::exact::ExactMatchReport;
 pub use search::lexical_lane::{
     check_lexical_limit, LexicalLaneDefaults, LexicalLimitError, MAX_LEXICAL_LIMIT, ORIGIN_CONFIG,
 };
+// #10195: per-stage search timings and the query phase.
+pub(crate) use search::timings as query_timings;
+pub use search::timings::{QueryPhase, SearchTimings};
 pub use search::SearchOutcome;
 pub use typeahead::{TypeaheadHit, TypeaheadMode, TypeaheadResponse};
 pub(crate) use types::ChunkSnapshot;
@@ -397,7 +403,7 @@ pub struct CodeIndexer {
     /// see `search::lanes::bm25_search` / `grep_fallback_search`) is the
     /// machine-readable signal that closes that gap, surfaced in the search
     /// HTTP response's `meta.bm25_lane_degraded` field
-    /// (`service::server::search::search_handler`) mirroring how
+    /// (`service::server::search::search_report`) mirroring how
     /// `WarmBootSummary.warm_boot_degraded` is surfaced on `/health`.
     /// What: set `true` by either lane's retry-exhausted tail; reset to
     /// `false` by `idle_evict::spawn_detached_rehydrate`'s commit-success
@@ -558,6 +564,11 @@ pub struct CodeIndexer {
     /// only by `take_corpus_for_shutdown`; while set, `index_file` and
     /// `purge_file_committed` refuse.
     pub(super) closed_for_shutdown: bool,
+
+    /// #10738: set while a staged reindex that died mid-run is rolled back.
+    /// Shared with the run's termination guard, which sets it from `Drop`
+    /// with no indexer lock; read by `refuse_if_corpus_detached`.
+    pub(super) swap_abandoned: Arc<AtomicBool>,
 
     /// Issue #4122: monotonic count of writes refused because
     /// [`Self::corpus_open_failed`] was set. Issue #4226 widened it from
@@ -829,6 +840,7 @@ impl CodeIndexer {
             corpus_ever_wired: false,
             deleted: false,
             closed_for_shutdown: false,
+            swap_abandoned: Arc::new(AtomicBool::new(false)),
             incremental_writes_refused: AtomicU64::new(0),
             hnsw_load_failed: false,
             skip_kg: false,
@@ -1164,7 +1176,7 @@ impl CodeIndexer {
     /// Why: the `GET /indexes/{id}/graph` endpoint needs to read the whole
     /// symbol graph without holding a lock.
     /// What: clones the inner `Arc<SymbolGraph>` while holding the read lock.
-    /// Test: covered by the `graph_handler` integration path.
+    /// Test: `graph_report_exports_nodes_and_edges`.
     pub async fn snapshot_symbol_graph(&self) -> Arc<SymbolGraph> {
         Arc::clone(&*self.symbol_graph.read().await)
     }
@@ -1202,10 +1214,16 @@ impl CodeIndexer {
     /// open is exactly the event that makes writes safe again, so this also
     /// lifts any active write quarantine via `clear_corpus_open_failure`
     /// (a no-op on the healthy-boot path, where the flag is already `false`).
+    /// #10738: a corpus created empty, or one whose `_meta` stamp does not
+    /// match the stored identity, raises the index generation first.
     /// Test: `tests::test_corpus_store_roundtrip`;
+    /// `identity_changes_when_the_corpus_is_recreated_empty`;
     /// `successful_reopen_lifts_quarantine_and_leaves_corpus_intact` in
     /// `tests/corpus_open_quarantine_4122.rs` covers the recovery transition.
     pub fn set_corpus_store(&mut self, corpus: Arc<crate::core::corpus::CorpusStore>) {
+        // #10738: bump unless the corpus carries the stored identity, so a
+        // failed bump is retried at the next attach, across a restart.
+        crate::service::index_identity::reconcile_on_attach(&self.index_id, &corpus);
         self.corpus = Some(corpus);
         // #7920: from here on, `corpus == None` means detached, not legacy.
         self.corpus_ever_wired = true;
@@ -1297,7 +1315,7 @@ impl CodeIndexer {
     /// boot-race fix, PR #3784 review finding 1).
     ///
     /// Why: `restore_one_index` / `restore_index_on_demand` /
-    /// `create_index_handler` / the relocate handler all resolve the pool
+    /// `create_index_report` / the relocate handler all resolve the pool
     /// via `state.current_embed_pool()` at construction time — but
     /// `install_embedder` (which unblocks these handlers) completes strictly
     /// BEFORE `install_embed_pool` in `commands/start/daemon.rs`, so a

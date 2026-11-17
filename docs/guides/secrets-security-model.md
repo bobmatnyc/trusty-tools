@@ -30,10 +30,12 @@ denied key is never set in a process whose parent chain includes Claude Code.
 You tick "Denied to agents" in the console. An agent may deny a key; only a
 person can remove a deny (#10386).
 
-Some operations stay with a person whatever the key: storing a value (`set`),
-deleting a key, and copying keys to another backend or to a sync target such
-as GitHub Actions. The service refuses each of them to a caller under Claude
-Code. A copy keeps a key's deny; a denied key cannot be copied into 1Password
+Some operations stay with a person whatever the key: deleting a key,
+removing a deny, and copying keys to a sync target such as GitHub Actions.
+The service refuses each of them to a caller under Claude Code. An agent may
+store a value (`set`, `import`) or copy keys to another local backend only
+for keys you have not denied (#10459); its confirmation shows the length
+only, and the audit log records its pid and project. A copy keeps a key's deny; a denied key cannot be copied into 1Password
 or Keeper, which cannot hold a deny.
 
 ## What it does not protect

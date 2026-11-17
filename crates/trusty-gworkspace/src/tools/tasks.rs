@@ -28,12 +28,14 @@ pub(super) fn append(tools: &mut Vec<Value>) {
     ));
     // #8629: re-advertise the flat task fields (the Python gworkspace-mcp
     // shape); the handler merges them with the `task` / `updates` object.
+    // #10709: the description tells callers how to page `list`.
     tools.push(tool(
         "manage_tasks",
         "CRUD, complete/move, get one, or search tasks within Google Tasks lists. \
          create/update take task fields flat (title, notes, due, status, completed), \
          as a 'task' (create) or 'updates' (update) object, or both: the two are merged, \
-         and a field set in both with different values is an error.",
+         and a field set in both with different values is an error. \
+         list returns 'next_page_token' when more pages exist; pass it back as 'page_token'.",
         json!({
             "account": account_schema(),
             "action": action_enum(&["list", "get", "create", "update", "delete", "complete", "move", "search"]),
@@ -50,6 +52,11 @@ pub(super) fn append(tools: &mut Vec<Value>) {
             "previous": { "type": "string" },
             "query": { "type": "string", "description": "search: case-insensitive substring matched against task title/notes across all lists." },
             "show_completed": { "type": "boolean", "description": "search: include completed tasks (default true)." },
+            // #10709: `list` paging and visibility params; each is sent only when supplied.
+            "show_hidden": { "type": "boolean", "description": "list: include hidden (completed and cleared) tasks. Omitted: API default (false)." },
+            "show_deleted": { "type": "boolean", "description": "list: include deleted tasks. Omitted: API default (false)." },
+            "max_results": { "type": "integer", "minimum": 1, "maximum": 100, "description": "list: page size. Omitted: API default (20)." },
+            "page_token": { "type": "string", "description": "list: the 'next_page_token' (or 'nextPageToken') from a previous list response, to fetch the next page." },
         }),
         &["action"],
     ));

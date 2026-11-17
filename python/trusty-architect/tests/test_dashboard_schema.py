@@ -22,12 +22,14 @@ T = "2026-10-11T04:00:00Z"
 GOAL = {"kind": "directed", "rank": 1, "title": "t", "lifecycle": "active", "updated": T}
 ITEM = {"kind": "question", "status": "open", "title": "t", "session": "s", "goal": "G01", "rank": 1, "created": T, "updated": T}
 SESSION = {"name": "tm-a", "state": "idle", "status": "x", "summary": "y", "updated": T}
+WATCH = {"key": "proj-a", "action": "watch", "status": "new", "created": T, "by": "owner"}
 
 
 def test_every_schema_file_loads_and_uses_supported_keywords():
     names = sorted(os.path.basename(p)[:-12] for p in glob.glob(os.path.join(sch.SCHEMA_DIR, "*.schema.json")))
     assert names == sorted(["items", "sessions", "goals", "goal_reorders", "goal_removals", "step_progress", "accounts",
-                            "effort_tunes", "il_steers", "briefs", "questions", "media", "meta-state", "meta-settings", "meta-seen", "meta-gh_track"])
+                            "effort_tunes", "il_steers", "briefs", "questions", "media", "watch_changes",
+                            "meta-state", "meta-settings", "meta-seen", "meta-gh_track"])
     for n in names:
         sch.load_schema(n)
 
@@ -81,6 +83,16 @@ CASES = [  # (coll, id, doc, expected error count > 0?)
                                 "doc": "local/briefs/x.md"}, True),
     ("accounts", "a", {"account": "a", "pct5h": 101, "pctwk": 1, "ts": T, "source": "manual"}, True),
     ("goal_reorders", "x", {"at": T, "kind": "directed", "order": ["G01", "x"], "status": "new"}, True),
+    # #10896: Watch / Unwatch requests.
+    ("watch_changes", "w", WATCH, False),
+    ("watch_changes", "w", {**WATCH, "status": "failed", "done_at": T, "message": "exit 1: not registered"}, False),
+    ("watch_changes", "w", {**WATCH, "status": "dismissed"}, False),
+    ("watch_changes", "w", {**WATCH, "status": "handled"}, True),
+    ("watch_changes", "w", {**WATCH, "action": "delete"}, True),
+    ("watch_changes", "w", {**WATCH, "key": "-rf"}, True),
+    ("watch_changes", "w", {**WATCH, "key": "a/b"}, True),
+    ("watch_changes", "w", {k: v for k, v in WATCH.items() if k != "by"}, True),
+    ("watch_changes", "w", {**WATCH, "done_at": "yesterday"}, True),
 ]
 
 

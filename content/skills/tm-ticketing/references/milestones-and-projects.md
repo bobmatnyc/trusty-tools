@@ -62,6 +62,11 @@ gh project list --owner <owner> -L 200 --format json  # what `tm issue standard`
 gh project item-add 25 --owner bobmatnyc --url https://github.com/…/issues/7067
 ```
 
+🔴 **Never use `gh project item-list` to find one issue's project item
+(#10550).** It pages the whole project and spends the primary GraphQL rate
+limit. Ask the issue instead:
+`gh api graphql -f query='{ repository(owner:"<owner>", name:"<repo>") { issue(number:<N>) { projectItems(first:20) { nodes { id project { number title } } } } } }'`.
+
 A project is a view; a milestone is a delivery slot. An issue can sit in several
 projects and still carry exactly one milestone.
 

@@ -43,7 +43,12 @@ impl SessionManager {
     ) -> Result<(), ManagedError> {
         let harness = harness_binary(record.runtime);
         let name = &record.tmux_name;
-        let why = match self.tmux.pane_harness(name, pane, harness) {
+        // See #10101: the pane's own server; unreachable reads as unknown.
+        let probe = super::tmux_route::route(self.tmux.as_ref(), record)
+            .map_or(PaneClaude::Unknown, |tmux| {
+                tmux.pane_harness(name, pane, harness)
+            });
+        let why = match probe {
             PaneClaude::Present => return Ok(()),
             PaneClaude::Absent => format!(
                 "no_live_harness: session {name} pane {pane} runs no {harness}; \

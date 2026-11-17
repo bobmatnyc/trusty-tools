@@ -246,6 +246,8 @@ fn detached_command(
     // #8783: out of the spawner's process group, so a group kill aimed at the
     // spawner (trusty-audit's budget kill, a terminal Ctrl-C) spares the daemon.
     start_in_new_session(&mut cmd);
+    // #10083: the daemon must not inherit the spawner's listeners or streams.
+    crate::child_fds::seal_inherited(&mut cmd);
     // #7085: scrub by default so an inherited stamp cannot silently arm a
     // daemon; a caller that wants the link asks for it by name.
     match stamp {

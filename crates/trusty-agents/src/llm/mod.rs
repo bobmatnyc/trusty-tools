@@ -26,6 +26,7 @@ mod helpers;
 mod http;
 pub mod inference_bridge;
 pub mod inference_client;
+pub mod provider_lock;
 pub mod provider_pin;
 pub mod provider_policy;
 mod single_turn;

@@ -228,12 +228,34 @@ pub fn park_decision(
     candidates: &[Candidate],
     disk: &impl Disk,
 ) -> Result<ParkOutcome, MapRefusal> {
+    park_decision_for(map_path, index_id, candidates, disk, false)
+}
+
+/// [`park_decision`], or a decommission park when `decommission` is set (#10989).
+///
+/// Why: tm decommissions a whole project, so its main checkout — the index
+/// [`park_decision`] refuses — must unload too. That refusal stops an
+/// operator choosing between two clones of one repo; a decommission names the
+/// project's own index, so there is no choice to get wrong.
+/// What: with `decommission`, any registered index parks as
+/// [`ParkReason::Decommissioned`], a main checkout and the group's live answer
+/// included; without it, the [`park_decision`] rules apply unchanged.
+/// Test: `a_decommission_park_unloads_a_main_checkout_stops_its_watcher_and_keeps_its_corpus`.
+pub fn park_decision_for(
+    map_path: &Path,
+    index_id: &str,
+    candidates: &[Candidate],
+    disk: &impl Disk,
+    decommission: bool,
+) -> Result<ParkOutcome, MapRefusal> {
     let (probed, key) = target(index_id, candidates, disk)?;
     let shares_root = candidates
         .iter()
         .any(|c| c.index_id != index_id && c.root_path == probed.root_path);
     let current = ensure_map(map_path, candidates, disk)?;
     let reason = match probed.kind {
+        // #10989: a decommission parks any root kind, the live answer included.
+        _ if decommission => ParkReason::Decommissioned,
         RootKind::Worktree => ParkReason::Worktree,
         RootKind::Orphaned => ParkReason::Orphaned,
         _ if shares_root => {
@@ -356,6 +378,35 @@ pub fn unpark_decision(map_path: &Path, index_id: &str) -> Result<ParkedIndex, M
         Ok((next, removed))
     })?
     .ok_or_else(|| MapRefusal::NotParked(index_id.to_string()))
+}
+
+/// Undo a park whose unload was refused: drop the row, restore the pins (#10989).
+///
+/// Why: Fail-Open Check — a decommission park answers parked only when the
+/// index is unloaded. A row left behind would hide the still-loaded index from
+/// `search.project.resolve`, so a retry could never find it to park again.
+/// What: one map write that removes `index_id`'s parked row and re-pins every
+/// pin in `unpinned` whose group has no pin now. An absent row is not an error.
+/// Test: `a_decommission_park_whose_unload_is_refused_leaves_the_index_unparked`.
+pub fn rollback_park(
+    map_path: &Path,
+    index_id: &str,
+    unpinned: &[PinnedProject],
+) -> Result<(), MapRefusal> {
+    project_map_io::update(map_path, |map| {
+        let Some(mut map) = map else {
+            return Ok((None, ()));
+        };
+        let mut changed = map.unpark(index_id).is_some();
+        for pin in unpinned {
+            if map.pin_for(&pin.key).is_none() {
+                map.set_pin(pin.clone());
+                changed = true;
+            }
+        }
+        Ok((changed.then(|| map.clone()), ()))
+    })?;
+    Ok(())
 }
 
 /// Pin the group of a just-created index when it has no pin (`create`).

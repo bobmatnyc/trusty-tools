@@ -582,10 +582,14 @@ mod palace_index_tests;
 mod palace_missing_tests;
 // #9881: a served recall hit records an access, persisted per owning palace.
 mod recall_access_tests;
+// #11255: the single-palace recall's bounded, off-worker palace open.
+mod recall_open_tests;
 // Owner ruling 2026-09-14: creator-tag hiding and the `min_score` floor.
 mod recall_projection_tests;
 // #9144: `memory_remember`'s optional drawer `type`.
 mod remember_type_tests;
+// #10609: the `superseded-by:` retirement marker, end to end.
+mod retired_marker_tests;
 // #9390: a Tier C slot's `verify` command, end to end through the dispatcher.
 mod verify_with_tests;
 mod write_budget_tests;

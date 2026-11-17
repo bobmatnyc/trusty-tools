@@ -11,13 +11,11 @@
 
 use std::sync::Arc;
 
-use axum::body::to_bytes;
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 
-use super::indexes::{create_index_handler, list_indexes_report, ListIndexesParams};
+use super::indexes::{list_indexes_report, ListIndexesParams};
 use super::router::CreateIndexRequest;
+use super::test_support::create_answer;
 use super::SearchAppState;
 use crate::core::embed::Embedder;
 use crate::core::registry::IndexRegistry;
@@ -50,12 +48,8 @@ async fn a_parked_registration_that_blocks_create_is_listed_and_named() {
         "root_path": repo,
     }))
     .expect("request");
-    let response = create_index_handler(State(Arc::clone(&state)), Json(req)).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let bytes = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("body");
-    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let (status, body) = create_answer(&state, req).await;
+    assert_eq!(status, StatusCode::CONFLICT);
     let stale = stale_root.display().to_string();
     assert_eq!(body["existing_index_id"], STALE_ID, "{body}");
     assert_eq!(body["existing_root_path"], stale, "{body}");

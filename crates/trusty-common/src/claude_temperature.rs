@@ -6,7 +6,8 @@
 //! adapter, the Anthropic adapter, the `config keys test` auth probe, and the
 //! chat Bedrock provider.
 //! One predicate here keeps them in agreement.
-//! What: [`accepts_temperature`], read with the same model-id parse
+//! What: [`accepts_temperature`](crate::claude_temperature::accepts_temperature),
+//! read with the same model-id parse
 //! trusty-review's Bedrock client uses for #9304.
 //! Test: the inline `tests` module below; per site,
 //! `build_converse_parts_omits_temperature_only_for_claude_5_5`,
@@ -29,9 +30,11 @@ const ROUTING_PREFIXES: &[&str] = &["bedrock/", "anthropic/"];
 /// What: `false` only when [`model_family`] reduces `model` to a family in
 /// [`NO_TEMPERATURE_FAMILIES`]. The family must match exactly, so an id that
 /// only contains `5-5` elsewhere (`claude-sonnet-4-5-20250505`) keeps it.
+/// Public (#10939) so trusty-agents' Bedrock client reads this rule instead
+/// of copying the model list.
 /// Test: `only_the_claude_5_5_families_reject_temperature`,
 /// `unclassifiable_ids_keep_temperature`.
-pub(crate) fn accepts_temperature(model: &str) -> bool {
+pub fn accepts_temperature(model: &str) -> bool {
     // #9318: an id that cannot be classified (an application-inference-profile
     // ARN, an unknown vendor) keeps `temperature`, as trusty-review does
     // (#9304). For a model that accepts it, dropping it would silently swap the

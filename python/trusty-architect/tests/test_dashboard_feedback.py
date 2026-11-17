@@ -51,7 +51,7 @@ class TestDashboardFeedback(unittest.TestCase):
         console.log(JSON.stringify({ sel: sel.value, opts: sel.children.map((o) => o.value + "=" + o.textContent), btns: b2.find((n) => n.tagName === "button").map((n) => n.textContent), inputs: b2.find((n) => n.tagName === "input").length }));"""
         for r in self.each(body):
             self.assertEqual(r["sel"], "action")
-            self.assertEqual(r["opts"], ["question=Decision", "action=Action", "task=Architect task"])
+            self.assertEqual(r["opts"], ["question=Decision", "action=Blocker", "task=Architect task"])
             self.assertEqual(r["btns"], ["Send", "Cancel"])
             self.assertEqual(r["inputs"], 1)
 
@@ -90,7 +90,8 @@ class TestDashboardFeedback(unittest.TestCase):
             src = open(page, encoding="utf-8").read()
             for fn in ("renderQuestion", "renderAction", "renderTask"):
                 m = re.search(r"  function %s\(.*?\n  }\n" % fn, src, re.S)
-                self.assertIn("feedbackControl(body, it, parkControl(body, it));", m.group(0), page + fn)
+                want = "parkControl(body, it)" if fn == "renderTask" else "parkControl(tools, it)"   # D and A: Park menu lives in .act-tools (2026-10-26)
+                self.assertIn("feedbackControl(body, it, %s);" % want, m.group(0), page + fn)
             self.assertIn("withFeedback(r, optimisticFeedback)", src)
             self.assertIn("cancelControl(", src)
             self.assertIn(".fb-form select", src)
@@ -136,7 +137,7 @@ class TestDashboardFeedback(unittest.TestCase):
                 self.assertIn('id="list-%sp"' % x, src)
             for fn in ("renderQuestion", "renderAction", "renderTask"):
                 m = re.search(r"  function %s\(.*?\n  }\n" % fn, src, re.S)
-                self.assertIn("parkControl(body, it)", m.group(0), page + fn)
+                self.assertIn("parkControl(body, it)" if fn == "renderTask" else "parkControl(tools, it)", m.group(0), page + fn)
                 self.assertIn("updatesBlock(body, it);", m.group(0), page + fn)
             self.assertIn("renderParked();", src)
             self.assertIn("withPark(withFeedback(r, optimisticFeedback), optimisticPark)", src)
@@ -231,7 +232,7 @@ class TestDashboardAccounts(unittest.TestCase):
             self.assertIn('bindOpen($("sec-accounts"), "sec:accounts", true);', src)
             self.assertIn('db.collection("accounts").onSnapshot', src)
             self.assertLess(src.index('id="sec-sessions"'), src.index('id="sec-accounts"'))
-            self.assertLess(src.index('id="sec-accounts"'), src.index("<footer>"))
+            self.assertLess(src.index('id="sec-accounts"'), src.index("<footer"))
 
 
 if __name__ == "__main__":

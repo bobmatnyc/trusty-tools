@@ -10,6 +10,8 @@
 //! the ADR-0071 coverage report). No user-scope rulings leg here: the
 //! per-palace surfaces return a bare JSON array, which has nowhere to report
 //! a failed rulings palace.
+//! #10609 (ADR-0074, D83): every method here leaves superseded drawers out; the
+//! historical opt-in is an MCP argument, not a service one.
 //! Test: `demotion_applies_on_every_recall_surface`
 //! (`tests/recall_temporal_rank.rs`); `recall_entry_json_hoists_drawer_fields`;
 //! `recall_all_never_opens_an_empty_palace` (#9141).
@@ -28,17 +30,22 @@ use crate::tools::recall_rank::{
     demote_stale_snapshots, demote_stale_snapshots_across, ranking_window,
 };
 // #9421: superseded drawers rank below their replacements here too.
-use crate::tools::recall_supersede::{Supersessions, supersessions_across, supersessions_for};
+use crate::tools::recall_supersede::{SupersessionLookup, supersessions_across, supersessions_for};
+// #10609 (ADR-0074): these surfaces exclude superseded drawers, with no opt-in.
+use crate::tools::recall_supersede_view::{annotate_response, settle_superseded};
 
 impl MemoryService {
     /// Per-palace recall, ranked: the hits every non-MCP recall surface shows.
     ///
     /// Why: the chat `recall_memories` tool and the chat context injection
     /// called the retrieval layer directly and so skipped demotion (#8246).
-    /// What: opens the palace, runs the shallow or deep vector recall and the
+    /// What: opens the palace with the bounded recall open (#11255: past the
+    /// open wait it fails with `ServiceError::PalaceOpening`), runs the
+    /// shallow or deep vector recall and the
     /// optional BM25 lane over a [`ranking_window`] of candidates, RRF-fuses
     /// them, demotes stale snapshots, and cuts to `top_k`.
-    /// Test: `demotion_applies_on_every_recall_surface`.
+    /// Test: `demotion_applies_on_every_recall_surface`,
+    /// `chat_recall_memories_answers_palace_opening_for_a_stalled_open`.
     pub async fn recall_ranked(
         &self,
         id: &str,
@@ -46,7 +53,10 @@ impl MemoryService {
         top_k: usize,
         deep: bool,
     ) -> ServiceResult<Vec<RecallResult>> {
-        let handle = self.open_handle(id)?;
+        // #11255: a cold open runs off the worker, bounded by the open wait.
+        let handle = crate::tools::recall_open::open_for_recall(&self.state, id)
+            .await
+            .map_err(|e| super::core_kg::open_failure(id, &e))?;
         // #8246: fetch past `top_k` so demotion can lift a hit over the cut.
         let window = ranking_window(top_k, None);
         let mut results = if deep {
@@ -66,7 +76,9 @@ impl MemoryService {
             crate::tools::bm25::fuse_bm25_into_recall(&mut results, &hits, window);
         }
         // #8246: same stale-snapshot demotion as the MCP recall handlers.
-        let sup = supersessions_for(&handle, &results).await;
+        let mut sup = supersessions_for(&handle, &results).await.edges;
+        // #10609: a replaced fact never reaches the chat or in-process caller.
+        settle_superseded(&mut results, &mut sup, false);
         demote_stale_snapshots(&mut results, chrono::Utc::now(), &sup);
         results.truncate(top_k);
         Ok(results)
@@ -126,7 +138,7 @@ impl MemoryService {
         let window = ranking_window(top_k, None);
         // #9421: per-batch edge reads, as in `memory_recall_all`. #9299: the
         // batches come from either scope; both demote the merged list below.
-        let sup = std::sync::Arc::new(parking_lot::Mutex::new(Supersessions::new()));
+        let sup = std::sync::Arc::new(parking_lot::Mutex::new(SupersessionLookup::default()));
         let outcome = recall_all_scoped(&self.state, scope, "recall_all", window, |handles| {
             let sup = sup.clone();
             async move {
@@ -136,7 +148,7 @@ impl MemoryService {
                     recall_across_palaces_reporting(&handles, &embedder, query, window, deep)
                         .await?;
                 let found = supersessions_across(&handles, &recall.results).await;
-                sup.lock().extend(found);
+                sup.lock().absorb(found);
                 Ok(recall)
             }
         })
@@ -145,7 +157,11 @@ impl MemoryService {
             Ok(outcome) => {
                 let mut results = outcome.results;
                 // #8246: same demotion as `memory_recall_all`, then the cut.
-                let sup = std::mem::take(&mut *sup.lock());
+                let lookup = std::mem::take(&mut *sup.lock());
+                let unverified = lookup.unverified;
+                let mut sup = lookup.edges;
+                // #10609: superseded drawers leave the merged list.
+                settle_superseded(&mut results, &mut sup, false);
                 demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
                 results.truncate(top_k);
                 let rows: Vec<Value> = results
@@ -165,7 +181,9 @@ impl MemoryService {
                 let mut out = serde_json::Map::new();
                 out.insert("results".into(), json!(rows));
                 outcome.coverage.insert_into(scope, &mut out);
-                Value::Object(out)
+                let mut out = Value::Object(out);
+                annotate_response(&mut out, &sup, unverified);
+                out
             }
             Err(e) => json!({ "error": format!("recall_across_palaces: {e:#}") }),
         }

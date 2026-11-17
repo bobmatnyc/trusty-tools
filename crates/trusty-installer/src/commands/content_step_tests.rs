@@ -5,10 +5,13 @@ use std::cell::RefCell;
 
 use super::*;
 
+/// What one fake run answers, given the program and its arguments.
+type Answer = Box<dyn Fn(&Path, &[&str]) -> std::io::Result<RunOutput>>;
+
 /// A [`CommandRunner`] that records each call and answers with `answer`.
 pub(crate) struct FakeRunner {
     calls: RefCell<Vec<(PathBuf, Vec<String>)>>,
-    answer: fn() -> std::io::Result<RunOutput>,
+    answer: Answer,
 }
 
 impl FakeRunner {
@@ -37,10 +40,58 @@ impl FakeRunner {
     }
 
     pub(crate) fn answering(answer: fn() -> std::io::Result<RunOutput>) -> Self {
+        Self::by_program(move |_, _| answer())
+    }
+
+    /// #10588: answers per program, so `tm` and `trusty-review` can differ.
+    pub(crate) fn by_program(
+        answer: impl Fn(&Path, &[&str]) -> std::io::Result<RunOutput> + 'static,
+    ) -> Self {
         Self {
             calls: RefCell::new(Vec::new()),
-            answer,
+            answer: Box::new(answer),
         }
+    }
+
+    /// #10588: `tm content update` pins `content-v2.3.0`, and the placed
+    /// trusty-review — newer than that release — answers `content check`
+    /// with `review`.
+    pub(crate) fn review_check(review: fn() -> RunOutput) -> Self {
+        Self::by_program(move |program, args| {
+            if program.file_name() == Some(std::ffi::OsStr::new("trusty-review")) {
+                assert_eq!(args, ["content", "check"], "the check verb");
+                return Ok(review());
+            }
+            Ok(RunOutput {
+                success: true,
+                code: Some(0),
+                stdout: "pinned content-v2.3.0 (sha256 aa0c)\n".to_owned(),
+                stderr: String::new(),
+            })
+        })
+    }
+
+    /// #10588: the deployed release predates the principles addendum.
+    pub(crate) fn review_newer_than_content() -> Self {
+        Self::review_check(|| {
+            RunOutput {
+            success: false,
+            code: Some(1),
+            stdout: String::new(),
+            stderr: format!("Error: content content-v2.3.0 does not serve trusty-review 0.39.0: missing or unusable {PRINCIPLES}; run `tm content update`\n"),
+        }
+        })
+    }
+
+    /// #10588: the deployed release serves the placed trusty-review.
+    pub(crate) fn review_served() -> Self {
+        Self::review_check(|| RunOutput {
+            success: true,
+            code: Some(0),
+            stdout: "content content-v2.3.0 has all 7 files trusty-review 0.39.0 reads\n"
+                .to_owned(),
+            stderr: String::new(),
+        })
     }
 
     /// Every `(program, args)` run so far.
@@ -55,9 +106,12 @@ impl CommandRunner for FakeRunner {
             program.to_path_buf(),
             args.iter().map(|a| (*a).to_owned()).collect(),
         ));
-        (self.answer)()
+        (self.answer)(program, args)
     }
 }
+
+/// The bundle path the #10588 fakes report missing.
+pub(crate) const PRINCIPLES: &str = "instructions/trusty-review/prompts/principles_addendum.md";
 
 /// `placed` rows for trusty-search and trusty-mpm under `dir`, with a `tm`
 /// beside `trusty-mpm` as a real install places one.
@@ -67,6 +121,13 @@ pub(crate) fn placed_with_mpm(dir: &Path) -> Vec<(String, PathBuf)> {
         ("trusty-search".to_owned(), dir.join("trusty-search")),
         (MPM_CRATE.to_owned(), dir.join("trusty-mpm")),
     ]
+}
+
+/// #10588: [`placed_with_mpm`] plus trusty-review under `dir`.
+pub(crate) fn placed_with_mpm_and_review(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut placed = placed_with_mpm(dir);
+    placed.push(("trusty-review".to_owned(), dir.join("trusty-review")));
+    placed
 }
 
 /// #9396: with trusty-mpm not placed, nothing runs.
@@ -101,4 +162,32 @@ fn tm_beside_prefers_the_sibling_tm() {
     assert_eq!(tm_beside(&placed), placed, "no sibling: the alias itself");
     std::fs::write(dir.path().join("tm"), b"").expect("tm");
     assert_eq!(tm_beside(&placed), dir.path().join("tm"));
+}
+
+/// #10588: a released trusty-review older than `content check` answers with
+/// clap's usage error; that is reported as not checked, never as a failure,
+/// and any other exit 2 still fails.
+#[test]
+fn a_trusty_review_without_the_check_verb_is_not_checked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let placed = vec![("trusty-review".to_owned(), dir.path().join("trusty-review"))];
+    let old = FakeRunner::review_check(|| RunOutput {
+        success: false,
+        code: Some(2),
+        stdout: String::new(),
+        stderr: "error: unrecognized subcommand 'content'\n\nUsage: trusty-review\n".to_owned(),
+    });
+    let out = run_content_steps(&placed, &old, true).expect("the check ran");
+    assert!(out.ok, "{out:?}");
+    assert!(out.detail.contains("not checked"), "{out:?}");
+
+    let broken = FakeRunner::review_check(|| RunOutput {
+        success: false,
+        code: Some(2),
+        stdout: String::new(),
+        stderr: "Error: content content-v2.3.0 is unreadable\n".to_owned(),
+    });
+    let out = run_content_steps(&placed, &broken, true).expect("the check ran");
+    assert!(!out.ok, "{out:?}");
+    assert!(out.detail.contains("is unreadable"), "{out:?}");
 }

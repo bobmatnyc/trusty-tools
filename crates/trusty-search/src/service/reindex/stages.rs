@@ -162,7 +162,7 @@ pub(crate) async fn mark_lexical_ready_semantic_in_progress(
 /// and the live vector count; returns the predicate's verdict.
 /// Test: `tests::semantic_stage_reports_failed_when_live_store_is_empty` and
 /// `tests::semantic_stage_still_ready_when_store_is_populated` below.
-pub(super) async fn semantic_health_reason(handle: &Arc<IndexHandle>) -> Option<String> {
+pub(crate) async fn semantic_health_reason(handle: &Arc<IndexHandle>) -> Option<String> {
     let indexer = handle.indexer.read().await;
     let embedder_present = indexer.has_embedder();
     let corpus_chunks = indexer

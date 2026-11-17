@@ -1171,6 +1171,8 @@ mod tests {
             .expect("seed session record");
         let stopped = SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             state: ManagedSessionState::Stopped,
             ..record
         };

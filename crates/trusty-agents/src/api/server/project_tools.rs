@@ -114,7 +114,7 @@ fn destination(dirs: &[PathBuf], knowledge: &Path, name: &str) -> Result<Destina
         let root = home
             .store_root(binding)
             .map_err(|e| failure(StatusCode::CONFLICT, e))?;
-        trusty_kb::roots::assert_within(home.path(), &root)
+        crate::kb::roots::assert_within(home.path(), &root)
             .map_err(|e| failure(StatusCode::CONFLICT, e))?;
         root
     } else {
@@ -128,7 +128,7 @@ fn destination(dirs: &[PathBuf], knowledge: &Path, name: &str) -> Result<Destina
     // The URI path is confined by Roots; an explicit AssistantHome root is
     // confined by store_root above. No client-supplied destination is accepted.
     if binding.root.is_none() {
-        trusty_kb::roots::assert_within(knowledge, &root)
+        crate::kb::roots::assert_within(knowledge, &root)
             .map_err(|e| failure(StatusCode::CONFLICT, e))?;
     }
     Ok(Destination {
@@ -379,7 +379,7 @@ pub(super) async fn index_project(Json(req): Json<ProjectPath>) -> Result<Json<V
 fn import_args(root: &Path, agent: &str, destination: &Destination) -> Result<Value, ApiError> {
     let id = trusty_common::derive_checkout_index_id(root)
         .ok_or_else(|| failure(StatusCode::BAD_REQUEST, "Invalid project root"))?;
-    let mut extensions = trusty_kb::okg::docstore::DEFAULT_EXTENSIONS
+    let mut extensions = trusty_okf::build::docstore::DEFAULT_EXTENSIONS
         .iter()
         .map(|s| s.to_string())
         .collect::<Vec<_>>();
@@ -414,9 +414,9 @@ pub(super) async fn import_project(
         .try_lock()
         .map_err(|_| failure(StatusCode::CONFLICT, "Another project import is running"))?;
     let args = import_args(&root, &req.agent, &destination)?;
-    let store = trusty_kb::store::KbStore::new(
+    let store = crate::kb::store::KbStore::new(
         destination.root.clone(),
-        trusty_kb::schema::Profile::default_profile(),
+        trusty_okf::profile::Profile::default_profile(),
     );
     let result =
         crate::tools::okg::ingest_into_store(&args, store, &crate::tools::okg::docstore_policy())

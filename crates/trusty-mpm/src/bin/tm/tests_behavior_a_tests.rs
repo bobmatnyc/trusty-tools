@@ -93,7 +93,10 @@ fn cli_parses_hook() {
             pm_guard: false,
             divert_check: false,
             prompt_feedback: false,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -110,7 +113,29 @@ fn cli_parses_hook_prompt_feedback() {
             pm_guard: false,
             divert_check: false,
             prompt_feedback: true,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
+        }
+    ));
+}
+
+/// Why (#10960): the Architect launch registers `tm hook --standing-rules`;
+/// parsing must route it to the standing-rules mode.
+#[test]
+fn cli_parses_hook_standing_rules() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "hook", "--standing-rules"]).unwrap();
+    assert!(matches!(
+        cli.command.unwrap(),
+        Command::Hook {
+            pm_guard: false,
+            divert_check: false,
+            prompt_feedback: false,
+            egress_guard: false,
+            standing_rules: true,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -126,7 +151,10 @@ fn cli_parses_hook_egress_guard() {
             pm_guard: false,
             divert_check: false,
             prompt_feedback: false,
-            egress_guard: true
+            egress_guard: true,
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -143,7 +171,10 @@ fn cli_parses_hook_pm_guard() {
             pm_guard: true,
             divert_check: false,
             prompt_feedback: false,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -155,7 +186,34 @@ fn cli_parses_hook_pm_guard() {
 fn cli_parses_compress() {
     let cli = Cli::try_parse_from(["trusty-mpm", "compress", "--tool", "bash"]).unwrap();
     match cli.command.unwrap() {
-        Command::Compress { tool } => assert_eq!(tool, "bash"),
+        Command::Compress { tool, command } => {
+            assert_eq!(tool, "bash");
+            assert!(command.is_empty());
+        }
+        other => panic!("expected Compress, got {other:?}"),
+    }
+}
+
+/// #10973: the run mode takes the program and its arguments after `--`, flags
+/// included, so `git diff --stat` reaches git rather than clap.
+#[test]
+fn cli_parses_compress_with_a_command() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "compress",
+        "--tool",
+        "git diff",
+        "--",
+        "git",
+        "diff",
+        "--stat",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Compress { tool, command } => {
+            assert_eq!(tool, "git diff");
+            assert_eq!(command, ["git", "diff", "--stat"]);
+        }
         other => panic!("expected Compress, got {other:?}"),
     }
 }

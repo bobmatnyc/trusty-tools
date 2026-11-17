@@ -194,7 +194,8 @@ fn dispatch(cli: Cli) {
         }
 
         Commands::Passthrough(args) => {
-            passthrough::run(&args, json);
+            // #10585: the stub exits non-zero so it never reads as success.
+            std::process::exit(passthrough::run(&args, json));
         }
     }
 }

@@ -61,6 +61,21 @@ pub enum MessageDirection {
     Received,
 }
 
+impl MessageDirection {
+    /// The wire string for this direction (`"sent"`, `"received"`).
+    ///
+    /// Why: `trusty-events`' `messages` counters are keyed by it (#10906), and
+    ///      a match outside this crate would need a wildcard arm for
+    ///      `#[non_exhaustive]`.
+    /// Test: `super::tests::source_and_direction_keys_match_their_serde_tags_10906`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MessageDirection::Sent => "sent",
+            MessageDirection::Received => "received",
+        }
+    }
+}
+
 /// One inter-session message, recorded by reference.
 ///
 /// Why: the bus must show that a message went from one session to another

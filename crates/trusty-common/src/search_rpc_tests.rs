@@ -287,3 +287,74 @@ fn call_blocking_reports_a_dead_socket_rather_than_hanging() {
         "a dial failure is a transport error, never a daemon refusal: {err:#}"
     );
 }
+
+/// Why: the params are the wire contract with `search.project.ensure`; an
+/// absent profile must not travel as `null`, which the daemon would refuse.
+/// Test: itself.
+#[test]
+fn ensure_project_params_omit_an_absent_profile() {
+    let bare = ensure_project_params("o/r", "r", Path::new("/work/r"), None);
+    assert_eq!(
+        bare,
+        serde_json::json!({ "project_key": "o/r", "name": "r", "root": "/work/r" })
+    );
+    let with = ensure_project_params("o/r", "r", Path::new("/work/r"), Some("std-v1"));
+    assert_eq!(with["profile"], "std-v1");
+}
+
+/// Why: the blocking wrapper must send the method and params verbatim.
+/// Test: itself.
+#[tokio::test]
+async fn ensure_project_blocking_sends_the_wire_shape() {
+    let daemon = uds_mock::spawn(|method, params| {
+        let answer = serde_json::json!({ "method": method, "params": params });
+        Box::pin(async move { Ok(answer) })
+    })
+    .await;
+    let socket = daemon.socket().to_path_buf();
+    let value = tokio::task::spawn_blocking(move || {
+        ensure_project_blocking(
+            &socket,
+            "o/r",
+            "r",
+            Path::new("/work/r"),
+            None,
+            PROBE_TIMEOUT,
+        )
+    })
+    .await
+    .expect("the blocking worker must not panic")
+    .expect("the daemon answered");
+    assert_eq!(value["method"], METHOD_PROJECT_ENSURE);
+    assert_eq!(value["params"]["project_key"], "o/r");
+}
+
+/// Why (#10738): trusty-okf decodes `search.index.file.status` with these
+/// types; an absent path and an unreadable identity must decode as `None`,
+/// never as a value.
+/// Test: itself.
+#[test]
+fn index_file_status_decodes_present_absent_and_unreadable_identity() {
+    let present: IndexFileStatus = serde_json::from_value(serde_json::json!({
+        "index_id": "x", "path": "a.md", "present": true,
+        "content_sha256": "ab", "chunk_count": 2,
+        "identity": { "instance_id": "00ff", "generation": 3 },
+    }))
+    .expect("decode present");
+    assert_eq!(present.content_sha256.as_deref(), Some("ab"));
+    assert_eq!(
+        present.identity,
+        Some(IndexIdentity {
+            instance_id: "00ff".into(),
+            generation: 3
+        })
+    );
+    let absent: IndexFileStatus = serde_json::from_value(serde_json::json!({
+        "path": "a.md", "present": false, "content_sha256": null,
+        "chunk_count": 0, "identity": null, "identity_error": "disk",
+    }))
+    .expect("decode absent");
+    assert!(!absent.present);
+    assert_eq!(absent.content_sha256, None);
+    assert_eq!(absent.identity, None);
+}

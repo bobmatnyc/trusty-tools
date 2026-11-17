@@ -110,8 +110,8 @@ pub(super) fn already_running_message(
     format!(
         "Daemon already running (pid {pid}).\n\
          \n\
-         If you just replaced the binary, this is the OLD image: a truncated \
-         shutdown leaves launchd respawning it, and it keeps the lock.\n\
+         This daemon predates the installed binary (it is the OLD image): a \
+         truncated shutdown leaves launchd respawning it, and it keeps the lock.\n\
          \n\
          Remedy:  kill -TERM {pid}\n\
          Allow up to {grace_secs}s for its index-snapshot flush to finish — do not \
@@ -149,7 +149,7 @@ pub(super) fn classify_lock_holder(
 /// What: a failed `stat` yields `None`, which classifies as a healthy peer.
 /// Test: `lock_holder_is_stale_only_when_the_image_postdates_its_start`
 /// covers the decision; the stat itself is exercised by a live `start`.
-fn probe_lock_holder() -> LockHolder {
+pub(super) fn probe_lock_holder() -> LockHolder {
     let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let started = crate::service::daemon_lock_path()
         .ok()
@@ -275,6 +275,24 @@ pub async fn handle_start(args: super::StartArgs, verbose: bool) -> Result<()> {
     //
     // launchd/systemd/Docker users (and `trusty-search service`) always pass
     // `--foreground` and stay on the inline path.
+    // #11085: on Linux the detached start runs on the shared lifecycle: the
+    // install-dir binary, and success only once its pid serves the socket.
+    #[cfg(target_os = "linux")]
+    if !foreground {
+        let mut extra = vec!["--device".to_string(), device.to_string()];
+        extra.extend(discovery.spawn_arg().map(str::to_string));
+        if serial {
+            extra.push("--serial".to_string());
+        }
+        if let Some(n) = fanout_concurrency {
+            extra.extend(["--fanout-concurrency".to_string(), n.to_string()]);
+        }
+        if let Some(path) = socket.as_deref() {
+            let path = path.to_str().context("--socket must be UTF-8")?;
+            extra.extend(["--socket".to_string(), path.to_string()]);
+        }
+        return crate::commands::linux_lifecycle::start(data_dir, socket.as_deref(), extra).await;
+    }
     if !foreground {
         // Validate `--device` here too so a typo doesn't silently spawn a
         // child that will then immediately exit non-zero.

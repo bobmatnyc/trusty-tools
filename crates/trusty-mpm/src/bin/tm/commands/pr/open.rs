@@ -390,6 +390,12 @@ pub(crate) struct OpenPlan {
     /// the argv would be a second spelling of the same fact.
     /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`.
     pub(crate) assignee: String,
+    /// Dr4: the `rung:N` label `--rung` records, with the argv that seeds it.
+    ///
+    /// Why: `tm pr queue-check` reads the rung back off the PR; an echo alone
+    /// recorded nothing.
+    /// Test: `dr4_open_rung_5_applies_the_rung_5_label`.
+    pub(crate) rung: Option<(String, Vec<String>)>,
 }
 
 impl OpenPlan {
@@ -397,10 +403,12 @@ impl OpenPlan {
     ///
     /// Test: `pr_7869_a_create_that_fails_after_creating_reports_the_pr_and_retries`.
     pub(crate) fn create_labels(&self) -> Vec<String> {
-        vec![
+        let mut labels = vec![
             policy_labels::CONVENTION_LABEL.to_string(),
             self.workstream_label.clone(),
-        ]
+        ];
+        labels.extend(self.rung.as_ref().map(|(name, _)| name.clone()));
+        labels
     }
 }
 
@@ -522,6 +530,18 @@ pub(crate) fn plan(
     gh_argv.push(policy_labels::CONVENTION_LABEL.to_string());
     gh_argv.push("--label".to_string());
     gh_argv.push(label.clone());
+    // Dr4: record the claimed rung as a label queue-check reads back.
+    let repo = args.repo.as_deref().filter(|r| !r.trim().is_empty());
+    let rung = args.rung.map(|n| {
+        (
+            super::rung_label::name(n),
+            super::rung_label::seed_argv(n, repo),
+        )
+    });
+    if let Some((name, _)) = &rung {
+        gh_argv.push("--label".to_string());
+        gh_argv.push(name.clone());
+    }
 
     Ok(OpenPlan {
         argv: gh_argv,
@@ -530,6 +550,7 @@ pub(crate) fn plan(
         supplied: report.supplied.iter().map(|f| f.heading()).collect(),
         body: linked,
         assignee: ticketing.default_assignee.clone(),
+        rung,
     })
 }
 
@@ -543,7 +564,8 @@ pub(crate) fn plan(
 /// verdict through [`Preflight`], calls [`plan`], and then either prints the
 /// argv (`--dry-run`) or runs it. On success prints the PR number and URL from
 /// `gh`'s own output plus the one-line list of supplied body fields; `--rung`
-/// is echoed there so the claimed test-ladder rung is visible at open time.
+/// is echoed there so the claimed test-ladder rung is visible at open time,
+/// and (Dr4) applied as the `rung:N` label, seeded first.
 ///
 /// #7748: the run starts by verifying `origin/<base>` against the remote, so no
 /// gate here — and no credential scan taken over the same range — diffs a base
@@ -625,6 +647,9 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
 
     if args.dry_run {
         println!("gh {}", shell_render(&plan.label_seed_argv));
+        if let Some((_, seed)) = &plan.rung {
+            println!("gh {}", shell_render(seed));
+        }
         println!("gh {}", shell_render(&plan.argv));
         return Ok(EXIT_OK);
     }
@@ -646,6 +671,19 @@ pub(crate) fn run<R: GhRunner, P: Preflight>(
             plan.workstream_label
         ),
         Ok(_) => {}
+    }
+    // Dr4: the `rung:N` label is seeded the same best-effort way.
+    if let Some((name, seed)) = &plan.rung {
+        match gh.run(seed) {
+            Ok(run) if !run.success => {
+                eprintln!(
+                    "  warning: could not seed the `{name}` label: {}",
+                    run.stderr.trim()
+                )
+            }
+            Err(e) => eprintln!("  warning: could not seed the `{name}` label: {e:#}"),
+            Ok(_) => {}
+        }
     }
 
     // #8431: a repository with no `trusty-mpm` label gets it created, or the PR

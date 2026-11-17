@@ -76,7 +76,7 @@ tm secrets copy --from <local> --to github-actions KEY_ONE KEY_TWO
 | Enabling | Only the account's own machine config section `secrets.github_actions` enables the target. A tracked project file with a `github_actions:` section is refused. A sandboxed server opens no sync target. |
 | Login | `gh` uses its own stored login. Inherited `GH_*`, `GITHUB_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` variables are removed. A signed-out `gh` pushes nothing: every key is listed in `failed`, and its audit record says `backend_locked`. It is not a request-level error. |
 | Value | The value reaches `gh secret set` on stdin only. It is never an argument. |
-| Agents | A caller with a Claude Code ancestor is refused with `agent_use_refused`, whether or not the key is denied to agents. |
+| Agents | A caller with a Claude Code ancestor may push a key that is not denied to agents (#10999). A key denied to agents fails with `agent_key_denied` and its value is never read. An unreadable ancestry chain refuses the push with `grant_refused`. The value never reaches the caller. |
 | Key names | `[A-Za-z0-9_]`, not starting with a digit or `GITHUB_`. GitHub stores them uppercased. |
 
 The reply lists `copied` and `failed` keys. A key is `copied` only when the

@@ -51,6 +51,7 @@
 
 #[cfg(test)]
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::time::Duration;
@@ -85,7 +86,8 @@ use trusty_common::credentials::{
 #[must_use]
 pub fn resolve_secret(var: &str) -> Option<String> {
     // #9121: a sandboxed daemon reads no tier — not `.env.local`, not the store.
-    resolve_gated(sandboxed(), var, || {
+    // #10721: except the one credential the sandbox admitted at entry.
+    resolve_gated(sandboxed(), admitted(var), var, || {
         if !is_registered_credential_env_var(var) {
             load_env_local_once();
             return process_env_only(var);
@@ -111,6 +113,100 @@ pub fn enter_sandbox() {
     SANDBOX.store(true, Ordering::SeqCst);
 }
 
+/// The provider credentials a sandbox may admit (#10721), compared exactly.
+///
+/// Why: a live check of an inference path needs one provider key; any wider
+/// list re-opens the #9121 hole. `scripts/sandbox_daemon.sh` and
+/// `scripts/lib/sandbox_exec.sh` carry the same two names.
+pub const SANDBOX_CREDENTIAL_NAMES: &[&str] = &["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"];
+
+/// The one credential the sandbox admitted at entry (#10721). Set once.
+static SANDBOX_CREDENTIAL: OnceLock<(&'static str, String)> = OnceLock::new();
+
+/// Why a sandbox refused to admit its credential (#10721). Names, never values.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SandboxCredentialError {
+    /// The name is not on [`SANDBOX_CREDENTIAL_NAMES`].
+    #[error(
+        "{0} is not a credential a sandbox may admit (allowed: ANTHROPIC_API_KEY, \
+         OPENROUTER_API_KEY)"
+    )]
+    NameNotAllowed(String),
+    /// The variable is unset, empty or not UTF-8.
+    #[error(
+        "{0} is not set in the environment (value not shown); a sandbox admits its \
+         credential from the process environment only, never from another tier"
+    )]
+    Absent(String),
+    /// A credential was already admitted in this process.
+    #[error("a sandbox credential was already admitted in this process")]
+    AlreadyAdmitted,
+}
+
+/// Check one admission request: the allowed name and the value read for it.
+///
+/// Why: the refusal arms of [`enter_sandbox_with_credential`] are pure, so a
+/// unit test pins them without touching the process environment.
+/// What: `Ok((name, value))` only for a [`SANDBOX_CREDENTIAL_NAMES`] entry with
+/// a non-empty UTF-8 value; otherwise the error naming the variable.
+/// Test: `a_sandbox_credential_outside_the_list_is_refused`,
+/// `an_absent_or_empty_sandbox_credential_is_refused`.
+pub fn check_sandbox_credential(
+    name: &str,
+    value: Option<std::ffi::OsString>,
+) -> Result<(&'static str, String), SandboxCredentialError> {
+    let Some(name) = SANDBOX_CREDENTIAL_NAMES
+        .iter()
+        .copied()
+        .find(|n| *n == name)
+    else {
+        return Err(SandboxCredentialError::NameNotAllowed(name.to_string()));
+    };
+    match value.map(std::ffi::OsString::into_string) {
+        Some(Ok(value)) if !value.is_empty() => Ok((name, value)),
+        _ => Err(SandboxCredentialError::Absent(name.to_string())),
+    }
+}
+
+/// [`enter_sandbox`], admitting exactly one provider credential (#10721).
+///
+/// Why: a live check of an inference path needs one key, handed in by vault
+/// reference through `tm secrets exec` and the sandbox launcher. Every other
+/// credential stays unreachable.
+/// What: latches FIRST, so a failure leaves a sandbox that reads nothing. Then
+/// reads `name` from the process environment once, removes it from the
+/// environment (Architect ruling Q2) so no child the daemon spawns — tmux,
+/// claude, git — inherits it, and holds the value for [`resolve_secret`].
+/// Never falls back to `.env.local` or the store.
+///
+/// Residual risk (Architect ruling Q3, accepted): from the launcher's `exec`
+/// until this call the value sits in the process environment, where a process
+/// of the same user can read it (`ps eww`, `/proc/<pid>/environ`).
+/// Test: `the_admitted_credential_resolves_and_leaves_the_environment`,
+/// in its own process, `tests/sandbox_credential_10721.rs`.
+pub fn enter_sandbox_with_credential(name: &str) -> Result<(), SandboxCredentialError> {
+    enter_sandbox();
+    let value = std::env::var_os(name);
+    if SANDBOX_CREDENTIAL_NAMES.contains(&name) {
+        // SAFETY: called from `tm daemon --sandbox` startup, before the daemon
+        // builds its state or spawns any task or child that reads the
+        // environment. #10721: removed even when refused, so none is inherited.
+        unsafe { std::env::remove_var(name) };
+    }
+    let admitted = check_sandbox_credential(name, value)?;
+    SANDBOX_CREDENTIAL
+        .set(admitted)
+        .map_err(|_| SandboxCredentialError::AlreadyAdmitted)
+}
+
+/// The admitted credential's value when it is `var`'s; `None` otherwise.
+fn admitted(var: &str) -> Option<&'static str> {
+    SANDBOX_CREDENTIAL
+        .get()
+        .filter(|(name, _)| *name == var)
+        .map(|(_, value)| value.as_str())
+}
+
 /// True once [`enter_sandbox`] has run in this process.
 #[must_use]
 pub fn sandboxed() -> bool {
@@ -121,16 +217,23 @@ pub fn sandboxed() -> bool {
 ///
 /// Why: the gate is a parameter so a test can prove the tiers are skipped
 /// without setting the process-wide latch under its parallel siblings.
-/// What: `sandbox` → a WARN naming the variable, then `None`; `resolve` is never
-/// called. Otherwise `resolve()`.
+/// What: `sandbox` → `admitted` when the sandbox admitted `var` (#10721);
+/// otherwise a WARN naming the variable, then `None`. `resolve` is never called
+/// under the latch. Outside it, `resolve()`.
 /// Test: `sandbox_mode_never_consults_the_store`,
-/// `outside_sandbox_mode_the_store_is_consulted`.
+/// `outside_sandbox_mode_the_store_is_consulted`,
+/// `a_sandbox_answers_only_the_admitted_credential`.
 fn resolve_gated(
     sandbox: bool,
+    admitted: Option<&str>,
     var: &str,
     resolve: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
     if sandbox {
+        // #10721: the one credential admitted at entry, read from memory.
+        if let Some(value) = admitted {
+            return Some(value.to_string());
+        }
         tracing::warn!(
             credential = var,
             "sandbox mode (#9121): no credential tier is consulted — the dependent feature stays DISABLED"

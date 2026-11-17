@@ -533,8 +533,13 @@ fn outcome(lock: ContentLock, action: UpdateAction) -> UpdateOutcome {
 /// `content-vX.Y.Z[-pre]` version is an error, never skipped: a listing this
 /// code cannot read in full must not pick a "latest" from part of it. A
 /// highest tag whose release is flagged pre-release is passed over for the
-/// next one down. A draft, or a tag with no release, is an error, not passed
-/// over: GitHub's `releases/tags/{tag}` answers 404 for both.
+/// next one down, and so is a draft or a tag with no release: GitHub's
+/// `releases/tags/{tag}` answers 404 for both (#10749). Any other failure
+/// reading a release (403, 5xx, a malformed answer) is an error. With no
+/// stable release left it is `NoReleases`.
+/// Test: `update_never_installs_a_draft_or_a_pre_release`,
+/// `update_passes_over_a_404_top_tag_but_not_a_403_or_5xx`,
+/// `github_source_reads_a_404_tag_listing_as_a_failure`.
 fn latest_tag<S: ReleaseSource + ?Sized>(
     source: &S,
     fallback: &Fallback,
@@ -557,7 +562,13 @@ fn latest_tag<S: ReleaseSource + ?Sized>(
     }
     stable.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, tag) in stable {
-        let release = source.release(&tag).map_err(network)?;
+        let release = match source.release(&tag) {
+            Ok(release) => release,
+            // #10749: a 404 is a draft or a release-less tag; pass it over
+            // like a pre-release (#8389 ruling 3). Other statuses stay errors.
+            Err(e) if e.status == Some(404) => continue,
+            Err(e) => return Err(network(e)),
+        };
         if !release.draft && !release.prerelease {
             return Ok(tag);
         }

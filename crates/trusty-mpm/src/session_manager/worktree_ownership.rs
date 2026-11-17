@@ -888,6 +888,8 @@ mod tests {
         let id = ManagedSessionId::new();
         let record = SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id,
             tmux_name: "tm-ownerless-test".into(),
             cwd: std::path::PathBuf::from("/tmp"),
@@ -914,6 +916,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: Some(id),
             terminal_at: None,
@@ -1049,6 +1052,8 @@ mod tests {
 
         let record = SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: ManagedSessionId::new(),
             tmux_name: "tm-fallback-test".into(),
             cwd: ws.path().to_path_buf(),
@@ -1075,6 +1080,7 @@ mod tests {
             deliverable_id: None,
             pane_id: None,
             tmux_server: None,
+            tmux_socket: None,
             injection_status: Default::default(),
             worktree_owner: None, // registry field unset — must fall back
             terminal_at: None,

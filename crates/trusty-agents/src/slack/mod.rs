@@ -19,6 +19,7 @@
 //! - `handlers.rs` — slash/plain-text handlers + `chat.postMessage` senders
 //! - `events.rs` — #3852 eventstream mirror for inbound messages
 //! - `format.rs` — mrkdwn conversion + 3000-char chunking
+//! - `tokens.rs` — #10120 Slack token resolution (env, `.env.local`, store)
 //! - `tests.rs` — unit tests for the pure helpers above
 //!
 //! Test: Build with `cargo build`; unit-test pure functions (split_message,
@@ -31,6 +32,7 @@ mod handlers;
 mod pairing;
 mod rbac;
 pub(crate) mod relay;
+mod tokens;
 
 #[cfg(test)]
 mod tests;
@@ -124,7 +126,8 @@ pub(super) type PairedChannels = Arc<RwLock<HashMap<ChannelId, Instant>>>;
 /// Why: Entry point wired to `--slack` in `main.rs`. Socket Mode uses an
 /// outbound WebSocket so the bot can run from a developer's laptop or CI
 /// runner without a public URL.
-/// What: Exchanges `SLACK_APP_TOKEN` for a WSS URL via
+/// What: Resolves both Slack tokens via `tokens::resolve_slack_token`, then
+/// exchanges `SLACK_APP_TOKEN` for a WSS URL via
 /// `apps.connections.open`, opens the socket, loops on incoming envelopes
 /// (ACK immediately, dispatch async), reconnects on disconnect.
 /// Test: `cargo build` is the primary gate; live verification needs a real
@@ -134,16 +137,11 @@ pub async fn run_slack_bot(
     pending: PendingPairs,
     rbac: Arc<SlackRbacConfig>,
 ) -> Result<()> {
-    let app_token = std::env::var("SLACK_APP_TOKEN").map_err(|_| {
-        anyhow!(
-            "SLACK_APP_TOKEN not set. Add it to .env.local or export it before running --slack."
-        )
-    })?;
-    let bot_token = std::env::var("SLACK_BOT_TOKEN").map_err(|_| {
-        anyhow!(
-            "SLACK_BOT_TOKEN not set. Add it to .env.local or export it before running --slack."
-        )
-    })?;
+    // #10120: env, then `.env.local`, then the credential store, so the
+    // gateway still starts after `tm doctor --fix-launchd-secrets` moves the
+    // tokens out of the LaunchAgent plist.
+    let app_token = tokens::resolve_slack_token(tokens::SLACK_APP_TOKEN).await?;
+    let bot_token = tokens::resolve_slack_token(tokens::SLACK_BOT_TOKEN).await?;
 
     if !app_token.starts_with("xapp-") {
         warn!(

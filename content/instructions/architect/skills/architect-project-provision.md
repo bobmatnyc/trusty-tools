@@ -3,7 +3,7 @@ name: architect-project-provision
 description: Architect skill. Load when the user sets up a new project for the fleet, when a new tm-* session appears whose project has no record in local/projects/, or when a mandate is checked. The provisioning checklist - confirm the stack, CLAUDE.md markers, the ADR folder, review and release gates, ticketing conventions, institutional mandates, tm registration and the push hook. Plans first; the user approves before anything is written into the project. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 category: monitoring
 tags: [architect, provisioning, mandates, trusty-mpm]
 effort: high
@@ -86,19 +86,26 @@ multiple-choice question per open decision, recommendation first:
    directory's absolute path; never `~` or `$CLAUDE_PROJECT_DIR`. Verify the
    entry in that file, then watch `inbox/events.jsonl` for the project's
    first event.
-3. Send the PM (or engineer agent) a short relay pointing to the brief for the
+3. Board check: run `tm issue board check` in the project directory and
+   report its output in the brief. Exit 0 means the board matches the spec.
+   A non-zero exit means drift, or no `project:` block in
+   `issue-state.yaml`; report either to the user, and do not run
+   `tm issue board apply` without the user's answer.
+4. Send the PM (or engineer agent) a short relay pointing to the brief for the
    in-repo items. The PM's own gates apply to that work.
-4. Verify each item before recording it as verified: use shell commands for
+5. Verify each item before recording it as verified: use shell commands for
    gates and manifests, and send a research agent to verify items that require
    reading project documents.
 
 ## 4. Record
 
-- `local/projects/<name>.md` from `local/projects/_template.md`, with the
+- `tm fleet project add <name>`: it starts `local/projects/<name>.md` from
+  `local/projects/_template.md` and adds the project to the watch set. A
+  project the registry lacks is refused; register it first. Then record the
   gates, the mandates in scope and the architecture baseline
-  (`architect-drift-check`, "Set a baseline").
-- `local/state.md` watch set, `local/goals.md` session-to-goal map, and one
-  `local/actions.md` entry.
+  (`architect-drift-check`, "Set a baseline") in that file.
+- `local/state.md` live sessions, `local/goals.md` session-to-goal map, and
+  one `local/actions.md` entry.
 - Offer the first architectural review (`architect-review`) as a proposal.
 
 ## Related skills

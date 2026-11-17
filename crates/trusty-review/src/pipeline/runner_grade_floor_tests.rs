@@ -253,7 +253,8 @@ async fn f_with_a_withheld_blocker_and_a_surviving_finding_reads_block() {
         "BLOCK",
         "F",
         serde_json::json!([
-            finding("`flush_all()` loses the total.", "high", 0.9, "correctness"),
+            // #10782: a quoted snippet, so the line gate withholds it.
+            finding("`flush()?;` loses the total.", "high", 0.9, "correctness"),
             finding(low, "low", 0.9, "correctness"),
         ]),
     )

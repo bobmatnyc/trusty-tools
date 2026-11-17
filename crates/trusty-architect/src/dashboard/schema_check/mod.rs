@@ -14,7 +14,7 @@
 //! Test: `walk_reports_each_keyword_like_the_prototype`,
 //! `walk_refuses_unknown_keywords_and_refs`, `goal_invariants_are_checked`,
 //! `schema_enforce_refuses_and_warn_writes`, `prototype_schemas_load_and_fixtures_validate`,
-//! `media_is_a_known_collection`.
+//! `media_is_a_known_collection`, `watch_changes_is_a_known_collection`.
 
 mod pattern;
 mod walk;
@@ -31,7 +31,7 @@ pub use pattern::Pattern;
 use walk::Patterns;
 
 /// Collections with a schema of the same name.
-pub const COLLECTIONS: [&str; 12] = [
+pub const COLLECTIONS: [&str; 13] = [
     "items",
     "sessions",
     "goals",
@@ -45,6 +45,8 @@ pub const COLLECTIONS: [&str; 12] = [
     "questions",
     // #10063 df-G01: the prototype lists it and `dashboard_media.py` writes it.
     "media",
+    // #10896: the owner's Watch / Unwatch requests (`watch-apply.py`).
+    "watch_changes",
 ];
 /// `meta` doc ids with a `meta-<id>` schema.
 pub const META_IDS: [&str; 4] = ["state", "settings", "seen", "gh_track"];

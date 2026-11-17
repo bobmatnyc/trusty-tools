@@ -90,11 +90,14 @@ def test_pilot_rescore_runs_once_and_writes_its_brief(env):
 
 
 def test_size_check_alerts_over_8kb(env):
+    # #10571: the bar is datg's own warn bar (caps.datg_size_warn, 32 KB by default since D74)
     sched, _, _, d = env
-    (d / "state.json").write_text("x" * 9000)
+    size = ic.SIZE_WARN + 1000
+    (d / "state.json").write_text("x" * size)
     sched["jobs"] = [{"name": "size-check", "due": "2026-10-16", "every": "1h", "command": "builtin:size-check"}]
     alerts = ic.cycle(sched, {}, DAY)
-    assert alerts and "tm-x 9000B" in alerts[0][1]
+    assert alerts and f"tm-x {size}B" in alerts[0][1]
+    assert f"over {ic.SIZE_WARN // 1024} KB" in alerts[0][1]
 
 
 def test_step_runs_at_most_once_per_hour_and_persists_state(env):

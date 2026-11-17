@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-60 bundled skills.
+63 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -22,6 +22,8 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `internal-comms` | agent-reference | no | Framework for writing concise 3P (Progress, Plans, Problems) team updates for executives and stakeholders |
 | `json-data-handling` | agent-reference | no | Working effectively with JSON data structures. |
 | `model-context-builder` | agent-reference | no | MCP (Model Context Protocol) server build and evaluation guide, including local conventions for tool surfaces, config, and testing |
+| `neon-postgres` | agent-reference | no | Neon Postgres on Vercel. Use for any Neon database, any Vercel Postgres or database env var (DATABASE_URL, DATABASE_URL_UNPOOLED, PG*, POSTGRES_*), any Neon preview-branch database, and any drizzle migration, push or baseline run against Neon. |
+| `prototype-then-port` | agent-reference | no | Prototype in Python while the shape changes, then port the settled parts to Rust. Use when starting a tool or script whose behaviour is not settled, when deciding whether a Python prototype should become Rust, or when doing the port. Gives the port trigger, the step path and the checklist; mappings, idioms, parity and pitfalls live in references/. |
 | `requesting-code-review` | agent-reference | no | Dispatch code-reviewer subagent to review implementation against plan or requirements before proceeding |
 | `root-cause-tracing` | agent-reference | no | Systematically trace bugs backward through call stack to find original trigger |
 | `rust-build-performance` | agent-reference | no | Rust build performance: scoped checks, timings, dependency hygiene, shared caches, bounded output, and Apple Silicon scheduling. Use for slow builds or excessive logs. |
@@ -37,7 +39,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm` | pm-reference | yes | trusty-mpm orchestration model overview — agents, skills, delegation |
 | `tm-adr` | documentation | yes | Architecture Decision Records (ADRs) — create, supersede and amend decision records under docs/adr/ with consistency vetting; bootstrap a project's ADR setup (init) and report whether its check-script copy matches the deployed skill (status) |
 | `tm-agent-architecture` | pm-workflow | no | Official vs custom agent workflow — how to safely update trusty-mpm's compose-chain agent catalog |
-| `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. A second run edits the watched set; it never makes a second Architect. |
+| `tm-architect-setup` | pm-reference | yes | Set up the Architect, the one fleet session per user, with `tm fleet init` — its project directory, a local-only git repo, the `supervisor` profile grant and an Opus launch. `tm fleet project add|remove|list` edits the watched set; a second `init` never makes a second Architect. |
 | `tm-bug-reporting` | pm-workflow | no | Bug reporting protocol for the PM and agents — routes through the MCP-native list_recent_errors / preview_bug_report / report_bug pipeline |
 | `tm-capabilities` | pm-reference | no | Auto-generated exhaustive harness capability catalog — every tm CLI command, MCP tool, bundled agent, bundled skill, and doctor check, plus the framework's own install layout and tier precedence. Verbatim and always current. Complements (does not replace) the conceptual `tm` skill. |
 | `tm-circuit-breaker` | pm-framework | no | Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM |
@@ -49,6 +51,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
 | `tm-memory-import` | pm-workflow | yes | Run a kuzu-memory import into trusty-memory with the refused-row review — the deterministic `trusty-memory import kuzu` runbook, the masked `--dry-run --export-refusals` export, the `import kuzu review` record, status and finish loop, and the `--review-ledger` apply, behind the READY FOR IMPORT / GO gate. The reviewer reads masked rows only. |
+| `tm-owner-scenarios` | pm-workflow | yes | Write owner scenarios a non-technical owner can review — intent, situation, observable result, and a trace to the team's test IDs, with no click-by-click steps — and check them with the scenario lint. Use when a plan, spec or acceptance set must be reviewed by an owner who does not read code. |
 | `tm-postmortem` | pm-workflow | yes | Analyze session errors captured across trusty-* daemons and route them through the bug-reporting pipeline |
 | `tm-prose-style` | pm-workflow | yes | Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them. |
 | `tm-secrets` | pm-reference | yes | Where a trusty credential lives today — the trusty-common store behind the daemon, and the trusty-secrets 0.1.0 Keychain vaults and socket — plus the rules that keep a secret value out of every transcript. Which tm secrets verbs ship in which release. |

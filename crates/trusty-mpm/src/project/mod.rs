@@ -12,6 +12,8 @@
 //! - `store`  — [`ProjectStore`] on-disk JSON persistence.
 //! - `registry` — [`ProjectRegistry`] lifecycle manager.
 //! - `resolver` — NL→project resolver, session↔project binding, fleet grouping.
+//! - `session_registration` — a session start's own checkout row, and the
+//!   `owner/repo` → checkout lookup `tm secrets assign` uses (#10368).
 //! - `worktree_adoption` — adopting a project's PRE-EXISTING worktrees at
 //!   registration time (#7357), so a repo that had agent activity before it was
 //!   registered is still surveyed and reclaimable.
@@ -31,19 +33,30 @@
 //! [`worktree_enabled_for_project`]: crate::project::worktree_enabled_for_project
 //! [`dispatched_agent_worktree_enabled`]: crate::project::dispatched_agent_worktree_enabled
 
+pub mod project_key;
 pub mod record;
 pub mod registry;
 pub mod resolver;
+// #10368: a session start registers its own checkout.
+pub mod session_registration;
 pub mod store;
 pub mod worktree_adoption;
 pub mod worktree_policy;
 
+pub use project_key::{
+    accepted_index_ids_for, assign_project_key, index_id_for_registered_root, index_id_for_root_in,
+    project_key_from_repo_url, registered_project_for_root, registered_project_for_root_in,
+};
 pub use record::{Project, derive_name_from_url};
 pub use registry::ProjectRegistry;
 pub use resolver::{
     DISAMBIGUATION_FLOOR, KEYWORD_COLLECTION_FLOOR, ProjectFleet, ProjectMatch, ProjectResolution,
     ResolutionReason, ResolverError, fleet_by_project, local_checkout_for, local_checkout_for_url,
-    resolve_project, resolve_session_project,
+    one_project_per_repo, resolve_project, resolve_session_project,
+};
+pub use session_registration::{
+    CheckoutLookupError, SessionRegistration, SessionRegistrationError, register_session_checkout,
+    registered_checkout,
 };
 pub use store::ProjectStoreError;
 pub use worktree_adoption::{

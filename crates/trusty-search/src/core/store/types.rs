@@ -194,6 +194,15 @@ pub trait VectorStore: Send + Sync {
     async fn remove(&self, id: &str) -> Result<()>;
     async fn len(&self) -> Result<usize>;
 
+    /// How many times this store promoted an mmap view to a heap copy (#10195).
+    ///
+    /// Why: a search that ran while a write promoted the graph paid for it,
+    /// and the search log reports that. What: a monotonic count; `0` for a
+    /// store with no view mode. Test: `search_reports_per_stage_timings_in_log_and_meta`.
+    fn promotions(&self) -> u64 {
+        0
+    }
+
     /// Predicate-scoped nearest-neighbour search (issue #3401).
     ///
     /// Why: a caller-supplied path/repo filter must not lose recall to

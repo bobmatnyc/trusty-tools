@@ -277,6 +277,7 @@ mod tests {
             // deserialization; a struct literal must still name them.
             on_branch: false,
             archive_reason: None,
+            bm25_raw: None,
         }
     }
 

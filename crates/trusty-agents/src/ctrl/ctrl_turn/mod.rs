@@ -96,18 +96,23 @@ pub(crate) async fn prepare_ctrl_turn_state(ctrl: &Ctrl) -> Result<CtrlTurnState
 }
 
 // Purpose: Resolve `ctrl.toml` (or fall back to the built-in default).
-pub(crate) async fn resolve_ctrl_turn_agent_config(ctrl: &Ctrl) -> (AgentConfig, Option<PathBuf>) {
+// #10978: under a provider lock a refused ctrl.toml is returned as an error,
+// never replaced by the built-in default, which the lock refuses too.
+pub(crate) async fn resolve_ctrl_turn_agent_config(
+    ctrl: &Ctrl,
+) -> Result<(AgentConfig, Option<PathBuf>)> {
     if let Some(self_path) = &ctrl.self_project {
         match resolve_ctrl_agent_config(self_path).await {
-            Ok((c, p)) => (c, p),
+            Ok(found) => return Ok(found),
+            Err(e) if crate::llm::provider_lock::is_locked(&crate::llm::provider_lock::active()) => {
+                return Err(e);
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "failed to resolve ctrl agent config; using built-in default");
-                (AgentConfig::ctrl_default(), None)
             }
         }
-    } else {
-        (AgentConfig::ctrl_default(), None)
     }
+    Ok((AgentConfig::try_ctrl_default()?, None))
 }
 
 // Purpose: Assemble the full CTRL system prompt.
@@ -306,7 +311,7 @@ pub(crate) async fn ctrl_chat_turn(ctrl: &mut Ctrl, user_input: &str) -> Result<
         openai_tools,
         side_effects,
     } = prepare_ctrl_turn_state(ctrl).await?;
-    let (agent_cfg, agent_cfg_path) = resolve_ctrl_turn_agent_config(ctrl).await;
+    let (agent_cfg, agent_cfg_path) = resolve_ctrl_turn_agent_config(ctrl).await?;
 
     let mcp_cfg = crate::mcp::GlobalConfig::load().await;
     // #7454: the concierge is not an Assistant INSTANCE, so it resolves the

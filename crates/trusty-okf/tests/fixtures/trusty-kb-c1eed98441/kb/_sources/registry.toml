@@ -1,0 +1,77 @@
+# OKG source registry — maintained by the okg_ingest_* tools.
+# Hand edits are preserved; re-registering a source updates its row in place.
+
+[[sources]]
+id = "field-notes"
+collection = "notes"
+enabled = true
+tombstone_deleted = true
+user_authored = false
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.doc_store]
+path = "/srv/okf-golden/corpus"
+extensions = ["md"]
+recursive = true
+
+[[sources]]
+id = "journal"
+collection = "journal"
+enabled = true
+tombstone_deleted = false
+user_authored = true
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.doc_store]
+path = "/srv/okf-golden/journal"
+extensions = []
+recursive = false
+
+[[sources]]
+id = "sent-mail"
+collection = "mail"
+enabled = true
+tombstone_deleted = false
+user_authored = false
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.gmail]
+query = "in:sent"
+after = "2025/01/01"
+
+[[sources]]
+id = "board-mail"
+collection = "mail"
+enabled = true
+tombstone_deleted = false
+user_authored = false
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.gmail]
+query = "from:board@example.com"
+after = "2025/06/01"
+before = "2026/01/01"
+
+[[sources]]
+id = "team-drive"
+collection = "sources"
+enabled = true
+tombstone_deleted = false
+user_authored = false
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.drive]
+folder_id = "1AbC-team"
+recursive = true
+
+[[sources]]
+id = "my-drive"
+collection = "drive"
+enabled = true
+tombstone_deleted = false
+user_authored = false
+added_at = "2026-07-24T12:00:00Z"
+
+[sources.locator.drive]
+folder_id = "root"
+recursive = false

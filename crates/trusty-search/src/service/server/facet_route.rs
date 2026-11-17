@@ -9,7 +9,7 @@
 //!
 //! What: on that refusal only, find the sibling index carrying the same
 //! `PersistedIndex::repo_identity` whose vector lane can actually answer, and
-//! hand it back so `search_handler` runs the caller's own query against it.
+//! hand it back so `search_report` runs the caller's own query against it.
 //!
 //! Scope, deliberately narrow. This resolves WHERE a lane the caller DECLARED
 //! runs; it never substitutes one lane for another, and it never fires for an

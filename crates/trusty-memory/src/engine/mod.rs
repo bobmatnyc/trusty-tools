@@ -49,6 +49,9 @@ pub(crate) mod palace_not_found;
 #[cfg(test)]
 pub(crate) mod palace_not_found_tests;
 pub mod registry;
+// #10609 (ADR-0074): the durable marker a Tier C retiree carries.
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+pub(crate) mod retired_marker;
 // ADR-0027 T1: pure room identity (canonical keys, UUIDv5 minting, the legacy
 // fold kept as the migration oracle). No I/O — see `store::rooms` for storage.
 pub mod retrieval;

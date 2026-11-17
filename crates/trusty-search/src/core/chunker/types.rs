@@ -53,7 +53,7 @@ impl ChunkType {
     /// line-range but with different types are still distinct.
     /// What: a `match` over every variant returning a `&'static str`.
     /// Test: covered transitively by `document_chunk` and language tests.
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Unknown => "Unknown",
             Self::Function => "Function",

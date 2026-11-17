@@ -1,5 +1,5 @@
-//! The daemon serves its RPC socket, and one shutdown drains it and stops the
-//! sessions it owns (#6288 slice 1; rewritten for S3a, acceptance A6).
+//! The daemon serves its RPC socket, and one shutdown drains it and leaves
+//! every managed session running (#6288 slice 1; S3a acceptance A6; #10597).
 //!
 //! Why the `env_serial` target: the proof reassigns `$HOME` to a scratch
 //! directory so `core::host_state_gate` classifies this process as a scratch
@@ -10,15 +10,14 @@
 //! one test at a time, and [`EnvRestore`] hands the next test the environment
 //! this one found (#8345). Same rationale as `scratch_home_tmux_gate.rs`.
 //!
-//! Why S3a rewrote it: the session stop (#1455) ran inside axum's
-//! `with_graceful_shutdown` closure. Deleting `axum::serve` is the easiest way
-//! to drop that closure by accident, so this test asserts the stop still runs.
+//! Why #10597 rewrote it: owner ruling D82 deleted the #1455 session stop, so
+//! the drain now asserts the stop is gone and the shutdown report still runs.
 //!
 //! What: binds the socket, runs `serve_with_shutdown` with a oneshot in place
 //! of SIGTERM on a current-thread runtime under a capturing `tracing`
 //! subscriber, proves the socket answers, fires the shutdown, and asserts the
-//! serve returned `Ok`, the socket file is gone, and both shutdown passes —
-//! `SessionManager::shutdown` and the legacy-registry report — logged.
+//! serve returned `Ok`, the socket file is gone, both left-running reports
+//! logged, and the deleted `SessionManager::shutdown` pass did not.
 //! Test: this file IS the test; run with
 //! `cargo test -p trusty-mpm --test env_serial daemon_serve_drain::`.
 
@@ -102,16 +101,15 @@ async fn call_over_socket(
     trusty_common::uds::send_framed_request(socket, &request, Duration::from_secs(10)).await
 }
 
-/// A6: one shutdown drains the socket, unlinks it, and runs both session
-/// passes the axum closure used to run.
+/// A6: one shutdown drains the socket, unlinks it, and stops no session.
 ///
 /// Why a current-thread runtime: `tracing::subscriber::with_default` is
 /// thread-local, so every task `serve_with_shutdown` spawns must run on this
-/// thread for its events to be captured. Deleting the session stop from
-/// `serve_with_shutdown` makes the log assertions fail.
+/// thread for its events to be captured. #10597: restoring the session stop
+/// in `serve_with_shutdown` makes the log assertions fail.
 /// Test: this function IS the test.
 #[test]
-fn serve_drains_the_socket_and_stops_sessions_on_shutdown() {
+fn serve_drains_the_socket_and_leaves_sessions_running_on_shutdown() {
     let scratch_home = TempDir::new().expect("scratch home");
     // `$HOME` puts `host_state_gate` into its scratch arm; the two flags switch
     // off the sweeps that would otherwise touch real repositories and
@@ -147,9 +145,14 @@ fn serve_drains_the_socket_and_stops_sessions_on_shutdown() {
         socket.display()
     );
     let logs = captured.text();
+    // #10597: the stop-every-session pass (#1455) must stay deleted.
     assert!(
-        logs.contains("shutdown: no owned live managed sessions to stop"),
-        "SessionManager::shutdown must run on the drain (#1455):\n{logs}"
+        !logs.contains("shutdown: no owned live managed sessions to stop"),
+        "SessionManager::shutdown ran on the drain (#10597):\n{logs}"
+    );
+    assert!(
+        logs.contains("graceful shutdown: managed sessions left running (#10597)"),
+        "the drain must report the managed sessions it leaves running:\n{logs}"
     );
     assert!(
         logs.contains("graceful shutdown: left 0 legacy session(s) running"),

@@ -1,7 +1,7 @@
 //! The `tm ls` new-session flow's name step (#8587).
 //!
 //! Why: Enter on a project creates a session with the default name
-//! (`tm-<project>-NN`), and the TUI had no way to name one before it existed.
+//! (`tm-<project>[-NN]`), and the TUI had no way to name one before it existed.
 //! Ctrl-N on the selected project opens this step instead; Enter here creates
 //! the session under the typed name, Esc goes back to the project list.
 //!
@@ -100,16 +100,18 @@ impl NameStep {
         &self.request.label
     }
 
-    /// The session name the typed text produces, as `tm-<slug>-NN`.
+    /// The session name the typed text produces, as `tm-<slug>`.
     ///
     /// Why: the slug drops case, spaces and symbols, so the operator needs to
     /// see the result before Enter rather than after.
-    /// What: `None` while the slug is empty. `NN` stands for the per-name
-    /// serial the daemon assigns.
-    /// Test: `new_session_name_preview_shows_the_slug`.
+    /// What: `None` while the slug is empty. #10478: the daemon names the first
+    /// session bare and adds `-02`, `-03` only on a duplicate, so the preview
+    /// shows the bare name; a typed `tm-` or `-NN` is stripped as the daemon does.
+    /// Test: `new_session_name_preview_shows_the_slug`,
+    /// `new_session_name_preview_strips_a_session_name_shape`.
     pub(crate) fn preview(&self) -> Option<String> {
         let slug = leaf_slug_from_hint(&self.typed);
-        (!slug.is_empty()).then(|| format!("{PREFIX}{slug}-NN"))
+        (!slug.is_empty()).then(|| format!("{PREFIX}{slug}"))
     }
 
     /// Route one keystroke through the name step.

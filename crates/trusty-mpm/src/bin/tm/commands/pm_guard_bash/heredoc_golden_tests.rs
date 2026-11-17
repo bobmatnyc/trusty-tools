@@ -10,7 +10,8 @@
 //! compares each line with `heredoc_golden_9720.txt`, recorded on f7d0c6f54c.
 //! The corpus is the here-document cases of the existing suites plus 500
 //! commands drawn by a fixed generator from shell tokens and lines.
-//! Test: `heredoc_scan_matches_the_pre_9720_golden_table`.
+//! Test: `heredoc_scan_matches_the_pre_9720_golden_table`,
+//! `an_open_quote_line_passes_only_after_every_operator_opened_a_body_8878`.
 
 use super::super::credential_print::{evaluate_credential_print_command, heredoc_operators};
 use super::super::evaluate_bash_command;
@@ -240,4 +241,20 @@ fn heredoc_scan_matches_the_pre_9720_golden_table() {
             .join("\n"),
         actual.join("\n"),
     );
+}
+
+/// #8878: an open-quote line passes the per-line scan only when every `<<`
+/// before it opened a body and none sits on or after it; otherwise the scan
+/// stays lost, as it was before #8878 (golden cases 106, 112, 414).
+#[test]
+fn an_open_quote_line_passes_only_after_every_operator_opened_a_body_8878() {
+    for lost in [
+        " \n\n<<-))$((;))cat \n'\nX#];x}#<<< ",
+        "$(($(#X<<<\\<<<\ncat X]\t$[\t$((\"",
+        "cat <<X # <<EOF\nX\necho $((1<<X))\nit's\n\n",
+    ] {
+        assert!(HeredocBodies::scan(lost).lost_confidence(), "{lost:?}");
+    }
+    let architect = "cat >> a.md <<'EOF'\n(it's)\nEOF\ngit commit -qm \"x\ny\"";
+    assert!(!HeredocBodies::scan(architect).lost_confidence());
 }

@@ -1,0 +1,184 @@
+//! The service roster the console home screen draws one tile per entry for.
+//!
+//! Why (#10491): `tm tui` opens on the same roster trusty-console shows
+//! (`trusty-console/src/detect/mod.rs::all_connectors`). trusty-mpm must not
+//! depend on trusty-console (#1318), so the roster's facts — binary names,
+//! health methods, socket paths and `console_metrics` launch commands — are
+//! ported here as data, not imported.
+//! What: [`ServiceId`] and the per-service [`ProbeKind`] and socket resolver.
+//! Test: `roster_lists_mpm_first_then_the_console_order`,
+//! `home_opens_with_mpm_first_and_selected`.
+
+use std::path::PathBuf;
+
+/// One trusty-* service the console knows, in the console's display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ServiceId {
+    /// trusty-search, `search.health` on its socket.
+    Search,
+    /// trusty-memory, `memory.health` on its socket.
+    Memory,
+    /// trusty-analyze, `analyze.health` on its socket.
+    Analyze,
+    /// trusty-review, an on-demand stdio service with no resident daemon.
+    Review,
+    /// trusty-mpm, `mpm.health` on its socket. Enter opens the projects view.
+    Mpm,
+    /// trusty-agents; no UDS socket yet, so the TUI does not probe it (#10899).
+    Agents,
+    /// trusty-events, the bus daemon, `events.health` on its socket.
+    Events,
+    /// trusty-console, `console.fleet_status` on its socket (#10966, #10902).
+    Console,
+}
+
+/// How a tile's health is observed. Every kind uses an existing interface.
+// #11115: crate-internal; no caller outside trusty-mpm, so a new variant is no semver break
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProbeKind {
+    /// One JSON-RPC `<method>` frame over the service's Unix socket.
+    UdsHealth(&'static str),
+    /// One JSON-RPC `<method>` frame answered with a
+    /// [`ConsoleFleetStatus`](trusty_common::console_rpc::ConsoleFleetStatus);
+    /// the console's own row in it carries the tile's status and version.
+    ///
+    /// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`.
+    UdsFleetStatus(&'static str),
+    // #11115: `SocketConnect` removed; no service used it, found once crate-internal
+    /// The service serves no Unix socket the TUI may dial, so it is not probed.
+    ///
+    /// Why (#10899): `tm tui` uses no native HTTP; services are reached over
+    /// UDS only (ADR-0032). A service with no UDS endpoint offers the TUI
+    /// nothing to observe, and that is not a failure.
+    /// What: carries the operator-facing detail naming the server-side gap.
+    /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
+    /// read, socket or process spawn.
+    /// Test: `agents_has_no_uds_endpoint_kind`,
+    /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+    NoUdsEndpoint(&'static str),
+    /// No resident daemon: the binary on `PATH` is the whole answer.
+    OnDemand,
+}
+
+impl ServiceId {
+    /// Every service: MPM first, then the console's `all_connectors` order.
+    // #10476: MPM tile first and selected on launch
+    pub const ALL: [ServiceId; 8] = [
+        ServiceId::Mpm,
+        ServiceId::Search,
+        ServiceId::Memory,
+        ServiceId::Analyze,
+        ServiceId::Review,
+        ServiceId::Agents,
+        ServiceId::Events,
+        ServiceId::Console,
+    ];
+
+    /// The machine id the console uses for this service.
+    pub fn id(self) -> &'static str {
+        match self {
+            ServiceId::Search => "trusty-search",
+            ServiceId::Memory => "trusty-memory",
+            ServiceId::Analyze => "trusty-analyze",
+            ServiceId::Review => "trusty-review",
+            ServiceId::Mpm => "trusty-mpm",
+            ServiceId::Agents => "trusty-agents",
+            ServiceId::Events => "trusty-events",
+            ServiceId::Console => "trusty-console",
+        }
+    }
+
+    /// The tile title.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            ServiceId::Search => "Search",
+            ServiceId::Memory => "Memory",
+            ServiceId::Analyze => "Analyze",
+            ServiceId::Review => "Review",
+            ServiceId::Mpm => "MPM",
+            ServiceId::Agents => "Agents",
+            ServiceId::Events => "Events",
+            ServiceId::Console => "Console",
+        }
+    }
+
+    /// The binary whose presence on `PATH` separates "stopped" from "absent".
+    pub fn binary(self) -> &'static str {
+        match self {
+            ServiceId::Mpm => "tm",
+            ServiceId::Agents => "tagent",
+            other => other.id(),
+        }
+    }
+
+    /// How this service's health is observed (ported from the console's
+    /// `detect/*.rs` connectors).
+    // #11115: crate-internal, as `ProbeKind` is
+    pub(crate) fn probe(self) -> ProbeKind {
+        match self {
+            ServiceId::Search => ProbeKind::UdsHealth("search.health"),
+            ServiceId::Memory => ProbeKind::UdsHealth("memory.health"),
+            ServiceId::Analyze => ProbeKind::UdsHealth("analyze.health"),
+            ServiceId::Mpm => ProbeKind::UdsHealth("mpm.health"),
+            // See #10901: the bus answers health, not just a connect.
+            ServiceId::Events => {
+                ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
+            }
+            // See #10899: the TUI sends no HTTP probe; agents has no UDS yet.
+            ServiceId::Agents => {
+                ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
+            }
+            // #10966: the console's listener (#10902) serves its fleet view.
+            ServiceId::Console => {
+                ProbeKind::UdsFleetStatus(trusty_common::console_rpc::METHOD_FLEET_STATUS)
+            }
+            ServiceId::Review => ProbeKind::OnDemand,
+        }
+    }
+
+    /// Whether a probe that found nothing listening means "idle on demand",
+    /// not "down". trusty-console's analyze connector makes the same call
+    /// (#6350, #6416); any other probe failure is still down.
+    ///
+    /// Test: `an_absent_or_refused_console_socket_reads_as_on_demand_or_absent`.
+    pub fn not_listening_is_on_demand(self) -> bool {
+        // #10476: analyze is on demand; not listening is idle, not down.
+        // #10966: the console is opened when wanted; a closed one is not down.
+        matches!(self, ServiceId::Analyze | ServiceId::Console)
+    }
+
+    /// The stdio MCP command trusty-console spawns to call `console_metrics`
+    /// (`trusty-console/src/server/mod.rs`), or `None` when the service
+    /// offers no such tool. trusty-mpm returns `None` because its Enter opens
+    /// the projects view instead.
+    pub fn metrics_command(self) -> Option<(&'static str, &'static [&'static str])> {
+        match self {
+            ServiceId::Search => Some(("trusty-search", &["serve"])),
+            ServiceId::Memory => Some(("trusty-memory", &["serve", "--stdio"])),
+            ServiceId::Analyze => Some(("trusty-analyze", &["mcp"])),
+            ServiceId::Review => Some(("trusty-review", &["serve", "--stdio"])),
+            ServiceId::Mpm | ServiceId::Agents | ServiceId::Events | ServiceId::Console => None,
+        }
+    }
+
+    /// The Unix socket a socket probe dials, resolved the way the service and
+    /// the console resolve it. `Err` carries an operator-facing reason.
+    pub fn socket(self) -> Result<PathBuf, String> {
+        match self {
+            ServiceId::Search => trusty_common::search_rpc::search_socket()
+                .map_err(|e| format!("search socket unresolved: {e:#}")),
+            ServiceId::Memory => trusty_common::memory_rpc::resolve_memory_socket()
+                .map_err(|e| format!("memory socket unresolved: {e:#}")),
+            ServiceId::Mpm => Ok(trusty_common::mpm_rpc::mpm_socket()),
+            ServiceId::Events => trusty_common::control_bus::events_socket_path()
+                .map_err(|e| format!("events socket unresolved: {e:#}")),
+            other => trusty_common::daemon_socket_path(other.id())
+                .map_err(|e| format!("{} socket unresolved: {e:#}", other.id())),
+        }
+    }
+}
+
+/// Whether `binary` resolves on `PATH`.
+pub fn binary_on_path(binary: &str) -> bool {
+    which::which(binary).is_ok()
+}

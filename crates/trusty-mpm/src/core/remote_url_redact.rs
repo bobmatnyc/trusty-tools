@@ -102,6 +102,20 @@ pub fn redact_stored_url(url: &str) -> Cow<'_, str> {
     }
 }
 
+/// One stored URL with its userinfo removed outright, for display (#10586).
+///
+/// Why: `tm project init` shows the record it kept in the CLI and Telegram; a
+/// `***@` marker still reads as a credential slot, and the operator needs only
+/// the host and path.
+/// What: [`redact_stored_url`] (quoted or spaced passwords, query tokens), then
+/// `trusty_common::url_userinfo::strip_userinfo` drops what userinfo is left,
+/// the `***` marker or an scp-style `git@` login included.
+/// Test: `url_without_userinfo_drops_every_userinfo_form`.
+pub fn url_without_userinfo(url: &str) -> String {
+    let redacted = redact_stored_url(url);
+    trusty_common::url_userinfo::strip_userinfo(&redacted).into_owned()
+}
+
 /// `url` with its stored userinfo replaced by [`REDACTED`]; `None` when the
 /// stored-URL boundaries find none.
 fn mask_stored_userinfo(url: &str) -> Option<String> {

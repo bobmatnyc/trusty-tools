@@ -89,6 +89,8 @@ impl ManagedTmuxDriver for PaneAwareTmux {
 pub(super) fn make_record(source_id: Option<&str>) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "tmpm-test-session".into(),
         cwd: PathBuf::from("/tmp/test"),
@@ -115,6 +117,7 @@ pub(super) fn make_record(source_id: Option<&str>) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -610,6 +613,25 @@ fn serializers_include_source_id() {
     );
 }
 
+/// Why: #10476 — the MCP `session_list` (`record_to_json`) and the HTTP list
+/// (`record_to_summary`) must both return a recorded parent, and a parentless
+/// row must look exactly as before: no key on either wire shape.
+/// Test: this test.
+#[test]
+fn record_to_json_and_summary_carry_parent() {
+    let parent = crate::session_manager::ManagedSessionId::new();
+    let mut r = make_record(None);
+    r.parent_session_id = Some(parent);
+    assert_eq!(record_to_json(&r)["parent_session_id"], parent.to_string());
+    let wire = serde_json::to_value(record_to_summary(&r)).unwrap();
+    assert_eq!(wire["parent_session_id"], parent.to_string());
+
+    let r_none = make_record(None);
+    assert!(record_to_json(&r_none).get("parent_session_id").is_none());
+    let wire = serde_json::to_value(record_to_summary(&r_none)).unwrap();
+    assert!(wire.get("parent_session_id").is_none(), "{wire}");
+}
+
 /// Why: `record_to_json` (MCP path) and `record_to_summary` (HTTP path) must
 /// both surface `deliverable_id` (DOC-35 §10.6, #2379) so `tm sessions ls`/
 /// `status` and the MCP tools can show which Deliverable a session is bound
@@ -700,6 +722,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deleted: false,
         auto_resume_parked: None,
         kind: Default::default(),
+        parent_session_id: None,
     };
     let resp_owned = DecommissionResponse {
         summary: owned_summary,
@@ -745,6 +768,7 @@ fn decommission_workspace_removed_reflects_ownership() {
         deleted: false,
         auto_resume_parked: None,
         kind: Default::default(),
+        parent_session_id: None,
     };
     let resp_unowned = DecommissionResponse {
         summary: unowned_summary,
@@ -1683,4 +1707,24 @@ fn list_response_omits_store_health_when_healthy() {
     };
     let json = serde_json::to_value(&degraded).expect("serialize");
     assert_eq!(json["store_health"]["corrupt"], serde_json::json!(true));
+}
+
+/// #10101 live check: `tm sessions attach <managed id>` printed
+/// `tmux attach-session -t '=tm-repob'` with no socket, which attaches on the
+/// default server. A record on a workspace server names that server's socket;
+/// a default-server record keeps the bare command.
+#[test]
+fn attach_cmd_names_the_records_workspace_socket_10101() {
+    let mut r = make_record(None);
+    r.tmux_socket = Some(PathBuf::from("/tmp/tmux-501/tm-ws-repob-1814c0712b9a"));
+    assert_eq!(
+        record_to_json(&r)["attach_cmd"],
+        "tmux -S '/tmp/tmux-501/tm-ws-repob-1814c0712b9a' attach-session -t '=tmpm-test-session'"
+    );
+
+    r.tmux_socket = None;
+    assert_eq!(
+        record_to_json(&r)["attach_cmd"],
+        "tmux attach-session -t '=tmpm-test-session'"
+    );
 }

@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.17.1] — 2026-11-07
+
+### Fixed
+
+- `tctl ensure` palace setup now refuses a trusty-memory daemon on an unsupported protocol with the named error, through the shared client check in trusty-common (#9538).
+- Tests that write a stub executable and then run it write it through `trusty_common::exec_stub::write_executable`, so a sibling test's fork can no longer fail the run with "Text file busy" (ETXTBSY) (#10248).
+- `trusty-installer install` no longer replaces a newer installed build (such as a dev build) with an older `latest` release. When the installed binary reports a newer version than the release, or than crates.io's newest on the `cargo install` fallback, the member fails with a message naming both versions and the run exits 2. A binary whose version cannot be read is refused rather than overwritten; remove the file to reinstall (#10584).
+- `trusty-installer <tool> <verb>` passthrough commands, such as `trusty-installer health trusty-memory`, now exit 2 instead of 0 while they are unimplemented, so install validation no longer reads the "not yet implemented" stub as a passing check. Use `trusty-installer stack health` for the real health rollup (#10585).
+- `tctl install` and `tctl upgrade` no longer report success when the content `tm content update` pinned is older than a placed trusty-review: after the update they run the placed binary's `content check`, and a failure exits non-zero naming the missing file. A trusty-review older than that verb is reported as not checked (#10588).
+
+### Security
+
+- `tctl ensure` refuses to run as root (effective uid 0) and exits 1 before it writes `.mcp.json`, its `.bak` or a temp file, or dials a daemon socket. The error says not to use sudo and gives `sudo chown $USER <file>` for a file that is already root-owned (#10320).
+- `tctl install` still runs as root, but its verify tail now skips the project `.mcp.json` patch and the search-index / memory-palace setup, and prints a warning with the same `sudo chown $USER <file>` hint. The install exit code is unchanged by the skip (#10320).
+
 ## [0.17.0] — 2026-10-22
 
 ### Fixed

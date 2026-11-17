@@ -45,10 +45,14 @@ mod agents_flag;
 // #9070: S8 — exec grants; #9066: the walk moved to the `ancestry` feature,
 // re-exported here so every `server::ancestry` path holds.
 pub use crate::ancestry;
+// #10459 P1: the Architect launch-record check for `set` and a local `copy`.
+mod architect;
 pub mod audit;
 // #9066: S3a, the console bridge's verdict.
 mod bridge;
 pub mod client;
+// #10998: `copy` from a named source (a Keychain item or another vault).
+mod copy_source;
 // #7520 S2: RLIMIT_CORE=0 at start (ruling Dd8).
 mod core_dump;
 // #7524 P2-M1: one table for the server's deadline and the client's wait.
@@ -59,8 +63,10 @@ pub mod errors;
 mod exec;
 mod gate;
 pub mod grant;
+// #11215: the timestamp on the server's start and exit lines.
 #[cfg(test)]
 mod grant_fakes;
+mod log_stamp;
 mod methods;
 pub mod project;
 mod router;
@@ -72,16 +78,23 @@ pub mod settings;
 mod test_support;
 // #9069: `copy` to a write-only sync target.
 mod sync_target;
+// #10459 PR1: main-thread tickets for the Architect (DOC-86 §2).
+mod ticket;
+mod ticket_checks;
+mod ticket_methods;
 mod tools;
 
 pub use ancestry::{
     OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
+pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
+    BackendWait,
 };
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
+pub use copy_source::CopySourceAudit;
 pub use core_dump::disable_core_dumps;
 pub use doctor::{
     BackendStatus, DOCTOR, DoctorResponse, HeadlessReadiness, StoragePosture, Unavailable,
@@ -91,6 +104,7 @@ pub use grant::{
     Clock, ClockError, DEFAULT_MAX_TTL, GrantError, GrantRegistry, GrantRequest, GrantScope,
     GrantToken, MAX_LIVE_GRANTS, MintedGrant, SystemClock,
 };
+pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use router::{
@@ -105,7 +119,11 @@ pub use settings::{
     ServerSettings, SettingsError, template_root_beside,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use test_support::serve_without_agent_callers;
+pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};
+pub use ticket::{
+    TICKET_TTL, TicketAudit, TicketEvent, TicketKind, TicketOp, TicketRefusal, TicketStore,
+    VoidCause,
+};
 pub use tools::DetectedTool;
 
 #[cfg(test)]

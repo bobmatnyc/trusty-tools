@@ -57,6 +57,7 @@ pub(crate) async fn run_daemon(
     mcp: bool,
     force: bool,
     sandbox: bool,
+    sandbox_credential: Option<String>,
 ) -> anyhow::Result<()> {
     // ADR-0011 loopback-only doctrine (#3330): the secondary Tailscale
     // listener has been removed. Fail loudly and immediately rather than
@@ -67,8 +68,10 @@ pub(crate) async fn run_daemon(
     }
     // #9121: refuse an unisolated sandbox, and latch, before any credential
     // read, state construction or bind.
+    // #10721: `--sandbox-credential` admits one provider key; clap requires
+    // `--sandbox` for it.
     if sandbox {
-        crate::commands::daemon_sandbox::enter()?;
+        crate::commands::daemon_sandbox::enter(sandbox_credential.as_deref())?;
     }
 
     // Anchor cwd to a stable directory so that git subprocesses spawned later
@@ -177,10 +180,10 @@ pub(crate) async fn run_daemon(
         )
         .await;
         // See #6288: this exit almost certainly wins the race against
-        // `serve_with_shutdown`'s graceful drain, so neither the session reap
-        // (#1455) nor the socket unlink is guaranteed to run on a real SIGTERM.
-        // The socket is self-healing — `daemon::socket::bind` reclaims a file
-        // nobody is serving. S3a leaves the race as it was.
+        // `serve_with_shutdown`'s graceful drain, so the socket unlink is not
+        // guaranteed to run on a real SIGTERM. The socket is self-healing —
+        // `daemon::socket::bind` reclaims a file nobody is serving. #10597:
+        // neither path stops a managed session.
         std::process::exit(0);
     });
 
@@ -592,7 +595,7 @@ mod tests {
     /// and side-effect free to test.
     #[tokio::test]
     async fn run_daemon_rejects_tailscale_flag() {
-        let err = run_daemon(None, true, false, false, false)
+        let err = run_daemon(None, true, false, false, false, None)
             .await
             .expect_err("--tailscale must be rejected");
         let msg = err.to_string();

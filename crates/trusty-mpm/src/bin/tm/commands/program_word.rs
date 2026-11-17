@@ -303,6 +303,18 @@ pub(crate) fn precommand_index<T: AsRef<str>>(tokens: &[T]) -> Option<usize> {
     (!word.took_options && !bare_wrapper).then_some(word.index)
 }
 
+/// The index of the program word past every wrapper WITH its options and
+/// option values, `xargs` read as a program; `None` when an option cannot be
+/// measured.
+///
+/// Why (#10665 r2): [`precommand_index`] answers `None` for any wrapper
+/// option, so a caller that falls back to "every word is a program" read the
+/// `TMUX` of `env -u TMUX tmux …` as `tmux`.
+/// Test: `env_value_flags_are_skipped_to_the_program`.
+pub(crate) fn program_index<T: AsRef<str>>(tokens: &[T]) -> Option<usize> {
+    resolve(tokens, false).ok().map(|word| word.index)
+}
+
 /// [`resolve_program_word`], with `xargs` read as a program when
 /// `through_xargs` is false (the [`precommand_index`] contract).
 fn resolve<T: AsRef<str>>(tokens: &[T], through_xargs: bool) -> Result<ProgramWord, Unresolved> {

@@ -17,6 +17,7 @@ pub(crate) mod commit;
 // #9230: an incremental commit stamps the corpus's reindex stamp.
 pub(crate) mod commit_stamp;
 pub(crate) mod deferred;
+pub(crate) mod deferred_stream;
 pub(crate) mod embed;
 // #8976: what one `index_file` write did, so zero chunks never read as success.
 pub(crate) mod outcome;
@@ -26,6 +27,8 @@ pub(crate) mod refusals;
 pub(crate) mod supersede;
 // #9284: count and warn on chunks cut at the embedder's input window.
 pub(crate) mod truncation;
+// #10481: split new chunks at the embedder window; header on the embedded text.
+pub(crate) mod window_split;
 
 use anyhow::{Context, Result};
 
@@ -399,6 +402,32 @@ impl CodeIndexer {
         file_path: &str,
         content: &str,
     ) -> Result<IndexFileOutcome> {
+        // #8959: one write per path at a time, from the superseded-id snapshot
+        // through the commit; otherwise two writes each removed only the ids
+        // they saw and both versions stayed indexed.
+        let path_lock = self.lock_path_for_write(file_path).await;
+        self.index_file_outcome_path_locked(file_path, content, &path_lock)
+            .await
+    }
+
+    /// [`Self::index_file_outcome`] for a caller that already holds
+    /// `file_path`'s lock from [`Self::lock_path_for_write`] (#10738).
+    ///
+    /// Why: the path's content hash must name the bytes its chunks came from,
+    /// whichever writer (put, watcher, reconcile) replaced them; forget and
+    /// record sit under the same lock as the write, or two writes interleave
+    /// and the stored hash names content whose chunks were replaced.
+    /// What: forgets the path's hash before any mutation, and records the
+    /// SHA-256 of `content` only when the write left chunks behind. A failed
+    /// forget or record fails the write.
+    /// Test: `concurrent_puts_to_one_path_store_the_hash_of_the_committed_chunks`,
+    /// `a_watcher_rewrite_after_a_put_never_reports_the_put_hash`.
+    pub(crate) async fn index_file_outcome_path_locked(
+        &self,
+        file_path: &str,
+        content: &str,
+        _path_lock: &supersede::PathWriteGuard<'_>,
+    ) -> Result<IndexFileOutcome> {
         // #8167: a handle that outlived DELETE must not write into it.
         self.refuse_if_deleted()?;
         // #9459: a corpus closed for shutdown would take this write in memory
@@ -412,13 +441,16 @@ impl CodeIndexer {
                 self.index_id
             );
         }
+        // #10738: a staged swap's detach window holds no corpus; the write
+        // would land in memory only and still answer success.
+        self.refuse_if_corpus_detached()?;
         // #10159: active from here, embed included, so the ticker's quiet
-        // rebuild cannot fire mid-write. Declared first, so it drops last.
+        // rebuild cannot fire mid-write.
         let _active_write = self.begin_active_write();
-        // #8959: one write per path at a time, from the superseded-id snapshot
-        // below through the commit; otherwise two writes each removed only
-        // the ids they saw and both versions stayed indexed.
-        let _path_lock = self.path_write_locks.lock(file_path).await;
+        // #10738: forget the old hash first, in every writer, so a write that
+        // fails part-way never leaves a hash naming content it replaced.
+        let hash_id = crate::core::registry::IndexId::new(self.index_id.as_str());
+        crate::service::reindex::hash::forget_file_hash(&hash_id, self, file_path).await?;
         if trusty_common::knowledge_document::is_tombstone(content) {
             // #8959: a failed redb delete fails the write with the ids still in
             // memory, so a retry removes them instead of a reopen loading them.
@@ -441,9 +473,7 @@ impl CodeIndexer {
             // #8959: `purge_file_with` stamps the durable stale mark. Fail
             // closed, or a failed redb delete answered `SopsEncrypted` and the
             // plaintext chunks came back at the next boot.
-            let removed = self
-                .purge_file_with(&id, file_path, super::RedbChunkDelete::FailClosed)
-                .await?;
+            let removed = self.purge_file_with(&id, file_path).await?;
             tracing::warn!(
                 index_id = %self.index_id,
                 file = %file_path,
@@ -471,6 +501,17 @@ impl CodeIndexer {
         populate_virtual_terms(&mut chunks, &entities);
 
         let chunk_contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+        // #10481: replace over-window chunks with windows before they embed. Ahead
+        // of the superseded-id snapshot, so the ids kept are the windows' own.
+        let (windowed, headers) = self.split_for_embed(chunks).await?;
+        let chunks = windowed;
+        // #10504: the reply counts the chunks committed, the windows, not the parse.
+        let outcome = match outcome {
+            IndexFileOutcome::Indexed { .. } => IndexFileOutcome::Indexed {
+                chunks: chunks.len(),
+            },
+            other => other,
+        };
         // #8959: ids this file held whose content the new text no longer has.
         // Chunk ids embed line spans and symbol names, so an upsert alone
         // left them searchable beside the new content.
@@ -486,7 +527,10 @@ impl CodeIndexer {
         } else if self.skip_vector {
             Some(vec![None; chunks.len()])
         } else {
-            Some(self.embed_chunks_in_batches(&chunks, None, None).await?)
+            Some(
+                self.embed_chunks_in_batches(&chunks, None, None, headers.as_deref())
+                    .await?,
+            )
         };
         // #8959: durable stale mark before anything below mutates the corpus;
         // the guard sets the in-memory mark when the write ends.
@@ -564,6 +608,12 @@ impl CodeIndexer {
                 self.chunk_cap(), // #6369: report the cap this index enforced
                 dropped_by_cap
             );
+        }
+        // #10738: the hash of the bytes these chunks came from, for every writer.
+        if matches!(outcome, IndexFileOutcome::Indexed { chunks } if chunks > 0) {
+            let hash = crate::service::reindex::hash::hash_content(content);
+            crate::service::reindex::hash::record_file_hash(&hash_id, self, file_path, &hash)
+                .await?;
         }
         // #9230: stamp only a write that is reported as a success and landed.
         if durable {
@@ -662,6 +712,11 @@ impl CodeIndexer {
         if files.is_empty() {
             return Ok(0);
         }
+        // #10738: the watcher rescan commits here; in a staged swap's detach
+        // window the batch would land in memory only and answer `Ok`, so the
+        // rescan recorded fingerprints for content live never got. The
+        // reindex's own batches call `commit_parsed_batch` on staging directly.
+        self.refuse_if_corpus_detached()?;
         let parsed = self.parse_and_embed_files(files.to_vec()).await?;
         let timings = self
             .commit_parsed_batch(parsed, defer_graph_rebuild)
@@ -740,8 +795,18 @@ impl CodeIndexer {
 
         let (embeddings, embed_ms, vector_count) = if embed {
             let embed_start = std::time::Instant::now();
+            // #10481: replace over-window chunks with windows before they embed.
+            let (windowed, headers) = self
+                .split_for_embed(std::mem::take(&mut all_chunks))
+                .await?;
+            all_chunks = windowed;
             let embeddings = self
-                .embed_chunks_in_batches(&all_chunks, progress_tx.as_ref(), None)
+                .embed_chunks_in_batches(
+                    &all_chunks,
+                    progress_tx.as_ref(),
+                    None,
+                    headers.as_deref(),
+                )
                 .await?;
             let embed_ms = embed_start.elapsed().as_millis() as u64;
             let vector_count = embeddings.iter().filter(|e| e.is_some()).count();
@@ -857,6 +922,8 @@ impl CodeIndexer {
     /// What: threads `pause` into `embed_chunks_in_batches`, which stops at the
     /// next wave and leaves the tail `None`. Only the embedded PREFIX is
     /// committed, so those vectors are durable and the next pass skips them.
+    /// #10294: each wave is committed before the next starts, and the vector
+    /// snapshot is written on a cadence and on exit (`deferred_stream`).
     /// `paused` in the returned [`EmbedCatchUp`] tells the caller the pass owes
     /// more work — it must not be reported as a completed stage. `pause: None`
     /// is the un-pausable form every caller used before #6524.
@@ -873,11 +940,9 @@ impl CodeIndexer {
         progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<(usize, u64)>>,
         pause: Option<&crate::core::embed_pause::EmbeddingPause>,
     ) -> anyhow::Result<EmbedCatchUp> {
-        // #8600: the three phases `run_embed_catch_up` runs with the indexer
-        // guard dropped between them, here under one borrow.
-        let plan = self.plan_deferred_embed().await;
-        let run = plan.embed(progress_tx, pause).await?;
-        self.commit_deferred_embed(plan, run).await
+        // #10294: the per-wave driver `run_embed_catch_up` uses, here under
+        // one borrow instead of a read guard per phase.
+        deferred_stream::run_deferred_embed(|| std::future::ready(self), progress_tx, pause).await
     }
 
     /// Count corpus chunks NOT yet embedded (issue #3748 slice A, review

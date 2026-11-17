@@ -15,6 +15,7 @@
 use trusty_common::uds::server::{CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, RpcError};
 
 use crate::api::SecretsError;
+use crate::store::timeout_note::TimeoutNote;
 
 /// Every failure a `secrets.*` method reports.
 ///
@@ -70,9 +71,9 @@ pub enum ErrorKind {
     HomeUnavailable = 14,
     /// `copy` named the same backend twice.
     SameBackend = 15,
-    /// An agent-parent process asked for a key denied to agents, or called
-    /// an operator-only method (#10386).
+    /// An agent-parent process called an operator-only method (#10386).
     // #7525: its own kind so a refusal never reads as a miss or a failure.
+    // #10459: a denied key is `AgentKeyDenied` now.
     AgentUseRefused = 16,
     /// An env-map entry broke a rule before any resolution started.
     InvalidEnvEntry = 17,
@@ -136,11 +137,21 @@ pub enum ErrorKind {
     // #9066: the next unused value; its own kind, so it never reads as a
     // grant or agent refusal.
     BridgeRefused = 36,
+    /// An agent-parent process asked to read or write a key the operator
+    /// denied to agents.
+    // #10459: split from `AgentUseRefused` (reverses #10386 Q6), so a
+    // refusal names which rule applied.
+    AgentKeyDenied = 37,
+    /// A main-thread ticket was not minted: minting is off, or a mint check
+    /// failed.
+    // #10459 PR1: the next unused value; ONE kind for every mint refusal,
+    // so a refusal names no check (the audit record's `reason_arm` does).
+    TicketRefused = 38,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 37] = [
+    pub(crate) const ALL: [Self; 39] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -178,6 +189,8 @@ impl ErrorKind {
         Self::GrantRefused,
         Self::GrantLimitReached,
         Self::BridgeRefused,
+        Self::AgentKeyDenied,
+        Self::TicketRefused,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -226,6 +239,8 @@ impl ErrorKind {
             Self::GrantRefused => "grant_refused",
             Self::GrantLimitReached => "grant_limit_reached",
             Self::BridgeRefused => "bridge_refused",
+            Self::AgentKeyDenied => "agent_key_denied",
+            Self::TicketRefused => "ticket_refused",
             Self::Internal => "internal",
         }
     }
@@ -253,9 +268,12 @@ impl ErrorKind {
             Self::ConfigInvalid => "a `secrets:` config section is invalid",
             Self::HomeUnavailable => "the home directory is unavailable",
             Self::SameBackend => "the source and destination backends are the same",
-            // #10386 Q6: one code for a denied key and an operator-only call.
+            // #10459: a denied key has its own kind, `AgentKeyDenied`.
             Self::AgentUseRefused => {
-                "this key is denied to agents, or the operation is operator-only"
+                "this operation is operator-only; a process under Claude Code may not call it"
+            }
+            Self::AgentKeyDenied => {
+                "the operator denied this key to agents (per-key deny); a process under Claude Code may not read or write it"
             }
             Self::InvalidEnvEntry => "an env-map entry is invalid",
             Self::EnvResolutionFailed => "a `secret://` reference in the env map did not resolve",
@@ -320,6 +338,10 @@ impl ErrorKind {
             Self::BridgeRefused => {
                 "a console bridge call is accepted only from the verified trusty-console process, running outside any Claude Code process tree; this caller was not verified"
             }
+            // #10459 PR1: names no check, as `GrantRefused` names none.
+            Self::TicketRefused => {
+                "no main-thread ticket was minted: minting is off, or the caller is not the Architect's registered hook"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -376,6 +398,10 @@ impl ErrorKind {
             Self::GrantLimitReached => -32083,
             // #9066: the next unused code.
             Self::BridgeRefused => -32084,
+            // #10459: the next unused code.
+            Self::AgentKeyDenied => -32085,
+            // #10459 PR1: the next unused code.
+            Self::TicketRefused => -32086,
         }
     }
 
@@ -389,6 +415,64 @@ impl ErrorKind {
     pub(crate) fn to_rpc(self, method: &'static str) -> RpcError {
         RpcError::new(self.code(), format!("{method}: {}", self.text()))
             .with_data(serde_json::json!({ "kind": self.as_str() }))
+    }
+
+    /// [`ErrorKind::to_rpc`], with a [`ErrorKind::BackendTimeout`] told
+    /// apart by the request's time-out `note` (#11215).
+    ///
+    /// Why: a bare "did not answer in time" left the caller unable to tell a
+    /// call that waited out its limit from one refused at once because an
+    /// earlier call on the item still hangs, and named no way out.
+    /// What: for `BackendTimeout` with a note, the message names the backend,
+    /// either the seconds this call waited or the at-once refusal, and the
+    /// recovery step; `data` adds `waited_ms` and `abandoned_item`. The text
+    /// is built from the backend id, a duration and a flag alone, never a
+    /// vault, key or value. Every other case is [`ErrorKind::to_rpc`].
+    /// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`,
+    /// `timeout_reply_text_names_wait_or_refusal_and_the_recovery`.
+    pub(crate) fn to_rpc_noted(self, method: &'static str, note: Option<&TimeoutNote>) -> RpcError {
+        let Some(note) = note.filter(|_| self == Self::BackendTimeout) else {
+            return self.to_rpc(method);
+        };
+        RpcError::new(self.code(), format!("{method}: {}", timeout_text(note))).with_data(
+            serde_json::json!({
+                "kind": self.as_str(),
+                "waited_ms": u64::try_from(note.waited.as_millis()).unwrap_or(u64::MAX),
+                "abandoned_item": note.abandoned_item,
+            }),
+        )
+    }
+}
+
+/// The step that clears a hung item: the abandoned set lives in the server
+/// process, so a new process starts with none (#11215).
+const TIMEOUT_RECOVERY: &str = "answer or dismiss any open macOS Keychain access prompt, or end \
+     the server with `pkill -x trusty-secrets` (the next call starts a fresh one), then retry; a \
+     write the abandoned call carried may still land, so check the value before writing it again";
+
+/// The sentence for one noted time-out; see [`ErrorKind::to_rpc_noted`].
+pub(crate) fn timeout_text(note: &TimeoutNote) -> String {
+    let backend = if note.backend == crate::api::BackendId::KEYCHAIN {
+        "the Keychain".to_owned()
+    } else {
+        format!("the {} backend", note.backend)
+    };
+    if note.abandoned_item {
+        format!(
+            "refused at once: an earlier call to {backend} on this item did not answer in time \
+             and is still waiting, and the item refuses calls until it ends; {TIMEOUT_RECOVERY}"
+        )
+    } else if note.waited.is_zero() {
+        format!(
+            "{backend} was not called: earlier backend calls used the whole request deadline; \
+             retry, and if it repeats, {TIMEOUT_RECOVERY}"
+        )
+    } else {
+        format!(
+            "{backend} did not answer in time: this call waited {:.1} s and was abandoned, and \
+             the item refuses calls until it ends; {TIMEOUT_RECOVERY}",
+            note.waited.as_secs_f64()
+        )
     }
 }
 
@@ -426,13 +510,14 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
             SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
             SecretsError::Timeout { .. } => Self::BackendTimeout,
-            SecretsError::AgentUseRefused { .. } => Self::AgentUseRefused,
+            // #10459: the store raises it only for a per-key deny.
+            SecretsError::AgentUseRefused { .. } => Self::AgentKeyDenied,
             // #7525: `resolve_env` wraps a refusal in `EnvResolution`; keep it
             // a refusal on the wire.
             SecretsError::EnvResolution { source, .. }
                 if matches!(*source, SecretsError::AgentUseRefused { .. }) =>
             {
-                Self::AgentUseRefused
+                Self::AgentKeyDenied
             }
             // #9328: likewise an out-of-scope pinned reference.
             SecretsError::EnvResolution { source, .. }

@@ -325,6 +325,11 @@ impl AppState {
         Arc::clone(&self.connectors)
     }
 
+    /// Whole seconds since this state was built (#10902: `console.health`).
+    pub(crate) fn uptime_secs(&self) -> u64 {
+        self.started_at.elapsed().as_secs()
+    }
+
     /// Access the background poll cache.
     ///
     /// Why: Routes read from the cache; the background task writes to it.
@@ -531,6 +536,25 @@ async fn apply_handle_overrides(
     }
 }
 
+/// Turn a detection pass into the rows `GET /api/console/services` serves.
+///
+/// Why (#10902): `console.fleet_status` must answer exactly what the HTTP route
+/// answers for the same cache state, so both call this one function.
+/// What: applies the MCP-handle overrides, then the per-service metrics overlay
+/// (#6642), then sorts with `detect::order_for_display` — AFTER the overrides,
+/// so a service demoted to Degraded ranks as degraded (#6370).
+/// Test: `test_services_route_handle_degraded_overlay`,
+/// `fleet_status_equals_the_http_services_body`.
+pub(crate) async fn overlay_services(
+    state: &AppState,
+    mut services: Vec<ServiceInfo>,
+) -> Vec<ServiceInfo> {
+    apply_handle_overrides(&mut services, &state.mcp_handles()).await;
+    crate::service_metrics::apply_metrics_overlay(&mut services, state.machine_history()).await;
+    crate::detect::order_for_display(&mut services);
+    services
+}
+
 /// `GET /api/console/services` — return cached snapshot of all services.
 ///
 /// Why: The Svelte SPA fetches this endpoint on load to render service cards.
@@ -551,16 +575,8 @@ async fn apply_handle_overrides(
 /// `test_services_route_handle_degraded_overlay`, and
 /// `test_services_route_orders_running_before_absent` below.
 async fn services_handler(State(state): State<AppState>) -> axum::response::Response {
-    let handles = state.mcp_handles();
-
     if let Some(snap) = state.poller_cache().snapshot().await {
-        let mut services = snap.services;
-        apply_handle_overrides(&mut services, &handles).await;
-        crate::service_metrics::apply_metrics_overlay(&mut services, state.machine_history()).await; // #6642
-        // #6370: sort AFTER the overrides so a service demoted to Degraded here
-        // ranks as degraded, not as the Running the poller recorded.
-        crate::detect::order_for_display(&mut services);
-        return axum::Json(services).into_response();
+        return axum::Json(overlay_services(&state, snap.services).await).into_response();
     }
 
     // First-boot fallback: run a one-shot detection synchronously.
@@ -570,13 +586,7 @@ async fn services_handler(State(state): State<AppState>) -> axum::response::Resp
     })
     .await
     {
-        Ok(mut infos) => {
-            apply_handle_overrides(&mut infos, &handles).await;
-            crate::service_metrics::apply_metrics_overlay(&mut infos, state.machine_history())
-                .await; // #6642
-            crate::detect::order_for_display(&mut infos); // #6370
-            axum::Json(infos).into_response()
-        }
+        Ok(infos) => axum::Json(overlay_services(&state, infos).await).into_response(),
         Err(e) => {
             tracing::error!("service detection task panicked: {e}");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()

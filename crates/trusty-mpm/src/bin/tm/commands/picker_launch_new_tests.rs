@@ -40,6 +40,7 @@ fn session(name: &str, state: &str, workspace_path: Option<&str>) -> ManagedSess
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 

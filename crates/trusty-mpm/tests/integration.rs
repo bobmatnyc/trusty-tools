@@ -19,6 +19,8 @@
 // #8545: `common` arms the home-write fence before `main`.
 mod common;
 
+// #10571 Phase 2: the Architect's clear chain on a fresh install.
+mod architect_turn_active_chain_10571;
 mod catalog_sync_idempotent;
 mod commit_stats_hook_budget;
 mod config_mount;
@@ -46,6 +48,8 @@ mod relocated_interactive_config_4181;
 mod resume_unresumable_mapping;
 // #6288 S3a: the built daemon serves its socket only and holds no TCP listener.
 mod daemon_no_tcp_6288_s3;
+// #10597: a daemon SIGTERM leaves managed sessions running (owner ruling D82).
+mod daemon_sigterm_survival_10597;
 // #9121: `tm daemon --sandbox` refuses secret-carrying envs, never printing values.
 mod sandbox_daemon_9121;
 // #9557: a sandbox daemon reaches only its own tmux server.
@@ -60,21 +64,29 @@ mod tm_build_lease;
 mod tm_cli_socket;
 // #6288 client cutover: moved commands reach the socket only, failing closed.
 mod tm_client_socket_cutover_6288;
+// #10569: `tm register` never feeds its repo argument to `--url`.
 mod tm_compress_pipe;
+// #10425: `tm doctor --fix --dry-run` / `--only`, `tm validate --repair --dry-run`.
+mod tm_doctor_fix_dry_run;
 mod tm_doctor_network;
 mod tm_doctor_standalone;
+mod tm_register_url_id_10569;
 // #9822: `tm architect <verb>` against the Python goldens, fake tmux.
 mod tm_architect_verbs;
 // #8436: `tm fleet init|status` through the binary.
 mod tm_fleet;
 mod tm_guided_default_explicit_url;
 mod tm_hook_delegation_payload;
+// #10735: the claude.ai connectors pass the egress guard; the rest stays.
+mod connectors_allowed_10735;
 // #8454 S2: the trust anchors through the egress hook, pm-guard off.
 mod tm_hook_egress_anchor_8454;
 // #8454: `tm hook --egress-guard`, the outbound-channel family deny.
 mod tm_hook_egress_guard_8454;
 // #10387: the per-project read-only Slack allowlist through the binary.
 mod tm_hook_egress_slack_read_10387;
+// #11194: a PM main thread's Slack send to the owner's DM, and nothing else.
+mod tm_hook_egress_pm_dm_11194;
 // #9923: the egress guard taints a hook-less id under a live mark.
 mod tm_hook_egress_lazy_taint_9923;
 mod tm_hook_idle_parking;
@@ -86,15 +98,22 @@ mod tm_hook_pm_guard;
 mod tm_hook_pm_guard_absolute_write_7228;
 mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
+mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
+// #10574: the stale-copy guard, fixture F2.
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+mod tm_hook_pm_guard_stale_copy_10574;
+// #11353: GP-051 on the live `Agent` dispatch path.
+mod tm_hook_pm_guard_fable_11353;
 // #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
 mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
 mod tm_hook_pm_guard_heredoc_continuation_9180;
 mod tm_hook_pm_guard_heredoc_delimiter_9150;
+// #10641: golden allow/deny table per role; every deny names its policy id.
+mod tm_hook_pm_guard_policy_10641;
 // #8625: the kuzu-store deny under each bypass and for the Architect.
 mod tm_hook_pm_guard_kuzu_store_8625;
 // #9720: a `<<`-dense command is judged inside the hook timeout.
@@ -108,15 +127,27 @@ mod tm_hook_pm_guard_refusing_daemon_9526;
 mod tm_hook_pm_guard_secret_batch;
 // #9791: `file -f`/`-m` on a secret file under each bypass and for the Architect.
 mod tm_hook_pm_guard_secret_file_list_9791;
+// #10599: the fleet-init Architect's seeded scripts through the real hook.
+mod tm_hook_pm_guard_seed_scripts_10599;
 mod tm_hook_pm_guard_stdin_7975;
+// #10665: a whole-server tmux kill needs an explicit scratch `-S` socket.
+mod tm_hook_pm_guard_tmux_kill_server_10665;
 mod tm_hook_pm_guard_tmux_target_9001;
 mod tm_hook_pm_guard_trust_anchor_8878;
 mod tm_hook_pm_guard_unquoted_heredoc_expansion;
+// #10973: a compression-opportunity row per tool result.
+mod tm_hook_opportunity_10973;
 mod tm_hook_pretooluse_rewrite;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 // #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.
 mod tm_hook_session_start_taint_8433;
+// #10960: the Architect's standing-rules block, per turn and at resume.
+mod tm_hook_standing_rules_10960;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg.
+mod tm_hook_turn_task_11398;
+// #10575: the warn-only completion-evidence Stop check.
+mod tm_hook_completion_evidence_10575;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

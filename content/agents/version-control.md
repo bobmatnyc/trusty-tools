@@ -84,13 +84,13 @@ fix — PR #6894 did exactly that to #6888:
 grep -nEi '\b(clos(e|es|ed)|fix(es|ed)?|resolv(e|es|ed))\b[[:space:]]*:?[[:space:]]*([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?#[0-9]+' <body-file>
 ```
 
-On a Refs-only project — this repo, whose root `CLAUDE.md` says fix PRs use
-`Refs #N` and never `Closes #N` — a hit is a stop. Rewrite the line to `Refs`
+Check `command -v tm` first; if absent, use `gh pr create` with the same title, body and labels.
+
+On a Refs-only project (this repo, per its root `CLAUDE.md`) a hit is a stop. Rewrite the line to `Refs`
 and re-grep until the command exits 1. Do not run `gh pr create`, do not edit
 the body onto an open PR, and do not arm auto-merge while a hit stands.
-`tm pr open` runs the same check itself and exits 2 without calling `gh`, so
-this grep covers the `gh` fallback (`command -v tm` absent) and every
-later `gh pr edit`.
+`tm pr open` runs this check itself (exit 2); the grep covers the `gh`
+fallback and every later `gh pr edit`.
 
 🔴 **Open every PR with `tm pr open --title <title> --body-file <path> [--issue N]
 [--rung 1-6] [--base main] [--docs-only]`.** It validates the nine-field body
@@ -107,9 +107,14 @@ attribution footer (a missing one exits 2; it never appends one) and attaches
 `--assignee @me --label trusty-mpm --label ws/<session>` itself — you never
 type them. Before spawning `gh` it runs `scripts/check_changelog_fragment.sh`
 (`--docs-only` skips it for a PR touching no crate source); a rung 1
-(docs-only) branch must pass `--docs-only` or the gate refuses. Any failed check exits 2 before `gh` runs.
+(docs-only) branch must pass `--docs-only` or the gate refuses.
 `--issue N` emits `Refs #N`; fix PRs here never pass `--closes`.
-Hand-assembled `gh pr create` is only for a host without `tm` on PATH.
+
+## Issue clusters
+
+One branch and one PR per cluster, one commit per issue. List every
+issue in the body as `Refs #N`, never `Closes`. Squash-merge: per-issue
+commits stay in PR history; the squash commit message lists every issue.
 
 ## Labels, project, milestone on the PR
 
@@ -124,21 +129,19 @@ the component labels for every crate the diff touches, and the milestone and
 project(s) of the issue the body's first `Refs #N` names. A phase issue adds a title
 tag: `<type>(<scope>): [EPIC_N PHASE_M] <subject>` (`tm-epic`).
 You pass no flag.
-Each step is best-effort: a refused step prints a warning and the PR still
-opens. A warning is yours to fix on the PR. "no component label: no workspace crate
+A refused step only warns: the PR still opens, and the warning is yours to fix. "no component label: no workspace crate
 owns the changed paths" (docs-only PR) and "no project or milestone" (`Refs`-less
 PR) are correct; "no component label: the diff could not be read" is a fault.
 
 🔴 **Before every push, scan `git diff origin/main...HEAD` for credentials
 yourself** (three-dot, never two-dot: see Safety Rules). "No Subagent
 Fan-Out" forbids delegating this to `security` from inside a dispatched run;
-report the pattern set you checked. A leaked credential in git history
-survives even a reverted commit. For a high-risk branch — one touching
-secrets, auth, or credential handling — the PM dispatches `security` before
-you start, never mid-task.
+report the pattern set you checked. A leaked credential
+outlives a revert. For a branch touching secrets, auth, or
+credentials, the PM dispatches `security` before you start, never mid-task.
 
-When scope or claims change mid-flight, edit the PR body — a stale body is a
-defect, and fixing it is yours, not ticketing's.
+When scope or claims change mid-flight, edit the PR body: a stale body is
+yours to fix, not ticketing's.
 
 Default to review: `tm pr open` opens the PR and `tm pr merge <n> --auto` arms
 auto-merge, passing the re-validated PR body as the squash commit message
@@ -205,7 +208,7 @@ Escalation"). The merge gate still applies: `--admin` bypasses only the
 bot/review gate, never a failing or running check. Genuine doubt goes back to
 the PM, not a frozen pipeline.
 
-Default to main-based PRs; use stacked PRs only on explicit request.
+Default to main-based PRs; stack PRs only for a true dependency chain.
 
 ## Deterministic Tools — Run These Yourself
 

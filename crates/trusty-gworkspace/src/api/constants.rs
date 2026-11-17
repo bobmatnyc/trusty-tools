@@ -40,15 +40,20 @@ pub const USERINFO_URL: &str = "https://www.googleapis.com/oauth2/v2/userinfo";
 /// Test: Compile-time constant; smoke test asserts it parses as a URL.
 pub const OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 
-/// Full OAuth scope set requested by the interactive consent flow.
+/// Full OAuth scope set requested by the interactive consent flow when no
+/// scope preset is named — the default.
 ///
-/// Why: This MUST stay identical to the Python CLI's scope set so that the
-/// tokens minted here are wire-compatible with the existing
+/// Why: The default set MUST stay identical to the Python CLI's scope set so
+/// that the tokens minted here are wire-compatible with the existing
 /// `~/.gworkspace-mcp/tokens.json` (Google keys refresh tokens by the exact
 /// granted scope set; a mismatch would force re-consent and could invalidate
 /// a token shared with the Python implementation).
 /// A token minted before a scope was added keeps its old grant; that profile
 /// must re-run `setup` to pick the new scope up (#8539).
+/// This is one of two consent scope sets. `setup --scopes readonly` and
+/// `add_account`'s `scopes: "readonly"` request [`READONLY_SCOPES`] instead;
+/// a profile minted that way is not Python-compatible and carries no write
+/// scope (#10746 ok-T20).
 /// What: `openid` plus ten Google API scopes covering userinfo, Calendar,
 /// Gmail (modify, settings.basic), Drive, Docs, Tasks, Sheets, and Slides.
 /// Test: `scope_string_matches_constant_set`,
@@ -66,6 +71,26 @@ pub const OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/presentations",
+];
+
+// #10746: ok-T20 read-only scope preset
+/// The `readonly` consent preset: the scopes an import needs, and no write
+/// scope.
+///
+/// Why: A bulk import (trusty-connectors, OKF criterion 148) reads Gmail,
+/// Drive and Docs only. A token that can send mail or delete files is more
+/// authority than that job needs, so the owner mints a separate profile with
+/// this set.
+/// What: `openid`, `userinfo.email`, `gmail.readonly`, `drive.readonly` and
+/// `documents.readonly`, as full scope URLs. Selected by
+/// `ScopePreset::ReadOnly`; never the default.
+/// Test: `readonly_preset_scope_string_is_exact`.
+pub const READONLY_SCOPES: &[&str] = &[
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/drive.readonly",
+    "https://www.googleapis.com/auth/documents.readonly",
 ];
 
 /// Default profile name for token storage — matches Python implementation.

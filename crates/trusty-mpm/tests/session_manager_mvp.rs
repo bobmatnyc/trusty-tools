@@ -2418,14 +2418,23 @@ async fn fleet_route_marks_dead_session_unresumable() {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register project");
 
     let id = seed_dead_errored_session(&mgr, root.path(), &repo_url, "fleet").await;
 
-    let (status, body) =
-        decode_response(fleet_by_project_route(axum::extract::State(state.clone())).await).await;
+    let (status, body) = decode_response(
+        fleet_by_project_route(
+            axum::extract::State(state.clone()),
+            axum::extract::Query(std::collections::HashMap::new()),
+        )
+        .await,
+    )
+    .await;
     assert_eq!(status, axum::http::StatusCode::OK);
     let projects = body["projects"].as_array().expect("projects array");
     let widget = find_row(projects, "project_name", "widget");
@@ -2469,14 +2478,15 @@ async fn session_manager_github_repo_url_produces_project_name() {
         .await
         .expect("create");
 
-    assert!(
-        record.tmux_name.starts_with("tm-trusty-tools-"),
-        "a GitHub repo_url must produce tm-<repo>-NN, got: {}",
+    // #10478: the first session for the repo is the bare `tm-<repo>`.
+    assert_eq!(
+        record.tmux_name, "tm-trusty-tools",
+        "a GitHub repo_url must produce tm-<repo>, got: {}",
         record.tmux_name
     );
     assert!(
         !record.tmux_name.starts_with("tm-local-"),
-        "must not fall through to tm-local-NN when repo_url is a GitHub URL: {}",
+        "must not fall through to tm-local when repo_url is a GitHub URL: {}",
         record.tmux_name
     );
 }

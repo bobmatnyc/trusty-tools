@@ -95,7 +95,8 @@ impl Lane {
 /// tests; this file reads only whether the limiter or the deadline spoke first.
 fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
     use crate::service::rpc::{
-        admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+        admin, chat, file, project, project_ensure, project_map, queries, reads, streams, warm,
+        writes,
     };
 
     let index = serde_json::json!({ "index_id": INDEX });
@@ -124,6 +125,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::Value::Null,
         ),
+        // #10739: the per-path admission query is a read.
+        (
+            reads::METHOD_INDEX_PATH_ADMITS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "path": "index.md" }),
+        ),
         (reads::METHOD_CHUNKS_LIST, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_GET, Lane::Free, scoped.clone()),
         (reads::METHOD_GRAPH_STATS, Lane::Free, index.clone()),
@@ -136,6 +143,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             reads::METHOD_CALL_CHAIN,
             Lane::Free,
             serde_json::json!({ "index_id": INDEX, "entry_point": "anything" }),
+        ),
+        // #10738: a read, so `free` like the rest of slice 2.
+        (
+            reads::METHOD_INDEX_FILE_STATUS,
+            Lane::Free,
+            serde_json::json!({ "index_id": INDEX, "body": { "path": "src/a.rs" } }),
         ),
         // Slice 3's queries: every HTTP route is in `interactive_limited`.
         (queries::METHOD_QUERY, Lane::Interactive, query.clone()),
@@ -202,6 +215,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             serde_json::json!({
                 "index_id": INDEX, "body": { "path_prefix": "src", "dry_run": true },
             }),
+        ),
+        // #10551: the embed-only resume takes the bulk lane, like the other index writes.
+        (
+            writes::METHOD_INDEX_EMBED_MISSING,
+            Lane::Bulk,
+            serde_json::json!({ "index_id": INDEX, "body": { "dry_run": true } }),
         ),
         (
             writes::METHOD_INDEX_REINDEX,
@@ -298,6 +317,12 @@ fn lanes() -> Vec<(&'static str, Lane, serde_json::Value)> {
             Lane::Free,
             serde_json::Value::Null,
         ),
+        // #10531: a registry write in the free lane, like `search.index.create`.
+        (
+            project_ensure::METHOD_PROJECT_ENSURE,
+            Lane::Free,
+            serde_json::json!({ "project_key": "o/r", "name": "r", "root": "/nonexistent-10531" }),
+        ),
         (project_map::METHOD_PROJECT_PIN, Lane::Free, index.clone()),
         (
             project_map::METHOD_PROJECT_UNPARK,
@@ -333,7 +358,8 @@ fn state_with(permits: usize, deadline: Duration) -> Arc<SearchAppState> {
 /// The whole socket router, exactly as `service::socket` assembles it.
 fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     use crate::service::rpc::{
-        admin, chat, file, project, project_map, queries, reads, streams, warm, writes,
+        admin, chat, file, project, project_ensure, project_map, queries, reads, streams, warm,
+        writes,
     };
 
     let held = Arc::clone(state);
@@ -353,6 +379,7 @@ fn router(state: &Arc<SearchAppState>) -> RpcRouter {
     let router = warm::register(router, state);
     let router = project::register(router, state);
     let router = project_map::register(router, state);
+    let router = project_ensure::register(router, state);
     let router = file::register(router, state);
     streams::register(router, state)
 }

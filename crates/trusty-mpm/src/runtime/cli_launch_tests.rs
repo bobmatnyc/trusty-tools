@@ -347,7 +347,7 @@ fn send_spec_launch_types_a_short_line_naming_a_readable_spec() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
+    super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-sess", &spec, &spec_dir, None)
         .expect("a short line is typed");
 
     let written = entries(&spec_dir);
@@ -372,8 +372,16 @@ fn a_cli_launch_is_named_after_its_tmux_session() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-dogfood", &spec, &spec_dir)
-        .expect("a short line is typed");
+    super::send_spec_launch_with(
+        Some(&bin),
+        None,
+        "/w/tm",
+        "tm-dogfood",
+        &spec,
+        &spec_dir,
+        None,
+    )
+    .expect("a short line is typed");
 
     let written = LaunchSpec::verify(&entries(&spec_dir)[0]).expect("readable");
     assert_eq!(
@@ -395,12 +403,67 @@ fn send_spec_launch_removes_the_spec_when_tmux_fails() {
     let spec_dir = tmp.path().join("specs");
     let spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
 
-    let err = super::send_spec_launch_with(Some(&bin), "/w/tm", "tm-sess", &spec, &spec_dir)
-        .expect_err("a failing send-keys is an error");
+    let err =
+        super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-sess", &spec, &spec_dir, None)
+            .expect_err("a failing send-keys is an error");
 
     assert!(matches!(err, CliLaunchError::Send(_)), "{err:?}");
     assert!(err.to_string().contains("fake failure"), "{err}");
     assert!(entries(&spec_dir).is_empty(), "the spec must be removed");
+}
+
+/// #11270: a binding launch of an Architect spec issues the grant the shim
+/// redeems for the spec file it types; without a root it types nothing, and
+/// a failed send leaves no grant behind.
+#[serial_test::serial]
+#[test]
+fn a_cli_launch_starts_its_architect_through_the_shim_grant_11270() {
+    use crate::core::session_profile::{SessionProfile, launch_env};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join(".trusty-mpm");
+    let spec_dir = tmp.path().join("specs");
+    let mut spec = super::inplace_spec(tmp.path(), Path::new("/p"), false);
+    spec.env_set.push(launch_env(SessionProfile::Architect));
+
+    let (bin, log) = fake_tmux(tmp.path(), 0);
+    let err =
+        super::send_spec_launch_with(Some(&bin), None, "/w/tm", "tm-a", &spec, &spec_dir, None)
+            .expect_err("no root, no grant");
+    assert!(matches!(err, CliLaunchError::Grant(_)), "{err:?}");
+    assert!(!log.exists(), "nothing was typed");
+    assert!(entries(&spec_dir).is_empty(), "no spec was left");
+
+    super::send_spec_launch_with(
+        Some(&bin),
+        None,
+        "/w/tm",
+        "tm-a",
+        &spec,
+        &spec_dir,
+        Some(&root),
+    )
+    .expect("the Architect line is typed");
+    let typed = LaunchSpec::consume(&entries(&spec_dir)[0]).expect("the typed spec");
+    assert_eq!(
+        crate::runtime::architect_grant::redeem(&root, &typed),
+        Ok(())
+    );
+
+    let failing = tmp.path().join("failing");
+    std::fs::create_dir_all(&failing).expect("mkdir");
+    let (bin, _) = fake_tmux(&failing, 1);
+    super::send_spec_launch_with(
+        Some(&bin),
+        None,
+        "/w/tm",
+        "tm-a",
+        &spec,
+        &spec_dir,
+        Some(&root),
+    )
+    .expect_err("a failing send-keys is an error");
+    let grants = crate::runtime::architect_grant::grant_dir(&root);
+    assert!(entries(&grants).is_empty(), "the grant was revoked");
 }
 
 /// #8308: a CLI spec has no managed session, so the child gets no

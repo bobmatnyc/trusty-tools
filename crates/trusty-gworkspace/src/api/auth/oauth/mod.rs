@@ -21,6 +21,8 @@ pub mod client_store;
 pub mod errors;
 pub mod flow;
 pub mod pkce;
+// #10746: ok-T20 read-only scope preset
+pub mod scope_preset;
 
 pub use client_store::{
     ClientSource, persist_profile_client, profile_client_path, profile_client_source,
@@ -29,3 +31,4 @@ pub use client_store::{
 pub use flow::{
     ClientCreds, ConsentOutcome, DefaultMode, resolve_client_creds, run_consent, run_consent_with,
 };
+pub use scope_preset::ScopePreset;

@@ -1,0 +1,2 @@
+Added
+- The SPEC-OKF-01 §4.4 bundle lock (#10746): one writer at a time on `_sources/okf.lock`. `put`, `verify`, `move_concept` and `Bundle::recover` take it per call once a write is certain (a refused or unchanged write creates no lock file); an ingest run holds it for the whole run; `SourceRegistry::upsert_at` loads, upserts and saves the registry under it. Concurrent writers no longer lose `log.md` entries or registry rows. `Bundle::open` recovers under the lock and, while another writer holds it, reports `recovery_deferred` instead.

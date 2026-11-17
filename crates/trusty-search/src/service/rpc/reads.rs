@@ -20,11 +20,13 @@
 //! | `search.index.status` | `GET /indexes/{id}/status` |
 //! | `search.index.config.get` | `GET /indexes/{id}/config` |
 //! | `search.config.get` | `GET /config` |
+//! | `search.index.path.admits` | none — socket-only (#10739) |
 //! | `search.chunks.list` | `GET /indexes/{id}/chunks` |
 //! | `search.graph.get` | `GET /indexes/{id}/graph` |
 //! | `search.graph.stats` | `GET /indexes/{id}/graph/stats` |
 //! | `search.graph.neighbors` | `GET /indexes/{id}/graph/neighbors` |
 //! | `search.call_chain` | `GET /indexes/{id}/call_chain` |
+//! | `search.index.file.status` | none (socket-only, #10738) |
 //!
 //! A route whose HTTP form splits its arguments across a path segment and a
 //! query string carries them as ONE `params` object here: the path's `{id}`
@@ -57,7 +59,7 @@ use trusty_common::uds::server::RpcRouter;
 
 use crate::service::server::{
     CallChainParams, ChunksParams, ConfigResponse, GraphQueryParams, IndexConfigView,
-    ListIndexesParams, NeighborsParams, SearchAppState,
+    ListIndexesParams, NeighborsParams, PathAdmission, PathAdmitsParams, SearchAppState,
 };
 use crate::service::socket::NoParams;
 
@@ -75,6 +77,8 @@ pub const METHOD_INDEX_STATUS: &str = "search.index.status";
 pub const METHOD_INDEX_CONFIG_GET: &str = "search.index.config.get";
 /// `GET /config` — the daemon's resolved memory limits.
 pub const METHOD_CONFIG_GET: &str = "search.config.get";
+/// #10739: socket-only — does an index's live admission policy admit one path?
+pub const METHOD_INDEX_PATH_ADMITS: &str = "search.index.path.admits";
 /// `GET /indexes/{id}/chunks` — a page of one index's chunk corpus.
 pub const METHOD_CHUNKS_LIST: &str = "search.chunks.list";
 /// `GET /indexes/{id}/graph` — the whole symbol graph as D3/Cytoscape JSON.
@@ -85,6 +89,10 @@ pub const METHOD_GRAPH_STATS: &str = "search.graph.stats";
 pub const METHOD_GRAPH_NEIGHBORS: &str = "search.graph.neighbors";
 /// `GET /indexes/{id}/call_chain` — the annotated call tree, as plain text.
 pub const METHOD_CALL_CHAIN: &str = "search.call_chain";
+/// One path's revision evidence: `{path, present, content_sha256,
+/// chunk_count, identity}` (#10738). Socket-only. Params use the write
+/// envelope, `{index_id, body: {path}}`.
+pub const METHOD_INDEX_FILE_STATUS: &str = "search.index.file.status";
 
 /// Every method this slice registers, in registration order.
 ///
@@ -98,11 +106,14 @@ pub const METHODS: &[&str] = &[
     METHOD_INDEX_STATUS,
     METHOD_INDEX_CONFIG_GET,
     METHOD_CONFIG_GET,
+    METHOD_INDEX_PATH_ADMITS,
     METHOD_CHUNKS_LIST,
     METHOD_GRAPH_GET,
     METHOD_GRAPH_STATS,
     METHOD_GRAPH_NEIGHBORS,
     METHOD_CALL_CHAIN,
+    // #10738 — per-file revision evidence.
+    METHOD_INDEX_FILE_STATUS,
 ];
 
 /// The one argument an index-scoped method with no query string carries.
@@ -167,8 +178,9 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     }
 
     use crate::service::server::{
-        call_chain_report, config_report, graph_neighbors_report, graph_report, graph_stats_report,
-        index_chunks_report, index_config_report, index_status_report, list_indexes_report,
+        call_chain_report, config_report, file_status_report, graph_neighbors_report, graph_report,
+        graph_stats_report, index_chunks_report, index_config_report, index_status_report,
+        list_indexes_report, FileStatusRequest,
     };
 
     let r = router;
@@ -193,6 +205,15 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
         |s, p| index_status_report(&s, &p.index_id).await
     );
 
+    // #10738: per-file revision evidence, in the put/remove envelope.
+    let r = fallible!(
+        r,
+        METHOD_INDEX_FILE_STATUS,
+        super::writes::IndexBody<FileStatusRequest>,
+        serde_json::Value,
+        |s, p| file_status_report(&s, &p.index_id, p.body).await
+    );
+
     // ---- config ------------------------------------------------------------
     let r = fallible!(
         r,
@@ -204,6 +225,14 @@ pub fn register(router: RpcRouter, state: &Arc<SearchAppState>) -> RpcRouter {
     let r = ok!(r, METHOD_CONFIG_GET, NoParams, ConfigResponse, |_s, _p| {
         config_report()
     });
+    // #10739: the per-path admission query (SPEC-OKF-01 D2).
+    let r = fallible!(
+        r,
+        METHOD_INDEX_PATH_ADMITS,
+        IndexScoped<PathAdmitsParams>,
+        PathAdmission,
+        |s, p| crate::service::server::path_admits_report(&s, &p.index_id, &p.params.path)
+    );
 
     // ---- chunks ------------------------------------------------------------
     let r = fallible!(

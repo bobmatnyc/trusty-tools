@@ -52,6 +52,18 @@ pub struct PersistedIndex {
     /// Glob patterns to exclude on top of the built-in ignores.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude_globs: Vec<String>,
+    /// #10532: the resolved exclude profile name (`std-v1` or `custom`).
+    ///
+    /// Why: `index_status` shows `profile: std-v1@<hash>` so drift from the
+    /// standard is visible. `None` is an index persisted before the profile
+    /// existed: it loads unchanged and reports no profile.
+    /// Test: `a_pre_profile_index_loads_with_no_profile` in
+    /// `service::server::profile_10532_tests`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// #10532: [`crate::core::profile::hash`] of `exclude_globs` when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_hash: Option<String>,
     /// Extension allow-list (e.g. `["rs", "py"]`, without leading dot).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
@@ -236,7 +248,7 @@ pub struct PersistedIndex {
     /// Why: `TRUSTY_WARMBOOT_MAX_INDEXES` ranks indexes by recency to decide which
     /// to warm-boot eagerly. Sort key = `max(last_queried_unix, last_indexed_unix)`.
     /// `None` means never queried (first-run / pre-upgrade).
-    /// What: updated fire-and-forget in `search_handler` (rate-limited ≤ 60 s).
+    /// What: updated fire-and-forget in `search_report` (rate-limited ≤ 60 s).
     /// Warm-boot defers an entry older than `TRUSTY_WARMBOOT_MAX_AGE_HOURS` (#8275).
     /// Test: `persistence_timestamps::tests::last_queried_and_indexed_round_trips`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,6 +437,8 @@ impl Default for PersistedIndex {
             additional_roots: Vec::new(),
             include_paths: Vec::new(),
             exclude_globs: Vec::new(),
+            profile: None,
+            profile_hash: None,
             extensions: Vec::new(),
             domain_terms: Vec::new(),
             path_filter: Vec::new(),
@@ -600,7 +614,7 @@ pub fn indexes_toml_path() -> Result<PathBuf> {
 ///
 /// Why: each index has its own subdir for its HNSW snapshot and chunks file.
 /// Centralising the layout here means `commit_parsed_batch`, the daemon's
-/// shutdown handler, and `delete_index_handler` all agree on the same paths.
+/// shutdown handler, and `delete_index_report` all agree on the same paths.
 /// What: returns `<data_dir>/indexes/<id>/` after creating the parent tree.
 /// Test: `tests::per_index_dir_created` checks the dir exists after the call.
 pub fn index_data_dir(index_id: &str) -> Result<PathBuf> {
@@ -817,7 +831,7 @@ pub fn load_index_registry_at(path: &Path) -> Result<Vec<PersistedIndex>> {
 /// Serializes every `indexes.toml` read-modify-write in this process (#4871).
 ///
 /// Why: each mutation is a load → mutate → whole-file save, and nothing
-/// ordered them. `search_handler` alone spawns a fire-and-forget
+/// ordered them. `search_report` alone spawns a fire-and-forget
 /// `update_last_queried_unix` per query, so a busy daemon runs many of these
 /// concurrently against the same file, alongside registration handlers and the
 /// boot reaper. Any write landing between another task's load and its save was
@@ -1007,7 +1021,7 @@ pub fn upsert_index_registry_entry_at(path: &Path, entry: PersistedIndex) -> Res
 /// next daemon restart re-registers the entry and pre-allocates an HNSW arena
 /// for it — production saw 60+ "deleted" indexes accumulate this way and pin
 /// 24 GB of RSS. This function is the persistence half of that fix; it is
-/// called from `delete_index_handler` so the removal survives restart.
+/// called from `delete_index_report` so the removal survives restart.
 /// What: load → filter out `id` → atomic save. No-op when id absent.
 /// Test: `tests::remove_index_persists_to_toml` registers two indexes, removes
 /// one, reloads the file, asserts only the survivor remains.

@@ -515,6 +515,36 @@ pub struct SessionRecord {
     #[serde(default)]
     pub tmux_server: Option<String>,
 
+    /// The `$N` id of the tmux session `pane_id` was read in (#10442).
+    ///
+    /// Why: tm names sessions `tm-<folder>`, so a dead session's name can be
+    /// reused by an unrelated one on the same server. `$N` is never reused
+    /// within one server instance, so with `tmux_server` it names one session
+    /// instance for all time; a send re-resolves only into that instance.
+    /// What: written with `pane_id` at every capture and by a successful
+    /// rebind. `None` for every record written before this field, and skipped
+    /// when `None`, so such a record re-saves byte-identical.
+    /// Test: `tmux_session_id_round_trips_and_old_records_load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_session_id: Option<String>,
+
+    /// The socket path of the tmux server this record's session runs on
+    /// (#10101).
+    ///
+    /// Why: a PM launched on its workspace's `-L` server is reachable only
+    /// through that server; the record must say which one, and the stored path
+    /// lets a later caller check that a `-L <name>` still resolves to it.
+    /// Unlike [`Self::tmux_server`], which is the server PROCESS identity
+    /// (`<pid>:<start_time>`, read with `pane_id`), this is the server's
+    /// ADDRESS.
+    /// What: `None` means the default server, and is every record written
+    /// before this field; skipped when `None`, so such a record re-saves
+    /// byte-identical. Nothing writes it yet (the launch change is #10101's
+    /// PR C).
+    /// Test: `tmux_socket_round_trips_and_old_records_load`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket: Option<std::path::PathBuf>,
+
     /// Delivery status of the turnkey `--task` pane injection (#2364).
     ///
     /// Why: `inject_task_when_ready` was fire-and-forget before this field
@@ -630,6 +660,23 @@ pub struct SessionRecord {
     /// `a_session_record_lacking_context_usage_still_deserializes`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<crate::core::context_usage::ContextUsage>,
+
+    // #10476: the session that spawned this one through the MCP bridge.
+    /// The managed session that created this one through the stdio bridge's
+    /// `session_new` call (#10476).
+    ///
+    /// Why: `tm tui` groups a worker under the session that made it, and only
+    /// the bridge knows the caller (its `TM_MANAGED_SESSION_ID`).
+    /// What: a recorded parent id and nothing more; not containment (DOC-66
+    /// §5). Set once after spawn by
+    /// [`super::SessionManager::set_parent_session_id`]. `#[serde(default)]`
+    /// loads every older record as `None`; skipped when `None`, so a parentless
+    /// record re-saves byte-identical. An older daemon drops the field on its
+    /// next upsert.
+    /// Test: `parent_round_trips_with_and_without_value`,
+    /// `old_sessions_json_resaves_without_new_key` in `parent_session_tests.rs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<ManagedSessionId>,
 }
 
 impl SessionRecord {

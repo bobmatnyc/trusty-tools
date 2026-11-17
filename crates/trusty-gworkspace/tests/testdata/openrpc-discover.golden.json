@@ -125,6 +125,18 @@
           }
         },
         {
+          "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Requires a \"profile\" other than the default \"gworkspace-mcp\", which keeps its full-scope token. Omit for the full default scope set. Any other value is refused.",
+          "name": "scopes",
+          "required": false,
+          "schema": {
+            "description": "Optional scope preset. \"readonly\" requests only openid, userinfo.email, gmail.readonly, drive.readonly and documents.readonly; write tools then fail on this profile with an error naming the missing scope. Requires a \"profile\" other than the default \"gworkspace-mcp\", which keeps its full-scope token. Omit for the full default scope set. Any other value is refused.",
+            "enum": [
+              "readonly"
+            ],
+            "type": "string"
+          }
+        },
+        {
           "description": "How long to wait for the user to complete browser consent, in seconds (clamped to 10-90; default 60).",
           "name": "timeout_secs",
           "required": false,
@@ -4281,7 +4293,7 @@
       ]
     },
     {
-      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists. create/update take task fields flat (title, notes, due, status, completed), as a 'task' (create) or 'updates' (update) object, or both: the two are merged, and a field set in both with different values is an error.",
+      "description": "CRUD, complete/move, get one, or search tasks within Google Tasks lists. create/update take task fields flat (title, notes, due, status, completed), as a 'task' (create) or 'updates' (update) object, or both: the two are merged, and a field set in both with different values is an error. list returns 'next_page_token' when more pages exist; pass it back as 'page_token'.",
       "name": "manage_tasks",
       "params": [
         {
@@ -4331,11 +4343,31 @@
           }
         },
         {
+          "description": "list: page size. Omitted: API default (20).",
+          "name": "max_results",
+          "required": false,
+          "schema": {
+            "description": "list: page size. Omitted: API default (20).",
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
           "description": "Task notes/description (create/update).",
           "name": "notes",
           "required": false,
           "schema": {
             "description": "Task notes/description (create/update).",
+            "type": "string"
+          }
+        },
+        {
+          "description": "list: the 'next_page_token' (or 'nextPageToken') from a previous list response, to fetch the next page.",
+          "name": "page_token",
+          "required": false,
+          "schema": {
+            "description": "list: the 'next_page_token' (or 'nextPageToken') from a previous list response, to fetch the next page.",
             "type": "string"
           }
         },
@@ -4370,6 +4402,24 @@
           "required": false,
           "schema": {
             "description": "search: include completed tasks (default true).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "list: include deleted tasks. Omitted: API default (false).",
+          "name": "show_deleted",
+          "required": false,
+          "schema": {
+            "description": "list: include deleted tasks. Omitted: API default (false).",
+            "type": "boolean"
+          }
+        },
+        {
+          "description": "list: include hidden (completed and cleared) tasks. Omitted: API default (false).",
+          "name": "show_hidden",
+          "required": false,
+          "schema": {
+            "description": "list: include hidden (completed and cleared) tasks. Omitted: API default (false).",
             "type": "boolean"
           }
         },

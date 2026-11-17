@@ -511,3 +511,169 @@ fn list_filters_orders_and_limits_like_the_prototype() -> R {
     }
     Ok(())
 }
+
+/// #10679: task, session and header documents for the views-agree tests.
+const VIEWS: [&str; 3] = ["items", "meta", "sessions"];
+
+/// A store holding the task D01, its session and the header, before the owner's answer.
+fn views_store(root: &Path, format: Format) -> Result<Store, DashError> {
+    let store = Store::new(root, format)
+        .with_secret_scan(no_secret)
+        .with_archive(Box::new(Accept));
+    store.batch(&[
+        Op::Set {
+            collection: "items".into(),
+            id: "D01".into(),
+            data: json!({"status": "open", "session": "tm-a"}),
+            if_version: None,
+        },
+        Op::Set {
+            collection: "sessions".into(),
+            id: "tm-a".into(),
+            data: json!({"state": "needs owner"}),
+            if_version: None,
+        },
+        Op::Set {
+            collection: "meta".into(),
+            id: "state".into(),
+            data: json!({"fleet_line": "1 decision waiting"}),
+            if_version: None,
+        },
+    ])?;
+    Ok(store)
+}
+
+/// The one batch that answers D01 and moves its session and the header with it.
+fn answer_batch() -> Vec<Op> {
+    let up = |collection: &str, id: &str, data: Value| Op::Update {
+        collection: collection.into(),
+        id: id.into(),
+        data,
+        if_version: None,
+    };
+    vec![
+        up("items", "D01", json!({"status": "answered"})),
+        up("sessions", "tm-a", json!({"state": "working"})),
+        up(
+            "meta",
+            "state",
+            json!({"fleet_line": "0 decisions waiting"}),
+        ),
+    ]
+}
+
+/// (task status, session state, header line) as one snapshot reads them.
+fn views_of(store: &Store) -> Result<[String; 3], DashError> {
+    let snap = store.snapshot(&VIEWS)?;
+    let field = |coll: &str, id: &str, key: &str| {
+        snap.get(coll)
+            .and_then(|docs| docs.iter().find(|d| d.id == id))
+            .and_then(|d| d.data.get(key))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    Ok([
+        field("items", "D01", "status"),
+        field("sessions", "tm-a", "state"),
+        field("meta", "state", "fleet_line"),
+    ])
+}
+
+/// Store files that differ between `old` and `new`, relative and sorted;
+/// the change log and the lock excluded.
+fn changed_files(old: &Path, new: &Path) -> Vec<PathBuf> {
+    let rel = |root: &Path| {
+        snapshot(root)
+            .into_iter()
+            .filter_map(|(p, b)| Some((p.strip_prefix(root).ok()?.to_path_buf(), b)))
+            .filter(|(p, _)| !p.to_string_lossy().starts_with("changes"))
+            .collect::<Vec<_>>()
+    };
+    let before = rel(old);
+    rel(new)
+        .into_iter()
+        .filter(|f| !before.contains(f))
+        .map(|(p, _)| p)
+        .collect()
+}
+
+/// Holds `<root>/.lock` exclusively, as a writer in the middle of a batch does.
+fn hold_write_lock(root: &Path) -> Result<fs::File, Box<dyn std::error::Error>> {
+    let held = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join(".lock"))?;
+    // SAFETY: the fd stays open for `held`'s life; flock touches nothing else.
+    assert_eq!(unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX) }, 0);
+    Ok(held)
+}
+
+/// #10679: a read that lands while a batch is between its files sees the
+/// task, its session and the header from the same side of the batch. The
+/// writer is the Python server's protocol: the exclusive `.lock`, then one
+/// file replaced at a time.
+#[test]
+fn a_read_during_a_batch_sees_task_session_and_header_together() -> R {
+    let old_view = ["open", "needs owner", "1 decision waiting"].map(String::from);
+    let new_view = ["answered", "working", "0 decisions waiting"].map(String::from);
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        let (old, new) = (tmp.path().join("old"), tmp.path().join("new"));
+        views_store(&old, format)?;
+        views_store(&new, format)?.batch(&answer_batch())?;
+        let files = changed_files(&old, &new);
+        assert!(files.len() >= 3, "{format}: {files:?}");
+        let held = hold_write_lock(&old)?;
+        fs::copy(new.join(&files[0]), old.join(&files[0]))?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = old.clone();
+        let reader = std::thread::spawn(move || {
+            let store = Store::new(root, format).with_lock_wait(Duration::from_secs(10));
+            let _ = tx.send(views_of(&store).map_err(|e| e.to_string()));
+        });
+        // A torn read answers here, between the batch's first and last file.
+        let early = rx.recv_timeout(Duration::from_millis(300)).ok();
+        for f in &files[1..] {
+            fs::copy(new.join(f), old.join(f))?;
+        }
+        drop(held);
+        let got = match early {
+            Some(got) => got,
+            None => rx.recv_timeout(Duration::from_secs(10))?,
+        }?;
+        reader.join().map_err(|_| "reader panicked")?;
+        assert!(
+            got == old_view || got == new_view,
+            "{format}: task, session and header disagree: {got:?}"
+        );
+        assert_eq!(views_of(&Store::new(&old, format))?, new_view, "{format}");
+    }
+    Ok(())
+}
+
+/// #10679: a writer that never lets go makes a read unavailable within the
+/// store's bounded wait; the read never returns a torn view instead.
+#[test]
+fn a_read_behind_a_hung_writer_is_unavailable_within_the_wait() -> R {
+    for format in FORMATS {
+        let tmp = tempfile::tempdir()?;
+        views_store(tmp.path(), format)?;
+        let held = hold_write_lock(tmp.path())?;
+        let store = Store::new(tmp.path(), format).with_lock_wait(Duration::from_millis(150));
+        let start = Instant::now();
+        let got = store.get("items", "D01");
+        assert!(
+            matches!(got, Err(DashError::Unavailable(_))),
+            "{format}: {got:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "{format}: unbounded"
+        );
+        drop(held);
+        assert_eq!(store.get("items", "D01")?.data["status"], json!("open"));
+    }
+    Ok(())
+}

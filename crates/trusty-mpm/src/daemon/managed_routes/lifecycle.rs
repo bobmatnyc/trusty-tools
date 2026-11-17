@@ -179,10 +179,13 @@ pub struct SpawnParams {
 /// `Err` before any side effect); (1) provisions an isolated workspace; (2)
 /// creates the tmux session rooted at that workspace; (3) spawns the selected
 /// runtime in the pane (a spawn failure marks the record errored but is not
-/// fatal — the record still exists). Returns the final [`SessionRecord`].
+/// fatal — the record still exists); (4) clears the project's decommissioned
+/// state (#10988), returning `Err` when that fails. Returns the final
+/// [`SessionRecord`].
 /// Test: `crate::daemon::mcp_session::tests::session_new_invalid_runtime_errors`
 /// covers the early runtime-rejection path; the HTTP spawn tests cover the
-/// provision/create/spawn path.
+/// provision/create/spawn path; `a_launch_on_main_spawn_reactivates_a_decommissioned_project`
+/// and `a_spawn_reports_a_failed_reactivation` cover step 4.
 ///
 /// #2605: the session id is now a CALLER-SUPPLIED parameter rather than minted
 /// internally, so the asynchronous-spawn path (`background: true`) can learn it
@@ -295,6 +298,28 @@ pub async fn spawn_managed(
     // uses, so `tm session new --task` / `tm ticket` start working immediately
     // instead of sitting idle at an empty prompt.
     spawn_task_injection(state.clone(), record.clone(), inject_flag);
+
+    // #10988: every spawn path (launch-on-main, worktree, local-only) returns
+    // through here, so this is the one place a new session reactivates its
+    // decommissioned project. A failure is the caller's error: the session
+    // runs, but the project still reads decommissioned.
+    let registry = state.project_registry().await;
+    registry
+        .reactivate_for_session(&record)
+        .await
+        .map_err(|e| {
+            format!(
+                "session {} ({}) is running, but its project could not be reactivated and \
+             still reads decommissioned (#10988): {e}",
+                record.id, record.tmux_name
+            )
+        })?;
+    // #10989: undo a decommission park of this project's index; a failure is named.
+    state
+        .session_manager()
+        .await
+        .restore_parked_index(&registry, &record)
+        .await?;
 
     Ok(record)
 }
@@ -692,7 +717,7 @@ fn find_reusable_inproject_session(
         .find(|r| {
             r.source_id.as_deref() == Some(source_id)
                 && r.state == ManagedSessionState::Active
-                && tmux.session_exists(&r.tmux_name)
+                && crate::session_manager::tmux_route::session_exists_on_own_server(tmux, r)
         })
         .cloned()
 }
@@ -786,7 +811,7 @@ pub(super) async fn spawn_managed_inproject(
     write_task_md(&worktree, &params.task, session_id);
 
     // `source.repo_url` is a canonical GitHub HTTPS URL, so the session-manager can
-    // derive the project name (`tm-<repo>-NN`, issue #1955, formerly
+    // derive the project name (`tm-<repo>[-NN]`, issue #1955, formerly
     // `tmpm-<repo>-<8hex>` per #1789) for the tmux session name. Using a
     // synthetic HTTPS URL is safe: `parse_github_path`
     // normalises both SSH and HTTPS forms to the same `{ owner, repo }` pair, and
@@ -883,7 +908,7 @@ pub(super) async fn spawn_managed_inproject(
     );
 
     emit(ProvisioningStage::LaunchingRuntime);
-    let tmux_arc = mgr.tmux_driver();
+    let tmux_arc = mgr.tmux_driver_for(&record).map_err(|e| e.to_string())?; // See #10101
     // #8233: the post-send launch check below needs the driver after the adapter
     // has taken ownership of its Arc.
     let tmux_driver = tmux_arc.clone();
@@ -1085,6 +1110,11 @@ pub async fn resume_managed(
         .await
         .map_err(ResumeManagedError::from)?;
     mgr.note_operator_resume(id).await;
+    // #10989 F3: unpark a decommission park before the launch; a failure is
+    // this resume's error once the runtime is up, as on the spawn path.
+    let restored = mgr
+        .restore_parked_index(&*state.project_registry().await, &record)
+        .await;
 
     let workspace = record
         .workspace_path
@@ -1144,7 +1174,12 @@ pub async fn resume_managed(
     }
 
     // #6766: the post-send launch check below takes its own driver handle.
-    let adapter = build_adapter(record.runtime, mgr.tmux_driver(), fw_root);
+    let adapter = build_adapter(
+        record.runtime,
+        mgr.tmux_driver_for(&record)
+            .map_err(|e| ResumeManagedError::Other(e.to_string()))?,
+        fw_root,
+    );
     // #1744: prefer --resume <id> when a claude_session_id was captured at
     // SessionStart; launch fresh when the id is absent or stale (#6765 — no
     // --continue fallback). ClaudeCodeAdapter overrides spawn_resume
@@ -1182,7 +1217,9 @@ pub async fn resume_managed(
         // not that `claude` started. A launch-time refusal leaves the pane at a
         // bare shell, and this arm used to log a resume that never happened.
         &mgr,
-        &*mgr.tmux_driver(),
+        &*mgr
+            .tmux_driver_for(&record)
+            .map_err(|e| ResumeManagedError::Other(e.to_string()))?,
         &record,
         &workspace,
     )
@@ -1192,6 +1229,7 @@ pub async fn resume_managed(
         // an error.
         return Err(ResumeManagedError::Other(msg));
     }
+    restored.map_err(ResumeManagedError::Other)?;
 
     Ok(mgr.get(id).await.unwrap_or(record))
 }

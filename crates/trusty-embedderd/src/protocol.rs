@@ -84,6 +84,10 @@ pub struct EmbedParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbedResult {
     pub embeddings: Vec<Vec<f32>>,
+    /// The model's input window in tokens (#9284). Optional on the wire: an
+    /// older daemon omits it, and a client that does not know it ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<usize>,
 }
 
 /// JSON-RPC 2.0 error object.

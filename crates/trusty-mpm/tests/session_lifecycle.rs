@@ -238,7 +238,7 @@ async fn rename_route_suffixes_collision() {
     .await;
 
     assert_eq!(status, axum::http::StatusCode::OK, "body={body}");
-    // `b_name` already carries its own `tm-<leaf>-NN` serial (from
+    // `b_name` already carries its own `tm-<leaf>[-NN]` serial (from
     // `resolve_session_name`'s per-project allocation, e.g. `tm-r-02`) —
     // dedupe increments that EXISTING trailing ordinal in place rather than
     // appending a second `-2` suffix (avoids an ugly `tm-r-02-2`).

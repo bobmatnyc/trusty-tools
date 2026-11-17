@@ -220,10 +220,13 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       host, launches the selected `runtime` (default claude-code) with
     ///       `task`, and returns the new session's id / tmux name / workspace
     ///       path / state / attach command. An unknown `runtime` value is an
-    ///       error string.
+    ///       error string. `parent_session_id` (#10476) is the bridge-stamped
+    ///       calling session; the daemon validates it and drops a bad one.
     /// Test: `dispatch_session_new_tool` (mock) + the daemon-side
     ///       `session_new_spawns_via_manager` integration test; the ADR-0055
     ///       refusal by `mcp_session_new_refuses_a_remote_repo_url`.
+    // #10476: an eighth input; a struct would churn every implementor.
+    #[allow(clippy::too_many_arguments)]
     async fn session_new(
         &self,
         repo_url: &str,
@@ -232,6 +235,7 @@ pub trait OrchestratorBackend: Send + Sync {
         name_hint: Option<&str>,
         runtime: Option<&str>,
         ephemeral: Option<bool>,
+        parent_session_id: Option<&str>,
     ) -> Result<Value, String>;
 
     /// Back `session_stop`: stop a session's runtime, keeping its workspace.
@@ -301,6 +305,17 @@ pub trait OrchestratorBackend: Send + Sync {
     ///       `dispatch_session_delete_records_rejects_bad_arguments` (mock);
     ///       behaviour in `crate::daemon::mcp_session_bulk`'s tests.
     async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String>;
+
+    /// Back `session_archive` (#10991): move the session's project directory
+    /// to the 0700 archive with a manifest; `dry_run` reports the plan only.
+    /// Test: `dispatch_session_archive_tool` (mock);
+    /// `session_archive_unknown_session_is_not_found`.
+    async fn session_archive(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Value, String>;
 
     /// Back `session_activity`: capture pane + lifecycle state.
     ///
@@ -566,6 +581,12 @@ pub trait OrchestratorBackend: Send + Sync {
     ///      `needs_disambiguation` flag.
     /// Test: `dispatch_project_resolve_tool` (mock).
     async fn project_resolve(&self, query: &str) -> Result<Value, String>;
+
+    /// Back `project_decommission` (#10988): stop a project's sessions and
+    /// mark it decommissioned, keeping every workspace and index.
+    /// Test: `dispatch_project_decommission_tool` (mock);
+    /// `project_decommission_marks_the_project_and_lists_it`.
+    async fn project_decommission(&self, name: &str) -> Result<Value, String>;
 
     // ── #2550: session-manager PROXY tools (#1440 follow-up) ─────────────────
     //

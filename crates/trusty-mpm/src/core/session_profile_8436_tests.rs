@@ -2,6 +2,7 @@
 //! then the Architect core, in that order (owner rulings Q1a, Q2a, Q3a).
 
 use super::*;
+use crate::core::architect_core::collapse_whitespace;
 use crate::core::content_source::test_support::rc;
 use crate::core::framework_content::FrameworkContent;
 use crate::core::framework_content::tests::legacy_content;
@@ -65,6 +66,46 @@ fn the_architect_composes_architect_md_then_agents_md_then_the_core() {
     assert!(manual_end <= heading && heading < sentinel && sentinel < core_start);
     // The legacy supervisor sections are gone.
     assert!(!prompt.contains("# Trusty Fleet Supervisor"), "{prompt}");
+}
+
+/// The manual's question-id sentences (`architect.md`, "Question ids").
+const HEX_ID_RULE: [&str; 2] = ["exactly two lowercase hex digits", "Never use `00`."];
+
+/// The offset of each [`HEX_ID_RULE`] sentence in `flat`, or `None` when one
+/// is missing or occurs more than once.
+/// Test: `the_composed_architect_prompt_carries_the_hex_id_rule_before_the_agents_md_and_the_core`.
+fn hex_id_rule_offsets(flat: &str) -> Option<Vec<usize>> {
+    HEX_ID_RULE
+        .iter()
+        .map(
+            |rule| match flat.match_indices(rule).collect::<Vec<_>>()[..] {
+                [(at, _)] => Some(at),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
+/// Why: #9291 — only the byte-for-byte goldens pinned the hex-id rule, and a
+/// golden refresh would drop it silently.
+/// What: the rule reaches the composed prompt once, from the manual, ahead of
+/// the owner's `AGENTS.md` section and the core.
+#[test]
+fn the_composed_architect_prompt_carries_the_hex_id_rule_before_the_agents_md_and_the_core() {
+    let body = format!("# Owner rules\n\n{SENTINEL}\n");
+    let tmp = architect_dir(Some(body.as_bytes()));
+    let flat = collapse_whitespace(&compose_in(rc(), tmp.path()).0);
+    let heading = flat
+        .find("## Owner overrides (AGENTS.md)")
+        .expect("the AGENTS.md heading");
+    let core_start = flat.len() - collapse_whitespace(&folded(rc(), "architect/core.md")).len();
+    let offsets = hex_id_rule_offsets(&flat).expect("the manual's hex-id rule, once each");
+    assert!(
+        offsets.iter().all(|&at| at < heading) && heading < core_start,
+        "the hex-id rule is not ahead of AGENTS.md and the core: {offsets:?}"
+    );
+    // Shown able to fail: the same check rejects a prompt without the rule.
+    assert!(hex_id_rule_offsets(&flat.replace(HEX_ID_RULE[0], "")).is_none());
 }
 
 #[test]

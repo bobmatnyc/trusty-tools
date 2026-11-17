@@ -99,6 +99,7 @@ fn no_row_without_a_session_id() {
     record_compress_with(
         dir.path(),
         "  ",
+        "cargo test",
         400_000,
         40_000,
         "rtk_binary",
@@ -126,6 +127,7 @@ fn a_compress_run_appends_exactly_one_row() {
     record_compress_with(
         dir.path(),
         "sess-a",
+        "cargo test",
         400_000,
         40_000,
         "rtk_binary",
@@ -160,6 +162,7 @@ fn a_ledger_write_failure_does_not_fail_the_compression() {
     record_compress_with(
         dir.path(),
         "sess-a",
+        "cargo test",
         400_000,
         40_000,
         "rtk_binary",

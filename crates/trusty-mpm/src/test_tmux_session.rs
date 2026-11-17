@@ -196,12 +196,12 @@ pub(crate) fn reserved_session_name(tag: &str) -> String {
 /// the daemon DERIVES lands in the reserved namespace (#6116).
 ///
 /// Why: a fixture that seeds a record does not choose its `tmux_name` —
-/// `build_managed_session_name` derives `tm-<project>-NN` from the repo url. So
+/// `build_managed_session_name` derives `tm-<project>[-NN]` from the repo url. So
 /// the namespace has to be reached through the project slug, not by naming the
 /// session directly.
 /// What: the reserved prefix with `tm-` and the trailing dash removed
 /// (`xtest`), joined to `tag`. Feed it as the repo segment of a url and the
-/// derived name is `tm-xtest-<tag>-NN`.
+/// derived name is `tm-xtest-<tag>[-NN]`.
 /// Test: [`tests::a_derived_project_slug_yields_a_reserved_name`]; end to end
 /// by `session_resume_headless_dead_runtime_reconciles_and_restarts`, which
 /// asserts the name it actually got is reserved.
@@ -831,7 +831,7 @@ mod tests {
     }
 
     /// A fixture that reaches the namespace through a derived name gets there
-    /// too: `tm-<project>-NN` built from the slug is reserved.
+    /// too: `tm-<project>[-NN]` built from the slug is reserved.
     #[test]
     fn a_derived_project_slug_yields_a_reserved_name() {
         let derived = trusty_common::session_naming::build_managed_session_name(

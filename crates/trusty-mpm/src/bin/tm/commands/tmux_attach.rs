@@ -63,6 +63,7 @@
 //! real `tmux` process).
 
 use anyhow::Context as _;
+use trusty_mpm::tui::focus::FocusResult;
 
 /// Outcome of [`tmux_attach`] — tells a looping caller (the guided picker)
 /// whether it may safely read `stdin` again.
@@ -503,7 +504,8 @@ fn print_fail_closed_hint(name: &str) {
     eprintln!(
         "tm: attach from a fresh shell (outside any tmux client) with: \
          {}",
-        trusty_mpm::core::tmux::shell_attach_command(name)
+        // #10101: the server that holds the session.
+        super::tmux_attach_server::shell_attach_command_on(name)
     );
 }
 
@@ -574,6 +576,18 @@ fn switch_decision(
 /// [`AttachOutcome::TargetUnresolved`] WITHOUT invoking tmux at all — never a
 /// bare, unguarded `switch-client`.
 fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
+    switch_client_to_with(name, false)
+}
+
+/// [`switch_client_to`], with `quiet` silencing every write to the terminal.
+///
+/// Why (#10476): the tui's Focus key runs this guard from inside its
+/// alternate screen, where an `eprintln!` or tmux's inherited output would
+/// tear the frame. The guard itself is unchanged; only output differs.
+/// What: `quiet` skips [`print_fail_closed_hint`] and the "switching" line,
+/// and runs `switch-client` with captured output, folding tmux's stderr into
+/// the error.
+fn switch_client_to_with(name: &str, quiet: bool) -> anyhow::Result<AttachOutcome> {
     let tmux_pane = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok());
     let pane_tty = tmux_pane.as_deref().and_then(pane_tty_for);
     let own_stdin_tty = own_controlling_tty(libc::STDIN_FILENO);
@@ -589,16 +603,24 @@ fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
         session.as_deref(),
         client_tty.as_deref(),
     ) else {
-        print_fail_closed_hint(name);
+        if !quiet {
+            print_fail_closed_hint(name);
+        }
         return Ok(AttachOutcome::TargetUnresolved);
     };
 
-    eprintln!("tm: switching client to session '{name}'");
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
-    let status = std::process::Command::new(&tmux_bin)
-        .args(switch_client_argv(name, &client_tty))
-        .status()
-        .context("failed to invoke tmux")?;
+    let mut command = std::process::Command::new(&tmux_bin);
+    command.args(switch_client_argv(name, &client_tty));
+    if quiet {
+        let output = command.output().context("failed to invoke tmux")?;
+        if !output.status.success() {
+            anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        return Ok(AttachOutcome::Switched);
+    }
+    eprintln!("tm: switching client to session '{name}'");
+    let status = command.status().context("failed to invoke tmux")?;
     if !status.success() {
         anyhow::bail!(
             "tmux switch-client exited with failure — the target session '{name}' may be \
@@ -631,7 +653,13 @@ fn switch_client_to(name: &str) -> anyhow::Result<AttachOutcome> {
 /// fail-closed/loop-termination decision via
 /// `attach_outcome_ends_interactive_loop_matrix`.
 pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
+    use super::tmux_attach_server as server;
+    // #10101 (Dc3): the server holding `name`; a refusal stops the attach.
+    let socket = server::target_socket(name)?;
     if inside_tmux() {
+        if server::on_other_server(std::env::var("TMUX").ok().as_deref(), &socket) {
+            return new_window_attach(name, &socket);
+        }
         return switch_client_to(name);
     }
     eprintln!("tm: attaching to session '{name}'");
@@ -644,7 +672,7 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     // the full scope note).
     let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
     let status = std::process::Command::new(&tmux_bin)
-        .args(attach_argv(name))
+        .args(server::attach_argv_on(&socket, name))
         .status()
         .context("failed to invoke tmux")?;
     if !status.success() {
@@ -653,9 +681,173 @@ pub(crate) fn tmux_attach(name: &str) -> anyhow::Result<AttachOutcome> {
     Ok(AttachOutcome::Attached)
 }
 
+/// Dc3 (#10101): a target on another tmux server opens a window in the
+/// caller's session that runs the attach there; no switch-client crosses
+/// servers. No `$TMUX_PANE` to place the window fails closed.
+/// Test: `a_cross_server_attach_opens_a_window_running_the_attach`.
+fn new_window_attach(name: &str, socket: &std::path::Path) -> anyhow::Result<AttachOutcome> {
+    let pane = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok());
+    new_window_attach_in(name, socket, pane.as_deref(), false)
+}
+
+/// [`new_window_attach`] with the caller pane given, and `quiet` silencing
+/// every terminal write (the tui's Focus key, #10476).
+/// What: the window opens after the caller pane's window, named by its `@N`
+/// id; tmux refuses a `%N` pane id as a `new-window -a` target. A pane, or a
+/// window id, that cannot be read moves nothing. A session the target server
+/// does not hold is an error, before any window opens.
+/// Test: `a_cross_server_focus_opens_the_attach_window`,
+/// `focus_on_a_session_no_server_holds_moves_nothing`,
+/// `a_cross_server_focus_without_a_pane_moves_nothing`,
+/// `a_caller_pane_with_no_window_moves_nothing`,
+/// `a_failed_attach_window_is_a_focus_failure`.
+fn new_window_attach_in(
+    name: &str,
+    socket: &std::path::Path,
+    pane: Option<&str>,
+    quiet: bool,
+) -> anyhow::Result<AttachOutcome> {
+    use super::tmux_attach_server as server;
+    let tmux_bin = trusty_mpm::core::tmux::resolve_tmux_binary_or_bare();
+    // #10101: Dc3 — `new-window -a -t %N` is refused ("can't specify pane here").
+    let window = match pane {
+        Some(pane) => server::window_of_pane(&tmux_bin, pane)?,
+        None => None,
+    };
+    let Some(window) = window else {
+        if !quiet {
+            print_fail_closed_hint(name);
+        }
+        return Ok(AttachOutcome::TargetUnresolved);
+    };
+    // #10101: Dc3 — no server holds `name`: an attach window would only close.
+    if !server::server_holds(&tmux_bin, socket, name)? {
+        anyhow::bail!("session '{name}' not found on any tmux server");
+    }
+    let argv = server::new_window_attach_argv(&window, &tmux_bin, socket, name);
+    if !quiet {
+        eprintln!("tm: opening a window attached to '{name}' on its own tmux server");
+    }
+    let output = std::process::Command::new(&tmux_bin)
+        .args(argv)
+        .output()
+        .context("failed to invoke tmux")?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(AttachOutcome::Switched)
+}
+
+/// The tui's Focus hook: move this terminal's tmux client to session `name`.
+///
+/// Why (#10476): the tui's Focus key must land on the session's existing
+/// window and must not open one (owner, #10476 comment 2). This is the one
+/// guarded switch path (#2678) kept in the binary (Architect Q4), lent to
+/// the lib through `trusty_mpm::tui::focus::set_focus_hook`. #10101 ruling
+/// Dc3: `switch-client` cannot cross tmux servers, so a session on another
+/// server gets the window `tm attach` opens for it.
+/// What: outside tmux, [`FocusResult::NotInTmux`] and no tmux call at all —
+/// never the `attach-session` branch of [`tmux_attach`]. Inside tmux, the
+/// server holding `name` is found as `tm attach` finds it, then
+/// [`focus_with`] decides.
+/// Test: `focus_with` tests below; `focus_outcome_maps_the_guard_result`; the
+/// guard keeps its `switch_decision_*` tests; the real switch is checked in
+/// the sandbox live check.
+pub(crate) fn focus_switch(name: &str) -> FocusResult {
+    if !inside_tmux() {
+        return FocusResult::NotInTmux;
+    }
+    // #10101: Dc3 — the target's server decides switch or attach window.
+    let target = super::tmux_attach_server::target_socket(name);
+    let pane = tmux_pane_id_from_env(std::env::var("TMUX_PANE").ok());
+    focus_with(
+        name,
+        std::env::var("TMUX").ok().as_deref(),
+        pane.as_deref(),
+        target,
+    )
+}
+
+/// The Focus decision once the caller's `$TMUX`, its pane and the target's
+/// server socket are read (#10101, ruling Dc3).
+///
+/// Why: Focus must never report a move it did not make; a `switch-client` on
+/// the caller's server cannot reach a session on another server.
+/// What: an unresolved target server, or a caller `$TMUX` with no socket, is
+/// a failure and runs no tmux command. Same server: the quiet guarded
+/// [`switch_client_to_with`], unchanged. Another server: the quiet
+/// [`new_window_attach_in`] in the caller's session; no caller pane is
+/// [`FocusResult::Unresolved`], a non-zero tmux exit is
+/// [`FocusResult::Failed`].
+/// Test: `a_cross_server_focus_opens_the_attach_window`,
+/// `a_same_server_focus_keeps_the_guarded_switch`,
+/// `a_cross_server_focus_without_a_pane_moves_nothing`,
+/// `focus_with_no_caller_server_moves_nothing`,
+/// `focus_with_no_target_server_moves_nothing`,
+/// `a_failed_attach_window_is_a_focus_failure`.
+fn focus_with(
+    name: &str,
+    caller_tmux: Option<&str>,
+    pane: Option<&str>,
+    target: anyhow::Result<std::path::PathBuf>,
+) -> FocusResult {
+    use super::tmux_attach_server as server;
+    let target = match target {
+        Ok(target) => target,
+        Err(e) => return FocusResult::Failed(format!("{e:#}")),
+    };
+    // #10101: Dc3 — an unknown caller server is never taken as the target's.
+    if server::caller_socket(caller_tmux).is_none() {
+        return FocusResult::Failed(
+            "cannot tell which tmux server this terminal is on ($TMUX has no socket)".to_owned(),
+        );
+    }
+    if server::on_other_server(caller_tmux, &target) {
+        return focus_outcome(new_window_attach_in(name, &target, pane, true));
+    }
+    focus_outcome(switch_client_to_with(name, true))
+}
+
+/// Map the guard's outcome onto the tui's [`FocusResult`].
+fn focus_outcome(outcome: anyhow::Result<AttachOutcome>) -> FocusResult {
+    match outcome {
+        Ok(AttachOutcome::Switched) => FocusResult::Switched,
+        Ok(_) => FocusResult::Unresolved,
+        Err(e) => FocusResult::Failed(format!("{e:#}")),
+    }
+}
+
+/// Register [`focus_switch`] as the tui's Focus hook; called once at startup.
+pub(crate) fn install_tui_focus_hook() {
+    trusty_mpm::tui::focus::set_focus_hook(focus_switch);
+}
+
+#[cfg(test)]
+#[path = "tmux_focus_tests.rs"]
+mod focus_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_outcome_maps_the_guard_result() {
+        // #10476: the hook never reaches `attach-session`; the outcome map is
+        // the only branch after the guard.
+        assert!(!inside_tmux_from_env(None, None));
+        assert_eq!(
+            focus_outcome(Ok(AttachOutcome::Switched)),
+            FocusResult::Switched
+        );
+        assert_eq!(
+            focus_outcome(Ok(AttachOutcome::TargetUnresolved)),
+            FocusResult::Unresolved
+        );
+        assert!(matches!(
+            focus_outcome(Err(anyhow::anyhow!("can't find session"))),
+            FocusResult::Failed(e) if e.contains("can't find session")
+        ));
+    }
 
     /// Outside tmux, attach must use `attach-session` — today's behavior,
     /// unchanged for the non-nested case.

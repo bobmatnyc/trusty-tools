@@ -20,6 +20,7 @@
 //! Test: All handler tests live in `service/rpc_tests.rs`.
 
 pub mod analysis;
+pub(crate) mod analysis_scope;
 pub mod deep;
 pub mod facts;
 pub mod graph;

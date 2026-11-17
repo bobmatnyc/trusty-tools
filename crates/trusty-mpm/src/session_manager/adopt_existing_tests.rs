@@ -206,6 +206,8 @@ fn bare_record(
 ) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: tmux_name.into(),
         cwd: PathBuf::from("/tmp/bare"),
@@ -232,6 +234,7 @@ fn bare_record(
         deliverable_id: None,
         pane_id: pane_id.map(str::to_string),
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,

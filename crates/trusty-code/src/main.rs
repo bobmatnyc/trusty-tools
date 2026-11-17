@@ -303,9 +303,8 @@ enum Command {
     /// Attach to a live session and stream its events to the terminal until
     /// it reaches a terminal state or you press Ctrl-C (#2060).
     ///
-    /// Spawns its OWN ephemeral daemon (see `crate::cli::attach`'s docs) —
-    /// only useful against a session created within THIS same invocation
-    /// today; M1 sessions are in-memory, per daemon process.
+    /// Dials the running daemon for `--project` on its Unix socket, starting
+    /// one if none answers (#10169).
     Attach {
         /// The session id to attach to.
         session_id: String,

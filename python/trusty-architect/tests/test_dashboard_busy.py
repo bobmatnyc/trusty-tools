@@ -76,7 +76,7 @@ class TestOverlayPage(unittest.TestCase):
         self.assertIn("409", block)
         self.assertIn('x.hidden = !isErr', block)                     # Dismiss only in the error state
         self.assertIn("prefers-reduced-motion: reduce) { .busy-spin", PAGE)
-        self.assertIn("color-mix(in srgb, var(--bg) 70%, transparent)", PAGE)   # theme variables, no fixed colours
+        self.assertIn("color-mix(in srgb, var(--surface-0) 70%, transparent)", PAGE)   # theme variables, no fixed colours
 
     def test_shim_emits_the_three_phases(self):
         for ph in ('emit("start")', 'emit("settled")', 'emit("error"'):

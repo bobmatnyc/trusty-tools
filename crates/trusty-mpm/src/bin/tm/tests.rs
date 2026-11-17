@@ -451,6 +451,8 @@ fn cli_parses_doctor() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -504,6 +506,8 @@ fn cli_parses_doctor_prune_stale_skills() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -534,6 +538,8 @@ fn cli_parses_doctor_fix_skills() {
                 quarantine_mcp: None,
                 dir: None,
                 network: false,
+                dry_run: false,
+                only: _,
             }
         }
     ));
@@ -676,7 +682,7 @@ fn cli_parses_doctor_fix() {
 fn cli_parses_validate() {
     let cli = Cli::try_parse_from(["trusty-mpm", "validate"]).unwrap();
     match cli.command.unwrap() {
-        Command::Validate { path, repair } => {
+        Command::Validate { path, repair, .. } => {
             assert_eq!(path, None);
             assert!(!repair);
         }
@@ -689,7 +695,7 @@ fn cli_parses_validate_with_path_and_repair() {
     let cli =
         Cli::try_parse_from(["trusty-mpm", "validate", "--path", "/tmp/ws", "--repair"]).unwrap();
     match cli.command.unwrap() {
-        Command::Validate { path, repair } => {
+        Command::Validate { path, repair, .. } => {
             assert_eq!(path, Some(std::path::PathBuf::from("/tmp/ws")));
             assert!(repair);
         }
@@ -1450,12 +1456,16 @@ fn cli_parses_tui_defaults() {
             url,
             interval_ms,
             single_pane,
+            no_mouse,
+            ..
         } => {
             assert_eq!(url.as_deref(), Some(DEFAULT_URL));
             assert_eq!(interval_ms, 1000);
             // #6483: bare `tm tui` opts into nothing — the multipane
             // project_ctl dashboard is what `initial_view(false)` resolves to.
             assert!(!single_pane);
+            // #10476: the mouse is on unless the operator opts out.
+            assert!(!no_mouse);
             assert_eq!(
                 trusty_mpm::tui::initial_view(single_pane),
                 trusty_mpm::tui::TuiView::Multipane
@@ -1477,6 +1487,15 @@ fn cli_parses_tui_single_pane_opt_in() {
                 trusty_mpm::tui::TuiView::SinglePane
             );
         }
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}
+
+#[test]
+fn cli_parses_tui_no_mouse_opt_out() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "tui", "--no-mouse"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Tui { no_mouse, .. } => assert!(no_mouse),
         other => panic!("expected Tui, got {other:?}"),
     }
 }
@@ -1752,6 +1771,7 @@ fn cli_parses_daemon_defaults() {
             mcp,
             force,
             sandbox,
+            sandbox_credential,
         } => {
             // #6288 S3a: no bind default; the deprecated flag is unset.
             assert_eq!(addr, None);
@@ -1759,6 +1779,8 @@ fn cli_parses_daemon_defaults() {
             assert!(!mcp);
             assert!(!force);
             assert!(!sandbox);
+            // #10721: the default stays closed — no credential admitted.
+            assert_eq!(sandbox_credential, None);
         }
         other => panic!("expected Daemon, got {other:?}"),
     }
@@ -1856,7 +1878,10 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             // #7688: a bare `tm hook` is still the daemon relay, never the
             // prompt-feedback capture.
             prompt_feedback: false,
-            egress_guard: false
+            egress_guard: false,
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 

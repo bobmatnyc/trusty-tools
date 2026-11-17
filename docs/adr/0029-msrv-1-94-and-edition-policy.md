@@ -187,3 +187,12 @@ Vetted against [`INDEX.md`](./INDEX.md) per DOC-46 §3.
   credential authority, memory tiers — none of which constrains or is
   constrained by the compiler floor. This ADR changes no interface, process
   boundary, or data model.
+
+## Notes
+
+- **2026-11-03 (#10745, SPEC-OKF-01 §3 (n)):** The trusty-okf extraction worker
+  lives in `workers/okf-extract`, which the root `[workspace] exclude` lists. It
+  depends on xberg, which needs Rust 1.98, so it builds outside the workspace on
+  its own `rust-toolchain.toml` (1.98). The workspace MSRV stays 1.94 and this
+  ADR's policy does not apply to that directory.
+  `scripts/check_worker_dir_excluded.sh` guards the exclusion.

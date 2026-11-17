@@ -297,11 +297,11 @@ async fn import_fixture_is_additive_idempotent_and_explicitly_targets_bound_stor
     };
     let args = import_args(&root, "fixture-project-import-test", &destination).unwrap();
     assert_eq!(args["root"], store_root.to_str().unwrap());
-    let policy = trusty_kb::okg::policy::DocStorePolicy::new(vec![root.clone()]);
+    let policy = trusty_okf::build::policy::DocStorePolicy::new(vec![root.clone()]);
     for expected in [1, 0] {
-        let store = trusty_kb::store::KbStore::new(
+        let store = crate::kb::store::KbStore::new(
             store_root.clone(),
-            trusty_kb::schema::Profile::default_profile(),
+            trusty_okf::profile::Profile::default_profile(),
         );
         let result = crate::tools::okg::ingest_into_store(&args, store, &policy)
             .await

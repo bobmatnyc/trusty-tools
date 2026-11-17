@@ -11,15 +11,15 @@
 //! Test: `preflight_tests.rs`.
 
 use std::fmt;
-use std::io;
+use std::io::{self, Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use trusty_common::crate_config::{crate_config_path_at, load_at};
 use trusty_common::workspace_layout::expand_tilde;
 use trusty_mpm::core::child_repo_scan::{
-    ChildRepoScan, scan_for_child_repo, scan_for_child_repo_except,
+    ChildRepoScan, DeviceOf, device_of, scan_for_child_repo_exhaustive_with,
 };
 use trusty_mpm::core::trusty_tools_config::{CRATE_NAME, TrustyToolsConfig, WORKSPACE_ROOT_ENV};
 
@@ -30,6 +30,21 @@ const PROJECTS_ROOT_DIR: &str = "trusty-mpm-projects";
 
 /// The one child repository fleet init accepts, `<dir>/local` (#8878 R1).
 pub(crate) const PRIVATE_REPO_DIR: &str = "local";
+
+/// Directories the workspace-parent scan may visit under one fleet directory.
+///
+/// Why: #10355 — the Architect's own directory (scripts, inbox, evidence,
+/// `.claude/`) outgrew the shared 256-directory budget, and the exhausted scan
+/// refused every relaunch. The scan guards a supervisor grant, so exhaustion
+/// stays a refusal; the budget is sized so an ordinary Architect directory
+/// finishes, while a tree too large to check still refuses in bounded time.
+/// What: 64x [`trusty_mpm::core::child_repo_scan::WORKSPACE_SCAN_BUDGET`];
+/// each visit is one `read_dir`, one `stat` for `st_dev` and one `lstat` per
+/// child directory. Since #10457 skip-listed trees such as `node_modules`
+/// count against it too.
+/// Test: `an_architect_dir_wider_than_the_workspace_budget_passes`,
+/// `a_tree_wider_than_the_fleet_budget_refuses_in_bounded_time`.
+pub(crate) const FLEET_SCAN_BUDGET: usize = 16_384;
 
 /// Git variables that point a git command at a repository other than `-C <dir>`.
 const GIT_REDIRECT_VARS: &[&str] = &["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"];
@@ -123,7 +138,8 @@ impl std::error::Error for DirRefusal {}
 /// (`<home>/trusty-mpm-projects`, the configured root, the
 /// `TRUSTY_MPM_WORKSPACE_ROOT` value) or an ancestor of one, or a directory
 /// whose subtree holds a repository or cannot be scanned — except one private
-/// repository at `<dir>/local` (see [`check_private_repo`]); (7) a path with
+/// repository at `<dir>/local` (see [`check_private_repo`]) and the
+/// directory's own linked worktrees (see [`own_worktrees`]); (7) a path with
 /// a `.git` entry in any strict ancestor; (8) a repository whose `git remote`
 /// lists a remote or fails. A trusty-mpm config that exists but will not
 /// load is a refusal; a missing one is the default. A fresh directory, and a
@@ -135,6 +151,15 @@ impl std::error::Error for DirRefusal {}
 /// `a_private_local_repository_without_a_remote_passes`, and the rest of
 /// `preflight_tests.rs`.
 pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
+    check_with(dir, home, device_of)
+}
+
+/// [`check`] with the `st_dev` reader the repository scan uses.
+///
+/// Why: #10457 — a test cannot mount a filesystem, so it fakes the device of
+/// `<dir>/local` to prove a mount there refuses.
+/// Test: `a_mount_point_at_local_is_refused`.
+pub(crate) fn check_with(dir: &Path, home: &Path, device: DeviceOf) -> Result<PathBuf, DirRefusal> {
     let target = resolve(dir)?;
     if is_filesystem_root(&target)? {
         return Err(DirRefusal::FilesystemRoot(target));
@@ -150,7 +175,7 @@ pub(crate) fn check(dir: &Path, home: &Path) -> Result<PathBuf, DirRefusal> {
         });
     }
     refuse_config_dir(&target, &home)?;
-    refuse_workspace_parent(&target, &home)?;
+    refuse_workspace_parent(&target, &home, device)?;
     refuse_enclosing_work_tree(&target)?;
     refuse_remote(&target)?;
     Ok(target)
@@ -258,7 +283,16 @@ fn projects_roots(target: &Path, home: &Path) -> Result<Vec<PathBuf>, DirRefusal
 
 /// Refuse any projects root or an ancestor of one, or a directory with a
 /// repository in its subtree (the #7673 workspace-parent scan).
-fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal> {
+///
+/// What: the scan is the exhaustive rule (#10457): skip-listed trees are
+/// walked, and an escaping symlink, a mount point or an exhausted budget is
+/// [`DirRefusal::Unresolvable`].
+/// Test: `a_repository_deep_in_a_skip_listed_dir_is_refused`,
+/// `a_repository_behind_a_symlinked_dir_is_refused`,
+/// `a_symlink_escaping_the_dir_refuses_without_a_repository`,
+/// `a_large_node_modules_refuses_in_bounded_time`,
+/// `a_pnpm_style_node_modules_inside_the_dir_passes`, `a_mount_point_at_local_is_refused`.
+fn refuse_workspace_parent(target: &Path, home: &Path, device: DeviceOf) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
         reason,
@@ -274,24 +308,234 @@ fn refuse_workspace_parent(target: &Path, home: &Path) -> Result<(), DirRefusal>
     }
     // #8878 R1: a private `local/` repository is checked on its own, and the
     // scan still looks at everything beside it.
-    let scan = match private_repo(target)? {
-        None => scan_for_child_repo(target),
-        Some(local) => {
-            check_private_repo(target, &local)?;
-            scan_for_child_repo_except(target, &local)
+    // #10355: fleet budget, not the shared 256; exhaustion still refuses below.
+    // #10457: exhaustive rule; the shallow one missed deep and symlinked repos.
+    let local = private_repo(target)?;
+    // #10262: the target's own linked worktrees are left out like `local/`,
+    // and each is scanned on its own below.
+    let worktrees = own_worktrees(target);
+    let except: Vec<&Path> = local
+        .iter()
+        .chain(&worktrees)
+        .map(PathBuf::as_path)
+        .collect();
+    refuse_child_repo(target, target, &except, device, String::new())?;
+    // #10457: after the outer scan, which compares `local`'s device with the
+    // target's, so no `git` command runs inside a foreign mount.
+    if let Some(local) = &local {
+        check_private_repo(target, local, device)?;
+    }
+    for worktree in &worktrees {
+        let within = format!(", nested in its linked worktree {}", worktree.display());
+        refuse_child_repo(target, worktree, &except, device, within)?;
+        // #10262 critic: config the target's own listing does not read, such
+        // as an `includeIf "onbranch:"` on the worktree's branch, can add a remote.
+        let remotes = list_remotes(worktree)?;
+        if !remotes.is_empty() {
+            return Err(parent(format!(
+                "its linked worktree {} has remote(s) {}",
+                worktree.display(),
+                remotes.join(", ")
+            )));
         }
-    };
-    match scan {
+    }
+    Ok(())
+}
+
+/// Refuse `target` when the exhaustive scan of `root`, leaving out `except`,
+/// finds a repository or does not finish.
+///
+/// What: a found repository is [`DirRefusal::WorkspaceParent`] whose reason
+/// ends in `within`, plus the `git worktree` fix when the repository is a
+/// linked worktree; an unfinished scan is [`DirRefusal::Unresolvable`] of `root`.
+fn refuse_child_repo(
+    target: &Path,
+    root: &Path,
+    except: &[&Path],
+    device: DeviceOf,
+    within: String,
+) -> Result<(), DirRefusal> {
+    match scan_for_child_repo_exhaustive_with(root, except, FLEET_SCAN_BUDGET, device) {
         ChildRepoScan::Clear => Ok(()),
-        ChildRepoScan::Found(repo) => Err(parent(format!(
-            "it contains the repository {}",
-            repo.display()
-        ))),
-        ChildRepoScan::Incomplete(why) => Err(DirRefusal::Unresolvable {
+        ChildRepoScan::Found(repo) => Err(DirRefusal::WorkspaceParent {
             path: target.to_path_buf(),
+            reason: format!(
+                "it contains the repository {}{within}{}",
+                repo.display(),
+                worktree_fix(&repo)
+            ),
+        }),
+        ChildRepoScan::Incomplete(why) => Err(DirRefusal::Unresolvable {
+            path: root.to_path_buf(),
             reason: format!("the scan for repositories inside it did not finish: {why}"),
         }),
     }
+}
+
+/// The fix for a refused repository that is a linked worktree (its `.git` is
+/// a file); empty for any other repository.
+// #10262: the removal keeps the branch; `--force` would drop uncommitted work.
+fn worktree_fix(repo: &Path) -> String {
+    match std::fs::symlink_metadata(repo.join(".git")) {
+        Ok(meta) if meta.is_file() => format!(
+            "; it is a linked git worktree: find it with `git worktree list` in its repository \
+             and remove it with `git worktree remove {}` (no --force; its branch is kept)",
+            repo.display()
+        ),
+        _ => String::new(),
+    }
+}
+
+/// Linked worktrees of `target`'s own repository that sit inside `target`.
+///
+/// Why: #10262 — Claude Code agent worktrees of the Architect's own repository
+/// (`.claude/worktrees/agent-*`) are that project, not a child one, yet the
+/// scan refused them, so a stopped Architect could not relaunch. The grant
+/// guard is about other projects, so only a worktree that is provably the
+/// target's own is left out of the scan.
+/// What: for each record `<target>/.git/worktrees/<name>` (a real `.git`
+/// directory only), the worktree counts when every file that names its
+/// repository names `target`'s: the record's `commondir` resolves to
+/// `<target>/.git`; the record's `config.worktree` is absent or sets only
+/// `push.default` (#10560, see [`worktree_config_is_benign`]); its `gitdir` back
+/// pointer resolves to a directory strictly inside `target` other than
+/// `local/`; and that directory's `.git` is a regular file whose `gitdir:`
+/// resolves to the same record. Neither pointer may hold `..`. Anything
+/// unreadable or unmatched is left out, so the scan still sees it and refuses:
+/// the check fails closed.
+/// Test: `a_linked_worktree_of_the_dirs_own_repository_passes`,
+/// `a_worktree_that_is_not_the_dirs_own_still_refuses`,
+/// `a_worktree_record_whose_commondir_is_not_the_dirs_own_refuses`,
+/// `a_worktree_with_its_own_config_or_remote_refuses`,
+/// `a_worktree_config_holding_only_push_default_passes`,
+/// `a_worktree_config_with_any_other_key_refuses`,
+/// `an_unreadable_or_irregular_worktree_config_refuses`,
+/// `a_worktree_record_or_pointer_that_escapes_refuses`.
+fn own_worktrees(target: &Path) -> Vec<PathBuf> {
+    let git_dir = target.join(".git");
+    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
+        return Vec::new();
+    }
+    let records = git_dir.join("worktrees");
+    let Ok(entries) = std::fs::read_dir(&records) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| own_worktree(target, &records, &entry.path()))
+        .collect()
+}
+
+/// The worktree `record` describes, when it passes [`own_worktrees`]' test.
+fn own_worktree(target: &Path, records: &Path, record: &Path) -> Option<PathBuf> {
+    let record = std::fs::canonicalize(record).ok()?;
+    // A `.git/worktrees` symlinked elsewhere holds no record of this repository.
+    if record.parent() != Some(records) {
+        return None;
+    }
+    // #10262 critic CRITICAL: `commondir` names the repository git operates
+    // on; a relative one is relative to the record, as git reads it.
+    let common = std::fs::read_to_string(record.join("commondir")).ok()?;
+    let common = std::fs::canonicalize(record.join(common.trim())).ok()?;
+    if common != std::fs::canonicalize(records.parent()?).ok()? {
+        return None;
+    }
+    // #10262: a per-worktree config can set its own remotes or `core.worktree`.
+    // #10560: tm writes `push.default` there itself; only that key passes.
+    if !worktree_config_is_benign(&record.join("config.worktree")) {
+        return None;
+    }
+    let back = std::fs::read_to_string(record.join("gitdir")).ok()?;
+    let back = record.join(without_parent_dir(back.trim())?);
+    if back.file_name()? != ".git" {
+        return None;
+    }
+    let worktree = std::fs::canonicalize(back.parent()?).ok()?;
+    let inside = worktree.strip_prefix(target).ok()?;
+    if inside.as_os_str().is_empty() || inside == Path::new(PRIVATE_REPO_DIR) {
+        return None;
+    }
+    let git = worktree.join(".git");
+    if !std::fs::symlink_metadata(&git).ok()?.is_file() {
+        return None;
+    }
+    let pointer = std::fs::read_to_string(&git).ok()?;
+    let pointer = without_parent_dir(pointer.trim().strip_prefix("gitdir:")?.trim())?;
+    (std::fs::canonicalize(worktree.join(pointer)).ok()? == record).then_some(worktree)
+}
+
+/// The largest `config.worktree` [`worktree_config_is_benign`] reads; a larger
+/// one refuses. tm's own file is one line.
+const WORKTREE_CONFIG_MAX_BYTES: u64 = 64 * 1024;
+
+/// Whether the record's `config.worktree` at `path` is absent, or a regular
+/// file whose every key is `push.default`.
+///
+/// Why: #10560 — tm sets `push.default = current` per worktree, which names
+/// no repository, while any other key (`remote.*`, `core.worktree`, an
+/// include) could make the worktree part of another one.
+/// What: the file is opened once and refused unless the opened file is the
+/// regular file `lstat` saw; git's own parser lists its bytes with includes
+/// off, so section and name fold case as git does and an include directive or
+/// a subsection is a key of its own. Anything unreadable, oversized,
+/// unparsable or carrying any other key is `false`: the check fails closed.
+/// Test: `a_worktree_config_holding_only_push_default_passes`,
+/// `a_worktree_config_with_any_other_key_refuses`,
+/// `an_unreadable_or_irregular_worktree_config_refuses`.
+fn worktree_config_is_benign(path: &Path) -> bool {
+    let seen = match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return true,
+        Ok(meta) if meta.is_file() => meta,
+        _ => return false,
+    };
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let same = file.metadata().is_ok_and(|opened| {
+        opened.is_file() && (opened.dev(), opened.ino()) == (seen.dev(), seen.ino())
+    });
+    let mut bytes = Vec::new();
+    let read = file
+        .take(WORKTREE_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut bytes);
+    if !same || read.is_err() || bytes.len() as u64 > WORKTREE_CONFIG_MAX_BYTES {
+        return false;
+    }
+    config_keys(&bytes).is_some_and(|keys| keys.iter().all(|key| key == "push.default"))
+}
+
+/// The keys git's parser reads in the config text `bytes`, includes off, or
+/// `None` when git cannot run or rejects the text.
+fn config_keys(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut child = git()
+        .args(["config", "--file", "-", "--no-includes", "--list", "-z"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let wrote = child.stdin.take()?.write_all(bytes);
+    let out = child.wait_with_output().ok()?;
+    if wrote.is_err() || !out.status.success() {
+        return None;
+    }
+    // `-z`: each entry is `key`, or `key\nvalue`, ended by NUL.
+    let text = String::from_utf8(out.stdout).ok()?;
+    let entries = text.split_terminator('\0');
+    Some(
+        entries
+            .map(|entry| entry.split('\n').next().unwrap_or_default().to_owned())
+            .collect(),
+    )
+}
+
+/// `raw` as a path, or `None` when it is empty or holds a `..` component.
+// #10262 critic LOW: git writes these pointers absolute unless
+// `worktree.useRelativePaths` is set; a `..` one is refused, not resolved.
+fn without_parent_dir(raw: &str) -> Option<&Path> {
+    let path = Path::new(raw);
+    let plain = !raw.is_empty() && path.components().all(|c| c != Component::ParentDir);
+    plain.then_some(path)
 }
 
 /// `<target>/local` when it is a real directory whose `.git` is a real
@@ -330,12 +574,12 @@ fn private_repo(target: &Path) -> Result<Option<PathBuf>, DirRefusal> {
 /// Test: `a_private_local_repository_with_a_remote_is_refused`,
 /// `a_repository_nested_in_the_private_local_repository_is_refused`,
 /// `a_failing_remote_listing_on_the_private_repository_refuses`.
-fn check_private_repo(target: &Path, local: &Path) -> Result<(), DirRefusal> {
+fn check_private_repo(target: &Path, local: &Path, device: DeviceOf) -> Result<(), DirRefusal> {
     let parent = |reason: String| DirRefusal::WorkspaceParent {
         path: target.to_path_buf(),
         reason,
     };
-    match scan_for_child_repo(local) {
+    match scan_for_child_repo_exhaustive_with(local, &[], FLEET_SCAN_BUDGET, device) {
         ChildRepoScan::Clear => {}
         ChildRepoScan::Found(repo) => {
             return Err(parent(format!(

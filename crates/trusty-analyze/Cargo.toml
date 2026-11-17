@@ -26,7 +26,7 @@ name        = "trusty-analyze"
 # `lsp` module (stdio language-server client and child manager) and a public
 # `lsp` field on `AnalyzerAppState`, which breaks a struct literal outside the
 # crate. L3 and L4 of #9078 ride this same bump.
-version     = "0.13.0"
+version     = "0.13.1"
 edition     = "2021"
 license.workspace    = true
 authors.workspace    = true

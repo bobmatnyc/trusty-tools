@@ -18,7 +18,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::http::StatusCode;
 use tokio::sync::RwLock;
 
@@ -96,13 +95,10 @@ async fn cold_parked_index_accepts_a_write_by_driving_the_load() {
         .cold_store
         .register_cold_entries(vec![colocated_entry(id, root)]);
 
-    let axum::Json(body) = super::files::index_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(index_request(
-            "src/auth.rs",
-            "fn authenticate() -> bool { true }",
-        )),
+    let body = super::files::index_file_report(
+        &state,
+        id,
+        index_request("src/auth.rs", "fn authenticate() -> bool { true }"),
     )
     .await
     .expect("a cold-parked index must accept the write by loading itself");
@@ -172,13 +168,9 @@ async fn cold_parked_index_accepts_a_delete_by_driving_the_load() {
         "the index must be cold-parked before the delete is issued"
     );
 
-    let axum::Json(body) = super::files::remove_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(remove_request("src/auth.rs")),
-    )
-    .await
-    .expect("a cold-parked index must accept the delete by loading itself");
+    let body = super::files::remove_file_report(&state, id, remove_request("src/auth.rs"))
+        .await
+        .expect("a cold-parked index must accept the delete by loading itself");
 
     assert!(
         body["removed_chunks"].as_u64().unwrap_or(0) >= 1,
@@ -212,10 +204,10 @@ async fn write_against_an_unloadable_cold_index_fails_loudly() {
         .cold_store
         .register_cold_entries(vec![colocated_entry(id, missing_root)]);
 
-    let (code, axum::Json(body)) = super::files::index_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path(id.to_string()),
-        axum::Json(index_request("src/auth.rs", "fn authenticate() {}")),
+    let (code, body) = super::files::index_file_report(
+        &state,
+        id,
+        index_request("src/auth.rs", "fn authenticate() {}"),
     )
     .await
     .expect_err("a write whose index could not be loaded must not report success");
@@ -246,10 +238,10 @@ async fn write_against_an_unloadable_cold_index_fails_loudly() {
 #[serial_test::parallel]
 async fn unknown_index_is_still_404_after_the_write_path_learned_to_load() {
     let state = mock_state().await;
-    let (code, axum::Json(body)) = super::files::index_file_handler(
-        State(Arc::clone(&state)),
-        axum::extract::Path("never-existed".to_string()),
-        axum::Json(index_request("src/auth.rs", "fn authenticate() {}")),
+    let (code, body) = super::files::index_file_report(
+        &state,
+        "never-existed",
+        index_request("src/auth.rs", "fn authenticate() {}"),
     )
     .await
     .expect_err("genuinely unknown");
@@ -281,25 +273,23 @@ async fn concurrent_writes_on_a_cold_index_both_land_in_one_loaded_index() {
     let first = tokio::spawn({
         let state = Arc::clone(&state);
         async move {
-            super::files::index_file_handler(
-                State(state),
-                axum::extract::Path(id.to_string()),
-                axum::Json(index_request("src/one.rs", "fn one() -> u8 { 1 }")),
+            super::files::index_file_report(
+                &state,
+                id,
+                index_request("src/one.rs", "fn one() -> u8 { 1 }"),
             )
             .await
-            .map(|axum::Json(body)| body)
         }
     });
     let second = tokio::spawn({
         let state = Arc::clone(&state);
         async move {
-            super::files::index_file_handler(
-                State(state),
-                axum::extract::Path(id.to_string()),
-                axum::Json(index_request("src/two.rs", "fn two() -> u8 { 2 }")),
+            super::files::index_file_report(
+                &state,
+                id,
+                index_request("src/two.rs", "fn two() -> u8 { 2 }"),
             )
             .await
-            .map(|axum::Json(body)| body)
         }
     });
 

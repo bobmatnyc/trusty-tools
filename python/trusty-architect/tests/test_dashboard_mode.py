@@ -27,6 +27,26 @@ PAGE = serve.PAGE
 SESSION_CFG = serve.session_config("tm-apex Intent Ledger", "https://github.com/example/r/blob/main/")
 
 
+# #10606: a stub `tmux` (exit 1) first on PATH for the whole module, so no route reaches a real tmux server
+_STUB = _PATH = None
+
+
+def setUpModule():
+    global _STUB, _PATH
+    _STUB = tempfile.TemporaryDirectory()
+    stub = os.path.join(_STUB.name, "tmux")
+    with open(stub, "w") as f:
+        f.write("#!/bin/sh\nexit 1\n")
+    os.chmod(stub, 0o755)
+    _PATH = mock.patch.dict(os.environ, {"PATH": _STUB.name + os.pathsep + os.environ.get("PATH", "")})
+    _PATH.start()
+
+
+def tearDownModule():
+    _PATH.stop()
+    _STUB.cleanup()
+
+
 def start(store, config=None, **kw):
     srv = serve.DashboardServer(0, store, PAGE, config=config, **kw)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -39,9 +59,11 @@ class TestConfig(ServerCase):
         self.assertEqual(status, 200)
         cfg = json.loads(body)
         self.assertIsInstance(cfg.pop("nav"), list)
+        self.assertIsInstance(cfg.pop("features"), dict)   # #10571: optional-backend flags (test_dashboard_routes)
+        self.assertIsInstance(cfg.pop("warnings"), list)   # #10606: test_dashboard_python_floor
         self.assertEqual(cfg, {"mode": "architect", "title": "Architect Dashboard", "briefs_base": "",
                                "storage_key": "architect-dashboard",
-                               "briefs_abs": os.path.join(serve.ds.REPO, "local", "briefs") + "/", "tailnet": ""})
+                               "briefs_abs": os.path.join(serve.ds.REPO, "local", "briefs") + "/", "tailnet": "", "console": ""})
 
     def test_session_mode_config_carries_title_briefs_base_and_key(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,9 +74,11 @@ class TestConfig(ServerCase):
             with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/config.json", timeout=5) as r:
                 cfg = json.load(r)
         cfg.pop("nav")
+        cfg.pop("features")   # #10571
+        cfg.pop("warnings")   # #10606
         self.assertEqual(cfg, {"mode": "session", "title": "tm-apex Intent Ledger",
                                "briefs_base": "https://github.com/example/r/blob/main/", "storage_key": "tm-apex-intent-ledger",
-                               "tailnet": ""})
+                               "tailnet": "", "console": ""})
 
     def test_session_flag_sets_default_title_and_stable_key(self):
         cfg = serve.session_config("", "b/", "tm-apex")
@@ -110,7 +134,7 @@ class TestConfig(ServerCase):
         self.assertIn('out.unshift({ name: "Architect", port: ARCH })', script)   # a session page offers Architect without a nav
         self.assertIn("out.push({ name: self, port: here })", script)             # and shows itself selected
         self.assertIn("sel.value = here;", script)
-        self.assertRegex(page, r"@media \(max-width: 800px\) \{ \.hdr-mid \{ justify-self: stretch")   # phone width
+        self.assertRegex(page, r"@container \(max-width: 880px\) \{ \.hdr-actions \{[^}]*\} \.hdr-mid \{[^}]*flex: 1 1 100%")   # narrow: own full-width row
 
     def test_dropdown_options_and_navigation_run(self):
         import shutil
@@ -223,10 +247,12 @@ class TestPageGates(ServerCase):
             self.page_src = f.read()
 
     def test_architect_pane_markup_is_still_in_the_page_and_only_gated(self):
-        for needle in ('id="user-state-badge"', 'class="console-link"', 'id="sec-sessions"', 'id="sec-accounts"',
-                       'id="set-tz"', 'id="pool-gd"', "<h1>Architect Dashboard</h1>", "<title>Architect Dashboard</title>"):
+        for needle in ('id="user-state-badge"', 'class="ctl console-link"', 'id="sec-sessions"', 'id="sec-accounts"',
+                       'id="set-tz"', 'id="pool-gd"', '<h1>Architect<span class="dash"> Dashboard</span></h1>', "<title>Architect Dashboard</title>"):
             self.assertIn(needle, self.page_src)
-        self.assertEqual(self.page_src.count(" data-arch-only"), 10)   # 10 = 7 + sec-il (Df7) + sec-visualize + the Live link (ar-Te8)
+        # 14 = 11 (7 + sec-il + sec-visualize + the Live link + the morning brief settings group) + sec-projects, sec-cliprof
+        # and the reader's edit button (rd-edit-btn): the page at prototype 23da8a9 (#10571); 15 with the technical level group (#11064)
+        self.assertEqual(self.page_src.count(" data-arch-only"), 15)
         self.assertIn('html[data-mode="session"] [data-arch-only] { display: none !important; }', self.page_src)
 
     def test_page_reads_config_json_and_falls_back_to_architect(self):
@@ -256,7 +282,7 @@ class TestPageGates(ServerCase):
             import urllib.request
             with urllib.request.urlopen(f"http://127.0.0.1:{srv.server_address[1]}/", timeout=5) as r:
                 served = r.read().decode("utf-8")
-        rev = serve.page_rev(PAGE)
+        rev = serve.page_rev(PAGE, (serve.TOKENS_CSS,))   # the rev folds in tokens.css
         self.assertEqual(served, serve.inject(self.page_src, rev))
 
 

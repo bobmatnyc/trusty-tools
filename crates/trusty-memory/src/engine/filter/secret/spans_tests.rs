@@ -477,6 +477,12 @@ fn rule_inputs_fingerprint() -> u64 {
         format!("{MAX_FILE_EXTENSION_LEN} {MAX_GITHUB_USER_ID_LEN} {MAX_GITHUB_LOGIN_LEN}"),
         format!("{GITHUB_NOREPLY_DOMAIN:?} {MAX_SHORT_STEM_RUN}"),
         format!("{PEM_BEGIN:?} {PEM_END:?} {PEM_PRIVATE_KEY:?}"),
+        format!(
+            "{PASSWORD_NAME_SUFFIXES:?} {TOKEN_NAME_SUFFIXES:?} {BOUNDARY_NAME_SUFFIXES:?} \
+             {COMPOUND_KEY_NAMES:?}"
+        ),
+        format!("{MIN_QUERY_SECRET_LEN} {MIN_WEAK_NAME_SECRET_LEN} {MAX_STRUCTURAL_EQUALS}"),
+        format!("{MAX_LINE_SUFFIX_GROUPS} {MAX_LINE_SUFFIX_DIGITS}"),
         format!("{labels:?}"),
     ];
     fnv1a(parts.join("\n").as_bytes())
@@ -488,6 +494,8 @@ const PINNED_FINGERPRINTS: &[(u32, u64)] = &[
     (1, 0xa59c_686b_f67d_6f1b),
     // #9748: GitHub Projects v2 node-id shapes.
     (2, 0x5cef_e4b6_e8ed_c676),
+    // #9748: `:line` file references; URL userinfo, query and fragment.
+    (3, 0x6f2a_8387_062a_3b04),
 ];
 
 /// Why (#8623): a ledger keyed on `SECRET_FILTER_VERSION` is only as good as

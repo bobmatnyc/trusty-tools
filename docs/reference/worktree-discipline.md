@@ -267,9 +267,14 @@ commands (`cargo test`, `git diff`, `grep`, `ls`, …) into
 refused that shape. Since
 [#7477](https://github.com/bobmatnyc/trusty-tools/issues/7477), `tm` no longer
 wraps a Bash command whose working directory is inside a `.claude/worktrees/`
-isolation worktree, or whose working directory the hook cannot read. The
-command reaches the harness as written. If a refusal quotes `tm compress`, the
-installed `tm` predates that fix.
+isolation worktree, or whose working directory the hook cannot read, in that
+shape. Since [#10973](https://github.com/bobmatnyc/trusty-tools/issues/10973) a
+covered command there becomes one simple command instead,
+`tm compress --tool "<name>" -- <cmd>`, with no brace group, pipe, `;` or `$?`;
+an env-prefixed or wrapped command, a heavy build and a command a `deny` rule
+names still reach the harness as written. If a refusal quotes
+`{ … } | tm compress`, the installed `tm` predates #7477; if it quotes
+`tm compress --tool "…" -- …`, report it on #10973.
 
 Those strings live only in the harness bundle. `tm hook --pm-guard` clears every
 shape reported on [#6982](https://github.com/bobmatnyc/trusty-tools/issues/6982):

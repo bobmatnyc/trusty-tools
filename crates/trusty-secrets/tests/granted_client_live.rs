@@ -10,7 +10,7 @@
 //! temp home, with the `file` backend, and seeds `API_KEY` (the `file`
 //! backend keeps no "agents may use" flag, so run it on a host that is not
 //! under an agent, as EVO is; under Claude Code the grant is refused with
-//! `agent_use_refused`). It spawns the `child` role holding a read-only fd
+//! `agent_key_denied`, #10459). It spawns the `child` role holding a read-only fd
 //! on an unlinked, still empty file, named by `TRUSTY_SECRETS_TOKEN_FD`,
 //! grants the child's pid, writes the token through its own writable fd and
 //! tells the child to go. The child calls `trusty_secrets::granted::resolve`

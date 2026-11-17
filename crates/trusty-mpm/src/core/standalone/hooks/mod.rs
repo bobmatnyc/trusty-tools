@@ -50,6 +50,7 @@ pub mod repoint;
 
 pub use build_tree::{is_build_tree_hook_command, is_build_tree_statusline_command};
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Why no stable hook binary could be resolved (#7244).
@@ -815,6 +816,27 @@ fn strip_mpm_hook_entries_for_events(
     strip_hook_entries_matching_for_events(val, events, is_mpm_hook_command)
 }
 
+/// The command line one hook entry runs, as the identity predicates read it.
+///
+/// Why (#10459): an exec-form entry keeps its argv in `args`, so its `command`
+/// is the bare executable and no ` hook --pm-guard` suffix predicate sees it.
+/// What: `command` alone for a shell-form entry (no `args`), byte for byte;
+/// for an exec-form entry, `command` and every string `args` element joined
+/// by one space. `None` when `command` is missing or not a string.
+/// Test: `an_exec_form_entry_reads_as_its_joined_argv`.
+pub(crate) fn hook_entry_command_line(entry: &serde_json::Value) -> Option<Cow<'_, str>> {
+    let command = entry.get("command")?.as_str()?;
+    let Some(args) = entry.get("args").and_then(serde_json::Value::as_array) else {
+        return Some(Cow::Borrowed(command));
+    };
+    let mut line = command.to_owned();
+    for arg in args.iter().filter_map(serde_json::Value::as_str) {
+        line.push(' ');
+        line.push_str(arg);
+    }
+    Some(Cow::Owned(line))
+}
+
 /// Remove hook group ENTRIES matching `matches_cmd` for the given events (or
 /// all events) in-place, at PER-ENTRY (not per-group) granularity.
 ///
@@ -874,11 +896,9 @@ pub(crate) fn strip_hook_entries_matching_for_events(
                 continue; // unknown shape: leave entirely untouched
             };
             let before_inner_len = inner_hooks.len();
+            // #10459: an exec-form entry is matched on its joined argv.
             inner_hooks.retain(|entry| {
-                !entry
-                    .get("command")
-                    .and_then(|c| c.as_str())
-                    .is_some_and(&matches_cmd)
+                !hook_entry_command_line(entry).is_some_and(|line| matches_cmd(&line))
             });
             if inner_hooks.len() != before_inner_len {
                 event_changed = true;

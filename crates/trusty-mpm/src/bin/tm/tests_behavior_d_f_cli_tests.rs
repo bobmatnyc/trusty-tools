@@ -91,3 +91,35 @@ fn cli_f_does_not_shadow_another_subcommand() {
     let cli = Cli::try_parse_from(["trusty-mpm", "f", "x"]).unwrap();
     assert!(matches!(cli.command, Some(Command::F(_))));
 }
+
+/// #10966: `tm tui --architect-store` names the Architect view's store root,
+/// overriding the daemon's own resolution (#10944). Here because `tests.rs`
+/// is at its cap.
+#[test]
+fn cli_parses_tui_architect_store() {
+    let cli =
+        Cli::try_parse_from(["trusty-mpm", "tui", "--architect-store", "/tmp/arch-store"]).unwrap();
+    match cli.command.unwrap() {
+        Command::Tui {
+            architect_store, ..
+        } => assert_eq!(
+            architect_store,
+            Some(std::path::PathBuf::from("/tmp/arch-store"))
+        ),
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}
+
+/// #10944: `tm tui` parses with no store root; the daemon resolves it. The
+/// field is whatever `TM_ARCHITECT_STORE` says, else `None`.
+#[test]
+fn cli_parses_tui_without_architect_store() {
+    let cli = Cli::try_parse_from(["trusty-mpm", "tui"]).unwrap();
+    let from_env = std::env::var_os("TM_ARCHITECT_STORE").map(std::path::PathBuf::from);
+    match cli.command.unwrap() {
+        Command::Tui {
+            architect_store, ..
+        } => assert_eq!(architect_store, from_env),
+        other => panic!("expected Tui, got {other:?}"),
+    }
+}

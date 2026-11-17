@@ -45,16 +45,21 @@ impl InjectRecorder for ActionPublisher {
     /// What: builds [`inject_event`] under the projection lock, as
     /// `publish` does, so `seq` follows buffer order. No I/O.
     /// Test: `an_inject_is_one_tmux_message_event_with_its_digest_9167`,
-    /// `an_unreachable_bus_keeps_the_inject_event_buffered_9167`.
+    /// `an_unreachable_bus_keeps_the_inject_event_buffered_9167`,
+    /// `an_inject_after_the_settle_is_counted_lost_10412`.
     fn delivered(&self, delivery: &Delivery<'_>) {
         let threader = self.threader.lock();
-        let root = delivery
+        let session = delivery
             .claude_session_id
             .and_then(|s| uuid::Uuid::parse_str(s).ok())
-            .and_then(|u| threader.root_of(&SessionId(u)));
+            .map(SessionId);
+        let root = session.as_ref().and_then(|s| threader.root_of(s));
         let mut event = inject_event(delivery, threader.message_bodies(), root);
+        // #10906: the target session's project, from memory; no I/O.
+        event.project = session.as_ref().and_then(|s| threader.project_of(s));
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.client.send(event);
+        // #10412: through the settle lock, so a late inject is counted.
+        self.buffer(event);
     }
 }
 
@@ -78,6 +83,7 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
         payload: HarnessPayload::Message(message),
         id: EventId::new(),
         parent_id: root,
+        project: None,
     }
 }
 
@@ -87,7 +93,14 @@ pub fn inject_event(delivery: &Delivery<'_>, bodies: bool, root: Option<EventId>
 /// Why: the daemon and `tm sm serve --stdio` both inject; each records on
 /// its own producer, under the same `bus_allowed` rule.
 pub fn start_with_injects(state: &DaemonState) -> bool {
-    super::start(state);
+    start_with_injects_at(state, super::StartAt::from_env(state))
+}
+
+/// [`start_with_injects`] on a given bus and data dir (#10464).
+///
+/// Test: `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub fn start_with_injects_at(state: &DaemonState, at: super::StartAt) -> bool {
+    super::start_at(state, at);
     install(state)
 }
 

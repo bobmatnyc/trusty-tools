@@ -6,7 +6,6 @@
 //! recorder on its `InjectSlot`.
 //! Test: this file.
 
-use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -28,8 +27,10 @@ impl InjectRecorder for Seen {
 /// A backend whose `tmux` is a stub exiting `code`, reporting to `seen`.
 fn backend(dir: &tempfile::TempDir, code: i32, seen: &Arc<Seen>) -> TmuxBackend {
     let bin = dir.path().join("tmux");
-    std::fs::write(&bin, format!("#!/bin/sh\nexit {code}\n")).expect("stub");
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    // #10748: an in-process write left a fd a sibling test's fork inherits, so
+    // the stub's exec failed with ETXTBSY; a child writes it instead (#10248).
+    trusty_common::exec_stub::write_executable(&bin, format!("#!/bin/sh\nexit {code}\n"))
+        .expect("stub");
     let slot = InjectSlot::default();
     assert!(slot.set(seen.clone()));
     TmuxBackend {
@@ -46,6 +47,9 @@ fn backend(dir: &tempfile::TempDir, code: i32, seen: &Arc<Seen>) -> TmuxBackend 
 }
 
 /// A delivered send is one event naming the pane's session and the text.
+// #10748: the tmux spawn guard reads process-global `$HOME`, which a
+// concurrent `#[serial]` test redirects; a send then fails as refused.
+#[serial_test::serial]
 #[tokio::test]
 async fn a_delivered_send_is_one_message_event_9167() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -61,6 +65,9 @@ async fn a_delivered_send_is_one_message_event_9167() {
 }
 
 /// A send tmux refused typed nothing, so records nothing.
+// #10748: the tmux spawn guard reads process-global `$HOME`, which a
+// concurrent `#[serial]` test redirects; a send then fails as refused.
+#[serial_test::serial]
 #[tokio::test]
 async fn a_failed_send_records_nothing_9167() {
     let dir = tempfile::tempdir().expect("tempdir");

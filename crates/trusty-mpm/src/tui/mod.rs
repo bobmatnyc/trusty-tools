@@ -14,14 +14,24 @@
 //!
 //! [`dashboard`]: crate::tui::dashboard
 
+// #10966: goal ar-G01, the read-only Architect view.
+pub mod architect;
 pub mod client;
 pub mod coordinator;
 pub mod dashboard;
 mod event_loop;
 pub mod health;
+// #10491: the console home screen `tm tui` opens on.
+pub mod home;
+// #10476: the Focus key's plan and the bin-registered tmux hook.
+pub mod focus;
 pub mod iterm2;
 pub mod project_ctl;
+// #10754: S3 tm ls actions; De1 key map (Bob 11-06).
+pub mod session_hooks;
 pub mod terminal;
+// #10966: G01 slice 1, the console palette as named roles.
+pub mod theme;
 
 use crossterm::{
     execute,
@@ -40,6 +50,14 @@ use client::DaemonClient;
 use dashboard::{ChatMessage, DashboardState};
 use event_loop::run_loop;
 use health::{Daemon, HealthScreen, HealthUpdate};
+
+// #10476: version in tui header (Bob 11-05)
+/// The `tm <version>` label every TUI header shows, so an operator can tell
+/// which build is running.
+///
+/// Test: `home_header_shows_tm_version_at_80_columns`,
+/// `projects_view_top_line_shows_tm_version_at_80_columns`.
+pub const VERSION_LABEL: &str = concat!("tm ", env!("CARGO_PKG_VERSION"));
 
 /// Which top-level screen the TUI is currently showing.
 ///
@@ -116,7 +134,15 @@ pub async fn run_initial_view(
     focus_id: Option<String>,
     single_pane: bool,
 ) -> anyhow::Result<()> {
-    run_initial_view_with(DaemonClient::new(url), interval_ms, focus_id, single_pane).await
+    let mouse = terminal::mouse_from_env(false);
+    run_initial_view_with(
+        DaemonClient::new(url),
+        interval_ms,
+        focus_id,
+        single_pane,
+        mouse,
+    )
+    .await
 }
 
 /// Build a TUI's daemon client from the operator's `--url` / `TRUSTY_MPM_URL`.
@@ -143,7 +169,8 @@ pub fn client_for(explicit: Option<&str>) -> anyhow::Result<DaemonClient> {
 /// `TRUSTY_MPM_URL` on the client ([`DaemonClient::with_pinned_base_url`]),
 /// and only a caller-built client carries that pin into the poll loop.
 /// What: the same routing as [`run_initial_view`], handing `client` to the
-/// chosen surface.
+/// chosen surface. #10476: `mouse` reaches the multipane surface only; the chat
+/// surface never captures.
 /// Test: the pin is honoured by [`rediscover_daemon`]
 /// (`rediscover_daemon_keeps_explicit_url`); this await glue is exercised by
 /// launching the TUI.
@@ -152,10 +179,11 @@ pub async fn run_initial_view_with(
     interval_ms: u64,
     focus_id: Option<String>,
     single_pane: bool,
+    mouse: bool,
 ) -> anyhow::Result<()> {
     match initial_view(single_pane) {
         TuiView::Multipane => {
-            project_ctl::run_focused_with_client(client, interval_ms, focus_id).await
+            project_ctl::run_focused_with_client(client, interval_ms, focus_id, mouse).await
         }
         TuiView::SinglePane => run_focused_with_client(client, interval_ms, focus_id).await,
     }
@@ -413,6 +441,7 @@ pub(crate) fn render_screen(
     chat: &DashboardState,
     hp: &HealthScreen,
 ) {
+    theme::paint_background(frame);
     match screen {
         Screen::Chat => dashboard::render(frame, chat),
         Screen::Health => {

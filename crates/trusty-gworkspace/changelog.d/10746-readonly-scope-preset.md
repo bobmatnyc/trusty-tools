@@ -1,0 +1,3 @@
+Added
+- `setup --scopes readonly` and the `add_account` tool's `scopes: "readonly"` request only `openid`, `userinfo.email`, `gmail.readonly`, `drive.readonly` and `documents.readonly` (#10746 ok-T20). Omitting the option keeps the full default scope set. Any other preset name is refused; free-form scope strings are never accepted. `api::auth::oauth::ScopePreset` names the preset, and `run_consent` / `run_consent_with` take it as a parameter.
+- A tool call on a read-only profile that needs a write scope now fails before any request, with an error naming the missing scope (`scope_guard::readonly_refusal`). Google's own 403 names no scope. Full and legacy profiles are unaffected.

@@ -19,18 +19,23 @@
 //! [`start`] attaches a publisher and its flush task at serve start;
 //! [`ActionEvents::shutdown`], called from both exit paths, ends the task,
 //! reads every tracked transcript once more, and runs one final flush, all within
-//! [`FINAL_FLUSH_BUDGET`].
-//! Test: `tests.rs` (socket level), `projection_tests.rs` (pure).
+//! [`FINAL_FLUSH_BUDGET`]. #10412: what the bus does not take is written to
+//! the [`spool`], and the next start buffers it again.
+//! #10906: [`registry_resolver`] names each session's registry `project_key`,
+//! once per session, on a blocking thread off the hook path; every event the
+//! session projects after the answer lands carries it.
+//! Test: `tests.rs` (socket level), `projection_tests.rs` (pure),
+//! `spool_tests.rs` (stop and restart).
 //!
 //! # Spec References
 //! - [`SPEC-UNIDASH-04~draft`](docs/specs/DOC-73-unified-mpm-code-agents-dashboard.md#SPEC-UNIDASH-04~draft)
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use trusty_common::control_bus::{PushClient, PushFlushOutcome};
+use trusty_common::control_bus::{DEFAULT_PUSH_BUFFER_CAPACITY, PushClient, PushFlushOutcome};
 
 use crate::core::hook::HookEventRecord;
 use crate::daemon::DaemonState;
@@ -43,6 +48,12 @@ pub mod message;
 pub mod projection;
 // #9167 PR2: the receiving side of a cross-session message.
 pub mod received;
+mod replayed;
+// #10412: the once-only settle at stop.
+mod settle;
+pub use settle::Settled;
+// #10412: what the bus did not take at stop, replayed on the next start.
+pub mod spool;
 pub mod tmux_send;
 
 /// How often the flush task drains the buffer (as #9078's producer).
@@ -55,6 +66,11 @@ pub const FINAL_FLUSH_BUDGET: Duration = Duration::from_secs(1);
 /// (#6849 fix round). Kept small because that wait delays the exit that
 /// races the serve drain's pane shutdown (#6288); see [`before_signal_exit`].
 pub const SIGNAL_FLUSH_BUDGET: Duration = Duration::from_millis(200);
+
+/// Project lookups running at once (#10906). A stale mount can hold each
+/// one for minutes; past this, a session's lookup waits for its next hook
+/// instead of taking another thread from the blocking pool.
+pub const MAX_LOOKUPS_IN_FLIGHT: usize = 16;
 
 /// At most one "events dropped" warning per this window.
 const DROP_WARN_EVERY: Duration = Duration::from_secs(60);
@@ -117,8 +133,8 @@ impl ActionEvents {
     /// [`FINAL_FLUSH_BUDGET`]. Idempotent; the serve drain's call.
     ///
     /// Test: `shutdown_runs_the_final_flush_once_6849`.
-    pub async fn shutdown(&self) {
-        self.shutdown_within(FINAL_FLUSH_BUDGET).await;
+    pub async fn shutdown(&self) -> Settled {
+        self.shutdown_within(FINAL_FLUSH_BUDGET).await
     }
 
     /// End the flush task, then run the final flush within `budget`.
@@ -132,14 +148,17 @@ impl ActionEvents {
     /// [`ActionPublisher::final_flush_within`] in what is left. The whole
     /// call is cut off at `budget`. A second call finds no task, and its
     /// scan finds reading closed.
+    /// #10412: returns where the buffered events went; the final flush
+    /// spools what the bus did not take, and logs any loss with a count.
     /// Test: `shutdown_runs_the_final_flush_once_6849`,
     /// `the_signal_path_flush_returns_within_its_budget_6849`,
-    /// `an_arrival_unread_at_shutdown_is_sent_exactly_once_9167`.
-    pub async fn shutdown_within(&self, budget: Duration) {
+    /// `an_arrival_unread_at_shutdown_is_sent_exactly_once_9167`,
+    /// `events_buffered_at_shutdown_with_the_bus_down_are_spooled_10412`.
+    pub async fn shutdown_within(&self, budget: Duration) -> Settled {
         let deadline = tokio::time::Instant::now() + budget;
         let task = self.flush_task.lock().take();
         let publisher = self.publisher.get();
-        let work = async {
+        let before = async {
             if let Some(task) = task {
                 task.abort();
                 let _ = task.await;
@@ -147,14 +166,28 @@ impl ActionEvents {
             if let Some(publisher) = publisher {
                 // #9167: arrivals pending at shutdown; the flush keeps half.
                 publisher.last_scan_within(budget / 2).await;
-                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-                publisher.final_flush_within(left).await;
             }
         };
-        // `final_flush_within` logs its own cut-off; this bounds the join too.
-        let _ = tokio::time::timeout(budget, work).await;
+        // The scan keeps half; a hung join must still leave the spool time.
+        if tokio::time::timeout(budget * 3 / 4, before).await.is_err() {
+            tracing::warn!("action events: shutdown's flush-task join outlived its budget");
+        }
+        // #10412: bounded on its own, so its loss count is always logged.
+        match publisher {
+            Some(publisher) => {
+                let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+                publisher.final_flush_within(left).await
+            }
+            None => Settled::default(),
+        }
     }
 }
+
+/// The push buffer's byte budget: 8 MiB, the `PushClient` default.
+///
+/// #10467: named here because the replay claims no more than the buffer
+/// holds ([`spool::Budget`]), and trusty-common does not export its default.
+const BUFFER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// One buffered `PushClient` plus the projection state.
 ///
@@ -165,35 +198,79 @@ impl ActionEvents {
 /// Test: `hook_events_reach_the_bus_with_a_parent_chain_6849`.
 pub struct ActionPublisher {
     client: PushClient,
-    threader: parking_lot::Mutex<projection::Threader>,
+    // #10906: shared with the project lookups, which settle off the hook path.
+    threader: Arc<parking_lot::Mutex<projection::Threader>>,
     seq: AtomicU64,
+    /// #10906: project lookups still running, at most [`MAX_LOOKUPS_IN_FLIGHT`].
+    lookups: Arc<AtomicUsize>,
     flush_interval: Duration,
     /// Transcript read positions for received messages (#9167).
     received: parking_lot::Mutex<received::Tails>,
     /// Held across one transcript scan, so two scans never race an offset.
     scanning: parking_lot::Mutex<()>,
+    /// #10412: where the final flush puts what the bus did not take.
+    spool: Option<PathBuf>,
+    /// #10412: the once-only settle and the closed buffer ([`settle`]).
+    settle: settle::SettleState,
+    /// #10467: replayed spool files, held until their events are written.
+    replayed: replayed::Replayed,
+    /// #10467: the buffer's room, which bounds what a replay claims.
+    budget: spool::Budget,
 }
 
 impl ActionPublisher {
     /// A publisher dialling `socket`, showing paths relative to `$HOME`.
     pub fn new(socket: impl Into<PathBuf>) -> Self {
+        Self::with_buffer(socket, DEFAULT_PUSH_BUFFER_CAPACITY, BUFFER_BYTES)
+    }
+
+    /// A publisher whose buffer holds `events` frames and `bytes` bytes.
+    ///
+    /// #10467: the replay budget is half of each limit.
+    pub fn with_buffer(socket: impl Into<PathBuf>, events: usize, bytes: u64) -> Self {
         Self {
-            client: PushClient::new(socket),
-            threader: parking_lot::Mutex::new(projection::Threader::new(dirs::home_dir())),
+            client: PushClient::with_limits(socket, events, bytes),
+            threader: Arc::new(parking_lot::Mutex::new(projection::Threader::new(
+                dirs::home_dir(),
+            ))),
             seq: AtomicU64::new(0),
+            lookups: Arc::default(),
             flush_interval: DEFAULT_FLUSH_INTERVAL,
             received: parking_lot::Mutex::default(),
             scanning: parking_lot::Mutex::new(()),
+            spool: None,
+            settle: settle::SettleState::default(),
+            replayed: replayed::Replayed::default(),
+            // #10467: half the buffer, so hooks before the first flush
+            // fit beside the replay instead of evicting it.
+            budget: spool::Budget {
+                events: (events / 2).max(1),
+                bytes: (bytes / 2).max(1),
+            },
         }
+    }
+
+    /// Spool undelivered events in `dir` at shutdown (#10412).
+    pub fn with_spool(mut self, dir: Option<PathBuf>) -> Self {
+        self.spool = dir;
+        self
     }
 
     /// Show paths outside a session's `cwd` relative to `home`.
     pub fn with_home(self, home: Option<PathBuf>) -> Self {
         let mut threader = self.threader.lock();
         let bodies = threader.message_bodies();
+        let resolver = threader.project_resolver();
         *threader = projection::Threader::new(home);
         threader.set_message_bodies(bodies);
+        threader.set_project_resolver(resolver);
         drop(threader);
+        self
+    }
+
+    /// Name each session's project with `resolver` (#10906).
+    pub fn with_project_resolver(self, resolver: projection::ProjectResolver) -> Self {
+        self.threader.lock().set_project_resolver(Some(resolver));
         self
     }
 
@@ -214,17 +291,71 @@ impl ActionPublisher {
     /// Why: this runs on the hook path, which must not wait on the bus.
     /// What: projection and `PushClient::send` under one lock, so `seq`
     /// follows emission order and a parent is buffered before its child.
+    /// #10906: a session's project lookup is queued here and run by
+    /// [`Self::spawn_lookup`] after the lock drops, so neither this call nor
+    /// any other holder of the lock waits on the resolver's disk reads.
     /// Test: `ten_thousand_hooks_with_no_bus_are_fast_and_bounded_6849`,
-    /// `a_stalled_bus_never_slows_hook_ingest_6849`.
+    /// `a_stalled_bus_never_slows_hook_ingest_6849`,
+    /// `a_slow_project_lookup_never_holds_the_hook_path_10906`.
     pub fn publish(&self, record: &HookEventRecord) {
         let mut threader = self.threader.lock();
         for mut event in threader.project(record) {
             event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            self.client.send(event);
+            self.buffer(event);
         }
+        let lookups = threader.take_lookups();
         drop(threader);
+        for lookup in lookups {
+            self.spawn_lookup(lookup);
+        }
         // #9167: no I/O here; the flush task reads the transcript.
         self.received.lock().note(record);
+    }
+
+    /// Run `lookup` on a blocking thread and settle its answer (#10906).
+    ///
+    /// Why: the resolver reads the disk, and the hook path must not wait on
+    /// it, nor hold the lock `delivered`, `publish_event` and the transcript
+    /// scan share.
+    /// What: on tokio's blocking pool when a runtime is current, else on a
+    /// named std thread. The thread takes the lock only to store the answer.
+    /// At [`MAX_LOOKUPS_IN_FLIGHT`] the lookup is requeued for the session's
+    /// next hook, so stuck lookups cannot drain the blocking pool.
+    /// Test: `a_slow_project_lookup_never_holds_the_hook_path_10906`.
+    fn spawn_lookup(&self, lookup: projection::Lookup) {
+        if self.lookups.fetch_add(1, Ordering::SeqCst) >= MAX_LOOKUPS_IN_FLIGHT {
+            self.lookups.fetch_sub(1, Ordering::SeqCst);
+            tracing::debug!("action events: project lookups saturated; retrying on the next hook");
+            self.threader.lock().requeue(&lookup);
+            return;
+        }
+        let threader = Arc::clone(&self.threader);
+        let in_flight = Arc::clone(&self.lookups);
+        let run = move || {
+            let project = lookup.resolve();
+            threader.lock().settle(&lookup, project);
+            in_flight.fetch_sub(1, Ordering::SeqCst);
+        };
+        if let Ok(rt) = tokio::runtime::Handle::try_current() {
+            drop(rt.spawn_blocking(run));
+        } else if let Err(e) = std::thread::Builder::new()
+            .name("tm-project-lookup".into())
+            .spawn(run)
+        {
+            // The closure, and its lookup, are gone; the session stays unattributed.
+            self.lookups.fetch_sub(1, Ordering::SeqCst);
+            tracing::warn!(error = %e, "action events: project lookup thread did not start");
+        }
+    }
+
+    /// Wait until no project lookup is running, at most 10 s (#10906 tests).
+    #[cfg(test)]
+    pub(crate) async fn lookups_settled(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.lookups.load(Ordering::SeqCst) > 0 {
+            assert!(Instant::now() < deadline, "project lookups still running");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
     /// Buffer one already-built `event`; never does I/O (#10362).
@@ -235,7 +366,7 @@ impl ActionPublisher {
     pub fn publish_event(&self, mut event: trusty_common::control_bus::HarnessEvent) {
         let _order = self.threader.lock();
         event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.client.send(event);
+        self.buffer(event);
     }
 
     /// Buffer a `received` event per cross-session message that reached a
@@ -284,9 +415,14 @@ impl ActionPublisher {
                     continue;
                 }
             };
-            let (bodies, root) = {
+            let (bodies, root, project) = {
                 let threader = self.threader.lock();
-                (threader.message_bodies(), threader.root_of(&job.session))
+                (
+                    threader.message_bodies(),
+                    threader.root_of(&job.session),
+                    // #10906: the receiving session's project, from memory.
+                    threader.project_of(&job.session),
+                )
             };
             let events = received::events(
                 job.session,
@@ -300,7 +436,8 @@ impl ActionPublisher {
             }
             for mut event in events {
                 event.seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                self.client.send(event);
+                event.project.clone_from(&project);
+                self.buffer(event);
                 found += 1;
             }
         }
@@ -328,8 +465,11 @@ impl ActionPublisher {
     }
 
     /// Drain the buffer to the bus once (the only call that does I/O).
+    ///
+    /// #10467: through [`Self::flush_counted`], so a replayed spool file
+    /// goes only once its events are written.
     pub async fn flush(&self) -> PushFlushOutcome {
-        self.client.flush().await
+        self.flush_counted().await
     }
 
     /// Events waiting for a flush.
@@ -342,54 +482,29 @@ impl ActionPublisher {
         self.client.dropped()
     }
 
-    /// Drain once per interval until aborted. A slow flush delays the next
-    /// tick rather than stacking; no connection is held between flushes.
+    /// Drain at once, then once per interval until aborted. A slow flush
+    /// delays the next tick rather than stacking; no connection is held
+    /// between flushes.
+    ///
+    /// Test: `a_capacity_spool_file_retires_after_a_hook_and_the_deferred_file_follows_10467`.
     pub fn spawn_flush_task(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let me = Arc::clone(self);
         tokio::spawn(async move {
             let every = me.flush_interval;
-            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            // #10467: the first tick is immediate, so a replay goes out
+            // before hooks can evict it from the buffer.
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now(), every);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             let mut health = FlushHealth::default();
             loop {
                 tick.tick().await;
                 // #9167: received messages ride the same flush.
                 me.collect_received().await;
-                let outcome = me.client.flush().await;
+                // #10467: counted, so delivered replay files are retired.
+                let outcome = me.flush_counted().await;
                 health.report(&outcome, me.client.dropped(), Instant::now());
             }
         })
-    }
-
-    /// The exit-path flush, bounded by [`FINAL_FLUSH_BUDGET`].
-    ///
-    /// Test: `final_flush_is_bounded_when_the_bus_stalls_6849`,
-    /// `shutdown_runs_the_final_flush_once_6849`.
-    pub async fn final_flush(&self) {
-        self.final_flush_within(FINAL_FLUSH_BUDGET).await;
-    }
-
-    /// The exit-path flush, bounded by `budget`; logs what it left behind.
-    pub async fn final_flush_within(&self, budget: Duration) {
-        match tokio::time::timeout(budget, self.client.flush()).await {
-            Ok(PushFlushOutcome { error: None, sent }) => {
-                tracing::debug!(sent, "action events: final flush delivered");
-            }
-            Ok(PushFlushOutcome {
-                error: Some(e),
-                sent,
-            }) => tracing::warn!(
-                sent,
-                undelivered = self.client.buffered_len(),
-                error = %e,
-                "action events: final flush stopped; the rest are lost"
-            ),
-            // The cut-off write re-queued its frame, so `undelivered` counts it.
-            Err(_) => tracing::warn!(
-                undelivered = self.client.buffered_len(),
-                "action events: final flush outlived its budget; the rest are lost"
-            ),
-        }
     }
 }
 
@@ -455,21 +570,24 @@ impl FlushHealth {
 
 /// tm's SIGTERM handler steps before `process::exit`, in order.
 ///
-/// Why: the handler's exit races the serve drain, whose `mgr.shutdown()`
-/// stops owned panes (#6288); every millisecond spent here widens that race,
-/// so the flush gets [`SIGNAL_FLUSH_BUDGET`], not [`FINAL_FLUSH_BUDGET`]. The
+/// Why: the handler's exit races the serve drain (#6288); every millisecond
+/// spent here delays the exit, so the flush gets [`SIGNAL_FLUSH_BUDGET`], not
+/// [`FINAL_FLUSH_BUDGET`]. The
 /// lock file names a live daemon until the flush ends, so a spawner never
 /// sees "no daemon" while this one still serves its socket.
 /// What: [`ActionEvents::shutdown_within`] with [`SIGNAL_FLUSH_BUDGET`], then
-/// `remove_lock`.
+/// `remove_lock`, then [`ActionEvents::report_late`].
 /// Test: `the_signal_path_flush_returns_within_its_budget_6849`,
-/// `the_signal_path_flushes_before_removing_the_lock_6849`.
+/// `the_signal_path_flushes_before_removing_the_lock_6849`,
+/// `the_signal_path_logs_the_final_late_total_10412`.
 pub async fn before_signal_exit(state: &DaemonState, remove_lock: impl FnOnce()) {
     state
         .action_events()
         .shutdown_within(SIGNAL_FLUSH_BUDGET)
         .await;
     remove_lock();
+    // #10412: the late total, once, before `process::exit`.
+    state.action_events().report_late();
 }
 
 /// Whether this daemon may dial a bus at all.
@@ -484,18 +602,122 @@ pub fn bus_allowed(data_dir_overridden: bool, real_environment: bool) -> bool {
     data_dir_overridden || real_environment
 }
 
-/// [`start_with`] on this process's environment and `events_socket_path`.
+/// Where [`start_at`] dials and spools (#10464).
+///
+/// Why: a test drives the production start on a scratch bus and data dir
+/// without setting the process-global data-dir override.
+pub struct StartAt {
+    /// [`bus_allowed`]'s verdict.
+    pub allowed: bool,
+    /// The bus socket; called only when `allowed`.
+    pub socket: Box<dyn FnOnce() -> anyhow::Result<PathBuf>>,
+    /// The data dir the spool lives under; `Err` starts with no spool.
+    pub data_dir: anyhow::Result<PathBuf>,
+}
+
+impl StartAt {
+    /// This process's environment, `events_socket_path` and data dir.
+    pub fn from_env(state: &DaemonState) -> Self {
+        let overridden =
+            std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
+        let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
+            .is_allowed();
+        Self {
+            allowed: bus_allowed(overridden, real),
+            socket: Box::new(trusty_common::control_bus::events_socket_path),
+            data_dir: trusty_common::resolve_data_dir("trusty-mpm"),
+        }
+    }
+}
+
+/// The production [`projection::ProjectResolver`]: the registry project
+/// whose checkout holds a session's `cwd` (#10906).
+///
+/// Why: the bus's `by_project` breakdown groups events by the registry
+/// `project_key` (`owner/repo`, or `local:<uuid>`), the same key the mpm
+/// pane groups by. Only the registry knows it.
+/// What: [`trusty_common::resolve_project_root`] on `cwd`, mapped through
+/// [`main_checkout_root`] when that root is a linked worktree, then
+/// [`crate::project::registered_project_for_root_in`] against
+/// `registry_dir`. All three read the disk, so it runs once per session. `None` for an unregistered cwd, an absent or unreadable
+/// registry, or a worktree whose main checkout cannot be read. #10906: the
+/// publisher runs it on a blocking thread, never on the hook path.
+/// Test: `an_event_from_a_registered_project_carries_its_project_key_10906`,
+/// `an_unresolvable_session_still_sends_its_events_unattributed_10906`,
+/// `a_linked_worktree_session_carries_its_main_checkouts_project_key_10906`.
+pub fn registry_resolver(registry_dir: PathBuf) -> projection::ProjectResolver {
+    Arc::new(move |cwd| {
+        let root = main_checkout_root(trusty_common::resolve_project_root(cwd));
+        crate::project::registered_project_for_root_in(&registry_dir, &root).map(|p| p.project_key)
+    })
+}
+
+/// The main checkout a linked worktree's `root` belongs to; `root` otherwise.
+///
+/// Why (#10906): the registry matches main-checkout paths only (#10530), so a
+/// session working in a linked worktree would count as unattributed.
+/// What: when `root/.git` is a FILE, defers to
+/// [`trusty_common::palace_resolve::find_project_root`], which follows
+/// `gitdir:` and the admin dir's `commondir` with file reads only — no git
+/// process. A submodule, a `--separate-git-dir` checkout, or a broken pointer
+/// keeps the worktree's own directory, which no registry entry matches.
+/// Test: `a_linked_worktree_session_carries_its_main_checkouts_project_key_10906`,
+/// `a_worktree_with_a_broken_gitdir_sends_its_events_unattributed_10906`.
+fn main_checkout_root(root: PathBuf) -> PathBuf {
+    if !root.join(".git").is_file() {
+        return root;
+    }
+    trusty_common::palace_resolve::find_project_root(&root).unwrap_or(root)
+}
+
+/// [`start_at`] on [`StartAt::from_env`].
 pub fn start(state: &DaemonState) -> bool {
-    let overridden =
-        std::env::var_os(trusty_common::DATA_DIR_OVERRIDE_ENV).is_some_and(|v| !v.is_empty());
-    let real = crate::core::host_state_gate::host_state_access_for_root(state.framework_root())
-        .is_allowed();
-    start_with(
-        state,
-        bus_allowed(overridden, real),
-        DEFAULT_FLUSH_INTERVAL,
-        trusty_common::control_bus::events_socket_path,
-    )
+    start_at(state, StartAt::from_env(state))
+}
+
+/// [`start_with_spool`] with the spool under `at.data_dir`.
+///
+/// Test: `sm_stdio_stop_spools_and_next_start_replays_10464`.
+pub fn start_at(state: &DaemonState, at: StartAt) -> bool {
+    // #10412: the spool follows the data dir, as the bus socket does.
+    let spool = match at.data_dir {
+        Ok(data_dir) => Some(spool::spool_dir(&data_dir)),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "action events: no data dir; events undelivered at stop are lost");
+            None
+        }
+    };
+    start_with_spool(state, at.allowed, DEFAULT_FLUSH_INTERVAL, at.socket, spool)
+}
+
+/// The serve exit's settle: the bounded final flush, then `served` back.
+///
+/// Why: a dead accept loop returns its error without stopping the managed
+/// sessions, so no later step logs the late total on that exit.
+/// What: [`ActionEvents::shutdown`]; on `Err`, also
+/// [`ActionEvents::report_late`]. The `Ok` path logs it after the sessions stop.
+/// Test: `a_serve_error_still_logs_the_final_late_total_10464`.
+pub async fn settle_serve_exit(
+    state: &DaemonState,
+    served: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    state.action_events().shutdown().await;
+    if served.is_err() {
+        // #10464: the error exit returns before the `Ok` path's late total.
+        state.action_events().report_late();
+    }
+    served
+}
+
+/// [`start_with_spool`] with no spool: what the bus does not take at stop is
+/// lost, and logged with a count.
+pub fn start_with(
+    state: &DaemonState,
+    allowed: bool,
+    flush_every: Duration,
+    resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> bool {
+    start_with_spool(state, allowed, flush_every, resolve, None)
 }
 
 /// Attach a publisher on `resolve`'s socket when `allowed`, and start its
@@ -507,14 +729,18 @@ pub fn start(state: &DaemonState) -> bool {
 /// (without calling `resolve`), when `resolve` fails, or when a publisher is
 /// already attached; otherwise attaches one, keeps its flush task on
 /// [`ActionEvents`] for [`ActionEvents::shutdown`], and returns `true`.
+/// #10412: the publisher spools to `spool` at stop, and first buffers what
+/// the last stop spooled there, before any hook can publish.
 /// Test: `an_unresolvable_bus_still_ingests_hooks_6849`,
 /// `a_scratch_daemon_dials_no_host_bus_6849`,
-/// `shutdown_runs_the_final_flush_once_6849`.
-pub fn start_with(
+/// `shutdown_runs_the_final_flush_once_6849`,
+/// `spooled_events_replay_on_the_next_start_exactly_once_10412`.
+pub fn start_with_spool(
     state: &DaemonState,
     allowed: bool,
     flush_every: Duration,
     resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
+    spool: Option<PathBuf>,
 ) -> bool {
     if !allowed {
         tracing::debug!("action events: isolated daemon on the host data dir; no bus");
@@ -526,13 +752,25 @@ pub fn start_with(
             let publisher = Arc::new(
                 ActionPublisher::new(socket)
                     .with_flush_interval(flush_every)
-                    .with_message_bodies(message::bodies_from_env()),
+                    .with_message_bodies(message::bodies_from_env())
+                    .with_spool(spool)
+                    // #10906: the daemon's own registry names each project.
+                    .with_project_resolver(registry_resolver(
+                        crate::project::registry_data_dir_under(state.framework_root()),
+                    )),
             );
             let events = state.action_events();
+            // #10412: held across check, replay and attach, so a second
+            // start never claims a spool its publisher then fails to attach.
+            let mut flush_task = events.flush_task.lock();
+            if events.publisher().is_some() {
+                return false;
+            }
+            publisher.replay_spool();
             if !events.attach(Arc::clone(&publisher)) {
                 return false;
             }
-            *events.flush_task.lock() = Some(publisher.spawn_flush_task());
+            *flush_task = Some(publisher.spawn_flush_task());
             true
         }
         Err(e) => {
@@ -546,5 +784,9 @@ pub fn start_with(
 mod message_tests;
 #[cfg(test)]
 mod received_tests;
+#[cfg(test)]
+mod replayed_tests;
+#[cfg(test)]
+mod spool_tests;
 #[cfg(test)]
 mod tests;

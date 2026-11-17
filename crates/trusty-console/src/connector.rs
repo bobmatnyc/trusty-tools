@@ -4,127 +4,16 @@
 //! `spawn()` and typed tool-call methods. Defining the trait now with those
 //! method stubs keeps the architecture clean and avoids large breaking
 //! refactors when those phases land.
-//! What: Defines `ServiceStatus`, the `ServiceConnector` trait, and a
-//! `ServiceInfo` result struct that the API layer serialises.
+//! What: Defines the `ServiceConnector` trait and re-exports the
+//! `ServiceStatus` / `ServiceInfo` row types (owned by
+//! `trusty_common::console_rpc` since #10902) that the API layer serialises.
 //! Test: Each concrete connector implements `#[cfg(test)]` unit tests that
 //! exercise `detect()` against fake data-dir fixtures; see `detect.rs`.
 
-use serde::{Deserialize, Serialize};
-
-/// Runtime status of one detected service.
-///
-/// Why: Four states capture everything the console needs — whether the binary
-/// exists, whether a daemon is running, whether the MCP handshake succeeded but
-/// the expected tool is missing (Degraded), and whether the binary is absent.
-/// What: Serialises to a lowercase string for the JSON API.
-/// Test: Asserted by unit tests in `detect.rs` and `server.rs`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceStatus {
-    /// Daemon is reachable and health-checked OK.
-    Running,
-    /// Binary found on PATH but no daemon discovery file / TCP probe.
-    Available,
-    /// Binary not found on PATH.
-    Absent,
-    /// Process is reachable (MCP handshake succeeded) but the expected
-    /// `console_metrics` tool was not listed in `tools/list` — check that
-    /// the daemon is started in `serve --stdio` mode with the correct wiring.
-    Degraded,
-}
-
-/// How a service is meant to run when it is healthy.
-///
-/// Why (#6416): `ServiceStatus::Available` means "the binary is installed and
-/// nothing is serving", and the console rendered that one sentence for every
-/// member: "Binary found but daemon is not running." For trusty-review, which
-/// #6290 retired the daemon of, and trusty-analyze, which #6287 moved to an
-/// on-demand socket server, that IS the healthy resting state — so the console
-/// was rendering the correct state as a fault, in amber, with remediation text
-/// for a daemon the operator cannot start. `status` alone cannot tell those two
-/// cases apart; this says which reading applies.
-///
-/// What: a per-member constant, not an observation. A connector picks it once
-/// and every `ServiceInfo` it builds carries it, `Absent` rows included.
-/// Test: `service_lifecycle_serialises_to_snake_case`,
-/// `on_demand_members_are_exactly_review_and_analyze`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ServiceLifecycle {
-    /// A resident daemon. `Running` is the healthy state and `Available` means
-    /// it is installed but stopped.
-    #[default]
-    Daemon,
-    /// A per-invocation binary or an on-demand server. Installed IS healthy:
-    /// `Available` is the resting state and `Running` merely means a server
-    /// happens to be up right now.
-    OnDemand,
-}
-
-/// All facts gathered about a service in one detection pass.
-///
-/// Why: The API handler turns this struct directly into JSON for
-/// `GET /api/console/services`, so callers get a stable shape to render cards.
-/// What: `id` is the stable machine identifier; `display_name` is human-
-/// readable; `status` is the current runtime state; `version` is the version
-/// string from `/health` when the daemon is running (absent otherwise);
-/// `url` is the daemon base URL when reachable; `hint` is an optional
-/// actionable remediation message surfaced when `status` is `Degraded`;
-/// `lifecycle` says whether a stopped daemon or an installed on-demand binary
-/// is the healthy reading of that status (#6416).
-/// Test: Tested via the server integration test in `server.rs`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceInfo {
-    /// Stable machine identifier (e.g. `"trusty-search"`).
-    pub id: String,
-    /// Human-readable display name (e.g. `"Trusty Search"`).
-    pub display_name: String,
-    /// Current runtime state.
-    pub status: ServiceStatus,
-    /// Version string reported by the running daemon's `/health` endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    /// Base URL of the running daemon (e.g. `"http://127.0.0.1:7879"`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    /// Actionable remediation hint — present when `status` is `Degraded`.
-    /// Example: "reachable but `console_metrics` tool not registered — check
-    /// `serve --stdio` wiring / restart the daemon".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-    /// Whether this member runs as a resident daemon or on demand (#6416).
-    ///
-    /// Serialised unconditionally — the UI branches on it — and `#[serde(default)]`
-    /// so a payload written before #6416 still deserialises, as a daemon.
-    #[serde(default)]
-    pub lifecycle: ServiceLifecycle,
-    /// The newest per-second CPU sample for this service, if any (#6642).
-    ///
-    /// Why it is on this struct at all: the home-page list must render a CPU
-    /// figure on first paint, before the SSE stream connects. Detection cannot
-    /// produce it — a connector is a synchronous probe with no sampler — so the
-    /// route overlays it from the same per-service history the graph reads,
-    /// which is what keeps the number and the newest bar identical.
-    ///
-    /// Serialised UNCONDITIONALLY, as `null` when absent, unlike the optional
-    /// fields above. `None` means no measurement was taken (on-demand member,
-    /// stopped daemon, or a process the console cannot identify); rendering that
-    /// as `0.0` would draw an idle service where there is none. A key that is
-    /// sometimes missing and sometimes null would be two spellings of one fact.
-    /// `#[serde(default)]` so a payload written before #6642 still deserialises.
-    #[serde(default)]
-    pub cpu_pct: Option<f32>,
-    /// The newest per-second resident-memory sample, in bytes, if any (#6773).
-    ///
-    /// The same first-paint argument as `cpu_pct` above, for the memory column
-    /// and the memory graph beside it: overlaid by the route from the same
-    /// per-service ring the graph reads, so the number and the newest bar cannot
-    /// disagree. Serialised unconditionally as `null` when absent — `None` means
-    /// no measurement, never zero bytes — and `#[serde(default)]` so a payload
-    /// written before #6773 still deserialises.
-    #[serde(default)]
-    pub rss_bytes: Option<u64>,
-}
+// #10902: the row types moved to trusty-common so the TUI (trusty-mpm, no edge
+// on this crate) can decode `console.fleet_status`. Re-exported here so every
+// `crate::connector::ServiceInfo` path, in and out of this crate, is unchanged.
+pub use trusty_common::console_rpc::{ServiceInfo, ServiceLifecycle, ServiceStatus};
 
 /// Per-service adapter contract.
 ///

@@ -36,6 +36,11 @@ use tempfile::TempDir;
 #[path = "../../test_tmux_session.rs"]
 pub(crate) mod tmux_session;
 
+/// A stale socket whose dial is known to be refused (#10026) — the same
+/// source file as the lib's `test_support::stale_socket`.
+#[path = "../../test_stale_socket.rs"]
+pub(crate) mod stale_socket;
+
 /// The spawn primitive [`tmux_session`] runs every tmux invocation through
 /// (#7060) — the binary target's spelling of the lib `test_support`'s
 /// re-export of the same function; see that module for why the seam exists.
@@ -208,6 +213,11 @@ pub(crate) fn renderer_operand(alternate_screen: bool) -> &'static str {
         "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 "
     }
 }
+
+// #10101 D3c: the stub daemon CLI launch tests run against. Declared here,
+// not in `main.rs`, which sits at the SLOC cap.
+#[path = "launch_stub_tests.rs"]
+pub(crate) mod launch_stub;
 
 #[cfg(test)]
 mod tests {

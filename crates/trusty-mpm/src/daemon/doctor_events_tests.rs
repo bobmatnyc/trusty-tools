@@ -13,26 +13,14 @@ fn sock_in(dir: &tempfile::TempDir) -> std::path::PathBuf {
     dir.path().join("trusty-events.sock")
 }
 
-/// Wait until `path`'s listener is gone from the kernel, so a dead-socket test
-/// observes a socket that is actually dead.
-///
-/// Why (#7215): a child that a concurrent test forks between `bind` and `drop`
-/// inherits the listener fd and holds it until its `exec`, so the dropped
-/// socket briefly still accepts. Once a connect is refused, no fd keeps the
-/// listener alive and it cannot come back.
-/// What: probes every 20 ms for up to 5 s until the connect is refused.
-/// Test: `doctor_events_reports_a_dead_socket`.
-async fn await_listener_gone(path: &Path) {
-    for _ in 0..250 {
-        if probe_socket_verdict(path, CONNECT_TIMEOUT).await == SocketVerdict::NotServing {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+/// #10975: an install probe over `agents_dir` alone — no binary directory and
+/// no loaded label, so only the plist can show the bus.
+fn bare(agents_dir: &Path) -> InstallProbe<'_> {
+    InstallProbe {
+        agents_dir,
+        bin_dirs: Vec::new(),
+        label_loaded: |_| false,
     }
-    panic!(
-        "{} still accepts 5 s after its listener dropped",
-        path.display()
-    );
 }
 
 /// Why (fail-open check): a socket file left by a crashed daemon still exists;
@@ -46,10 +34,9 @@ async fn doctor_events_reports_a_dead_socket() {
     // See #7215: bind in a 0700 directory, as the bus does, so a late connect
     // reaches the socket rather than the directory-mode refusal.
     let path = hardened_sock_in(&dir);
-    drop(trusty_common::uds::bind_hardened(&path).expect("bind"));
+    // #10026: the shared helper waits out a forked child's inherited fd.
+    crate::test_support::stale_socket::bind_stale(&path);
     assert!(path.exists(), "the stale socket file must remain");
-    // See #7215: a forked child's inherited fd can keep the listener alive.
-    await_listener_gone(&path).await;
 
     let state = observe_socket(&path, CONNECT_TIMEOUT).await;
     assert_eq!(state, SocketState::Stale);
@@ -59,9 +46,10 @@ async fn doctor_events_reports_a_dead_socket() {
     assert!(row.message.contains("stale"), "{}", row.message);
 }
 
-/// Why: no socket is the not-running case and must read as a failure.
-/// What: a missing path observes `Absent` and grades `Fail` with the install
-/// and start remedies.
+/// Why: no socket on a host with the bus installed is the not-running case
+/// and must read as a failure.
+/// What: a missing path observes `Absent` and grades `Fail` with the start
+/// remedy. #10151: never `tctl install trusty-events`, which exits 3.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_missing_socket_is_absent() {
@@ -73,10 +61,12 @@ async fn a_missing_socket_is_absent() {
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("not running"), "{}", row.message);
     assert!(
-        row.message.contains("tctl install trusty-events"),
+        row.message
+            .contains("Its LaunchAgent is installed; start it with `tctl start trusty-events`."),
         "{}",
         row.message
     );
+    assert!(!row.message.contains("tctl install"), "{}", row.message);
 }
 
 /// Why (#10042): the row's remedy must actually bring the bus back. `tctl
@@ -85,8 +75,9 @@ async fn a_missing_socket_is_absent() {
 /// bus after ANY exit (`KeepAlive` `<true/>`, pinned on the installer side by
 /// `events_plist_restarts_the_bus_after_any_exit`). With `SuccessfulExit:
 /// false` a stray exit 0 left a loaded, stopped job that `tctl start` skipped.
-/// What: the not-running remedy names `tctl start trusty-events` and
-/// `tctl install trusty-events`; the stale remedy says launchd restarts it.
+/// What: the not-running remedy names `tctl start trusty-events` and, since
+/// #10151, not `tctl install trusty-events` (it exits 3, #10130); the stale
+/// remedy says launchd restarts it.
 /// Test: This is the test.
 #[test]
 fn the_not_running_remedy_is_tctl_start() {
@@ -98,7 +89,7 @@ fn the_not_running_remedy_is_tctl_start() {
         absent.message
     );
     assert!(
-        absent.message.contains("`tctl install trusty-events`"),
+        !absent.message.contains("tctl install"),
         "{}",
         absent.message
     );
@@ -148,7 +139,7 @@ async fn a_listener_that_never_accepts_is_hung() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = hardened_sock_in(&dir);
     let _listener = trusty_common::uds::bind_hardened(&path).expect("bind");
-    let row = grade_resolved(Ok(path)).await;
+    let row = grade_resolved(Ok(path), &bare(dir.path())).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("hung"), "{}", row.message);
 }
@@ -218,14 +209,18 @@ async fn an_unreadable_parent_is_unreadable() {
 /// Why (fail-closed): every observation other than `Serving` is a fault or an
 /// unknown, never health — a refactor that defaulted an arm to `Ok` would ship
 /// a green row for a dead bus.
-/// What: each non-serving state grades `Fail`, except `Undetermined` and `VersionSkew`,
-/// which are `Warn`; none is `Ok`.
+/// What: each non-serving state grades `Fail`, except `Undetermined`,
+/// `VersionSkew` and `Unsupervised`, which are `Warn`; none is `Ok`.
+/// `NotInstalled` is a host without the bus, not a non-serving bus;
+/// `a_host_without_the_bus_is_an_info_line_with_no_fix_command` covers it.
 /// Test: This is the test.
 #[test]
 fn every_non_serving_state_is_never_ok() {
     let p = Path::new("/x/trusty-events.sock");
     for (state, want) in [
         (SocketState::Absent, CheckStatus::Fail),
+        // #10975: no socket beside a binary or a loaded label.
+        (SocketState::Unsupervised, CheckStatus::Warn),
         (SocketState::Stale, CheckStatus::Fail),
         (SocketState::NotASocket, CheckStatus::Fail),
         (
@@ -257,10 +252,127 @@ fn every_non_serving_state_is_never_ok() {
 /// Test: This is the test.
 #[tokio::test]
 async fn an_unresolvable_socket_path_fails() {
-    let row = grade_resolved(Err(anyhow::anyhow!("no data dir"))).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let row = grade_resolved(Err(anyhow::anyhow!("no data dir")), &bare(dir.path())).await;
     assert_eq!(row.name, CHECK_NAME);
     assert_eq!(row.status, CheckStatus::Fail);
     assert!(row.message.contains("no data dir"), "{}", row.message);
+}
+
+/// A LaunchAgents directory in `dir`, holding the trusty-events plist when
+/// `installed`.
+fn agents_in(dir: &tempfile::TempDir, installed: bool) -> std::path::PathBuf {
+    let agents = dir.path().join("LaunchAgents");
+    std::fs::create_dir_all(&agents).expect("agents dir");
+    if installed {
+        std::fs::write(agents.join("com.trusty.events.plist"), "<plist/>").expect("plist");
+    }
+    agents
+}
+
+/// Why (#10151, Architect ruling 2026-10-26): a host without the bus is a
+/// supported setup. It read `Fail` and named `tctl install trusty-events`,
+/// which exits 3 because the bus is internal (#10130). #10975 (owner ruling
+/// 2026-11-13): it is an INFO line, not a warning, and names no fix command.
+/// What: no socket, no trusty-events plist, no binary and no loaded label
+/// grades `Ok` with the INFO message
+/// `info: trusty-events: not installed (internal, optional)`, names no
+/// command, and leaves a report of otherwise-healthy rows `Ok`.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_host_without_the_bus_is_an_info_line_with_no_fix_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = agents_in(&dir, false);
+    let row = grade_resolved(Ok(sock_in(&dir)), &bare(&agents)).await;
+    assert_eq!(row.name, CHECK_NAME);
+    assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
+    assert_eq!(
+        row.message,
+        "info: trusty-events: not installed (internal, optional)"
+    );
+    assert!(!row.message.contains("tctl"), "{}", row.message);
+    assert!(!row.message.contains('`'), "{}", row.message);
+    let report = crate::core::doctor::DoctorReport::from_checks(vec![row]);
+    assert_eq!(report.overall, CheckStatus::Ok);
+}
+
+/// Why (#10975 review, fail-open): the bus unlinks its socket on a clean stop,
+/// so "no socket and no plist" also describes a bus started by hand and then
+/// stopped, or a loaded label whose plist was deleted. Either must not read as
+/// a green "not installed" while producers drop events.
+/// What: no socket and no plist, with the `trusty-events` binary on an injected
+/// search path, grades `Warn` naming no command; so does a loaded label with no
+/// binary.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_bus_footprint_without_a_socket_is_never_ok() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let agents = agents_in(&dir, false);
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    std::fs::write(bin.join("trusty-events"), "").expect("binary");
+
+    let on_path = InstallProbe {
+        agents_dir: &agents,
+        bin_dirs: vec![bin],
+        label_loaded: |_| false,
+    };
+    let loaded = InstallProbe {
+        agents_dir: &agents,
+        bin_dirs: Vec::new(),
+        label_loaded: |_| true,
+    };
+    for probe in [&on_path, &loaded] {
+        let row = grade_resolved(Ok(sock_in(&dir)), probe).await;
+        assert_ne!(row.status, CheckStatus::Ok, "{}", row.message);
+        assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+        assert!(row.message.contains("not running"), "{}", row.message);
+        assert!(!row.message.contains("tctl"), "{}", row.message);
+    }
+}
+
+/// Why (#10151 fail-open check): only "no socket and no plist" may be
+/// downgraded. A host that HAS the bus must still fail when the bus is down,
+/// refuses the dial, or answers without a frame; a blanket "any error is
+/// `Warn`" would hide a dead bus.
+/// What: with the plist installed, a missing socket is `Fail` naming `tctl
+/// start`. A dead socket is `Fail` with or without the plist (the file proves a
+/// bus ran here), as is a bus that hangs up without a frame. A LaunchAgents
+/// path that cannot be inspected counts as installed, so it stays `Fail`.
+/// Test: This is the test.
+#[tokio::test]
+async fn a_host_with_the_bus_still_fails_on_every_fault() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let installed = agents_in(&dir, true);
+    let missing = grade_resolved(Ok(sock_in(&dir)), &bare(&installed)).await;
+    assert_eq!(missing.status, CheckStatus::Fail, "{}", missing.message);
+    assert!(
+        missing.message.contains("`tctl start trusty-events`"),
+        "{}",
+        missing.message
+    );
+
+    // A file where the directory should be: the plist lookup errors.
+    let blocker = dir.path().join("not-a-dir");
+    std::fs::write(&blocker, "").expect("blocker file");
+    let unknown = grade_resolved(Ok(sock_in(&dir)), &bare(&blocker)).await;
+    assert_eq!(unknown.status, CheckStatus::Fail, "{}", unknown.message);
+
+    // See #7215: bind in a 0700 directory and wait out an inherited fd.
+    let stale_dir = tempfile::tempdir().expect("tempdir");
+    let path = hardened_sock_in(&stale_dir);
+    crate::test_support::stale_socket::bind_stale(&path);
+    let not_installed = agents_in(&stale_dir, false);
+    for agents in [&installed, &not_installed] {
+        let row = grade_resolved(Ok(path.clone()), &bare(agents)).await;
+        assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+        assert!(row.message.contains("stale"), "{}", row.message);
+    }
+
+    let bus_dir = tempfile::tempdir().expect("tempdir");
+    let bus = spawn_stub(&bus_dir, Stub::HangUp);
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(&installed)).await;
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
 }
 
 // #10071: stub buses. Each binds a hardened socket, as `trusty-events` does,
@@ -432,7 +544,7 @@ async fn a_silent_bus_is_hung_within_the_bound() {
         .metrics()
         .num_alive_tasks();
     let started = std::time::Instant::now();
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(dir.path())).await;
     let took = started.elapsed();
 
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
@@ -469,7 +581,7 @@ async fn a_bus_that_sends_a_heartbeat_is_ok() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut bus = spawn_stub(&dir, Stub::Heartbeat);
     let started = std::time::Instant::now();
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(dir.path())).await;
 
     assert_eq!(row.status, CheckStatus::Ok, "{}", row.message);
     assert!(
@@ -486,26 +598,28 @@ async fn a_bus_that_sends_a_heartbeat_is_ok() {
 /// Why (#10071: lockstep, no fallback): a bus older than the heartbeat refuses
 /// `heartbeat_ms`; that is version skew, neither healthy nor hung.
 /// What: a stub refusing `heartbeat_ms` the way a pre-#10071 bus did grades
-/// `Warn`, naming the skew and the upgrade remedy.
+/// `Warn` and names both versions: the bus as older than #10071, and this
+/// tm's. #10975 (owner ruling, "defer the install text"): it names no rebuild,
+/// install or `tctl` command.
 /// Test: This is the test.
 #[tokio::test]
 async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::PreHeartbeat);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(dir.path())).await;
 
     assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     assert!(
-        row.message.contains("older than this tm"),
+        row.message.contains("a build older than #10071"),
         "{}",
         row.message
     );
+    let tm = format!("this tm is {}", env!("CARGO_PKG_VERSION"));
+    assert!(row.message.contains(&tm), "{}", row.message);
     assert!(row.message.contains("heartbeat_ms"), "{}", row.message);
-    assert!(
-        row.message.contains("`tctl upgrade trusty-events`"),
-        "{}",
-        row.message
-    );
+    for banned in ["tctl", "Rebuild", "cargo install"] {
+        assert!(!row.message.contains(banned), "{banned}: {}", row.message);
+    }
 }
 
 /// Why (fail-closed): a bus that closes the subscription without a frame did
@@ -516,7 +630,7 @@ async fn a_bus_that_refuses_heartbeat_ms_is_version_skew() {
 async fn a_bus_that_hangs_up_without_a_frame_fails() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::HangUp);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(dir.path())).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
 }
 
@@ -530,10 +644,10 @@ async fn a_bus_that_hangs_up_without_a_frame_fails() {
 async fn a_refusal_not_naming_heartbeat_ms_is_a_fault_not_skew() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bus = spawn_stub(&dir, Stub::Refuse);
-    let row = grade_resolved(Ok(bus.path.clone())).await;
+    let row = grade_resolved(Ok(bus.path.clone()), &bare(dir.path())).await;
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(
-        !row.message.contains("older than this tm"),
+        !row.message.contains("older than #10071"),
         "{}",
         row.message
     );

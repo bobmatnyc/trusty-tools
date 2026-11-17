@@ -28,7 +28,7 @@ fn chunking_indexer() -> CodeIndexer {
 
 async fn embed(indexer: &CodeIndexer, chunks: &[RawChunk]) {
     let out = indexer
-        .embed_chunks_in_batches(chunks, None, None)
+        .embed_chunks_in_batches(chunks, None, None, None)
         .await
         .expect("embed pass");
     assert!(out.iter().all(Option::is_some), "every chunk must embed");
@@ -226,7 +226,7 @@ async fn counting_leaves_the_vectors_unchanged() {
     let expected = Embedder::embed(&mock, &text).await.expect("direct embed");
     let indexer = indexer_with(Arc::new(mock));
     let out = indexer
-        .embed_chunks_in_batches(&[raw("a", "src/a.rs", &text)], None, None)
+        .embed_chunks_in_batches(&[raw("a", "src/a.rs", &text)], None, None, None)
         .await
         .expect("embed pass");
     assert_eq!(out[0].as_deref(), Some(expected.as_slice()));
@@ -305,4 +305,60 @@ async fn a_panicking_count_task_counts_every_chunk_as_unmeasured() {
     let indexer = chunking_indexer();
     embed(&indexer, &forced(FORCE_COUNT_PANIC, 3)).await;
     assert_all_unmeasured(&indexer, &cap, 3, "the token-count task failed");
+}
+
+/// Reports its window only once it has embedded, as a lazy sidecar does.
+struct LateWindowEmbedder {
+    inner: MockEmbedder,
+    answered: std::sync::atomic::AtomicBool,
+}
+
+impl LateWindowEmbedder {
+    fn answered(&self) -> bool {
+        self.answered.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[async_trait::async_trait]
+impl Embedder for LateWindowEmbedder {
+    async fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        Embedder::embed(&self.inner, text).await
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let out = Embedder::embed_batch(&self.inner, texts).await;
+        self.answered
+            .store(true, std::sync::atomic::Ordering::Release);
+        out
+    }
+    fn dimension(&self) -> usize {
+        DIM
+    }
+    fn input_window(&self) -> Option<usize> {
+        self.answered()
+            .then(|| Embedder::input_window(&self.inner))
+            .flatten()
+    }
+    fn chunking_tokenizer(&self) -> Result<Option<Arc<ChunkTokenizer>>, ChunkError> {
+        if self.answered() {
+            Embedder::chunking_tokenizer(&self.inner)
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// #9284: a sidecar that reports its window only after its first answer still
+/// yields a real window and a real count on the very first pass.
+#[tokio::test]
+async fn a_window_learned_after_the_first_wave_is_reported_and_counted() {
+    let indexer = indexer_with(Arc::new(LateWindowEmbedder {
+        inner: MockEmbedder::new(DIM).with_chunking(WINDOW),
+        answered: std::sync::atomic::AtomicBool::new(false),
+    }));
+    // 7 words + 2 specials = 9 tokens, one past the window of 8.
+    embed(&indexer, &[raw("a", "src/a.rs", &words(7))]).await;
+    let stats = indexer.embed_window_stats();
+    assert_eq!(stats.window(), Some(WINDOW), "the window is no longer null");
+    assert_eq!(stats.truncated(), 1, "the first wave is counted too");
+    assert_eq!(stats.unmeasured(), 0);
 }

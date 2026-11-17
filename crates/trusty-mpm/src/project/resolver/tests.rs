@@ -28,6 +28,9 @@ fn proj(name: &str, repo_url: &str) -> Project {
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
@@ -45,12 +48,17 @@ fn proj_tagged(name: &str, repo_url: &str, tags: &[&str], desc: &str) -> Project
         commit_name: None,
         commit_email: None,
         worktree: None,
+        project_key: None,
+        decommissioned_at: None,
+        archived_at: None,
     }
 }
 
 fn session_with_repo(repo_url: &str) -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "test".into(),
         cwd: PathBuf::from("/tmp"),
@@ -77,6 +85,7 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -88,6 +97,8 @@ fn session_with_repo(repo_url: &str) -> SessionRecord {
 fn session_no_repo() -> SessionRecord {
     SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: ManagedSessionId::new(),
         tmux_name: "no-repo".into(),
         cwd: PathBuf::from("/tmp"),
@@ -114,6 +125,7 @@ fn session_no_repo() -> SessionRecord {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -461,7 +473,8 @@ fn resolver_session_unregistered_url_returns_none() {
 }
 
 /// Per #1532 item 5: when the same repo_url appears under two project names,
-/// the first project in the slice wins (tie-break by ordering).
+/// one wins. #10476: `alpha` wins by name order, not by slice position; see
+/// `resolver_session_url_tie_break_is_name_order_not_insertion_order`.
 #[test]
 fn resolver_session_url_tie_break_first_wins() {
     let projects = vec![
@@ -476,7 +489,58 @@ fn resolver_session_url_tie_break_first_wins() {
     );
 }
 
+/// #10476 (D64): the winner among registrations of one repo is the smallest
+/// name by `(lowercase, raw)`, whatever order the registry `HashMap` yields.
+#[test]
+fn resolver_session_url_tie_break_is_name_order_not_insertion_order() {
+    let forward = vec![
+        proj("beta", "https://github.com/org/shared-repo"),
+        proj("Alpha", "https://github.com/org/Shared-Repo.git/"),
+    ];
+    let reversed: Vec<Project> = forward.iter().rev().cloned().collect();
+    let session = session_with_repo("https://github.com/org/shared-repo");
+    for projects in [&forward, &reversed] {
+        let bound = resolve_session_project(&session, projects).expect("tie-break");
+        assert_eq!(bound.name, "Alpha", "name order wins in {projects:?}");
+    }
+}
+
 // ---- fleet_by_project ----
+
+/// #10476 (D64): one project per repo. Registrations of the trusty-tools repo
+/// that differ by case, trailing `/` and `.git` (the live session form is the
+/// plain https URL) collapse into one group, and each matching session sits in
+/// it exactly once.
+#[test]
+fn resolver_fleet_shared_repo_url_one_group_all_sessions() {
+    let projects = vec![
+        proj("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
+        proj("other", "https://github.com/bobmatnyc/other"),
+        proj(
+            "Trusty-Tools",
+            "https://github.com/bobmatnyc/Trusty-Tools.git/",
+        ),
+        proj(
+            "trusty-tools-2",
+            "https://github.com/bobmatnyc/trusty-tools/",
+        ),
+    ];
+    let sessions = vec![
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools"),
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools"),
+        session_with_repo("https://github.com/bobmatnyc/trusty-tools.git"),
+        session_no_repo(),
+    ];
+    let fleet = fleet_by_project(&sessions, &projects);
+    let names: Vec<&str> = fleet.iter().map(|f| f.project.name.as_str()).collect();
+    assert_eq!(names, vec!["Trusty-Tools", "other"], "one group per repo");
+    let mut ids: Vec<String> = fleet[0].sessions.iter().map(|s| s.id.to_string()).collect();
+    ids.sort();
+    let mut want: Vec<String> = sessions[..3].iter().map(|s| s.id.to_string()).collect();
+    want.sort();
+    assert_eq!(ids, want, "every matching session exactly once");
+    assert!(fleet[1].sessions.is_empty());
+}
 
 #[test]
 fn resolver_fleet_by_project_basic() {
@@ -572,6 +636,48 @@ fn local_checkout_for_keeps_an_absolute_repo_url() {
     assert_eq!(
         local_checkout_for(&proj("tools", "/Users/me/work/trusty-tools")),
         Some(PathBuf::from("/Users/me/work/trusty-tools"))
+    );
+}
+
+/// #10604: a `~` path names the flat checkout under the home directory, never
+/// `<repos_root>/trusty-mpm-projects/trusty-tools` (host `~` dropped).
+#[test]
+fn local_checkout_for_expands_a_tilde_repo_url_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", Some(home)),
+        Some(PathBuf::from("/home/u/trusty-mpm-projects/trusty-tools"))
+    );
+    assert_eq!(
+        local_checkout_for_url_in("~", Some(home)),
+        Some(PathBuf::from("/home/u"))
+    );
+    // No home to expand against: no answer, not a guessed managed clone.
+    assert_eq!(
+        local_checkout_for_url_in("~/trusty-mpm-projects/trusty-tools", None),
+        None
+    );
+}
+
+/// #10604: `repo_key` expands a `~` spelling the way key minting does, so a
+/// `~` and an absolute registration of one checkout fold; an unexpandable `~`
+/// stays as spelled rather than becoming a guessed path.
+#[test]
+fn repo_key_folds_a_tilde_and_an_absolute_spelling_10604() {
+    let home = std::path::Path::new("/home/u");
+    assert_eq!(
+        repo_key_in("~/code/Widget/", Some(home)),
+        repo_key_in("/home/u/code/widget.git", Some(home))
+    );
+    assert_eq!(repo_key_in("~/code/widget", None), "~/code/widget");
+    assert_eq!(
+        repo_key_in("~/code/widget", Some(std::path::Path::new("rel"))),
+        "~/code/widget"
+    );
+    // URLs keep #10720's rule.
+    assert_eq!(
+        repo_key_in("https://github.com/Acme/Widget.git/", Some(home)),
+        "https://github.com/acme/widget"
     );
 }
 

@@ -1,0 +1,263 @@
+"""fleet_poll_io.py — fleet-poll.py's tmux, log, event and host reads (#10571 Phase 2 split).
+
+Why: fleet-poll.py sat at the 500-SLOC cap; its I/O half moves here unchanged.
+What: TmuxError, log, tmux, socket_dir, workspace_servers, list_panes, is_architect_pane, capture, capture_pane,
+send_to_architect, read_events, swap_used_mb, swap_probe (used, swap-in/out, OS memory pressure; ar-T8a), host_alerts
+and acquire_poll_lock. Every name these
+functions use from the poller (settings, sibling functions) is read through `P`, the late-bound view fleet-poll.py passes to
+bind(), so rebinding `fleet-poll.tmux` or `fleet-poll.LOG` still steers them, as before the split.
+Test: tests/test_fleet_poll.py, tests/test_fleet_poll_workspace_servers.py (through fleet-poll.py)
+"""
+import fcntl
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+
+P = None  # fleet-poll.py's late-bound view; set by bind()
+
+
+def bind(poller):
+    """Point this module at the loaded fleet-poll.py (its `_Poller` view)."""
+    global P
+    P = poller
+
+
+class TmuxError(Exception):
+    pass
+
+
+def acquire_poll_lock(path):
+    """("held", fd) | ("busy", detail) | ("unknown", detail) for an exclusive flock on `path` (#10571).
+
+    Why: two live pollers double every alert and type two wakes into one box.
+    What: a non-blocking LOCK_EX on `path` (created when absent). "held" returns the open fd, which the caller
+    keeps for the process's life; "busy" means another process holds it; "unknown" (no flock, an unwritable
+    inbox) is never a refusal: the caller logs it and polls.
+    Test: test_a_second_live_poller_exits_before_any_write, test_an_unknown_lock_state_only_logs
+    """
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        return "unknown", f"cannot open {path}: {e}"
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(fd)
+        return "busy", f"another fleet poller holds {path}"
+    except OSError as e:
+        os.close(fd)
+        return "unknown", f"cannot lock {path}: {e}"
+    return "held", fd
+
+
+def log(msg, dry_run=False):
+    line = f"{P.iso()} {msg}"
+    if dry_run:
+        print(line)
+        return
+    with open(P.LOG, "a") as f:
+        f.write(line + "\n")
+
+
+def tmux(*args, server=None):
+    # #8928: `server` names a workspace's private server (`tmux -L <server>`).
+    where = ["-L", server] if server else (["-S", P.SOCKET] if P.SOCKET else [])
+    cmd = ["tmux", *where, *args]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise P.TmuxError(f"{args[0]}: {e}") from e
+    if r.returncode != 0:
+        raise P.TmuxError(f"{args[0]}: {r.stderr.strip()[:200]}")
+    return r.stdout
+
+
+def socket_dir():
+    """tmux's socket directory: $TMUX_TMPDIR (or /tmp), resolved, + tmux-<uid>."""
+    base = os.path.realpath(os.environ.get("TMUX_TMPDIR") or "/tmp")
+    return os.path.join(base, f"tmux-{os.getuid()}")
+
+
+def workspace_servers(directory=None):
+    """#8928: live workspace servers (`tm-ws-*` sockets that answer), sorted."""
+    directory = directory or P.socket_dir()
+    try:
+        names = os.listdir(directory)
+    except FileNotFoundError:
+        return []
+    live = []
+    for name in sorted(n for n in names if n.startswith(P.WORKSPACE_PREFIX)):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(1.0)  # a wedged server must not stall the cycle
+        try:
+            s.connect(os.path.join(directory, name))
+            live.append(name)
+        except OSError:
+            pass  # not a socket, or a server that exited
+        finally:
+            s.close()
+    return live
+
+
+def list_panes():
+    """Panes of the default server and, unless TMUX_SOCKET pins one server,
+    of every live workspace server; each pane names the server it is on."""
+    fmt = "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{window_active}#{pane_active}"
+    panes = P._rows(P.tmux("list-panes", "-a", "-F", fmt), None)
+    for server in ([] if P.SOCKET else P.workspace_servers()):
+        try:
+            panes += P._rows(P.tmux("list-panes", "-a", "-F", fmt, server=server), server)
+        except P.TmuxError as e:
+            P.log(f"{server} list-panes ERROR {e}")
+    return panes
+
+
+def is_architect_pane(p):
+    """#10101: the Architect's pane is on its own (default) server; a same-named
+    session on a workspace server is never it."""
+    return p["session"] == P.ARCHITECT and not p.get("server")
+
+
+def _rows(out, server):
+    panes = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4:
+            pane = dict(zip(("session", "pane", "cmd", "active"), parts))
+            if server:
+                pane["server"] = server
+            panes.append(pane)
+    return panes
+
+
+def capture(pane, server=None, history=80, join=False):
+    # #11065: `history` is how many scrollback lines above the screen to include; the pane tail asks up to 200.
+    # join=True adds -J, so a line tmux soft-wrapped comes back as one row and a wrapped secret is masked whole.
+    args = ("capture-pane", "-e", "-p", *(("-J",) if join else ()), "-S", f"-{int(history)}", "-t", pane)
+    if server:
+        return P.tmux(*args, server=server)
+    return P.tmux(*args)
+
+
+def capture_pane(p, **kw):
+    """Capture listed pane `p` on the server it was listed from (#8928); `kw` (history=, join=) goes to capture()."""
+    return P.capture(p["pane"], p["server"], **kw) if p.get("server") else P.capture(p["pane"], **kw)
+
+
+def send_to_architect(pane, *keys):
+    """The only send path. Re-checks that `pane` belongs to the Architect first, and that no
+    self-clear.sh run may be typing there (#10599): every key the poller sends passes this check."""
+    if P.self_clear_running(P.ROOT):
+        raise P.TmuxError(f"refusing to send to {pane}: self-clear running")
+    owner = P.tmux("display-message", "-p", "-t", pane, "#{session_name}").strip()
+    if owner != P.ARCHITECT:
+        raise P.TmuxError(f"refusing to send to {pane} (session {owner!r})")
+    P.tmux("send-keys", "-t", pane, *keys)
+
+
+def read_events(state):
+    """New permission_prompt / agent_needs_input lines since the saved offset."""
+    size = os.path.getsize(P.EVENTS) if os.path.exists(P.EVENTS) else 0
+    off = state.get("events_offset")
+    if off is None or size < off:   # first run: skip backlog; smaller file: rotated
+        off = size if off is None else 0
+    evs = []
+    if size > off:
+        with open(P.EVENTS) as f:
+            f.seek(off)
+            chunk = f.read()
+            off = f.tell()
+        for line in chunk.splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            s = ev.get("tmux_session") or ""
+            if ev.get("type") in P.EVENT_TYPES and s not in P.SKIP_SESSIONS:
+                evs.append(P.alert(ev["type"], P.fp(line), ev.get("message") or ev["type"],
+                                   s, ev.get("tmux_pane") or "", now=time.time()))
+    state["events_offset"] = off
+    return evs
+
+
+def swap_used_mb():
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "vm.swapusage"], capture_output=True,
+                             text=True, timeout=5).stdout
+        m = re.search(r"used = ([\d.]+)([KMG])", out)
+        if not m:
+            return None
+        return float(m.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[m.group(2)]
+    with open("/proc/meminfo") as f:
+        mi = {l.split(":")[0]: int(l.split()[1]) for l in f if ":" in l}
+    return (mi.get("SwapTotal", 0) - mi.get("SwapFree", 0)) / 1024
+
+
+PSI_FULL_CRITICAL = 10.0   # Linux: /proc/pressure/memory "full avg10" at or above this is critical
+# #10857: the previous cycle's (ins, outs). Swap activity needs a previous sample, so the first cycle after a
+# start, and every --once run, reads activity as unknown (logged as info, never an alert).
+_SWAP_PREV = []
+
+
+def _swap_counters():
+    """(swap-ins, swap-outs) since boot: vm_stat on macOS, /proc/vmstat elsewhere. Raises on no reading."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5).stdout
+        ins, outs = re.search(r"Swapins:\s+(\d+)", out), re.search(r"Swapouts:\s+(\d+)", out)
+        if not (ins and outs):
+            raise ValueError("vm_stat has no Swapins/Swapouts line")
+        return int(ins.group(1)), int(outs.group(1))
+    with open("/proc/vmstat") as f:
+        vm = dict(l.split()[:2] for l in f if len(l.split()) >= 2)
+    return int(vm["pswpin"]), int(vm["pswpout"])
+
+
+def _memory_pressure():
+    """"critical" | "warn" | "normal" from the OS. Raises when the OS gives no reading."""
+    if sys.platform == "darwin":
+        out = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        return {"1": "normal", "2": "warn", "4": "critical"}[out]
+    with open("/proc/pressure/memory") as f:
+        full = next(l for l in f if l.startswith("full"))
+    avg10 = float(re.search(r"avg10=([\d.]+)", full).group(1))
+    return "critical" if avg10 >= PSI_FULL_CRITICAL else "normal"
+
+
+def swap_probe():
+    """{"used_mb", "counters", "pressure", "errors"} for this host (ar-T8a). A part that fails is None and its
+    error is listed: a failed probe is an unknown reading, never a critical one.
+    Test: test_a_pressure_probe_error_neither_invents_critical_nor_drops_warn"""
+    r = {"used_mb": None, "counters": None, "pressure": None, "errors": []}
+    for key, fn, name in (("used_mb", P.swap_used_mb, "swap used"), ("counters", P._swap_counters, "swap-in/out"),
+                          ("pressure", P._memory_pressure, "memory pressure")):
+        try:
+            r[key] = fn()
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, AttributeError,
+                StopIteration, IndexError) as e:
+            r["errors"].append(f"{name} unknown: {type(e).__name__}")
+    return r
+
+
+def host_alerts(now):
+    """load, disk and swap alerts with a severity and a bucket (fleet_alert_dedupe.py, ar-T8a). Leftover or
+    unknown-activity swap comes back at severity "info", which the cycle logs and never alerts on.
+    Test: test_load_and_disk_carry_severity_and_bucket"""
+    out, ad = [], P.fleet_classify.alert_dedupe
+    cores, factor = os.cpu_count() or 1, float(os.environ.get("LOAD_FACTOR", P.LOAD_FACTOR_DEFAULT))
+    du = shutil.disk_usage("/")
+    reading = P.swap_probe()
+    prev = _SWAP_PREV[-1] if _SWAP_PREV else None
+    if reading.get("counters"):
+        _SWAP_PREV[:] = [reading["counters"]]
+    for a in (ad.load_alert(P.alert, os.getloadavg(), cores, factor, now),
+              ad.disk_alert(P.alert, 100 * du.used / du.total, P.DISK_HIGH, now),
+              ad.swap_alert(P.alert, reading, prev, now)):
+        if a:
+            out.append(a)
+    return out

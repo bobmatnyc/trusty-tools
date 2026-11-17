@@ -1,6 +1,6 @@
 # 0039. Operator-named sessions are unique by construction; the per-project serial stays scoped to auto-creation
 
-- **Status:** Accepted
+- **Status:** Amended by [0073](0073-bare-first-session-names-counter-only-on-duplicates.md)
 - **Date:** 2026-08-10
 - **Scope:** crate `trusty-mpm` (`session_manager::naming`, `rename`, `adopt`, `slots`; `core::session_launch::workstream_label`), crate `trusty-common` (`session_naming` module) — including an explicit, owner-ruled future-only rule for the `ws/<session-name>` GitHub label convention's interaction with rename, and the lookup mechanism (`SlotRegistry`'s new name→id index) that backs attach-if-live
 - **Reversibility Cost:** Medium-High — this changes a user-visible naming convention (two name shapes now carry different semantics an operator must learn) and the collision behavior operators see when they type a name that already exists; existing tooling, scripts, or muscle memory built against "every session ends in `-NN`" is invalidated for the operator-named case

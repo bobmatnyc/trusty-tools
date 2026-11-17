@@ -22,6 +22,10 @@
 //! [`build_inplace_resume_command`]: crate::runtime::build_inplace_resume_command
 //! [`InPlaceResumeCommand`]: crate::runtime::InPlaceResumeCommand
 
+// #8878: every Architect `claude` a CLI launch starts is bound.
+pub mod architect_bind;
+// #11270: the launch shim execs an Architect spec only against a grant.
+pub mod architect_grant;
 mod claude_code;
 // #8308: the CLI and fleet launches ride the same spec carrier.
 pub mod cli_launch;

@@ -29,7 +29,7 @@ use clap::Parser;
 use cli::{Cli, Command};
 use commands::{
     agent::agent,
-    compress::run_compress,
+    compress_run,
     daemon::{restart, run_daemon, start, stop_daemon},
     generate::generate,
     hooks::clean as hooks_clean,
@@ -228,6 +228,10 @@ static HELP: std::sync::LazyLock<trusty_common::help::HelpConfig> =
 async fn main() -> anyhow::Result<()> {
     // #7889: the pm-guard hook's decision deadline is measured from here.
     let started = std::time::Instant::now();
+    // #10476: lend the tui the guarded, quiet tmux switch for its Focus key.
+    commands::tmux_attach::install_tui_focus_hook();
+    // #10754: S3 tm ls actions plumbing (keys wait on De1).
+    commands::tui_session_hooks::install_tui_session_hooks();
     // Why: parse via `try_parse` so we can attach the workspace-shared
     // "did you mean?" suggestion (issue #216) before exiting on a clap error.
     let argv: Vec<String> = std::env::args().collect();
@@ -273,20 +277,17 @@ async fn main() -> anyhow::Result<()> {
         commands::build_lease::run(args).await
     }
     // #8436: `tm fleet` is daemon-less — no gateway probe, no migration.
-    if let Some(Command::Fleet { action }) = cli.command {
-        return commands::fleet::run(action).await;
-    }
-    // #9822: `tm architect` is daemon-less, and its stdout is a script's.
-    if let Some(Command::Architect { action }) = cli.command {
-        std::process::exit(commands::architect::run(action));
-    }
-    // #8939: `tm env` is daemon-less too, and prints no value.
-    if let Some(Command::Env { action }) = cli.command {
-        return commands::env_file::run(action);
-    }
+    // #9822: `tm architect` too, and its stdout is a script's. #8939: `tm env`
+    // too, and prints no value. #8878 PR2a: `tm presence` too.
     // #7521: `tm secrets` talks to the trusty-secrets socket, not the daemon.
     // #8378 PR-C: `tm content` is daemon-less as well.
     match cli.command {
+        Some(Command::Fleet { action }) => return commands::fleet::run(action).await,
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
+        Some(Command::Presence { action }) => return commands::presence::run(action),
+        Some(Command::Env { action }) => return commands::env_file::run(action),
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
         Some(Command::Content { action }) => return commands::content::run(action).await,
         Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await), // #9758
@@ -501,7 +502,7 @@ async fn main() -> anyhow::Result<()> {
             commands::session_account::session_as_account(&daemon, action, account, token).await
         }
         Some(Command::Events) => commands::misc::events(&client, &url).await,
-        Some(Command::Validate { path, repair }) => validate(path, repair).await,
+        Some(cmd @ Command::Validate { .. }) => validate(cmd).await,
         Some(Command::Hooks { action }) => {
             use cli::HooksAction;
             match action {
@@ -510,15 +511,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Agent { action }) => agent(action).await,
         Some(Command::Generate { action }) => generate(action).await,
-        Some(Command::Tui {
-            url: tui_url,
-            interval_ms,
-            single_pane,
-        }) => {
-            // #9556: an explicit `--url` is pinned; #6483: multipane by default.
-            let client = trusty_mpm::tui::client_for(tui_url.as_deref())?;
-            trusty_mpm::tui::run_initial_view_with(client, interval_ms, None, single_pane).await
-        }
+        Some(tui @ Command::Tui { .. }) => commands::projects::run_tui(tui).await,
         Some(Command::Telegram { cmd }) => telegram(&url, cmd).await,
         Some(Command::Slack { cmd }) => slack(cmd).await,
         Some(Command::Install {
@@ -545,7 +538,8 @@ async fn main() -> anyhow::Result<()> {
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
         Some(Command::Memory { action }) => memory(action).await,
-        Some(Command::Compress { tool }) => run_compress(&tool).await,
+        // #10973: a command after `--` selects the run mode (`compress_run`).
+        Some(Command::Compress { tool, command }) => compress_run::run(&tool, &command).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
@@ -558,7 +552,8 @@ async fn main() -> anyhow::Result<()> {
             mcp,
             force,
             sandbox,
-        }) => run_daemon(addr, tailscale, mcp, force, sandbox).await,
+            sandbox_credential,
+        }) => run_daemon(addr, tailscale, mcp, force, sandbox, sandbox_credential).await,
         Some(Command::Supervisor {
             interval,
             auto_resume,
@@ -607,8 +602,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
-        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
         Some(Command::Env { action }) => commands::env_file::run(action),
+        Some(Command::Presence { action }) => commands::presence::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,
         Some(Command::Content { action }) => commands::content::run(action).await,
         Some(Command::Dbatg(args)) => std::process::exit(commands::dbatg::run(args).await),

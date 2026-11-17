@@ -67,6 +67,8 @@ pub const MAINTENANCE_DISABLE_ARGS: &[&str] = &["-c", "maintenance.auto=false", 
 pub fn command() -> Command {
     let mut cmd = Command::new("git");
     cmd.args(MAINTENANCE_DISABLE_ARGS);
+    // #10083: a socket another thread is mid-creating must not reach git.
+    crate::child_fds::seal_inherited(&mut cmd);
     cmd
 }
 
@@ -100,6 +102,8 @@ pub fn command_in(dir: &Path) -> Command {
 pub fn tokio_command() -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(MAINTENANCE_DISABLE_ARGS);
+    // #10083: as in [`command`].
+    crate::child_fds::seal_inherited_tokio(&mut cmd);
     cmd
 }
 

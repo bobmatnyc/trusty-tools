@@ -3,7 +3,8 @@
 Each workspace runs its own tmux server (`tmux -L tm-ws-<slug>-<hash>`), so a
 listing of the default server alone misses those PMs. The poller lists the
 default server and every live `tm-ws-*` server, and captures each pane on the
-server it was listed from.
+server it was listed from. #10101: the Architect's pane is only ever the one on
+its own (default) server; a workspace server's same-named session is never it.
 """
 import importlib.util
 import os
@@ -114,3 +115,29 @@ def test_an_explicit_socket_lists_only_that_server(monkeypatch):
                         lambda *a: (_ for _ in ()).throw(AssertionError("not scanned")))
     assert fp.list_panes() == []
     assert seen == [None]
+
+
+def _ws_architect_and_default_pm():
+    """A session named like the Architect on a workspace server, beside a PM."""
+    return [
+        {"session": "tm-pm", "pane": "%1", "cmd": "claude", "active": "11"},
+        {"session": fp.ARCHITECT, "pane": "%1", "cmd": "claude", "active": "11",
+         "server": "tm-ws-api-0123456789ab"},
+    ]
+
+
+def test_a_workspace_server_session_is_never_the_architects_pane():
+    default, named = ({"session": fp.ARCHITECT}, {"session": fp.ARCHITECT, "server": "tm-ws-x"})
+    assert fp.is_architect_pane(default)
+    assert not fp.is_architect_pane(named)
+
+
+def test_the_architect_probes_skip_a_workspace_servers_same_named_pane(monkeypatch):
+    captured = []
+    panes = _ws_architect_and_default_pm()
+    busy = fp.architect_busy(panes, capturer=lambda pane: captured.append(pane) or "")
+    assert busy == (False, "") and captured == []
+    monkeypatch.setattr(fp, "tmux", lambda *a, **k: (_ for _ in ()).throw(AssertionError(a)))
+    assert fp.wake(1, panes, dry_run=True) == f"skipped: no {fp.ARCHITECT} pane"
+    verdict, _ = fp.watchdog.classify(panes, fp.ARCHITECT, fp.SHELLS, None, None, 0, 5)
+    assert verdict == "dead"

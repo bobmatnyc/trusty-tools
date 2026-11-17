@@ -18,6 +18,8 @@
 //! rendering/serialization tests live in each submodule.
 
 pub(crate) mod convert;
+// #10988: `tm projects decommission`.
+pub(crate) mod decommission;
 pub(crate) mod deliverables;
 pub(crate) mod milestones;
 // #7406: the one predicate every surface that OFFERS a project shares.
@@ -78,7 +80,33 @@ pub(crate) async fn launch_bare_tui() -> anyhow::Result<()> {
     let explicit = trusty_mpm::core::explicit_url_from_env();
     let url = trusty_mpm::core::try_resolve_daemon_url(explicit.as_deref())?;
     let daemon = trusty_mpm::client::DaemonClient::with_client(client, url);
-    trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false).await
+    // #10476: this view captures the mouse unless `TM_TUI_MOUSE=0`.
+    let mouse = trusty_mpm::tui::terminal::mouse_from_env(false);
+    trusty_mpm::tui::run_initial_view_with(daemon, PROJECT_CTL_INTERVAL_MS, None, false, mouse)
+        .await
+}
+
+/// `tm tui`: the console home screen, whose MPM tile opens the projects view.
+///
+/// Why: #9556 pins an explicit `--url`; #10491 opens `tm tui` on the home
+/// screen. Moved out of `main.rs` (#10476), which sits at the SLOC cap; it
+/// takes the whole `Command::Tui` so a new flag never grows `main.rs` (#10966).
+/// Test: terminal glue, exercised by launching the TUI.
+pub(crate) async fn run_tui(tui: crate::cli::Command) -> anyhow::Result<()> {
+    let crate::cli::Command::Tui {
+        url,
+        interval_ms,
+        single_pane,
+        no_mouse,
+        architect_store,
+    } = tui
+    else {
+        anyhow::bail!("run_tui needs `tm tui` arguments");
+    };
+    let client = trusty_mpm::tui::client_for(url.as_deref())?;
+    let mouse = trusty_mpm::tui::terminal::mouse_from_env(no_mouse);
+    trusty_mpm::tui::home::run_tui_entry(client, interval_ms, single_pane, mouse, architect_store)
+        .await
 }
 
 /// True when `argv` is exactly a bare `tm projects` invocation (#2118).
@@ -159,6 +187,10 @@ pub(crate) async fn projects(
         }
         ProjectsAction::Show { name, json } => registry::show(client, url, &name, json).await,
         ProjectsAction::Status { name, json } => registry::status(client, url, &name, json).await,
+        // #10988
+        ProjectsAction::Decommission { name, json } => {
+            decommission::decommission(client, url, &name, json).await
+        }
         ProjectsAction::Config { name, json, action } => {
             registry::config(client, url, &name, json, action).await
         }

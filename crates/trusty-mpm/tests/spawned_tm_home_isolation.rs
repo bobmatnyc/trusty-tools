@@ -252,6 +252,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // A `sh -c` pipeline with `tm compress` at its tail; the isolation goes on
     // the shell.
     ("tests/tm_compress_pipe.rs", 1),
+    // D60: the hook's `cd <dir> && { …; } | tm compress` rewrite runs in a `sh -c`
+    // with the binary's path at its tail; the isolation goes on the shell.
+    ("tests/tm_hook_pretooluse_rewrite.rs", 1),
     // #8878 ruling A: the guard must be the child of a fake `claude` shell, so
     // the shell runs `tm` by path; the isolation goes on the shell.
     ("tests/tm_hook_pm_guard_trust_anchor_8878.rs", 1),
@@ -269,6 +272,9 @@ const RAW_BIN_BUDGET: &[(&str, usize)] = &[
     // the framework the operator actually installed, so a scratch `$HOME` would
     // make it untestable rather than hermetic. Never run in CI.
     ("tests/meta_demo_e2e.rs", 1),
+    // #10571: `scripts/sandbox_daemon.sh --bin` takes the binary's path; the
+    // isolation goes on the script, which starts the daemon under `env -i`.
+    ("tests/architect_turn_active_chain_10571.rs", 1),
 ];
 
 /// `crates/trusty-mpm/tests`.

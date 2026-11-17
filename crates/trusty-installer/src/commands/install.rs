@@ -58,7 +58,8 @@ use crate::output::render_json;
 mod install_report;
 use install_report::{
     plans_mpm_supervisor_bootstrap, plans_service_bootstrap, print_dry_run, print_human_summary,
-    report_with_content, selection_error, selection_notes, InstallOutcome, InstallReport,
+    report_with_content, selection_error, selection_notes, short_reason, InstallOutcome,
+    InstallReport,
 };
 
 /// Handle `tctl install [<members>…]`.
@@ -300,7 +301,7 @@ pub fn run(
         }
     }
 
-    let mut report = block_on(install_all(&selected, json, service_enabled, force));
+    let (mut report, placements) = block_on(install_all(&selected, json, service_enabled, force));
 
     // #2560: post-install verify tail — ensure + health (with the #2498
     // kickstart retry), folded into the SAME report/exit-code so `--json`
@@ -310,6 +311,8 @@ pub fn run(
         let verify = super::verify_tail::run_verify_tail(&selected);
         report = report.with_verify(verify);
     }
+    // #10607: record what landed; compare the machine with it unless --no-verify.
+    report = report.finish_deployment(&placements, no_verify, &super::deployment_record::finish);
 
     if json {
         // A failed machine-readable write must not exit 0: automation would
@@ -325,6 +328,10 @@ pub fn run(
         if let Some(verify) = &report.verify {
             super::verify_tail::print_human(verify);
         }
+        report
+            .deployment
+            .iter()
+            .for_each(super::deployment_record::print_human);
     }
     report.exit_code()
 }
@@ -394,7 +401,7 @@ async fn install_all(
     json: bool,
     service_enabled: bool,
     force: bool,
-) -> InstallReport {
+) -> (InstallReport, Vec<super::deployment_record::Placement>) {
     let narr = narrator(json);
     let _ = narr.info(&format!("installing {} component(s)", selected.len()));
 
@@ -433,6 +440,7 @@ async fn install_all(
     let mut show_signing_tip = false;
     // #9396: what landed, for the content step after the loop.
     let mut placed = Vec::new();
+    let mut placements = Vec::new();
 
     for m in selected {
         checklist.set(&m.crate_name, ComponentState::Downloading);
@@ -442,6 +450,11 @@ async fn install_all(
         match install_one(m).await {
             Ok(installed) => {
                 placed.push((m.crate_name.clone(), installed.path.clone()));
+                placements.push(super::deployment_record::Placement::new(
+                    &m.crate_name,
+                    &installed.path,
+                    &installed.version,
+                ));
                 checklist.set(&m.crate_name, ComponentState::Verifying);
                 // #4964: size of the binary THIS run just placed, at its
                 // concrete path — never a name re-joined onto a directory the
@@ -703,7 +716,11 @@ async fn install_all(
     if show_signing_tip {
         eprintln!("{}", super::macos_signing::signing_persistence_tip());
     }
-    report_with_content(outcomes, &placed, &super::content_step::ProcessRunner, json)
+    let runner = super::content_step::ProcessRunner::fetch();
+    (
+        report_with_content(outcomes, &placed, &runner, json),
+        placements,
+    )
 }
 
 /// Whether an install failure is a failed integrity check rather than a routine
@@ -716,34 +733,19 @@ async fn install_all(
 /// `download::Outcome` alone would leave the conflation intact one layer up
 /// (#5518).
 ///
-/// What: Walks the error's source chain for a `download::ChecksumMismatch`. The
-/// chain, not just the head, because a caller may add context above it.
+/// What: Walks the error's source chain for a `download::ChecksumMismatch` or
+/// a `version_guard::DowngradeRefusal` (#10584). The chain, not just the head,
+/// because a caller may add context above it.
 ///
 /// Test: `tests::is_integrity_failure_spots_a_checksum_mismatch_through_context`,
-/// `tests::is_integrity_failure_ignores_a_routine_failure`.
+/// `tests::is_integrity_failure_ignores_a_routine_failure`,
+/// `tests::is_integrity_failure_spots_a_downgrade_refusal`.
 fn is_integrity_failure(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| c.is::<crate::download::ChecksumMismatch>())
-}
-
-/// Shorten an install error to a single-line reason for the live checklist row.
-///
-/// Why: `install_one`'s `anyhow::Error` chains can be long / multi-line (a
-/// health-gate mismatch message embeds a raw `--version` output); a checklist
-/// row must stay one line so the block keeps reading cleanly.
-/// What: Takes the first line of `e`'s `Display` output, truncated to 80
-/// chars (with a `…` marker) if still too long.
-/// Test: `tests::short_reason_truncates_long_and_multiline_errors`.
-fn short_reason(e: &anyhow::Error) -> String {
-    const MAX: usize = 80;
-    let first_line = e.to_string();
-    let first_line = first_line.lines().next().unwrap_or_default();
-    if first_line.chars().count() > MAX {
-        let truncated: String = first_line.chars().take(MAX).collect();
-        format!("{truncated}…")
-    } else {
-        first_line.to_owned()
-    }
+    // #10584: a downgrade refusal must not render as an optional skip either.
+    e.chain().any(|c| {
+        c.is::<crate::download::ChecksumMismatch>()
+            || c.is::<crate::download::version_guard::DowngradeRefusal>()
+    })
 }
 
 /// Select the concrete path for `binary` from a prebuilt placement's
@@ -855,6 +857,11 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// because it means the binary being health-gated is provably not the one
 /// that was just placed.
 ///
+/// #10584: before either branch writes, the build already at the destination
+/// is probed; a release (or crates.io version) older than it, or an installed
+/// binary whose version cannot be read, is a `DowngradeRefusal` — see
+/// `crate::download::version_guard`.
+///
 /// Test: Side-effecting; the fallback routing and shaping are unit-tested in
 /// `crate::download::tests`. The #3554 shape (health gate immune to a
 /// PATH-shadowing stale binary) is covered at the `verify_installed_binary_at_path`
@@ -862,7 +869,7 @@ fn existed_before_at_both(preferred_bin_path: &Path, cargo_bin_path: &Path) -> (
 /// path-selection glue specifically is covered by `select_prebuilt_bin_path`'s
 /// and `cargo_fallback_bin_path`'s own tests (see above).
 async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
-    use crate::download::{self, Outcome};
+    use crate::download::{self, version_guard as vg, Outcome};
 
     // Resolve the install directory — the canonical cargo bin dir (#5777:
     // `default_install_dir()` delegates to the shared `canonical_bin_dir()`,
@@ -878,7 +885,13 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
     let (existed_at_preferred, existed_at_cargo_bin) =
         existed_before_at_both(&preferred_bin_path, &cargo_bin_path);
 
-    let outcome = download::try_install_prebuilt(&m.crate_name, &install_dir).await;
+    // #10584: read the build already installed before anything is fetched; a
+    // newer one is never replaced, and an unreadable one is refused.
+    let dests = [preferred_bin_path.as_path(), cargo_bin_path.as_path()];
+    let have = vg::probe_installed_build(&m.crate_name, &dests).await?;
+    let outcome =
+        download::try_install_prebuilt_no_downgrade(&m.crate_name, &install_dir, have.as_ref())
+            .await;
     match outcome {
         Outcome::Installed { paths, version } => {
             tracing::info!(crate_name = %m.crate_name, %version, "installed from prebuilt");
@@ -924,8 +937,11 @@ async fn install_one(m: &StableMember) -> anyhow::Result<InstalledBinary> {
         Outcome::ChecksumMismatch(mismatch) => Err(anyhow::Error::new(mismatch)),
         // #9974: binaries placed, cargo's launcher record not taken over.
         Outcome::CargoRecord(e) => Err(anyhow::Error::new(e)),
+        Outcome::Refused(e) => Err(anyhow::Error::new(e)),
         Outcome::Fallback { reason } => {
             tracing::info!(crate_name = %m.crate_name, %reason, "prebuilt unavailable; using cargo install");
+            // #10584: `cargo install` places crates.io's newest — same guard.
+            vg::guard_cargo_fallback(&m.crate_name, have.as_ref()).await?;
             // Verify cargo is available before attempting the fallback.
             which::which("cargo").map_err(|_| {
                 anyhow::anyhow!(

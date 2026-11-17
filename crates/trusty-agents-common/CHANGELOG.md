@@ -6,6 +6,28 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.6] — 2026-11-13
+
+### Changed
+
+- The `web-qa` entry in the roster tools fixture (`roster_tools_tests.rs`) now lists `mcp__trusty-browser`, matching the enrolled-browser web-QA agent; no API change (#11181).
+
+## [0.9.5] — 2026-11-10
+
+### Changed
+
+- Bus events set the new `HarnessEvent.project` field to `None`; no producer here names a project yet (#10906).
+
+## [0.9.4] — 2026-10-30
+
+### Changed
+
+- Register the data-designer agent in the roster test fixtures (`agent_content_tests.rs`, `roster_tools_tests.rs`); no API change (#10401).
+
+### Documentation
+
+- Comments no longer cite the retired `src/assets/` paths or a private ruling label; they point at `content/` paths or an issue (#10096).
+
 ## [0.9.3] — 2026-10-26
 
 ### Added

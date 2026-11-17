@@ -119,10 +119,20 @@ fn ensure_member(path: &Path, m: &McpMember) -> EnsureOutcome {
 /// the project-local [`MCP_FILE`].
 /// Test: side-effecting (filesystem); the member table is unit-tested.
 pub fn patch_all() -> Vec<EnsureOutcome> {
-    let path = Path::new(MCP_FILE);
+    patch_all_in(Path::new("."))
+}
+
+/// [`patch_all`] against `<root>/.mcp.json` instead of the cwd.
+///
+/// Why: #10320 — the install tail's root-skip test needs a temp project dir
+/// without changing the process-global cwd.
+/// What: upserts each member into `root.join(MCP_FILE)`.
+/// Test: `root_install_tail_writes_no_mcp_json` (verify_tail_tests).
+pub fn patch_all_in(root: &Path) -> Vec<EnsureOutcome> {
+    let path = root.join(MCP_FILE);
     mcp_members()
         .iter()
-        .map(|m| ensure_member(path, m))
+        .map(|m| ensure_member(&path, m))
         .collect()
 }
 

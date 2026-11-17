@@ -55,7 +55,8 @@ The fleet supervisor becomes the Architect, after the Architect in The Matrix Re
 | R6 | 2026-09-28 | owner | The old relay marker stays valid indefinitely. |
 | R7 | 2026-10-04 | owner (Codex voice) | Two-way Codex voice relay is part of the Architect spec (§6). Codex delivers straight into the Architect session; it may read Trusty MPM project files directly; every project change goes through the Architect and the owning PM. Direct writes are allowed only to the Architect voice conversation log and to shared brainstorming notes. |
 | R8 | 2026-10-04 | owner (Codex voice) | While the voice relay is active, the Architect asks decisions inline with a two-hex-digit question id and opens no modal dialog. Answers come back as `ANSWER <id>` and resolve only that id. |
-| R9 | 2026-10-11 | owner ruling 2026-10-11 | The dashboard gets a Briefs section and a Markdown reader. A brief is a one-paragraph answer. Longer text lives in `docs/briefs/` of the owning project, and every dashboard section shows at most one paragraph inline (§7). |
+| R9 | 2026-10-11 | owner ruling 2026-10-11 | The dashboard gets a Briefs section and a Markdown reader. A brief is a one-paragraph answer. Longer text lives in `docs/briefs/` of the owning project, and every dashboard section shows at most one paragraph inline (§7). The Briefs section is superseded by R10. |
+| R10 | 2026-10-14 | owner ruling 2026-10-14 | The dashboard has no standalone Briefs section; this supersedes R9's Briefs section. Every decision or action that is not truly simple links a readable brief in the owning project's briefs directory, the owner can ask for a brief on any item, and no dashboard field holds more than one paragraph. The shipped manual carries this as r-181 in `content/instructions/architect/architect.md` (§7). |
 
 ## 3. Phase 1 in the Architect project {#SPEC-ARCHITECT-03~draft}
 
@@ -140,13 +141,13 @@ A1 a fresh executor discovers the right pane and socket. A2 a bounded capture gi
 
 **ID:** SPEC-ARCHITECT-07~draft
 
-Owner ruling 2026-10-11 (R9). The owner asks for a Briefs section on the dashboard and a Markdown reader that renders diagrams. This section is the requirement. The Architect's dashboard skill (`architect-dashboard`) carries the per-pass procedure. The dashboard data contract is [DOC-82](./DOC-82-portfolio-intent-ledger-dashboard.md); the `briefs` collection below extends it.
+Owner rulings 2026-10-11 (R9) and 2026-10-14 (R10). The owner asked for briefs on the dashboard and a Markdown reader that renders diagrams (R9), then removed the standalone Briefs section (R10). This section is the requirement. The Architect's dashboard skill (`architect-dashboard`) carries the per-pass procedure. The dashboard data contract is [DOC-82](./DOC-82-portfolio-intent-ledger-dashboard.md); the `briefs` collection below extends it.
 
 ### 7.1 Requirement
 
-- The dashboard has a fifth top-level section, Briefs, after Sessions.
-- A brief is a one-paragraph answer to an owner question.
-- Anything longer than one paragraph is a Markdown file in the owning project's `docs/briefs/`. The brief row links that file.
+- The dashboard has no standalone Briefs section (R10, superseding R9).
+- Every decision or action that is not truly simple links a readable brief in the owning project's `docs/briefs/`. The owner can ask for a brief on any item.
+- A brief shown inline is one paragraph. Anything longer is a Markdown file in the owning project's `docs/briefs/`, and the item links that file.
 - Every dashboard section shows at most one paragraph inline. Long text is never placed in a dashboard field. It is linked instead.
 - The dashboard has a reader for brief files and other project Markdown. It works on phones and on desktops.
 
@@ -177,8 +178,8 @@ The document id is `YYYY-MM-DD-<slug>`. The collection adds no id prefix. The G,
 
 - A field longer than one paragraph shows a short excerpt. If the field has a doc, a "Read" link opens that doc in the reader.
 - A field longer than one paragraph with no doc is clipped with a "more" control. The control opens the full text in the reader, rendered as Markdown.
-- Applies to every section: Decisions, Asks, Goals, Sessions and Briefs.
-- An owner question answered in the Briefs section gets one paragraph. Anything longer is written to a brief file, and the row links it.
+- Applies to every section: Decisions, Asks, Goals and Sessions.
+- An owner question answered on the dashboard gets one paragraph. Anything longer is written to a brief file, and the item links it.
 
 ### 7.5 Markdown reader
 

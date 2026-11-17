@@ -282,8 +282,9 @@ pub(super) fn preflight_bounded<R: Read + Seek>(
 /// Does the container carry a zip signature (`PK`) in its first two bytes?
 ///
 /// Why the guard needs this at all: it reads the package with this crate's
-/// `zip` 9.x (#10019) while calamine parses the same bytes with its own `zip` 8.x
-/// (`cargo tree -p trusty-search -i zip@8.6.0`). Two independent zip readers
+/// `zip` 9.x (#10019) while calamine parses the same bytes with its own `zip`
+/// copy. calamine 0.37 shares the 9.x copy today (GHSA-m665-v7pm-7grj), but a
+/// future calamine can diverge again, and two independent zip readers
 /// over one file do not agree at the edges of the format, so "our reader could
 /// not open it" is NOT "calamine will not open it either". Treating an open
 /// failure as nothing-to-bound therefore fails OPEN: a package crafted to trip

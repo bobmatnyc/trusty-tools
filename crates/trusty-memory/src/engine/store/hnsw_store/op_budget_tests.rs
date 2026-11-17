@@ -175,6 +175,49 @@ async fn a_dropped_caller_still_trips_the_breaker_at_the_budget() {
     drop(release);
 }
 
+thread_local! {
+    /// `(is_tripped, abandoned_ops)` as `OpBreaker::abandon` saw them between
+    /// its two writes, on this thread (#10707).
+    static ABANDON_MIDPOINT: std::cell::Cell<Option<(bool, u64)>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test seam `OpBreaker::abandon` calls between counting and tripping.
+pub(super) fn record_abandon_midpoint(breaker: &super::OpBreaker) {
+    let seen = (breaker.is_tripped(), breaker.abandoned_ops());
+    ABANDON_MIDPOINT.with(|m| m.set(Some(seen)));
+}
+
+/// Why (#10707): `abandon` tripped the breaker before it counted the op, so a
+/// waiter on `is_tripped()` could read `abandoned_ops() == 0`. The window is a
+/// few instructions wide, so the dropped-caller test caught it 3 times in 30.
+/// What: snapshots the breaker at the one point between `abandon`'s two
+/// writes — the state a concurrent reader can observe there. It must never
+/// be "tripped with no count"; after the call both writes are visible.
+/// Test: this test.
+#[test]
+fn a_reader_that_sees_the_breaker_tripped_also_sees_the_abandoned_count() {
+    let breaker = super::OpBreaker::from_env();
+    ABANDON_MIDPOINT.with(|m| m.set(None));
+
+    let err = breaker.abandon("upsert", "palace");
+
+    assert!(matches!(
+        err,
+        OpBudgetError::BudgetExceeded { op: "upsert", .. }
+    ));
+    let midpoint = ABANDON_MIDPOINT
+        .with(std::cell::Cell::get)
+        .expect("abandon must pass its midpoint seam");
+    assert_ne!(
+        midpoint,
+        (true, 0),
+        "between abandon's writes the breaker read tripped with no abandoned op"
+    );
+    assert!(breaker.is_tripped());
+    assert_eq!(breaker.abandoned_ops(), 1);
+}
+
 /// Why (#9487 F3): the join bound must hold on its own, for a closure that
 /// hangs somewhere no inner lock bound reaches (inside `hnsw_rs`, or on
 /// `begin_write`).

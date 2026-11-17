@@ -22,9 +22,9 @@
 //!      yields a confidently wrong (huge) throughput number.
 //!
 //! What: spawns the REAL `trusty-search` binary (`--foreground`, isolated
-//! `--data-dir` and socket directory, dedicated port) once per embedder backend
+//! `--data-dir` and socket directory) once per embedder backend
 //! (`TRUSTY_EMBEDDER=stdio` / `TRUSTY_EMBEDDER=python`), registers a synthetic
-//! corpus, triggers a reindex over HTTP, and watches the daemon's stderr
+//! corpus, triggers a reindex over its Unix socket, and watches the daemon's stderr
 //! (via a buffered `tokio::io::BufReader::lines()`) for the
 //! `deferred_embed[...]: embedded N/N chunks` line. Elapsed time from the
 //! reindex trigger to that line, divided by N, is the measured throughput.
@@ -58,6 +58,9 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
+use trusty_search::service::daemon_client::DaemonClient;
+use trusty_search::service::rpc::admin::METHOD_ADMIN_STOP;
+use trusty_search::service::rpc::writes::{METHOD_INDEX_CREATE, METHOD_INDEX_REINDEX};
 
 /// Chunk count target for the synthetic corpus. Large enough for a stable
 /// throughput reading (the epic's own spike used ~24k embeds; this bench
@@ -139,18 +142,12 @@ fn spawn_daemon(
     data_dir: &Path,
     runtime_root: &Path,
     project_registry: &Path,
-    port: u16,
 ) -> Child {
     // #8900: stamped, so a daemon this bench starts dies with the test
     // binary even when `kill_on_drop` never runs.
     Command::from(test_daemon::command())
-        .args([
-            "start",
-            "--foreground",
-            "--port",
-            &port.to_string(),
-            "--data-dir",
-        ])
+        // #10458: the daemon serves only its socket; `--port` was removed (#9536).
+        .args(["start", "--foreground", "--data-dir"])
         .arg(data_dir)
         .arg("--no-auto-discover")
         .env("TRUSTY_EMBEDDER", embedder_env)
@@ -230,7 +227,7 @@ fn is_python_fallback(line: &str) -> bool {
     line.contains("FALLING BACK to the") && line.contains("ort")
 }
 
-/// Readiness is separate from HTTP liveness. Require the actual requested
+/// Readiness is separate from socket liveness. Require the actual requested
 /// backend so the Python arm cannot silently measure its ORT fallback.
 fn embedder_ready(health: &serde_json::Value, expected: &str) -> Result<bool, String> {
     match health["embedder"].as_str() {
@@ -249,12 +246,11 @@ fn embedder_ready(health: &serde_json::Value, expected: &str) -> Result<bool, St
     }
 }
 
-/// Poll `GET /health` until it responds successfully or `deadline` passes.
+/// Poll `search.health` on the socket until the requested embedder is ready or
+/// `deadline` passes.
 async fn wait_for_daemon_ready(
     child: &mut Child,
-    data_dir: &Path,
-    client: &reqwest::Client,
-    base: &str,
+    client: &DaemonClient,
     expected_backend: &str,
     deadline: Instant,
 ) {
@@ -262,33 +258,15 @@ async fn wait_for_daemon_ready(
         if let Some(status) = child.try_wait().expect("inspect daemon process status") {
             panic!("benchmark daemon exited before readiness: {status}; see child stderr");
         }
-        // This fresh private file is published only after HTTP and UDS bind.
-        // Fail closed on auto-port shifting instead of contacting an unrelated
-        // process that already owns the benchmark's requested port.
-        let advertised = std::fs::read_to_string(data_dir.join("http_addr"));
-        if let Ok(addr) = &advertised {
-            assert_eq!(
-                format!("http://{}", addr.trim()),
-                base,
-                "benchmark port was unavailable"
-            );
-        }
-        if advertised.is_ok() {
-            if let Ok(resp) = client.get(format!("{base}/health")).send().await {
-                if resp.status().is_success() {
-                    let health: serde_json::Value =
-                        resp.json().await.expect("decode daemon health");
-                    if embedder_ready(&health, expected_backend)
-                        .unwrap_or_else(|error| panic!("{error}"))
-                    {
-                        return;
-                    }
-                }
+        if let Ok(health) = client.health().await {
+            if embedder_ready(&health, expected_backend).unwrap_or_else(|error| panic!("{error}")) {
+                return;
             }
         }
         assert!(
             Instant::now() < deadline,
-            "daemon at {base} never became ready (GET /health)"
+            "daemon at {} never became ready (search.health)",
+            client.socket().display()
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
@@ -296,7 +274,7 @@ async fn wait_for_daemon_ready(
 
 /// Run one full bench arm: spawn the daemon, register+reindex the synthetic
 /// corpus, and time the deferred-embed completion.
-async fn run_bench_arm(label: &'static str, embedder_env: &str, port: u16) -> BenchResult {
+async fn run_bench_arm(label: &'static str, embedder_env: &str) -> BenchResult {
     // Keep Unix socket paths beneath sockaddr_un's short path limit. Source
     // files must instead live outside the allowlist's denied temporary roots.
     let runtime_parent = if cfg!(unix) {
@@ -329,7 +307,6 @@ async fn run_bench_arm(label: &'static str, embedder_env: &str, port: u16) -> Be
         &data_dir,
         runtime_root.path(),
         &project_registry,
-        port,
     );
     let mut stderr = BufReader::new(child.stderr.take().expect("child stderr was not piped"));
     // Read from startup onward so bootstrap diagnostics remain visible and
@@ -350,50 +327,42 @@ async fn run_bench_arm(label: &'static str, embedder_env: &str, port: u16) -> Be
     });
 
     let deadline = Instant::now() + BENCH_TIMEOUT;
-    let base = format!("http://127.0.0.1:{port}");
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("reqwest client");
+    // The daemon derives this path from TRUSTY_DATA_DIR. This test's own client
+    // is pinned to it, so it cannot resolve or dial the live daemon's socket.
+    let client =
+        DaemonClient::at(data_dir.join("trusty-search.sock")).with_timeout(Duration::from_secs(30));
 
-    wait_for_daemon_ready(&mut child, &data_dir, &client, &base, label, deadline).await;
-    eprintln!("[bench:{label}] daemon ready on {base}");
-
-    let create_resp = client
-        .post(format!("{base}/indexes"))
-        .json(&serde_json::json!({
-            "id": "throughput-bench",
-            "root_path": corpus_dir.path(),
-        }))
-        .send()
-        .await
-        .expect("POST /indexes failed");
-    assert!(
-        create_resp.status().is_success(),
-        "POST /indexes returned {}: {}",
-        create_resp.status(),
-        create_resp.text().await.unwrap_or_default()
+    wait_for_daemon_ready(&mut child, &client, label, deadline).await;
+    eprintln!(
+        "[bench:{label}] daemon ready on {}",
+        client.socket().display()
     );
+
+    client
+        .call(
+            METHOD_INDEX_CREATE,
+            serde_json::json!({
+                "id": "throughput-bench",
+                "root_path": corpus_dir.path(),
+            }),
+        )
+        .await
+        .expect("search.index.create failed");
 
     // Trigger (or re-trigger) an explicit reindex so the deferred-embed pass
     // this bench times definitely runs — registration alone may or may not
     // have already kicked one off; an explicit trigger removes the ambiguity.
     let t_reindex_start = Instant::now();
-    let reindex_resp = client
-        .post(format!("{base}/indexes/throughput-bench/reindex"))
-        .json(&serde_json::json!({ "force": true }))
-        .send()
+    client
+        .call(
+            METHOD_INDEX_REINDEX,
+            serde_json::json!({ "index_id": "throughput-bench", "body": { "force": true } }),
+        )
         .await
-        .expect("POST /indexes/:id/reindex failed");
-    assert!(
-        reindex_resp.status().is_success(),
-        "POST /reindex returned {}: {}",
-        reindex_resp.status(),
-        reindex_resp.text().await.unwrap_or_default()
-    );
+        .expect("search.index.reindex failed");
 
     // THE gotcha: wait for the `deferred_embed[...]: embedded N/N chunks`
-    // line, NOT the reindex HTTP response and NOT any "complete" event — the
+    // line, NOT the reindex RPC response and NOT any "complete" event — the
     // fast BM25-only pass (C1) finishes long before embedding does.
     let (chunks_embedded, t_embedded) = tokio::time::timeout(
         deadline.saturating_duration_since(Instant::now()),
@@ -406,16 +375,7 @@ async fn run_bench_arm(label: &'static str, embedder_env: &str, port: u16) -> Be
     let elapsed = t_embedded.duration_since(t_reindex_start);
     // An eager Python bootstrap or later sidecar failure can fall back to ORT.
     // Do not label that measurement as Python throughput.
-    let health: serde_json::Value = client
-        .get(format!("{base}/health"))
-        .send()
-        .await
-        .expect("post-embedding health request")
-        .error_for_status()
-        .expect("post-embedding health status")
-        .json()
-        .await
-        .expect("decode post-embedding health");
+    let health = client.health().await.expect("post-embedding search.health");
     assert!(
         embedder_ready(&health, label).unwrap_or_else(|error| panic!("{error}")),
         "embedder lost readiness after embedding: {health}"
@@ -432,7 +392,7 @@ async fn run_bench_arm(label: &'static str, embedder_env: &str, port: u16) -> Be
 
     // Best-effort clean shutdown; `kill_on_drop(true)` on `child` is the
     // backstop if this hangs.
-    let _ = client.post(format!("{base}/admin/stop")).send().await;
+    let _ = client.call(METHOD_ADMIN_STOP, serde_json::json!({})).await;
     let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
     log_task.abort();
 
@@ -476,8 +436,8 @@ fn print_comparison(results: &[BenchResult]) {
 }
 
 /// Real, `#[ignore]`d throughput comparison. A single test (not one per arm)
-/// so both daemons run sequentially on the same port and the comparison
-/// table prints once, covering both backends.
+/// so both daemons run sequentially and the comparison table prints once,
+/// covering both backends.
 ///
 /// Requires: a real `trusty-embedderd` binary discoverable (built alongside
 /// this test binary — `cargo build -p trusty-search` builds it) for the
@@ -491,10 +451,10 @@ async fn throughput_bench_ort_vs_python() {
     let mut results = Vec::new();
 
     eprintln!("=== bench arm: ort ===");
-    results.push(run_bench_arm("ort", "stdio", 17_878).await);
+    results.push(run_bench_arm("ort", "stdio").await);
 
     eprintln!("=== bench arm: python ===");
-    results.push(run_bench_arm("python", "python", 17_879).await);
+    results.push(run_bench_arm("python", "python").await);
 
     print_comparison(&results);
 

@@ -349,21 +349,82 @@ pub fn resolve_project(
 /// #2379) need to bind a repo URL to its registry-B project name; extracting
 /// the shared match rule keeps the normalisation logic in exactly one place
 /// rather than duplicating it at the new call site.
-/// What: normalises both sides and returns the first exact match. Per #1532
-/// item 5, when the same `repo_url` is registered under multiple project
-/// names the first match in `projects` order wins.
-/// Test: `resolver_by_repo_url_matches`, `resolver_by_repo_url_no_match`
-/// (`resolve_session_project`'s own tests exercise this transitively).
+/// What: normalises both sides with [`repo_key`] and returns the matching
+/// project. When the same repo is registered under several names (#1532 item
+/// 5) the winner is the smallest by [`name_order`], never `projects` order.
+/// Test: `resolver_by_repo_url_matches`, `resolver_by_repo_url_no_match`,
+/// `resolver_session_url_tie_break_is_name_order_not_insertion_order`.
 pub fn resolve_project_by_repo_url<'a>(
     repo_url: &str,
     projects: &'a [Project],
 ) -> Option<&'a Project> {
-    let repo_lower = repo_url.to_lowercase();
-    let repo_norm = normalise_url(&repo_lower);
-    projects.iter().find(|p| {
-        let proj_lower = p.repo_url.to_lowercase();
-        normalise_url(&proj_lower) == repo_norm
-    })
+    let key = repo_key(repo_url);
+    // #10476: a stable winner; the registry is a HashMap, so slice order is not.
+    projects
+        .iter()
+        .filter(|p| repo_key(&p.repo_url) == key)
+        .min_by(|a, b| name_order(a).cmp(&name_order(b)))
+}
+
+/// One project per repo: the registrations of `projects`, duplicates folded.
+///
+/// Why: owner ruling D64 (#10476) — "a project is a repo by definition". The
+/// registry can hold several registrations of one repo (differing by case,
+/// trailing `/` or `.git`), and every view that listed one node per
+/// registration showed the repo's sessions under each of them. Folding at the
+/// view layer leaves `projects.json` untouched.
+/// What: groups by [`repo_key`] and keeps each group's [`name_order`] winner,
+/// in the order the group's first registration appears in `projects`. A
+/// registration with an empty `repo_url` names no repo and is never folded.
+/// Test: `resolver_fleet_shared_repo_url_one_group_all_sessions`,
+/// `poll_collapses_duplicate_repo_registrations_to_one_row`.
+pub fn one_project_per_repo(projects: &[Project]) -> Vec<&Project> {
+    let mut out: Vec<&Project> = Vec::with_capacity(projects.len());
+    let mut slot_of: std::collections::HashMap<String, usize> = Default::default();
+    for p in projects {
+        let key = repo_key(&p.repo_url);
+        if key.is_empty() {
+            out.push(p);
+            continue;
+        }
+        match slot_of.get(&key) {
+            Some(&i) if name_order(p) < name_order(out[i]) => out[i] = p,
+            Some(_) => {}
+            None => {
+                slot_of.insert(key, out.len());
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// The comparison key that matches a `repo_url` to a project: lowercased,
+/// then [`normalise_url`].
+///
+/// #10604: a `~` spelling is first expanded by the same
+/// [`local_repo_path`](crate::project::project_key::local_repo_path) the key
+/// minting and [`local_checkout_for_url`] use, so `~/code/x` and the absolute
+/// path it names fold to one node. An unexpandable `~` stays as spelled. No
+/// `git` runs here: a path never folds with its origin URL.
+/// Test: `repo_key_folds_a_tilde_and_an_absolute_spelling_10604`.
+fn repo_key(url: &str) -> String {
+    repo_key_in(url, dirs::home_dir().as_deref())
+}
+
+/// [`repo_key`] with an explicit home directory (#10604).
+fn repo_key_in(url: &str, home: Option<&std::path::Path>) -> String {
+    let expanded = crate::project::project_key::local_repo_path(url, home);
+    let spelled = expanded.as_deref().map_or_else(
+        || std::borrow::Cow::Borrowed(url),
+        std::path::Path::to_string_lossy,
+    );
+    normalise_url(&spelled.to_lowercase()).to_string()
+}
+
+/// The order that picks the winner among one repo's registrations (#10476).
+fn name_order(p: &Project) -> (String, &str) {
+    (p.name.to_lowercase(), p.name.as_str())
 }
 
 /// Bind a live session to its registered project by `repo_url`.
@@ -388,16 +449,18 @@ pub fn resolve_session_project<'a>(
 /// Why: the Telegram `/fleet` command and the SM TUI both need a
 /// project-grouped view of active sessions; computing it once here keeps
 /// the rendering layer thin.
-/// What: for each registered project collects sessions whose `repo_url`
-/// matches; projects with no sessions are included with an empty `sessions`
-/// vec so callers can still display the full registry. Session records with
-/// no `repo_url` (or whose URL matches no project) are silently omitted from
-/// the fleet view.
+/// What: one entry per repo ([`one_project_per_repo`], #10476), holding every
+/// session whose `repo_url` matches it, each once; projects with no sessions
+/// are included with an empty `sessions` vec so callers can still display the
+/// full registry. Session records with no `repo_url` (or whose URL matches no
+/// project) are silently omitted from the fleet view.
 /// Test: `resolver_fleet_by_project_basic`, `resolver_fleet_empty_sessions`,
-/// `resolver_fleet_no_repo_sessions_omitted`.
+/// `resolver_fleet_no_repo_sessions_omitted`,
+/// `resolver_fleet_shared_repo_url_one_group_all_sessions`.
 pub fn fleet_by_project(sessions: &[SessionRecord], projects: &[Project]) -> Vec<ProjectFleet> {
-    projects
-        .iter()
+    // #10476: one group per repo, not one per registration.
+    one_project_per_repo(projects)
+        .into_iter()
         .map(|project| {
             let bound: Vec<SessionRecord> = sessions
                 .iter()
@@ -444,17 +507,32 @@ pub fn local_checkout_for(project: &Project) -> Option<PathBuf> {
 /// throwaway record just to read one field would be a second spelling of this
 /// derivation; `repo_url` was always the only input.
 /// What: identical to [`local_checkout_for`], which is now this function
-/// applied to `project.repo_url`.
+/// applied to `project.repo_url`; `~` expands against the process home.
 /// Test: `local_checkout_for_derives_the_managed_clone_path`,
 /// `local_checkout_for_keeps_an_absolute_repo_url`,
 /// `local_checkout_for_refuses_what_names_no_project`.
 pub fn local_checkout_for_url(repo_url: &str) -> Option<PathBuf> {
+    local_checkout_for_url_in(repo_url, dirs::home_dir().as_deref())
+}
+
+/// [`local_checkout_for_url`] with an explicit home directory (#10604).
+///
+/// What: a path spelling (`/…`, `~`, `~/…`) IS the directory, with `~`
+/// expanded against `home` ([`local_repo_path`](crate::project::project_key::local_repo_path));
+/// a `~` that cannot be expanded is `None`, never a URL parse.
+/// Test: `local_checkout_for_expands_a_tilde_repo_url_10604`.
+pub fn local_checkout_for_url_in(
+    repo_url: &str,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
     let trimmed = repo_url.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed.starts_with('/') {
-        return Some(PathBuf::from(trimmed));
+    // #10604: `~/x` once parsed as host `~`, owner `x`'s parent, and named a
+    // directory nested inside the projects root.
+    if crate::project::project_key::is_path_spelling(trimmed) {
+        return crate::project::project_key::local_repo_path(trimmed, home);
     }
     let gh = trusty_common::github_path::parse_github_path(trimmed)?;
     // A one-segment `repo_url` parses with a placeholder owner; that names no

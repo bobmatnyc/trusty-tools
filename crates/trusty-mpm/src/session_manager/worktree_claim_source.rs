@@ -73,12 +73,11 @@ impl SessionManager {
         let records = self.list().await;
         // #7652: built from EVERY record. Gate 4 judges a sentinel's owner by its
         // record, and the claim list below drops a record with no workspace.
-        let owners = SessionOwners::observed(records.iter().map(|r| {
-            (
-                r.id.to_string(),
-                liveness_of(live_names.as_ref(), &r.tmux_name),
-            )
-        }))
+        let owners = SessionOwners::observed(
+            records
+                .iter()
+                .map(|r| (r.id.to_string(), liveness_of(live_names.as_ref(), r))),
+        )
         // #7771: an agent owner file names the CLAUDE session that dispatched
         // it, and condition (d) permits the caller's own trees.
         .with_aliases(records.iter().filter_map(|r| {
@@ -100,11 +99,12 @@ impl SessionManager {
         let claims = records
             .into_iter()
             .filter_map(|r| {
+                let liveness = liveness_of(live_names.as_ref(), &r);
                 let path = r.workspace_path?;
                 Some(WorkspaceClaim::with_liveness(
                     r.id.to_string(),
                     path,
-                    liveness_of(live_names.as_ref(), &r.tmux_name),
+                    liveness,
                 ))
             })
             .collect();
@@ -149,10 +149,11 @@ impl SessionManager {
     /// blocking thread until tmux returns. That is deliberate: the thread it no
     /// longer holds is the CALLER's, which is the one a request needs.
     /// Test: `a_slow_tmux_probe_is_bounded_and_leaves_every_claim_live`.
-    async fn bounded_live_managed_names(&self) -> Option<std::collections::HashSet<String>> {
+    async fn bounded_live_managed_names(&self) -> Option<super::tmux_route::LiveSessions> {
         let tmux = std::sync::Arc::clone(&self.tmux);
+        // See #10101: every live server, keyed by (server, session).
         let probe =
-            tokio::task::spawn_blocking(move || super::dedup::live_managed_names_of(tmux.as_ref()));
+            tokio::task::spawn_blocking(move || super::tmux_route::live_sessions_of(tmux.as_ref()));
         match tokio::time::timeout(TMUX_PROBE_TIMEOUT, probe).await {
             Ok(Ok(Ok(names))) => Some(names),
             Ok(Ok(Err(e))) => {
@@ -188,18 +189,20 @@ impl SessionManager {
 /// Test: `dead_sessions_claims_are_discarded_and_live_ones_are_not`,
 /// `an_unmanaged_tmux_name_is_never_read_as_dead`.
 fn liveness_of(
-    live_names: Option<&std::collections::HashSet<String>>,
-    tmux_name: &str,
+    live_names: Option<&super::tmux_route::LiveSessions>,
+    record: &super::record::SessionRecord,
 ) -> ClaimLiveness {
+    use super::tmux_route::LiveSet as _;
     let Some(names) = live_names else {
         return ClaimLiveness::Live;
     };
     // A name the probe filters out could never appear in `names`, so its
     // absence proves nothing about the session.
-    if !crate::core::names::is_managed_session_name(tmux_name) {
+    if !crate::core::names::is_managed_session_name(&record.tmux_name) {
         return ClaimLiveness::Live;
     }
-    if names.contains(tmux_name) {
+    // See #10101: live only on the record's own server.
+    if names.holds(record) {
         ClaimLiveness::Live
     } else {
         ClaimLiveness::SessionGone

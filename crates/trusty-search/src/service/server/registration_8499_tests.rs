@@ -14,14 +14,12 @@ use super::*;
 use crate::core::registry::IndexId;
 use crate::service::colocated_storage::COLOCATED_DIR_NAME;
 use crate::service::reindex::{spawn_reindex_awaitable, ReindexProgress, ReindexStatus};
-use axum::extract::State;
 use axum::http::StatusCode;
-use axum::Json;
 use std::path::Path;
 use std::sync::Arc;
 
 /// POST `create_req(id, root)` (optionally lexical-only) through the real
-/// handler; returns the status and JSON body.
+/// create core; returns the status and JSON body.
 pub(super) async fn post_create(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -32,9 +30,7 @@ pub(super) async fn post_create(
     if lexical_only {
         req.lexical_only = Some(true);
     }
-    let resp = super::indexes::create_index_handler(State(Arc::clone(state)), Json(req)).await;
-    let status = resp.status();
-    (status, super::tests_components::body_json(resp).await)
+    super::test_support::create_answer(state, req).await
 }
 
 /// #8499 round 2: a new registration is refused when the data dir itself sits

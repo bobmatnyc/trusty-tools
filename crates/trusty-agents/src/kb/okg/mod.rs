@@ -1,0 +1,628 @@
+//! OKG builder — grow one KB tree from N idempotent, additive sources.
+//!
+//! Why: a KB tree is only a knowledge graph once something FILLS it, repeatedly,
+//! without duplicating what it already holds. Bob's requirement is three
+//! properties at once: idempotent (re-running an ingest changes nothing),
+//! additive (registering a new doc store, or reaching further back in time,
+//! appends and never rebuilds), and crash-convergent (a killed run re-runs to
+//! the same state). The engine and its parts live in `trusty_okf::build`
+//! (#10746 S4); this module composes them for the agent's OKG tools.
+//!
+//! What:
+//!   - [`registry`] — the typed view of `_sources/registry.toml`, which adds
+//!     the `gmail` and `drive` kinds this crate implements (#10746 S11).
+//!   - [`ingest`]   — the `KbStore` entry points over the trusty-okf engine.
+//!   - [`index_state`] — this machine's index state for a bound SEARCH index,
+//!     read through `trusty_okf::state::index` from a directory in the
+//!     trusty-agents data area, never the synced tree (#3892; #10746 S12).
+//!     `crate::stores::okg_feed` runs the `trusty_okf::feed` pass.
+//!   - [`legacy_journal`] — the one-time migration of the pre-S12 in-tree
+//!     `_sources/<id>.index.jsonl` journals into that state, as Pending.
+//!
+//! The ledger, docstore walk, read policy and trust labels are used straight
+//! from `trusty_okf::build`. Gmail and Drive fetchers live in
+//! `crate::tools::okg`, next to the authenticated `trusty-gworkspace` client.
+//!
+//! This file adds the store-level entry points that compose those pieces:
+//! [`KbStore::okg_register_source`], [`KbStore::okg_sources`], and
+//! [`KbStore::okg_ingest_docstore`].
+//!
+//! Test: `register_is_additive_across_sources`,
+//! `docstore_ingest_is_idempotent_end_to_end`,
+//! `ingest_rejects_a_now_that_is_not_an_instant`.
+
+pub mod index_state;
+pub mod ingest;
+pub mod legacy_journal;
+pub mod registry;
+
+use serde::Serialize;
+use serde_json::Value as Json;
+
+use trusty_okf::build::ingest::IngestReport;
+use trusty_okf::build::ledger::{Ledger, Watermark};
+use trusty_okf::build::{docstore, policy};
+
+use crate::kb::okg::index_state::IndexStateRef;
+use crate::kb::okg::registry::{Locator, RegisterOutcome, SourceRegistry, SourceSpec};
+use crate::kb::store::KbStore;
+
+/// One row of the `okg_sources` status view.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SourceStatus {
+    /// Canonical source id.
+    pub id: String,
+    /// `docstore` / `gmail` / `drive`.
+    pub kind: String,
+    /// Collection this source writes into.
+    pub collection: String,
+    /// Whether ingestion runs for it.
+    pub enabled: bool,
+    /// Whether vanished items are tombstoned.
+    pub tombstone_deleted: bool,
+    /// First registration timestamp.
+    pub added_at: String,
+    /// The locator, as JSON, so a caller can see exactly what is covered.
+    pub locator: Json,
+    /// Derived coverage: item counts, time span, last run.
+    pub watermark: Watermark,
+    /// How much of this source has reached the bound SEARCH INDEX (#3892).
+    pub index: IndexCoverage,
+}
+
+/// Per-source search-index coverage — the "is it actually findable?" half.
+///
+/// Why (#3892): `watermark` answers "what is in the tree", and for a long time
+/// that was silently read as "what the assistant can find". It is not: an
+/// entity is only searchable once it has been pushed into the store's bound
+/// trusty-search index, and that push can lag (daemon down, push failed, no
+/// binding at all). This field makes the lag VISIBLE — an "ingested but not yet
+/// searchable" backlog is the exact failure mode #3892 reports, and it must
+/// never again be invisible on both sides.
+/// What: from this machine's index state (#10746 S12: never the synced
+/// tree), `synced` entities confirmed searchable under a known index
+/// identity, `unconfirmed` entities pushed and probed whose identity is not
+/// known (every settled entity before SPEC-OKF-01 dependency D1), and
+/// `pending` still owed — pushes, withdrawals, AND rows that could not be resolved to a
+/// readable entity file (unsearchable too, and additionally listed in `notes`).
+/// Derived, like the watermark, so it cannot claim more than was recorded.
+/// Test: `sources_report_index_coverage`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct IndexCoverage {
+    /// Entities Searchable (or Withdrawn) under a known, matching index
+    /// identity. #10746 S12: always 0 before search indexes report an
+    /// identity (SPEC-OKF-01 §4.9.2 rule 5).
+    pub synced: usize,
+    /// Entities pushed at their current bytes and probed on this machine,
+    /// whose index identity is not confirmed (§4.9.2 rules 4-5).
+    pub unconfirmed: usize,
+    /// Entities still owed to the index (not yet searchable, or not yet
+    /// withdrawn after a tombstone).
+    pub pending: usize,
+    /// Rows the reconcile could not resolve to a readable entity file.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+}
+
+impl KbStore {
+    /// Register a source, or update an existing one in place.
+    ///
+    /// Why: this is the additive entry point. A new id appends a row and starts
+    /// an empty ledger; a known id (e.g. the same Gmail source with an earlier
+    /// `after:`) updates only its locator, so the ledger — and therefore
+    /// everything already ingested — is preserved and the next run pulls only
+    /// what is genuinely new.
+    /// What: loads the registry, upserts, and write-if-changed saves it.
+    /// Test: `register_is_additive_across_sources`.
+    pub fn okg_register_source(&self, spec: SourceSpec) -> anyhow::Result<RegisterOutcome> {
+        let id = spec.id.clone();
+        // #10746: only this row passes through the typed view; every other
+        // row is saved exactly as trusty-okf read it. S5: load, upsert and
+        // save run under the bundle lock, so a concurrent registration keeps
+        // its row (SPEC-OKF-01 §4.4).
+        let (created, changed, wrote) =
+            trusty_okf::build::registry::SourceRegistry::upsert_at(&self.root, spec.to_okf())?;
+        Ok(RegisterOutcome {
+            id,
+            created,
+            changed: changed || wrote,
+            path: self.rel(&SourceRegistry::path(&self.root)?),
+        })
+    }
+
+    /// Fetch a registered source's spec, erroring when it is unknown.
+    pub fn okg_source(&self, source_id: &str) -> anyhow::Result<SourceSpec> {
+        SourceRegistry::load(&self.root)?
+            .get(source_id)
+            .ok_or_else(|| anyhow::anyhow!("no source registered with id {source_id:?}"))
+    }
+
+    /// The status view: every registered source with its live coverage.
+    ///
+    /// Why: "what does this store cover, and how far back?" is the question an
+    /// operator asks before widening a window or adding a store. Coverage is
+    /// derived from the ledgers, so it cannot drift from what was ingested. It
+    /// additionally reports SEARCH coverage (#3892) — see [`IndexCoverage`] —
+    /// because "ingested" and "findable" are two different claims and conflating
+    /// them is what made the ingest→search gap silent.
+    /// What: one row per registered source. `state` is this machine's index
+    /// state for the bound index (#10746 S12); `None` (no bound index) reads
+    /// every entity as pending. The coverage read is local filesystem work,
+    /// never a daemon call, so this stays a read-only, offline-safe view.
+    /// Test: `register_is_additive_across_sources`,
+    /// `sources_report_index_coverage`.
+    pub fn okg_sources(&self, state: Option<&IndexStateRef>) -> anyhow::Result<Vec<SourceStatus>> {
+        let sources = SourceRegistry::load(&self.root)?.sources();
+        let mut out = Vec::with_capacity(sources.len());
+        let view = if sources.is_empty() {
+            None
+        } else {
+            self.index_view(state)?
+        };
+        for spec in &sources {
+            let watermark = Ledger::load(&self.root, &spec.id)?.watermark();
+            out.push(SourceStatus {
+                index: self.okg_index_coverage_of(spec, view.as_ref())?,
+                id: spec.id.clone(),
+                kind: spec.kind().to_string(),
+                collection: spec.collection.clone(),
+                enabled: spec.enabled,
+                tombstone_deleted: spec.tombstone_deleted,
+                added_at: spec.added_at.clone(),
+                locator: serde_json::to_value(&spec.locator)?,
+                watermark,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Tree-wide search coverage, folded across every registered source.
+    ///
+    /// Why (#3892): the store card and the `[[stores]]` status endpoint answer
+    /// "is this store connected?" per INDEX; this answers the other half — how
+    /// much of the tree has actually reached that index. A store can be
+    /// perfectly connected and still hold nothing the assistant ingested.
+    /// What: sums [`IndexCoverage`] over the registry, against this machine's
+    /// `state` (#10746 S12). Returns zeroes for a tree with no registry at
+    /// all, which is the normal state for a hand-built tree.
+    /// Test: `sources_report_index_coverage`.
+    pub fn okg_index_coverage(
+        &self,
+        state: Option<&IndexStateRef>,
+    ) -> anyhow::Result<IndexCoverage> {
+        let mut total = IndexCoverage::default();
+        let sources = SourceRegistry::load(&self.root)?.sources();
+        if sources.is_empty() {
+            return Ok(total);
+        }
+        let view = self.index_view(state)?;
+        for spec in &sources {
+            let c = self.okg_index_coverage_of(spec, view.as_ref())?;
+            total.synced += c.synced;
+            total.unconfirmed += c.unconfirmed;
+            total.pending += c.pending;
+            total.notes.extend(c.notes);
+        }
+        Ok(total)
+    }
+
+    /// Scan a registered doc store and ingest whatever changed.
+    ///
+    /// Why: the whole doc-store path is local and deterministic, so it runs
+    /// end-to-end without a connector — the agent tool is a thin wrapper.
+    /// What: resolves the source, walks its directory (subject to `policy`, the
+    /// read-side confinement gate), and hands the items to the ingest engine
+    /// with deletion detection enabled (a full walk DOES enumerate the corpus,
+    /// so an absent file is genuinely absent).
+    /// Test: `docstore_ingest_is_idempotent_end_to_end`,
+    /// `ingest_rechecks_the_policy_on_every_run`.
+    pub fn okg_ingest_docstore(
+        &self,
+        source_id: &str,
+        policy: &policy::DocStorePolicy,
+        now: &str,
+    ) -> anyhow::Result<IngestReport> {
+        let spec = self.okg_source(source_id)?;
+        let Locator::DocStore {
+            path,
+            extensions,
+            recursive,
+        } = &spec.locator
+        else {
+            anyhow::bail!(
+                "source {} is a {} source, not a doc store",
+                spec.id,
+                spec.kind()
+            );
+        };
+        if !spec.enabled {
+            anyhow::bail!("source {} is disabled", spec.id);
+        }
+
+        let scan = docstore::scan(
+            std::path::Path::new(path),
+            extensions,
+            *recursive,
+            docstore::DEFAULT_CHUNK_CHARS,
+            policy,
+        )?;
+        let mut report = self.ingest_items(&spec, &scan.items, true, now)?;
+        report.errors.extend(scan.errors);
+        for binary in scan.skipped_binary {
+            report
+                .errors
+                .push(format!("{binary}: skipped (binary content)"));
+        }
+        Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trusty_okf::build::policy::DocStorePolicy;
+    use trusty_okf::profile::Profile;
+
+    /// A policy permitting the whole fixture tempdir.
+    fn policy(tmp: &tempfile::TempDir) -> DocStorePolicy {
+        DocStorePolicy::new(vec![tmp.path().canonicalize().unwrap()])
+    }
+
+    fn store() -> (tempfile::TempDir, KbStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = KbStore::new(tmp.path().join("kb"), Profile::default_profile());
+        (tmp, store)
+    }
+
+    /// Why: code-critic CRITICAL 2 — the read-side gate must live in the ENGINE,
+    /// not only at the tool boundary. A `registry.toml` row can be hand-edited
+    /// (or was written before the policy existed) to point at `~/.ssh`, and the
+    /// row is re-read on every run; validating only at registration time would
+    /// let that poisoned row read credentials forever.
+    /// What: registers a doc store while the policy permits it, then re-runs with
+    /// a policy that does NOT, and asserts the ingest is refused.
+    /// Test: self-contained.
+    #[test]
+    fn ingest_rechecks_the_policy_on_every_run() {
+        let (tmp, store) = store();
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.md"), "alpha").unwrap();
+
+        store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: corpus.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        assert_eq!(
+            store
+                .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24T00:00:00Z")
+                .unwrap()
+                .ingested,
+            1
+        );
+
+        // The same registered row, now outside the permitted roots.
+        let narrowed = DocStorePolicy::new(vec![tmp.path().join("somewhere-else")]);
+        let err = store
+            .okg_ingest_docstore("docs", &narrowed, "2026-07-24T01:00:00Z")
+            .expect_err("a registered row must not bypass the policy");
+        assert!(
+            err.to_string().contains("outside every configured"),
+            "unexpected error: {err}"
+        );
+
+        // And an empty policy denies it too — the gate fails closed.
+        let err = store
+            .okg_ingest_docstore("docs", &DocStorePolicy::default(), "2026-07-24T02:00:00Z")
+            .expect_err("unconfigured policy must deny");
+        assert!(err.to_string().contains("no doc-store roots"), "{err}");
+    }
+
+    /// Why: #10746 — the engine moved to trusty-okf writes `generated.at`
+    /// and never invents a time (SPEC-OKF-01 §2.8), so an ingest time that is
+    /// not an instant with an offset is refused, not guessed.
+    /// What: registers a doc store and ingests with a date-only `now`.
+    /// Test: self-contained.
+    #[test]
+    fn ingest_rejects_a_now_that_is_not_an_instant() {
+        let (tmp, store) = store();
+        let corpus = tmp.path().join("corpus");
+        std::fs::create_dir_all(&corpus).unwrap();
+        std::fs::write(corpus.join("a.md"), "alpha").unwrap();
+        store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: corpus.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        let err = store
+            .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24")
+            .expect_err("a date is not an instant");
+        assert!(err.to_string().contains("not an ISO 8601 instant"), "{err}");
+    }
+
+    /// Why: criterion 116 (SPEC-OKF-01 §2.13.1) — a source that plants
+    /// `source_status: deleted` must not make its concept a tombstone for
+    /// trusty-common's `is_tombstone`, which search uses to hide retired
+    /// claims. trusty-okf cannot link trusty-common (B8), so the real
+    /// predicate is checked here. #10746.
+    /// What: ingests one item whose fields plant the tombstone keys.
+    /// Test: self-contained.
+    #[test]
+    fn planted_source_status_is_not_a_tombstone() {
+        let (_tmp, store) = store();
+        let spec = SourceSpec::new(
+            "mail",
+            Some("mail"),
+            Locator::Gmail {
+                query: "in:sent".into(),
+                after: None,
+                before: None,
+            },
+            "t0",
+        );
+        let mut item = trusty_okf::build::ingest::SourceItem {
+            item_id: "m1".into(),
+            fingerprint: "m1".into(),
+            name: "m1".into(),
+            title: "m1".into(),
+            body: "hello".into(),
+            ..trusty_okf::build::ingest::SourceItem::default()
+        };
+        item.fields.insert("source_status".into(), "deleted".into());
+        item.fields
+            .insert("tombstoned".into(), "2026-01-01T00:00:00Z".into());
+        let report = store
+            .ingest_items(&spec, &[item], false, "2026-11-04T00:00:00Z")
+            .unwrap();
+        assert_eq!(report.findings.len(), 2, "{report:?}");
+        let text = std::fs::read_to_string(store.root.join("mail/m1.md")).unwrap();
+        assert!(
+            !trusty_common::knowledge_document::is_tombstone(&text),
+            "{text}"
+        );
+    }
+
+    /// Why: Bob's core requirement — "I can add a new doc store" — must not
+    /// disturb what other sources already built.
+    /// What: registers a doc store, ingests it, then registers a SECOND source
+    /// and asserts the first source's ledger, entities, and status row are all
+    /// untouched while the new row simply appends.
+    /// Test: self-contained.
+    #[test]
+    fn register_is_additive_across_sources() {
+        let (tmp, store) = store();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.md"), "alpha").unwrap();
+
+        let first = store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: docs.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        assert!(first.created && first.changed);
+        store
+            .okg_ingest_docstore("docs", &policy(&tmp), "2026-07-24T00:00:00Z")
+            .unwrap();
+
+        let before = store.okg_sources(None).unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].watermark.items, 1);
+
+        // Add an unrelated source.
+        let second = store
+            .okg_register_source(SourceSpec::new(
+                "mail",
+                None,
+                Locator::Gmail {
+                    query: "in:sent".into(),
+                    after: Some("2026/01/01".into()),
+                    before: None,
+                },
+                "t1",
+            ))
+            .unwrap();
+        assert!(second.created);
+
+        let after = store.okg_sources(None).unwrap();
+        assert_eq!(after.len(), 2, "append, not replace");
+        assert_eq!(after[0], before[0], "the existing source row is untouched");
+        assert_eq!(after[1].kind, "gmail");
+        assert_eq!(after[1].watermark.items, 0, "new source starts empty");
+
+        // Re-registering the identical doc store is a no-op.
+        let again = store
+            .okg_register_source(SourceSpec::new(
+                "docs",
+                Some("notes"),
+                Locator::DocStore {
+                    path: docs.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t2",
+            ))
+            .unwrap();
+        assert!(
+            !again.created && !again.changed,
+            "identical re-register is inert"
+        );
+        assert_eq!(store.okg_sources(None).unwrap()[0], before[0]);
+    }
+
+    /// Why: the end-to-end doc-store path must satisfy every property at once —
+    /// first run ingests, second run is inert, an edit re-ingests exactly one
+    /// entity, and a deletion is tombstoned rather than dropped.
+    /// What: drives all four phases against a real directory.
+    /// Test: self-contained.
+    #[test]
+    fn docstore_ingest_is_idempotent_end_to_end() {
+        let (tmp, store) = store();
+        let docs = tmp.path().join("corpus");
+        std::fs::create_dir_all(docs.join("sub")).unwrap();
+        std::fs::write(docs.join("one.md"), "first note").unwrap();
+        std::fs::write(docs.join("sub/two.txt"), "second note").unwrap();
+        std::fs::write(docs.join("photo.bin"), b"\x00\x01binary").unwrap();
+
+        let mut spec = SourceSpec::new(
+            "corpus",
+            Some("notes"),
+            Locator::DocStore {
+                path: docs.to_string_lossy().to_string(),
+                extensions: vec![],
+                recursive: true,
+            },
+            "t0",
+        );
+        spec.tombstone_deleted = true;
+        store.okg_register_source(spec).unwrap();
+
+        let first = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
+            .unwrap();
+        assert_eq!((first.ingested, first.updated, first.skipped), (2, 0, 0));
+        assert_eq!(first.scanned, 2, ".bin filtered by extension");
+        let one = store.entity_path("notes", "one").unwrap();
+        assert!(
+            std::fs::read_to_string(&one)
+                .unwrap()
+                .contains("first note")
+        );
+
+        // Re-run: nothing changes.
+        let second = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T01:00:00Z")
+            .unwrap();
+        assert_eq!(
+            (
+                second.ingested,
+                second.updated,
+                second.skipped,
+                second.tombstoned
+            ),
+            (0, 0, 2, 0),
+            "an unchanged corpus must produce zero writes"
+        );
+
+        // Edit one file: exactly one entity re-ingests.
+        std::fs::write(docs.join("one.md"), "first note, revised").unwrap();
+        let third = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T02:00:00Z")
+            .unwrap();
+        assert_eq!((third.ingested, third.updated, third.skipped), (0, 1, 1));
+        assert!(
+            std::fs::read_to_string(&one).unwrap().contains("revised"),
+            "edited content replaces the entity"
+        );
+
+        // Delete one file: tombstoned, content preserved.
+        std::fs::remove_file(docs.join("sub/two.txt")).unwrap();
+        let fourth = store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T03:00:00Z")
+            .unwrap();
+        assert_eq!(fourth.tombstoned, 1);
+        let two = std::fs::read_to_string(store.entity_path("notes", "sub/two").unwrap()).unwrap();
+        assert!(two.contains("source_status: deleted"), "flagged: {two}");
+        assert!(two.contains("second note"), "never silently dropped: {two}");
+
+        let status = store.okg_sources(None).unwrap();
+        assert_eq!(status[0].watermark.items, 1);
+        assert_eq!(status[0].watermark.tombstoned, 1);
+    }
+
+    /// Why (#3892): "N entities ingested" was truthful and still meant "findable
+    /// by nobody". The status view must therefore separate tree coverage from
+    /// SEARCH coverage, so an operator can see a backlog instead of guessing.
+    /// What: ingests two files with no index feed at all and asserts both the
+    /// per-source row and the tree-wide fold report them as pending, then
+    /// asserts recording the pushes moves them to synced.
+    /// Test: self-contained.
+    #[test]
+    fn sources_report_index_coverage() {
+        let (tmp, store) = store();
+        let docs = tmp.path().join("corpus");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("one.md"), "first note").unwrap();
+        std::fs::write(docs.join("two.md"), "second note").unwrap();
+        store
+            .okg_register_source(SourceSpec::new(
+                "corpus",
+                Some("notes"),
+                Locator::DocStore {
+                    path: docs.to_string_lossy().to_string(),
+                    extensions: vec![],
+                    recursive: true,
+                },
+                "t0",
+            ))
+            .unwrap();
+        store
+            .okg_ingest_docstore("corpus", &policy(&tmp), "2026-07-24T00:00:00Z")
+            .unwrap();
+
+        // #10746 S12: index state is this machine's, in a directory outside
+        // the tree, for one bound index.
+        let state = IndexStateRef::new(tmp.path().join("state"), "corpus-index");
+        let status = store.okg_sources(Some(&state)).unwrap();
+        assert_eq!(status[0].watermark.items, 2, "both are in the TREE");
+        assert_eq!(
+            (status[0].index.synced, status[0].index.pending),
+            (0, 2),
+            "and neither is searchable yet — the #3892 state, now visible"
+        );
+        assert_eq!(store.okg_index_coverage(Some(&state)).unwrap().pending, 2);
+
+        // Record the pushes and probes the feed layer would have made.
+        let journal =
+            trusty_okf::state::IndexJournal::open(&state.dir, &store.root, "corpus-index").unwrap();
+        for (_, path) in store.entity_files("notes").unwrap() {
+            let rel = store.rel(&path);
+            let bytes = trusty_okf::state::ByteHash::of(&std::fs::read(&path).unwrap());
+            journal
+                .append(&[
+                    trusty_okf::state::IndexRecord::PutAck {
+                        path: rel.clone(),
+                        bytes: bytes.as_str().to_string(),
+                        identity: None,
+                    },
+                    trusty_okf::state::IndexRecord::Probe {
+                        path: rel,
+                        bytes: bytes.as_str().to_string(),
+                        identity: None,
+                        passed: true,
+                    },
+                ])
+                .unwrap();
+        }
+
+        // #10746 S12 fix round: settled, but no index identity (D1), so
+        // `unconfirmed`, never `synced` (SPEC-OKF-01 §4.9.2 rules 4-5).
+        let settled = store.okg_sources(Some(&state)).unwrap();
+        assert_eq!((settled[0].index.synced, settled[0].index.pending), (0, 0));
+        assert_eq!(settled[0].index.unconfirmed, 2);
+        let total = store.okg_index_coverage(Some(&state)).unwrap();
+        assert_eq!((total.synced, total.unconfirmed), (0, 2));
+    }
+}

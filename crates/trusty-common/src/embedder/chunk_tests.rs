@@ -333,6 +333,78 @@ fn fixture_fastembed_cache(model_max_length: usize) -> tempfile::TempDir {
     dir
 }
 
+/// Copies the fixture snapshot's three files into `dest`.
+fn copy_snapshot_files(cache: &tempfile::TempDir, dest: &std::path::Path) {
+    let repo = cache
+        .path()
+        .join(format!("models--{}", DEFAULT_MODEL_CODE.replace('/', "--")));
+    std::fs::create_dir_all(dest).expect("dest dir");
+    for name in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+    ] {
+        std::fs::copy(repo.join("snapshots/fixture").join(name), dest.join(name)).expect("copy");
+    }
+}
+
+fn set_revision(cache: &tempfile::TempDir, revision: &str) {
+    let repo = cache
+        .path()
+        .join(format!("models--{}", DEFAULT_MODEL_CODE.replace('/', "--")));
+    std::fs::write(repo.join("refs").join("main"), revision).expect("write refs/main");
+}
+
+#[test]
+fn traversal_revision_is_rejected_without_reading() {
+    // Complete tokenizer files sit where `snapshots/../../x` resolves, so an
+    // unguarded join would load them; the guard must refuse instead.
+    let cache = fixture_fastembed_cache(256);
+    let repo = cache
+        .path()
+        .join(format!("models--{}", DEFAULT_MODEL_CODE.replace('/', "--")));
+    copy_snapshot_files(&cache, &repo.join("x"));
+    for revision in ["../../x", "..", "a/b", "", "  \n", "sha with space", "."] {
+        set_revision(&cache, revision);
+        let result = ChunkTokenizer::for_fastembed_model_in(cache.path(), DEFAULT_MODEL_CODE);
+        assert!(
+            matches!(result, Err(ChunkError::InvalidRevision { .. })),
+            "revision {revision:?}: {:?}",
+            result.err()
+        );
+    }
+}
+
+#[test]
+fn backslash_revision_is_rejected() {
+    let cache = fixture_fastembed_cache(256);
+    set_revision(&cache, "..\\..\\x");
+    let result = ChunkTokenizer::for_fastembed_model_in(cache.path(), DEFAULT_MODEL_CODE);
+    assert!(
+        matches!(result, Err(ChunkError::InvalidRevision { .. })),
+        "{:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn sha_revision_still_loads() {
+    let cache = fixture_fastembed_cache(256);
+    let sha = "5f1b8cd78bc4fb444dd171117a8cb2d3b8a6ffd1";
+    copy_snapshot_files(
+        &cache,
+        &cache
+            .path()
+            .join(format!("models--{}", DEFAULT_MODEL_CODE.replace('/', "--")))
+            .join("snapshots")
+            .join(sha),
+    );
+    set_revision(&cache, &format!("{sha}\n"));
+    let tok = ChunkTokenizer::for_fastembed_model_in(cache.path(), DEFAULT_MODEL_CODE)
+        .expect("sha revision loads");
+    assert_eq!(tok.max_length(), Some(256));
+}
+
 #[test]
 fn fastembed_truncates_at_minilm_window_on_every_model_revision() {
     // fastembed 5.13.4 truncates at min(TextInitOptions::max_length,

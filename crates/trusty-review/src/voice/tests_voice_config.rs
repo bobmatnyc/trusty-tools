@@ -6,6 +6,9 @@
 //! Test: included via `#[path = "tests_voice_config.rs"]` from mod.rs.
 
 use super::VoiceConfig;
+use crate::runtime_content::PromptContentError;
+use crate::runtime_content::test_support::{installed_with, installed_without, staged};
+use crate::voice::principles::principles_path;
 
 /// stock_only() gives an empty VoiceConfig — no addenda.
 ///
@@ -41,10 +44,10 @@ fn voice_config_none_gives_stock_only() {
 /// Why: issue #756 specifies principles is default-on (universal/safe); voice
 /// is opt-in.  This test guards against regression.
 /// What: asserts principles is Some and non-empty; voice_addendum is None.
-/// Test: no filesystem.
+/// Test: reads the staged content (#9991).
 #[test]
 fn voice_config_production_default_enables_principles() {
-    let vc = VoiceConfig::default_production();
+    let vc = VoiceConfig::default_production(&staged()).expect("the content ships the principles");
     assert!(
         vc.principles.is_some(),
         "default_production must have principles"
@@ -60,6 +63,29 @@ fn voice_config_production_default_enables_principles() {
     assert!(
         vc.has_any_addendum(),
         "default_production must report has_any_addendum=true"
+    );
+}
+
+/// default_production() refuses content without the principles addendum,
+/// or with it emptied; it never falls back to a compiled-in text (#9991).
+///
+/// Why: the principles text is runtime content; a stale release must refuse.
+/// What: `Missing` naming the path for an absent file, `Invalid` for an empty one.
+/// Test: reads staged bundles of the checkout's content.
+#[test]
+fn voice_config_production_default_refuses_without_the_principles() {
+    let path = principles_path();
+    let err = VoiceConfig::default_production(&installed_without(&path))
+        .expect_err("absent principles must refuse");
+    assert!(
+        matches!(&err, PromptContentError::Missing { path: p, .. } if p == &path),
+        "{err:?}"
+    );
+    let err = VoiceConfig::default_production(&installed_with(&path, b""))
+        .expect_err("empty principles must refuse");
+    assert!(
+        matches!(&err, PromptContentError::Invalid { path: p, .. } if p == &path),
+        "{err:?}"
     );
 }
 

@@ -375,7 +375,7 @@ document_version, snapshot, kind, items}`) onto the envelope:
 | `kind` | `tool`, as `lsp.<method>` with the bare LSP method name, for example `lsp.textDocument/references` or `lsp.publishDiagnostics` |
 | `uri` | an `ObjectRef` of type `file` in the event's `objects` (`objects` holds `ObjectRef`s, not `PathRef`s): the path, with `$HOME` shown as `~`, and the file name as the label. It carries a reference, not a body (DOC-73 §3.2) |
 | `language`, `workspace`, `document_version`, `snapshot` | `ActionMeta.attrs`, a name-to-value map added to `trusty-common` for this (#9078), with the position (`line`, `column`) |
-| `items` | dropped (§4.4). The answer stays in the RPC response. The terminal event's `attrs` carry `result_count`, `duration_ms` and `outcome` (`ok`, `cancelled`, or the `lsp_*` error code, never the error text) |
+| `items` | dropped (§4.4). The answer stays in the RPC response. The terminal event's `attrs` carry `result_count`, `duration_ms` and `outcome` (`ok`, `cancelled`, `timed_out`, or the `lsp_*` error code, never the error text). The `lsp.analysed_at` terminal event also carries `state` (`ready` or `timed_out`) and, on a timeout, `version_seen`; a barrier that hit its deadline ends Finished with `outcome: timed_out`, never `ok` (#10087) |
 
 `actor` is `System`; the source is `analyze`. `EventId` is minted per event.
 `call_id` is one UUID per call, shared by its Started and terminal events. The

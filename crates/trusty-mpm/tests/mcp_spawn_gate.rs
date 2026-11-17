@@ -257,6 +257,9 @@ async fn mcp_initiated_spawn_rejects_repo_name_impersonation() {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register legitimate project");
@@ -328,6 +331,9 @@ async fn mcp_initiated_spawn_allowed_for_registered_project_reaches_provisioning
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register project");
@@ -393,6 +399,9 @@ async fn mcp_initiated_spawn_rejects_a_same_basename_directory_outside_the_proje
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         })
         .await
         .expect("register the legitimate checkout");

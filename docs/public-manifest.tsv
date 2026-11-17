@@ -97,6 +97,7 @@ SECTION	getting-started	Getting Started
 PAGE	getting-started	docs/intro.md	/	Introduction
 PAGE	getting-started	docs/getting-started/README.md	/getting-started	Getting Started
 PAGE	getting-started	docs/getting-started/install-and-run-tm.md	/getting-started/install	Install and Run trusty-mpm
+PAGE	getting-started	docs/getting-started/canonical-clones.md	/getting-started/canonical-clones	Let tm Create Your Project Clones
 PAGE	getting-started	docs/getting-started/claude-mpm-vs-trusty-mpm.md	/getting-started/claude-mpm-vs-trusty-mpm	Coming from claude-mpm
 
 SECTION	installation	Installation

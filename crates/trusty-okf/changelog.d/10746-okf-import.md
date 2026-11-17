@@ -1,0 +1,7 @@
+Added
+- `import` (SPEC-OKF-01 §2.13-§2.14, §4.10, #10746): `plan_import` lists a source, assigns concept IDs by the §2.14 rule, picks an extractor and records every refusal without writing; `import` applies the plan under the bundle lock through the ingest engine and returns an `ImportReport` with one read, write, index and verification outcome per item. `DocTreeSource` imports a local document tree and never writes under it.
+- The document-tree ID rule keeps the source hierarchy: `a.md` becomes `a`, `a.pdf` becomes `a.pdf`, and a name §2.11 refuses gains a stable `~<h8>` suffix. Colliding items are refused with `collision`, and a ledger-pinned ID keeps its concept.
+- A re-import writes zero bytes when nothing changed, keeps editorial keys on a change, refuses a hand-edited concept with a conflict, and tombstones a vanished file only on a deletion-safe listing. `import status` lists interrupted runs.
+- `extract`: DOC-55's `Extractor` contract, `BuiltinText` (UTF-8 text and Markdown, the file's own frontmatter checked against the protected keys) and `NoWorker` (`worker_absent`). A run with `child_processes: false` skips worker items with `policy_refused` and refuses a connector store before any write.
+- The `trusty-okf` binary: `import plan`, `import run` (with `--feed` under `search-feed`), `import status` and `feed`, with the §4.10 exit codes; `import::exit_code` maps a library result to them.
+- `feed::reindex_after_rebuild` sends a full reindex only when the index binding provably excludes `_sources/` and `_state/`.

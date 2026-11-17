@@ -304,8 +304,11 @@ pub struct ResumeResponse {
 /// Response of `POST /sessions/{id}/command`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CommandResponse {
-    /// Always `true` — the command was sent.
+    /// `true` when the command reached the session's pane (#10101).
     pub sent: bool,
+    /// Why the command did not reach the pane; absent when `sent` is `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_error: Option<String>,
     /// Captured pane output (possibly compressed).
     pub output: String,
     /// Output size in bytes before compression.

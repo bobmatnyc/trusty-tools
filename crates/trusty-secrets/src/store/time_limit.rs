@@ -133,8 +133,12 @@ impl TimeLimited {
     ) -> Result<T, SecretsError> {
         let item: Item = (part, vault.clone(), key.cloned());
         let limit = self.effective_limit();
-        if limit.is_zero() || self.abandoned.items().contains_key(&item) {
-            return Err(self.timeout(operation, vault, key, Duration::ZERO));
+        if limit.is_zero() {
+            return Err(self.timeout(operation, vault, key, Duration::ZERO, false));
+        }
+        // #11215: a refusal for a still-hung item is noted as such.
+        if self.abandoned.items().contains_key(&item) {
+            return Err(self.timeout(operation, vault, key, Duration::ZERO, true));
         }
         let phase = Arc::new(Mutex::new(Phase::Running));
         let finish = Finish {
@@ -167,7 +171,7 @@ impl TimeLimited {
                 if *phase == Phase::Running {
                     *phase = Phase::Abandoned;
                     *self.abandoned.items().entry(item).or_insert(0) += 1;
-                    return Err(self.timeout(operation, vault, key, limit));
+                    return Err(self.timeout(operation, vault, key, limit, false));
                 }
                 // It ended between the timeout and the lock; take its result.
                 drop(phase);
@@ -186,13 +190,17 @@ impl TimeLimited {
         self.limit
     }
 
+    /// The time-out error for `operation`, noted for this thread (#11215).
     fn timeout(
         &self,
         operation: &'static str,
         vault: &VaultName,
         key: Option<&SecretKey>,
         waited: Duration,
+        abandoned_item: bool,
     ) -> SecretsError {
+        // #11215: the reply and the audit row read the wait from this note.
+        super::timeout_note::note(self.inner.id().to_string(), waited, abandoned_item);
         SecretsError::Timeout {
             backend: self.inner.id().to_string(),
             operation,

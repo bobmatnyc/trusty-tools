@@ -139,11 +139,15 @@ fn default_model_matches_sentence_transformers_reference() {
         .enable_all()
         .build()
         .expect("current-thread tokio runtime must build");
-    let (model_name, vectors) = rt.block_on(async {
+    let (model_name, fallback_reason, vectors) = rt.block_on(async {
         let e = FastEmbedder::new().await.unwrap();
         let texts: Vec<String> = REFERENCE_TEXTS.iter().map(|s| s.to_string()).collect();
         let vectors = e.embed_batch(&texts).await.unwrap();
-        (e.model_name(), vectors)
+        (
+            e.model_name(),
+            e.fallback_reason().map(str::to_owned),
+            vectors,
+        )
     });
 
     // #3711: which model loaded must be checked BEFORE the cosine gate —
@@ -155,7 +159,8 @@ fn default_model_matches_sentence_transformers_reference() {
          TRUSTY_EMBEDDER_MODEL leaked an INT8 opt-in or the two-model fallback net in \
          FastEmbedder::with_cache_size substituted INT8 because the fp32 primary failed \
          to initialise (check the tracing warn it emits, and ci.yml's fastembed pre-seed \
-         step). This is a wrong-model failure, NOT an accuracy regression (issue #3711)"
+         step). This is a wrong-model failure, NOT an accuracy regression (issue #3711); \
+         primary init error (#10639): {fallback_reason:?}"
     );
     assert_eq!(vectors.len(), REFERENCE_VECTORS.len());
 

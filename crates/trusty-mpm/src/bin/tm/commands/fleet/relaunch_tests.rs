@@ -11,7 +11,7 @@ use trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
 use trusty_mpm::core::process::PaneClaude;
 use trusty_mpm::core::twin_identity::ArmingRecord;
 
-use super::super::launch::{Launched, PaneState, Pending};
+use super::super::launch::{Launched, PaneState, Pending, Unbound};
 use super::super::session_name::SessionNames;
 use super::super::{Probe, Step};
 use super::*;
@@ -26,10 +26,24 @@ thread_local! {
     static PANE: RefCell<PaneState> = const { RefCell::new(PaneState::Absent) };
     static PANE_CLAUDE: RefCell<VecDeque<PaneClaude>> = const { RefCell::new(VecDeque::new()) };
     static CALLS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// The poller session's pane; `None` answers [`PANE`] for it too.
+    static POLL_PANE: RefCell<Option<PaneState>> = const { RefCell::new(None) };
 }
 
-fn pane(_: &str) -> PaneState {
-    PANE.with(|p| p.borrow().clone())
+fn pane(name: &str) -> PaneState {
+    let poll = POLL_PANE.with(|p| p.borrow().clone());
+    match poll {
+        Some(state) if name.ends_with("-poll") => state,
+        _ => PANE.with(|p| p.borrow().clone()),
+    }
+}
+
+/// A poller start that runs no script: it logs the session it was asked to
+/// start and leaves that session live in `dir`.
+fn start_poller(dir: &Path, _: Probe, names: &SessionNames) -> anyhow::Result<()> {
+    call(&format!("start-poller {}", names.poll()));
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Live(dir.to_path_buf())));
+    Ok(())
 }
 
 fn no_stamp(_: &str) -> Option<String> {
@@ -45,8 +59,18 @@ fn architect_ok(_: &Path, _: &str) -> anyhow::Result<()> {
 }
 
 /// The planted answers in order; `Absent` once they run out.
+/// The next queued read; #11068: the last one repeats, so a pane queued to
+/// end on `Present` keeps a `claude` through the settle wait.
 fn pane_claude(_: &str) -> PaneClaude {
-    PANE_CLAUDE.with(|q| q.borrow_mut().pop_front().unwrap_or(PaneClaude::Absent))
+    PANE_CLAUDE.with(|q| {
+        let mut q = q.borrow_mut();
+        if q.len() > 1 {
+            q.pop_front()
+        } else {
+            q.front().copied()
+        }
+        .unwrap_or(PaneClaude::Absent)
+    })
 }
 
 fn stop_ok(pid: u32) -> Result<(), String> {
@@ -83,7 +107,10 @@ fn prepare_unbound(_: &Path, _: &Path, _: &str) -> anyhow::Result<Pending> {
     Ok(Box::new(|| {
         call("send");
         let launched: Launched = (
-            Err("no `claude` process appeared".to_owned()),
+            Err(Unbound::NotRecorded(
+                "cannot write the Architect launch record /h/x.architect: denied (os error 13)"
+                    .to_owned(),
+            )),
             ConversationStart::Resume("c-1".to_owned()),
         );
         Ok(launched)
@@ -101,6 +128,7 @@ const STUB: Ops = Ops {
     pane_claude,
     stop: stop_ok,
     prepare: prepare_bound,
+    start_poller,
 };
 
 /// A scratch home and Architect directory, with the stubs' state planted.
@@ -121,6 +149,7 @@ impl Fixture {
         PANE.with(|p| *p.borrow_mut() = pane);
         PANE_CLAUDE.with(|q| *q.borrow_mut() = pane_claude.iter().copied().collect());
         CALLS.with(|c| c.borrow_mut().clear());
+        POLL_PANE.with(|p| *p.borrow_mut() = None);
         fx
     }
 
@@ -256,6 +285,72 @@ fn relaunch_starts_a_claude_when_none_ran() {
     assert!(matches!(&report.steps[0], Step::Unchanged(t) if t.contains("no `claude` ran")));
 }
 
+/// #10357: after a reboot the poller is gone; a bound relaunch starts it,
+/// and only it, once. A second run finds it running and starts nothing; a
+/// poller session in another directory is a FAILED step, never a second one.
+#[test]
+fn relaunch_restores_a_missing_poller_once() {
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let first = fx.relaunch(STUB).expect("relaunched");
+    assert!(!first.failed(), "{}", first.render());
+    assert!(
+        first
+            .render()
+            .contains("started poller session tm-architect-poll"),
+        "{}",
+        first.render()
+    );
+    let second = fx.relaunch(STUB).expect("relaunched again");
+    assert!(
+        second
+            .render()
+            .contains("poller session tm-architect-poll is running"),
+        "{}",
+        second.render()
+    );
+    let starts: Vec<String> = calls()
+        .into_iter()
+        .filter(|c| c.starts_with("start-poller"))
+        .collect();
+    assert_eq!(starts, ["start-poller tm-architect-poll"], "{:?}", calls());
+    let reg = second.registration.expect("registered");
+    assert_eq!(reg.poll_session.as_deref(), Some("tm-architect-poll"));
+
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Live("/elsewhere".into())));
+    let report = fx.relaunch(STUB).expect("relaunched");
+    assert!(report.failed(), "{}", report.render());
+    assert!(report.render().contains("already runs in /elsewhere"));
+    assert!(!calls().iter().any(|c| c.starts_with("start-poller")));
+}
+
+/// #10357 fail closed: an unreadable or non-Architect setup, and a new
+/// `claude` that is not recorded, start no poller, and the error says why.
+#[test]
+fn relaunch_never_starts_a_poller_unless_the_architect_is_bound() {
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let mut ops = STUB;
+    ops.architect = |_, _| anyhow::bail!("cannot read ~/.trusty-mpm/config.toml");
+    let err = fx.relaunch(ops).expect_err("an unreadable config refuses");
+    assert!(format!("{err:#}").contains("cannot read"), "{err:#}");
+    assert!(calls().is_empty(), "{:?}", calls());
+
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    POLL_PANE.with(|p| *p.borrow_mut() = Some(PaneState::Absent));
+    let mut ops = STUB;
+    ops.prepare = prepare_unbound;
+    ops.probe.claude = |_| Some(NEW_PID);
+    let err = fx.relaunch(ops).expect_err("an unrecorded claude fails");
+    assert!(format!("{err:#}").contains("is NOT bound"), "{err:#}");
+    assert!(
+        !calls().iter().any(|c| c.starts_with("start-poller")),
+        "{:?}",
+        calls()
+    );
+}
+
 #[test]
 fn relaunch_refuses_a_session_with_more_than_one_pane() {
     // #9092 critic HIGH: a split or a second window makes the active pane
@@ -345,8 +440,29 @@ fn relaunch_names_the_stopped_pid_when_the_new_claude_fails() {
     assert!(!calls().contains(&"send".to_owned()), "{:?}", calls());
 }
 
+/// #11068: a pane that still reads `Present` once after the stop, then
+/// `Absent`, is a relaunch, not a refusal.
+#[test]
+fn relaunch_waits_for_the_pane_to_settle_after_the_stop() {
+    let reads = [PaneClaude::Present, PaneClaude::Present, PaneClaude::Absent];
+    let fx = Fixture::new(live(), &reads);
+    let report = fx.relaunch(STUB).expect("the pane settles");
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            format!("stop {OLD_PID}"),
+            "send".to_owned()
+        ]
+    );
+}
+
+/// A pane that keeps a `claude` through the whole settle wait still refuses
+/// (#9092); #11068: the wait is bounded by [`PANE_SETTLE`].
 #[test]
 fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
+    let started = std::time::Instant::now();
     let fx = Fixture::new(live(), &[PaneClaude::Present, PaneClaude::Present]);
     let err = fx.relaunch(STUB).expect_err("a surviving claude refuses");
     assert!(
@@ -357,6 +473,15 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
         calls(),
         ["prepare".to_owned(), format!("stop {OLD_PID}")],
         "no send"
+    );
+    let waited = started.elapsed();
+    assert!(
+        waited >= PANE_SETTLE,
+        "refused before the bound: {waited:?}"
+    );
+    assert!(
+        waited < PANE_SETTLE * 2,
+        "waited past the bound: {waited:?}"
     );
 
     let fx = Fixture::new(live(), &[PaneClaude::Present]);
@@ -370,17 +495,51 @@ fn relaunch_never_types_into_a_pane_that_still_holds_a_claude() {
     assert_eq!(calls(), ["prepare".to_owned()], "no send");
 }
 
+/// #10448 Fail-Open Check: a new `claude` whose record did not land is
+/// stopped, and the run is an error naming the record and the stop; it was a
+/// FAILED step that left the unbound `claude` running.
 #[test]
-fn relaunch_reports_an_unrecorded_claude_as_failed() {
+fn relaunch_stops_an_unrecorded_claude_and_fails() {
     let fx = Fixture::new(live(), &[PaneClaude::Absent]);
     let mut ops = STUB;
     ops.prepare = prepare_unbound;
-    let report = fx.relaunch(ops).expect("the run completes");
-    assert!(report.failed());
-    assert!(report.registration.is_none());
-    let text = report.render();
-    assert!(text.contains("FAILED"), "{text}");
-    assert!(text.contains("but it is NOT bound"), "{text}");
+    ops.probe.claude = |_| Some(NEW_PID);
+    let err = fx
+        .relaunch(ops)
+        .expect_err("an unrecorded claude fails the run");
+    let text = format!("{err:#}");
+    assert!(text.contains("is NOT bound"), "{text}");
+    assert!(
+        text.contains("/h/x.architect: denied (os error 13)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "stopped claude pid {NEW_PID}, so no Architect runs unbound"
+        )),
+        "{text}"
+    );
+    assert_eq!(
+        calls(),
+        [
+            "prepare".to_owned(),
+            "send".to_owned(),
+            format!("stop {NEW_PID}")
+        ]
+    );
+
+    // A stop that fails says the `claude` may still run, and how to stop it.
+    let fx = Fixture::new(live(), &[PaneClaude::Absent]);
+    ops.stop = |_| Err("permission denied".to_owned());
+    let text = format!("{:#}", fx.relaunch(ops).expect_err("still an error"));
+    assert!(
+        text.contains(&format!("could NOT stop claude pid {NEW_PID}")),
+        "{text}"
+    );
+    assert!(
+        text.contains("tmux kill-session -t =tm-architect"),
+        "{text}"
+    );
 }
 
 /// Write the `<pid>.architect` record (when `project` is set) and the
@@ -448,40 +607,40 @@ fn prune_replaced_removes_only_this_sessions_dead_records() {
     );
 }
 
-/// Spawn `program 600`, reaped by a thread so a stopped child does not linger
-/// as a zombie, and panic if it is not still running a moment later.
+// #11061: the fake `claude` process, shared with `tests/tm_fleet.rs`.
+#[path = "../../../../../tests/common/fake_claude.rs"]
+mod fake_claude;
+
+/// Spawn `command`, reaped by a thread so a stopped child does not linger as
+/// a zombie, and panic if it is not still running a moment later.
 ///
 /// #10089: on a host whose `sleep` is a multicall binary (uutils coreutils on
 /// EVO) a program name it does not know exits at once; without this check the
 /// test then fails with "the process table holds no entry for pid N".
-fn spawn_alive(program: &Path) -> u32 {
-    let mut child = std::process::Command::new(program)
-        .arg("600")
-        .spawn()
-        .expect("spawn");
+fn spawn_alive(mut command: std::process::Command) -> u32 {
+    let mut child = command.spawn().expect("spawn");
     let pid = child.id();
     std::thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        panic!(
-            "sleeper pid {pid} ({}) exited at once: {status}",
-            program.display()
-        );
+        panic!("sleeper pid {pid} ({command:?}) exited at once: {status}");
     }
     std::thread::spawn(move || child.wait());
     pid
 }
 
-/// Spawn `name` (a symlink to `/bin/sleep` in `bin`) for 600 s.
-fn spawn_sleeper(bin: &Path, name: &str) -> u32 {
-    let path = bin.join(name);
-    std::os::unix::fs::symlink("/bin/sleep", &path).expect("symlink");
-    spawn_alive(&path)
+/// Spawn the fake `claude` (see [`fake_claude`]) in `bin` for 600 s.
+fn spawn_sleeper(bin: &Path) -> u32 {
+    let mut command = std::process::Command::new(fake_claude::sleeper(bin));
+    command
+        .args(fake_claude::argv())
+        .env(fake_claude::SECS_ENV, "600");
+    spawn_alive(command)
 }
 
 #[test]
 fn stop_claude_ends_a_claude_process() {
     let bin = tempfile::tempdir().expect("tempdir");
-    let pid = spawn_sleeper(bin.path(), "claude-sleep");
+    let pid = spawn_sleeper(bin.path());
     let deadline = Instant::now() + Duration::from_secs(5);
     while !process::process_name_is_claude(pid) && Instant::now() < deadline {
         std::thread::sleep(STOP_POLL);
@@ -497,7 +656,9 @@ fn stop_claude_ends_a_claude_process() {
 fn stop_claude_refuses_a_process_not_named_claude() {
     // #10089: the real `sleep`, unrenamed; a symlink with an unknown name dies
     // under a multicall `sleep`. Its process name is `sleep`, not `claude`.
-    let pid = spawn_alive(Path::new("/bin/sleep"));
+    let mut sleep = std::process::Command::new("/bin/sleep");
+    sleep.arg("600");
+    let pid = spawn_alive(sleep);
     let err = stop_claude(pid).expect_err("not a claude");
     assert!(err.contains("is not a `claude` process"), "{err}");
     assert!(process::is_process_alive(pid), "the process was signalled");

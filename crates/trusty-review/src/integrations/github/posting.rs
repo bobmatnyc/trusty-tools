@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::integrations::github::{GithubClient, GithubError};
+use crate::integrations::github::{GithubClient, GithubError, posting_anchors};
 use crate::models::{Finding, ReviewResult, Verdict};
 
 // ─── Structured payload embedded in the comment ─────────────────────────────────
@@ -250,24 +250,48 @@ fn review_event(_verdict: &Verdict) -> &'static str {
 /// Build the `comments[]` array for the review from inline comments (#1414).
 ///
 /// Why: GitHub's review API attaches per-line comments via a `comments[]` array,
-/// each entry anchored with the modern `line` + `side: RIGHT` format (the new-side
-/// diff line).  Building it here keeps `post_pr_review` a thin POST.
-/// What: maps each `result.inline_comments` entry to `{path, line, side, body}`.
-/// Returns an empty vec when there are no inline comments (a plain summary review).
-/// Test: `inline_comments_payload_shape` (asserts the per-comment JSON shape).
+/// each entry anchored with the modern `line` + `side` format.  Building it here
+/// keeps `post_pr_review` a thin POST.
+/// What: maps each `result.inline_comments` entry through
+/// `posting_anchors::comment_json` (#10762: the entry's own side, plus
+/// `start_line`/`start_side` for a range). Returns an empty vec when there are
+/// no inline comments (a plain summary review).
+/// Test: `inline_comments_payload_shape`,
+/// `post_payload_uses_left_side_and_start_line`.
 fn build_inline_comments_payload(result: &ReviewResult) -> Vec<serde_json::Value> {
     result
         .inline_comments
         .iter()
-        .map(|c| {
-            json!({
-                "path": c.path,
-                "line": c.line,
-                "side": "RIGHT",
-                "body": c.body,
-            })
-        })
+        .map(posting_anchors::comment_json)
         .collect()
+}
+
+/// Build the JSON body of the single review POST.
+///
+/// Why: the POST must send a payload GitHub accepts; keeping it pure lets a
+/// test pin it without a network.
+/// What: `{body, event, comments?}` from `result`; `comments` is omitted
+/// when empty. #10762: built from `posting_view`, so a file-level or
+/// `line: 0` anchor renders in `body`, never in `comments`.
+/// Test: `file_level_and_line_zero_entries_demoted_to_summary_not_posted_inline`,
+/// `demoted_entry_rendered_exactly_once_in_summary`.
+fn build_review_payload(result: &ReviewResult) -> serde_json::Value {
+    // #10762: GitHub's comments[] has no file-level form; demote to the summary.
+    let view = posting_anchors::posting_view(result);
+    let result = view.as_ref();
+    let body = build_review_comment_body(result);
+    let event = review_event(&result.verdict);
+    let comments = build_inline_comments_payload(result);
+    let mut payload = json!({
+        "body": body,
+        "event": event,
+    });
+    if !comments.is_empty()
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("comments".to_string(), serde_json::Value::Array(comments));
+    }
+    payload
 }
 
 /// Post a completed review to a GitHub PR with inline per-line comments (#1414).
@@ -342,20 +366,8 @@ pub(crate) async fn post_pr_review_at(
     token: &str,
     result: &ReviewResult,
 ) -> Result<PostedReview, ReviewPostError> {
-    let body = build_review_comment_body(result);
-    let event = review_event(&result.verdict);
     let url = format!("{api}/repos/{owner}/{repo}/pulls/{pr}/reviews");
-
-    let comments = build_inline_comments_payload(result);
-    let mut payload = json!({
-        "body": body,
-        "event": event,
-    });
-    if !comments.is_empty()
-        && let Some(obj) = payload.as_object_mut()
-    {
-        obj.insert("comments".to_string(), serde_json::Value::Array(comments));
-    }
+    let payload = build_review_payload(result);
 
     let resp = client
         .http
@@ -397,7 +409,7 @@ pub(crate) async fn post_pr_review_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::Effort;
+    use crate::models::{AnchorSide, Effort, InlineCommentOut, SubjectType};
 
     fn sample_result() -> ReviewResult {
         let mut r = ReviewResult::new(
@@ -501,6 +513,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — SQL injection".to_string(),
+                ..Default::default() // #10762
             });
         result.inline_finding_indices = vec![0];
         let body = build_review_comment_body(&result);
@@ -541,6 +554,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — SQL injection".to_string(),
+                ..Default::default() // #10762
             });
         result.inline_finding_indices = vec![0];
 
@@ -573,6 +587,7 @@ mod tests {
                 path: "src/db.rs".to_string(),
                 line: 42,
                 body: "**security** — use a bind param".to_string(),
+                ..Default::default() // #10762
             });
         let payload = build_inline_comments_payload(&result);
         assert_eq!(payload.len(), 1);
@@ -580,6 +595,139 @@ mod tests {
         assert_eq!(payload[0]["line"], 42);
         assert_eq!(payload[0]["side"], "RIGHT");
         assert!(payload[0]["body"].as_str().unwrap().contains("bind param"));
+    }
+
+    /// #10762: a LEFT entry posts on LEFT; a range sends `start_line` and a
+    /// `start_side` equal to `side`.
+    #[test]
+    fn post_payload_uses_left_side_and_start_line() {
+        let mut result = sample_result();
+        result.inline_comments.push(InlineCommentOut {
+            path: "src/db.rs".to_string(),
+            line: 12,
+            side: AnchorSide::Left,
+            body: "removed guard".to_string(),
+            ..Default::default()
+        });
+        result.inline_comments.push(InlineCommentOut {
+            path: "src/db.rs".to_string(),
+            line: 44,
+            start_line: Some(40),
+            body: "range".to_string(),
+            ..Default::default()
+        });
+        let payload = build_inline_comments_payload(&result);
+        assert_eq!(payload[0]["side"], "LEFT");
+        assert!(payload[0].get("start_line").is_none(), "{}", payload[0]);
+        assert!(payload[0].get("start_side").is_none(), "{}", payload[0]);
+        assert_eq!(payload[1]["side"], "RIGHT");
+        assert_eq!(payload[1]["start_line"], 40);
+        assert_eq!(payload[1]["start_side"], "RIGHT");
+        for entry in &payload {
+            assert!(entry.get("subject_type").is_none(), "{entry}");
+        }
+    }
+
+    /// A result with finding 0 anchored file-level, finding 1 at `line: 0`
+    /// with no subject type, and finding 2 on a real line.
+    fn result_with_file_level_anchor() -> ReviewResult {
+        let mut result = sample_result();
+        let mut f = Finding::new(
+            "src/api.rs",
+            "design",
+            "Module mixes transport and domain logic",
+            "Split the module",
+            0.8,
+            Effort::Medium,
+        );
+        f.line = None;
+        result.findings.insert(0, f);
+        let mut zero = Finding::new(
+            "src/zero.rs",
+            "style",
+            "Zero-line anchor finding",
+            "Anchor it",
+            0.8,
+            Effort::Low,
+        );
+        zero.line = None;
+        result.findings.insert(1, zero);
+        result.inline_comments = vec![
+            InlineCommentOut {
+                path: "src/api.rs".to_string(),
+                line: 0,
+                subject_type: Some(SubjectType::File),
+                finding_index: 0,
+                body: "file-level".to_string(),
+                ..Default::default()
+            },
+            InlineCommentOut {
+                path: "src/zero.rs".to_string(),
+                line: 0,
+                finding_index: 1,
+                body: "zero-line".to_string(),
+                ..Default::default()
+            },
+            InlineCommentOut {
+                path: "src/db.rs".to_string(),
+                line: 42,
+                finding_index: 2,
+                body: "**security** — use a bind param".to_string(),
+                ..Default::default()
+            },
+        ];
+        result.inline_finding_indices = vec![0, 1, 2];
+        result
+    }
+
+    /// #10762: a file-level or `line: 0` entry never reaches `comments[]`;
+    /// the result itself keeps the entry.
+    #[test]
+    fn file_level_and_line_zero_entries_demoted_to_summary_not_posted_inline() {
+        let result = result_with_file_level_anchor();
+        let payload = build_review_payload(&result);
+        let comments = payload["comments"].as_array().expect("comments[]");
+        assert_eq!(comments.len(), 1, "{comments:?}");
+        assert_eq!(comments[0]["path"], "src/db.rs");
+        assert_eq!(comments[0]["line"], 42);
+        let body = payload["body"].as_str().expect("body");
+        assert!(body.contains("3 total — 1 inline, 2 below"), "{body}");
+        // The ReviewResult is untouched: the anchor stays in inline_comments.
+        assert_eq!(result.inline_comments.len(), 3);
+        assert_eq!(result.inline_finding_indices, vec![0, 1, 2]);
+
+        // All entries demoted: no `comments` key at all.
+        let mut only_file = result_with_file_level_anchor();
+        only_file.inline_comments.truncate(2);
+        only_file.inline_finding_indices = vec![0, 1];
+        let payload = build_review_payload(&only_file);
+        assert!(payload.get("comments").is_none(), "{payload}");
+    }
+
+    /// #10762: a demoted finding is listed once in the summary, and the
+    /// inline finding is not listed there.
+    #[test]
+    fn demoted_entry_rendered_exactly_once_in_summary() {
+        let result = result_with_file_level_anchor();
+        let body = build_review_payload(&result)["body"]
+            .as_str()
+            .expect("body")
+            .to_string();
+        // The fenced JSON block repeats every finding; count the summary only.
+        let summary = body.split("```json").next().unwrap_or_default();
+        for text in [
+            "Module mixes transport and domain logic",
+            "Zero-line anchor finding",
+        ] {
+            assert_eq!(summary.matches(text).count(), 1, "{text}: {summary}");
+        }
+        assert_eq!(
+            summary
+                .matches("SQL injection via string interpolation")
+                .count(),
+            0,
+            "the inline finding stays out of the summary: {summary}"
+        );
     }
 
     #[test]

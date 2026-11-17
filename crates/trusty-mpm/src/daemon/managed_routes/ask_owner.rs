@@ -195,6 +195,8 @@ pub async fn architect_asker(state: &Arc<DaemonState>, peer: RepairPeer) -> Resu
                 let grant = crate::daemon::state::session_claudes::ResumeGrant {
                     tmux_name: record.tmux_name.clone(),
                     pane_id: Some(pane),
+                    // See #10101: the pane is read on the record's own server.
+                    tmux_socket: record.tmux_socket.clone(),
                     issued_at: 0,
                 };
                 crate::daemon::state::session_claude_resume::pane_claude(&grant)

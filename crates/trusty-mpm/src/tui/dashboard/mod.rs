@@ -11,6 +11,7 @@
 //! Test: `cargo test -p trusty-mpm-tui` checks chat/session formatting and the
 //! empty state without a terminal.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
@@ -335,11 +336,11 @@ impl DashboardState {
 pub fn status_indicator(status: crate::core::session::SessionStatus) -> (char, Color) {
     use crate::core::session::SessionStatus;
     match status {
-        SessionStatus::Active | SessionStatus::Starting => ('●', Color::Green),
+        SessionStatus::Active | SessionStatus::Starting => ('●', palette().ok),
         SessionStatus::AwaitingApproval | SessionStatus::Paused | SessionStatus::Detached => {
-            ('○', Color::Yellow)
+            ('○', palette().warn)
         }
-        SessionStatus::Stopped => ('✕', Color::Red),
+        SessionStatus::Stopped => ('✕', palette().err),
     }
 }
 
@@ -362,7 +363,7 @@ pub fn session_prefix(name: &str) -> &str {
 /// the formatted text without a terminal backend; the `selected` index drives
 /// the visible navigation highlight.
 /// What: one item per session — a coloured status glyph then the session name;
-/// the item at `selected` gets a bold blue background.
+/// the item at `selected` gets the bold theme selection style.
 /// Test: `sidebar_items_format_each_session`.
 pub fn sidebar_items(state: &DashboardState) -> Vec<ListItem<'static>> {
     state
@@ -382,12 +383,7 @@ pub fn sidebar_items(state: &DashboardState) -> Vec<ListItem<'static>> {
             ]);
             let item = ListItem::new(line);
             if idx == state.selected_session && state.focus == Focus::Sidebar {
-                item.style(
-                    Style::default()
-                        .bg(Color::Blue)
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )
+                item.style(palette().selection().add_modifier(Modifier::BOLD))
             } else {
                 item
             }
@@ -453,16 +449,16 @@ pub fn clamp_scroll(scroll: usize, total: usize, height: usize) -> usize {
 
 /// Pick the header-title style from the daemon's reachability.
 ///
-/// Why: the title doubles as a health indicator — a calm cyan when reachable,
-/// a loud reverse-video red banner when not, unmissable on any terminal theme.
-/// What: bold cyan when reachable; bold + reversed red when unreachable.
+/// Why: the title doubles as a health indicator — a calm accent when reachable,
+/// a loud reverse-video err banner when not, unmissable on any terminal theme.
+/// What: bold accent when reachable; bold + reversed err when unreachable.
 /// Test: `title_style_signals_daemon_health`.
 fn title_style(daemon_reachable: bool) -> Style {
     let base = Style::default()
         .fg(if daemon_reachable {
-            Color::Cyan
+            palette().accent
         } else {
-            Color::Red
+            palette().err
         })
         .add_modifier(Modifier::BOLD);
     if daemon_reachable {
@@ -490,7 +486,7 @@ fn panel_title(text: impl Into<String>) -> Line<'static> {
     Line::from(Span::styled(
         text.into(),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -531,14 +527,14 @@ pub fn help_text() -> String {
 ///
 /// Why: the body text previously used `Color::White`, which renders the same as
 /// the terminal background on light/white themes — making the overlay's
-/// contents invisible. The default `Color::Reset` always contrasts with the
-/// terminal's own background, so the text stays legible regardless of theme.
+/// contents invisible. The overlay now draws theme text on the theme surface
+/// (`palette().overlay()`), which is the terminal's own pair in 16 colours.
 fn render_help_overlay(frame: &mut Frame) {
     let area = centered_rect(58, 13, frame.area());
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(help_text())
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -627,14 +623,13 @@ pub fn render(frame: &mut Frame, state: &DashboardState) {
         .into_iter()
         .skip(offset)
         .map(|(text, role)| {
-            // User turns use the terminal's default foreground (`Reset`) rather
-            // than `Color::White` so the text stays legible on light terminal
-            // themes — `Color::White` paints literal white pixels that vanish
-            // against a white background. Coordinator turns keep their cyan
-            // accent since cyan contrasts with both light and dark themes.
+            // User turns use the theme text role rather than `Color::White`,
+            // which paints literal white pixels that vanish on a white
+            // background; in 16 colours that role is the terminal's own
+            // foreground. Coordinator turns take the accent.
             let color = match role {
-                ChatRole::User => Color::Reset,
-                ChatRole::Coordinator => Color::Cyan,
+                ChatRole::User => palette().text,
+                ChatRole::Coordinator => palette().accent,
             };
             ListItem::new(Line::from(text).style(Style::default().fg(color)))
         })
@@ -650,7 +645,7 @@ pub fn render(frame: &mut Frame, state: &DashboardState) {
     let input_focused = state.focus == Focus::Input;
     let input_style = if input_focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(palette().warn)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()

@@ -149,7 +149,9 @@ fn every_r3_bypass_is_refused_and_a_script_operand_passes_under_each_bypass() {
         for command in refused {
             let out = guard(command, &env);
             assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
-            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+            // #10665: a whole-server kill is refused first by its own floor.
+            let floor = out.contains("#9001") || out.contains("#10665");
+            assert!(floor, "{command} {bypass:?}: {out}");
         }
         let script = "cat log | bash scripts/report.sh tmux";
         let out = guard(script, &env);
@@ -196,7 +198,9 @@ fn an_unreadable_or_grammar_wrapped_tmux_command_is_refused_under_each_bypass() 
             let env: Vec<(&str, &str)> = bypass.into_iter().collect();
             let out = guard(command, &env);
             assert!(out.contains("\"deny\""), "{command} {bypass:?}: {out}");
-            assert!(out.contains("#9001"), "{command} {bypass:?}: {out}");
+            // #10665: `kill-session -a` is refused first by its own floor.
+            let floor = out.contains("#9001") || out.contains("#10665");
+            assert!(floor, "{command} {bypass:?}: {out}");
         }
     }
 }

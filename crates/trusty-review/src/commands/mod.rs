@@ -24,6 +24,9 @@
 
 pub mod calibrate;
 pub mod compare;
+// #10588: `content check` lets an installer ask whether the content serves
+// this binary; like `version`, `main` dispatches it before the runtime.
+pub mod content;
 pub(crate) mod diff_source;
 #[cfg(feature = "mcp")]
 pub mod mcp_stdio;

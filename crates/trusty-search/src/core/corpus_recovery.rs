@@ -139,12 +139,16 @@ pub(crate) struct CorpusCorrupted {
 /// `.v2-incompatible` sibling and logs a loud `ERROR`; it then RETRIES the
 /// create only when the error was NOT [`is_genuine_corpus_corruption`],
 /// returning a typed [`CorpusCorrupted`] otherwise. All other errors (including
-/// lock contention) are surfaced verbatim with context.
+/// lock contention) are surfaced verbatim with context. #10738: the `bool` is
+/// true when the database was recreated after a move-aside.
 /// Test: `old_format_is_backed_up_and_recreated_without_error` (real redb-2.x
 /// fixture) and `corruption_returns_typed_error_after_backing_the_file_aside`.
-pub(crate) fn open_corpus_db_or_recreate(path: &Path, cache_bytes: usize) -> Result<Database> {
+pub(crate) fn open_corpus_db_or_recreate(
+    path: &Path,
+    cache_bytes: usize,
+) -> Result<(Database, bool)> {
     match Database::builder().set_cache_size(cache_bytes).create(path) {
-        Ok(db) => Ok(db),
+        Ok(db) => Ok((db, false)),
         Err(e) if is_incompatible_corpus_format(&e) => {
             // #5063: the classification is trusty-common's; this recovery policy
             // stays here because it fails CLOSED on genuine corruption (#4227)
@@ -188,6 +192,7 @@ pub(crate) fn open_corpus_db_or_recreate(path: &Path, cache_bytes: usize) -> Res
             Database::builder()
                 .set_cache_size(cache_bytes)
                 .create(path)
+                .map(|db| (db, true))
                 .with_context(|| {
                     format!(
                         "create fresh redb corpus at {} after moving incompatible file aside",

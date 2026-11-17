@@ -598,7 +598,7 @@ their per-type constraints; §11 specifies how an eighth arrives.
 | # | Type | Locator params | Windowed? | Constraint (normative) |
 |---|---|---|---|---|
 | a | `directory` | `path`, `extensions`, `recursive` | no — full corpus | Also attached to the assistant as a **project** and indexed by trusty-search. See §5.2. |
-| b | `gmail` | `identity`, `months_back`, `query` | **yes** | **SENT messages only** (§5.3). Idempotent, date-bounded, extendable by N more months. |
+| b | `gmail` | `identity`, `months_back`, `query` | **yes** | **SENT messages only** in automated runs (§5.3); an operator-initiated inbound import is allowed only as the S-3.3 amendment states. Idempotent, date-bounded, extendable by N more months. |
 | c | `drive` | `identity`, `folder_id`, `recursive` | no, iff fully recursive | Additional directories are additional sources, not a widened one. |
 | d | `slack-sent` | `workspace`, `months_back` | **yes** | **SENT messages only** (§5.3). |
 | e | `slack-channel` | `workspace`, `channel`, `months_back` | yes | One source per channel. Additional channels are additional sources. |
@@ -645,6 +645,39 @@ the query**, not by filtering after fetch. Gmail: `in:sent`. Slack: the
 authenticated user as author. A post-fetch filter would mean untrusted inbound
 content was fetched, extracted, and held in memory before being discarded, and
 one bug away from being written.
+
+> **Amended 2026-11-03** (SPEC-OKF-01 r7.1, accepted 2026-11-03, §3 (l) and
+> §2.15 "Inbound email"; owner item 2 C; #10742). The amendment lifts SENT-only
+> for Gmail inbound (roster row b) only, and only in a run marked
+> `operator_initiated`. Slack `slack-sent` (roster row d) stays SENT-only in
+> every run. The rules for Gmail:
+>
+> - In an automated or non-operator run, `in:sent` is always in the listing
+>   query, and no store query or caller query can remove it. This covers every
+>   scheduled refresh (#4538) and every OKG build that no operator started. The
+>   constraint stays enforced at the query, not after fetch.
+> - An operator may start an explicit import with a named query that reads
+>   inbound mail. The CLI or caller marks the run, and the mark reaches the
+>   adapter as `operator_initiated: true` in the `acquire` request. An absent
+>   `operator_initiated` field means the run is not operator-initiated, and
+>   SENT-only applies.
+> - Only a human operator sets `operator_initiated: true`, and only through a
+>   path the operator invokes directly: the trusty-okf CLI `--operator` flag
+>   (SPEC-OKF-01 Appendix B, `import run`) or an equivalent operator UI command.
+>   No agent or assistant tool call, MCP tool, scheduled refresh or other
+>   automated path sets it. An agent-originated request that carries
+>   `operator_initiated: true` is refused, or the field is treated as false, so
+>   SENT-only applies. This is fail-closed. (New constraint, 2026-11-07: SPEC-OKF-01
+>   says "the CLI or caller marks the run" and does not name who may set it.)
+> - A sub-agent cannot start an inbound import (SPEC-OKF-01 §2.15
+>   "Sub-agent imports").
+> - Until the capability-grant review (§13) passes, the adapter refuses an
+>   inbound query. That review follows Phase A, so inbound import also waits
+>   for S-4.4.
+> - Every inbound concept carries the trust label `UntrustedExternal`.
+>
+> Test: SPEC-OKF-01 criterion 98 (SPEC-OKF-01 §6.1 item 13 records this
+> amendment).
 
 **S-3.4** (c) `drive`, (e) `slack-channel`, (f) `notion`, and (g) `granola` have
 **no equivalent constraint and cannot have one** — a Drive folder, a channel, a
@@ -840,6 +873,12 @@ two sources.
 2. **Attachments on sent mail are third-party bytes** in the general case.
 3. **Slack sent messages quote and thread-reply** to the same effect.
 4. **A compromised or shared account** writes directly into the "trusted" set.
+
+**Operator inbound import (S-3.3 amendment, 2026-11-03).** An operator-initiated
+Gmail inbound import (SPEC-OKF-01 §2.15 "Inbound email") removes this mitigation
+for that run: the dominant injection vector is open again. That import relies on
+the `UntrustedExternal` label alone. Slack `slack-sent` and every automated run
+stay SENT-only.
 
 **S-4.8** SENT-only is therefore documented as *signal quality plus partial
 mitigation*, never as a trust boundary. Gmail and Slack sent corpora carry the
@@ -1734,3 +1773,4 @@ Phase B's runner ticket.
 | 2026-08-01 | §3.4 added: searchable-corpus and OKG-contributor capacities are orthogonal, and search-only is a complete end state, never pending. §10.5–§10.6 added: OKG-first search tiering with attached-store fan-out, and per-result tier/origin provenance (`SPEC-OKGSRC-14~draft`), verified absent today. |
 | 2026-08-01 | §2.4–§2.7 added: `stores/<store-identifier>/` extraction targets for remote stores with the local/remote asymmetry made explicit (`SPEC-OKGSRC-11~draft`); `${TRUSTY_AGENTS_HOME}` recorded as one system value with migration deferred; config-format, dotless, and not-access-controlled recorded as settled. |
 | 2026-09-11 | Amended for the owner's 1.0 assistant-platform scope (epic #7425). Marked §10.2 (`S-8.2`/`S-8.3`, index cardinality) and §10.5 (`SPEC-OKGSRC-14~draft`, OKG-first tiering with attached-store fan-out) superseded by the one-index-multiple-roots model (#7429): one trusty-search index per Assistant, with the OKG tree and each attached project as roots of that single index, not separate K-a/K-d indexes queried by fan-out. Pre-1.0 tier/fan-out text is retained for historical record; it governs the current implementation until #7429 lands. Clarified §7.1b that an OKG source's read-scoped credential and a two-way channel's send/receive credential (#7427) are separate grants against the same provider. Evidence: `docs/research/trusty-agents-1.0-gap-analysis-2026-09-11.md`. |
+| 2026-11-03 | S-3.3 amended: for Gmail inbound only (roster row b) and only in an `operator_initiated` run, SENT-only is lifted after the capability-grant review, with `UntrustedExternal` labelling; automated runs keep `in:sent` unremovable, an absent `operator_initiated` field means SENT-only, a sub-agent cannot start an inbound import, and Slack `slack-sent` stays SENT-only (SPEC-OKF-01 r7.1, accepted 2026-11-03, §3 (l), §2.15, criterion 98; owner item 2 C; #10742). §5.1 row b and §6.4 aligned |

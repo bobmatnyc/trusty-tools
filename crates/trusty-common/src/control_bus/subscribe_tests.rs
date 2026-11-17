@@ -38,6 +38,7 @@ fn event(source: HarnessSource, session: Option<&str>, payload: HarnessPayload) 
         payload,
         id: EventId::new(),
         parent_id: None,
+        project: None,
     }
 }
 

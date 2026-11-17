@@ -1,7 +1,11 @@
 // Test harness for the dashboard-serve.py shim (scripts/test_dashboard_busy.py): runs the shim in node against a fake /api.
 // Usage: node shim_harness.js <shim.js> <scenario>; prints one JSON line with what the page would have seen.
+// #10896: scenario "page" runs page code over the shim against a real dashboard-serve instead of the fake /api:
+// node shim_harness.js <shim.js> page <base url> <code.js>, where <code.js> defines `async function main(db)`; the harness
+// prints its result as one JSON line (a thrown error prints {error, status}).
 const fs = require("fs");
-const [, , shimPath, scenario] = process.argv;
+const [, , shimPath, scenario, pageBase, pageCode] = process.argv;
+const realFetch = globalThis.fetch;
 const events = [], snaps = [], t0 = Date.now();
 let version = 1, putStatus = 200, getDelay = [];            // getDelay: per-GET latency queue (ms), then 20
 const listeners = {};
@@ -22,8 +26,17 @@ global.fetch = async (url, o) => {
   return res(200, { id: "A01", version });
 };
 const src = fs.readFileSync(shimPath, "utf8");
+if (scenario === "page") global.fetch = (url, o) => realFetch(pageBase + url, o);
 (0, eval)(src);
-(async () => {
+if (scenario === "page") {
+  (0, eval)(fs.readFileSync(pageCode, "utf8"));
+  (async () => {
+    let out;
+    try { out = await main(await window.claude.use("db")); } catch (e) { out = { error: String(e && e.message), status: e && e.status }; }
+    console.log(JSON.stringify(out));
+    process.exit(0);
+  })();
+} else (async () => {
   const db = await window.claude.use("db");
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   if (scenario === "stale") getDelay = [400];              // the first (initial) poll is slow and will return v1

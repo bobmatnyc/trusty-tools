@@ -409,6 +409,7 @@ impl OrchestratorBackend for StateBackend {
         name_hint: Option<&str>,
         runtime: Option<&str>,
         ephemeral: Option<bool>,
+        parent_session_id: Option<&str>, // #10476
     ) -> Result<Value, String> {
         super::mcp_session::session_new(
             &self.state,
@@ -418,6 +419,7 @@ impl OrchestratorBackend for StateBackend {
             name_hint,
             runtime,
             ephemeral,
+            parent_session_id,
         )
         .await
     }
@@ -442,6 +444,16 @@ impl OrchestratorBackend for StateBackend {
     // separate path from `session_delete` and from the legacy `remove_session`.
     async fn session_delete_records(&self, session_ids: &[String]) -> Result<Value, String> {
         super::mcp_session_bulk::session_delete_records(&self.state, session_ids).await
+    }
+
+    async fn session_archive(
+        &self,
+        session_id: &str,
+        dry_run: bool,
+        force: bool,
+    ) -> Result<Value, String> {
+        let opts = crate::session_manager::session_archive::ArchiveOptions { dry_run, force };
+        super::session_archive::session_archive(&self.state, session_id, opts).await // #10991
     }
 
     async fn session_activity(&self, session_id: &str, lines: u32) -> Result<Value, String> {
@@ -654,6 +666,10 @@ impl OrchestratorBackend for StateBackend {
 
     async fn project_resolve(&self, query: &str) -> Result<Value, String> {
         super::mcp_project::project_resolve(&self.state, query).await
+    }
+
+    async fn project_decommission(&self, name: &str) -> Result<Value, String> {
+        super::mcp_project_decommission::project_decommission(&self.state, name).await // #10988
     }
 
     // ── #2550: session-manager proxy tools (delegate to mcp_proxy) ───────────

@@ -5,7 +5,7 @@
 //! `[supervisor] projects` allowlist, the project's `profile = "supervisor"`,
 //! and the launch stamp. Setting that up by hand meant editing the operator's
 //! config file; `tm fleet init` does it in one idempotent command.
-//! What: [`init_with_session`] creates the project (local git repo, no
+//! What: [`init_full`] creates the project (local git repo, no
 //! remote), writes the profile request and the allowlist entry — each an
 //! atomic write that keeps the rest of the file — seeds the fleet files
 //! ([`seed`]), and starts the Architect's tmux session and its poller
@@ -15,23 +15,36 @@
 //! `tm-architect` unless `--session` chose and recorded another name
 //! ([`session_name`], #8878 R1). [`relaunch`] restarts the running
 //! Architect's `claude` and binds it (#9092). Twin mode (#8878) is out of
-//! scope (ruling Q7). `add` and `remove` are phase P3.
+//! scope (ruling Q7). [`project`] edits the watch list (#10895), which
+//! `init` seeds when it is absent ([`init_full`], #11012).
 //! Test: `commands::fleet::tests`, `commands::fleet::preflight::tests`,
 //! `commands::fleet::relaunch::tests`, `tests/tm_fleet.rs`.
 
+// #8878 PR2a: `tm fleet bind`.
+mod bind;
 mod config;
+mod dashboard_agent;
 // #10033: relaunch refuses inside a Claude Code session.
+mod il_init;
 mod inside_claude;
 // #8902: the pm-guard's Architect pane floor names the launch session.
 pub(crate) mod launch;
+// #10885: the Architect's Notification hook step and status row.
+mod notify_hook;
 mod poller;
 mod preflight;
+// #10895: `tm fleet project add|remove|list` over `local/watch.json`.
+mod project;
+// #10861: init creates `local/quiet-sessions.txt`.
+mod quiet_list;
 // #8942: daemon registration and the ruling-2 sidecar prune.
 mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
 mod relaunch;
+pub(crate) mod restart; // #11365
 mod seed;
 mod session_name;
+pub(crate) mod up; // #11364
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
 pub(crate) mod status;
 
@@ -41,22 +54,32 @@ use anyhow::{Context, bail};
 use trusty_mpm::core::content_source::Fetch;
 use trusty_mpm::core::project_config::PROJECT_CONFIG_FILE;
 use trusty_mpm::core::project_skill_tier::architect_seed::{ArchitectSeed, ArchitectSeedError};
+use trusty_mpm::session_manager::architect_register::collector_session_name;
 
 use self::config::Edit;
 use self::session_name::SessionNames;
 use crate::cli::FleetAction;
 
 pub(crate) use self::launch::ARCHITECT_SESSION;
+// #11058: `tm doctor` names a kept core script lacking this release's wiring.
+pub(crate) use self::seed::wiring::{
+    CHECK as SEED_WIRING_CHECK, doctor_row as seed_wiring_doctor_row,
+};
 pub(crate) use self::status::status;
+// #11364: what `tm architect up|attach|restart` reuse.
+pub(crate) use self::register::register as register_architect;
+pub(crate) use self::session_name::recorded_names;
 
-/// The Architect's directory under the user home (ruling Q4).
-pub(crate) const DEFAULT_DIR: &str = "trusty-mpm-projects/architect";
+/// Whether this process runs inside a Claude Code session (#10033 markers).
+pub(crate) fn inside_claude_code() -> bool {
+    !inside_claude::present_markers(|name| std::env::var_os(name)).is_empty()
+}
 
 /// Dispatch `tm fleet <action>` against the process home.
 ///
 /// Why: the CLI entry point; every function below takes `home` so a test
 /// never touches the operator's `~/.trusty-mpm`.
-/// What: resolves the home and the directory, runs [`init_with_session`],
+/// What: resolves the home and the directory, runs [`init_full`],
 /// [`status()`] or [`relaunch::relaunch`], and prints the report. `init` and
 /// `relaunch` return an error, so exit 1, when a step failed; `status` does
 /// when the setup is incomplete.
@@ -68,11 +91,27 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             dir,
             no_launch,
             session,
+            dashboard_takeover,
         } => {
             // #8878 R1: a bad name refuses before anything is read or written.
             let session = session.as_deref().map(SessionNames::new).transpose()?;
             let dir = resolve_dir(dir.as_deref(), &home)?;
-            let mut report = init_with_session(&dir, &home, !no_launch, TMUX, session.as_ref())?;
+            // #11012: the registry and tmux sessions the watch-list seed reads.
+            let watch = project::init_watch().await;
+            let seed = |dir: &Path| ArchitectSeed::resolve_for(dir, Fetch::OnFirstUse);
+            let names = session.as_ref();
+            let mut report = init_full(&dir, &home, !no_launch, TMUX, names, seed, Some(&watch))?;
+            // #10571 P1b: the dashboard's login start, once the scripts are seeded.
+            if !report.failed() {
+                let shipped = seed::embedded_contents(dashboard_agent::SCRIPT).unwrap_or_default();
+                report.steps.extend(dashboard_agent::login_steps(
+                    &dir,
+                    &home,
+                    !no_launch,
+                    dashboard_takeover,
+                    shipped,
+                ));
+            }
             // #8942: after the poller step, so its pane can be placed.
             if let Some(reg) = report.registration.take() {
                 report.steps.push(register::register(&reg).await);
@@ -124,11 +163,30 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        // #8878 PR2a: re-bind a running Architect after presence.
+        FleetAction::Bind => {
+            let root = home.join(crate::commands::pm_guard_trust_anchor::ANCHOR_ROOT);
+            let env = crate::commands::pm_guard_trust_anchor::HookEnv {
+                home: Some(home.clone()),
+                ..status::this_session_env()
+            };
+            let source = trusty_mpm::core::presence_key::KeySource::ambient(&root);
+            let auth = trusty_mpm::core::presence_local::LocalAuthenticator;
+            let config = trusty_mpm::core::config::MpmConfig::load_default;
+            println!(
+                "{}",
+                bind::bind(&env, config, &auth, &source, &root, bind::live_pane)?
+            );
+            Ok(())
+        }
+        FleetAction::Project { action } => project::run(action, &home).await,
     }
 }
 
 /// The Architect directory: `--dir` made absolute, else the one Architect
-/// `home`'s config records, else [`DEFAULT_DIR`] under `home`.
+/// `home`'s config records, else
+/// [`DEFAULT_ARCHITECT_DIR`](trusty_mpm::core::architect_store::DEFAULT_ARCHITECT_DIR)
+/// under `home` (#10944 Q5: the pick is the lib's, shared with the daemon).
 ///
 /// Why: #8995 — a bare `tm fleet status` checked the default while the
 /// operator's Architect was recorded elsewhere.
@@ -150,10 +208,10 @@ pub(crate) fn resolve_dir(dir: Option<&str>, home: &Path) -> anyhow::Result<Path
         .and_then(|raw| config::parse_user_config(&raw, &path))
         .map(|(_, typed)| config::architects(&typed))
         .unwrap_or_default();
-    match recorded.as_slice() {
-        [] => Ok(home.join(DEFAULT_DIR)),
-        [one] => Ok(one.clone()),
-        many => bail!(
+    // #10944 Q5: the pick is the lib's, so the daemon resolves the same directory.
+    match trusty_mpm::core::architect_store::pick_architect_dir(&recorded, home) {
+        Ok(dir) => Ok(dir),
+        Err(many) => bail!(
             "{} records more than one Architect in `[supervisor] projects` ({}); pass --dir",
             path.display(),
             many.iter()
@@ -218,9 +276,9 @@ impl Step {
 pub(crate) struct InitReport {
     /// One entry per step.
     pub(crate) steps: Vec<Step>,
-    /// This run started the Architect but could not bind it to its `claude`
-    /// (#8878 ruling A), or found its session running unbound (#8878 R1); a
-    /// warning, never a failure.
+    /// This run started the Architect but found no `claude` to bind (#8878
+    /// ruling A), or found its session running unbound (#8878 R1); a warning,
+    /// never a failure. #10448: a record that does not land fails instead.
     pub(crate) unbound: bool,
     /// The daemon registration to send, set only when the Architect's
     /// session runs bound (#8942); [`run`] sends it.
@@ -287,7 +345,8 @@ pub(crate) fn init(
     init_with_session(dir, home, launch, probe, None)
 }
 
-/// `init`, with the `--session` choice (#8878 R1); the production entry point.
+/// `init`, with the `--session` choice (#8878 R1); production runs
+/// [`init_full`] (#11012).
 ///
 /// Why: see [`session_name`]; the default run must stay what `init` was.
 /// What: the names are `session`, else the recorded `[supervisor] session`,
@@ -301,6 +360,7 @@ pub(crate) fn init(
 /// `a_rename_is_refused_while_the_recorded_session_runs`,
 /// `a_malformed_recorded_name_refuses_init_and_fails_status`,
 /// `the_default_session_writes_no_key`.
+#[cfg(test)]
 pub(crate) fn init_with_session(
     dir: &Path,
     home: &Path,
@@ -321,6 +381,7 @@ pub(crate) fn init_with_session(
 /// What: runs `load_seed` on the checked path right after the config reads,
 /// before the first write; its error ends the run.
 /// Test: `a_seed_that_does_not_resolve_writes_nothing`.
+#[cfg(test)]
 pub(crate) fn init_with_seed(
     dir: &Path,
     home: &Path,
@@ -328,6 +389,25 @@ pub(crate) fn init_with_seed(
     probe: Probe,
     session: Option<&SessionNames>,
     load_seed: impl FnOnce(&Path) -> Result<ArchitectSeed, ArchitectSeedError>,
+) -> anyhow::Result<InitReport> {
+    init_full(dir, home, launch, probe, session, load_seed, None)
+}
+
+/// The `init` steps with the seed loader named, also seeding the watch list (#11012).
+///
+/// Why: issue #11012 — installing the Architect creates `local/watch.json`.
+/// What: after the fleet files and before the launch, so the Architect's
+/// first pass reads the seeded list, runs [`project::init_steps`]; `None`
+/// skips that step. Its FAILED line makes `init` exit 1.
+/// Test: `init_full_seeds_the_list_before_the_launch_step_and_a_rerun_keeps_it`.
+pub(crate) fn init_full(
+    dir: &Path,
+    home: &Path,
+    launch: bool,
+    probe: Probe,
+    session: Option<&SessionNames>,
+    load_seed: impl FnOnce(&Path) -> Result<ArchitectSeed, ArchitectSeedError>,
+    watch: Option<&project::InitWatch>,
 ) -> anyhow::Result<InitReport> {
     // #8436: the preflight runs before any read or write, and every later step
     // uses the path it checked (code-critic BLOCK: `--dir $HOME` was accepted).
@@ -389,10 +469,26 @@ pub(crate) fn init_with_seed(
         let label = format!("`[supervisor] session = \"{}\"` in", names.architect());
         report.steps.push(write_edit(&config_path, edit, &label)?);
     }
+    // #10885: after the config edits; fails `init` only on its config write.
+    report.steps.push(notify_hook::step(dir, home, None));
 
     // #8436 P4: the seeded CLAUDE.md must exist before the launch, whose
     // instruction pipeline creates a stub CLAUDE.md when none is there.
     report.steps.extend(seed::deploy(dir, &seed)?);
+    // #11012: the watch list, seeded once from live sessions; never replaced.
+    if let Some(watch) = watch {
+        // #11012 review: the dashboard collector is the Architect's too.
+        let collector = collector_session_name(names.architect());
+        let own = [names.architect(), names.poll(), collector.as_str()];
+        report.steps.extend(project::init_steps(dir, watch, &own));
+    }
+    // #10571/#10579: the Architect's own Intent Ledger and its hooks, on install and upgrade.
+    // #10459: never before a launch's Claude Code version refusal; the launch step reports it.
+    let version_ok = !launch
+        || trusty_mpm::core::architect_claude_version::require_architect_claude_version().is_ok();
+    if version_ok && !dir.join(status::STALE_RECORDS_DIR).is_dir() {
+        report.steps.extend(il_init::steps(dir, names.architect()));
+    }
     // #8942 ruling 2: before the launch writes this run's sidecar.
     report.steps.extend(register::prune_step(home, probe));
     let (step, unbound) = launch_step(dir, home, launch, probe, &names)?;
@@ -402,13 +498,18 @@ pub(crate) fn init_with_seed(
     }
     report.steps.push(step);
     report.unbound = unbound;
-    report.steps.push(poller::step(dir, launch, probe, &names));
+    // #10357: no poller beside an Architect that is not bound.
+    report.steps.push(if unbound {
+        poller::unbound(&names)
+    } else {
+        poller::step(dir, launch, probe, &names)
+    });
     Ok(report)
 }
 
 /// `~/.trusty-mpm/config.toml` under `home`.
 pub(crate) fn user_config_path(home: &Path) -> PathBuf {
-    home.join(".trusty-mpm").join("config.toml")
+    trusty_mpm::core::architect_store::user_config_path(home)
 }
 
 /// A file's text, or `""` when it does not exist.
@@ -521,8 +622,10 @@ fn write_edit(path: &Path, edit: Edit, label: &str) -> anyhow::Result<Step> {
 /// name may hold a `claude` tm never launched, and `init` must not call that
 /// set up.
 /// What: a running session is checked with [`status::bound`]; not bound is a
-/// warning and the unbound flag. Otherwise starts and records the Architect.
-/// Test: `a_running_unbound_session_is_reported_by_init`.
+/// warning and the unbound flag. Otherwise starts and records the Architect;
+/// #10448: a launch record that does not land is `Err` ([`launch::start`]).
+/// Test: `a_running_unbound_session_is_reported_by_init`,
+/// `fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written`.
 fn launch_step(
     dir: &Path,
     home: &Path,
@@ -570,6 +673,8 @@ fn launch_step(
     }
     let (bound, unbound) = match binding {
         Ok(record) => (format!("bound to claude pid {}", record.pid), false),
+        // #10448: only `Unbound::NoClaude` gets here; a record that did not
+        // land already failed `launch::start`.
         Err(err) => {
             eprintln!("warning: the Architect process was NOT recorded: {err}");
             let text = format!(
@@ -590,3 +695,11 @@ fn launch_step(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "notify_hook_tests.rs"]
+mod notify_hook_tests;
+
+#[cfg(test)]
+#[path = "quiet_list_tests.rs"]
+mod quiet_list_tests;

@@ -28,7 +28,8 @@ def test_poller_defaults_name_the_architect_and_stay_inside_the_checkout(monkeyp
     assert fp.ARCHITECT == "tm-architect"
     assert fp.SKIP_SESSIONS == {"tm-architect", "tm-architect-poll"}
     assert fp.INBOX == os.path.join(ROOT, "inbox")
-    assert fp.QUIET_SESSIONS_FILE == os.path.join(ROOT, "quiet-sessions.txt")
+    # #10861: the path `tm architect quiet` and the Rust poller read.
+    assert fp.QUIET_SESSIONS_FILE == os.path.join(ROOT, "local", "quiet-sessions.txt")
 
 
 def test_poller_session_and_paths_follow_the_environment(monkeypatch, tmp_path):

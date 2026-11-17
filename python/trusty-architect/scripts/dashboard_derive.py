@@ -18,7 +18,9 @@ ID_COLLECTIONS = ("items", "goals", "priorities", "sessions", "questions", "medi
 
 
 def snapshot(store, colls):
-    return {c: store.list_docs(c) for c in colls}
+    # #10679: one read of every collection, so a batch is seen whole; a store without snapshot() reads them in turn
+    whole = getattr(store, "snapshot", None)
+    return whole(colls) if whole else {c: store.list_docs(c) for c in colls}
 
 
 def _d(doc):
@@ -209,21 +211,26 @@ def _relayed(data):
     return isinstance(r, str) and bool(r.strip())
 
 
+def _with_note(head, note):
+    """`head`, then ": <note>" when the owner typed a non-blank answer_note (#10765)."""
+    return head + (f": {note.strip()}" if isinstance(note, str) and note.strip() else "")
+
+
 def pending_items(items, now):
     out = []
     for doc in sorted(items, key=lambda x: x["id"]):
         data, item_id = _d(doc), doc["id"]
         status, note = data.get("status"), data.get("answer_note")
-        if status in ("answered", "cancelled", "wont_do") and _relayed(data):
+        if status in ("answered", "cancelled", "wont_do", "interactive") and _relayed(data):
             pass
         elif status == "answered" and not _done(note, ("Relayed",)):
             # "Architect Do" on an ask (page button; old stored text "Have Architect Do" still accepted): the Architect carries it out, then sets status done.
             if data.get("answer") in ("Architect Do", "Have Architect Do"):
                 out.append({"id": item_id, "kind": "architect_do", "at": str(data.get("answered_at", "")),
-                            "text": "Architect Do" + (f": {str(note).strip()}" if isinstance(note, str) and note.strip() else "")})
+                            "text": _with_note("Architect Do", note)})
             else:
                 out.append({"id": item_id, "kind": "answered", "at": str(data.get("answered_at", "")),
-                            "text": str(data.get("answer", ""))})
+                            "text": _with_note(str(data.get("answer", "")), note)})   # #10765: "Other" plus the typed text
         elif status == "cancelled" and not _done(note, ("Relayed", "Acknowledged")):
             out.append({"id": item_id, "kind": "cancelled", "at": str(data.get("cancelled_at", "")),
                         "text": str(data.get("cancel_note", ""))})
@@ -231,6 +238,10 @@ def pending_items(items, now):
             wd = data.get("wont_do") if isinstance(data.get("wont_do"), dict) else {}
             out.append({"id": item_id, "kind": "wont_do", "at": str(wd.get("at", "")),
                         "text": str(wd.get("note", "")).strip() or "no reason given"})
+        elif status == "interactive" and not _done(note, ("Relayed", "Acknowledged")):
+            # "Respond interactively" button: the Architect asks the owner in the terminal chat, records the result, then sets status done.
+            out.append({"id": item_id, "kind": "interactive", "at": str(data.get("answered_at", "")),
+                        "text": str(data.get("title", ""))})
         pk = data.get("parked")
         ups = data.get("updates") if isinstance(data.get("updates"), list) else []
         if status == "open" and isinstance(pk, dict) and pk.get("until") and _due(pk["until"], now):
@@ -249,7 +260,7 @@ def pending_items(items, now):
             if status == "open" and isinstance(req, dict) and req.get("at"):
                 out.append({"id": item_id, "kind": field, "at": str(req["at"]), "text": str(data.get("title", ""))})
         req = data.get("brief_request")
-        if status == "open" and isinstance(req, dict) and req.get("at") and not data.get("brief"):   # "Ask for a brief"; cleared once `brief` is set
+        if status in ("open", "brief_pending") and isinstance(req, dict) and req.get("at") and (not data.get("brief") or req.get("refresh") is True):   # "Ask for a brief"; cleared once `brief` is set; "Refresh briefing" (refresh true) reports until the Architect clears brief_request
             out.append({"id": item_id, "kind": "brief_request", "at": str(req["at"]), "text": str(data.get("title", ""))})
         sr_list = data.get("steer_requests")
         for s in sr_list if isinstance(sr_list, list) else []:
@@ -273,6 +284,19 @@ def pending_efforts(docs):
         goal, direction = str(d.get("goal", "")), str(d.get("direction", ""))
         out.append({"id": doc["id"], "kind": "effort", "at": str(d.get("at", "")),
                     "text": f"{goal} effort {direction} (bias {b})", "goal": goal, "direction": direction, "bias": b})
+    return out
+
+
+def pending_watch_changes(docs):
+    """#10896: Watch / Unwatch requests (watch_changes, status "new"): kind "watch_change", id = the doc id, with `key` and `action`."""
+    out = []
+    for doc in sorted(docs, key=lambda x: x["id"]):
+        d = _d(doc)
+        if d.get("status") != "new":
+            continue
+        key, action = str(d.get("key", "")), str(d.get("action", ""))
+        out.append({"id": doc["id"], "kind": "watch_change", "at": str(d.get("created", "")),
+                    "text": f"{action} {key}", "key": key, "action": action})
     return out
 
 
@@ -329,7 +353,19 @@ def pending_goal_done(goals):
     return out
 
 
+def pending_goal_briefs(goals):
+    """"Ask for a brief" / "Refresh briefing" on a goal: brief_request {at} with no brief, or refresh true, until the Architect clears it."""
+    out = []
+    for doc in sorted(goals, key=lambda x: x["id"]):
+        d = _d(doc)
+        req = d.get("brief_request")
+        if isinstance(req, dict) and req.get("at") and (not d.get("brief") or req.get("refresh") is True):
+            out.append({"id": doc["id"], "kind": "brief_request", "at": str(req["at"]), "text": str(d.get("title", ""))})
+    return out
+
+
 def pending(snap, now):
-    """Owner events the Architect must act on, from a snapshot with items, sessions, effort_tunes, goals."""
+    """Owner events the Architect must act on, from a snapshot with items, sessions, effort_tunes, goals, watch_changes."""
     return (pending_items(snap.get("items", []), now) + pending_commands(snap.get("sessions", []))
-            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])))
+            + pending_efforts(snap.get("effort_tunes", [])) + pending_il_steers(snap.get("il_steers", [])) + pending_goal_parks(snap.get("goals", [])) + pending_goal_done(snap.get("goals", [])) + pending_goal_briefs(snap.get("goals", []))
+            + pending_watch_changes(snap.get("watch_changes", [])))

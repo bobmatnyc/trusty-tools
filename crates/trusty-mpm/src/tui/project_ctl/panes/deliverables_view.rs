@@ -26,10 +26,11 @@
 //! Test: `tests` covers `body_lines`' status/tier/date formatting and the
 //! empty-list placeholder text.
 
+use crate::tui::theme::palette;
 use ratatui::{
     Frame,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
@@ -44,7 +45,7 @@ use crate::tui::project_ctl::state::DeliverableView;
 /// three-line pure function, not worth a cross-module dependency to share.
 /// What: same behavior as the dashboard original: centers a `width x height`
 /// box within `area`, clamped so it never exceeds `area`'s own bounds.
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
     Rect {
@@ -143,14 +144,14 @@ pub fn render(frame: &mut Frame, view: &DeliverableView) {
     let title = Line::from(vec![Span::styled(
         format!("Deliverables/Milestones — {}", view.project_name),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette().accent)
             .add_modifier(Modifier::BOLD),
     )]);
     let body = body_lines(view).join("\n");
     let footer = "\n[↑↓] scroll  [Esc/v] close";
     frame.render_widget(
         Paragraph::new(format!("{body}{footer}"))
-            .style(Style::default().fg(Color::Reset))
+            .style(palette().overlay())
             .scroll((view.scroll, 0))
             .block(Block::default().borders(Borders::ALL).title(title)),
         area,

@@ -464,6 +464,8 @@ mod tests {
     fn stub_record(runtime: crate::runtime::RuntimeKind) -> crate::session_manager::SessionRecord {
         crate::session_manager::SessionRecord {
             context_usage: None,
+            parent_session_id: None,
+            tmux_session_id: None,
             id: crate::session_manager::ManagedSessionId::new(),
             tmux_name: "tmpm-probe".to_owned(),
             cwd: std::path::PathBuf::from("/tmp/project"),
@@ -484,6 +486,7 @@ mod tests {
             last_cwd: None, deliverable_id: None,
             pane_id: None, injection_status: Default::default(),
             tmux_server: None,
+            tmux_socket: None,
             worktree_owner: None,
             terminal_at: None,
             stop_cause: None,

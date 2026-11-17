@@ -14,11 +14,13 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod anchor; // #10762
 // #9192: the optional-context ledger `run_review_with` returns.
 pub mod context_source;
 pub mod severity; // #9310
 pub mod status;
 pub mod verdict_status; // #9310
+pub use anchor::{AnchorSide, SubjectType, UnanchoredFinding, UnanchoredReason};
 pub use context_source::{ContextItemRecord, ContextSourceRecord, SourceState};
 pub use severity::Severity;
 pub use status::ReviewStatus;
@@ -468,6 +470,18 @@ pub struct Finding {
     /// deserialising as `false`.
     #[serde(default)]
     pub code_provable: bool,
+    /// #10782: code copied verbatim from `file` at `line`, the quote the
+    /// line-citation gate places the finding on.
+    ///
+    /// Why: the quote used to be a convention inside `body`, so a "confirm X"
+    /// note with nothing to quote reached the gate and was withheld there.
+    /// What: set by the reviewer's `quoted_snippet` field, or, for a reviewer
+    /// that omits it, from the first code the body quotes
+    /// (`quote_admission::admit_quoted_findings`); a finding with neither is
+    /// withheld before the gate. Absent from the JSON when `None`.
+    /// Test: `a_finding_without_a_quote_is_withheld_before_the_gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quoted_snippet: Option<String>,
     // ── Transient pipeline state ──────────────────────────────────────────
     /// Verification outcome; `None` before the verification round.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,6 +568,7 @@ impl Finding {
             category: FindingCategory::Correctness,
             source_citation: None,
             code_provable: false,
+            quoted_snippet: None, // #10782
             verified: None,
             issue_eligible: false,
             citation_correction: None,
@@ -585,14 +600,36 @@ impl Finding {
 /// the GitHub review and (b) the dry-run / MCP response can preview exactly what
 /// would be posted.  It is a flat, owned projection (no borrows, serde-friendly)
 /// distinct from the posting-layer's internal `InlineComment` type.
-/// What: `path` + `line` are the new-side anchor; `body` is the rendered markdown.
-/// Test: `inline_comment_out_serde_roundtrip`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// What: `path` + `line` + `side` are the anchor; `body` is the rendered
+/// markdown. #10762: `finding_index` names the finding (see
+/// [`anchor`]), and `severity` and `category` copy it. Every #10762 field
+/// defaults on deserialize, so a 0.39 entry still parses.
+/// Test: `inline_comment_out_serde_roundtrip`,
+/// `inline_entry_carries_severity_source_finding_index`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineCommentOut {
     /// Changed file path (new side), e.g. `src/db.rs`.
     pub path: String,
-    /// New-side line number the comment anchors to.
+    /// Line number the comment anchors to, on `side`; 0 for a file-level anchor.
     pub line: u32,
+    /// First line of a multi-line anchor; `None` for a single line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    /// Diff side the anchor addresses; `LEFT` for a deleted line (#10762).
+    #[serde(default)]
+    pub side: AnchorSide,
+    /// `file` for a file-level anchor; `None` for a line anchor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_type: Option<SubjectType>,
+    /// The finding's severity, as `finalize_review` stamps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severity: Option<Severity>,
+    /// The finding's category.
+    #[serde(default)]
+    pub category: FindingCategory,
+    /// Index of the finding in `findings`.
+    #[serde(default)]
+    pub finding_index: usize,
     /// Rendered inline-comment markdown body.
     pub body: String,
 }
@@ -743,6 +780,41 @@ pub struct ReviewResult {
     /// result deserialising with an empty list.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inline_comments: Vec<InlineCommentOut>,
+    /// Every finding with no inline anchor, and why (#10762).
+    ///
+    /// Why: with `inline_comments`, this accounts for every entry of
+    /// `findings` and `withheld_findings`, so a consumer need not re-derive
+    /// the anchoring.
+    /// What: written by `attach_inline_comments`; each finding index appears
+    /// in exactly one of the two lists. Absent from the JSON when empty.
+    /// Test: `partition_invariant_with_fixture`,
+    /// `result_without_unanchored_field_still_deserializes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanchored: Vec<UnanchoredFinding>,
+    /// #10782: the reviewer's "confirm / check / verify X" notes, which quote
+    /// no code and so are not findings.
+    ///
+    /// Why: emitted as findings, they were withheld by the line-citation gate
+    /// and turned an APPROVE into `all_withheld`.
+    /// What: copied from the reply's `questions` array, blanks dropped. No
+    /// gate, grade or verdict reads it. Absent from the JSON when empty.
+    /// Test: `parse_questions_are_kept_apart_from_findings`,
+    /// `run_review_questions_never_shape_the_verdict`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<String>,
+    /// #10782: an APPROVE with no surviving finding whose every withhold is
+    /// `no_quote_pregate`.
+    ///
+    /// Why: Architect ruling 09:02Z counts pregate drops apart from gate
+    /// withholds. Such a review is `parsed`, not `all_withheld`, and this
+    /// flag names it without a caller re-deriving the rule.
+    /// What: set by `withheld_contract::sync_withheld_counts`. The pregate
+    /// count is `withheld_by_reason["no_quote_pregate"]`; the gate count is
+    /// `withheld_count` minus it. Absent from the JSON when false.
+    /// Test: `run_review_pregate_only_approve_is_parsed_not_all_withheld`,
+    /// `run_review_mixed_pregate_and_gate_withholds_are_all_withheld`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub pregate_only_approve: bool,
     /// Indices (into `findings`) of the findings that were placed inline (#1414).
     ///
     /// Why: the summary body must render exactly the findings that did NOT land
@@ -905,6 +977,9 @@ impl ReviewResult {
             withheld_by_reason: BTreeMap::new(),
             verdict_status: None,
             inline_comments: Vec::new(),
+            unanchored: Vec::new(),
+            questions: Vec::new(),       // #10782
+            pregate_only_approve: false, // #10782
             inline_finding_indices: Vec::new(),
             suppressed_nits: 0,
             shallow_clean_review: false,

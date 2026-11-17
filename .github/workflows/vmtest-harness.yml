@@ -80,7 +80,8 @@ jobs:
     # with `exec -a`. A Linux runner would run these under bash 5 with GNU `ps`
     # and could report green for semantics the real target fails — the exact
     # false negative that lets a swallowed-status construct through.
-    runs-on: macos-14
+    # macos-14 image retired 2026-11-02 (actions/runner-images#13518)
+    runs-on: macos-15
     # 10, not the 5 this repo's pure-shell gates default to. Measured on an
     # arm64 macOS host: 0.2s + 2.5s + 2.5s + 17.9s ≈ 23s wall clock. The
     # headroom is for `test-preflight-single-run.sh`, which starts and reaps

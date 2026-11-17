@@ -1,17 +1,24 @@
-"""datg_ops.py: validate and apply datg write ops (add, update, session, close).
+"""datg_ops.py: validate and apply datg write ops (add, update, session, pulse, close).
 
 Why: datg.py passed the 500-SLOC cap; #10161 P3 split it by section, bodies moved verbatim.
-What: id and option checks, apply_add/update/session/op, collect_closed and write_ops_ev
-(one locked, all-or-nothing commit). datg.py re-exports every name.
+What: id and option checks, apply_add/update/session/pulse/op, collect_closed and write_ops_ev
+(one locked, all-or-nothing commit). #11101: `add T` stamps `created` and runs the WIP cap check
+(datg_task). datg.py re-exports every name.
 Test: tests/test_datg.py
 """
 import json
 import os
 import re
+import sys
 import time
 
+import datg_guards
+from datg_task import set_delivery, wip_check
+
 from datg_store import (CODE_RE, DEFAULT_BLOCK_AFTER, ID_RE, PREFIXES, SESSION_MAX, STATUS, TITLE_MAX, VAGUE,
-                        WHO, DatgError, Locked, commit, load_state, now_iso, paths)
+                        WHO, DatgError, Locked, commit, load_state, now_iso, parse_ts, paths)
+
+SOURCE_KEYS = {"owner": ("by", "cite", "quote", "until"), "architect": ("by", "basis")}
 
 def _title(t):
     t = (t or "").strip()
@@ -52,12 +59,15 @@ def _next_id(st, pre, explicit=None):
         if explicit in used:
             raise DatgError(f"id collision: {explicit} exists")
         return explicit
-    n = int(st["next"].get(pre, "01"), 16)
-    while n <= 255 and f"{st['code']}-{pre}{n:02x}" in used:
-        n += 1
-    if n > 255:
+    # Why: ids are recycled (the owner 2026-10-24); scan from the pointer, wrap ff -> 01.
+    # What: first free id in pointer..ff then 01..pointer-1; pointer = next hex after it, ff -> 01.
+    # Test: test_datg.py NextIdCase
+    start = int(st["next"].get(pre, "01"), 16) or 1
+    order = list(range(start, 256)) + list(range(1, start))
+    n = next((i for i in order if f"{st['code']}-{pre}{i:02x}" not in used), None)
+    if n is None:
         raise DatgError(f"no free {pre} id (01-ff exhausted)")
-    st["next"][pre] = f"{n + 1:02x}" if n < 255 else "ff"
+    st["next"][pre] = f"{n % 255 + 1:02x}"
     return f"{st['code']}-{pre}{n:02x}"
 
 
@@ -119,7 +129,8 @@ def apply_add(st, a):
         _check_goal(st, a.get("goal"))
         if pre == "T":
             obj = {"id": new_id, "goal": a["goal"], "title": title, "status": a.get("status") or "open",
-                   "to": a.get("to") or "", "outcome": ""}
+                   "to": a.get("to") or "", "outcome": "", "created": now_iso()}   # #11101: the @MMDD stamp
+            wip_check(st, new_id)
             if obj["status"] not in STATUS["T"][:2]:
                 raise DatgError("new task status must be open or running")
             st["tasks"].append(obj)
@@ -128,13 +139,83 @@ def apply_add(st, a):
                    "goal": a["goal"], "title": title, "opts": _check_opts(a.get("opts")),
                    "answer": "", "outcome": "", "esc": None}
             st["items"].append(obj)
+    set_delivery(obj, a, pre)   # #10960 G-5: `add T --needs`
     ev = "drift" if pre == "D" and title.lower().startswith("drift:") else "open"
     return {"id": new_id, "ev": ev, "note": title}
+
+
+def _source(src):
+    """The stored provenance of an answer (#10780); DatgError unless it is one of the two shapes and an owner
+    quote is in its cited turn (verify_owner_quote).
+
+    Why: after a /clear a fresh session could not tell an owner ruling from an Architect inference, and
+    restored the inference as a ruling. What: {by: owner, cite, quote[, until]} (cite one line <= 80,
+    quote one line <= 300, until an ISO minute) or {by: architect, basis} (one line <= 200). An
+    inference never carries an owner quote. Keys are written in that order.
+    Test: tests/test_datg_provenance.py SourceCase, ledger_writer_matches_prototype_bytes
+    """
+    by = src.get("by") if isinstance(src, dict) else None
+    if by not in SOURCE_KEYS:
+        raise DatgError("source.by must be owner or architect")
+    if set(src) - set(SOURCE_KEYS[by]):
+        raise DatgError(f"source by {by} takes only {', '.join(SOURCE_KEYS[by][1:])}")
+    if by == "architect":
+        return {"by": by, "basis": _lim(src.get("basis"), "source.basis", 200, True)}
+    out = {"by": by, "cite": _lim(src.get("cite"), "source.cite", 80, True),
+           "quote": _lim(src.get("quote"), "source.quote", 300, True)}
+    if src.get("until") is not None:
+        out["until"] = _lim(src["until"], "source.until", 20, True)
+        if parse_ts(out["until"]) is None:
+            raise DatgError("source.until must be YYYY-MM-DDTHH:MMZ")
+    verify_owner_quote(out["cite"], out["quote"])
+    return out
+
+
+def verify_owner_quote(cite, quote):
+    """#10780 critic H3: an owner source is written only when its quote is in the cited owner turn.
+
+    What: relay_provenance.verify (the relay gate's own check) beside this file; its refusal, or the
+    module missing, raises DatgError, so nothing unverified is stored as the owner's.
+    Test: tests/test_datg_provenance.py SourceCase
+    """
+    try:
+        import relay_provenance
+    except ImportError as e:
+        raise DatgError(f"source by owner cannot be checked: relay_provenance.py is missing ({e})")
+    try:
+        relay_provenance.verify(cite, [quote])
+    except relay_provenance.Refused as e:
+        raise DatgError(f"source by owner refused: {e}")
+
+
+def supersede(st, new, old_id):
+    """#10960 (DOC-87 G-4): mark the owner ruling `old_id` as replaced by `new`, an explicit link only.
+
+    Why: an authentic quote of an owner turn the owner has since reversed still passed the relay check.
+    What: sets `superseded_by` = new id on the old item. Both must be D/A items whose answer is sourced to the
+    owner, the new one unsuperseded; the old one may not already name another successor (the same one is a
+    no-op), so links never fork or cycle. Later turns never supersede by inference.
+    Test: tests/test_relay_supersession.py TestLinkCase
+    """
+    if (new.get("source") or {}).get("by") != "owner":
+        raise DatgError("--supersedes needs the new item's answer sourced to the owner (--source owner)")
+    pre, old = _find(st, old_id)
+    if pre not in "DA" or old is new:
+        raise DatgError(f"--supersedes takes another decision or action item, not {old_id}")
+    if (old.get("source") or {}).get("by") != "owner":
+        raise DatgError(f"{old_id} is not an owner ruling; only an owner-sourced answer is superseded")
+    if new.get("superseded_by"):
+        raise DatgError(f"{new['id']} is itself superseded by {new['superseded_by']}")
+    if old.get("superseded_by") not in (None, new["id"]):
+        raise DatgError(f"{old_id} is already superseded by {old['superseded_by']}")
+    old["superseded_by"] = new["id"]
 
 
 def apply_update(st, a):
     pre, o = _find(st, a.get("id"))
     evs = []
+    if a.get("source") is not None and a.get("answer") is None:
+        raise DatgError("source needs an answer in the same update")   # #10780: a source describes one answer
     if a.get("title") is not None:
         o["title"] = _title(a["title"])
     if a.get("rank") is not None:
@@ -151,9 +232,18 @@ def apply_update(st, a):
     if a.get("answer") is not None:
         if pre not in "DA":
             raise DatgError("answer applies to D/A")
+        if o.get("superseded_by"):   # #10960 G-4: a superseded ruling stays history; a new one is a new item
+            raise DatgError(f"{o['id']} is superseded by {o['superseded_by']}; record a new ruling on a new item "
+                            f"with --supersedes {o['superseded_by']}")
         o["answer"] = _lim(a["answer"], "answer", 300, ml=True)
         o["status"] = "answered"
+        if a.get("source") is not None:
+            o["source"] = _source(a["source"])
+        else:
+            o.pop("source", None)   # #10780: a new answer with no source is unsourced, never the old answer's source
         evs.append("answered")
+    if a.get("supersedes") is not None:
+        supersede(st, o, a["supersedes"])
     if a.get("to") is not None:
         if pre != "T":
             raise DatgError("to applies to tasks")
@@ -162,6 +252,7 @@ def apply_update(st, a):
         if pre == "G":
             raise DatgError("outcome does not apply to goals")
         o["outcome"] = _lim(a["outcome"], "outcome", 300, ml=True)
+    set_delivery(o, a, pre)   # #10960 G-5: `--state`, `--needs`
     if a.get("status") is not None:
         if a["status"] not in STATUS[pre]:
             raise DatgError(f"status for {pre} must be one of {STATUS[pre]}")
@@ -185,17 +276,20 @@ def _bad(msg):
 
 def _rows(a, key, mx, name):
     rows = a[key]
-    if not isinstance(rows, list) or len(rows) > mx or any(not isinstance(r, dict) for r in rows):
+    if isinstance(rows, list) and len(rows) > mx:   # #11101: name the cap that was hit
+        raise DatgError(f"{name}: {len(rows)} rows is over the cap of {mx} (max {mx}); drop or merge rows")
+    if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
         raise DatgError(f"{name}: a list of at most {mx} objects")
     return rows
 
 
+OWED_MAX = 8   # #11101: the digest prints owed (n/OWED_MAX)
 REF_KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,31}$")
 REFS_MAX = 12
 
 
 def _merge_refs(old, new):
-    """Merge [{key, value}] into the stored refs: same key replaces; None/[] clears (session set --ref none)."""
+    """Merge [{key, value}] into the stored refs: same key replaces; value None removes that key; [] clears (session set --ref none)."""
     if not new:
         return []
     refs = {r["key"]: r["value"] for r in old}
@@ -203,8 +297,10 @@ def _merge_refs(old, new):
         key = r.get("key")
         if not isinstance(key, str) or not REF_KEY.match(key):
             raise DatgError(f"refs.key must match {REF_KEY.pattern}")
-        val = _lim(r.get("value"), "refs.value", 200, True)
-        refs[key] = val
+        if r.get("value") is None:
+            refs.pop(key, None)
+            continue
+        refs[key] = _lim(r.get("value"), "refs.value", 200, True)
     if len(refs) > REFS_MAX:
         raise DatgError(f"refs: at most {REFS_MAX} refs")
     return [{"key": k, "value": v} for k, v in refs.items()]
@@ -217,6 +313,10 @@ def apply_session(st, a):
         ses["task"] = _lim(a["task"], "task", 160, True)
     if a.get("next") is not None:
         ses["next"] = _lim(a["next"], "next", 200, True)
+    if a.get("hold") is not None:   # #10579: "" clears it
+        ses["hold"] = _lim(a["hold"], "hold", 1000)   # a usage HOLD carries its reset/projection/resume context
+    if a.get("merge_hold") is not None:   # #10579: a no-merge hold, never folded into the usage HOLD
+        ses["merge_hold"] = _lim(a["merge_hold"], "merge_hold", 1000)
     if "waiting_on" in a:
         ses["waiting_on"] = [
             {"who": r.get("who") if r.get("who") in WHO else _bad(f"waiting_on.who must be one of {WHO}"),
@@ -225,7 +325,7 @@ def apply_session(st, a):
             for r in _rows(a, "waiting_on", 5, "waiting_on")]
     if "owed" in a:
         owed = []
-        for r in _rows(a, "owed", 8, "owed"):
+        for r in _rows(a, "owed", OWED_MAX, "owed"):
             exp = _lim(r.get("expect"), "owed.expect", 80, True)
             if exp.lower() in VAGUE:
                 raise DatgError(f"owed.expect must be an exact value (SHA, run id, count), not {exp!r}")
@@ -262,6 +362,19 @@ def apply_session(st, a):
     return {"id": f"{st['code']}-session", "ev": "update", "note": ses.get("task", "")[:120]}
 
 
+def apply_pulse(st, a):
+    """Record a pulse on a task: note, last_msg_at, last_signal_at. Never touches status or outcome (#11101)."""
+    pre, o = _find(st, a.get("id"))
+    if pre != "T":
+        raise DatgError("pulse applies to tasks")
+    if a.get("note") is not None:
+        o["pulse"] = _lim(a["note"], "pulse", 200)
+    for k in ("last_msg_at", "last_signal_at"):
+        if a.get(k):
+            o[k] = _lim(a[k], k, 30, req=True)
+    return {"id": o["id"], "ev": "update", "note": "pulse"}
+
+
 def apply_op(st, a):
     verb = a.get("op")
     if verb == "add":
@@ -270,10 +383,13 @@ def apply_op(st, a):
         return apply_update(st, a)
     if verb == "session":
         return [apply_session(st, a)]
+    if verb == "pulse":   # #11101: task_pulse.py writes it
+        return [apply_pulse(st, a)]
     if verb == "close":
         if not a.get("outcome"):
             raise DatgError("close needs --outcome")
-        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done"})
+        return apply_update(st, {"id": a.get("id"), "outcome": a["outcome"], "status": "done",
+                                 "state": a.get("state")})   # #10960 G-5: the claimed delivery state
     raise DatgError(f"unknown op {verb!r}")
 
 
@@ -288,7 +404,14 @@ def collect_closed(st, evs):
 
 
 def write_ops_ev(project, ops):
-    """Apply ops to a copy of the state; commit once (all-or-nothing). Returns (events, state)."""
+    """Apply ops to a copy of the state; commit once (all-or-nothing). Returns (events, state).
+
+    #10800 G2: a task closed with no evidence in its outcome is refused under guard_mode enforce; in shadow
+    the write lands, and stderr and <datg>/guards.jsonl record it (never log.jsonl: the Rust writer parity).
+    #10960 G-5: delivery_gaps sets a closed task's recorded `delivery`; its FLAG lines go to the same two places
+    in every guard_mode and never refuse.
+    Test: tests/test_datg_guards.py EvidenceCase, tests/test_datg_delivery.py DeliveryCase
+    """
     with Locked(project):
         st = load_state(project)
         evs = []
@@ -296,5 +419,16 @@ def write_ops_ev(project, ops):
             if not isinstance(a, dict):
                 raise DatgError("each op must be an object")
             evs.extend(apply_op(st, a))
-        commit(project, st, evs, collect_closed(st, evs))
+        closed = collect_closed(st, evs)
+        gaps = datg_guards.evidence_gaps(closed)
+        if gaps and datg_guards.guard_mode(st) == "enforce":
+            raise DatgError(gaps[0][1])
+        flags = datg_guards.delivery_gaps(closed)
+        commit(project, st, evs, closed)
+        for ref, msg in gaps:
+            datg_guards.record_guard(project, "evidence", msg, ref)
+            print(msg + datg_guards.SHADOW, file=sys.stderr)
+        for ref, msg in flags:
+            datg_guards.record_guard(project, "delivery", msg, ref)
+            print(msg, file=sys.stderr)
     return evs, st

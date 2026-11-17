@@ -55,12 +55,105 @@ pub struct IndexSummary {
     pub root_path: Option<String>,
 }
 
+/// How a chunk walk tolerates a slow page (#10781).
+///
+/// Why: one timed-out page used to abort the whole walk and discard every
+/// chunk already fetched; under trusty-search load a 1000-row page can time
+/// out where a 100-row page answers in half a second.
+/// What: a page that fails in transport (timeout, broken connection) is
+/// retried up to `attempts` times in total, halving the page `limit` on each
+/// retry down to `min_limit`, with a linear `backoff`. A page the daemon
+/// answered with an error is never retried. The reduced limit stays in force
+/// for the rest of the walk.
+/// Test: `a_page_that_times_out_once_still_completes_the_walk`,
+/// `a_page_that_always_times_out_fails_naming_its_cursor`.
+#[derive(Clone, Debug)]
+pub struct PageRetryPolicy {
+    /// Bound on one `search.chunks.list` call.
+    pub call_timeout: Duration,
+    /// Total tries per page, the first included. Values below 1 act as 1.
+    pub attempts: u32,
+    /// The page limit never drops below this.
+    pub min_limit: usize,
+    /// Sleep before retry `n` is `backoff * n`.
+    pub backoff: Duration,
+}
+
+impl Default for PageRetryPolicy {
+    fn default() -> Self {
+        Self {
+            call_timeout: CALL_TIMEOUT,
+            attempts: 4,
+            min_limit: 100,
+            backoff: Duration::from_millis(250),
+        }
+    }
+}
+
+/// What `search.index.status` says about an index's current corpus (#10781).
+///
+/// Why: the per-index analysis cache must notice that an index changed.
+/// trusty-search exposes no monotonic generation, so this is the strongest
+/// signal it serves: the last completed reindex, the chunk count, and the
+/// lifecycle status.
+/// What: two fingerprints are equal only when all three fields are equal. A
+/// fingerprint carrying neither `last_indexed` nor `chunk_count` cannot
+/// detect any change and is not [`Self::is_verifiable`].
+/// Test: `fingerprint_reads_last_indexed_chunk_count_and_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexFingerprint {
+    #[serde(default)]
+    pub last_indexed: Option<String>,
+    #[serde(default)]
+    pub chunk_count: Option<u64>,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+impl IndexFingerprint {
+    /// True when the fingerprint carries at least one change signal.
+    pub fn is_verifiable(&self) -> bool {
+        self.last_indexed.is_some() || self.chunk_count.is_some()
+    }
+}
+
+/// The `search.index.status` fields a scoped walk is checked against (#10781).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ScopeBounds {
+    #[serde(default)]
+    pub root_path: Option<String>,
+    #[serde(default)]
+    pub chunk_count: Option<u64>,
+}
+
+/// A scoped walk whose first page matched every chunk of the index (#10781).
+///
+/// Why: trusty-search normalizes an absolute prefix naming its root to `""`,
+/// which matches every chunk, while still echoing the prefix it was sent. The
+/// echo check cannot see that; the count can.
+/// What: carried inside the walk's `anyhow::Error`; a caller downcasts it to
+/// tell a widened scope from an upstream failure.
+/// Test: `a_scope_the_daemon_widens_to_the_corpus_is_refused`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "index '{index_id}': path_prefix {prefix:?} selects all {total} chunks of the index; a \
+     scope covers part of the index, so omit it for the corpus-wide result"
+)]
+pub struct ScopeSelectsWholeIndex {
+    pub index_id: String,
+    pub prefix: String,
+    pub total: usize,
+}
+
 /// Client for the trusty-search daemon's Unix socket.
 ///
-/// Cheap to clone — it holds only the socket path; each call dials afresh.
+/// Cheap to clone — it holds only the socket path and the page retry policy;
+/// each call dials afresh.
 #[derive(Clone, Debug)]
 pub struct TrustySearchClient {
     socket: PathBuf,
+    // #10781: page-walk timeout and retry bounds.
+    page_retry: PageRetryPolicy,
 }
 
 impl TrustySearchClient {
@@ -73,7 +166,16 @@ impl TrustySearchClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
+            page_retry: PageRetryPolicy::default(),
         }
+    }
+
+    /// Replace the page retry policy (#10781).
+    ///
+    /// Test: `a_page_that_times_out_once_still_completes_the_walk`.
+    pub fn with_page_retry(mut self, policy: PageRetryPolicy) -> Self {
+        self.page_retry = policy;
+        self
     }
 
     /// Construct a client at the path every trusty-search client derives.
@@ -203,6 +305,59 @@ impl TrustySearchClient {
         Ok(body.root_path)
     }
 
+    /// `search.index.status` — the index's change signals (#10781).
+    ///
+    /// What: reads `last_indexed`, `chunk_count` and `status` from the status
+    /// body; an absent field is `None`. A failed call is `Err`.
+    /// Test: `fingerprint_reads_last_indexed_chunk_count_and_status`.
+    pub async fn index_fingerprint(&self, index_id: &str) -> Result<IndexFingerprint> {
+        self.call(
+            search_rpc::METHOD_INDEX_STATUS,
+            json!({ "index_id": index_id }),
+        )
+        .await
+    }
+
+    /// `search.index.status` — what a scoped walk is checked against (#10781).
+    ///
+    /// What: the index's `root_path` and `chunk_count`; an absent field is
+    /// `None`. A failed call is `Err`.
+    /// Test: `an_absolute_scope_naming_the_root_is_refused`.
+    pub async fn index_scope_bounds(&self, index_id: &str) -> Result<ScopeBounds> {
+        self.call(
+            search_rpc::METHOD_INDEX_STATUS,
+            json!({ "index_id": index_id }),
+        )
+        .await
+    }
+
+    /// `search.chunks.list` scoped to one `path_prefix` (#10781).
+    ///
+    /// Why: a PR review needs the changed files, not the corpus. trusty-search
+    /// filters by a segment-boundary prefix (#7677), so a scoped walk is a few
+    /// small pages instead of hundreds of large ones.
+    /// What: the same cursor walk, completeness check and page retry as
+    /// [`Self::get_chunks`], with `path_prefix` on every page. A page that does
+    /// not echo the prefix came from a daemon that ignored the filter; the
+    /// walk is refused rather than allowed to page the whole corpus.
+    ///
+    /// #10781: `corpus_chunks` is the index's chunk count. A first page whose
+    /// `total` equals it means the daemon matched every chunk — a prefix it
+    /// normalized to the root — so the walk stops with
+    /// [`ScopeSelectsWholeIndex`] before paging the corpus.
+    /// Test: `scoped_walk_sends_the_prefix_on_every_page`,
+    /// `a_daemon_that_ignores_path_prefix_is_refused`,
+    /// `a_scope_the_daemon_widens_to_the_corpus_is_refused`.
+    pub async fn get_chunks_under(
+        &self,
+        index_id: &str,
+        prefix: &str,
+        corpus_chunks: Option<u64>,
+    ) -> Result<Vec<CodeChunk>> {
+        self.walk_chunks(index_id, Some(prefix), corpus_chunks)
+            .await
+    }
+
     /// `search.chunks.list` — bulk export of every chunk for `index_id`.
     ///
     /// Why (#6043): this used to page with `offset`/`limit`, and that mode
@@ -235,17 +390,58 @@ impl TrustySearchClient {
     /// `short_export_against_reported_total_is_an_error`,
     /// `walk_truncated_after_the_first_page_is_an_error`,
     /// `repeated_cursor_stops_the_walk_instead_of_spinning`,
-    /// `export_without_total_makes_no_completeness_claim`.
+    /// `export_without_total_makes_no_completeness_claim`,
+    /// `a_page_that_times_out_once_still_completes_the_walk` (#10781 retry).
     pub async fn get_chunks(&self, index_id: &str) -> Result<Vec<CodeChunk>> {
+        self.walk_chunks(index_id, None, None).await
+    }
+
+    /// The cursor walk behind [`Self::get_chunks`] and
+    /// [`Self::get_chunks_under`]; `prefix` scopes every page, and
+    /// `corpus_chunks` bounds a scoped first page's `total`.
+    async fn walk_chunks(
+        &self,
+        index_id: &str,
+        prefix: Option<&str>,
+        corpus_chunks: Option<u64>,
+    ) -> Result<Vec<CodeChunk>> {
         let mut all_chunks: Vec<CodeChunk> = Vec::new();
         // An empty cursor means "start from the first chunk" — trusty-search
         // treats `after: ""` as present-but-unset, which is how cursor mode is
         // selected at all. Omitting the field would fall back to offset.
         let mut cursor = String::new();
         let mut reported_total: Option<usize> = None;
+        let mut limit = CHUNK_PAGE_LIMIT;
 
         loop {
-            let page = self.fetch_chunk_page(index_id, &cursor).await?;
+            let page = self
+                .fetch_page_with_retry(index_id, &cursor, prefix, &mut limit)
+                .await?;
+            // #10781: an unscoped page from a pre-#7677 daemon would make this
+            // "scoped" walk page the whole corpus. Refuse it.
+            if let Some(p) = prefix {
+                if page.path_prefix.as_deref() != Some(p) {
+                    bail!(
+                        "index '{index_id}': trusty-search did not apply path_prefix {p:?} \
+                         (it echoed {:?}); it predates #7677, so a scoped analysis would \
+                         page the whole corpus and is refused",
+                        page.path_prefix
+                    );
+                }
+                // #10781: backstop for a prefix the daemon normalized to "".
+                if let (true, Some(total), Some(corpus)) =
+                    (cursor.is_empty(), page.total, corpus_chunks)
+                {
+                    if corpus > 0 && total as u64 == corpus {
+                        return Err(ScopeSelectsWholeIndex {
+                            index_id: index_id.to_string(),
+                            prefix: p.to_string(),
+                            total,
+                        }
+                        .into());
+                    }
+                }
+            }
             if let Some(total) = page.total {
                 reported_total = Some(total);
             }
@@ -267,8 +463,9 @@ impl TrustySearchClient {
         // #6043: a short export must not pass as the whole corpus.
         if let Some(total) = reported_total {
             if all_chunks.len() < total {
+                let scope = prefix.map_or(String::new(), |p| format!(" under {p:?}"));
                 bail!(
-                    "index '{index_id}': chunk export is incomplete — trusty-search reports \
+                    "index '{index_id}'{scope}: chunk export is incomplete — trusty-search reports \
                      {total} chunks but the cursor walk returned {}. The corpus is cold, \
                      still rehydrating, or unreadable; analysis over this partial corpus \
                      would understate every metric, so it is refused rather than reported \
@@ -281,13 +478,76 @@ impl TrustySearchClient {
         Ok(all_chunks)
     }
 
+    /// Fetch one page at `cursor`, retrying a transport failure (#10781).
+    ///
+    /// What: applies [`PageRetryPolicy`]; `limit` is halved in place on each
+    /// retry so later pages keep the smaller size. The final error names the
+    /// cursor, the attempt count and the last limit tried.
+    async fn fetch_page_with_retry(
+        &self,
+        index_id: &str,
+        cursor: &str,
+        prefix: Option<&str>,
+        limit: &mut usize,
+    ) -> Result<ChunksPage> {
+        let policy = &self.page_retry;
+        let attempts = policy.attempts.max(1);
+        let mut attempt = 1;
+        loop {
+            let err = match self
+                .fetch_chunk_page(index_id, cursor, prefix, *limit)
+                .await
+            {
+                Ok(page) => return Ok(page),
+                Err(e) => e,
+            };
+            // The daemon answered: a retry would get the same answer.
+            if err.downcast_ref::<SearchRpcError>().is_some() || attempt >= attempts {
+                return Err(err.context(format!(
+                    "index '{index_id}': chunk page after cursor {cursor:?} failed on attempt \
+                     {attempt} of {attempts} (page limit {limit})"
+                )));
+            }
+            tracing::warn!(
+                index_id,
+                cursor,
+                attempt,
+                limit = *limit,
+                "chunk page failed in transport; retrying at a smaller limit: {err:#}"
+            );
+            *limit = (*limit / 2).max(policy.min_limit.max(1));
+            tokio::time::sleep(policy.backoff * attempt).await;
+            attempt += 1;
+        }
+    }
+
     /// Fetch a single chunk page at `cursor`.
-    async fn fetch_chunk_page(&self, index_id: &str, cursor: &str) -> Result<ChunksPage> {
+    async fn fetch_chunk_page(
+        &self,
+        index_id: &str,
+        cursor: &str,
+        prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<ChunksPage> {
         // #9214: socket twin of `GET /indexes/{id}/chunks?after=&limit=`.
-        let params = json!({ "index_id": index_id, "after": cursor, "limit": CHUNK_PAGE_LIMIT });
-        self.call(METHOD_CHUNKS_LIST, params)
-            .await
-            .with_context(|| format!("{METHOD_CHUNKS_LIST} index '{index_id}' after {cursor:?}"))
+        let mut params = json!({ "index_id": index_id, "after": cursor, "limit": limit });
+        if let Some(p) = prefix {
+            params["path_prefix"] = json!(p);
+        }
+        let value = search_rpc::call_at(
+            &self.socket,
+            METHOD_CHUNKS_LIST,
+            params,
+            self.page_retry.call_timeout,
+        )
+        .await
+        .with_context(|| format!("{METHOD_CHUNKS_LIST} index '{index_id}' after {cursor:?}"))?;
+        serde_json::from_value(value).with_context(|| {
+            format!(
+                "decode {METHOD_CHUNKS_LIST} from the trusty-search daemon at {}",
+                self.socket.display()
+            )
+        })
     }
 }
 
@@ -303,4 +563,7 @@ struct ChunksPage {
     total: Option<usize>,
     #[serde(default)]
     next_cursor: Option<String>,
+    /// #10781: the prefix trusty-search applied, echoed only when one was.
+    #[serde(default)]
+    path_prefix: Option<String>,
 }

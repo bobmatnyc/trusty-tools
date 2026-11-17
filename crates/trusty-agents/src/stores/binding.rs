@@ -11,7 +11,7 @@
 //! silent-wrong one. This module is the resolution the binding always implied.
 //!
 //! What: [`okg_tree_path`] is the one canonical `okg://X` →
-//! `<knowledge_dir>/<slug(X)>` mapping, matching `trusty_kb::roots::Roots`'
+//! `<knowledge_dir>/<slug(X)>` mapping, matching `crate::kb::roots::Roots`'
 //! agent mapping exactly. [`bound_index_for_tree`] answers "which index does
 //! this KB tree feed?" — from a named agent when the caller has one, or by
 //! searching the agent roster for the single agent whose binding claims that
@@ -23,7 +23,7 @@
 
 use std::path::{Path, PathBuf};
 
-use trusty_kb::entity::slugify;
+use trusty_okf::format::concept::slugify;
 
 use super::config::{OKG_SCHEME, StoresConfig};
 

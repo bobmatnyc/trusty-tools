@@ -86,6 +86,11 @@ pub(crate) fn ensure_project_hooks_with(
     if !settings_is_writable_object(project_dir) {
         return Ok(());
     }
+    // #10459: an Architect's resume, relaunch or worker spawn refuses here,
+    // before the exec-form guard is written, on a Claude Code below v2.1.295.
+    let config = crate::core::config::MpmConfig::load(&fw.root);
+    let profile = crate::core::session_profile::resolve(project_dir, &config);
+    crate::core::architect_claude_version::require_for_profile(profile)?;
     // #7849: the toggles now resolve in ONE place, shared with the read-only
     // diff `tm validate --repair` and `tm doctor` report from. This call used
     // to hard-code the #7688 capture off, so every resume STRIPPED the two

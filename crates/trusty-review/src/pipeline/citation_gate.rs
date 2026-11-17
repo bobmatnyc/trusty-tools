@@ -44,9 +44,10 @@ use crate::pipeline::diff_analyzer::models::FilteredDiff;
 #[path = "citation_gate_anchors.rs"]
 mod anchors;
 use anchors::{
-    Anchors, bracket_anchors, finding_anchors, is_removal_claim, parse_locator, ref_citations,
-    same_file,
+    Anchors, bracket_anchors, finding_anchors, is_removal_claim, parse_locator, placing_anchors,
+    ref_citations, same_file,
 };
+pub(crate) use anchors::{is_usable_quote, text_quote}; // #10782: for `quote_admission`
 
 #[path = "citation_gate_index.rs"]
 mod index;
@@ -244,7 +245,20 @@ fn gate_finding(f: &mut Finding, index: &LineIndex) -> Result<Outcome, GateError
     let anchors = finding_anchors(f);
     let removal_ok = is_removal_claim(f);
     let mut moved = false;
-    match check_citation(index, &f.file, f.line.map(|l| (l, l)), &anchors, removal_ok)? {
+    // #10782: a structured quote alone places the finding on its line.
+    let placing = placing_anchors(f, finding_anchors(f));
+    let check = check_citation(index, &f.file, f.line.map(|l| (l, l)), &placing, removal_ok)?;
+    // #9188 B still holds beside a quote: every other snippet is in the file.
+    if f.quoted_snippet.is_some()
+        && !matches!(check, Check::Drop(_))
+        && let Some(fragment) = first_missing(index, &f.file, &anchors, removal_ok)?
+    {
+        return Ok(Outcome::Drop(DropCause {
+            reason: SNIPPET_ABSENT,
+            fragment: Some(fragment),
+        }));
+    }
+    match check {
         Check::Holds => {}
         Check::Drop(cause) => return Ok(Outcome::Drop(cause)),
         Check::Move { to, removed } => {

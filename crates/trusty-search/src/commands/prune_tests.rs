@@ -620,3 +620,100 @@ fn prune_apply_blocks_on_the_cross_process_registry_lock() {
         "once the lock is released the prune must complete normally"
     );
 }
+
+/// Deterministic embedder for the #10738 case — the library's `MockEmbedder`
+/// is `cfg(test)`-gated and not linked into this binary test target.
+struct ConstEmbedder10738;
+
+#[async_trait::async_trait]
+impl crate::core::Embedder for ConstEmbedder10738 {
+    async fn embed(&self, _text: &str) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![0.1; 8])
+    }
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
+        Ok(texts.iter().map(|_| vec![0.1; 8]).collect())
+    }
+    fn dimension(&self) -> usize {
+        8
+    }
+}
+
+/// Points `TRUSTY_DATA_DIR` at a tempdir for one test; unsets it on drop.
+struct DataDir10738 {
+    _dir: tempfile::TempDir,
+}
+impl DataDir10738 {
+    fn new() -> Self {
+        let dir = tempdir().unwrap();
+        // SAFETY: `#[serial]` — no other test in this group reads the env meanwhile.
+        unsafe { std::env::set_var("TRUSTY_DATA_DIR", dir.path()) };
+        Self { _dir: dir }
+    }
+}
+impl Drop for DataDir10738 {
+    fn drop(&mut self) {
+        // SAFETY: as in `new`.
+        unsafe { std::env::remove_var("TRUSTY_DATA_DIR") };
+    }
+}
+
+/// Why: #10738 (H1) — prune deletes the registry row and the data dir but not
+/// the identity file, so re-creating the id came back empty under the
+/// identity a journal had already matched.
+/// What: load a colocated index and put a file, prune it with `--apply`, load
+/// the same entry again (re-create), and the identity differs.
+/// Test: this function IS the test.
+#[tokio::test(flavor = "multi_thread")]
+#[serial_test::serial]
+async fn prune_then_recreate_changes_the_index_identity_10738() {
+    use crate::service::index_identity;
+    use crate::service::persistence_loader::build_indexer_from_entry;
+    let _data = DataDir10738::new();
+    let tmp = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let toml = tmp.path().join("indexes.toml");
+    let now = 1_000 * DAY;
+    let id = "prune-identity-10738";
+    let mut entry = PersistedIndex::new(id.to_string(), root.path().to_path_buf());
+    entry.colocated = true;
+    entry.last_queried_unix = Some(now - 60 * DAY);
+    let embedder: std::sync::Arc<dyn crate::core::Embedder> =
+        std::sync::Arc::new(ConstEmbedder10738);
+
+    let indexer = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+    indexer
+        .index_file("src/lib.rs", "pub fn pruned_10738() -> u32 { 7 }\n")
+        .await
+        .unwrap();
+    let before = index_identity::current(id).unwrap();
+    drop(indexer);
+
+    write_registry(&toml, std::slice::from_ref(&entry));
+    handle_prune_at(
+        &toml,
+        true,
+        true,
+        Some(30),
+        default_cfg(),
+        false,
+        no_size,
+        now,
+    )
+    .unwrap();
+    assert!(
+        load_index_registry_at(&toml).unwrap().is_empty(),
+        "precondition: prune removed the entry"
+    );
+    assert!(
+        !root.path().join(".trusty-search").exists(),
+        "precondition: prune removed the colocated data dir"
+    );
+
+    let recreated = build_indexer_from_entry(&entry, &embedder).await.unwrap();
+    let after = index_identity::current(id).unwrap();
+    assert_ne!(
+        after, before,
+        "a pruned and re-created index must change identity"
+    );
+    drop(recreated);
+}

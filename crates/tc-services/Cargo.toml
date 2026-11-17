@@ -3,7 +3,7 @@ name = "tc-services"
 version = "0.1.4"
 edition.workspace = true
 license.workspace = true
-description = "Shared service-layer implementations for the Trusty ecosystem (CTO DB, Granola, Google Workspace)."
+description = "Shared service-layer implementations for the Trusty ecosystem (Granola, Google Workspace)."
 authors.workspace = true
 repository.workspace = true
 publish = false
@@ -17,8 +17,6 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# CTO DB service is a framework-agnostic adapter over trusty-cto-db.
-trusty-cto-db = { path = "../trusty-cto-db", version = "0.1.3" }
 # Phase 2: native Granola HTTP client + Google Workspace bridge.
 # `reqwest` is inherited from the workspace (rustls-tls, json) so the
 # Granola client links the same TLS stack as the rest of trusty-common.

@@ -143,6 +143,6 @@ Crates with `[[bin]]` targets that are deliberately **not** on this checklist be
 they are not main-crate/sidecar bundles: `trusty-agents` (`tagent`),
 `trusty-channels` (`slack-mcp`, `telegram-mcp`), `trusty-common` (`tickets-mcp`,
 `candle_metal_bench`), `trusty-console`, `trusty-embedderd-py`, `trusty-gworkspace`,
-`trusty-kb`, `trusty-review`, `trusty-sld-lint`, and the `publish = false`
+`trusty-review`, `trusty-sld-lint`, and the `publish = false`
 `trusty-code-gui`, `trusty-publish-guard`.
 Add one here the moment it gains a second bundled binary.

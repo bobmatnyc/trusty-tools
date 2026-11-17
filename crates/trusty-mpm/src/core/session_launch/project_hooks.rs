@@ -24,10 +24,21 @@
 //! call, and the predicate claims it too.
 //! Test: `project_hooks_tests.rs`.
 
+// #10459: the Architect's exec-form guard and prompt-hook groups.
+use super::architect_hooks::{
+    ArchitectHooks, architect_pm_guard_hook_value, is_standing_rules_hook_command,
+    push_prompt_hook_groups, push_standing_rules_groups,
+};
 use super::divert_hooks::{divert_hook_groups, is_divert_hook_command};
 // #7688: the prompt-feedback capture's groups and its identity predicate.
 use super::prompt_feedback_hooks::{is_prompt_feedback_hook_command, prompt_feedback_hook_groups};
 use super::settings::{PM_GUARD_SUFFIX, TRUSTY_MEMORY_HOOKS, pm_guard_hook_value};
+// #11398: the PM-only per-turn task stamp.
+use super::turn_task_hooks::{is_turn_task_hook_command, push_turn_task_group};
+// #10575: the PM-only warn-only completion-evidence `Stop` check.
+use super::completion_evidence_hooks::{
+    is_completion_evidence_hook_command, push_completion_evidence_group,
+};
 // #8454: the egress-guard group, written whatever the toggles say.
 use crate::core::standalone::hooks::egress::{
     is_egress_guard_hook_command, push_egress_guard_group,
@@ -139,16 +150,61 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
     prompt_feedback_enabled: bool,
     pm_guard_enabled: bool,
 ) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
+    // #10459: `None` is a PM or agent session, byte for byte as before.
+    project_managed_hook_additions_for_profile(
+        exe_override,
+        inject_prompt_context,
+        divert_enabled,
+        prompt_feedback_enabled,
+        pm_guard_enabled,
+        None,
+    )
+}
+
+/// [`project_managed_hook_additions_with_pm_guard`], with the Architect's
+/// hook registration when `architect` is `Some` (#10459, DOC-86 §5).
+///
+/// Why: the Architect's PM guard must run in exec form with
+/// `onFailure: "block"`, and its prompt hooks exist only behind
+/// `[architect] direct_commands`; every PM and agent session keeps today's
+/// shell-form group.
+/// What: `None` builds exactly what the function above documents. `Some`
+/// puts [`architect_pm_guard_hook_value`] where the PM guard group goes (only
+/// when `pm_guard_enabled`, so `[pm_guard] enabled = false` still removes it),
+/// and appends [`push_prompt_hook_groups`] then (#10960)
+/// [`push_standing_rules_groups`] last, so every other group keeps its bytes
+/// and position. #11398: `None` (a PM) appends the
+/// [`push_turn_task_group`] `UserPromptSubmit` group last; `Some` never does.
+/// Test: `architect_hook_settings_golden`, `pm_session_registers_no_ticket_handler`.
+pub(super) fn project_managed_hook_additions_for_profile(
+    exe_override: Option<&std::path::Path>,
+    inject_prompt_context: bool,
+    divert_enabled: bool,
+    prompt_feedback_enabled: bool,
+    pm_guard_enabled: bool,
+    architect: Option<ArchitectHooks>,
+) -> Result<serde_json::Value, crate::core::standalone::hooks::StableHookExeError> {
     // #7244: resolved first — a refusal must reach the caller before the
     // project's `.claude/` directory is created or its settings file read.
     let triad = mpm_hook_additions_with_exe(exe_override)?;
+    // #7688 fix round: resolved by the SAME rule the triad above uses, so the
+    // egress guard, the capture and (#10459) the Architect guard honour
+    // `exe_override` and carry the installed absolute path — never the bare
+    // `tm` the statusline resolver falls back to, which no-ops under Claude
+    // Code's minimal PATH (#1914). A refusal writes nothing (#7244).
+    let exe = resolve_stable_hook_exe(exe_override)?;
 
     let mut hooks: serde_json::Value =
         serde_json::from_str(TRUSTY_MEMORY_HOOKS).expect("bundled hook block is valid JSON");
     if let Some(obj) = hooks.as_object_mut() {
         // #9018: off → no guard group; the triad below still fills `PreToolUse`.
         if pm_guard_enabled {
-            obj.insert("PreToolUse".to_string(), pm_guard_hook_value());
+            let guard = match architect {
+                // #10459: exec form, `onFailure: "block"`, Architect only.
+                Some(_) => architect_pm_guard_hook_value(&exe),
+                None => pm_guard_hook_value(),
+            };
+            obj.insert("PreToolUse".to_string(), guard);
         }
         // #5034: the opt-out drops only this one event. `SessionStart` (also a
         // TRUSTY_MEMORY_HOOKS key) and every other source stay as they are.
@@ -177,14 +233,6 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
             }
         }
     }
-
-    // #7688 fix round: resolved by the SAME rule the triad above uses, so the
-    // egress guard and the capture honour `exe_override` and carry the
-    // installed absolute path — never the bare `tm` the statusline resolver
-    // falls back to, which no-ops under Claude Code's minimal PATH (#1914). A
-    // refusal propagates here for the #7244 reason it does above: write nothing
-    // rather than a command tm cannot vouch for.
-    let exe = resolve_stable_hook_exe(exe_override)?;
 
     // #8454: unconditional — no toggle, `[pm_guard] enabled` included, may
     // leave the egress guard out (Architect D3). Appended BEFORE the divert
@@ -227,6 +275,21 @@ pub(super) fn project_managed_hook_additions_with_pm_guard(
         }
     }
 
+    // #10459: APPENDED last, Architect only, and only with the guard on and
+    // `[architect] direct_commands = true`; every group above is unchanged.
+    if let (Some(architect), Some(hooks_obj)) = (architect, hooks.as_object_mut()) {
+        let on = pm_guard_enabled && architect.direct_commands;
+        push_prompt_hook_groups(hooks_obj, &exe, on);
+        // #10960: the standing-rules block, every Architect, no toggle.
+        push_standing_rules_groups(hooks_obj, &exe);
+    }
+    // #11398: the turn-task stamp, PM sessions only, appended last.
+    if let (None, Some(hooks_obj)) = (architect, hooks.as_object_mut()) {
+        push_turn_task_group(hooks_obj, &exe);
+        // #10575: appended last onto `Stop`.
+        push_completion_evidence_group(hooks_obj, &exe);
+    }
+
     Ok(serde_json::json!({ "hooks": hooks }))
 }
 
@@ -253,7 +316,7 @@ pub(super) fn project_managed_hook_events() -> Vec<String> {
     // installed-looking path makes the resolution unconditionally succeed
     // without a filesystem or PATH lookup; the path itself never reaches a
     // file, because only the keys are read.
-    project_managed_hook_additions_with_prompt_feedback(
+    project_managed_hook_additions_for_profile(
         Some(EVENT_KEY_PROBE_EXE.as_ref()),
         true,
         true,
@@ -261,6 +324,12 @@ pub(super) fn project_managed_hook_events() -> Vec<String> {
         // every toggle on — otherwise a stale `Stop` capture group would
         // survive the flag being turned back off.
         true,
+        true,
+        // #10459: and the Architect's prompt hooks, so `direct_commands =
+        // false` removes a `UserPromptExpansion` group a prior launch wrote.
+        Some(ArchitectHooks {
+            direct_commands: true,
+        }),
     )
     .ok()
     .and_then(|additions| {
@@ -312,6 +381,13 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
         || is_prompt_feedback_hook_command(cmd)
         // #8454: a stale exe path is replaced, never duplicated.
         || is_egress_guard_hook_command(cmd)
+        // #10960: a stale standing-rules group is replaced, and stripped when
+        // the project stops being an Architect.
+        || is_standing_rules_hook_command(cmd)
+        // #11398: replaced on relaunch, stripped on a flip to the Architect.
+        || is_turn_task_hook_command(cmd)
+        // #10575: replaced on relaunch, stripped on a flip to the Architect.
+        || is_completion_evidence_hook_command(cmd)
 }
 
 /// Recognise a hook command only the PROJECT tier ever writes.
@@ -327,12 +403,11 @@ pub(super) fn is_project_managed_hook_command(cmd: &str) -> bool {
 /// What: `true` for a PM-guard command (ends with [`PM_GUARD_SUFFIX`]) or a
 /// `trusty-memory ` command. Deliberately narrower than
 /// [`is_project_managed_hook_command`], which is a STRIP domain rather than a
-/// tier marker.
+/// tier marker. #10565: defined in `standalone::hooks::cleanup`, whose
+/// contamination classifier needs the same marker.
 /// Test: `the_tier_marker_ignores_a_user_tier_lifecycle_command`,
 /// `the_tier_marker_recognises_the_pm_guard`.
-pub(super) fn is_project_tier_marker_command(cmd: &str) -> bool {
-    cmd.ends_with(PM_GUARD_SUFFIX) || cmd.starts_with("trusty-memory ")
-}
+pub(super) use crate::core::standalone::hooks::cleanup::is_project_tier_marker_command;
 
 #[cfg(test)]
 #[path = "project_hooks_tests.rs"]

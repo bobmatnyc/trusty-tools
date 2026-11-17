@@ -192,7 +192,8 @@ async fn finish_rename(
 /// success, parses the response body's `name` field and returns
 /// [`rename_success_message`] built from it — falling back to the requested
 /// name only when the body carries none (an older daemon). Returns the
-/// message rather than printing so tests can assert it.
+/// message rather than printing so tests can assert it. #10754: the PATCH is
+/// [`rename_request_quiet`]; this wrapper only adds the stderr line.
 /// Test: `do_rename_request_reports_server_confirmed_suffixed_name`,
 /// `do_rename_request_reports_plain_success`,
 /// `do_rename_request_surfaces_daemon_500_body`,
@@ -212,6 +213,33 @@ pub(super) async fn do_rename_request(
     id: &str,
     new_name: String,
 ) -> anyhow::Result<String> {
+    rename_request_quiet(daemon, target, id, new_name)
+        .await
+        .inspect_err(|e| {
+            if let Some(RenameRejected(msg)) = e.downcast_ref() {
+                eprintln!("error: {msg}");
+            }
+        })
+}
+
+/// A 400/409 rename refusal; its text is the daemon's message.
+#[derive(Debug, thiserror::Error)]
+#[error("rename rejected: {0}")]
+pub(super) struct RenameRejected(String);
+
+/// [`do_rename_request`] with no stderr line: a refusal is only the error.
+///
+/// Why: #10754 — `tm tui` shows the result as a notice, and a write to
+/// stderr would land on its screen.
+/// What: the PATCH and outcome mapping [`do_rename_request`] documents; a
+/// 400/409 returns [`RenameRejected`] and prints nothing.
+/// Test: `tui_rename_hook_returns_the_refusal_and_writes_no_stderr`.
+pub(super) async fn rename_request_quiet(
+    daemon: &trusty_mpm::client::DaemonClient,
+    target: &str,
+    id: &str,
+    new_name: String,
+) -> anyhow::Result<String> {
     let resp = daemon
         .patch(format!("/api/v1/sessions/managed/{id}"))
         .json(&serde_json::json!({ "name": new_name }))
@@ -223,11 +251,10 @@ pub(super) async fn do_rename_request(
         }
         reqwest::StatusCode::CONFLICT | reqwest::StatusCode::BAD_REQUEST => {
             // Invalid name (400) — or a collision (409) from a pre-#3692
-            // daemon that still rejects instead of auto-suffixing: surface the
-            // daemon's actionable message on stderr and fail (non-zero exit).
+            // daemon that still rejects instead of auto-suffixing: fail with
+            // the daemon's actionable message (#10754: the caller prints it).
             let msg = resp.text().await.unwrap_or_default();
-            eprintln!("error: {msg}");
-            Err(anyhow::anyhow!("rename rejected: {msg}"))
+            Err(RenameRejected(msg).into())
         }
         status if !status.is_success() => {
             // Every OTHER non-success status (500 above all). `error_for_status()`

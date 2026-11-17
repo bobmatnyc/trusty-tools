@@ -70,20 +70,14 @@ fn deny_of(payload: &str) -> Vec<String> {
         .collect()
 }
 
-/// #10127 D24 = B: the deny list is the plan's full list as written
-/// (`s5-p3-plan.md` §1a), the gworkspace braces expanded to four globs.
+/// #10127 D24 = B: the plan's gworkspace braces expanded to four globs.
+/// #10735 (owner ruling D6d): the Slack, Gmail, Notion and Google Chat
+/// globs are gone, so the claude.ai connectors load.
 #[test]
-fn the_production_deny_list_is_the_plans_full_list() {
+fn the_production_deny_list_is_the_gworkspace_messaging_globs() {
     assert_eq!(
         ARCHITECT_DENY_GLOBS,
         [
-            "mcp__*slack*",
-            "mcp__*gmail*",
-            "mcp__*googlemail*",
-            "mcp__*notion*",
-            "mcp__*googlechat*",
-            "mcp__*google-chat*",
-            "mcp__*gchat*",
             "mcp__*gworkspace*__*mail*",
             "mcp__*gworkspace*__*chat*",
             "mcp__*gworkspace*__*message*",
@@ -152,7 +146,7 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 
 /// #10127 C2: `ask_owner` is the Architect's only outbound path, so no rule
 /// (glob or capitalised variant) matches it or any other trusty-mpm tool; the
-/// families' own tools are matched.
+/// gworkspace messaging tools are matched. #10735: no connector-family tool is.
 #[test]
 fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
     let rules = Lockdown::PRODUCTION.deny_rules().expect("rules");
@@ -170,21 +164,20 @@ fn the_family_deny_never_matches_ask_owner_or_the_trusty_mpm_tools() {
         }
     }
     for denied in [
-        "mcp__slack-mcp__send_message",
-        "mcp__claude_ai_Slack__slack_send_message",
-        "mcp__gmail__send",
-        "mcp__claude_ai_Notion__search",
-        "mcp__google-chat__post",
         "mcp__gworkspace-mcp__send_gmail_message",
         "mcp__gworkspace-mcp__create_draft",
     ] {
         assert!(rules.iter().any(|r| glob_matches(r, denied)), "{denied}");
     }
-    assert!(
-        !rules
-            .iter()
-            .any(|r| glob_matches(r, "mcp__gworkspace-mcp__list_files"))
-    );
+    for allowed in [
+        "mcp__gworkspace-mcp__list_files",
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Notion__search",
+        "mcp__claude_ai_Gmail__create_draft",
+        "mcp__claude_ai_Google_Chat__send_message",
+    ] {
+        assert!(!rules.iter().any(|r| glob_matches(r, allowed)), "{allowed}");
+    }
 }
 
 /// #10127 Q5: each word after the `mcp__` prefix gains a capital, so a

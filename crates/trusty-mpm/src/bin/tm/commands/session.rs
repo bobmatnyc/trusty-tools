@@ -346,6 +346,8 @@ pub(crate) async fn session(
                 }
                 _ => {
                     let body: serde_json::Value = resp.error_for_status()?.json().await?;
+                    // #10101: a command that reached no pane fails the verb.
+                    trusty_mpm::client::http_client::command_delivery(&body)?;
                     let output = body.get("output").and_then(|v| v.as_str()).unwrap_or("");
                     print!("{output}");
                     print_compression_stats(&body);
@@ -491,8 +493,26 @@ pub(crate) async fn session(
         // #2012: hard-delete the record; goes through direct HTTP like the
         // other fleet-teardown verbs above (not chat-core — `delete` is a
         // distinct terminal store operation, not a `decommission` alias).
-        SessionAction::Delete { id, force } => {
+        // #10992: `--project-dir` removes the directory first, behind guards.
+        SessionAction::Delete {
+            id,
+            project_dir: true,
+            dry_run,
+            yes,
+            ..
+        } => crate::commands::session_delete_dir::run(daemon, id, dry_run, yes).await?,
+        SessionAction::Delete { id, force, .. } => {
             crate::commands::delete::session_delete(daemon, id, force).await?
+        }
+        // #10991: direct HTTP like `delete`; the daemon owns every guard.
+        SessionAction::Archive {
+            id,
+            dry_run,
+            force,
+            json,
+        } => {
+            crate::commands::session_archive::session_archive(daemon, &id, dry_run, force, json)
+                .await?
         }
         // Rename a managed session. Direct HTTP (PATCH), like `delete` — a
         // distinct store+tmux mutation, not a chat-core intent.

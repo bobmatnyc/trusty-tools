@@ -111,6 +111,56 @@ pub const METHOD_INDEX_REINDEX: &str = "search.index.reindex";
 /// which holds that crate's one copy of the `delete_data` opt-in (#4743).
 pub const METHOD_INDEX_DELETE: &str = "search.index.delete";
 
+/// One path's revision evidence (#10738, SPEC-OKF-01 §5.6 D1).
+///
+/// Params use the index-scoped write envelope, `{index_id, body: {path}}`. The
+/// reply decodes as [`IndexFileStatus`]. An unknown index answers
+/// [`CODE_NOT_FOUND`]; an unknown path answers `present: false`.
+pub const METHOD_INDEX_FILE_STATUS: &str = "search.index.file.status";
+
+/// An index's identity, as `search.index.status`, the `search.index.file.put`
+/// reply and [`METHOD_INDEX_FILE_STATUS`] report it (#10738).
+///
+/// `instance_id` changes when the index ID is deleted and re-created;
+/// `generation` rises when the stored contents may have lost chunks without a
+/// per-path remove (a reset, a force reindex, a migration fault, a corpus that
+/// failed to open). Two equal values mean the same stored contents lineage.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IndexIdentity {
+    /// Opaque, at least 128 random bits.
+    pub instance_id: String,
+    /// Starts at 1 for each `instance_id`.
+    pub generation: u64,
+}
+
+/// The reply of [`METHOD_INDEX_FILE_STATUS`] (#10738).
+///
+/// `identity` is `None` when the daemon could not read its identity; a caller
+/// must then treat the index as unreadable, never as matching.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct IndexFileStatus {
+    /// The path as the caller sent it.
+    pub path: String,
+    /// True when the index holds chunks for the path.
+    pub present: bool,
+    /// Lowercase hex SHA-256 of the content the chunks came from; `None`
+    /// when absent or unknown.
+    pub content_sha256: Option<String>,
+    /// How many chunks the index holds for the path.
+    pub chunk_count: u64,
+    /// The index identity at read time.
+    pub identity: Option<IndexIdentity>,
+}
+
+/// Find or create the one index of a trusty-mpm project (#10531).
+///
+/// Params are `{project_key, name, root, profile?}`, a bare object like
+/// [`METHOD_INDEX_CREATE`]. Idempotent: a repeat call for the same root
+/// returns the same `index_id` and queues no reindex. A root that contains,
+/// or sits inside, another index's root answers [`CODE_CONFLICT`] with
+/// `data.overlapping_index_id`.
+pub const METHOD_PROJECT_ENSURE: &str = "search.project.ensure";
+
 /// The daemon's code for "the thing you asked about does not exist" (HTTP 404).
 ///
 /// A second copy of `trusty_search::service::rpc::error::CODE_NOT_FOUND`, and
@@ -325,4 +375,53 @@ pub fn call_blocking(
     })
     .join()
     .map_err(|_| anyhow!("the trusty-search {method} worker thread panicked"))?
+}
+
+/// The params of [`METHOD_PROJECT_ENSURE`] for one project (#10531).
+///
+/// Why: tm's register path and session launch both call it; one builder keeps
+/// the two from spelling the wire shape twice.
+/// What: `profile` is omitted from the object when `None`.
+/// Test: `ensure_project_params_omit_an_absent_profile`.
+#[must_use]
+pub fn ensure_project_params(
+    project_key: &str,
+    name: &str,
+    root: &Path,
+    profile: Option<&str>,
+) -> Value {
+    let mut params = serde_json::json!({
+        "project_key": project_key,
+        "name": name,
+        "root": root.to_string_lossy(),
+    });
+    if let Some(profile) = profile {
+        params["profile"] = Value::String(profile.to_string());
+    }
+    params
+}
+
+/// [`call_blocking`] of [`METHOD_PROJECT_ENSURE`], answering the daemon's body.
+///
+/// Why: session launch is synchronous and often inside a runtime, like the
+/// other find-or-create callers here.
+/// Test: `ensure_project_blocking_sends_the_wire_shape`.
+///
+/// # Errors
+///
+/// Everything [`call_blocking`] reports; a refusal is a [`SearchRpcError`].
+pub fn ensure_project_blocking(
+    socket: &Path,
+    project_key: &str,
+    name: &str,
+    root: &Path,
+    profile: Option<&str>,
+    timeout: Duration,
+) -> Result<Value> {
+    call_blocking(
+        socket,
+        METHOD_PROJECT_ENSURE,
+        ensure_project_params(project_key, name, root, profile),
+        timeout,
+    )
 }

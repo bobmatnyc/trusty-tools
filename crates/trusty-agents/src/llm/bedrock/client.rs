@@ -17,6 +17,7 @@ use aws_sdk_bedrockruntime::types::{
 };
 use serde_json::Value;
 use std::sync::Arc;
+use trusty_common::claude_temperature::accepts_temperature;
 
 use super::convert::{
     BedrockToolUse, build_tool_config, extract_text_from_output, extract_tool_uses,
@@ -24,6 +25,31 @@ use super::convert::{
 };
 use crate::perf::TokenUsage;
 use crate::tools::{ToolRegistry, ToolResult};
+
+/// The `InferenceConfiguration` every Converse request in this module sends.
+///
+/// Why: Opus 5.5 and Sonnet 5.5 reject a Converse request that carries
+/// `temperature` with a `ValidationException` (#10939).
+/// What: sets `max_tokens` and each stop sequence; sets `temperature` only
+/// when trusty-common's [`accepts_temperature`] allows it for `model_id`, so
+/// the model list lives in one place.
+/// Test: `converse_requests_omit_temperature_only_for_claude_5_5`.
+fn inference_config(
+    model_id: &str,
+    temperature: f32,
+    max_tokens: u32,
+    stop_sequences: &[String],
+) -> InferenceConfiguration {
+    // #10939: omit `temperature` for a model that rejects it.
+    let temperature = accepts_temperature(model_id).then_some(temperature);
+    let mut builder = InferenceConfiguration::builder()
+        .set_temperature(temperature)
+        .max_tokens(max_tokens as i32);
+    for seq in stop_sequences {
+        builder = builder.stop_sequences(seq.clone());
+    }
+    builder.build()
+}
 
 /// Single-turn chat via Bedrock Converse with optional tool definitions, returning
 /// any `ToolUse` blocks WITHOUT executing them.
@@ -52,10 +78,7 @@ pub async fn chat_oneshot(
         .content(ContentBlock::Text(user_message.to_string()))
         .build()
         .context("failed to build Bedrock user message")?;
-    let inference = InferenceConfiguration::builder()
-        .temperature(temperature)
-        .max_tokens(max_tokens as i32)
-        .build();
+    let inference = inference_config(model_id, temperature, max_tokens, &[]);
     let tool_config = build_tool_config(&tools)?;
 
     let mut req = client
@@ -100,10 +123,7 @@ pub async fn chat(
         .content(ContentBlock::Text(user_message.to_string()))
         .build()
         .context("failed to build Bedrock user message")?;
-    let inference = InferenceConfiguration::builder()
-        .temperature(temperature)
-        .max_tokens(max_tokens as i32)
-        .build();
+    let inference = inference_config(model_id, temperature, max_tokens, &[]);
 
     let resp = client
         .converse()
@@ -151,13 +171,7 @@ pub async fn chat_with_tools(
     // #297: Forward agent-configured stop sequences via Bedrock's
     // InferenceConfiguration.stop_sequences. The Bedrock Converse API supports
     // up to 4 stop sequences depending on the model.
-    let mut inference_builder = InferenceConfiguration::builder()
-        .temperature(temperature)
-        .max_tokens(max_tokens as i32);
-    for seq in stop_sequences {
-        inference_builder = inference_builder.stop_sequences(seq.clone());
-    }
-    let inference = inference_builder.build();
+    let inference = inference_config(model_id, temperature, max_tokens, stop_sequences);
     let tool_config = build_tool_config(&tools)?;
 
     let mut total_usage = TokenUsage::default();
@@ -252,6 +266,109 @@ pub async fn chat_with_tools(
 mod tests {
     use super::*;
     use crate::llm::bedrock::build_client;
+    use aws_sdk_bedrockruntime::config::interceptors::BeforeSerializationInterceptorContextRef;
+    use aws_sdk_bedrockruntime::config::{
+        BehaviorVersion, ConfigBag, Credentials, Intercept, Region,
+    };
+    use aws_sdk_bedrockruntime::operation::converse::ConverseInput;
+    use std::sync::Mutex;
+    use trusty_common::inference::ChatMessage;
+
+    /// Records each Converse request's `InferenceConfiguration`, then fails the
+    /// request before it is signed or sent, so the test never reaches AWS.
+    #[derive(Debug, Clone, Default)]
+    struct CaptureInference(Arc<Mutex<Vec<InferenceConfiguration>>>);
+
+    impl Intercept for CaptureInference {
+        fn name(&self) -> &'static str {
+            "CaptureInference"
+        }
+
+        fn read_before_execution(
+            &self,
+            context: &BeforeSerializationInterceptorContextRef<'_>,
+            _cfg: &mut ConfigBag,
+        ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+            let input = context
+                .input()
+                .downcast_ref::<ConverseInput>()
+                .ok_or("not a Converse request")?;
+            let inference = input
+                .inference_config()
+                .cloned()
+                .ok_or("request has no inference config")?;
+            self.0.lock().expect("capture lock").push(inference);
+            Err("captured; request stopped before send".into())
+        }
+    }
+
+    /// A Bedrock client with static placeholder credentials and `capture`.
+    fn capturing_client(capture: &CaptureInference) -> BedrockClient {
+        let conf = aws_sdk_bedrockruntime::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+            .interceptor(capture.clone())
+            .build();
+        BedrockClient::from_conf(conf)
+    }
+
+    /// Why: Opus 5.5 and Sonnet 5.5 reject a Converse request that carries
+    /// `temperature` (#10939); every other model keeps its configured value.
+    /// What: sends one request through each of `chat_oneshot`, `chat` and
+    /// `chat_with_tools` for both 5.5 ids and `us.anthropic.claude-sonnet-4-6`,
+    /// captures the `InferenceConfiguration` before send, and asserts
+    /// `temperature` is `None` for 5.5 and `0.3` otherwise, with `max_tokens`
+    /// and the tool loop's stop sequences still set.
+    /// Test: itself.
+    #[tokio::test]
+    async fn converse_requests_omit_temperature_only_for_claude_5_5() {
+        let stop = vec!["STOP".to_string()];
+        for (model, expected) in [
+            ("us.anthropic.claude-opus-5-5", None),
+            ("us.anthropic.claude-sonnet-5-5", None),
+            ("us.anthropic.claude-sonnet-4-6", Some(0.3)),
+        ] {
+            let capture = CaptureInference::default();
+            let client = capturing_client(&capture);
+            let oneshot = chat_oneshot(&client, model, "sys", "hi", 0.3, 64, Vec::new()).await;
+            assert!(oneshot.is_err(), "{model}: capture must stop chat_oneshot");
+            let single = chat(&client, model, "sys", "hi", 0.3, 64).await;
+            assert!(single.is_err(), "{model}: capture must stop chat");
+            let looped = chat_with_tools(
+                &client,
+                model,
+                vec![ChatMessage::system("sys"), ChatMessage::user("hi")],
+                0.3,
+                64,
+                Vec::new(),
+                Arc::new(ToolRegistry::new()),
+                None,
+                1,
+                &stop,
+            )
+            .await;
+            assert!(
+                looped.is_err(),
+                "{model}: capture must stop chat_with_tools"
+            );
+
+            let sent = capture.0.lock().expect("capture lock").clone();
+            assert_eq!(sent.len(), 3, "{model}: one request per entry point");
+            for (path, inference) in ["chat_oneshot", "chat", "chat_with_tools"]
+                .iter()
+                .zip(&sent)
+            {
+                assert_eq!(inference.temperature(), expected, "{model} via {path}");
+                assert_eq!(inference.max_tokens(), Some(64), "{model} via {path}");
+            }
+            assert_eq!(
+                sent[2].stop_sequences(),
+                &stop[..],
+                "{model} stop sequences"
+            );
+        }
+    }
 
     /// Smoke test against a real AWS Bedrock endpoint. Gated with #[ignore]
     /// because it requires credentials. Run manually with:
@@ -265,9 +382,11 @@ mod tests {
             .expect("build_client failed");
         // Use the cross-region inference profile id ("us." prefix) — the
         // raw foundation model id rejects on-demand throughput in us-east-1.
+        // #10939: Opus 5.5 rejects `temperature`, so this request proves the
+        // field is omitted.
         let (text, usage) = chat(
             &client,
-            "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+            "us.anthropic.claude-opus-5-5",
             "You are a concise assistant. Reply in plain text.",
             "Say hello in exactly 3 words.",
             0.0,

@@ -241,3 +241,36 @@ fn every_single_url_type_masks_a_quoted_or_spaced_password() {
         }
     }
 }
+
+/// Why: `tm project init` prints the kept record's URL; no userinfo form,
+/// the `***` marker included, may reach the operator's screen (#10586).
+/// Test: this test.
+#[test]
+fn url_without_userinfo_drops_every_userinfo_form() {
+    for (url, want) in [
+        (
+            format!("https://octo:{TOKEN}@github.com/acme/widget"),
+            "https://github.com/acme/widget",
+        ),
+        (
+            format!("https://{TOKEN}@github.com/acme/widget"),
+            "https://github.com/acme/widget",
+        ),
+        (
+            format!("https://u:pa'ss{TOKEN}@github.com/acme/widget"),
+            "https://github.com/acme/widget",
+        ),
+        (
+            format!("u:{TOKEN}@github.com:acme/widget.git"),
+            "github.com:acme/widget.git",
+        ),
+        (
+            "https://github.com/acme/widget".to_string(),
+            "https://github.com/acme/widget",
+        ),
+    ] {
+        let out = url_without_userinfo(&url);
+        assert_eq!(out, want);
+        assert!(!out.contains('@') && !out.contains(TOKEN));
+    }
+}

@@ -156,7 +156,7 @@ pub(crate) struct NewSessionRequest {
     /// The project's display name.
     pub(crate) label: String,
     /// #8587: the slugged session name from the Ctrl-N name step; `None`
-    /// takes the daemon's default `tm-<project>-NN`.
+    /// takes the daemon's default `tm-<project>[-NN]`.
     pub(crate) name_hint: Option<String>,
 }
 

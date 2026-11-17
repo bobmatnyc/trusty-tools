@@ -47,11 +47,16 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
 - 🔴 **A live check needing an isolated daemon starts it with
   `scripts/sandbox_daemon.sh` (tm), `scripts/sandbox_search_daemon.sh`
-  (trusty-search), `scripts/sandbox_code_daemon.sh` (tcode, #6637) or
-  `scripts/sandbox_secrets_console.sh` (trusty-secrets + console, #9793)
+  (trusty-search), `scripts/sandbox_code_daemon.sh` (tcode, #6637),
+  `scripts/sandbox_secrets_console.sh` (trusty-secrets + console, #9793) or
+  `scripts/sandbox_agents_daemon.sh` (tagent, #10940)
   only (#9121)** — a hand-built daemon inherits bot tokens,
   loads the `.env.local` at or above its cwd (#9161), and reaches the
   per-user Keychain.
+- 🔴 **k8s, container work and builds run on EVO whenever possible** via
+  `Skill(skill="instance-evo")` (owner ruling 2026-11-14). Never start
+  Rancher Desktop, Docker or a local k8s on this Mac. Mac-only work stays on
+  the Mac: macOS-gated tests, the Apple release build, signing.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:

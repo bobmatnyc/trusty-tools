@@ -102,10 +102,19 @@ impl LlmCredentials {
 /// `runner == Some(RunnerKind::ClaudeCode)` AND the `claude-code` credential
 /// resolves. Otherwise prefers `AnthropicDirect` then `OpenRouter`. Returns
 /// `None` when nothing applicable is configured.
+/// Under a provider lock ([`crate::llm::provider_lock`], #10978) it returns
+/// `None`: every credential it can pick routes off Bedrock.
 /// Test: See module-level tests, including
 /// `pick_skips_claude_code_when_runner_not_claude_code`,
-/// `pick_consults_store_when_env_absent`.
+/// `pick_consults_store_when_env_absent`,
+/// `pick_returns_none_under_the_provider_lock`.
 pub fn pick_credentials(runner: Option<crate::agents::RunnerKind>) -> Option<LlmCredentials> {
+    // #10978: none of ClaudeCode / AnthropicDirect / OpenRouter is Bedrock,
+    // and an unreadable lock counts as locked.
+    if crate::llm::provider_lock::is_locked(&crate::llm::provider_lock::active()) {
+        tracing::debug!("pick_credentials: provider lock in effect, no ambient credential");
+        return None;
+    }
     let openrouter = resolve_key_set("openrouter");
     let anthropic = resolve_key_set("anthropic");
     let claude_code = resolve_key_set("claude-code");
@@ -327,6 +336,45 @@ mod tests {
         );
         unsafe {
             std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+    }
+
+    /// Why: #10978 — under the provider lock no ambient credential may be
+    /// picked, since each one routes off Bedrock; an unreadable lock counts as
+    /// locked. Unlocked, the same environment still picks as before.
+    /// Test: itself.
+    #[test]
+    #[serial]
+    fn pick_returns_none_under_the_provider_lock() {
+        use crate::llm::provider_lock::{ProviderLock, ProviderLockError};
+        let _g = crate::test_env::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _cleared = clear_all();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-api03-test");
+            std::env::set_var("OPENROUTER_API_KEY", "sk-or-test"); // pragma: allowlist secret
+            std::env::set_var("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test"); // pragma: allowlist secret
+        }
+        let claude = Some(crate::agents::RunnerKind::ClaudeCode);
+        let unreadable = Err(ProviderLockError::Unsupported {
+            source_name: "test",
+            value: "bedrok".into(),
+        });
+        for lock in [Ok(Some(ProviderLock::Bedrock)), unreadable] {
+            let _locked = crate::llm::provider_lock::override_on_this_thread(lock.clone());
+            assert_eq!(pick_credentials(None), None, "{lock:?}");
+            assert_eq!(pick_credentials(claude), None, "{lock:?}");
+        }
+        let _unlocked = crate::llm::provider_lock::override_on_this_thread(Ok(None));
+        assert_eq!(
+            pick_credentials(None),
+            Some(LlmCredentials::AnthropicDirect)
+        );
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
         }
     }
 

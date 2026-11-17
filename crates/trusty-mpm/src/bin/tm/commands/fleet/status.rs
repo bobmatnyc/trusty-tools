@@ -10,9 +10,14 @@
 //! [`this_session_check`] adds whether the calling session is bound as the
 //! Architect, naming the failed identity check as the hook does (#8878 PR-I).
 //! [`skills_check`] adds whether the Architect's shipped skills are current
-//! in its project tier (#9540); like `binding` it is never part of `complete`.
+//! in its project tier (#9540); it is never part of `complete`. #10448: an
+//! unbound `binding` makes the setup incomplete. #10885: the
+//! `notification_hook` row is informational too.
 //! It also warns on the pre-#9997 records directory and moves nothing.
-//! Test: `status_reports_incomplete_setup`,
+//! #9092: it warns, naming the PID, when the session's live `claude` has no
+//! launch record.
+//! Test: `status_warns_when_the_live_claude_has_no_launch_record_9092`,
+//! `status_reports_incomplete_setup`,
 //! `status_warns_about_a_stale_records_dir_and_moves_nothing`,
 //! `fleet_status_names_why_this_session_is_not_bound`,
 //! `the_skills_row_names_a_missing_or_custom_skill`,
@@ -54,17 +59,26 @@ pub(crate) struct StatusReport {
     pub(crate) session: String,
     /// `allowlist`, `profile`, `session`, `launch_stamp`, in that order.
     pub(crate) checks: Vec<Check>,
-    /// Whether every check passed.
+    /// Whether every check passed and `binding` is ok (#10448).
     pub(crate) complete: bool,
     /// Whether the session's `claude` is the Architect tm launched, under
-    /// this session name (#8878 R1); informational, never part of `complete`.
+    /// this session name (#8878 R1); #10448: part of `complete`.
     pub(crate) binding: Check,
     /// Whether the Architect's shipped skills are current in its project
     /// tier (#9540); informational, never part of `complete`.
     pub(crate) skills: Check,
+    /// Which prototype commit and content the seeded bundle came from
+    /// (#10571); informational, never part of `complete`.
+    pub(crate) bundle: Check,
+    /// Whether the Architect's `Notification` hook is on and applied
+    /// (#10885); informational, never part of `complete`.
+    pub(crate) notification_hook: Check,
     /// Whether the calling session is bound as the Architect; informational,
     /// never part of `complete`. `None` when not evaluated.
     pub(crate) this_session: Option<Check>,
+    /// #9092: the warning that the session's live `claude` has no launch
+    /// record, naming its PID; `None` when it has one or none was found.
+    pub(crate) unrecorded: Option<String>,
 }
 
 impl StatusReport {
@@ -81,12 +95,27 @@ impl StatusReport {
             "  {mark}  {:<12} {}\n",
             self.skills.name, self.skills.detail
         ));
+        // #10885: the notification hook row is informational like `bundle`.
+        for c in [&self.bundle, &self.notification_hook] {
+            let mark = if c.ok { "ok     " } else { "WARN   " };
+            out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
+        }
         for c in std::iter::once(&self.binding).chain(&self.this_session) {
             let mark = if c.ok { "ok     " } else { "UNBOUND" };
             out.push_str(&format!("  {mark}  {:<12} {}\n", c.name, c.detail));
         }
+        if let Some(warning) = &self.unrecorded {
+            out.push_str(&format!("WARNING: {warning}\n"));
+        }
         if self.complete {
             out.push_str("complete\n");
+        } else if self.checks.iter().all(|c| c.ok) {
+            // #10448: set up but unbound; `init` refuses a running session.
+            out.push_str(&format!(
+                "incomplete: the Architect is not bound; run `tm fleet relaunch --dir {}` to \
+                 rebind it\n",
+                self.dir.display()
+            ));
         } else {
             // #8995: a bare `tm fleet init` could set up a second Architect.
             out.push_str(&format!(
@@ -108,10 +137,12 @@ impl StatusReport {
 /// the stamp `supervisor`. The session is `session`, else the name recorded
 /// in `home`'s config ([`session_name::recorded_names`]); a recorded name
 /// that cannot be read fails `session` and `launch_stamp` and is never
-/// replaced by `tm-architect`. `binding` comes from [`binding_check`].
+/// replaced by `tm-architect`. `binding` comes from [`binding_check`];
+/// `complete` needs all four checks and `binding` (#10448).
 /// `probe` reads tmux (see [`Probe`]).
 /// Test: `status_reports_incomplete_setup`,
 /// `fleet_init_launches_the_architect_and_status_is_complete`,
+/// `status_is_complete_only_when_the_architect_is_bound`,
 /// `status_without_the_flag_reads_the_recorded_name`,
 /// `a_malformed_recorded_name_refuses_init_and_fails_status`.
 pub(crate) fn status(
@@ -129,10 +160,19 @@ pub(crate) fn status(
         session_check(&dir, probe, &names),
         stamp_check(probe, &names),
     ];
-    let complete = checks.iter().all(|c| c.ok);
+    let binding = binding_check(&dir, home, probe, &names);
+    // #10448: an unbound Architect is denied every anchor write; not complete.
+    let complete = checks.iter().all(|c| c.ok) && binding.ok;
+    let unrecorded = names
+        .as_ref()
+        .ok()
+        .and_then(|n| unrecorded_claude(&dir, home, probe, n.architect()));
     StatusReport {
-        binding: binding_check(&dir, home, probe, &names),
+        unrecorded,
+        binding,
         skills: skills_check(&dir),
+        bundle: bundle_check(&dir),
+        notification_hook: super::notify_hook::status_check(&dir, home, None),
         session: names
             .as_ref()
             .map(|n| n.architect().to_owned())
@@ -173,6 +213,35 @@ pub(crate) fn binding_check(
         ok,
         detail,
     }
+}
+
+/// The warning that the live `claude` in `session` has no launch record.
+///
+/// Why: #9092 — a `claude` started outside `tm fleet init|relaunch` (a
+/// hand-typed `claude --resume`) runs unbound for hours with every exemption
+/// silently denied; the operator needs the PID named, not only `UNBOUND`.
+/// What: `Some` only when the pane is live, `probe` finds its `claude`, and
+/// `home`'s `architect-launch/` holds no record for that PID (a record that
+/// does not read is reported by `binding` instead). Names the PID, the record
+/// path and `tm fleet relaunch`.
+/// Test: `status_warns_when_the_live_claude_has_no_launch_record_9092`.
+fn unrecorded_claude(dir: &Path, home: &Path, probe: Probe, session: &str) -> Option<String> {
+    if !matches!((probe.pane)(session), PaneState::Live(_)) {
+        return None;
+    }
+    let pid = (probe.claude)(session)?;
+    let root = home.join(".trusty-mpm");
+    let records = trusty_mpm::core::architect_launch::ARCHITECT_RECORDS;
+    if !matches!(records.read(&root, pid), Ok(None)) {
+        return None;
+    }
+    Some(format!(
+        "the live `claude` pid {pid} in tmux session {session} has no Architect launch record \
+         ({}); it runs UNBOUND and every Architect exemption is denied. Run `tm fleet relaunch \
+         --dir {}` from an operator terminal",
+        records.path(&root, pid).display(),
+        dir.display()
+    ))
 }
 
 /// `Ok` when the `claude` in `session` is the bound Architect of `dir`, else
@@ -267,6 +336,30 @@ pub(crate) fn skills_check(dir: &Path) -> Check {
         name: "skills",
         ok,
         detail,
+    }
+}
+
+/// The seeded bundle's provenance, from `docs/architect/bundle-provenance.json`.
+///
+/// Why: #10571, an install must say which prototype commit and content it runs.
+/// What: ok with the provenance line when the seeded stamp parses; a warning
+/// naming `tm fleet init` when it is absent or unreadable. Reads only.
+/// Test: `init_and_status_report_the_bundle_provenance`.
+pub(crate) fn bundle_check(dir: &Path) -> Check {
+    let path = dir.join(super::seed::refresh::PROVENANCE_DEST);
+    let line = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| super::seed::refresh::provenance_line(&t));
+    Check {
+        name: "bundle",
+        ok: line.is_some(),
+        detail: line.unwrap_or_else(|| {
+            format!(
+                "no readable {}: run `tm fleet init --dir {}` to seed it",
+                super::seed::refresh::PROVENANCE_DEST,
+                dir.display()
+            )
+        }),
     }
 }
 

@@ -3,13 +3,10 @@
 //! Why: extracted from `search.rs` to keep both files under the 500-line cap
 //! (issue #993 added ~82 lines to `search.rs`; the global handler is an
 //! independent concern with no shared state with the per-index path).
-//! What: `GlobalSearchRequest` and `global_search_handler`. Per-index search
+//! What: `GlobalSearchRequest` and `global_search_report`. Per-index search
 //! lives in `search.rs`; routing helpers live in `routing.rs`.
 //! Test: `test_global_search_fans_out_and_merges` in `server.rs#tests`.
 use axum::http::StatusCode;
-// #9214 (D1): imports only the test-only HTTP handlers use.
-#[cfg(test)]
-use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -112,9 +109,16 @@ fn default_global_top_k() -> usize {
     10
 }
 
-/// `POST /search` — fan-out hybrid search across every registered index.
+/// The body `POST /search` serves, without the transport (#6285 slice 3):
+/// fan-out hybrid search across every registered index.
 ///
-/// Why: see [`GlobalSearchRequest`] doc. This is distinct from
+/// Why: `search.query.all` answers the same question over the socket. The
+/// fan-out's incompleteness counters — `cold_indexes_skipped`,
+/// `corpus_failed_indexes_skipped`, `corpus_read_failed_indexes_skipped` — are
+/// the fields a caller reads to know the sweep was partial, so a second
+/// implementation that omitted one would report a complete answer over a
+/// missing corpus. `partial` (#9027) folds them, plus a degraded query embed,
+/// into one flag. See [`GlobalSearchRequest`] doc. Distinct from
 /// `POST /indexes/:id/search`, which targets a single index.
 /// What: runs per-index search with *bounded* concurrency (issue #2845 — at
 /// most `fanout_concurrency` in flight, or strictly serial when `serial` is
@@ -122,7 +126,9 @@ fn default_global_top_k() -> usize {
 /// `index_id`, then re-runs RRF (k=60) over the per-index ranked lists
 /// (each index treated as an equally-weighted lane) and returns the top-k
 /// merged results. Indexes that error during search are skipped (logged) so
-/// one bad index doesn't take down the whole fan-out.
+/// one bad index doesn't take down the whole fan-out. Order (#9027): embed
+/// under its own timeout, route, kick rehydrates for the routed indexes, then
+/// take the one fan-out deadline and search.
 ///
 /// PR #1103 correctness: with selective warm-boot, `registry.list()` returns
 /// only HOT (eagerly loaded) indexes. Cold indexes parked in `ColdIndexStore`
@@ -152,30 +158,7 @@ fn default_global_top_k() -> usize {
 /// indexes a file into each, and asserts both contribute results tagged with
 /// the right `index_id`. `test_global_search_surfaces_cold_indexes_skipped`
 /// asserts the count is > 0 when cold indexes exist.
-#[cfg(test)] // #9214 (D1): HTTP route; the daemon binds no TCP listener.
-pub(super) async fn global_search_handler(
-    State(state): State<Arc<SearchAppState>>,
-    Json(req): Json<GlobalSearchRequest>,
-) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    global_search_report(&state, req)
-        .await
-        .map(Json)
-        .map_err(|(status, body)| (status, Json(body)))
-}
-
-/// The body `POST /search` serves, without the transport (#6285 slice 3).
-///
-/// Why: `search.query.all` answers the same question over the socket. The
-/// fan-out's incompleteness counters — `cold_indexes_skipped`,
-/// `corpus_failed_indexes_skipped`, `corpus_read_failed_indexes_skipped` — are
-/// the fields a caller reads to know the sweep was partial, so a second
-/// implementation that omitted one would report a complete answer over a
-/// missing corpus. `partial` (#9027) folds them, plus a degraded query embed,
-/// into one flag.
-/// What: [`global_search_handler`]'s whole former body. Order (#9027): embed
-/// under its own timeout, route, kick rehydrates for the routed indexes, then
-/// take the one fan-out deadline and search.
-/// Test: `global_search_over_the_socket_matches_the_http_body`,
+/// `global_search_over_the_socket_matches_the_http_body`,
 /// `a_slow_embed_degrades_to_lexical_and_still_searches_every_index`,
 /// `the_fan_out_deadline_starts_after_the_query_embed`,
 /// `global_search_skips_an_index_that_misses_the_deadline`,
@@ -255,6 +238,9 @@ pub(crate) async fn global_search_report(
     }
 
     let started = std::time::Instant::now();
+    // #10195: a fan-out the deadline drops logs its query and stage.
+    let cancel_guard = super::search_log::CancelGuard::new("*", &req.query, started);
+    crate::core::indexer::query_timings::mark(crate::core::indexer::QueryPhase::Embed);
     let intent = QueryClassifier::classify(&req.query);
 
     // Issue #112: compute per-index context weights, then apply the routing
@@ -269,6 +255,7 @@ pub(crate) async fn global_search_report(
         super::fanout_deadline::resolve_embed_timeout(),
     )
     .await;
+    let embed_ms = super::search_log::ms_since(started);
     let query_vector = embed.vector;
     let routing_vector = query_vector
         .as_deref()
@@ -373,7 +360,7 @@ pub(crate) async fn global_search_report(
     //
     // NOTE — this cap is per-request only: it does not bound how many
     // concurrent `POST /search` calls the daemon serves at once (see the
-    // "Residual limitation" doc on `global_search_handler` above).
+    // "Residual limitation" doc on `global_search_report` above).
     use futures::stream::StreamExt;
     let fanout_concurrency =
         super::fanout::resolve_fanout_concurrency(req.serial, req.max_fanout_concurrency);
@@ -387,6 +374,9 @@ pub(crate) async fn global_search_report(
     // deadline. Taking it any earlier let a slow embed spend it before a single
     // index was searched.
     super::fanout_deadline::kick_evicted_rehydrates(&state.registry, &active_ids);
+    crate::core::indexer::query_timings::mark(crate::core::indexer::QueryPhase::Fanout);
+    // #10195: the targets, captured for the one `info` line below.
+    let targets = active_ids.clone();
     let deadline_at = tokio::time::Instant::now() + per_index_deadline;
     // #4087 / #5917 / #6581 / #9027: every way an index can contribute no lane
     // is classified by `search_one_index` and counted below, so a partial
@@ -491,6 +481,16 @@ pub(crate) async fn global_search_report(
         + deadline_skipped
         > 0
         || embed.status.degraded();
+    let n_searched = indexes_searched.len();
+    super::search_log::log_fanout(
+        &targets,
+        n_searched,
+        deadline_skipped,
+        embed_ms,
+        latency_ms,
+        &req.query,
+    );
+    cancel_guard.done();
     Ok(serde_json::json!({
         "results": results,
         "indexes_searched": indexes_searched,

@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use crate::service::recall_stream::{RecallAllScope, recall_all_scoped};
 
 use super::bm25::{bm25_live_hits, bm25_search_optional, fuse_bm25_into_recall};
-use super::helpers::open_palace_handle;
+use super::recall_open::open_for_recall;
 // #6318: the read tools below fall back to a palace index instead of erroring
 // when the caller names no palace and the server has no default.
 use super::palace_index::{PalaceScope, resolve_palace_or_index};
@@ -42,7 +42,10 @@ use super::recall_rulings::{RulingsFold, fetch_user_rulings, fold_rulings};
 use super::recall_rulings_floor::apply_rulings_floor;
 // #9421: drawers superseded through a `superseded_by` edge rank below their
 // replacements on every recall path.
-use super::recall_supersede::{Supersessions, supersessions_across, supersessions_for};
+use super::recall_supersede::{SupersessionLookup, supersessions_across, supersessions_for};
+// #10609 (ADR-0074, D83): superseded drawers are excluded unless the caller
+// asks for a historical search.
+use super::recall_supersede_view::{annotate_response, include_superseded_arg, settle_superseded};
 // Owner ruling 2026-09-14: the recall projection — creator-tag hiding and the
 // optional `min_score` floor — applies to every recall response this file emits.
 use super::recall_projection::{
@@ -192,6 +195,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // Owner ruling 2026-09-14: both projection arguments are read once, here,
     // so the warming short-circuit below and the fused path answer identically.
     let include_creator_tags = include_creator_tags_arg(&args);
+    let include_superseded = include_superseded_arg(&args);
     let min_score = min_score_arg(&args, "memory_recall")?;
     // A floored recall asks the lanes for a wider candidate set, so hits the
     // floor removes are backfilled instead of leaving the caller short.
@@ -199,7 +203,8 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // hit from just past the cut.
     let fetch_k = ranking_window(top_k, min_score);
 
-    let handle = open_palace_handle(state, &palace)?;
+    // #11255: off the worker, bounded; a slow open answers `PalaceOpening`.
+    let handle = open_for_recall(state, &palace).await?;
     // ADR-0027 T7 + T9: resolved BEFORE the warming short-circuit below, so a
     // wing- or room-scoped recall is filtered on every path. Resolving it after
     // that early return would let a scoped recall issued during embedder warmup
@@ -217,7 +222,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
-        let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+        let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
         let (out, served) =
             cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
         served.record(state, &handle); // #9881
@@ -257,7 +262,7 @@ pub(crate) async fn handle_memory_recall(state: &AppState, args: Value) -> Resul
     // Owner ruling 2026-09-14: the floor runs AFTER fusion — the RRF bonus is
     // part of the score the caller set a bar against, so filtering before it
     // would judge a hit on a number the response never shows.
-    let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+    let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
     let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
     served.record(state, &handle); // #9881
     Ok(out)
@@ -278,11 +283,13 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     // arguments as `memory_recall`, for the reason ADR-0027 D4.1 gives about
     // `room`/`wing` — two spellings of one option is how these two drift.
     let include_creator_tags = include_creator_tags_arg(&args);
+    let include_superseded = include_superseded_arg(&args);
     let min_score = min_score_arg(&args, "memory_recall_deep")?;
     // #8246: same widened window as `memory_recall`.
     let fetch_k = ranking_window(top_k, min_score);
 
-    let handle = open_palace_handle(state, &palace)?;
+    // #11255: same bounded, off-worker open as `memory_recall`.
+    let handle = open_for_recall(state, &palace).await?;
     // ADR-0027 T7 + T9: deep recall is no longer the odd one out — it takes the
     // same `room`/`wing` scope as `memory_recall`, resolved before the warming
     // short-circuit so no path can return unscoped results.
@@ -295,7 +302,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
         // #8246: stale snapshots rank below current facts on every path. No
         // rulings leg here: it needs the embedder this path is waiting for.
         let sup = supersessions_for(&handle, &results).await;
-        let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+        let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
         let (out, served) =
             cut.rank_and_serialize(&palace, query, results, RulingsFold::default(), sup);
         served.record(state, &handle); // #9881
@@ -322,7 +329,7 @@ pub(crate) async fn handle_memory_recall_deep(state: &AppState, args: Value) -> 
     let fold = fold_rulings(&mut results, rulings, query, top_k, min_score);
     let sup = supersessions_for(&handle, &results).await;
     // Owner ruling 2026-09-14: after fusion, same as `memory_recall`.
-    let cut = RecallCut::new(top_k, min_score, include_creator_tags);
+    let cut = RecallCut::new(top_k, min_score, include_creator_tags, include_superseded);
     let (out, served) = cut.rank_and_serialize(&palace, query, results, fold, sup);
     served.record(state, &handle); // #9881
     Ok(out)
@@ -337,18 +344,27 @@ struct RecallCut {
     top_k: usize,
     min_score: Option<f32>,
     include_creator_tags: bool,
+    /// #10609: a historical search keeps superseded drawers, tagged.
+    include_superseded: bool,
 }
 
 impl RecallCut {
-    fn new(top_k: usize, min_score: Option<f32>, include_creator_tags: bool) -> Self {
+    fn new(
+        top_k: usize,
+        min_score: Option<f32>,
+        include_creator_tags: bool,
+        include_superseded: bool,
+    ) -> Self {
         Self {
             top_k,
             min_score,
             include_creator_tags,
+            include_superseded,
         }
     }
 
-    /// Demote stale snapshots (#8246) and superseded drawers (#9421), lift
+    /// Exclude superseded drawers (#10609), demote stale snapshots (#8246) and
+    /// any superseded drawer a historical search kept (#9421), lift
     /// answering rulings into reserved slots (#9143), apply the floor, cut to
     /// `top_k`, and serialize with any failed rulings palaces (#9143).
     ///
@@ -365,10 +381,15 @@ impl RecallCut {
         query: &str,
         mut results: Vec<RecallResult>,
         mut rulings: RulingsFold,
-        mut sup: Supersessions,
+        lookup: SupersessionLookup,
     ) -> (Value, ServedHits) {
+        let unverified = lookup.unverified || rulings.superseded_unverified;
+        let mut sup = lookup.edges;
         // #9421: a ruling superseded inside its rulings palace demotes too.
         sup.extend(std::mem::take(&mut rulings.superseded));
+        // #10609 (ADR-0074): leave superseded drawers out before the floor and
+        // the cut, unless this is a historical search.
+        settle_superseded(&mut results, &mut sup, self.include_superseded);
         // #9421: a superseded ruling is no longer the standing rule, so the
         // floor never lifts it (it could land above its replacement).
         rulings.floored.retain(|id| !sup.contains_key(id));
@@ -379,7 +400,7 @@ impl RecallCut {
         let dropped_below_floor = apply_score_floor(&mut results, self.min_score, self.top_k);
         // #9881: classified after the cut, so only what the caller sees counts.
         let served = ServedHits::from_cut(&results, &rulings.owners);
-        let out = serialize_recall(
+        let mut out = serialize_recall(
             palace,
             query,
             results,
@@ -389,6 +410,7 @@ impl RecallCut {
                 rulings_degraded: rulings.degraded,
             },
         );
+        annotate_response(&mut out, &sup, unverified);
         (out, served)
     }
 }
@@ -440,8 +462,9 @@ async fn recall_all_without_embedder(
 /// response could not say what it had missed.
 /// What: parses `q`, `top_k`, `deep` and `scope` (`resident` by default,
 /// `all` for the streamed walk; anything else is an error), runs
-/// `recall_all_scoped`, demotes stale snapshots and superseded drawers
-/// (#9421) in either scope, cuts to `top_k`, and returns
+/// `recall_all_scoped`, leaves superseded drawers out unless
+/// `include_superseded` (#10609), demotes stale snapshots and any superseded
+/// drawer kept (#9421) in either scope, cuts to `top_k`, and returns
 /// `query`, `results` and the ADR-0071 D4 coverage fields.
 /// Test: `default_scope_opens_no_palace_and_keeps_the_resident_set`,
 /// `open_failure_is_reported_on_every_surface`,
@@ -464,6 +487,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // tool merges across palaces, where one floor over heterogeneous corpora
     // would mean different things per palace.
     let include_creator_tags = include_creator_tags_arg(&args);
+    let include_superseded = include_superseded_arg(&args);
     // #8246: fetch about 2 * top_k so demotion can lift a hit past the cut.
     let window = ranking_window(top_k, None);
 
@@ -476,14 +500,14 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     // #9421: each batch reads its own palaces' `superseded_by` edges while its
     // handles are open; the merged list is demoted once, below. #9299: in
     // either scope, so the resident default demotes as `scope: "all"` does.
-    let sup = std::sync::Arc::new(parking_lot::Mutex::new(Supersessions::new()));
+    let sup = std::sync::Arc::new(parking_lot::Mutex::new(SupersessionLookup::default()));
     let outcome = if !vector_lane_available(state) {
         recall_all_scoped(state, scope, "memory_recall_all", window, |handles| {
             let sup = sup.clone();
             async move {
                 let hits = recall_all_without_embedder(state, &handles, query, window).await;
                 let found = supersessions_across(&handles, &hits).await;
-                sup.lock().extend(found);
+                sup.lock().absorb(found);
                 Ok(CrossPalaceRecall {
                     results: hits,
                     failed: Vec::new(),
@@ -504,7 +528,7 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
                     recall_across_palaces_reporting(&handles, &embedder, query, window, deep)
                         .await?;
                 let found = supersessions_across(&handles, &recall.results).await;
-                sup.lock().extend(found);
+                sup.lock().absorb(found);
                 Ok(recall)
             }
         })
@@ -513,10 +537,16 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     };
     let mut results = outcome.results;
     // #8246: the merged list gets the same snapshot demotion, then the cut.
-    let sup = std::mem::take(&mut *sup.lock());
+    let lookup = std::mem::take(&mut *sup.lock());
+    let unverified = lookup.unverified;
+    let mut sup = lookup.edges;
+    // #10609 (ADR-0074): superseded drawers leave the merged list before the
+    // cut, unless this is a historical search.
+    settle_superseded(&mut results, &mut sup, include_superseded);
     demote_stale_snapshots_across(&mut results, chrono::Utc::now(), &sup);
     results.truncate(top_k);
-    record_served_across(state, &results); // #9881 (Q4): per owning palace.
+    // #9881 (Q4): per owning palace. #11255: no reopen after a deadline hit.
+    record_served_across(state, &results, !outcome.coverage.deadline_exceeded);
 
     let payload: Vec<Value> = results
         .iter()
@@ -541,7 +571,9 @@ pub(crate) async fn handle_memory_recall_all(state: &AppState, args: Value) -> R
     out.insert("results".into(), json!(payload));
     // #9299 (ADR-0071 D4): scope and coverage on every response.
     outcome.coverage.insert_into(scope, &mut out);
-    Ok(Value::Object(out))
+    let mut out = Value::Object(out);
+    annotate_response(&mut out, &sup, unverified);
+    Ok(out)
 }
 
 #[cfg(test)]

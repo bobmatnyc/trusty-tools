@@ -21,6 +21,7 @@
 //! Test: `rpc_tests.rs` drives every method over a real socket with a
 //! stub search client.
 
+pub mod analysis_cache;
 mod diagnostics_dispatch;
 
 pub mod events;

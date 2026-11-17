@@ -745,10 +745,34 @@ echo "ci-apt-install:"
 # a `sudo` that just runs its arguments, and a `dpkg` whose `--configure -a`
 # clears the `broken` marker the install stub can set (#6064). The dpkg stub is
 # unconditional so no case reaches the host's real dpkg.
+#
+# The 2026-11-11 outage fix added two routes ahead of `apt-get update`, so the
+# stub models a runner more closely:
+#   - `dpkg-query` reports a package `ok installed` only when it is a line of
+#     `<dir>/installed`. That file starts absent, so nothing is installed and
+#     no case reaches the host's real dpkg database.
+#   - `apt-get` is a wrapper. Every call is logged to `<dir>/apt-calls`. An
+#     `install` before any successful `update` fails with `Unable to locate
+#     package`, as it does on a runner with no package lists, unless
+#     `<dir>/updated` exists. Only after that gate does the case's own body run
+#     (from `<dir>/apt-get-body`, so `${0%/*}` in it is still the stub dir).
 apt_stub_dir() {
   local dir
   dir="$(mktemp -d "${TMPDIR:-/tmp}/aptstub.XXXXXX")"
-  printf '#!/usr/bin/env bash\n%s\n' "$1" > "${dir}/apt-get"
+  printf '#!/usr/bin/env bash\n%s\n' "$1" > "${dir}/apt-get-body"
+  cat > "${dir}/apt-get" <<'APT_STUB'
+#!/usr/bin/env bash
+d="${0%/*}"
+echo "$*" >> "${d}/apt-calls"
+if [ "$1" = "install" ] && [ ! -f "${d}/updated" ]; then
+  echo "E: Unable to locate package build-essential" >&2
+  exit 100
+fi
+rc=0
+bash "${d}/apt-get-body" "$@" || rc=$?
+[ "$1" = "update" ] && [ "$rc" -eq 0 ] && : > "${d}/updated"
+exit "$rc"
+APT_STUB
   printf '#!/usr/bin/env bash\nexec "$@"\n' > "${dir}/sudo"
   cat > "${dir}/dpkg" <<'DPKG_STUB'
 #!/usr/bin/env bash
@@ -759,7 +783,18 @@ if [ "$1" = "--configure" ]; then
 fi
 exit 0
 DPKG_STUB
-  chmod +x "${dir}/apt-get" "${dir}/sudo" "${dir}/dpkg"
+  cat > "${dir}/dpkg-query" <<'DPKG_QUERY_STUB'
+#!/usr/bin/env bash
+d="${0%/*}"
+pkg="${!#}"
+if [ -f "${d}/installed" ] && grep -qxF "$pkg" "${d}/installed"; then
+  echo "install ok installed"
+  exit 0
+fi
+echo "dpkg-query: no packages found matching ${pkg}" >&2
+exit 1
+DPKG_QUERY_STUB
+  chmod +x "${dir}/apt-get" "${dir}/sudo" "${dir}/dpkg" "${dir}/dpkg-query"
   echo "${dir}"
 }
 
@@ -777,18 +812,29 @@ DPKG_STUB
 # GITHUB_OUTPUT is likewise pinned per case, so the rows the wrapper writes for
 # a workflow to read are observable here instead of landing in the runner's real
 # output file.
+#
+# CI_APT_SOURCES_DIR and CI_APT_FALLBACK_MIRRORS are pinned the same way: the
+# sources come from `<dir>/etc-apt` (absent unless a case writes it, so no
+# fallback route), and the fallback mirror is a name no real host answers.
+#
+# apt_run <stub-dir> [<package> ...] — packages default to build-essential.
 apt_run() {
-  local dir="$1" rc=0
+  local dir="$1" rc=0 install_s="${CI_APT_INSTALL_TIMEOUT_S:-2}"
+  shift
+  [ "$#" -gt 0 ] || set -- build-essential
   # Actions creates $GITHUB_OUTPUT before the step runs and the wrapper only
   # ever appends, so create it here too — a case that asserts NOTHING was
   # written needs a file to read, not a missing one.
   : >"${dir}/github-output"
   PATH="${dir}:${PATH}" CI_APT_RETRY_DELAY_S=0 CI_APT_ATTEMPTS=3 \
     CI_APT_UPDATE_TIMEOUT_S="${CI_APT_UPDATE_TIMEOUT_S:-2}" \
-    CI_APT_INSTALL_TIMEOUT_S="${CI_APT_INSTALL_TIMEOUT_S:-2}" \
+    CI_APT_INSTALL_TIMEOUT_S="${install_s}" \
+    CI_APT_CACHED_INSTALL_TIMEOUT_S="${install_s}" \
     CI_APT_LISTS_DIR="${dir}/lists" \
+    CI_APT_SOURCES_DIR="${dir}/etc-apt" \
+    CI_APT_FALLBACK_MIRRORS="http://mirror.test/ubuntu" \
     GITHUB_OUTPUT="${dir}/github-output" \
-    bash scripts/ci-apt-install.sh build-essential \
+    bash scripts/ci-apt-install.sh "$@" \
     >"${dir}/out" 2>&1 || rc=$?
   echo "$rc"
 }
@@ -977,16 +1023,252 @@ assert_eq "  the purge ran, and said so"               "1" \
 assert_eq "  the stale index is gone"                  "absent" \
   "$([ -e "${purge_dir}/lists/stale-index" ] && echo present || echo absent)"
 rm -rf "${purge_dir}"
+
+# ---------------------------------------------------------------------------
+# ci-apt-install.sh — mirror-outage survival (2026-11-11)
+#
+# Runs 43037343719 and 43037343501: the runners could not resolve any
+# *.ubuntu.com host, and every job that called apt went red — including jobs
+# whose packages the runner image already ships.
+# ---------------------------------------------------------------------------
+
+# THE REGRESSION CASE. Every package is already installed, and apt itself is
+# dead. The pre-fix wrapper ran `apt-get update` regardless and exited 1; the
+# fixed one must not call apt at all. build-essential is satisfied by its
+# component packages, the way the runner image ships it.
+skip_dir="$(apt_stub_dir '
+echo "Err:1 http://azure.archive.ubuntu.com/ubuntu noble InRelease" >&2
+echo "  Temporary failure resolving '"'"'azure.archive.ubuntu.com'"'"'" >&2
+exit 100')"
+printf '%s\n' libc6-dev gcc g++ make dpkg-dev pkg-config libssl-dev > "${skip_dir}/installed"
+assert_eq "already-installed packages survive a dead apt: exit 0" "0" \
+  "$(apt_run "${skip_dir}" build-essential pkg-config libssl-dev)"
+assert_eq "  and apt-get is never called"           "absent" \
+  "$([ -e "${skip_dir}/apt-calls" ] && echo present || echo absent)"
+assert_eq "  the log says why"                      "1" \
+  "$(grep -c 'ci-apt-install: already installed: build-essential pkg-config libssl-dev' "${skip_dir}/out" || true)"
+rm -rf "${skip_dir}"
+
+# The fail-open guard on the skip: ONE missing package (g++, a build-essential
+# part) must send the wrapper to apt, not wave the request through.
+partial_dir="$(apt_stub_dir 'exit 0')"
+printf '%s\n' libc6-dev gcc make dpkg-dev pkg-config > "${partial_dir}/installed"
+assert_eq "a missing part is not skipped: apt runs, exit 0" "0" \
+  "$(apt_run "${partial_dir}" build-essential pkg-config)"
+assert_eq "  no already-installed claim"            "0" \
+  "$(grep -c 'already installed' "${partial_dir}/out" || true)"
+# Two installs: the cached-index try (no lists yet, so it fails) and the one
+# after `apt-get update`.
+assert_eq "  build-essential is what apt installs" "2" \
+  "$(grep -cx 'install -y --no-install-recommends build-essential' "${partial_dir}/apt-calls" || true)"
+assert_eq "  the present pkg-config is not asked for" "0" \
+  "$(grep -c 'pkg-config' "${partial_dir}/apt-calls" || true)"
+rm -rf "${partial_dir}"
+
+# Route 2: the runner already has package lists, so the install needs no fresh
+# `apt-get update` and must not run one.
+cached_dir="$(apt_stub_dir '[ "$1" = "update" ] && exit 100
+exit 0')"
+: > "${cached_dir}/updated"
+assert_eq "an install from existing lists needs no update" "0" "$(apt_run "${cached_dir}")"
+assert_eq "  apt-get update never ran"              "0" \
+  "$(grep -c '^update' "${cached_dir}/apt-calls" || true)"
+rm -rf "${cached_dir}"
+
+# fallback_sources <stub-dir> — the runner's deb822 Ubuntu sources, plus a
+# non-Ubuntu source the rewrite must leave alone.
+fallback_sources() {
+  mkdir -p "$1/etc-apt/sources.list.d"
+  cat > "$1/etc-apt/sources.list.d/ubuntu.sources" <<'SOURCES'
+Types: deb
+URIs: http://azure.archive.ubuntu.com/ubuntu/
+Suites: noble noble-updates noble-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://security.ubuntu.com/ubuntu
+Suites: noble-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+  echo "deb https://packages.microsoft.com/ubuntu/24.04/prod noble main" \
+    > "$1/etc-apt/sources.list.d/microsoft-prod.list"
+}
+
+# outage_body — apt as it behaved on 2026-11-11: every *.ubuntu.com host fails
+# DNS. When apt is pointed at rewritten sources (SourceParts=...), the stub
+# keeps a copy of them and succeeds only if no Ubuntu host is left in them and
+# FALLBACK_OK is set; otherwise the mirror fails DNS too.
+outage_body() {
+  printf '%s\n' "FALLBACK_OK=$1" '
+d="${0%/*}"
+parts=""
+for a in "$@"; do
+  case "$a" in Dir::Etc::SourceParts=*) parts="${a#*=}" ;; esac
+done
+if [ -n "$parts" ]; then
+  cat "$parts"/* > "${d}/seen-sources"
+  if [ "$FALLBACK_OK" = 1 ] && ! grep -q "ubuntu\.com" "${d}/seen-sources"; then
+    exit 0
+  fi
+  echo "Err:1 http://mirror.test/ubuntu noble InRelease" >&2
+  echo "  Temporary failure resolving '"'"'mirror.test'"'"'" >&2
+  exit 100
+fi
+echo "Err:1 http://azure.archive.ubuntu.com/ubuntu noble InRelease" >&2
+echo "  Temporary failure resolving '"'"'azure.archive.ubuntu.com'"'"'" >&2
+exit 100'
+}
+
+# Route 4 rescues: the primary hosts are dead, the mirror is not.
+fb_dir="$(apt_stub_dir "$(outage_body 1)")"
+fallback_sources "${fb_dir}"
+assert_eq "a dead *.ubuntu.com is survived via the fallback" "0" "$(apt_run "${fb_dir}")"
+assert_eq "  the log names the host that failed"   "1" \
+  "$(grep -c 'apt-get update attempt 1 failed host(s): azure.archive.ubuntu.com$' "${fb_dir}/out" || true)"
+assert_eq "  the log names the fallback mirror"    "1" \
+  "$(grep -c 'falling back to mirror http://mirror.test/ubuntu (outside \*.ubuntu.com) — 2 Ubuntu source' "${fb_dir}/out" || true)"
+assert_eq "  the rewrite left no ubuntu.com host"  "0" \
+  "$(grep -c 'ubuntu\.com' "${fb_dir}/seen-sources" || true)"
+assert_eq "  and kept the non-Ubuntu source"       "1" \
+  "$(grep -c 'packages.microsoft.com' "${fb_dir}/seen-sources" || true)"
+assert_eq "  a rescue leaves no apt-infra annotation" "0" \
+  "$(grep -c '::error::' "${fb_dir}/out" || true)"
+assert_eq "  and no apt_infra row"                 "0" \
+  "$(grep -c '^apt_infra=' "${fb_dir}/github-output" || true)"
+rm -rf "${fb_dir}"
+
+# Every route fails: the existing INFRA-FAIL classification, once, naming both
+# the primary host and the mirror — never a success.
+allfail_dir="$(apt_stub_dir "$(outage_body 0)")"
+fallback_sources "${allfail_dir}"
+assert_eq "every route failing still exits 75"     "75" "$(apt_run "${allfail_dir}")"
+assert_eq "  the fallback was tried"               "1" \
+  "$(grep -c 'falling back to mirror http://mirror.test/ubuntu' "${allfail_dir}/out" || true)"
+assert_eq "  one annotation, reason dns"           "1" \
+  "$(grep -c '::error::apt-infra: dns — INFRA-FAIL: apt' "${allfail_dir}/out" || true)"
+assert_eq "  it names both failed hosts"           "1" \
+  "$(grep -c 'failed host(s): azure.archive.ubuntu.com mirror.test;' "${allfail_dir}/out" || true)"
+assert_eq "  and \$GITHUB_OUTPUT carries the reason" "1" \
+  "$(grep -c '^apt_infra_reason=dns$' "${allfail_dir}/github-output" || true)"
+assert_eq "  no success line"                      "0" \
+  "$(grep -c 'ci-apt-install: installed' "${allfail_dir}/out" || true)"
+rm -rf "${allfail_dir}"
+
+# The runner shape of run 43037343501: the Ubuntu sources are one
+# `mirror+file:/etc/apt/apt-mirrors.txt` URI, and the list names the hosts.
+mirror_file_sources() {
+  mkdir -p "$1/etc-apt/sources.list.d"
+  cat > "$1/etc-apt/sources.list.d/ubuntu.sources" <<'SOURCES'
+Types: deb
+URIs: mirror+file:/etc/apt/apt-mirrors.txt
+Suites: resolute resolute-updates resolute-backports resolute-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+SOURCES
+  printf 'http://azure.archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' \
+    > "$1/etc-apt/apt-mirrors.txt"
+}
+
+# quiet_update_body <fallback-ok> — real apt on a DNS outage: `apt-get update`
+# WARNS about the unresolvable host and exits 0, leaving no lists, so the
+# install that follows says `Unable to locate package` with no infra signature.
+# Against rewritten sources it behaves like outage_body.
+quiet_update_body() {
+  printf '%s\n' "FALLBACK_OK=$1" '
+d="${0%/*}"
+parts=""
+for a in "$@"; do
+  case "$a" in Dir::Etc::SourceParts=*) parts="${a#*=}" ;; esac
+done
+if [ -n "$parts" ]; then
+  cat "$parts"/* > "${d}/seen-sources"
+  if [ "$FALLBACK_OK" = 1 ] && ! grep -qE "ubuntu\.com|mirror\+file" "${d}/seen-sources"; then
+    exit 0
+  fi
+  echo "W: Failed to fetch http://mirror.test/ubuntu/dists/resolute/InRelease  Temporary failure resolving '"'"'mirror.test'"'"'" >&2
+  exit 100
+fi
+if [ "$1" = "update" ]; then
+  echo "W: Failed to fetch mirror+file:/etc/apt/apt-mirrors.txt/dists/resolute/InRelease  Temporary failure resolving '"'"'security.ubuntu.com'"'"'" >&2
+  echo "W: Some index files failed to download. They have been ignored, or old ones used instead." >&2
+  exit 0
+fi
+echo "E: Unable to locate package build-essential" >&2
+exit 100'
+}
+
+# An update that exits 0 on a DNS failure is still infra, and the mirror+file
+# source is rewritten, so route 4 rescues.
+quiet_dir="$(apt_stub_dir "$(quiet_update_body 1)")"
+mirror_file_sources "${quiet_dir}"
+assert_eq "an update exiting 0 on a DNS failure still reaches the fallback" "0" \
+  "$(apt_run "${quiet_dir}")"
+assert_eq "  the exit-0 update counts as failed"   "3" \
+  "$(grep -c 'apt-get update attempt [0-9] exited 0 but logged a fetch failure' "${quiet_dir}/out" || true)"
+assert_eq "  the mirror+file source is rewritten"  "1" \
+  "$(grep -c 'falling back to mirror http://mirror.test/ubuntu (outside \*.ubuntu.com) — 1 Ubuntu source' "${quiet_dir}/out" || true)"
+assert_eq "  no mirror+file URI is left"           "0" \
+  "$(grep -c 'mirror+file' "${quiet_dir}/seen-sources" || true)"
+assert_eq "  the mirror took its place"            "1" \
+  "$(grep -c '^URIs: http://mirror.test/ubuntu/$' "${quiet_dir}/seen-sources" || true)"
+rm -rf "${quiet_dir}"
+
+# The same outage with the mirror dead too: infra, exit 75 — never exit 1 for
+# the empty-lists `Unable to locate package` the install prints.
+quietfail_dir="$(apt_stub_dir "$(quiet_update_body 0)")"
+mirror_file_sources "${quietfail_dir}"
+assert_eq "an exit-0 DNS update with every route dead exits 75" "75" \
+  "$(apt_run "${quietfail_dir}")"
+assert_eq "  one annotation, reason dns"           "1" \
+  "$(grep -c '::error::apt-infra: dns — INFRA-FAIL: apt — apt-get update failed' "${quietfail_dir}/out" || true)"
+assert_eq "  it names both failed hosts"           "1" \
+  "$(grep -c 'failed host(s): mirror.test security.ubuntu.com;' "${quietfail_dir}/out" || true)"
+rm -rf "${quietfail_dir}"
+
+# An install whose own error is a resolve failure is infra, so route 4 runs.
+install_dns_dir="$(apt_stub_dir '
+d="${0%/*}"
+for a in "$@"; do
+  case "$a" in Dir::Etc::SourceParts=*) exit 0 ;; esac
+done
+[ "$1" = "update" ] && exit 0
+echo "E: Failed to fetch https://security.ubuntu.com/ubuntu/pool/main/d/dbus/libdbus-1-dev_1.16.2-2ubuntu4_amd64v3.deb  Temporary failure resolving '"'"'security.ubuntu.com'"'"'" >&2
+exit 100')"
+fallback_sources "${install_dns_dir}"
+assert_eq "an install failing on DNS reaches the fallback" "0" \
+  "$(apt_run "${install_dns_dir}" libdbus-1-dev)"
+assert_eq "  classified dns on the install"        "3" \
+  "$(grep -c 'apt-get install attempt [0-9] failed (exit 100) — apt infrastructure signature: dns' "${install_dns_dir}/out" || true)"
+assert_eq "  and installed from the mirror"        "1" \
+  "$(grep -c 'installed libdbus-1-dev from fallback mirror http://mirror.test/ubuntu' "${install_dns_dir}/out" || true)"
+rm -rf "${install_dns_dir}"
 unset CI_APT_UPDATE_TIMEOUT_S CI_APT_INSTALL_TIMEOUT_S
 
 # Wiring: the wrapper helps nobody while a job still inlines the raw pair.
 assert_eq "no raw apt-get left in ci.yml" "0" \
   "$(grep -cE '^ *sudo apt-get' .github/workflows/ci.yml || true)"
+# 2026-11-11: the release, pre-publish and semver workflows inlined the raw pair
+# too, and semver-checks went "verdict unavailable" on the DNS outage.
+for wf in semver-checks pre-publish release line-cap; do
+  assert_eq "no raw apt-get left in ${wf}.yml" "0" \
+    "$(grep -cE '(^|[[:space:]])(sudo )?apt-get (update|install)' ".github/workflows/${wf}.yml" || true)"
+done
+assert_eq "check_semver.sh's remedy uses the wrapper" "0" \
+  "$(grep -cE 'sudo apt-get install' scripts/check_semver.sh || true)"
+assert_eq "semver-checks.yml calls the wrapper"     "1" \
+  "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/semver-checks.yml || true)"
+assert_eq "pre-publish.yml calls the wrapper"       "4" \
+  "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/pre-publish.yml || true)"
+assert_eq "release.yml calls the wrapper"           "1" \
+  "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/release.yml || true)"
 # 12 -> 13: the `affected-test` legs (#7777) install test-shard's packages.
 # 13 -> 12: the `audit-ui` job left with trusty-audit-ui (owner ruling 2026-09-28).
 # 12 -> 13: the `trusty-common-lanes` job (owner ruling 2026-09-27).
 # 13 -> 12: the `mpm-gui` job left with trusty-mpm-gui (#7964).
-assert_eq "every apt step routes through the wrapper" "12" \
+# 12 -> 13: the trusty-okf bubblewrap step in `affected-test` (#10822).
+assert_eq "every apt step routes through the wrapper" "13" \
   "$(grep -c 'bash scripts/ci-apt-install.sh' .github/workflows/ci.yml || true)"
 
 # ---------------------------------------------------------------------------

@@ -115,9 +115,18 @@ def pm_session(code):
 
 
 def notify_escalations(project, evs, st):
-    """Queue each `escalated` event as a D10 `decision`. A failure is logged and never raised."""
+    """Queue escalation notices after commit: 0 confirmed, 3 partial success.
+
+    State is already saved, including esc (requested routing, not delivery proof).
+    Preserve stdout IDs for callers; on partial success, stderr gives every
+    sender outcome so a mixed batch is never mistaken for an atomic failure.
+    A failed or timed-out sender may have enqueued before failing: no auto retry.
+    """
     cmd = os.environ.get("DATG_NOTIFY_CMD") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "pm-notify.sh")
+    if not any(ev["ev"] == "escalated" for ev in evs):
+        return 0
     sess = pm_session(st["code"])
+    outcomes = []
     for ev in evs:
         if ev["ev"] != "escalated":
             continue
@@ -130,6 +139,7 @@ def notify_escalations(project, evs, st):
             err = "" if r.returncode == 0 else f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[:200]}"
         except (OSError, subprocess.SubprocessError) as e:
             err = f"{type(e).__name__}: {e}"
+        outcomes.append((ev["id"], err))
         if err:
             print(f"datg: pm-notify failed for {ev['id']} ({err})", file=sys.stderr)
             try:
@@ -137,3 +147,14 @@ def notify_escalations(project, evs, st):
                                      "text": f"{ev['id']} pm-notify failed: {err}"})
             except OSError as e:
                 print(f"datg: log write failed ({e})", file=sys.stderr)
+
+    if any(err for _, err in outcomes):
+        print("datg: ledger saved; notification queueing not confirmed for all escalations (exit 3).",
+              file=sys.stderr)
+        for item_id, err in outcomes:
+            status = "unconfirmed; delivery may have occurred" if err else "sender confirmed queueing"
+            print(f"datg: {item_id}: {status}", file=sys.stderr)
+        print("datg: do not replay the saved update/batch; reconcile delivery, then retry only the needed notification.",
+              file=sys.stderr)
+        return 3
+    return 0

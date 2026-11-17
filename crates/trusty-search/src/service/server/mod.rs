@@ -35,10 +35,9 @@ mod fanout;
 mod fanout_deadline;
 // #9029: `search.file.get`, one indexed file and its diff.
 mod file_get;
+// #10738: the put reply's hash and `search.index.file.status`.
+mod file_status;
 mod files;
-// #9214 (D1): the `files` handlers, test-only; tests call them directly.
-#[cfg(test)]
-mod files_http;
 // #8959/#9179: runs the symbol-graph rebuild single-file writes defer.
 mod graph_refresh_ticker;
 mod health;
@@ -54,12 +53,29 @@ mod indexes_roots;
 mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 // #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
+mod project_ensure;
+// #11417: ensure re-activates a parked index.
+mod project_ensure_unpark;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
+// #10989: the decommission park of a main checkout.
+#[cfg(test)]
+mod project_park_decommission_tests;
+// #10551: `search.index.embed_missing`, the embed-only resume of a failed semantic stage.
+mod embed_missing;
+#[cfg(test)]
+mod embed_missing_tests;
 mod quantize_handlers;
 mod reindex_handlers;
 // #10110: `search.index.files.remove`, the batch removal by prefix or list.
+#[cfg(test)]
+mod profile_10532_tests;
+mod profile_apply;
+// #10739: `search.index.path.admits` and the include_paths config tests.
+#[cfg(test)]
+mod include_paths_10739_tests;
+mod path_admits;
 mod remove_files;
 #[cfg(test)]
 mod remove_files_tests;
@@ -72,6 +88,8 @@ mod router;
 mod routing;
 mod search;
 mod search_global;
+// #10195: per-stage timings, the fan-out line and the cancelled-search log.
+mod search_log;
 // #9970: the per-index search `meta` block, `embedder` included.
 mod search_meta;
 mod state;
@@ -262,6 +280,9 @@ mod tests_8348;
 // #10194: a cold embedder waits at most the query-embed deadline.
 #[cfg(test)]
 mod tests_10194;
+// #10195: stage timings, logged deadline cancellations, the search_all line.
+#[cfg(test)]
+mod tests_10195;
 // #9027: the all-index fan-out's per-index deadline and one query embed.
 #[cfg(test)]
 mod tests_9027;
@@ -289,24 +310,6 @@ pub use state::{DaemonEvent, DaemonTransport, ReconcileSummary, SearchAppState, 
 
 use std::sync::Arc;
 
-// #9214 (ruling D1): the handlers are test-only; tests reach them through
-// `super::*`.
-#[cfg(test)]
-use admin::{admin_stop_handler, logs_tail_handler};
-#[cfg(test)]
-use files::{get_index_chunks_handler, global_grep_handler, grep_handler};
-#[cfg(test)]
-use health::health_handler;
-#[cfg(test)]
-use indexes::{create_index_handler, list_indexes_handler};
-#[cfg(test)]
-use reindex_handlers::reindex_handler;
-#[cfg(test)]
-use search::search_handler;
-#[cfg(test)]
-use search_global::global_search_handler;
-#[cfg(test)]
-use status::{graph_handler, index_status_handler};
 use tickers::{
     spawn_disk_size_ticker, spawn_idle_chunk_eviction_ticker, spawn_memory_pressure_ticker,
     spawn_orphan_reaper_ticker, spawn_residency_sweep_ticker, spawn_status_ticker,
@@ -323,8 +326,11 @@ pub(crate) use health::health_report;
 pub(crate) use admin::{config_report, ConfigResponse};
 pub(crate) use contrib_graph::{graph_neighbors_report, NeighborsParams};
 pub(crate) use files::{call_chain_report, index_chunks_report, CallChainParams};
+// #10738: `search.index.file.status`.
+pub(crate) use file_status::{file_status_report, FileStatusRequest};
 pub(crate) use index_config::{index_config_report, IndexConfigView};
 pub(crate) use indexes::{list_indexes_report, ListIndexesParams};
+pub(crate) use path_admits::{path_admits_report, PathAdmission, PathAdmitsParams};
 pub(crate) use status::{graph_report, graph_stats_report, index_status_report, GraphQueryParams};
 
 // #6285 slice 3: the query surface's transport-neutral bodies. Same contract as
@@ -342,6 +348,7 @@ pub(crate) use typeahead::{typeahead_report, TypeaheadParams};
 // the socket renders, so a socket write cannot report a landing that did not
 // happen.
 pub(crate) use contrib_graph::{ingest_graph_report, IngestGraphRequest};
+pub(crate) use embed_missing::{embed_missing_report, EmbedMissingRequest};
 pub(crate) use embedding_pause::{pause_embedding_report, resume_embedding_report};
 pub(crate) use files::{index_file_report, remove_file_report};
 pub(crate) use indexes::create_index_report;
@@ -352,6 +359,7 @@ pub(crate) use indexes_roots::{add_index_roots_report, AddRootsRequest};
 // #6285 consumer move: the quantize backfill's socket twin, `search.index.quantize`.
 pub(crate) use quantize_handlers::{quantize_report, QuantizeRequest};
 // #9169 PR-B1: the socket's project-map methods drive these.
+pub(crate) use project_ensure::{ensure_project_report, EnsureProjectRequest};
 pub(crate) use project_park::{detach_parked, reindex_after_unpark, with_map_parked};
 pub(crate) use reindex_handlers::reindex_report;
 #[cfg(test)]
@@ -378,7 +386,7 @@ pub use warm_all::{WarmStartRequest, WarmState, WarmTracker};
 /// the HTTP router. The daemon builds no router, so `run_daemon` starts them
 /// here, or it would serve the socket with no residency sweep, no
 /// memory-pressure enforcement and no status events.
-/// What: the nine `spawn_*` calls the deleted router made inline. Each holds a
+/// What: the ten `spawn_*` calls the deleted router made inline. Each holds a
 /// `Weak`, so the tickers stop once the last `Arc` drops.
 /// Test: `run_daemon_serves_only_the_socket` waits for a `status_changed`
 /// event from a daemon that built no router.
@@ -396,4 +404,6 @@ pub fn spawn_daemon_tickers(state_arc: &Arc<SearchAppState>) {
     // client that discovers indexes by listing never names them, and boot
     // reconcile walks registered handles only.
     crate::service::timeout_recovery::spawn_timeout_recovery_ticker(Arc::clone(state_arc));
+    // #10551: re-run a failed semantic stage once the embedder answers again.
+    crate::service::embed_retry::spawn_embed_retry_ticker(Arc::clone(state_arc));
 }

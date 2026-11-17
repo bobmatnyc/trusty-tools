@@ -236,8 +236,8 @@ pub fn build_router(state: AnalyzerAppState) -> RpcRouter {
     let router = bind!(
         router,
         "analyze.quality",
-        analysis::IndexRequest,
-        crate::core::quality::QualityReport,
+        analysis::QualityRequest,
+        serde_json::Value,
         analysis::quality_report
     );
     let router = bind!(

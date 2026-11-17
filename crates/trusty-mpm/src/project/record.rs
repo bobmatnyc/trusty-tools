@@ -169,6 +169,49 @@ pub struct Project {
     /// `worktree_enabled_defaults_true`, `worktree_enabled_honors_false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<bool>,
+
+    /// Stable project key, assigned once at register (#10530).
+    ///
+    /// Why: the registry-derived trusty-search index id must survive `mv`, a repo
+    /// rename and `git remote remove`, so it derives from a value that never
+    /// recomputes instead of the checkout path or live git state. Index NAMING
+    /// still uses the legacy basename until `REGISTRY_IDS_ADOPTED` flips (D7).
+    /// What: canonical lowercase `owner/repo` when an origin exists, else
+    /// `local:<uuid>`. `None` only on a legacy record not yet registered since
+    /// this field landed; [`ProjectStore::upsert`](super::store::ProjectStore::upsert)
+    /// fills it, keeps an existing value, and refuses a second record with the
+    /// same key under a NEW name. Callers build records with `None` and never set it.
+    /// Test: `upsert_assigns_a_key_once_and_keeps_it` and the key-stability
+    /// tests in `store_tests.rs`; `project_serde_round_trip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+
+    /// When the project was decommissioned, or `None` while it is active (#10988).
+    ///
+    /// Why: a decommissioned project keeps its registry row so implicit
+    /// registration cannot re-list it as active; the row carries the state
+    /// instead. What: set only by
+    /// [`ProjectRegistry::mark_decommissioned`](super::ProjectRegistry::mark_decommissioned);
+    /// cleared only when a new session registers for the project. An upsert
+    /// never clears it. A record written before this field loads as active.
+    /// Test: `project_without_decommissioned_at_loads_as_active`,
+    /// `seed_from_config_keeps_a_decommissioned_project_decommissioned`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decommissioned_at: Option<chrono::DateTime<chrono::Utc>>,
+
+    /// When a session's project directory was moved to the archive, or `None`
+    /// (#10991).
+    ///
+    /// Why: owner ruling D8b — an archived project leaves the active view (the
+    /// TUI dims it) while its row, like a decommissioned one, stays.
+    /// What: set only by
+    /// [`ProjectRegistry::mark_archived`](super::ProjectRegistry::mark_archived);
+    /// cleared with `decommissioned_at` when a new session registers. An upsert
+    /// never clears it. A record written before this field loads unarchived.
+    /// Test: `project_without_archived_at_loads_unarchived`,
+    /// `upsert_keeps_a_stored_archived_state`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl Project {
@@ -181,6 +224,16 @@ impl Project {
     /// Test: `worktree_enabled_defaults_true`, `worktree_enabled_honors_false`.
     pub fn worktree_enabled(&self) -> bool {
         self.worktree.unwrap_or(true)
+    }
+
+    /// Whether the project is decommissioned (#10988).
+    pub fn is_decommissioned(&self) -> bool {
+        self.decommissioned_at.is_some()
+    }
+
+    /// Whether a session's project directory was archived (#10991).
+    pub fn is_archived(&self) -> bool {
+        self.archived_at.is_some()
     }
 }
 
@@ -284,6 +337,9 @@ mod tests {
             commit_name: Some("Bob".into()),
             commit_email: Some("bob@example.com".into()),
             worktree: Some(false),
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(json.contains("gh_user"), "json: {json}");
@@ -312,6 +368,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         };
         let json = serde_json::to_string(&p).expect("serialize");
         assert!(
@@ -458,6 +517,9 @@ mod tests {
             commit_name: None,
             commit_email: None,
             worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
         }
     }
 
@@ -466,6 +528,28 @@ mod tests {
     #[test]
     fn worktree_enabled_defaults_true() {
         assert!(minimal_project().worktree_enabled());
+    }
+
+    /// Why (#10988): a record written before `decommissioned_at` existed loads
+    /// as active, and an active record does not write the key.
+    #[test]
+    fn project_without_decommissioned_at_loads_as_active() {
+        let old = r#"{"name":"w","repo_url":"https://github.com/acme/w","default_branch":"main"}"#;
+        let p: Project = serde_json::from_str(old).expect("legacy record");
+        assert!(!p.is_decommissioned());
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(!json.contains("decommissioned_at"), "{json}");
+    }
+
+    /// Why (#10991): a record written before `archived_at` existed loads
+    /// unarchived, and an unarchived record does not write the key.
+    #[test]
+    fn project_without_archived_at_loads_unarchived() {
+        let old = r#"{"name":"w","repo_url":"https://github.com/acme/w","default_branch":"main"}"#;
+        let p: Project = serde_json::from_str(old).expect("legacy record");
+        assert!(!p.is_archived());
+        let json = serde_json::to_string(&p).expect("serialize");
+        assert!(!json.contains("archived_at"), "{json}");
     }
 
     /// Why (#3455): `worktree: Some(false)` is the "launch on main" opt-out.

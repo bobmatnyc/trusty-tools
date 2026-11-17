@@ -1,0 +1,8 @@
+{
+  "case_id": "c02-alpha-nested-cap-omitted",
+  "expected_verdict": "revise",
+  "binding_rule_ids": [
+    "alpha-cap-1"
+  ],
+  "label_note": "LABEL-ONLY-c02-alpha-nested-cap-omitted"
+}

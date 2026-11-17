@@ -1,4 +1,4 @@
-//! Integration tests for the `tm-<leaf>-NN` naming scheme (issue #1955).
+//! Integration tests for the `tm-<leaf>[-NN]` naming scheme (issue #1955).
 //!
 //! Why: `session_manager/tests.rs` is at the 1500-SLOC test cap; the
 //! #1955 serial-allocation and backward-compat-reconciliation coverage lives
@@ -66,15 +66,16 @@ fn set_home(home: &std::path::Path) -> HomeGuard {
     HomeGuard(prior, prior_ccd)
 }
 
-/// The full `tm-<leaf>-NN` naming convention (issue #1955): a `tm-` prefix
-/// AND a trailing two-digit numeric serial.
+/// The full `tm-<leaf>[-NN]` naming convention (issue #1955, #10478): a `tm-`
+/// prefix, a bare first name, and a trailing two-digit serial on a duplicate.
 ///
 /// Why (#1966 review follow-up, moved from `tests.rs` to keep that file under
 /// its 1500-SLOC test cap): checking only the `tm-` prefix would not catch a
 /// regression that dropped the `-NN` suffix entirely (e.g. a future change
 /// that regressed to the pre-#1955 `tm-<leaf>` form with no serial).
-/// What: creates one session and asserts its `tmux_name` has the `tm-` prefix
-/// AND that the segment after the last dash is exactly two ASCII digits.
+/// What: creates two sessions in one directory. The first must be the bare
+/// `tm-wt1`; the second's segment after the last dash must be exactly two
+/// ASCII digits in 02-99.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn manager_naming_convention() {
@@ -95,6 +96,19 @@ async fn manager_naming_convention() {
         .expect("create");
 
     assert!(record.tmux_name.starts_with("tm-"), "has tm- prefix");
+    // #10478: the first session carries no counter.
+    assert_eq!(record.tmux_name, "tm-wt1");
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/wt1")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create the duplicate");
     let suffix = record
         .tmux_name
         .rsplit('-')
@@ -111,17 +125,17 @@ async fn manager_naming_convention() {
         "serial suffix is numeric: {}",
         record.tmux_name
     );
-    // `01`-`99`, never `00` (#1966 review follow-up: a bare length+digit-ness
-    // check would also accept "00", which `allocate_serial` never hands out).
+    // `02`-`99`, never `00` or `01` (#1966 review follow-up; #10478: the
+    // bare name holds serial 1, so a duplicate starts at `02`).
     let serial: u8 = suffix.parse().expect("suffix is numeric (checked above)");
     assert!(
-        (1..=99).contains(&serial),
-        "serial is in 01-99: {}",
+        (2..=99).contains(&serial),
+        "serial is in 02-99: {}",
         record.tmux_name
     );
 }
 
-/// Serial reuse end-to-end (issue #1955 worked example): sessions `-01`,
+/// Serial reuse end-to-end (issue #1955 worked example): sessions `tm-x`,
 /// `-02`, `-03` exist for a project; `-02` is decommissioned; the NEXT session
 /// created for that project must reuse `-02`, not jump to `-04`.
 ///
@@ -175,7 +189,8 @@ async fn manager_serial_reuses_decommissioned_gap() {
         .await
         .expect("create r3");
 
-    assert_eq!(r1.tmux_name, "tm-gap-test-01");
+    // #10478: the first session is bare; duplicates count from `-02`.
+    assert_eq!(r1.tmux_name, "tm-gap-test");
     assert_eq!(r2.tmux_name, "tm-gap-test-02");
     assert_eq!(r3.tmux_name, "tm-gap-test-03");
 
@@ -207,9 +222,35 @@ async fn manager_serial_reuses_decommissioned_gap() {
     );
 }
 
+/// #10478 end to end: a hint shaped like a session name is not prefixed and
+/// numbered twice, and a second session for it gets `-02`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn name_hint_with_session_shape_is_bare_then_02() {
+    let dir = TempDir::new().unwrap();
+    let fake = FakeTmuxDriver::new();
+    let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
+    let mut names = Vec::new();
+    for wt in ["/tmp/h1", "/tmp/h2"] {
+        let record = mgr
+            .create(
+                "task".into(),
+                Some(PathBuf::from(wt)),
+                Some("tm-mpm-bugs-01".into()),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create");
+        names.push(record.tmux_name);
+    }
+    assert_eq!(names, ["tm-mpm-bugs", "tm-mpm-bugs-02"]);
+}
+
 /// Live tmux sessions created under the NEW `tm-` prefix (#1955) must be
 /// recognized and adopted by boot reconciliation exactly like the legacy
-/// `tmpm-` prefix — the daemon must never treat a `tm-<leaf>-NN` session as
+/// `tmpm-` prefix — the daemon must never treat a `tm-<leaf>[-NN]` session as
 /// foreign just because the prefix changed.
 ///
 /// Why: `reconcile_on_boot` used to hardcode `starts_with("tmpm-")`; after
@@ -697,6 +738,8 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
     let mgr = SessionManager::new(dir.path(), fake).await.unwrap();
     let existing = super::record::SessionRecord {
         context_usage: None,
+        parent_session_id: None,
+        tmux_session_id: None,
         id: super::record::ManagedSessionId::new(),
         tmux_name: "tm-known-01".into(),
         cwd: workspace.path().to_path_buf(),
@@ -723,6 +766,7 @@ async fn reconcile_skips_external_adopt_when_workspace_already_tracked() {
         deliverable_id: None,
         pane_id: None,
         tmux_server: None,
+        tmux_socket: None,
         injection_status: Default::default(),
         worktree_owner: None,
         terminal_at: None,
@@ -1000,7 +1044,7 @@ async fn repeated_reconcile_of_one_resolvable_pane_keeps_one_record() {
 /// worktree provisioning ran; that window is the create path's documented
 /// TOCTOU. Pre-fix, this scenario produced two live sessions sharing one
 /// name — the literal #3692 defect, via the create path.
-/// What: registers a live tmux session + Active record under `tm-stale-01`,
+/// What: registers a live tmux session + Active record under `tm-stale`,
 /// then calls `create_with_reserved_name` with that same (now stale) reserved
 /// name and asserts the created session/record landed on `tm-stale-02`.
 /// Test: this function IS the test.
@@ -1010,7 +1054,7 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
     let fake = FakeTmuxDriver::new();
     let mgr = SessionManager::new(dir.path(), fake.clone()).await.unwrap();
 
-    // The reservation went stale: someone else now LIVES at tm-stale-01.
+    // The reservation went stale: someone else now LIVES at tm-stale.
     let first = mgr
         .create(
             "squatter".into(),
@@ -1022,12 +1066,13 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
         )
         .await
         .expect("first create");
-    assert_eq!(first.tmux_name, "tm-stale-01");
+    // #10478: the first session for a leaf is bare.
+    assert_eq!(first.tmux_name, "tm-stale");
 
     let second = mgr
         .create_with_reserved_name(
             super::record::ManagedSessionId::new(),
-            "tm-stale-01".into(),
+            "tm-stale".into(),
             "stale reservation".into(),
             Some(PathBuf::from("/tmp/wt2")),
             None,
@@ -1051,7 +1096,7 @@ async fn create_with_reserved_name_suffixes_stale_reservation() {
     // The squatter is untouched.
     assert_eq!(
         mgr.get(&first.id).await.expect("get first").tmux_name,
-        "tm-stale-01"
+        "tm-stale"
     );
 }
 
@@ -1311,4 +1356,85 @@ fn reserved_name(tag: &str) -> String {
         "{}{tag}",
         trusty_common::session_naming::RESERVED_TEST_PREFIX
     )
+}
+
+/// A driver whose default server lists nothing and whose one workspace
+/// server (`server`, socket in `dir`) holds `tm-adoptee` with cwd `cwd`.
+struct WorkspaceHost {
+    dir: PathBuf,
+    server: Option<String>,
+    cwd: PathBuf,
+}
+
+impl ManagedTmuxDriver for WorkspaceHost {
+    fn create_session(&self, _n: &str, _w: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn kill_session(&self, _n: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn send_line(&self, _n: &str, _t: &str) -> Result<(), super::manager::ManagedError> {
+        Ok(())
+    }
+    fn capture(&self, _n: &str, _l: usize) -> Result<String, super::manager::ManagedError> {
+        Ok(String::new())
+    }
+    fn list_sessions(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(match self.server {
+            Some(_) => vec!["tm-adoptee".to_owned()],
+            None => Vec::new(),
+        })
+    }
+    fn get_pane_cwd(&self, _n: &str) -> Option<PathBuf> {
+        self.server.as_ref().map(|_| self.cwd.clone())
+    }
+    fn on_server(&self, server: &str) -> Option<std::sync::Arc<dyn ManagedTmuxDriver>> {
+        Some(std::sync::Arc::new(Self {
+            dir: self.dir.clone(),
+            server: Some(server.to_owned()),
+            cwd: self.cwd.clone(),
+        }))
+    }
+    fn workspace_servers(&self) -> Result<Vec<String>, super::manager::ManagedError> {
+        Ok(vec!["tm-ws-10101-adopt".to_owned()])
+    }
+    fn socket_dir(&self) -> Option<PathBuf> {
+        Some(self.dir.clone())
+    }
+}
+
+/// Error arm (Fail-Open Check): boot adoption reads every workspace server; a
+/// session found only on one is adopted with that server's socket, so later
+/// calls reach it there. Red on 420b3717bf, which adopted from the default
+/// server only.
+#[serial_test::serial]
+#[tokio::test]
+async fn boot_reconcile_adopts_a_workspace_servers_session_with_its_socket() {
+    let dir = TempDir::new().unwrap();
+    // #3965: `#[serial]` + `$HOME` override — see `HomeGuard` above.
+    let _home = set_home(dir.path());
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let host = WorkspaceHost {
+        dir: dir.path().join("sockets"),
+        server: None,
+        cwd: workspace,
+    };
+    let mgr = SessionManager::new(&dir.path().join("data"), std::sync::Arc::new(host))
+        .await
+        .expect("manager");
+
+    let report = mgr.reconcile_on_boot(false).await.expect("reconcile");
+
+    assert_eq!(report.external_adopted, vec!["tm-adoptee".to_owned()]);
+    let adopted = mgr
+        .list()
+        .await
+        .into_iter()
+        .find(|r| r.tmux_name == "tm-adoptee")
+        .expect("adopted record");
+    assert_eq!(
+        adopted.tmux_socket,
+        Some(dir.path().join("sockets").join("tm-ws-10101-adopt"))
+    );
 }

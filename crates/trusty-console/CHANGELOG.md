@@ -6,6 +6,73 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.14.0] — 2026-11-16
+
+### Added
+
+- trusty-console now serves its own Unix socket at `{data_dir}/trusty-console.sock` beside its HTTP listener (#10902). It answers `console.health` (`status`, `service`, `version`, `uptime_secs`) and `console.fleet_status`, which returns the same services snapshot as `GET /api/console/services`, read from the poller cache with no probe per call. The socket is `0600` in a `0700` directory, checks the peer uid, and is removed on shutdown. A failed bind logs a warning and the console keeps serving HTTP.
+- `ServiceInfo`, `ServiceStatus` and `ServiceLifecycle` now live in `trusty_common::console_rpc`; `trusty_console::connector` re-exports them, so existing paths are unchanged.
+- The console socket now answers `console.machine_status` and `console.history` (#10942). `console.machine_status` returns the `GET /api/console/machine-status` body under `machine`, with `ready: false` and `machine: null` before the first host sample. `console.history` returns the `GET /api/console/machine-status/history` body, including the per-service CPU/RSS rings in `service_samples` (#10943). Both read the existing caches; a params value that is not absent, `null`, an object or `[]` is answered `invalid_params`. The HTTP routes are unchanged.
+- `HistorySnapshot`, `ServiceSample`, `ServiceTransition`, `ServiceState` and `MACHINE_HISTORY_SCHEMA_VERSION` now live in `trusty_common::console_rpc::metrics`; `trusty_console::machine_history` re-exports them, so existing paths are unchanged.
+- Linux only: `trusty-console start`, `stop` and `restart`, on `trusty_common::linux_lifecycle` (#11085). `start` spawns `serve` from the install dir and returns once it serves the console socket. `stop` exits 1 when no console runs. `restart` stops, confirms the stop, then starts, and starts a console that is not running. A console whose socket bind failed is found through the listener its `http_addr` file names, and is signalled only after the lifecycle module confirms it is this console. `start` and `restart` pass `TRUSTY_CONSOLE_TOKEN_FILE` (the token file's path) to the spawned console, so it keeps its TCP token gate, and `GITHUB_WEBHOOK_SECRET`, so it keeps accepting webhooks. They also pass every non-credential setting of the daemons the console's stdio bridges auto-start (trusty-memory, trusty-search, trusty-analyze, trusty-mpm), so a daemon a bridge starts keeps multi-tenant mode, its embedder model and device, its loader paths, the analyze facts store path (`TRUSTY_ANALYZER_FACTS`), the mpm daemon's Architect dashboard store root (`DASHBOARD_ROOT`, `ARCHITECT_PROJECT_DIR`), its background-service and supervisor settings, the AWS profile, region, endpoint, FIPS, dual-stack, metadata and retry settings the Bedrock provider uses, and the `trusty-secrets serve` cache and idle tunables. Two credential pointers pass on purpose: `SSH_AUTH_SOCK`, so bridge-started daemons keep ssh agent access as under a shell-started console, and `AWS_CONFIG_FILE`. Other credentials and credential pointers (`AWS_SHARED_CREDENTIALS_FILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`) are not passed. Neither is `AWS_ROLE_ARN`: without its token file it would make the mpm daemon pick Bedrock and fail instead of falling through to OpenRouter. macOS is unchanged.
+- Limit: `restart` respawns plain `serve`, so `--http`, `--tailscale` and `--poll-interval` given to the original `serve` are not carried over. Set `TRUSTY_CONSOLE_BIND` to keep tailnet exposure across a restart.
+- Limit: a restart through `http_addr` of an HTTP-only console whose socket bind keeps failing stops that console; the new child then fails readiness after 60 s, the console stays down, and `restart` exits non-zero (`NotReady`).
+- Limit: a verb-started console runs with cwd `/`, so a daemon its bridges start loads only the user-level `~/.env.local`, not the project-level one a shell-started console finds from its cwd.
+
+### Changed
+
+- The Linux lifecycle stop and restart tests scan an injected process table of their own processes, so a host trusty-console no longer changes their result (#11085). `stop` and `restart` behaviour is unchanged.
+
+### Security
+
+- With `TRUSTY_CONSOLE_TOKEN_FILE` set, every route on the console's TCP listeners needs the console token (#11074, DOC-90 §4). This covers the loopback and tailnet listeners; the Host/Origin check and the tailnet peer gate still run first. A request without the token gets `401` with `WWW-Authenticate: Bearer` and a fixed body; a browser page load is redirected to `/login`. Callers send `Authorization: Bearer <token>`. In a browser, `POST /login` sets an `HttpOnly; Secure; SameSite=Strict` session cookie that holds a random session id, never the token. Sessions last 12 hours and end on restart. The gate removes `Authorization` and the session cookie before request logging, the handlers and the reverse proxy see the request. The console's Unix socket is not covered; its peer-uid check gates it.
+- The console exits non-zero before it binds when the token file is missing, empty, shorter than 32 bytes, or has a group or other permission bit set. The error names the path and the problem, never the content. With the variable unset, the console behaves exactly as before.
+
+## [0.13.0] — 2026-11-07
+
+### Added
+
+- Console subscribes to the trusty-events bus over its Unix socket (`events_socket_path()`). It resumes after a hang-up with the last event's `seq` and id, resubscribes from 0 and drops duplicates by event id when the bus refuses a resume, passes gaps on, and backs off between attempts. A quiet bus does not end the subscription. An event this build cannot decode is relayed as a one-event gap and stepped over, so a newer daemon cannot stall the client (#9076).
+- `GET /api/console/events/status` reports the bus client's state, a failure category (`not_running`, `refused`, `hung_up`, `decode`, ...), retry delay and gap, duplicate, resync and undecodable counts; `200` when connected, `503` otherwise. It serves no path or error text, and sits behind the same Host/Origin guard as the other `/api/console` routes. `/health` does not depend on the bus (#9076).
+- New public module `events_uds`: the client, the `<seq>:<uuid>` resume token an SSE `id:` carries, and the in-process relay the event routes will read (#9076).
+- The trusty-mpm Session Manager chat page, moved from the daemon's `/web`, is served at `/tools/mpm/chat/` (`/tools/mpm/chat` redirects). Its one call, `POST /api/console/sessions/chat`, sends the turn to the mpm `sessions_chat` MCP tool on a dedicated `tm serve --stdio --allow-chat` handle with a 20.5-minute bound and no retry, so a slow turn never blocks the Sessions, Disk and Config routes or the metrics poller. Both routes are loopback-only and unframeable; a turn that cannot run answers `503` with a text body (#9979, D96).
+- `McpServiceHandle::call_tool_enveloped`: a capability-gated tool call with a per-call timeout that returns the raw MCP result, `isError` included (#9979).
+- The console's services roster has a Trusty Events row for the trusty-events bus daemon (#10042). It reports `running` only when the bus's Unix socket accepts a connection, and `available` with a hint when the socket is missing, stale, not a socket or unreadable. The probe is one connect over the socket, never TCP, and reads no version because the bus has no health method. It reads the socket directly, not `/api/console/events/status` (#10072).
+
+### Fixed
+
+- connect-retry and stale-socket tests hold their socket instead of dropping and rebinding, removing a console test flake (Refs #3674, #10323).
+- Every console call to trusty-memory (the dashboard bridge, its activity stream, and the palace delete and compact actions) now checks the daemon's `memory.protocol` version first and refuses an unsupported or unreadable one with a named 502 or 409 instead of sending the frame (#9538).
+- `every_sample_reaches_a_mid_run_subscriber_exactly_once` ends its writer on the subscriber's progress, so a descheduled subscriber thread no longer fails the mid-run floor on a loaded runner (Refs #10029).
+
+### Changed
+
+- The trusty-mpm service card is detected with `mpm.health` on the daemon's Unix socket (honouring `TRUSTY_MPM_SOCKET`), not its `http_addr` file and a TCP probe; it carries no URL. An error answer reads `Degraded` with the daemon's error as the hint (#6288).
+- The trusty-mpm CPU and memory graphs find the daemon's pid from its socket peer, not the lock file (#6288).
+- The console's `known_siblings` port guard keeps 7880 as a collision-history row for the retired `trusty-mpm` daemon port and no longer points at `DEFAULT_DAEMON_ADDR`, which #6288 S3a removed with the daemon's TCP bind (#6288).
+- The `DEFAULT_PORT` collision guard no longer reserves 7882 for trusty-code or names the deleted `DEFAULT_HTTP_PORT`. `tcode serve` binds no TCP port, and trusty-code-gui's bridge binds an ephemeral one ([#6637](https://github.com/bobmatnyc/trusty-tools/issues/6637))
+- Console's trusty-events client asks the bus for a heartbeat every 5 s and reports a bus that accepts the connection but sends no frame for 12.5 s as `hung` on `GET /api/console/events/status`, then reconnects with the usual backoff. Before, a stopped or wedged daemon read as a quiet, healthy bus. A heartbeat never moves the resume point and is never relayed (#10071).
+- The status reaches `connected` when the bus sends its first frame, not when the socket accepts. A daemon too old to know `heartbeat_ms` is reported `refused`, and the client keeps its resume point instead of resyncing (#10071).
+- The Secrets page's per-key toggle is now "Denied to agents", off by default: agents may use every in-scope key the operator has not denied (#10386). Checking it writes the key's deny; only a person can clear it, and a refused change puts the toggle back.
+- The ui-secrets fake and test fixtures now show the ruled secret mask shape (#10394): first 4 and last 5 characters at 16 or more, last 5 at 10 to 15, length only below that.
+- The console relays the new secrets refusal kind `agent_key_denied` (403), and the Secrets page shows its own sentence for it; `agent_use_refused` now reads as an operator-only method (#10459).
+- The console relays the new secrets refusal kind `ticket_refused` (403), and the Secrets page shows its own sentence for it, so its kind table matches the server again (#10459).
+
+### Removed
+
+- The `/api/mpm/*` reverse proxy and its `/proxy/mpm/*` alias. No client used them once every mpm client moved to the daemon socket; both now answer 400 (unknown daemon) and never dial the daemon (#6288).
+- Console no longer hosts the event bus. The ingest socket it bound at `<data dir>/trusty-console/trusty-console.sock`, the event ring and the `event_log/` writer moved to the new `trusty-events` daemon (ADR-0065). No producer pushed to that socket and no route read the ring, so no events are lost; console's old `event_log/` directory is no longer written and is not migrated. The `chrono` dependency went with it (#9075).
+
+### Security
+
+- The loopback listener now refuses (403) any request, read or write, whose `Host` is not its own `ip:port` or `localhost:port`, or whose `Origin` is not `http://<Host>`; a request with no `Origin` is still served when `Host` matches. The permissive CORS layer is gone, so no other web page can read sessions, pids, tmux names, the disk tree or host metrics, and DNS rebinding and other local ports are refused too (#9792).
+- When `tailscale` reports this node's MagicDNS name, the loopback listener also answers `Host: <name>` with `Origin: https://<name>`, the shape `tailscale serve` forwards. If the name cannot be read, only loopback is accepted (#9792).
+- The ui-memory, ui-search and ui-analyze Vite dev proxies now rewrite `Host` and drop only the dev server's own `Origin` (`http://<Host>`); any other `Origin` is forwarded, so the console still refuses foreign pages (#9792).
+
+### Documentation
+
+- Comments no longer cite the retired `src/assets/` paths or a private ruling label; they point at `content/` paths or an issue (#10096).
+
 ## [0.12.6] — 2026-10-12
 
 ### Added

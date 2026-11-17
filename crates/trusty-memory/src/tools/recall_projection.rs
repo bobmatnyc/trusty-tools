@@ -215,13 +215,17 @@ pub(crate) fn apply_score_floor(
 /// the prefix keeps this projection in lock-step with the TUI, dashboard and
 /// prompt-context renderers that already hide the same namespace.
 /// What: borrows from `tags` and filters; nothing is copied and nothing is
-/// removed from storage. `include_creator_tags` returns the stored list intact.
+/// removed from storage. `include_creator_tags` returns the stored creator tags
+/// too. The retirement marker (`superseded-by:*`, #10609) is hidden either way:
+/// a historical search reports it as `superseded_by`, so the raw tag is noise.
 /// Test: `creator_tags_are_hidden_by_default`,
-/// `creator_tags_come_back_when_the_flag_is_set`.
+/// `creator_tags_come_back_when_the_flag_is_set`,
+/// `the_retirement_marker_is_never_shown_as_a_tag`.
 pub(crate) fn project_tags(tags: &[String], include_creator_tags: bool) -> Vec<&str> {
     tags.iter()
         .map(String::as_str)
         .filter(|t| include_creator_tags || !crate::attribution::is_creator_tag(t))
+        .filter(|t| !crate::engine::retired_marker::is_retirement_tag(t))
         .collect()
 }
 

@@ -17,6 +17,7 @@
 
 use super::*;
 use crate::client::ManagedSessionSummary;
+use crate::tui::project_ctl::state::ProjectRow;
 
 fn summary(id: &str, state: &str) -> ManagedSessionSummary {
     ManagedSessionSummary {
@@ -46,6 +47,7 @@ fn summary(id: &str, state: &str) -> ManagedSessionSummary {
         deleted: false,
         auto_resume_parked: None,
         kind: None,
+        parent_session_id: None,
     }
 }
 
@@ -122,8 +124,7 @@ fn seeded_activity_state(session_id: &str) -> ProjectCtlState {
         "widget".to_string(),
         vec![session_to_row(summary(session_id, "active"))],
     );
-    state.projects_nav.sync_len(state.projects.len());
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    state.focus_session(session_id);
     state
 }
 
@@ -199,6 +200,7 @@ fn activity_response(state: &str, summary: &str) -> ManagedActivityResponse {
         classification: None,
         pending_decision: None,
         proposed_default: None,
+        input_box: None,
     }
 }
 
@@ -372,7 +374,7 @@ fn apply_activity_outcome_session_switch_starts_a_fresh_streak() {
         .get_mut("widget")
         .unwrap()
         .push(session_to_row(summary("s2", "active")));
-    state.sessions_nav.sync_len(state.current_sessions().len());
+    state.rebuild_tree();
     assert_eq!(state.selected_session().unwrap().id, "s1");
 
     apply_activity_outcome(
@@ -391,7 +393,7 @@ fn apply_activity_outcome_session_switch_starts_a_fresh_streak() {
     );
 
     // The operator moves the Sessions-pane selection to "s2".
-    state.sessions_nav.select(1);
+    state.focus_session("s2");
     assert_eq!(state.selected_session().unwrap().id, "s2");
     assert!(
         !state.activity_unavailable_for_selected(),
@@ -485,4 +487,150 @@ async fn refresh_deliverables_keeps_stale_list_on_transient_fetch_failure() {
         "a previously-resolved link must stay Resolved through one bad poll, \
          never flip to Dangling"
     );
+}
+
+/// #10476: the tui fleet poll asks the daemon to skip the stale-assets probe
+/// (`?slim=true`), while the plain `fleet_managed_sessions` — `tm projects
+/// show`, the executor's `managed-fleet` — still sends no flag and so still
+/// probes. `unresumable` must still reach the tui row.
+/// What: a fake daemon records each fleet request's raw query string and
+/// answers one session flagged `unresumable`.
+#[tokio::test]
+async fn tui_fleet_fetch_sends_slim_and_other_callers_do_not() {
+    use std::future::IntoFuture;
+    use std::sync::{Arc, Mutex};
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let fleet_seen = Arc::clone(&seen);
+    let fleet_body = serde_json::json!({"projects": [{
+        "project_name": "widget",
+        "repo_url": "https://github.com/acme/widget",
+        "sessions": [{"id": "00000000-0000-0000-0000-0000000000aa",
+                      "name": "s-dead", "state": "errored", "unresumable": true}],
+    }]});
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"projects": []})) }),
+        )
+        .route(
+            "/api/v1/sessions/managed/fleet",
+            axum::routing::get(move |uri: axum::http::Uri| {
+                fleet_seen
+                    .lock()
+                    .expect("query log")
+                    .push(uri.query().unwrap_or_default().to_string());
+                std::future::ready(axum::Json(fleet_body.clone()))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    let client = DaemonClient::new(format!("http://{addr}"));
+
+    let (_rows, sessions_by_project, _full) =
+        fetch_projects_and_sessions(&client, &mut CallTimings::new())
+            .await
+            .expect("tui fetch");
+    client
+        .fleet_managed_sessions()
+        .await
+        .expect("plain fleet fetch");
+
+    let seen = seen.lock().expect("query log").clone();
+    assert_eq!(
+        seen,
+        vec!["slim=true".to_string(), String::new()],
+        "the tui fetch must send slim=true; the plain method must send no query"
+    );
+    let widget = &sessions_by_project["widget"];
+    assert_eq!(widget.len(), 1);
+    assert!(
+        widget[0].unresumable,
+        "unresumable must still reach the tui row"
+    );
+}
+
+/// #10476 (D64): two registrations of one repo (differing by case and `.git`)
+/// give ONE project row, named by the same winner the fleet groups under, with
+/// each session counted once. The fake daemon answers what the daemon's
+/// `fleet_by_project` now emits: one group for the repo.
+#[tokio::test]
+async fn poll_collapses_duplicate_repo_registrations_to_one_row() {
+    use std::future::IntoFuture;
+
+    let projects_body = serde_json::json!({"projects": [
+        {"name": "bta-agent-ai", "repo_url": "https://github.com/travel-bta/bta-agent-ai",
+         "default_branch": "main"},
+        {"name": "widget", "repo_url": "https://github.com/acme/widget",
+         "default_branch": "main"},
+        {"name": "BTA-agent-AI", "repo_url": "https://github.com/travel-bta/BTA-agent-AI.git",
+         "default_branch": "main"},
+    ]});
+    let fleet_body = serde_json::json!({"projects": [
+        {"project_name": "BTA-agent-AI",
+         "repo_url": "https://github.com/travel-bta/BTA-agent-AI.git",
+         "sessions": [
+            {"id": "00000000-0000-0000-0000-0000000000a1", "name": "s-a", "state": "active"},
+            {"id": "00000000-0000-0000-0000-0000000000a2", "name": "s-b", "state": "stopped"},
+         ]},
+        {"project_name": "widget", "repo_url": "https://github.com/acme/widget", "sessions": []},
+    ]});
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/projects",
+            axum::routing::get(move || std::future::ready(axum::Json(projects_body.clone()))),
+        )
+        .route(
+            "/api/v1/sessions/managed/fleet",
+            axum::routing::get(move || std::future::ready(axum::Json(fleet_body.clone()))),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(axum::serve(listener, app).into_future());
+    let client = DaemonClient::new(format!("http://{addr}"));
+
+    let (rows, sessions_by_project, _full) =
+        fetch_projects_and_sessions(&client, &mut CallTimings::new())
+            .await
+            .expect("tui fetch");
+
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["BTA-agent-AI", "widget"], "one row per repo");
+    assert_eq!((rows[0].total_count, rows[0].live_count), (2, 1));
+    assert_eq!(sessions_by_project["BTA-agent-AI"].len(), 2);
+}
+
+/// #10476: the selected session's `/activity` is due on a new selection or
+/// once `ACTIVITY_REFRESH` has passed, never on a tick in between.
+#[test]
+fn activity_target_serves_cache_until_refresh_is_due() {
+    use std::time::{Duration, Instant};
+    use tick::{ACTIVITY_REFRESH, activity_target};
+
+    let mut state = seeded_activity_state("s1");
+    let t0 = Instant::now();
+    assert_eq!(activity_target(&mut state, t0).as_deref(), Some("s1"));
+    assert_eq!(
+        activity_target(&mut state, t0 + Duration::from_secs(1)),
+        None,
+        "a tick inside the refresh window serves the cache"
+    );
+    assert_eq!(
+        activity_target(&mut state, t0 + ACTIVITY_REFRESH).as_deref(),
+        Some("s1"),
+        "the window elapsing makes the next tick fetch"
+    );
+
+    // A different selection is due at once.
+    state.activity_attempt = Some(("other".to_string(), t0 + ACTIVITY_REFRESH));
+    assert_eq!(
+        activity_target(&mut state, t0 + ACTIVITY_REFRESH).as_deref(),
+        Some("s1")
+    );
+
+    // A down daemon asks for nothing.
+    state.daemon_reachable = false;
+    state.activity_attempt = None;
+    assert_eq!(activity_target(&mut state, t0), None);
 }

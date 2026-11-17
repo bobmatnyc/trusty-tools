@@ -2,6 +2,9 @@
   "owner_name": "",
   "memory_palace": "",
   "dashboard_port": 7890,
+  "tailnet_url": "",
+  "projects_root": "",
+  "claude_config_dir": "",
   "repos": {},
   "caps": {}
 }

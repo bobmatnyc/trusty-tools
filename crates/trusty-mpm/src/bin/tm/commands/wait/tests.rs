@@ -34,16 +34,23 @@ fn args_for(condition: WaitFor) -> WaitArgs {
     }
 }
 
-/// A clock that never really sleeps — it just advances.
+/// A clock that never really sleeps — it just advances, and records each nap
+/// (#10550) so a test can pin the backoff the loop chose.
 struct FakeClock {
     now: Cell<u64>,
+    sleeps: std::cell::RefCell<Vec<u64>>,
 }
 
 impl FakeClock {
     fn at(now: u64) -> Self {
         Self {
             now: Cell::new(now),
+            sleeps: std::cell::RefCell::new(Vec::new()),
         }
+    }
+    /// Every nap, in seconds, in call order.
+    fn sleeps(&self) -> Vec<u64> {
+        self.sleeps.borrow().clone()
     }
 }
 
@@ -52,6 +59,7 @@ impl Clock for FakeClock {
         self.now.get()
     }
     fn sleep(&self, secs: u64) {
+        self.sleeps.borrow_mut().push(secs);
         self.now.set(self.now.get() + secs);
     }
 }
@@ -135,6 +143,7 @@ fn budget_at(now: u64, timeout_s: u64) -> Budget {
         updated_at: now,
         polls: 0,
         timeout_s,
+        rate_limited_streak: 0,
     }
 }
 
@@ -702,6 +711,205 @@ fn loop_recovers_from_a_transient_probe_error() {
     assert_eq!(b.polls, 3);
 }
 
+// ── the rate-limit backoff (#10550) ──────────────────────────────────────────
+
+/// The probe error `GhChecksProbe` returns when the pinned gh shim refuses a
+/// call on the primary GraphQL rate limit. A LITERAL copy of the shim's line,
+/// so a change to the shim's wording fails these tests.
+fn shim_refusal(reset_epoch: Option<u64>) -> String {
+    let when = match reset_epoch {
+        Some(epoch) => format!("it resets at 2026-11-09 02:00:00 UTC (epoch {epoch})"),
+        None => "the reset time is unknown (gh api rate_limit did not answer)".to_string(),
+    };
+    format!(
+        "`gh pr view 7` failed (exit status: 1): tm: GitHub refused this gh call on its \
+         primary GraphQL rate limit (gh account 'bot' on github.com); {when}. tm did not retry it."
+    )
+}
+
+/// Why: only the shim's own sentence earns a backoff, and its epoch is read.
+#[test]
+fn classify_reads_the_shim_refusal_and_its_reset_epoch() {
+    let hit = |text: String| rate_limit::classify(&anyhow::anyhow!(text));
+    assert_eq!(
+        hit(shim_refusal(Some(1_767_225_600))),
+        Some(rate_limit::RateLimited {
+            reset_epoch: Some(1_767_225_600)
+        })
+    );
+    assert_eq!(
+        hit(shim_refusal(None)),
+        Some(rate_limit::RateLimited { reset_epoch: None })
+    );
+    // A REST quota and gh's own unmarked text are generic probe errors.
+    for other in [
+        "gh: API rate limit exceeded for user ID 1. (HTTP 403)",
+        "GraphQL: API rate limit already exceeded for user ID 1.",
+        "connection reset",
+    ] {
+        assert_eq!(hit(other.to_string()), None, "{other}");
+    }
+}
+
+/// Why: a refused poll must wait for the reset the shim named, not re-poll on
+/// the 20-second interval and burn the probe-error budget.
+#[test]
+fn loop_backs_off_to_the_reset_on_a_rate_limited_probe() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![
+        Err(shim_refusal(Some(1_137))),
+        Ok(Poll::Met("done".into())),
+    ]);
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Met);
+    assert_eq!(clock.sleeps(), vec![137], "the nap must be reset minus now");
+    assert_eq!(b.polls, 2);
+}
+
+/// Why: with no reset to wait for, back off 20, 40, 80 s, never past 5 min,
+/// and never count those polls against the 3-error budget.
+#[test]
+fn loop_backs_off_exponentially_when_the_reset_is_unknown() {
+    let clock = FakeClock::at(0);
+    let cond = FakeCondition::new(vec![
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Err(shim_refusal(None)),
+        Ok(Poll::Met("done".into())),
+    ]);
+    let mut b = budget_at(0, 1800);
+    let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Met);
+    assert_eq!(clock.sleeps(), vec![20, 40, 80, 160]);
+    let unknown = rate_limit::RateLimited { reset_epoch: None };
+    assert_eq!(
+        rate_limit::backoff_secs(unknown, 0, 20, 5),
+        300,
+        "5-min cap"
+    );
+}
+
+/// Why: fail closed. A refusal that keeps coming ends the wait as an error
+/// naming the rate limit — never as met, never as a generic probe failure.
+#[test]
+fn rate_limit_exhaustion_errors_not_met() {
+    let clock = FakeClock::at(0);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(None))]);
+    let mut b = budget_at(0, 1800);
+    let err = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("rate limit"), "{text}");
+    assert!(text.contains("5 polls in a row"), "{text}");
+    assert_eq!(b.polls, 5);
+    assert_eq!(Status::Error.exit_code(), EXIT_ERROR);
+}
+
+/// Why: a reset past the hard deadline must not stretch the wait past it.
+#[test]
+fn loop_rate_limit_sleep_never_extends_the_hard_deadline() {
+    // 60s of budget left, a reset 300s away, a 500s slice.
+    let clock = FakeClock::at(11_740);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(12_040)))]);
+    let mut b = budget_at(10_000, 1_800);
+    let out = poll_until(&cond, &plan(20, 500, 1_800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Timeout);
+    assert_eq!(clock.sleeps(), vec![60]);
+    assert_eq!(clock.now_unix(), 11_800, "stopped at the deadline");
+}
+
+/// Why: a slice that ends mid-backoff is pending (75), and says why.
+#[test]
+fn loop_reports_pending_with_the_rate_limit_when_a_slice_ends_in_a_backoff() {
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(1_300)))]);
+    let mut b = budget_at(1_000, 1800);
+    let out = poll_until(&cond, &plan(20, 100, 1800), &mut b, &clock).unwrap();
+    assert_eq!(out.status, Status::Pending);
+    assert_eq!(out.status.exit_code(), EXIT_PENDING);
+    assert_eq!(clock.sleeps(), vec![100], "clamped to the slice");
+    assert!(out.detail.contains("rate limit"), "{}", out.detail);
+}
+
+/// Why: with a reset beyond the slice, each invocation sees one refusal and
+/// returns pending. The streak must survive the state file, or a refusal that
+/// never clears would re-poll until the hard deadline instead of exiting 2.
+#[test]
+fn rate_limit_streak_spans_slices_and_errors_on_the_fifth_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = "check:pr=7";
+    let path = budget::path_for(dir.path(), spec);
+    let clock = FakeClock::at(1_000);
+    let cond = FakeCondition::new(vec![Err(shim_refusal(Some(100_000)))]);
+    let p = plan(20, 100, 3_600);
+    let resume = || budget::load_or_start(&path, spec, 3_600, clock.now_unix(), 600);
+    for slice in 1..=4 {
+        let mut b = resume();
+        let out = poll_until(&cond, &p, &mut b, &clock).unwrap();
+        assert_eq!(out.status, Status::Pending, "slice {slice}");
+        budget::save(&path, &b).unwrap();
+    }
+    let mut b = resume();
+    let err = poll_until(&cond, &p, &mut b, &clock).unwrap_err();
+    let text = format!("{err:#}");
+    assert!(text.contains("rate limit"), "{text}");
+    assert!(text.contains("5 polls in a row"), "{text}");
+    assert_eq!(b.polls, 5);
+}
+
+/// Why: the two error streaks interact one way only, and a reset that has
+/// already passed falls back to the normal interval (#10550).
+#[test]
+fn rate_limit_streak_and_generic_errors_interact_as_documented() {
+    let r = || Err(shim_refusal(None));
+    let e = || Err::<Poll, String>("connection reset".into());
+    let met = || Ok(Poll::Met("done".into()));
+    // (name, script, expected sleeps, expected error text; None = met)
+    type Case = (
+        &'static str,
+        Vec<Result<Poll, String>>,
+        Vec<u64>,
+        Option<&'static str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            // A refusal never resets the generic count; an error resets the
+            // refusal streak, so eight refusals never reach five in a row.
+            "R,R,E alternation exits on the 4th generic error",
+            [r(), r(), e()].into_iter().cycle().take(12).collect(),
+            vec![20, 40, 20, 20, 40, 20, 20, 40, 20, 20, 40],
+            Some("failed 4 times in a row"),
+        ),
+        (
+            "a reset already passed naps the interval",
+            vec![Err(shim_refusal(Some(990))), met()],
+            vec![20],
+            None,
+        ),
+        (
+            "a reset equal to now naps the interval",
+            vec![Err(shim_refusal(Some(1_000))), met()],
+            vec![20],
+            None,
+        ),
+    ];
+    for (name, script, sleeps, error) in cases {
+        let clock = FakeClock::at(1_000);
+        let cond = FakeCondition::new(script);
+        let mut b = budget_at(1_000, 1800);
+        let out = poll_until(&cond, &plan(20, 500, 1800), &mut b, &clock);
+        match error {
+            Some(want) => {
+                let text = format!("{:#}", out.expect_err(name));
+                assert!(text.contains(want), "{name}: {text}");
+            }
+            None => assert_eq!(out.expect(name).status, Status::Met, "{name}"),
+        }
+        assert_eq!(clock.sleeps(), sleeps, "{name}");
+    }
+}
+
 // ── budget persistence ───────────────────────────────────────────────────────
 
 /// Why: two different waits must not share one deadline, and one wait must
@@ -744,6 +952,18 @@ fn budget_resumes_across_invocations() {
     assert_eq!(second.started_at, 1_000, "the deadline must not restart");
     assert_eq!(second.polls, 11);
     assert_eq!(second.remaining(1_150), 1_650);
+}
+
+/// Why: a state file written before #10550 has no rate-limit streak; a wait
+/// already in flight must resume it, not restart its deadline.
+#[test]
+fn budget_resumes_a_state_file_written_before_the_rate_limit_streak() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = budget::path_for(dir.path(), "file:/tmp/gate.txt");
+    let legacy = r#"{"spec":"file:/tmp/gate.txt","started_at":1000,"updated_at":1100,"polls":11,"timeout_s":1800}"#;
+    std::fs::write(&p, legacy).unwrap();
+    let resumed = budget::load_or_start(&p, "file:/tmp/gate.txt", 1800, 1_150, 600);
+    assert_eq!((resumed.started_at, resumed.polls), (1_000, 11));
 }
 
 /// Why: a changed `--timeout` means the agent changed the terms of the wait.

@@ -31,6 +31,9 @@ mod tests_9450;
 // #9450 fix round: writes during a compaction, queued callers, crash safety.
 #[cfg(test)]
 mod compact_9450_tests;
+// #9450: the post-rebuild reachability sweep, with forced strandings.
+#[cfg(test)]
+mod relink_9450_tests;
 #[cfg(test)]
 mod tests_close_8232;
 // #8778: a rewrite that collapses ids leaves no orphan vector.
@@ -54,6 +57,8 @@ mod usearch_reconcile;
 // Issue #4707: snapshot-adoption recovery for the #1711 guard. Kept in its own
 // file so `usearch_store.rs` stays under the 500-SLOC production cap.
 mod usearch_recover;
+// #9450: reachability sweep after a parallel rebuild.
+mod usearch_relink;
 // #6822: the in-place scalar-precision backfill. Its own file so
 // `usearch_store.rs` stays under the 500-SLOC production cap.
 mod usearch_requant;

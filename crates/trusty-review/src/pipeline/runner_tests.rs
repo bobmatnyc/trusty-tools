@@ -2895,6 +2895,10 @@ mod pr_body;
 #[path = "runner_verdict_status_tests.rs"]
 mod verdict_status;
 
+// #10782: a finding carries a quote; a note with none is withheld pre-gate.
+#[path = "runner_quote_admission_tests.rs"]
+mod quote_admission;
+
 // #9310 ruling 50: a D or F grade is a hard verdict floor.
 #[path = "runner_grade_floor_tests.rs"]
 mod grade_floor;

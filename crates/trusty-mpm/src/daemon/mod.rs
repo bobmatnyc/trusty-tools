@@ -109,15 +109,24 @@ pub(crate) mod verify_allowlist;
 // #8985: the last complete `disk_survey` pass, refreshed in the background.
 pub(crate) mod disk_survey_cache;
 pub mod mcp_project;
+// #10988: `project_decommission`, shared by the MCP tool and the socket method.
+pub mod mcp_project_decommission;
+// #10991: `tm session archive`, shared by the MCP tool, socket and HTTP.
+pub mod session_archive;
+// #10368: a session the daemon first sees registers its checkout.
+pub mod session_project;
 // #7357: the backfill both registration transports share.
 pub mod mcp_proxy;
 pub mod mcp_session;
 pub mod project_adoption;
+// #10531: best-effort `search.project.ensure` at registration.
+pub(crate) mod search_project_ensure;
 // #6431: record-only bulk deletion for the console's unknown-state bucket.
 pub mod mcp_session_bulk;
 pub mod openapi;
 pub mod optimizer;
 pub mod orphan_gc;
+pub(crate) mod orphan_gc_servers; // #10101
 pub mod overseer_compose;
 /// The `/pair/*` route registrations, extracted from `api.rs` (#4480).
 pub mod pairing_routes;
@@ -163,7 +172,7 @@ pub use state::DaemonState;
 /// As [`serve_with_shutdown`]: when the socket's accept loop ends without a
 /// shutdown signal.
 ///
-/// Test: `serve_drains_the_socket_and_stops_sessions_on_shutdown` in
+/// Test: `serve_drains_the_socket_and_leaves_sessions_running_on_shutdown` in
 /// `tests/daemon_serve_drain.rs` drives this body through
 /// [`serve_with_shutdown`].
 pub async fn serve(state: Arc<DaemonState>, rpc: socket::BoundSocket) -> anyhow::Result<()> {
@@ -197,9 +206,9 @@ fn host_state_refusal(state: &DaemonState) -> Option<String> {
 ///
 /// Why: [`serve`] waits on SIGTERM/SIGINT, which a test cannot deliver to its
 /// own process without affecting the whole test binary. Taking the future as a
-/// parameter is what lets `serve_drains_the_socket_and_stops_sessions_on_shutdown`
-/// drive the REAL drain — the same session stop, the same unlink — rather than
-/// re-implementing it.
+/// parameter is what lets `serve_drains_the_socket_and_leaves_sessions_running_on_shutdown`
+/// drive the REAL drain — the same shutdown report, the same unlink — rather
+/// than re-implementing it.
 ///
 /// # Errors
 ///
@@ -208,7 +217,7 @@ fn host_state_refusal(state: &DaemonState) -> Option<String> {
 /// listener, so a daemon whose loop is gone serves nothing and must exit rather
 /// than keep running. See [`socket::join_serve_task`].
 ///
-/// Test: `serve_drains_the_socket_and_stops_sessions_on_shutdown`;
+/// Test: `serve_drains_the_socket_and_leaves_sessions_running_on_shutdown`;
 /// the error arm by `join_serve_task_errors_when_the_accept_loop_panics` and
 /// `join_serve_task_errors_when_the_loop_ends_without_a_shutdown`.
 pub async fn serve_with_shutdown(
@@ -383,24 +392,23 @@ pub async fn serve_with_shutdown(
     // daemon ending. An end nobody asked for is an error, never a warning.
     let served = socket::join_serve_task(rpc_task, &drain).await;
 
-    // Signal all background loops to stop before we walk the session list.
+    // Signal all background loops to stop before the shutdown report.
     cancel.cancel();
     // #6849: the bounded final flush runs on both exit arms below.
-    state.action_events().shutdown().await;
-    if let Err(e) = served {
+    // #10464: the error arm logs the late total there too.
+    if let Err(e) = action_events::settle_serve_exit(&state, served).await {
         // #6288 S3a: a dead accept loop is a crash, not a stop; the managed
         // sessions are left running as a SIGKILLed daemon leaves them.
         tracing::error!("trusty-mpm socket stopped serving: {e:#}");
         return Err(e);
     }
-    // #1455 (moved out of axum's `with_graceful_shutdown` by #6288 S3a):
-    // graceful-stop live SessionManager sessions (SIGTERM → 2s wait → kill).
-    // This is the single authority for SM-tracked sessions, and #9101 it stops
-    // only the ones it proves it owns. The legacy-registry pass that follows
-    // (`reap_all_live_sessions`) kills nothing: a legacy entry is a bare tmux
-    // name, which proves no ownership.
-    let mgr = state.session_manager().await;
-    mgr.shutdown().await;
+    // #10597 (owner ruling D82): managed sessions survive a daemon stop or
+    // restart. The #1455 stop-every-session pass is gone; a session ends only
+    // on an explicit stop request (#1454), the orphan-GC (#1458) or a spawn
+    // rollback (#1456/#1457).
+    info!("graceful shutdown: managed sessions left running (#10597)");
+    // #10412: hooks that arrive after the settle are still reported.
+    state.action_events().report_late();
     reap_all_live_sessions(state).await;
     Ok(())
 }
@@ -411,12 +419,9 @@ pub async fn serve_with_shutdown(
 
 /// Report the LEGACY DaemonState registry's sessions on shutdown, killing none.
 ///
-/// Why: on graceful shutdown no session may be left fire-and-forget (#1452,
-/// #1455), and `SessionManager::shutdown`, run first, stops every managed
-/// session it proves it owns. A legacy registry entry records only a tmux
-/// name, which proves nothing: boot discovery adds ANY claude pane, and a
-/// restarted tmux server hands the name to an unrelated session. #9101: the
-/// daemon kills only sessions it proves it owns, so this pass kills none.
+/// Why: #10597 (owner ruling D82): every session survives a daemon stop or
+/// restart, so the shutdown only reports what it leaves running. A legacy
+/// registry entry records only a tmux name, which proves no ownership (#9101).
 /// What: collects the `tmux_name` of every legacy registry entry (NOT the
 /// `SessionManager` store) and logs each as left running through
 /// [`legacy_reap::skip_legacy_names`]. It never runs tmux, so it needs no
@@ -716,6 +721,7 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
     // #6118: the untracked-active skip log repeats once every N sweeps per
     // session rather than every sweep; N is overridable for live debugging.
     let mut gc = orphan_gc::OrphanGc::from_env();
+    let mut ws_gc = orphan_gc_servers::WorkspaceServerGc::default(); // #10101: per server
     // Cross-restart debounce for the PID-file sweep (#1918): owned here (not
     // reconstructed per-tick) so its two-pass candidate history persists across
     // sweeps, exactly like `gc` above.
@@ -813,8 +819,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // #6118: `run_sweep_fs` supplies the filesystem cwd probe, which
                 // is what lets the sweep reap a pane whose worktree was deleted
                 // underneath it — see `orphan_gc::CwdProbe`.
-                let reaped =
-                    orphan_gc::run_sweep_fs(&mut gc, &panes, &tracked, &probe, mtmux.as_ref());
+                let reaped = orphan_gc::run_sweep_fs(&mut gc, &panes, &tracked, &probe, &*mtmux)
+                    + ws_gc.sweep(&tracked, &probe, &driver, &*mtmux);
                 if reaped > 0 {
                     info!("orphan-GC reaped {reaped} orphaned managed session(s)");
                 }
@@ -831,6 +837,8 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 // session that is alive across a daemon restart (when `self.sessions`
                 // is always empty) gets one full GC interval to be re-learned before
                 // any SIGTERM is sent.
+                // #10753: and only when no live tmux pane hosts the PID; an
+                // unanswerable pane check sends no signal.
                 let live_ids = state.gather_live_session_ids().await;
                 let pid_outcome = state.pid_registry().sweep_orphans(
                     &live_ids,
@@ -840,11 +848,13 @@ async fn orphan_gc_loop(state: Arc<DaemonState>, cancel: tokio_util::sync::Cance
                 if pid_outcome.terminated > 0
                     || pid_outcome.removed_stale > 0
                     || pid_outcome.deferred > 0
+                    || pid_outcome.unverifiable > 0
                 {
                     info!(
                         terminated = pid_outcome.terminated,
                         removed_stale = pid_outcome.removed_stale,
                         deferred = pid_outcome.deferred,
+                        unverifiable = pid_outcome.unverifiable, // #10753
                         "orphan-GC PID-file sweep cleaned up orphaned claude process(es)"
                     );
                 }
@@ -1261,7 +1271,7 @@ mod shutdown_reaper_tests {
     /// The shutdown reaper is a safe no-op on an empty daemon.
     ///
     /// Why: graceful shutdown must never panic, whether or not tmux is present
-    /// and whether or not any session is tracked (#1455). With no registered
+    /// and whether or not any session is tracked. With no registered
     /// sessions there is nothing to kill, so the sweep must complete cleanly —
     /// returning early when tmux is unavailable, or reaping zero when it is.
     /// What: builds a fresh in-memory `DaemonState` (no sessions) and runs the

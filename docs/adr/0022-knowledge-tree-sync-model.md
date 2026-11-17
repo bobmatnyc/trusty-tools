@@ -165,3 +165,5 @@ No prior decisions contradict this choice. The decision extends ADR-0008's ident
 **Implementation sequence:** This decision does not block DOC-56's Phases 1–4 (config-only sync to the monorepo). Those phases are fully specified and shippable without knowledge-tree sync. Phase 5 (knowledge trees, if Option B is chosen) is deferred; this ADR closes the question so Phase 1–4 can proceed with architectural clarity.
 
 **Future reversal:** If Option B is preferred later, the decision is revisable: knowledge trees can be consolidated into the monorepo by mirroring per-store repos into `knowledge/<tree>/`, and the sync story can unify. This ADR is not a permanent lock; it is a decision made on available evidence, revisable if evidence changes (e.g., if append-only ledger merge conflicts prove manageable, or if UX simplification of a single repo outweighs size concerns).
+
+**Amendment 2026-11-03** (SPEC-OKF-01 r7.1, accepted 2026-11-03, §2.12, §4.11, §6.1 item 7; #10744). The sync rule adds two constraints. Sync excludes `_sources/ops/`. Sync never commits while the bundle lock is held.

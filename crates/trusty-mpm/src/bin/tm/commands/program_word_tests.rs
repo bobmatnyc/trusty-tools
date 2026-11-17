@@ -1,6 +1,9 @@
 //! #8735: the shared program-word resolver.
 
-use super::{COMMAND_WRAPPERS, GRAMMARS, precommand_index, resolve_program_word, sample_operand};
+use super::{
+    COMMAND_WRAPPERS, GRAMMARS, precommand_index, program_index, resolve_program_word,
+    sample_operand,
+};
 
 /// The program word `command` resolves to, or `None` when resolution fails.
 fn program(command: &str) -> Option<String> {
@@ -136,4 +139,22 @@ fn precommand_index_keeps_the_legacy_none_answers() {
     assert_eq!(index("env -i make"), None);
     assert_eq!(index("sudo"), None);
     assert_eq!(index("timeout make"), None);
+}
+
+/// #10665 r2: `env`'s value flags are skipped to the program, `xargs` stays
+/// the program, and an unmeasurable option still fails.
+#[test]
+fn env_value_flags_are_skipped_to_the_program() {
+    for (command, want) in [
+        ("env -u TMUX tmux kill-server", Some("tmux")),
+        ("env --unset TMUX tmux kill-server", Some("tmux")),
+        ("env --unset=TMUX tmux kill-server", Some("tmux")),
+        ("sudo -u root env -u TMUX tmux ls", Some("tmux")),
+        ("xargs -n 1 tmux", Some("xargs")),
+        ("env -S 'tmux kill-server'", None),
+    ] {
+        let argv = shlex::split(command).expect("test rows lex");
+        let got = program_index(&argv).map(|at| argv[at].as_str());
+        assert_eq!(got, want, "{command}");
+    }
 }

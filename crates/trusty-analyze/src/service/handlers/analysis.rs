@@ -6,8 +6,11 @@
 //! hotspots, smell detection, quality grades, refactor suggestions, and
 //! on-demand external linting via `ToolRegistry`.
 //!
-//! What: Six public handlers plus supporting helpers. All are stateless
-//! analysis passes over the chunk corpus fetched from trusty-search.
+//! What: Six public handlers plus supporting helpers. All are analysis passes
+//! over the chunk corpus fetched from trusty-search. #10781: the three
+//! review-path methods (`complexity_hotspots`, `smells`, `quality_report`)
+//! take an optional scope (`analysis_scope`) and, unscoped, answer from the
+//! per-index cache (`service::analysis_cache`) instead of walking in-request.
 //!
 //! #6287: each handler takes `(&AnalyzerAppState, Request)` rather than axum's
 //! `State`/`Path`/`Query` extractors. The path segment and the query string
@@ -23,8 +26,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+use super::analysis_scope::{fetch_scoped, ScopeParams};
 use crate::core::complexity::{compute_complexity_for, detect_smells_with_thresholds};
 use crate::core::{analyze_refactor, quality, RefactorSuggestion, Severity};
+use crate::service::analysis_cache::HOTSPOT_CACHE_CAP;
 use crate::service::events::{fetch_chunks, AnalyzerAppState, ApiError};
 use crate::types::complexity::CodeSmell;
 use crate::types::CodeChunk;
@@ -39,11 +44,31 @@ pub struct IndexRequest {
     pub index_id: String,
 }
 
+/// Params for `analyze.quality`.
+///
+/// #10781: `IndexRequest` plus the optional scope; kept separate so
+/// `complexity_distribution` and `scip_status` gain no scope they ignore.
+#[derive(Debug, Deserialize)]
+pub struct QualityRequest {
+    pub index_id: String,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
+    #[serde(flatten)]
+    pub scope: ScopeParams,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HotspotsRequest {
     pub index_id: String,
     #[serde(default = "default_top_n")]
     pub top_n: usize,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
+    /// #10781: optional `paths` / `path_prefix`.
+    #[serde(flatten)]
+    pub scope: ScopeParams,
 }
 
 fn default_top_n() -> usize {
@@ -87,6 +112,29 @@ pub struct SmellsRequest {
     /// keep response size bounded. Set to false to include full source text.
     #[serde(default = "default_omit_content")]
     pub omit_content: bool,
+    /// #10781: opt in to `-32007` `analysis_warming` on a cold cache.
+    #[serde(default)]
+    pub allow_warming: bool,
+    /// #10781: optional `paths` / `path_prefix`.
+    #[serde(flatten)]
+    pub scope: ScopeParams,
+}
+
+// #10781 `allow_warming`: an unscoped call on a cold cache waits for the one
+// shared corpus walk and returns its result, as before #10781. With
+// `allow_warming: true` it waits at most `CacheConfig::warm_wait`, then
+// answers `-32007` with `data.kind: "analysis_warming"` and
+// `retryable: true`. A warm or stale cache answers at once either way.
+// Test: `an_old_shape_cold_call_waits_for_the_walk`,
+// `an_opted_in_cold_call_answers_warming`,
+// `concurrent_cold_calls_share_one_walk`.
+
+/// Merge `extra`'s keys into the object `body` (#10781: additive fields).
+fn with_fields(mut body: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+    if let (Some(map), serde_json::Value::Object(extra)) = (body.as_object_mut(), extra) {
+        map.extend(extra);
+    }
+    body
 }
 
 /// A smell result with optionally-stripped content.
@@ -134,17 +182,47 @@ impl SmellItem {
     }
 }
 
+/// `analyze.complexity_hotspots` — the top-N chunks by cyclomatic complexity.
+///
+/// Why (#10781): the unscoped call walked the whole corpus per request.
+/// What: scoped, ranks only the scope's chunks and echoes `scope`. Unscoped,
+/// serves the cached top [`HOTSPOT_CACHE_CAP`] truncated to `top_n` — the
+/// same rows the direct ranking returns — plus `cache`; a `top_n` above the
+/// cap adds `hotspots_capped_at`. A cold cache follows `allow_warming`.
+/// Test: `scoped_hotspots_fetch_only_the_scope`,
+/// `unscoped_results_match_the_uncached_computation`.
 pub async fn complexity_hotspots(
     state: &AnalyzerAppState,
     req: HotspotsRequest,
 ) -> Result<serde_json::Value, ApiError> {
-    let chunks = fetch_chunks(state, &req.index_id).await?;
-    let hotspots = quality::complexity_hotspots(&chunks, req.top_n);
-    Ok(serde_json::json!({
+    if let Some(scope) = req.scope.resolve()? {
+        let scoped = fetch_scoped(state, &req.index_id, &scope).await?;
+        let hotspots = quality::complexity_hotspots(&scoped.chunks, req.top_n);
+        return Ok(serde_json::json!({
+            "index_id": req.index_id,
+            "top_n": req.top_n,
+            "hotspots": hotspots,
+            "scoped": true,
+            "scope": scope.echo(&scoped.unmatched),
+        }));
+    }
+    let hit = state
+        .analysis_cache
+        .get_with(&state.search, &req.index_id, req.allow_warming)
+        .await?;
+    let cached = &hit.entry.analysis.hotspots;
+    let hotspots: Vec<&quality::HotspotItem> = cached.iter().take(req.top_n).collect();
+    let mut body = serde_json::json!({
         "index_id": req.index_id,
         "top_n": req.top_n,
         "hotspots": hotspots,
-    }))
+        "scoped": false,
+        "cache": hit.meta(),
+    });
+    if req.top_n > HOTSPOT_CACHE_CAP && cached.len() >= HOTSPOT_CACHE_CAP {
+        body["hotspots_capped_at"] = serde_json::json!(HOTSPOT_CACHE_CAP);
+    }
+    Ok(body)
 }
 
 /// `analyze.complexity_distribution` — the full A–F histogram over the whole
@@ -184,24 +262,48 @@ pub async fn complexity_distribution(
 /// optionally strips raw source text from each result. Returns a pagination
 /// envelope (`total`, `returned`, `truncated`) so callers know when to
 /// paginate.
-/// Test: `smells_pagination_*` and `smells_omit_content_*` unit tests below;
-/// integration coverage in `service/rpc_tests.rs`.
+///
+/// #10781: scoped, detects over the scope's chunks and adds `scoped`/`scope`;
+/// unscoped, pages the cached smell list and adds `scoped`/`cache`; a cold
+/// cache follows `allow_warming`.
+/// Test: `smells_carry_their_detected_categories`;
+/// `unscoped_results_match_the_uncached_computation`.
 pub async fn smells(
     state: &AnalyzerAppState,
     req: SmellsRequest,
 ) -> Result<serde_json::Value, ApiError> {
-    let chunks = fetch_chunks(state, &req.index_id).await?;
-    let smelly = quality::smelly_chunks_with_smells(&chunks);
+    if let Some(scope) = req.scope.resolve()? {
+        let scoped = fetch_scoped(state, &req.index_id, &scope).await?;
+        let smelly = quality::smelly_chunks_with_smells(&scoped.chunks);
+        let body = smells_page(&req, &smelly);
+        return Ok(with_fields(
+            body,
+            serde_json::json!({ "scoped": true, "scope": scope.echo(&scoped.unmatched) }),
+        ));
+    }
+    let hit = state
+        .analysis_cache
+        .get_with(&state.search, &req.index_id, req.allow_warming)
+        .await?;
+    let body = smells_page(&req, &hit.entry.analysis.smells);
+    Ok(with_fields(
+        body,
+        serde_json::json!({ "scoped": false, "cache": hit.meta() }),
+    ))
+}
+
+/// The pre-#10781 `analyze.smells` body over an already-detected list.
+fn smells_page(req: &SmellsRequest, smelly: &[(CodeChunk, Vec<CodeSmell>)]) -> serde_json::Value {
     let total = smelly.len();
     let page: Vec<SmellItem> = smelly
-        .into_iter()
+        .iter()
         .skip(req.offset)
         .take(req.limit)
-        .map(|(c, smells)| SmellItem::from_chunk(&c, smells, !req.omit_content))
+        .map(|(c, smells)| SmellItem::from_chunk(c, smells.clone(), !req.omit_content))
         .collect();
     let returned = page.len();
     let truncated = (req.offset + returned) < total;
-    Ok(serde_json::json!({
+    serde_json::json!({
         "index_id": req.index_id,
         "total": total,
         "offset": req.offset,
@@ -209,7 +311,7 @@ pub async fn smells(
         "returned": returned,
         "truncated": truncated,
         "chunks": page,
-    }))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -304,12 +406,39 @@ fn min_severity_label(s: &Severity) -> &'static str {
     }
 }
 
+/// `analyze.quality` — the aggregate grade.
+///
+/// Why (#10781): the unscoped call walked the whole corpus per request.
+/// What: the `QualityReport` fields as before, plus `scoped` and either
+/// `scope` (the scope's own grade) or `cache` (the cached corpus grade). A
+/// caller wanting both runs one scoped and one unscoped call. A cold cache
+/// follows `allow_warming`.
+/// Test: `scoped_quality_grades_only_the_scope`,
+/// `unscoped_results_match_the_uncached_computation`.
 pub async fn quality_report(
     state: &AnalyzerAppState,
-    req: IndexRequest,
-) -> Result<quality::QualityReport, ApiError> {
-    let chunks = fetch_chunks(state, &req.index_id).await?;
-    Ok(quality::aggregate_quality(&chunks))
+    req: QualityRequest,
+) -> Result<serde_json::Value, ApiError> {
+    let to_value = |r: &quality::QualityReport| {
+        serde_json::to_value(r).map_err(|e| ApiError::internal(format!("encode quality: {e}")))
+    };
+    if let Some(scope) = req.scope.resolve()? {
+        let scoped = fetch_scoped(state, &req.index_id, &scope).await?;
+        let body = to_value(&quality::aggregate_quality(&scoped.chunks))?;
+        return Ok(with_fields(
+            body,
+            serde_json::json!({ "scoped": true, "scope": scope.echo(&scoped.unmatched) }),
+        ));
+    }
+    let hit = state
+        .analysis_cache
+        .get_with(&state.search, &req.index_id, req.allow_warming)
+        .await?;
+    let body = to_value(&hit.entry.analysis.quality)?;
+    Ok(with_fields(
+        body,
+        serde_json::json!({ "scoped": false, "cache": hit.meta() }),
+    ))
 }
 
 /// Params for the on-demand diagnostics method.

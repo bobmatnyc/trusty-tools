@@ -86,6 +86,8 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
         // #7519: template files and the startup sweep stay in the temp dir.
         template_root: tmp.path().join("tmp"),
+        // #10459 PR1: the shipped default; ticket tests turn it on.
+        mint_enabled: false,
     };
     // #9326: the build default is `file` where no Keychain is compiled; pin
     // `keychain` (the in-memory double here) so every host runs one path.
@@ -156,6 +158,15 @@ impl Fixture {
         // own table may run this test under Claude Code, so the caller is
         // placed under plain parents in a fake one.
         state.grants = person_grants();
+        // #10459 P1: never the account home's Architect launch records.
+        state.architect_records = None;
+        // #10998: never the OS Keychain; a copy test that reads an item
+        // gives its own fake.
+        state.keychain_item_read = |_, _| {
+            Err(SecretsError::UnknownBackend {
+                backend: BackendId::KEYCHAIN.to_string(),
+            })
+        };
         state
     }
 
@@ -233,7 +244,7 @@ fn fixed_error(response: &RpcResponse, method: &'static str) -> ErrorKind {
     kind
 }
 
-const ALL_KINDS: [ErrorKind; 37] = ErrorKind::ALL;
+const ALL_KINDS: [ErrorKind; 39] = ErrorKind::ALL;
 
 fn wire(response: &RpcResponse) -> String {
     serde_json::to_string(response).unwrap()
@@ -725,6 +736,7 @@ async fn server_doctor_reports_backends_and_paths_only() {
             ("keeper", false, String::new(), Some(cli)),
             // #9069: the sync target, listed after the stores.
             ("github-actions", false, String::new(), Some(cli)),
+            ("vercel", false, String::new(), Some(cli)),
         ]
     );
     assert!(
@@ -1254,7 +1266,7 @@ async fn server_project_path_must_be_an_absolute_directory() {
 /// Test: itself.
 #[test]
 fn error_kind_all_lists_every_variant_once() {
-    const ARMS: usize = 37;
+    const ARMS: usize = 39;
     fn index(kind: ErrorKind) -> usize {
         match kind {
             ErrorKind::InvalidParams => 0,
@@ -1302,6 +1314,10 @@ fn error_kind_all_lists_every_variant_once() {
             ErrorKind::GrantLimitReached => 35,
             // #9066: after `GrantLimitReached`.
             ErrorKind::BridgeRefused => 36,
+            // #10459: after `BridgeRefused`.
+            ErrorKind::AgentKeyDenied => 37,
+            // #10459 PR1: after `AgentKeyDenied`.
+            ErrorKind::TicketRefused => 38,
         }
     }
     assert_eq!(ErrorKind::ALL.len(), ARMS);
@@ -1315,12 +1331,12 @@ fn error_kind_all_lists_every_variant_once() {
 /// enum the trusty-secrets 0.1.2 accepted-break declaration covers only
 /// `Internal` 25 -> 29. A variant reordered, or inserted before `Internal`,
 /// moves a published value.
-/// What: `kind as i32` equals its pinned value for all 37 variants, and the
+/// What: `kind as i32` equals its pinned value for all 39 variants, and the
 /// table names every kind in `ErrorKind::ALL` exactly once.
 /// Test: itself.
 #[test]
 fn error_kind_discriminants_are_pinned() {
-    const PINNED: [(ErrorKind, i32); 37] = [
+    const PINNED: [(ErrorKind, i32); 39] = [
         (ErrorKind::InvalidParams, 0),
         (ErrorKind::ProjectInvalid, 1),
         (ErrorKind::ProjectUnresolved, 2),
@@ -1358,6 +1374,8 @@ fn error_kind_discriminants_are_pinned() {
         (ErrorKind::GrantRefused, 34),
         (ErrorKind::GrantLimitReached, 35),
         (ErrorKind::BridgeRefused, 36),
+        (ErrorKind::AgentKeyDenied, 37),
+        (ErrorKind::TicketRefused, 38),
     ];
     for (kind, value) in PINNED {
         assert_eq!(kind as i32, value, "{kind:?} moved from its pinned value");
@@ -1507,8 +1525,9 @@ fn server_resolver_errors_have_their_own_wire_kinds() {
         reason: SENTINEL,
     };
     let cases = [
-        (refused(), ErrorKind::AgentUseRefused),
-        (wrapped(refused()), ErrorKind::AgentUseRefused),
+        // #10459: a store refusal is always a per-key deny.
+        (refused(), ErrorKind::AgentKeyDenied),
+        (wrapped(refused()), ErrorKind::AgentKeyDenied),
         (wrapped(missing), ErrorKind::EnvResolutionFailed),
         (
             SecretsError::InvalidEnvEntry {
