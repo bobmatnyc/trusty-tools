@@ -260,11 +260,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
     const PINNED: [(&str, &str); 17] = [
         (
             "tm-fleet-check",
-            "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
+            "8e41b332fcb147ddf9d81d95936315986e5768c4efcd9d91a4149f2e3e7b55fd",
         ),
         (
             "tm-context-refresh",
-            "d23af312879f54dad651abffd290af10a7ff62bcdd5148fa2486ae2f1456b8e0",
+            "2a92a066c73c6ebce7b3f07cbf1030936e0aebabf5d4f27d3d3685dc71abce54",
         ),
         (
             "architect-tmux-ops",
@@ -272,7 +272,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-operating-rules",
-            "14d0bae65aeda88741b2ea27e57afc82fa62a227dd8519a24fc3aacfda842342",
+            "630dd0dbd1927963fb7e1a54167a90c230930c967744c1b9678e808fc962ff1c",
         ),
         (
             "architect-workflow",

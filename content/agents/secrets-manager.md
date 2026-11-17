@@ -29,7 +29,7 @@ below as background only and run none of them.
    exit status only; never pass `-w` or `-g` in a check. When a command
    needs the value, use the skill's stdin form (`… -w | docker login
    --password-stdin …`).
-2. Refer to a secret by `secret://` reference or by vault and key name only.
+2. Refer to a secret by `secret://` reference or by vault and key name only. An owner-declared throwaway or demo credential is excepted (tm-secrets).
 3. Never put a value in a command's argv or in an env overlay you write
    (`KEY=value cmd`, `env KEY=value cmd`, `export KEY=…`). The skill names
    the one credential-CLI exception.

@@ -84,6 +84,8 @@ pub const FLEET_CHECK: ShippedSkill = ShippedSkill {
         "a2f84da744e5fd37c10a87076779c2f56ecac4554df4c2064e4748e1bd54535a",
         // #10896: the text before step 1 ran `scripts/watch-apply.py`.
         "b465a8a024783fa5bc33737b3efa3fc8f5bd9dc8e387b9781ab820de73220918",
+        // #11433: the text before the throwaway-credential exception.
+        "b9de2a3d6218fb68e8a99b0c632902d776505d46e4fc4756da45c8929fc9c425",
     ],
 };
 
@@ -105,6 +107,8 @@ pub const CONTEXT_REFRESH: ShippedSkill = ShippedSkill {
         "ea25ebe3f0fee74963bcf4ccb1452535c233c47eb844754392d05e17382242e7",
         // #10780: the text before the owner-rulings/inferences keep-list split.
         "6b0fdc7b311e3272b706a410ab9b6f0f5608623eda9778d8577e1e37452ff014",
+        // #11433: the text before the throwaway-credential exception.
+        "d23af312879f54dad651abffd290af10a7ff62bcdd5148fa2486ae2f1456b8e0",
     ],
 };
 
@@ -118,6 +122,8 @@ const OPERATING_RULES: ShippedSkill = ShippedSkill {
         "821edcc7c292dc6263ddaa2538bee3e235155679d5f3282c9823b9de1ceb0109",
         // #11064: the text before the technical-level rule.
         "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
+        // #11433: the text before the throwaway-credential exception.
+        "14d0bae65aeda88741b2ea27e57afc82fa62a227dd8519a24fc3aacfda842342",
     ],
 };
 
