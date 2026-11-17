@@ -199,7 +199,8 @@ pub(crate) async fn run_ctrl_turn_via_rest(
     ];
     let local_cfg = &mcp_cfg.local_inference;
     let intent_class = crate::intent::classify_intent(user_input);
-    let local_qualifies = local_cfg.enabled
+    // #10978: `route_enabled` is off under a provider lock.
+    let local_qualifies = crate::local_inference::route_enabled(local_cfg)
         && crate::local_inference::qualifies_for_local_inference(&intent_class, user_input)
         && crate::local_inference::is_ollama_available_cached(&local_cfg.ollama_host).await;
     let effective_model =
