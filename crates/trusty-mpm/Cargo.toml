@@ -463,6 +463,8 @@ trusty-common = { workspace = true, features = [
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+# SM per-call cost estimates (`core::sm::providers::pricing`).
+llm-prices.workspace = true
 toml.workspace = true
 # #7521: `tm secrets` is a client of the trusty-secrets socket. The client
 # (`server::OnDemandSecrets`) lives behind `server`, which implies `store`
