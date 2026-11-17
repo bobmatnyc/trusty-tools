@@ -1,13 +1,25 @@
 [package]
 name = "trusty-browser"
 version = "0.7.0"
-description = "Trusty Browser broker and MCP server (Rust port of the Python 0.7.0 package)"
+description = "Trusty Browser broker and MCP server: lets local AI agents drive your own Chrome profile through paired, per-workflow grants"
+readme = "README.md"
+homepage = "https://trustytools.dev"
+keywords = ["browser", "chrome", "mcp", "automation", "agents"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
 rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-publish = false
+# The embedded extension (`extension/**`, read by `include_bytes!`) ships;
+# the parity fixtures and capture scripts under `tests/` stay in the repo.
+include = [
+    "/src/**/*",
+    "/extension/**/*",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+]
 
 [features]
 # Exposes the enrollment `HostCheck` seam to integration tests only; never
