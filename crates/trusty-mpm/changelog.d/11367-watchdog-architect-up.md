@@ -1,0 +1,2 @@
+Fixed
+- The poller's watchdog now relaunches a dead Architect with `tm architect up`, the bound launch path, instead of `session-relaunch.sh`, so the new `claude` has a launch record and the pm-guard keeps its anchor exemptions. The relaunch fails closed unless `up` exits 0, launches into the Architect's own session, and a following `up --dry-run` sees it live and bound. `TM_BIN` overrides the `tm` lookup; the 1800 s debounce and 2-failure cap are unchanged.
