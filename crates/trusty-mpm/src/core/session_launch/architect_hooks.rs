@@ -8,14 +8,19 @@
 //! additions take. [`architect_pm_guard_hook_value`] is the exec-form
 //! `PreToolUse` group with `onFailure: "block"`; [`push_prompt_hook_groups`]
 //! appends the exec-form `UserPromptSubmit` and `UserPromptExpansion` groups
-//! when `[architect] direct_commands = true`. PM and agent sessions never
-//! reach this module.
+//! when `[architect] direct_commands = true`. #10960:
+//! [`push_standing_rules_groups`] registers `tm hook --standing-rules` on
+//! `SessionStart` and `UserPromptSubmit`. PM and agent sessions never reach
+//! this module.
 //! Test: `architect_hook_settings_golden`, `pm_session_registers_no_ticket_handler`
 //! in `architect_hooks_tests.rs`.
 
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
+
+// #10960: the standing-rules argv tail, defined once in the lower layer.
+pub(super) use crate::core::standalone::hooks::build_tree::STANDING_RULES_SUFFIX;
 
 /// The registered argv after `argv[0]`, the absolute `tm` path.
 // #10459: must equal trusty-secrets' `HOOK_ARGV_TAIL` (PR 1, `ticket_checks.rs`).
@@ -128,6 +133,45 @@ pub(super) fn push_prompt_hook_groups(hooks: &mut Map<String, Value>, exe: &Path
             groups.push(group);
         }
     }
+}
+
+/// Append the Architect's standing-rules groups onto `hooks` (#10960).
+///
+/// Why: the owner's standing rules must sit in resident context after every
+/// `/clear` and resume, and stay there turn after turn; a `SessionStart` group
+/// (matcher `""` covers startup, resume, clear and compact) and a
+/// `UserPromptSubmit` group are the two events whose `additionalContext`
+/// Claude Code adds to the model's context.
+/// What: one empty-matcher group invoking `<exe> hook --standing-rules`, 10 s
+/// timeout, no `onFailure`, appended after every existing group on each of
+/// [`crate::core::standing_rules::STANDING_RULES_EVENTS`]; deduped by deep
+/// equality. Only the Architect branch of
+/// [`super::project_hooks::project_managed_hook_additions_for_profile`] calls
+/// it, so PM and agent sessions never register it.
+/// Test: `architect_standing_rules_groups_are_architect_only`,
+/// `architect_hook_settings_golden`.
+pub(super) fn push_standing_rules_groups(hooks: &mut Map<String, Value>, exe: &Path) {
+    let command = format!("{}{STANDING_RULES_SUFFIX}", exe.display());
+    let group = json!({
+        "matcher": "",
+        "hooks": [{ "type": "command", "command": command, "timeout": PM_GUARD_TIMEOUT_SECS }],
+    });
+    for event in crate::core::standing_rules::STANDING_RULES_EVENTS {
+        let target = hooks
+            .entry(event.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(groups) = target.as_array_mut()
+            && !groups.contains(&group)
+        {
+            groups.push(group.clone());
+        }
+    }
+}
+
+/// Recognise a standing-rules hook command (#10960), so the strip replaces a
+/// stale one and removes it when the project stops being an Architect.
+pub(super) fn is_standing_rules_hook_command(cmd: &str) -> bool {
+    cmd.ends_with(STANDING_RULES_SUFFIX)
 }
 
 #[cfg(test)]

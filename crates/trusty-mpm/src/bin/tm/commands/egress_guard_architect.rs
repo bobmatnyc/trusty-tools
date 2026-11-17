@@ -4,6 +4,11 @@
 //! its own session may reach Slack, Gmail, Notion and Google Chat directly.
 //! It supersedes the D9a "no Architect carve-out" ruling (#10416) for the
 //! Architect's main thread only; PMs, agents and subagents stay denied.
+//! #11273 (owner ruling 2026-11-14): this launch-record lift is the one path
+//! to a family send or write and to a channel Bash command; a main session's
+//! family reads pass through `egress_guard_main_read` without the record, and
+//! an Architect-stamped main thread that fails the record is told to run
+//! `tm fleet bind` ([`unbound_hint`]).
 //! What: [`lift`] runs on the guard's verdict after the #8878 trust-anchor
 //! floor. It judges only an `egress-family` deny (an MCP or MCP-resource tool
 //! of a family) and an `egress-bash` deny whose command names a channel host
@@ -39,7 +44,9 @@ use crate::commands::egress_guard_bash::{
 };
 use crate::commands::egress_guard_families::{Classification, FamilyTable};
 use crate::commands::hook_stdin::HookStdinError;
-use crate::commands::pm_guard_architect_reason::architect_main_thread;
+use crate::commands::pm_guard_architect_reason::{
+    NotArchitect, architect_main_thread, with_identity,
+};
 use crate::commands::pm_guard_trust_anchor::HookEnv;
 
 /// The check slug of an MCP family deny.
@@ -87,7 +94,7 @@ impl ArchitectAllowed {
 
 /// `raw` with every byte outside `[A-Za-z0-9._:-]` dropped, capped at
 /// [`MAX_FIELD`]; `-` when nothing is left.
-fn field(raw: &str) -> String {
+pub(crate) fn field(raw: &str) -> String {
     let kept: String = raw
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
@@ -132,6 +139,34 @@ fn liftable_family(check: &str, payload: &Value, table: &FamilyTable) -> Option<
     }
 }
 
+/// `first` with a `tm fleet bind` hint when an Architect-stamped main thread
+/// failed the launch-record identity (#11273).
+///
+/// Why: owner ruling 2026-11-14 — sends and writes need the tm launch
+/// record, so an unbound Architect is told how to bind; its reads pass
+/// through `egress_guard_main_read`.
+/// What: a deny unchanged for a subagent, an unknown thread or a session
+/// with no Architect stamp; otherwise the deny with its check kept and the
+/// failed identity check and the bind step appended. Never an allow.
+/// Test: `unbound_architect_send_is_denied_and_told_to_bind_11273`.
+fn unbound_hint(first: Verdict, why: NotArchitect) -> Verdict {
+    let Verdict::Deny { check, reason } = first else {
+        return first;
+    };
+    if matches!(
+        why,
+        NotArchitect::Subagent | NotArchitect::UnknownThread | NotArchitect::NoArchitectStamp
+    ) {
+        return Verdict::Deny { check, reason };
+    }
+    let reason = format!(
+        "{} Run `tm fleet bind` in the Architect's session to bind it to its tm launch \
+         record; until then only its family reads pass (#11273).",
+        with_identity(reason, why)
+    );
+    Verdict::Deny { check, reason }
+}
+
 /// Lift a family or Bash channel deny for the Architect's main thread.
 ///
 /// Why / What: see the module doc. `config` is called only for a judged
@@ -156,8 +191,8 @@ pub(crate) fn lift(
         return (first, None);
     };
     // #10447: the floor's identity predicate; any failed check keeps the deny.
-    if architect_main_thread(payload, env, config).is_err() {
-        return (first, None);
+    if let Err(why) = architect_main_thread(payload, env, config) {
+        return (unbound_hint(first, why), None);
     }
     let text = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or("");
     let allowed = ArchitectAllowed {
@@ -201,11 +236,29 @@ pub(crate) fn audited(
     path: Option<&Path>,
     time: &str,
 ) -> Verdict {
-    let (Verdict::Allow, Some(allowed)) = (&verdict, allowed) else {
+    let line = allowed.map(|allowed| allowed.audit_line(time));
+    audited_line(verdict, line, path, "Architect call (#10447)")
+}
+
+/// [`audited`] over a ready audit line; `what` names the allow in the deny.
+///
+/// Why: #11194's PM owner-DM allow is audited in the same file, with the
+/// same rule — no line written, no allow.
+/// What: `verdict` unchanged unless it is [`Verdict::Allow`] and `line` is
+/// set; then `line` is appended to `path`, and a `None` path or a failed
+/// write is an [`AUDIT_CHECK`] deny.
+/// Test: `architect_allow_needs_its_audit_line`, `pm_dm_allow_needs_its_audit_line`.
+pub(crate) fn audited_line(
+    verdict: Verdict,
+    line: Option<String>,
+    path: Option<&Path>,
+    what: &str,
+) -> Verdict {
+    let (Verdict::Allow, Some(line)) = (&verdict, line) else {
         return verdict;
     };
     let written = match path {
-        Some(path) => append(path, &allowed.audit_line(time)).map_err(|err| err.kind().to_string()),
+        Some(path) => append(path, &line).map_err(|err| err.kind().to_string()),
         None => Err("the trusty-mpm data directory is unknown".to_owned()),
     };
     match written {
@@ -213,7 +266,7 @@ pub(crate) fn audited(
         Err(why) => Verdict::Deny {
             check: AUDIT_CHECK,
             reason: format!(
-                "tm hook --egress-guard would allow this Architect call (#10447), but its audit \
+                "tm hook --egress-guard would allow this {what}, but its audit \
                  line could not be written ({why}), so it denies it. Fix the trusty-mpm data \
                  directory and retry."
             ),

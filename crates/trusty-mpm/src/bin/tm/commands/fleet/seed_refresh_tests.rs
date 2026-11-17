@@ -164,3 +164,158 @@ fn the_il_schedule_is_seeded_and_an_edited_copy_is_kept() {
         "{steps:?}"
     );
 }
+
+/// The core fleet scripts and the symbol each must name, written out here so
+/// the deploy tests compile against the pre-#11058 code.
+const CORE_WIRING: &[(&str, &str)] = &[
+    ("scripts/fleet-poll.py", "owner_answer_alerts"),
+    ("scripts/fleet-classify.py", "\"owner_answer\""),
+];
+
+/// #11058: a kept core script with its symbol removed gets a WARNING step that
+/// names the file, the symbol and both remedies, and is still not overwritten.
+#[test]
+fn an_edited_poller_without_owner_answer_wiring_is_warned_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for &(dest, symbol) in CORE_WIRING {
+        let edited = shipped(dest).replace(symbol, "removed_by_the_owner");
+        assert_ne!(edited, shipped(dest), "{dest} does not name {symbol}");
+        std::fs::write(dir.join(dest), &edited).unwrap();
+        let steps =
+            super::super::seed::deploy_with(&dir, seed(), &refresh::shipped_before).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join(dest)).unwrap(), edited);
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::Skipped(t)
+                if t.starts_with(&format!("WARNING {dest} lacks "))
+                    && t.contains(&format!("`{symbol}`"))
+                    && t.contains("re-run `tm fleet init`")
+                    && t.contains(&format!("merge `{symbol}`")))),
+            "{dest}: {steps:?}"
+        );
+        std::fs::write(dir.join(dest), shipped(dest)).unwrap();
+    }
+}
+
+/// #11058: a kept core script that still names its symbol gets no WARNING.
+#[test]
+fn an_edited_poller_with_owner_answer_wiring_is_not_warned_11058() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for &(dest, _) in CORE_WIRING {
+        let edited = format!("{}\n# the owner's local tweak\n", shipped(dest));
+        std::fs::write(dir.join(dest), &edited).unwrap();
+    }
+    let steps = super::super::seed::deploy_with(&dir, seed(), &refresh::shipped_before).unwrap();
+    for &(dest, _) in CORE_WIRING {
+        assert!(
+            steps.iter().any(|s| matches!(s, Step::Skipped(t)
+                if t.starts_with(dest) && t.contains("custom copy kept"))),
+            "{dest} was not kept: {steps:?}"
+        );
+    }
+    assert!(
+        !steps
+            .iter()
+            .any(|s| matches!(s, Step::Skipped(t) if t.starts_with("WARNING scripts/fleet-"))),
+        "{steps:?}"
+    );
+}
+
+/// #10608: an upgrade over a configured instance leaves every `local/` file
+/// byte-identical, even one equal to an earlier shipped template, refreshes an
+/// unedited earlier framework script, and a repeat upgrade changes nothing.
+#[test]
+fn an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let script = "scripts/fleet-poll.py";
+    let old = |dest: &str| format!("an earlier shipped copy of {dest}\n");
+    let locals: Vec<String> = seeded_files()
+        .into_iter()
+        .map(|f| f.dest)
+        .filter(|d| d.starts_with("local/"))
+        .collect();
+    assert!(locals.len() >= 10, "{locals:?}");
+    for dest in locals.iter().map(String::as_str).chain([script]) {
+        std::fs::write(dir.join(dest), old(dest)).unwrap();
+    }
+    // Every destination's earlier bytes are a known shipped copy.
+    let history = |d: &str, b: &[u8]| b == old(d).as_bytes();
+    for _ in 0..2 {
+        super::super::seed::deploy_with(&dir, seed(), &history).unwrap();
+        for dest in &locals {
+            assert_eq!(
+                std::fs::read_to_string(dir.join(dest)).unwrap(),
+                old(dest),
+                "{dest}: an upgrade replaced instance-owned content"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join(script)).unwrap(),
+            shipped(script)
+        );
+    }
+}
+
+/// #10608: two `init` runs over a configured instance leave the dashboard
+/// questions, the user's `~/.claude` settings and conversations, a non-seeded
+/// skill and an instance-edited shipped skill byte-identical. `HOME` is the
+/// fixture's injected scratch home; no process env is touched.
+#[test]
+fn a_repeat_init_keeps_questions_claude_home_and_skills_10608() {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    let home = fx.home();
+    let edited_skill = seeded_files()
+        .into_iter()
+        .map(|f| f.dest)
+        .find(|d| d.starts_with(".claude/skills/"))
+        .expect("a seeded skill");
+    let open = r#"{"data":{"state":"open","title":"Pick a host"},"id":"Q1","sv":1,"version":1}"#;
+    let answered = r#"{"data":{"answer":"EVO","state":"answered","title":"Pick a build host"},"id":"Q2","sv":1,"version":2}"#;
+    let kept: Vec<(std::path::PathBuf, String)> = vec![
+        (
+            dir.join("local/owner-queue/questions.jsonl"),
+            format!("{open}\n{answered}\n"),
+        ),
+        (
+            home.join(".claude/settings.json"),
+            "{\"model\":\"opus\",\"theme\":\"dark\"}\n".to_owned(),
+        ),
+        (
+            home.join(".claude/projects/x/conv.jsonl"),
+            "{\"type\":\"user\",\"message\":\"hello\"}\n".to_owned(),
+        ),
+        (
+            dir.join(".claude/skills/coaching/SKILL.md"),
+            "# Coaching\n\nPlain English, minimal words.\n".to_owned(),
+        ),
+        (
+            dir.join(&edited_skill),
+            format!(
+                "{}\n<!-- the instance's own note -->\n",
+                shipped(&edited_skill)
+            ),
+        ),
+    ];
+    for (path, text) in &kept {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    for run in 0..2 {
+        fx.init().unwrap();
+        for (path, text) in &kept {
+            assert_eq!(
+                &std::fs::read_to_string(path).unwrap(),
+                text,
+                "run {run}: {} changed",
+                path.display()
+            );
+        }
+    }
+}

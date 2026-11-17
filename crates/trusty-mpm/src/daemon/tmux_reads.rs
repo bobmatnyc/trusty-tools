@@ -85,12 +85,12 @@ impl TmuxDriver {
         Ok(sessions)
     }
 
-    /// List every pane on the server as `session_name pane_current_command`.
+    /// List every pane as `session_name pane_current_command pane_current_path`.
     ///
     /// Why: session auto-discovery scans all panes to find ones running Claude
     /// Code; `list-panes -a` reports every pane across every session in one
     /// call, so the daemon need not iterate sessions itself.
-    /// What: runs `tmux list-panes -a -F "#{session_name} #{pane_current_command}"`
+    /// What: runs `tmux list-panes -a -F "#{session_name} #{pane_current_command} #{pane_current_path}"`
     /// directly (this cross-session form has no `core::tmux::TmuxCommand`
     /// variant) and returns its raw stdout. An empty tmux server (`no server
     /// running`) yields an empty string rather than an error.
@@ -102,7 +102,9 @@ impl TmuxDriver {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name} #{pane_current_command}",
+                // #10368: the pane's own cwd, so discovery never reads
+                // another pane's directory.
+                "#{session_name} #{pane_current_command} #{pane_current_path}",
             ])
             .output()?;
         if !output.status.success() {

@@ -21,7 +21,7 @@ use std::io::{self, Read};
 use std::os::unix::io::FromRawFd;
 use std::process::Output;
 
-use super::{OwnedFd, environ, pipe_cloexec, resolve_disclaim_fn, wait_for};
+use super::{OwnedFd, cloexec_default, environ, pipe_cloexec, resolve_disclaim_fn, wait_for};
 
 /// Spawn with stdout/stderr captured and TCC responsibility disclaimed.
 ///
@@ -108,6 +108,13 @@ pub(crate) fn spawn_capture_disclaimed(program: &str, args: &[String]) -> io::Re
                 // A non-zero return here is non-fatal: worst case the child
                 // is not disclaimed (today's behaviour), so we ignore it.
                 let _ = disclaim(&mut attr, 1);
+            }
+
+            // #10083: the child keeps only its opened/dup2'd stdio.
+            if let Err(e) = cloexec_default(&mut attr, &mut file_actions, &[]) {
+                libc::posix_spawnattr_destroy(&mut attr);
+                libc::posix_spawn_file_actions_destroy(&mut file_actions);
+                return Err(e);
             }
 
             let mut pid: libc::pid_t = 0;

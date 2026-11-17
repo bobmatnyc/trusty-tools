@@ -205,6 +205,18 @@ fn cli_parses_projects_status() {
     }
 }
 
+/// #10988: `tm projects decommission <name> [--json]` parses.
+#[test]
+fn cli_parses_projects_decommission() {
+    match projects_action(&["trusty-mpm", "projects", "decommission", "widget", "--json"]) {
+        ProjectsAction::Decommission { name, json } => {
+            assert_eq!(name, "widget");
+            assert!(json);
+        }
+        other => panic!("expected decommission, got {other:?}"),
+    }
+}
+
 // `config` subtree (§3.1/§6, #2120) parse + shared-suite tests live in the
 // sibling `tests_projects_config_tests.rs` (split out to stay under this
 // file's 500-SLOC production cap — that file's `_tests.rs` suffix gives it

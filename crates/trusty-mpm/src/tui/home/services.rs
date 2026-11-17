@@ -33,8 +33,9 @@ pub enum ServiceId {
 }
 
 /// How a tile's health is observed. Every kind uses an existing interface.
+// #11115: crate-internal; no caller outside trusty-mpm, so a new variant is no semver break
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbeKind {
+pub(crate) enum ProbeKind {
     /// One JSON-RPC `<method>` frame over the service's Unix socket.
     UdsHealth(&'static str),
     /// One JSON-RPC `<method>` frame answered with a
@@ -43,8 +44,7 @@ pub enum ProbeKind {
     ///
     /// Test: `the_console_row_reads_running_with_its_version_from_fleet_status`.
     UdsFleetStatus(&'static str),
-    /// One connect to the service's Unix socket, closed at once.
-    SocketConnect,
+    // #11115: `SocketConnect` removed; no service used it, found once crate-internal
     /// The service serves no Unix socket the TUI may dial, so it is not probed.
     ///
     /// Why (#10899): `tm tui` uses no native HTTP; services are reached over
@@ -113,7 +113,8 @@ impl ServiceId {
 
     /// How this service's health is observed (ported from the console's
     /// `detect/*.rs` connectors).
-    pub fn probe(self) -> ProbeKind {
+    // #11115: crate-internal, as `ProbeKind` is
+    pub(crate) fn probe(self) -> ProbeKind {
         match self {
             ServiceId::Search => ProbeKind::UdsHealth("search.health"),
             ServiceId::Memory => ProbeKind::UdsHealth("memory.health"),

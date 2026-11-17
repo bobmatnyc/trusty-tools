@@ -32,6 +32,9 @@ const BYPASS_ENV: &[&str] = &[
     "CLAUDE_MPM_SUB_AGENT",
 ];
 
+/// The launch stamp `tm` puts on a session it starts (#11273).
+pub(crate) const SESSION_PROFILE: &str = "TRUSTY_MPM_SESSION_PROFILE";
+
 /// A `tm hook --egress-guard` command with its data directory at `data`, every
 /// bypass variable stripped, then `env` applied on top.
 fn guard_command(data: &Path, env: &[(&str, &str)]) -> Command {
@@ -45,6 +48,9 @@ pub(crate) fn guard_command_in(home: &Path, data: &Path, env: &[(&str, &str)]) -
         .args(["--url", UNREACHABLE_DAEMON, "hook", "--egress-guard"])
         .env("TRUSTY_DATA_DIR_OVERRIDE", data)
         .env_remove("TRUSTY_NO_BUG_CAPTURE")
+        // #11273: a stamped runner would make every call a main session's;
+        // a case that wants a stamp passes it in `env`.
+        .env_remove(SESSION_PROFILE)
         .current_dir(data)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -185,6 +191,39 @@ fn egress_denies_subagent_payload() {
     .to_string();
     let out = run(subagent.as_bytes(), &[("CLAUDE_MPM_SUB_AGENT", "1")]);
     assert_denied(&out, "subagent payload");
+}
+
+/// 🔴 #11273: a stamped PM or Architect main session's family read passes
+/// with one audit line; the same read from its subagent, and a stamped
+/// session's send, stay denied.
+#[test]
+fn egress_main_session_read_passes_and_subagent_read_stays_denied_11273() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let read = "mcp__googlechat__list_spaces";
+    for stamp in ["pm", "supervisor"] {
+        let env = [(SESSION_PROFILE, stamp)];
+        assert_allowed(&run_in(tmp.path(), &payload(read), &env), stamp);
+        let sub = serde_json::json!({
+            "session_id": "s-8454",
+            "agent_id": "agent-1",
+            "tool_name": read,
+            "tool_input": {},
+        })
+        .to_string();
+        assert_denied(&run_in(tmp.path(), sub.as_bytes(), &env), "subagent read");
+        let send = payload("mcp__Google-Chat__send_message");
+        assert_denied(&run_in(tmp.path(), &send, &env), "stamped send");
+    }
+    let log = tmp
+        .path()
+        .join("trusty-mpm")
+        .join("egress-architect-allowed.log");
+    let text = std::fs::read_to_string(log).expect("audit log");
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(
+        text.lines()
+            .all(|l| l.starts_with("egress-main-read-allowed "))
+    );
 }
 
 /// 🔴 #8454 S1 (fail-open audit 1): both pm-guard bypass variables set, plus

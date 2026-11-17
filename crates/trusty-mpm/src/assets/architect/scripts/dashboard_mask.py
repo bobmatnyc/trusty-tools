@@ -3,12 +3,13 @@
 Why: a Decision will show a session's last N pane lines (#11065 phases 2-4). A pane shows whatever the session
 printed, keys and tokens included, and the thin one-line scrubbers (_SECRET in dashboard_harness_base.py, _TOKENS
 in dashboard_harness.py) miss PEM blocks, JWTs, URL credentials and Authorization headers.
-What: mask_pane_text(text, *, max_lines, max_line_len), a pure function (no I/O, no state). In order: strip
-ANSI/OSC escapes and control bytes; mask every secret-shaped span in place with "[masked:<shape>]", keeping the
-text around it; keep the last max_lines lines; cut each line to max_line_len characters plus "…". Masking runs on
-the whole text before the line cap, so a cap that cuts a PEM block can never expose part of it, and an armor whose
-BEGIN or END fell outside the capture is masked to the edge of the text. The shapes mirror the Rust
-credential_rules (the trusty-mpm daemon's bug-report scrubber, rules 1-10) plus the _TOKENS prefixes.
+What: mask_pane_text(text, *, max_lines, max_line_len, hard_wraps), a pure function (no I/O, no state). In order:
+strip ANSI/OSC escapes and control bytes; with hard_wraps, mask_row_breaks; mask every secret-shaped span in place
+with "[masked:<shape>]", keeping the text around it; keep the last max_lines lines; cut each line to max_line_len
+characters plus "…". Masking runs on the whole text before the line cap, so a cap that cuts a PEM block can never
+expose part of it, and an armor whose BEGIN or END fell outside the capture is masked to the edge of the text.
+The shapes mirror the Rust credential_rules (the trusty-mpm daemon's bug-report scrubber, rules 1-10) plus the
+_TOKENS prefixes.
 A marker names the shape only; it never carries any character of the secret.
 Test: tests/test_dashboard_mask.py
 """
@@ -109,6 +110,61 @@ def mask_secrets(text):
     return _B64.sub(_b64, text)
 
 
+# #11065: shapes whose value runs to the end of its row. Their span into the next row masks that row and stops,
+# so one key=value line costs at most one masked row below it.
+_EOL_SHAPES = frozenset({"auth", "secret"})
+CARRY_MAX = 1024   # characters of a multi-row token kept as the left side of the next row break
+
+
+def _spans(text):
+    """(value_start, end, shape, match_start) for every secret-shaped span in `text`; a prefixed rule's value only."""
+    for shape, rx, _ in _RULES:
+        for m in rx.finditer(text):
+            yield (m.end(1) if rx.groups else m.start()), m.end(), shape, m.start()
+    for m in _B64.finditer(text):
+        if _b64(m) != m.group(0):
+            yield m.start(), m.end(), "base64", m.start()
+
+
+def mask_row_breaks(lines):
+    """`lines` with every secret span that crosses a row break masked on both sides of the break.
+
+    Why: an application's own hard wrap splits a token or a key=value value over two rows, and the row rules then
+    see only the first part (#11065: a split ghp_ token kept its second half; a wrapped password its last words).
+    What: each row break is tested on the two rows joined with no separator. A span that starts in the upper row
+    and ends in the lower one masks the upper row from its value start and the lower row up to its end. A token
+    span that covers the whole lower row carries on to the next break; an _EOL_SHAPES span does not.
+    Test: tests/test_dashboard_pane_tail.py::test_hard_wrapped_token_leaves_no_fragment,
+    tests/test_dashboard_pane_tail.py::test_hard_wrapped_password_leaves_no_fragment
+    """
+    n = len(lines)
+    head, tail = [(0, "")] * n, [None] * n
+    carry = ""   # the unmasked text of a token that already covers row i whole, from the token's start
+    for i in range(n - 1):
+        carried, below = bool(carry), lines[i + 1]
+        joined = (carry or lines[i]) + below
+        b, carry = len(joined) - len(below), ""
+        for start, end, shape, mstart in _spans(joined):
+            if not mstart < b < end:
+                continue
+            if not carried and start < b and (tail[i] is None or start < tail[i][0]):
+                tail[i] = (start, shape)
+            if end - b > head[i + 1][0]:
+                head[i + 1] = (end - b, shape)
+            if end - b >= len(below) and shape not in _EOL_SHAPES:
+                carry = joined[start:][-CARRY_MAX:]
+    out = []
+    for row, (h, hs), t in zip(lines, head, tail):
+        t, ts = t or (len(row), "")
+        if h == 0 and t >= len(row):
+            out.append(row)
+        elif t <= h:
+            out.append(MARK.format(hs or ts))
+        else:
+            out.append((MARK.format(hs) if h else "") + row[h:t] + (MARK.format(ts) if t < len(row) else ""))
+    return out
+
+
 def _cut(line, n):
     if len(line) <= n:
         return line
@@ -116,12 +172,14 @@ def _cut(line, n):
     return _PARTIAL_MARK.sub("", line[:n]) + TRUNC
 
 
-def mask_pane_text(text, *, max_lines, max_line_len):
+def mask_pane_text(text, *, max_lines, max_line_len, hard_wraps=False):
     """The last max_lines lines of pane text, escapes stripped, secrets masked, each line cut to max_line_len.
 
     Why: the one gate pane text passes before the dashboard serves it (#11065).
-    What: strip_escapes, then mask_secrets on the whole text, then the line cap, then the length cap (a cut line
-    is max_line_len characters plus "…"). max_lines 0 gives "". Input past INPUT_MAX characters keeps its tail.
+    What: strip_escapes, then (hard_wraps=True) mask_row_breaks, then mask_secrets on the whole text, then the line
+    cap, then the length cap (a cut line is max_line_len characters plus "…"). max_lines 0 gives "". Input past
+    INPUT_MAX characters keeps its tail. hard_wraps=True treats every row break as a possible wrap inside a secret,
+    at the cost of masking a row that only follows one; the pane tail sets it (#11065).
     Raises ValueError for a negative max_lines or a max_line_len below 1, TypeError for a non-int cap.
     Test: tests/test_dashboard_mask.py
     """
@@ -136,5 +194,8 @@ def mask_pane_text(text, *, max_lines, max_line_len):
     if len(text) > INPUT_MAX:
         # A front cut can split a token; its first, partial line is dropped so no unprefixed tail survives.
         text = text[-INPUT_MAX:].partition("\n")[2]
-    lines = mask_secrets(strip_escapes(text)).split("\n")
+    text = strip_escapes(text)
+    if hard_wraps:
+        text = "\n".join(mask_row_breaks(text.split("\n")))
+    lines = mask_secrets(text).split("\n")
     return "\n".join(_cut(ln, max_line_len) for ln in lines[-max_lines:])

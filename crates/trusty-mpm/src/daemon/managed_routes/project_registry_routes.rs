@@ -276,6 +276,9 @@ pub async fn register_project_registry_op(
             .or_else(|| existing.as_ref().and_then(|p| p.worktree)),
         // #10530: carried forward; the store assigns it on first register.
         project_key: existing.as_ref().and_then(|p| p.project_key.clone()),
+        // #10988: an upsert never clears a decommissioned state.
+        decommissioned_at: existing.as_ref().and_then(|p| p.decommissioned_at),
+        archived_at: existing.as_ref().and_then(|p| p.archived_at),
     };
     if let Err(e) = registry.register(project.clone()).await {
         warn!(error = %e, project = %project.name, "register_project_registry_route: register failed");
@@ -926,6 +929,8 @@ mod tests {
                 commit_email: None,
                 worktree: None,
                 project_key: None,
+                decommissioned_at: None,
+                archived_at: None,
             })
             .await
             .expect("seed register");

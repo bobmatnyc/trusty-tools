@@ -15,11 +15,9 @@ Python's stdlib `sqlite3`. Run `python3 build_fixture.py` from this
 directory to regenerate the committed `cto_fixture.db` after editing the
 sample rows below.
 
-Schema: matches `crates/trusty-cto-db/src/lib.rs`'s in-memory test schema
-(`person`, `rd_budget_2026`, `user_work_distribution`, view
-`v_needs_review`) — the closest thing this repo has to a schema spec for
-"the db", since that Rust module documents the real file's expected shape
-even though it was never wired into a running binary.
+Schema: the subset this skill queries (`person`, `rd_budget_2026`,
+`user_work_distribution`, view `v_needs_review`) of the schema of record,
+`schema/cto_db_schema.sql` in the bob-duetto/cto repository.
 """
 
 from __future__ import annotations

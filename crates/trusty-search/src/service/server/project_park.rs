@@ -210,8 +210,11 @@ pub(crate) async fn with_map_parked(
 /// What: a resident index is detached through the residency park, which saves
 /// its vector store first and refuses while a reindex runs; then the cold
 /// entry is dropped so nothing lazy-loads it. Returns whether the index is
-/// now unloaded. The corpus and the registry row are never touched.
-/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`.
+/// now unloaded. The corpus and the registry row are never touched. The
+/// watcher is stopped on both paths (#10989), so an unloaded index is never
+/// watched, whatever left a watch behind.
+/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `a_decommission_park_unloads_a_main_checkout_stops_its_watcher_and_keeps_its_corpus`.
 pub(crate) async fn detach_parked(
     state: &Arc<SearchAppState>,
     index_id: &str,
@@ -239,24 +242,45 @@ pub(crate) async fn detach_parked(
         if !parked {
             return false;
         }
-        state.watcher_manager.stop_for_index(&id).await;
     }
+    // #10989: stopped on both paths; a no-op when nothing watches the index.
+    state.watcher_manager.stop_for_index(&id).await;
     let token = state.cold_store.entry_token(&id);
     state.cold_store.mark_loaded_if(&id, token);
     true
 }
 
-/// Reload an unparked index if needed, then queue its reindex (#9169).
+/// Reload an unparked index if needed, restart its watcher, then queue its
+/// reindex (#9169, #10989).
 ///
 /// What: a non-resident index is registered cold from its `indexes.toml` row
-/// and loaded through the ordinary lazy-load path; then the ordinary reindex
-/// core runs. Every refusal is the reindex or load path's own.
-/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`.
+/// and loaded through the ordinary lazy-load path; its watcher is started
+/// again, since [`detach_parked`] stopped it; then the ordinary reindex core
+/// runs. Every refusal is the reindex or load path's own.
+/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `a_decommission_park_then_unpark_reloads_the_index_and_restarts_its_watcher`.
 pub(crate) async fn reindex_after_unpark(
     state: &Arc<SearchAppState>,
     index_id: &str,
     entry: Option<PersistedIndex>,
 ) -> Result<serde_json::Value, (StatusCode, serde_json::Value)> {
+    reload_after_unpark(state, index_id, entry).await?;
+    super::reindex_handlers::reindex_report(state, index_id, None).await
+}
+
+/// The load half of [`reindex_after_unpark`]: register cold, lazy-load, and
+/// restart the watcher.
+///
+/// Why: #11417 — `search.project.ensure` re-activates a parked index through
+/// this same path rather than a second one.
+/// What: `Err` is the load path's own refusal; the index is then not live.
+/// Test: `park_and_unpark_keep_the_corpus_and_queue_a_reindex`,
+/// `ensure_reports_an_unpark_that_cannot_load_as_an_error`.
+pub(crate) async fn reload_after_unpark(
+    state: &Arc<SearchAppState>,
+    index_id: &str,
+    entry: Option<PersistedIndex>,
+) -> Result<(), (StatusCode, serde_json::Value)> {
     let id = IndexId::new(index_id);
     if state.registry.get(&id).is_none() {
         let Some(entry) = entry else {
@@ -270,7 +294,11 @@ pub(crate) async fn reindex_after_unpark(
             .await
             .map_err(|(status, Json(body))| (status, body))?;
     }
-    super::reindex_handlers::reindex_report(state, index_id, None).await
+    // #10989: a park stops the watcher; the unpark starts it (a no-op when watched).
+    if let Some(handle) = state.registry.get(&id) {
+        state.watcher_manager.spawn_for_index(&handle).await;
+    }
+    Ok(())
 }
 
 /// Unregister `id` through the project map (#9169).

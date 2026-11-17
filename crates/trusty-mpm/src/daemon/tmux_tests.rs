@@ -678,7 +678,7 @@ fn list_claude_panes_reaches_the_named_server() {
     });
     assert_eq!(
         lines,
-        ["list-panes -a -F #{session_name} #{pane_current_command}"]
+        ["list-panes -a -F #{session_name} #{pane_current_command} #{pane_current_path}"]
     );
 }
 

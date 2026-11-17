@@ -7,7 +7,9 @@
 //! file the session can write must never be able to drop a family. The one
 //! narrowing is per call, not per family: `egress_guard_slack_read` (#10387)
 //! lifts two exact Slack read tools for a project the host `config.yaml`
-//! names, and that file is a trust anchor no session may write.
+//! names, and that file is a trust anchor no session may write. #11273: the
+//! table still classifies reads as family calls; `egress_guard_main_read`
+//! lifts a listed read for a PM or Architect main session after the deny.
 //! What: [`FamilyTable`] holds the server-segment patterns;
 //! [`FamilyTable::classify`] maps a tool name to a [`Classification`]. Claude
 //! Code names an MCP tool `mcp__<server>__<tool>`. The server segment is

@@ -1,0 +1,32 @@
+{
+  "case_id": "c09-alpha-background-census-unknown",
+  "project_id": "alpha",
+  "boundary": "launch",
+  "description": "Write handoff",
+  "subagent_type": "writer",
+  "model": null,
+  "run_in_background": false,
+  "prompt": "Write the session handoff for the synthetic sprint.",
+  "rules": [
+    {
+      "rule_id": "alpha-bg-1",
+      "source_kind": "ledger",
+      "source_ref": "ledger/alpha/0015",
+      "span_start": 0,
+      "text": "Background workers must finish before a handoff is written.",
+      "authority": "owner_verified",
+      "status": "active"
+    }
+  ],
+  "inherits": [],
+  "worker_state": {
+    "snapshot_age_ms": 120,
+    "registry_epoch": 3,
+    "complete": false,
+    "running": 0,
+    "queued": 0,
+    "background": 1,
+    "depth": 1,
+    "tree": "tree-synthetic"
+  }
+}

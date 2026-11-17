@@ -19,8 +19,9 @@
 #       when — the row names a relevance output and `changes` set it to
 #       `false`. A skip the classifier did not ask for is a failure.
 #     - a row whose relevance is `pr_skip` may be `skipped` only when
-#       $EVENT_NAME is `pull_request`; unset or empty is not a PR, so the skip
-#       fails (#10631: the pre-publish `test` aggregate runs only off PRs).
+#       $EVENT_NAME is `pull_request` or `merge_group` (the queue commit runs
+#       the PR-time suite); any other value, unset or empty included, fails
+#       the skip (#10631: the pre-publish `test` aggregate runs only off PRs).
 #     - a context whose job key is absent from `needs` is a failure: the
 #       workflow and this table have drifted apart.
 #   Prints one table row per context and, when $GITHUB_STEP_SUMMARY is set,
@@ -54,6 +55,7 @@ search-daemon-smoke|trusty-search daemon smoke test|-
 rustdoc-links|Rustdoc intra-doc links|-
 teardown-guard|Durable writes hold the teardown guard|teardown_guard_relevant
 tmux-exact-targets|Every tmux -t target is exact|tmux_targets_relevant
+sled-static|Sled tailscaled isolation (static)|sled_static_relevant
 parity-selftest|Parity gate self-test (must catch a drifted tag)|-
 check5-decision|CHECK 5 decision self-test (0 compared must never print PASS)|-
 check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gated)|-
@@ -108,12 +110,15 @@ while IFS='|' read -r key context relevance; do
     success) verdict="ok" ;;
     skipped)
       if [ "$relevance" = "pr_skip" ]; then
-        if [ "${EVENT_NAME:-}" = "pull_request" ]; then
-          verdict="ok"
-          note="skipped: pre-publish only, event=pull_request"
-        else
-          note="skipped on event '${EVENT_NAME:-unset}'; runs off pull_request"
-        fi
+        case "${EVENT_NAME:-}" in
+          pull_request | merge_group)
+            verdict="ok"
+            note="skipped: pre-publish only, event=${EVENT_NAME}"
+            ;;
+          *)
+            note="skipped on event '${EVENT_NAME:-unset}'; runs off pull_request and merge_group"
+            ;;
+        esac
       elif [ "$relevance" != "-" ] &&
         [ "$(need ".changes.outputs.${relevance}")" = "false" ]; then
         verdict="ok"

@@ -2,7 +2,7 @@
   "answer": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit am",
   "answer_note": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor üb",
   "answered_at": "lorem ipsum dolor sit am",
-  "created": "2026-10-21T10:32:31Z",
+  "created": "2026-10-21T10:00:00Z",
   "detail": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ",
   "goal": "G01",
   "kind": "question",
@@ -46,6 +46,6 @@
   ],
   "status": "answered",
   "title": "lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit ",
-  "updated": "2026-10-21T11:16:00Z",
+  "updated": "2026-10-21T10:00:00Z",
   "version": 1
 }

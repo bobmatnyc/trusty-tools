@@ -46,6 +46,18 @@ pub(crate) fn shipped_before(dest: &str, bytes: &[u8]) -> bool {
     history().any(|(d, h)| d == dest && h == hash)
 }
 
+/// Whether `dest` holds instance-owned content an upgrade must never replace.
+///
+/// Why: #10608. Files under `local/` hold this instance's guidance, owner
+/// profile, config, schedule and records. A template the instance left as
+/// shipped is still its own copy; refreshing it to a newer template changes
+/// its config and schedule. What: true for every `local/` destination; the
+/// scripts, schemas, dashboard templates and docs stay framework-owned.
+/// Test: `an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608`.
+pub(crate) fn instance_owned(dest: &str) -> bool {
+    dest.starts_with("local/")
+}
+
 /// One line naming the bundle's prototype commit, export manifest and file count.
 ///
 /// Why: an install must say which prototype commit and content it runs.

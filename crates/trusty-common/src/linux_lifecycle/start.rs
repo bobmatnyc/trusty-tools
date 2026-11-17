@@ -8,14 +8,18 @@
 //! starts only on `Stopped` or `NotRunning` (P-b).
 //! Test: the `start_*` and `restart_*` tests in `tests/linux_lifecycle.rs`.
 
+use std::ffi::OsString;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
+use super::liveness::{ProcessTable, refuse_other_instances, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial};
-use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with};
-use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL, StoppedSignal, lock_is_free};
+use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with_table};
+use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL};
 
 /// A started daemon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,9 +46,12 @@ pub struct RestartOutcome {
 /// What:
 ///
 /// 1. Refuse when `<install_dir>/<binary>` is not a file, when the socket
-///    already serves, or (lock signal) when the lock is held.
+///    already serves, (lock signal) when the lock is held, or when a process
+///    still runs the daemon without serving (`RunningUnserved`).
 /// 2. Spawn it detached with `spawn_args` (new session, null stdio, no
-///    inherited fds), so it outlives the caller.
+///    inherited fds), so it outlives the caller. Its cwd is `working_dir`
+///    and its environment is `BASE_ENV` plus `env_passthrough` only, with
+///    the `instance_env` values set over them.
 /// 3. Until `ready_timeout`: an exited child is `ChildExited`; a connect whose
 ///    peer pid is the child is success. The deadline is `NotReady`.
 ///
@@ -62,13 +69,26 @@ pub struct RestartOutcome {
 /// `start_errors_when_the_socket_never_serves`,
 /// `start_kills_the_child_when_its_pidfd_cannot_be_opened`,
 /// `start_errors_when_the_child_exits_at_boot`,
-/// `start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon`.
+/// `start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon`,
+/// `start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment`,
+/// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
+/// `start_and_restart_start_a_stopped_instance_while_a_sibling_runs`.
 pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleError> {
+    start_with_table(desc, &ProcessTable::system()).await
+}
+
+/// [`start`], with the scan reading `table` instead of `/proc` (#11085).
+///
+/// What: [`start`]'s steps; only the pre-spawn scan for an unserved daemon
+/// reads `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn start_with_table(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<StartOutcome, LifecycleError> {
     desc.validate()?;
-    let program = desc.program();
-    if !program.is_file() {
-        return Err(LifecycleError::BinaryMissing { path: program });
-    }
+    let program = installed_program(desc)?;
     match dial(&desc.socket).await {
         Dial::NotServing => {}
         Dial::Peer(pid) => {
@@ -83,22 +103,10 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
             });
         }
     }
-    if let StoppedSignal::LockFree(lock) = &desc.stopped_signal
-        && !lock_is_free(lock)?
-    {
-        return Err(LifecycleError::Unidentified {
-            socket: desc.socket.clone(),
-            lock: lock.clone(),
-        });
-    }
+    // #11098: a daemon whose socket is unlinked still runs; never start a second.
+    refuse_unserved_daemon(desc, table)?;
 
-    let args: Vec<&str> = desc.spawn_args.iter().map(String::as_str).collect();
-    let pid = crate::daemon_guard::spawn_detached(&program, &args).map_err(|e| {
-        LifecycleError::Spawn {
-            program: program.clone(),
-            message: e.to_string(),
-        }
-    })?;
+    let pid = spawn(desc, &program)?;
     // Not reaped until it fails, so an early exit stays a zombie and still pins.
     let child = match PinnedProcess::open(pid) {
         Ok(Some(child)) => child,
@@ -141,6 +149,76 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// `<install_dir>/<binary>`, or [`LifecycleError::BinaryMissing`] when it is
+/// not a file.
+///
+/// Why: #11085 — a restart that found it missing only at its start had
+/// already stopped a healthy daemon (mid-upgrade), and started nothing.
+/// Test: `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
+///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
+pub(crate) fn installed_program(desc: &DaemonDescriptor) -> Result<PathBuf, LifecycleError> {
+    let program = desc.program();
+    if !program.is_file() {
+        return Err(LifecycleError::BinaryMissing { path: program });
+    }
+    Ok(program)
+}
+
+/// Spawn `program` detached, in `desc.working_dir`, with `daemon_env` only.
+///
+/// Why: #11098 — the daemon inherited the caller's cwd and environment, so a
+/// start from inside a checkout could load that checkout's `.env.local`
+/// (#9161) and carry the caller's tokens.
+/// What: `desc.spawn_args`, null stdio, a new session, sealed inherited fds,
+/// a cleared environment refilled from `daemon_env`, and `chdir` to
+/// `desc.working_dir`. The `Child` handle is dropped without a wait.
+/// Test: `start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment`.
+fn spawn(desc: &DaemonDescriptor, program: &Path) -> Result<u32, LifecycleError> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(&desc.spawn_args)
+        .current_dir(&desc.working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .env_clear()
+        .envs(daemon_env(desc, |name| std::env::var_os(name)));
+    crate::daemon_guard::start_in_new_session(&mut cmd);
+    crate::child_fds::seal_inherited(&mut cmd);
+    let child = cmd.spawn().map_err(|e| LifecycleError::Spawn {
+        program: program.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    Ok(child.id())
+}
+
+/// The spawned daemon's whole environment: each name in
+/// [`DaemonDescriptor::BASE_ENV`], then each in `desc.env_passthrough`, that
+/// `lookup` (the caller's environment) has a value for — except that a name
+/// in `desc.instance_env` takes that value, or is left out when it is `None`.
+///
+/// Why: #11098 — the scan knows this instance by its `instance_env` values,
+/// so the daemon `start` spawns must carry exactly those.
+/// Test: `daemon_env_carries_the_base_and_the_allowlist_only`.
+pub(crate) fn daemon_env(
+    desc: &DaemonDescriptor,
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(String, OsString)> {
+    let pinned = |name: &str| desc.instance_env.iter().any(|(n, _)| n == name);
+    let instance = desc
+        .instance_env
+        .iter()
+        .filter_map(|(name, value)| Some((name.clone(), value.clone()?)));
+    DaemonDescriptor::BASE_ENV
+        .iter()
+        .copied()
+        .chain(desc.env_passthrough.iter().map(String::as_str))
+        .filter(|name| !pinned(name))
+        .filter_map(|name| Some((name.to_string(), lookup(name)?)))
+        .chain(instance)
+        .collect()
 }
 
 /// SIGKILL a child `start` spawned and reap it; true once it is reaped.
@@ -192,21 +270,67 @@ async fn kill_and_reap(pid: u32, pinned: Option<&PinnedProcess>, limit: Duration
 /// Stop, make sure it stopped, and only then start (D1).
 ///
 /// What: [`restart_with`] with [`KernelDelivery`].
-/// Test: `restart_starts_a_daemon_that_is_not_running`.
+/// Test: `restart_starts_a_daemon_that_is_not_running`,
+/// `restart_of_one_instance_leaves_a_sibling_with_the_same_argv_serving`.
 pub async fn restart(desc: &DaemonDescriptor) -> Result<RestartOutcome, LifecycleError> {
     restart_with(desc, &KernelDelivery).await
 }
 
 /// [`restart`] with an explicit signal delivery (the test seam).
 ///
-/// What: `NotRunning` from stop proceeds to start (P-b); every stop error is
+/// What: before any signal (#11085), a missing install binary is
+/// [`LifecycleError::BinaryMissing`], and, while the socket serves, another
+/// process that is this instance is [`LifecycleError::RestartBlocked`]. Then
+/// `NotRunning` from stop proceeds to start (P-b); every stop error is
 /// returned as is, before any spawn.
-/// Test: `restart_does_not_start_when_stop_reports_a_survivor`.
+/// Test: `restart_does_not_start_when_stop_reports_a_survivor`,
+/// `restart_refuses_before_any_signal_when_another_process_is_this_instance`,
+/// `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
+///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
+/// [`LifecycleError::RestartBlocked`]: crate::linux_lifecycle::LifecycleError::RestartBlocked
 pub async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
-    let stop = stop_with(desc, delivery).await?;
-    let start = start(desc).await?;
+    restart_with_table(desc, delivery, &ProcessTable::system()).await
+}
+
+/// [`restart_with`], with every scan reading `table` instead of `/proc`
+/// (#11085).
+///
+/// What: [`restart_with`]'s steps; the pre-stop scan for another instance,
+/// the stop's scan and the start's scan read `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn restart_with_table(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<RestartOutcome, LifecycleError> {
+    desc.validate()?;
+    // #11085: never stop a healthy daemon that the start would then refuse on.
+    installed_program(desc)?;
+    refuse_restart_blockers(desc, table).await?;
+    let stop = stop_with_table(desc, delivery, table).await?;
+    let start = start_with_table(desc, table).await?;
     Ok(RestartOutcome { stop, start })
+}
+
+/// Fail a restart before its stop when another process is this instance.
+///
+/// Why: #11085 — the start after the stop refuses on such a process, which
+/// left a previously healthy daemon down.
+/// What: when the socket's peer serves, the scan with that pid left out must
+/// find nothing. When nothing serves, or the dial does not decide, the stop's
+/// own checks answer.
+/// Test: `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
+async fn refuse_restart_blockers(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<(), LifecycleError> {
+    match dial(&desc.socket).await {
+        Dial::Peer(Some(peer)) => refuse_other_instances(desc, &[peer], table),
+        _ => Ok(()),
+    }
 }

@@ -463,8 +463,8 @@ without the note. A merged fix that fails live verification stays open — at
 follow-up fix PR is open (owner ruling 2026-09-07).
 
 🔴 **A fix PR references `Refs #N`, never `Closes #N`.** A merge must not
-auto-close an issue that has not been verified live. The PM relays this to
-`version-control`, which writes the PR body.
+auto-close an issue not verified live. A cluster merge moves every
+listed issue; each closes only under the bar above.
 
 Blocked work keeps its `status:` label and gains a comment naming the blocker,
 its impact, and the unblock criteria.

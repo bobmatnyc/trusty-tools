@@ -317,7 +317,8 @@ pub(super) async fn copy_named(
 }
 
 /// Print a copy's `copied`/`not copied` lines and count; fail on any miss.
-fn report_copy(
+// #11015: shared with `assign`.
+pub(super) fn report_copy(
     from: &BackendId,
     to: &BackendId,
     response: &CopyResponse,

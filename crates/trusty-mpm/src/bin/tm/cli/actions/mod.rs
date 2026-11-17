@@ -62,7 +62,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
-pub(crate) use architect::ArchitectAction;
+pub(crate) use architect::{ArchitectAction, UpArgs};
 pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
@@ -85,7 +85,7 @@ pub(crate) use meta::MetaAction;
 pub(crate) use optimizer::{CliCompressionLevel, OptimizerAction};
 pub(crate) use overseer::OverseerAction;
 pub(crate) use pr::{PrCleanupArgs, PrCmd, PrMergeArgs, PrOpenArgs, PrQueueCheckArgs};
-pub(crate) use presence::PresenceAction;
+pub(crate) use presence::{DevicesAction, PresenceAction};
 pub(crate) use project::ProjectAction;
 pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,

@@ -58,12 +58,9 @@ fn output_of(cmd: &mut Command) -> Output {
 }
 
 /// Path to the binary under test, as cargo builds it for this integration test.
+// #11337: cargo's build-dir layout v2 moves the test exe out of `deps/`.
 fn bin() -> std::path::PathBuf {
-    let mut p = std::env::current_exe().expect("current exe");
-    p.pop(); // .../deps
-    p.pop(); // .../debug
-    p.push("trusty-memory");
-    p
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_trusty-memory"))
 }
 
 /// Run `trusty-memory <args>` with a piped stdin that is closed immediately.

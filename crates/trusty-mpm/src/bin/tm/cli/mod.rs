@@ -472,8 +472,8 @@ pub(crate) enum Command {
         #[arg(long)]
         no_mouse: bool,
         /// The Architect dashboard store root the Architect view reads
-        /// (`a` on the home screen). Until #10944 the daemon does not resolve
-        /// it; afterwards this stays an override (#10966).
+        /// (`a` on the home screen). Optional: without it the daemon resolves
+        /// the root (#10944); given, it overrides that (#10966).
         #[arg(long, env = "TM_ARCHITECT_STORE")]
         architect_store: Option<std::path::PathBuf>,
     },
@@ -627,6 +627,22 @@ pub(crate) enum Command {
         /// Gmail, Notion and Google Chat MCP tool, for every caller.
         #[arg(long)]
         egress_guard: bool,
+        /// Run in standing-rules mode (#10960): on `SessionStart` /
+        /// `UserPromptSubmit`, inject the Architect's
+        /// `local/standing-rules.md` into context. Architect sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        standing_rules: bool,
+        /// Run in turn-task mode (#11398): on `UserPromptSubmit`, stamp
+        /// `Task: <id>@<MMDD>` from datg's `current` field. PM sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        turn_task: bool,
+        /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
+        /// final message claims completion with no evidence map or sets an
+        /// invented size target. Warn-only; always exits 0.
+        #[arg(long)]
+        completion_evidence: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -786,6 +802,13 @@ pub(crate) enum Command {
         /// allowlist).
         #[arg(long)]
         sandbox: bool,
+        /// Admit exactly one provider credential into the sandbox (#10721):
+        /// `ANTHROPIC_API_KEY` or `OPENROUTER_API_KEY`, read once from the
+        /// environment and then removed from it. Any other name, or the
+        /// variable unset, refuses. The sandbox launcher's `--credential`
+        /// sets it through `tm secrets exec`; requires `--sandbox`.
+        #[arg(long, value_name = "NAME", requires = "sandbox")]
+        sandbox_credential: Option<String>,
     },
     /// Run the unattended fleet supervisor (24/7 observer, #1206).
     ///
@@ -829,8 +852,8 @@ pub(crate) enum Command {
         dir: Option<String>,
         /// Active output style id for this launch (HR-4). Overrides the
         /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
-        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
-        /// to the default.
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`, `owner-plain`. An
+        /// unknown id falls back to the default.
         #[arg(long)]
         style: Option<String>,
         /// Run this session in its own git worktree instead of the project's
@@ -906,12 +929,13 @@ pub(crate) enum Command {
     /// The Architect's deterministic commands: the poller and its readers.
     ///
     /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
-    /// Architect's Python scripts with the same arguments and output.
-    // #9822. Test: `cli_parses_architect_verbs`.
+    /// Architect's Python scripts with the same arguments and output. With
+    /// no verb, `tm architect` is `tm architect up` plus attach.
+    // #9822, #11364. Test: `cli_parses_architect_verbs`.
     Architect {
-        /// Architect action to perform.
+        /// Architect action to perform; none means `up` and attach.
         #[command(subcommand)]
-        action: ArchitectAction,
+        action: Option<ArchitectAction>,
     },
     /// Prove you are at the Studio, so the Architect may write trust anchors.
     ///
@@ -937,7 +961,7 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: EnvAction,
     },
-    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `doctor`.
+    /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {

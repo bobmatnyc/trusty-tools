@@ -1,0 +1,8 @@
+{
+  "case_id": "c01-alpha-nested-cap-kept",
+  "expected_verdict": "allow",
+  "binding_rule_ids": [
+    "alpha-cap-1"
+  ],
+  "label_note": "LABEL-ONLY-c01-alpha-nested-cap-kept"
+}

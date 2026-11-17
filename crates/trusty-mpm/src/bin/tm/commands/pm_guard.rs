@@ -214,6 +214,7 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::hook_stdin::read_stdin_payload_or_deny;
 use crate::commands::misc::{DISABLE_HOOKS_ENV, SUB_AGENT_ENV};
+use crate::commands::pm_guard_accounts;
 use crate::commands::pm_guard_bash::{
     CommitVerdict, DeleteTarget, DispatchIdentity, SHELL_EDIT_REASON, WorktreeRemoveVerdict,
     deny_linked_worktree_head_move, deny_main_checkout_head_move, docs_commit_deny_reason,
@@ -241,9 +242,9 @@ use crate::commands::pm_guard_protected_paths::{ProtectedEnv, evaluate as protec
 use crate::commands::pm_guard_refusal::{emit, refuse};
 pub(crate) use crate::commands::pm_guard_response::build_pretooluse_context_response;
 use crate::commands::pm_guard_routing::{GENERIC_ENGINEER_HINT, delegation_hint_for_path};
-use crate::commands::pm_guard_trust_anchor;
 use crate::commands::pm_guard_worktree_grant;
 use crate::commands::pm_guard_write_boundary;
+use crate::commands::{pm_guard_stale_copy, pm_guard_trust_anchor};
 use trusty_mpm::core::agent_cost::{self, AgentCostConfig, BudgetStatus};
 use trusty_mpm::core::config::MpmConfig;
 use trusty_mpm::core::guard_policy;
@@ -262,7 +263,7 @@ use trusty_mpm::core::guard_policy;
 /// is that [`payload_is_subagent_dispatch`] now makes this bypass unnecessary
 /// for ordinary delegated work. It remains available for the rare case an
 /// operator wants to lift enforcement on the PM's *own* direct edits too.
-/// What: the literal env var name. See [`pm_unrestricted`].
+/// What: the literal env var name. See [`pm_unrestricted`](super::pm_guard_floor::pm_unrestricted).
 pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 
 /// Single-file mutation tools the PM invokes directly. Whether a given call is
@@ -368,7 +369,8 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // remainder runs here for every call; under a bypass so do the trust
     // anchors, `rm -rf` of a root and secret values, which the guarded path
     // reaches at their own sites below, in their original order.
-    let bypassed = std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_unrestricted();
+    let bypassed =
+        std::env::var_os(DISABLE_HOOKS_ENV).is_some() || pm_guard_floor::pm_unrestricted();
     let architect = ArchitectGate::ambient(&payload);
     if pm_guard_floor::deny_floors(url, &payload, &hook_cwd, &architect, bypassed).await {
         return Ok(());
@@ -613,8 +615,11 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
         return Ok(());
     }
     // #8878: the trust-anchor floor, ahead of Guards 1 and 4 — a subagent,
-    // even the Architect's, is "an agent" under the ruling.
-    if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await {
+    // even the Architect's, is "an agent" under the ruling. #10574: the
+    // stale-copy guard binds the same population, the Architect exempt.
+    if pm_guard_trust_anchor::deny_trust_anchor_write(url, &payload).await
+        || pm_guard_stale_copy::gate(&refused, &payload, &architect).await
+    {
         return Ok(());
     }
     // #8928 step 7: Write/Edit to settings, `.mcp.json`, git config or hooks,
@@ -757,6 +762,15 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
             return Ok(());
         }
     };
+    // #11353 (Dq7): a PM dispatch that would run a non-complex agent on Fable.
+    if roster.is_some()
+        && let Some(reason) = crate::commands::pm_guard_fable::evaluate_fable_cap(
+            tool_name, tool_input, &hook_cwd, session_id,
+        )
+    {
+        refuse(&refused, &guard_policy::FABLE_CAP, &reason).await;
+        return Ok(());
+    }
     if let Some(roster) = roster.as_ref()
         && let Some(grant) = pm_guard_worktree_grant::evaluate_worktree_grant(
             roster, tool_name, tool_input, &hook_cwd,
@@ -778,8 +792,14 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         refuse(&refused, &guard_policy::WORKTREE_GRANT_DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
+                    // #11390: one `updatedInput` carries the grant and the accounts.
                     None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
-                        &updated_input,
+                        &pm_guard_accounts::compose(
+                            Some(roster),
+                            tool_name,
+                            updated_input,
+                            &hook_cwd,
+                        ),
                     )),
                 }
             }
@@ -804,8 +824,14 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
                         refuse(&refused, &guard_policy::DISPATCH, &reason).await;
                     }
                     // #8261: dispatch takes no builder slot; the build command does.
+                    // #11390: one `updatedInput` carries the grant and the accounts.
                     None => emit(pm_guard_worktree_grant::build_worktree_grant_response(
-                        &updated_input,
+                        &pm_guard_accounts::compose(
+                            Some(roster),
+                            tool_name,
+                            updated_input,
+                            &hook_cwd,
+                        ),
                     )),
                 }
             }
@@ -955,9 +981,16 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // exempt, and every ABSOLUTE guard above has already run for it.
     let Some(reason) = pm_guard_profile::verdict(tool_name, tool_input) else {
         // ALLOW: exit 0 with no output so the normal permission flow applies —
-        // unless #8261's lease rule rewrote a heavy build the PM may run.
+        // unless #8261's lease rule rewrote a heavy build the PM may run, or
+        // #11390 appends the project's account names to an ops dispatch.
         if let Some(rewrite) = lease_rewrite {
             emit(rewrite);
+        } else if let Some(input) =
+            pm_guard_accounts::account_rewrite(roster.as_ref(), tool_name, tool_input, &hook_cwd)
+        {
+            emit(pm_guard_worktree_grant::build_worktree_grant_response(
+                &input,
+            ));
         }
         return Ok(());
     };
@@ -1011,17 +1044,6 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // zero latency to every tool invocation.
     refuse(&refused, &guard_policy::PM_TOOL_POLICY, reason).await;
     Ok(())
-}
-
-/// Whether the `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass is active.
-///
-/// Why: split out so the exact-`"1"` matching rule has one definition.
-/// What: `true` only when [`PM_UNRESTRICTED_ENV`] is set to exactly `"1"`.
-/// Test: exercised via `tests/tm_hook_pm_guard.rs::pm_guard_bypass_env_allows_all`.
-fn pm_unrestricted() -> bool {
-    std::env::var(PM_UNRESTRICTED_ENV)
-        .map(|v| v == "1")
-        .unwrap_or(false)
 }
 
 /// Whether a `PreToolUse` payload originates from a native Claude Code

@@ -9,7 +9,7 @@
 //! `~/.trusty-tools/mcp/servers.toml`.
 //! Test: this file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,53 @@ fn fixture_binary() -> String {
     BUILT.get_or_init(build_fixture_binary).clone()
 }
 
+/// Derive `(profile_dir, cargo profile)` from a test binary's path.
+///
+/// Why: `build_fixture_binary` rebuilds the fixture into the profile the test
+/// binary came from, and that profile is read off the path.
+/// What: legacy layout is `<profile_dir>/deps/<name>-<hash>`.
+/// `// #11138: build-dir layout v2` (rust-lang/cargo#16807, rustc 1.100) is
+/// `<profile_dir>/build/<crate>/<hash>/out/<name>-<hash>`. `debug` maps to the
+/// `dev` profile. Any other shape is an `Err`, never a guessed profile.
+/// Test: `profile_is_derived_from_both_cargo_layouts_and_rejects_others_11138`.
+fn fixture_profile(exe: &Path) -> Result<(PathBuf, String), String> {
+    let parent = exe.parent();
+    fn dir_name(p: Option<&Path>) -> Option<&str> {
+        p.and_then(Path::file_name).and_then(|n| n.to_str())
+    }
+    let profile_dir = match dir_name(parent) {
+        Some("deps") => parent.and_then(Path::parent),
+        // #11138: build-dir layout v2
+        Some("out") => {
+            // out -> <hash> -> <crate> -> build -> <profile_dir>
+            let hash = parent.and_then(Path::parent);
+            let krate = hash.and_then(Path::parent);
+            let build = krate.and_then(Path::parent);
+            if dir_name(build) == Some("build") {
+                build.and_then(Path::parent)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let profile_dir = profile_dir
+        .filter(|d| d.parent().is_some())
+        .ok_or_else(|| {
+            format!(
+                "unrecognised cargo test-binary layout: {} (expected \
+                 `<profile>/deps/<bin>` or `<profile>/build/<crate>/<hash>/out/<bin>`)",
+                exe.display()
+            )
+        })?;
+    let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
+        Some("debug") => "dev".to_owned(),
+        Some(other) => other.to_owned(),
+        None => return Err(format!("no profile directory in {}", exe.display())),
+    };
+    Ok((profile_dir.to_path_buf(), profile))
+}
+
 /// Build the fixture example into this run's own target dir, once.
 ///
 /// Why: the one-time half of [`fixture_binary`], kept separate so the
@@ -50,22 +97,15 @@ fn fixture_binary() -> String {
 /// under. Cargo's own build lock serialises this against a concurrent build.
 /// Test: `the_fixture_binary_is_never_stale_relative_to_its_source_7951`.
 fn build_fixture_binary() -> String {
-    let mut profile_dir: PathBuf = std::env::current_exe().expect("the test binary has a path");
-    profile_dir.pop();
-    if profile_dir.ends_with("deps") {
-        profile_dir.pop();
-    }
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let (profile_dir, profile) = fixture_profile(&exe).unwrap_or_else(|e| panic!("{e}"));
     let target_dir = profile_dir
         .parent()
         .expect("a profile directory has a parent");
-    let profile = match profile_dir.file_name().and_then(|n| n.to_str()) {
-        Some("debug") | None => "dev",
-        Some(other) => other,
-    };
 
     let output = std::process::Command::new(env!("CARGO"))
         .args(["build", "--example", "mcp_fixture_server", "--profile"])
-        .arg(profile)
+        .arg(&profile)
         .arg("--manifest-path")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .arg("--target-dir")
@@ -408,4 +448,51 @@ fn the_fixture_binary_is_never_stale_relative_to_its_source_7951() {
         binary.display(),
         source.display(),
     );
+}
+
+/// Why (#11138): under cargo build-dir layout v2 the test binary sits in
+/// `.../build/<crate>/<hash>/out/`, and reading the profile off the parent
+/// directory yielded `--profile out`.
+/// What: pure parse of both layouts plus unknown shapes; no cargo run.
+#[test]
+fn profile_is_derived_from_both_cargo_layouts_and_rejects_others_11138() {
+    let cases = [
+        (
+            "/t/debug/deps/mcp_loader_e2e-0123456789abcdef",
+            "/t/debug",
+            "dev",
+        ),
+        (
+            "/t/release/deps/mcp_loader_e2e-0123456789abcdef",
+            "/t/release",
+            "release",
+        ),
+        (
+            "/t/debug/build/trusty-code/0123456789abcdef/out/mcp_loader_e2e-0123456789abcdef",
+            "/t/debug",
+            "dev",
+        ),
+        (
+            "/t/release/build/trusty-code/0123456789abcdef/out/mcp_loader_e2e-0123456789abcdef",
+            "/t/release",
+            "release",
+        ),
+    ];
+    for (exe, dir, profile) in cases {
+        let (got_dir, got_profile) =
+            fixture_profile(Path::new(exe)).unwrap_or_else(|e| panic!("{exe} must parse: {e}"));
+        assert_eq!(got_dir, PathBuf::from(dir), "profile dir of {exe}");
+        assert_eq!(got_profile, profile, "profile of {exe}");
+    }
+    for bad in [
+        "/t/debug/mcp_loader_e2e-0123456789abcdef",
+        "/t/debug/odd/mcp_loader_e2e-0123456789abcdef",
+        "/t/debug/notbuild/trusty-code/0123456789abcdef/out/mcp_loader_e2e-0123456789abcdef",
+        "/out/mcp_loader_e2e-0123456789abcdef",
+    ] {
+        assert!(
+            fixture_profile(Path::new(bad)).is_err(),
+            "{bad} must be rejected"
+        );
+    }
 }

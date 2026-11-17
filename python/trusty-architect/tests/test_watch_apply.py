@@ -150,8 +150,9 @@ def test_a_doc_changed_by_another_writer_keeps_that_content_and_is_reported(worl
         store.set(wa.COLL, "w1", theirs)
         return real(*args)
     monkeypatch.setattr(wa, "run_cli", racing_cli)
+    stamped = data(store, "w1")["created"]   # #10678: the store owns created, not the writer
     assert run(store, arch) == 0
-    assert data(store, "w1") == theirs
+    assert data(store, "w1") == {**theirs, "created": stamped}
     err = capsys.readouterr().err
     assert "w1" in err and "another writer" in err, err
 

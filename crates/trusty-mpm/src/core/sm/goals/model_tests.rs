@@ -14,13 +14,15 @@ fn ts() -> chrono::DateTime<Utc> {
     Utc.with_ymd_and_hms(2026, 6, 16, 12, 0, 0).unwrap()
 }
 
-/// Build a goal with `total` links, the first `verified` of which are `Verified`.
+/// Build a goal with `total` links, the first `verified` of which are `Verified`
+/// with evidence (#10722: a Verified link counts only with evidence).
 fn goal_with_links(total: usize, verified: usize) -> Goal {
     let mut g = Goal::new("g-test1234", "ship the thing", vec![], ts());
     for i in 0..total {
         let mut link = SessionLink::launched(format!("s-{i}"), format!("task {i}"));
         if i < verified {
             link.state = SessionTaskState::Verified;
+            link.evidence = Some(format!("PR opened: https://github.com/o/r/pull/{i}"));
         }
         g.sessions.push(link);
     }

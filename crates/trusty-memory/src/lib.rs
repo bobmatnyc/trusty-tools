@@ -775,6 +775,12 @@ pub struct AppState {
     /// behaviour under that ceiling lives in trusty-common's retrieval
     /// write-pipeline tests.
     pub write_pipeline_budget: std::time::Duration,
+    /// The recall time limits (#11255): the single-palace open wait and the
+    /// `scope: "all"` deadline. Per-instance for the same reason as
+    /// `write_op_budget`; see [`service::op_limits::RecallLimits`].
+    pub recall_limits: service::op_limits::RecallLimits,
+    /// The single-palace recall opens in flight, one per palace (#11255).
+    pub recall_opens: Arc<tools::recall_open::RecallOpens>,
 }
 
 #[cfg(feature = "server")]
@@ -873,45 +879,13 @@ impl AppState {
             palace_last_used: Arc::new(dashmap::DashMap::new()),
             // #6366: the ceiling on the critical section #4002's budget stops at.
             write_pipeline_budget: crate::engine::timeouts::write_pipeline_timeout(),
+            recall_limits: service::op_limits::RecallLimits::from_env(),
+            recall_opens: Arc::default(),
         }
     }
 
-    /// Override the per-operation write budget (issue #4002).
-    ///
-    /// Why: tests must prove the two write legs draw on ONE budget without
-    /// setting `TRUSTY_WRITE_OP_BUDGET_SECS`, which is process-wide and would
-    /// race any test running in parallel.
-    /// What: consuming builder that overwrites [`AppState::write_op_budget`]
-    /// and re-derives [`AppState::wedge_threshold`] from it.
-    /// Test: `tools::tests::write_budget_tests`,
-    /// `the_wedge_line_follows_the_configured_write_budgets`.
-    #[must_use]
-    pub fn with_write_op_budget(mut self, budget: std::time::Duration) -> Self {
-        self.write_op_budget = budget;
-        // #9783: the wedge line follows the write bounds this state enforces.
-        self.wedge_threshold =
-            worker_liveness::wedge_threshold_for(self.write_op_budget, self.write_pipeline_budget);
-        self
-    }
-
-    /// Override the write-pipeline ceiling (issue #6366).
-    ///
-    /// Why: same reason as [`AppState::with_write_op_budget`] — a test proving
-    /// the ceiling fires must not set `TRUSTY_WRITE_PIPELINE_TIMEOUT_SECS`,
-    /// which is process-wide and would race any parallel test.
-    /// What: consuming builder that overwrites
-    /// [`AppState::write_pipeline_budget`] and re-derives
-    /// [`AppState::wedge_threshold`] from it.
-    /// Test: `tools::tests::write_budget_tests::memory_note_surfaces_the_pipeline_ceiling`,
-    /// `the_wedge_line_follows_the_configured_write_budgets`.
-    #[must_use]
-    pub fn with_write_pipeline_budget(mut self, budget: std::time::Duration) -> Self {
-        self.write_pipeline_budget = budget;
-        // #9783: the wedge line follows the write bounds this state enforces.
-        self.wedge_threshold =
-            worker_liveness::wedge_threshold_for(self.write_op_budget, self.write_pipeline_budget);
-        self
-    }
+    // #11255: `with_write_op_budget`, `with_write_pipeline_budget` and
+    // `with_recall_limits` live in `service::op_limits` (SLOC cap).
 
     /// Acquire (lazily, then clone) the per-palace write mutex.
     ///

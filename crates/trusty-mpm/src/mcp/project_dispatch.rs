@@ -4,8 +4,9 @@
 //! Why: mirroring `session_dispatch.rs`, pulling the project-tool parse-and-call
 //! arms into a sibling module keeps `mcp/mod.rs` under the 500-SLOC production
 //! cap while giving the project tools an auditable home.
-//! What: [`try_dispatch`] matches a tool name against the four project tools
-//! (`project_list`, `project_register`, `project_get`, `project_resolve`); when
+//! What: [`try_dispatch`] matches a tool name against the five project tools
+//! (`project_list`, `project_register`, `project_get`, `project_resolve`,
+//! `project_decommission`); when
 //! it matches, parses arguments and calls the corresponding
 //! [`super::OrchestratorBackend`] method, returning `Some(result)`. A
 //! non-project tool name returns `None`.
@@ -20,7 +21,7 @@ use super::{OrchestratorBackend, required_str};
 ///
 /// Why: a single entry point lets `dispatch_tool_call` delegate every
 /// project-tool name in one arm without widening the core dispatch match.
-/// What: returns `Some(Result)` for the three project tool names, parsing
+/// What: returns `Some(Result)` for the five project tool names, parsing
 /// args and calling the matching backend method, or `None` for any other name.
 /// Test: exercised by every `dispatch_project_*` test in `super::tests`.
 pub async fn try_dispatch<B: OrchestratorBackend>(
@@ -37,6 +38,11 @@ pub async fn try_dispatch<B: OrchestratorBackend>(
         },
         "project_resolve" => match required_str(args, "query") {
             Ok(q) => backend.project_resolve(&q).await,
+            Err(e) => Err(e),
+        },
+        // #10988
+        "project_decommission" => match required_str(args, "name") {
+            Ok(n) => backend.project_decommission(&n).await,
             Err(e) => Err(e),
         },
         _ => return None,

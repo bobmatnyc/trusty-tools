@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# sled-bind-addr SQUID_CONF OUT [FIB_TRIE] — render the squid config squid runs.
+#
+# Why: `http_port 3128` listens on every interface, the default bridge
+#   included, so any container on that bridge could use the proxy (audit N8,
+#   architect ruling R3 on #11156). Squid cannot bind to an interface name, and
+#   the internal address is known only when the container starts.
+# What: finds this container's one local IPv4 address inside the subnet of the
+#   `acl internal_net src` line of SQUID_CONF (read from FIB_TRIE, default
+#   /proc/net/fib_trie), then writes SQUID_CONF to OUT with the single
+#   `http_port 3128` line replaced by `http_port <addr>:3128`. Fails (exit 1,
+#   OUT not written) on no or two matching addresses, or on any line count
+#   other than one `http_port 3128`. SQUID_CONF stays as built, so check_v1.sh
+#   still compares it with docker/sled/proxy/squid.conf.
+# Test: scripts/check_sled_launch.sh (`proxy-bind-*` cases).
+# Refs #11156
+set -euo pipefail
+
+CONF="$1"; OUT="$2"; FIB="${3:-/proc/net/fib_trie}"
+
+ip2int() {
+    local a b c d
+    IFS=. read -r a b c d <<< "$1"
+    echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+net="$(awk '$1=="acl" && $2=="internal_net" && $3=="src" {print $4}' "${CONF}")"
+case "${net}" in
+    */*) ;;
+    *) echo "sled-bind-addr: no single internal_net subnet in ${CONF}" >&2; exit 1 ;;
+esac
+bits="${net#*/}"
+mask=$(( bits == 0 ? 0 : (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+want=$(( $(ip2int "${net%/*}") & mask ))
+
+# A local address is the "|-- A.B.C.D" line followed by "/32 host LOCAL".
+addrs="$(awk '/\|--/ {ip=$2} /\/32 host LOCAL/ {print ip}' "${FIB}" | sort -u)"
+found=""
+for a in ${addrs}; do
+    if [ $(( $(ip2int "$a") & mask )) -eq "${want}" ]; then found="${found} ${a}"; fi
+done
+found="${found# }"
+case "${found}" in
+    '' | *' '*) echo "sled-bind-addr: want one local address in ${net}, found '${found}'" >&2; exit 1 ;;
+esac
+
+[ "$(grep -c '^http_port 3128$' "${CONF}")" = 1 ] \
+    || { echo "sled-bind-addr: ${CONF} must hold exactly one 'http_port 3128'" >&2; exit 1; }
+[ "$(grep -c '^http_port' "${CONF}")" = 1 ] \
+    || { echo "sled-bind-addr: ${CONF} holds another http_port line" >&2; exit 1; }
+sed "s/^http_port 3128\$/http_port ${found}:3128/" "${CONF}" > "${OUT}.tmp"
+mv "${OUT}.tmp" "${OUT}"
+echo "sled-bind-addr: squid listens on ${found}:3128 only"

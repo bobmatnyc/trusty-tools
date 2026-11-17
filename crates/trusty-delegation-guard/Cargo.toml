@@ -1,0 +1,40 @@
+# #10892: focused delegation guard (SHADOW only). PR1 ships the `types`
+# feature alone: event, policy bundle, verdict, canonical hashing, dedupe key,
+# redaction and strict validation. No inference, HTTP or model dependency
+# lives here (design §4.1), so `trusty-mpm` can depend on it cheaply later.
+[package]
+name = "trusty-delegation-guard"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire types for the trusty-mpm focused delegation guard: dg.event.v1, policy bundle, dg.verdict.v1, canonical hashing and redaction (#10892)."
+homepage = "https://trustytools.dev"
+keywords = ["delegation", "guard", "schema", "agents"]
+categories = ["development-tools"]
+# #10892 (A1): the fixture labels are read only by test code and must never
+# ship in the package.
+exclude = ["tests/fixtures/labels/**"]
+
+[features]
+default = ["types"]
+types = [
+    "dep:hex",
+    "dep:regex",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:thiserror",
+    "dep:uuid",
+]
+
+[dependencies]
+hex = { workspace = true, optional = true }
+regex = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }

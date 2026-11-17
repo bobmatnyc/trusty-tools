@@ -54,9 +54,14 @@ mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 // #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
 mod project_ensure;
+// #11417: ensure re-activates a parked index.
+mod project_ensure_unpark;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;
+// #10989: the decommission park of a main checkout.
+#[cfg(test)]
+mod project_park_decommission_tests;
 // #10551: `search.index.embed_missing`, the embed-only resume of a failed semantic stage.
 mod embed_missing;
 #[cfg(test)]

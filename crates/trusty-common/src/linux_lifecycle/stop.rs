@@ -12,6 +12,7 @@ use std::io;
 
 use tokio::time::Instant;
 
+use super::liveness::{ProcessTable, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial, exe_name};
 use super::{
     DaemonDescriptor, LifecycleError, POLL_INTERVAL, PROBE_TIMEOUT, StoppedSignal, lock_is_free,
@@ -75,8 +76,10 @@ pub async fn stop(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError
 /// Why: D1 — a stop that has not proven the process gone is not a stop.
 /// What, in order:
 ///
-/// 1. Dial the socket. Absent or refusing: `NotRunning`, no signal (for a
-///    lock signal, only when the lock is also free). Undecided: an error.
+/// 1. Dial the socket. Absent or refusing: `NotRunning`, no signal — only
+///    when no process of `binary` carries `liveness_args` (else
+///    `RunningUnserved`) and, for a lock signal, the lock is also free.
+///    Undecided: an error.
 /// 2. Pin the peer pid with a pidfd and require `/proc/<pid>/exe` to name
 ///    `desc.binary`. A mismatch is an error and no signal is sent.
 /// 3. SIGTERM; wait up to `stop_grace` for the pid to exit. If it has not,
@@ -85,6 +88,7 @@ pub async fn stop(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError
 ///
 /// Test: `stop_returns_not_running_when_socket_is_absent`,
 /// `stop_returns_not_running_when_socket_refuses_connections`,
+/// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
 /// `stop_refuses_to_signal_a_process_with_another_name`,
 /// `stop_reports_a_survivor_when_sigkill_does_not_take`,
 /// `stop_with_lock_signal_is_not_stopped_while_another_process_holds_the_lock`.
@@ -92,9 +96,26 @@ pub async fn stop_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<StopOutcome, LifecycleError> {
+    stop_with_table(desc, delivery, &ProcessTable::system()).await
+}
+
+/// [`stop_with`], with the scan reading `table` instead of `/proc` (#11085).
+///
+/// Why: a test whose descriptor a host process could match must not depend on
+/// the host's processes; see [`ProcessTable`].
+/// What: [`stop_with`]'s steps; only the scan on the "socket does not serve"
+/// path reads `table`. The socket's peer is still pinned and identified in
+/// the real `/proc`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn stop_with_table(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<StopOutcome, LifecycleError> {
     desc.validate()?;
     let pid = match dial(&desc.socket).await {
-        Dial::NotServing => return not_running(desc),
+        Dial::NotServing => return not_running(desc, table),
         Dial::Inconclusive => {
             return Err(LifecycleError::ProbeInconclusive {
                 socket: desc.socket.clone(),
@@ -112,17 +133,31 @@ pub async fn stop_with(
     // own: nothing was signalled, so the answer is `NotRunning` once settled.
     let Some(target) = PinnedProcess::open(pid)? else {
         settle(desc, pid).await?;
-        return Ok(StopOutcome::NotRunning);
+        return not_running(desc, table);
     };
     if !identity_holds(desc, &target)? {
         settle(desc, pid).await?;
-        return Ok(StopOutcome::NotRunning);
+        return not_running(desc, table);
     }
+    terminate(desc, delivery, &target).await
+}
 
-    send(delivery, &target, Signal::Term)?;
+/// Steps 3 and 4 of [`stop_with`] on an identified, pinned process.
+///
+/// What: SIGTERM, the `stop_grace` exit wait, SIGKILL and the `kill_wait` exit
+/// wait (`Survivor` when the pid outlives it), then the stopped-signal wait.
+/// Test: `stop_sends_sigkill_to_a_process_that_ignores_sigterm`,
+/// `stop_pid_reports_a_survivor_and_restart_pid_starts_nothing`.
+pub(crate) async fn terminate(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    target: &PinnedProcess,
+) -> Result<StopOutcome, LifecycleError> {
+    let pid = target.pid();
+    send(delivery, target, Signal::Term)?;
     let mut forced = false;
     if !target.wait_exit(desc.stop_grace).await {
-        send(delivery, &target, Signal::Kill)?;
+        send(delivery, target, Signal::Kill)?;
         forced = true;
         if !target.wait_exit(desc.kill_wait).await {
             return Err(LifecycleError::Survivor { pid });
@@ -132,23 +167,24 @@ pub async fn stop_with(
     Ok(StopOutcome::Stopped { pid, forced })
 }
 
-/// The socket does not serve: `NotRunning`, unless a lock signal's lock is held.
-fn not_running(desc: &DaemonDescriptor) -> Result<StopOutcome, LifecycleError> {
-    if let StoppedSignal::LockFree(lock) = &desc.stopped_signal
-        && !lock_is_free(lock)?
-    {
-        return Err(LifecycleError::Unidentified {
-            socket: desc.socket.clone(),
-            lock: lock.clone(),
-        });
-    }
+/// The socket does not serve: `NotRunning`, unless a lock signal's lock is
+/// held or a process still runs the daemon.
+// #11098: "socket absent ⇒ not running" let restart start a second daemon.
+fn not_running(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<StopOutcome, LifecycleError> {
+    refuse_unserved_daemon(desc, table)?;
     Ok(StopOutcome::NotRunning)
 }
 
 /// `Ok(true)` when the pinned process is alive and runs `desc.binary`;
 /// `Ok(false)` when it exited mid-check; an error, with nothing signalled,
 /// when it runs something else or cannot be read.
-fn identity_holds(desc: &DaemonDescriptor, target: &PinnedProcess) -> Result<bool, LifecycleError> {
+pub(crate) fn identity_holds(
+    desc: &DaemonDescriptor,
+    target: &PinnedProcess,
+) -> Result<bool, LifecycleError> {
     let pid = target.pid();
     let read = exe_name(pid);
     // Alive after the read means the read saw the pinned process: a pid

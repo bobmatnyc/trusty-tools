@@ -17,9 +17,10 @@
 ///
 /// Why: see the module docs — distinct, matchable variants for the gate and
 /// not-found cases, plus graceful wrappers for the persistence surfaces.
-/// What: the five failure modes of the goal store.
+/// What: the six failure modes of the goal store.
 /// Test: `close_without_all_verified_is_rejected` (gate),
-/// `link_unknown_goal_is_not_found` (not-found).
+/// `link_unknown_goal_is_not_found` (not-found),
+/// `update_to_verified_without_evidence_is_rejected` (evidence).
 #[derive(Debug, thiserror::Error)]
 pub enum SmGoalError {
     /// No goal exists with the referenced id.
@@ -40,6 +41,16 @@ pub enum SmGoalError {
         verified: usize,
         /// Total linked tasks.
         total: usize,
+    },
+
+    /// A link was stored or updated as `Verified` without non-blank evidence
+    /// (#10722). The goal is left unchanged.
+    #[error("goal '{goal_id}': session '{session_id}' cannot be Verified without evidence")]
+    VerifiedWithoutEvidence {
+        /// The goal the link belongs to.
+        goal_id: String,
+        /// The linked session whose update was refused.
+        session_id: String,
     },
 
     /// A cache filesystem operation (mkdir / write / rename / read) failed.

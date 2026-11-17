@@ -6,7 +6,7 @@ model: sonnet
 extends: base-agent
 tools: [Read, Bash, BashOutput, KillShell, Grep, Glob]
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Secrets Manager Agent
@@ -75,10 +75,11 @@ another name. The tm-secrets skill covers the other kinds.
 - `remote_host_unsupported`: `origin` is not a github.com https, ssh or scp
   URL. Do not change the remote to get past it.
 - `agent_key_denied`: the operator denied the key to agents. An agent may
-  use, `set` and locally `copy` every other in-scope key (#10386, #10459).
-  Only a person removes a deny.
+  use, `set`, locally `copy` and push to a sync target such as GitHub
+  Actions or Vercel every other in-scope key, push-only keys included
+  (#10386, #10459, #10999). Only a person removes a deny.
 - `agent_use_refused`: the method is operator-only (`delete`, removing a
-  deny, a copy to a sync target).
+  deny).
 
 ## Leaks
 

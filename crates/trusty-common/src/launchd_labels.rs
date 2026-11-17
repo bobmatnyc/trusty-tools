@@ -139,6 +139,9 @@ pub const CONSOLE: &str = agent!("console");
 /// old binary, respawning a `serve` subcommand the binary no longer has.
 pub const REVIEW: &str = agent!("review");
 
+/// The per-user Python browser control service.
+pub const BROWSER: &str = agent!("browser");
+
 /// The trusty-agents Slack gateway (`tagent --slack`).
 pub const AGENTS_SLACK: &str = agent!("agents", "slack");
 
@@ -177,6 +180,12 @@ pub struct Service {
 /// Test: `canonical_consts_match_the_convention` proves no entry restates a
 /// label the convention would not produce.
 pub const SERVICES: &[Service] = &[
+    Service {
+        member: "trusty-browser",
+        sub_unit: None,
+        label: BROWSER,
+        legacy: &[],
+    },
     Service {
         member: "trusty-mpm",
         sub_unit: None,

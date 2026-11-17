@@ -151,6 +151,8 @@ pub mod daemon_identity;
 pub mod dbatg;
 // #10063: the `mpm.architect.dashboard.*` host facts and verb routing.
 pub mod architect_dashboard;
+// #10944: the Architect directory and the dashboard store root the daemon resolves.
+pub mod architect_store;
 pub mod delegation_authority;
 pub mod deploy_validate;
 pub mod deterministic_overseer;
@@ -296,6 +298,8 @@ pub mod pane_foreground;
 #[cfg(test)]
 pub(crate) mod pane_foreground_tests;
 pub mod paths;
+// #10753: tmux-ancestry evidence that a pid file's session still exists.
+pub mod pid_host;
 pub mod pid_registry;
 // #8992: the built-in tools a tm-launched PM does not load.
 pub mod pm_tool_trim;
@@ -310,6 +314,10 @@ pub mod policy_labels;
 pub mod pr_cleanup;
 pub mod process;
 pub mod project;
+/// `[accounts]` in `.trusty-mpm.toml` and the ops-prompt block it renders (#11390).
+pub mod project_accounts;
+#[cfg(test)]
+mod project_accounts_tests;
 pub mod project_aliases;
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;
@@ -368,6 +376,8 @@ pub mod savings_divert;
 pub mod savings_instructions;
 // #10973: the per-tool-call compression opportunity ledger rows.
 pub mod savings_opportunity;
+// #10973: why an opportunity row was not compressed, and the per-reason fold.
+pub mod savings_opportunity_reason;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
@@ -436,6 +446,20 @@ pub mod stack_profile;
 pub mod staged_paths;
 pub mod stale_skills;
 pub mod standalone;
+// #10960: the Architect's standing-rules block, injected by `tm hook --standing-rules`.
+pub mod standing_rules;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg's `current`.
+pub mod turn_task_stamp;
+// #10575: the completion-standard check behind `tm hook --completion-evidence`.
+pub mod completion_evidence;
+#[cfg(test)]
+#[path = "completion_evidence_tests.rs"]
+mod completion_evidence_tests;
+// #10574: the stale-copy guard's config and observed-version store.
+pub mod stale_copy;
+#[cfg(test)]
+#[path = "stale_copy_tests.rs"]
+mod stale_copy_tests;
 // #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
 // daemon's reap loop replays it — instead of the record sitting Running for the
 // six hours of `RUNNING_STALE_AFTER_SECS`.
@@ -485,6 +509,8 @@ pub mod presence_store;
 #[cfg(test)]
 pub(crate) mod presence_test_support;
 pub mod presence_verify;
+// #8878 PR2b-1b: the WebAuthn passkey adapter (ES256 only, D72).
+pub mod presence_webauthn;
 pub mod twin_identity;
 // #8572: dirty-tree probe for the main-checkout HEAD-switch guard.
 pub mod uncommitted_changes;

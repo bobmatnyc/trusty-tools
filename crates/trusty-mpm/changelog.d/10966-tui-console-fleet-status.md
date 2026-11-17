@@ -1,2 +1,0 @@
-Changed
-- `tm tui`: the Console tile and services row read `console.fleet_status` over trusty-console's Unix socket and show the console's real status and version instead of "no UDS endpoint". A closed console (socket absent or refused) reads "on demand", or "not installed" when the binary is missing; there is no HTTP fallback. Machine cards and per-service history still read "no data yet" (#10966, #10902).

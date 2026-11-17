@@ -48,8 +48,28 @@
 #     cd-fails      under umask 0777 mkdir makes a home the launcher cannot
 #                   enter; it exits 1 and the daemon never starts
 #     teardown      after the daemon exits, the launcher runs
-#                   `tmux -S <dir>/data/tmux/tmux-<uid>/default kill-server`
-#                   and no other tmux call (#9557); skips without python3
+#                   `tmux -S <socket> kill-server` for `default` and a
+#                   tm-ws-* socket beside it, and every tmux call addresses a
+#                   sandbox socket by -S (#9557, #10922); skips without python3
+#     teardown-ws   (#10922) a stub daemon starts a real tm-ws-* tmux server
+#                   whose pane and its child ignore HUP and TERM; after
+#                   teardown the server is gone, both processes are dead and
+#                   the exit is 0; skips without tmux
+#     teardown-survivor  (#10922) a stub daemon leaves a process outside tmux
+#                   with its cwd under <dir>; the launcher names its pid and
+#                   exits 1
+#     teardown-symlink-entry  (#10922) a socket entry symlinked to a scratch
+#                   decoy socket is skipped: no tmux call names it or its target
+#     teardown-symlink-dir  (#10922) tmux-<uid> symlinked to a scratch decoy
+#                   dir refuses the tmux step: no tmux call, exit 1
+#     teardown-dead-pane  (#10922) a pane tmux reports dead is never signalled
+#     teardown-socket-survivor  (#10922) a process with cwd / holding a bound
+#                   unix socket under <dir> is named; exit 1
+#     teardown-find-probe-failed  (#10922) the Linux probe on a find that
+#                   cannot print links (fake find, fake SANDBOX_PROC) exits 1
+#                   naming the check; runs on macOS and Linux.
+#     teardown-probe-failed  (#10922) a survivor probe that fails or is missing
+#                   (SANDBOX_LSOF) is named on stderr; exit 1, never clean
 #     bin-fresh-*   (#10755) against a temp git source root (SANDBOX_SRC_ROOT)
 #                   and a stubbed dependency tree (BIN_FRESH_SOURCES_CMD): a
 #                   stale build artifact refuses, in a dry run and in a real
@@ -61,6 +81,17 @@
 #                   installed-style stub passes with a notice; the override
 #                   is announced, and ignored with a warning unless
 #                   BIN_FRESH_TEST=1
+#     cred-*        (#10721) --credential NAME=<ref> against a perl stub that
+#                   plays `tm secrets exec` and the daemon: the daemon sees
+#                   exactly the pinned and forwarded names plus NAME, never a
+#                   polluting secret, exported function or the exec's token
+#                   fd name, and holds no fd above stderr (the stub opens a
+#                   real token fd); a canary value is in no output, `ps` argv or file
+#                   under the sandbox; a bad name, a malformed or empty ref,
+#                   a repeat, and an unresolvable ref each refuse and start
+#                   no daemon; without --credential a provider key in the
+#                   caller env never arrives; the wrapper refuses a bad or
+#                   unset NAME and a malformed or stdio token fd; and its FORWARDED list matches the launcher's
 #   The two mode-000 cases skip as root, which enters any directory.
 #
 # Usage: ./scripts/sandbox_daemon_selftest.sh
@@ -382,19 +413,29 @@ if command -v python3 >/dev/null 2>&1; then
   mkdir -p "$DIR10/data/tmux/tmux-$(id -u)" "$FAKE_BIN"
   chmod 700 "$DIR10/data/tmux" "$DIR10/data/tmux/tmux-$(id -u)"
   SOCK10="$DIR10/data/tmux/tmux-$(id -u)/default"
-  python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$SOCK10"
-  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\n' "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
+  # #10922: a per-workspace server's socket beside `default`.
+  WS10="$DIR10/data/tmux/tmux-$(id -u)/tm-ws-selftest-0123"
+  for s in "$SOCK10" "$WS10"; do
+    python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$s"
+  done
+  # The fake answers no list-sessions, as a stopped server does.
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; esac\n' \
+    "$TMP_ROOT/tmux-calls" > "$FAKE_BIN/tmux"
   chmod +x "$FAKE_BIN/tmux"
   set +e
   OUT10="$(env -i PATH="$FAKE_BIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIR10" 2>&1)"
   STATUS10=$?
   set -e
   CALLS10="$(cat "$TMP_ROOT/tmux-calls" 2>/dev/null || true)"
+  KILLS10="$(printf '%s\n' "$CALLS10" | grep 'kill-server' | tr '\n' ' ')"
+  UNSCOPED10="$(printf '%s\n' "$CALLS10" | grep -v "^-S $DIR10/data/tmux/tmux-$(id -u)/" || true)"
   if [ "$STATUS10" -ne 0 ]; then
     fail teardown "launcher exit $STATUS10"
     printf '%s\n' "$OUT10" | sed 's/^/    /'
-  elif [ "$CALLS10" != "-S $SOCK10 kill-server" ]; then
-    fail teardown "tmux calls were [$CALLS10], want [-S $SOCK10 kill-server]"
+  elif [ "$KILLS10" != "-S $SOCK10 kill-server -S $WS10 kill-server " ]; then
+    fail teardown "kill-server calls were [$KILLS10], want one per socket in the sandbox dir"
+  elif [ -n "$UNSCOPED10" ]; then
+    fail teardown "a tmux call did not address a sandbox socket by -S: [$UNSCOPED10]"
   elif ! printf '%s' "$OUT10" | grep -qF "tmux socket: $SOCK10"; then
     fail teardown "the launcher did not name the sandbox socket"
   else
@@ -402,6 +443,239 @@ if command -v python3 >/dev/null 2>&1; then
   fi
 else
   echo "skip teardown: no python3 to bind a fake socket"
+fi
+
+# 10b. teardown-ws (#10922): a stub daemon starts a REAL per-workspace tmux
+# server under the sandbox's TMUX_TMPDIR whose pane, and the pane's child,
+# ignore HUP and TERM, as a `claude` outliving kill-server does; then it
+# exits. Every tmux call here passes -S and runs with TMUX unset.
+if command -v tmux >/dev/null 2>&1; then
+  DIRWS="$TMP_ROOT/casews"
+  mkdir -p "$DIRWS"
+  WS_STUB="$TMP_ROOT/stub-ws-tm"
+  cat > "$WS_STUB" <<'WS_EOF'
+#!/bin/sh
+# The launcher's env -i leaves TMUX unset; -L resolves under its TMUX_TMPDIR.
+tmux -L tm-ws-selftest-4567 new-session -d -s ws \
+  "sh -c 'trap \"\" HUP TERM; sleep 611 & echo \$! > \"$HOME/child-pid\"; echo \$\$ > \"$HOME/pane-pid\"; exec sleep 612'"
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$HOME/pane-pid" ]; do sleep 0.1; i=$((i + 1)); done
+WS_EOF
+  chmod +x "$WS_STUB"
+  WSSOCK="$DIRWS/data/tmux/tmux-$(id -u)/tm-ws-selftest-4567"
+  set +e
+  OUTWS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$WS_STUB" --dir "$DIRWS" 2>&1)"
+  STATUSWS=$?
+  set -e
+  PANE="$(cat "$DIRWS/home/pane-pid" 2>/dev/null || true)"
+  CHILD="$(cat "$DIRWS/home/child-pid" 2>/dev/null || true)"
+  if [ -z "$PANE" ] || [ -z "$CHILD" ]; then
+    fail teardown-ws "the stub never started its tmux pane"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  elif env -u TMUX tmux -S "$WSSOCK" list-sessions >/dev/null 2>&1; then
+    fail teardown-ws "the tm-ws server still answers on $WSSOCK"
+  elif kill -0 "$PANE" 2>/dev/null || kill -0 "$CHILD" 2>/dev/null; then
+    fail teardown-ws "a pane process outlived teardown (pane $PANE, child $CHILD)"
+  elif [ "$STATUSWS" -ne 0 ]; then
+    fail teardown-ws "launcher exit $STATUSWS"
+    printf '%s\n' "$OUTWS" | sed 's/^/    /'
+  else
+    pass teardown-ws
+  fi
+  # Whatever the result, leave nothing running: by -S path and by pid only.
+  env -u TMUX tmux -S "$WSSOCK" kill-server >/dev/null 2>&1 || true
+  for p in $PANE $CHILD; do kill -KILL "$p" 2>/dev/null || true; done
+else
+  echo "skip teardown-ws: no tmux"
+fi
+
+# 10c. teardown-survivor (#10922): a process outside tmux with its cwd under
+# <dir> is not the launcher's to kill; teardown names it and exits 1.
+DIRSV="$TMP_ROOT/casesv"
+mkdir -p "$DIRSV"
+SV_STUB="$TMP_ROOT/stub-sv-tm"
+# shellcheck disable=SC2016  # expands in the stub, not here
+printf '%s\n' '#!/bin/sh' 'sleep 613 > /dev/null 2>&1 &' 'echo $! > "$HOME/sv-pid"' > "$SV_STUB"
+chmod +x "$SV_STUB"
+set +e
+OUTSV="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SV_STUB" --dir "$DIRSV" 2>&1)"
+STATUSSV=$?
+set -e
+SVPID="$(cat "$DIRSV/home/sv-pid" 2>/dev/null || true)"
+if [ -z "$SVPID" ]; then
+  fail teardown-survivor "the stub never started its process"
+elif [ "$STATUSSV" -ne 1 ] || ! printf '%s' "$OUTSV" | grep -q "teardown left processes under $DIRSV:.* $SVPID"; then
+  fail teardown-survivor "exit $STATUSSV (want 1), survivor $SVPID not named"
+  printf '%s\n' "$OUTSV" | sed 's/^/    /'
+else
+  pass teardown-survivor
+fi
+[ -z "$SVPID" ] || kill -KILL "$SVPID" 2>/dev/null || true
+
+# 10d-10f use a fake tmux that logs every call and answers no list-sessions;
+# $TMP_ROOT/fake-panes, when present, answers list-panes. The paths are baked
+# in: the launcher runs tmux under `env -i`.
+if command -v python3 >/dev/null 2>&1; then
+  bind_sock() { python3 -I -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+  LOGBIN="$TMP_ROOT/logtmux-bin"
+  mkdir -p "$LOGBIN"
+  printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\ncase "$*" in *list-sessions*) exit 1 ;; *list-panes*) cat "%s" 2>/dev/null ;; esac\nexit 0\n' \
+    "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes" > "$LOGBIN/tmux"
+  chmod +x "$LOGBIN/tmux"
+  # Scratch decoys only: a socket and a socket dir outside every case dir.
+  DECOY_DIR="$TMP_ROOT/decoy/tmux-$(id -u)"
+  mkdir -p "$DECOY_DIR"
+  DECOY_SOCK="$DECOY_DIR/default"
+  bind_sock "$DECOY_SOCK"
+
+  # 10d. teardown-symlink-entry (#10922): a socket entry symlinked to the
+  # decoy is skipped; `default` beside it is still stopped.
+  DIRSE="$TMP_ROOT/casese"
+  mkdir -p "$DIRSE/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRSE/data/tmux" "$DIRSE/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRSE/data/tmux/tmux-$(id -u)/default"
+  ln -s "$DECOY_SOCK" "$DIRSE/data/tmux/tmux-$(id -u)/tm-ws-decoy"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSE="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSE" 2>&1)"
+  STATUSSE=$?
+  set -e
+  CALLSSE="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if printf '%s\n' "$CALLSSE" | grep -qe "tm-ws-decoy" -e "$TMP_ROOT/decoy"; then
+    fail teardown-symlink-entry "a tmux -S call named the symlinked entry or its decoy target: [$CALLSSE]"
+  elif ! printf '%s\n' "$CALLSSE" | grep -qxF -- "-S $DIRSE/data/tmux/tmux-$(id -u)/default kill-server"; then
+    fail teardown-symlink-entry "default was not stopped: [$CALLSSE]"
+  elif [ "$STATUSSE" -ne 0 ]; then
+    fail teardown-symlink-entry "launcher exit $STATUSSE"
+    printf '%s\n' "$OUTSE" | sed 's/^/    /'
+  else
+    pass teardown-symlink-entry
+  fi
+
+  # 10e. teardown-symlink-dir (#10922): tmux-<uid> symlinked to the decoy dir
+  # refuses the tmux step: no tmux call at all, exit 1, the refusal named.
+  DIRSD="$TMP_ROOT/casesd"
+  mkdir -p "$DIRSD/data/tmux"
+  chmod 700 "$DIRSD/data/tmux"
+  ln -s "$DECOY_DIR" "$DIRSD/data/tmux/tmux-$(id -u)"
+  rm -f "$TMP_ROOT/calls" "$TMP_ROOT/fake-panes"
+  set +e
+  OUTSD="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRSD" 2>&1)"
+  STATUSSD=$?
+  set -e
+  CALLSSD="$(cat "$TMP_ROOT/calls" 2>/dev/null || true)"
+  if [ -n "$CALLSSD" ]; then
+    fail teardown-symlink-dir "tmux was called through the symlinked dir: [$CALLSSD]"
+  elif [ "$STATUSSD" -ne 1 ] || ! printf '%s' "$OUTSD" | grep -q "teardown refused the tmux socket dir"; then
+    fail teardown-symlink-dir "exit $STATUSSD (want 1), refusal not named"
+    printf '%s\n' "$OUTSD" | sed 's/^/    /'
+  else
+    pass teardown-symlink-dir
+  fi
+
+  # 10f. teardown-dead-pane (#10922): a pane tmux reports dead keeps its pid
+  # out of the TERM list, so a reused pid is never signalled.
+  DIRDP="$TMP_ROOT/casedp"
+  mkdir -p "$DIRDP/data/tmux/tmux-$(id -u)"
+  chmod 700 "$DIRDP/data/tmux" "$DIRDP/data/tmux/tmux-$(id -u)"
+  bind_sock "$DIRDP/data/tmux/tmux-$(id -u)/default"
+  # Detached, so a stopped one is reaped by init, not left a zombie of ours.
+  (sleep 614 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/srv-dp")
+  (sleep 615 > /dev/null 2>&1 & echo $! > "$TMP_ROOT/dead-dp")
+  SRVDP="$(cat "$TMP_ROOT/srv-dp")"
+  DEADDP="$(cat "$TMP_ROOT/dead-dp")"
+  rm -f "$TMP_ROOT/calls"
+  echo "$SRVDP $DEADDP 1" > "$TMP_ROOT/fake-panes"
+  set +e
+  OUTDP="$(env -i PATH="$LOGBIN:$PATH" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRDP" 2>&1)"
+  STATUSDP=$?
+  set -e
+  if ! kill -0 "$DEADDP" 2>/dev/null; then
+    fail teardown-dead-pane "the dead pane's pid $DEADDP was signalled"
+  elif kill -0 "$SRVDP" 2>/dev/null; then
+    fail teardown-dead-pane "the server pid $SRVDP was not stopped"
+  elif [ "$STATUSDP" -ne 0 ]; then
+    fail teardown-dead-pane "launcher exit $STATUSDP"
+    printf '%s\n' "$OUTDP" | sed 's/^/    /'
+  else
+    pass teardown-dead-pane
+  fi
+  kill -KILL "$SRVDP" "$DEADDP" 2>/dev/null || true
+
+  # 10g. teardown-socket-survivor (#10922): a process with its cwd at / that
+  # holds a bound unix socket under <dir> is a survivor; exit 1 names it.
+  DIRSS="$TMP_ROOT/casess"
+  mkdir -p "$DIRSS"
+  SS_STUB="$TMP_ROOT/stub-ss-tm"
+  # shellcheck disable=SC2016  # expands in the stub, not here
+  printf '%s\n' '#!/bin/sh' 'cd / || exit 1' \
+    'python3 -I -c "import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); s.listen(1); time.sleep(616)" "$HOME/held.sock" > /dev/null 2>&1 &' \
+    'echo $! > "$HOME/ss-pid"' \
+    'i=0; while [ "$i" -lt 50 ] && [ ! -S "$HOME/held.sock" ]; do sleep 0.1; i=$((i + 1)); done' > "$SS_STUB"
+  chmod +x "$SS_STUB"
+  set +e
+  OUTSS="$(env -i PATH="$PATH" bash "$LAUNCHER" --bin "$SS_STUB" --dir "$DIRSS" 2>&1)"
+  STATUSSS=$?
+  set -e
+  SSPID="$(cat "$DIRSS/home/ss-pid" 2>/dev/null || true)"
+  if [ -z "$SSPID" ] || [ ! -S "$DIRSS/home/held.sock" ]; then
+    fail teardown-socket-survivor "the stub never bound its socket"
+  elif [ "$STATUSSS" -ne 1 ] || ! printf '%s' "$OUTSS" | grep -q "teardown left processes under $DIRSS:.* $SSPID"; then
+    fail teardown-socket-survivor "exit $STATUSSS (want 1), socket holder $SSPID not named"
+    printf '%s\n' "$OUTSS" | sed 's/^/    /'
+  else
+    pass teardown-socket-survivor
+  fi
+  [ -z "$SSPID" ] || kill -KILL "$SSPID" 2>/dev/null || true
+else
+  echo "skip teardown-symlink-entry, teardown-symlink-dir, teardown-dead-pane, teardown-socket-survivor: no python3"
+fi
+
+# 10h. teardown-probe-failed (#10922): a survivor check that cannot run is a
+# failure naming the check, never a clean teardown. SANDBOX_LSOF points the
+# probe at a failing or a missing binary; a failing `lsof` also leads PATH.
+PROBEBIN="$TMP_ROOT/probe-bin"
+mkdir -p "$PROBEBIN"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$PROBEBIN/lsof"
+chmod +x "$PROBEBIN/lsof"
+NPF=0
+for probe in "$PROBEBIN/lsof:exited 1" "$TMP_ROOT/no-such-lsof:is missing or not executable"; do
+  NPF=$((NPF + 1))
+  DIRPF="$TMP_ROOT/casepf$NPF"
+  mkdir -p "$DIRPF"
+  set +e
+  OUTPF="$(env -i PATH="$PROBEBIN:$PATH" SANDBOX_LSOF="${probe%%:*}" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRPF" 2>&1)"
+  STATUSPF=$?
+  set -e
+  if [ "$STATUSPF" -ne 1 ] || ! printf '%s' "$OUTPF" | grep -qF "survivor check failed: ${probe%%:*} ${probe#*:}"; then
+    fail teardown-probe-failed "probe ${probe%%:*}: exit $STATUSPF (want 1), failed check not named"
+    printf '%s\n' "$OUTPF" | sed 's/^/    /'
+  else
+    pass "teardown-probe-failed (${probe#*:})"
+  fi
+done
+
+# 10i. teardown-find-probe-failed (#10922): the Linux probe on a `find` that
+# cannot print links (BusyBox has no -printf) is a failure naming the check,
+# never "nothing held". SANDBOX_PROC points the Linux branch at a fake proc
+# tree, so the case runs on macOS and Linux alike.
+FAKEPROC="$TMP_ROOT/fake-proc"
+FINDBIN="$TMP_ROOT/find-bin"
+mkdir -p "$FAKEPROC/self/fd" "$FAKEPROC/net" "$FINDBIN"
+: > "$FAKEPROC/net/unix"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$FINDBIN/find"
+chmod +x "$FINDBIN/find"
+DIRFP="$TMP_ROOT/casefp"
+mkdir -p "$DIRFP"
+set +e
+OUTFP="$(env -i PATH="$FINDBIN:$PATH" SANDBOX_PROC="$FAKEPROC" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRFP" 2>&1)"
+STATUSFP=$?
+set -e
+if [ "$STATUSFP" -ne 1 ] || ! printf '%s' "$OUTFP" | grep -qF "survivor check failed: find cannot list $FAKEPROC/<pid>/cwd and fd links"; then
+  fail teardown-find-probe-failed "exit $STATUSFP (want 1), failed check not named"
+  printf '%s\n' "$OUTFP" | sed 's/^/    /'
+else
+  pass "teardown-find-probe-failed"
 fi
 
 # 11. bin-fresh (#10755): a temp source root and a stubbed dependency tree
@@ -493,6 +767,191 @@ SRC_ROOT_ENV=("SANDBOX_SRC_ROOT=$TMP_ROOT/not-a-repo" "BIN_FRESH_TEST=1" "BIN_FR
 expect_refusal bin-fresh-no-source 1 "no source file of trusty-mpm found by git" \
   --bin "$TGT11/release/tm" --dir "$DIR2" --dry-run
 SRC_ROOT_ENV=()
+
+# ── #10721: --credential NAME=<ref> ─────────────────────────────────────────
+# A perl stub `tm`: perl adds no variable of its own, so the daemon side sees
+# exactly what the wrapper passed. `secrets exec --env NAME=REF -- CMD...`
+# sets NAME to a canary (never on argv) and opens a real fd named by
+# TRUSTY_SECRETS_TOKEN_FD, as the real exec does, then execs CMD; REF `unresolvable` exits 1 running nothing.
+# `daemon ...` records names, args, cwd, `ps` argv and whether the credential
+# arrived — never its value.
+CANARY="10721-selftest-canary-credential-value"
+CRED_STUB="$TMP_ROOT/stub-cred-tm"
+cat > "$CRED_STUB" <<'CRED_EOF'
+#!/usr/bin/perl
+use strict;
+use warnings;
+use Fcntl qw(F_SETFD);
+use POSIX ();
+my $canary = "10721-selftest-canary-credential-value";
+if (@ARGV && $ARGV[0] eq 'secrets') {
+  my ($name, $ref) = $ARGV[3] =~ /^([^=]+)=(.*)$/ or exit 2;
+  if ($ref eq 'unresolvable') {
+    print STDERR "tm secrets exec: a key did not resolve; nothing ran\n";
+    exit 1;
+  }
+  $ENV{$name} = $canary;
+  # A real open fd, close-on-exec cleared, as exec_token.rs leaves the token.
+  open(my $tok, '<', $0) or exit 2;
+  fcntl($tok, F_SETFD, 0) or exit 2;
+  $ENV{TRUSTY_SECRETS_TOKEN_FD} = fileno($tok);
+  exec { $ARGV[5] } @ARGV[5 .. $#ARGV] or exit 127;
+}
+# Before this stub opens anything: every fd above 2 the daemon inherited.
+# perl itself holds none here (it closed the script after compiling it).
+my @fds;
+for my $n (3 .. 1023) {
+  my $d = POSIX::dup($n);
+  next unless defined $d;
+  POSIX::close($d);
+  push @fds, $n;
+}
+my $h = $ENV{HOME};
+open(my $ff, '>', "$h/stub-fds") or die;
+print $ff join(' ', @fds), "\n";
+close $ff;
+open(my $f, '>', "$h/stub-env-names") or die;
+print $f join("\n", sort keys %ENV), "\n";
+close $f;
+open($f, '>', "$h/stub-args") or die;
+print $f join("\n", @ARGV), "\n";
+close $f;
+system("pwd -P > '$h/stub-pwd'");
+system("ps -A -ww -o args= > '$h/stub-ps'");
+my $got = (grep { defined $ENV{$_} && $ENV{$_} eq $canary } keys %ENV) ? 'present' : 'absent';
+open($f, '>', "$h/stub-cred") or die;
+print $f "$got\n";
+close $f;
+CRED_EOF
+chmod +x "$CRED_STUB"
+
+# cred-forwarded-in-step: the wrapper keeps the launcher's FORWARDED list.
+WRAPPER="$SCRIPT_DIR/lib/sandbox_exec.sh"
+fwd_list() { sed -n '/^FORWARDED="/,/"$/p' "$1" | sed -e 's/^FORWARDED="//' | tr -d '\\"' | tr ' ' '\n' | grep . | sort; }
+if [ "$(fwd_list "$LAUNCHER")" = "$(fwd_list "$WRAPPER")" ] && [ -n "$(fwd_list "$WRAPPER")" ]; then
+  pass cred-forwarded-in-step
+else
+  fail cred-forwarded-in-step "FORWARDED differs between the launcher and $WRAPPER"
+fi
+
+# cred-allowlist + cred-canary: a real (stubbed) run with a polluted caller,
+# an exported shell function, and exported names that shadow the wrapper's own
+# variables.
+DIRC="$TMP_ROOT/cred1"
+mkdir -p "$DIRC"
+set +e
+OUTC="$(env -i PATH="$PATH" LANG=C RUST_LOG=warn TELEGRAM_BOT_TOKEN="$FAKE_TOKEN" \
+  OPENAI_API_KEY="$FAKE_KEY" OPENROUTER_API_KEY="$FAKE_KEY" KEEP="$FAKE_KEY" NAME="$FAKE_KEY" \
+  'BASH_FUNC_leak%%=() { echo '"$FAKE_KEY"'; }' \
+  bash "$LAUNCHER" --bin "$CRED_STUB" --dir "$DIRC" --credential ANTHROPIC_API_KEY=selftest-ref 2>&1)"
+STATUSC=$?
+set -e
+if [ "$STATUSC" -ne 0 ]; then
+  fail cred-allowlist "launcher exit $STATUSC"
+  printf '%s\n' "$OUTC" | sed 's/^/    /'
+elif [ ! -f "$DIRC/home/stub-env-names" ]; then
+  fail cred-allowlist "the stub daemon never ran"
+else
+  GOT="$(tr '\n' ' ' < "$DIRC/home/stub-env-names")"
+  WANT="ANTHROPIC_API_KEY HOME LANG PATH RUST_LOG TMUX_TMPDIR TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX "
+  if [ "$GOT" != "$WANT" ]; then
+    fail cred-allowlist "daemon saw [$GOT], want [$WANT]"
+  elif [ "$(tr '\n' ' ' < "$DIRC/home/stub-args")" != "daemon --sandbox --sandbox-credential ANTHROPIC_API_KEY " ]; then
+    fail cred-allowlist "daemon args were [$(tr '\n' ' ' < "$DIRC/home/stub-args")]"
+  elif [ "$(cat "$DIRC/home/stub-pwd")" != "$DIRC/home" ]; then
+    fail cred-allowlist "daemon cwd was not <dir>/home"
+  elif [ "$(cat "$DIRC/home/stub-cred")" != "present" ]; then
+    fail cred-allowlist "the credential did not reach the daemon"
+  else
+    pass cred-allowlist
+  fi
+fi
+# cred-no-inherited-fd: the daemon holds no fd above stderr, so no child of it
+# can present the exec's grant token (#10721).
+if [ ! -f "$DIRC/home/stub-fds" ]; then
+  fail cred-no-inherited-fd "the stub daemon never recorded its fds"
+elif [ -n "$(tr -d ' \n' < "$DIRC/home/stub-fds")" ]; then
+  fail cred-no-inherited-fd "the daemon inherited fds above 2: $(cat "$DIRC/home/stub-fds")"
+else
+  pass cred-no-inherited-fd
+fi
+# The canary is in no output, no ps argv, and no file under the sandbox dir.
+if printf '%s' "$OUTC" | grep -qF "$CANARY"; then
+  fail cred-canary "the credential value reached the launcher's output"
+elif [ ! -s "$DIRC/home/stub-ps" ]; then
+  fail cred-canary "no ps argv was captured"
+elif grep -rqF "$CANARY" "$DIRC"; then
+  fail cred-canary "the credential value is in a file under the sandbox: $(grep -rlF "$CANARY" "$DIRC")"
+elif printf '%s' "$OUTC" | grep -qF -e "$FAKE_KEY" -e "$FAKE_TOKEN" -e selftest-ref; then
+  fail cred-canary "a fake value or the ref reached the output"
+else
+  pass cred-canary
+fi
+
+# cred-dry-run: names the credential and passes it; starts nothing.
+DIRCD="$TMP_ROOT/cred-dry"
+mkdir -p "$DIRCD"
+expect_refusal cred-dry-run 0 "names only): HOME PATH TRUSTY_DATA_DIR_OVERRIDE TRUSTY_SANDBOX TMUX_TMPDIR LANG RUST_LOG ANTHROPIC_API_KEY" \
+  --bin "$CRED_STUB" --dir "$DIRCD" --credential ANTHROPIC_API_KEY=selftest-ref --dry-run
+[ ! -e "$DIRCD/home" ] || fail cred-dry-run "a dry run created $DIRCD/home"
+
+# Refusals before anything starts: each fails on a launcher without --credential.
+DIRCR="$TMP_ROOT/cred-refuse"
+mkdir -p "$DIRCR"
+expect_refusal cred-bad-name 1 "--credential name not allowed" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential TELEGRAM_BOT_TOKEN=selftest-ref
+expect_refusal cred-malformed 1 "--credential takes NAME=<ref>" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY
+expect_refusal cred-empty-ref 1 "--credential ANTHROPIC_API_KEY has an empty reference" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY=
+expect_refusal cred-twice 1 "--credential may be given once" \
+  --bin "$CRED_STUB" --dir "$DIRCR" --credential ANTHROPIC_API_KEY=a --credential OPENROUTER_API_KEY=b
+[ ! -e "$DIRCR/home" ] || fail cred-refusals-start-nothing "a refused --credential created $DIRCR/home"
+
+# cred-unresolvable: `tm secrets exec` exits 1 and no daemon runs.
+DIRCU="$TMP_ROOT/cred-unres"
+mkdir -p "$DIRCU"
+expect_refusal cred-unresolvable 1 "a key did not resolve" \
+  --bin "$CRED_STUB" --dir "$DIRCU" --credential OPENROUTER_API_KEY=unresolvable
+[ ! -e "$DIRCU/home/stub-args" ] || fail cred-unresolvable "a daemon ran on an unresolvable ref"
+
+# cred-default-closed: a provider key in the caller env, no --credential:
+# the daemon sees none and gets no --sandbox-credential.
+DIRCN="$TMP_ROOT/cred-none"
+mkdir -p "$DIRCN"
+set +e
+env -i PATH="$PATH" ANTHROPIC_API_KEY="$CANARY" bash "$LAUNCHER" --bin "$STUB" --dir "$DIRCN" >/dev/null 2>&1
+set -e
+if grep -qx ANTHROPIC_API_KEY "$DIRCN/home/stub-env-names" 2>/dev/null; then
+  fail cred-default-closed "a provider key reached the daemon without --credential"
+elif [ "$(tr '\n' ' ' < "$DIRCN/home/stub-args" 2>/dev/null)" != "daemon --sandbox " ]; then
+  fail cred-default-closed "the daemon args changed without --credential"
+else
+  pass cred-default-closed
+fi
+
+# The wrapper's own refusals, run directly.
+run_wrapper() {
+  local name="$1" needle="$2" out status
+  shift 2
+  set +e
+  out="$(env -i PATH="$PATH" "$@" 2>&1)"
+  status=$?
+  set -e
+  if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -qF -- "$needle"; then
+    pass "$name"
+  else
+    fail "$name" "exit $status, output: $out"
+  fi
+}
+run_wrapper cred-wrapper-bad-name "credential name not allowed: GITHUB_PAT" \
+  GITHUB_PAT="$FAKE_KEY" bash "$WRAPPER" "$DIRCR" "$CRED_STUB" GITHUB_PAT
+run_wrapper cred-wrapper-absent "ANTHROPIC_API_KEY is not set" \
+  bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-bad-fd "TRUSTY_SECRETS_TOKEN_FD is not an fd number" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD='3;x' bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
+run_wrapper cred-wrapper-stdio-fd "TRUSTY_SECRETS_TOKEN_FD names stdio" \
+  ANTHROPIC_API_KEY="$FAKE_KEY" TRUSTY_SECRETS_TOKEN_FD=2 bash "$WRAPPER" "$DIRCR" "$CRED_STUB" ANTHROPIC_API_KEY
 
 echo "sandbox_daemon selftest: $PASSED passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]

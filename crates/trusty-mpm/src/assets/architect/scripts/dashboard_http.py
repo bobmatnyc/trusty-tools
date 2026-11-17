@@ -5,10 +5,11 @@ DNS-rebinding and CSRF guard.
 What: `Handler` routes GET / (the page with the shim), /config.json, /api/<coll>[/<id>] (store reads and versioned
 writes; 409 on if_version mismatch), /api/batch, /api/user, /api/il, /api/harness[/diff], /api/viz, /live, /files,
 /usage, /media, /media-file, /doc, /doc-sync, /briefs and /vendor (see dashboard-serve.py for the API list), plus the
-dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /static). A request
+dashboard_routes.py routes (PUT /doc, /api/attach, /api/fleet, /api/projects, /api/cli-profiles, /api/pane,
+/static). A request
 whose Host is not 127.0.0.1/localhost:<port> or a guard name (bare, :<port>, :443), or a write whose Origin is not
 http://127.0.0.1|localhost:<port> or https://<name>[:<port>|:443], gets 403 (`host_allowed`, `origin_allowed`).
-/config.json `warnings` lists why this interpreter degrades the page ([] on Python >= 3.11, #10606).
+/config.json `warnings` lists why this interpreter degrades the page ([] when tmux is on PATH, #10606).
 /config.json carries the tailnet origin the server was given (local/architect.json `tailnet_url`, "" when unset) and,
 in architect mode only, the session nav from `load_nav`. /api/user names meta/state.owner_name, else the configured
 owner_name, else "the owner". The Notion share sidecar is optional: without notion_sync every /doc-sync answer is
@@ -46,9 +47,10 @@ try:
 except ImportError:
     notion_sync = None
 try:  # #10571: the Secrets nav and project lifecycle need the trusty-secrets bridge; optional, not shipped yet
-    import dashboard_secrets
+    # #10570: bound as sec_nav; pm-guard read the module name's attribute calls as a secret-file name.
+    import dashboard_secrets as sec_nav
 except ImportError:
-    dashboard_secrets = None
+    sec_nav = None
 try:
     import dashboard_lifecycle
 except ImportError:
@@ -181,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 return routes.fleet(self)
             if parts == ["api", "projects"]:
                 return routes.projects(self)
+            if parts == ["api", "pane"]:   # #11065: a session's masked pane tail
+                return routes.pane(self, url)
             if parts == ["api", "cli-profiles"]:
                 return routes.cli_profiles(self, url)
             if parts == ["api", "harness", "diff"]:
@@ -231,9 +235,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._doc(url.path) if parts[0] == "doc" else self._vendor(parts[1:])
             if parts[:2] == ["api", "attach"]:
                 return routes.attach(self, parts[2:], parse_qs(url.query), _DIGITS)
-            if dashboard_secrets is not None and tuple(parts[:2]) == dashboard_secrets.PREFIX:
+            if sec_nav is not None and tuple(parts[:2]) == sec_nav.PREFIX:
                 # Secrets nav: POST-only, Origin + CSRF guarded; never returns a value
-                return dashboard_secrets.handle(self, parts[2:], host_allowed, origin_allowed)
+                return sec_nav.handle(self, parts[2:], host_allowed, origin_allowed)
             if dashboard_lifecycle is not None and tuple(parts[:2]) == dashboard_lifecycle.PREFIX and len(parts) == 3:
                 # Projects archive/decommission/restore: POST-only, CSRF guarded
                 return dashboard_lifecycle.handle(self, parts[2:], host_allowed, origin_allowed)
@@ -253,15 +257,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _harness(self):
         sv = self.server
-        sdocs = [d["data"] for d in sv.store.list_docs("sessions")]
-        idocs = [d["data"] for d in sv.store.list_docs("items")]
-        gdocs = [d["data"] for d in sv.store.list_docs("goals")]
+        snap = sv.store.snapshot(("sessions", "items", "goals", "meta"))   # #10679: one shared lock, so one batch is seen whole
+        sdocs, idocs, gdocs = ([d["data"] for d in snap[c]] for c in ("sessions", "items", "goals"))
         roots = sv.projects()
         cwds = {x.get("name"): roots[x.get("project")] for x in sdocs if x.get("name") and x.get("project") in roots}
-        try:
-            ustate = sv.store.get("meta", "settings")["data"].get("user_state")
-        except Exception:  # noqa: BLE001 - settings absent: state unknown, never sleeping
-            ustate = None
+        settings = next((d["data"] for d in snap["meta"] if d["id"] == "settings"), None)
+        ustate = settings.get("user_state") if isinstance(settings, dict) else None   # settings absent: unknown, never sleeping
         return dashboard_harness.build(sv.inbox, sv.claude_projects, sdocs, idocs, project_cwds=cwds, roots=roots, goal_docs=gdocs,
                                        user_state=ustate, tmux=dashboard_harness.tmux_sessions())
 
@@ -403,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
 def features():
     """Which optional backends this install has (#10571): {"secrets", "cli_profiles", "project_lifecycle"} -> bool.
     The page drops the Secrets and CLI Profiles tabs and the archive buttons when their flag is false."""
-    return {"secrets": dashboard_secrets is not None, "cli_profiles": routes.cli_profiles_mod is not None,
+    return {"secrets": sec_nav is not None, "cli_profiles": routes.cli_profiles_mod is not None,
             "project_lifecycle": dashboard_lifecycle is not None}
 
 

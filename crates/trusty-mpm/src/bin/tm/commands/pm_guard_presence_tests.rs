@@ -248,3 +248,67 @@ fn every_spelling_of_a_presence_verb_is_found_8878() {
         assert_eq!(evaluate_presence_verbs(command), None, "{command}");
     }
 }
+
+/// Spoof (#8878 PR2b-1b): the new verbs are a PM's or an agent's to run no
+/// more than `local` is.
+#[test]
+fn a_pm_calling_presence_request_or_devices_add_is_denied_by_the_floor_8878() {
+    for command in [
+        "tm presence request",
+        "tm presence wait --timeout 5m",
+        "tm presence devices add phone",
+        "tm presence devices revoke abc",
+        "tm presence devices list",
+    ] {
+        assert!(evaluate_presence_verbs(command).is_some(), "{command}");
+    }
+}
+
+/// Spoof (#8878 PR2b-1b): a PM writing a device record or a pending request
+/// is an anchor write, so it cannot enrol a device or forge a request.
+#[test]
+fn a_pm_writing_devices_or_pending_is_denied_8878() {
+    let fx = fixture();
+    let anchor = root(&fx).join(ARCHITECT_DIR);
+    for target in [
+        anchor.join("devices").join("cred.json"),
+        anchor
+            .join("pending")
+            .join(format!("{}.json", "0".repeat(32))),
+        anchor.join("devices").join(".ticket-00"),
+    ] {
+        let reason = evaluate(&write_to(&fx, &target), &pm_env(&fx), || allowlist(&fx))
+            .expect("a PM is denied");
+        assert!(
+            reason.contains("Trust-anchor write denied (#8878)"),
+            "{reason}"
+        );
+    }
+    assert!(grants(&fx).is_empty());
+}
+
+/// Fail-open 11 (#8878 PR2b-1b): a request that fails (daemon down, timeout,
+/// rate limit) leaves the deny text exactly as with no request; a request
+/// that lands names its id and `tm presence wait`. Neither writes a grant.
+#[test]
+fn hook_request_failure_does_not_change_the_deny_8878() {
+    let fx = fixture();
+    let plain = assert_presence_denied(&fx, &gated_env(&fx));
+    let failing = HookEnv {
+        presence_key: key_lookup().with_request(|_| None),
+        ..bound_env(&fx)
+    };
+    assert_eq!(assert_presence_denied(&fx, &failing), plain);
+    let asked = HookEnv {
+        presence_key: key_lookup().with_request(|_| Some("abc123".to_owned())),
+        ..bound_env(&fx)
+    };
+    let reason = assert_presence_denied(&fx, &asked);
+    assert!(reason.starts_with(&plain[..plain.len() / 2]), "{reason}");
+    assert!(
+        reason.contains("tm presence wait --request abc123"),
+        "{reason}"
+    );
+    assert!(reason.contains("unverified origin"), "{reason}");
+    assert!(grants(&fx).is_empty());
+}

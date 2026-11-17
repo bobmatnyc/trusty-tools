@@ -263,7 +263,6 @@ crates/trusty-console/src/mcp_handle/mod.rs	mcp_handle_degraded_when_console_met
 crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_absent_binary_returns_503
 crates/trusty-console/src/server/mod.rs	test_analyze_visualize_handler_no_index_returns_400
 crates/trusty-console/src/server/mod.rs	test_services_route_daemon_version_overlay
-crates/trusty-cto-db/src/lib.rs	open_readonly_rejects_writes
 crates/trusty-embedderd/src/stdio_server.rs	stdio_eof_terminates_cleanly
 crates/trusty-gworkspace/src/api/services/calendar.rs	build_event_body_attendees_*
 crates/trusty-installer/src/commands/plist_bootstrap.rs	resolve_uid_returns_nonzero
@@ -446,8 +445,6 @@ crates/trusty-mpm/src/core/sm/goals/model.rs	session_state_serde_roundtrip
 crates/trusty-mpm/src/core/sm/goals/model.rs	status_default_is_pending
 crates/trusty-mpm/src/core/sm/goals/store.rs	create_dual_persists
 crates/trusty-mpm/src/core/sm/goals/store.rs	note_appends_and_persists
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_appends_note
-crates/trusty-mpm/src/core/sm/goals/store.rs	update_sets_state_and_evidence
 crates/trusty-mpm/src/core/sm/providers/resolve.rs	resolve_tests
 crates/trusty-mpm/src/core/standalone/registry.rs	test_alias_validation
 crates/trusty-mpm/src/core/standalone/registry.rs	test_atomic_save_tmp_cleaned_on_rename_failure

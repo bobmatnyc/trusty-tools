@@ -1375,6 +1375,18 @@ pub mod local_probe;
 #[cfg(feature = "daemon-token")]
 pub mod daemon_token;
 
+/// The trusty-console token file loader the console and its TCP clients share
+/// (#11074, DOC-90 §4).
+///
+/// Why: the console enforces the token and its clients send it; both must
+/// agree on the file and its validity rules.
+/// What: `console_token::load_from_env` (`TRUSTY_CONSOLE_TOKEN_FILE`) and the
+/// redacted, constant-time `ConsoleToken`. Behind `daemon-token`, whose
+/// `credentials_match` it compares with.
+/// Test: `cargo test -p trusty-common --features daemon-token -- console_token`.
+#[cfg(feature = "daemon-token")]
+pub mod console_token;
+
 /// The single HTTP-client constructor for loopback/daemon targets (#4392).
 ///
 /// Why: reqwest 0.12 routes `127.0.0.1` through an exported `HTTP_PROXY` /

@@ -1,0 +1,8 @@
+{
+  "case_id": "c05-alpha-census-within",
+  "expected_verdict": "allow",
+  "binding_rule_ids": [
+    "alpha-census-1"
+  ],
+  "label_note": "LABEL-ONLY-c05-alpha-census-within"
+}

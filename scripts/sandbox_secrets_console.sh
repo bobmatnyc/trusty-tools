@@ -37,19 +37,35 @@
 #   or any physical ancestor (#9161); a <dir> path holding a quote, a
 #   backslash or a control character (it is written into JSON); a live child
 #   already recorded for <dir>.
-#   Teardown is kill-by-pid only: <dir>/secrets.pid and <dir>/console.pid.
+#   Event bus dir (#11159): <dir>/data/trusty-events is made, or narrowed, to
+#   0700 before any child starts. The console resolves it with the caller's
+#   umask (0775 under 002) and refuses to dial a socket in a directory that
+#   is not 0700. A symlinked <dir>/data or <dir>/data/trusty-events refuses.
+#   Event bus (#11159): with --events-bin a third child serves the bus:
+#     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
+#            TRUSTY_DATA_DIR_OVERRIDE=<dir>/data \
+#            <events-bin> serve --socket <dir>/data/trusty-events/trusty-events.sock
+#   It starts after the dir above is 0700 and before the console, so the
+#   console's subscription connects. A stale socket from an earlier run is
+#   removed first, so the wait sees only a socket the new child bound; no
+#   socket within the wait refuses and tears down. Without --events-bin no
+#   bus runs, and the console reports it not running.
+#   Teardown is kill-by-pid only: <dir>/secrets.pid, <dir>/console.pid and
+#   <dir>/events.pid.
 #   A pid is signalled only while its argv still ends in the token this
 #   script gave it (`--socket <socket>` or `--http <bind>`): TERM, 10 s, KILL,
-#   5 s. On EXIT, INT, TERM, when either child exits, and under `--stop DIR`.
+#   5 s. On EXIT, INT, TERM, when any child exits, and under `--stop DIR`.
 #   Output names variables and paths this script chose; it never prints a
 #   value it inherited.
 #
 # Usage: scripts/sandbox_secrets_console.sh --secrets-bin PATH --console-bin PATH
-#            [--dir DIR] [--tm-bin PATH] [--bind HOST:PORT] [--projects N]
-#            [--idle-secs N] [--dry-run]
+#            [--dir DIR] [--tm-bin PATH] [--events-bin PATH] [--bind HOST:PORT]
+#            [--projects N] [--idle-secs N] [--dry-run]
 #        scripts/sandbox_secrets_console.sh --stop DIR
 #   --secrets-bin PATH  absolute path of the trusty-secrets binary
 #   --console-bin PATH  absolute path of the trusty-console binary
+#   --events-bin PATH   absolute path of a trusty-events binary to serve the
+#                       sandbox's event bus (#11159); default: no bus
 #   --tm-bin PATH       absolute path of a directory holding an executable `tm`
 #                       (and `trusty-mpm`), or of the `tm` file in it. The
 #                       console's PATH becomes <that dir>:/usr/bin:/bin so its
@@ -76,6 +92,9 @@ set -euo pipefail
 SANDBOX_PATH="/usr/bin:/bin"
 SOCKET_SUBPATH=".trusty-tools/trusty-secrets/secrets.sock"
 CONSENT_SUBPATH=".trusty-tools/trusty-common/config.yaml"
+# #11159: trusty_common::control_bus::events_socket_path() under the data dir.
+EVENTS_SUBPATH="trusty-events/trusty-events.sock"
+EVENTS_DIR=""
 SOCKET_WAIT_SECS="${SANDBOX_SOCKET_WAIT_SECS:-10}"
 ME="sandbox_secrets_console"
 
@@ -86,7 +105,7 @@ die() {
 
 usage() {
   echo "usage: scripts/sandbox_secrets_console.sh --secrets-bin PATH --console-bin PATH" >&2
-  echo "           [--dir DIR] [--tm-bin PATH] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]" >&2
+  echo "           [--dir DIR] [--tm-bin PATH] [--events-bin PATH] [--bind HOST:PORT] [--projects N] [--idle-secs N] [--dry-run]" >&2
   echo "  --tm-bin PATH  directory holding an executable tm (and trusty-mpm), or the tm file;" >&2
   echo "                 prepended to the console's PATH only (default PATH: /usr/bin:/bin)" >&2
   echo "       scripts/sandbox_secrets_console.sh --stop DIR" >&2
@@ -162,21 +181,26 @@ stop_owned() {
 
 # The token each child's argv ends in, for DIR.
 secrets_token() { echo "--socket $1/home/$SOCKET_SUBPATH"; }
+events_token() { echo "--socket $1/data/$EVENTS_SUBPATH"; }
 console_token() {
   local addr=""
   [ -f "$1/console.addr" ] && read -r addr < "$1/console.addr"
   echo "--http $addr"
 }
 
-# stop_recorded DIR: stop both recorded children; a pidfile goes only once
-# its process is dead. 0 when both are dead.
+# stop_recorded DIR: stop every recorded child; a pidfile goes only once
+# its process is dead. 0 when all are dead.
 stop_recorded() {
   local dir="$1" status=0 role pid token
-  for role in console secrets; do
+  for role in console events secrets; do
     [ -f "$dir/$role.pid" ] || continue
     pid=""
     read -r pid < "$dir/$role.pid" || true
-    if [ "$role" = console ]; then token="$(console_token "$dir")"; else token="$(secrets_token "$dir")"; fi
+    case "$role" in
+      console) token="$(console_token "$dir")" ;;
+      events) token="$(events_token "$dir")" ;;
+      *) token="$(secrets_token "$dir")" ;;
+    esac
     if stop_owned "$pid" "$token"; then
       rm -f "$dir/$role.pid"
     else
@@ -190,6 +214,7 @@ SECRETS_BIN=""
 CONSOLE_BIN=""
 DIR=""
 TM_BIN=""
+EVENTS_BIN=""
 BIND="127.0.0.1:17890"
 PROJECTS=2
 IDLE=14400
@@ -201,6 +226,7 @@ while [ "$#" -gt 0 ]; do
     --console-bin) [ "$#" -ge 2 ] || usage; CONSOLE_BIN="$2"; shift 2 ;;
     --dir) [ "$#" -ge 2 ] || usage; DIR="$2"; shift 2 ;;
     --tm-bin) [ "$#" -ge 2 ] || usage; TM_BIN="$2"; shift 2 ;;
+    --events-bin) [ "$#" -ge 2 ] || usage; EVENTS_BIN="$2"; shift 2 ;;
     --bind) [ "$#" -ge 2 ] || usage; BIND="$2"; shift 2 ;;
     --projects) [ "$#" -ge 2 ] || usage; PROJECTS="$2"; shift 2 ;;
     --idle-secs) [ "$#" -ge 2 ] || usage; IDLE="$2"; shift 2 ;;
@@ -227,6 +253,10 @@ for bin in "$SECRETS_BIN" "$CONSOLE_BIN"; do
   case "$bin" in /*) ;; *) die "binary path is not absolute: $bin" ;; esac
   [ -f "$bin" ] && [ -x "$bin" ] || die "binary is not an executable file: $bin"
 done
+if [ -n "$EVENTS_BIN" ]; then
+  case "$EVENTS_BIN" in /*) ;; *) die "binary path is not absolute: $EVENTS_BIN" ;; esac
+  [ -f "$EVENTS_BIN" ] && [ -x "$EVENTS_BIN" ] || die "binary is not an executable file: $EVENTS_BIN"
+fi
 
 # --tm-bin: the console's only extra PATH entry, a physical directory holding
 # an executable `tm` (#9979 df-D4c).
@@ -310,9 +340,17 @@ SECRETS_ENV=("${COMMON[@]}" "PATH=$SANDBOX_PATH")
 CONSOLE_ENV=("${COMMON[@]}" "PATH=$CONSOLE_PATH" "TRUSTY_MPM_ROOT=$SANDBOX/mpm" "TRUSTY_SECRETS_EXTERNAL=1")
 SECRETS_ARGV=("$SECRETS_BIN" serve --idle-timeout-secs "$IDLE" --socket "$SOCKET")
 CONSOLE_ARGV=("$CONSOLE_BIN" serve --http "$BIND")
+EVENTS_SOCKET="$SANDBOX/data/$EVENTS_SUBPATH"
+EVENTS_ARGV=("$EVENTS_BIN" serve --socket "$EVENTS_SOCKET")
 
 echo "$ME: sandbox dir: $SANDBOX"
 echo "$ME: secrets socket: $SOCKET"
+if [ -n "$EVENTS_BIN" ]; then
+  echo "$ME: events env -i (names): HOME PATH TRUSTY_SANDBOX TRUSTY_DATA_DIR_OVERRIDE"
+  echo "$ME: events argv: ${EVENTS_ARGV[*]}"
+else
+  echo "$ME: no --events-bin: no event bus runs; the console reports it not running"
+fi
 echo "$ME: console: http://$BIND/"
 echo "$ME: secrets env -i (names): HOME PATH TRUSTY_SANDBOX TRUSTY_DATA_DIR_OVERRIDE"
 echo "$ME: console PATH: $CONSOLE_PATH"
@@ -325,7 +363,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-for role in secrets console; do
+for role in secrets console events; do
   if [ -f "$SANDBOX/$role.pid" ]; then
     prev=""
     read -r prev < "$SANDBOX/$role.pid" || true
@@ -333,7 +371,14 @@ for role in secrets console; do
   fi
 done
 
+# #11159: the console's create_dir_all makes the bus dir with the caller's umask
+# (0775 under 002), then refuses to dial into it; make or narrow it to 0700
+# before any child starts. A failure is fatal, never a warning.
+EVENTS_DIR="$SANDBOX/data/${EVENTS_SUBPATH%/*}"
+[ ! -L "$SANDBOX/data" ] || die "$SANDBOX/data is a symlink"
+[ ! -L "$EVENTS_DIR" ] || die "$EVENTS_DIR is a symlink"
 mkdir -p "$SANDBOX/home/${CONSENT_SUBPATH%/*}" "$SANDBOX/data" "$SANDBOX/mpm" "$SANDBOX/projects"
+{ mkdir -p "$EVENTS_DIR" && chmod 700 "$EVENTS_DIR"; } || die "cannot make the event bus dir 0700: $EVENTS_DIR"
 printf 'secrets:\n  default_backend: file\n' > "$SANDBOX/home/$CONSENT_SUBPATH"
 
 # Seed the projects; git runs with the sandbox's own empty environment.
@@ -360,39 +405,60 @@ echo "$BIND" > "$SANDBOX/console.addr"
 
 SECRETS_PID=""
 CONSOLE_PID=""
+EVENTS_PID=""
 # shellcheck disable=SC2329  # invoked through the traps below
 teardown() {
   trap - EXIT INT TERM
   stop_recorded "$SANDBOX" || echo "$ME: teardown left a child running; see the pidfiles in $SANDBOX" >&2
   # Reap our own children, so none outlives this script as a zombie.
   local pid
-  for pid in $SECRETS_PID $CONSOLE_PID; do wait "$pid" 2>/dev/null || true; done
+  for pid in $SECRETS_PID $CONSOLE_PID $EVENTS_PID; do wait "$pid" 2>/dev/null || true; done
 }
 trap teardown EXIT
 trap 'teardown; exit 130' INT
 trap 'teardown; exit 143' TERM
 
+# wait_socket PID SOCKET NAME: up to SOCKET_WAIT_SECS for PID to serve
+# SOCKET; refuses when PID exits first.
+wait_socket() {
+  local waited=0
+  while [ "$waited" -lt $((SOCKET_WAIT_SECS * 5)) ] && [ ! -S "$2" ] && is_alive "$1"; do
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  is_alive "$1" || die "$3 exited before serving $2"
+}
+
 cd "$SANDBOX/home"
 env -i "${SECRETS_ENV[@]}" "${SECRETS_ARGV[@]}" &
 SECRETS_PID=$!
 echo "$SECRETS_PID" > "$SANDBOX/secrets.pid"
-waited=0
-while [ "$waited" -lt $((SOCKET_WAIT_SECS * 5)) ] && [ ! -S "$SOCKET" ] && is_alive "$SECRETS_PID"; do
-  sleep 0.2
-  waited=$((waited + 1))
-done
-is_alive "$SECRETS_PID" || die "trusty-secrets exited before serving $SOCKET"
+wait_socket "$SECRETS_PID" "$SOCKET" trusty-secrets
 [ -S "$SOCKET" ] || echo "$ME: no socket at $SOCKET after ${SOCKET_WAIT_SECS}s; starting the console anyway" >&2
+
+# #11159: the bus starts before the console, so its first subscription connects.
+# A socket left by an earlier run would satisfy the wait before the new child
+# binds, so it goes first; a bus that never binds is fatal, not a warning.
+if [ -n "$EVENTS_BIN" ]; then
+  [ ! -S "$EVENTS_SOCKET" ] || rm -f "$EVENTS_SOCKET"
+  env -i "${SECRETS_ENV[@]}" "${EVENTS_ARGV[@]}" &
+  EVENTS_PID=$!
+  echo "$EVENTS_PID" > "$SANDBOX/events.pid"
+  wait_socket "$EVENTS_PID" "$EVENTS_SOCKET" trusty-events
+  [ -S "$EVENTS_SOCKET" ] || die "trusty-events bound no socket at $EVENTS_SOCKET after ${SOCKET_WAIT_SECS}s"
+fi
 
 env -i "${CONSOLE_ENV[@]}" "${CONSOLE_ARGV[@]}" &
 CONSOLE_PID=$!
 echo "$CONSOLE_PID" > "$SANDBOX/console.pid"
 echo "$ME: started trusty-secrets pid $SECRETS_PID and trusty-console pid $CONSOLE_PID"
-echo "$ME: TRUSTY_SANDBOX=1 is set for both; the Keychain and CLI backends stay closed"
+[ -z "$EVENTS_PID" ] || echo "$ME: started trusty-events pid $EVENTS_PID"
+echo "$ME: TRUSTY_SANDBOX=1 is set for every child; the Keychain and CLI backends stay closed"
 echo "$ME: stop with: scripts/sandbox_secrets_console.sh --stop $SANDBOX (or Ctrl-C here)"
 
-# bash 3.2 has no `wait -n`: poll until either child exits, then tear down.
-while is_alive "$SECRETS_PID" && is_alive "$CONSOLE_PID"; do
+# bash 3.2 has no `wait -n`: poll until any child exits, then tear down.
+while is_alive "$SECRETS_PID" && is_alive "$CONSOLE_PID" \
+  && { [ -z "$EVENTS_PID" ] || is_alive "$EVENTS_PID"; }; do
   sleep 1
 done
 echo "$ME: a child exited; stopping the other" >&2

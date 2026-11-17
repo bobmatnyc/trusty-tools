@@ -22,7 +22,6 @@ use tokio::sync::mpsc;
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
 use trusty_common::console_rpc::{CONSOLE_SERVICE, ConsoleFleetStatus, ServiceStatus};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
-use trusty_common::uds::probe::{SocketVerdict, probe_socket_verdict};
 use trusty_common::uds::server::RpcResponse;
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
@@ -157,13 +156,7 @@ where
             Ok(socket) => uds_fleet_status(&socket, method, deadline).await,
             Err(reason) => Observation::Silent(reason),
         },
-        ProbeKind::SocketConnect => match socket() {
-            Ok(socket) => match probe_socket_verdict(&socket, deadline).await {
-                SocketVerdict::Serving => Observation::Healthy(None),
-                _ => Observation::Silent(format!("nothing serves {}", socket.display())),
-            },
-            Err(reason) => Observation::Silent(reason),
-        },
+        // #11115: the `SocketConnect` arm went with its never-built variant
     }
 }
 
@@ -264,7 +257,8 @@ pub(super) fn transport_failure(err: &UdsRpcError) -> Observation {
 /// Whether `err` is a dial that found no listener: the socket (or its
 /// directory) absent, or `connect` refused / not-found, seen through the
 /// bounded connect retry's wrapper.
-fn is_not_listening(err: &UdsRpcError) -> bool {
+// #10942: shared with `machine::transport_fault`.
+pub(super) fn is_not_listening(err: &UdsRpcError) -> bool {
     use std::io::ErrorKind::{ConnectionRefused, NotFound};
     match err {
         UdsRpcError::Dial { source, .. } => match source {

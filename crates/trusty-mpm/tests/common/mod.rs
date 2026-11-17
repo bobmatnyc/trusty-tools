@@ -143,6 +143,9 @@ pub fn tm_bin() -> &'static str {
 /// server and session rather than the fixture's. #6288: `TRUSTY_MPM_SOCKET`,
 /// `TRUSTY_DATA_DIR_OVERRIDE` and `XDG_DATA_HOME` pick the daemon socket the
 /// socket-only commands dial, so each points a child at the developer's daemon.
+/// #11273: `TRUSTY_MPM_SESSION_PROFILE` and `CLAUDE_MPM_SUB_AGENT` stamp the
+/// child's role and thread, so a child inheriting them is judged as the
+/// developer's own session; each harness starts unstamped and stamps itself.
 ///
 /// What: cleared on the CHILD only. Nothing here touches this process's
 /// environment, so the `#5544` hazard — a `set_var` visible to every test
@@ -164,6 +167,10 @@ const CHILD_STATE_ENV: &[&str] = &[
     "TMUX_PANE",
     "REPOS_ROOT",
     "GH_CONFIG_DIR",
+    "TRUSTY_MPM_SESSION_PROFILE",
+    // #11353: a managed launch's model stamp decides the Fable cap.
+    "TRUSTY_MPM_LAUNCH_MODEL",
+    "CLAUDE_MPM_SUB_AGENT",
 ];
 
 /// Point `cmd`'s child at `home` and strip every other state-pointing variable.

@@ -197,7 +197,25 @@ impl BaseClient {
         B: Serialize + ?Sized,
     {
         let token = self.token.as_deref().ok_or(SlackError::MissingToken)?;
-        self.request(token, method, body).await
+        self.request(token, method, body, MAX_RATE_LIMIT_RETRIES)
+            .await
+    }
+
+    /// Call a bot-token Slack method once, with no `429` retry.
+    ///
+    /// Why: an optional follow-up lookup (the bot identity behind a
+    /// `channel_not_found`) must not hold the caller's primary error for the
+    /// minutes a rate-limit backoff can take.
+    /// What: the same request path as [`BaseClient::call_method`], except a
+    /// `429` returns [`SlackError::RateLimited`] at once (`retries: 0`). It sets
+    /// no timeout of its own; the caller bounds it.
+    /// Test: `tests/tools_http.rs::channel_read_not_found_bare_when_identity_rate_limited`.
+    pub async fn call_method_once<B>(&self, method: &str, body: &B) -> Result<Value, SlackError>
+    where
+        B: Serialize + ?Sized,
+    {
+        let token = self.token.as_deref().ok_or(SlackError::MissingToken)?;
+        self.request(token, method, body, 0).await
     }
 
     /// Call a **user-scope-only** Slack method (`search.messages`) with the user
@@ -221,7 +239,8 @@ impl BaseClient {
             .user_token
             .as_deref()
             .ok_or(SlackError::MissingUserToken)?;
-        self.request(token, method, body).await
+        self.request(token, method, body, MAX_RATE_LIMIT_RETRIES)
+            .await
     }
 
     /// Download a private Slack file (or canvas export) via its
@@ -281,11 +300,17 @@ impl BaseClient {
     /// parameters as POST JSON to `{base_url}/{method}`, with `token` as the
     /// bearer credential;
     /// maps 401 / auth-class `ok:false` to [`SlackError::Auth`], honours
-    /// `429 Retry-After` up to [`MAX_RATE_LIMIT_RETRIES`], and returns the
+    /// `429 Retry-After` up to `max_retries` times, and returns the
     /// decoded `Value` on `ok:true`.
     /// Test: exercised through both public entry points in `tests/tools_http.rs`
     /// and `tests/client_http.rs`.
-    async fn request<B>(&self, token: &str, method: &str, body: &B) -> Result<Value, SlackError>
+    async fn request<B>(
+        &self,
+        token: &str,
+        method: &str,
+        body: &B,
+        max_retries: u32,
+    ) -> Result<Value, SlackError>
     where
         B: Serialize + ?Sized,
     {
@@ -310,7 +335,7 @@ impl BaseClient {
 
             if status == StatusCode::TOO_MANY_REQUESTS {
                 let retry_after = retry_after_from_headers(response.headers());
-                if retries >= MAX_RATE_LIMIT_RETRIES {
+                if retries >= max_retries {
                     return Err(SlackError::RateLimited {
                         retries,
                         retry_after,

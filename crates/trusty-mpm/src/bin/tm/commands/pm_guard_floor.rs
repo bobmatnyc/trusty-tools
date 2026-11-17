@@ -357,6 +357,17 @@ fn universal_floor(
     evaluate_secret_file_read_gated(tool_name, tool_input, hook_cwd, gate)
 }
 
+/// Whether the `TRUSTY_MPM_PM_UNRESTRICTED=1` bypass is active.
+///
+/// Why: split out (moved here from `pm_guard.rs` for its line cap, #10574) so the exact-`"1"` matching rule has one definition.
+/// What: `true` only when [`super::pm_guard::PM_UNRESTRICTED_ENV`] is set to exactly `"1"`.
+/// Test: exercised via `tests/tm_hook_pm_guard.rs::pm_guard_bypass_env_allows_all`.
+pub(crate) fn pm_unrestricted() -> bool {
+    std::env::var(super::pm_guard::PM_UNRESTRICTED_ENV)
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 #[path = "pm_guard_floor_tests.rs"]
 pub(crate) mod tests;

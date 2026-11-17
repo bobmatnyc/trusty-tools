@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.7.0] — 2026-11-14
+
+### Fixed
+
+- A `backend_timeout` reply now says whether the call waited N s for the Keychain or was refused at once because an earlier call on the same item still hangs, and names the recovery step (answer the access prompt, or end the server so the next call starts a fresh one). The error data adds `waited_ms` and `abandoned_item`; the kind and code are unchanged (#11215).
+- A `backend_timeout` audit row now carries `backend_wait` (`backend`, `waited_ms`, `abandoned_item`). The field is additive and omitted on every other row (#11215).
+- The server's start and exit lines in `trusty-secrets.stderr.log` now begin with a UTC timestamp (#11215).
+
+### Changed
+
+- `secrets.copy` to a sync target (GitHub Actions, Vercel) now admits a caller with a Claude Code ancestor for keys not denied to agents, superseding D63 D3 for agents (#10999, owner ruling 2026-11-10). A key denied to agents fails with `agent_key_denied` before its value is read; an unreadable ancestry chain still refuses with `grant_refused`. Each key's audit record names the target, key, caller pid and `agent_parent`, never the value.
+- The Vercel "already existed" (D9) failure reason now says the new value may already be set and a retry reports the same failure (#10999).
+- An agent may push a key marked push-only for agents (#10998) to a sync target; a deny still refuses and wins over the mark, and a failed lookup of the deny or the mark fails the key (#10999).
+
+## [0.5.0] — 2026-11-13
+
+### Breaking
+
+- `store::ControlItem` gains the `PushOnly` variant and is now `#[non_exhaustive]`. A `match` on it outside trusty-secrets needs a wildcard arm. Later control items are no longer a semver break (#10998).
+
+### Added
+
+- `secrets.copy` accepts an optional `source` locator: any Keychain item by service and account (`keychain_item`, read with `from_backend: keychain`), or a key in any trusty vault, the owner vault included (`vault`, read on `from_backend`). The one value lands in the caller's project vault under the single key `keys` names, moved inside the server only; a request without `source` behaves as before. A Keychain item in trusty's own namespace is refused, so a trusty key keeps its agent deny; an agent caller is refused (`agent_key_denied`) for a denied source or destination key, and an agent's copy of a Keychain item lands push-only for agents — a new per-key mark (`ControlItem::PushOnly`, read with `store::is_push_only`, listed as `agents_push_only`) that refuses every agent read of the value until a person lifts it with `secrets.set_agents_may_use`; a retry of a Keychain item whose earlier read timed out fails at once instead of starting another read; a failure is the call's typed error. Each record carries the new `copy_source` field, never the value (#10998).
+
 ## [0.4.1] — 2026-11-10
 
 ### Changed

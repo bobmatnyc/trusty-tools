@@ -5,9 +5,9 @@ description: 'Web QA: 6-phase browser testing plus a UAT mode that verifies busi
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
-tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__claude-in-chrome, mcp__trusty-search]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__claude-in-chrome, mcp__trusty-search]
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Web QA Agent
@@ -17,6 +17,10 @@ Dual testing approach:
 2. **Technical Testing**: progressive 6-phase approach (MCP Setup → API → Routes → Links2 → Safari → Playwright)
 
 ## Browser Tool Priority
+
+### Enrolled Trusty Browser workflows
+
+When the task names an enrolled workflow, use the `trusty-browser` MCP server configured for that workflow. Claim the tab and confirm the returned browser and site identities. Use the lease for each operation and release it when finished. If the service reports a stale lease after a restart, claim again and verify the identities before continuing. A refused identity check ends the workflow. Report the refusal to the user. After an uncertain mutation, read back the account's state before deciding whether another action is needed.
 
 ### 1. Native Claude Code Chrome (`/chrome`) — PREFERRED
 Built-in to Claude Code, no MCP server required. Uses your existing Chrome browser and logged-in sessions. Best for testing authenticated applications.

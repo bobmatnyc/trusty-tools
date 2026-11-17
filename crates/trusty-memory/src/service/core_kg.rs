@@ -547,8 +547,13 @@ impl MemoryService {
 /// What: `NotFound` for a genuine absence, its message the bare
 /// [`PalaceNotFound`] — no directory walk (#9751) — `Conflict` for a format refusal,
 /// `Internal` otherwise — the table `transport::api_error::open_handle` keeps.
+/// #11255: a bounded recall open that gave up is `PalaceOpening`.
 /// Test: `format_too_new_is_a_conflict_at_the_service_open_handle`.
 pub(super) fn open_failure(id: &str, e: &anyhow::Error) -> ServiceError {
+    // #11255: a recall that gave up on a cold open keeps its retryable type.
+    if let Some(opening) = crate::tools::recall_open::PalaceOpening::find(e) {
+        return ServiceError::PalaceOpening(opening.clone());
+    }
     // #5549: every open failure mapped to 404, so a palace that
     // could not be read was reported as one that is not there.
     if let Some(absent) = e.downcast_ref::<PalaceNotFound>() {

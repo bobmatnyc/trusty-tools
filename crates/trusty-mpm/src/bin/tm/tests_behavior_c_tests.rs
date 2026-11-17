@@ -37,7 +37,7 @@ use crate::commands::guided::{
 use crate::commands::guided_launch::spawn_progress_message;
 use crate::commands::guided_resume::{
     ResumeAction, is_zombie, needs_restart, panes_prove_session_dead, parse_pane_probes,
-    plan_resume, resume_classification_state, session_runtime_live,
+    plan_resume, resume_classification_state, session_runtime_live_with_bin,
 };
 use crate::tests_behavior_b::run_fallback_default;
 // #3873: the CLI's dead-runtime verdict composes the daemon's OWN liveness
@@ -1576,11 +1576,11 @@ fn session_runtime_live_assumes_live_for_blank_session_name() {
     // and preserve the pre-#3873 Attach behavior. Pure: takes the early return
     // before any tmux shell-out.
     assert!(
-        session_runtime_live(""),
+        session_runtime_live_with_bin("tmux", ""),
         "an empty session name must fail OPEN (assume the runtime is live)"
     );
     assert!(
-        session_runtime_live("   "),
+        session_runtime_live_with_bin("tmux", "   "),
         "a whitespace-only session name is no evidence either — must fail OPEN"
     );
 }

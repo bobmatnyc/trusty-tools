@@ -174,11 +174,17 @@ pub fn list_sessions(state: &Arc<DaemonState>, query: SessionQuery) -> SessionsR
 /// [`DaemonError::InvalidRequest`] when `tmux_socket` is combined with
 /// `workdir` (#10101).
 ///
+/// #10368: once registered, the session's `workdir` (else `project_path`)
+/// checkout is registered as a project; a failure there is logged at warn and
+/// never fails the call.
+///
 /// Test: `parity_sessions_register_agrees_across_transports`,
 /// `register_and_remove_session`,
 /// `a_registration_records_the_workspace_server_socket_10101`,
-/// `a_socket_with_spawn_mode_is_refused_10101`.
-pub fn register_session(
+/// `a_socket_with_spawn_mode_is_refused_10101`,
+/// `a_registered_session_registers_its_checkout_as_a_project`,
+/// `a_failed_registry_write_leaves_the_session_registered_and_warns`.
+pub async fn register_session(
     state: &Arc<DaemonState>,
     body: RegisterSession,
 ) -> Result<RegisterSessionResponse, DaemonError> {
@@ -226,7 +232,16 @@ pub fn register_session(
     session.tmux_socket = body.tmux_socket.clone();
     let id = session.id;
     let tmux_name = session.tmux_name.clone();
+    // #10368: a session start registers its checkout, whichever client sent it.
+    let checkout = body.workdir.clone().or_else(|| body.project_path.clone());
     state.register_session(session);
+    if let Some(dir) = checkout {
+        let _ = crate::daemon::session_project::register_seen_session_project(
+            state.framework_root(),
+            &dir,
+        )
+        .await;
+    }
 
     // Discover the `claude` PID inside the registered tmux pane in the
     // background so the reaper can monitor process liveness. This is the

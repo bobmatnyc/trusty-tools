@@ -60,8 +60,11 @@ pub(crate) mod program;
 pub mod resolve;
 mod scope;
 mod secret_store;
-// #7524 P2-L7: the time limit on every Keychain call.
-mod time_limit;
+// #7524 P2-L7: the time limit on every Keychain call. #11215: crate-visible
+// so the server's tests wrap a fake hung backend in it.
+pub(crate) mod time_limit;
+// #11215: the last time-out's wait, read by the server's reply and audit row.
+pub(crate) mod timeout_note;
 
 pub use agent_deny::{
     AgentDenyMigration, ControlItem, DEFAULT_AGENT_DENY_MIGRATION, DenyAudit, is_push_only,

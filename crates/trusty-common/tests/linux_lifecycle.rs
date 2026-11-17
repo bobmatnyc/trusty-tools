@@ -6,7 +6,8 @@
 //!
 //! What: this test binary is also its own fixture. Run with the
 //! `tc-lc-role=daemon` argument, `child_entry` becomes a small daemon that
-//! binds a Unix socket and reacts to SIGTERM per its `mode=`; with
+//! binds the Unix socket named by `TC_LC_SOCKET` (its instance key, #11098)
+//! and reacts to SIGTERM per its `mode=`; with
 //! `tc-lc-role=runner` it becomes a separate process that calls `start`.
 //! Each test hard-links this binary into a temp install dir under the names
 //! `lc-daemon` and `lc-other`, so `/proc/<pid>/exe` names the install-dir
@@ -37,12 +38,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
-    DaemonDescriptor, LifecycleError, PinnedProcess, Signal, SignalDelivery, StopOutcome,
-    StoppedSignal, restart, restart_with, start, stop, stop_with,
+    DaemonDescriptor, KernelDelivery, LifecycleError, PinnedProcess, ProcessTable, Signal,
+    SignalDelivery, StopOutcome, StoppedSignal, restart, restart_pid, restart_pid_with,
+    restart_with, restart_with_table, start, start_with_table, stop, stop_pid, stop_pid_with,
+    stop_with, stop_with_table,
 };
 
 const ROLE_DAEMON: &str = "tc-lc-role=daemon";
 const ROLE_RUNNER: &str = "tc-lc-role=runner";
+/// #11098: a stdio bridge stand-in — the same executable as the daemon, run
+/// as `daemon_main` but without the daemon's `ROLE_DAEMON` argument.
+const ROLE_BRIDGE: &str = "tc-lc-role=bridge";
+/// #11098: the fixture's instance key. A fixture daemon reads its socket from
+/// this variable when its argv names none, as a real daemon derives its socket
+/// from its data-dir variable, so two instances can run with identical argv.
+const SOCKET_ENV: &str = "TC_LC_SOCKET";
+/// #11098: the fixture flag that sets the process name to [`BAD_NAME`].
+const BAD_NAME_FLAG: &str = "bad-name";
+/// A `comm` that is not UTF-8; `/proc/<pid>/status` prints it unescaped.
+const BAD_NAME: &[u8] = b"lc-\xff\xfe-bad";
 const DAEMON: &str = "lc-daemon";
 const OTHER: &str = "lc-other";
 /// Longer than `tm restart`'s 3 s health wait, which AC1 rules out.
@@ -60,7 +74,7 @@ const SPAWN_SETTLE: Duration = Duration::from_millis(500);
 #[test]
 fn child_entry() {
     let args: Vec<String> = std::env::args().collect();
-    if args.iter().any(|a| a == ROLE_DAEMON) {
+    if args.iter().any(|a| a == ROLE_DAEMON || a == ROLE_BRIDGE) {
         daemon_main(&args);
     }
     if args.iter().any(|a| a == ROLE_RUNNER) {
@@ -126,17 +140,27 @@ fn forked_watch(dir: &CString) -> ! {
 /// A daemon stand-in. Modes: `serve` (exit on SIGTERM), `linger` (close the
 /// socket on SIGTERM, exit `LINGER_MS` later), `ignore-term`, `never-bind`,
 /// `exit-now`, `fork-lock-holder` (on SIGTERM, fork a child that keeps the
-/// inherited lock, then exit). The `undumpable` flag makes `/proc/<pid>/exe`
-/// unreadable to other processes.
+/// inherited lock, then exit), and (#11098) `unlink-socket` / `close-socket`
+/// (after the bind, unlink the socket file or close the listener, write
+/// `unserved` to the marker, and keep running). The `undumpable` flag makes
+/// `/proc/<pid>/exe` unreadable to other processes.
 fn daemon_main(args: &[String]) -> ! {
     let mode = arg(args, "mode").unwrap_or("serve");
-    let socket = PathBuf::from(arg(args, "socket").expect("socket arg"));
+    let socket = arg(args, "socket")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os(SOCKET_ENV).map(PathBuf::from))
+        .expect("socket arg or env");
     let watch_dir = socket.parent().expect("socket dir").to_path_buf();
     arm_watchdog(watch_dir.clone());
     if args.iter().any(|a| a == "undumpable") {
         // SAFETY: PR_SET_DUMPABLE takes one integer argument.
         let rc = unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
         assert_eq!(rc, 0, "prctl(PR_SET_DUMPABLE)");
+    }
+    if args.iter().any(|a| a == BAD_NAME_FLAG) {
+        // `prctl(PR_SET_NAME)` here would name only this test thread; status
+        // prints the main thread's `comm`, which this write sets.
+        fs::write("/proc/self/comm", BAD_NAME).expect("set comm");
     }
     let marker = arg(args, "marker");
     if let Some(m) = marker {
@@ -176,6 +200,16 @@ fn daemon_main(args: &[String]) -> ! {
     drop(bind_lock);
     listener.set_nonblocking(true).expect("nonblocking");
     let mut listener = Some(listener);
+    if mode == "unlink-socket" || mode == "close-socket" {
+        if mode == "unlink-socket" {
+            fs::remove_file(&socket).expect("unlink fixture socket");
+        } else {
+            drop(listener.take());
+        }
+        if let Some(m) = marker {
+            append(m, "unserved");
+        }
+    }
     loop {
         if TERM.load(Ordering::SeqCst) {
             match mode {
@@ -288,6 +322,8 @@ fn children_of_self() -> Vec<u32> {
 /// A process other than the test that calls `start`, writes the outcome to
 /// `out=`, and exits. With `no-pidfd`, `pidfd_open` fails in this process and
 /// an error report also lists this process's children left after `start`.
+/// With `emfile` (#11098) it calls `stop` instead, with one fd free, and
+/// writes the result's `Debug` form.
 fn runner_main(args: &[String]) -> ! {
     if args.iter().any(|a| a == "no-pidfd") {
         deny_pidfd_open();
@@ -302,12 +338,24 @@ fn runner_main(args: &[String]) -> ! {
         StoppedSignal::SocketRefuses,
     )
     .expect("descriptor");
-    desc.spawn_args = daemon_args("serve", &socket, &[format!("marker={}", marker.display())]);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    set_instance(&mut desc, &socket);
+    // #11098: `allow=NAME` puts one name on the environment allowlist.
+    desc.env_passthrough = arg(args, "allow").map(str::to_string).into_iter().collect();
     desc.ready_timeout = SERVE_BOUND;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
+    if args.iter().any(|a| a == "emfile") {
+        // #11098: one free fd — the dial's, then `read_dir("/proc")`'s — so
+        // the scan's first `/proc/<pid>/status` open fails with EMFILE.
+        let fillers = exhaust_fds();
+        let stopped = rt.block_on(stop(&desc));
+        drop(fillers);
+        fs::write(out, format!("{stopped:?}")).expect("write out");
+        std::process::exit(0);
+    }
     match rt.block_on(start(&desc)) {
         Ok(outcome) => {
             fs::write(out, outcome.pid.to_string()).expect("write out");
@@ -322,14 +370,53 @@ fn runner_main(args: &[String]) -> ! {
     }
 }
 
-fn daemon_args(mode: &str, socket: &Path, extra: &[String]) -> Vec<String> {
+/// Lower the soft fd limit, open files until `EMFILE`, then free exactly one.
+fn exhaust_fds() -> Vec<File> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: get/setrlimit with a valid rlimit pointer.
+    unsafe {
+        assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut lim), 0);
+        lim.rlim_cur = lim.rlim_cur.min(128);
+        assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &raw const lim), 0);
+    }
+    let mut files = Vec::new();
+    loop {
+        match File::open("/dev/null") {
+            Ok(f) => files.push(f),
+            Err(e) if e.raw_os_error() == Some(libc::EMFILE) => break,
+            Err(e) => panic!("filling the fd table: {e}"),
+        }
+    }
+    files.pop().expect("at least one filler");
+    files
+}
+
+fn daemon_args(mode: &str, extra: &[String]) -> Vec<String> {
+    role_args(ROLE_DAEMON, mode, extra)
+}
+
+/// Point `desc` at the instance on `socket` (#11098). The liveness argument is
+/// the real daemons' shape — the role alone, as `serve --foreground` is — so
+/// every test's fixture daemon matches it, and only `instance_env` tells this
+/// test's instance from the others.
+fn set_instance(desc: &mut DaemonDescriptor, socket: &Path) {
+    desc.socket = socket.to_path_buf();
+    desc.liveness_args = vec![ROLE_DAEMON.to_string()];
+    desc.instance_env.retain(|(name, _)| name != SOCKET_ENV);
+    desc.instance_env
+        .push((SOCKET_ENV.to_string(), Some(socket.as_os_str().to_owned())));
+}
+
+fn role_args(role: &str, mode: &str, extra: &[String]) -> Vec<String> {
     let mut args = vec![
         "--exact".to_string(),
         "child_entry".to_string(),
         "-q".to_string(),
-        ROLE_DAEMON.to_string(),
+        role.to_string(),
         format!("mode={mode}"),
-        format!("socket={}", socket.display()),
     ];
     args.extend_from_slice(extra);
     args
@@ -372,13 +459,26 @@ impl Fixture {
     }
 
     fn descriptor(&self, signal: StoppedSignal) -> DaemonDescriptor {
-        let mut desc =
-            DaemonDescriptor::with_install_dir(DAEMON, &self.install, &self.socket, signal)
-                .expect("descriptor");
+        self.descriptor_at(signal, &self.socket)
+    }
+
+    /// [`Fixture::descriptor`] for the instance on another socket path.
+    fn descriptor_at(&self, signal: StoppedSignal, socket: &Path) -> DaemonDescriptor {
+        let mut desc = DaemonDescriptor::with_install_dir(DAEMON, &self.install, socket, signal)
+            .expect("descriptor");
         desc.stop_grace = Duration::from_secs(30);
         desc.kill_wait = Duration::from_secs(5);
         desc.ready_timeout = SERVE_BOUND;
+        set_instance(&mut desc, socket);
         desc
+    }
+
+    /// The socket of another instance, in its own directory under the work
+    /// dir, so that instance's watchdog ends with the test.
+    fn instance_socket(&self, name: &str) -> PathBuf {
+        let dir = self.path(name);
+        fs::create_dir(&dir).expect("instance dir");
+        dir.join("d.sock")
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -400,8 +500,21 @@ impl Fixture {
 
     /// Spawn a fixture daemon without waiting for it to serve.
     fn launch(&self, binary: &str, mode: &str, socket: &Path, extra: &[String]) -> Running {
+        self.launch_as(ROLE_DAEMON, binary, mode, socket, extra)
+    }
+
+    /// [`Fixture::launch`] with another role argument (#11098: a bridge).
+    fn launch_as(
+        &self,
+        role: &str,
+        binary: &str,
+        mode: &str,
+        socket: &Path,
+        extra: &[String],
+    ) -> Running {
         let child = Command::new(self.install.join(binary))
-            .args(daemon_args(mode, socket, extra))
+            .args(role_args(role, mode, extra))
+            .env(SOCKET_ENV, socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -461,13 +574,13 @@ fn lock_held(lock: &Path) -> bool {
 
 /// Alive = `/proc/<pid>` exists and is not a zombie.
 fn is_alive(pid: u32) -> bool {
-    let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
+    // #11098: bytes, as `comm` in `stat` may be non-UTF-8.
+    let Ok(stat) = fs::read(format!("/proc/{pid}/stat")) else {
         return false;
     };
-    let state = stat
-        .rsplit_once(')')
-        .and_then(|(_, rest)| rest.trim_start().chars().next());
-    !matches!(state, None | Some('Z' | 'X'))
+    let close = stat.iter().rposition(|b| *b == b')');
+    let state = close.and_then(|i| stat[i + 1..].iter().find(|b| !b.is_ascii_whitespace()));
+    !matches!(state, None | Some(b'Z' | b'X'))
 }
 
 fn kill_pid(pid: u32) {
@@ -591,6 +704,13 @@ async fn stop_returns_not_running_when_socket_refuses_connections() {
     let fx = Fixture::new();
     drop(UnixListener::bind(&fx.socket).expect("bind"));
     assert!(fx.socket.exists(), "stale socket file must remain");
+    // #11098: another test's fork holds a copy of the listener until its exec,
+    // so the socket can accept for that window; wait until it refuses.
+    assert!(
+        wait_for(|| UnixStream::connect(&fx.socket)
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)),
+        "fixture precondition: the stale socket refuses"
+    );
     let rec = Recording::new(true);
     let out = stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await;
     assert_eq!(out.expect("stop"), StopOutcome::NotRunning);
@@ -833,11 +953,7 @@ async fn start_errors_when_the_socket_never_serves() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.spawn_args = daemon_args(
-        "never-bind",
-        &fx.socket,
-        &[format!("marker={}", marker.display())],
-    );
+    desc.spawn_args = daemon_args("never-bind", &[format!("marker={}", marker.display())]);
     desc.ready_timeout = Duration::from_secs(1);
     let out = start(&desc).await;
     let _reaps = fx.reap_reported(&marker);
@@ -904,7 +1020,7 @@ fn start_kills_the_child_when_its_pidfd_cannot_be_opened() {
 async fn start_errors_when_the_child_exits_at_boot() {
     let fx = Fixture::new();
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.spawn_args = daemon_args("exit-now", &fx.socket, &[]);
+    desc.spawn_args = daemon_args("exit-now", &[]);
     desc.ready_timeout = Duration::from_secs(30);
     let t0 = Instant::now();
     let out = start(&desc).await;
@@ -926,11 +1042,7 @@ async fn restart_starts_a_daemon_that_is_not_running() {
     let fx = Fixture::new();
     let marker = fx.path("marker");
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.spawn_args = daemon_args(
-        "serve",
-        &fx.socket,
-        &[format!("marker={}", marker.display())],
-    );
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
     let out = restart(&desc).await;
     let mut reaps = fx.reap_reported(&marker);
     let out = out.expect("restart");
@@ -962,7 +1074,7 @@ async fn restart_does_not_start_when_stop_reports_a_survivor() {
     let marker_arg = format!("marker={}", marker.display());
     let d = fx.spawn(DAEMON, "ignore-term", std::slice::from_ref(&marker_arg));
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.spawn_args = daemon_args("serve", &fx.socket, &[marker_arg]);
+    desc.spawn_args = daemon_args("serve", &[marker_arg]);
     desc.stop_grace = Duration::from_millis(200);
     desc.kill_wait = Duration::from_millis(300);
     match restart_with(&desc, &Recording::new(false)).await {
@@ -1002,7 +1114,7 @@ async fn stop_and_restart_refuse_when_the_lock_is_held_without_a_socket() {
         "the holder never took the lock"
     );
     let mut desc = fx.descriptor(StoppedSignal::LockFree(lock.clone()));
-    desc.spawn_args = daemon_args("serve", &fx.socket, &[marker_arg]);
+    desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let rec = Recording::new(true);
     let stopped = stop_with(&desc, &rec).await;
     let restarted = restart_with(&desc, &rec).await;
@@ -1035,7 +1147,7 @@ async fn start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon(
     let marker_arg = format!("marker={}", marker.display());
     let d = fx.spawn(DAEMON, "serve", std::slice::from_ref(&marker_arg));
     let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.spawn_args = daemon_args("serve", &fx.socket, &[marker_arg]);
+    desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let out = start(&desc).await;
     std::thread::sleep(SPAWN_SETTLE);
     let _reaps = fx.reap_reported(&marker);
@@ -1057,7 +1169,16 @@ async fn start_refuses_a_socket_that_already_serves_and_spawns_no_second_daemon(
 #[tokio::test]
 async fn stop_refuses_to_signal_a_process_whose_executable_cannot_be_read() {
     let fx = Fixture::new();
-    let d = fx.spawn(DAEMON, "serve", &["undumpable".to_string()]);
+    // #11098: the bridge role keeps this process out of every concurrent
+    // test's scan, where its unreadable environment would fail closed.
+    let d = fx.launch_as(
+        ROLE_BRIDGE,
+        DAEMON,
+        "serve",
+        &fx.socket,
+        &["undumpable".to_string()],
+    );
+    assert!(wait_serving(&fx.socket), "fixture never served");
     assert!(
         fs::read_link(format!("/proc/{}/exe", d.pid())).is_err(),
         "fixture precondition: the exe link is unreadable (not running as root)"
@@ -1082,9 +1203,8 @@ async fn stop_and_restart_stop_short_when_the_socket_cannot_be_probed() {
     let marker = fx.path("marker");
     let marker_arg = format!("marker={}", marker.display());
     let d = fx.spawn_at(DAEMON, "serve", &socket, std::slice::from_ref(&marker_arg));
-    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
-    desc.socket = socket.clone();
-    desc.spawn_args = daemon_args("serve", &socket, &[marker_arg]);
+    let mut desc = fx.descriptor_at(StoppedSignal::SocketRefuses, &socket);
+    desc.spawn_args = daemon_args("serve", &[marker_arg]);
     let guard = ModeGuard::lock(&dir);
     let probe = UnixStream::connect(&socket).map(drop);
     assert!(
@@ -1114,4 +1234,1045 @@ async fn stop_and_restart_stop_short_when_the_socket_cannot_be_probed() {
         "restart spawned nothing"
     );
     assert!(is_alive(d.pid()), "the daemon is untouched");
+}
+
+// ─── #11098: liveness without a socket, and the spawn's cwd/env ─────────────
+
+/// The pid lines of a marker; other lines (`unserved`, `closed`) are skipped.
+fn pid_lines(marker: &Path) -> Vec<String> {
+    lines(marker)
+        .into_iter()
+        .filter(|l| l.parse::<u32>().is_ok())
+        .collect()
+}
+
+// #11098: a daemon that unlinked its socket file, or closed its listener,
+// still runs. The shortcut "socket absent ⇒ not running" reports `NotRunning`
+// and lets `restart` spawn a second daemon; here every call refuses, names
+// the pid, and signals and spawns nothing.
+#[tokio::test]
+async fn stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket() {
+    for mode in ["unlink-socket", "close-socket"] {
+        let fx = Fixture::new();
+        let marker = fx.path("marker");
+        let marker_arg = format!("marker={}", marker.display());
+        let d = fx.launch(DAEMON, mode, &fx.socket, std::slice::from_ref(&marker_arg));
+        assert!(
+            wait_for(|| lines(&marker).iter().any(|l| l == "unserved")),
+            "{mode}: the fixture never dropped its socket"
+        );
+        assert!(
+            UnixStream::connect(&fx.socket).is_err(),
+            "{mode}: fixture precondition: the socket does not serve"
+        );
+        let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+        desc.spawn_args = daemon_args("serve", &[marker_arg]);
+        let rec = Recording::new(true);
+        let stopped = stop_with(&desc, &rec).await;
+        let restarted = restart_with(&desc, &rec).await;
+        let started = start(&desc).await;
+        std::thread::sleep(SPAWN_SETTLE);
+        let _reaps = fx.reap_reported(&marker);
+
+        assert_eq!(
+            pid_lines(&marker),
+            vec![d.pid().to_string()],
+            "{mode}: a second daemon was spawned (stop: {stopped:?}, restart: {restarted:?})"
+        );
+        for (call, out) in [
+            ("stop", stopped.map(|o| format!("{o:?}"))),
+            ("restart", restarted.map(|o| format!("{o:?}"))),
+            ("start", started.map(|o| format!("{o:?}"))),
+        ] {
+            assert!(
+                matches!(&out, Err(LifecycleError::RunningUnserved { pids, .. }) if *pids == [d.pid()]),
+                "{mode}: {call}: expected RunningUnserved naming pid {}, got {out:?}",
+                d.pid()
+            );
+        }
+        assert!(rec.sent().is_empty(), "{mode}: no signal may be sent");
+        assert!(is_alive(d.pid()), "{mode}: the daemon is untouched");
+    }
+}
+
+// #11098: the scan reads every process's status, and a `comm` that is not
+// UTF-8 once failed `read_to_string`, so one such process anywhere on the
+// host made `stop` and `start` error for every daemon.
+#[tokio::test]
+async fn stop_ignores_an_unrelated_process_whose_name_is_not_utf8() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let other = fx.launch(
+        OTHER,
+        "never-bind",
+        &fx.instance_socket("other"),
+        &[format!("marker={}", marker.display()), BAD_NAME_FLAG.into()],
+    );
+    assert!(
+        wait_for(|| !pid_lines(&marker).is_empty()),
+        "the fixture never started"
+    );
+    let status = fs::read(format!("/proc/{}/status", other.pid())).expect("read status");
+    assert!(
+        std::str::from_utf8(&status).is_err(),
+        "the fixture's status must hold its non-UTF-8 name"
+    );
+    let rec = Recording::new(true);
+    let out = stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await;
+    assert_eq!(
+        out.expect("a non-UTF-8 name on an unrelated process must not fail the scan"),
+        StopOutcome::NotRunning
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(other.pid()), "the unrelated process is untouched");
+}
+
+// #11098: a stdio bridge runs the daemon's executable but not its arguments.
+// The shortcut "match on the executable alone" reads it as the daemon.
+#[tokio::test]
+async fn stop_returns_not_running_while_only_a_bridge_of_the_same_binary_runs() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let bridge = fx.launch_as(
+        ROLE_BRIDGE,
+        DAEMON,
+        "never-bind",
+        &fx.socket,
+        &[format!("marker={}", marker.display())],
+    );
+    assert!(
+        wait_for(|| !pid_lines(&marker).is_empty()),
+        "the bridge never started"
+    );
+    let rec = Recording::new(true);
+    let out = stop_with(&fx.descriptor(StoppedSignal::SocketRefuses), &rec).await;
+    assert_eq!(
+        out.expect("a bridge alone is not the daemon"),
+        StopOutcome::NotRunning
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(bridge.pid()), "the bridge is untouched");
+}
+
+// #11098: `start` called from a checkout with a `.env.local`, and with a
+// sentinel exported, must not run the daemon in that checkout or hand it the
+// sentinel. A separate runner calls `start`, so this process keeps its cwd.
+#[test]
+fn start_runs_the_daemon_in_its_working_dir_with_only_the_allowed_environment() {
+    let fx = Fixture::new();
+    let checkout = fx.path("checkout");
+    fs::create_dir(&checkout).expect("checkout dir");
+    fs::write(checkout.join(".env.local"), "TC_LC_FROM_DOTENV=1\n").expect(".env.local");
+    let checkout = fs::canonicalize(&checkout).expect("canonical checkout");
+    let out = fx.path("out");
+    let marker = fx.path("marker");
+    let status = Command::new(std::env::current_exe().expect("current_exe"))
+        .args([
+            "--exact",
+            "child_entry",
+            "-q",
+            ROLE_RUNNER,
+            "allow=TC_LC_ALLOWED",
+        ])
+        .arg(format!("install={}", fx.install.display()))
+        .arg(format!("socket={}", fx.socket.display()))
+        .arg(format!("marker={}", marker.display()))
+        .arg(format!("out={}", out.display()))
+        .current_dir(&checkout)
+        .env("TC_LC_SENTINEL", "leaked")
+        .env("TC_LC_ALLOWED", "kept")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run runner");
+    let _reaps = fx.reap_reported(&marker);
+    let report = fs::read_to_string(&out).unwrap_or_default();
+    assert!(status.success(), "runner failed: {report}");
+    let pid: u32 = report.trim().parse().expect("runner pid");
+    let cwd = fs::read_link(format!("/proc/{pid}/cwd")).expect("daemon cwd");
+    let environ = fs::read(format!("/proc/{pid}/environ")).expect("daemon environ");
+    let vars: Vec<String> = environ
+        .split(|b| *b == 0)
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .collect();
+    // Names only in a failure message: a value can be a credential.
+    let names: Vec<&str> = vars.iter().filter_map(|v| v.split('=').next()).collect();
+
+    assert_ne!(cwd, checkout, "the daemon runs in the caller's cwd");
+    assert_eq!(cwd, Path::new("/"), "the default working_dir is /");
+    assert!(
+        !names.contains(&"TC_LC_SENTINEL"),
+        "the caller's sentinel reached the daemon; its names: {names:?}"
+    );
+    assert!(
+        vars.iter().any(|v| v == "TC_LC_ALLOWED=kept"),
+        "the allowlisted variable is missing; names: {names:?}"
+    );
+    if let Some(home) = std::env::var_os("HOME") {
+        let want = format!("HOME={}", home.to_string_lossy());
+        assert!(
+            vars.contains(&want),
+            "the base HOME is missing; names: {names:?}"
+        );
+    }
+}
+
+// ─── #11098: sibling instances of the same binary and argv ──────────────────
+
+fn cmdline(pid: u32) -> Vec<u8> {
+    fs::read(format!("/proc/{pid}/cmdline")).expect("cmdline")
+}
+
+/// Two instances, A and B, of one binary with identical argv; only their
+/// `SOCKET_ENV` values (the stand-in for a data-dir variable) differ.
+struct Siblings {
+    fx: Fixture,
+    marker: PathBuf,
+    extra: Vec<String>,
+    sock_a: PathBuf,
+    sock_b: PathBuf,
+}
+
+impl Siblings {
+    fn new() -> Self {
+        let fx = Fixture::new();
+        let marker = fx.path("marker");
+        let extra = vec![format!("marker={}", marker.display())];
+        let (sock_a, sock_b) = (fx.instance_socket("a"), fx.instance_socket("b"));
+        Self {
+            fx,
+            marker,
+            extra,
+            sock_a,
+            sock_b,
+        }
+    }
+
+    fn run(&self, socket: &Path) -> Running {
+        self.fx.spawn_at(DAEMON, "serve", socket, &self.extra)
+    }
+
+    /// The descriptor for instance A, spawning A with B's argv.
+    fn desc_a(&self) -> DaemonDescriptor {
+        let mut desc = self
+            .fx
+            .descriptor_at(StoppedSignal::SocketRefuses, &self.sock_a);
+        desc.spawn_args = daemon_args("serve", &self.extra);
+        desc
+    }
+
+    fn assert_b_untouched(&self, b: &Running) {
+        assert!(is_alive(b.pid()), "sibling B was stopped");
+        assert!(UnixStream::connect(&self.sock_b).is_ok(), "B still serves");
+    }
+}
+
+// #11098: a sandbox daemon runs the production argv; only its data-dir
+// variable differs. The shortcut "binary + argv is this daemon" stops A, then
+// reads B as A still running, so `start` refuses and A stays down.
+#[tokio::test]
+async fn restart_of_one_instance_leaves_a_sibling_with_the_same_argv_serving() {
+    let s = Siblings::new();
+    let a = s.run(&s.sock_a);
+    let b = s.run(&s.sock_b);
+    assert_eq!(
+        cmdline(a.pid()),
+        cmdline(b.pid()),
+        "precondition: same argv"
+    );
+    let desc = s.desc_a();
+    let out = restart(&desc).await;
+    let _reaps = s.fx.reap_reported(&s.marker);
+    let out = out.expect("restart of A beside sibling B");
+    assert_eq!(
+        out.stop,
+        StopOutcome::Stopped {
+            pid: a.pid(),
+            forced: false
+        }
+    );
+    let new = out.start.pid;
+    assert!(UnixStream::connect(&s.sock_a).is_ok(), "A serves again");
+    assert_eq!(cmdline(new), cmdline(b.pid()), "the new A has B's argv");
+    s.assert_b_untouched(&b);
+    assert_eq!(
+        stop(&desc).await.expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: new,
+            forced: false
+        }
+    );
+    s.assert_b_untouched(&b);
+}
+
+// #11098: owner ruling — a daemon that is not running is started, even while
+// a sibling instance of it runs.
+#[tokio::test]
+async fn start_and_restart_start_a_stopped_instance_while_a_sibling_runs() {
+    let s = Siblings::new();
+    let b = s.run(&s.sock_b);
+    let desc = s.desc_a();
+    let started = start(&desc).await;
+    let mut reaps = s.fx.reap_reported(&s.marker);
+    let pid = started.expect("start of A beside sibling B").pid;
+    assert!(UnixStream::connect(&s.sock_a).is_ok(), "A serves");
+    assert_eq!(cmdline(pid), cmdline(b.pid()), "A has B's argv");
+    assert_eq!(
+        stop(&desc).await.expect("stop A"),
+        StopOutcome::Stopped { pid, forced: false }
+    );
+    s.assert_b_untouched(&b);
+
+    let restarted = restart(&desc).await;
+    reaps.extend(s.fx.reap_reported(&s.marker));
+    let restarted = restarted.expect("restart of a stopped A beside B");
+    assert_eq!(restarted.stop, StopOutcome::NotRunning);
+    assert!(UnixStream::connect(&s.sock_a).is_ok(), "A serves again");
+    assert_eq!(
+        stop(&desc).await.expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: restarted.start.pid,
+            forced: false
+        }
+    );
+    s.assert_b_untouched(&b);
+}
+
+// #11098: a process that matches the binary and argv but hides its
+// environment (undumpable) cannot be told from this instance, so it fails
+// closed. It runs as `OTHER`, which no other test's descriptor names.
+#[tokio::test]
+async fn stop_and_start_fail_closed_when_a_matching_process_hides_its_environment() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let marker_arg = format!("marker={}", marker.display());
+    let hidden = fx.launch(
+        OTHER,
+        "never-bind",
+        &fx.socket,
+        &[marker_arg.clone(), "undumpable".to_string()],
+    );
+    assert!(
+        wait_for(|| !pid_lines(&marker).is_empty()),
+        "the fixture never started"
+    );
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.binary = OTHER.to_string();
+    desc.spawn_args = daemon_args("serve", &[marker_arg]);
+    let rec = Recording::new(true);
+    let stopped = stop_with(&desc, &rec).await;
+    let started = start(&desc).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+
+    for (call, out) in [
+        ("stop", stopped.map(|o| format!("{o:?}"))),
+        ("start", started.map(|o| format!("{o:?}"))),
+    ] {
+        assert!(
+            matches!(&out, Err(LifecycleError::InstanceUnreadable { pid, .. }) if *pid == hidden.pid()),
+            "{call}: expected InstanceUnreadable naming pid {}, got {out:?}",
+            hidden.pid()
+        );
+    }
+    assert_eq!(
+        pid_lines(&marker),
+        vec![hidden.pid().to_string()],
+        "start spawned a second process"
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(hidden.pid()), "the process is untouched");
+}
+
+// ─── injected process table (#11085) ────────────────────────────────────────
+
+/// A pid above any `pid_max`, so a fake entry never names a real process.
+const FAKE_PID: u32 = 4_194_401;
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Write a fake `<root>/<pid>` entry: a live process of `uid` that runs
+/// `desc`'s binary with its `liveness_args` and every `instance_env` value,
+/// so only the uid can rule it out. `environ` is mode 000 unless `readable`.
+fn fake_proc_entry(root: &Path, pid: u32, uid: u32, desc: &DaemonDescriptor, readable: bool) {
+    let dir = root.join(pid.to_string());
+    fs::create_dir_all(&dir).expect("fake entry dir");
+    let status = format!("Name:\tlc\nState:\tS (sleeping)\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n");
+    fs::write(dir.join("status"), status).expect("fake status");
+    let mut cmdline = desc.program().as_os_str().as_bytes().to_vec();
+    for arg in &desc.liveness_args {
+        cmdline.push(0);
+        cmdline.extend_from_slice(arg.as_bytes());
+    }
+    cmdline.push(0);
+    fs::write(dir.join("cmdline"), cmdline).expect("fake cmdline");
+    std::os::unix::fs::symlink(desc.program(), dir.join("exe")).expect("fake exe link");
+    let mut environ = Vec::new();
+    for (name, value) in &desc.instance_env {
+        if let Some(value) = value {
+            environ.extend_from_slice(format!("{name}=").as_bytes());
+            environ.extend_from_slice(value.as_bytes());
+            environ.push(0);
+        }
+    }
+    let path = dir.join("environ");
+    fs::write(&path, environ).expect("fake environ");
+    if !readable {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
+    }
+}
+
+// #11085: a matching process of another uid, readable or hiding its
+// environment as a foreign daemon does, is skipped by every scan: stop, start
+// and restart act as if it were absent. The same entry under this uid is this
+// instance, so the uid alone rules it out.
+#[tokio::test]
+async fn a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let mine = fx.path("mine-proc");
+    fake_proc_entry(&mine, FAKE_PID, euid(), &desc, true);
+    let foreign = fx.path("foreign-proc");
+    let other_uid = euid().wrapping_add(1);
+    fake_proc_entry(&foreign, FAKE_PID, other_uid, &desc, true);
+    fake_proc_entry(&foreign, FAKE_PID + 1, other_uid, &desc, false);
+    let table = ProcessTable::at(&foreign);
+    let rec = Recording::new(true);
+
+    let control = stop_with_table(&desc, &rec, &ProcessTable::at(&mine)).await;
+    let stopped = stop_with_table(&desc, &rec, &table).await;
+    let started = start_with_table(&desc, &table).await;
+    let restarted = restart_with_table(&desc, &KernelDelivery, &table).await;
+    let mut reaps = fx.reap_reported(&marker);
+
+    assert!(
+        matches!(&control, Err(LifecycleError::RunningUnserved { pids, .. }) if pids == &[FAKE_PID]),
+        "the same entry under this uid is this instance: {control:?}"
+    );
+    assert_eq!(stopped.expect("stop"), StopOutcome::NotRunning);
+    let first = started.expect("start").pid;
+    let restarted = restarted.expect("restart");
+    assert_eq!(
+        restarted.stop,
+        StopOutcome::Stopped {
+            pid: first,
+            forced: false
+        }
+    );
+    let second = restarted.start.pid;
+    assert_eq!(
+        stop_with_table(&desc, &KernelDelivery, &table)
+            .await
+            .expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: second,
+            forced: false
+        }
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    reaps.iter_mut().for_each(Reap::disarm);
+}
+
+// #11085: a matching process of this uid whose environment cannot be read
+// still fails every scan closed through an injected table, as through `/proc`
+// (#11098); so does a table that cannot be listed.
+#[tokio::test]
+async fn a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed() {
+    let fx = Fixture::new();
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let proc = fx.path("proc");
+    fake_proc_entry(&proc, FAKE_PID, euid(), &desc, false);
+    let table = ProcessTable::at(&proc);
+    let rec = Recording::new(true);
+
+    let stopped = stop_with_table(&desc, &rec, &table).await;
+    let started = start_with_table(&desc, &table).await;
+    let restarted = restart_with_table(&desc, &rec, &table).await;
+    let unlisted = stop_with_table(&desc, &rec, &ProcessTable::at(fx.path("absent"))).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+
+    for (call, out) in [
+        ("stop", stopped.map(|o| format!("{o:?}"))),
+        ("start", started.map(|o| format!("{o:?}"))),
+        ("restart", restarted.map(|o| format!("{o:?}"))),
+    ] {
+        assert!(
+            matches!(&out, Err(LifecycleError::InstanceUnreadable { pid, source, .. })
+                if *pid == FAKE_PID && source.kind() == std::io::ErrorKind::PermissionDenied),
+            "{call}: expected InstanceUnreadable naming pid {FAKE_PID}, got {out:?}"
+        );
+    }
+    assert!(
+        matches!(&unlisted, Err(LifecycleError::Io { .. })),
+        "an unlistable table must fail closed: {unlisted:?}"
+    );
+    assert!(lines(&marker).is_empty(), "a daemon was spawned");
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+}
+
+// #11098: a `/proc` read that fails for a reason other than a vanished
+// process (here EMFILE) once read every process as absent, so `stop` said
+// `NotRunning` and `restart` started a second daemon.
+#[test]
+fn stop_fails_closed_when_the_scan_cannot_open_proc_files() {
+    let fx = Fixture::new();
+    let out = fx.path("out");
+    let status = Command::new(std::env::current_exe().expect("current_exe"))
+        .args(["--exact", "child_entry", "-q", ROLE_RUNNER, "emfile"])
+        .arg(format!("install={}", fx.install.display()))
+        .arg(format!("socket={}", fx.socket.display()))
+        .arg(format!("marker={}", fx.path("marker").display()))
+        .arg(format!("out={}", out.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("run runner");
+    let report = fs::read_to_string(&out).unwrap_or_default();
+    assert!(status.success(), "runner failed: {report}");
+    assert!(
+        report.starts_with("Err(Io") && report.contains("/status"),
+        "expected an Io error on a status read, got {report}"
+    );
+}
+
+// ─── #11085: the path flag, the restart pre-check, and stop/restart by pid ──
+
+/// The fixture's stand-in for `--data-dir`; libtest reads it as a filter.
+const DIR_FLAG: &str = "lc-dir";
+
+/// The AC6 residual's shape: instance A serves `sock_a` in `dir_a`; the
+/// sibling carries A's instance key (`SOCKET_ENV`) in its environment, as a
+/// `--data-dir X` daemon with the data-dir variable unset does, but names
+/// `dir_b` with [`DIR_FLAG`] and serves `sock_b`.
+struct PathSiblings {
+    fx: Fixture,
+    marker: PathBuf,
+    extra: Vec<String>,
+    sock_a: PathBuf,
+    sock_b: PathBuf,
+}
+
+impl PathSiblings {
+    fn new() -> Self {
+        let fx = Fixture::new();
+        let marker = fx.path("marker");
+        let extra = vec![format!("marker={}", marker.display())];
+        let (sock_a, sock_b) = (fx.instance_socket("a"), fx.instance_socket("b"));
+        Self {
+            fx,
+            marker,
+            extra,
+            sock_a,
+            sock_b,
+        }
+    }
+
+    fn dir(socket: &Path) -> PathBuf {
+        socket.parent().expect("instance dir").to_path_buf()
+    }
+
+    /// Run the sibling and wait until it serves `sock_b`.
+    fn sibling(&self) -> Running {
+        let mut extra = self.extra.clone();
+        extra.extend([
+            format!("socket={}", self.sock_b.display()),
+            DIR_FLAG.to_string(),
+            Self::dir(&self.sock_b).display().to_string(),
+        ]);
+        let running = self.fx.launch(DAEMON, "serve", &self.sock_a, &extra);
+        assert!(wait_serving(&self.sock_b), "the sibling never served");
+        running
+    }
+
+    /// A's descriptor; `opt_in` declares [`DIR_FLAG`] with A's directory.
+    fn desc_a(&self, opt_in: bool) -> DaemonDescriptor {
+        let mut desc = self
+            .fx
+            .descriptor_at(StoppedSignal::SocketRefuses, &self.sock_a);
+        desc.spawn_args = daemon_args("serve", &self.extra);
+        if opt_in {
+            desc.instance_path_args = vec![(DIR_FLAG.to_string(), Self::dir(&self.sock_a))];
+        }
+        desc
+    }
+
+    fn assert_sibling_untouched(&self, sibling: &Running) {
+        assert!(is_alive(sibling.pid()), "the sibling was stopped");
+        assert!(
+            UnixStream::connect(&self.sock_b).is_ok(),
+            "the sibling still serves"
+        );
+    }
+}
+
+/// Launch an unserved daemon (its socket bind "failed") on `socket`'s
+/// instance and wait until it has started.
+fn launch_unserved(fx: &Fixture, socket: &Path, name: &str, extra: &[String]) -> Running {
+    let marker = fx.path(name);
+    let mut args = vec![format!("marker={}", marker.display())];
+    args.extend_from_slice(extra);
+    let running = fx.launch(DAEMON, "never-bind", socket, &args);
+    assert!(
+        wait_for(|| !pid_lines(&marker).is_empty()),
+        "{name}: the fixture never started"
+    );
+    running
+}
+
+// #11085 AC6: a sibling started as `--data-dir X` without the data-dir variable
+// read as the default instance, so `stop` refused with `RunningUnserved`. The
+// opt-in tells it apart; a process naming A's own dir is still A.
+#[tokio::test]
+async fn stop_tells_a_sibling_from_this_instance_by_its_path_flag() {
+    let s = PathSiblings::new();
+    let sibling = s.sibling();
+    let rec = Recording::new(true);
+    let residual = stop_with(&s.desc_a(false), &rec).await;
+    let told_apart = stop_with(&s.desc_a(true), &rec).await;
+    let own_dir = format!("{DIR_FLAG}={}", PathSiblings::dir(&s.sock_a).display());
+    let own = launch_unserved(&s.fx, &s.sock_a, "own-marker", &[own_dir]);
+    let refused = stop_with(&s.desc_a(true), &rec).await;
+
+    assert!(
+        matches!(&residual, Err(LifecycleError::RunningUnserved { pids, .. }) if *pids == [sibling.pid()]),
+        "precondition: without the opt-in the sibling reads as A, got {residual:?}"
+    );
+    assert_eq!(told_apart.expect("stop A"), StopOutcome::NotRunning);
+    assert!(
+        matches!(&refused, Err(LifecycleError::RunningUnserved { pids, .. }) if *pids == [own.pid()]),
+        "a process naming A's own dir is A, got {refused:?}"
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    s.assert_sibling_untouched(&sibling);
+}
+
+// #11085: with a sibling the scan reads as A, `restart` of a HEALTHY A stopped
+// it, then `start` refused, and A stayed down. The refusal now comes first.
+#[tokio::test]
+async fn restart_refuses_before_any_signal_when_another_process_is_this_instance() {
+    let s = PathSiblings::new();
+    let a = s.fx.spawn_at(DAEMON, "serve", &s.sock_a, &s.extra);
+    let sibling = s.sibling();
+    let rec = Recording::new(true);
+    let blocked = restart_with(&s.desc_a(false), &rec).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    match &blocked {
+        Err(LifecycleError::RestartBlocked {
+            serving, others, ..
+        }) => {
+            assert_eq!(*serving, [a.pid()]);
+            assert_eq!(*others, [sibling.pid()]);
+        }
+        other => panic!("expected RestartBlocked, got {other:?}"),
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(a.pid()), "A was stopped");
+    assert!(UnixStream::connect(&s.sock_a).is_ok(), "A still serves");
+    assert_eq!(pid_lines(&s.marker).len(), 2, "nothing was spawned");
+
+    // With the opt-in the sibling is told apart, and the restart goes through.
+    let out = restart(&s.desc_a(true)).await;
+    let _reaps = s.fx.reap_reported(&s.marker);
+    let out = out.expect("restart of A beside the told-apart sibling");
+    assert_eq!(
+        out.stop,
+        StopOutcome::Stopped {
+            pid: a.pid(),
+            forced: false
+        }
+    );
+    assert!(UnixStream::connect(&s.sock_a).is_ok(), "A serves again");
+    s.assert_sibling_untouched(&sibling);
+    assert_eq!(
+        stop(&s.desc_a(true)).await.expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: out.start.pid,
+            forced: false
+        }
+    );
+}
+
+// #11085 AC10: a daemon whose socket bind failed is unreachable through the
+// socket — `stop` refuses on it — and is stopped through its pid.
+#[tokio::test]
+async fn stop_pid_stops_a_daemon_whose_socket_bind_failed() {
+    let fx = Fixture::new();
+    let mut d = launch_unserved(&fx, &fx.socket, "marker", &[]);
+    let desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    let rec = Recording::new(true);
+    let by_socket = stop_with(&desc, &rec).await;
+    assert!(
+        matches!(&by_socket, Err(LifecycleError::RunningUnserved { pids, .. }) if *pids == [d.pid()]),
+        "precondition: the socket path cannot reach it, got {by_socket:?}"
+    );
+    let pid = d.pid();
+    assert_eq!(
+        stop_pid_with(&desc, pid, &rec).await.expect("stop by pid"),
+        StopOutcome::Stopped { pid, forced: false }
+    );
+    assert_eq!(rec.sent(), vec![Signal::Term]);
+    assert!(
+        d.child.try_wait().expect("try_wait").is_some(),
+        "pid must have exited"
+    );
+}
+
+// #11085 AC10: the pid a caller names is a hint. A pid that runs another
+// binary, a bridge of this binary, or a sibling instance is never signalled,
+// and the answer is an error, never `NotRunning`.
+#[tokio::test]
+async fn stop_pid_refuses_a_pid_that_is_not_this_instance() {
+    let fx = Fixture::new();
+    let own_dir = fx.path("own");
+    fs::create_dir(&own_dir).expect("own dir");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.instance_path_args = vec![(DIR_FLAG.to_string(), own_dir)];
+    desc.spawn_args = daemon_args(
+        "serve",
+        &[format!("marker={}", fx.path("spawned").display())],
+    );
+    let other_sock = fx.instance_socket("b");
+    let other = fx.launch(OTHER, "never-bind", &fx.socket, &[]);
+    let bridge = fx.launch_as(ROLE_BRIDGE, DAEMON, "never-bind", &fx.socket, &[]);
+    let env_sibling = launch_unserved(&fx, &other_sock, "env-marker", &[]);
+    let path_sibling = launch_unserved(
+        &fx,
+        &fx.socket,
+        "path-marker",
+        &[
+            DIR_FLAG.to_string(),
+            PathSiblings::dir(&other_sock).display().to_string(),
+        ],
+    );
+    for pid in [other.pid(), bridge.pid()] {
+        assert!(
+            wait_for(|| fs::read_link(format!("/proc/{pid}/exe"))
+                .is_ok_and(|e| e.starts_with(&fx.install))),
+            "fixture {pid} never ran"
+        );
+    }
+    let rec = Recording::new(true);
+    match stop_pid_with(&desc, other.pid(), &rec).await {
+        Err(LifecycleError::IdentityMismatch { pid, found, .. }) => {
+            assert_eq!((pid, found.as_str()), (other.pid(), OTHER));
+        }
+        out => panic!("another binary: expected IdentityMismatch, got {out:?}"),
+    }
+    for (what, pid) in [
+        ("a bridge", bridge.pid()),
+        ("an env sibling", env_sibling.pid()),
+        ("a path sibling", path_sibling.pid()),
+    ] {
+        let stopped = stop_pid_with(&desc, pid, &rec).await;
+        let restarted = restart_pid_with(&desc, pid, &rec).await;
+        for (call, out) in [
+            ("stop_pid", stopped.map(|o| format!("{o:?}"))),
+            ("restart_pid", restarted.map(|o| format!("{o:?}"))),
+        ] {
+            assert!(
+                matches!(&out, Err(LifecycleError::NotThisInstance { pid: p, .. }) if *p == pid),
+                "{what}: {call}: expected NotThisInstance, got {out:?}"
+            );
+        }
+    }
+    std::thread::sleep(SPAWN_SETTLE);
+    assert!(lines(&fx.path("spawned")).is_empty(), "restart_pid spawned");
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    for pid in [
+        other.pid(),
+        bridge.pid(),
+        env_sibling.pid(),
+        path_sibling.pid(),
+    ] {
+        assert!(is_alive(pid), "pid {pid} is untouched");
+    }
+}
+
+// #11085: a stale pid (a pid file or address that outlived its daemon) proves
+// nothing. The shortcut "the pid is gone ⇒ NotRunning" misses a daemon of this
+// instance that runs under another pid.
+#[tokio::test]
+async fn stop_pid_of_a_pid_that_is_gone_answers_as_stop_does() {
+    let fx = Fixture::new();
+    let mut gone = fx.launch(DAEMON, "exit-now", &fx.socket, &[]);
+    gone.child.wait().expect("reap the exited fixture");
+    let stale = gone.pid();
+    let desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    let rec = Recording::new(true);
+    assert_eq!(
+        stop_pid_with(&desc, stale, &rec)
+            .await
+            .expect("nothing runs"),
+        StopOutcome::NotRunning
+    );
+    let d = launch_unserved(&fx, &fx.socket, "marker", &[]);
+    let out = stop_pid_with(&desc, stale, &rec).await;
+    assert!(
+        matches!(&out, Err(LifecycleError::RunningUnserved { pids, .. }) if *pids == [d.pid()]),
+        "expected RunningUnserved naming pid {}, got {out:?}",
+        d.pid()
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(d.pid()), "the daemon is untouched");
+}
+
+// #11085 AC10, D1: restart by pid stops the unserved daemon, proves it gone,
+// and starts one that serves.
+#[tokio::test]
+async fn restart_pid_restarts_a_daemon_whose_socket_bind_failed() {
+    let fx = Fixture::new();
+    let d = launch_unserved(&fx, &fx.socket, "old-marker", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let out = restart_pid(&desc, d.pid()).await;
+    let mut reaps = fx.reap_reported(&marker);
+    let out = out.expect("restart by pid");
+    assert_eq!(
+        out.stop,
+        StopOutcome::Stopped {
+            pid: d.pid(),
+            forced: false
+        }
+    );
+    let new = out.start.pid;
+    assert_eq!(pid_lines(&marker), vec![new.to_string()], "one new daemon");
+    assert!(UnixStream::connect(&fx.socket).is_ok(), "it serves");
+    assert!(!is_alive(d.pid()), "the old daemon is gone");
+    assert_eq!(
+        stop_pid(&desc, new).await.expect("cleanup stop"),
+        StopOutcome::Stopped {
+            pid: new,
+            forced: false
+        }
+    );
+    reaps.iter_mut().for_each(Reap::disarm);
+}
+
+// #11085: two processes of this instance; restarting one by pid would stop it
+// and then the start would refuse on the other.
+#[tokio::test]
+async fn restart_pid_refuses_before_any_signal_when_another_process_is_this_instance() {
+    let fx = Fixture::new();
+    let d = launch_unserved(&fx, &fx.socket, "d-marker", &[]);
+    let twin = launch_unserved(&fx, &fx.socket, "twin-marker", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let rec = Recording::new(true);
+    let out = restart_pid_with(&desc, d.pid(), &rec).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+    match &out {
+        Err(LifecycleError::RestartBlocked {
+            serving, others, ..
+        }) => {
+            assert_eq!(*serving, [d.pid()]);
+            assert_eq!(*others, [twin.pid()]);
+        }
+        other => panic!("expected RestartBlocked, got {other:?}"),
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(d.pid()) && is_alive(twin.pid()), "both untouched");
+}
+
+// #11085 AC2 by pid: a survivor fails the stop, and the restart starts nothing.
+#[tokio::test]
+async fn stop_pid_reports_a_survivor_and_restart_pid_starts_nothing() {
+    let fx = Fixture::new();
+    let d = fx.spawn(DAEMON, "ignore-term", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    desc.stop_grace = Duration::from_millis(200);
+    desc.kill_wait = Duration::from_millis(300);
+    let stopped = stop_pid_with(&desc, d.pid(), &Recording::new(false)).await;
+    let restarted = restart_pid_with(&desc, d.pid(), &Recording::new(false)).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+    for (call, out) in [
+        ("stop_pid", stopped.map(|o| format!("{o:?}"))),
+        ("restart_pid", restarted.map(|o| format!("{o:?}"))),
+    ] {
+        assert!(
+            matches!(&out, Err(LifecycleError::Survivor { pid }) if *pid == d.pid()),
+            "{call}: expected Survivor, got {out:?}"
+        );
+    }
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(d.pid()), "the survivor still runs");
+}
+
+// #11085: the scan counts an undecided path flag as this instance and refuses,
+// but a stop by pid must not signal a process nobody proved is this instance.
+// Empty `liveness_args` lets every process of the binary pass, so it refuses.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_refuse_an_undecided_instance_before_any_signal() {
+    let fx = Fixture::new();
+    let own_dir = fx.path("own");
+    fs::create_dir(&own_dir).expect("own dir");
+    let spawned = fx.path("spawned");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.instance_path_args = vec![(DIR_FLAG.to_string(), own_dir)];
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", spawned.display())]);
+    let mut no_liveness = fx.descriptor(StoppedSignal::SocketRefuses);
+    no_liveness.liveness_args.clear();
+    no_liveness.spawn_args = desc.spawn_args.clone();
+    let flag = |value: &str| vec![DIR_FLAG.to_string(), value.to_string()];
+    let missing = fx.path("missing").display().to_string();
+    let relative = launch_unserved(&fx, &fx.socket, "rel-marker", &flag("own"));
+    let unresolvable = launch_unserved(&fx, &fx.socket, "abs-marker", &flag(&missing));
+    let no_value = launch_unserved(&fx, &fx.socket, "none-marker", &[DIR_FLAG.to_string()]);
+    let plain = launch_unserved(&fx, &fx.socket, "plain-marker", &[]);
+    let rec = Recording::new(true);
+    let mut results = Vec::new();
+    for (what, d, pid, undecided) in [
+        ("a relative value", &desc, relative.pid(), true),
+        ("an unresolvable value", &desc, unresolvable.pid(), true),
+        ("no value", &desc, no_value.pid(), true),
+        ("empty liveness_args", &no_liveness, plain.pid(), false),
+    ] {
+        let stopped = stop_pid_with(d, pid, &rec).await.map(|o| format!("{o:?}"));
+        let restarted = restart_pid_with(d, pid, &rec)
+            .await
+            .map(|o| format!("{o:?}"));
+        results.push((what, pid, undecided, stopped, restarted));
+    }
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&spawned);
+    for (what, pid, undecided, stopped, restarted) in results {
+        for (call, out) in [("stop_pid", stopped), ("restart_pid", restarted)] {
+            let refused = match &out {
+                Err(LifecycleError::InstanceUndecided { pid: p, flag, .. }) => {
+                    undecided && *p == pid && flag == DIR_FLAG
+                }
+                Err(LifecycleError::InvalidDescriptor { .. }) => !undecided,
+                _ => false,
+            };
+            assert!(refused, "{what}: {call}: expected a refusal, got {out:?}");
+        }
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&spawned).is_empty(), "restart_pid spawned");
+    for pid in [
+        relative.pid(),
+        unresolvable.pid(),
+        no_value.pid(),
+        plain.pid(),
+    ] {
+        assert!(is_alive(pid), "pid {pid} is untouched");
+    }
+}
+
+// #11085: P is this instance but unserved; Q serves the socket. A restart of
+// P stopped P and then `start` found Q serving, so the daemon reached by pid
+// was down and nothing started; a stop of P could not reach the stopped
+// signal. Both now refuse before any signal. Q runs another binary, so the
+// `/proc` scan does not count it and only the socket check can refuse.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_refuse_before_any_signal_when_another_pid_serves_the_socket() {
+    let fx = Fixture::new();
+    let p = launch_unserved(&fx, &fx.socket, "p-marker", &[]);
+    let q = fx.spawn(OTHER, "serve", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let rec = Recording::new(true);
+    let restarted = restart_pid_with(&desc, p.pid(), &rec).await;
+    let stopped = stop_pid_with(&desc, p.pid(), &rec).await;
+    std::thread::sleep(SPAWN_SETTLE);
+    let _reaps = fx.reap_reported(&marker);
+    match &restarted {
+        Err(LifecycleError::RestartBlocked {
+            serving, others, ..
+        }) => {
+            assert_eq!(*serving, [p.pid()]);
+            assert_eq!(*others, [q.pid()]);
+        }
+        other => panic!("restart_pid: expected RestartBlocked, got {other:?}"),
+    }
+    assert!(
+        matches!(&stopped, Err(LifecycleError::ServedByAnother { pid, peer, .. })
+            if (*pid, *peer) == (p.pid(), q.pid())),
+        "stop_pid: expected ServedByAnother, got {stopped:?}"
+    );
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(p.pid()) && is_alive(q.pid()), "both untouched");
+    assert!(UnixStream::connect(&fx.socket).is_ok(), "Q still serves");
+}
+
+// #11085: a socket that cannot be probed may be served by another pid, so a
+// stop or restart by pid refuses before any signal.
+#[tokio::test]
+async fn stop_pid_and_restart_pid_stop_short_when_the_socket_cannot_be_probed() {
+    let fx = Fixture::new();
+    let dir = fx.path("locked");
+    fs::create_dir(&dir).expect("socket dir");
+    let socket = dir.join("d.sock");
+    let p = launch_unserved(&fx, &socket, "p-marker", &[]);
+    let marker = fx.path("marker");
+    let mut desc = fx.descriptor_at(StoppedSignal::SocketRefuses, &socket);
+    desc.spawn_args = daemon_args("serve", &[format!("marker={}", marker.display())]);
+    let guard = ModeGuard::lock(&dir);
+    let probe = UnixStream::connect(&socket).map(drop);
+    assert!(
+        matches!(&probe, Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied),
+        "fixture precondition: connect is refused with EACCES, got {probe:?}"
+    );
+    let rec = Recording::new(true);
+    let restarted = restart_pid_with(&desc, p.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    let stopped = stop_pid_with(&desc, p.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    std::thread::sleep(SPAWN_SETTLE);
+    drop(guard);
+    let _reaps = fx.reap_reported(&marker);
+    for (call, out) in [("restart_pid", restarted), ("stop_pid", stopped)] {
+        assert!(
+            matches!(&out, Err(LifecycleError::ProbeInconclusive { socket: s }) if *s == socket),
+            "{call}: expected ProbeInconclusive, got {out:?}"
+        );
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(lines(&marker).is_empty(), "nothing was spawned");
+    assert!(is_alive(p.pid()), "the daemon is untouched");
+}
+
+// #11085: mid-upgrade the install binary is briefly absent. A restart that
+// found that only at its start had already stopped the healthy daemon.
+#[tokio::test]
+async fn restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing() {
+    let fx = Fixture::new();
+    let d = fx.spawn(DAEMON, "serve", &[]);
+    let desc = fx.descriptor(StoppedSignal::SocketRefuses);
+    let program = fx.install.join(DAEMON);
+    fs::remove_file(&program).expect("remove the install binary");
+    let rec = Recording::new(true);
+    let restarted = restart_with(&desc, &rec).await.map(|o| format!("{o:?}"));
+    let by_pid = restart_pid_with(&desc, d.pid(), &rec)
+        .await
+        .map(|o| format!("{o:?}"));
+    for (call, out) in [("restart", restarted), ("restart_pid", by_pid)] {
+        assert!(
+            matches!(&out, Err(LifecycleError::BinaryMissing { path }) if *path == program),
+            "{call}: expected BinaryMissing, got {out:?}"
+        );
+    }
+    assert!(rec.sent().is_empty(), "no signal may be sent");
+    assert!(is_alive(d.pid()), "the daemon still runs");
+    assert!(UnixStream::connect(&fx.socket).is_ok(), "it still serves");
 }

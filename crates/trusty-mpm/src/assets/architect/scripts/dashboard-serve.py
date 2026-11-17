@@ -16,7 +16,8 @@ only real files under local/briefs), GET /usage/<account-slug>, GET /doc/<projec
 (dashboard_media.py; SVG under a sandbox CSP), GET /vendor/<name> (marked and DOMPurify from templates/dashboard/vendor/;
 mermaid.min.js only from the instance tree when present), GET /static/<design tokens>, POST|GET /api/attach (dashboard_attach.py),
 POST /api/media-archive/<id>. Architect mode only: PUT /doc/<project>/<rel> (compare-and-swap edit, dashboard_routes.py),
-GET /api/fleet, GET /api/projects (dashboard_projects.py). Read-only: GET /api/il (every Intent
+GET /api/fleet, GET /api/projects (dashboard_projects.py), GET /api/pane?session=&lines= (a session's masked
+pane tail; dashboard_pane_tail.py, #11065). Read-only: GET /api/il (every Intent
 Ledger; dashboard_il.py), GET /api/harness and /api/harness/diff?id= (the Live snapshot, cached 4 s;
 dashboard_harness.py), GET /live (templates/dashboard/live.html), GET /api/viz[?days=1..14] (dashboard_viz.py).
 Guard: a Host other than 127.0.0.1/localhost:<port> or a tailnet guard name, or a write from another Origin, gets 403.
@@ -59,6 +60,7 @@ if HERE not in sys.path:     # python3 -I drops the script directory
 import architect_config  # noqa: E402
 import dashboard_docs  # noqa: E402
 import dashboard_harness  # noqa: E402
+import dashboard_pane_tail  # noqa: E402
 import dashboard_projects  # noqa: E402
 import dashboard_store as ds  # noqa: E402
 from dashboard_docs import ARCHITECT, list_briefs, resolve_doc, usage_samples  # noqa: E402,F401  (re-exported)
@@ -142,10 +144,12 @@ class DashboardServer(ThreadingHTTPServer):
     def __init__(self, port, store, page=PAGE, briefs=BRIEFS, tailnet_names=(), projects=None, vendor=VENDOR, ledger=LEDGER,
                  config=None, nav_file=NAV_FILE, il_schedule=IL_SCHEDULE, architect_il=ARCHITECT_IL, tokens=TOKENS,
                  live_page=LIVE_PAGE, inbox=INBOX, claude_projects=CLAUDE_PROJECTS, tailnet_url="", owner_name="",
-                 static=STATIC, projects_view=None, cli_profiles=None, cli_runner=None):
+                 static=STATIC, projects_view=None, cli_profiles=None, cli_runner=None, pane_tail=None):
         self.tokens = tokens
         self.cli_profiles, self.cli_runner = cli_profiles, cli_runner   # CLI Profiles view (optional module)
         self.static = static
+        # #11065: (name, n) -> PaneTail | PaneTailFailure for GET /api/pane; tests pass a provider over a fake tmux
+        self.pane_tail = pane_tail or dashboard_pane_tail.session_pane_tail
         self.live_page, self.inbox, self.claude_projects = live_page, inbox, claude_projects
         self.harness_cache = dashboard_harness.HarnessCache(swr=True)
         self._hbody = (None, None, None)   # (snapshot object, json bytes, gzip bytes): serialise and compress once per build

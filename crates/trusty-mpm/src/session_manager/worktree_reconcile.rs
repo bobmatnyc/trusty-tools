@@ -824,8 +824,12 @@ impl super::manager::SessionManager {
         let records = self.list().await;
         let mut live_cwds: Vec<PathBuf> = Vec::new();
         for r in &records {
-            if self.tmux.session_exists(&r.tmux_name)
-                && let Some(cwd) = self.tmux.get_pane_cwd(&r.tmux_name)
+            // #10101: each record's cwd is read on its own tmux server.
+            let Ok(tmux) = super::tmux_route::route(self.tmux.as_ref(), r) else {
+                continue;
+            };
+            if tmux.session_exists(&r.tmux_name)
+                && let Some(cwd) = tmux.get_pane_cwd(&r.tmux_name)
             {
                 live_cwds.push(std::fs::canonicalize(&cwd).unwrap_or(cwd));
             }

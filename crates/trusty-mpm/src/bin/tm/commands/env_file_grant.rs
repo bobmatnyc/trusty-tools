@@ -136,7 +136,7 @@ pub(crate) fn consume_at(home: &Path, call: &EnvfileCall, now: SystemTime) -> bo
             .modified()
             .ok()
             .and_then(|m| now.duration_since(m).ok());
-        if !meta.is_file() || !age.is_some_and(|age| age <= GRANT_TTL) {
+        if !(meta.is_file() && age.is_some_and(|age| age <= GRANT_TTL)) {
             let _ = std::fs::remove_file(&path);
             continue;
         }

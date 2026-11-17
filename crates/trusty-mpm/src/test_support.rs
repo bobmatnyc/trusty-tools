@@ -59,6 +59,13 @@ pub(crate) mod tmux_session;
 #[path = "test_stale_socket.rs"]
 pub(crate) mod stale_socket;
 
+/// #11061: a named fake process that is not a symlink to `/bin/sleep`, which
+/// uutils `sleep` (Ubuntu 26.04) refuses under another argv[0]. The same file
+/// backs the `tm` binary's and the `integration` target's copies.
+#[path = "../tests/common/fake_claude.rs"]
+#[allow(dead_code)] // `sleeper` is the fleet tests' spelling; the lib uses `sleeper_named`.
+pub(crate) mod fake_claude;
+
 /// The spawn primitive [`tmux_session`] runs every tmux invocation through
 /// (#7060).
 ///

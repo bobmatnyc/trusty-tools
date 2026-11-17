@@ -602,6 +602,36 @@ fn cli_parses_daemon_mcp() {
     }
 }
 
+/// #10721: `--sandbox-credential NAME` parses with `--sandbox`, and refuses
+/// without it.
+#[test]
+fn cli_parses_daemon_sandbox_credential() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "daemon",
+        "--sandbox",
+        "--sandbox-credential",
+        "ANTHROPIC_API_KEY",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Command::Daemon {
+            sandbox_credential, ..
+        } => assert_eq!(sandbox_credential.as_deref(), Some("ANTHROPIC_API_KEY")),
+        other => panic!("expected Daemon, got {other:?}"),
+    }
+    assert!(
+        Cli::try_parse_from([
+            "trusty-mpm",
+            "daemon",
+            "--sandbox-credential",
+            "ANTHROPIC_API_KEY",
+        ])
+        .is_err(),
+        "--sandbox-credential parsed without --sandbox"
+    );
+}
+
 #[test]
 fn cli_parses_repair_deploy() {
     // `tm repair deploy` must parse to Command::Repair { action: RepairAction::Deploy { force: false } }.
@@ -2532,5 +2562,42 @@ fn launch_claude_spec_follows_the_configured_renderer() {
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
+    }
+}
+
+/// #11353: the `tm launch` spec carries its `--model` as the launch-model
+/// stamp, and that stamp decides an `inherit` dispatch of a capped role.
+#[test]
+fn a_managed_launch_stamps_its_model_for_the_fable_cap() {
+    let cwd = std::path::Path::new("/work/p");
+    let config = trusty_mpm::core::config::MpmConfig::default();
+    for (model, refused) in [("claude-opus-5-5", false), ("claude-fable-5-2", true)] {
+        let spec = crate::commands::launch::launch_claude_spec(
+            cwd,
+            None,
+            model,
+            None,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .expect("a PM spec builds");
+        let stamp = spec
+            .env_set
+            .iter()
+            .find(|(k, _)| k == trusty_mpm::core::session_profile::LAUNCH_MODEL_ENV)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(stamp, Some(model), "the stamp names the launch model");
+        let deny = crate::commands::pm_guard_fable::fable_cap_refusal(
+            &config,
+            "qa",
+            Some("qa"),
+            crate::commands::pm_guard_fable::DispatchModel {
+                frontmatter: Some("inherit"),
+                parent: stamp,
+                ..Default::default()
+            },
+        );
+        assert_eq!(deny.is_some(), refused, "{model}: {deny:?}");
     }
 }

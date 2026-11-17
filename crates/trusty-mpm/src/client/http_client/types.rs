@@ -961,6 +961,9 @@ pub struct ManagedActivityResponse {
     /// Proposed default answer to the pending decision.
     #[serde(default)]
     pub proposed_default: Option<String>,
+    /// #8407: the pane's input box, `None` when unreadable or an older daemon.
+    #[serde(default)]
+    pub input_box: Option<crate::core::input_box::InputBox>,
 }
 
 /// Per-project session group from `GET /api/v1/sessions/managed/fleet`.
@@ -979,6 +982,10 @@ pub struct FleetProjectGroupWire {
     /// Sessions bound to this project (may be empty).
     #[serde(default)]
     pub sessions: Vec<ManagedSessionSummary>,
+    /// Whether the project is decommissioned (#10988); absent from an older
+    /// daemon, which reads as active.
+    #[serde(default)]
+    pub decommissioned: bool,
 }
 
 /// Response body for `GET /api/v1/sessions/managed/fleet`.

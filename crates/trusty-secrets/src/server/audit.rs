@@ -261,6 +261,41 @@ pub struct AuditRecord {
     /// and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_source: Option<super::copy_source::CopySourceAudit>,
+    /// On a `backend_timeout` deny: how long the timed-out backend call
+    /// waited, and whether it was refused at once (#11215). `None`
+    /// otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_wait: Option<BackendWait>,
+}
+
+/// How a timed-out backend call ended (#11215).
+///
+/// Why: a `backend_timeout` row could not tell a call that waited out its
+/// whole limit (an unanswered prompt, a slow `securityd`) from one cut short
+/// by earlier calls in the same request, or from one refused at once because
+/// an earlier call on its item still hangs.
+/// What: the backend id, the wait in milliseconds, and the refusal flag.
+/// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BackendWait {
+    /// The backend id, e.g. `keychain`.
+    pub backend: String,
+    /// How long the call waited, in milliseconds; zero when it never started.
+    pub waited_ms: u64,
+    /// `true` when the call was refused at once because an earlier,
+    /// abandoned call on the same item is still running.
+    pub abandoned_item: bool,
+}
+
+impl From<crate::store::timeout_note::TimeoutNote> for BackendWait {
+    fn from(note: crate::store::timeout_note::TimeoutNote) -> Self {
+        Self {
+            backend: note.backend,
+            waited_ms: u64::try_from(note.waited.as_millis()).unwrap_or(u64::MAX),
+            abandoned_item: note.abandoned_item,
+        }
+    }
 }
 
 impl AuditRecord {
@@ -289,6 +324,7 @@ impl AuditRecord {
             architect_refusal: None,
             ticket: None,
             copy_source: None,
+            backend_wait: None,
         }
     }
 

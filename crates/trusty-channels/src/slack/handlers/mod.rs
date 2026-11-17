@@ -96,6 +96,9 @@ pub(super) const CONVERSATIONS_MEMBERS: &str = "conversations.members";
 /// (issue #5161). Used only to name the existing canvas on a
 /// `channel_canvas_already_exists` collision — never on the create happy path.
 pub(super) const CONVERSATIONS_INFO: &str = "conversations.info";
+/// Any token, no scope: names the Slack user the token authenticates as. Used
+/// only to explain a channel read's `channel_not_found`.
+pub(super) const AUTH_TEST: &str = "auth.test";
 pub(super) const USERS_LIST: &str = "users.list";
 pub(super) const USERS_INFO: &str = "users.info";
 /// User-scope-only: reached through the client's **user** token.

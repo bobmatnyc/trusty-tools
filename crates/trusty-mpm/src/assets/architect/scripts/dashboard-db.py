@@ -15,7 +15,9 @@ id, data, if_version}
 Writes to collection "items" validate `steps`: each is an object with a non-empty string
 `title` (fields: id, title, detail, links, values); a step with `text` and no `title` is refused.
 set/create/update/batch on `items` print a stderr warning (never a refusal) when kind is question or action and `task` (a T id) is missing.
+The same writes print a stderr warning (never a refusal) per level_lint.py finding in title, detail or options at the item's technical level (#11064).
 status-brief <T id> <MB id> <project/path.md> puts {id, at, brief} at the front of the task's `status_briefs` (newest first; schema-checked; the same id moves to the front).
+Writes to collection "items" (set, update, batch) refuse a change to a stored owner `answer` / `answer_note` (a reopen may only clear them); the relay goes in `relayed`.
 Writes to collection "items" refuse an open/running task (kind task) left with no `steps` and no `progress` (ar-T33); `validate` lists any such open task.
 Writes to collection "sessions" validate the `site` block (per-project live/staging/origin/default_branch/deploy_model/deploy_owner/notes + `src` map) against schemas/dashboard/sessions.schema.json; an invalid block is refused (exit 2).
 Writes to collection "questions" (set, update on the merged doc, batch) validate against schemas/dashboard/questions.schema.json; an invalid doc is refused (exit 2).
@@ -54,6 +56,7 @@ import dashboard_jsonl as dj  # noqa: E402
 import dashboard_schema as dsch  # noqa: E402
 import dashboard_store as ds  # noqa: E402
 import dashboard_qual as dq  # noqa: E402
+import level_lint as ll  # noqa: E402  # #11064: warn-only level lint on item writes
 import owner_answers as oa  # noqa: E402
 
 
@@ -280,7 +283,9 @@ def check_ops(ops, store=None):
             check_steps(entry.get("id"), entry.get("data"))
             if store is not None:
                 check_task_progress(store, verb, entry.get("id"), entry.get("data"))
+                oa.refuse_owner_answer_change(store, verb, entry.get("id"), entry.get("data"))   # #10711
                 warn_no_task(store, verb, entry.get("id"), entry.get("data"))
+                ll.warn_item(store, entry.get("id"), entry.get("data"))   # #11064: warns, never refuses
         elif entry.get("collection") == "questions" and store is not None:
             check_question(store, verb, entry.get("id"), entry.get("data"))
         elif entry.get("collection") == "sessions" and store is not None:
@@ -468,6 +473,7 @@ def run(args):
             check_steps(n, data)
             check_task_progress(store, "create", n, data)
             warn_no_task(store, "create", n, data)
+            ll.warn_item(store, n, data)   # #11064: warns, never refuses
             data = normalize_specs(data)
         return store.set(args.collection, n, data, 0)   # if_version 0: a concurrent create of the same id conflicts
     if args.cmd == "get":
@@ -487,7 +493,9 @@ def run(args):
         if args.collection == "items":
             check_steps(args.id, data)
             check_task_progress(store, args.cmd, args.id, data)
+            oa.refuse_owner_answer_change(store, args.cmd, args.id, data)   # #10711: a close never rewrites the owner's answer
             warn_no_task(store, args.cmd, args.id, data)
+            ll.warn_item(store, args.id, data)   # #11064: warns, never refuses
             data = normalize_specs(data)
         elif args.collection == "questions":
             check_question(store, args.cmd, args.id, data)

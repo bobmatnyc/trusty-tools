@@ -7,8 +7,10 @@
 //! existing formats, and a store in the other format is refused, never read
 //! as empty (LDG-3.2).
 //! What: [`Store`] over a root and a [`Format`]. Reads ([`Store::get`],
-//! [`Store::list`], [`Store::collections`], [`Store::snapshot`]) take no
-//! lock: every replace is atomic. [`Store::batch`] takes `<root>/.lock`
+//! [`Store::list`], [`Store::snapshot`]) take `<root>/.lock` shared with
+//! the same bounded wait, so a read never lands between the files of one
+//! batch (#10679); [`Store::snapshot`] reads every collection under one
+//! lock. [`Store::collections`] takes none. [`Store::batch`] takes `<root>/.lock`
 //! with a bounded wait, stages every [`Op`], runs the optional schema check
 //! ([`SchemaSet`], [`SchemaMode`]), checks the change log can take the
 //! batch, hands each removed document to the [`DeleteArchive`] (in
@@ -36,6 +38,8 @@ mod changes;
 pub mod dir;
 mod fsck;
 pub mod jsonl;
+// #11064: the always-on technical-level refusal.
+mod level;
 mod lock;
 pub mod pruned;
 // #10063 PR 3: LDG-2.2.5 dangling references, for `fsck`.
@@ -321,6 +325,8 @@ impl Store {
     pub fn get(&self, coll: &str, id: &str) -> Result<Doc, DashError> {
         check_name("collection", coll)?;
         check_name("doc id", id)?;
+        // #10679: never between the files of one batch.
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
         self.guard(coll)?;
         let found = match self.format {
             Format::Dir => dir::load_exact(&self.root, coll, id)?,
@@ -341,6 +347,13 @@ impl Store {
     /// # Errors
     /// A bad name, the other format, or a corrupt file.
     pub fn list(&self, coll: &str, query: &ListQuery) -> Result<Vec<Doc>, DashError> {
+        // #10679: never between the files of one batch.
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
+        self.list_unlocked(coll, query)
+    }
+
+    /// [`Store::list`] for a caller that already holds the read lock.
+    fn list_unlocked(&self, coll: &str, query: &ListQuery) -> Result<Vec<Doc>, DashError> {
         self.guard(coll)?;
         let mut docs = match self.format {
             Format::Dir => dir::list(&self.root, coll)?,
@@ -398,14 +411,21 @@ impl Store {
         Ok(mine)
     }
 
-    /// Every document of `colls`.
+    /// Every document of `colls`, read under one shared lock so every
+    /// collection comes from the same side of any batch (#10679).
     ///
     /// # Errors
     /// [`Store::list`]'s errors.
     pub fn snapshot(&self, colls: &[&str]) -> Result<Snapshot, DashError> {
+        let _read = lock::acquire_shared(&self.root, self.lock_wait)?;
         colls
             .iter()
-            .map(|c| Ok(((*c).to_owned(), self.list(c, &ListQuery::default())?)))
+            .map(|c| {
+                Ok((
+                    (*c).to_owned(),
+                    self.list_unlocked(c, &ListQuery::default())?,
+                ))
+            })
             .collect()
     }
 
@@ -415,7 +435,7 @@ impl Store {
     /// [`DashError::Conflict`] (stale `if_version`), [`DashError::NotFound`],
     /// [`DashError::Invalid`] (bad op, body, name, a case variant of an
     /// existing name, a delete with no archive, a batch with no secret
-    /// scan), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
+    /// scan, a technical level outside the six), [`DashError::SecretRefused`], [`DashError::SchemaInvalid`]
     /// (enforce mode), [`DashError::Unavailable`] (lock wait passed), the
     /// archive's error, or an I/O or corrupt-file error, a torn or
     /// unrotatable change log included. Nothing is written on
@@ -431,14 +451,17 @@ impl Store {
         }
         // #10063 PR 2: before the lock and before any message can quote a value.
         self.refuse_secrets(ops)?;
+        // #11064: a level outside the six is refused whatever the schema mode.
+        self.refuse_bad_levels(ops)?;
         let _lock = lock::acquire(&self.root, self.lock_wait)?;
+        // #10678: one store-side write time for every document and the log line.
+        let now = crate::classify::alerts::iso(self.clock.now_unix());
         let mut staged = Staged::default();
         let results = ops
             .iter()
-            .map(|op| self.stage(&mut staged, op))
+            .map(|op| self.stage(&mut staged, op, &now))
             .collect::<Result<Vec<_>, _>>()?;
         self.check_schemas(&staged)?;
-        let now = crate::classify::alerts::iso(self.clock.now_unix());
         // #10063 df-G01: the log's checks refuse the batch before any write.
         let seq = changes::prepare(self, &now)?;
         self.archive_removed(&staged, &now)?;

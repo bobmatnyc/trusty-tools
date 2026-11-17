@@ -591,35 +591,54 @@ pub async fn serve(port: u16) -> Result<()> {
     serve_with_config(ApiConfig::unauthenticated(port)).await
 }
 
+/// The refusal message for a non-loopback `bind`, or `None` for loopback.
+///
+/// Why (#6433, DOC-90 AG-2): the API can spawn arbitrary subprocesses, so a
+/// token does not make LAN exposure acceptable; only loopback is allowed.
+/// What: `None` for `127.0.0.0/8` and `::1`; `Some(message)` for anything
+/// else, including unspecified addresses and IPv4-mapped IPv6 (even
+/// `::ffff:127.0.0.1`, which `IpAddr::is_loopback` does not treat as
+/// loopback).
+/// Test: `super::tests::guard::bind_refusal_table`.
+pub(crate) fn bind_refusal(bind: std::net::IpAddr) -> Option<String> {
+    if bind.is_loopback() {
+        return None;
+    }
+    Some(format!(
+        "refusing to start the trusty-agents API on non-loopback bind {bind}: this API can \
+         spawn arbitrary subprocesses, so it binds loopback only, with or without an API \
+         token (#6433). Omit --bind for the 127.0.0.1 default. For remote access, front \
+         this surface with the trusty-console proxy (reachable as /api/agents/*)."
+    ))
+}
+
 /// Serve the HTTP API and embedded web UI, honoring `ApiConfig`. (#181, #3329)
 ///
-/// Why: Loopback-only doctrine (#3329) — the API can spawn arbitrary
-/// subprocesses and mutate live sessions, so it binds `127.0.0.1` by default
-/// and REFUSES to start on a non-loopback interface without a token. For
-/// remote access the intended path is the trusty-console reverse proxy
-/// (`/api/agents/*`), not exposing this port directly. We also write the
-/// standard `http_addr` discovery file after bind so the console proxy can
-/// resolve this surface, and remove it on shutdown.
-/// What: Rejects a non-loopback `cfg.bind` when `cfg.token` is `None` with an
-/// actionable error; binds `cfg.bind:cfg.port`; builds the router trusting the
-/// resolved bind address as a self-origin for the write guard; writes/removes
-/// the `http_addr` discovery file; prints startup URLs (LAN URL only for a
-/// non-loopback bind); serves until killed.
-/// Test: `super::tests::guard::non_loopback_without_token_refuses_start`;
-/// manual — run `--api --port 7654` and confirm the discovery file appears.
+/// Why: Loopback-only doctrine (#3329, tightened by #6433 / DOC-90 AG-2) —
+/// the API can spawn arbitrary subprocesses and mutate live sessions, so it
+/// binds `127.0.0.1` by default and REFUSES any non-loopback interface, token
+/// or not. Remote access goes through the trusty-console reverse proxy
+/// (`/api/agents/*`). A set `TAGENT_NO_API` refuses the API outright unless
+/// it is an explicit off value (DOC-90 AG-1). We also write the standard `http_addr` discovery file after bind so
+/// the console proxy can resolve this surface, and remove it on shutdown.
+/// What: Bails on `no_api::no_api_refusal`, then on `bind_refusal`,
+/// both before any listener binds; binds `cfg.bind:cfg.port`; builds the
+/// router trusting the resolved bind address as a self-origin for the write
+/// guard; writes/removes the `http_addr` discovery file; prints the loopback
+/// startup URLs; serves until killed.
+/// Test: `super::tests::guard::non_loopback_without_token_refuses_start`,
+/// `super::tests::guard::non_loopback_with_token_refuses_start`; manual — run
+/// `--api --port 7654` and confirm the discovery file appears.
 pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
-    // #3329: loopback-only doctrine. An unauthenticated non-loopback bind would
-    // expose an arbitrary-subprocess-spawning API to the whole LAN — refuse it
-    // with an actionable error rather than binding silently.
-    if !cfg.bind.is_loopback() && cfg.token.is_none() {
-        anyhow::bail!(
-            "refusing to start the trusty-agents API on non-loopback bind {bind} without an API \
-             token: this API can spawn arbitrary subprocesses. Set --api-token <TOKEN> (or the \
-             TAGENT_API_TOKEN env var), or bind loopback (omit --bind for the 127.0.0.1 default). \
-             For remote access, front this surface with the trusty-console proxy (reachable as \
-             /api/agents/*) instead of exposing this port directly.",
-            bind = cfg.bind
-        );
+    // #6433: the `--api` early dispatch in `runtime::startup` reaches here
+    // without passing `mode_dispatch`, so the TAGENT_NO_API gate lives here
+    // too. Either flag can reach this point, so the message names both.
+    if let Some(msg) = super::no_api::process_no_api_refusal(true, true) {
+        anyhow::bail!(msg);
+    }
+    // #6433: refuse ANY non-loopback bind, token or not (DOC-90 AG-2).
+    if let Some(msg) = bind_refusal(cfg.bind) {
+        anyhow::bail!(msg);
     }
 
     // #364: Don't block server startup on docs indexing. For projects with
@@ -777,13 +796,7 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     let port = cfg.port;
     println!("[trusty-agents] API:    http://localhost:{port}/api");
     println!("[trusty-agents] Web UI: http://localhost:{port}/");
-    // Only advertise a LAN URL when the operator explicitly opted into a
-    // non-loopback bind; the loopback default is not reachable off-host.
-    if !cfg.bind.is_loopback()
-        && let Some(lan_ip) = detect_lan_ip()
-    {
-        println!("[trusty-agents] Web UI (LAN): http://{lan_ip}:{port}/");
-    }
+    // #6433: no LAN URL and no UDP LAN-address probe — every bind is loopback.
     if cfg.token.is_none() {
         eprintln!("\u{26A0}  No API token set — server is unauthenticated (loopback-only)");
     } else {
@@ -810,28 +823,4 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     }
     serve_result?;
     Ok(())
-}
-
-/// Best-effort LAN IP detection. (#181)
-///
-/// Why: Printing `localhost` alone hides the URL another device on the same
-/// Wi-Fi would use. The classic UDP trick — bind a UDP socket and "connect"
-/// it to a public address — doesn't transmit anything but lets the OS pick
-/// the outbound interface, giving us its IP. Any failure is non-fatal.
-/// What: Returns `Some(IpAddr)` on success, `None` if no usable interface.
-/// Test: Manually verified on macOS; in CI / unit tests we don't assert a
-/// specific value (the function is best-effort).
-fn detect_lan_ip() -> Option<std::net::IpAddr> {
-    // Try the dependency-free UDP trick first.
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
-        && socket.connect("8.8.8.8:80").is_ok()
-        && let Ok(addr) = socket.local_addr()
-    {
-        let ip = addr.ip();
-        if !ip.is_unspecified() && !ip.is_loopback() {
-            return Some(ip);
-        }
-    }
-    // Fallback: ask the local-ip-address crate.
-    local_ip_address::local_ip().ok()
 }

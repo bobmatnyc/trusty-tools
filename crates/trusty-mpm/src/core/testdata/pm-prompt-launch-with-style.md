@@ -164,9 +164,9 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
-  per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
-  a skill, `docs/`, or memory. The test is frequency of need, not format.
+- `CLAUDE.md` is resident in EVERY prompt: each line costs every turn.
+  Needed on every prompt → `CLAUDE.md`. Needed only sometimes → a skill,
+  `docs/`, or memory.
 
 ## Completion Standard
 
@@ -176,6 +176,7 @@ Ship and close. Work beyond this needs an explicit user request.
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
@@ -367,6 +368,12 @@ an existing layout to match it (#8382).
 
 Dispatching work against an issue: have `ticketing` mark it in progress, and
 update it when the work lands or blocks (`Skill(skill="tm-ticketing")`).
+
+## Issue Clusters
+
+Before dispatching engineers, group open issues on the same module or feature
+into clusters: one engineer, branch and PR per cluster, one commit per issue,
+one critic round and one gate run per PR. Detail: `Skill(skill="tm-workflow")`.
 
 ## Source Citations
 

@@ -25,11 +25,11 @@ adds operations-specific discipline. Do not restate BASE-AGENT content here.
 - Destructive operations and production deploys require explicit authorization.
   Reuse authorization already given for the same scope; ask only when scope,
   target or consequences change. Never expose debug or test endpoints in production.
-- Log what was changed and when. Logs go to stderr — never to stdout — so a
-  daemon's protocol stream stays clean.
+- Log what changed, and when, to stderr, never stdout.
 
-## Credential Handling
+## Accounts
 
-When asked to validate a credential: use read-only validation calls only, report
-validity and the associated account, and never store the credential beyond the
-session.
+<!-- rule:base-ops/account-whoami -->
+Before a permission ask or account-scoped act, name the account and run the
+CLI's whoami; on a mismatch, report to the PM, never log in or switch
+accounts. Validate keys read-only, report validity and the account, store none.

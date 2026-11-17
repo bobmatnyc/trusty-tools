@@ -43,6 +43,12 @@ def _no_caller_architect_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_caller_task_mode(monkeypatch):
+    """#11101: the caller's TASK_TAG_MODE never turns a test's Task check or WIP cap into refuse mode."""
+    monkeypatch.delenv("TASK_TAG_MODE", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _wake_alert_in_tmp(tmp_path, monkeypatch):
     """No test writes or clears the live inbox/pm-wake-alert.json (D39)."""
     monkeypatch.setenv("PM_WAKE_ALERT", str(tmp_path / "pm-wake-alert.json"))
@@ -59,3 +65,4 @@ def _owner_provenance_files_in_tmp(tmp_path, monkeypatch):
     """#10780: no test reads or appends to the live owner-turn record or relay-provenance log."""
     monkeypatch.setenv("ARCHITECT_OWNER_TURNS", str(tmp_path / "owner-turns.jsonl"))
     monkeypatch.setenv("ARCHITECT_RELAY_LOG", str(tmp_path / "relay-provenance.jsonl"))
+    monkeypatch.setenv("ARCHITECT_IL", str(tmp_path / "no-architect-il"))   # #10960: the supersession ledgers

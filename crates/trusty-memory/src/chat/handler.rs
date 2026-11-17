@@ -30,8 +30,8 @@
 
 use crate::AppState;
 use crate::engine::PalaceRegistry;
-use crate::engine::palace::PalaceId;
-use crate::service::{MemoryService, load_user_config};
+use crate::service::{MemoryService, ServiceError, load_user_config};
+use crate::tools::recall_open::{PalaceOpening, open_for_recall};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use trusty_common::uds::server::{RpcError, RpcStreamItems};
@@ -46,17 +46,47 @@ use super::tools::{ChatBody, MAX_TOOL_ROUNDS, all_tools, execute_get_dream_statu
 /// Why (#8246): ranked through the service, so a stale snapshot is demoted
 /// before it can fill one of the five context lines.
 /// What: [`MemoryService::recall_ranked`] for `message`, top 5, one
-/// `- (L<layer>) <content>` line per hit; empty when the recall fails.
-/// Test: `chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot`.
+/// `- (L<layer>) <content>` line per hit; empty when nothing matches. A failed
+/// recall is one [`recall_unavailable`] line instead (#11255).
+/// Test: `chat_recall_surfaces_rank_a_ruling_above_a_stale_snapshot`,
+/// `chat_context_says_a_stalled_palace_is_still_opening`.
 pub(crate) async fn recall_context(state: &AppState, palace_id: &str, message: &str) -> String {
     let ranked = MemoryService::new(state.clone())
         .recall_ranked(palace_id, message, 5, false)
         .await;
+    let hits = match ranked {
+        Ok(hits) => hits,
+        Err(e) => {
+            let opening = matches!(e, ServiceError::PalaceOpening(_));
+            return recall_unavailable(palace_id, opening, &e);
+        }
+    };
     let mut context = String::new();
-    for r in ranked.iter().flatten().take(5) {
+    for r in hits.iter().take(5) {
         context.push_str(&format!("- (L{}) {}\n", r.layer, r.drawer.content()));
     }
     context
+}
+
+/// The context line that stands in for the memories when the recall failed.
+///
+/// Why (#11255): a failed recall left the context empty, which the prompt
+/// shows exactly like a palace with nothing relevant. Like the #5384
+/// `kg_triple_count` line, the prompt says so instead.
+/// What: logs the failure at WARN, then returns one line: "still opening,
+/// ask again shortly" when `opening`, else "the recall failed". The line
+/// never carries the error text, which can name a path and goes to the
+/// chat provider.
+/// Test: `chat_context_says_a_stalled_palace_is_still_opening`.
+fn recall_unavailable(palace_id: &str, opening: bool, e: &dyn std::fmt::Display) -> String {
+    tracing::warn!(palace = %palace_id, "chat context recall unavailable: {e:#}");
+    if opening {
+        format!(
+            "- (unavailable this turn: palace '{palace_id}' is still opening; ask again shortly)\n"
+        )
+    } else {
+        "- (unavailable this turn: the recall failed; see the daemon log)\n".to_string()
+    }
 }
 
 /// Open a `memory.chat` stream (#6286).
@@ -162,11 +192,17 @@ pub async fn chat_stream(state: &AppState, body: ChatBody) -> Result<RpcStreamIt
     let mut context = String::new();
     let mut palace_display_name = palace_id.clone();
 
-    if !palace_id.is_empty()
-        && let Ok(handle) = state
-            .registry
-            .open_palace(&state.data_root, &PalaceId::new(&palace_id))
-    {
+    let opened = if palace_id.is_empty() {
+        None
+    } else {
+        // #11255: off the worker and bounded, as every single-palace recall.
+        Some(open_for_recall(&state, &palace_id).await)
+    };
+    if let Some(Err(e)) = &opened {
+        let opening = PalaceOpening::find(e).is_some();
+        context = recall_unavailable(&palace_id, opening, e);
+    }
+    if let Some(Ok(handle)) = opened {
         // Live counts from the opened handle.
         let drawer_count = handle.drawers.read().len();
         let vector_count = handle.vector_store.index_size();

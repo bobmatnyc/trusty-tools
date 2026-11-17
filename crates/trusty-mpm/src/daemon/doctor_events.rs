@@ -22,14 +22,17 @@
 //! one (the file exists, nothing accepts), a path that is not a socket, a path
 //! that cannot be read, or a subscription that ends without a frame is `Fail`;
 //! a connect that neither completes nor is refused is `Warn`. #10151: a host
-//! without the bus is supported (Architect ruling 2026-10-26), so a missing
-//! socket with no trusty-events LaunchAgent plist is `NotInstalled`, a `Warn`
-//! that names no command. Only that pair is downgraded: every other state, and
-//! a missing socket beside an installed plist, grades as above. Read-only.
+//! without the bus is supported (Architect ruling 2026-10-26). #10975: a
+//! missing socket is `NotInstalled`, an INFO line (an `Ok` row whose message
+//! starts `info:`) naming no command, only when no trusty-events LaunchAgent
+//! plist exists, the binary does not resolve, and no launchd label is loaded.
+//! The bus unlinks its socket on a clean stop, so a missing socket beside the
+//! binary or a loaded label is `Unsupervised`, a `Warn`. A missing socket
+//! beside an installed plist grades as above. Read-only.
 //!
 //! Test: `doctor_events_tests.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use trusty_common::control_bus::{SubscribeItem, SubscribeParams, SubscribeRequest};
@@ -74,8 +77,12 @@ pub(crate) enum SocketState {
     /// No file at the path, and the bus is installed: the daemon is not running.
     Absent,
     /// #10151: no file at the path and no trusty-events LaunchAgent plist: the
-    /// host runs without the bus, a supported setup.
+    /// host runs without the bus, a supported setup. #10975: also no binary
+    /// and no loaded label.
     NotInstalled,
+    /// #10975: no file at the path and no plist, but the binary resolves or
+    /// the launchd label is loaded: a bus that ran here is not serving.
+    Unsupervised,
     /// The file exists and a connect is refused: a stale socket.
     Stale,
     /// Something other than a socket sits at the path.
@@ -170,12 +177,14 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// Grade one observation of the socket at `socket` as a doctor row.
 ///
 /// Why: a pure function, so every verdict is testable without a daemon.
-/// What: `Serving` is `Ok`; `VersionSkew`, `Undetermined` and `NotInstalled`
-/// are `Warn`; every other state is `Fail` with its remedy. #10151: the
-/// not-running remedy no longer names `tctl install trusty-events`, which exits
-/// 3 since the bus is internal (#10130); `NotInstalled` names no command,
-/// because every `tctl` verb on the bus exits non-zero on a host without its
-/// plist. #10042: the not-running remedy
+/// What: `Serving` is `Ok`; `NotInstalled` is an INFO line (`Ok`, message
+/// starting `info:`); `VersionSkew`, `Unsupervised` and `Undetermined` are
+/// `Warn`; every other state is `Fail` with its remedy. #10151: the
+/// not-running remedy no longer names `tctl install trusty-events`, which
+/// exits 3 since the bus is internal (#10130); `NotInstalled` names no command.
+/// #10975: no row names `tctl upgrade`, which skips internal members, and the
+/// skew and unsupervised rows name no install command (owner ruling
+/// 2026-11-13, "defer the install text"). #10042: the not-running remedy
 /// `tctl start trusty-events` works because the LaunchAgent restarts the bus
 /// after any exit, so a loaded job is never left stopped. #10071: a hung bus
 /// has not exited, so launchd leaves it alone and `tctl start` answers
@@ -186,7 +195,9 @@ fn refuses_heartbeat(error: &RpcError) -> bool {
 /// Test: `serving_is_ok_and_says_the_bus_answered`,
 /// `every_non_serving_state_is_never_ok`, `the_not_running_remedy_is_tctl_start`,
 /// `a_silent_bus_is_hung_within_the_bound`, `the_stale_remedy_restarts_a_hung_bus`,
-/// `a_host_without_the_bus_warns_and_names_no_failing_remedy`.
+/// `a_host_without_the_bus_is_an_info_line_with_no_fix_command`,
+/// `a_bus_that_refuses_heartbeat_ms_is_version_skew`,
+/// `a_bus_footprint_without_a_socket_is_never_ok`.
 pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
     let at = socket.display();
     let (status, message) = match state {
@@ -210,9 +221,10 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
         SocketState::VersionSkew(refusal) => (
             CheckStatus::Warn,
             format!(
-                "trusty-events at {at} is older than this tm: it refused the `heartbeat_ms` \
-                 liveness request ({refusal}), so whether it is hung cannot be checked. The \
-                 two ship in lockstep; run `tctl upgrade trusty-events`."
+                "trusty-events at {at} is a build older than #10071 and this tm is {}: it \
+                 refused the `heartbeat_ms` liveness request ({refusal}), so whether it is \
+                 hung cannot be checked. The two ship in lockstep.",
+                env!("CARGO_PKG_VERSION")
             ),
         ),
         SocketState::Unanswered(err) => (
@@ -231,13 +243,20 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
                  `tctl start trusty-events`."
             ),
         ),
-        // #10151: a host without the bus is supported; nothing to run.
+        // #10975: a host without the bus is supported, so this is an INFO line
+        // with no fix command (owner ruling 2026-11-13).
         SocketState::NotInstalled => (
+            CheckStatus::Ok,
+            "info: trusty-events: not installed (internal, optional)".to_owned(),
+        ),
+        // #10975: the bus unlinks its socket on a clean stop, so a binary or a
+        // loaded label with no socket is a bus that is not serving.
+        SocketState::Unsupervised => (
             CheckStatus::Warn,
             format!(
-                "trusty-events is not installed on this host: no socket at {at} and no \
-                 trusty-events LaunchAgent. The bus is optional and internal, so this is a \
-                 supported setup and needs no action; producers drop their events."
+                "trusty-events is not running: no socket at {at} and no trusty-events \
+                 LaunchAgent, but its binary resolves or its launchd label is loaded. \
+                 Producers buffer, then drop, events until it runs."
             ),
         ),
         SocketState::Stale => (
@@ -278,30 +297,68 @@ pub(crate) fn grade(socket: &Path, state: &SocketState) -> DoctorCheck {
 /// Why / What: see the module docs. A socket path that cannot be resolved is
 /// `Fail` — no producer can reach the bus either. #10151: `home` locates the
 /// LaunchAgents directory that tells a host without the bus from a stopped one.
+/// #10975: the binary's search path is `PATH` plus `~/.cargo/bin`, since a
+/// launchd-started daemon's `PATH` may omit the cargo install directory.
 /// Test: `an_unresolvable_socket_path_fails`; the wiring is covered by
 /// `run_doctor_produces_eighty_checks`.
 pub(super) async fn check_events(home: &Path) -> DoctorCheck {
     let agents = super::doctor_launchd_process_type::launch_agents_dir(home).path;
-    grade_resolved(trusty_common::control_bus::events_socket_path(), &agents).await
+    let mut bin_dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    bin_dirs.push(home.join(".cargo").join("bin"));
+    let probe = InstallProbe {
+        agents_dir: &agents,
+        bin_dirs,
+        label_loaded,
+    };
+    grade_resolved(trusty_common::control_bus::events_socket_path(), &probe).await
 }
 
-/// [`check_events`] over an already-resolved path and LaunchAgents directory,
-/// so the resolution failure and the no-bus host are testable without
+/// Where the row looks for a trusty-events install besides its socket.
+///
+/// Why (#10975): the bus unlinks its socket on a clean stop, so "no socket and
+/// no plist" also describes a bus started by hand and stopped, or a loaded label
+/// whose plist was deleted. Each input is injected so tests need no real
+/// `PATH` or launchd.
+pub(super) struct InstallProbe<'a> {
+    /// The LaunchAgents directory that would hold the bus's plist.
+    pub agents_dir: &'a Path,
+    /// The directories searched for the `trusty-events` binary.
+    pub bin_dirs: Vec<PathBuf>,
+    /// Whether a launchd label is loaded; `true` when that cannot be told.
+    pub label_loaded: fn(&str) -> bool,
+}
+
+/// What a missing socket means on this host.
+enum Footprint {
+    /// The plist is installed (or could not be inspected).
+    Plist,
+    /// No plist, but the binary resolves or the label is loaded.
+    Unsupervised,
+    /// No plist, no binary, no loaded label.
+    None,
+}
+
+/// [`check_events`] over an already-resolved path and an [`InstallProbe`], so
+/// the resolution failure and the no-bus host are testable without
 /// process-global environment.
 ///
-/// What: observes the socket and grades it. #10151: only an `Absent` socket
-/// with no trusty-events plist in `agents_dir` becomes `NotInstalled`.
-/// Test: `a_host_without_the_bus_warns_and_names_no_failing_remedy`,
-/// `a_host_with_the_bus_still_fails_on_every_fault`.
-async fn grade_resolved(
-    socket: anyhow::Result<std::path::PathBuf>,
-    agents_dir: &Path,
-) -> DoctorCheck {
+/// What: observes the socket and grades it. #10975: an `Absent` socket is
+/// `NotInstalled` only when [`footprint`] finds nothing; a binary or a loaded
+/// label with no plist is `Unsupervised`.
+/// Test: `a_host_without_the_bus_is_an_info_line_with_no_fix_command`,
+/// `a_host_with_the_bus_still_fails_on_every_fault`,
+/// `a_bus_footprint_without_a_socket_is_never_ok`.
+async fn grade_resolved(socket: anyhow::Result<PathBuf>, probe: &InstallProbe<'_>) -> DoctorCheck {
     match socket {
         Ok(path) => {
             let state = match observe_socket(&path, CONNECT_TIMEOUT).await {
-                // #10151: no socket and no plist is a host without the bus.
-                SocketState::Absent if !bus_installed(agents_dir) => SocketState::NotInstalled,
+                SocketState::Absent => match footprint(probe) {
+                    Footprint::Plist => SocketState::Absent,
+                    Footprint::Unsupervised => SocketState::Unsupervised,
+                    Footprint::None => SocketState::NotInstalled,
+                },
                 state => state,
             };
             grade(&path, &state)
@@ -314,20 +371,53 @@ async fn grade_resolved(
     }
 }
 
-/// Whether the trusty-events LaunchAgent plist sits in `agents_dir`.
+/// What trace of the bus the host carries besides its socket.
 ///
-/// Why (#10151): `tctl` installs the bus by writing this plist, and the socket's
-/// directory is no signal — resolving the socket path creates it. A plist that
-/// cannot be inspected counts as installed, so the row stays fail-closed.
-/// What: `<agents_dir>/<canonical label>.plist` exists, or its lookup errors.
-/// Test: `a_host_with_the_bus_still_fails_on_every_fault`.
-fn bus_installed(agents_dir: &Path) -> bool {
-    let label =
-        trusty_common::launchd_labels::canonical_label(trusty_common::control_bus::EVENTS_SERVICE);
-    agents_dir
-        .join(format!("{label}.plist"))
-        .try_exists()
-        .unwrap_or(true)
+/// Why (#10151, #10975): `tctl` installs the bus by writing its plist, and the
+/// socket's directory is no signal — resolving the socket path creates it. A
+/// plist that cannot be inspected counts as installed, so the row stays
+/// fail-closed.
+/// What: the plist at `<agents_dir>/<canonical label>.plist` exists or its
+/// lookup errors → `Plist`; else a `trusty-events` file in any `bin_dirs`
+/// entry, or a loaded label → `Unsupervised`; else `None`.
+/// Test: `a_host_with_the_bus_still_fails_on_every_fault`,
+/// `a_bus_footprint_without_a_socket_is_never_ok`.
+fn footprint(probe: &InstallProbe<'_>) -> Footprint {
+    let service = trusty_common::control_bus::EVENTS_SERVICE;
+    let label = trusty_common::launchd_labels::canonical_label(service);
+    let plist = probe.agents_dir.join(format!("{label}.plist"));
+    if plist.try_exists().unwrap_or(true) {
+        return Footprint::Plist;
+    }
+    let binary = probe.bin_dirs.iter().any(|d| d.join(service).is_file());
+    if binary || (probe.label_loaded)(&label) {
+        Footprint::Unsupervised
+    } else {
+        Footprint::None
+    }
+}
+
+/// Whether `label` is loaded in this user's launchd GUI domain.
+///
+/// Why (#10975): `trusty_common::launchd::label_is_loaded` reads a failed query
+/// as "not loaded", which would turn an unknown into a green row here.
+/// What: `launchctl list <label>` with its output discarded (#8756: never
+/// `launchctl print`, which prints the job's environment). Exit 0 is loaded;
+/// exit 113, launchd's "could not find service", is not; any other exit or a
+/// spawn failure counts as loaded, except off macOS, where there is no launchd.
+/// Test: side-effecting `launchctl` call; the decision it feeds is covered by
+/// `a_bus_footprint_without_a_socket_is_never_ok` through an injected fake.
+fn label_loaded(label: &str) -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    std::process::Command::new("launchctl")
+        .args(["list", label])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_or(true, |s| s.code() != Some(113))
 }
 
 #[cfg(test)]

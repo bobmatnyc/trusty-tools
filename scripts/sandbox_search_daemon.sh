@@ -53,14 +53,17 @@
 #   `--bin` therefore needs a sibling `trusty-embedderd`, or export
 #   TRUSTY_EMBEDDERD_BIN before calling.
 #   Socket (#9214): the daemon binds no TCP port; it serves the Unix socket
-#   <dir>/data/trusty-search.sock only, so the script passes no `--port` and
+#   <dir>/data/trusty-search/trusty-search.sock only (#10989: the path tm
+#   resolves under TRUSTY_DATA_DIR_OVERRIDE=<dir>/data, so a tm sandbox of the
+#   same <dir> reaches it; the directory is a real 0700 dir, never a symlink),
+#   so the script passes no `--port` and
 #   takes none. It removes a stale socket file before the start, refusing
 #   while sandbox.pid names a live daemon of this dir, while the socket accepts
 #   a connection (a daemon sandbox.pid does not record), or when a python3
 #   connect probe cannot tell either way. It waits up to 60 s
 #   (SANDBOX_SOCKET_WAIT_SECS) for the socket to appear, and prints its path,
 #   or says it timed out. Clients reach the sandbox with
-#   `TRUSTY_DATA_DIR=<dir>/data` or `TRUSTY_SEARCH_SOCKET=<that path>`.
+#   `TRUSTY_DATA_DIR=<dir>/data/trusty-search` or `TRUSTY_SEARCH_SOCKET=<that path>`.
 #   Model cache: a fresh HOME makes the embedder download its ONNX model into
 #   <dir>/home/.cache/fastembed. `--model-cache PATH` (or an exported
 #   FASTEMBED_CACHE_DIR) forwards that one directory as FASTEMBED_CACHE_DIR;
@@ -163,7 +166,7 @@ resolve() {
 }
 
 # owned_pid PID DIR: succeeds only when PID is a plain pid above 1 and its argv
-# holds the token `--data-dir DIR/data` followed by a space or the end of argv.
+# holds the token `--data-dir DIR/data/trusty-search` followed by a space or the end of argv.
 # A negative, zero, group-shaped or reused pid, and a sibling dir such as
 # `DIR-other`, fail.
 owned_pid() {
@@ -172,7 +175,7 @@ owned_pid() {
   [ "$pid" -gt 1 ] || return 1
   args="$(ps -p "$pid" -o command= 2>/dev/null || true)"
   [ -n "$args" ] || return 1
-  case "$args " in *"--data-dir $dir/data "*) return 0 ;; *) return 1 ;; esac
+  case "$args " in *"--data-dir $dir/data/trusty-search "*) return 0 ;; *) return 1 ;; esac
 }
 
 # is_alive PID: a running process; a zombie awaiting its parent is dead.
@@ -220,7 +223,7 @@ terminate_owned() {
   local pid="$1" dir="$2"
   is_alive "$pid" || return 0
   if ! owned_pid "$pid" "$dir"; then
-    echo "sandbox_search_daemon: refused: pid '$pid' is not a process whose argv holds --data-dir $dir/data; nothing signalled" >&2
+    echo "sandbox_search_daemon: refused: pid '$pid' is not a process whose argv holds --data-dir $dir/data/trusty-search; nothing signalled" >&2
     return 1
   fi
   kill -TERM "$pid" 2>/dev/null || true
@@ -314,7 +317,9 @@ if [ -n "$DIR" ]; then
 elif [ "$DRY_RUN" -eq 1 ]; then
   SANDBOX="<new mktemp -d>"
 else
-  MADE="$(mktemp -d "${TMPDIR:-/tmp}/ts-sandbox.XXXXXX")"
+  # #10989: under /tmp, not $TMPDIR; macOS $TMPDIR is long and the socket path
+  # <dir>/data/trusty-search/trusty-search.sock must fit sun_path (104 bytes).
+  MADE="$(mktemp -d /tmp/ts-sandbox.XXXXXX)"
   resolve "$MADE"
   SANDBOX="$RESOLVED"
   [ -n "$SANDBOX" ] || die "could not create a sandbox directory"
@@ -352,7 +357,7 @@ fi
 # The KNOBS the caller exported, as NAME=value words for env -i. `compgen -e`
 # lists exported names only. Values are read by indirect expansion.
 EXPORTED=" $(compgen -e | tr '\n' ' ') "
-ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data" "TRUSTY_SANDBOX=1")
+ENV_WORDS=("HOME=$SANDBOX/home" "PATH=$SANDBOX_PATH" "TRUSTY_DATA_DIR=$SANDBOX/data/trusty-search" "TRUSTY_SANDBOX=1")
 if [ -n "$MODEL_CACHE" ]; then
   ENV_WORDS+=("FASTEMBED_CACHE_DIR=$MODEL_CACHE")
 fi
@@ -374,11 +379,16 @@ for name in $EXPORTED; do
 done
 # #8176: --auto-discover leaves the flag off; the daemon's own default decides.
 if [ "$AUTO_DISCOVER" -eq 1 ]; then
-  ARGV=("$BIN" start --foreground --data-dir "$SANDBOX/data")
+  ARGV=("$BIN" start --foreground --data-dir "$SANDBOX/data/trusty-search")
 else
-  ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data")
+  ARGV=("$BIN" start --foreground --no-auto-discover --data-dir "$SANDBOX/data/trusty-search")
 fi
-SOCKET="$SANDBOX/data/$SOCKET_NAME"
+SOCKET="$SANDBOX/data/trusty-search/$SOCKET_NAME"
+# #10989: sun_path holds 104 bytes on macOS (108 on Linux) with the NUL; the
+# daemon refuses a longer path (SocketPathTooLong). 103 usable bytes, both OSes.
+if [ "${SANDBOX#<}" = "$SANDBOX" ] && [ "${#SOCKET}" -gt 103 ]; then
+  die "socket path is ${#SOCKET} bytes, over the 103-byte unix-socket limit: $SOCKET; pass a shorter --dir (for example /tmp/ts-sbx)"
+fi
 
 echo "sandbox_search_daemon: sandbox dir: $SANDBOX"
 echo "sandbox_search_daemon: socket: $SOCKET"
@@ -396,6 +406,11 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 mkdir -p "$SANDBOX/home" "$SANDBOX/data"
+# #10989: tm resolves this socket at <dir>/data/trusty-search/trusty-search.sock
+# (daemon_socket_path under TRUSTY_DATA_DIR_OVERRIDE=<dir>/data): a real 0700 dir.
+[ ! -L "$SANDBOX/data/trusty-search" ] || die "$SANDBOX/data/trusty-search is a symlink; remove it"
+{ mkdir -p "$SANDBOX/data/trusty-search" && chmod 700 "$SANDBOX/data/trusty-search"; } \
+  || die "cannot create $SANDBOX/data/trusty-search (mode 0700)"
 
 # #9214: a socket file left by an earlier run must not pass for ours, but a
 # live sandbox daemon of this dir owns its socket; refuse rather than unlink it.

@@ -247,7 +247,9 @@ suite_args() { # $1 = suite; prints one cargo argument per line
 		recall_supersession_latency_profile -- --nocapture ;;
 	concurrent) printf '%s\n' test -p trusty-memory --release --test concurrent_perf \
 		-- --include-ignored --nocapture ;;
-	slice) printf '%s\n' test -p trusty-memory --release --lib -- --ignored --exact \
+	# #10802: the slice measure is opt-in; without the variable it skips.
+	slice) printf '%s\n' test -p trusty-memory --release --config \
+		'env.TRUSTY_MEMORY_SLICE_MEASURE="1"' --lib -- --ignored --exact \
 		"$SLICE_TEST" --nocapture ;;
 	esac
 }

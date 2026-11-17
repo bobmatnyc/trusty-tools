@@ -167,7 +167,13 @@ impl PinnedProcess {
 /// that outlived an upgrade, which must still be recognised.
 /// Test: `exe_name_strips_the_deleted_suffix`.
 pub(crate) fn exe_name(pid: u32) -> io::Result<String> {
-    let target = std::fs::read_link(format!("/proc/{pid}/exe"))?;
+    exe_name_at(Path::new(&format!("/proc/{pid}/exe")))
+}
+
+/// [`exe_name`] of the `exe` link at `link`, such as an injected process
+/// table's (#11085).
+pub(crate) fn exe_name_at(link: &Path) -> io::Result<String> {
+    let target = std::fs::read_link(link)?;
     Ok(strip_deleted(&target.to_string_lossy()))
 }
 

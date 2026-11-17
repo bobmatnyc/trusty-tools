@@ -102,9 +102,49 @@ fn expand_tilde_repos(template: &str, home: &Path) -> PathBuf {
 /// Compute the base clone path for a GitHub `owner/repo`.
 ///
 /// Why: the base clone directory must be stable and deterministic so multiple
-/// sessions against the same repo all share one protected clone.
-/// What: returns `<repos_root>/<owner>/<repo>`.
-/// Test: `base_clone_path_resolves_to_canonical_root` (unit); wiring via integration tests.
+/// sessions against the same repo all share one protected clone, whatever case
+/// or punctuation the caller spelled the identity with (#10604).
+/// What: returns `<repos_root>/<owner>/<repo>`, each segment slugified exactly
+/// as [`trusty_common::github_path::parse_github_path`] does (lowercase, other
+/// runs to `-`), so `BobMatNYC/Trusty_Tools` and `bobmatnyc/trusty-tools` name
+/// one directory.
+/// Test: `base_clone_path_is_canonical_for_a_mixed_case_identity_10604`;
+/// `base_clone_path_resolves_to_canonical_root`; wiring via integration tests.
 pub fn base_clone_path(owner: &str, repo: &str) -> PathBuf {
-    repos_root().join(owner).join(repo)
+    // #10604: canonical here, not by caller convention.
+    repos_root()
+        .join(canonical_segment(owner))
+        .join(canonical_segment(repo))
+}
+
+/// One `owner` or `repo` path segment in the slug form tm names clones with.
+///
+/// What: the slug [`trusty_common::github_path::parse_owner_repo`] gives a
+/// single segment; ASCII-lowercase when that parse refuses (an `@` in it) or
+/// leaves nothing.
+fn canonical_segment(segment: &str) -> String {
+    trusty_common::github_path::parse_owner_repo(segment)
+        .map(|gh| gh.repo)
+        .unwrap_or_else(|| segment.trim().to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #10604: a mixed-case, underscored identity lands on the lowercase slug
+    /// path every slugified caller already uses.
+    #[test]
+    fn base_clone_path_is_canonical_for_a_mixed_case_identity_10604() {
+        // #10604: assert on the tail, not on three `repos_root()` reads, so a
+        // concurrent test that changes HOME or the root env cannot flake this.
+        for (owner, repo) in [
+            ("bobmatnyc", "trusty-tools"),
+            ("BobMatNYC", "Trusty_Tools"),
+            ("BOBMATNYC", "Trusty-Tools.git"),
+        ] {
+            let path = base_clone_path(owner, repo);
+            assert!(path.ends_with("bobmatnyc/trusty-tools"), "{path:?}");
+        }
+    }
 }

@@ -200,6 +200,7 @@ fn activity_response(state: &str, summary: &str) -> ManagedActivityResponse {
         classification: None,
         pending_decision: None,
         proposed_default: None,
+        input_box: None,
     }
 }
 

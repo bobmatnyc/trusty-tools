@@ -14,7 +14,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
-use crate::tm_hook_egress_guard_8454::{assert_allowed, assert_denied, guard_command_in};
+use crate::tm_hook_egress_guard_8454::{
+    SESSION_PROFILE, assert_allowed, assert_denied, guard_command_in,
+};
 
 /// The two read tools the allowlist may grant.
 const READS: &[&str] = &["slack_read_channel", "slack_read_thread"];
@@ -197,6 +199,26 @@ fn slack_read_allowlist_fault_arms_refuse() {
         "unreadable",
         "(NotRegular)",
     );
+}
+
+/// 🔴 #11273: a PM main session reads Slack in a project with no allowlist
+/// entry, through the main-session read pass; its subagent's read and the
+/// PM's own post stay refused, and the #10387 audit line is not printed.
+#[test]
+fn a_pm_main_session_reads_without_an_entry_and_its_subagent_does_not_11273() {
+    let fx = Fx::new();
+    fx.write(&fx.yaml());
+    let other = fx.root.join("other");
+    let pm = (SESSION_PROFILE, "pm");
+    let read = "mcp__slack-mcp__slack_read_channel";
+    let out = fx.run(read, Some(&other), &[pm]);
+    assert_allowed(&out, "PM main-session read");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("egress-slack-read-allowed"), "{stderr}");
+    let out = fx.run(read, Some(&other), &[pm, ("CLAUDE_MPM_SUB_AGENT", "1")]);
+    assert_refused(&out, "subagent read", "no slack_read_allowlist entry");
+    let out = fx.run("mcp__slack-mcp__slack_send_message", Some(&other), &[pm]);
+    assert_refused(&out, "PM post", "no slack_read_allowlist entry");
 }
 
 /// 🔴 #10387: the pm-guard bypass variables and the subagent marker widen

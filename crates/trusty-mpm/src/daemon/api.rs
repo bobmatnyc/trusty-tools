@@ -32,6 +32,7 @@ use crate::core::project::ProjectInfo;
 use crate::core::session::Session;
 
 use super::error::DaemonError;
+use super::mcp_project_decommission::project_decommission_route; // #10988
 // #6288: the transport-neutral bodies these handlers and the socket's
 // `mpm.*` methods both call. One route, one implementation.
 use super::rpc::core_ops;
@@ -234,6 +235,10 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         // flags for ONE named project. Pure composition over ProjectRegistry::get
         // + SessionManager::list; no LLM, no cross-project reasoning (§11).
         .route("/api/v1/projects/{name}/status", get(project_status_route))
+        .route(
+            "/api/v1/projects/{name}/decommission",
+            post(project_decommission_route),
+        )
         .route("/events", get(stream_events))
         .route("/events/poll", get(recent_events))
         .route("/hooks", post(ingest_hook))
@@ -388,6 +393,11 @@ pub fn router(state: Arc<DaemonState>) -> Router {
         .route(
             "/api/v1/sessions/managed/{id}/delete",
             post(delete_managed_session),
+        )
+        // #10991: move the session's directory to the 0700 archive.
+        .route(
+            "/api/v1/sessions/managed/{id}/archive",
+            post(super::session_archive::session_archive_route),
         )
         // TELUI-6 (#1440): the local session-manager PROXY surface — the SAME
         // focus/inject/summarize state machine every channel (Telegram, Slack)
@@ -652,7 +662,7 @@ pub async fn register_session(
     // #6288: the body is shared with `mpm.sessions.register` over the Unix
     // socket; `mpm.sessions.connect` mounts the same body under its own name,
     // exactly as `POST /api/v1/sessions/connect` does here.
-    Ok(Json(sessions_ops::register_session(&state, body)?))
+    Ok(Json(sessions_ops::register_session(&state, body).await?))
 }
 
 /// `POST /api/v1/sessions/connect` — register a session for a *connect* (no

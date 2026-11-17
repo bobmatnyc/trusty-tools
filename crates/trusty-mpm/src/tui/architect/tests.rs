@@ -8,12 +8,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{Terminal, backend::TestBackend};
 use serde_json::{Value, json};
 
-use super::data::{DashSnapshot, STORE_NOT_SET, fetch_dashboard, snapshot_from};
-use super::live::{LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines};
+use super::data::{DashSnapshot, fetch_dashboard, snapshot_from};
+use super::live::{
+    LiveAgent, LiveSession, LiveSnapshot, Record, fetch_live, group, live_lines, merge,
+};
 use super::{
     ArchitectAction, ArchitectState, ArchitectUpdate, Due, Fetch, REFRESH, Tab, handle_key,
 };
-use crate::client::{DaemonClient, SessionRow};
+use crate::client::{DaemonClient, ManagedSessionSummary, SessionRow};
 
 /// Apply one dashboard and one Live result, as two fetch tasks would.
 fn feed(s: &mut ArchitectState, dashboard: Result<DashSnapshot, String>, live: LiveSnapshot) {
@@ -91,16 +93,114 @@ fn snapshot_splits_items_by_kind_and_drops_closed_rows() {
 }
 
 #[tokio::test]
-async fn fetch_dashboard_says_why_without_store_or_socket() {
-    let socket = Path::new("/nonexistent/sock");
-    let err = fetch_dashboard(Some(socket), None)
+async fn fetch_dashboard_says_why_without_a_socket() {
+    for root in [None, Some(Path::new("/tmp/store"))] {
+        let err = fetch_dashboard(None, root).await.expect_err("no socket");
+        assert!(err.contains("#10899"), "{err}");
+    }
+}
+
+/// A `0700` temp dir holding the stub daemon socket.
+fn stub_socket() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("narrow the tempdir");
+    let socket = dir.path().join("mpm.sock");
+    (dir, socket)
+}
+
+/// A stub daemon: records each request frame's `params` and answers with
+/// `reply(method)` as the frame's `result` (`Ok`) or `error.message` (`Err`).
+fn serve_recording(
+    socket: &Path,
+    reply: fn(&str) -> Result<Value, &'static str>,
+) -> std::sync::Arc<std::sync::Mutex<Vec<(String, Value)>>> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = trusty_common::uds::bind_hardened(socket).expect("bind stub");
+    let log = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            if BufReader::new(read).read_line(&mut line).await.is_err() {
+                continue;
+            }
+            let frame: Value = serde_json::from_str(&line).expect("request frame");
+            let method = frame["method"].as_str().unwrap_or_default().to_string();
+            let answer = match reply(&method) {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": 1, "result": result}),
+                Err(msg) => json!({"jsonrpc": "2.0", "id": 1,
+                    "error": {"code": -32000, "message": msg}}),
+            };
+            log.lock()
+                .expect("log")
+                .push((method, frame["params"].clone()));
+            let mut out = serde_json::to_vec(&answer).expect("encode");
+            out.push(b'\n');
+            let _ = write.write_all(&out).await;
+            let _ = write.shutdown().await;
+        }
+    });
+    seen
+}
+
+fn empty_store(method: &str) -> Result<Value, &'static str> {
+    Ok(if method.ends_with(".tally") {
+        json!({})
+    } else {
+        json!([])
+    })
+}
+
+// #10944: the daemon resolves the root; the TUI must not demand or invent one.
+#[tokio::test]
+async fn fetch_dashboard_sends_no_store_when_no_root_is_given() {
+    let (_dir, socket) = stub_socket();
+    let seen = serve_recording(&socket, empty_store);
+    fetch_dashboard(Some(&socket), None)
         .await
-        .expect_err("no store");
-    assert_eq!(err, STORE_NOT_SET);
-    let err = fetch_dashboard(None, Some(Path::new("/tmp/store")))
+        .expect("daemon rows");
+    let seen = seen.lock().expect("log");
+    assert_eq!(seen.len(), 5, "four lists and one tally: {seen:?}");
+    for (method, params) in seen.iter() {
+        assert!(
+            params.get("store").is_none(),
+            "{method} sent store: {params}"
+        );
+    }
+    assert_eq!(
+        seen[0].1,
+        json!({"collection": "items", "order_by": "rank"})
+    );
+    assert_eq!(seen[4], ("mpm.architect.dashboard.tally".into(), json!({})));
+}
+
+#[tokio::test]
+async fn fetch_dashboard_sends_the_root_when_given() {
+    let (_dir, socket) = stub_socket();
+    let seen = serve_recording(&socket, empty_store);
+    fetch_dashboard(Some(&socket), Some(Path::new("/tmp/arch-store")))
         .await
-        .expect_err("no socket");
-    assert!(err.contains("#10899"), "{err}");
+        .expect("daemon rows");
+    let want = json!({"root": "/tmp/arch-store", "format": "dir"});
+    let seen = seen.lock().expect("log");
+    assert_eq!(seen.len(), 5);
+    for (method, params) in seen.iter() {
+        assert_eq!(params["store"], want, "{method}");
+    }
+}
+
+#[tokio::test]
+async fn old_daemon_decode_error_carries_the_upgrade_hint() {
+    let (_dir, socket) = stub_socket();
+    serve_recording(&socket, |_| Err("invalid params: missing field `store`"));
+    let err = fetch_dashboard(Some(&socket), None)
+        .await
+        .expect_err("old daemon");
+    assert!(err.contains("missing field `store`"), "{err}");
+    assert!(err.contains(super::data::OLD_DAEMON_HINT), "{err}");
 }
 
 #[test]
@@ -113,7 +213,7 @@ fn fetch_is_due_once_per_refresh_and_never_twice_in_flight() {
     };
     assert_eq!(s.fetch_due(t0), both);
     assert_eq!(s.fetch_due(t0 + REFRESH), Due::default(), "both in flight");
-    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
+    feed(&mut s, Err("x".into()), LiveSnapshot::default());
     assert_eq!(s.fetch_due(t0 + REFRESH / 2), Due::default(), "fresh");
     assert_eq!(s.fetch_due(t0 + REFRESH), both);
 }
@@ -215,12 +315,14 @@ fn architect_render_lists_rows_with_badges_and_counts() {
 }
 
 #[test]
-fn architect_render_says_why_when_the_store_is_not_set() {
+fn daemon_resolution_error_reaches_the_failed_state_and_the_screen() {
+    // #10944: the daemon's "no Architect store" frame text, shown verbatim.
+    let msg = "mpm.architect.dashboard.list: no Architect store at /h/x (default)";
     let mut s = ArchitectState::default();
-    feed(&mut s, Err(STORE_NOT_SET.into()), LiveSnapshot::default());
+    feed(&mut s, Err(msg.into()), LiveSnapshot::default());
     assert!(matches!(s.dashboard, Fetch::Failed(_)));
     let screen = draw(&s);
-    assert!(screen.contains("--architect-store"), "{screen}");
+    assert!(screen.contains("no Architect store at /h/x"), "{screen}");
 }
 
 fn session_row(id: &str, name: &str, workdir: &str, status: &str) -> SessionRow {
@@ -256,7 +358,7 @@ fn group_attaches_agents_by_owner_label() {
             5,
         ),
     ];
-    let snap = group(&rows, &records);
+    let snap = group(merge(&rows, &[]), &records);
     assert_eq!(snap.sessions.len(), 2);
     let agents: Vec<&str> = snap.sessions[0]
         .agents
@@ -267,6 +369,86 @@ fn group_attaches_agents_by_owner_label() {
     assert_eq!(snap.sessions[0].id, ID_A);
     assert!(snap.sessions[1].agents.is_empty());
     assert_eq!(snap.sessions[1].status, "Detached");
+}
+
+fn managed(id: &str, name: &str, state: &str, cwd: &str, deleted: bool) -> ManagedSessionSummary {
+    serde_json::from_value(json!({
+        "id": id, "name": name, "state": state, "cwd": cwd, "deleted": deleted
+    }))
+    .expect("managed summary")
+}
+
+// #11104: a managed session is in `mpm.managed.list`, not the hook registry.
+#[test]
+fn merge_lists_managed_sessions_the_hook_registry_lacks() {
+    const ID_C: &str = "9d5e3e1f-0a2b-4c39-8b7d-6f1c1f2e4c5d";
+    let rows = [session_row(ID_A, "tm-03", "/w/a", "Active")];
+    let list = [
+        managed(ID_A, "tm-03", "active", "/w/a", false),
+        managed(ID_B, "tm-07", "active", "/w/m", false),
+        managed(ID_C, "tm-09", "stopped", "/w/z", true),
+    ];
+    let records = [record("engineer", "session `tm-07`", "running", 90)];
+    let snap = group(merge(&rows, &list), &records);
+    let names: Vec<&str> = snap.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["tm-03", "tm-07"],
+        "managed added once, tombstone skipped"
+    );
+    let m = &snap.sessions[1];
+    assert_eq!((m.id.as_str(), m.workdir.as_str()), (ID_B, "/w/m"));
+    assert_eq!(m.agents.len(), 1, "agents attach to a managed session");
+    let mut s = ArchitectState::default();
+    feed(&mut s, Ok(sample()), snap);
+    s.open(Tab::Live);
+    let screen = draw(&s);
+    assert!(screen.contains("● tm-07"), "{screen}");
+}
+
+// #11104: a SessionStart hook auto-registers a row keyed by Claude's UUID
+// with a friendly name and no workdir; `correlate_session_start` stores that
+// UUID on the managed record. The pair is one session and draws as one row.
+#[test]
+fn merge_folds_a_hook_row_into_the_managed_session_it_correlates_with() {
+    const CLAUDE: &str = "11111111-2222-4333-8444-555555555555";
+    const ID_D: &str = "2b4c5d6f-1c1f-4e8b-9d5e-3e1f0a7d4c39";
+    const OTTER: &str = "33333333-4444-4555-8666-777777777777";
+    let with_claude = |id: &str, name: &str, cwd: &str, claude: &str| -> ManagedSessionSummary {
+        serde_json::from_value(json!({
+            "id": id, "name": name, "state": "stopped", "cwd": cwd,
+            "claude_session_id": claude
+        }))
+        .expect("managed summary")
+    };
+    let rows = [
+        session_row(CLAUDE, "tm-nimble-tiger", "", "Active"),
+        session_row(ID_A, "tm-03", "/w/a", "Active"),
+        // Correlated to `tm-03`, which is listed already: dropped.
+        session_row(OTTER, "tm-brave-otter", "", "Active"),
+    ];
+    let list = [
+        with_claude(ID_A, "tm-03", "/w/a", OTTER),
+        with_claude(ID_B, "tm-proj2", "/w/proj2", CLAUDE),
+        // A second record naming the same UUID is a different session.
+        with_claude(ID_D, "tm-proj3", "/w/proj3", CLAUDE),
+    ];
+    let records = [record("engineer", "session `tm-proj2`", "running", 30)];
+    let snap = group(merge(&rows, &list), &records);
+    let names: Vec<&str> = snap.sessions.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["tm-proj2", "tm-03", "tm-proj3"],
+        "one row per session"
+    );
+    let m = &snap.sessions[0];
+    assert_eq!(
+        (m.id.as_str(), m.workdir.as_str(), m.status.as_str()),
+        (ID_B, "/w/proj2", "Active"),
+        "managed name, id and workdir; the hook row's live status"
+    );
+    assert_eq!(m.agents.len(), 1, "agents attach by the managed name");
+    assert_eq!(snap.sessions[2].status, "stopped");
 }
 
 fn live_sample() -> LiveSnapshot {

@@ -178,6 +178,7 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description | License |
 |---|---|---|
+| [`trusty-browser`](python/trusty-browser/README.md) | Python service for web-QA workflows in enrolled Chrome profiles over Unix domain sockets | MIT |
 | `trusty-console` | Web console for the local trusty service fleet | MIT |
 | `trusty-channels` | Native Slack and Telegram MCP servers | MIT |
 
@@ -188,8 +189,7 @@ package to its manifest, source, and documentation, use the
 | `trusty-common` | Tracing, daemon helpers, OpenRouter chat client, shared utilities |
 | `trusty-embedderd` | fastembed wrapper — all-MiniLM-L6-v2 INT8 quantised, 384-dim output |
 | `trusty-gworkspace` | Google Workspace client (Calendar, Tasks, Drive) |
-| `trusty-cto-db` | SQLite schema + rusqlite bindings for ops data |
-| `tc-services` | Service adapters (CTO DB, Granola, GWorkspace) |
+| `tc-services` | Service adapters (Granola, GWorkspace) |
 | `trusty-mcp` | Shared JSON-RPC 2.0 and MCP protocol primitives |
 | `trusty-progress` | Shared terminal progress and status rendering |
 | `trusty-code-tui` | Shared interactive terminal UI seam |
@@ -242,7 +242,7 @@ package to its manifest, source, and documentation, use the
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
 │ Shared foundations: common · mcp · embedderd · progress      │
-│                     cto-db · tc-services · kb                │
+│                     tc-services · kb                         │
 └───────────────────────────────────────────────────────────────┘
 ```
 

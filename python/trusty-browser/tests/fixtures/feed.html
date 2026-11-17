@@ -1,0 +1,36 @@
+<!doctype html>
+<!-- #11291: an infinite feed. Reaching the bottom sentinel appends a page of items after a delay,
+     three pages in all; "Replace first" swaps the first item for a new node, so its ref goes stale. -->
+<title>Feed QA</title>
+<style>.item { height: 400px; border-bottom: 1px solid #ccc; }</style>
+<main>
+  <button id="replace">Replace first</button>
+  <ol id="feed"></ol>
+  <p id="sentinel">Loading</p>
+</main>
+<script>
+  const feed = document.getElementById("feed");
+  let pages = 0, loading = false;
+  function addPage() {
+    pages += 1;
+    for (let i = 0; i < 5; i++) {
+      const li = document.createElement("li");
+      li.className = "item";
+      li.innerHTML = `<button>Item ${(pages - 1) * 5 + i}</button>`;
+      feed.append(li);
+    }
+    if (pages === 3) document.getElementById("sentinel").textContent = "End of feed";
+  }
+  addPage();
+  new IntersectionObserver(entries => {
+    if (!entries[0].isIntersecting || loading || pages >= 3) return;
+    loading = true;
+    setTimeout(() => { addPage(); loading = false; }, 200);
+  }).observe(document.getElementById("sentinel"));
+  document.getElementById("replace").addEventListener("click", () => {
+    const li = document.createElement("li");
+    li.className = "item";
+    li.innerHTML = "<button>Item 0</button>";
+    feed.firstElementChild.replaceWith(li);
+  });
+</script>

@@ -29,6 +29,10 @@
 //! Test: `bash_tokens_*` in this module's `tests` submodule, and the per-issue
 //! rows in the sibling `guard_tokenizer_tests` module.
 
+// #11262: cuts glued shell operators before `tokenize` hands words to a rule.
+#[path = "operator_split.rs"]
+mod operator_split;
+
 /// Why a command's bytes could not be cut into words.
 ///
 /// Why: a guard that treats "the lexer failed" as "there were no tokens"
@@ -36,14 +40,18 @@
 /// error rather than a `None` forces every caller to say what it does with it,
 /// and [`TokenizeError::reason`] gives the refusal a message that names the
 /// parse problem instead of naming a program the guard never resolved.
-/// What: one variant today — `shlex` reports only this failure — kept as an
-/// enum so a second parse failure gets its own message rather than this one.
+/// What: unbalanced quoting from `shlex`, and (#11262) a segment whose shell
+/// operators [`operator_split::split_operators`] cannot place.
 /// Test: `bash_tokens_reports_unbalanced_quoting`,
-/// `guard_tokenizer_parse_failure_refuses_naming_the_parse_problem`.
+/// `guard_tokenizer_parse_failure_refuses_naming_the_parse_problem`,
+/// `operator_split_refuses_what_it_cannot_place`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TokenizeError {
     /// A `'` or `"` is opened and never closed.
     UnbalancedQuoting,
+    /// #11262: bash and `shlex` read the quoting differently, or a `case`
+    /// runs inside a substitution, so word ends cannot be placed.
+    AmbiguousOperators,
 }
 
 impl TokenizeError {
@@ -52,6 +60,9 @@ impl TokenizeError {
         match self {
             Self::UnbalancedQuoting => {
                 "a command this guard cannot parse (unbalanced `'`/`\"` quoting)"
+            }
+            Self::AmbiguousOperators => {
+                "a command this guard cannot parse (shell operators it cannot place)"
             }
         }
     }
@@ -62,7 +73,9 @@ impl TokenizeError {
 /// Why: the lexer call site for the guards #7839 migrated — the secret-read
 /// rule and [`super::secret_file_copy`] — so neither can silently substitute a
 /// laxer split and neither can mistake a parse failure for an empty command.
-/// What: `shlex::split`, with its `None` promoted to
+/// What: [`operator_split::split_operators`] first, so an unquoted
+/// operator glued to a word is cut where bash cuts it (#11262), then
+/// `shlex::split`, with its `None` promoted to
 /// [`TokenizeError::UnbalancedQuoting`].
 ///
 /// Eleven non-test `shlex::split` sites have NOT migrated and still read a
@@ -71,9 +84,14 @@ impl TokenizeError {
 /// `commands/hook_rewrite.rs` (1). Each owns its own fail-closed fallback
 /// today; moving them here is remaining work, not a claim this function
 /// already made.
-/// Test: `bash_tokens_reports_unbalanced_quoting`.
+/// Test: `bash_tokens_reports_unbalanced_quoting`,
+/// `operator_split_cuts_each_redirect_class`,
+/// `operator_split_cuts_control_operators`.
 pub(crate) fn tokenize(segment: &str) -> Result<Vec<String>, TokenizeError> {
-    shlex::split(segment).ok_or(TokenizeError::UnbalancedQuoting)
+    // #11262: cut glued operators before any rule reads a word.
+    let split =
+        operator_split::split_operators(segment).map_err(|_| TokenizeError::AmbiguousOperators)?;
+    shlex::split(&split).ok_or(TokenizeError::UnbalancedQuoting)
 }
 
 /// What a redirection token does with the word beside it.
@@ -380,7 +398,7 @@ pub(crate) fn without_glob_metacharacters(word: &str) -> String {
 /// Programs whose every argument is text they PRINT, never a file they open.
 ///
 /// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
-const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
+pub(crate) const TEXT_PRINTERS: &[&str] = &["printf", "echo"];
 
 /// Which tokens of a `printf`/`echo` call are prose it writes into a file
 /// (#8723).
@@ -454,7 +472,7 @@ pub(crate) fn prose_write_indices(segment: &str, argv: &[String]) -> Vec<usize> 
 /// What: unbalanced quoting, a `$` or backtick outside single quotes, or an
 /// unquoted `(` (a subshell or a process substitution).
 /// Test: `bash_tokens_reads_prose_a_printer_writes_to_a_file`.
-fn runs_a_nested_command(segment: &str) -> bool {
+pub(crate) fn runs_a_nested_command(segment: &str) -> bool {
     let scan = super::shell_lex::QuoteScan::new(segment);
     !scan.balanced
         || segment.bytes().enumerate().any(|(i, b)| {

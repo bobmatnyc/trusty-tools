@@ -181,6 +181,9 @@ pub struct ActivityResponse {
     pub pending_decision_id: Option<String>,
     /// Proposed default answer to the pending decision.
     pub proposed_default: Option<String>,
+    /// #8407: the live pane's input box (`empty`, `suggestion`, `typed`), or
+    /// `null` when the pane could not be read or `raw_pane` is a snapshot.
+    pub input_box: Option<crate::core::input_box::InputBox>,
 }
 
 /// GET /api/v1/sessions/managed/{id}/activity — inspect session activity.
@@ -263,6 +266,13 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         (pane_text, false)
     };
 
+    // #8407: only a live pane has a box to read; a snapshot is unknown.
+    let input_box = if pane_stale {
+        None
+    } else {
+        mgr.input_box(&id).await
+    };
+
     // Run the optional LLM classifier. `ActivityMonitor::check` converts
     // `MissingApiKey` to an `Unknown` verdict non-erroring — the raw pane is
     // always available regardless of whether a key is configured.
@@ -303,6 +313,7 @@ pub(crate) async fn activity_core(state: &Arc<DaemonState>, id_str: &str) -> Rou
         pending_decision_id: record.live_decision_id().map(|d| d.to_string()),
         pending_decision: record.pending_decision,
         proposed_default: record.proposed_default,
+        input_box,
     })
 }
 

@@ -1,0 +1,6 @@
+crate   trusty-mpm
+version 1.14.4
+reason  Bob VERSIONING ruling 2026-09-26 18:57Z: trusty-tools (all crates) and TGA use internal numbering; API breaks never force a major; majors only on Bob's word; semver gates report only. semver-checks vs baseline 1.14.0 computes these main-origin lints (#11183, #11232); Architect ruling 2026-11-14 08:55Z.
+accept  constructible_struct_adds_field field OpportunityRow.skip_reason
+accept  constructible_struct_adds_field field ProjectDecommissionReport.index_shutdown
+accept  enum_variant_added variant ProjectDecommissionError:IndexShutdown

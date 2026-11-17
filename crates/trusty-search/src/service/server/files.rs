@@ -137,11 +137,10 @@ pub(crate) async fn index_file_report(
 /// callers, same lazy load, same residency verdict, and the same rule that a
 /// removal which failed never reports a chunk count. #9236: the path goes
 /// through [`super::remove_path::remove_keys`] first, so an absolute in-root
-/// path removes its stored keys and one outside the root answers 400. A
-/// successful delete then forgets the key's content hash, so the next
-/// reindex indexes the file again. A 500 from the delete keeps both the
-/// chunks and the hash. A 500 from the hash step comes after the chunks are
-/// gone, and the request is safe to retry.
+/// path removes its stored keys and one outside the root answers 400. The
+/// delete also forgets the key's content hash, so the next reindex indexes
+/// the file again. #11096: the chunks and the hash leave in one redb
+/// transaction, so a 500 keeps both and the request is safe to retry.
 /// Test: `remove_file_over_the_socket_matches_the_http_body`,
 /// `a_write_against_an_unknown_index_is_refused_and_indexes_nothing` in
 /// `crate::service::rpc::writes`;
@@ -149,8 +148,10 @@ pub(crate) async fn index_file_report(
 /// the #9236 paths by `remove_file_takes_an_absolute_in_root_path_9236`,
 /// `remove_file_refuses_a_path_outside_the_root_9236` and
 /// `remove_file_refuses_a_relative_path_outside_the_root_9236`; the hash by
-/// `remove_file_forgets_the_hash_so_a_reindex_restores_it_9236` and
-/// `remove_file_reports_a_failed_hash_forget_and_a_retry_clears_it_9236`.
+/// `remove_file_forgets_the_hash_so_a_reindex_restores_it_9236`; the one
+/// transaction by
+/// `remove_file_fault_in_the_hash_delete_keeps_chunks_and_hash_11096` and
+/// `remove_file_drops_chunk_rows_and_hash_row_together_11096`.
 pub(crate) async fn remove_file_report(
     state: &Arc<SearchAppState>,
     id: &str,
@@ -191,18 +192,13 @@ pub(crate) async fn remove_file_report(
     for key in &keys {
         // #9230: fail-closed. A delete redb refused answers 500
         // `remove_file_failed` with the file's chunks and hash still indexed.
+        // #11096: the chunks and the hash leave in one transaction, so no
+        // failure leaves the chunks gone and the hash kept.
         let (count, committed) = indexer.remove_file_committed(key).await.map_err(failed)?;
         // #9230: only a delete whose rows left redb moves `reindexed_unix`.
         if committed {
             indexer.record_incremental_commit(key).await;
         }
-        // #9236: forget the content hash only once the delete is through, or
-        // the next reindex skips the unchanged file and it never comes back.
-        // A 500 here comes after the chunks are gone, and is safe to retry:
-        // every successful delete forgets, so the retry (0 chunks) clears it.
-        crate::service::reindex::hash::forget_file_hash(&index_id, &indexer, key)
-            .await
-            .map_err(failed)?;
         removed += count;
     }
     Ok(serde_json::json!({
