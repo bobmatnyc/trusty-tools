@@ -3,7 +3,7 @@ name: tm-verification-protocols
 description: QA verification gate and evidence requirements for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: pm-workflow
 tags: [qa, verification, evidence, pm-required]
 effort: high

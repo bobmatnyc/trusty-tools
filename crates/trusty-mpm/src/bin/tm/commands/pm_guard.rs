@@ -263,7 +263,7 @@ use trusty_mpm::core::guard_policy;
 /// is that [`payload_is_subagent_dispatch`] now makes this bypass unnecessary
 /// for ordinary delegated work. It remains available for the rare case an
 /// operator wants to lift enforcement on the PM's *own* direct edits too.
-/// What: the literal env var name. See [`pm_unrestricted`].
+/// What: the literal env var name. See [`pm_unrestricted`](super::pm_guard_floor::pm_unrestricted).
 pub(crate) const PM_UNRESTRICTED_ENV: &str = "TRUSTY_MPM_PM_UNRESTRICTED";
 
 /// Single-file mutation tools the PM invokes directly. Whether a given call is
