@@ -127,6 +127,63 @@ fn the_log_holds_no_argument_values() {
     assert_eq!(line["fact"]["positional_count"], 3);
 }
 
+/// #11431: a token in a URL query string never reaches the log.
+#[test]
+fn the_log_drops_url_query_tokens() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = home.path().join("session");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "git@github.com:owner/session.git",
+        ],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status();
+        assert!(ok.is_ok_and(|s| s.success()));
+    }
+    let env = |_: &Value, home: &Path| GuardEnv {
+        project_dir: Some(home.join("session")),
+        cwd: home.join("session"),
+        ..test_env(&Value::Null, home)
+    };
+    let cmd = "git push https://github.com/o/r.git?access_token=X main";
+    let raw = json!({ "tool_name": "Bash", "tool_input": { "command": cmd } });
+    let line = judge(raw.to_string().as_bytes(), home.path(), &env).expect("R3");
+    assert_eq!(line["rule"], "R3");
+    assert_eq!(
+        line["fact"]["remote_repo"], "o/r",
+        "query cut before the slug"
+    );
+    let text = line.to_string().to_lowercase();
+    assert!(!text.contains("access_token"), "{text}");
+    assert!(!text.contains("=x"), "{text}");
+}
+
+/// #11431: a symlink planted at the log path is not followed.
+#[test]
+fn a_symlink_at_the_log_path_is_not_followed() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let victim = home.path().join("victim.txt");
+    std::fs::write(&victim, "keep").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let path = home.path().join(LOG_PATH);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&victim, &path).unwrap();
+    append_log(home.path(), &json!({ "rule": "R2" }));
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    let mode = std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+}
+
 /// #11431 review: the log is 0600 in a 0700 directory and rotates once past 10 MiB.
 #[test]
 fn the_log_is_private_and_rotates_at_the_cap() {

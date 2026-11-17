@@ -333,7 +333,9 @@ pub(crate) fn r3_cross_repo(cmd: &Cmd, env: &GuardEnv) -> Option<Hit> {
 
 /// `owner/repo` of a git URL, lowercased, without `.git`; userinfo never survives.
 pub(crate) fn repo_slug(url: &str) -> String {
-    let trimmed = url
+    // #11431: a query or fragment can carry a token; cut it first.
+    let base = url.split(['?', '#']).next().unwrap_or("");
+    let trimmed = base
         .trim()
         .trim_end_matches('/')
         .trim_end_matches(".git")

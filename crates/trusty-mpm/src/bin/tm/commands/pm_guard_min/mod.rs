@@ -153,8 +153,11 @@ pub(crate) fn r5_allow(path: &Path, session: &str) -> Vec<String> {
 /// may read it, and a runaway session must not fill the disk (#11431 review).
 /// What: the directory is created 0700 and the file 0600 (an existing file is
 /// re-tightened to 0600). Past [`MAX_LOG_BYTES`] the file rotates once to
-/// `shadow.jsonl.1`, replacing an older `.1`. Every error is dropped.
-/// Test: `the_log_is_private_and_rotates_at_the_cap`, `an_unwritable_log_is_dropped`.
+/// `shadow.jsonl.1`, replacing an older `.1`. The open uses `O_NOFOLLOW`
+/// and writes only to a regular file, so a planted symlink is never
+/// followed. Every error is dropped.
+/// Test: `the_log_is_private_and_rotates_at_the_cap`, `an_unwritable_log_is_dropped`,
+/// `a_symlink_at_the_log_path_is_not_followed`.
 pub(crate) fn append_log(home: &Path, line: &Value) {
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
@@ -168,15 +171,19 @@ pub(crate) fn append_log(home: &Path, line: &Value) {
     {
         return;
     }
-    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() > MAX_LOG_BYTES) {
         let _ = std::fs::rename(&path, path.with_extension("jsonl.1"));
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
+        // #11431: a symlink planted at the log path is never followed.
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&path);
-    if let Ok(mut f) = file {
+    if let Ok(mut f) = file
+        && f.metadata().is_ok_and(|m| m.is_file())
+    {
         let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
         let _ = writeln!(f, "{line}");
     }
