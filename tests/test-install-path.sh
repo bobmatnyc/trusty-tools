@@ -1043,7 +1043,7 @@ test_curl_pipe_confirm_reads_tty() {
         bash -c 'printf "" | sh -c ". \"\$1\"; maybe_update_path \"\$2\"" _ "$1" "$2"' _ "$INSTALL_SH" "$dir" 2>&1 | tr -d '\r')
 
     assert_eq "$(has_text "$out" "[y/N]")" "yes" "the prompt is shown on the terminal"
-    assert_eq "$(count_matches "$home/.bashrc" "export PATH=\"${dir}:\$PATH\"")" "1" "the terminal's \"y\" wrote .bashrc"
+    assert_eq "$(count_matches "$home/.bashrc" "PATH='${dir}'")" "1" "the terminal's \"y\" wrote .bashrc"
 
     rm -rf "$home"
 }
