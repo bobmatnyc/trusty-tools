@@ -99,10 +99,16 @@ fn every_frame_sample_decodes_to_an_object() {
         ));
         let raw = fs::read(fixtures().join("frames").join(s(entry, "file"))).expect("frame file");
         let frame = decode_frame(&raw);
-        if s(entry, "direction") == "broker_to_client"
-            && !s(entry, "message").starts_with("worker-command")
-        {
-            if !s(entry, "message").ends_with("challenge") {
+        let message = s(entry, "message");
+        if s(entry, "direction") == "broker_to_client" {
+            if message.starts_with("worker-command") {
+                // Broker -> worker command envelope (activation-codes.md, page commands).
+                assert!(
+                    frame["id"].is_string()
+                        && frame["op"].is_string()
+                        && frame["email"].is_string()
+                );
+            } else if !message.ends_with("challenge") {
                 assert!(frame["ok"].is_boolean(), "{}: no ok flag", s(entry, "file"));
             }
         }

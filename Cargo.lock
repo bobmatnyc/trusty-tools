@@ -11697,6 +11697,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-browser"
+version = "0.7.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hmac 0.12.1",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "trusty-channels"
 version = "0.2.2"
 dependencies = [
