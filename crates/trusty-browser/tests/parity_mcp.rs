@@ -126,7 +126,11 @@ impl Mcp {
                 }
             }
         });
-        Mcp { child, stdin, lines }
+        Mcp {
+            child,
+            stdin,
+            lines,
+        }
     }
 
     fn send(&mut self, line: &str) {
@@ -154,7 +158,9 @@ fn uuid4_like(s: &str) -> bool {
         && [8, 13, 18, 23].iter().all(|&i| b[i] == b'-')
         && b[14] == b'4'
         && b"89ab".contains(&b[19])
-        && s.bytes().enumerate().all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit())
+        && s.bytes()
+            .enumerate()
+            .all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit())
 }
 
 /// Replace each `"request_id": "<36-char uuid4>"` with `<uuid4>`, collecting the ids.
@@ -181,7 +187,12 @@ struct Roots {
 
 impl Roots {
     fn norm(&self, text: &str, seen: &mut Vec<String>) -> String {
-        mask_uuids(&text.replace(&self.real, "<REALROOT>").replace(&self.shown, "<ROOT>"), seen)
+        mask_uuids(
+            &text
+                .replace(&self.real, "<REALROOT>")
+                .replace(&self.shown, "<ROOT>"),
+            seen,
+        )
     }
 }
 
@@ -218,11 +229,16 @@ fn replay(name: &str, args: &[&str], broker: &FakeBroker, roots: &Roots) -> Vec<
             .iter()
             .map(|f| {
                 let request = common::s(f, "request").to_owned();
-                (request, f.get("reply").and_then(Json::as_str).map(str::to_owned))
+                (
+                    request,
+                    f.get("reply").and_then(Json::as_str).map(str::to_owned),
+                )
             })
             .collect();
-        let got: Vec<(String, Option<String>)> =
-            frames.into_iter().map(|(r, rep)| (roots.norm(&r, &mut seen), rep)).collect();
+        let got: Vec<(String, Option<String>)> = frames
+            .into_iter()
+            .map(|(r, rep)| (roots.norm(&r, &mut seen), rep))
+            .collect();
         assert_eq!(got, want, "{name} step {n}: agent.sock frames for {send}");
     }
     mcp.finish();
@@ -262,7 +278,7 @@ fn make_root(base: &Path) -> PathBuf {
     // SAFETY: a NUL-terminated path.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0, "mkfifo");
     fs::write(root.join("locked"), b"x").expect("write");
-    fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0)).expect("chmod");
+    fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o000)).expect("chmod");
     root
 }
 
@@ -273,7 +289,11 @@ fn tools_list_and_initialize_are_byte_identical() {
     let dir = private_dir();
     let state = dir.path().to_str().expect("utf-8").to_owned();
     let cred = dir.path().join("cred.json");
-    fs::write(&cred, br#"{"workflow": "fixture", "ticket": "plain-ticket"}"#).expect("write");
+    fs::write(
+        &cred,
+        br#"{"workflow": "fixture", "ticket": "plain-ticket"}"#,
+    )
+    .expect("write");
     fs::set_permissions(&cred, fs::Permissions::from_mode(0o600)).expect("chmod");
     let broker = FakeBroker::start(&dir.path().join("agent.sock"));
     for mode in ["connect", "workflow"] {
@@ -289,7 +309,10 @@ fn tools_list_and_initialize_are_byte_identical() {
             let want = read(&format!("mcp/{mode}.{fixture}.json"));
             let mut got = mcp.recv().into_bytes();
             got.push(b'\n');
-            assert_eq!(got, want, "{mode} {fixture} differs from the Python fixture");
+            assert_eq!(
+                got, want,
+                "{mode} {fixture} differs from the Python fixture"
+            );
         }
         mcp.finish();
     }
@@ -301,12 +324,21 @@ fn connect_exchange_replays_byte_identically() {
     let root = make_root(dir.path());
     let roots = Roots {
         shown: root.to_str().expect("utf-8").to_owned(),
-        real: fs::canonicalize(&root).expect("realpath").to_str().expect("utf-8").to_owned(),
+        real: fs::canonicalize(&root)
+            .expect("realpath")
+            .to_str()
+            .expect("utf-8")
+            .to_owned(),
     };
     let state = dir.path().join("state");
     fs::create_dir(&state).expect("mkdir");
     let broker = FakeBroker::start(&state.join("agent.sock"));
-    let args = ["--state", state.to_str().expect("utf-8"), "--upload-root", &roots.shown];
+    let args = [
+        "--state",
+        state.to_str().expect("utf-8"),
+        "--upload-root",
+        &roots.shown,
+    ];
     let fresh = replay("connect", &args, &broker, &roots);
     fs::set_permissions(root.join("locked"), fs::Permissions::from_mode(0o600)).expect("chmod");
     // Each omitted request_id was a new uuid4 (plan section 3, item 14).
@@ -325,14 +357,23 @@ fn noroot_exchange_replays_byte_identically() {
         shown: "<unused>".into(),
         real: "<unused>".into(),
     };
-    replay("noroot", &["--state", dir.path().to_str().expect("utf-8")], &broker, &roots);
+    replay(
+        "noroot",
+        &["--state", dir.path().to_str().expect("utf-8")],
+        &broker,
+        &roots,
+    );
 }
 
 #[test]
 fn workflow_exchange_replays_byte_identically() {
     let dir = private_dir();
     let cred = dir.path().join("cred.json");
-    fs::write(&cred, br#"{"workflow": "fixture", "ticket": "plain-ticket"}"#).expect("write");
+    fs::write(
+        &cred,
+        br#"{"workflow": "fixture", "ticket": "plain-ticket"}"#,
+    )
+    .expect("write");
     fs::set_permissions(&cred, fs::Permissions::from_mode(0o600)).expect("chmod");
     let broker = FakeBroker::start(&dir.path().join("agent.sock"));
     let roots = Roots {
@@ -342,7 +383,12 @@ fn workflow_exchange_replays_byte_identically() {
     let state = dir.path().to_str().expect("utf-8");
     let fresh = replay(
         "workflow",
-        &["--state", state, "--credential", cred.to_str().expect("utf-8")],
+        &[
+            "--state",
+            state,
+            "--credential",
+            cred.to_str().expect("utf-8"),
+        ],
         &broker,
         &roots,
     );
@@ -358,7 +404,11 @@ fn validation_matches_pydantic_for_every_captured_case() {
         let tool = common::s(row, "tool");
         let args = row.get("arguments").expect("arguments");
         // Python ints are unbounded; this port stops at u64 (module doc of mcp_args).
-        if args.dumps(false).ok().is_some_and(|a| a.contains(&"1".repeat(30))) {
+        if args
+            .dumps(false)
+            .ok()
+            .is_some_and(|a| a.contains(&"1".repeat(30)))
+        {
             continue;
         }
         let spec = CONNECT
@@ -371,7 +421,11 @@ fn validation_matches_pydantic_for_every_captured_case() {
             (Some(ok), None) => {
                 let got = got.unwrap_or_else(|e| panic!("{tool} {args:?}: {e}"));
                 let got = Json::object(got);
-                assert_eq!(got.dumps(false).ok(), ok.dumps(false).ok(), "{tool} {args:?}");
+                assert_eq!(
+                    got.dumps(false).ok(),
+                    ok.dumps(false).ok(),
+                    "{tool} {args:?}"
+                );
             }
             (None, Some(err)) => assert_eq!(got.err().as_deref(), Some(err), "{tool} {args:?}"),
             _ => panic!("bad row {row:?}"),
@@ -387,7 +441,10 @@ fn run_status(args: &[&str]) -> (Option<i32>, String) {
         .stdin(Stdio::null())
         .output()
         .expect("run");
-    (out.status.code(), String::from_utf8_lossy(&out.stderr).into_owned())
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
 }
 
 #[test]
@@ -395,17 +452,34 @@ fn bad_flags_and_credentials_are_refused() {
     let dir = private_dir();
     let state = dir.path().to_str().expect("utf-8");
     let missing = dir.path().join("nope");
-    let (code, err) = run_status(&["--state", state, "--upload-root", missing.to_str().expect("utf-8")]);
+    let (code, err) = run_status(&[
+        "--state",
+        state,
+        "--upload-root",
+        missing.to_str().expect("utf-8"),
+    ]);
     assert_eq!(code, Some(2));
     assert!(err.contains("is not a directory"), "{err}");
     let (code, err) = run_status(&["--state", state, "--workflow", "Bad"]);
-    assert_eq!((code, err.contains("invalid workflow name")), (Some(2), true), "{err}");
+    assert_eq!(
+        (code, err.contains("invalid workflow name")),
+        (Some(2), true),
+        "{err}"
+    );
     let (code, _) = run_status(&["--state", state, "--workflow", "a", "--credential", "x"]);
     assert_eq!(code, Some(2));
     let cred = dir.path().join("cred.json");
     fs::write(&cred, br#"{"workflow": "w", "ticket": "t"}"#).expect("write");
     fs::set_permissions(&cred, fs::Permissions::from_mode(0o644)).expect("chmod");
-    let (code, err) = run_status(&["--state", state, "--credential", cred.to_str().expect("utf-8")]);
+    let (code, err) = run_status(&[
+        "--state",
+        state,
+        "--credential",
+        cred.to_str().expect("utf-8"),
+    ]);
     assert_eq!(code, Some(1));
-    assert!(err.contains("Use an owner-only workflow credential file (0600)"), "{err}");
+    assert!(
+        err.contains("Use an owner-only workflow credential file (0600)"),
+        "{err}"
+    );
 }

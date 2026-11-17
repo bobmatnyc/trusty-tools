@@ -51,7 +51,9 @@ fn usage_error(msg: &str) -> ExitCode {
 /// `[a-z0-9][a-z0-9_-]{0,63}`.
 fn workflow_name_ok(name: &str) -> bool {
     let b = name.as_bytes();
-    let first = b.first().is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    let first = b
+        .first()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
     first
         && b.len() <= 64
         && b.iter()
@@ -95,7 +97,10 @@ fn open_workflow(state: &Path, credential: &Path) -> anyhow::Result<WorkflowWire
     let mut wire = WorkflowWire::connect(&state.join("agent.sock"))?;
     wire.call(
         "open",
-        vec![("workflow", Json::Str(workflow)), ("ticket", Json::Str(ticket))],
+        vec![
+            ("workflow", Json::Str(workflow)),
+            ("ticket", Json::Str(ticket)),
+        ],
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     Ok(wire)

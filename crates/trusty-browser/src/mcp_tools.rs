@@ -59,10 +59,20 @@ const fn tool(
 /// Connect mode, in Python's registration order.
 pub const CONNECT: &[Tool] = &[
     tool("browser_profiles", &[], "", &[]),
-    tool("browser_connect", &[field("profile", K::OptStr, D::Null)], "", &[]),
+    tool(
+        "browser_connect",
+        &[field("profile", K::OptStr, D::Null)],
+        "",
+        &[],
+    ),
     tool("browser_disconnect", &[], "", &[]),
     tool("browser_tabs", &[], "tabs", &[]),
-    tool("browser_select", &[field("tab", K::Int, D::Required)], "select", &["tab"]),
+    tool(
+        "browser_select",
+        &[field("tab", K::Int, D::Required)],
+        "select",
+        &["tab"],
+    ),
     tool("browser_switch", &[LEASE], "switch", &["lease"]),
     tool(
         "page_read",
@@ -74,7 +84,13 @@ pub const CONNECT: &[Tool] = &[
             field("include_text", K::Bool, D::Bool(false)),
         ],
         "page_read",
-        &["lease", "scope_ref", "max_chars", "viewport_only", "include_text"],
+        &[
+            "lease",
+            "scope_ref",
+            "max_chars",
+            "viewport_only",
+            "include_text",
+        ],
     ),
     tool(
         "page_find",
@@ -95,7 +111,12 @@ pub const CONNECT: &[Tool] = &[
         "page_click",
         &["lease", "ref", "request_id", "dialog"],
     ),
-    tool("page_hover", &[LEASE, REF, RID], "page_hover", &["lease", "ref", "request_id"]),
+    tool(
+        "page_hover",
+        &[LEASE, REF, RID],
+        "page_hover",
+        &["lease", "ref", "request_id"],
+    ),
     tool(
         "page_drag",
         &[LEASE, REF, field("target", K::Str, D::Required), RID],
@@ -144,9 +165,24 @@ pub const CONNECT: &[Tool] = &[
         "page_navigate",
         &["lease", "url", "request_id"],
     ),
-    tool("page_back", &[LEASE, RID], "page_back", &["lease", "request_id"]),
-    tool("page_forward", &[LEASE, RID], "page_forward", &["lease", "request_id"]),
-    tool("page_reload", &[LEASE, RID], "page_reload", &["lease", "request_id"]),
+    tool(
+        "page_back",
+        &[LEASE, RID],
+        "page_back",
+        &["lease", "request_id"],
+    ),
+    tool(
+        "page_forward",
+        &[LEASE, RID],
+        "page_forward",
+        &["lease", "request_id"],
+    ),
+    tool(
+        "page_reload",
+        &[LEASE, RID],
+        "page_reload",
+        &["lease", "request_id"],
+    ),
     tool(
         "page_upload",
         &[LEASE, REF, field("paths", K::ListStr, D::Required), RID],
@@ -160,7 +196,12 @@ pub const CONNECT: &[Tool] = &[
 /// Workflow mode (`add_tab_tools`).
 pub const WORKFLOW: &[Tool] = &[
     tool("browser_claim", &[], "claim", &[]),
-    tool("browser_snapshot", &[LEASE, RID], "snapshot", &["lease", "request_id"]),
+    tool(
+        "browser_snapshot",
+        &[LEASE, RID],
+        "snapshot",
+        &["lease", "request_id"],
+    ),
     tool(
         "browser_click",
         &[LEASE, field("marker", K::Str, D::Required), RID],
@@ -191,7 +232,10 @@ pub type Outcome = Result<Json, String>;
 
 fn error_text(tool: &str, frame: &Json) -> String {
     // Python `Refused`: one compact ensure_ascii JSON frame.
-    format!("Error executing tool {tool}: {}", frame.dumps(true).unwrap_or_default())
+    format!(
+        "Error executing tool {tool}: {}",
+        frame.dumps(true).unwrap_or_default()
+    )
 }
 
 impl Server {
@@ -221,9 +265,10 @@ impl Server {
                     "browser_profiles" => session.profiles(),
                     "browser_disconnect" => Ok(session.disconnect()),
                     "browser_connect" => match get("profile") {
-                        Some(Json::Str(p)) if p.is_empty() => {
-                            Err(local("InvalidRequest", "profile must be a non-empty string"))
-                        }
+                        Some(Json::Str(p)) if p.is_empty() => Err(local(
+                            "InvalidRequest",
+                            "profile must be a non-empty string",
+                        )),
                         Some(Json::Str(p)) => session.connect(Some(&p)),
                         _ => session.connect(None),
                     },

@@ -46,7 +46,12 @@ impl ReplyError {
             ReplyError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 "Trusty Browser closed the connection".to_owned()
             }
-            ReplyError::Io(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+            ReplyError::Io(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
                 "timed out".to_owned()
             }
             ReplyError::Io(e) => match e.raw_os_error() {
@@ -78,7 +83,8 @@ fn request_body(frame: &Json) -> Option<Vec<u8>> {
 
 /// Send one request and read one reply (Python `read_reply`).
 fn exchange(wire: &mut UnixStream, body: &[u8]) -> Result<Json, ReplyError> {
-    let size = u32::try_from(body.len()).map_err(|_| ReplyError::Msg("Trusty Browser request is too large"))?;
+    let size = u32::try_from(body.len())
+        .map_err(|_| ReplyError::Msg("Trusty Browser request is too large"))?;
     let mut out = size.to_ne_bytes().to_vec();
     out.extend_from_slice(body);
     wire.write_all(&out).map_err(ReplyError::Io)?;
@@ -90,7 +96,8 @@ fn exchange(wire: &mut UnixStream, body: &[u8]) -> Result<Json, ReplyError> {
     }
     let mut payload = vec![0u8; size];
     read_full(wire, &mut payload, "Trusty Browser reply was interrupted")?;
-    let reply = Json::parse(&payload).map_err(|_| ReplyError::Msg("Invalid Trusty Browser reply"))?;
+    let reply =
+        Json::parse(&payload).map_err(|_| ReplyError::Msg("Invalid Trusty Browser reply"))?;
     match reply.get("ok") {
         Some(Json::Bool(_)) => Ok(reply),
         _ => Err(ReplyError::Msg("Invalid Trusty Browser reply")),
@@ -155,7 +162,8 @@ impl CodeSession {
 
     /// One frame on the held connection; a failure drops it.
     fn send(&mut self, frame: &Json) -> Result<Json, Json> {
-        let body = request_body(frame).ok_or_else(|| local("InvalidRequest", "The request is too large"))?;
+        let body = request_body(frame)
+            .ok_or_else(|| local("InvalidRequest", "The request is too large"))?;
         let Some(wire) = self.wire.as_mut() else {
             return Err(Self::unavailable());
         };
@@ -217,7 +225,10 @@ impl CodeSession {
         if reply.get("ok") != Some(&Json::Bool(true)) {
             if reply.get("error").and_then(Json::as_str) == Some("GrantEnded") {
                 self.wire = None; // The broker closes the socket after this frame.
-                let reason = reply.get("reason").and_then(Json::as_str).unwrap_or("unknown");
+                let reason = reply
+                    .get("reason")
+                    .and_then(Json::as_str)
+                    .unwrap_or("unknown");
                 self.ended = Some(reason.to_owned());
             }
             return Err(reply);

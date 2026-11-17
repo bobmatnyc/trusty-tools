@@ -56,7 +56,10 @@ fn realpath(p: &Path) -> PathBuf {
     let mut cur = p.to_path_buf();
     loop {
         if let Ok(real) = fs::canonicalize(&cur) {
-            return tail.iter().rev().fold(real, |acc: PathBuf, c: &std::ffi::OsString| acc.join(c));
+            return tail
+                .iter()
+                .rev()
+                .fold(real, |acc: PathBuf, c: &std::ffi::OsString| acc.join(c));
         }
         match (cur.file_name().map(ToOwned::to_owned), cur.parent()) {
             (Some(name), Some(parent)) => {
@@ -70,7 +73,9 @@ fn realpath(p: &Path) -> PathBuf {
 
 /// `PurePosixPath(raw).parts`, without the root: `.` and empty parts dropped.
 fn parts(raw: &str) -> Vec<&str> {
-    raw.split('/').filter(|c| !c.is_empty() && *c != ".").collect()
+    raw.split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect()
 }
 
 /// The components of `raw` below `root` (Python `_inside`).
@@ -92,7 +97,9 @@ fn inside(root: &Path, raw: &str) -> Result<Vec<String>, &'static str> {
             None => ("", raw),
         };
         let parent = realpath(Path::new(dir));
-        let below = parent.strip_prefix(root).map_err(|_| "is outside the upload root")?;
+        let below = parent
+            .strip_prefix(root)
+            .map_err(|_| "is outside the upload root")?;
         let mut rel: Vec<String> = below
             .components()
             .filter_map(|c| match c {
@@ -103,7 +110,10 @@ fn inside(root: &Path, raw: &str) -> Result<Vec<String>, &'static str> {
         rel.push(base.to_owned());
         rel
     };
-    let comps: Vec<String> = rel.into_iter().filter(|c| !c.is_empty() && c != ".").collect();
+    let comps: Vec<String> = rel
+        .into_iter()
+        .filter(|c| !c.is_empty() && c != ".")
+        .collect();
     if comps.is_empty() {
         return Err("is not a regular file");
     }
@@ -129,14 +139,26 @@ enum Read {
 
 /// Open `comps` below `root` with no symlink followed and read at most `limit` bytes.
 fn read_below(root: &Path, comps: &[String], limit: usize) -> io::Result<Read> {
-    let root_s = root.to_str().ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let root_s = root
+        .to_str()
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
     let mut dir = openat(None, root_s, libc::O_RDONLY | libc::O_DIRECTORY)?;
-    let (leaf, dirs) = comps.split_last().ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
+    let (leaf, dirs) = comps
+        .split_last()
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::ENOENT))?;
     for comp in dirs {
-        dir = openat(Some(&dir), comp, libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW)?;
+        dir = openat(
+            Some(&dir),
+            comp,
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
+        )?;
     }
     // O_NONBLOCK: opening a FIFO must not hang the tool.
-    let fd = openat(Some(&dir), leaf, libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK)?;
+    let fd = openat(
+        Some(&dir),
+        leaf,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+    )?;
     let file = fs::File::from(fd);
     if !file.metadata()?.file_type().is_file() {
         return Ok(Read::NotRegular);
@@ -157,7 +179,12 @@ fn entry(raw: &Json, root: Option<&Path>, budget: usize) -> Result<(Json, usize)
     let root = root.ok_or_else(|| local("UploadsDisabled", UPLOADS_DISABLED))?;
     let raw = match raw {
         Json::Str(s) if !s.is_empty() && !s.contains('\0') => s.as_str(),
-        _ => return Err(local("InvalidRequest", "paths must be non-empty file path strings")),
+        _ => {
+            return Err(local(
+                "InvalidRequest",
+                "paths must be non-empty file path strings",
+            ));
+        }
     };
     let refuse = |reason: &str| local("FileRefused", format!("{raw}: {reason}"));
     let comps = inside(root, raw).map_err(refuse)?;
@@ -175,7 +202,9 @@ fn entry(raw: &Json, root: Option<&Path>, budget: usize) -> Result<(Json, usize)
     };
     if data.len() > budget {
         if budget < UPLOAD_MAX {
-            return Err(refuse(&format!("puts the upload over {UPLOAD_MAX} bytes in total")));
+            return Err(refuse(&format!(
+                "puts the upload over {UPLOAD_MAX} bytes in total"
+            )));
         }
         return Err(refuse(&format!("is larger than {UPLOAD_MAX} bytes")));
     }

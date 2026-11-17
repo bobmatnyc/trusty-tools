@@ -66,8 +66,14 @@ fn initialize(id: &Json, params: Option<&Json>) -> String {
     let client = params.get("clientInfo");
     let shaped = version.is_some()
         && matches!(params.get("capabilities"), Some(Json::Object(_)))
-        && client.and_then(|c| c.get("name")).and_then(Json::as_str).is_some()
-        && client.and_then(|c| c.get("version")).and_then(Json::as_str).is_some();
+        && client
+            .and_then(|c| c.get("name"))
+            .and_then(Json::as_str)
+            .is_some()
+        && client
+            .and_then(|c| c.get("version"))
+            .and_then(Json::as_str)
+            .is_some();
     let Some(version) = version.filter(|_| shaped) else {
         return invalid_params(id);
     };

@@ -109,7 +109,13 @@ impl Json {
         Ok(out)
     }
 
-    fn write(&self, out: &mut String, st: Style, ascii: bool, depth: usize) -> Result<(), NonFinite> {
+    fn write(
+        &self,
+        out: &mut String,
+        st: Style,
+        ascii: bool,
+        depth: usize,
+    ) -> Result<(), NonFinite> {
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(true) => out.push_str("true"),
@@ -154,9 +160,21 @@ struct Style {
 }
 
 impl Style {
-    const COMPACT: Style = Style { item: ",", key: ":", indent: None };
-    const SPACED: Style = Style { item: ", ", key: ": ", indent: None };
-    const INDENT2: Style = Style { item: ",", key: ": ", indent: Some(2) };
+    const COMPACT: Style = Style {
+        item: ",",
+        key: ":",
+        indent: None,
+    };
+    const SPACED: Style = Style {
+        item: ", ",
+        key: ": ",
+        indent: None,
+    };
+    const INDENT2: Style = Style {
+        item: ",",
+        key: ": ",
+        indent: Some(2),
+    };
 
     /// Before item `i` of a container whose items sit at `depth`.
     fn item(self, out: &mut String, i: usize, depth: usize) {

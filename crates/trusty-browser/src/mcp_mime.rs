@@ -32,7 +32,8 @@ fn maps() -> &'static Maps {
         };
         for line in TABLE.lines().filter(|l| !l.starts_with('#')) {
             let mut cols = line.split('\t');
-            let (Some(kind), Some(key), Some(value)) = (cols.next(), cols.next(), cols.next()) else {
+            let (Some(kind), Some(key), Some(value)) = (cols.next(), cols.next(), cols.next())
+            else {
                 continue;
             };
             let map = match kind {
@@ -70,7 +71,8 @@ fn url_path(url: &str) -> (String, &str) {
     let (scheme, rest) = match url.split_once(':') {
         Some((s, rest))
             if s.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-                && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b)) =>
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b)) =>
         {
             (s.to_ascii_lowercase(), rest)
         }
@@ -111,7 +113,9 @@ pub fn guess_type(name: &str) -> Option<String> {
         let (_, e) = splitext(&base);
         ext = e.to_owned();
     }
-    m.types.get(ext.to_lowercase().as_str()).map(|t| (*t).to_owned())
+    m.types
+        .get(ext.to_lowercase().as_str())
+        .map(|t| (*t).to_owned())
 }
 
 #[cfg(test)]

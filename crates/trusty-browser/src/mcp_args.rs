@@ -84,7 +84,11 @@ struct Issue {
 /// Why/What: see the module doc. Keys not in `fields` are ignored but still
 /// appear in a `missing` error's `input_value`, as in pydantic.
 /// Test: `validation_matches_pydantic_for_every_captured_case`.
-pub fn validate(tool: &str, fields: &[Field], args: &Json) -> Result<Vec<(&'static str, Json)>, String> {
+pub fn validate(
+    tool: &str,
+    fields: &[Field],
+    args: &Json,
+) -> Result<Vec<(&'static str, Json)>, String> {
     let empty = Vec::new();
     let items = match args {
         Json::Object(items) => items,
@@ -130,7 +134,8 @@ fn pre_parse(v: &Json) -> Json {
         return v.clone();
     };
     match Json::parse(s.as_bytes()) {
-        Ok(Json::Str(_) | Json::Int(_) | Json::UInt(_) | Json::Float(_) | Json::Bool(_)) | Err(_) => v.clone(),
+        Ok(Json::Str(_) | Json::Int(_) | Json::UInt(_) | Json::Float(_) | Json::Bool(_))
+        | Err(_) => v.clone(),
         Ok(other) => other,
     }
 }
@@ -209,7 +214,9 @@ fn int(v: &Json) -> Result<Json, Fail> {
     match v {
         Json::Int(_) | Json::UInt(_) => Ok(v.clone()),
         Json::Bool(b) => Ok(Json::Int(i64::from(*b))),
-        Json::Float(f) if !f.is_finite() => Err(("finite_number", "Input should be a finite number")),
+        Json::Float(f) if !f.is_finite() => {
+            Err(("finite_number", "Input should be a finite number"))
+        }
         Json::Float(f) if f.fract() != 0.0 => Err((
             "int_from_float",
             "Input should be a valid integer, got a number with a fractional part",
@@ -246,7 +253,11 @@ fn str_int(s: &str) -> Result<Json, Fail> {
         return Err(INT_PARSING);
     }
     let clean: String = digits.chars().filter(|c| *c != '_').collect();
-    let signed = if neg { format!("-{clean}") } else { clean.clone() };
+    let signed = if neg {
+        format!("-{clean}")
+    } else {
+        clean.clone()
+    };
     if let Ok(i) = signed.parse::<i64>() {
         return Ok(Json::Int(i));
     }
@@ -356,7 +367,11 @@ pub fn repr(v: &Json) -> String {
 
 /// Python `str.__repr__`.
 fn str_repr(s: &str) -> String {
-    let quote = if s.contains('\'') && !s.contains('"') { '"' } else { '\'' };
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
     let mut out = String::new();
     out.push(quote);
     for c in s.chars() {
@@ -407,7 +422,10 @@ mod tests {
     fn repr_picks_quotes_and_escapes_like_python() {
         assert_eq!(str_repr("a'b"), "\"a'b\"");
         assert_eq!(str_repr("a'b\"c"), "'a\\'b\"c'");
-        assert_eq!(str_repr("\u{0}\u{7f}\u{a0}\u{200b}\u{1F600}"), "'\\x00\\x7f\\xa0\\u200b\u{1F600}'");
+        assert_eq!(
+            str_repr("\u{0}\u{7f}\u{a0}\u{200b}\u{1F600}"),
+            "'\\x00\\x7f\\xa0\\u200b\u{1F600}'"
+        );
     }
 
     #[test]
@@ -416,6 +434,9 @@ mod tests {
         assert_eq!(truncate(&s).chars().count(), 52);
         // Bytes, not characters: a two-byte 'é' in the tail leaves 23 characters.
         let s = format!("{}é{}", "x".repeat(40), "y".repeat(22));
-        assert_eq!(truncate(&s), format!("{}...é{}", "x".repeat(25), "y".repeat(22)));
+        assert_eq!(
+            truncate(&s),
+            format!("{}...é{}", "x".repeat(25), "y".repeat(22))
+        );
     }
 }
