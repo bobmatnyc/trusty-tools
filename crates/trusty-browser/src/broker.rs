@@ -353,13 +353,40 @@ impl Broker {
 async fn accept_loop(core: Arc<Core>, listener: UnixListener, name: &'static str) {
     let mut conns = JoinSet::new();
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            tokio::task::yield_now().await;
-            continue;
-        };
+        let (stream, _) = accept_next(|| listener.accept()).await;
         let core = Arc::clone(&core);
         conns.spawn(handle(core, stream, name));
         while conns.try_join_next().is_some() {}
+    }
+}
+
+/// CPython asyncio `constants.ACCEPT_RETRY_DELAY`, in seconds.
+pub const ACCEPT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Why: a persistent accept error such as EMFILE must not spin the runtime.
+/// What: accept until one call succeeds. On EMFILE, ENFILE, ENOBUFS or ENOMEM
+/// wait [`ACCEPT_RETRY_DELAY`] first, as CPython's `selector_events`
+/// `_accept_connection` does; any other error retries at once, as there.
+/// Test: `accept_waits_the_retry_delay_after_emfile` in this file.
+async fn accept_next<T, F, Fut>(mut accept: F) -> T
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    loop {
+        match accept().await {
+            Ok(v) => return v,
+            // #11440: Python `call_later(ACCEPT_RETRY_DELAY, _start_serving)`.
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM)
+                ) =>
+            {
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+            }
+            Err(_) => tokio::task::yield_now().await,
+        }
     }
 }
 
@@ -410,4 +437,28 @@ pub fn refused(
         .and_then(crate::audit::email_domain);
     core.audit.refuse(site, reason, profile, domain.as_deref());
     crate::refusal::Refusal::new("Unauthorized").with("reason", reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accept_waits_the_retry_delay_after_emfile() {
+        let mut calls = 0;
+        let start = std::time::Instant::now();
+        let got = accept_next(|| {
+            calls += 1;
+            let r = if calls == 1 {
+                Err(io::Error::from_raw_os_error(libc::EMFILE))
+            } else {
+                Ok(calls)
+            };
+            async move { r }
+        })
+        .await;
+        assert_eq!(got, 2);
+        let waited = start.elapsed();
+        assert!(waited >= ACCEPT_RETRY_DELAY, "retried after {waited:?}");
+    }
 }

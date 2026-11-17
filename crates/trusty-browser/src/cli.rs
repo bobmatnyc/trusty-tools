@@ -137,6 +137,11 @@ fn store() -> Box<dyn crate::vault::KeyStore> {
 #[cfg(feature = "test-seams")]
 pub const TEST_SEAMS_ENV: &str = "TRUSTY_BROWSER_TEST_SEAMS";
 
+/// Stderr banner `serve` prints when the test seams are active.
+#[cfg(feature = "test-seams")]
+pub const TEST_SEAMS_BANNER: &str =
+    "trusty-browser: TEST SEAMS ACTIVE (open enrollment check, in-memory keys); not for real use";
+
 /// Production options; nothing in the environment can change them.
 #[cfg(not(feature = "test-seams"))]
 fn serve_options(state: &Path) -> crate::broker::BrokerOptions {
@@ -162,6 +167,7 @@ fn serve_options(state: &Path) -> crate::broker::BrokerOptions {
         }
     }
     if std::env::var_os(TEST_SEAMS_ENV).is_some_and(|v| v == "1") {
+        eprintln!("{TEST_SEAMS_BANNER}");
         let mut o =
             crate::broker::BrokerOptions::new(state, Box::new(crate::vault::MemoryKeyStore::new()));
         o.host_check = std::sync::Arc::new(Open);
@@ -221,8 +227,18 @@ fn launchd_layout(state: &Path) -> Result<crate::launchd::Layout, String> {
     })
 }
 
+/// Refusal printed by a `test-seams` build asked to register itself.
+#[cfg(feature = "test-seams")]
+pub const TEST_BUILD_REFUSAL: &str = "test build; refusing to register";
+
 fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
     let e = |e: std::io::Error| e.to_string();
+    // #11440: a `cargo test` binary carries the seams; never let launchd or
+    // Chrome run it through `current_exe()`.
+    #[cfg(feature = "test-seams")]
+    if matches!(command, Command::InstallHost | Command::InstallService) {
+        return Err(TEST_BUILD_REFUSAL.to_owned());
+    }
     match command {
         Command::Grants => operator(state, "grants", None),
         Command::RevokeGrants => operator(state, "revoke-grants", None),

@@ -411,3 +411,28 @@ fn uninstall_service_replaces_a_python_registration() {
         launchd::launch_configuration(&l.exe, &l.state).expect("render")
     );
 }
+
+/// A loaded Python broker is restarted on our plist, not left running.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_over_a_loaded_python_job_restarts_it() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    python_registration(&l);
+    let plist = plist_path(dir.path());
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
+    launchd::manage(&l, true, &ctl).expect("install");
+    assert_eq!(ctl.verbs(), vec!["print", "bootout", "bootstrap"]);
+    assert_eq!(
+        ctl.calls.borrow()[2],
+        vec![
+            "bootstrap".to_owned(),
+            "gui/501".to_owned(),
+            plist.display().to_string()
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(&plist).expect("plist"),
+        launchd::launch_configuration(&l.exe, &l.state).expect("render")
+    );
+}

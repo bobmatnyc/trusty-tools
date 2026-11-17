@@ -174,9 +174,13 @@ fn extension_path_prints_path_and_notice() {
 #[test]
 fn default_state_and_install_host_live_under_home() {
     let home = common::state_dir();
-    let out = run(home.path(), &["install-host"]);
-    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    // A test build refuses the `install-host` verb (#11440), so this drives the
+    // library call the verb makes, with the binary as the registered exe.
     let real = std::fs::canonicalize(home.path()).expect("canon");
+    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_trusty-browser")).expect("exe");
+    let dir = trusty_browser::install_host::default_directory(home.path()).expect("dir");
+    let manifest = trusty_browser::install_host::install(&real.join(".trusty/browser"), &dir, &exe)
+        .expect("install");
     let hosts = if cfg!(target_os = "macos") {
         "Library/Application Support/Google/Chrome/NativeMessagingHosts"
     } else {
@@ -184,15 +188,11 @@ fn default_state_and_install_host_live_under_home() {
     };
     // Python prints the unresolved home-relative manifest path.
     assert_eq!(
-        text(&out.stdout),
-        format!(
-            "{}/{hosts}/com.trusty.browser.json\n",
-            home.path().display()
-        )
+        manifest,
+        home.path().join(hosts).join("com.trusty.browser.json")
     );
     let launcher =
         std::fs::read_to_string(real.join(".trusty/browser/chrome-native-host")).expect("launcher");
-    let exe = std::fs::canonicalize(env!("CARGO_BIN_EXE_trusty-browser")).expect("exe");
     assert!(launcher.starts_with(&format!(
         "#!/bin/sh\nexec {} native-host --socket ",
         exe.display()
@@ -217,4 +217,49 @@ fn revoke_offline_without_a_route_is_a_no_op() {
         (Some(0), String::new())
     );
     assert!(st.join("registry.sqlite3").is_file());
+}
+
+/// A test build carries the seams, so it never registers itself with Chrome.
+#[test]
+fn a_test_build_refuses_to_register() {
+    let home = common::state_dir();
+    // `install-service` shares the guard; it is not run here because a
+    // regression would reach the real `/bin/launchctl`.
+    let out = run(home.path(), &["install-host"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stderr), "test build; refusing to register\n");
+    assert!(!home.path().join(".trusty").exists());
+    assert!(!home.path().join("Library").exists());
+}
+
+/// `serve` says on stderr that the test seams are active.
+#[test]
+fn serve_with_test_seams_prints_a_banner() {
+    let home = common::state_dir();
+    let st = home.path().join("state");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_trusty-browser"))
+        .args(["--state", st.to_str().expect("utf8"), "serve"])
+        .env("HOME", home.path())
+        .env("TRUSTY_BROWSER_TEST_SEAMS", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut err = child.stderr.take().expect("stderr");
+    let line = std::thread::spawn(move || {
+        let mut buf = [0u8; 256];
+        let n = err.read(&mut buf).unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !line.is_finished() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let got = line.join().expect("reader");
+    assert!(
+        got.starts_with(trusty_browser::cli::TEST_SEAMS_BANNER),
+        "stderr: {got:?}"
+    );
 }

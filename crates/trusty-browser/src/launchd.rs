@@ -287,7 +287,11 @@ pub fn manage(layout: &Layout, install: bool, ctl: &dyn Launchctl) -> Result<(),
             install_host::replace_owned(&plist_path, &configuration, 0o600)?;
         }
         install_host::write_owned(&plist_path, &configuration, 0o600)?;
-        if loaded.code != 0 {
+        // #11440: a loaded Python job keeps running its old plist until booted out.
+        if loaded.code == 0 && present == Presence::Python {
+            checked(ctl, &["bootout", &target])?;
+        }
+        if loaded.code != 0 || present == Presence::Python {
             checked(ctl, &["bootstrap", &domain, &plist_path.to_string_lossy()])?;
         }
     } else {
