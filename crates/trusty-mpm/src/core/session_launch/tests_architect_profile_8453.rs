@@ -25,7 +25,11 @@ fn launch_in(project: &Path, home: &Path) -> (SessionProfile, serde_json::Value,
         true,
         None,
         None,
-        HostInputs::with_home(Some(home)),
+        // #10612: a stable hook exe, so a runner with no installed `tm` launches.
+        HostInputs {
+            hook_exe: Some(Path::new(crate::test_support::STABLE_HOOK_EXE)),
+            ..HostInputs::with_home(Some(home))
+        },
     )
     .expect("the launch prepares");
     let settings = serde_json::from_str(
