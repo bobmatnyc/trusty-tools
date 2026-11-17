@@ -39,11 +39,12 @@ fn project_managed_hook_additions_combines_all_three_sources() {
     let pre = hooks["PreToolUse"]
         .as_array()
         .expect("PreToolUse must be an array");
-    // #8454: plus the egress-guard group, written unconditionally.
+    // #8454: plus the egress-guard group, written unconditionally; #11431:
+    // plus the shadow guard.
     assert_eq!(
         pre.len(),
-        3,
-        "PreToolUse must carry guard + triad + egress groups"
+        4,
+        "PreToolUse must carry guard + triad + egress + shadow groups"
     );
     let pre_commands: Vec<&str> = pre
         .iter()
@@ -919,8 +920,8 @@ fn write_project_hooks_strips_stale_divert_when_disabled() {
     let pre = value["hooks"]["PreToolUse"].as_array().expect("array");
     assert_eq!(
         pre.len(),
-        3,
-        "PM guard + lifecycle triad + egress guard (#8454) must remain: {pre:?}"
+        4,
+        "PM guard + lifecycle triad + egress guard (#8454) + shadow guard (#11431) must remain: {pre:?}"
     );
 }
 

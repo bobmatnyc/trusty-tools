@@ -29,6 +29,7 @@ fn cli_parses_hook_divert_check() {
             egress_guard: false,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));

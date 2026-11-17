@@ -274,6 +274,9 @@ async fn run_ci(
     run_seam(client, project, (clipboard, stdin), ci, seam, args).await
 }
 
+/// The stack of the thread that parses the CLI (#11431).
+const PARSE_STACK_BYTES: usize = 16 << 20;
+
 /// [`run_ci`], with `assign`'s resolver and caller check from `seam` (#11015).
 async fn run_seam(
     client: &OnDemandSecrets,
@@ -283,9 +286,21 @@ async fn run_seam(
     seam: assign::Seam<'_>,
     args: &[&str],
 ) -> Outcome {
-    let argv = ["tm", "secrets"].into_iter().chain(args.iter().copied());
-    let Some(Command::Secrets { action }) = Cli::try_parse_from(argv).expect("parse").command
-    else {
+    let argv: Vec<String> = ["tm", "secrets"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .map(str::to_owned)
+        .collect();
+    // #11431: the debug-build clap parse of the full `tm` CLI needs about 2 MiB
+    // of stack, the whole of a test thread's default; parse on a thread of its own.
+    let cli = std::thread::Builder::new()
+        .stack_size(PARSE_STACK_BYTES)
+        .spawn(move || Cli::try_parse_from(argv))
+        .expect("spawn the parse thread")
+        .join()
+        .expect("the parse thread")
+        .expect("parse");
+    let Some(Command::Secrets { action }) = cli.command else {
         panic!("not a secrets command");
     };
     let sink = LogSink::default();

@@ -380,6 +380,8 @@ pub(crate) mod completion_evidence_hook;
 pub(crate) mod pm_guard_stale_copy;
 // #11398: `tm hook --turn-task`, the PM's per-turn task stamp.
 pub(crate) mod turn_task_hook;
+// #11431: `tm hook --pm-guard-shadow`, the minimal fact-based guard, log-only.
+pub(crate) mod pm_guard_min;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
 // `tm doctor` uses — see its module doc for why the two disagreed.
 pub(crate) mod status_daemon;
