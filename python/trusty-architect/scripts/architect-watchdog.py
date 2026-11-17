@@ -33,7 +33,7 @@ SILENT_MINUTES_DEFAULT = 45
 FROZEN_MIN_DEFAULT = 15    # minutes of transcript silence under a running turn
 RELAUNCH_DEBOUNCE = 1800   # seconds between relaunch attempts
 MAX_FAILURES = 2           # failed relaunches before the watchdog gives up
-RELAUNCH_TIMEOUT = 300     # seconds session-relaunch.sh may take
+RELAUNCH_TIMEOUT = 300     # seconds one `tm architect up` may take (#11367)
 
 
 def silent_minutes():
