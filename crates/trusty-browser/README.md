@@ -65,7 +65,15 @@ file.
    It unseals every pairing with the key before it replaces the Keychain item,
    and refuses a wrong key without changing anything.
 5. `~/.cargo/bin/trusty-browser install-service`. It accepts the files Python
-   wrote, replaces them, and restarts the job on the Rust binary.
+   wrote, replaces them, and restarts the job on the Rust binary. First it
+   signs `~/.cargo/bin/trusty-browser` in place with your Developer ID
+   (identifier `com.trusty.browser`, team 4JH68XUHC5) and verifies it; if
+   signing or verification fails it writes nothing. The identity comes from
+   `--sign-identity`, then `TRUSTY_BROWSER_SIGN_IDENTITY`, then the one
+   matching identity in `security find-identity -v -p codesigning`. The first
+   signing can show a Keychain dialog asking to let `codesign` use the
+   private key; answer it at the desk. Run `install-service` again after each
+   `cargo install` upgrade so the new binary is signed.
 6. Run `trusty-browser pairings` and confirm the same profiles are listed. Point
    your MCP client at `~/.cargo/bin/trusty-browser-mcp`.
 
@@ -73,15 +81,21 @@ Rollback: `trusty-browser uninstall-service`, restore the backups, and
 bootstrap the restored plist. The two brokers never run together: both take
 `service.lock`.
 
-## Pending: Developer ID signing
+## Developer ID signing
 
-`cargo install` produces an ad-hoc signed binary, and its code identity
-changes on every reinstall. The Keychain item's access list is pinned to that
-identity, so a reinstall can bring back a Keychain prompt, and a prompt under
-launchd hangs the broker. A release signed with a stable Developer ID identity
-is pending approval. Until it ships, run the binary once in your GUI session
-after each reinstall and answer **Always Allow**, before relying on the
-launchd job.
+`cargo install` produces an ad-hoc signed binary whose code identity changes
+on every reinstall. The Keychain item's access list trusts the signed
+identity, so `install-service` and `install-host` sign the binary they
+register (see cutover step 5). A Developer ID signed binary keeps that
+identity across rebuilds, so upgrades read the Keychain without a prompt.
+
+`--no-sign` skips signing and prints a warning. Without signing every upgrade
+brings back a Keychain prompt, and a prompt under launchd hangs the broker:
+run the binary once in your GUI session after each reinstall and answer
+**Always Allow** before relying on the launchd job.
+
+`trusty-browser-mcp` is not signed by these verbs: neither launchd nor the
+extension runs it, your MCP client does.
 
 ## License
 

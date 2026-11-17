@@ -11,10 +11,9 @@
 //! with the `launchctl` calls behind [`Launchctl`] so tests never reach the
 //! real `gui/<uid>` domain.
 //!
-//! Signing seam: Developer ID signing is pending approval (plan section 6
-//! item 2). When approved, the codesign step goes in [`manage`] before the
-//! plist is written: verify `exe` carries the stable identity and refuse
-//! otherwise. Until then the job runs whatever binary `cargo install` placed.
+//! Signing: install runs [`crate::codesign::ensure_signed`] on `exe` after
+//! the ownership checks and before any file is written, so a failed sign or
+//! verify leaves no plist or manifest behind (#11440).
 //! Test: `python_plist_renders_byte_identically`, `install_service_writes_files_and_bootstraps`,
 //! `uninstall_service_replaces_a_python_registration` in `tests/install.rs`.
 
@@ -22,6 +21,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::codesign::{Signer, ensure_signed};
 use crate::install_host::{self, Registration};
 
 /// The launchd label.
@@ -244,8 +244,13 @@ fn legacy_for(r: &Registration, state: &Path) -> Box<dyn Fn(&str) -> bool> {
 /// the host registrations, the plist (0600), then `bootstrap` unless already
 /// loaded. Uninstall: `bootout` when loaded, then remove every owned file.
 /// Test: `install_service_writes_files_and_bootstraps`, `uninstall_service_replaces_a_python_registration`,
-/// `install_service_refuses_a_job_owned_elsewhere`.
-pub fn manage(layout: &Layout, install: bool, ctl: &dyn Launchctl) -> Result<(), LaunchdError> {
+/// `install_service_refuses_a_job_owned_elsewhere`, `install_service_writes_nothing_when_signing_fails`.
+pub fn manage(
+    layout: &Layout,
+    install: bool,
+    ctl: &dyn Launchctl,
+    signer: &Signer<'_>,
+) -> Result<(), LaunchdError> {
     if !cfg!(target_os = "macos") {
         return Err(io::Error::other("launchd service installation requires macOS").into());
     }
@@ -274,6 +279,8 @@ pub fn manage(layout: &Layout, install: bool, ctl: &dyn Launchctl) -> Result<(),
         }
     }
     if install {
+        // #11440: sign (or refuse) before writing anything.
+        ensure_signed(&layout.exe, signer)?;
         install_host::mkdir_0700(&agents)?;
         install_host::mkdir_0700(state)?;
         crate::assets::extension_path(state)?;

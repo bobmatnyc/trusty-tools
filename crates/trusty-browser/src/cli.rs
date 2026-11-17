@@ -45,11 +45,11 @@ enum Command {
     /// Print the unpacked Chrome extension directory
     ExtensionPath,
     /// Register both native messaging hosts for Chrome
-    InstallHost,
+    InstallHost(SignArgs),
     /// Print the launchd configuration without installing it
     LaunchdPlist,
     /// Start at login and register the native messaging hosts
-    InstallService,
+    InstallService(SignArgs),
     /// Stop the service and remove its launchd and host registrations
     UninstallService,
     /// List unredeemed activation codes and live grants
@@ -76,6 +76,30 @@ enum Command {
         #[arg(long, required = true)]
         from_stdin: bool,
     },
+}
+
+/// Developer ID signing flags of the install verbs ([`crate::codesign`]).
+#[derive(clap::Args, Clone)]
+struct SignArgs {
+    /// Signing identity (default: $TRUSTY_BROWSER_SIGN_IDENTITY, else the one
+    /// Developer ID Application identity of team 4JH68XUHC5)
+    #[arg(long, conflicts_with = "no_sign")]
+    sign_identity: Option<String>,
+    /// Register the binary unsigned; every upgrade will prompt for the Keychain
+    #[arg(long)]
+    no_sign: bool,
+}
+
+impl SignArgs {
+    /// Flag, then env, then auto-detect (`None`); `--no-sign` skips.
+    fn signing(&self) -> crate::codesign::Signing {
+        use crate::codesign::{IDENTITY_ENV, Signing};
+        if self.no_sign {
+            return Signing::Skip;
+        }
+        let env = std::env::var(IDENTITY_ENV).ok().filter(|v| !v.is_empty());
+        Signing::Sign(self.sign_identity.clone().or(env))
+    }
 }
 
 fn home() -> Result<PathBuf, String> {
@@ -236,7 +260,10 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
     // #11440: a `cargo test` binary carries the seams; never let launchd or
     // Chrome run it through `current_exe()`.
     #[cfg(feature = "test-seams")]
-    if matches!(command, Command::InstallHost | Command::InstallService) {
+    if matches!(
+        command,
+        Command::InstallHost(_) | Command::InstallService(_)
+    ) {
         return Err(TEST_BUILD_REFUSAL.to_owned());
     }
     match command {
@@ -258,16 +285,29 @@ fn dispatch(command: Command, state: &Path) -> Result<ExitCode, String> {
             std::io::stdout().flush().map_err(e)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::InstallHost => {
+        Command::InstallHost(sign) => {
             let dir = crate::install_host::default_directory(&home()?).map_err(e)?;
-            let path = crate::install_host::install(state, &dir, &own_exe()?).map_err(e)?;
+            let signer = crate::codesign::Signer {
+                signing: sign.signing(),
+                tool: &crate::codesign::SystemCodesign,
+            };
+            let path = crate::install_host::install_signed(state, &dir, &own_exe()?, &signer)
+                .map_err(e)?;
             println!("{}", path.display());
             Ok(ExitCode::SUCCESS)
         }
-        Command::InstallService | Command::UninstallService => {
-            let install = matches!(command, Command::InstallService);
+        Command::InstallService(_) | Command::UninstallService => {
+            let signing = match &command {
+                Command::InstallService(sign) => sign.signing(),
+                _ => crate::codesign::Signing::Skip,
+            };
+            let install = matches!(command, Command::InstallService(_));
             let layout = launchd_layout(state)?;
-            crate::launchd::manage(&layout, install, &crate::launchd::SystemLaunchctl)
+            let signer = crate::codesign::Signer {
+                signing,
+                tool: &crate::codesign::SystemCodesign,
+            };
+            crate::launchd::manage(&layout, install, &crate::launchd::SystemLaunchctl, &signer)
                 .map_err(|e| e.to_string())?;
             Ok(ExitCode::SUCCESS)
         }

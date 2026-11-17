@@ -183,6 +183,20 @@ pub fn install(state: &Path, manifest_dir: &Path, exe: &Path) -> io::Result<Path
     Ok(manifest_dir.join(format!("{NAME}.json")))
 }
 
+/// `install-host`: [`crate::codesign::ensure_signed`] on `exe`, then [`install`].
+///
+/// Test: `install_host_writes_nothing_when_signing_fails` in `tests/install.rs`.
+pub fn install_signed(
+    state: &Path,
+    manifest_dir: &Path,
+    exe: &Path,
+    signer: &crate::codesign::Signer<'_>,
+) -> io::Result<PathBuf> {
+    // #11440: a manifest must never name a binary whose signing failed.
+    crate::codesign::ensure_signed(exe, signer)?;
+    install(state, manifest_dir, exe)
+}
+
 /// `install_host.default_directory` under `home`.
 pub fn default_directory(home: &Path) -> io::Result<PathBuf> {
     if cfg!(target_os = "macos") {

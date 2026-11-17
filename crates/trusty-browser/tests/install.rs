@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
 use trusty_browser::assets::{self, EXTENSION_ID};
+use trusty_browser::codesign::{self, Codesign, Signer, Signing};
 use trusty_browser::install_host;
 use trusty_browser::launchd::{self, Launchctl, Layout, Outcome};
 
@@ -281,6 +282,15 @@ fn layout(home: &Path) -> Layout {
     }
 }
 
+/// A signer whose binary already satisfies the requirement.
+fn signed() -> Signer<'static> {
+    let tool: &'static FakeSign = Box::leak(Box::new(FakeSign::new(&[true], Ok(()), "")));
+    Signer {
+        signing: Signing::Sign(None),
+        tool,
+    }
+}
+
 fn plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents/com.trusty.browser.plist")
 }
@@ -291,7 +301,7 @@ fn install_service_writes_files_and_bootstraps() {
     let dir = common::state_dir();
     let l = layout(dir.path());
     let ctl = FakeCtl::new(113, "");
-    launchd::manage(&l, true, &ctl).expect("install");
+    launchd::manage(&l, true, &ctl, &signed()).expect("install");
     let plist = plist_path(dir.path());
     assert_eq!(
         *ctl.calls.borrow(),
@@ -317,7 +327,7 @@ fn install_service_writes_files_and_bootstraps() {
     assert!(hosts.join("com.trusty.browser.enroll.json").is_file());
     // Loaded with our plist: a second install is a no-op that does not bootstrap.
     let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
-    launchd::manage(&l, true, &ctl).expect("reinstall");
+    launchd::manage(&l, true, &ctl, &signed()).expect("reinstall");
     assert_eq!(ctl.verbs(), vec!["print"]);
 }
 
@@ -326,8 +336,8 @@ fn install_service_writes_files_and_bootstraps() {
 fn install_service_refuses_a_job_owned_elsewhere() {
     let dir = common::state_dir();
     let l = layout(dir.path());
-    let err =
-        launchd::manage(&l, true, &FakeCtl::new(0, "path = /elsewhere\n")).expect_err("refused");
+    let err = launchd::manage(&l, true, &FakeCtl::new(0, "path = /elsewhere\n"), &signed())
+        .expect_err("refused");
     assert_eq!(
         err.to_string(),
         "A different launchd job owns com.trusty.browser"
@@ -336,7 +346,7 @@ fn install_service_refuses_a_job_owned_elsewhere() {
     fs::create_dir_all(plist.parent().expect("p")).expect("mkdir");
     fs::write(&plist, "foreign").expect("w");
     fs::set_permissions(&plist, fs::Permissions::from_mode(0o600)).expect("chmod");
-    let err = launchd::manage(&l, false, &FakeCtl::new(113, "")).expect_err("refused");
+    let err = launchd::manage(&l, false, &FakeCtl::new(113, ""), &signed()).expect_err("refused");
     assert_eq!(
         err.to_string(),
         format!(
@@ -391,14 +401,14 @@ fn uninstall_service_replaces_a_python_registration() {
     let plist = plist_path(dir.path());
     let loaded = format!("\tpath = {}\n", plist.display());
     let ctl = FakeCtl::new(0, &loaded);
-    launchd::manage(&l, false, &ctl).expect("uninstall");
+    launchd::manage(&l, false, &ctl, &signed()).expect("uninstall");
     assert_eq!(ctl.verbs(), vec!["print", "bootout"]);
     assert!(!plist.exists());
     assert!(!l.state.join("chrome-native-host").exists());
     assert!(!l.state.join("chrome-native-host.enroll").exists());
     // Install straight over a Python registration replaces every file.
     python_registration(&l);
-    launchd::manage(&l, true, &FakeCtl::new(113, "")).expect("install");
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signed()).expect("install");
     for r in install_host::registration_files(
         &l.state,
         &install_host::default_directory(&l.home).expect("d"),
@@ -421,7 +431,7 @@ fn install_over_a_loaded_python_job_restarts_it() {
     python_registration(&l);
     let plist = plist_path(dir.path());
     let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
-    launchd::manage(&l, true, &ctl).expect("install");
+    launchd::manage(&l, true, &ctl, &signed()).expect("install");
     assert_eq!(ctl.verbs(), vec!["print", "bootout", "bootstrap"]);
     assert_eq!(
         ctl.calls.borrow()[2],
@@ -435,4 +445,265 @@ fn install_over_a_loaded_python_job_restarts_it() {
         fs::read_to_string(&plist).expect("plist"),
         launchd::launch_configuration(&l.exe, &l.state).expect("render")
     );
+}
+
+/// Records every codesign call; `verify` answers from a queue (the last repeats).
+struct FakeSign {
+    verify: RefCell<Vec<bool>>,
+    sign: Result<(), String>,
+    listing: String,
+    calls: RefCell<Vec<String>>,
+}
+
+impl FakeSign {
+    fn new(verify: &[bool], sign: Result<(), String>, listing: &str) -> FakeSign {
+        FakeSign {
+            verify: RefCell::new(verify.to_vec()),
+            sign,
+            listing: listing.to_owned(),
+            calls: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Codesign for FakeSign {
+    fn verify(&self, path: &Path) -> io::Result<bool> {
+        self.calls
+            .borrow_mut()
+            .push(format!("verify {}", path.display()));
+        let mut q = self.verify.borrow_mut();
+        Ok(if q.len() > 1 { q.remove(0) } else { q[0] })
+    }
+    fn sign(&self, path: &Path, identity: &str) -> io::Result<Result<(), String>> {
+        self.calls
+            .borrow_mut()
+            .push(format!("sign {identity} {}", path.display()));
+        Ok(self.sign.clone())
+    }
+    fn identities(&self) -> io::Result<String> {
+        self.calls.borrow_mut().push("identities".to_owned());
+        Ok(self.listing.clone())
+    }
+}
+
+const ONE_ID: &str = "  1) 0123456789ABCDEF0123456789ABCDEF01234567 \"Developer ID Application: Test Owner (4JH68XUHC5)\"\n     1 valid identities found\n";
+const ID: &str = "Developer ID Application: Test Owner (4JH68XUHC5)";
+
+/// No plist, no manifest, no launcher, and no launchctl call beyond `print`.
+#[cfg(target_os = "macos")]
+fn assert_nothing_registered(l: &Layout, ctl: &FakeCtl) {
+    assert!(!plist_path(&l.home).exists(), "plist written");
+    let hosts = install_host::default_directory(&l.home).expect("dir");
+    for r in install_host::registration_files(&l.state, &hosts, &l.exe) {
+        assert!(!r.path.exists(), "{} written", r.path.display());
+    }
+    assert_eq!(ctl.verbs(), vec!["print"]);
+}
+
+#[test]
+fn auto_detect_needs_exactly_one_team_identity() {
+    assert_eq!(codesign::detect_identity(ONE_ID).as_deref(), Ok(ID));
+    let other = "  1) AA \"Developer ID Application: X (ZZZZZZZZZZ)\"\n  2) BB \"Apple Development: Y (4JH68XUHC5)\"\n";
+    assert!(
+        codesign::detect_identity(other)
+            .expect_err("none")
+            .starts_with("No Developer ID Application identity for team 4JH68XUHC5")
+    );
+    let two = format!("{ONE_ID}  2) CC \"Developer ID Application: Other (4JH68XUHC5)\"\n");
+    assert!(
+        codesign::detect_identity(&two)
+            .expect_err("two")
+            .starts_with("More than one")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_signs_an_unsigned_binary_before_writing() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false, true], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signer).expect("install");
+    let exe = l.exe.display();
+    assert_eq!(
+        *tool.calls.borrow(),
+        vec![
+            format!("verify {exe}"),
+            "identities".to_owned(),
+            format!("sign {ID} {exe}"),
+            format!("verify {exe}"),
+        ]
+    );
+    assert!(plist_path(dir.path()).is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_uses_the_given_identity_and_skips_a_signed_binary() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false, true], Ok(()), "");
+    let signer = Signer {
+        signing: Signing::Sign(Some("Developer ID Application: Given (4JH68XUHC5)".into())),
+        tool: &tool,
+    };
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signer).expect("install");
+    assert_eq!(
+        tool.calls.borrow()[1],
+        format!(
+            "sign Developer ID Application: Given (4JH68XUHC5) {}",
+            l.exe.display()
+        )
+    );
+    // Already satisfying the requirement: verified once, never re-signed.
+    let tool = FakeSign::new(&[true], Err("must not sign".into()), "");
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(
+        0,
+        &format!("\tpath = {}\n", plist_path(dir.path()).display()),
+    );
+    launchd::manage(&l, true, &ctl, &signer).expect("reinstall");
+    assert_eq!(
+        *tool.calls.borrow(),
+        vec![format!("verify {}", l.exe.display())]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_writes_nothing_when_signing_fails() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false], Err("errSecInternalComponent".into()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(113, "");
+    let err = launchd::manage(&l, true, &ctl, &signer).expect_err("refused");
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "codesign failed for {}: errSecInternalComponent",
+            l.exe.display()
+        )
+    );
+    assert_nothing_registered(&l, &ctl);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_writes_nothing_when_verify_fails_after_signing() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false, false], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(113, "");
+    let err = launchd::manage(&l, true, &ctl, &signer).expect_err("refused");
+    assert!(
+        err.to_string()
+            .contains("does not satisfy the signing requirement"),
+        "{err}"
+    );
+    assert_nothing_registered(&l, &ctl);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_refuses_without_an_identity() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false], Ok(()), "     0 valid identities found\n");
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(113, "");
+    let err = launchd::manage(&l, true, &ctl, &signer).expect_err("refused");
+    assert!(err.to_string().contains("use --no-sign"), "{err}");
+    assert!(!tool.calls.borrow().iter().any(|c| c.starts_with("sign")));
+    assert_nothing_registered(&l, &ctl);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_no_sign_registers_without_codesign() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let tool = FakeSign::new(&[false], Err("must not sign".into()), "");
+    let signer = Signer {
+        signing: Signing::Skip,
+        tool: &tool,
+    };
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signer).expect("install");
+    assert!(tool.calls.borrow().is_empty());
+    assert!(plist_path(dir.path()).is_file());
+}
+
+#[test]
+fn install_host_writes_nothing_when_signing_fails() {
+    let dir = common::state_dir();
+    let state = dir.path().join("state");
+    let manifests = dir.path().join("hosts");
+    let exe = Path::new("/opt/bin/trusty-browser");
+    let tool = FakeSign::new(&[false, false], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    install_host::install_signed(&state, &manifests, exe, &signer).expect_err("refused");
+    for r in install_host::registration_files(&state, &manifests, exe) {
+        assert!(!r.path.exists(), "{} written", r.path.display());
+    }
+    let tool = FakeSign::new(&[false, true], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    install_host::install_signed(&state, &manifests, exe, &signer).expect("install");
+    assert!(manifests.join("com.trusty.browser.json").is_file());
+}
+
+/// Opt-in (`TRUSTY_BROWSER_SIGN_TEST=1`): really sign a throwaway copy and verify it.
+///
+/// Signing may raise a Keychain dialog asking to let codesign use the key.
+#[cfg(target_os = "macos")]
+#[test]
+fn real_developer_id_sign_of_a_throwaway_copy() {
+    if std::env::var("TRUSTY_BROWSER_SIGN_TEST").as_deref() != Ok("1") {
+        eprintln!("skipped: set TRUSTY_BROWSER_SIGN_TEST=1");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tmp");
+    let bin = dir.path().join("throwaway");
+    fs::copy("/usr/bin/true", &bin).expect("copy");
+    let tool = codesign::SystemCodesign;
+    assert!(
+        !tool.verify(&bin).expect("verify"),
+        "copy already satisfies"
+    );
+    let signing = match std::env::var(codesign::IDENTITY_ENV) {
+        Ok(id) if !id.is_empty() => Signing::Sign(Some(id)),
+        _ => Signing::Sign(None),
+    };
+    codesign::ensure_signed(
+        &bin,
+        &Signer {
+            signing,
+            tool: &tool,
+        },
+    )
+    .expect("sign");
+    assert!(tool.verify(&bin).expect("verify"));
+    eprintln!("signed and verified {}", bin.display());
 }
