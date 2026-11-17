@@ -9,6 +9,11 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[features]
+# Exposes the enrollment `HostCheck` seam to integration tests only; never
+# enable it in a release build (see review af942b9e95 #4).
+test-seams = []
+
 [[bin]]
 name = "trusty-browser"
 path = "src/main.rs"
@@ -33,4 +38,6 @@ unicode-normalization = { workspace = true }
 keyring = { workspace = true }
 
 [dev-dependencies]
+# Self dev-dependency: turns on `test-seams` for this crate's own test targets only.
+trusty-browser = { path = ".", features = ["test-seams"] }
 tempfile = { workspace = true }

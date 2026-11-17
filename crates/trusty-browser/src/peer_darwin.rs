@@ -26,13 +26,18 @@ pub const ORIGIN: &str = "chrome-extension://jabfhcolknbbdajilgpficniedhcfahc/";
 pub const CHROME_EXE: &str = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 /// Chrome's designated requirement, checked against the running parent PID.
 pub const CHROME_REQUIREMENT: &str = "anchor apple generic and identifier \"com.google.Chrome\" and certificate leaf[subject.OU] = \"EQHXZ8M8AV\"";
-/// Chrome flags that load another profile store or extension, or open a debugger.
+/// Chrome flags that load another profile store or extension, open a debugger,
+/// or put the browser under automation. Matched with one or two leading dashes.
+// See review af942b9e95 #1: debugger-address, automation and allow-origins added.
 pub const UNSAFE_FLAGS: &[&str] = &[
     "--user-data-dir",
     "--load-extension",
     "--disable-extensions-except",
     "--remote-debugging-port",
     "--remote-debugging-pipe",
+    "--remote-debugging-address",
+    "--enable-automation",
+    "--remote-allow-origins",
 ];
 /// The native-host subcommand name.
 pub const HOST_VERB: &str = "native-host";
@@ -200,8 +205,19 @@ pub fn parse_procargs(raw: &[u8]) -> io::Result<Vec<String>> {
 /// Why: Python's argv[1] named the script (`service.py`/`native_host.py`); a
 /// single Rust binary has no script, so argv[0] carries that pin instead.
 pub fn argv0_is(arg0: &str, own_exe: &Path) -> bool {
+    // See review af942b9e95 #3: string checks first; canonicalize (which may
+    // touch a peer-chosen, possibly hung mount) only when the path differs.
     let p = Path::new(arg0);
-    p.is_absolute() && std::fs::canonicalize(p).is_ok_and(|r| r == own_exe)
+    if !p.is_absolute() {
+        return false;
+    }
+    if p == own_exe {
+        return true;
+    }
+    if p.file_name() != own_exe.file_name() {
+        return false;
+    }
+    std::fs::canonicalize(p).is_ok_and(|r| r == own_exe)
 }
 
 /// The broker's pin on the native host's argv.
@@ -245,12 +261,33 @@ pub fn service_argv_ok(argv: &[String], own_exe: &Path, socket_dir: &Path) -> bo
     state.is_absolute() && a == b
 }
 
+/// The switch name of a Chrome argument: one or two leading dashes stripped,
+/// any `=value` dropped; `None` for a non-switch (including a bare `--`).
+fn switch_name(arg: &str) -> Option<&str> {
+    let body = arg.strip_prefix("--").or_else(|| arg.strip_prefix('-'))?;
+    let name = body.split_once('=').map_or(body, |(f, _)| f);
+    (!name.is_empty()).then_some(name)
+}
+
 /// True when any Chrome argument (after argv[0]) is an unsafe flag, `=value` or not.
+///
+/// What: `-name` and `--name` match alike, as Chromium accepts both prefixes
+/// on macOS and Linux. Every argument is scanned, so an unsafe name after a
+/// bare `--` separator is still refused.
+/// Test: `unsafe_chrome_flags_are_seen_with_one_dash`,
+/// `unsafe_chrome_flags_after_a_bare_separator_are_refused`,
+/// `automation_and_debugger_flags_are_unsafe`.
+// See review af942b9e95 #1: the double-dash-only match let `-load-extension` through.
 pub fn has_unsafe_flag(chrome_argv: &[String]) -> bool {
     chrome_argv
         .iter()
         .skip(1)
-        .any(|a| UNSAFE_FLAGS.contains(&a.split_once('=').map_or(a.as_str(), |(f, _)| f)))
+        .filter_map(|a| switch_name(a))
+        .any(|name| {
+            UNSAFE_FLAGS
+                .iter()
+                .any(|f| f.strip_prefix("--") == Some(name))
+        })
 }
 
 /// `codesign -v -R=<requirement> <pid>` with a 5 s bound; `Ok(true)` when it passes.
@@ -365,6 +402,11 @@ pub fn verify_enrollment_service(sock: &impl AsRawFd, path: &Path) -> io::Result
     if !service_argv_ok(&process_argv(pid)?, &me, dir) {
         return Err(denied("unexpected enrollment service command"));
     }
+    // See review af942b9e95 #2: re-read the peer PID, as `verify_chrome_host` does,
+    // so a PID reused during the exe/argv reads is refused.
+    if kernel_pid(sock)? != pid {
+        return Err(denied("enrollment service changed during verification"));
+    }
     Ok(())
 }
 
@@ -478,5 +520,47 @@ mod tests {
         assert!(has_unsafe_flag(&v(&["chrome", "--remote-debugging-pipe"])));
         assert!(!has_unsafe_flag(&v(&["--user-data-dir", "--flag"])));
         assert!(parse_procargs(&[1, 0, 0, 0]).is_err());
+    }
+
+    // See review af942b9e95 #1: Chromium also takes single-dash switches.
+    #[test]
+    fn unsafe_chrome_flags_are_seen_with_one_dash() {
+        for flag in [
+            "-user-data-dir",
+            "-load-extension",
+            "-disable-extensions-except",
+            "-remote-debugging-port",
+            "-remote-debugging-pipe",
+        ] {
+            assert!(has_unsafe_flag(&v(&["chrome", flag])), "{flag}");
+            let valued = format!("{flag}=/tmp/evil");
+            assert!(has_unsafe_flag(&v(&["chrome", &valued])), "{valued}");
+        }
+    }
+
+    #[test]
+    fn unsafe_chrome_flags_after_a_bare_separator_are_refused() {
+        assert!(has_unsafe_flag(&v(&["chrome", "--", "-load-extension=/x"])));
+        assert!(has_unsafe_flag(&v(&["chrome", "--", "-user-data-dir=/x"])));
+        assert!(!has_unsafe_flag(&v(&["chrome", "--", "https://x/"])));
+    }
+
+    #[test]
+    fn automation_and_debugger_flags_are_unsafe() {
+        for name in [
+            "remote-debugging-address",
+            "enable-automation",
+            "remote-allow-origins",
+        ] {
+            for arg in [
+                format!("--{name}"),
+                format!("-{name}"),
+                format!("--{name}=*"),
+                format!("-{name}=*"),
+            ] {
+                assert!(has_unsafe_flag(&v(&["chrome", &arg])), "{arg}");
+            }
+        }
+        assert!(!has_unsafe_flag(&v(&["chrome", "--enable-automation-x"])));
     }
 }

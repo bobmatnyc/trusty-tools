@@ -42,15 +42,25 @@ pub const SOCKETS: [&str; 4] = [
     "operator.sock",
 ];
 
-/// The enrollment socket's peer identity check (`verify_chrome_host`).
-pub trait HostCheck: Send + Sync {
-    /// `Ok` when the connected peer is our native host under Chrome Stable.
-    fn verify(
-        &self,
-        sock: &std::os::unix::net::UnixStream,
-        state: &Path,
-    ) -> Result<(), HostRefused>;
+// See review af942b9e95 #4: the seam is nameable outside the crate only with
+// the `test-seams` feature, so a release build cannot swap in an open check.
+mod host_seam {
+    use super::{HostRefused, Path};
+
+    /// The enrollment socket's peer identity check (`verify_chrome_host`).
+    pub trait HostCheck: Send + Sync {
+        /// `Ok` when the connected peer is our native host under Chrome Stable.
+        fn verify(
+            &self,
+            sock: &std::os::unix::net::UnixStream,
+            state: &Path,
+        ) -> Result<(), HostRefused>;
+    }
 }
+#[cfg(feature = "test-seams")]
+pub use host_seam::HostCheck;
+#[cfg(not(feature = "test-seams"))]
+pub(crate) use host_seam::HostCheck;
 
 /// The real Darwin check from [`crate::peer_darwin::verify_chrome_host`].
 #[derive(Debug, Default, Clone, Copy)]
@@ -98,7 +108,8 @@ pub struct BrokerOptions {
     pub lease_clock: Arc<dyn Monotonic>,
     /// Wall clock of `TabClaimed.expires_at` (`time.time`).
     pub wall_clock: Arc<dyn Clock>,
-    /// Enrollment peer check.
+    /// Enrollment peer check (test builds only; see review af942b9e95 #4).
+    #[cfg(feature = "test-seams")]
     pub host_check: Arc<dyn HostCheck>,
 }
 
@@ -114,6 +125,7 @@ impl BrokerOptions {
             clock: Arc::new(SystemMonotonic),
             lease_clock: Arc::new(SystemMonotonic),
             wall_clock: Arc::new(SystemClock),
+            #[cfg(feature = "test-seams")]
             host_check: Arc::new(ChromeHostCheck),
         }
     }
@@ -209,7 +221,7 @@ pub struct Core {
     /// Wall clock (`time.time`).
     pub wall_clock: Arc<dyn Clock>,
     /// Enrollment peer check.
-    pub host_check: Arc<dyn HostCheck>,
+    pub(crate) host_check: Arc<dyn HostCheck>,
     /// Self, for spawned tasks.
     pub this: Weak<Core>,
     inner: Mutex<Inner>,
@@ -278,7 +290,11 @@ impl Broker {
             clock: options.clock,
             lease_clock: options.lease_clock,
             wall_clock: options.wall_clock,
+            #[cfg(feature = "test-seams")]
             host_check: options.host_check,
+            // See review af942b9e95 #4: without the seam the real check is fixed.
+            #[cfg(not(feature = "test-seams"))]
+            host_check: Arc::new(ChromeHostCheck),
             this: this.clone(),
             inner: Mutex::new(inner),
         });
