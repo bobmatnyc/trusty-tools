@@ -133,8 +133,45 @@ fn store() -> Box<dyn crate::vault::KeyStore> {
     Box::new(crate::vault::MemoryKeyStore::new())
 }
 
+/// Env switch read by a `test-seams` build of `serve` only (see [`serve_options`]).
+#[cfg(feature = "test-seams")]
+pub const TEST_SEAMS_ENV: &str = "TRUSTY_BROWSER_TEST_SEAMS";
+
+/// Production options; nothing in the environment can change them.
+#[cfg(not(feature = "test-seams"))]
+fn serve_options(state: &Path) -> crate::broker::BrokerOptions {
+    crate::broker::BrokerOptions::new(state, store())
+}
+
+/// Why: the end-to-end smoke test drives the real binary through pairing,
+/// which needs an open enrollment check and must never reach the Keychain.
+/// What: with `TRUSTY_BROWSER_TEST_SEAMS=1`, an in-memory key store and an
+/// enrollment check that admits any peer; otherwise production options.
+/// The feature exists only in this crate's own test builds (dev-dependency).
+/// Test: `smoke_serve_pair_connect_page_op_shutdown` in `tests/smoke_e2e.rs`.
+#[cfg(feature = "test-seams")]
+fn serve_options(state: &Path) -> crate::broker::BrokerOptions {
+    struct Open;
+    impl crate::broker::HostCheck for Open {
+        fn verify(
+            &self,
+            _: &std::os::unix::net::UnixStream,
+            _: &Path,
+        ) -> Result<(), crate::peer_darwin::HostRefused> {
+            Ok(())
+        }
+    }
+    if std::env::var_os(TEST_SEAMS_ENV).is_some_and(|v| v == "1") {
+        let mut o =
+            crate::broker::BrokerOptions::new(state, Box::new(crate::vault::MemoryKeyStore::new()));
+        o.host_check = std::sync::Arc::new(Open);
+        return o;
+    }
+    crate::broker::BrokerOptions::new(state, store())
+}
+
 async fn serve(state: PathBuf) -> anyhow::Result<()> {
-    let options = crate::broker::BrokerOptions::new(&state, store());
+    let options = serve_options(&state);
     let broker = crate::broker::Broker::start(options)?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
