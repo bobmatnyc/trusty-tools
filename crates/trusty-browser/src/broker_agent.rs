@@ -299,10 +299,10 @@ fn validate(request: &Json) -> Result<&'static str, Refusal> {
     if !pairing::key_set_is(request, fields) {
         return Err(Refusal::new("InvalidRequest"));
     }
-    if let Some(tab) = request.get("tab") {
-        if !matches!(tab, Json::Int(t) if *t >= 0) {
-            return Err(Refusal::new("InvalidRequest"));
-        }
+    if let Some(tab) = request.get("tab")
+        && !matches!(tab, Json::Int(t) if *t >= 0)
+    {
+        return Err(Refusal::new("InvalidRequest"));
     }
     Ok(op)
 }
