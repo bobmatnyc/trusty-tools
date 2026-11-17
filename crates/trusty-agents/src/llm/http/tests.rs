@@ -846,3 +846,114 @@ async fn a_read_timeout_is_not_retried() {
         "a timeout is still a transport failure, or #3766's local recovery stops firing: {wrapped:#}"
     );
 }
+
+/// An OpenAI-compatible client aimed at a closed loopback port, so an
+/// unguarded request fails with a connection error and never leaves the host.
+fn loopback_client() -> Client<OpenAIConfig> {
+    Client::with_config(
+        OpenAIConfig::new()
+            .with_api_base("http://127.0.0.1:1")
+            .with_api_key("sk-test"),
+    )
+}
+
+/// Assert `got` is the #10978 provider-lock refusal, not a transport error.
+fn assert_lock_refusal<T>(site: &str, got: Result<T>) {
+    let Err(err) = got else {
+        panic!("{site}: must be refused under the lock");
+    };
+    assert!(
+        err.to_string().contains("provider lock = bedrock"),
+        "{site}: {err:#}"
+    );
+}
+
+/// Lock this thread to Bedrock for one test.
+fn lock_bedrock() -> crate::llm::provider_lock::LockOverride {
+    crate::llm::provider_lock::override_on_this_thread(Ok(Some(
+        crate::llm::provider_lock::ProviderLock::Bedrock,
+    )))
+}
+
+/// Why: #10978 — `single_turn::chat` always posts to OpenRouter and is
+/// reached by `tagent eval`, inspection and skills with a `bedrock/` slug;
+/// under the lock it must refuse before any request, naming the model.
+/// Test: itself.
+#[tokio::test]
+async fn single_turn_chat_is_refused_under_the_provider_lock() {
+    let _l = lock_bedrock();
+    let chat = crate::llm::single_turn::chat(
+        &loopback_client(),
+        "bedrock/anthropic.claude-sonnet",
+        "system",
+        "user",
+        0.0,
+        16,
+        Vec::new(),
+    )
+    .await;
+    let err = chat
+        .as_ref()
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        err.contains("bedrock/anthropic.claude-sonnet"),
+        "names the model: {err}"
+    );
+    assert_lock_refusal("single_turn::chat", chat);
+}
+
+/// Why: #10978 — the OpenRouter transport refuses under the lock.
+/// Test: itself.
+#[tokio::test]
+async fn lenient_completion_is_refused_under_the_provider_lock() {
+    let _l = lock_bedrock();
+    let msg: ChatCompletionRequestMessage = ChatCompletionRequestUserMessageArgs::default()
+        .content("user")
+        .build()
+        .expect("message")
+        .into();
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("m")
+        .messages(vec![msg])
+        .build()
+        .expect("request");
+    assert_lock_refusal(
+        "create_chat_completion_lenient",
+        create_chat_completion_lenient(&loopback_client(), request).await,
+    );
+}
+
+/// Why: #10978 — the raw sender reaches Anthropic, Fireworks, AtlasCloud,
+/// Ollama or OpenRouter; it refuses under the lock.
+/// Test: itself.
+#[tokio::test]
+async fn raw_completion_is_refused_under_the_provider_lock() {
+    let _l = lock_bedrock();
+    let body = serde_json::json!({"model": "m", "messages": []});
+    assert_lock_refusal(
+        "send_raw_completion",
+        send_raw_completion(&body, &NoCredentialAdapter).await,
+    );
+}
+
+/// Why: #10978 — the Anthropic Messages API is not Bedrock; it refuses
+/// under the lock.
+/// Test: itself.
+#[tokio::test]
+async fn anthropic_native_completion_is_refused_under_the_provider_lock() {
+    let _l = lock_bedrock();
+    let body = serde_json::json!({"model": "m", "messages": []});
+    let endpoint = adapter::ApiEndpoint {
+        base_url: "http://127.0.0.1:1".to_string(),
+        auth_header_name: "x-api-key".to_string(),
+        auth_header_value: "sk-test".to_string(),
+        extra_headers: vec![],
+        auth_source: adapter::AuthSource::OpenRouter,
+    };
+    assert_lock_refusal(
+        "send_anthropic_native_completion",
+        send_anthropic_native_completion(&body, &endpoint).await,
+    );
+}

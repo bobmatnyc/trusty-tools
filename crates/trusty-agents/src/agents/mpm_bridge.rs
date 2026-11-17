@@ -115,8 +115,8 @@ pub(crate) fn is_claude_agents_dir(dir: &Path) -> bool {
 /// [`agent_metadata_from_str`] (never `compose_agent` — the artifact is
 /// already flattened), emits the two warnings described on
 /// [`warn_dropped_fields`] and below, then projects via
-/// [`project_mpm_agent`]. An unreadable file is the only error path; a
-/// malformed frontmatter block degrades to empty metadata (the shared
+/// [`project_mpm_agent`]. An unreadable file, or a projection a provider lock
+/// refuses (#10978), is an error; a malformed frontmatter block degrades to empty metadata (the shared
 /// reader's own documented behavior) and the file-stem name, rather than
 /// dropping the agent.
 /// Test: `tests::projects_clean_scalars`, `tests::missing_file_errors`,
@@ -145,7 +145,11 @@ pub(crate) fn load_mpm_agent(path: &Path) -> anyhow::Result<AgentConfig> {
     }
     warn_dropped_fields(agent_name, path, &raw);
 
-    Ok(project_mpm_agent(default_name, meta, extract_body(&raw)))
+    let cfg = project_mpm_agent(default_name, meta, extract_body(&raw))?;
+    // #10978: this tier never runs `apply_provider_pin`, so the lock is
+    // checked on the projected slug here.
+    cfg.enforce_provider_lock(&crate::llm::provider_lock::active())?;
+    Ok(cfg)
 }
 
 /// Warn ONCE, naming every frontmatter key this projection has no home for.
@@ -323,12 +327,16 @@ fn extract_body(raw: &str) -> String {
 /// `tests::skills_never_become_a_permission_grant`,
 /// `tests::tier_is_never_populated`, `tests::extends_is_not_propagated`,
 /// `tests::projected_agent_grants_no_subagents`.
-fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> AgentConfig {
+fn project_mpm_agent(
+    default_name: &str,
+    meta: AgentMetadata,
+    body: String,
+) -> anyhow::Result<AgentConfig> {
     let name = meta.name.unwrap_or_else(|| default_name.to_string());
-    let model = crate::agents::resolve_model(&name, &meta.model.unwrap_or_default(), None).0;
+    let model = crate::agents::resolve_model(&name, &meta.model.unwrap_or_default(), None)?.0;
     let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> = Arc::from(adapter_for_model(&model));
 
-    AgentConfig {
+    Ok(AgentConfig {
         agent: AgentInfo {
             name,
             // #4502: NORMALIZED, never a verbatim copy — see this function's
@@ -399,7 +407,7 @@ fn project_mpm_agent(default_name: &str, meta: AgentMetadata, body: String) -> A
         skills: crate::agents::SkillsConfig::default(),
         permissions: crate::agents::PermissionsConfig::default(),
         subagents: crate::agents::SubagentsConfig::default(),
-    }
+    })
 }
 
 #[cfg(test)]
