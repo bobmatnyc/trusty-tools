@@ -42,3 +42,5 @@ Hex is a subset of base 34, so every LDG-2.2.1 id still parses under LDG-9.1.4. 
 The Architect treats LDG-2.x as authoritative, so the Rust crate rejects base-34 ids and the `@MMDD` stamp today. Until the owner rules, `Task: <id>@MMDD` lines from tm need the stamp stripped before id parsing.
 
 Not verified: the datg, `task_tag` and `dashboard_tasks.py` regexes were not read; their behaviour is taken from DOC-82 §9 and the scripts are outside this repository.
+
+**Ruling (2026-11-17, owner ruling Duq):** §9 wins on both points. `R` means only a library reply; ids are base 34 with `@MMDD` as a message-side stamp. DOC-82 LDG-2.1.1, LDG-2.2.1, LDG-2.2.3 and LDG-9.1.4 amended; see DOC-82 §9.6 and §9.7.
