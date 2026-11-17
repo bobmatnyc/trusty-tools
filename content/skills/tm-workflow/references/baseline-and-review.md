@@ -27,6 +27,15 @@ else.
    brief waives it by name (`tm pr merge <PR> --allow-failing <check>`). A red
    required check is never merged around.
 
+## Critic before PR open
+
+`code-critic` reviews the committed branch before `gh pr create` or
+`tm pr open`. Its verdict is posted on the PR as a comment by an OWNER, MEMBER
+or COLLABORATOR, with the verdict line `## Verdict: <V> pinned to <headsha>`.
+The body's `## Review` field cites that comment. A later push needs a new
+verdict pinned to the new head. `tm pr queue-check` refuses a `rung:5` or
+`rung:6` PR without one (owner ruling Dr4).
+
 ## The trusty-review Gate
 
 Before merge, delegate to the review gate:

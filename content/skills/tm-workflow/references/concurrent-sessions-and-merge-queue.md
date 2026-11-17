@@ -84,4 +84,6 @@ list — the handoff is a notification, and the PRs are the record.
 On a repository with `tm pr open`, `tm pr queue-check [--base main] [<pr>]` runs
 this whole table itself — draft, hold label, `CHANGES_REQUESTED`, an unresolved
 `code-critic` BLOCK, then the live required contexts, in that order — and exits
-nonzero on the first stop condition it finds.
+nonzero on the first stop condition it finds. It also refuses a PR with no single
+well-formed `rung:N` label (set by `tm pr open --rung N`), and a `rung:5` or
+`rung:6` PR with no trusted APPROVE or WARN verdict pinned to its head (Dr4).

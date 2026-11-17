@@ -140,7 +140,7 @@ resolves here: find the section name in the middle column.
 | Provision a worktree, keep the main checkout fresh, isolate a dispatch, clean up after merge | "Worktree Discipline (Mandatory Before Any Source Edit)", including "Keep the main checkout fresh"; "Task-Owned Cleanup" | [references/worktree-discipline.md](references/worktree-discipline.md) |
 | Read another session on this repo; own, check or hand off the merge queue | "Concurrent Sessions on One Repo", "Merge-Queue Ownership — the Procedure" | [references/concurrent-sessions-and-merge-queue.md](references/concurrent-sessions-and-merge-queue.md) |
 | Write the changelog entry a PR owes | "Changelog Requirement (Before Merge)" | [references/changelog.md](references/changelog.md) |
-| Handle a red gate the branch did not cause; run the review gate | "Baseline-Failure Protocol (Red That Isn't Yours)", "The trusty-review Gate" | [references/baseline-and-review.md](references/baseline-and-review.md) |
+| Handle a red gate the branch did not cause; run the critic and review gates | "Baseline-Failure Protocol (Red That Isn't Yours)", "Critic before PR open", "The trusty-review Gate" | [references/baseline-and-review.md](references/baseline-and-review.md) |
 | Customize the workflow through `CLAUDE.md`; inspect the resolved prompt; pick an output style | "How the PM Prompt Is Assembled", "The One Customization Surface", "Trigger Phrases", "Inspecting the Resolved Prompt", "Output Style Selection (#8533)" | [references/customizing.md](references/customizing.md) |
 | Open these files from an agent with no `Skill` tool | the Read path | [references/README.md](references/README.md) |
 
@@ -239,7 +239,8 @@ nine fields are.
    aggregate run", itemized.
 8. `## Docs` — documentation/changelog status.
 9. `## Review` — review-finding disposition: fixed here, kept on the parent,
-   or separately ticketed.
+   or separately ticketed. Rung 5-6: cite the pinned `code-critic` verdict
+   (references/baseline-and-review.md, "Critic before PR open").
 
 🔴 **Fields 6 and 7 are answered, never omitted.** A clean run writes the single
 word `none` under each — that is a valid whole section, and it is the disclosure
