@@ -106,6 +106,8 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-git-file-tracking",
     "tm-init",
     "tm-issues-prune",
+    // #10576: PM owner-scenario authoring skill, non-coding like `tm-epic`.
+    "tm-owner-scenarios",
     "tm-postmortem",
     "tm-prose-style",
     "tm-secrets",
