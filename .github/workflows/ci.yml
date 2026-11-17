@@ -3050,6 +3050,13 @@ jobs:
         if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_content_selftest.sh
 
+      # #10576: the owner-scenario lint must still fail a UI-script scenario, a
+      # missing field, an unknown trace ID and a prose-only block. Valid on
+      # merge_group like the other steps in this job.
+      - name: Owner-scenario lint selftest (#10576)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_owner_scenarios_selftest.sh
+
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot, so the merge base cannot lag behind the merge
       # ref's own first parent. See the ATTRIBUTION note in

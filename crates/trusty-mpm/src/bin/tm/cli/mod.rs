@@ -847,8 +847,8 @@ pub(crate) enum Command {
         dir: Option<String>,
         /// Active output style id for this launch (HR-4). Overrides the
         /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
-        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
-        /// to the default.
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`, `owner-plain`. An
+        /// unknown id falls back to the default.
         #[arg(long)]
         style: Option<String>,
         /// Run this session in its own git worktree instead of the project's
