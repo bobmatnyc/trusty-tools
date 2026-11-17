@@ -66,7 +66,8 @@ file.
    and refuses a wrong key without changing anything.
 5. `~/.cargo/bin/trusty-browser install-service`. It accepts the files Python
    wrote, replaces them, and restarts the job on the Rust binary. First it
-   signs `~/.cargo/bin/trusty-browser` in place with your Developer ID
+   signs `~/.cargo/bin/trusty-browser` and `~/.cargo/bin/trusty-browser-mcp`
+   in place with your Developer ID
    (identifier `com.trusty.browser`, team 4JH68XUHC5) and verifies it; if
    signing or verification fails it writes nothing. The identity comes from
    `--sign-identity`, then `TRUSTY_BROWSER_SIGN_IDENTITY`, then the one
@@ -94,8 +95,13 @@ brings back a Keychain prompt, and a prompt under launchd hangs the broker:
 run the binary once in your GUI session after each reinstall and answer
 **Always Allow** before relying on the launchd job.
 
-`trusty-browser-mcp` is not signed by these verbs: neither launchd nor the
-extension runs it, your MCP client does.
+Both verbs also sign `trusty-browser-mcp`, found beside the canonical
+`trusty-browser` (same directory, same `cargo install`), with the same
+identity and the same identifier `com.trusty.browser`. A workflow-mode
+`trusty-browser-mcp` unseals its ticket from the same Keychain item at
+start-up, and an MCP client cannot answer a prompt. Both binaries must sign
+and verify or nothing is registered. A missing `trusty-browser-mcp` is an
+error unless `--no-sign` is given.
 
 ## License
 

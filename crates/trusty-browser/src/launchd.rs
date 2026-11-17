@@ -11,7 +11,7 @@
 //! with the `launchctl` calls behind [`Launchctl`] so tests never reach the
 //! real `gui/<uid>` domain.
 //!
-//! Signing: install runs [`crate::codesign::ensure_signed`] on `exe` after
+//! Signing: install runs [`crate::codesign::ensure_install_signed`] on `exe` and its MCP sibling after
 //! the ownership checks and before any file is written, so a failed sign or
 //! verify leaves no plist or manifest behind (#11440).
 //! Test: `python_plist_renders_byte_identically`, `install_service_writes_files_and_bootstraps`,
@@ -21,7 +21,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::codesign::{Signer, ensure_signed};
+use crate::codesign::{Signer, ensure_install_signed};
 use crate::install_host::{self, Registration};
 
 /// The launchd label.
@@ -280,7 +280,7 @@ pub fn manage(
     }
     if install {
         // #11440: sign (or refuse) before writing anything.
-        ensure_signed(&layout.exe, signer)?;
+        ensure_install_signed(&layout.exe, signer)?;
         install_host::mkdir_0700(&agents)?;
         install_host::mkdir_0700(state)?;
         crate::assets::extension_path(state)?;

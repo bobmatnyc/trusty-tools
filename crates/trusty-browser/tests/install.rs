@@ -273,11 +273,22 @@ impl Launchctl for FakeCtl {
     }
 }
 
+/// `home/bin/trusty-browser` and its `trusty-browser-mcp` sibling, both present.
+fn bin_pair(home: &Path) -> (PathBuf, PathBuf) {
+    let bin = home.join("bin");
+    fs::create_dir_all(&bin).expect("bin");
+    let exe = bin.join("trusty-browser");
+    let mcp = bin.join("trusty-browser-mcp");
+    fs::write(&exe, b"exe").expect("exe");
+    fs::write(&mcp, b"mcp").expect("mcp");
+    (exe, mcp)
+}
+
 fn layout(home: &Path) -> Layout {
     Layout {
         home: home.to_path_buf(),
         state: home.join(".trusty/browser"),
-        exe: PathBuf::from("/opt/bin/trusty-browser"),
+        exe: bin_pair(home).0,
         uid: 501,
     }
 }
@@ -536,6 +547,7 @@ fn install_service_signs_an_unsigned_binary_before_writing() {
             "identities".to_owned(),
             format!("sign {ID} {exe}"),
             format!("verify {exe}"),
+            format!("verify {}", codesign::mcp_sibling(&l.exe).display()),
         ]
     );
     assert!(plist_path(dir.path()).is_file());
@@ -572,7 +584,10 @@ fn install_service_uses_the_given_identity_and_skips_a_signed_binary() {
     launchd::manage(&l, true, &ctl, &signer).expect("reinstall");
     assert_eq!(
         *tool.calls.borrow(),
-        vec![format!("verify {}", l.exe.display())]
+        vec![
+            format!("verify {}", l.exe.display()),
+            format!("verify {}", codesign::mcp_sibling(&l.exe).display()),
+        ]
     );
 }
 
@@ -655,7 +670,8 @@ fn install_host_writes_nothing_when_signing_fails() {
     let dir = common::state_dir();
     let state = dir.path().join("state");
     let manifests = dir.path().join("hosts");
-    let exe = Path::new("/opt/bin/trusty-browser");
+    let (exe, _) = bin_pair(dir.path());
+    let exe = exe.as_path();
     let tool = FakeSign::new(&[false, false], Ok(()), ONE_ID);
     let signer = Signer {
         signing: Signing::Sign(None),
@@ -674,29 +690,152 @@ fn install_host_writes_nothing_when_signing_fails() {
     assert!(manifests.join("com.trusty.browser.json").is_file());
 }
 
-/// Opt-in (`TRUSTY_BROWSER_SIGN_TEST=1`): really sign a throwaway copy and verify it.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_signs_the_mcp_sibling() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let mcp = codesign::mcp_sibling(&l.exe);
+    assert_eq!(mcp, dir.path().join("bin/trusty-browser-mcp"));
+    let tool = FakeSign::new(&[false, true, false, true], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signer).expect("install");
+    let (exe, mcp) = (l.exe.display(), mcp.display());
+    assert_eq!(
+        *tool.calls.borrow(),
+        vec![
+            format!("verify {exe}"),
+            "identities".to_owned(),
+            format!("sign {ID} {exe}"),
+            format!("verify {exe}"),
+            format!("verify {mcp}"),
+            "identities".to_owned(),
+            format!("sign {ID} {mcp}"),
+            format!("verify {mcp}"),
+        ]
+    );
+    assert!(plist_path(dir.path()).is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_writes_nothing_when_the_sibling_fails_to_sign() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    // The main binary signs and verifies; the sibling never verifies.
+    let tool = FakeSign::new(&[false, true, false, false], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(113, "");
+    let err = launchd::manage(&l, true, &ctl, &signer).expect_err("refused");
+    let mcp = codesign::mcp_sibling(&l.exe);
+    assert!(
+        err.to_string().starts_with(&format!(
+            "{} does not satisfy the signing requirement",
+            mcp.display()
+        )),
+        "{err}"
+    );
+    assert_nothing_registered(&l, &ctl);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_service_refuses_a_missing_mcp_sibling() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let mcp = codesign::mcp_sibling(&l.exe);
+    fs::remove_file(&mcp).expect("rm");
+    let tool = FakeSign::new(&[true], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let ctl = FakeCtl::new(113, "");
+    let err = launchd::manage(&l, true, &ctl, &signer).expect_err("refused");
+    assert!(
+        err.to_string()
+            .starts_with(&format!("{} is missing", mcp.display())),
+        "{err}"
+    );
+    assert!(tool.calls.borrow().is_empty());
+    assert_nothing_registered(&l, &ctl);
+    // --no-sign accepts the missing sibling.
+    let tool = FakeSign::new(&[false], Err("must not sign".into()), "");
+    let signer = Signer {
+        signing: Signing::Skip,
+        tool: &tool,
+    };
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signer).expect("no-sign install");
+    assert!(plist_path(dir.path()).is_file());
+}
+
+#[test]
+fn install_host_signs_the_mcp_sibling_and_refuses_a_missing_one() {
+    let dir = common::state_dir();
+    let state = dir.path().join("state");
+    let manifests = dir.path().join("hosts");
+    let (exe, mcp) = bin_pair(dir.path());
+    // The sibling's sign fails after the main binary passed.
+    let tool = FakeSign::new(&[true, false, false], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    install_host::install_signed(&state, &manifests, &exe, &signer).expect_err("refused");
+    assert!(
+        tool.calls
+            .borrow()
+            .contains(&format!("sign {ID} {}", mcp.display()))
+    );
+    for r in install_host::registration_files(&state, &manifests, &exe) {
+        assert!(!r.path.exists(), "{} written", r.path.display());
+    }
+    fs::remove_file(&mcp).expect("rm");
+    let tool = FakeSign::new(&[true], Ok(()), ONE_ID);
+    let signer = Signer {
+        signing: Signing::Sign(None),
+        tool: &tool,
+    };
+    let err = install_host::install_signed(&state, &manifests, &exe, &signer).expect_err("missing");
+    assert!(
+        err.to_string().contains("trusty-browser-mcp is missing"),
+        "{err}"
+    );
+    assert!(!manifests.join("com.trusty.browser.json").exists());
+}
+
+/// Opt-in (`TRUSTY_BROWSER_SIGN_TEST=1`): really sign two throwaway copies
+/// (`trusty-browser` and its `trusty-browser-mcp` sibling) and verify both
+/// carry identifier `com.trusty.browser` and satisfy the one requirement.
 ///
 /// Signing may raise a Keychain dialog asking to let codesign use the key.
 #[cfg(target_os = "macos")]
 #[test]
-fn real_developer_id_sign_of_a_throwaway_copy() {
+fn real_developer_id_sign_of_two_throwaway_copies() {
     if std::env::var("TRUSTY_BROWSER_SIGN_TEST").as_deref() != Ok("1") {
         eprintln!("skipped: set TRUSTY_BROWSER_SIGN_TEST=1");
         return;
     }
     let dir = tempfile::tempdir().expect("tmp");
-    let bin = dir.path().join("throwaway");
+    let bin = dir.path().join("trusty-browser");
+    let mcp = codesign::mcp_sibling(&bin);
     fs::copy("/usr/bin/true", &bin).expect("copy");
+    fs::copy("/usr/bin/false", &mcp).expect("copy");
     let tool = codesign::SystemCodesign;
-    assert!(
-        !tool.verify(&bin).expect("verify"),
-        "copy already satisfies"
-    );
+    for p in [&bin, &mcp] {
+        assert!(!tool.verify(p).expect("verify"), "copy already satisfies");
+    }
     let signing = match std::env::var(codesign::IDENTITY_ENV) {
         Ok(id) if !id.is_empty() => Signing::Sign(Some(id)),
         _ => Signing::Sign(None),
     };
-    codesign::ensure_signed(
+    codesign::ensure_install_signed(
         &bin,
         &Signer {
             signing,
@@ -704,6 +843,16 @@ fn real_developer_id_sign_of_a_throwaway_copy() {
         },
     )
     .expect("sign");
-    assert!(tool.verify(&bin).expect("verify"));
-    eprintln!("signed and verified {}", bin.display());
+    for p in [&bin, &mcp] {
+        assert!(tool.verify(p).expect("verify"));
+        let out = std::process::Command::new("/usr/bin/codesign")
+            .arg("-dv")
+            .arg(p)
+            .output()
+            .expect("codesign -dv");
+        let text = String::from_utf8_lossy(&out.stderr);
+        assert!(text.contains("Identifier=com.trusty.browser\n"), "{text}");
+        assert!(text.contains("TeamIdentifier=4JH68XUHC5\n"), "{text}");
+        eprintln!("signed and verified {}", p.display());
+    }
 }

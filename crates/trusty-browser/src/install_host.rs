@@ -183,9 +183,10 @@ pub fn install(state: &Path, manifest_dir: &Path, exe: &Path) -> io::Result<Path
     Ok(manifest_dir.join(format!("{NAME}.json")))
 }
 
-/// `install-host`: [`crate::codesign::ensure_signed`] on `exe`, then [`install`].
+/// `install-host`: [`crate::codesign::ensure_install_signed`] on `exe` and its MCP sibling, then [`install`].
 ///
-/// Test: `install_host_writes_nothing_when_signing_fails` in `tests/install.rs`.
+/// Test: `install_host_writes_nothing_when_signing_fails`,
+/// `install_host_signs_the_mcp_sibling_and_refuses_a_missing_one` in `tests/install.rs`.
 pub fn install_signed(
     state: &Path,
     manifest_dir: &Path,
@@ -193,7 +194,7 @@ pub fn install_signed(
     signer: &crate::codesign::Signer<'_>,
 ) -> io::Result<PathBuf> {
     // #11440: a manifest must never name a binary whose signing failed.
-    crate::codesign::ensure_signed(exe, signer)?;
+    crate::codesign::ensure_install_signed(exe, signer)?;
     install(state, manifest_dir, exe)
 }
 

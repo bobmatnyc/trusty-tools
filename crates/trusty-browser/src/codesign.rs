@@ -162,3 +162,37 @@ pub fn ensure_signed(exe: &Path, signer: &Signer<'_>) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// File name of the MCP binary `cargo install` puts beside `trusty-browser`.
+pub const MCP_BINARY: &str = "trusty-browser-mcp";
+
+/// The `trusty-browser-mcp` in the same directory as `exe`.
+pub fn mcp_sibling(exe: &Path) -> std::path::PathBuf {
+    exe.with_file_name(MCP_BINARY)
+}
+
+/// Sign `exe` and its [`mcp_sibling`] before an install registers anything.
+///
+/// Why: `trusty-browser-mcp` unseals a workflow ticket from the same Keychain
+/// item at start-up, and its MCP client cannot answer a prompt (#11440).
+/// What: `Skip` warns once and returns. Otherwise a missing sibling is `Err`;
+/// then [`ensure_signed`] runs on `exe` and on the sibling with the same
+/// identity and [`IDENTIFIER`], and the first failure is returned.
+/// Test: `install_service_signs_the_mcp_sibling`,
+/// `install_service_writes_nothing_when_the_sibling_fails_to_sign`,
+/// `install_service_refuses_a_missing_mcp_sibling`,
+/// `install_host_signs_the_mcp_sibling_and_refuses_a_missing_one`.
+pub fn ensure_install_signed(exe: &Path, signer: &Signer<'_>) -> io::Result<()> {
+    if signer.signing == Signing::Skip {
+        return ensure_signed(exe, signer);
+    }
+    let sibling = mcp_sibling(exe);
+    if !sibling.is_file() {
+        return Err(io::Error::other(format!(
+            "{} is missing; install both binaries from the same `cargo install`, or use --no-sign",
+            sibling.display()
+        )));
+    }
+    ensure_signed(exe, signer)?;
+    ensure_signed(&sibling, signer)
+}
