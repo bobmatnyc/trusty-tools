@@ -133,6 +133,11 @@ impl FleetEnv {
             // TMUX_TMPDIR above is what keeps tmux off the operator's server.
             .env("TRUSTY_MPM_ALLOW_HOST_STATE", "1")
             .env("PATH", path)
+            // #10612: an Architect launch needs a stable hook exe; CI has no `tm`.
+            .env(
+                trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV,
+                "/usr/local/bin/tm",
+            )
             .output()
             .expect("spawn tm")
     }
