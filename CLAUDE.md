@@ -36,11 +36,6 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 - Anything else (release builds, feature-gated tests, `--include-ignored`, a
   single test by name) — `Skill(skill="cargo-commands")` rather than guessing.
-- 🟡 **EVO is the default host for rung 3 and 4 gates (Df4, draft).**
-  `check` and `clippy` default to EVO now; `test` defaults to EVO only once the
-  failing-test-name and ci_result conditions are deployed. Run from a
-  committed, clean linked worktree through `scripts/evo` in MPM-Utils, logged by
-  `evo-gate-log`. CI stays the gate of record.
 - 🔴 **`CARGO_TARGET_DIR` is exported by the repo-local `.envrc`.** Never
   override it EXCEPT with the builder slot the hook grants, and never point a
   gate at a worktree-local `target/` — that is a cold build of the whole
@@ -56,7 +51,12 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 - 🔴 **k8s, container work and builds run on EVO whenever possible** via
   `Skill(skill="instance-evo")` (owner ruling 2026-11-14). Never start
   Rancher Desktop, Docker or a local k8s on this Mac. Mac-only work stays on
-  the Mac: macOS-gated tests, the Apple release build, signing.
+  the Mac: macOS-gated tests, the Apple release build, signing. Rung 3 and 4
+  gates follow it: `check` and `clippy` now, `test` once the failing-test-name
+  and ci_result conditions are deployed. Run from a clean committed worktree
+  with `scripts/evo` (MPM-Utils), logged by `evo-gate-log`. Scope is the crate
+  (rung 3) or the crate plus direct dependents (rung 4). CI stays the gate of
+  record.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
@@ -75,9 +75,6 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 | 4 | **Cross-crate change** — public API or shared library | Normal → High | Rung 3 on the library, then `SKIP_UI_BUILD=1 check --workspace` + `test -p <consumer> --no-fail-fast` for **each direct dependent** |
 | 5 | Cross-crate contract, persistence, security, process lifecycle, **release tooling** | High | Rung 4 + `--include-ignored` integration coverage, failure-path tests, `code-critic` round |
 | 6 | **UI / API surface** — Svelte UIs, MCP schemas, HTTP routes | High | Rung 3/4 for Rust + the UI package's test/build + one binary smoke run |
-
-🟡 **On EVO, scope = the crate plus its direct dependents** (rung 4); rung 3
-stays the one crate.
 
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
