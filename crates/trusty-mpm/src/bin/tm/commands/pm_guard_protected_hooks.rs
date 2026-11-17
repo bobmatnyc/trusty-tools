@@ -254,13 +254,16 @@ fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                // #10937: skip and log one unreadable file.
-                Err(e) => {
+                // #10937: skip and log a file Claude Code cannot read either;
+                // every other read error (EIO, non-UTF-8) still refuses.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                     skipped(&file, &e.to_string());
                     continue;
                 }
+                Err(_) => return Err(file),
             };
-            if !text.contains("hooks") {
+            // #10937: an escape may spell `hooks`, so it is parsed too.
+            if !text.contains("hooks") && !frontmatter_block(&text).contains('\\') {
                 continue;
             }
             match frontmatter_hooks(&text) {
@@ -286,28 +289,36 @@ fn skipped(file: &Path, why: &str) {
     );
 }
 
-/// Whether `text`'s frontmatter has a line that may open a top-level `hooks`
-/// key: `hooks`, optionally quoted, then `:`, at column 0; or a flow mapping
-/// (`{`) mentioning `hooks` (#10937).
+/// Whether `text`'s frontmatter may carry a `hooks` key a lenient parser
+/// would read (#10937): a word-bounded `hooks` anywhere (indented, explicit
+/// `? hooks`, tagged, quoted, or inside a flow mapping), a `<<` merge key, or
+/// a backslash escape that could spell the key.
 ///
 /// Why: a frontmatter that does not parse may still be read by Claude Code,
-/// so a `hooks` key in it keeps the scan fail-closed; prose such as
-/// `webhooks` in a description does not.
+/// so any plausible `hooks` key keeps the scan fail-closed; prose such as
+/// `webhooks` does not. Over-refusal on an unparseable file is the safe side.
 /// Test: `an_unparseable_agent_file_declaring_hooks_still_denies_10937`.
 fn declares_hooks_key(text: &str) -> bool {
+    let block = frontmatter_block(text);
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bounded = block.match_indices("hooks").any(|(i, _)| {
+        let before = block[..i].chars().next_back().is_none_or(|c| !word(c));
+        let after = block[i + 5..].chars().next().is_none_or(|c| !word(c));
+        before && after
+    });
+    bounded || block.contains("<<") || block.contains('\\')
+}
+
+/// The frontmatter block of `text`: the lines between the opening `---` and
+/// the next `---`, or every line after the opening one when none closes it.
+fn frontmatter_block(text: &str) -> String {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    text.lines()
+    let block: Vec<&str> = text
+        .lines()
         .skip(1)
         .take_while(|l| l.trim_end() != "---")
-        .any(|line| {
-            let key = line.trim_start_matches(['"', '\'']);
-            let flow = line.trim_start().starts_with('{') && line.contains("hooks");
-            flow || key.strip_prefix("hooks").is_some_and(|rest| {
-                rest.trim_start_matches(['"', '\''])
-                    .trim_start()
-                    .starts_with(':')
-            })
-        })
+        .collect();
+    block.join("\n")
 }
 
 /// The `.md` files in `dir`, and in its subdirectories `depth` levels down.
@@ -422,7 +433,8 @@ pub(crate) fn frontmatter_hooks(text: &str) -> Result<Option<serde_yaml::Value>,
     }
     let block: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
     let block = block.join("\n");
-    let mentions = block.to_ascii_lowercase().contains("hooks");
+    // #10937: a backslash escape may spell `hooks` (`"ho\x6fks"`).
+    let mentions = block.to_ascii_lowercase().contains("hooks") || block.contains('\\');
     match serde_yaml::from_str::<serde_yaml::Value>(&block) {
         Ok(serde_yaml::Value::Mapping(map)) => Ok(map.get("hooks").cloned()),
         _ if mentions => Err(()),

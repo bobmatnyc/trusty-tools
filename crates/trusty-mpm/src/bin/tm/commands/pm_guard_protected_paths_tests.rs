@@ -573,6 +573,20 @@ fn an_unreadable_agent_file_is_skipped_10937() {
     assert_eq!(verdict, None);
 }
 
+/// #10937 error arm: a read error other than permission denied (here,
+/// non-UTF-8 bytes) still refuses.
+#[test]
+fn a_non_utf8_agent_file_still_denies_10937() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/binary.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    std::fs::write(&agent, b"---\nhooks: \xff\xfe\n---\n").expect("write agent");
+    let reason = fx
+        .write(&fx.project.join("notes.md"), "x")
+        .unwrap_or_else(|| panic!("a non-UTF-8 agent file must deny"));
+    assert!(reason.contains("binary.md"), "{reason}");
+}
+
 /// #10937 error arm: unparseable frontmatter that declares a top-level
 /// `hooks` key still fails closed, in each spelling.
 #[test]
@@ -580,7 +594,20 @@ fn an_unparseable_agent_file_declaring_hooks_still_denies_10937() {
     let fx = Fx::new();
     let agent = fx.home.join(".claude/agents/hooked.md");
     std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
-    for key in ["hooks:", "\"hooks\":", "'hooks' :", "{hooks: [unclosed"] {
+    for key in [
+        "hooks:",
+        "\"hooks\":",
+        "'hooks' :",
+        "{hooks: [unclosed",
+        // Code-critic round on #10937: each spelling below was skipped.
+        "  hooks:",
+        "? hooks\n: x",
+        "!!str hooks:",
+        "\"ho\\x6fks\":",
+        "y: &a {k: 1, hooks: x}\n<<: *a",
+        "z: {a: 1, hooks: x}",
+        "<<: {k: 1}\nw: [hooks]",
+    ] {
         let text = format!("---\nname: x\nversion: 1\nversion: 2\n{key} x\n---\n");
         std::fs::write(&agent, &text).expect("write agent");
         let reason = fx
