@@ -16,55 +16,14 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use common::{fixture_key, fixture_service, fixtures, json, state_dir};
+use common::{Det, Fixed, Ticks, fixture_key, fixture_service, fixtures, json, state_dir};
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use trusty_browser::audit::Clock;
 use trusty_browser::broker::{Broker, BrokerOptions, ChromeHostCheck, HostCheck, SOCKETS};
-use trusty_browser::entropy::{Entropy, Monotonic};
+use trusty_browser::entropy::Entropy;
 use trusty_browser::peer_darwin::HostRefused;
 use trusty_browser::vault::{KeyStore, MemoryKeyStore};
-
-const SEED: &[u8] = b"trusty-browser-phase0-fixtures";
-
-/// `capture.py` `_det`: SHA-256(SEED + str(counter)) blocks, one counter per block.
-#[derive(Clone, Default)]
-struct Det(Arc<AtomicU64>);
-
-impl Entropy for Det {
-    fn bytes(&self, n: usize) -> Vec<u8> {
-        let mut out = Vec::new();
-        while out.len() < n {
-            let i = self.0.fetch_add(1, Ordering::SeqCst);
-            let mut h = Sha256::new();
-            h.update(SEED);
-            h.update(i.to_string().as_bytes());
-            out.extend_from_slice(&h.finalize());
-        }
-        out.truncate(n);
-        out
-    }
-}
-
-/// `audit.time`: 1_790_000_000.0 + 0.25 per call.
-struct Ticks(AtomicU64);
-
-impl Clock for Ticks {
-    fn now(&self) -> f64 {
-        1_790_000_000.0 + self.0.fetch_add(1, Ordering::SeqCst) as f64 * 0.25
-    }
-}
-
-/// `codes.clock = lambda: 1000.0`.
-struct Fixed;
-
-impl Monotonic for Fixed {
-    fn now(&self) -> f64 {
-        1000.0
-    }
-}
 
 /// The real Chrome-host check until `open` is set (the capture's seam).
 #[derive(Default)]

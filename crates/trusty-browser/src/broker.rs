@@ -94,6 +94,10 @@ pub struct BrokerOptions {
     pub entropy: Arc<dyn Entropy>,
     /// Grant clock.
     pub clock: Arc<dyn Monotonic>,
+    /// Lease clock (`time.monotonic` in `leases.py`/`pages.py`).
+    pub lease_clock: Arc<dyn Monotonic>,
+    /// Wall clock of `TabClaimed.expires_at` (`time.time`).
+    pub wall_clock: Arc<dyn Clock>,
     /// Enrollment peer check.
     pub host_check: Arc<dyn HostCheck>,
 }
@@ -108,6 +112,8 @@ impl BrokerOptions {
             audit_clock: Box::new(SystemClock),
             entropy: Arc::new(OsEntropy),
             clock: Arc::new(SystemMonotonic),
+            lease_clock: Arc::new(SystemMonotonic),
+            wall_clock: Arc::new(SystemClock),
             host_check: Arc::new(ChromeHostCheck),
         }
     }
@@ -132,8 +138,10 @@ pub struct Claim {
     pub busy: bool,
     /// Last document id.
     pub document: Option<String>,
-    /// Last origin host.
+    /// Last origin (as the worker wrote it).
     pub origin: Option<String>,
+    /// Shows the page indicator; `false` for code-session leases (#11239).
+    pub indicator: bool,
 }
 
 /// An attached agent session, as `detach` sees it.
@@ -197,7 +205,9 @@ pub struct Core {
     /// Grant clock.
     pub clock: Arc<dyn Monotonic>,
     /// Lease clock (`time.monotonic`).
-    pub lease_clock: SystemMonotonic,
+    pub lease_clock: Arc<dyn Monotonic>,
+    /// Wall clock (`time.time`).
+    pub wall_clock: Arc<dyn Clock>,
     /// Enrollment peer check.
     pub host_check: Arc<dyn HostCheck>,
     /// Self, for spawned tasks.
@@ -266,7 +276,8 @@ impl Broker {
             vault,
             entropy: options.entropy,
             clock: options.clock,
-            lease_clock: SystemMonotonic,
+            lease_clock: options.lease_clock,
+            wall_clock: options.wall_clock,
             host_check: options.host_check,
             this: this.clone(),
             inner: Mutex::new(inner),

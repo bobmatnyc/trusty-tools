@@ -5,6 +5,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use sha2::{Digest, Sha256};
+use trusty_browser::audit::Clock;
+use trusty_browser::entropy::{Entropy, Monotonic};
 use trusty_browser::pyjson::Json;
 
 pub fn fixtures() -> PathBuf {
@@ -46,4 +52,43 @@ pub fn fixture_key() -> String {
 
 pub fn fixture_service() -> String {
     s(&json("vault.json"), "keychain_service").to_owned()
+}
+
+const SEED: &[u8] = b"trusty-browser-phase0-fixtures";
+
+/// `capture.py` `_det`: SHA-256(SEED + str(counter)) blocks, one counter per block.
+#[derive(Clone, Default)]
+pub struct Det(pub Arc<AtomicU64>);
+
+impl Entropy for Det {
+    fn bytes(&self, n: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        while out.len() < n {
+            let i = self.0.fetch_add(1, Ordering::SeqCst);
+            let mut h = Sha256::new();
+            h.update(SEED);
+            h.update(i.to_string().as_bytes());
+            out.extend_from_slice(&h.finalize());
+        }
+        out.truncate(n);
+        out
+    }
+}
+
+/// `audit.time`: 1_790_000_000.0 + 0.25 per call.
+pub struct Ticks(pub AtomicU64);
+
+impl Clock for Ticks {
+    fn now(&self) -> f64 {
+        1_790_000_000.0 + self.0.fetch_add(1, Ordering::SeqCst) as f64 * 0.25
+    }
+}
+
+/// `codes.clock = lambda: 1000.0`.
+pub struct Fixed;
+
+impl Monotonic for Fixed {
+    fn now(&self) -> f64 {
+        1000.0
+    }
 }

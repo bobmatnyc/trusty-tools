@@ -20,3 +20,4 @@ security unlock-keychain -p "$PW" "$KC"
 security set-keychain-settings "$KC"   # no lock timeout, no lock on sleep
 mkdir -p "$TMP/home"
 HOME="$TMP/home" TB_CAPTURE_KEYCHAIN="$KC" "$PY" "$(dirname "$0")/capture.py" --out "$OUT" </dev/null
+HOME="$TMP/home" TB_CAPTURE_KEYCHAIN="$KC" "$PY" "$(dirname "$0")/capture_pages.py" --out "$OUT" </dev/null

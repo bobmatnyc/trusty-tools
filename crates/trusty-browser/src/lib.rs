@@ -7,8 +7,9 @@
 //! [`frame`], [`refusal`], [`proof`], [`audit`], [`registry`] and [`vault`].
 //! Phase 2 adds the [`broker`] (four sockets, [`peer`] and [`peer_darwin`]
 //! authentication, the pairing handshake, enrollment, grant and operator
-//! ops) and the [`native_host`] relay. Leases, page ops and the MCP server
-//! arrive in later phases.
+//! ops) and the [`native_host`] relay. Phase 3 adds [`leases`], the
+//! request journal and every page op ([`pages`], [`pages_url`]). The MCP
+//! server arrives in a later phase.
 
 pub mod audit;
 pub mod broker;
@@ -19,8 +20,12 @@ pub mod casefold;
 pub mod entropy;
 pub mod frame;
 pub mod grants;
+pub mod leases;
 mod legacy;
 pub mod native_host;
+pub mod pages;
+mod pages_ops;
+pub mod pages_url;
 pub mod pairing;
 pub mod peer;
 pub mod peer_conn;

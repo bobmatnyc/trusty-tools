@@ -20,6 +20,9 @@ use crate::pyjson::Json;
 use crate::refusal::{MUTATING, PAGE_ERRORS, REFUSAL_FIELDS, Refusal, UNFINISHED};
 use crate::wire::write_frame;
 
+// `Peer.command`: the route-checked command behind the lease indicator (port phase 3).
+mod command;
+
 /// Seconds the broker waits for a worker reply (`PAGE_WAIT`).
 pub const PAGE_WAIT: f64 = 8.0;
 
@@ -35,6 +38,8 @@ pub struct Peer {
     pub incarnation: String,
     /// This connection's generation uuid.
     pub generation: String,
+    /// The pairing row at handshake time (`Peer.row`).
+    pub route: crate::pairing::Route,
     writer: tokio::sync::Mutex<OwnedWriteHalf>,
     pending: Mutex<HashMap<String, oneshot::Sender<Json>>>,
     killed: Notify,
@@ -71,6 +76,7 @@ impl Peer {
             browser_key: route.browser_key.clone(),
             incarnation,
             generation,
+            route: route.clone(),
             writer: tokio::sync::Mutex::new(writer),
             pending: Mutex::new(HashMap::new()),
             killed: Notify::new(),
