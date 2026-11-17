@@ -263,7 +263,7 @@ fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
                 Err(_) => return Err(file),
             };
             // #10937: an escape may spell `hooks`, so it is parsed too.
-            if !text.contains("hooks") && !frontmatter_block(&text).contains('\\') {
+            if !text.contains("hooks") && !has_hex_escape(&frontmatter_block(&text)) {
                 continue;
             }
             match frontmatter_hooks(&text) {
@@ -306,7 +306,7 @@ fn declares_hooks_key(text: &str) -> bool {
         let after = block[i + 5..].chars().next().is_none_or(|c| !word(c));
         before && after
     });
-    bounded || block.contains("<<") || block.contains('\\')
+    bounded || block.contains("<<") || has_hex_escape(&block)
 }
 
 /// The frontmatter block of `text`: the lines between the opening `---` and
@@ -319,6 +319,28 @@ fn frontmatter_block(text: &str) -> String {
         .take_while(|l| l.trim_end() != "---")
         .collect();
     block.join("\n")
+}
+
+/// Whether `block` holds a YAML hex escape (`\xHH`, `\uHHHH`, `\UHHHHHHHH`),
+/// which in a double-quoted scalar could spell `hooks` (#10937).
+///
+/// Why: a plain backslash (`C:\Users`, `\d+`) cannot hide the key, so it
+/// must not refuse an unparseable file on its own. Quote state is not
+/// tracked: an escape outside double quotes also counts, the safe side.
+/// Test: `a_backslash_without_a_hex_escape_is_not_a_hooks_key_10937`.
+fn has_hex_escape(block: &str) -> bool {
+    let bytes = block.as_bytes();
+    bytes.iter().enumerate().any(|(i, &b)| {
+        let width = match (b, bytes.get(i + 1)) {
+            (b'\\', Some(b'x')) => 2,
+            (b'\\', Some(b'u')) => 4,
+            (b'\\', Some(b'U')) => 8,
+            _ => return false,
+        };
+        bytes
+            .get(i + 2..i + 2 + width)
+            .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+    })
 }
 
 /// The `.md` files in `dir`, and in its subdirectories `depth` levels down.
@@ -434,7 +456,7 @@ pub(crate) fn frontmatter_hooks(text: &str) -> Result<Option<serde_yaml::Value>,
     let block: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
     let block = block.join("\n");
     // #10937: a backslash escape may spell `hooks` (`"ho\x6fks"`).
-    let mentions = block.to_ascii_lowercase().contains("hooks") || block.contains('\\');
+    let mentions = block.to_ascii_lowercase().contains("hooks") || has_hex_escape(&block);
     match serde_yaml::from_str::<serde_yaml::Value>(&block) {
         Ok(serde_yaml::Value::Mapping(map)) => Ok(map.get("hooks").cloned()),
         _ if mentions => Err(()),
