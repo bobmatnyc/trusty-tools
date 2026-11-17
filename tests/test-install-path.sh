@@ -75,7 +75,9 @@
 # - no controlling terminal (a new session via perl setsid) and no -y:
 #   exit 1 before any download, one error naming `| sh -s -- -y` and
 #   TRUSTY_YES=1, bootstrap never run
+# - CI=1 with a terminal and no -y: the same early stop (owner decision)
 # - -y / TRUSTY_YES=1: `install -y` as before
+# A skipped case is counted; any skip fails the suite unless ALLOW_SKIP=1.
 #
 # Every case runs against a temp HOME with ZDOTDIR and the TRUSTY_* knobs
 # removed from the environment; the real $HOME is never touched.
@@ -93,6 +95,15 @@ INSTALL_SH="$REPO_ROOT/install.sh"
 
 PASS=0
 FAIL=0
+SKIP=0
+
+# skip <reason> — records a skipped test. #11430: skips are counted and turn
+# the suite red unless ALLOW_SKIP=1, so a host that cannot run a case never
+# reports green.
+skip() {
+    echo "  SKIP: $1"
+    SKIP=$((SKIP + 1))
+}
 
 assert_eq() {
     local actual="$1" expected="$2" desc="$3"
@@ -120,7 +131,8 @@ count_matches() {
 
 # Environment knobs that must not leak from the developer's shell into a
 # test: a real ZDOTDIR would point writes at the developer's own .zshenv.
-HERMETIC_ENV=(env -u ZDOTDIR -u TRUSTY_NO_MODIFY_PATH -u TRUSTY_YES -u ASSUME_YES -u TRUSTY_INSTALL_DIR)
+# #11430: a CI runner's CI=true would make install.sh stop early.
+HERMETIC_ENV=(env -u ZDOTDIR -u TRUSTY_NO_MODIFY_PATH -u TRUSTY_YES -u ASSUME_YES -u TRUSTY_INSTALL_DIR -u CI)
 
 # Runs maybe_update_path("$FAKE_HOME/.local/bin") inside a fresh subshell
 # with $HOME/$SHELL overridden, sourcing install.sh in source-only mode.
@@ -235,7 +247,7 @@ test_bash_already_on_path_is_noop() {
 test_login_interactive_zsh_sources_dir_exactly_once() {
     echo "--- test_login_interactive_zsh_sources_dir_exactly_once ---"
     if ! command -v zsh >/dev/null 2>&1; then
-        echo "  SKIP: zsh not available on this host"
+        skip "zsh not available on this host"
         return
     fi
     local home
@@ -352,7 +364,7 @@ test_dir_as_prefix_of_longer_path_does_not_block_real_write() {
 # skip_without_zsh — prints a SKIP line and returns 1 when zsh is absent.
 skip_without_zsh() {
     if ! command -v zsh >/dev/null 2>&1; then
-        echo "  SKIP: zsh not available on this host"
+        skip "zsh not available on this host"
         return 1
     fi
     return 0
@@ -578,7 +590,7 @@ test_unwritable_zshenv_reports_failure() {
     echo "--- test_unwritable_zshenv_reports_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -603,7 +615,7 @@ test_readonly_home_reports_failure() {
     echo "--- test_readonly_home_reports_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -688,7 +700,7 @@ test_bash_no_tty_still_skips() {
 test_unwritable_bashrc_reports_failure() {
     echo "--- test_unwritable_bashrc_reports_failure ---"
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -726,7 +738,7 @@ test_finish_install_reports_path_failure() {
     echo "--- test_finish_install_reports_path_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -830,21 +842,21 @@ with_pty() {
 # host cannot give a command no terminal / a terminal.
 skip_without_no_ctty() {
     if ! command -v perl >/dev/null 2>&1; then
-        echo "  SKIP: perl not installed (needed to drop the controlling terminal)"
+        skip "perl not installed (needed to drop the controlling terminal)"
         return 1
     fi
     if [[ "$(no_ctty sh -c '( : </dev/tty ) 2>/dev/null && echo tty || echo none' </dev/null)" != "none" ]]; then
-        echo "  SKIP: could not drop the controlling terminal"
+        skip "could not drop the controlling terminal"
         return 1
     fi
 }
 skip_without_pty() {
     if ! command -v script >/dev/null 2>&1; then
-        echo "  SKIP: script(1) not installed (needed for a pseudo-terminal)"
+        skip "script(1) not installed (needed for a pseudo-terminal)"
         return 1
     fi
     if ! with_pty sh -c '( : </dev/tty ) 2>/dev/null && echo tty' </dev/null 2>&1 | grep -q tty; then
-        echo "  SKIP: script(1) did not provide a controlling terminal"
+        skip "script(1) did not provide a controlling terminal"
         return 1
     fi
 }
@@ -963,6 +975,32 @@ test_curl_pipe_without_terminal_stops_before_bootstrap() {
     rm -rf "$home" "$fx"
 }
 
+# CI set + a terminal + piped stdin + no -y: the owner decision treats CI as
+# no terminal (a pty nobody types at), so the same early stop applies.
+test_ci_with_terminal_stops_before_bootstrap() {
+    echo "--- test_ci_with_terminal_stops_before_bootstrap ---"
+    skip_without_pty || return
+    local home fx out st
+    home=$(new_home)
+    fx=$(new_home)
+    make_release_fixture "$fx"
+    EXTRA_ENV=(CI=1)
+    curl_pipe_main_cmd "$home" "$fx"
+    unset EXTRA_ENV
+
+    with_pty "${CMD[@]}" </dev/null >"$fx/out.raw" 2>&1
+    st=$?
+    out=$(tr -d '\r' <"$fx/out.raw")
+
+    assert_eq "$st" "1" "install.sh exits 1"
+    assert_eq "$(has_text "$out" "| sh -s -- -y")" "yes" "message names | sh -s -- -y"
+    assert_eq "$(has_text "$out" "TRUSTY_YES=1")" "yes" "message names TRUSTY_YES=1"
+    assert_eq "$([[ -e "$fx/stub.log" ]] && echo invoked || echo never)" "never" "bootstrap never invoked"
+    assert_eq "$([[ -e "$fx/curl.log" ]] && echo yes || echo no)" "no" "nothing downloaded"
+
+    rm -rf "$home" "$fx"
+}
+
 # (c) -y and TRUSTY_YES=1 keep `install -y`, with or without a terminal.
 test_yes_bootstraps_with_yes_flag() {
     echo "--- test_yes_bootstraps_with_yes_flag ---"
@@ -1047,12 +1085,17 @@ test_finish_install_success_and_bootstrap_failure
 test_probe_leaves_no_stray_sleep
 test_curl_pipe_with_terminal_bootstraps_from_tty
 test_curl_pipe_without_terminal_stops_before_bootstrap
+test_ci_with_terminal_stops_before_bootstrap
 test_yes_bootstraps_with_yes_flag
 test_curl_pipe_confirm_reads_tty
 
 echo "==========================================================="
-echo "Result: $PASS passed, $FAIL failed"
+echo "Result: $PASS passed, $FAIL failed, $SKIP skipped"
 echo "==========================================================="
 
 [[ "$FAIL" -eq 0 ]] || exit 1
+if [[ "$SKIP" -ne 0 && "${ALLOW_SKIP:-0}" != "1" ]]; then
+    echo "error: $SKIP test(s) skipped; set ALLOW_SKIP=1 to accept a partial run" >&2
+    exit 1
+fi
 exit 0

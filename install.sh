@@ -33,6 +33,11 @@
 #                          API rate limit from 60/hr (unauthenticated, easily
 #                          exhausted behind a shared/NAT'd IP) to 5000/hr.
 #                          Never required — the tokenless path still works.
+#   CI                     Non-empty (as CI runners set it) without -y or
+#                          TRUSTY_YES=1: stop before installing anything, even
+#                          when a terminal opens (#11430). `docker run -t`
+#                          without -i, and other runners that give a pty
+#                          nobody types at, must pass -y.
 #
 # Exit status: 0 on success; 1 when install.sh itself aborts; a failed
 # `trusty-installer install` bootstrap's own status (1-3) unchanged; 4 when
@@ -358,6 +363,9 @@ _have_tty() {
 #      tests/test-install-path.sh.
 confirm() {
     _prompt="$1"
+    # #11430: a failed read (e.g. the /dev/tty redirect) must never leave an
+    # inherited or earlier `_reply` to be taken as "yes".
+    _reply=""
     if [ "${ASSUME_YES}" = "1" ]; then
         return 0
     fi
@@ -387,16 +395,24 @@ confirm() {
 #      `tctl install` refuses with exit 3 (#2112). Finding that out after the
 #      download and the PATH edit left a half-done install and a misleading
 #      "components failed to bootstrap" banner.
-# What: returns 0 when ASSUME_YES=1, stdin is a terminal, or /dev/tty opens.
-#      Otherwise prints one error naming `| sh -s -- -y` and TRUSTY_YES=1 and
-#      exits 1. main calls it before any download or file change.
-# Test: `test_curl_pipe_without_terminal_stops_before_bootstrap` in
+#      A CI runner can hand the script a pty nobody types at (`docker run -t`
+#      without -i), where the prompt would wait forever.
+# What: returns 0 when ASSUME_YES=1, or when CI is empty and stdin is a
+#      terminal or /dev/tty opens. Otherwise (no terminal, or CI set) prints
+#      one error naming `| sh -s -- -y` and TRUSTY_YES=1 and exits 1. main
+#      calls it before any download or file change.
+# Test: `test_curl_pipe_without_terminal_stops_before_bootstrap`,
+#      `test_ci_with_terminal_stops_before_bootstrap` in
 #      tests/test-install-path.sh.
 require_consent_terminal() {
-    if [ "${ASSUME_YES}" = "1" ] || [ -t 0 ] || _have_tty; then
+    if [ "${ASSUME_YES}" = "1" ]; then
         return 0
     fi
-    die "no terminal to confirm the install and no -y given; nothing was installed. Re-run with: curl -sSf ${INSTALL_SH_URL} | sh -s -- -y  (or set TRUSTY_YES=1)"
+    # #11430 (owner decision): CI set counts as no terminal, even with a pty.
+    if [ -z "${CI:-}" ] && { [ -t 0 ] || _have_tty; }; then
+        return 0
+    fi
+    die "no terminal to confirm the install (or CI is set) and no -y given; nothing was installed. Re-run with: curl -sSf ${INSTALL_SH_URL} | sh -s -- -y  (or set TRUSTY_YES=1)"
 }
 
 # ---------------------------------------------------------------------------
@@ -1063,8 +1079,8 @@ main() {
         shift
     done
 
-    # #11430: no terminal and no -y means `tctl install` would refuse; stop
-    # now, before the download, the PATH edit or any other change.
+    # #11430: no terminal (or CI set) and no -y means no one can confirm;
+    # stop now, before the download, the PATH edit or any other change.
     require_consent_terminal
 
     # Required tools.
