@@ -392,7 +392,8 @@ fn tier_alias_defaults_when_not_configured() {
     let cfg = MpmConfig::default();
     assert_eq!(cfg.expand_model_alias("haiku"), "claude-haiku-4-5");
     assert_eq!(cfg.expand_model_alias("sonnet"), "claude-sonnet-4-5");
-    assert_eq!(cfg.expand_model_alias("opus"), "claude-opus-4-5");
+    assert_eq!(cfg.expand_model_alias("opus"), "claude-opus-5-5");
+    assert_eq!(OPUS_DEFAULT_MODEL_ID, "claude-opus-5-5");
 }
 
 #[test]
@@ -548,7 +549,7 @@ engineer = "haiku"
 
     // 3. Frontmatter hint wins over config default.
     let m = resolve_agent_model(&cfg, "unknown-agent", Some("opus"), None);
-    assert_eq!(m, "claude-opus-4-5");
+    assert_eq!(m, OPUS_DEFAULT_MODEL_ID);
 
     // 4. Config default is the final fallback for unknown agents.
     let m = resolve_agent_model(&cfg, "unknown-agent", None, None);
@@ -598,7 +599,7 @@ fn load_effective_applies_the_project_layer() {
 
     assert_eq!(
         resolve_agent_model(&cfg, "nobody", None, None),
-        "claude-opus-4-5",
+        OPUS_DEFAULT_MODEL_ID,
         "the project file's default_model must beat the root config.toml's"
     );
 }
@@ -618,7 +619,7 @@ fn project_default_model_tops_the_chain() {
 
     assert_eq!(
         resolve_agent_model(&cfg, "nobody", None, None),
-        "claude-opus-4-5",
+        OPUS_DEFAULT_MODEL_ID,
         "the project layer must beat both host layers"
     );
 }
@@ -642,7 +643,7 @@ fn yaml_default_model_beats_toml_default() {
 
     assert_eq!(
         resolve_agent_model(&cfg, "nobody", None, None),
-        "claude-opus-4-5"
+        OPUS_DEFAULT_MODEL_ID
     );
 }
 
@@ -686,5 +687,73 @@ fn project_default_model_still_loses_to_more_specific_settings() {
         resolve_agent_model(&cfg, "engineer", None, None),
         "claude-haiku-4-5",
         "a per-agent pin must beat the project default"
+    );
+}
+
+// #11353: Fable is reserved for PM, engineer and research roles.
+
+#[test]
+fn fable_gate_allows_pm_engineer_research() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(
+        dir.path(),
+        "[models]\ndefault = \"fable\"\n[models.agents]\npm = \"fable\"\n",
+    );
+    assert_eq!(
+        crate::core::model_inject::resolve_pm_model(&cfg, None),
+        "claude-fable-5-2"
+    );
+    assert_eq!(
+        resolve_agent_model_for_role(&cfg, "rust-engineer", Some("engineer"), Some("fable"), None),
+        "claude-fable-5-2"
+    );
+    // A language-engineer name with no known role is still an engineer.
+    assert_eq!(
+        resolve_agent_model(&cfg, "rust-engineer", Some("fable"), None),
+        "claude-fable-5-2"
+    );
+    assert_eq!(
+        resolve_agent_model_for_role(&cfg, "research", Some("research"), Some("fable"), None),
+        "claude-fable-5-2"
+    );
+}
+
+#[test]
+fn fable_gate_caps_other_roles_to_opus() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let cfg = load_from_str(
+        dir.path(),
+        "[models.agents]\nqa = \"fable\"\nticketing = \"claude-fable-5-2\"\n",
+    );
+    // Via config.
+    for agent in ["qa", "ticketing"] {
+        assert_eq!(
+            resolve_agent_model_for_role(&cfg, agent, Some(agent), None, None),
+            OPUS_DEFAULT_MODEL_ID,
+            "{agent} via config"
+        );
+    }
+    // Via frontmatter.
+    let empty = MpmConfig::default();
+    for agent in ["qa", "ticketing"] {
+        assert_eq!(
+            resolve_agent_model_for_role(&empty, agent, Some(agent), Some("fable"), None),
+            OPUS_DEFAULT_MODEL_ID,
+            "{agent} via frontmatter"
+        );
+    }
+    // Unknown role fails closed, even with an explicit request.
+    assert_eq!(
+        resolve_agent_model_for_role(&empty, "mystery", Some("mystery"), None, Some("fable")),
+        OPUS_DEFAULT_MODEL_ID
+    );
+    assert_eq!(
+        resolve_agent_model(&empty, "mystery", Some("fable"), None),
+        OPUS_DEFAULT_MODEL_ID
+    );
+    // A qa role on an engineer-sounding name is still qa.
+    assert_eq!(
+        resolve_agent_model_for_role(&empty, "code-critic", Some("qa"), Some("fable"), None),
+        OPUS_DEFAULT_MODEL_ID
     );
 }

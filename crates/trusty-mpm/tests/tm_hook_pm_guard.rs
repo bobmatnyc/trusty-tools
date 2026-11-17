@@ -1462,8 +1462,8 @@ fn pm_guard_fanout_fails_open_on_indeterminate_caller() {
     // checkout refuses rather than failing open (ADR-0048, #8547). The two
     // rules disagree by design; this one is asserted where only it can fire.
     for payload in [
-        r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
-        r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Agent","tool_input":{"prompt":"go"}}"#,
+        r#"{"hook_event_name":"PreToolUse","agent_id":"","tool_name":"Agent","tool_input":{"model":"opus","prompt":"go"}}"#,
+        r#"{"hook_event_name":"PreToolUse","agent_type":"rust-engineer","tool_name":"Agent","tool_input":{"model":"opus","prompt":"go"}}"#,
     ] {
         assert_eq!(
             run_pm_guard_outside_a_checkout(payload).trim(),
@@ -2051,7 +2051,9 @@ const UNISOLATED_ENGINEER_DISPATCH: &str = r#"{"hook_event_name":"PreToolUse","s
 /// never sees it. That is what makes it the right payload for a case whose
 /// subject is the shared-tree guard's behaviour against a daemon that is not
 /// answering, where the builder cap's answer is the opposite one.
-const UNISOLATED_DOCUMENTATION_DISPATCH: &str = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_docs","tool_name":"Agent","tool_input":{"subagent_type":"documentation","prompt":"go"}}"#;
+// #11353: dispatch fixtures name `model: "opus"`, so the Fable cap
+// (unknown parent model) never decides a case written for another rule.
+const UNISOLATED_DOCUMENTATION_DISPATCH: &str = r#"{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_docs","tool_name":"Agent","tool_input":{"subagent_type":"documentation","model":"opus","prompt":"go"}}"#;
 
 #[test]
 fn pm_guard_denies_when_a_running_daemon_does_not_answer() {
@@ -4377,7 +4379,7 @@ fn pm_guard_keeps_an_opted_out_project_in_the_checkout() {
     let (_dir, repo) = main_checkout_fixture();
     std::fs::write(repo.join(".trusty-mpm.toml"), "agent_worktree = false\n")
         .expect("write project config");
-    let input = r#"{"subagent_type":"documentation","prompt":"write the memo"}"#;
+    let input = r#"{"subagent_type":"documentation","model":"opus","prompt":"write the memo"}"#;
     let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
 
     let value: serde_json::Value =
@@ -4569,11 +4571,17 @@ fn pm_guard_refuses_an_untyped_or_unknown_dispatch_in_a_main_checkout() {
     let (_dir, repo) = main_checkout_fixture();
     for (input, names) in [
         (
-            r#"{"subagent_type":"some-project-custom-agent","prompt":"x"}"#,
+            r#"{"subagent_type":"some-project-custom-agent","model":"opus","prompt":"x"}"#,
             "`some-project-custom-agent`",
         ),
-        (r#"{"prompt":"an untyped dispatch"}"#, "no `subagent_type`"),
-        (r#"{"subagent_type":7,"prompt":"x"}"#, "not an agent name"),
+        (
+            r#"{"model":"opus","prompt":"an untyped dispatch"}"#,
+            "no `subagent_type`",
+        ),
+        (
+            r#"{"subagent_type":7,"model":"opus","prompt":"x"}"#,
+            "not an agent name",
+        ),
     ] {
         let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
         assert_denied(&stdout);
@@ -4602,7 +4610,7 @@ fn pm_guard_grants_a_worktree_to_a_deployed_agent_it_does_not_bundle() {
         "---\nname: fixture-deployed-ops\nrole: ops\n---\n\n# Ops\n",
     )
     .expect("write agent");
-    let input = r#"{"subagent_type":"fixture-deployed-ops","prompt":"go"}"#;
+    let input = r#"{"subagent_type":"fixture-deployed-ops","model":"opus","prompt":"go"}"#;
     let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
     let value: serde_json::Value =
         serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
@@ -4617,11 +4625,11 @@ fn pm_guard_never_refuses_a_harness_builtin_agent() {
     // #8547 review: Claude Code's built-ins ship in no bundle and no tier. The
     // reader runs in place; the writers are isolated; none is refused.
     let (_dir, repo) = main_checkout_fixture();
-    let reader = r#"{"subagent_type":"claude-code-guide","prompt":"go"}"#;
+    let reader = r#"{"subagent_type":"claude-code-guide","model":"opus","prompt":"go"}"#;
     let stdout = run_pm_guard(&tool_payload_at("Agent", reader, &repo, ""), &[]);
     assert_eq!(stdout.trim(), "", "claude-code-guide only reads: {stdout}");
     for agent in ["general-purpose", "claude", "statusline-setup"] {
-        let input = format!(r#"{{"subagent_type":"{agent}","prompt":"go"}}"#);
+        let input = format!(r#"{{"subagent_type":"{agent}","model":"opus","prompt":"go"}}"#);
         let stdout = run_pm_guard(&tool_payload_at("Agent", &input, &repo, ""), &[]);
         let value: serde_json::Value =
             serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
@@ -4639,10 +4647,10 @@ fn pm_guard_leaves_read_only_and_isolated_dispatches_alone() {
     // guard silently downgrade `remote` to `worktree`.
     let (_dir, repo) = main_checkout_fixture();
     for input in [
-        r#"{"subagent_type":"research","prompt":"x"}"#,
-        r#"{"subagent_type":"code-critic","prompt":"x"}"#,
-        r#"{"subagent_type":"rust-engineer","isolation":"worktree","prompt":"x"}"#,
-        r#"{"subagent_type":"rust-engineer","isolation":"remote","prompt":"x"}"#,
+        r#"{"subagent_type":"research","model":"opus","prompt":"x"}"#,
+        r#"{"subagent_type":"code-critic","model":"opus","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"worktree","model":"opus","prompt":"x"}"#,
+        r#"{"subagent_type":"rust-engineer","isolation":"remote","model":"opus","prompt":"x"}"#,
     ] {
         let stdout = run_pm_guard(&tool_payload_at("Agent", input, &repo, ""), &[]);
         assert_eq!(stdout.trim(), "", "{input} must pass through untouched");
@@ -5235,7 +5243,7 @@ fn pm_guard_allows_a_non_builder_when_the_daemon_cannot_be_asked() {
     let daemon = RefusingDaemon::new();
     for agent in ["research", "ticketing", "qa"] {
         let payload = format!(
-            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_ro","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go"}}}}"#
+            r#"{{"hook_event_name":"PreToolUse","session_id":"11111111-1111-1111-1111-111111111111","tool_use_id":"toolu_ro","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","model":"opus","prompt":"go"}}}}"#
         );
         assert_eq!(
             run_pm_guard_at(&payload, &daemon.url, cwd.path()).trim(),
@@ -5469,4 +5477,88 @@ fn pm_guard_refuses_a_dispatch_when_no_content_is_installed() {
         // #9396: the remedy named first is `tm content update`.
         assert!(stdout.contains("tm content update"), "{stdout}");
     }
+}
+
+/// #11390: the real binary appends the project's account names to an ops
+/// dispatch as one `updatedInput`, and leaves a non-ops or `Task` dispatch
+/// silent. Before the fix every case printed nothing.
+#[test]
+fn pm_guard_appends_project_accounts_to_an_ops_dispatch_only_11390() {
+    let cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        cwd.path().join(".trusty-mpm.toml"),
+        "[accounts.gh]\naccount = \"octo-user\"\nverify = \"gh auth status\"\n",
+    )
+    .expect("write config");
+    // #11353: an ops dispatch names a non-Fable model, or the Fable cap refuses it.
+    let payload = |tool: &str, agent: &str| {
+        format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}","tool_input":{{"subagent_type":"{agent}","prompt":"go","model":"sonnet"}}}}"#
+        )
+    };
+    let stdout = run_pm_guard_at(
+        &payload("Agent", "local-ops"),
+        UNREACHABLE_DAEMON,
+        cwd.path(),
+    );
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("one JSON object");
+    let input = &v["hookSpecificOutput"]["updatedInput"];
+    let prompt = input["prompt"]
+        .as_str()
+        .unwrap_or_else(|| panic!("prompt in {stdout}"));
+    assert!(prompt.starts_with("go"), "{prompt}");
+    assert!(prompt.contains("## Project accounts"), "{prompt}");
+    assert!(
+        prompt.contains("`gh`: account `octo-user`; verify: `gh auth status`"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("never log in or switch accounts"),
+        "{prompt}"
+    );
+    assert_eq!(input["subagent_type"], "local-ops");
+    for (tool, agent) in [("Agent", "research"), ("Task", "local-ops")] {
+        let out = run_pm_guard_at(&payload(tool, agent), UNREACHABLE_DAEMON, cwd.path());
+        assert_eq!(out.trim(), "", "{tool} {agent}");
+    }
+}
+
+/// #11390 review: a bad `[accounts]` value is reported as rejected — never as
+/// "no map" — and drops only the accounts: the same file's
+/// `agent_worktree = false` still turns a writer's grant into the in-place
+/// note. Before the fix the whole file was rejected, so the writer got
+/// `isolation: "worktree"` and the ops agent read "No account map".
+#[test]
+fn pm_guard_reports_a_rejected_account_map_and_keeps_the_worktree_setting_11390() {
+    let cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(cwd.path().join(".git")).expect("mkdir .git");
+    std::fs::write(
+        cwd.path().join(".trusty-mpm.toml"),
+        "agent_worktree = false\n[accounts.gh]\naccount = \"me\"\nverify = \"gh auth status `id`\"\n",
+    )
+    .expect("write config");
+    // #11353: an ops dispatch names a non-Fable model, or the Fable cap refuses it.
+    let payload = |agent: &str| {
+        format!(
+            r#"{{"hook_event_name":"PreToolUse","tool_name":"Agent","tool_input":{{"subagent_type":"{agent}","prompt":"go","model":"sonnet"}}}}"#
+        )
+    };
+    let updated = |agent: &str| -> serde_json::Value {
+        let stdout = run_pm_guard_at(&payload(agent), UNREACHABLE_DAEMON, cwd.path());
+        let v: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("{agent}: one JSON object, got {stdout:?}: {e}"));
+        v["hookSpecificOutput"]["updatedInput"].clone()
+    };
+    let ops = updated("local-ops");
+    let prompt = ops["prompt"].as_str().expect("prompt");
+    assert!(
+        prompt.contains("The project account map was rejected (accounts.gh.verify"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("`id`"), "{prompt}");
+    assert!(!prompt.contains("No account map is configured"), "{prompt}");
+    let writer = updated("rust-engineer");
+    assert!(writer.get("isolation").is_none(), "{writer}");
+    let prompt = writer["prompt"].as_str().expect("prompt");
+    assert!(prompt.contains("Worktree isolation is OFF"), "{prompt}");
 }

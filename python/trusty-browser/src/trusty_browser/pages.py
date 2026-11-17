@@ -7,19 +7,19 @@ tests/test_page_ops.py.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import secrets
 import time
-import unicodedata
 from urllib.parse import urlsplit
 
 from trusty_browser import codes
 from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
+from trusty_browser.page_fields import MODIFIERS, key_allowed, valid_files
+from trusty_browser.page_query import KEEP_LEASE, clicked, controls, optional
 from trusty_browser.protocol import (
+    HISTORY,
     MUTATING,
     Claim,
     Frame,
@@ -34,29 +34,24 @@ OPS = {
     "select": {"op", "tab"},
     "page_read": {"op", "lease"},
     "page_click": {"op", "lease", "request_id", "ref"},
+    "page_hover": {"op", "lease", "request_id", "ref"},
     "page_type": {"op", "lease", "request_id", "ref", "text"},
     "page_scroll": {"op", "lease", "request_id", "to", "ref", "wait_ms"},
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_select": {"op", "lease", "request_id", "ref", "value"},
+    "page_drag": {"op", "lease", "request_id", "ref", "target"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
+    "page_find": {"op", "lease"},  # #11357: terms are optional fields
+    "page_back": {"op", "lease", "request_id"},
+    "page_forward": {"op", "lease", "request_id"},
+    "page_reload": {"op", "lease", "request_id"},
     "release": {"op", "lease"},
+    # #11293: focus the leased tab; profile grants only.
+    "switch": {"op", "lease"},
 }
 TAB_KEYS = ("tab", "window", "index", "active", "access", "origin", "title")
-# Worker refusals after which the lease stays; any other drops it.
-KEEP_LEASE = {
-    "PermissionNeeded",
-    "DocumentChanged",
-    "NavigationPending",
-    "StaleElement",
-    "NotEditable",
-    "NotSelectable",
-    "NoSuchOption",
-    "InvalidUrl",
-    "InvalidRequest",
-    "InvalidOperation",
-}
 
 
 def remembered(request: Frame) -> Frame:
@@ -120,7 +115,15 @@ READ = {
     "elements": (list,),
     "truncated": (bool,),
 }
+FOUND = {
+    "document": (str,),
+    "origin": (str,),
+    "matches": (list,),
+    "truncated": (bool,),
+}
 DONE = {"document": (str,)}
+# #11352: a page_type or page_press whose text a maxlength cut still succeeds, with its counts.
+CUT = {**DONE, "truncated": (bool,), "typed": (int,), "accepted": (int,)}
 SCROLL_TO = ("down", "up", "top", "bottom", "element")
 SCROLLED = {
     **DONE,
@@ -132,6 +135,8 @@ SCROLLED = {
 }
 # #11285: page_select says whether the value moved and what it is now.
 SELECTED = {"document": (str,), "changed": (bool,), "value": (str,)}
+SWITCHED = {"window": (int,), "focused": (bool,)}
+DRAGGED = {"document": (str,), "dropped": (bool,)}  # #11288
 LANDED = {
     "access": (bool,),
     "document": OPTIONAL,
@@ -150,65 +155,20 @@ DOWNLOAD = {
     "error": OPTIONAL,
     "started": (str,),
 }
-# #11289: the worker's own limits; base64 of MAX_UPLOAD bytes fits one 1 MiB native frame.
-MAX_FILES = 10
-MAX_UPLOAD = 512 * 1024
-FILE_KEYS = {"name", "type", "data"}
-
-
-def valid_files(files: object) -> bool:
-    """True for 1-10 ``{name, type, data}`` entries whose base64 decodes within ``MAX_UPLOAD``."""
-    if not isinstance(files, list) or not 0 < len(files) <= MAX_FILES:
-        return False
-    total = 0
-    for item in files:
-        if not isinstance(item, dict) or set(item) != FILE_KEYS:
-            return False
-        name, kind, data = item["name"], item["type"], item["data"]
-        if not isinstance(name, str) or not 0 < len(name) <= 255:
-            return False
-        if "/" in name or "\\" in name:
-            return False
-        if not isinstance(kind, str) or len(kind) > 255 or not isinstance(data, str):
-            return False
-        try:
-            total += len(base64.b64decode(data, validate=True))
-        except (binascii.Error, ValueError):
-            return False
-    return total <= MAX_UPLOAD
-
-
-# #11286: the keys page_press names; any other single printable character is also a key.
-NAMED_KEYS = {
-    "Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown",
-    "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown", "Space", " ",
-}  # fmt: skip
-MODIFIERS = {"Shift", "Control", "Alt", "Meta"}
-
-
-def key_allowed(key: object) -> bool:
-    """A named key, or one code point that is not a control, format or separator.
-
-    Why: the broker refuses a key the worker would refuse, before sending it.
-    What: mirrors ``keyAllowed`` in extension/pages.js.
-    Test: `test_page_press_validates_key_and_modifiers_before_sending`.
-    """
-    if not isinstance(key, str):
-        return False
-    if key in NAMED_KEYS:
-        return True
-    return len(key) == 1 and unicodedata.category(key)[0] not in "CZ"
 
 
 def validate(request: Frame) -> str:
     """Exact fields and types per op; returns the op name. Contract "Field types"."""
     op = request.get("op")
-    if not isinstance(op, str) or op not in OPS or set(request) != OPS[op]:
+    if not isinstance(op, str) or op not in OPS:
         raise Refusal("InvalidRequest")
-    for name in ("lease", "request_id", "ref"):
+    if not OPS[op] <= set(request) <= OPS[op] | optional(op):
+        raise Refusal("InvalidRequest")
+    controls(request)  # #11356
+    for name in ("lease", "request_id", "ref", "target"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
         # #11286: page_press takes a null ref for the focused element.
-        nullable = op == "page_scroll" or (op == "page_press" and request[name] is None)
+        nullable = op == "page_scroll" or (op == "page_press" and request.get(name) is None)
         if name in request and not (name == "ref" and nullable):
             string(request, name)
     if op == "page_press":
@@ -424,12 +384,20 @@ class Pages(Grants):
             self.drop(claim)
             return {"ok": True}, claim.tab, None
         tab = claim.tab
-        if op == "page_read":
+        if op == "switch":
+            return await self.switch(grant, claim)
+        if op in ("page_read", "page_find"):
             result = shaped(
                 await self.send(
-                    grant, claim, claim.peer, op, tab=tab, document=claim.document
+                    grant,
+                    claim,
+                    claim.peer,
+                    op,
+                    tab=tab,
+                    document=claim.document,
+                    **controls(request),
                 ),
-                READ,
+                READ if op == "page_read" else FOUND,
             )
             changed = result["document"] != claim.document
             claim.document, claim.origin = (
@@ -452,8 +420,12 @@ class Pages(Grants):
             raise Refusal("SessionFull")
         if op == "page_navigate":
             args: Frame = {"url": request["url"]}
+        elif op in HISTORY:
+            args = {}
         else:
             args = {"document": claim.document, "ref": request["ref"]}
+            if op == "page_click":  # #11294: the dialog policy
+                args.update(controls(request))
             if op == "page_type":
                 args["text"] = request["text"]
             if op == "page_scroll":
@@ -464,25 +436,54 @@ class Pages(Grants):
                 args.update(key=request["key"], modifiers=request["modifiers"])
             if op == "page_select":
                 args["value"] = request["value"]
+            if op == "page_drag":
+                args["target"] = request["target"]
         try:
             raw = await self.send(grant, claim, claim.peer, op, tab=tab, **args)
         except Refusal as exc:
-            if str(exc) == "OutcomeUnknown":
+            # #11352: TextDropped reports typing that ran, so a retry must not type again.
+            if str(exc) in ("OutcomeUnknown", "TextDropped"):
                 session.journal[rid] = (remembered(request), exc.response)
             raise
-        if op == "page_navigate":
+        if op == "page_navigate" or op in HISTORY:
             result = shaped(raw, LANDED)
             claim.document = result["document"]  # type: ignore[assignment]
             claim.origin = result["origin"] if result["access"] else None  # type: ignore[assignment]
             where = host(claim.origin)
         else:
-            shape = {"page_scroll": SCROLLED, "page_select": SELECTED}.get(op, DONE)
-            result = shaped(raw, shape)
+            shape = {"page_scroll": SCROLLED, "page_select": SELECTED, "page_drag": DRAGGED}
+            shape = shape.get(op, DONE)
+            if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
+                shape = CUT
+            result = clicked(raw) if op == "page_click" else shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}
         session.journal[rid] = (remembered(request), reply)
         return reply, tab, where
+
+    async def switch(
+        self, grant: Grant, claim: Claim
+    ) -> tuple[Frame, int | None, str | None]:
+        """Make the leased tab the active tab of its window and focus that window.
+
+        Why: an agent on a profile grant must reach a tab a link opened, and the
+        human must see which tab it drives (#11293). What: needs this session's
+        own lease, so a tab another session holds stays out of reach; a tab
+        grant answers ``OutOfScope`` because focus changes browser-wide state.
+        Idempotent, so it is not journaled.
+        Test: `test_profile_grant_switch_focuses_the_leased_tab`,
+        `test_switch_needs_this_sessions_own_lease`.
+        """
+        if grant.scope == "tab":
+            raise Refusal("OutOfScope", tab=claim.tab)
+        result = shaped(
+            await self.send(grant, claim, claim.peer, "page_switch", tab=claim.tab),
+            SWITCHED,
+        )
+        claim.deadline = time.monotonic() + TTL
+        reply = {"ok": True, "tab": claim.tab, **result}
+        return reply, claim.tab, host(claim.origin)
 
     async def select(
         self, session: Session, grant: Grant, tab: int

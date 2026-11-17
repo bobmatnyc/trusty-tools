@@ -59,3 +59,6 @@ When the guard fails (it panics, errors, or, in a release build, has not decided
 | GP-048 | `egress-guard-panic` | PM, Architect, Agent | yes | the guard stays on | #8454 | An egress guard run that panics denies the call. |
 | GP-049 | `guard-timeout` | PM, Architect, Agent | yes | the guard stays on | #10600, #10641 | Release builds: a guard run that has not decided by its 8 s deadline refuses the call, bar the recovery allowlist. |
 | GP-050 | `tmux-kill-server` | PM, Architect, Agent | yes | checkpoint first | #10665 | No tmux kill-server or kill-session -a on the fleet server (default, $TMUX, -L default, a tm- server, case folded), and no kill-session there unless it names a literal non-tm- session; a scratch -S or -L is allowed. Other findings are log-only. |
+| GP-051 | `fable-cap` | PM, Architect | no | the guard stays on | #11353 (owner ruling Dq7) | Only PM, engineer (incl. any *-engineer) and research agents run on a Fable model; any other dispatch that would is refused. |
+| GP-052 | `stale-input-hash` | PM, Agent | no | - | #10574 (owner ruling Dr8) | No replacing write to a registered artifact that changed since it was last read, was never read, or whose record store cannot be read. |
+| GP-053 | `locked-path-write` | PM, Agent | no | - | #10574 (owner ruling Dr8) | No write to a locked artifact, whatever its hash. |

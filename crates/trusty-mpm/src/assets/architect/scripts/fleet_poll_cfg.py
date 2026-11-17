@@ -7,6 +7,7 @@ fleet-poll.py loads this file by path; fleet-poll.py re-exports every name, so c
 Test: tests/test_config.py (through fleet-poll.py's re-exports)
 """
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -33,8 +34,8 @@ EVENT_TYPES = {"permission_prompt", "agent_needs_input"}  # idle_prompt is not a
 DISK_HIGH = 90
 LOAD_FACTOR_DEFAULT = 1.5  # x cores, vs. the 5-min load avg; env LOAD_FACTOR overrides
 
-# The watchdog's one relaunch path (fleet_poll_watchdog.py); not shipped yet, so a relaunch reports failed.
-RELAUNCH_SCRIPT = os.path.join(HERE, "session-relaunch.sh")
+# #11367: the watchdog's one relaunch path is the bound launch, `tm architect up`; TM_BIN overrides PATH.
+TM_BIN = os.environ.get("TM_BIN") or shutil.which("tm") or ""
 
 # #10861: <root>/local/, the file `tm architect quiet` and the Rust poller read.
 def resolve_quiet_sessions_file(root, env=None):

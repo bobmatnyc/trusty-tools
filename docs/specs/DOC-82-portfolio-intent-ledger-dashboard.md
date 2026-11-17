@@ -1,10 +1,10 @@
 # DOC-82 — Portfolio Intent Ledger and Dashboard: Data Contract, Session Reporting and Architect Aggregation
 
 **Status:** Draft (owner ruling recorded; implementation tracked in issues A-G, linked in §8.3)
-**Spec ID:** `SPEC-LEDGER-01~draft` … `SPEC-LEDGER-08~draft` (DOC-82)
+**Spec ID:** `SPEC-LEDGER-01~draft` … `SPEC-LEDGER-09~draft` (DOC-82)
 **Subsystem:** `trusty-architect` (shared Ledger and dashboard data layer, `tm architect dashboard`); `trusty-mpm` (`tm dbatg`, `tm init`, `tm fleet init`, `tm doctor`, daemon methods, MCP tool); `trusty-console` (dashboard route)
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-10-27 (LDG-1.2 scoped to PM projects, owner ruling D9d)
+**Last-updated:** 2026-11-16 (§9 IL-talk added, owner direction 2026-11-16; Refs ar-G01)
 **DOC-N claim:** `DOC-82`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). `docs/specs/README.md` names `DOC-82` as next free; no tracked file on `origin/main` (18fabeb8ff) and no open PR names it (checked 2026-10-19). Re-verify before merge.
 **Placement:** No Architect spec exists in `docs/specs/` on `origin/main`. This is therefore a new DOC for the `trusty-architect` crate's Ledger and dashboard contract, not a section of an existing spec. When a general trusty-architect spec lands, it links here.
 **Builds on:** [#9756](https://github.com/bobmatnyc/trusty-tools/issues/9756) (every PM keeps a structured plan the Architect ingests), [#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171) (Architect launcher crate), [DOC-73](./DOC-73-unified-mpm-code-agents-dashboard.md) (console dashboard), [ADR-0032](../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md) (console is the only HTTP surface).
@@ -258,3 +258,109 @@ Implementation is tracked in issues A-G, linked below. Each issue body carries t
 - **G.** [#10068](https://github.com/bobmatnyc/trusty-tools/issues/10068): this DOC, plus renaming `datg` to `dbatg` in #9757.
 
 **LDG-8.1** Each of issues A-F MUST carry acceptance criteria that cite the `LDG-` ids of this DOC. Check: review of each issue body at filing.
+
+---
+
+## 9. IL-talk: talking through the Ledger {#SPEC-LEDGER-09~draft}
+
+**ID:** SPEC-LEDGER-09~draft
+
+Owner direction, 2026-11-16 (Refs ar-G01): "Let's spec IL-talk as part of the IL spec in trusty." This section records IL-talk as it runs today in the Architect's private project and states the contract the Rust port keeps. Status: prototype in Python; the Architect has used it as its standard since the owner ruling of 2026-11-15 00:48Z, and PM-to-agent use was prototyped on 2026-11-15 (task ar-T4d). No code in this repository implements it yet.
+
+**Terms.** **IL-talk**: sessions exchange ledger ids, one closing `il` block per turn and library replies instead of prose. **ILIO**: the name of the Architect's response model that introduced IL-talk. **`il` block**: the fenced block of §9.1. **R reply**: a library reply of §9.2. **Prototype scripts**: `ilio.py`, `il_agent.py`, `datg.py`, `architect-mcp.py`.
+
+**Sources, all in the Architect's private project (not in this repository).** `ARCHITECT.md` line 37; `.claude/skills/il-response-model/SKILL.md`; `.claude/skills/il-agent-read/SKILL.md`; `scripts/ilio.py`; `scripts/il_agent.py`; `scripts/architect-mcp.py`; `scripts/pm_intake.py`; `scripts/datg.py`; `scripts/README.md` (rows for `datg.py`, `architect-mcp.py`); `local/ilio/r-library.json`; `local/briefs/2026-11-12-il-response-model-spec.md` (the ILIO spec); `local/briefs/2026-11-15-il-talk-agents.md`; `docs/specs/SPEC-IL-01.md`. Requirements below say "today" where they describe the prototype and MUST where they bind the port. Anything the sources leave undefined is an **Open question**, collected in §9.6.
+
+### 9.1 `il` blocks
+
+- **LDG-9.1.1** An `il` block is a fenced block whose info string is `il`. When a message holds several, only the last is read. Each line is `<field>: <text>`. Check: `parse` over a message with two blocks returns the second (`test_ilio.py` in the Architect project).
+- **LDG-9.1.2** The fields, in this fixed order, are: `goal`, `task`, `done`, `pct`, `est`, `remaining`, `open`, `new`, `close`, `next`, `delta`, `need`, `decided`, `evidence`, `refs`, `error`, `feedback`, `merge`. `goal`, `task`, `done`, `pct` and `next` are required. A field out of order, an unknown field or a missing required field is rejected. Check: reject codes `ORDER`, `FIELD`, `MISSING`.
+
+| Field | Content today |
+|---|---|
+| `goal`, `task` | Ledger ids. A task id carries its creation day: `ar-T01@1115`. |
+| `done` | What was done, with a sha or path; or an R reply (§9.2); or `free: <text>`. |
+| `pct` | Integer 0 to 100. |
+| `est`, `remaining` | Time estimate and what is left. |
+| `open` | Ledger D and A ids the reader should look at. |
+| `new` | A new item for the PM or Architect to file: `<D\|A\|T> "title" [goal <id>] [opts a\|b*]`. A decision's detail may be prose. |
+| `close` | Ledger ids to close. The outcome comes from `evidence`, else from `done`. |
+| `next` | The next step. For a PM or the Architect, it becomes the session record's `next` (LDG-2.4.1). |
+| `delta`, `evidence` | What changed and the proof, labelled `[VERIFIED]` or `[REPORTED]`, with a command or path. |
+| `need` | What the sender needs from the receiver. An agent proposes a decision or follow-up here. |
+| `decided`, `refs` | As in DOC-89 (compact handback v0). |
+| `error`, `feedback` | A failure that fits no other field; feedback on the brief or prompt. |
+| `merge` | Undefined (open question 5). |
+
+- **LDG-9.1.3** A line, field name included, MUST NOT exceed 240 characters. `pct` MUST be an integer 0 to 100. A value that matches a secret pattern MUST be rejected; a secret's location is written instead. Check: reject codes `LONG`, `PCT`, `SECRET`.
+- **LDG-9.1.4** IL-talk ids today are `[<code>-]<G|D|A|T|R><2 digits>[@MMDD]`. Digits are base 34 (`0-9`, `a-z` without `o` and `l`). The parser rejects an `o` or an `l` with a hint and never corrects it (`BADID`). A task id left in a message that outlives the conversation carries its `@MMDD` stamp, because ids recycle (LDG-2.2.3); a stamp that differs from the holder's creation day, or an id absent from the ledger, is `STALE-ID`. This conflicts with LDG-2.2.1 (open question 2).
+- **LDG-9.1.5** A rejection is one line, at most 200 characters: `IL-REJECT <code> <field>: <expected>`. Today a rejected turn gets one retry; a second failure is logged and accepted with a warn flag. The Stop hook (`ilio-stop`) validates and records every text turn, and blocks once only when `ILIO_MODE=enforce`; the default is warn. Check: `test_ilio.py`.
+- **LDG-9.1.6** Where blocks appear today. (a) Every Architect turn that is not an owner-facing reply: a poll wake, a heartbeat, an MCP or cross-session message, a relay it sends, a PM handback it reads. The turn ends with exactly one block and nothing beside it. (b) A PM turn. (c) The closing message of an agent a PM dispatched (§9.3). (d) The dashboard chat view, which renders a block as a card. An owner-facing reply (the owner typed it, a dashboard chat post, a voice relay) is prose with the dashboard footer and carries no block. Check: the footer hook skips a turn that holds a block.
+- **LDG-9.1.7** Who writes the store. Only the PM or the Architect writes, and only from its own block: `apply` writes the session `next`, a `new:` item and `close:` ids through the Ledger writer. Today that writer is `datg.py`; in the port it is the daemon method of LDG-3.3, and the block MUST NOT be a second write path around it. Check: a block with `new:` produces the same record as the equivalent `dbatg.add`.
+- **LDG-9.1.8** At a context clear the session first updates its session record, then runs `collapse`, which archives done items and checks that every id that was open, running, answered or owed before is still in the table or the archive. If the check fails, the clear MUST NOT run. Check: the `INVARIANT FAILED` path in `test_ilio.py`.
+
+### 9.2 The R reply library
+
+- **LDG-9.2.1** An R reply is a named, lettered option with `{slot}` placeholders, written `R<2 digits>-<letter>` plus `slot=value` pairs, for example `R02-a sha=abc1234`. A sender puts it in `done:`; a script (`relay`, `expand`) prints the filled text, and the relay carries that text, not the code. An unknown code is rejected (`RREF`). A text that fits no option is written `done: free: <text>`. Check: `relay` on a known and an unknown code.
+- **LDG-9.2.2** Today the library holds five replies. The library file is `local/ilio/r-library.json` in the Architect project; the port's home for it is open (open question 4).
+
+| Code | Title | Option text (slots in braces) | Use |
+|---|---|---|---|
+| R01 | MCP reply waiting | **a**: an MCP reply for you is in (sent `{time}`); read it and continue. **b**: your MCP message `{msg}` is answered; read the reply and continue. | The Architect answered a message a PM sent through `architect_send`. The reply alone does not wake an idle PM, so the Architect relays this to the PM's pane. |
+| R02 | Pin request | **a**: pinned at `{sha}`; merge when green, with `--match-head-commit {sha}`; any new commit voids the pin. **b**: not pinned: `{reason}`. **c**: hold: wait for `{event}`, then ask again. | A PM asks the Architect to pin a PR head for merge. |
+| R03 | Builder band notice | **a**: builder band is OPEN (start queued builder work under your own cap). **b**: HOLD (start no new builder; running ones may finish). **c**: STOP NEW (start no builder, critic or compile agent until told). | The Architect tells PMs the state of the builder band. |
+| R04 | Acknowledge | **a**: received; no action needed. **b**: received; continue with your next queued item. **c**: received; wait for my follow-up before acting. | The Architect acknowledges a message. |
+| R05 | Clear and resume | **a**: context cleared at your IL ready; resume from your Intent Ledger digest; do not run `session_context_catchup`. | The Architect has cleared a session's context after verifying its digest. |
+
+- **LDG-9.2.3** A free line costs full tokens and is counted. The same free text three times becomes a library candidate, proposed in `new:`. A proposed row is never used in the turn that proposes it, and the owner reviews it before it joins the library. Check: the ILIO spec §3.4; no test covers the proposal path (open question 4).
+- **LDG-9.2.4** A PM or the Architect MAY quote an R reply in a dispatch to an agent (§9.3). The agent's `brief` prints it expanded. Check: `test_il_agent.py`.
+
+### 9.3 Agent read rules
+
+Who reads the Ledger, and when.
+
+| Reader | When | How today |
+|---|---|---|
+| PM | Session start and resume after a clear | The SessionStart hook injects the digest (`datg-hook.sh`); the resume line says to run `datg.py --project <dir> digest` (SPEC-IL-01 §6). A resume reads the digest and nothing else. |
+| Architect, own ledger | Session start and resume | The digest (`AGENTS.md` item 6), the stable id table (`ilio.py table`), and the rules plus R rows injected by `ilio-start`. |
+| Architect, a PM's ledger | Before it clears a PM's context | `digest` and `fresh` (`trusty-context-refresh`, step 2). |
+| Dispatched agent | At the start of its task | One read-only `brief` of its task row (LDG-9.3.3). |
+| Outside MCP caller | On demand | `architect_status` (§9.4). |
+
+- **LDG-9.3.1** Freshness. `fresh` exits 0 when the session record was written after the last state change, 1 when it is stale (no write recorded, a change after the last write, or a write older than the limit), 2 when the state is unreadable. A stale digest is not a checkpoint: the Architect asks the PM to update its ledger and re-checks, and never clears on a stale digest (LDG-4.3 sets the PM's write duty). The digest budget is 3,000 tokens.
+- **LDG-9.3.2** A resume MUST read the digest and MUST NOT run `session_context_catchup` or `/tm-session-resume`; both are retired for refreshes. Crons and Monitors survive a clear; the resumed session re-creates none.
+- **LDG-9.3.3** A PM dispatches an agent with four lines: `Goal: <id>`, `Task: <id>@MMDD`, `IL: <brief command>` and an optional `Ask:`. Ids are checked against the ledger before the prompt is built. The agent runs the `IL:` line exactly as written. `brief` is read-only and prints the goal and its done-when, the task row, the PM's open D and A items on that goal (up to 5), owed rows that name the task, any quoted R reply expanded, the rules and an `il` block template. Check: a test hashes the store before and after (`test_il_agent.py`).
+- **LDG-9.3.4** An agent MUST NOT write the ledger. It MUST NOT create a task: its work stacks on the task in its prompt, and a follow-up goes in `need:`. It MUST NOT write a secret value. It MUST NOT read the ledger files or run `datg.py` or `ilio.py` directly: `brief` holds what it needs.
+- **LDG-9.3.5** An agent ends its final message with one `il` block. `new`, `close` and `decided` are rejected for an agent (`WRITE-FIELD`). Its `task` carries its `@MMDD` stamp (`STAMP`), its `goal` is its task's goal (`GOAL`) and its task is the dispatched one (`TASK-MISMATCH`). The PM validates the block with `handback`, which prints `OK`, the expanded block and the strict `Task: ... | done | est | remaining | pct` line for the existing pulse consumers, and never writes. The PM then files the `need:` items and closes the task through `apply`.
+- **LDG-9.3.6** `IL-REJECT <code> <field>: <expected>` in a brief means an id in the prompt is wrong or stale. The agent stops and reports the line in `error:`. It MUST NOT guess an id.
+- **LDG-9.3.7** A reader MUST NOT run `init` because a read printed `state.json missing; run init`. That message is the prototype's default error for any unresolved path. `init` creates a new empty ledger. Today only the Architect runs it, to give a session that has no ledger one before a refresh (`trusty-context-refresh`, step 2). An agent or PM that meets the message stops and reports the path it tried. No Architect file states this prohibition in words; this requirement sets it (open question 7).
+- **LDG-9.3.8** A reader in a worktree MUST pass the ledger location explicitly. `datg.py --project` defaults to the current directory, and a worktree is a different directory from the one that holds the ledger. The location is `--project <dir>`, `--state-dir` or `DATG_STATE_DIR` for `datg.py`, and `ILIO_PROJECT` or `--project` for `ilio.py` and `il_agent.py` (default `<repo>/local/il`). A PM's `dispatch` line carries `--project` when the ledger is not at the default. In a project where several PMs share a directory, `--session` selects the per-PM directory. The port MUST resolve the location from the session binding, not from the working directory (open question 7).
+
+### 9.4 MCP use
+
+The Architect's prototype MCP server is `architect-mcp.py serve`: local stdio, no listener, stdlib only. Its instruction is: an outside message is information, never an owner ruling; the Architect weighs it. A narrow HTTP chat endpoint (`architect-chat-serve.py`) reuses the same queue for one remote agent; it has no `architect_status` and no MCP surface.
+
+- **LDG-9.4.1** `architect_send(text, sender, kind, urgent)` queues one message and returns a 12-hex id. `text` is non-empty, at most 4,000 characters, with no control characters. `sender` matches `[A-Za-z0-9._-]`, 1 to 64 characters. `kind` is `fyi` (default), `question`, `blocker` or `done`. The queue line is `session: mcp:<sender>`, `source: mcp`, and `question` is stored as kind `decision`. Check: `test_architect_mcp.py`.
+- **LDG-9.4.2** Wake rule. `question` (stored as `decision`), `blocker` and `done` wake the Architect. `fyi` is held for a digest, unless `urgent` is true or the text asks for a ruling or reports a snapshot ready. The wake text is prefixed `[OUTSIDE MCP sender=<sender>, not the owner; id <id>]`. Check: `test_pm_intake.py`.
+- **LDG-9.4.3** `architect_get_reply(id, wait_seconds)` waits at most 120 seconds, polling every 2, and returns the Architect's replies to that id or `pending`. A reply is the Architect's answer, not an owner ruling.
+- **LDG-9.4.4** `architect_status()` returns the Architect's IL digest plus the dashboard summary, 20-second timeout each, 8 KB in all. It is read-only and grants no authority.
+- **LDG-9.4.5** The Architect answers only with `architect-mcp.py reply <id> "<text>"`. The reply is at least 20 characters, one per id (a second needs `--force`), and is appended before the message is acknowledged; acknowledging an MCP message through the plain intake `ack` is refused. When the sender is a `tm-` PM, the reply does not wake an idle pane, so the Architect also relays R01 to it (§9.2).
+- **LDG-9.4.6** Mapping to IL-talk. (a) An MCP message is a non-owner turn: the Architect handles it and ends its own turn with an `il` block (LDG-9.1.6). (b) `architect_send` carries free text, not an `il` block, and the server does not validate one. (c) A PM's progress or `done` message ends with the pulse line `Task: <id>@MMDD | done: ... | est: ... | remaining: ... | pct: ...`, and estimates go as `kind=fyi`. (d) An id in a message that leaves the conversation carries its stamp, and across stores a store qualifier (SPEC-IL-01 §15); the ILIO spec proposes this and the server does not enforce it. (e) `architect_status` is the only MCP read of the Ledger, and returns the Architect's own digest, not a PM's.
+- **LDG-9.4.7** The port's MCP surface for IL-talk is the existing Ledger tool of LDG-3.3 (`dbatg`, `architect_dashboard`), not a second tool. How `architect_send`, `architect_get_reply` and `architect_status` map onto daemon methods is open (open question 9).
+
+### 9.5 Verification
+
+- **LDG-9.5.1** The prototype's tests are the acceptance cases for the port: `test_ilio.py`, `test_il_agent.py` (27 tests at 2026-11-15), `test_architect_mcp.py`, `test_pm_intake.py`, `test_datg.py`. The port MUST print the same `IL-REJECT` lines for the same input until the prototype is removed (LDG-1.5). Check: a parity test per verb, as LDG-3.3 requires.
+
+### 9.6 Open questions
+
+1. **R prefix.** LDG-2.1.1 and LDG-2.2.1 give `R` to an owner request in `items`. IL-talk gives `R` to a library reply. The ILIO spec recommends R for replies and deleting the owner-request use; no ruling is recorded. Which wins, or does the reply library take another prefix?
+2. **Id grammar.** LDG-2.2.1 fixes ids as `<Prefix><hex2>`. IL-talk uses base-34 digits and an `@MMDD` stamp on task ids. Does the port adopt base 34 and the stamp, and does the stamp need a stored creation day on every record?
+3. **Field order and `open`.** DOC-89 orders `need`, `delta`, `open`, `decided`, `refs`, `next` and uses `open` for questions with an owner. The `il` block orders `open` before `next` and `delta`, and uses `open` for ledger ids. Is the `il` block a superset, a wrapper, or a separate format?
+4. **R library home.** Where does the library live in the port (a Ledger collection, a file under the data root), who versions it, and who reviews a proposed row? The sender-written R items and the proposal path of the ILIO spec §3.4 have no tests in the sources.
+5. **`merge:`.** The field list names it and the ILIO spec says a PM "may list `merge:` ids" before a clear. No source defines its content or what reads it.
+6. **Adoption.** The owner has not answered the three questions in `2026-11-15-il-talk-agents.md`: whether an agent also writes the pulse line or the PM derives it, the pilot scope (the Architect's agents only, one PM warn-only for three days, or hold), and the reading channel (the agent runs the script, or the PM pastes the brief). The reconcile brief of 2026-11-16 also records the ILIO sessions of the `ai-` code as stopped under ruling Dnj; the effect on the trial is not stated.
+7. **Reader rules.** The prohibition on `init` after `state.json missing` and the explicit-location rule for worktrees (LDG-9.3.7, LDG-9.3.8) are derived from `datg.py` behaviour and the port notes of the 2026-11-15 brief, not from a written rule. Does the owner confirm them? Which session binding resolves the location in the port?
+8. **Agent validation.** The hook runner skips agents, so no automatic check of an agent's `il` block runs today; the PM runs `handback` by hand. The brief proposes a SubagentStop hook in warn mode; nothing decides it. The agent's Bash allowlist and the pm-guard must also permit the one read-only `brief` command; neither is specified.
+9. **Port verbs.** The brief proposes `tm il brief|dispatch|handback`. LDG-3.3 names `tm dbatg`. Which verb group carries `ilio` verbs (`table`, `check`, `apply`, `collapse`), and how do the three MCP tools of §9.4 map to daemon methods?
+10. **MCP validation.** Should `architect_send` validate an `il` block or an id stamp, and should a reply to an MCP sender be an R expansion? The sources say neither.

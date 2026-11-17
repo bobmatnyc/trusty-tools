@@ -314,6 +314,10 @@ pub mod policy_labels;
 pub mod pr_cleanup;
 pub mod process;
 pub mod project;
+/// `[accounts]` in `.trusty-mpm.toml` and the ops-prompt block it renders (#11390).
+pub mod project_accounts;
+#[cfg(test)]
+mod project_accounts_tests;
 pub mod project_aliases;
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;
@@ -444,6 +448,18 @@ pub mod stale_skills;
 pub mod standalone;
 // #10960: the Architect's standing-rules block, injected by `tm hook --standing-rules`.
 pub mod standing_rules;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg's `current`.
+pub mod turn_task_stamp;
+// #10575: the completion-standard check behind `tm hook --completion-evidence`.
+pub mod completion_evidence;
+#[cfg(test)]
+#[path = "completion_evidence_tests.rs"]
+mod completion_evidence_tests;
+// #10574: the stale-copy guard's config and observed-version store.
+pub mod stale_copy;
+#[cfg(test)]
+#[path = "stale_copy_tests.rs"]
+mod stale_copy_tests;
 // #6556: a `SubagentStop` the hook could not deliver, parked on disk where the
 // daemon's reap loop replays it — instead of the record sitting Running for the
 // six hours of `RUNNING_STALE_AFTER_SECS`.

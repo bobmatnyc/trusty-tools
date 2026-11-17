@@ -1879,7 +1879,9 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             // prompt-feedback capture.
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 

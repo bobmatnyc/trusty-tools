@@ -16,55 +16,18 @@
         <span class="eye right"><span class="iris"></span></span>
       </div>
     </div>
-    <section id="unpaired" hidden>
-      <p id="pair-help">Let an agent use this browser with an activation code</p>
-      <button id="pair" aria-describedby="pair-help">Pair this profile</button>
+    <section id="offline" hidden aria-label="Not connected">
+      <p id="connect-help">Let local agents use this Chrome profile</p>
+      <button id="connect" aria-describedby="connect-help" disabled>Connect</button>
     </section>
-    <p id="activate-help">Connect this site's workflow to Trusty Browser</p>
-    <button id="activate" aria-describedby="activate-help" disabled>Enroll this site's workflow</button>
+    <section id="online" hidden aria-label="Connected">
+      <p><span id="badge" class="badge">Connected</span> <span id="connected-email"></span></p>
+      <p>Local agents can use every tab in this profile.</p>
+      <button class="secondary" id="disconnect">Disconnect</button>
+      <p class="forget"><a href="#" id="forget">Forget this profile</a></p>
+    </section>
     <output id="status" aria-live="polite"></output>
-    <section id="transfer" hidden>
-      <p id="transfer-route"></p>
-      <button id="replace">Confirm replacement</button>
-      <button class="secondary" id="cancel">Cancel</button>
-    </section>
-    <section id="access" hidden aria-label="Agent access">
-      <div id="choose">
-        <p id="target"></p>
-        <button id="mint-tab">Give access to this tab</button>
-        <button class="secondary" id="mint-profile">Give access to the whole profile (every tab in this profile)</button>
-      </div>
-      <div id="shown" hidden>
-        <input id="code" readonly aria-label="Activation code" autocomplete="off" spellcheck="false">
-        <p><span id="code-scope"></span>, expires in <span id="countdown"></span></p>
-        <button id="copy">Copy</button>
-        <button class="secondary" id="cancel-code">Cancel code</button>
-      </div>
-      <div id="expired" hidden>
-        <p>Code expired</p>
-        <button id="new-code">New code</button>
-      </div>
-      <ul id="grants" aria-label="Agent grants"></ul>
-      <button class="secondary" id="disconnect-all" hidden>Disconnect all</button>
-    </section>
-    <section id="paired" hidden aria-label="Pairing">
-      <details>
-        <summary>Pairing details</summary>
-        <dl><dt>Chrome profile</dt><dd id="paired-email"></dd></dl>
-      </details>
-      <button class="secondary" id="unpair">Disconnect this profile</button>
-    </section>
     <button class="secondary" id="retry" hidden>Retry</button>
-    <details id="details" hidden>
-      <summary>Activation details</summary>
-      <dl>
-        <dt>Chrome profile</dt><dd id="profile"></dd>
-        <dt>Site</dt><dd id="site"></dd>
-        <dt>Site account</dt><dd id="account"></dd>
-        <dt>Workflow</dt><dd id="workflow"></dd>
-      </dl>
-      <button class="secondary" id="remove">Remove workflow</button>
-    </details>
   </main>
   <script src="setup.js"></script>
 </body>

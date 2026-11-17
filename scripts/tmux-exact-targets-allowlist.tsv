@@ -45,3 +45,4 @@ crates/trusty-mpm/src/bin/tm/commands/program_word.rs	"-T", "-t", "-U"	#10665: g
 crates/trusty-mpm/src/bin/tm/commands/program_word.rs	flags: &\["-t", "--ignore"\]	#10665: grammar flag table in the program-word classifier, where -t is a flag name, not a tmux target
 crates/trusty-mpm/src/bin/tm/commands/program_word.rs	valued: &\["-t", "-w"\]	#10665: grammar flag table in the program-word classifier, where -t is a flag name, not a tmux target
 crates/trusty-mpm/src/bin/tm/commands/program_word.rs	^\s*"-t",$	#10665: grammar flag table in the program-word classifier, where -t is a flag name, not a tmux target
+crates/trusty-mpm/src/core/turn_task_stamp.rs	\.args\(\["display-message", "-p", "-t"\]\)	runtime %N pane id from $TMUX_PANE, passed through as the hook received it

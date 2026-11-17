@@ -70,6 +70,7 @@ trusty-mpm	bin:tm	commands::pm_guard_kuzu_store::tests	names content/skills/tm-m
 trusty-mpm	bin:tm	commands::pm_guard_dispatch::tests	reads r (install::test_roster_ref) — the dispatch classifier's roster (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_dispatch_type::tests	reads r (install::test_roster_ref) (#9011)
 trusty-mpm	bin:tm	commands::pm_guard_worktree_grant::tests	reads r (install::test_roster_ref) (#9011)
+trusty-mpm	bin:tm	commands::pm_guard_accounts::tests	reads r (install::test_roster_ref) — the ops-dispatch account block is composed over the roster (#11390)
 trusty-mpm	bin:tm	commands::pr::tests::body_headings_are_named_verbatim_in_the_assets	reads install::test_roster_ref (content/agents/version-control.md)
 trusty-mpm	bin:tm	commands::session::start::tests::inplace_prompt_file_stamps_the_profile_it_composed_for	reads install::test_content_ref (#9012)
 trusty-mpm	bin:tm	generate	reads SKILLS_ASSET_REL, run_capabilities_in, install::test_roster_ref (#7776, #9011)

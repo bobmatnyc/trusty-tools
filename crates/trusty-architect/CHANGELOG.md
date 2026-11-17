@@ -6,6 +6,19 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.2.3] — 2026-11-16
+
+### Added
+
+- `send_line_guarded` types one line through `send_guarded` and presses Enter only after the line echoes in the box; otherwise it returns the new `SendError::NotEchoed` (#11365).
+- `ledger::fresh` ports the `datg.py fresh` and `datg.py ready` verdicts (exit 0, 1 or 2) so `tm architect restart` can gate on a fresh Intent Ledger checkpoint; an unreadable ledger is never fresh (#11366).
+
+### Fixed
+
+- The dashboard store stamps `created` and `updated` from its own clock on every write and ignores a client value for either; `created` keeps the stored value, and one batch uses one write time for every document and its change-log line (#10678).
+- Dashboard store reads (`get`, `list`, `snapshot`) take `<root>/.lock` shared with the store's bounded wait, so a read never lands between the files of one batch and the task, session and header documents of one write are seen together; `snapshot` reads every collection under one lock. A read behind a writer that never lets go is `Unavailable` within the wait (#10679).
+- A pending "answered" event now carries the owner's typed `answer_note` after the button label (`Other: <text>`), matching the Python prototype (#10765).
+
 ## [0.2.2] — 2026-11-13
 
 ### Fixed

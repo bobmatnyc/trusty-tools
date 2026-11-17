@@ -103,6 +103,16 @@
           }
         ],
         "matcher": "*"
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --completion-evidence",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "SubagentStop": [
@@ -123,6 +133,16 @@
           {
             "command": "trusty-memory prompt-context",
             "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --turn-task",
+            "timeout": 5,
             "type": "command"
           }
         ],

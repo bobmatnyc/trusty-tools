@@ -94,21 +94,28 @@ pub enum IndexPin<'a> {
 /// Why: an unreadable registry is a search outage, so it follows the surface's
 /// own `require_search` contract — the interactive MCP tool degrades by
 /// default, while the hosted webhook bot and a CLI GitHub-PR run require
-/// search by default (REV-011). An unregistered repo is a configuration fault
-/// and never degrades (#6687).
+/// search by default (REV-011). An unregistered repo is a configuration fault:
+/// the hosted surfaces fail closed on it (#6687), while the interactive MCP
+/// tool, which never posts, reviews the diff alone and says so (#11409).
 /// What: under [`IndexPin::Prefer`], `resolve_repo_index` against `search`
 /// with `config.search_index` as a hint; under [`IndexPin::Require`],
-/// `resolve_pinned_index`. `RepoIndexError::Registry` becomes
-/// [`PrIndex::DiffOnly`] (logged at `warn`) when
-/// `effective_require_search(surface)` is false; every other error, and
-/// `Registry` when search is required, is returned.
+/// `resolve_pinned_index`. When `effective_require_search(surface)` is false,
+/// `RepoIndexError::Registry` becomes [`PrIndex::DiffOnly`], and so does
+/// `RepoIndexError::NoIndex` on [`InvocationSurface::Interactive`]; the notice
+/// says DEGRADED and, for `NoIndex`, names the repo and
+/// `trusty-search index <path>`. Both are logged at `warn`. Every other error
+/// is returned.
 ///
 /// # Errors
 ///
 /// Every [`RepoIndexError`] except a `Registry` failure on a surface that does
+/// not require search, and a `NoIndex` on the interactive surface that does
 /// not require search.
 ///
-/// Test: `hosted_surface_requires_search_for_an_unreadable_registry`,
+/// Test: `interactive_no_index_degrades_to_diff_only`,
+/// `no_index_fails_closed_when_required_or_hosted`,
+/// `unreadable_registry_is_unchanged_on_the_interactive_surface`,
+/// `hosted_surface_requires_search_for_an_unreadable_registry`,
 /// `hosted_surface_degrades_when_the_operator_opts_out_of_search`,
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `operator_pin_is_used_only_for_its_own_repo`.
@@ -137,6 +144,19 @@ pub async fn resolve_pr_index(
                 "{e} — search is not required for this call, so this review is DEGRADED: \
                  diff only, no code context and no static analysis, not the server's startup \
                  index (#8649)"
+            );
+            warn!("{notice}");
+            Ok(PrIndex::DiffOnly(notice))
+        }
+        // #11409: an unindexed repo degrades on the interactive surface only;
+        // the hosted surfaces can post, so they keep failing closed.
+        Err(e @ RepoIndexError::NoIndex { .. })
+            if surface == InvocationSurface::Interactive
+                && !config.context.effective_require_search(surface) =>
+        {
+            let notice = format!(
+                "{e}. Search is not required for this call, so this review is DEGRADED: \
+                 diff only, no code context and no static analysis (#11409)"
             );
             warn!("{notice}");
             Ok(PrIndex::DiffOnly(notice))

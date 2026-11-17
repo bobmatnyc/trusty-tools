@@ -8,6 +8,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
+  - `attach` — Attach to the Architect's tmux session (switch-client inside tmux)
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
   - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
     - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
@@ -25,7 +26,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
+  - `restart` — Restart the Architect behind the checkpoint gate (#11365)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
+  - `up` — Bring the Architect up from any state, then attach (#11364)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present

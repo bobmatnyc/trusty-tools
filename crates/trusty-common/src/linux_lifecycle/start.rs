@@ -10,15 +10,15 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
 use tokio::time::Instant;
 
-use super::liveness::refuse_unserved_daemon;
+use super::liveness::{ProcessTable, refuse_other_instances, refuse_unserved_daemon};
 use super::process::{Dial, PinnedProcess, Signal, dial};
-use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with};
+use super::stop::{KernelDelivery, SignalDelivery, StopOutcome, stop_with_table};
 use super::{DaemonDescriptor, LifecycleError, POLL_INTERVAL};
 
 /// A started daemon.
@@ -74,11 +74,21 @@ pub struct RestartOutcome {
 /// `stop_start_and_restart_refuse_while_a_daemon_runs_without_its_socket`,
 /// `start_and_restart_start_a_stopped_instance_while_a_sibling_runs`.
 pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleError> {
+    start_with_table(desc, &ProcessTable::system()).await
+}
+
+/// [`start`], with the scan reading `table` instead of `/proc` (#11085).
+///
+/// What: [`start`]'s steps; only the pre-spawn scan for an unserved daemon
+/// reads `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn start_with_table(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<StartOutcome, LifecycleError> {
     desc.validate()?;
-    let program = desc.program();
-    if !program.is_file() {
-        return Err(LifecycleError::BinaryMissing { path: program });
-    }
+    let program = installed_program(desc)?;
     match dial(&desc.socket).await {
         Dial::NotServing => {}
         Dial::Peer(pid) => {
@@ -94,7 +104,7 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
         }
     }
     // #11098: a daemon whose socket is unlinked still runs; never start a second.
-    refuse_unserved_daemon(desc)?;
+    refuse_unserved_daemon(desc, table)?;
 
     let pid = spawn(desc, &program)?;
     // Not reaped until it fails, so an early exit stays a zombie and still pins.
@@ -139,6 +149,22 @@ pub async fn start(desc: &DaemonDescriptor) -> Result<StartOutcome, LifecycleErr
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
+}
+
+/// `<install_dir>/<binary>`, or [`LifecycleError::BinaryMissing`] when it is
+/// not a file.
+///
+/// Why: #11085 — a restart that found it missing only at its start had
+/// already stopped a healthy daemon (mid-upgrade), and started nothing.
+/// Test: `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
+///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
+pub(crate) fn installed_program(desc: &DaemonDescriptor) -> Result<PathBuf, LifecycleError> {
+    let program = desc.program();
+    if !program.is_file() {
+        return Err(LifecycleError::BinaryMissing { path: program });
+    }
+    Ok(program)
 }
 
 /// Spawn `program` detached, in `desc.working_dir`, with `daemon_env` only.
@@ -252,14 +278,59 @@ pub async fn restart(desc: &DaemonDescriptor) -> Result<RestartOutcome, Lifecycl
 
 /// [`restart`] with an explicit signal delivery (the test seam).
 ///
-/// What: `NotRunning` from stop proceeds to start (P-b); every stop error is
+/// What: before any signal (#11085), a missing install binary is
+/// [`LifecycleError::BinaryMissing`], and, while the socket serves, another
+/// process that is this instance is [`LifecycleError::RestartBlocked`]. Then
+/// `NotRunning` from stop proceeds to start (P-b); every stop error is
 /// returned as is, before any spawn.
-/// Test: `restart_does_not_start_when_stop_reports_a_survivor`.
+/// Test: `restart_does_not_start_when_stop_reports_a_survivor`,
+/// `restart_refuses_before_any_signal_when_another_process_is_this_instance`,
+/// `restart_and_restart_pid_stop_nothing_when_the_install_binary_is_missing`.
+///
+/// [`LifecycleError::BinaryMissing`]: crate::linux_lifecycle::LifecycleError::BinaryMissing
+/// [`LifecycleError::RestartBlocked`]: crate::linux_lifecycle::LifecycleError::RestartBlocked
 pub async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
 ) -> Result<RestartOutcome, LifecycleError> {
-    let stop = stop_with(desc, delivery).await?;
-    let start = start(desc).await?;
+    restart_with_table(desc, delivery, &ProcessTable::system()).await
+}
+
+/// [`restart_with`], with every scan reading `table` instead of `/proc`
+/// (#11085).
+///
+/// What: [`restart_with`]'s steps; the pre-stop scan for another instance,
+/// the stop's scan and the start's scan read `table`.
+/// Test: `a_foreign_uid_entry_in_the_process_table_is_skipped_by_stop_start_and_restart`,
+/// `a_same_uid_entry_with_an_unreadable_environment_in_the_process_table_fails_closed`.
+pub async fn restart_with_table(
+    desc: &DaemonDescriptor,
+    delivery: &dyn SignalDelivery,
+    table: &ProcessTable,
+) -> Result<RestartOutcome, LifecycleError> {
+    desc.validate()?;
+    // #11085: never stop a healthy daemon that the start would then refuse on.
+    installed_program(desc)?;
+    refuse_restart_blockers(desc, table).await?;
+    let stop = stop_with_table(desc, delivery, table).await?;
+    let start = start_with_table(desc, table).await?;
     Ok(RestartOutcome { stop, start })
+}
+
+/// Fail a restart before its stop when another process is this instance.
+///
+/// Why: #11085 — the start after the stop refuses on such a process, which
+/// left a previously healthy daemon down.
+/// What: when the socket's peer serves, the scan with that pid left out must
+/// find nothing. When nothing serves, or the dial does not decide, the stop's
+/// own checks answer.
+/// Test: `restart_refuses_before_any_signal_when_another_process_is_this_instance`.
+async fn refuse_restart_blockers(
+    desc: &DaemonDescriptor,
+    table: &ProcessTable,
+) -> Result<(), LifecycleError> {
+    match dial(&desc.socket).await {
+        Dial::Peer(Some(peer)) => refuse_other_instances(desc, &[peer], table),
+        _ => Ok(()),
+    }
 }

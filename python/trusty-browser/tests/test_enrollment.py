@@ -92,6 +92,7 @@ def test_ordinary_client_cannot_enroll():
                 assert (await service.read_frame(r)) == {
                     "ok": False,
                     "error": "Unauthorized",
+                    "reason": "host_not_native_host",
                 }
                 w.close()
                 assert not broker.db.execute("SELECT * FROM routes").fetchall()
@@ -135,6 +136,7 @@ def test_host_with_genuine_argv_but_wrong_parent_is_explicitly_rejected():
                     assert json.loads(await child.stdout.readexactly(size)) == {
                         "ok": False,
                         "error": "Unauthorized",
+                        "reason": "host_parent_not_chrome",
                     }
                 finally:
                     child.stdin.close()
@@ -195,12 +197,12 @@ def test_damaged_pending_removal_preserves_foreign_file_and_service_startup():
         asyncio.run(check(Path(tmp)))
 
 
-@pytest.mark.parametrize("action", ["popup", "cli"])
+@pytest.mark.parametrize("action", ["operator", "cli"])
 def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch):
     async def check(state):
         req = request()
         async with service.Broker(state) as broker:
-            await broker.enrollment_request(req)
+            enrollment.register(broker.db, state, req)
 
             async def pair():
                 reader, writer = await asyncio.open_unix_connection(
@@ -236,13 +238,14 @@ def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch)
                     await writer.wait_closed()
 
             assert (await pair())["ok"]
-            if action == "popup":
-                # Exercise the signed popup request handler including frame decoding.
-                monkeypatch.setattr(service, "verify_chrome_host", lambda *_: None)
+            if action == "operator":
+                # #11239: the popup's unenroll is gone; the operator socket remains.
                 reader, writer = await asyncio.open_unix_connection(
-                    state / "enrollment.sock"
+                    state / "operator.sock"
                 )
-                await service.write_frame(writer, {**req, "op": "unenroll"})
+                await service.write_frame(
+                    writer, {"op": "revoke", "workflow": req["workflow"]}
+                )
                 assert (await service.read_frame(reader))["ok"]
                 writer.close()
                 await writer.wait_closed()
@@ -258,74 +261,6 @@ def test_removed_extension_cannot_prove_its_old_browser_key(action, monkeypatch)
                 assert await proc.wait() == 0
             assert await pair() == {"ok": False, "error": "Unauthorized"}
             assert req["profile"] not in broker.peers
-
-    with tempfile.TemporaryDirectory() as tmp:
-        asyncio.run(check(Path(tmp)))
-
-
-def test_activation_selects_distinct_workflows_and_preserves_existing_names():
-    async def run(tmp_path):
-        async with service.Broker(tmp_path) as broker:
-            req = request()
-            target = {k: req[k] for k in ("email", "url", "account")}
-            resolve = dict(op="resolve", **target)
-            managed = (await broker.enrollment_request(resolve))["workflow"]
-            assert managed.startswith("browser-")
-            assert (await broker.enrollment_request(resolve))["workflow"] == managed
-            for change in ({"account": "second"}, {"url": "https://second.test"}, {"email": "t@t.test"}):
-                assert (await broker.enrollment_request({**resolve, **change}))["workflow"] != managed
-            assert not (tmp_path / "workflows").exists()
-            assert (await broker.enrollment_request(req))["ok"]
-            assert (await broker.enrollment_request(resolve))["workflow"] == req["workflow"]
-
-    with tempfile.TemporaryDirectory() as root:
-        asyncio.run(run(Path(root)))
-
-
-def stored_state(broker, state):
-    tables = [
-        r[0]
-        for r in broker.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        )
-    ]
-    rows = {t: sorted(map(tuple, broker.db.execute(f"SELECT * FROM {t}"))) for t in tables}
-    files = sorted(str(p.relative_to(state)) for p in state.rglob("*"))
-    return rows, files
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"profile": str(uuid.uuid4())},
-        {"account": None},
-        {"url": ""},
-        {"email": " test@example.test"},
-        {"account": "travel\n"},
-        {"url": 7},
-    ],
-    ids=["extra-key", "missing-key", "empty", "leading-space", "trailing-newline", "not-string"],
-)
-def test_refused_resolve_answers_invalid_enrollment_and_stores_nothing(change, monkeypatch):
-    async def check(state):
-        req = request()
-        resolve = {"op": "resolve", **{k: req[k] for k in ("email", "url", "account")}}
-        bad = {k: v for k, v in {**resolve, **change}.items() if v is not None}
-        async with service.Broker(state) as broker:
-            before = stored_state(broker, state)
-            with pytest.raises(ValueError, match="^InvalidEnrollment$"):
-                await broker.enrollment_request(bad)
-            monkeypatch.setattr(service, "verify_chrome_host", lambda *_: None)
-            reader, writer = await asyncio.open_unix_connection(state / "enrollment.sock")
-            try:
-                await service.write_frame(writer, bad)
-                reply = await service.read_frame(reader)
-            finally:
-                writer.close()
-                await writer.wait_closed()
-            assert reply == {"ok": False, "error": "InvalidEnrollment"}
-            assert stored_state(broker, state) == before
-            assert not (state / "workflows").exists()
 
     with tempfile.TemporaryDirectory() as tmp:
         asyncio.run(check(Path(tmp)))

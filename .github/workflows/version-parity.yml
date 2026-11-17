@@ -97,6 +97,12 @@ on:
     # No `paths` / `paths-ignore` here — see the header comment above.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # Merge queue (owner ruling Dpu). Every required context must also report,
+  # under the same name, on the queue commit. On this event the diff base is
+  # `github.event.merge_group.base_sha`: steps read it as MERGE_GROUP_BASE_SHA,
+  # or as the `before` SHA where a step already diffs a push range.
+  merge_group:
+    types: [checks_requested]
   workflow_dispatch: {}
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
@@ -140,6 +146,7 @@ jobs:
   # never `skipped`.
   #
   # #6243 — WHY EVERY STEP'S `if:` IS `github.event_name == 'pull_request'`
+  # (plus `|| github.event_name == 'merge_group'`, the merge queue's run)
   # AND NOTHING NARROWER. This job used to carry a first step that set a
   # `run_check` output and reported `success` WITHOUT running the check
   # whenever a `pull_request: edited` event arrived with no base change. That
@@ -198,7 +205,7 @@ jobs:
       # branch and `git show <merge-base>:crates/<X>/Cargo.toml`, neither of
       # which a shallow checkout can resolve.
       - uses: actions/checkout@v5
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           fetch-depth: 0
 
@@ -208,7 +215,7 @@ jobs:
       # same reason the scan-floor selftest does: a gate whose green can be
       # fabricated makes the real run's green meaningless.
       - name: Verdict-integrity selftest (no success without running the check)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/check_version_bump_verdict_selftest.sh
 
       # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
@@ -217,7 +224,7 @@ jobs:
       # Runs before the real gate — a gate that cannot fail makes the real run's
       # green meaningless. Mirrors line-cap.yml's selftest-then-gate ordering.
       - name: Scan-floor selftest (must refuse an empty scan)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/check_scan_floor_selftest.sh pr_version_bump
 
       # Publish-ORDER selftest (issue #5358). Different question from this
@@ -234,7 +241,7 @@ jobs:
       # a checked-in cargo-metadata fixture, no cargo, no network, well under
       # a second. It never runs `cargo publish` — every case is --list-only.
       - name: Publish-order selftest (optional + dev dep edges must order first)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/publish-dry-run-order_selftest.sh
 
       # Shared-classification selftest (#5765). This gate decides which crates
@@ -246,7 +253,7 @@ jobs:
       # required context of the two. Pure shell, no network, well under a
       # second.
       - name: Source-classification selftest (both gates share one definition)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/check_source_class_selftest.sh
 
       # Internal `[workspace.dependencies]` requirement drift (#6776). A
@@ -261,11 +268,11 @@ jobs:
       # every PR. Pure shell over two manifests: no cargo, no network, well
       # under a second. Selftest first, for the same reason as the gates above.
       - name: Workspace-dep version selftest (must reject a drifted row)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/check_workspace_dep_versions_selftest.sh
 
       - name: Check internal workspace.dependencies version requirements
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         run: bash scripts/check_workspace_dep_versions.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
@@ -275,26 +282,35 @@ jobs:
       # ATTRIBUTION note in scripts/check-pr-version-bump.sh for the failure
       # this removes (PR #4666 / run 30839255128).
       - name: Refresh the base branch ref
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        # merge_group: the base is the queue's base_sha, already in the
+        # full clone; verify it instead of fetching a branch.
         run: |
+          if [ -n "${MERGE_GROUP_BASE_SHA}" ]; then
+            git rev-parse --verify "${MERGE_GROUP_BASE_SHA}^{commit}"
+            exit 0
+          fi
           git fetch --no-tags --quiet origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
           git rev-parse --verify "refs/remotes/origin/${BASE_REF}"
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
 
       - name: Check PR version bumps against crates.io
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         env:
           PR_VERSION_BUMP_BASE: origin/${{ github.event.pull_request.base.ref }}
-        run: bash scripts/check-pr-version-bump.sh
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        # merge_group: the combined queue commit is judged against base_sha.
+        run: PR_VERSION_BUMP_BASE="${MERGE_GROUP_BASE_SHA:-$PR_VERSION_BUMP_BASE}" bash scripts/check-pr-version-bump.sh
 
   # Post-merge authority (#3366). Quoted `name:` — an unquoted ` #` opens a
   # YAML comment in a plain scalar, which silently truncated this job's
   # reported context to "Publish-version parity (issue".
   version-parity:
     name: "Publish-version parity (issue #3366)"
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -329,7 +345,7 @@ jobs:
   # is cancelled, or is skipped; a non-green verdict is never silence.
   notify-main-drift:
     name: Notify on version drift on main
-    if: always() && github.event_name != 'pull_request'
+    if: always() && github.event_name != 'pull_request' && github.event_name != 'merge_group'
     needs: [version-parity]
     runs-on: ubuntu-latest
     timeout-minutes: 5

@@ -62,7 +62,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
-pub(crate) use architect::ArchitectAction;
+pub(crate) use architect::{ArchitectAction, UpArgs};
 pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;

@@ -11787,7 +11787,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.0"
+version = "0.70.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12086,7 +12086,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12136,7 +12136,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.6"
+version = "1.14.8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12256,7 +12256,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12292,7 +12292,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",

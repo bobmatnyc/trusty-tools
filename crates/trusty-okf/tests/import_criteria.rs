@@ -153,27 +153,31 @@ fn c74_refused_names_normalize_with_a_stable_suffix() {
 /// Why: criterion 75 — two colliding source paths are both refused with
 /// `collision` and neither is written; a ledger-pinned ID keeps its concept
 /// when a new colliding file appears.
-/// What: `Notes/a.md` and `notes/a.md` (one fold key); then `x/a.md` alone,
-/// and `X/a.md` added.
+/// What: `nı/a.md` and `ni/a.md` (one fold key: dotless `ı` folds to
+/// `i`); then `xı/a.md` alone, and `xi/a.md` added.
 /// Test: self-contained.
 #[test]
 fn c75_colliding_sources_are_refused_and_pins_hold() {
-    let fx = Fx::new(&[("Notes/a.md", "One.\n"), ("notes/a.md", "Two.\n")]);
+    // c75 macOS: (issue number pending) the pairs differed only in ASCII case,
+    // which case-insensitive APFS stores as one file, so no collision was
+    // built. Dotless `ı` vs `i` collides by `fold_key` but is two names
+    // on every filesystem.
+    let fx = Fx::new(&[("nı/a.md", "One.\n"), ("ni/a.md", "Two.\n")]);
     let r = fx.import();
-    for item in ["Notes/a.md", "notes/a.md"] {
+    for item in ["nı/a.md", "ni/a.md"] {
         assert_eq!(outcome(&r, item).1, "failed");
         assert_eq!(outcome(&r, item).2.as_deref(), Some("collision"));
     }
-    assert!(!fx.root.join("Notes").exists() && !fx.root.join("notes").exists());
+    assert!(!fx.root.join("nı").exists() && !fx.root.join("ni").exists());
     assert_eq!(r.exit_code, 3);
 
-    let fx = Fx::new(&[("x/a.md", "Pinned.\n")]);
+    let fx = Fx::new(&[("xı/a.md", "Pinned.\n")]);
     fx.import();
-    let pinned = fx.read("x/a.md");
-    fx.write("X/a.md", "Usurper.\n");
+    let pinned = fx.read("xı/a.md");
+    fx.write("xi/a.md", "Usurper.\n");
     let r = fx.import();
-    assert_eq!(outcome(&r, "X/a.md").2.as_deref(), Some("collision"));
-    assert_eq!(fx.read("x/a.md"), pinned);
+    assert_eq!(outcome(&r, "xi/a.md").2.as_deref(), Some("collision"));
+    assert_eq!(fx.read("xı/a.md"), pinned);
 }
 
 /// Why: criterion 76 — provenance: `sources[]` with the source-relative

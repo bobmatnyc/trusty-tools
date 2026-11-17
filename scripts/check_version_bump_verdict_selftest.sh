@@ -41,7 +41,7 @@
 #                               skipped-required-context hazard, and it sits
 #                               above every step-scoped assertion here.
 #     no-conditional-skip       every `if:`-shaped line in the job is EXACTLY
-#                               `        if: github.event_name == 'pull_request'`,
+#                               `        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'`,
 #                               matched whole-line at its own indent. Anything
 #                               narrower — a clause appended to that expression,
 #                               a step output, an `if:` at another indent — can
@@ -130,7 +130,7 @@ JOB="pr-version-bump"
 # The one permitted step condition, as a whole line at its own indent. Both the
 # expression AND the indent are part of the assertion: an `if:` anywhere else in
 # the job is a shape this file has not reasoned about, so it fails closed.
-STEP_IF_LINE="        if: github.event_name == 'pull_request'"
+STEP_IF_LINE="        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'"
 
 FAILURES=0
 CASES=0

@@ -21,8 +21,8 @@ use std::time::Duration;
 use anyhow::{bail, Context as _, Result};
 use colored::Colorize;
 use trusty_common::linux_lifecycle::{
-    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, SignalDelivery, StopOutcome,
-    StoppedSignal,
+    self as lc, DaemonDescriptor, KernelDelivery, LifecycleError, ProcessTable, SignalDelivery,
+    StopOutcome, StoppedSignal,
 };
 use trusty_common::DATA_DIR_OVERRIDE_ENV;
 
@@ -63,7 +63,10 @@ pub struct LifecycleArgs {
 /// resolver now serves every verb. The resolved dir is pinned in
 /// `instance_env` as `TRUSTY_DATA_DIR` and set on the spawned daemon, so the
 /// module's `/proc` scan tells this instance from a sibling with another data
-/// dir. A blank `TRUSTY_DATA_DIR_OVERRIDE` is refused: the module compares
+/// dir. The resolved dir — the default data dir for the default instance — is
+/// also the `--data-dir` entry of `instance_path_args`, so a sibling started
+/// with `--data-dir X` and no `TRUSTY_DATA_DIR` is told apart by its argv.
+/// A blank `TRUSTY_DATA_DIR_OVERRIDE` is refused: the module compares
 /// environ bytes exactly, so blank and unset would read as different
 /// instances while both resolve the live socket.
 /// What: `flag` wins over `env_data_dir` (empty counts as unset; the result
@@ -94,9 +97,9 @@ pub(crate) fn descriptor_for(
     }
     let data_dir = super::start::resolve_data_dir_override(env_data_dir, flag)?;
     let data_os = data_dir.as_deref().map(Path::as_os_str);
-    let lock = crate::service::daemon::resolve_daemon_dir(data_os)
-        .context("could not determine the trusty-search data directory")?
-        .join("daemon.lock");
+    let daemon_dir = crate::service::daemon::resolve_daemon_dir(data_os)
+        .context("could not determine the trusty-search data directory")?;
+    let lock = daemon_dir.join("daemon.lock");
     let socket = match socket_flag {
         Some(path) => path.to_path_buf(),
         None => crate::service::socket::resolve_socket_path(data_os)?,
@@ -117,6 +120,8 @@ pub(crate) fn descriptor_for(
         DATA_DIR_ENV.to_string(),
         data_dir.map(PathBuf::into_os_string),
     ));
+    // #11085 AC6: a `--data-dir X` sibling without TRUSTY_DATA_DIR is not this instance.
+    desc.instance_path_args = vec![("--data-dir".to_string(), daemon_dir)];
     desc.env_passthrough = ENV_PASSTHROUGH.iter().map(|s| (*s).to_string()).collect();
     desc.stop_grace = trusty_common::shutdown::termination_grace();
     desc.ready_timeout = READY_TIMEOUT;
@@ -168,31 +173,34 @@ pub(crate) async fn start(
 
 /// `trusty-search restart` on Linux (D1, P-b, AC9).
 ///
-/// What: [`restart_with`] with the real systemd probe and the kernel.
+/// What: [`restart_with`] with the real systemd probe, the kernel and `/proc`.
 /// Test: `restart_refuses_while_the_systemd_unit_is_active`.
 pub async fn restart(args: LifecycleArgs) -> Result<()> {
     let desc = descriptor(args.data_dir.as_deref(), None)?;
-    restart_with(&desc, &KernelDelivery, || {
+    restart_with(&desc, &KernelDelivery, &ProcessTable::system(), || {
         systemd_unit_active(Path::new("systemctl"))
     })
     .await
 }
 
-/// [`restart`] with the descriptor, signal delivery and systemd probe supplied.
+/// [`restart`] with the descriptor, signal delivery, process table and systemd
+/// probe supplied.
 ///
 /// What: refuses before any signal while `probe` reports the unit active;
-/// otherwise the module's restart — any stop error is returned before a spawn,
-/// and `NotRunning` proceeds to the start.
+/// otherwise the module's restart, scanning `table` — any stop error is
+/// returned before a spawn, and `NotRunning` proceeds to the start.
 /// Test: `restart_refuses_while_the_systemd_unit_is_active`,
 /// `restart_names_a_survivor_and_starts_nothing`,
 /// `restart_of_a_daemon_that_is_not_running_goes_on_to_start`.
 pub(crate) async fn restart_with(
     desc: &DaemonDescriptor,
     delivery: &dyn SignalDelivery,
+    // #11085: injectable so a test never scans the host's processes.
+    table: &ProcessTable,
     probe: impl Fn() -> Option<UnitScope>,
 ) -> Result<()> {
     refuse_under_systemd(probe)?;
-    restart_report(lc::restart_with(desc, delivery).await)
+    restart_report(lc::restart_with_table(desc, delivery, table).await)
 }
 
 /// Which systemd scope runs the unit, when one does.

@@ -54,6 +54,8 @@ mod lexical_lane;
 // #6822: the scalar-precision backfill route.
 // #9169 PR-B1: what a parked index answers, and its park/unpark side effects.
 mod project_ensure;
+// #11417: ensure re-activates a parked index.
+mod project_ensure_unpark;
 mod project_park;
 #[cfg(test)]
 mod project_park_tests;

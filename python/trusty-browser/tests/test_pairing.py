@@ -12,9 +12,16 @@ import uuid
 from pathlib import Path
 
 import pytest
-from test_activation_codes import FakeBrowser, Rig, clock, run, short  # noqa: F401
+from test_activation_codes import (  # noqa: F401
+    FakeBrowser,
+    Rig,
+    clock,
+    run,
+    session,
+    short,
+)
 
-from trusty_browser import codes, service, vault
+from trusty_browser import service, vault
 
 
 def rows(state):
@@ -58,8 +65,7 @@ def test_pair_is_idempotent_and_seals_exactly_one_key(keychain):
                 vault.unseal(keychain, "browser:" + cred["profile"], sealed)
                 == (cred["key"])
             )
-            minted = await rig.mint(cred)
-            reply, _ = await rig.redeem(minted["code"])
+            reply, _ = await session(rig, cred)
             assert reply["ok"] and reply["profile"] == cred["profile"]
             browser.writer.close()
             for writer in rig.writers:
@@ -74,7 +80,6 @@ def test_pair_is_idempotent_and_seals_exactly_one_key(keychain):
         for path in files:
             data = path.read_bytes()
             assert cred["key"].encode() not in data, path
-            assert minted["code"].encode() not in data, path
 
     asyncio.run(body())
 
@@ -83,16 +88,19 @@ def test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing(short,
     async def body(rig):
         cred, _ = await paired(rig)
         before = rows(rig.state)
+        # Ruling Dqw 2026-11-16: a new profile id for the same email now replaces
+        # (see the re-pair test); a route or a changed key on the profile still refuses.
         conflicts = [
-            {**cred, "key": secrets.token_hex(32)},
-            {**cred, "profile": str(uuid.uuid4())},
-            {**cred, "email": "other@example.test"},
-            {k: rig.alpha[k] for k in ("profile", "email", "key")},
+            ({**cred, "key": secrets.token_hex(32)}, "enroll_conflict_key"),
+            ({**cred, "email": "other@example.test"}, "enroll_conflict_key"),
+            ({k: rig.alpha[k] for k in ("profile", "email", "key")}, "enroll_conflict_route"),
+            ({**rig.credential("x"), "email": rig.alpha["email"]}, "enroll_conflict_route"),
         ]
-        for frame in conflicts:
+        for frame, reason in conflicts:
             assert await rig.pair(frame) == {
                 "ok": False,
                 "error": "EnrollmentConflict",
+                "reason": reason,
             }
         malformed = [
             {**cred, "extra": 1},
@@ -104,64 +112,85 @@ def test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing(short,
         for frame in malformed:
             assert (await rig.pair(frame))["error"] == "InvalidEnrollment"
         assert rows(rig.state) == before
-        enroll = {
-            "op": "enroll",
-            "profile": cred["profile"],
-            "email": "fresh@example.test",
-            "workflow": "fresh",
-            "url": "https://qa.test/",
-            "account": "fresh",
-            "key": secrets.token_hex(32),
-        }
+        # #11239: the workflow enroll op is gone, so it cannot take a paired profile.
+        enroll = {**cred, "op": "enroll", "workflow": "fresh", "url": "https://qa.test/"}
         reply = await rig.once("enrollment.sock", enroll)
-        assert reply["error"] == "EnrollmentConflict"
-        assert (
-            await rig.once(
-                "enrollment.sock",
-                {**enroll, "profile": str(uuid.uuid4()), "email": cred["email"]},
-            )
-        )["error"] == "EnrollmentConflict"
+        assert reply["error"] == "InvalidRequest"
+        assert rows(rig.state) == before
 
     run(short, body)
 
 
-def test_mint_with_a_pairing_credential_succeeds_and_a_wrong_key_does_not(short, clock):
+def test_a_same_email_repair_replaces_the_old_pairing_and_ends_its_grants(short, clock):
+    async def body(rig):
+        old, browser = await paired(rig)
+        _, call = await session(rig, old)
+        # Lost extension storage: the same account pairs again under a new id and key.
+        new = {**rig.credential("gamma"), "email": old["email"]}
+        assert await rig.pair(new) == {"ok": True, "profile": new["profile"]}
+        assert [(r["profile"], r["email"]) for r in rows(rig.state)] == [
+            (new["profile"], new["email"])
+        ]
+        assert not rig.broker.grants
+        assert rig.outcomes("grant_end") == ["unenrolled"]
+        with pytest.raises((EOFError, asyncio.IncompleteReadError, ConnectionError)):
+            await call({"op": "tabs"})
+        await browser.task  # the old profile's native connection is dropped
+        assert old["profile"] not in rig.broker.peers
+        replaced = [line for line in rig.audit() if line["event"] == "pair_replaced"]
+        assert replaced == [
+            {
+                "ts": replaced[0]["ts"],
+                "event": "pair_replaced",
+                "profile": new["profile"],
+                "replaced": old["profile"],
+                "outcome": "ok",
+            }
+        ]
+        assert await rig.grant(old) == {"ok": False, "error": "NotEnrolled"}
+        await FakeBrowser(rig, new).pair()
+        assert (await rig.grant(new))["ok"]
+
+    run(short, body)
+
+
+def test_connect_with_a_pairing_credential_succeeds_and_a_wrong_key_does_not(
+    short, clock
+):
     async def body(rig):
         cred, browser = await paired(rig)
         other, _ = await paired(rig, "delta")
-        tab = await rig.mint(cred, "tab", 7)
-        assert tab["ok"] and tab["profile"] == cred["profile"] and tab["tab"] == 7
+        made = await rig.grant(cred)
+        assert made["ok"] and made["profile"] == cred["profile"]
         for frame in (
             {**cred, "key": secrets.token_hex(32)},
             {**cred, "key": other["key"]},
             {**cred, "email": other["email"]},
         ):
-            assert await rig.mint(frame) == {"ok": False, "error": "NotEnrolled"}
-        triple = {k: rig.alpha[k] for k in ("profile", "email", "key")}
-        assert (await rig.mint(triple))["ok"]  # an enrolled profile mints alike
-        assert (await rig.mint(rig.alpha))["ok"]  # and phase 1's six fields stay
-        assert (await rig.redeem(tab["code"]))[0]["ok"]
+            assert await rig.grant(frame) == {"ok": False, "error": "NotEnrolled"}
+        assert (await rig.grant(rig.alpha))["ok"]  # an enrolled profile connects alike
+        ack, call = await rig.attach(cred["profile"])
+        assert ack["grant"] == made["grant"]
+        assert (await call({"op": "select", "tab": 7}))["ok"]
         assert ("page_tab", 7) in browser.seen
 
     run(short, body)
 
 
-def test_unpair_ends_grants_and_a_removed_key_cannot_mint(short, clock):
+def test_unpair_ends_grants_and_a_removed_key_cannot_connect(short, clock):
     async def body(rig):
         cred, browser = await paired(rig)
-        _, call = await rig.redeem((await rig.mint(cred))["code"])
-        waiting = await rig.mint(cred)
+        _, call = await session(rig, cred)
         assert await rig.pair(cred, "unpair") == {
             "ok": True,
             "profile": cred["profile"],
         }
-        assert await rig.mint(cred) == {"ok": False, "error": "NotEnrolled"}
+        assert await rig.grant(cred) == {"ok": False, "error": "NotEnrolled"}
         assert rows(rig.state) == []
         with pytest.raises((EOFError, asyncio.IncompleteReadError, ConnectionError)):
             await call({"op": "tabs"})
-        assert (await rig.redeem(waiting["code"]))[0]["error"] == "CodeRefused"
         assert not rig.broker.grants
-        assert rig.outcomes("grant_end").count("unenrolled") == 2
+        assert rig.outcomes("grant_end").count("unenrolled") == 1
         assert rig.outcomes("unpair") == ["ok"]
         await browser.task  # the broker closed the profile's native connection
         assert cred["profile"] not in rig.broker.peers
@@ -173,7 +202,7 @@ def test_unpair_ends_grants_and_a_removed_key_cannot_mint(short, clock):
 def test_unpair_with_a_wrong_key_is_unauthorized_and_keeps_the_pairing(short, clock):
     async def body(rig):
         cred, _ = await paired(rig)
-        ack, call = await rig.redeem((await rig.mint(cred))["code"])
+        ack, call = await session(rig, cred)
         before = rows(rig.state)
         for frame in (
             {**cred, "key": secrets.token_hex(32)},
@@ -183,6 +212,7 @@ def test_unpair_with_a_wrong_key_is_unauthorized_and_keeps_the_pairing(short, cl
             assert await rig.pair(frame, "unpair") == {
                 "ok": False,
                 "error": "Unauthorized",
+                "reason": "unpair_bad_credential",
             }
         assert (await rig.pair({**cred, "extra": 1}, "unpair"))[
             "error"
@@ -197,7 +227,7 @@ def test_unpair_with_a_wrong_key_is_unauthorized_and_keeps_the_pairing(short, cl
 def test_operator_pairings_list_and_unpair(short, clock):
     async def body(rig):
         cred, _ = await paired(rig)
-        _, call = await rig.redeem((await rig.mint(cred))["code"])
+        _, call = await session(rig, cred)
         listed = await rig.operator(op="pairings")
         assert listed == {
             "ok": True,
@@ -222,10 +252,10 @@ def test_operator_pairings_list_and_unpair(short, clock):
 def test_popup_list_and_revoke_see_only_the_credential_profile(short, clock):
     async def body(rig):
         cred, _ = await paired(rig)
-        mine = [await rig.mint(cred), await rig.mint(cred, "tab", 7)]
-        theirs = await rig.mint(rig.alpha)
+        mine = await rig.grant(cred)
+        theirs = await rig.grant(rig.alpha)
         listed = await rig.popup(cred, "grants")
-        assert {g["grant"] for g in listed["grants"]} == {m["grant"] for m in mine}
+        assert [g["grant"] for g in listed["grants"]] == [mine["grant"]]
         assert await rig.popup(cred, "revoke_grant", grant=theirs["grant"]) == {
             "ok": False,
             "error": "UnknownGrant",
@@ -236,12 +266,11 @@ def test_popup_list_and_revoke_see_only_the_credential_profile(short, clock):
             "error": "NotEnrolled",
         }
         assert (await rig.popup(cred, "grants", extra=1))["error"] == "InvalidRequest"
-        assert (await rig.popup(cred, "revoke_grant", grant=mine[0]["grant"]))[
+        assert (await rig.popup(cred, "revoke_grant", grant=mine["grant"]))[
             "revoked"
         ] == 1
+        assert (await rig.grant(cred))["ok"]
         assert await rig.popup(cred, "revoke_grants") == {"ok": True, "revoked": 1}
         assert list(rig.broker.grants) == [theirs["grant"]]
-        assert (await rig.redeem(mine[1]["code"]))[0]["error"] == "CodeRefused"
-        assert codes.code_digest(theirs["code"]) in rig.broker.codes
 
     run(short, body)

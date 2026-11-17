@@ -6,6 +6,65 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.7] — 2026-11-16
+
+### Breaking
+
+- trusty-mpm 1.14.7 ships a public-API break under the internal numbering
+  policy (owner ruling 2026-09-26); recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.7.txt` (Refs #8699).
+
+### Added
+
+- Model resolution recognizes the Fable tier (`fable` alias, `[models.tiers] fable`, default `claude-fable-5-2`) and reserves it for PM sessions and engineer and research roles. Any other agent that asks for Fable, through `--model`, `[models.agents]`, frontmatter or `[models] default`, runs on Opus, and the substitution is logged with the agent, requested and resolved models. See #11353.
+- `tm hook --pm-guard` refuses a PM `Agent`/`Task` dispatch that would run any role other than PM, engineer (any `*-engineer`, including `data-engineer`) or research on a Fable model — whether the model comes from `CLAUDE_CODE_SUBAGENT_MODEL`, the dispatch's `model` argument, the deployed agent's frontmatter, or an `inherit` from a Fable PM session. When the model is unknown — `inherit` or no `model:` with no recorded parent model and no non-Fable `[models] default`, or an unreadable agent file — the dispatch is refused and asks for an explicit `model: "opus"`; `model: "inherit"` counts as inherit. `tm launch` and the Architect launch export the model they pass as `--model` as `TRUSTY_MPM_LAUNCH_MODEL`, which the guard reads after the statusline's session-model record, so a managed session's parent model is known before the first statusline render and in a headless session. New guard policy GP-051 `fable-cap`. See #11353.
+- `tm architect up` brings the Architect up from any state (no tmux server, no session, dead pane, pane at a shell) and attaches; bare `tm architect` does the same. It is idempotent, holds `<dir>/.trusty-mpm/architect-up.lock`, never stops a live `claude` (an unbound one is reported), and inside Claude Code only ensures a bound Architect. Flags `--no-attach`, `--dry-run`, `--json`; `tm architect attach` attaches only (#11364).
+- `tm architect restart` restarts the Architect only behind two gates: a fresh Intent Ledger checkpoint (else exit 4; a ledger it cannot read also refuses) and an idle box for 3 reads 5 s apart (else exit 2, or keep trying with `--wait <s>`). It then relaunches `claude` bound with resume, restores the poller, types one guarded resume line and appends one line to `inbox/restart.log`. It holds the `tm architect up` lock for the whole run and exits 1 at once if `up` or another `restart` holds it. Refused inside Claude Code; no bypass flag (#11365).
+- A dispatch of an ops agent (`role: ops`) now carries a `## Project accounts` block listing each service's account name, scope and read-only verify command from `[accounts.<service>]` in `.trusty-mpm.toml`, plus the rule to name the account and run its verify command before any permission request (#11390).
+- `.trusty-mpm.toml` accepts `[accounts.<service>]` with `account`, `scope` and `verify`. A value outside the allowed characters, shaped like a credential, or under an unknown key rejects only the account map, never the rest of the file, and the block then says the map was rejected (#11390).
+
+### Fixed
+
+- `tm hook` now compresses chained Bash commands whose every segment is safe: `cargo build && cargo test`, `git diff; git log -3`, `cd <dir> && …` chains and a trailing `| head`/`tail`/`wc`/`grep`/`sort`/`uniq`/`cut`/`tr`. A destructive or unrecognised segment, `||`, a background `&`, a subshell, a substitution, a redirect or a heredoc still leaves the command uncompressed, and isolation worktrees still skip chains. Compressed chains write savings rows, so the 💸 footer shows a figure instead of `—` (#10973, #11037).
+
+### Changed
+
+- The built-in `opus` tier default is now `claude-opus-5-5` (was `claude-opus-4-5`), held in one constant `OPUS_DEFAULT_MODEL_ID` that also backs the Fable cap's fallback. See #11353.
+
+## [1.14.6] — 2026-11-16
+
+### Added
+
+- `tm session delete <id> --project-dir` removes the session's project directory. It shows the plan, then needs `--yes` or the typed directory name, then Touch ID or the login password; `--dry-run` shows the plan and deletes nothing. It deletes only strictly inside the managed workspace root (no symlink or `..` escape) and refuses dirty or unpushed work (tm's own provisioning files do not count, exactly as `tm sessions decommission --force` excuses them, nor do the `.claude/settings.json` backups a spawn writes into a gitignored `.claude/` while their bytes match what the spawn recorded), an unpushed commit any local branch or tag reaches, or a stash, in a checkout whose `.git` it would delete, gitignored files that are not build output, a running session or live process in the directory, and the Architect's sessions and directory (every `[architect]` entry in `~/.trusty-mpm/config.toml` and `ARCHITECT_PROJECT_DIR`; a config file it cannot read or parse refuses the delete); after the prompt it reads the session list again and re-runs these checks, so a session started in the directory meanwhile still refuses, and an unreadable list refuses too ([#11238](https://github.com/bobmatnyc/trusty-tools/issues/11238), [#10992](https://github.com/bobmatnyc/trusty-tools/issues/10992))
+
+### Fixed
+
+- GP-043: a PM session's subagents may now read and search Gmail and Google Workspace (`search_gmail_messages`, `get_gmail_message_content`, `list_message_attachments` and the other listed reads); sends, writes and unlisted tools stay denied.
+- `tm sessions output` and `tm sessions activity` now report a managed session's input box as `empty`, `suggestion` or `typed`, classified from an escaped capture of its own pane; an unreadable pane still reads `unknown`. The activity JSON gains an additive `input_box` field (#8407).
+- A disclaimed spawn on macOS now starts its child with `POSIX_SPAWN_CLOEXEC_DEFAULT`, so the child keeps only its stdio and never inherits a stray parent descriptor (#10083).
+- `cargo clippy -p trusty-mpm --all-targets -- -D warnings` passes again on the MSRV 1.94 toolchain: three `nonminimal_bool` conditions are rewritten with identical behavior (#10436).
+- The exhaustive child-repo scan refuses a symlink whose target folds `..` past a dangling in-root symlink, which a later `mkdir` could turn into a path out of the root (#10473).
+- The Architect dashboard reads TOML on Python < 3.11: a shipped `dashboard_toml.py` reader stands in for `tomllib`, so the Projects stack and config rows fill on macOS's Python 3.9. The "needs Python 3.11" warning is removed; 3.11+ still uses `tomllib`.
+- `tm fleet init` run as an upgrade no longer replaces a file under the Architect's `local/` (instance guidance, owner profile, config, IL schedule, records) when it still equals an earlier shipped template; framework scripts, schemas and dashboard templates are still refreshed (#10608).
+- The Architect dashboard store now stamps a document's `created` and `updated` from its own clock: a client-supplied value for either is ignored, `created` keeps the stored time on later writes, and one batch shares one write time with its change-log line. Event fields such as `at` and `done_at` still carry the writer's value (#10678).
+- The Architect dashboard store reads under a shared lock, so a read never lands between the files of one batch: after one write the task, session and header views agree, and `/api/meta` straight after a write serves the new values. Reading several collections together goes through one lock, and `/api/harness` reads its sessions, tasks, goals and settings that way. A read behind a writer that never lets go answers 503 after the same 10-second wait the Rust store uses, instead of hanging (#10679).
+- The Architect reads a saved owner answer back from the store before acting on it: `pending-answers.py --read-back <id> --kind <kind> --at <at>` prints the stored answer and its version as a bare integer that `dashboard-db.py --if-version` takes as is, and exits 3 (changed, gone or already relayed) or 2 (unreadable, including a read that times out behind a held writer lock) with nothing on stdout, so the relay does not proceed. The architect-dashboard skill (r-183) now requires it and pins the `relayed` write to the printed version with `--if-version`, so an answer saved after the read-back stays pending (#10680).
+- `tm hook --pm-guard` no longer refuses a command made only of `printf`/`echo` calls whose operands are literal text, such as a regex (`(secret|token|[.]env)`), a regex-escaped name (`process\.env\.TZ`) or Markdown emphasis. An operand made only of path characters (`echo .env`), any pipe, redirect, substitution or non-printer segment, and a CR or other control byte keep the refusal. A quoted emphasis fragment such as `echo '**A …**'` (no `$`, backtick, redirect or pipe) is now allowed, reversing that row of #7533 (#10685).
+- `tm hook --pm-guard` withdraws the `printf`/`echo` literal-text release from any command holding a shell comment, so a quote inside a comment can no longer hide a second line such as `dd if=.env` from the guard (#10685).
+- The Architect dashboard no longer logs a 404 every few seconds on a fresh store: the store seed now creates `meta/settings` as `{updated}` when it is absent (an existing one is never overwritten), and the page no longer polls `meta/gh_track`, which no shipped writer produces, so its repo-totals line stays hidden ([#10752](https://github.com/bobmatnyc/trusty-tools/issues/10752))
+- The Architect's pending owner answer and its poller alert now show the text the owner typed (`answer_note`), not only the button label such as "Other" (#10765).
+- Two unit-test fakes (`a_real_foreign_compiler_is_counted`, `a_resume_rebind_reads_the_claude_on_the_grants_own_server`) no longer symlink `/bin/sleep`, which uutils `sleep` on Ubuntu 26.04 refuses under another name (#11061).
+- pm-guard now ends a word at an unquoted shell redirection or control operator the way bash does before any rule reads the word, so every rule sees the same program, script and file names the shell uses; a segment whose operators it cannot place is refused as unparseable ([#11262](https://github.com/bobmatnyc/trusty-tools/issues/11262))
+- No tm launch path leaves an Architect `claude` running without a launch record. An Architect launch into a tmux session that is already running is refused before anything is registered or typed, with an error naming `tm fleet relaunch` and `tm fleet bind`; `tm session start` and `tm launch` exit non-zero and add no session record, and the GUI spawn answers 422. A fresh Architect that tm starts but cannot bind is now stopped and reported as an error (non-zero exit for `tm launch`, `tm connect` and `tm session start`, an error response and an ERROR log for the daemon spawn paths) instead of a warning. An Architect session is always created new, never attached to one of the same name. The launch shim starts an Architect only for a launch that a binding tm path issued. Other launches are unchanged ([#11270](https://github.com/bobmatnyc/trusty-tools/issues/11270))
+- `tm hook --pm-guard` now refuses a Bash segment whose shell operators it cannot place in the script-body, computed-read and secret-copy rules, instead of reading that segment as having no words; inside a script body such a segment refuses when it runs a script or names a secret-shaped word (#11276).
+- `seed_history.tsv` records the bytes of `docs/architect/bundle-provenance.json` as merged on main after #11333 and #11334, so `every_embedded_seed_is_in_the_shipped_history` passes again (Refs #11334)
+
+### Changed
+
+- `tm hook --egress-guard` splits its family rule by action (#11273). A PM's or the Architect's main session may now use the read, search and list tools of the Slack, Gmail, Notion and Google Chat families, native servers included; each such read is audited, and a read whose audit line cannot be written is denied. A tool the guard does not list as a read is treated as a send.
+- Sends and writes still need the tm launch record. Only the Architect has one today, so a bound Architect may send and write, an unbound Architect is denied and told to run `tm fleet bind`, and a PM keeps only its send to the owner's Slack DM (#11194). No PM launch record is added in this change.
+- Subagents keep exactly the outcomes they had: every family call is denied, bar the claude.ai connectors and the host Slack read allowlist.
+- The Bash rule (GP-044) no longer denies a command that names a family host only as inert text, such as a `gh` issue title or body, a commit message, a branch name, a path or a search pattern. Only free-text options and words that open nothing count as inert: a redirect, a `gh` repository, host or URL argument, and a command pointed at another repository are judged as before. A command that can reach a family endpoint or run a family sender is denied as before for every caller without the launch record.
+
 ## [1.14.5] — 2026-11-14
 
 ### Breaking

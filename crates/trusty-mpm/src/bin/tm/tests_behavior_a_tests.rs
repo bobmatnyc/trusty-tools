@@ -94,7 +94,9 @@ fn cli_parses_hook() {
             divert_check: false,
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -112,7 +114,9 @@ fn cli_parses_hook_prompt_feedback() {
             divert_check: false,
             prompt_feedback: true,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -129,7 +133,9 @@ fn cli_parses_hook_standing_rules() {
             divert_check: false,
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: true
+            standing_rules: true,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -146,7 +152,9 @@ fn cli_parses_hook_egress_guard() {
             divert_check: false,
             prompt_feedback: false,
             egress_guard: true,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
@@ -164,7 +172,9 @@ fn cli_parses_hook_pm_guard() {
             divert_check: false,
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }

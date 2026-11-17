@@ -27,7 +27,9 @@ fn cli_parses_hook_divert_check() {
             divert_check: true,
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            completion_evidence: false
         }
     ));
 }
