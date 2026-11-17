@@ -88,12 +88,28 @@ impl Json {
     /// Compact `json.dumps(self, separators=(",", ":"), allow_nan=False,
     /// ensure_ascii=ensure_ascii)`.
     pub fn dumps(&self, ensure_ascii: bool) -> Result<String, NonFinite> {
+        self.dumps_style(Style::COMPACT, ensure_ascii)
+    }
+
+    /// `json.dumps(self, allow_nan=False)` with the default `", "` / `": "`
+    /// separators; the MCP server's `agent.sock` request frames use it.
+    pub fn dumps_spaced(&self) -> Result<String, NonFinite> {
+        self.dumps_style(Style::SPACED, true)
+    }
+
+    /// `json.dumps(self, indent=2, ensure_ascii=False)`: the text FastMCP
+    /// puts in a tool result's `content`.
+    pub fn dumps_indent2(&self) -> Result<String, NonFinite> {
+        self.dumps_style(Style::INDENT2, false)
+    }
+
+    fn dumps_style(&self, style: Style, ascii: bool) -> Result<String, NonFinite> {
         let mut out = String::new();
-        self.write(&mut out, ensure_ascii)?;
+        self.write(&mut out, style, ascii, 0)?;
         Ok(out)
     }
 
-    fn write(&self, out: &mut String, ascii: bool) -> Result<(), NonFinite> {
+    fn write(&self, out: &mut String, st: Style, ascii: bool, depth: usize) -> Result<(), NonFinite> {
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(true) => out.push_str("true"),
@@ -102,30 +118,63 @@ impl Json {
             Json::UInt(u) => push_display(out, u),
             Json::Float(f) => out.push_str(&float_repr(*f)?),
             Json::Str(s) => write_str(out, s, ascii),
+            Json::Array(items) if items.is_empty() => out.push_str("[]"),
+            Json::Object(items) if items.is_empty() => out.push_str("{}"),
             Json::Array(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    item.write(out, ascii)?;
+                    st.item(out, i, depth + 1);
+                    item.write(out, st, ascii, depth + 1)?;
                 }
+                st.close(out, depth);
                 out.push(']');
             }
             Json::Object(items) => {
                 out.push('{');
                 for (i, (k, v)) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
+                    st.item(out, i, depth + 1);
                     write_str(out, k, ascii);
-                    out.push(':');
-                    v.write(out, ascii)?;
+                    out.push_str(st.key);
+                    v.write(out, st, ascii, depth + 1)?;
                 }
+                st.close(out, depth);
                 out.push('}');
             }
         }
         Ok(())
+    }
+}
+
+/// `json.dumps` separators and indent.
+#[derive(Clone, Copy)]
+struct Style {
+    item: &'static str,
+    key: &'static str,
+    indent: Option<usize>,
+}
+
+impl Style {
+    const COMPACT: Style = Style { item: ",", key: ":", indent: None };
+    const SPACED: Style = Style { item: ", ", key: ": ", indent: None };
+    const INDENT2: Style = Style { item: ",", key: ": ", indent: Some(2) };
+
+    /// Before item `i` of a container whose items sit at `depth`.
+    fn item(self, out: &mut String, i: usize, depth: usize) {
+        if i > 0 {
+            out.push_str(self.item);
+        }
+        if let Some(n) = self.indent {
+            out.push('\n');
+            out.extend(std::iter::repeat_n(' ', n * depth));
+        }
+    }
+
+    /// Before the closing bracket of a non-empty container at `depth`.
+    fn close(self, out: &mut String, depth: usize) {
+        if let Some(n) = self.indent {
+            out.push('\n');
+            out.extend(std::iter::repeat_n(' ', n * depth));
+        }
     }
 }
 
@@ -330,6 +379,20 @@ mod tests {
         assert_eq!(
             v.and_then(|v| v.dumps(true).ok()).as_deref(),
             Some(r#"{"a":3,"b":2}"#)
+        );
+    }
+
+    #[test]
+    fn spaced_and_indented_styles_match_python() {
+        let v = Json::parse(br#"{"a":[1,{}],"b":[],"c":"\u00e9"}"#).ok();
+        let v = v.unwrap_or(Json::Null);
+        assert_eq!(
+            v.dumps_spaced().ok().as_deref(),
+            Some(r#"{"a": [1, {}], "b": [], "c": "\u00e9"}"#)
+        );
+        assert_eq!(
+            v.dumps_indent2().ok().as_deref(),
+            Some("{\n  \"a\": [\n    1,\n    {}\n  ],\n  \"b\": [],\n  \"c\": \"é\"\n}")
         );
     }
 }

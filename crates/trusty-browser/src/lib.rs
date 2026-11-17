@@ -8,8 +8,11 @@
 //! Phase 2 adds the [`broker`] (four sockets, [`peer`] and [`peer_darwin`]
 //! authentication, the pairing handshake, enrollment, grant and operator
 //! ops) and the [`native_host`] relay. Phase 3 adds [`leases`], the
-//! request journal and every page op ([`pages`], [`pages_url`]). The MCP
-//! server arrives in a later phase.
+//! request journal and every page op ([`pages`], [`pages_url`]). Phase 5 adds
+//! the `trusty-browser-mcp` stdio server: [`mcp_cli`] (flags and start-up),
+//! [`mcp_server`] (JSON-RPC lines), [`mcp_tools`] (tool table and results),
+//! [`mcp_args`] (FastMCP/pydantic argument rules), [`mcp_session`]
+//! (`agent.sock` client), [`mcp_upload`] and [`mcp_mime`] (upload root).
 
 pub mod audit;
 pub mod broker;
@@ -21,6 +24,13 @@ pub mod entropy;
 pub mod frame;
 pub mod grants;
 pub mod leases;
+pub mod mcp_args;
+pub mod mcp_cli;
+pub mod mcp_mime;
+pub mod mcp_server;
+pub mod mcp_session;
+pub mod mcp_tools;
+pub mod mcp_upload;
 mod legacy;
 pub mod native_host;
 pub mod pages;

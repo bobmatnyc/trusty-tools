@@ -32,3 +32,12 @@ Contents: `registry.sqlite3` (two pairings, one non-ASCII email), `vault.json`
 transcript bytes, key, MAC for both roles), `frames/` (one length-prefixed frame
 per file, `index.json` names socket, direction and message), `refusals.json`,
 `audit.jsonl`, `mcp/` (`initialize` and `tools/list` in connect and workflow mode).
+
+MCP tool calls (phase 5): `capture_mcp.py` runs `trusty-browser-mcp` against a
+scripted fake `agent.sock` (no broker, vault or keychain) and writes
+`mcp/{connect,noroot,workflow}.exchange.json`, `mcp/validation.json` and
+`../../src/mimetypes.tsv`:
+
+```sh
+/tmp/tb-venv/bin/python -I crates/trusty-browser/tests/fixtures/capture/capture_mcp.py --out crates/trusty-browser/tests/fixtures
+```
