@@ -504,6 +504,9 @@ webauthn-rs.workspace = true
 base64.workspace = true
 hex.workspace = true
 regex.workspace = true
+# #11431: the minimal shadow pm-guard parses Bash into argv facts.
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
 # Glob compilation for the `tm ls` picker's `d <glob>` bulk delete (#5539).
 # Already a workspace dep (trusty-code) and already in the lockfile, so this
 # adds no new dependency to resolve.

@@ -1881,6 +1881,7 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             egress_guard: false,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));

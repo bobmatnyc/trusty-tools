@@ -638,6 +638,12 @@ pub(crate) enum Command {
         /// Always exits 0.
         #[arg(long)]
         turn_task: bool,
+        /// Run the minimal pm-guard in shadow mode (#11431): judge a
+        /// `PreToolUse` call on parsed facts (rules 1-3, 5) and log each
+        /// would-refuse to `~/.trusty-mpm/guard/shadow.jsonl`. Never blocks;
+        /// always exits 0.
+        #[arg(long)]
+        pm_guard_shadow: bool,
         /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
         /// final message claims completion with no evidence map or sets an
         /// invented size target. Warn-only; always exits 0.

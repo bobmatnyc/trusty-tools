@@ -33,6 +33,8 @@ pub use entry::{
 mod architect_hooks;
 // #11398: the PM-only `tm hook --turn-task` group.
 mod turn_task_hooks;
+// #11431: the shadow minimal pm-guard group, every session.
+mod shadow_guard_hooks;
 // #10575: the PM-only `tm hook --completion-evidence` group.
 mod completion_evidence_hooks;
 // #10459: `HostInputs`, moved out for the line cap.

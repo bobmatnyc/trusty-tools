@@ -96,6 +96,7 @@ fn cli_parses_hook() {
             egress_guard: false,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));
@@ -116,6 +117,7 @@ fn cli_parses_hook_prompt_feedback() {
             egress_guard: false,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));
@@ -135,6 +137,7 @@ fn cli_parses_hook_standing_rules() {
             egress_guard: false,
             standing_rules: true,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));
@@ -154,6 +157,7 @@ fn cli_parses_hook_egress_guard() {
             egress_guard: true,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));
@@ -174,6 +178,7 @@ fn cli_parses_hook_pm_guard() {
             egress_guard: false,
             standing_rules: false,
             turn_task: false,
+            pm_guard_shadow: false,
             completion_evidence: false
         }
     ));

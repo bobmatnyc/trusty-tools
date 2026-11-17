@@ -529,6 +529,8 @@ tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
+# #11431: the minimal pm-guard parses shell with a real grammar (MIT).
+tree-sitter-bash = "0.25"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-kotlin-ng = "1.1"
 tree-sitter-swift = "=0.7.0"

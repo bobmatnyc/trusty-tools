@@ -148,6 +148,8 @@ mod tm_hook_standing_rules_10960;
 mod tm_hook_turn_task_11398;
 // #10575: the warn-only completion-evidence Stop check.
 mod tm_hook_completion_evidence_10575;
+// #11431: the shadow minimal pm-guard never blocks.
+mod tm_hook_pm_guard_shadow_11431;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

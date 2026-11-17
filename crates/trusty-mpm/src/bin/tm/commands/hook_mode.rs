@@ -13,9 +13,9 @@ use crate::cli::Command;
 ///
 /// Why: see the module doc.
 /// What: `--egress-guard` first — it is a fail-closed deny layer, so it wins
-/// any flag combination (#8454) — then `--pm-guard`, `--divert-check`,
-/// `--prompt-feedback`, `--standing-rules` (#10960), `--turn-task`
-/// (#11398), else the daemon relay. `hook` is always a
+/// any flag combination (#8454) — then `--pm-guard`, `--pm-guard-shadow` (#11431),
+/// `--divert-check`, `--prompt-feedback`, `--standing-rules` (#10960),
+/// `--turn-task` (#11398), else the daemon relay. `hook` is always a
 /// [`Command::Hook`]; any other variant is a caller bug and returns an error.
 /// Test: `egress_denies_each_family_tool_name` reaches the egress branch through
 /// the binary; `cli_parses_hook_egress_guard` the flag.
@@ -32,6 +32,7 @@ pub(crate) async fn run(
         egress_guard,
         standing_rules,
         turn_task,
+        pm_guard_shadow,
         completion_evidence,
     } = hook
     else {
@@ -42,6 +43,10 @@ pub(crate) async fn run(
     } else if pm_guard {
         // #10600: a guard that panics or errors denies instead of exiting non-zero.
         crate::commands::pm_guard_refusal::run(url, started).await
+    // #11431: log-only; never blocks, never relays to the daemon.
+    } else if pm_guard_shadow {
+        crate::commands::pm_guard_min::pm_guard_shadow();
+        Ok(())
     // #6887: a separate hook mode, not a pm-guard variant.
     } else if divert_check {
         crate::commands::divert_check::divert_check().await

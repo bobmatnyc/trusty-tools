@@ -57,6 +57,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "/usr/local/bin/tm hook --pm-guard-shadow",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit"
       }
     ],
     "SessionEnd": [
