@@ -44,21 +44,21 @@ impl Word {
 /// One simple command.
 #[derive(Debug, Clone)]
 pub(crate) struct Cmd {
-    /// argv with wrappers (`sudo`, `env`, `nohup`, ...) removed; argv[0] is a basename.
+    /// argv with wrappers (`sudo`, `env`, `nohup`, ...) removed; `argv[0]` is a basename.
     pub argv: Vec<Word>,
     /// The directory the command runs in (`cd` earlier in the input followed).
     pub cwd: PathBuf,
-    /// A substitution, `eval`, a dynamic argv[0] or a parse error touched it.
+    /// A substitution, `eval`, a dynamic `argv[0]` or a parse error touched it.
     pub unparsed: bool,
 }
 
 impl Cmd {
-    /// argv[0], or `""` when dynamic.
+    /// `argv[0]`, or `""` when dynamic.
     pub(crate) fn name(&self) -> &str {
         self.argv.first().and_then(Word::lit).unwrap_or("")
     }
 
-    /// The literal words after argv[0]; dynamic words are skipped.
+    /// The literal words after `argv[0]`; dynamic words are skipped.
     pub(crate) fn lit_args(&self) -> Vec<&str> {
         self.argv.iter().skip(1).filter_map(Word::lit).collect()
     }
