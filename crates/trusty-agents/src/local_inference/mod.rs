@@ -136,9 +136,35 @@ pub fn qualifies_for_local_inference(intent: &IntentClass, message: &str) -> boo
     }
 }
 
+/// Whether the local fast path may be tried at all.
+///
+/// Why: #10978 — the fast path sends ctrl and PM turns to `ollama/…`, a
+/// route off Bedrock, so a provider lock must switch it off.
+/// What: `cfg.enabled` and no provider lock (an unreadable lock counts as
+/// locked). Both dispatch sites gate on this instead of `cfg.enabled`.
+/// Test: `route_is_off_under_the_provider_lock`.
+pub fn route_enabled(cfg: &crate::mcp::LocalInferenceConfig) -> bool {
+    cfg.enabled && !crate::llm::provider_lock::is_locked(&crate::llm::provider_lock::active())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why: #10978 — the default-on fast path must be off under the lock,
+    /// and stay on without one.
+    /// Test: itself.
+    #[test]
+    fn route_is_off_under_the_provider_lock() {
+        use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+        let cfg = crate::mcp::LocalInferenceConfig::default();
+        {
+            let _unlocked = override_on_this_thread(Ok(None));
+            assert!(route_enabled(&cfg));
+        }
+        let _locked = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+        assert!(!route_enabled(&cfg));
+    }
 
     #[test]
     fn qualifies_conversational_always_true() {
