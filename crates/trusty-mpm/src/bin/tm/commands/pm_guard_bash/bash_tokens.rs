@@ -481,6 +481,24 @@ pub(crate) fn runs_a_nested_command(segment: &str) -> bool {
         })
 }
 
+/// Whether `segment` carries a nested-command marker (`$(`, backtick, `<(`,
+/// `>(`, `${`) the shell would act on (#10974).
+///
+/// What: a marker inside single quotes is data. Unbalanced quoting or live
+/// ANSI-C quoting (`$'…'`, whose escapes the quote scan does not model) counts
+/// every marker as live, as the raw check did.
+/// Test: `a_text_payload_with_quoted_backticks_is_exempt_10974`.
+pub(crate) fn has_live_nested_marker(segment: &str) -> bool {
+    use crate::commands::pm_guard_secret_read::NESTED_COMMAND_MARKERS;
+    let scan = super::shell_lex::QuoteScan::new(segment);
+    let exact = scan.balanced && !super::shell_lex::has_live_ansi_c_quoting(segment);
+    NESTED_COMMAND_MARKERS.iter().any(|marker| {
+        segment
+            .match_indices(marker)
+            .any(|(i, _)| !exact || scan.allows_substitution(i))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -615,6 +633,25 @@ mod tests {
             "echo .env > >(cat)",
         ] {
             assert!(prose(command).is_empty(), "no prose in `{command}`");
+        }
+    }
+
+    /// #10974: a marker in single quotes is data; every other spelling, and
+    /// every unbalanced or ANSI-C segment, still counts as live.
+    #[test]
+    fn a_text_payload_with_quoted_backticks_is_exempt_10974() {
+        for quoted in ["x --body 'see `tm doctor`'", "x --body '$(a) ${b} <(c)'"] {
+            assert!(!has_live_nested_marker(quoted), "`{quoted}` is data");
+        }
+        for live in [
+            "x --body \"`cat .env`\"",
+            "x --body \"$(cat .env)\"",
+            "x --body 'a' `cat .env`",
+            "x --body 'a' ${X}",
+            "x --body 'unclosed `cat .env`",
+            "x --body $'\\'' '`cat .env`'",
+        ] {
+            assert!(has_live_nested_marker(live), "`{live}` is live");
         }
     }
 }

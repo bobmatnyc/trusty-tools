@@ -169,8 +169,9 @@ pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
 // #10685: and whether a printer-only command can run anything nested.
 pub(crate) use bash_tokens::{
-    TEXT_PRINTERS, TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices,
-    runs_a_nested_command, tokenize, without_glob_metacharacters,
+    TEXT_PRINTERS, TokenizeError, has_live_nested_marker, has_regex_quantifier,
+    program_text_indices, prose_write_indices, runs_a_nested_command, tokenize,
+    without_glob_metacharacters,
 };
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.

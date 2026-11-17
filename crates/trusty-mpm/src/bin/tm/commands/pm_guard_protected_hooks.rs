@@ -238,9 +238,15 @@ fn is_executable(path: &Path) -> bool {
 /// The frontmatter `hooks` values of the skill and agent Markdown under
 /// `base` (`skills/` and `agents/`, one directory level deep).
 ///
-/// What: a missing directory or file has none; `Err(path)` for one that
-/// cannot be read, or frontmatter that mentions `hooks` and does not parse
-/// (fail-closed, #8928 fix round).
+/// What: a missing directory or file has none. #10937: a file that cannot be
+/// read (Claude Code cannot read it either) and frontmatter that does not
+/// parse but declares no top-level `hooks` key are skipped with a stderr
+/// warning, so one stray agent file no longer refuses every write.
+/// Fail-closed (#8928 fix round): `Err(path)` for frontmatter that does not
+/// parse and declares a top-level `hooks` key ([`declares_hooks_key`]).
+/// Test: `an_unparseable_agent_file_without_hooks_is_skipped_10937`,
+/// `an_unreadable_agent_file_is_skipped_10937`,
+/// `an_unparseable_agent_file_declaring_hooks_still_denies_10937`.
 fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
     let mut out = Vec::new();
     for kind in ["skills", "agents"] {
@@ -248,7 +254,11 @@ fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return Err(file),
+                // #10937: skip and log one unreadable file.
+                Err(e) => {
+                    skipped(&file, &e.to_string());
+                    continue;
+                }
             };
             if !text.contains("hooks") {
                 continue;
@@ -256,11 +266,48 @@ fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
             match frontmatter_hooks(&text) {
                 Ok(None) => {}
                 Ok(Some(hooks)) => out.push(serde_json::to_value(hooks).map_err(|_| file.clone())?),
-                Err(()) => return Err(file),
+                Err(()) if declares_hooks_key(&text) => return Err(file),
+                // #10937: no `hooks` key to hide, so the file names no hook.
+                Err(()) => skipped(
+                    &file,
+                    "frontmatter does not parse and declares no `hooks` key",
+                ),
             }
         }
     }
     Ok(out)
+}
+
+/// Logs a skill or agent file the hook-path scan skipped (#10937).
+fn skipped(file: &Path, why: &str) {
+    eprintln!(
+        "tm pm-guard: skipped `{}` in the hook-path scan: {why}",
+        file.display()
+    );
+}
+
+/// Whether `text`'s frontmatter has a line that may open a top-level `hooks`
+/// key: `hooks`, optionally quoted, then `:`, at column 0; or a flow mapping
+/// (`{`) mentioning `hooks` (#10937).
+///
+/// Why: a frontmatter that does not parse may still be read by Claude Code,
+/// so a `hooks` key in it keeps the scan fail-closed; prose such as
+/// `webhooks` in a description does not.
+/// Test: `an_unparseable_agent_file_declaring_hooks_still_denies_10937`.
+fn declares_hooks_key(text: &str) -> bool {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    text.lines()
+        .skip(1)
+        .take_while(|l| l.trim_end() != "---")
+        .any(|line| {
+            let key = line.trim_start_matches(['"', '\'']);
+            let flow = line.trim_start().starts_with('{') && line.contains("hooks");
+            flow || key.strip_prefix("hooks").is_some_and(|rest| {
+                rest.trim_start_matches(['"', '\''])
+                    .trim_start()
+                    .starts_with(':')
+            })
+        })
 }
 
 /// The `.md` files in `dir`, and in its subdirectories `depth` levels down.
