@@ -503,6 +503,8 @@ scip = "0.7"
 protobuf = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hmac = "0.12"
+# AES-256-GCM for trusty-browser vault sealing (Python `cryptography` AESGCM parity).
+aes-gcm = "0.11"
 hex = "0.4"
 ort = "2.0.0-rc.10"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
