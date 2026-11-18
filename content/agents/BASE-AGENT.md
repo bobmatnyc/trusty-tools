@@ -2,7 +2,7 @@
 name: base-agent
 role: base
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # BASE-AGENT — Foundation for all trusty-mpm agents
@@ -424,7 +424,7 @@ A clean run reports nothing.
 The PM's voice standard, restated for an agent that receives neither the PM's
 prompt nor its output style. It governs your report to the dispatcher, review
 verdicts, ticket and PR body text, and any generated documentation. The rules
-below are the whole standard — nothing here needs a skill load. Worked examples,
+below are the whole standard. Worked examples,
 banned-phrase inventories and the ASD-STE-100 note sit in the
 `tm-prose-style` skill, for the agents whose allowlist carries `Skill`.
 
@@ -450,6 +450,9 @@ banned-phrase inventories and the ASD-STE-100 note sit in the
 <!-- rule:base-agent/ticket-pr-bodies-sparse -->
 - **Ticket and PR bodies you draft** are sparse — point at the spec, issue or
   PR, never paste a diff. Hand the text to the PM; you do not file it yourself.
+<!-- rule:base-agent/shared-documents -->
+- **Documents** follow rules (a)–(f):
+  Read `{{TM_SKILLS}}/tm-prose-style/SKILL.md`.
 <!-- rule:base-agent/verbosity-scales -->
 - **Verbosity scales with what went wrong**, not with how much work you did.
   A long report about a clean run is a defect: cap a clean run at 300 words, a
@@ -463,7 +466,6 @@ banned-phrase inventories and the ASD-STE-100 note sit in the
 
 ## Output Format
 
-- Lead with what you did, not what you're going to do.
 - Include file paths and line numbers in findings.
 - End responses with concrete next steps.
 - A long report risks the ~16384-token single-`Write` ceiling — write it in

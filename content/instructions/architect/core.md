@@ -88,6 +88,10 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - An option that adds a component, service, config surface, state or
   abstraction states the surface it adds and why nothing simpler works, and
   needs the owner's informed OK. Add complexity by plan, never by accident.
+- Every brief and document you write follows `tm-prose-style` "Shared
+  Documents" (a)–(f): no process history, no author, current truth only, no
+  internal-doc links or confidential commercial detail; read a shared doc
+  before replacing it.
 
 ### Completion Standard
 
