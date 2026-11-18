@@ -219,14 +219,14 @@ not agent time. Phases 4 and 5 can run beside 3 after phase 1; the figures are s
 
 | Ph | Work | Eng. d | Est. (h) | Agent est. (h) | Rung | Start (UTC) | End (UTC) | Actual (h) | Cause of gap |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 | Skeleton, fake driver, spike cases and fixtures, sandbox script | 1.0 | 8 | 0.2 | 3 | | | | |
-| 1 | Policy, redact, audit, journal | 1.5 | 12 | 0.25 | 3 | | | | |
-| 2 | Driver client, supervisor, manifest, pin, telemetry off, session, restart timing | 2.0 | 16 | 0.45 | 5 | | | | |
-| 3 | Broker, peer auth, pipeline, grants, lease queue, read-back, rescope | 2.5 | 20 | 0.4 | 5 | | | | |
-| 4 | Operator socket and CLI, helper dialog, code mint, lockout | 1.5 | 12 | 0.3 | 5 | | | | |
-| 5 | MCP server, 20 static tools, schema test, smoke run | 1.5 | 12 | 0.25 | 6 | | | | |
-| 6 | Install, launchd, signing both bins, README, fragment, doc gates | 1.0 | 8 | 0.2 | 5 | | | | |
-| 7 | Live fixture checks, `code-critic` round, fixes; (c) proof +1 d if run | 1.5 | 12 | 0.5 | 5 | | | | |
+| 0 | Skeleton, fake driver, spike cases and fixtures, sandbox script | 1.0 | 8 | 0.2 | 3 | 2026-11-18T11:40Z | 2026-11-18T11:50Z | 0.15 | Small spike oracle (~400 py lines), fast first build. Commit e2485b1f87 |
+| 1 | Policy, redact, audit, journal | 1.5 | 12 | 0.25 | 3 | 2026-11-18T11:50Z | 2026-11-18T11:54Z | 0.07 | Module code written in phase 0 window; this window = red checks, gates. Commit e2677220d2 |
+| 2 | Driver client, supervisor, manifest, pin, telemetry off, session, restart timing | 2.0 | 16 | 0.45 | 5 | 2026-11-18T11:55Z | 2026-11-18T12:09Z | 0.24 | Spike supplied protocol/flags/fake daemon. BLOCKED: live click fails, new private daemons see 0 AXWindows (ax_window_unresolved). Commit 8ea4806243 |
+| 3 | Broker, peer auth, pipeline, grants, lease queue, read-back, rescope | 2.5 | 20 | 0.4 | 5 | 2026-11-18T12:14Z | 2026-11-18T12:41Z | 0.45 | Over agent est by 0.05h: 22-variant fail-open sweep (~15s builds) + one hung variant. Commit e04efed080 |
+| 4 | Operator socket and CLI, helper dialog, code mint, lockout | 1.5 | 12 | 0.3 | 5 | 2026-11-18T12:42Z | 2026-11-18T12:55Z | 0.22 | Phase 3 rig and fake driver carried the flow; no live work. Commit 6587d809e5 |
+| 5 | MCP server, 20 static tools, schema test, smoke run | 1.5 | 12 | 0.25 | 6 | 2026-11-18T12:55Z | 2026-11-18T12:59Z | 0.08 | Agent ops already in phase 4; smoke passed first run. Commit 45128b3755 |
+| 6 | Install, launchd, signing both bins, README, fragment, doc gates | 1.0 | 8 | 0.2 | 5 | 2026-11-18T13:00Z | 2026-11-18T13:12Z | 0.20 | trusty-browser modules ported 1:1. check_permissions preflight not built (needs live daemon). Commit 92e81d23d1 |
+| 7 | Live fixture checks, `code-critic` round, fixes | 1.5 | 12 | 0.5 | 5 | 2026-11-18T13:12Z | 2026-11-18T13:50Z | 0.63 | critic 0.08 (BLOCK, 2 HIGH); fix 1 0.26; delta 0.03 (WARN, 1 HIGH); fix 2 0.13 (9db1706942); delta 0.02 APPROVE; live 0.03; scans 0.02. Over agent est: two review/fix cycles; screen-lock wait not counted |
 | | Total | 12.5 | 100 | 2.55 | | | | | |
 | H | Human gates: typing test, reboot, signing desk slot, gap acceptance (about 1 h) | n/a | n/a | n/a | | | | | |
 | P | This plan | 1 | 1 | n/a | | 2026-11-18T11:35Z | 2026-11-18T11:40Z | 0.08 | Over-estimate: sources already local |
