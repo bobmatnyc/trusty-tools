@@ -516,13 +516,15 @@ fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
 ///
 /// Why: the acceptance-criteria rule (TICKETING.md) warns for one release
 /// before it gates, so an issue filed before the rule never turns the audit red.
-/// What: PASS when any body line, with `*` emphasis removed, is a labelled
-/// `Acceptance criteria:` list head or a `#`-heading whose text is exactly
-/// `Acceptance` or `Acceptance criteria` (case-insensitive, optional trailing
-/// `:`); otherwise WARN with [`ACCEPTANCE_WARNING`]. Testability is not judged.
+/// What: PASS when [`has_acceptance_criteria`] finds a label or heading with
+/// at least one real criterion under it; otherwise WARN with
+/// [`ACCEPTANCE_WARNING`]. Testability is not judged.
 /// Test: `a_labelled_acceptance_criteria_list_passes`,
 /// `an_acceptance_heading_passes`,
-/// `a_body_without_acceptance_criteria_warns_and_does_not_fail`.
+/// `a_body_without_acceptance_criteria_warns_and_does_not_fail`,
+/// `an_unfilled_template_warns`, `a_tbd_label_warns`,
+/// `a_heading_inside_a_code_fence_warns`,
+/// `a_bulleted_label_with_real_items_passes`.
 fn acceptance_row(facts: &IssueFacts) -> AuditRow {
     let (verdict, detail) = if has_acceptance_criteria(&facts.body) {
         (Verdict::Pass, "present".to_string())
@@ -532,20 +534,118 @@ fn acceptance_row(facts: &IssueFacts) -> AuditRow {
     AuditRow::new(REQ_ACCEPTANCE, verdict, detail)
 }
 
-/// Whether `body` carries an acceptance-criteria label or heading.
+/// Whether `body` carries at least one real acceptance criterion (#11469).
+///
+/// What: lines inside fenced code blocks and `<!-- -->` comments (multi-line
+/// too) are ignored. A marker is an `Acceptance criteria:` label, bulleted or
+/// not, or an `Acceptance` / `Acceptance criteria` heading. Text after the
+/// label on its own line counts as the criterion; otherwise the lines that
+/// follow, up to the next heading, must hold one that is not a placeholder
+/// (`...`, `TBD`, `TODO`, `none`).
 fn has_acceptance_criteria(body: &str) -> bool {
-    body.lines().any(|line| {
-        let line = line.replace('*', "").trim().to_ascii_lowercase();
-        if line.starts_with("acceptance criteria:") {
+    let mut collecting = false;
+    for line in visible_lines(body) {
+        let line = line.replace('*', "");
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if let Some(heading) = lower.strip_prefix('#') {
+            let text = heading.trim_start_matches('#').trim();
+            let text = text.strip_suffix(':').unwrap_or(text).trim_end();
+            collecting = text == "acceptance" || text == "acceptance criteria";
+            continue;
+        }
+        let item = strip_list_marker(line);
+        if item
+            .to_ascii_lowercase()
+            .starts_with("acceptance criteria:")
+        {
+            let rest = &item["acceptance criteria:".len()..];
+            if is_real_criterion(rest) {
+                return true;
+            }
+            collecting = rest.trim().is_empty();
+            continue;
+        }
+        if collecting && is_real_criterion(item) {
             return true;
         }
-        let Some(heading) = line.strip_prefix('#') else {
-            return false;
-        };
-        let text = heading.trim_start_matches('#').trim();
-        let text = text.strip_suffix(':').unwrap_or(text).trim_end();
-        text == "acceptance" || text == "acceptance criteria"
-    })
+    }
+    false
+}
+
+/// `body`'s lines with fenced code blocks and HTML comments removed.
+fn visible_lines(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut in_fence, mut in_comment) = (false, false);
+    for raw in body.lines() {
+        if !in_comment
+            && (raw.trim_start().starts_with("```") || raw.trim_start().starts_with("~~~"))
+        {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let mut kept = String::new();
+        let mut rest = raw;
+        loop {
+            if in_comment {
+                match rest.find("-->") {
+                    Some(i) => {
+                        rest = &rest[i + 3..];
+                        in_comment = false;
+                    }
+                    None => break,
+                }
+            } else {
+                match rest.find("<!--") {
+                    Some(i) => {
+                        kept.push_str(&rest[..i]);
+                        rest = &rest[i + 4..];
+                        in_comment = true;
+                    }
+                    None => {
+                        kept.push_str(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        out.push(kept);
+    }
+    out
+}
+
+/// `line` without a leading `-`/`*`/`+` bullet, `1.`/`1)` number or `[ ]` box.
+fn strip_list_marker(line: &str) -> &str {
+    let mut s = line.trim_start();
+    if let Some(r) = s.strip_prefix(['-', '+', '*']) {
+        s = r.trim_start();
+    } else {
+        let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0 {
+            if let Some(r) = s[digits..].strip_prefix(['.', ')']) {
+                s = r.trim_start();
+            }
+        }
+    }
+    for boxed in ["[ ]", "[x]", "[X]"] {
+        if let Some(r) = s.strip_prefix(boxed) {
+            return r.trim_start();
+        }
+    }
+    s
+}
+
+/// Whether `text` (list marker already stripped) states a criterion.
+fn is_real_criterion(text: &str) -> bool {
+    let text = strip_list_marker(text)
+        .trim()
+        .trim_end_matches(['.', '…'])
+        .trim();
+    !text.is_empty()
+        && !["tbd", "todo", "none", "n/a"].contains(&text.to_ascii_lowercase().as_str())
 }
 
 /// The `relationships` row — always INFO.

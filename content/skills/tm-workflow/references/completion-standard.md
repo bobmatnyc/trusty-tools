@@ -68,13 +68,8 @@ and no fix round for it, unless the user asks.
 A project ruling that sets a stricter bar for a named project (for example
 cto-reports, "MEDIUMs fixed") stays in force for that project only.
 
-**Acceptance criteria.** Every bug, feature, task and epic issue states one to
-four testable acceptance criteria, each a check that can fail for a named
-reason; an epic states them on its phase issues. They set the good-enough bar:
-the issue closes when each criterion has evidence. Anything beyond the bar
-becomes a follow-up issue filed at close, with its own criteria and the
-`stretch` label; it never widens this issue's scope. The closing note lists
-every criterion with its evidence, plus the follow-up issue numbers or "none".
+**Acceptance criteria** set an issue's good-enough bar; the rule lives in
+`tm-ticketing`, `references/ticket-content.md`.
 
 ## Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets
 

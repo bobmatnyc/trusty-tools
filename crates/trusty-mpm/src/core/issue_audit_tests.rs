@@ -588,7 +588,7 @@ fn a_labelled_acceptance_criteria_list_passes() {
 fn an_acceptance_heading_passes() {
     for body in [
         "## Acceptance\n\nExternally observable.",
-        "## Acceptance criteria\n\n1. ...",
+        "## Acceptance criteria\n\n1. the probe exits 0",
         "### acceptance Criteria\n- x",
     ] {
         let audit = audit_issue(&with_body(body), &standard(), &components());
@@ -618,4 +618,59 @@ fn a_body_without_acceptance_criteria_warns_and_does_not_fail() {
         );
         assert!(!audit.failed(), "a warning never fails the audit");
     }
+}
+
+/// Asserts each body in `bodies` gets `want` on the acceptance row.
+fn assert_acceptance(bodies: &[&str], want: Verdict) {
+    for body in bodies {
+        let audit = audit_issue(&with_body(body), &standard(), &components());
+        assert_eq!(row(&audit, "acceptance criteria").verdict, want, "{body:?}");
+    }
+}
+
+#[test]
+fn an_unfilled_template_warns() {
+    assert_acceptance(
+        &[
+            "## Acceptance criteria\n\n1. ...\n",
+            "## Acceptance criteria\n\n<!--\nAcceptance criteria: one to four checks\n-->\n\n1. ...\n\n## Notes\nmore",
+            "## Acceptance criteria\n\n- ...\n- …",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_tbd_label_warns() {
+    assert_acceptance(
+        &[
+            "Acceptance criteria: TBD",
+            "Acceptance criteria: todo.",
+            "- **Acceptance criteria:** none",
+            "Acceptance criteria:\n- TBD",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_heading_inside_a_code_fence_warns() {
+    assert_acceptance(
+        &[
+            "Template:\n```\n## Acceptance criteria\n1. exits 0\n```\n",
+            "~~~md\nAcceptance criteria: exits 0\n~~~",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_bulleted_label_with_real_items_passes() {
+    assert_acceptance(
+        &[
+            "- Acceptance criteria:\n  - a rename is reindexed\n  - the probe exits 0",
+            "* **Acceptance criteria:** the audit prints WARN",
+        ],
+        Verdict::Pass,
+    );
 }

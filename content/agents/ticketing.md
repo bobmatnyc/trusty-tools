@@ -84,8 +84,10 @@ else.
 - **Type-aware title.** `<type>: <what is wrong or wanted>`, under ~70
   characters — `fix(trusty-search): watcher misses renames on external volumes`,
   not "Bug in system".
-- **A labelled `Acceptance criteria:` list**, never a heading (rule below).
-  More than four means several outcomes; split the ticket.
+- **A labelled `Acceptance criteria:` list** of one to four testable checks,
+  never a heading; each can fail for a named reason (an epic: on its phases).
+  More is several outcomes; split it. Work past the bar is a `stretch`
+  follow-up filed at close. Rule: `tm-ticketing`, "Every issue: acceptance criteria".
 
 - **No structured headings.** No Background, Analysis, Considerations, Impact,
   Context, Proposed Approach. A body with `##` sections in it is over-written.
@@ -98,14 +100,6 @@ else.
   constantly.
 - **Length is the check.** If the body runs past a short screen, it is
   over-written. Cut it before posting.
-
-**Acceptance criteria.** Every bug, feature, task and epic issue states one to
-four testable acceptance criteria, each a check that can fail for a named
-reason; an epic states them on its phase issues. They set the good-enough bar:
-the issue closes when each criterion has evidence. Anything beyond the bar
-becomes a follow-up issue filed at close, with its own criteria and the
-`stretch` label; it never widens this issue's scope. The closing note lists
-every criterion with its evidence, plus the follow-up issue numbers or "none".
 
 The issue schema in the `tm-ticketing` skill lists facts a reader must be able
 to *tell* from the body. They are not headings to fill in, and most tickets
@@ -416,8 +410,8 @@ refuses any edge the model does not declare, and issues the `--add-label` and
 two of them.
 
 - Closing needs evidence: `tm issue transition N closed --note "<what you ran
-  and what it printed>"`. Without `--note` the edge is refused. The note follows
-  the acceptance-criteria rule above.
+  and what it printed>"`. Without `--note` the edge is refused. It cites each
+  criterion's evidence, plus follow-ups or "none".
 - **On a host with no `tm`**, and only there, fall back to a hand-typed edit —
   both flags in ONE call, never two:
 

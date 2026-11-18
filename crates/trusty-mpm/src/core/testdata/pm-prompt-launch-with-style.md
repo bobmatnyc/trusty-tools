@@ -164,9 +164,6 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt: each line costs every turn.
-  Needed on every prompt → `CLAUDE.md`. Needed only sometimes → a skill,
-  `docs/`, or memory.
 
 ## Completion Standard
 
@@ -189,13 +186,8 @@ Ship and close. Work beyond this needs an explicit user request.
   fix uses that one round. Never widen scope.
   Detail: `Skill(skill="tm-workflow")`.
 
-**Acceptance criteria.** Every bug, feature, task and epic issue states one to
-four testable acceptance criteria, each a check that can fail for a named
-reason; an epic states them on its phase issues. They set the good-enough bar:
-the issue closes when each criterion has evidence. Anything beyond the bar
-becomes a follow-up issue filed at close, with its own criteria and the
-`stretch` label; it never widens this issue's scope. The closing note lists
-every criterion with its evidence, plus the follow-up issue numbers or "none".
+**Acceptance criteria:** 1–4 testable per issue; the close cites each, plus
+`stretch` follow-ups or "none". `Skill(skill="tm-ticketing")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 

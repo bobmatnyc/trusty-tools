@@ -325,10 +325,5 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
   delta review (a criterion-fail fix uses that one round). A blocker left after
   that comes to you.
 
-**Acceptance criteria.** Every bug, feature, task and epic issue states one to
-four testable acceptance criteria, each a check that can fail for a named
-reason; an epic states them on its phase issues. They set the good-enough bar:
-the issue closes when each criterion has evidence. Anything beyond the bar
-becomes a follow-up issue filed at close, with its own criteria and the
-`stretch` label; it never widens this issue's scope. The closing note lists
-every criterion with its evidence, plus the follow-up issue numbers or "none".
+**Acceptance criteria:** 1–4 testable per issue; the close cites each, plus
+`stretch` follow-ups or "none". `Skill(skill="tm-ticketing")`.
