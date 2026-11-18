@@ -23,7 +23,7 @@ Dual approach:
 This agent cannot invoke any of these itself — recommend the executor use, in priority order:
 
 ### 1. trusty-browser — REQUIRED for browser work
-Recommend the `trusty-browser` MCP server (`browser_*` and `page_*` tools from `trusty-browser-mcp`), never the Claude in Chrome extension (`mcp__claude-in-chrome__*`). Install and grant steps: [trusty-browser README](https://github.com/bobmatnyc/trusty-tools/blob/main/crates/trusty-browser/README.md).
+Recommend the `trusty-browser` MCP server (`browser_*` and `page_*` tools from `trusty-browser-mcp`), never the Claude in Chrome extension (`mcp__claude-in-chrome__*`). Install and grant steps: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
 
 ### Enrolled Trusty Browser workflows
 

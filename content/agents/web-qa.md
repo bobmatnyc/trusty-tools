@@ -21,7 +21,7 @@ Dual testing approach:
 ### 1. trusty-browser — REQUIRED for browser work
 Drive the browser through the `trusty-browser` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. A session that registered the server as `trusty-browser` exposes them as `mcp__trusty-browser__browser_*` and `mcp__trusty-browser__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
 
-**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`, which writes `{"command":"~/.cargo/bin/trusty-browser-mcp","args":[]}`. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://github.com/bobmatnyc/trusty-tools/blob/main/crates/trusty-browser/README.md).
+**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`, which writes `{"command":"~/.cargo/bin/trusty-browser-mcp","args":[]}`. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
 
 ### Enrolled Trusty Browser workflows
 
