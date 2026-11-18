@@ -17,6 +17,7 @@ pub mod bundle_cache;
 pub mod catalog_sync;
 mod catalog_url;
 pub mod first_use;
+pub mod min_content;
 pub mod release_source;
 pub mod requires;
 pub mod status;
