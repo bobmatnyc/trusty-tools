@@ -23,6 +23,7 @@ use std::sync::atomic::Ordering;
 
 use serde_json::{Map, Value, json};
 
+use crate::app_identity::check_same;
 use crate::broker::{Broker, Ctx, Inner, base, refusal};
 use crate::consent::{
     self, DIALOG_CODE_TTL, DialogOutcome, GRANT_CODE_TTL, Prompt, PromptKind, STRIKE_LIMIT, Strikes,
@@ -40,6 +41,8 @@ pub struct GrantRequest {
     pub ttl: f64,
     pub idle_ttl: f64,
     pub allow_sensitive: bool,
+    /// Start time of the resolved process; set from the resolver, never the wire.
+    pub started_us: u64,
 }
 
 impl GrantRequest {
@@ -78,6 +81,7 @@ impl GrantRequest {
             idle_ttl: secs("idle_ttl", DEFAULT_IDLE_TTL)
                 .ok_or_else(|| bad("idle_ttl must be seconds"))?,
             allow_sensitive: req.get("allow_sensitive") == Some(&json!(true)),
+            started_us: 0,
         })
     }
 }
@@ -110,6 +114,11 @@ impl ConsentState {
     /// True when `session` redeemed a code for `grant`.
     pub fn bound(&self, session: &str, grant: &str) -> bool {
         self.bound.get(session).is_some_and(|g| g.contains(grant))
+    }
+
+    /// Drop every unredeemed code of `grant`.
+    pub(crate) fn drop_codes(&mut self, grant: &str) {
+        self.codes.retain(|_, (g, _)| g != grant);
     }
 
     /// Forget a closed session's bindings.
@@ -166,6 +175,7 @@ impl<L: Launcher> Broker<L> {
             return self.lock().refuse(rec, "bundle_mismatch", &detail);
         }
         parsed.bundle_id = app.bundle_id.clone();
+        parsed.started_us = app.started_us;
         let tools = match Grants::check(&OperatorMint::consented(parsed.clone())) {
             Ok(t) => t,
             Err(e) => return self.lock().refuse(rec, e.code(), &e.to_string()),
@@ -261,7 +271,10 @@ impl<L: Launcher> Broker<L> {
 impl<L: Launcher> Inner<L> {
     /// Operator op `grant_confirm`: check the dialog code, mint, answer a `tc-` code.
     ///
-    /// Test: `wrong_code_refuses_and_locks_out`, `expired_code_refuses`.
+    /// A pid that is no longer the confirmed process (bundle or start time)
+    /// is refused `app_changed` and the challenge is dropped.
+    /// Test: `wrong_code_refuses_and_locks_out`, `expired_code_refuses`,
+    /// `app_changed_between_request_and_confirm_refuses`.
     pub(crate) fn grant_confirm(
         &mut self,
         req: &Map<String, Value>,
@@ -292,6 +305,11 @@ impl<L: Launcher> Inner<L> {
         let Some(pending) = self.consent.pending.remove(challenge) else {
             return self.refuse(rec, "bad_challenge", "no such challenge");
         };
+        // #11460: the pid must still be the process the operator confirmed.
+        let (pid, bundle) = (pending.req.scope.pid, &pending.req.bundle_id);
+        if let Err(e) = check_same(&*self.resolver, pid, bundle, pending.req.started_us) {
+            return self.refuse(rec, "app_changed", &e);
+        }
         let grant = match self.mint(OperatorMint::consented(pending.req), now) {
             Ok(g) => g,
             Err(reply) => return reply,
@@ -389,7 +407,7 @@ impl<L: Launcher> Inner<L> {
     ) -> Value {
         let result = self.grants.revoke(id);
         self.journals.remove(id);
-        self.consent.codes.retain(|_, (g, _)| g != id);
+        self.consent.drop_codes(id);
         let moved = self.lease.drop_grant(id, now);
         rec.insert("grant".into(), json!(id));
         let reply = match &result {

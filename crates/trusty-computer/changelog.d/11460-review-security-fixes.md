@@ -7,3 +7,4 @@ Security
 - Hotkey and key-chord checks fold aliases (`command`, `meta`, `⌘` -> `cmd`; `alt`, `opt` -> `option`; `control` -> `ctrl`; `escape` -> `esc`), ignore order and refuse any superset of a denied chord (#11460).
 - A lockout writes `<state>/lockout` before anything else; a restarted broker reads it and refuses every op but `status` until the operator runs `trusty-computer unlock`, which needs the dialog and its code typed on `/dev/tty` (#11460).
 - `scripts/sandbox_computer_daemon.sh` runs `cua-driver stop --socket <dir>/state/driver/cua-driver.sock` after a KILL teardown (#11460).
+- A grant records the process start time (`proc_pidinfo` `PROC_PIDTBSDINFO`) with the resolved bundle; `grant_confirm` and every forwarded `call` re-resolve the pid, and a changed bundle, a changed start time or a vanished process is refused `app_changed`, revokes the grant and is audited, so a reused pid cannot inherit a grant (#11460).

@@ -77,6 +77,9 @@ impl ConsentDialog for FakeDialog {
     }
 }
 
+/// The start time every fake process reports unless set otherwise.
+pub const FAKE_START_US: u64 = 1_000_000;
+
 /// A fake pid resolver: every pid is [`super::rig::BUNDLE`] unless [`FakeResolver::set`] says otherwise.
 #[derive(Debug, Default)]
 pub struct FakeResolver {
@@ -86,9 +89,15 @@ pub struct FakeResolver {
 impl FakeResolver {
     /// Answer `bundle_id` (named `name`) for `pid`.
     pub fn set(&self, pid: u32, bundle_id: &str, name: &str) {
+        self.set_started(pid, bundle_id, name, FAKE_START_US);
+    }
+
+    /// Answer `bundle_id` (named `name`) started at `started_us` for `pid`.
+    pub fn set_started(&self, pid: u32, bundle_id: &str, name: &str, started_us: u64) {
         let app = ResolvedApp {
             bundle_id: bundle_id.to_owned(),
             name: name.to_owned(),
+            started_us,
         };
         self.apps.lock().expect("apps").insert(pid, Ok(app));
     }
@@ -105,6 +114,7 @@ impl AppResolver for FakeResolver {
                 Ok(ResolvedApp {
                     bundle_id: super::rig::BUNDLE.to_owned(),
                     name: "Fixture".to_owned(),
+                    started_us: FAKE_START_US,
                 })
             })
     }

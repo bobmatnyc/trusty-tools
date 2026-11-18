@@ -75,6 +75,8 @@ pub struct Inner<L: Launcher> {
     pub(crate) consent: ConsentState,
     /// `<state>/lockout`: present while a lockout holds, across restarts.
     pub(crate) lockout_marker: PathBuf,
+    /// Names the app behind a pid; re-checked at confirm and at every call (#11460).
+    pub(crate) resolver: Arc<dyn AppResolver>,
 }
 
 /// The broker.
@@ -84,7 +86,6 @@ pub struct Broker<L: Launcher> {
     sessions: AtomicU64,
     dialog: Arc<dyn ConsentDialog>,
     dialog_timeout: std::time::Duration,
-    resolver: Arc<dyn AppResolver>,
     pub(crate) shutdown: AtomicBool,
 }
 
@@ -117,12 +118,12 @@ impl<L: Launcher> Broker<L> {
                 scope_ready: false,
                 consent,
                 lockout_marker,
+                resolver: Arc::new(LsappinfoResolver),
             }),
             clock,
             sessions: AtomicU64::new(0),
             dialog,
             dialog_timeout: DIALOG_TIMEOUT,
-            resolver: Arc::new(LsappinfoResolver),
             shutdown: AtomicBool::new(false),
         })
     }
@@ -135,12 +136,15 @@ impl<L: Launcher> Broker<L> {
 
     /// The same broker resolving pids with `resolver` (tests pass a fake).
     pub fn with_app_resolver(mut self, resolver: Arc<dyn AppResolver>) -> Self {
-        self.resolver = resolver;
+        self.inner
+            .get_mut()
+            .unwrap_or_else(|p| p.into_inner())
+            .resolver = resolver;
         self
     }
 
     pub(crate) fn resolver(&self) -> Arc<dyn AppResolver> {
-        Arc::clone(&self.resolver)
+        Arc::clone(&self.lock().resolver)
     }
 
     pub(crate) fn dialog(&self) -> Arc<dyn ConsentDialog> {

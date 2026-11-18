@@ -6,7 +6,8 @@
 //! this session, live, and its lease held by this session; only then a repeat
 //! answers from the grant's journal (`replayed`); policy verdict and argument
 //! filter on the grant's pid and bundle; grant scope (tool granted, window);
-//! daemon scoped to the grant; journal room; token gate against the last
+//! the pid still the granted process (bundle and start time; else
+//! `app_changed` and the grant is revoked, #11460); daemon scoped to the grant; journal room; token gate against the last
 //! redacted snapshot of that window; audit `forward` (a failure refuses); the
 //! driver call; menu-bar strip of a snapshot (one with no structured part is
 //! refused) and of a `driver_refused` result; read-back confirmation of a
@@ -19,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
+use crate::app_identity::check_same;
 use crate::audit::summarize_args;
 use crate::broker::{Ctx, Inner, refusal};
 use crate::driver::{DriverError, is_manifest_idle};
@@ -74,6 +76,28 @@ fn named_token(args: &Map<String, Value>) -> Option<String> {
 }
 
 impl<L: Launcher> Inner<L> {
+    /// Refuse `app_changed` and revoke `grant_id`: its pid is now another process.
+    ///
+    /// Test: `app_changed_between_confirm_and_call_revokes`.
+    fn app_changed(
+        &mut self,
+        grant_id: &str,
+        detail: &str,
+        mut rec: Map<String, Value>,
+        ctx: &Ctx,
+        now: f64,
+    ) -> Value {
+        let revoked = self.grants.revoke(grant_id);
+        self.journals.remove(grant_id);
+        self.consent.drop_codes(grant_id);
+        let moved = self.lease.drop_grant(grant_id, now);
+        rec.insert("revoked".into(), json!(true));
+        rec.insert("grants_persisted".into(), json!(revoked.is_ok()));
+        let reply = self.refuse(rec, "app_changed", detail);
+        self.moved(moved, ctx);
+        reply
+    }
+
     /// Run one `call` request for `ctx`.
     ///
     /// Postcondition: the driver saw the call only if every gate passed and
@@ -149,6 +173,15 @@ impl<L: Launcher> Inner<L> {
                 "window_out_of_scope",
                 "window_id is not the granted window",
             );
+        }
+        // #11460: the pid must still be the granted process, or the grant dies.
+        if let Err(e) = check_same(
+            &*self.resolver,
+            grant.scope.pid,
+            &grant.bundle_id,
+            grant.started_us,
+        ) {
+            return self.app_changed(grant_id, &e, rec, ctx, now);
         }
         // 3. The daemon's scope (the lease was checked above).
         if let Err(e) = self.ensure_scope(grant.scope) {

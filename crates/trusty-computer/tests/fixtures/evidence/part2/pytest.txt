@@ -1,6 +1,6 @@
 ============================= test session starts ==============================
 platform darwin -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0
-rootdir: /Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-ad0085e92919089c9/spikes/trusty-computer
+rootdir: <repo>/spikes/trusty-computer
 plugins: asyncio-1.4.0, anyio-4.13.0
 asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
 collected 51 items

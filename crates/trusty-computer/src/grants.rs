@@ -111,6 +111,8 @@ pub struct OperatorMint {
     pub ttl: f64,
     pub idle_ttl: f64,
     pub allow_sensitive: bool,
+    /// Start time of the resolved process (#11460 pid reuse).
+    pub started_us: u64,
 }
 
 impl OperatorMint {
@@ -123,6 +125,7 @@ impl OperatorMint {
             ttl: req.ttl,
             idle_ttl: req.idle_ttl,
             allow_sensitive: req.allow_sensitive,
+            started_us: req.started_us,
         }
     }
 }
@@ -140,6 +143,8 @@ pub struct Grant {
     pub last_used: f64,
     pub revoked: bool,
     pub sensitive: bool,
+    /// Start time of the process the grant names; a pid with another one is another app.
+    pub started_us: u64,
 }
 
 impl Grant {
@@ -167,7 +172,8 @@ impl Grant {
     fn to_json(&self) -> Value {
         json!({"id": self.id, "bundle_id": self.bundle_id, "pid": self.scope.pid,
             "window_id": self.scope.window_id, "tools": self.tools, "expires_at": self.expires_at,
-            "idle_ttl": self.idle_ttl, "revoked": self.revoked, "sensitive": self.sensitive})
+            "idle_ttl": self.idle_ttl, "revoked": self.revoked, "sensitive": self.sensitive,
+            "started_us": self.started_us})
     }
 
     fn from_json(v: &Value, now: f64) -> Option<Grant> {
@@ -190,6 +196,8 @@ impl Grant {
             last_used: now,
             revoked: v.get("revoked")?.as_bool()?,
             sensitive: v.get("sensitive")?.as_bool()?,
+            // #11460: a row from before the start time is 0, refused at the first call.
+            started_us: v.get("started_us").and_then(Value::as_u64).unwrap_or(0),
         })
     }
 }
@@ -265,6 +273,7 @@ impl Grants {
             idle_ttl: req.idle_ttl,
             last_used: now,
             revoked: false,
+            started_us: req.started_us,
         };
         let mut next = self.grants.clone();
         next.insert(grant.id.clone(), grant.clone());

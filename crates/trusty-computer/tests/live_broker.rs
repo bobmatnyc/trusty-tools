@@ -3,22 +3,23 @@
 //! Why: the fake daemon cannot prove the broker's pipeline against the real
 //! cua-driver: redaction of a real menu bar, a read-back confirmed click on
 //! the fixture, and a second session queued behind the first (plan section 8).
-//! What: launches `tests/fixtures/fixture.js`, builds an in-process broker on
+//! What: compiles `tests/fixtures/fixture.js` into `Fixture.app` in the test
+//! temp dir (`osacompile -l JavaScript`, `CFBundleIdentifier`
+//! [`FIXTURE_BUNDLE`], ad-hoc re-signed) and opens it, so the real
+//! `lsappinfo` resolver names the fixture's own bundle; then builds an in-process broker on
 //! the real launcher in a temp state dir, mints two grants through the
 //! consent flow (fake dialog) for the fixture's pid and window only, then over
 //! `agent.sock` connects, snapshots (no `AXMenuBar` in the reply), clicks
 //! "Press Me" (confirmed, fixture click count +1), and checks that a second
 //! session is queued. It refuses to run unless `TRUSTY_SANDBOX=1`, so it never
 //! runs with the operator's HOME, and it never names any other app or daemon.
-//! Status: NOT RUN in Phase 3 (screen locked, AX returns 0 windows). Run it at
-//! Phase 7 under the sandbox script:
-//! `cargo test -p trusty-computer --test live_broker -- --ignored --nocapture`.
+//! Run: `TRUSTY_SANDBOX=1 cargo test -p trusty-computer --test live_broker -- --ignored --nocapture`.
 //! Test: this file.
 
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -31,16 +32,48 @@ use trusty_computer::launcher::CuaAppLauncher;
 use trusty_computer::manifest::LeaseScope;
 use trusty_computer::supervisor::Supervisor;
 
-/// Label for the fixture grant (an osascript JXA app; `launch_app` is not used).
-const FIXTURE_BUNDLE: &str = "com.apple.ScriptEditor.id.trusty-computer-fixture";
+/// The fixture app's own bundle id (#11460: the grant names what `lsappinfo` reports).
+const FIXTURE_BUNDLE: &str = "com.trusty.computer.fixture";
 
-struct Fixture(Child);
+/// The opened fixture app, terminated by pid on drop.
+struct Fixture(Option<u32>);
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(pid) = self.0 {
+            let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+        }
     }
+}
+
+fn run(cmd: &mut Command) {
+    let status = cmd.stdout(Stdio::null()).status().expect("spawn");
+    assert!(status.success(), "{cmd:?}: {status}");
+}
+
+/// Build `<dir>/Fixture.app` from `fixture.js`, writing its state to `readback`.
+fn build_fixture_app(dir: &Path, readback: &Path) -> PathBuf {
+    let js = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture.js");
+    let source = std::fs::read_to_string(js).expect("fixture.js");
+    // An applet's run handler gets no argv; bake the state path in.
+    let default = "argv[0] || '/tmp/grantcheck_state.txt'";
+    assert!(source.contains(default), "fixture.js state-path line moved");
+    let path = json!(readback.to_str().expect("utf-8 path")).to_string();
+    let wrapped = dir.join("fixture-app.js");
+    std::fs::write(&wrapped, source.replace(default, &path)).expect("write js");
+    let app = dir.join("Fixture.app");
+    run(Command::new("/usr/bin/osacompile")
+        .args(["-l", "JavaScript", "-o"])
+        .arg(&app)
+        .arg(&wrapped));
+    run(Command::new("/usr/bin/plutil")
+        .args(["-replace", "CFBundleIdentifier", "-string", FIXTURE_BUNDLE])
+        .arg(app.join("Contents/Info.plist")));
+    run(Command::new("/usr/bin/codesign")
+        .args(["-f", "-s", "-"])
+        .arg(&app)
+        .stderr(Stdio::null()));
+    app
 }
 
 fn state_value(path: &Path, key: &str) -> Option<u64> {
@@ -74,17 +107,11 @@ fn live_broker_drives_fixture_and_queues_second_session() {
         .expect("tmp");
     let state: PathBuf = dir.path().join("state");
     let readback = dir.path().join("fixture-state.txt");
-    let js = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fixture.js");
-    let child = Command::new("/usr/bin/osascript")
-        .args(["-l", "JavaScript"])
-        .arg(&js)
-        .arg(&readback)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("launch fixture");
-    let _fixture = Fixture(child);
+    let app = build_fixture_app(dir.path(), &readback);
+    let mut fixture = Fixture(None);
+    run(Command::new("/usr/bin/open").arg("-n").arg(&app));
     let pid = wait_for("fixture pid", 15, || state_value(&readback, "pid "));
+    fixture.0 = u32::try_from(pid).ok();
     let wid = wait_for("fixture window", 15, || state_value(&readback, "window "));
     let scope = LeaseScope {
         pid: u32::try_from(pid).expect("pid"),
@@ -101,11 +128,13 @@ fn live_broker_drives_fixture_and_queues_second_session() {
         "window_id": scope.window_id});
     let mint = |what: &str| {
         let reply = consent(&server.operator, &dialog, &req);
-        let id = reply["result"]["grant"]["id"]
-            .as_str()
-            .expect(what)
-            .to_owned();
-        let code = reply["result"]["code"].as_str().expect(what).to_owned();
+        let field = |v: &serde_json::Value| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("{what}: broker replied {reply}"))
+                .to_owned()
+        };
+        let id = field(&reply["result"]["grant"]["id"]);
+        let code = field(&reply["result"]["code"]);
         (broker.lock().grant(&id).cloned().expect(what), code)
     };
     let (grant, code) = mint("first grant");
@@ -141,4 +170,5 @@ fn live_broker_drives_fixture_and_queues_second_session() {
     println!("click: {click}");
     assert_eq!(click["confirmation"]["confirmed"], true, "{click}");
     let _ = broker.lock().supervisor.stop();
+    drop(fixture);
 }
