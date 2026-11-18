@@ -319,7 +319,8 @@ pub(crate) fn declares_hooks_key(text: &str) -> bool {
 /// `"ho\` + newline + `  oks"` folds to `hooks`.
 /// What: true for a `\` that starts `\x` + 2 hex digits, `\u` + 4, `\U` + 8
 /// (the escapes that can produce a letter), or is followed by a line break
-/// that folds: LF, CR, or the YAML 1.1 NEL, LS and PS that libyaml reads. Every other backslash is ignored. `\\` pairs are not skipped, so a
+/// that folds: LF, CR, or the YAML 1.1 NEL, LS and PS that libyaml reads.
+/// Every other backslash is ignored. `\\` pairs are not skipped, so a
 /// literal backslash before a hex run still counts (over-refusal is safe).
 /// Test: `an_escaped_line_break_spelling_hooks_denies_11438`,
 /// `a_plain_backslash_is_not_a_hooks_key_11438`,
