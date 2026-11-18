@@ -24,10 +24,10 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_isolated_session_under, prepare_session,
-    prepare_session_for_managed, prepare_session_for_repair_in, prepare_session_for_repair_under,
-    prepare_session_with_home, prepare_session_with_home_in, prepare_session_with_repo_url,
-    prepare_session_with_repo_url_and_exe, prepare_session_with_style,
-    prepare_session_with_style_and_native,
+    prepare_session_for_managed, prepare_session_for_managed_from, prepare_session_for_repair_in,
+    prepare_session_for_repair_under, prepare_session_with_home, prepare_session_with_home_in,
+    prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
+    prepare_session_with_style, prepare_session_with_style_and_native,
 };
 // #10459: the Architect's exec-form PM-guard and prompt-hook groups.
 mod architect_hooks;
@@ -633,8 +633,7 @@ pub(super) fn prepare_session_inner(
     let crate::core::content_source::LaunchContent {
         framework: content,
         roster,
-    } = crate::core::content_source::launch_content_for(project_dir)
-        .map_err(|source| PrepError::Content { source })?;
+    } = host.launch_content(project_dir)?;
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is

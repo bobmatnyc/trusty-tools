@@ -63,6 +63,18 @@ pub(super) fn has_concurrent_main_checkout_session<'a>(
         .find(|r| r.state == ManagedSessionState::Active && r.cwd == local_path)
 }
 
+/// Where a launch-on-main session runs and where it was launched from.
+///
+/// `placement` is the managed checkout the session runs in; `launch` is the
+/// directory the operator named, which the session composes its content from.
+#[derive(Clone, Copy)]
+pub(super) struct Dirs<'a> {
+    /// The managed checkout (ADR-0037).
+    pub(super) placement: &'a std::path::Path,
+    /// The directory the launch named.
+    pub(super) launch: &'a std::path::Path,
+}
+
 /// Spawn a managed session directly in the project's main checkout, with NO
 /// per-session git worktree (#3455 "launch on main" opt-out).
 ///
@@ -111,10 +123,11 @@ pub(super) async fn spawn_managed_on_main(
     session_id: &ManagedSessionId,
     params: &SpawnParams,
     runtime: RuntimeKind,
-    local_path: &std::path::Path,
+    dirs: Dirs<'_>,
     source: &super::local_only_spawn::SessionSource,
 ) -> Result<SessionRecord, String> {
     use crate::core::provisioning_stage::{ProvisioningStage, emit};
+    let local_path = dirs.placement;
 
     let mgr = state.session_manager().await;
 
@@ -169,7 +182,9 @@ pub(super) async fn spawn_managed_on_main(
     // brief, which is how this path has always delivered it.
     // #8934: a local-only repository has no GitHub URL to synthesise.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(local_path);
-    prepare_inproject_session(&fw, session_id, local_path, source.repo_url.as_deref())?;
+    // The content comes from the launch directory, not the managed checkout.
+    let repo_url = source.repo_url.as_deref();
+    prepare_inproject_session(&fw, session_id, local_path, dirs.launch, repo_url)?;
 
     emit(ProvisioningStage::CreatingTmuxSession);
     let record = mgr

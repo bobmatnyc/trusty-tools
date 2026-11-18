@@ -115,6 +115,37 @@ pub fn launch_content_for(dir: &Path) -> Result<LaunchContent, AgentContentError
     LaunchContent::load(&resolve_for(Some(dir), Fetch::OnFirstUse)?)
 }
 
+/// The content for a session whose own directory is `session_dir`.
+///
+/// Why: a daemon-hosted launch runs in the managed checkout, which can sit on
+/// another branch behind `origin/main`; composing from it, or from the
+/// daemon's cwd, served a stale tree the session never asked for.
+/// What: [`resolve_session_content_in`] with the default cache and
+/// [`Fetch::OnFirstUse`], then [`LaunchContent::load`].
+pub fn launch_content_for_session(session_dir: &Path) -> Result<LaunchContent, AgentContentError> {
+    let cache = trusty_common::content::default_cache_dir();
+    LaunchContent::load(&resolve_session_content_in(
+        session_dir,
+        cache.as_deref(),
+        Fetch::OnFirstUse,
+    )?)
+}
+
+/// The trusted checkout enclosing `session_dir`, else the installed release
+/// in `cache`; never a checkout found from the process cwd.
+///
+/// What: [`resolve_for_in`] with no cwd, so the pinned release (checked
+/// against the minimum content release, #11470) answers whenever
+/// `session_dir` is outside a checkout.
+/// Test: `a_session_outside_any_checkout_uses_the_installed_content`.
+pub fn resolve_session_content_in(
+    session_dir: &Path,
+    cache: Option<&Path>,
+    fetch: Fetch,
+) -> Result<ResolvedContent, AgentContentError> {
+    resolve_for_in(Some(session_dir), None, cache, fetch)
+}
+
 /// [`framework_content_for`], or [`framework_content`] for `None`, that never
 /// fetches: `tm doctor` and the read-only callers (#9396).
 pub fn framework_content_local(dir: Option<&Path>) -> Result<FrameworkContent, AgentContentError> {
