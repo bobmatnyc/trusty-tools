@@ -93,6 +93,10 @@ impl<L: Launcher> Supervisor<L> {
     pub fn launcher(&self) -> &L {
         &self.launcher
     }
+    /// The launcher, mutably (tests set failure knobs).
+    pub fn launcher_mut(&mut self) -> &mut L {
+        &mut self.launcher
+    }
     /// The private socket.
     pub fn socket(&self) -> &Path {
         &self.socket

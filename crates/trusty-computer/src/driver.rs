@@ -69,6 +69,20 @@ pub fn parse_session_ended(message: &str) -> Option<(String, String)> {
         .then(|| (session.to_owned(), tool.to_owned()))
 }
 
+/// The daemon's refusal once the manifest `idle_timeout` elapsed (cua-driver 0.23.2).
+///
+/// Every call, `start_session` included, gets it until the daemon restarts
+/// (`tests/fixtures/evidence/session-ended-0.23.2.txt`).
+pub const MANIFEST_IDLE_TEXT: &str =
+    "Policy loading error: capability manifest idle timeout exceeded";
+
+/// True when `err` is the manifest idle-timeout lockout.
+///
+/// Test: `idle_timeout_lockout_is_recognised_exactly`.
+pub fn is_manifest_idle(err: &DriverError) -> bool {
+    matches!(err, DriverError::Refused { message, .. } if message == MANIFEST_IDLE_TEXT)
+}
+
 /// One daemon endpoint.
 #[derive(Debug, Clone)]
 pub struct DriverClient {

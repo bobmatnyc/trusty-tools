@@ -199,3 +199,21 @@ fn mutating_call_is_not_rerun_after_session_ended() {
     let names: Vec<String> = daemon.calls().into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["start_session", "click", "start_session"]);
 }
+
+#[test]
+fn idle_timeout_lockout_is_recognised_exactly() {
+    use trusty_computer::driver::{MANIFEST_IDLE_TEXT, is_manifest_idle};
+    let refused = |m: &str| DriverError::Refused {
+        message: m.to_owned(),
+        exit_code: 1,
+    };
+    // The live 0.23.2 line in tests/fixtures/evidence/session-ended-0.23.2.txt.
+    assert!(is_manifest_idle(&refused(
+        "Policy loading error: capability manifest idle timeout exceeded"
+    )));
+    assert!(is_manifest_idle(&refused(MANIFEST_IDLE_TEXT)));
+    assert!(!is_manifest_idle(&refused("Unknown method: bogus")));
+    assert!(!is_manifest_idle(&DriverError::Lifecycle(
+        MANIFEST_IDLE_TEXT.into()
+    )));
+}

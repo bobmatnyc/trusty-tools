@@ -9,15 +9,24 @@
 //! [`audit`] is the fail-closed JSONL log; [`journal`] answers a repeated
 //! `request_id`. Phase 2 adds [`driver`] (the socket client), [`manifest`]
 //! (the per-lease bounded manifest), [`launcher`] and [`supervisor`] (the
-//! daemon lifecycle). The broker comes in Phase 3.
+//! daemon lifecycle). Phase 3 adds [`broker`] (grants, lease, operator ops),
+//! `broker_call` (the call pipeline), [`broker_server`] (the sockets),
+//! [`grants`], [`lease`] and [`peer`] (the uid check).
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
-//! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`.
+//! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
+//! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`.
 
 pub mod audit;
+pub mod broker;
+mod broker_call;
+pub mod broker_server;
 pub mod driver;
+pub mod grants;
 pub mod journal;
 pub mod launcher;
+pub mod lease;
 pub mod manifest;
+pub mod peer;
 pub mod policy;
 mod policy_rules;
 pub mod private;

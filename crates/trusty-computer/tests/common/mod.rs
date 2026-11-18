@@ -20,7 +20,9 @@ use std::thread;
 
 use serde_json::{Value, json};
 
-/// A pid the fake answers with a bounded `isError` refusal, as the real daemon does.
+pub mod rig;
+
+/// A pid (or window id) the fake answers with a bounded `isError` refusal, as the real daemon does.
 pub const OUT_OF_MANIFEST_PID: u64 = 99;
 
 /// The fixture app's observable state.
@@ -128,6 +130,12 @@ struct Shared {
     calls: Vec<(String, Value)>,
     fixture: Option<FixtureState>,
     ended: Vec<String>,
+    /// Every call gets the manifest idle-timeout lockout (until a new daemon).
+    idle_locked: bool,
+    /// `get_window_state` is refused.
+    readback_broken: bool,
+    /// `structuredContent.effect` of every non-snapshot result.
+    effect: Option<String>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -145,6 +153,9 @@ impl FakeDaemon {
             calls: Vec::new(),
             fixture,
             ended: Vec::new(),
+            idle_locked: false,
+            readback_broken: false,
+            effect: None,
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -172,6 +183,21 @@ impl FakeDaemon {
     /// End `session`: later calls naming it get the daemon's session-ended refusal.
     pub fn end_session(&self, session: &str) {
         self.lock().ended.push(session.to_owned());
+    }
+
+    /// Lock the daemon out as an elapsed manifest `idle_timeout` does.
+    pub fn lock_out(&self) {
+        self.lock().idle_locked = true;
+    }
+
+    /// Refuse every later `get_window_state`.
+    pub fn break_readback(&self) {
+        self.lock().readback_broken = true;
+    }
+
+    /// Answer every later non-snapshot call with `structuredContent.effect`.
+    pub fn set_effect(&self, effect: &str) {
+        self.lock().effect = Some(effect.to_owned());
     }
 
     /// The fixture's current state.
@@ -217,6 +243,9 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
     let mut state = shared.lock().expect("fake daemon lock");
     state.calls.push((name.to_owned(), args.clone()));
+    if state.idle_locked {
+        return json!({"ok": false, "error": "Policy loading error: capability manifest idle timeout exceeded", "exit_code": 1});
+    }
     let session = args
         .get("session")
         .and_then(Value::as_str)
@@ -233,10 +262,15 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             return json!({"ok": false, "error": error, "exit_code": 1});
         }
     }
-    if args.get("pid") == Some(&json!(OUT_OF_MANIFEST_PID)) {
+    if args.get("pid") == Some(&json!(OUT_OF_MANIFEST_PID))
+        || args.get("window_id") == Some(&json!(OUT_OF_MANIFEST_PID))
+    {
         let message = "protected resource is outside the capability manifest: desktop application pid 99 is outside the capability manifest";
         return json!({"ok": true, "result": {"content": [{"type": "text", "text": message}], "isError": true,
             "structuredContent": {"refusal": {"code": "bounded_resource_outside_manifest", "message": message}, "status": "refused"}}});
+    }
+    if name == "get_window_state" && state.readback_broken {
+        return json!({"ok": false, "error": "snapshot failed", "exit_code": 1});
     }
     if name == "get_window_state" {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
@@ -256,7 +290,12 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             fixture.set_text(&text);
         }
     }
-    json!({"ok": true, "result": {"tool": name, "ok": true}})
+    match &state.effect {
+        Some(effect) => {
+            json!({"ok": true, "result": {"tool": name, "ok": true, "structuredContent": {"effect": effect}}})
+        }
+        None => json!({"ok": true, "result": {"tool": name, "ok": true}}),
+    }
 }
 
 /// Send one NDJSON request to `socket` and read one reply line.
@@ -285,6 +324,8 @@ pub struct FakeLauncher {
     pub starts: u32,
     pub stops: u32,
     pub manifests: Vec<String>,
+    /// When set, `start` fails (a rescope cannot complete).
+    pub fail_start: bool,
 }
 
 impl FakeLauncher {
@@ -297,6 +338,7 @@ impl FakeLauncher {
             starts: 0,
             stops: 0,
             manifests: Vec::new(),
+            fail_start: false,
         }
     }
 }
@@ -310,6 +352,11 @@ impl trusty_computer::launcher::Launcher for FakeLauncher {
         socket: &Path,
         manifest: &Path,
     ) -> Result<(), trusty_computer::driver::DriverError> {
+        if self.fail_start {
+            return Err(trusty_computer::driver::DriverError::Lifecycle(
+                "fake launch failure".into(),
+            ));
+        }
         self.starts += 1;
         self.manifests
             .push(fs::read_to_string(manifest).expect("manifest written before start"));
