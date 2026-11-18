@@ -3,7 +3,7 @@ name: tm-delegation-patterns
 description: Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it
 user-invocable: false
 metadata:
-  version: "1.3.0"
+  version: "1.3.1"
 category: pm-reference
 tags: [delegation, agents, patterns, pm-required]
 effort: high
@@ -53,7 +53,7 @@ Agent" or "API QA" is not an agent and fails to dispatch (issue #4594).
 | `code-analyzer` | reviewing a proposed solution BEFORE implementation; static analysis, correctness, architectural health | sonnet | The phase-2 "Code Analysis" agent; verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED. `code-analyzer` and `code-critic` are separate agents, not interchangeable |
 | `code-critic` | adversarial review of code that already exists and passes its tests; APPROVE/WARN/BLOCK verdict | opus | Dispatch-gated by test-ladder rung — see "code-critic Dispatch Standard" in `references/code-critic.md`. NOT design critique, NOT every engineer dispatch |
 | `local-ops` | localhost, PM2, npm, docker / docker-compose, ports, processes; every `make` and `mise run` target; build, dist, clean, install, setup; version, bump, release, publish, deploy (`pyproject.toml`, `package.json`) | sonnet | Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
-| `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa` — never chrome-devtools, claude-in-chrome, or playwright directly |
+| `qa`, `web-qa`, `api-qa` | test, verify, check, regression, deployment verification; `make`/`mise run` `test`, `lint`, `check` (or `engineer`); browser, screenshot, click, navigate, DOM, console errors → `web-qa`; APIs → `api-qa` | sonnet | For browser work use `web-qa`, which drives trusty-browser (`browser_*`, `page_*`) — never claude-in-chrome or chrome-devtools |
 | `documentation` | docs, README, API docs, guides | haiku | Style consistency, organization standards |
 | `ticketing` | every Issue operation — create, update, close, label, assign, milestone, comment, dedupe (P6) | sonnet | Route by artifact: the Issue is always ticketing's, and no PR mutation ever is. Every issue gets a milestone, relationships and state — `tm-ticketing`, "Every issue: milestone, relationships, state" |
 | `version-control` | the whole PR lifecycle incl. its title and body, plus branches, push/rebase/merge, complex git, stacked PRs, post-merge verification, and reclaiming merged worktrees (P7). A plain annotated tag on explicit PM instruction is version-control's; a release tag bound to a `cargo publish` is `local-ops`'s | sonnet | Check git user for main-branch access. Dispatch it WITHOUT `isolation` — ADR-0056 leaves it in the checkout it is given — EXCEPT a dispatch that commits source, which declares `isolation: "worktree"` (#8156). Policy comes from `tm-workflow` via the PM |

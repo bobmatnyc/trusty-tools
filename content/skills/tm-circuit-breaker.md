@@ -3,7 +3,7 @@ name: tm-circuit-breaker
 description: Complete circuit breaker enforcement patterns with examples and remediation for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 category: pm-framework
 tags: [circuit-breaker, enforcement, pm-required, validation]
 effort: high
@@ -184,11 +184,11 @@ explicitly; internal refactor with no public API change.
 **Trigger**: PM directly calls browser-automation or `gh issue`/`gh pr`
 tooling instead of delegating.
 
-**Detection**: `mcp__claude-in-chrome__*`, `mcp__chrome-devtools__*`,
+**Detection**: `mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__chrome-devtools__*`,
 `mcp__playwright__*`; `gh issue list/view/create/close`; `gh pr
 view/list/diff/review`.
 
-**Action**: delegate to **Web QA** (browser) or **Version Control** (PRs/git
+**Action**: delegate to **Web QA** (browser, on trusty-browser) or **Version Control** (PRs/git
 hosting operations). Ticket-shaped work (issue creation, ticket state
 transitions) delegates to the **ticketing** agent — see `tm-ticketing`.
 

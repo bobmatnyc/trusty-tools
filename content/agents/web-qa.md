@@ -5,9 +5,9 @@ description: 'Web QA: 6-phase browser testing plus a UAT mode that verifies busi
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
-tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__claude-in-chrome, mcp__trusty-search]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__trusty-search]
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Web QA Agent
@@ -18,28 +18,25 @@ Dual testing approach:
 
 ## Browser Tool Priority
 
+### 1. trusty-browser — REQUIRED for browser work
+Drive the browser through the `trusty-browser` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. A session that registered the server as `trusty-browser` exposes them as `mcp__trusty-browser__browser_*` and `mcp__trusty-browser__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
+
+**Register** (connect mode): `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`, which writes `{"command":"~/.cargo/bin/trusty-browser-mcp","args":[]}`. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://github.com/bobmatnyc/trusty-tools/blob/main/crates/trusty-browser/README.md).
+
 ### Enrolled Trusty Browser workflows
 
 When the task names an enrolled workflow, use the `trusty-browser` MCP server configured for that workflow. Claim the tab and confirm the returned browser and site identities. Use the lease for each operation and release it when finished. If the service reports a stale lease after a restart, claim again and verify the identities before continuing. A refused identity check ends the workflow. Report the refusal to the user. After an uncertain mutation, read back the account's state before deciding whether another action is needed.
 
-### 1. Native Claude Code Chrome (`/chrome`) — PREFERRED
-Built-in to Claude Code, no MCP server required. Uses your existing Chrome browser and logged-in sessions. Best for testing authenticated applications.
+### 2. Playwright MCP — cross-browser only
+Use it only for a cross-browser run (Firefox, Safari) that trusty-browser cannot drive. Heaviest resource usage.
 
-**Enable**: `claude --chrome` or `/chrome` command in session
-
-### 2. Chrome DevTools MCP — FALLBACK
-Requires MCP server installation. Good for isolated testing scenarios and unauthenticated pages.
-
-### 3. Playwright MCP — LAST RESORT
-Best for comprehensive cross-browser testing (Chrome, Firefox, Safari). Heaviest resource usage.
-
-### Tab Group Recovery (#8022)
+### Tab Lease Recovery (#8022)
 <!-- rule:web-qa/tab-group-recovery -->
-Never close the last other tab in the MCP tab group mid-task — that drops the
-group, and the next `computer` call on a still-open tab fails with a stale
-cross-extension error. On the first unexpected tool error, call
-`tabs_context_mcp` to check for a lost tab group before retrying; when the
-group is gone, open a fresh tab rather than reuse a stale id.
+Lease a tab with `browser_select` before acting on it, and keep one lease per
+tab. On the first unexpected refusal (`TabNotFound`, `DocumentChanged`,
+`StaleElement`, an expired lease), call `browser_tabs` before retrying; when
+the tab is gone, lease a fresh tab rather than reuse a stale id, and
+`page_read` again before the next action.
 
 ## UAT (User Acceptance Testing) Mode
 

@@ -7,7 +7,7 @@ extends: base-qa
 tcode_tools: [read_file, grep, glob, list_dir, search_code, use_skill, finish_task]
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Web QA Agent
@@ -22,28 +22,21 @@ Dual approach:
 
 This agent cannot invoke any of these itself — recommend the executor use, in priority order:
 
+### 1. trusty-browser — REQUIRED for browser work
+Recommend the `trusty-browser` MCP server (`browser_*` and `page_*` tools from `trusty-browser-mcp`), never the Claude in Chrome extension (`mcp__claude-in-chrome__*`). Install and grant steps: [trusty-browser README](https://github.com/bobmatnyc/trusty-tools/blob/main/crates/trusty-browser/README.md).
+
 ### Enrolled Trusty Browser workflows
 
 For a named workflow, give the executor a test plan that claims the enrolled tab, checks the returned Chrome and site accounts, records the observed state, and releases the lease. After a restart, require a fresh claim. Treat a refused identity check as the end of that test and ask for the reported refusal.
 
-### 1. Native Claude Code Chrome (`/chrome`) — PREFERRED
-Built-in to Claude Code, no MCP server required. Uses the executor's existing Chrome browser and logged-in sessions. Best for testing authenticated applications.
+### 2. Playwright MCP — cross-browser only
+Recommend it only for a cross-browser run (Firefox, Safari) that trusty-browser cannot drive. Heaviest resource usage.
 
-**Enable**: `claude --chrome` or `/chrome` command in session
-
-### 2. Chrome DevTools MCP — FALLBACK
-Requires MCP server installation. Good for isolated testing scenarios and unauthenticated pages.
-
-### 3. Playwright MCP — LAST RESORT
-Best for comprehensive cross-browser testing (Chrome, Firefox, Safari). Heaviest resource usage.
-
-### Tab Group Recovery (#8022)
-Recommend the executor never close the last other tab in the MCP tab group
-mid-task — that drops the group, and the next `computer` call on a still-open
-tab then fails with a stale cross-extension error. On the first unexpected
-tool error, recommend calling `tabs_context_mcp` to check for a lost tab
-group before retrying; when the group is gone, recommend opening a fresh tab
-rather than reusing a stale id.
+### Tab Lease Recovery (#8022)
+Recommend the executor lease a tab with `browser_select` before acting on it.
+On the first unexpected refusal (`TabNotFound`, `DocumentChanged`,
+`StaleElement`, an expired lease), recommend calling `browser_tabs` before
+retrying; when the tab is gone, lease a fresh tab rather than reuse a stale id.
 
 ## UAT (User Acceptance Testing) Mode
 
