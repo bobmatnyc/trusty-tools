@@ -524,7 +524,8 @@ fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
 /// `a_body_without_acceptance_criteria_warns_and_does_not_fail`,
 /// `an_unfilled_template_warns`, `a_tbd_label_warns`,
 /// `a_heading_inside_a_code_fence_warns`,
-/// `a_bulleted_label_with_real_items_passes`.
+/// `a_bulleted_label_with_real_items_passes`,
+/// `a_criterion_starting_with_an_issue_reference_passes`.
 fn acceptance_row(facts: &IssueFacts) -> AuditRow {
     let (verdict, detail) = if has_acceptance_criteria(&facts.body) {
         (Verdict::Pass, "present".to_string())
@@ -539,19 +540,27 @@ fn acceptance_row(facts: &IssueFacts) -> AuditRow {
 /// What: lines inside fenced code blocks and `<!-- -->` comments (multi-line
 /// too) are ignored. A marker is an `Acceptance criteria:` label, bulleted or
 /// not, or an `Acceptance` / `Acceptance criteria` heading. Text after the
-/// label on its own line counts as the criterion; otherwise the lines that
-/// follow, up to the next heading, must hold one that is not a placeholder
-/// (`...`, `TBD`, `TODO`, `none`).
+/// label on its own line counts as the criterion. Under a heading, any line
+/// up to the next heading counts. Under a bare label, only list items or lines
+/// indented deeper than the label count, and the first other non-blank line
+/// ends the section. A criterion must not be a placeholder (`...`, `TBD`,
+/// `TODO`, `none`). A heading is a `#` run followed by whitespace.
 fn has_acceptance_criteria(body: &str) -> bool {
-    let mut collecting = false;
-    for line in visible_lines(body) {
-        let line = line.replace('*', "");
+    // #11469: `None` = not collecting; `Some(None)` = under a heading;
+    // `Some(Some(indent))` = under a bare label at that indent.
+    let mut collecting: Option<Option<usize>> = None;
+    for raw in visible_lines(body) {
+        let indent = raw.len() - raw.trim_start().len();
+        let is_list_item = strip_list_marker(&raw).len() < raw.trim_start().len();
+        let line = raw.replace('*', "");
         let line = line.trim();
         let lower = line.to_ascii_lowercase();
-        if let Some(heading) = lower.strip_prefix('#') {
-            let text = heading.trim_start_matches('#').trim();
+        if let Some(text) = heading_text(&lower) {
             let text = text.strip_suffix(':').unwrap_or(text).trim_end();
-            collecting = text == "acceptance" || text == "acceptance criteria";
+            collecting = (text == "acceptance" || text == "acceptance criteria").then_some(None);
+            continue;
+        }
+        if line.is_empty() {
             continue;
         }
         let item = strip_list_marker(line);
@@ -563,14 +572,25 @@ fn has_acceptance_criteria(body: &str) -> bool {
             if is_real_criterion(rest) {
                 return true;
             }
-            collecting = rest.trim().is_empty();
+            collecting = rest.trim().is_empty().then_some(Some(indent));
             continue;
         }
-        if collecting && is_real_criterion(item) {
-            return true;
+        match collecting {
+            Some(Some(label_indent)) if !is_list_item && indent <= label_indent => {
+                collecting = None;
+            }
+            Some(_) if is_real_criterion(item) => return true,
+            _ => {}
         }
     }
     false
+}
+
+/// The text after a Markdown heading's `#` run, or `None` when `line` is not
+/// a heading: the run must be followed by whitespace, so `#11469` is not one.
+fn heading_text(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches('#');
+    (rest.len() < line.len() && rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 /// `body`'s lines with fenced code blocks and HTML comments removed.

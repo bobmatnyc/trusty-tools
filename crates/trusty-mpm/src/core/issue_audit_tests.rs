@@ -648,6 +648,8 @@ fn a_tbd_label_warns() {
             "Acceptance criteria: todo.",
             "- **Acceptance criteria:** none",
             "Acceptance criteria:\n- TBD",
+            "Acceptance criteria:\n- TBD\n\nSee #thread for logs",
+            "Acceptance criteria:\n\nNotes: later",
         ],
         Verdict::Warn,
     );
@@ -661,6 +663,17 @@ fn a_heading_inside_a_code_fence_warns() {
             "~~~md\nAcceptance criteria: exits 0\n~~~",
         ],
         Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_criterion_starting_with_an_issue_reference_passes() {
+    assert_acceptance(
+        &[
+            "## Acceptance criteria\n#11469 must reindex",
+            "Acceptance criteria:\n- #11469 must reindex",
+        ],
+        Verdict::Pass,
     );
 }
 
