@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.3] — 2026-11-18
+
+### Changed
+
+- Exempt three more paths from the launchd-label source scan in the `launchd_labels` tests (#11440).
+
 ## [0.70.2] — 2026-11-16
 
 ### Added
