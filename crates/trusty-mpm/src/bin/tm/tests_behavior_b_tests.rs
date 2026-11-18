@@ -2156,7 +2156,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     // #10101 D3c: a launch refuses an unreachable daemon, so a stub answers.
     let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
     // #10101: the PM's workspace server, named for the base clone that owns
-    // the session worktree; empty under `TM_WORKSPACE_TMUX=0`. Killed on
+    // the session worktree; empty unless `TM_WORKSPACE_TMUX=1`. Killed on
     // every exit path, panic included.
     let workspace = trusty_mpm::session_manager::launch_server::cli_launch_server(&base)
         .map(|(server, _)| server);

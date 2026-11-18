@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV;
 use trusty_mpm::runtime::{ClaudeCodeAdapter, RuntimeAdapter};
 use trusty_mpm::session_manager::{ManagedError, ManagedTmuxDriver};
 
@@ -73,7 +74,8 @@ impl ManagedTmuxDriver for Recorder {
     }
 }
 
-/// Restores `HOME`, `PATH` and `TRUSTY_MPM_REPOS_ROOT` when a case ends.
+/// Restores `HOME`, `PATH`, `TRUSTY_MPM_REPOS_ROOT` and the #10612 hook-exe
+/// seam when a case ends.
 ///
 /// `env_serial` runs one test at a time, so no other test observes the rewrite.
 struct EnvGuard {
@@ -82,18 +84,20 @@ struct EnvGuard {
 
 impl EnvGuard {
     fn install(home: &Path, bin: &Path, repos_root: &Path) -> Self {
-        let names = ["HOME", "PATH", "TRUSTY_MPM_REPOS_ROOT"];
+        let names = ["HOME", "PATH", "TRUSTY_MPM_REPOS_ROOT", TEST_HOOK_EXE_ENV];
         let saved = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
         let mut entries = vec![bin.to_path_buf()];
         if let Some(p) = std::env::var_os("PATH") {
             entries.extend(std::env::split_paths(&p));
         }
         let path = std::env::join_paths(entries).expect("join PATH");
-        // SAFETY: `env_serial` forces one test thread; Drop restores all three.
+        // SAFETY: `env_serial` forces one test thread; Drop restores all four.
         unsafe {
             std::env::set_var("HOME", home);
             std::env::set_var("PATH", path);
             std::env::set_var("TRUSTY_MPM_REPOS_ROOT", repos_root);
+            // #10612: a stable hook exe on a runner with no installed `tm`.
+            std::env::set_var(TEST_HOOK_EXE_ENV, "/usr/local/bin/tm");
         }
         Self { saved }
     }
