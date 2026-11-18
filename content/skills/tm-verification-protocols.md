@@ -31,8 +31,9 @@ missing coverage, changed-input checks and required independent high-risk
 gates. Keep live deployment evidence separate from source-test evidence.
 
 Declared demo/POC work owes a smoke run plus the core happy path. QA lists its
-open `intent(demo):` intentions (`git grep -n 'intent(demo):'`) and never
-counts them as coverage. Rule: `tm-workflow`, "Demo and POC Work" in
+open `intent(demo):` intentions
+(`git grep -n 'intent(demo):' -- <demo paths>`) and never counts them as
+coverage. Rule: `tm-workflow`, "Demo and POC Work" in
 `references/completion-standard.md`.
 
 ## Verification Requirements by Work Type
