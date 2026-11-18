@@ -1,19 +1,33 @@
-//! `trusty-computer-mcp`: the stdio MCP server (Phase 0 stub).
+//! `trusty-computer-mcp`: the stdio MCP server in front of the broker.
 //!
-//! Why: the second bin of plan section 2, present so signing and packaging
-//! cover both from the start.
-//! What: prints usage and exits 2; the 20 `computer_*` tools arrive in Phase 5.
-//! Test: none yet; the `tools/list` schema test comes in Phase 5.
+//! Why: the second bin of plan section 2; agents load it as an MCP server.
+//! What: `trusty-computer-mcp [--state DIR]` (default `~/.trusty/computer`)
+//! serves the 20 `computer_*` tools of `trusty_computer::mcp` on stdio and
+//! forwards each to `<state>/agent.sock`. Logs go to stderr only.
+//! Test: `mcp_smoke_against_a_fake_broker` in `tests/mcp_server.rs`.
 
+use std::io::{self, BufReader};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "\
-usage: trusty-computer-mcp
-
-Speaks MCP JSON-RPC on stdio and forwards to the trusty-computer broker.
-Not implemented yet (issue #11460, Phase 5).";
+use trusty_computer::{mcp::McpServer, operator_cli::default_state};
 
 fn main() -> ExitCode {
-    eprintln!("{USAGE}");
-    ExitCode::from(2)
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let state = match args.as_slice() {
+        [] => default_state(),
+        [flag, dir] if flag == "--state" => PathBuf::from(dir),
+        _ => {
+            eprintln!("usage: trusty-computer-mcp [--state DIR]");
+            return ExitCode::from(2);
+        }
+    };
+    let stdin = io::stdin();
+    match McpServer::new(state).serve(BufReader::new(stdin.lock()), io::stdout().lock()) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("trusty-computer-mcp: {e}");
+            ExitCode::from(1)
+        }
+    }
 }

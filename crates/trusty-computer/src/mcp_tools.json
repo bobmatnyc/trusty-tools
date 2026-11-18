@@ -1,0 +1,448 @@
+[
+ {
+  "name": "computer_connect",
+  "description": "Redeem an operator code for a grant and ask for the desktop lease (held or queued).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "code": {
+     "type": "string",
+     "description": "The tc- code the operator minted."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "code"
+   ]
+  }
+ },
+ {
+  "name": "computer_status",
+  "description": "Lease state, queue position, grant TTL, driver version, telemetry state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_release",
+  "description": "Give up the lease for the next grant.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_disconnect",
+  "description": "End the session and drop the grant binding.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_grants",
+  "description": "Show this session's grant (app, tools, expiry); never other grants.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_apps",
+  "description": "Running pids of the granted app only.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_windows",
+  "description": "Windows of the granted app only.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid"
+   ]
+  }
+ },
+ {
+  "name": "computer_read",
+  "description": "AX tree of a granted window, menu bar removed, element tokens included.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_verify",
+  "description": "Check a predicate on window state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_click",
+  "description": "Click an element by token in background; returns confirmed by read-back.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token"
+   ]
+  }
+ },
+ {
+  "name": "computer_double_click",
+  "description": "As computer_click, with a double click.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token"
+   ]
+  }
+ },
+ {
+  "name": "computer_right_click",
+  "description": "As computer_click, with the secondary button.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token"
+   ]
+  }
+ },
+ {
+  "name": "computer_scroll",
+  "description": "Scroll an element by token.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "direction": {
+     "type": "string"
+    },
+    "amount": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token"
+   ]
+  }
+ },
+ {
+  "name": "computer_type",
+  "description": "Insert up to 2000 chars into an element by token.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "text": {
+     "type": "string",
+     "maxLength": 2000
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token",
+    "text"
+   ]
+  }
+ },
+ {
+  "name": "computer_set_value",
+  "description": "Set an AX value on an element by token.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "element_token": {
+     "type": "string",
+     "description": "Token from the last computer_read of this window."
+    },
+    "value": {
+     "type": "string",
+     "maxLength": 2000
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "element_token",
+    "value"
+   ]
+  }
+ },
+ {
+  "name": "computer_key",
+  "description": "One key to the granted app; quit, close, hide, switch chords refused.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "key": {
+     "type": "string"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "key"
+   ]
+  }
+ },
+ {
+  "name": "computer_hotkey",
+  "description": "A chord to the granted app; quit, close, hide, switch chords refused.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "keys": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "keys"
+   ]
+  }
+ },
+ {
+  "name": "computer_launch",
+  "description": "Background-launch the granted bundle id only.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "bundle_id": {
+     "type": "string"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "bundle_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_wait",
+  "description": "Sleep up to 5 s in the broker; keeps the lease alive.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "seconds": {
+     "type": "number",
+     "minimum": 0,
+     "maximum": 5
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "computer_refresh",
+  "description": "Re-list pids and rescope after a relaunch or new window.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": []
+  }
+ }
+]

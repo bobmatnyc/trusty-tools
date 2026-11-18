@@ -1,5 +1,5 @@
 Added
-- New crate `trusty-computer` 0.1.0 with two stub bins, `trusty-computer` and `trusty-computer-mcp`, that print usage and exit 2 (#11460).
+- New crate `trusty-computer` 0.1.0 with two bins, `trusty-computer` (broker and operator CLI) and `trusty-computer-mcp` (#11460).
 - `policy`: the allow list for all 56 cua-driver 0.23.2 tools (6 ALLOW, 13 FILTER, 37 DENY) with the spike's argument checks; `invoke_menu` is denied (#11460).
 - `redact`: removes every AXMenuBar element and its markdown subtree from a `get_window_state` reply, returns the element tokens that remain, and fingerprints the redacted tree (#11460).
 - `audit`: a fail-closed JSONL log, 0600 and fsynced, rotated at 5 MiB, that records argument keys and text lengths only (#11460).
@@ -16,3 +16,4 @@ Added
 - The consent flow: `trusty-computer grant <bundle-id> --pid N --window N` opens `/dev/tty` before it contacts the broker (no TTY: exit 3, nothing sent); the broker shows the app, tools, TTL and a six-digit code in an `osascript` dialog run as a separate helper process, and mints only after a confirm and the matching code. Denied, timed-out (enforced by the broker, not the dialog) and failed dialogs, wrong and expired codes refuse. The CLI prints a one-use `tc-` grant code (120 bits, 300 s) that the agent redeems with `connect`; a session reaches only grants it redeemed. Five bad codes in 60 s lock minting or redeeming out (#11460).
 - Operator verbs `grants`, `revoke <grant-id>`, `status`, `lease` and `lockout`. The lockout revokes every grant on disk, drops every code, binding and the lease, stops the daemon and exits the broker (#11460).
 - Agent ops `grants` (this session's grants only), `disconnect`, `wait` (up to 5 s, keeps the lease) and `refresh` (restarts the daemon on the grant's scope) (#11460).
+- `trusty-computer-mcp [--state DIR]`: a stdio MCP server with exactly 20 static `computer_*` tools (no screenshot, pixel, clipboard or `invoke_menu` tool). Each call goes to the broker's `agent.sock` with a `request_id`, a uuid4 when omitted; a broker refusal is an MCP tool error carrying its code (#11460).
