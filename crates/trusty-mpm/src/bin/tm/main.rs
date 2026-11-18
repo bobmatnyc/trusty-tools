@@ -73,6 +73,11 @@ mod divert_cli_tests;
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
 
+// #11470: every clap command has a row in the release-gate table.
+#[cfg(test)]
+#[path = "release_gate_drift_tests.rs"]
+mod release_gate_drift_tests;
+
 // #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
 // file rather than `tests.rs` because the `infer_subcommands` /
 // `external_subcommand` precedence it pins is one cohesive claim.

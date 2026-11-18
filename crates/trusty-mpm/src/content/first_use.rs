@@ -322,7 +322,7 @@ impl FailureMemo {
 }
 
 /// Whether an [`OFFLINE_ENV`] value switches the fetch off.
-fn offline_from(value: Option<&str>) -> bool {
+pub(crate) fn offline_from(value: Option<&str>) -> bool {
     value.is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
 }
 

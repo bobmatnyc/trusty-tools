@@ -128,6 +128,22 @@ pub enum AgentContentError {
         /// The parse or validation failure.
         reason: String,
     },
+    /// The pinned content release is older than the oldest one this binary
+    /// reads (#11470): its seed files would be missing, so nothing is read.
+    /// `remedy` is the caller's, because only the harness knows whether a
+    /// qualifying release is published.
+    #[error(
+        "the pinned content {tag} is older than {minimum}, the oldest content release \
+         this binary reads; {remedy}"
+    )]
+    BelowMinimum {
+        /// The pinned release tag.
+        tag: String,
+        /// The oldest release tag the binary reads.
+        minimum: String,
+        /// What the operator runs next.
+        remedy: String,
+    },
     /// Writing a materialized roster failed.
     #[error("could not write {}: {source}", path.display())]
     Write {
