@@ -6,9 +6,9 @@
 //! in a precise order on every request (§7). This module is that engine. SM-5
 //! delivers the context engine in isolation; it deliberately does NOT wire into
 //! any endpoint or the agent loop (those are SM-7 / SM-8) — the compaction LLM
-// #11451: module-scoped path; docs.rs nightly resolves `//!` links in this scope.
+// #11451: absolute path; stable and docs.rs nightly resolve `//!` scope differently.
 //! call is dependency-injected through the SM-2
-//! [`LlmProvider`](super::providers::LlmProvider) trait, and the
+//! [`LlmProvider`](crate::core::sm::providers::LlmProvider) trait, and the
 //! storage root is injectable, so the whole engine is unit-testable with a mock
 //! provider and a tempdir.
 //! What: a thin facade re-exporting the four concerns —
