@@ -91,7 +91,7 @@ async fn resuming_a_stopped_workspace_record_recreates_it_on_the_default_server(
 fn a_live_pane_on_a_workspace_server_is_never_rerouted() {
     let dir = crate::test_support::hermetic_temp_dir();
     let workdir = dir.path().to_path_buf();
-    let live = "case \"$*\" in *list-sessions*) echo tm-rehome;; esac";
+    let live = "case \"$*\" in *list-sessions*) echo tm-rehome:1700000000:1;; esac";
     let (_log, tmux) = driver(dir.path(), &workdir, live);
     let mut record = stopped_record(&ManagedSessionId::new(), dir.path(), &workdir);
     assert!(!rehome_with(&tmux, &mut record, None).expect("probe"));
