@@ -149,6 +149,26 @@ fn a_failed_listing_on_an_answering_socket_keeps_the_record() {
     assert_eq!(record.tmux_server.as_deref(), Some("1:1"));
     assert_eq!(record.pane_id.as_deref(), Some("%9"));
 
+    // A probe of this socket still in flight: `socket_answers` reads `None`
+    // (unknown), which keeps the record too.
+    let socket = dir.path().join(SERVER);
+    let (release, wait) = std::sync::mpsc::channel::<()>();
+    let held = crate::core::tmux_server::bounded_probe(
+        &socket,
+        std::time::Duration::from_millis(10),
+        move || wait.recv().ok(),
+    );
+    assert!(held.is_none(), "the holding probe outlives its budget");
+    assert_eq!(
+        crate::core::tmux_server::socket_answers(&socket, std::time::Duration::from_millis(10)),
+        None
+    );
+    assert!(!rehome_with(&tmux, &mut record, None).expect("unknown probe"));
+    assert_eq!(record.tmux_socket, Some(socket));
+    assert_eq!(record.tmux_server.as_deref(), Some("1:1"));
+    assert_eq!(record.pane_id.as_deref(), Some("%9"));
+    release.send(()).expect("release the holding probe");
+
     record.tmux_socket = None;
     assert!(!rehome_with(&tmux, &mut record, None).expect("no socket"));
 }
