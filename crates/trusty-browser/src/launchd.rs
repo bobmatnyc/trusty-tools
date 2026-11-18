@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use crate::codesign::{Signer, ensure_install_signed};
 use crate::install_host::{self, Registration};
 
-/// The launchd label.
-pub const LABEL: &str = "com.trusty.browser";
+/// The launchd label, from the shared registry (#4919: no label literal outside it).
+pub const LABEL: &str = trusty_common::launchd_labels::BROWSER;
 
 /// Why a launchd action failed.
 #[derive(Debug, thiserror::Error)]

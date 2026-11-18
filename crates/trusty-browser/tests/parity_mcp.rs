@@ -187,12 +187,14 @@ struct Roots {
 
 impl Roots {
     fn norm(&self, text: &str, seen: &mut Vec<String>) -> String {
-        mask_uuids(
-            &text
-                .replace(&self.real, "<REALROOT>")
-                .replace(&self.shown, "<ROOT>"),
-            seen,
-        )
+        // Linux has no `/private` alias, so the real root can equal the shown one;
+        // then every hit is the path the binary was given, which is `<ROOT>`.
+        let text = if self.real == self.shown {
+            text.to_owned()
+        } else {
+            text.replace(&self.real, "<REALROOT>")
+        };
+        mask_uuids(&text.replace(&self.shown, "<ROOT>"), seen)
     }
 }
 

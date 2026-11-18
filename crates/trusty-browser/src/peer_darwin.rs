@@ -12,11 +12,15 @@
 //! Test: `kernel_facts_describe_this_process`, `host_argv_pin_is_exact`,
 //! `service_argv_pin_is_exact`.
 
+#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
 use std::io;
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -202,8 +206,8 @@ pub fn parse_procargs(raw: &[u8]) -> io::Result<Vec<String>> {
 
 /// True when `arg0` is an absolute path that resolves to `own_exe`.
 ///
-/// Why: Python's argv[1] named the script (`service.py`/`native_host.py`); a
-/// single Rust binary has no script, so argv[0] carries that pin instead.
+/// Why: Python's `argv[1]` named the script (`service.py`/`native_host.py`); a
+/// single Rust binary has no script, so `argv[0]` carries that pin instead.
 pub fn argv0_is(arg0: &str, own_exe: &Path) -> bool {
     // See review af942b9e95 #3: string checks first; canonicalize (which may
     // touch a peer-chosen, possibly hung mount) only when the path differs.
@@ -225,7 +229,7 @@ pub fn argv0_is(arg0: &str, own_exe: &Path) -> bool {
 /// Why: Python required `argv[1:] == [native_host.py, "--socket", <sock>, ORIGIN]`
 /// with the same interpreter. The Rust host is this binary, so the pin is
 /// `[<this binary>, "native-host", "--socket", <state>/enrollment.sock, ORIGIN]`:
-/// exactly five arguments, argv[0] absolute and resolving to this executable.
+/// exactly five arguments, `argv[0]` absolute and resolving to this executable.
 /// Test: `host_argv_pin_is_exact`.
 pub fn host_argv_ok(argv: &[String], own_exe: &Path, enrollment_sock: &Path) -> bool {
     let sock = enrollment_sock.to_string_lossy();
@@ -243,7 +247,7 @@ pub fn host_argv_ok(argv: &[String], own_exe: &Path, enrollment_sock: &Path) -> 
 /// with the same interpreter, `<dir>` resolving to the socket's directory. The
 /// Rust broker is this binary, so the pin is
 /// `[<this binary>, "--state", <abs dir>, "serve"]`: exactly four arguments,
-/// argv[0] absolute and resolving to this executable, the state resolving to
+/// `argv[0]` absolute and resolving to this executable, the state resolving to
 /// the socket's directory.
 /// Test: `service_argv_pin_is_exact`.
 pub fn service_argv_ok(argv: &[String], own_exe: &Path, socket_dir: &Path) -> bool {
@@ -269,7 +273,7 @@ fn switch_name(arg: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-/// True when any Chrome argument (after argv[0]) is an unsafe flag, `=value` or not.
+/// True when any Chrome argument (after `argv[0]`) is an unsafe flag, `=value` or not.
 ///
 /// What: `-name` and `--name` match alike, as Chromium accepts both prefixes
 /// on macOS and Linux. Every argument is scanned, so an unsafe name after a

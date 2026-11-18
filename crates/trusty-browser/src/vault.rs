@@ -7,7 +7,7 @@
 //! the purpose (`browser:<profile>`). The 32-byte key is a base64 generic
 //! password, service [`SERVICE`], account = the canonical state path, read
 //! under `state/keychain.lock`. The store is a trait so tests never touch a
-//! real Keychain; [`KeyringStore`] is the macOS login-Keychain backend.
+//! real Keychain; `KeyringStore` is the macOS login-Keychain backend.
 //! Test: `fixture_registry_unseals_every_pairing`, `rust_seal_round_trips_and_binds_aad`
 //! in `tests/parity_registry.rs`, `throwaway_keychain_round_trip` (opt-in) in
 //! `tests/keychain_optin.rs`.

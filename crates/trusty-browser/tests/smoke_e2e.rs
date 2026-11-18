@@ -6,6 +6,11 @@
 //! `trusty-browser-mcp` in connect mode for `tools/list`, `browser_connect`,
 //! `browser_select` and one `page_read`, and a clean shutdown that leaves no
 //! child process and no socket behind.
+//!
+//! macOS only: pairing runs through popup enrollment, whose native-host side
+//! (`peer_darwin::verify_enrollment_service`, Darwin `LOCAL_PEERPID`/libproc)
+//! exists only on macOS; elsewhere it refuses every peer by design.
+#![cfg(target_os = "macos")]
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};

@@ -49,6 +49,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+# The launchd label registry (`launchd_labels::BROWSER`, #4919); no features.
+trusty-common = { workspace = true }
 # The shared JSON-RPC envelope types; never rmcp (plan section 2).
 trusty-mcp = { workspace = true }
 unicode-normalization = { workspace = true }

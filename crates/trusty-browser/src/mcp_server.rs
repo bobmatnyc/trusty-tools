@@ -3,7 +3,7 @@
 //! Why: an MCP client sees Python's exact lines today; the port must give
 //! the same `initialize`, `tools/list`, `tools/call` and error lines so no
 //! client notices the switch (plan section 3, item 16).
-//! What: [`handle_line`] maps one input line to at most one output line.
+//! What: [`Server::handle_line`] maps one input line to at most one output line.
 //! Results are written with [`Json::dumps`] (`ensure_ascii=False`, Python
 //! float repr), which is how pydantic serialises them. The `-32602` error
 //! envelope is a [`trusty_mcp::Response`]; its field order matches FastMCP's.

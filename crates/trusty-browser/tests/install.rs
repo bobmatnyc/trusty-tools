@@ -24,7 +24,24 @@ const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
 const PY_PKG: &str = "/private/tmp/tb-venv-p1/lib/python3.12/site-packages/trusty_browser";
 
 fn fixture(name: &str) -> String {
-    String::from_utf8(common::read(&format!("install/{name}"))).expect("utf8")
+    link_mode_masked(&String::from_utf8(common::read(&format!("install/{name}"))).expect("utf8"))
+}
+
+/// A captured listing with each `link` row's mode replaced by `-`, as [`tree`] writes it.
+///
+/// Why: the fixture was captured on macOS, where a symlink's lstat mode follows the
+/// umask; Linux reports 0o777 for every symlink, and neither side sets it.
+fn link_mode_masked(listing: &str) -> String {
+    listing
+        .lines()
+        .map(|line| {
+            let mut f: Vec<&str> = line.split('\t').collect();
+            if f.get(1) == Some(&"link") && f.len() > 2 {
+                f[2] = "-";
+            }
+            format!("{}\n", f.join("\t"))
+        })
+        .collect()
 }
 
 /// The same listing as `capture/tree.py`: path, kind, mode, sha256 or link target.
@@ -46,7 +63,13 @@ fn tree(root: &Path) -> String {
     for rel in paths {
         let p = root.join(&rel);
         let m = p.symlink_metadata().expect("lstat");
-        let mode = format!("0o{:o}", m.mode() & 0o7777);
+        // A symlink's own mode is the OS's, not the installer's: Linux always
+        // reports 0o777, macOS the umask. Mask it on both sides (see `link_mode_masked`).
+        let mode = if m.is_symlink() {
+            "-".to_owned()
+        } else {
+            format!("0o{:o}", m.mode() & 0o7777)
+        };
         let (kind, tail) = if m.is_symlink() {
             (
                 "link",
