@@ -7,8 +7,8 @@
 //! What: [`launch_target`] answers the driver for the workspace's server and
 //! the socket path the record stores only when [`WORKSPACE_TMUX_ENV`] is `1`
 //! and the driver has a socket directory and reaches a named server; else
-//! `None`, the default server. Existing records are never moved (ruling Q3):
-//! only a create calls this.
+//! `None`, the default server. Only a create calls this; a resume
+//! moves a stopped record in `resume_server` (#10101).
 //! Test: `launch_server_tests.rs`.
 
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ pub const WORKSPACE_TMUX_ENV: &str = "TM_WORKSPACE_TMUX";
 /// Whether `value` (the opt-in variable's value) asks for the workspace server.
 /// Test: `with_no_env_a_launch_stays_on_the_default_server`.
 // #10101: opt-in, not opt-out — owner ruling 2026-11-18.
-fn opted_in(value: Option<&str>) -> bool {
+pub(crate) fn opted_in(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim() == "1")
 }
 

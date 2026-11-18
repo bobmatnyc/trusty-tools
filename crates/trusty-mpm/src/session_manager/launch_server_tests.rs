@@ -62,6 +62,30 @@ fn only_the_opt_in_reaches_the_workspace_server() {
     assert!(launch_target_with(&FakeNoopTmuxDriver, dir.path(), Some("1")).is_none());
 }
 
+/// #10101 (ruling 2026-11-18): with `TM_WORKSPACE_TMUX` unset, a create
+/// stores no socket and creates its session on the default server.
+#[serial_test::serial]
+#[tokio::test]
+async fn with_no_env_a_create_stores_no_socket() {
+    let _env = crate::secret_source::test_env::EnvVarGuard::unset(WORKSPACE_TMUX_ENV);
+    let (dir, log, tmux) = real_driver();
+    let workspace = dir.path().join("repo");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let mgr = SessionManager::new(&scratch_data_dir(dir.path()), Arc::new(tmux))
+        .await
+        .expect("manager");
+    let record = mgr
+        .create("task".into(), Some(workspace), None, None, None, None)
+        .await
+        .expect("create");
+    assert_eq!(record.tmux_socket, None);
+    let calls = std::fs::read_to_string(&log).expect("log");
+    assert!(
+        calls.lines().all(|l| !l.starts_with("-L ")),
+        "a call reached a named server: {calls}"
+    );
+}
+
 /// The create path starts the workspace server, creates the session there and
 /// nowhere else, and stores the server's socket on the record; the record
 /// then routes to that server. Red on 420b3717bf, which created every session
@@ -128,6 +152,8 @@ async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
 #[serial_test::serial]
 #[tokio::test]
 async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pane() {
+    // #10101: only an opted-in record stays on its workspace server.
+    let _opt_in = crate::secret_source::test_env::EnvVarGuard::set(WORKSPACE_TMUX_ENV, "1");
     let dir = crate::test_support::hermetic_temp_dir();
     let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
     let log = dir.path().join("calls.log");
