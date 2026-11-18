@@ -1,4 +1,0 @@
-Fixed
-- `tm hook --pm-guard` no longer refuses every Write and Edit when one skill or agent file under `~/.claude/agents` or `~/.claude/skills` cannot be read for lack of permission, or has frontmatter that does not parse and carries no plausible `hooks` key. The file is skipped with a warning on stderr. Frontmatter that does not parse but declares a `hooks` key still refuses (#10937).
-- `tm hook --pm-guard` keeps the `--body`/`--title`/`--message`/`--note` text-payload exemption when the payload holds backticks or `$(` inside single quotes, so Markdown code spans in a `gh` comment no longer read as secret file names. A substitution outside single quotes still voids the exemption (#10974).
-- Regression tests pin that a shell redirect glued to a script word does not hide the script from the pm-guard rules, and that a benign script under the same redirect is allowed (#11262).

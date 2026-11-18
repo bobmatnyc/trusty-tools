@@ -6,6 +6,32 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.8] — 2026-11-18
+
+### Added
+
+- `tm hook --pm-guard` gains a stale-copy guard (#10574): a `[stale_copy]` table in `.trusty-mpm.toml` lists registered (`paths`) and `locked` artifacts. A `Read` of a registered file records its observed version (path, SHA-256, saved copy) under `.trusty-mpm/stale-copy/`, bounded at 32 MiB and 512 records. A replacing Write/Edit or Bash redirect is denied `STALE_INPUT_HASH` (GP-052) when the file changed since it was read, was never read, or the record store cannot be read; any write to a locked file is denied `LOCKED` (GP-053). An absent, empty or unreadable config leaves the guard off.
+- PM sessions register `tm hook --completion-evidence` on `Stop` (#10575). It warns, never blocks, when the final message claims completion with no evidence map (verified / helper-reported / unfinished / untested), names an incomplete map, sets a size target with no `OWNER-REQUESTED-LIMIT: "<owner quote>"` line (`INVENTED_TARGET`), or carries that line without a quote.
+- A bundled `owner-plain` output style, selected with `[style] active = "owner-plain"` or `tm launch --style owner-plain`: the default PM with plain-word, regularly timed reporting to a non-technical owner. `tm install` deploys it and the scaffold `.gitignore` block covers its file (#10576).
+- PM sessions now register `tm hook --turn-task` on `UserPromptSubmit`. Each turn gets `Task: <id>@<MMDD>` as hook context when datg's session record names an open task in its `current` field; the hook is silent otherwise and never writes datg state.
+- New `tm hook --pm-guard-shadow`: a minimal pm-guard that judges each `Bash`, `Write` and `Edit` call on parsed facts (tree-sitter-bash argv and canonical paths), not command text. It never blocks. Each would-refuse appends one JSON line to `~/.trusty-mpm/guard/shadow.jsonl`; the line holds the rule, argv facts and a command SHA-256, never the command text. Rules: R1 trust-anchor writes, R2 destructive git, discarded work, raw-disk writes and protected-path deletes, R3 cross-repo push, R5 production deletes (per-session allow list in `~/.trusty-mpm/guard/shadow.toml`). PM and subagent sessions run all four rules; the Architect runs R1 only. Every session registers the hook on `PreToolUse`, independent of `[pm_guard] enabled`.
+
+### Fixed
+
+- An Architect launch, resume or in-place relaunch whose project hook write fails is now refused with an error naming `.claude/settings.json`, instead of starting without the exec-form `tm hook --pm-guard` entry. A PM session keeps the previous best-effort behaviour (#10612).
+- `tm hook --pm-guard` no longer refuses every Write and Edit when one skill or agent file under `~/.claude/agents` or `~/.claude/skills` cannot be read for lack of permission, or has frontmatter that does not parse and carries no plausible `hooks` key. The file is skipped with a warning on stderr. Frontmatter that does not parse but declares a `hooks` key still refuses (#10937).
+- `tm hook --pm-guard` keeps the `--body`/`--title`/`--message`/`--note` text-payload exemption when the payload holds backticks or `$(` inside single quotes, so Markdown code spans in a `gh` comment no longer read as secret file names. A substitution outside single quotes still voids the exemption (#10974).
+- Regression tests pin that a shell redirect glued to a script word does not hide the script from the pm-guard rules, and that a benign script under the same redirect is allowed (#11262).
+- `tm sessions ls` reads whether a session's runtime still runs from the panes on its own workspace tmux server, so it agrees with `tm tui` instead of showing a running session `stopped` (#11071).
+- A `SessionEnd` hook no longer marks a session on a `tm-ws-*` workspace tmux server Stopped while its pane still runs the runtime, so `tm projects decommission` stops that session and its pane (#11175).
+- `tm session ls` and `tm session resume` read a session's liveness on its own `tm-ws-*` workspace tmux server, so a live per-workspace session no longer reads `stopped` (#11222).
+- The poller's watchdog now relaunches a dead Architect with `tm architect up`, the bound launch path, instead of `session-relaunch.sh`, so the new `claude` has a launch record and the pm-guard keeps its anchor exemptions. The relaunch fails closed unless `up` exits 0, launches into the Architect's own session, and a following `up --dry-run` sees it live and bound. `TM_BIN` overrides the `tm` lookup; the 1800 s debounce and 2-failure cap are unchanged.
+
+### Changed
+
+- `tm pr open --rung N` now applies the label `rung:N` to the PR, creating it if missing.
+- `tm pr queue-check` refuses a PR with no `rung:N` label, with two rung labels, or with a malformed one, and refuses a `rung:5` or `rung:6` PR unless a trusted APPROVE or WARN is pinned to the head. Its code-critic BLOCK check now uses the same reader as `tm pr merge`, so only OWNER, MEMBER and COLLABORATOR verdicts count (owner ruling Dr4).
+
 ## [1.14.7] — 2026-11-16
 
 ### Breaking
