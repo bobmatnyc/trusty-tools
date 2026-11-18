@@ -1,0 +1,31 @@
+# Bounded capability manifest for the part 2 daemon (cua docs:
+# docs/content/docs/how-to-guides/driver/write-a-bounded-manifest.mdx).
+# Daemon-side ceiling under the broker's own filter. The app entry is a
+# placeholder: part 2 step 0 checks whether a non-bundled Python fixture can
+# be scoped by `executable`, or needs a bundle id.
+version: 3
+expires_after: 2h
+idle_timeout: 15m
+
+allow:
+  tools:
+    - start_session
+    - end_session
+    - list_apps
+    - list_windows
+    - get_window_state
+    - verify_state
+    - click
+    - type_text
+    - set_value
+    - press_key
+    - check_permissions
+
+resources:
+  apps:
+    - executable: FIXTURE_PYTHON_EXECUTABLE
+      launch: false
+      windows: all
+      terminate: driver_launched
+  desktop:
+    display: false
