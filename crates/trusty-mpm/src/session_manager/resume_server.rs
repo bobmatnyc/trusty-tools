@@ -43,7 +43,8 @@ pub(crate) fn rehome_to_default(
 /// project, account and `claude_session_id` are untouched.
 /// Test: `a_live_pane_on_a_workspace_server_is_never_rerouted`,
 /// `the_opt_in_keeps_a_resumed_record_on_its_workspace_server`,
-/// `a_crashed_workspace_server_moves_the_record_to_the_default_server`.
+/// `a_crashed_workspace_server_moves_the_record_to_the_default_server`,
+/// `a_failed_listing_on_an_answering_socket_keeps_the_record`.
 pub(crate) fn rehome_with(
     tmux: &dyn ManagedTmuxDriver,
     record: &mut SessionRecord,

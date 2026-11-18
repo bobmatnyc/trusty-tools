@@ -131,3 +131,24 @@ fn a_crashed_workspace_server_moves_the_record_to_the_default_server() {
     assert_eq!(record.pane_id, None);
     assert_eq!(record.claude_session_id.as_deref(), Some("claude-10101"));
 }
+
+/// Fail-closed arm: a failed listing whose socket still answers keeps the
+/// record on its server, untouched. A record with no socket never moves.
+#[serial_test::serial]
+#[test]
+fn a_failed_listing_on_an_answering_socket_keeps_the_record() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let workdir = dir.path().to_path_buf();
+    // A live listener, held to the end: the server's socket answers.
+    let _listener = std::os::unix::net::UnixListener::bind(dir.path().join(SERVER)).expect("bind");
+    let refuse = "if [ \"$1\" = -L ]; then echo 'list failed' >&2; exit 1; fi";
+    let (_log, tmux) = driver(dir.path(), &workdir, refuse);
+    let mut record = stopped_record(&ManagedSessionId::new(), dir.path(), &workdir);
+    assert!(!rehome_with(&tmux, &mut record, None).expect("probe"));
+    assert_eq!(record.tmux_socket, Some(dir.path().join(SERVER)));
+    assert_eq!(record.tmux_server.as_deref(), Some("1:1"));
+    assert_eq!(record.pane_id.as_deref(), Some("%9"));
+
+    record.tmux_socket = None;
+    assert!(!rehome_with(&tmux, &mut record, None).expect("no socket"));
+}
