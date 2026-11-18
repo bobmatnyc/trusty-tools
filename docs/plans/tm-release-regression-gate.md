@@ -1,10 +1,10 @@
 # tm release regression gate: read-only command inventory (#11470)
 
 Start 2026-11-18T16:11:17Z. Inventory only; nothing is wired in.
-Binary under test: `/Users/masa/.cargo/bin/tm`, `tm --version` = `trusty-mpm 1.14.8`.
+Binary under test: `$HOME/.cargo/bin/tm`, `tm --version` = `trusty-mpm 1.14.8`.
 (`tm` on `PATH` is a mise shim that errors "not a valid shim", so the cargo-installed binary was used.)
 
-Method and limits. Every `--help` ran under `env -i HOME=<fresh mktemp> PATH=/usr/bin:/bin:/Users/masa/.cargo/bin TERM=dumb`.
+Method and limits. Every `--help` ran under `env -i HOME=<fresh mktemp> PATH=/usr/bin:/bin:$HOME/.cargo/bin TERM=dumb`.
 No `tm` subcommand was executed. Classification and expected exit codes come from `--help` text and source reading, not from runs.
 A trailing `?` on an exit code means the code is not backed by source or help text. Those need a calibration run (open question 1).
 Seconds are estimates, not measurements.
