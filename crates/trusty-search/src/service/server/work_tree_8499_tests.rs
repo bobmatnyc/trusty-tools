@@ -52,7 +52,14 @@ async fn create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree() {
         "the refusal must name the reason: {body}"
     );
     assert!(!in_repo.join("indexes").exists(), "no store was written");
-    assert_eq!(git(&repo, &["status", "--porcelain"]), "", "#8499");
+    // #11445: `TRUSTY_DATA_DIR` is process-global, so a concurrent test's
+    // `data_dir()` caller can drop a registry or lock file into `<repo>/data`
+    // while it points here. That is not the store this test is about.
+    assert_eq!(
+        work_tree_leftovers(&repo, &in_repo),
+        Vec::<String>::new(),
+        "#8499"
+    );
 
     // #8499: an `indexes.toml` row alone exempts nothing. With no store at the
     // resolved location, re-registering would create one in the work tree.
@@ -90,6 +97,48 @@ async fn create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree() {
         "a data dir outside the repo: {body}"
     );
     unregister(&state, "nested-outside-8499").await;
+}
+
+/// Paths `git status` reports in `repo`, minus the top-level files of
+/// `data_dir`, which carry no store.
+///
+/// Why (#11445): the #8499 property is that a refused registration leaves no
+/// STORE in the work tree. `git status` alone also reports a file a concurrent
+/// test's `data_dir()` caller wrote while the process-global
+/// `TRUSTY_DATA_DIR` named `data_dir`; under the bare workspace run that read
+/// `?? data/` and failed the test for a write the handler never made.
+/// What: lists `git status --porcelain --untracked-files=all` paths and drops
+/// regular files directly inside `data_dir`. Anything under a subdirectory of
+/// it (`indexes/<id>/`, an index store) and anything outside it still counts.
+/// Test: `create_refuses_a_data_dir_elsewhere_in_the_enclosing_work_tree`,
+/// `work_tree_leftovers_ignores_a_stray_file_but_not_a_store`.
+fn work_tree_leftovers(repo: &Path, data_dir: &Path) -> Vec<String> {
+    let rel = data_dir.strip_prefix(repo).unwrap_or(data_dir);
+    git(repo, &["status", "--porcelain", "--untracked-files=all"])
+        .lines()
+        .map(|l| l[3..].to_string())
+        .filter(|p| {
+            Path::new(p)
+                .strip_prefix(rel)
+                .map_or(true, |inner| inner.components().count() > 1)
+        })
+        .collect()
+}
+
+/// A stray top-level file in the data dir is tolerated; a store is not.
+///
+/// Why: pins the filter in [`work_tree_leftovers`] so it cannot hide a store.
+/// Test: this test.
+#[test]
+#[serial_test::parallel]
+fn work_tree_leftovers_ignores_a_stray_file_but_not_a_store() {
+    let (_dir, repo) = clean_repo("leftovers-11445-", Some("target/\n"));
+    let data = repo.join("data");
+    std::fs::create_dir_all(data.join("indexes").join("x")).expect("store dir");
+    std::fs::write(data.join("indexes.toml.lock"), "").expect("stray");
+    assert_eq!(work_tree_leftovers(&repo, &data), Vec::<String>::new());
+    std::fs::write(data.join("indexes").join("x").join("c.redb"), "").expect("store file");
+    assert_eq!(work_tree_leftovers(&repo, &data), ["data/indexes/x/c.redb"]);
 }
 
 /// Seed an `indexes.toml` row for a non-colocated `id` at `root`.
