@@ -88,7 +88,13 @@ pub fn window_state(clicks: u64) -> Value {
     ]
     .join("\n");
     // (element_index, role, label, parent_index, element_token)
-    type Row = (i64, &'static str, Option<&'static str>, Option<i64>, &'static str);
+    type Row = (
+        i64,
+        &'static str,
+        Option<&'static str>,
+        Option<i64>,
+        &'static str,
+    );
     let rows: [Row; 8] = [
         (0, "AXWindow", Some("fixture"), None, "tok-window"),
         (1, "AXTextField", Some(""), Some(0), "tok-field"),

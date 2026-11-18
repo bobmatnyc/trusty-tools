@@ -102,7 +102,8 @@ pub fn rule(tool: &str) -> Option<&'static Rule> {
 /// Postcondition: an `Ok` rule is never DENY and every one of its checks
 /// accepted `args`.
 /// Test: `unknown_tool_is_denied`, `brief_named_tools_are_denied`,
-/// `invoke_menu_is_denied`, `filter_refuses_click_pid_out_of_scope`.
+/// `invoke_menu_is_denied`, `non_object_args_are_refused`; the `refuses!` and
+/// `admits!` rows in `tests/spike_policy.rs`.
 pub fn check_call(tool: &str, args: &Value, scope: &Scope) -> Result<&'static Rule, PolicyError> {
     let rule = rule(tool).ok_or_else(|| PolicyError::new("unknown_tool", tool))?;
     if rule.verdict == Verdict::Deny {
