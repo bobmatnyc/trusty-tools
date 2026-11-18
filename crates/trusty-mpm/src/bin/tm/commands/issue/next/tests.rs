@@ -427,7 +427,7 @@ impl CommandRunner for FakeGh {
             .next()
             .unwrap_or("")
             .to_string();
-        let second_page = args.iter().any(|a| *a == "cursor=c1");
+        let second_page = args.contains(&"cursor=c1");
         self.seen.borrow_mut().push(op.clone());
         let data = match op.as_str() {
             "IntakeMeta" => {
@@ -509,4 +509,52 @@ fn a_rate_limited_graphql_answer_is_a_rate_limit_error() {
     };
     let err = source.fetch("o/r").expect_err("limited");
     assert!(matches!(err, NextError::RateLimited { .. }), "{err}");
+}
+
+#[test]
+fn cli_parses_issue_next_flags() {
+    use crate::cli::{Cli, Command, IssueCmd};
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "issue",
+        "next",
+        "--repo",
+        "o/r",
+        "--goal",
+        "G01",
+        "--limit",
+        "5",
+        "--json",
+    ])
+    .unwrap();
+    let Command::Issue {
+        cmd:
+            IssueCmd::Next {
+                repo,
+                goal,
+                limit,
+                json,
+            },
+        ..
+    } = cli.command.unwrap()
+    else {
+        panic!("not `issue next`");
+    };
+    assert_eq!(
+        (repo.as_deref(), goal.as_deref(), limit, json),
+        (Some("o/r"), Some("G01"), 5, true)
+    );
+    let bare = Cli::try_parse_from(["trusty-mpm", "issue", "next"]).unwrap();
+    assert!(matches!(
+        bare.command.unwrap(),
+        Command::Issue {
+            cmd: IssueCmd::Next {
+                limit: 10,
+                json: false,
+                ..
+            },
+            ..
+        }
+    ));
 }

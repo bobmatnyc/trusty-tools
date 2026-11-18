@@ -2386,53 +2386,6 @@ fn cli_parses_issue_current_and_states_and_repair() {
 }
 
 #[test]
-fn cli_parses_issue_next_flags() {
-    use crate::cli::IssueCmd;
-    let cli = Cli::try_parse_from([
-        "trusty-mpm",
-        "issue",
-        "next",
-        "--repo",
-        "o/r",
-        "--goal",
-        "G01",
-        "--limit",
-        "5",
-        "--json",
-    ])
-    .unwrap();
-    let Command::Issue {
-        cmd:
-            IssueCmd::Next {
-                repo,
-                goal,
-                limit,
-                json,
-            },
-        ..
-    } = cli.command.unwrap()
-    else {
-        panic!("not `issue next`");
-    };
-    assert_eq!(
-        (repo.as_deref(), goal.as_deref(), limit, json),
-        (Some("o/r"), Some("G01"), 5, true)
-    );
-    let bare = Cli::try_parse_from(["trusty-mpm", "issue", "next"]).unwrap();
-    assert!(matches!(
-        bare.command.unwrap(),
-        Command::Issue {
-            cmd: IssueCmd::Next {
-                limit: 10,
-                json: false,
-                ..
-            },
-            ..
-        }
-    ));
-}
-
-#[test]
 fn cli_parses_issue_seed_config_force() {
     // Why: `tm issue seed-config --force` must parse the overwrite flag (#1246).
     use crate::cli::IssueCmd;
