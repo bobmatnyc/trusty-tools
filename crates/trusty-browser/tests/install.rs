@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 use trusty_browser::assets::{self, EXTENSION_ID};
 use trusty_browser::codesign::{self, Codesign, Signer, Signing};
 use trusty_browser::install_host;
-use trusty_browser::launchd::{self, Launchctl, Layout, Outcome};
+use trusty_browser::launchd;
+#[cfg(target_os = "macos")]
+use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
 const PY_SIGNATURE: &str = "8189a4cbd58c1314d0a5d15ecf7c3bc40add49ce16adeb21ef7690711449b4e8";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
