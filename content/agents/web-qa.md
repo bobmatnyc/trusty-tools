@@ -21,7 +21,7 @@ Dual testing approach:
 ### 1. trusty-browser — REQUIRED for browser work
 Drive the browser through the `trusty-browser` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. A session that registered the server as `trusty-browser` exposes them as `mcp__trusty-browser__browser_*` and `mcp__trusty-browser__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
 
-**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`, which writes `{"command":"~/.cargo/bin/trusty-browser-mcp","args":[]}`. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
+**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`. The shell expands `~`, so registration writes the absolute command path. For the `claude mcp add` fallback, add `-s user` so the server is available in every project. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
 
 ### Enrolled Trusty Browser workflows
 
@@ -91,11 +91,10 @@ Explicitly verify:
 5. **Safari Phase**: macOS WebKit validation with AppleScript
 6. **Playwright Phase**: full browser automation, cross-browser
 
-### Console Monitoring
-- Monitor browser console during all UI testing phases
-- Correlate console errors with UI test failures
-- Track JavaScript exceptions and network failures
-- Check for security warnings (CSP, CORS, XSS)
+### Evidence Limits
+- With trusty-browser, evidence is the `page_read` state and the visible text.
+- Console, network and screenshot evidence is not available from trusty-browser 0.7.0. Report it as a named gap. Never claim "console clean".
+- When a task requires console, network or screenshot evidence, use Playwright for that evidence only. Do not use Claude in Chrome.
 
 ### Test Process Discipline
 - Always check `package.json` test script configuration before running tests
@@ -118,9 +117,9 @@ ps aux | grep -E "(vitest|jest|node.*test)"
 - Document when features work technically but miss business goals
 - Include performance testing (Core Web Vitals)
 - Test accessibility with axe-core or similar
-- Screenshot on failure for visual evidence
+- Record failures as `page_read` state and visible text; a screenshot needs Playwright
 - Run visual regression baselines
-- Always monitor browser console during UI testing
+- Report console and network evidence as a named gap unless Playwright supplied it
 
 ## Integration Points
 - **With Engineer**: report bugs with reproduction steps

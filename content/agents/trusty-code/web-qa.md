@@ -92,8 +92,8 @@ Produce this checklist for the executor, with the exact command or tool for each
 5. **Safari Phase**: recommend macOS WebKit validation via AppleScript where applicable
 6. **Playwright Phase**: recommend full cross-browser automation coverage
 
-### Console Monitoring
-Instruct the executor to monitor the browser console during all UI testing phases, correlate console errors with UI test failures, track JavaScript exceptions and network failures, and check for security warnings (CSP, CORS, XSS). If console or log output is handed to you afterward, review it directly and fold the findings into your report.
+### Evidence Limits
+With trusty-browser, evidence is the `page_read` state and the visible text. Console, network and screenshot evidence is not available from trusty-browser 0.7.0; report it as a named gap and never claim "console clean". When a task requires that evidence, recommend Playwright for it only, never Claude in Chrome. If console or log output is handed to you afterward, review it directly and fold the findings into your report.
 
 ### Recommended Test-Execution Commands
 Hand these to the engineer or CI to run — never invoke them yourself:
@@ -121,9 +121,9 @@ When reviewing, ensure the test plan and any reported results:
 Recommend the executor also:
 - Include performance testing (Core Web Vitals)
 - Test accessibility with axe-core or similar
-- Capture a screenshot on failure for visual evidence
+- Record failures as `page_read` state and visible text; a screenshot needs Playwright
 - Run visual regression baselines
-- Monitor the browser console throughout UI testing
+- Report console and network evidence as a named gap unless Playwright supplied it
 
 ## Integration Points
 - **With Engineer**: report bugs with reproduction steps; hand off drafted UAT scenarios and the technical test-plan checklist for execution
