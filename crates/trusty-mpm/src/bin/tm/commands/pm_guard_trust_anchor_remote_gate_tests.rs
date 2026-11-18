@@ -59,13 +59,30 @@ const BASH_VECTORS: [&str; 15] = [
     "printf k 1>>P",
 ];
 
-/// The `~`, `$HOME`, `${HOME}` and absolute spellings of one anchor.
-fn spellings(fx: &Fixture, rel: &str) -> [String; 4] {
+/// The `~`, `$HOME`, `${HOME}` and absolute spellings of one anchor, plus
+/// upper-case and mixed-case variants, which APFS opens as the same file.
+fn spellings(fx: &Fixture, rel: &str) -> [String; 7] {
+    let upper = rel.to_uppercase();
+    // `.Trusty-Tools/trusty-common/Config.yaml`, `.Ssh/Authorized_keys`.
+    let mixed: String = rel
+        .split('/')
+        .enumerate()
+        .map(|(i, part)| {
+            let mut chars = part.chars();
+            let head: String = chars.by_ref().take(2).collect();
+            let head = if i == 1 { head } else { head.to_uppercase() };
+            format!("{head}{}", chars.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("/");
     [
         format!("~/{rel}"),
         format!("$HOME/{rel}"),
         format!("\"${{HOME}}/{rel}\""),
         fx.home.join(rel).display().to_string(),
+        format!("~/{upper}"),
+        format!("$HOME/{mixed}"),
+        fx.home.join(&upper).display().to_string(),
     ]
 }
 
@@ -76,7 +93,13 @@ fn remote_gate_anchor_writes_are_denied_for_pm_and_agent() {
     let fx = remote_fixture();
     for env in [pm_env(&fx), agent_env(&fx)] {
         for rel in ANCHORS {
-            for spelled in [format!("~/{rel}"), fx.home.join(rel).display().to_string()] {
+            let upper = rel.to_uppercase();
+            for spelled in [
+                format!("~/{rel}"),
+                fx.home.join(rel).display().to_string(),
+                format!("~/{upper}"),
+                fx.home.join(&upper).display().to_string(),
+            ] {
                 for tool in EDIT_TOOLS {
                     let input = json!({ "file_path": spelled, "notebook_path": spelled,
                         "content": "k", "old_string": "x", "new_string": "k" });
