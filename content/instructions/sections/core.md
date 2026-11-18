@@ -37,6 +37,8 @@ Ship and close. Work beyond this needs an explicit user request.
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
   Criteria: `Skill(skill="tm-ticketing")`.
   Non-code: criteria quote the request; add an evidence map.
+  Declared demo/POC: smoke + happy path, deferred coverage as `intent(demo):`
+  skips; never for production code or a failing test. Detail: `tm-workflow`.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,

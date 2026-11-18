@@ -71,6 +71,37 @@ cto-reports, "MEDIUMs fixed") stays in force for that project only.
 **Acceptance criteria** set an issue's good-enough bar; the rule lives in
 `tm-ticketing`, `references/ticket-content.md`.
 
+## Demo and POC Work — Minimal Tests, Named Intentions
+
+<!-- rule:tm-workflow/demo-test-intentions -->
+Owner ruling 2026-11-18. A demo, POC, prototype or spike is work the issue or
+brief declares as one. Nothing else is in this class.
+
+**Minimal tests.** A demo ships with a smoke run plus a test of the core happy
+path. Those two pass like any other test.
+
+**Named intentions.** Each piece of coverage the demo defers is one skipped
+case whose reason starts with `intent(demo):` and states what is owed:
+
+- Rust: `#[ignore = "intent(demo): <what is owed>"]`
+- JS/TS: `it.todo("intent(demo): <what is owed>")`
+- Python: `@pytest.mark.skip(reason="intent(demo): <what is owed>")`
+
+An intention has no body and no assertion. It is not a placeholder assertion
+and it does not count as coverage.
+
+**Promotion to production.** Intentions tell the harness that the full suite is
+owed once scope is accepted for production. Promotion requires turning every
+intention into a real test. A reviewer or tool finds the open ones with
+`git grep -n 'intent(demo):'`; promotion is done when that grep returns nothing
+for the promoted code.
+
+**Limits.** This does not relax "scope down, never scope away" or "no
+placeholders, never `todo!()`". Intentions apply only to declared demo or POC
+work. They never stand in for coverage of production code, and they never
+replace or hide a failing test: a red test is fixed, not turned into an
+intention.
+
 ## Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets
 
 A document reported "goals only" was closed after one table row was deleted,
