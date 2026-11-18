@@ -104,6 +104,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `create` — File an epic tracker and its phase issues from a committed plan document
     - `defer` — Append one row to a tracker's `deferred` block (#8448)
     - `sync` — Regenerate a tracker's `phases` block from its live child issues
+  - `next` — List the ready issues to take next, ranked by goal, priority and age
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
