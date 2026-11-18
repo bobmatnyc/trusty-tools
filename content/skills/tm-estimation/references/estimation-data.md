@@ -64,7 +64,7 @@ delta 0.02 h (APPROVE). Fix rounds: 0.26 h and 0.13 h.
 | Cua spike | spike | 24 h | n/a | 0.63 | 2.6% | |
 | gate inventory | plan | 1 h | n/a | 0.11 | 11% | |
 | factory plan | plan | 0.5 h | n/a | 0.02 | 4% | |
-| tm-estimation skill | docs | 4 h | 0.1 | see commit | | This skill |
+| tm-estimation skill | docs | 4 h | 0.1 | 0.19 | 4.8% | 1.9× agent est.; worktree-guard retries |
 
 ## Human waits
 

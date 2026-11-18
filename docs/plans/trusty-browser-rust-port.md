@@ -6,7 +6,7 @@ Status: plan only, no code. Date 2026-11-17. Author: research agent.
 
 The source is in this repo, not a separate project. Commit `fb04ee366b` ("publish to PyPI at 0.7.0") sits on branch
 `feat/trusty-browser-pypi-0.7.0`, checked out at
-`/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a40f304632fcbb299`. Package root:
+`$HOME/trusty-mpm-projects/bobmatnyc/trusty-tools/.claude/worktrees/agent-a40f304632fcbb299`. Package root:
 `python/trusty-browser/` (`pyproject.toml`: name `trusty-browser`, version 0.7.0, Python >=3.12, deps `mcp`, `cryptography`, `keyring`).
 Entry points: `trusty-browser = trusty_browser.cli:main`, `trusty-browser-mcp = trusty_browser.agent_mcp:main` (`pyproject.toml` `[project.scripts]`).
 The spec of record is `python/trusty-browser/docs/activation-codes.md` (1133 lines; section map at lines 23-1119).
@@ -135,16 +135,21 @@ Estimate in hours at 8 h per engineer-day. Actual hours are agent wall-clock tim
 | 5 | 32 | 2026-11-17T21:43Z | 2026-11-17T22:03Z | 0.33 | Python server as byte oracle via fake agent.sock capture; one fix (pydantic byte-length truncation); no waits. trusty_mcp stdio loop unusable (sorts keys); types only. Commits 416ee8b901, 59641d33f7 |
 | 6 (non-live) | 32 | 2026-11-17T22:23Z | 2026-11-17T22:32Z | 0.15 | Suite already deterministic (0/90 flakes), warm slot; added smoke_e2e + test-seams serve switch. Live 2-profile soak deferred to cutover. Commit c49df6c20d |
 | CR critic round | 2 | 2026-11-17T22:33Z | 2026-11-17T22:37Z | 0.06 | Read-only review; APPROVE, 2 MEDIUM + 3 LOW |
-| FX fix round | 1 | 2026-11-17T22:36Z | | | |
+| FX fix round | 1 | 2026-11-17T22:36Z | 2026-11-17T22:41Z | 0.08 | Scoped fixes, warm cache. Commit 82d86cd37c |
 | SEC flag fix | 1 | 2026-11-17T21:38Z | 2026-11-17T21:43Z | 0.08 | Small scoped fix, warm cache. Commit 0cb96b0009 |
-| 7 | 16 | 2026-11-17T22:36Z | | | |
+| SG Developer ID signing | 2 | 2026-11-17T23:13Z | 2026-11-17T23:18Z | 0.10 | Seam + fake pattern already in place; real-sign test no dialog. Gap found: trusty-browser-mcp reads the Keychain item but is unsigned. Commit ef6eeca07b |
+| SG2 sign mcp sibling | 1 | 2026-11-17T23:19Z | 2026-11-17T23:26Z | 0.10 | Small; workflow mode reads Keychain at start. Commit 4966d23f4b |
+| CO cutover (steps 1-7) | 4 | 2026-11-17T23:26Z | 2026-11-18T03:57Z | 4.52 wall (0.17 agent + 4.35 human wait) | Unplanned Keychain dialog at migrate-keychain step (not at signing as planned), owner away; service outage 23:35-03:56Z. Lesson: dialog-capable steps need a scheduled desk slot and a wait limit. Soak pending |
+| RD crate README + comparison | 3 | 2026-11-18T08:06Z | 2026-11-18T08:08Z | 0.04 | One-pass write from source; parallel source fetches; no hands-on competitor testing. Commit 275d713590 |
+| SK two-profile soak | 4 | 2026-11-18T14:59Z | 2026-11-18T15:29Z | 0.50 (30 min soak by design) | Broker stable: pid unchanged, RSS/fd flat, 0 stderr, 330/330 session ops ok; page_read 0/60 PermissionNeeded (only tabs were ungranted new-tab pages) |
+| 7 | 16 | 2026-11-17T22:41Z | 2026-11-17T22:45Z | 0.07 | Metadata/docs only; gates green first run. Push/PR/publish not yet counted. Commit bc066fedbe |
 
 Single engineer, serial. Phases 3 and 5 can run in parallel with two engineers (about 25 calendar days).
 
 ## 5. Cutover on the Studio
 
 How Studio runs it today (this machine, `terraces-mac-studio`):
-- launchd job `com.trusty.browser`, `~/Library/LaunchAgents/com.trusty.browser.plist`: `ProgramArguments` = uv venv `python` + `.../site-packages/trusty_browser/service.py --state /Users/masa/.trusty/browser serve`, `RunAtLoad`, `KeepAlive`, `Umask 63`, logs in the state dir.
+- launchd job `com.trusty.browser`, `~/Library/LaunchAgents/com.trusty.browser.plist`: `ProgramArguments` = uv venv `python` + `.../site-packages/trusty_browser/service.py --state $HOME/.trusty/browser serve`, `RunAtLoad`, `KeepAlive`, `Umask 63`, logs in the state dir.
 - Install by `uv tool install` at `~/.local/share/uv/tools/trusty-browser`; shims `~/.local/bin/trusty-browser` and `~/.local/bin/trusty-browser-mcp`.
 - State `~/.trusty/browser` (files listed in section 1). Prior install records and backups: `~/.trusty/browser.bak-20261115*` and `*.INSTALL.txt`.
 - Chrome native host manifests in `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (`install_host.py:57-63`), launchers in the state dir run the venv python on `native_host.py`.
