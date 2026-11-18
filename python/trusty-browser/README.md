@@ -1,5 +1,11 @@
 # Trusty Browser
 
+> **Deprecated.** This Python package is replaced by the Rust crate
+> [`trusty-browser`](../../crates/trusty-browser/README.md)
+> (`cargo install trusty-browser --locked`), which keeps the same sockets,
+> registry, Keychain item and launchd job. See that README for the cutover with
+> `migrate-keychain`. This tree is frozen and receives no new features.
+
 Trusty Browser routes a web-QA workflow to one enrolled Google Chrome profile, one exact page URL and one signed-in site account. The Python service listens on private Unix domain sockets. Chrome starts the bundled native messaging hosts over stdio. A rust-colored border marks the edges of the controlled tab. The robot toolbar icon shows an ON badge while any tab in that profile is under control.
 
 ## Install on macOS

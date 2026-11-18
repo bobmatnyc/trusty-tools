@@ -1,0 +1,1324 @@
+[
+  {
+    "conn": "enroll-pair",
+    "action": "open",
+    "socket": "enrollment.sock"
+  },
+  {
+    "conn": "enroll-pair",
+    "action": "send",
+    "label": "enroll-pair",
+    "file": "001-enroll-pair.bin"
+  },
+  {
+    "conn": "enroll-pair",
+    "action": "recv",
+    "label": "enroll-pair-reply",
+    "file": "002-enroll-pair-reply.bin"
+  },
+  {
+    "conn": "enroll-pair",
+    "action": "close",
+    "label": "close"
+  },
+  {
+    "conn": "-",
+    "action": "write",
+    "path": "extension/manifest.json",
+    "file": "004-state-file.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "open",
+    "socket": "service.sock"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "hello",
+    "file": "006-hello.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "challenge",
+    "file": "007-challenge.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "proof",
+    "file": "008-proof.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "ack",
+    "file": "009-ack.bin"
+  },
+  {
+    "conn": "enroll-connect",
+    "action": "open",
+    "socket": "enrollment.sock"
+  },
+  {
+    "conn": "enroll-connect",
+    "action": "send",
+    "label": "connect",
+    "file": "011-connect.bin"
+  },
+  {
+    "conn": "enroll-connect",
+    "action": "recv",
+    "label": "connect-reply",
+    "file": "012-connect-reply.bin"
+  },
+  {
+    "conn": "enroll-connect",
+    "action": "close",
+    "label": "close"
+  },
+  {
+    "conn": "a",
+    "action": "open",
+    "socket": "agent.sock"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "attach-a",
+    "file": "015-attach-a.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "attach-a-ack",
+    "file": "016-attach-a-ack.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select",
+    "file": "017-select.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-command",
+    "file": "018-select-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-worker-reply",
+    "file": "019-select-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-reply",
+    "file": "020-select-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read",
+    "file": "021-page-read.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-read-command",
+    "file": "022-page-read-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-read-worker-reply",
+    "file": "023-page-read-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-reply",
+    "file": "024-page-read-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read-controls",
+    "file": "025-page-read-controls.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-read-controls-command",
+    "file": "026-page-read-controls-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-read-controls-worker-reply",
+    "file": "027-page-read-controls-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-controls-reply",
+    "file": "028-page-read-controls-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-find",
+    "file": "029-page-find.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-find-command",
+    "file": "030-page-find-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-find-worker-reply",
+    "file": "031-page-find-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-find-reply",
+    "file": "032-page-find-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click",
+    "file": "033-page-click.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-click-command",
+    "file": "034-page-click-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-click-worker-reply",
+    "file": "035-page-click-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-reply",
+    "file": "036-page-click-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-retry",
+    "file": "037-page-click-retry.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-retry-reply",
+    "file": "038-page-click-retry-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-conflict",
+    "file": "039-page-click-conflict.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-conflict-reply",
+    "file": "040-page-click-conflict-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-no-request-id",
+    "file": "041-page-click-no-request-id.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-no-request-id-reply",
+    "file": "042-page-click-no-request-id-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-empty-request-id",
+    "file": "043-page-click-empty-request-id.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-empty-request-id-reply",
+    "file": "044-page-click-empty-request-id-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-int-request-id",
+    "file": "045-page-click-int-request-id.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-int-request-id-reply",
+    "file": "046-page-click-int-request-id-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-dialog",
+    "file": "047-page-click-dialog.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-click-dialog-command",
+    "file": "048-page-click-dialog-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-click-dialog-worker-reply",
+    "file": "049-page-click-dialog-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-dialog-reply",
+    "file": "050-page-click-dialog-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-hover",
+    "file": "051-page-hover.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-hover-command",
+    "file": "052-page-hover-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-hover-worker-reply",
+    "file": "053-page-hover-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-hover-reply",
+    "file": "054-page-hover-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-type",
+    "file": "055-page-type.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-type-command",
+    "file": "056-page-type-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-type-worker-reply",
+    "file": "057-page-type-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-type-reply",
+    "file": "058-page-type-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-scroll",
+    "file": "059-page-scroll.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-scroll-command",
+    "file": "060-page-scroll-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-scroll-worker-reply",
+    "file": "061-page-scroll-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-scroll-reply",
+    "file": "062-page-scroll-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-press",
+    "file": "063-page-press.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-press-command",
+    "file": "064-page-press-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-press-worker-reply",
+    "file": "065-page-press-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-press-reply",
+    "file": "066-page-press-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-select",
+    "file": "067-page-select.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-select-command",
+    "file": "068-page-select-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-select-worker-reply",
+    "file": "069-page-select-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-select-reply",
+    "file": "070-page-select-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-drag",
+    "file": "071-page-drag.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-drag-command",
+    "file": "072-page-drag-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-drag-worker-reply",
+    "file": "073-page-drag-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-drag-reply",
+    "file": "074-page-drag-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-upload",
+    "file": "075-page-upload.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-upload-command",
+    "file": "076-page-upload-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-upload-worker-reply",
+    "file": "077-page-upload-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-upload-reply",
+    "file": "078-page-upload-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-upload-retry",
+    "file": "079-page-upload-retry.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-upload-retry-reply",
+    "file": "080-page-upload-retry-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-downloads",
+    "file": "081-page-downloads.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-downloads-command",
+    "file": "082-page-downloads-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-downloads-worker-reply",
+    "file": "083-page-downloads-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-downloads-reply",
+    "file": "084-page-downloads-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-navigate",
+    "file": "085-page-navigate.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-navigate-command",
+    "file": "086-page-navigate-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-navigate-worker-reply",
+    "file": "087-page-navigate-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-navigate-reply",
+    "file": "088-page-navigate-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-navigate-floor",
+    "file": "089-page-navigate-floor.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-navigate-floor-reply",
+    "file": "090-page-navigate-floor-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-navigate-userinfo",
+    "file": "091-page-navigate-userinfo.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-navigate-userinfo-reply",
+    "file": "092-page-navigate-userinfo-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-back",
+    "file": "093-page-back.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-back-command",
+    "file": "094-page-back-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-back-worker-reply",
+    "file": "095-page-back-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-back-reply",
+    "file": "096-page-back-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-forward",
+    "file": "097-page-forward.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-forward-command",
+    "file": "098-page-forward-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-forward-worker-reply",
+    "file": "099-page-forward-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-forward-reply",
+    "file": "100-page-forward-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-reload",
+    "file": "101-page-reload.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-reload-command",
+    "file": "102-page-reload-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-reload-worker-reply",
+    "file": "103-page-reload-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-reload-reply",
+    "file": "104-page-reload-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-document-changed",
+    "file": "105-page-click-document-changed.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-click-document-changed-command",
+    "file": "106-page-click-document-changed-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-click-document-changed-worker-reply",
+    "file": "107-page-click-document-changed-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-document-changed-reply",
+    "file": "108-page-click-document-changed-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-type-text-dropped",
+    "file": "109-page-type-text-dropped.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-type-text-dropped-command",
+    "file": "110-page-type-text-dropped-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-type-text-dropped-worker-reply",
+    "file": "111-page-type-text-dropped-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-type-text-dropped-reply",
+    "file": "112-page-type-text-dropped-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-type-text-dropped-retry",
+    "file": "113-page-type-text-dropped-retry.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-type-text-dropped-retry-reply",
+    "file": "114-page-type-text-dropped-retry-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read-bad-max-chars",
+    "file": "115-page-read-bad-max-chars.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-bad-max-chars-reply",
+    "file": "116-page-read-bad-max-chars-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-find-no-terms",
+    "file": "117-page-find-no-terms.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-find-no-terms-reply",
+    "file": "118-page-find-no-terms-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-press-bad-key",
+    "file": "119-page-press-bad-key.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-press-bad-key-reply",
+    "file": "120-page-press-bad-key-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-press-dup-mods",
+    "file": "121-page-press-dup-mods.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-press-dup-mods-reply",
+    "file": "122-page-press-dup-mods-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-scroll-element-no-ref",
+    "file": "123-page-scroll-element-no-ref.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-scroll-element-no-ref-reply",
+    "file": "124-page-scroll-element-no-ref-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-upload-bad-base64",
+    "file": "125-page-upload-bad-base64.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-upload-bad-base64-reply",
+    "file": "126-page-upload-bad-base64-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-click-extra",
+    "file": "127-page-click-extra.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-click-extra-reply",
+    "file": "128-page-click-extra-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-with-request-id",
+    "file": "129-select-with-request-id.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-with-request-id-reply",
+    "file": "130-select-with-request-id-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-negative-tab",
+    "file": "131-select-negative-tab.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-negative-tab-reply",
+    "file": "132-select-negative-tab-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-bool-tab",
+    "file": "133-select-bool-tab.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-bool-tab-reply",
+    "file": "134-select-bool-tab-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-malformed-probe",
+    "file": "135-select-malformed-probe.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-malformed-probe-command",
+    "file": "136-select-malformed-probe-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-malformed-probe-worker-reply",
+    "file": "137-select-malformed-probe-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-malformed-probe-reply",
+    "file": "138-select-malformed-probe-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "tabs",
+    "file": "139-tabs.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "tabs-command",
+    "file": "140-tabs-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "tabs-worker-reply",
+    "file": "141-tabs-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "tabs-reply",
+    "file": "142-tabs-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-hover-weird",
+    "file": "143-page-hover-weird.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-hover-weird-command",
+    "file": "144-page-hover-weird-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-hover-weird-worker-reply",
+    "file": "145-page-hover-weird-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-hover-weird-reply",
+    "file": "146-page-hover-weird-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read-stale",
+    "file": "147-page-read-stale.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-stale-reply",
+    "file": "148-page-read-stale-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "release-stale",
+    "file": "149-release-stale.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "release-stale-reply",
+    "file": "150-release-stale-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-again",
+    "file": "151-select-again.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-again-command",
+    "file": "152-select-again-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-again-worker-reply",
+    "file": "153-select-again-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-again-reply",
+    "file": "154-select-again-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-hover-unknown",
+    "file": "155-page-hover-unknown.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-hover-unknown-command",
+    "file": "156-page-hover-unknown-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-hover-unknown-worker-reply",
+    "file": "157-page-hover-unknown-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-hover-unknown-reply",
+    "file": "158-page-hover-unknown-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-hover-unknown-retry",
+    "file": "159-page-hover-unknown-retry.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-hover-unknown-retry-reply",
+    "file": "160-page-hover-unknown-retry-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read-after-unknown",
+    "file": "161-page-read-after-unknown.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-after-unknown-reply",
+    "file": "162-page-read-after-unknown-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-third",
+    "file": "163-select-third.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-third-command",
+    "file": "164-select-third-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-third-worker-reply",
+    "file": "165-select-third-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-third-reply",
+    "file": "166-select-third-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "page-read-identity",
+    "file": "167-page-read-identity.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "page-read-identity-command",
+    "file": "168-page-read-identity-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "page-read-identity-worker-reply",
+    "file": "169-page-read-identity-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "page-read-identity-reply",
+    "file": "170-page-read-identity-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-fourth",
+    "file": "171-select-fourth.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-fourth-command",
+    "file": "172-select-fourth-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-fourth-worker-reply",
+    "file": "173-select-fourth-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-fourth-reply",
+    "file": "174-select-fourth-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "switch",
+    "file": "175-switch.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "switch-command",
+    "file": "176-switch-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "switch-worker-reply",
+    "file": "177-switch-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "switch-reply",
+    "file": "178-switch-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "switch-bad-shape",
+    "file": "179-switch-bad-shape.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "switch-bad-shape-command",
+    "file": "180-switch-bad-shape-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "switch-bad-shape-worker-reply",
+    "file": "181-switch-bad-shape-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "switch-bad-shape-reply",
+    "file": "182-switch-bad-shape-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "select-fifth",
+    "file": "183-select-fifth.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "select-fifth-command",
+    "file": "184-select-fifth-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "select-fifth-worker-reply",
+    "file": "185-select-fifth-worker-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "select-fifth-reply",
+    "file": "186-select-fifth-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "open",
+    "socket": "agent.sock"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "attach-b",
+    "file": "188-attach-b.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "attach-b-ack",
+    "file": "189-attach-b-ack.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-select-claimed",
+    "file": "190-b-select-claimed.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-select-claimed-reply",
+    "file": "191-b-select-claimed-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-switch-foreign-lease",
+    "file": "192-b-switch-foreign-lease.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-switch-foreign-lease-reply",
+    "file": "193-b-switch-foreign-lease-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "release",
+    "file": "194-release.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "release-reply",
+    "file": "195-release-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "release-again",
+    "file": "196-release-again.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "release-again-reply",
+    "file": "197-release-again-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-select",
+    "file": "198-b-select.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "b-select-command",
+    "file": "199-b-select-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "b-select-worker-reply",
+    "file": "200-b-select-worker-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-select-reply",
+    "file": "201-b-select-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-select-repeat",
+    "file": "202-b-select-repeat.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "b-select-repeat-command",
+    "file": "203-b-select-repeat-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "b-select-repeat-worker-reply",
+    "file": "204-b-select-repeat-worker-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-select-repeat-reply",
+    "file": "205-b-select-repeat-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "bad-frame-op",
+    "file": "206-bad-frame-op.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "bad-frame-op-reply",
+    "file": "207-bad-frame-op-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-select-8",
+    "file": "208-b-select-8.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "b-select-8-command",
+    "file": "209-b-select-8-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "send",
+    "label": "b-select-8-worker-reply",
+    "file": "210-b-select-8-worker-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-select-8-reply",
+    "file": "211-b-select-8-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-page-click-lost",
+    "file": "212-b-page-click-lost.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "recv",
+    "label": "b-page-click-lost-command",
+    "file": "213-b-page-click-lost-command.bin"
+  },
+  {
+    "conn": "worker",
+    "action": "close",
+    "label": "close"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-page-click-lost-reply",
+    "file": "215-b-page-click-lost-reply.bin"
+  },
+  {
+    "conn": "b",
+    "action": "send",
+    "label": "b-page-click-lost-retry",
+    "file": "216-b-page-click-lost-retry.bin"
+  },
+  {
+    "conn": "b",
+    "action": "recv",
+    "label": "b-page-click-lost-retry-reply",
+    "file": "217-b-page-click-lost-retry-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "send",
+    "label": "tabs-no-peer",
+    "file": "218-tabs-no-peer.bin"
+  },
+  {
+    "conn": "a",
+    "action": "recv",
+    "label": "tabs-no-peer-reply",
+    "file": "219-tabs-no-peer-reply.bin"
+  },
+  {
+    "conn": "a",
+    "action": "close",
+    "label": "close"
+  },
+  {
+    "conn": "b",
+    "action": "close",
+    "label": "close"
+  }
+]

@@ -69,6 +69,9 @@ mod grant_fakes;
 mod log_stamp;
 mod methods;
 pub mod project;
+// #11464: the remote gate's server methods and its forced-command front.
+mod remote;
+mod remote_gate;
 mod router;
 // #9793: the sandbox consent override and backend refusal.
 mod sandbox;
@@ -91,7 +94,7 @@ pub use ancestry::{
 pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
-    BackendWait,
+    BackendWait, RemoteAgent,
 };
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use copy_source::CopySourceAudit;
@@ -107,6 +110,11 @@ pub use grant::{
 pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
+pub use remote_gate::{
+    EXIT_REFUSED, EXIT_UNAVAILABLE, EXIT_USAGE, GATE_DEADLINE, GATE_SUBCOMMAND, GateConfig,
+    GateReply, MAX_FRAME_BYTES, gate_reply, run_from_args as run_remote_gate_from_args,
+    run_remote_gate,
+};
 pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
     default_backends, run_to_exit, serve, serve_with,
