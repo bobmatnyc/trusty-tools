@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.9] — 2026-11-18
+
+### Fixed
+
+- `tm pm-guard` no longer refuses unparseable skill or agent frontmatter whose only backslashes cannot spell a `hooks` key, such as `"C:\Users\me"` or `"match \d+"`. A hex escape (`\x`, `\u`, `\U`) or an escaped line break still fails closed.
+- docs.rs builds the trusty-mpm docs again: two module-level intra-doc links that newer rustdoc cannot resolve now name their full path (#11451).
+
+### Changed
+
+- A fresh trusty-mpm session now launches on the default tmux server. `TM_WORKSPACE_TMUX=1` opts in to the per-workspace `tm-ws-*` server.
+- Resuming a stopped session whose workspace server holds no live pane recreates its pane on the default tmux server, keeping its project, account and Claude conversation. A live pane is never moved, and `TM_WORKSPACE_TMUX=1` keeps a session on its workspace server.
+
 ## [1.14.8] — 2026-11-18
 
 ### Added
