@@ -290,6 +290,14 @@ jobs:
       # #8716: the rustdoc-links job's scope decision and the gate's own
       # fail-closed arms. Neither needs a doc build; the gate's selftest scores
       # captured cargo streams. It ran in no workflow before this step.
+      # #11470: the release gates for a trusty-mpm publish — published content
+      # coverage and the clean-HOME command walk — driven with fixtures and a
+      # stub binary; no network, no toolchain.
+      - name: Release content-gate selftests (#11470)
+        run: |
+          bash scripts/check-content-release-coverage-selftest.sh
+          bash scripts/release-gate-selftest.sh
+
       - name: Rustdoc scope + link-gate selftests (#8716)
         run: |
           bash scripts/rustdoc-links-scope-selftest.sh
