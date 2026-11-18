@@ -415,12 +415,14 @@ fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
     assert!(err.to_string().contains("tm content update"), "{err}");
 
     let src = tempfile::tempdir().unwrap();
-    let bytes = bundle(A, 1, A.as_bytes());
-    install_from_file(&cache, &bundle_file(src.path(), A, &bytes, true)).expect("pin A");
+    // #11470: at the minimum, so the launch resolver serves it.
+    let tag = crate::content::min_content::MIN_CONTENT_TAG;
+    let bytes = bundle(tag, 1, tag.as_bytes());
+    install_from_file(&cache, &bundle_file(src.path(), tag, &bytes, true)).expect("pin");
     for fetch in [Fetch::Never, Fetch::OnFirstUse] {
         let content = resolve_for_in(Some(&project), None, Some(&cache), fetch)
             .expect("the installed bundle serves");
-        assert_eq!(installed_tag(&content), A);
+        assert_eq!(installed_tag(&content), tag);
     }
 
     let content = resolve_for_in(Some(&stale), None, Some(&cache), Fetch::Never)

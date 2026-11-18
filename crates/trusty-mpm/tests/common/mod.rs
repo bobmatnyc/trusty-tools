@@ -383,13 +383,14 @@ pub fn assert_refusal_names_a_policy(reason: &str) {
 /// What: a gzip tar of every file under `content/{agents,skills,instructions}`
 /// (#9012: skills, PM sections, output styles and SM instructions are content
 /// too) under the bundle paths the packager uses, plus `bundle-manifest.toml`,
-/// written as `content-v0.0.1.tar.gz` with a `content-lock.toml` pinning its
+/// written as `<MIN_CONTENT_TAG>.tar.gz` with a `content-lock.toml` pinning its
 /// sha256. Idempotent per `home`.
 pub fn stage_repo_content(home: &Path) {
     use trusty_common::content::{ContentLock, LOCK_FILE_NAME};
     use trusty_common::integrity::Sha256Digest;
 
-    const TAG: &str = "content-v0.0.1";
+    // #11470: at the minimum, so the launch resolver serves it.
+    const TAG: &str = trusty_mpm::content::min_content::MIN_CONTENT_TAG;
     let cache = home.join(".trusty-mpm").join("content");
     if cache.join(LOCK_FILE_NAME).exists() {
         return;

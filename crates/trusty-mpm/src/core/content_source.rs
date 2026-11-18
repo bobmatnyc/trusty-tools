@@ -53,7 +53,8 @@ pub fn resolve_for(dir: Option<&Path>, fetch: Fetch) -> Result<ResolvedContent, 
 /// else the installed bundle in `cache`. A checkout that is found is the
 /// source; a failure reading it is returned, never answered by another
 /// source. With no checkout, [`Fetch::OnFirstUse`] fetches the release when
-/// no lock is installed; [`Fetch::Never`] answers `NotInstalled`.
+/// no lock is installed, and refuses a pin below the minimum content release
+/// (#11470); [`Fetch::Never`] answers `NotInstalled`.
 /// [`AgentContentError::NoCacheDir`] when no checkout serves and `cache` is
 /// `None`.
 /// Test: `a_managed_workspace_resolves_the_cache_once_a_bundle_lands`,
@@ -73,7 +74,12 @@ pub fn resolve_for_in(
     }
     let cache = cache.ok_or(AgentContentError::NoCacheDir)?;
     match fetch {
-        Fetch::OnFirstUse => resolve_or_fetch_at(cache, DevOverride::Off),
+        Fetch::OnFirstUse => {
+            let resolved = resolve_or_fetch_at(cache, DevOverride::Off)?;
+            // #11470: a pin below the minimum is refused before a file is read.
+            crate::content::min_content::check_pin(resolved.source())?;
+            Ok(resolved)
+        }
         Fetch::Never => resolve_content_in(cache, DevOverride::Off),
     }
 }

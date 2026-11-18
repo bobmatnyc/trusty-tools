@@ -200,6 +200,32 @@ pub enum CacheError {
         "no published content-v* release upstream (drafts and pre-releases are never installed)"
     )]
     NoReleases,
+    /// #11470: `--content-ref` names a release older than this binary reads.
+    #[error(
+        "refusing {tag}: it is older than {minimum}, the oldest content release this tm \
+         reads, so it lacks files this tm needs; run `tm content update` without \
+         --content-ref for the newest release"
+    )]
+    BelowMinimum {
+        /// The requested tag.
+        tag: String,
+        /// The oldest tag this binary reads.
+        minimum: String,
+    },
+    /// #11470: no published release is at or above the binary's minimum.
+    #[error(
+        "no published content release is at or above {minimum}, the oldest this tm reads \
+         (the newest published is {newest}); {fallback}; none is published yet, so install \
+         the previous tm release or wait for {minimum}"
+    )]
+    NoQualifyingRelease {
+        /// The newest published release.
+        newest: String,
+        /// The oldest tag this binary reads.
+        minimum: String,
+        /// What stays in use.
+        fallback: Fallback,
+    },
     /// Neither the sidecar nor the bundle's file name names a release tag.
     #[error(
         "cannot tell which release {} is: its sidecar names no content-vX.Y.Z.tar.gz file, \
@@ -322,11 +348,37 @@ pub fn update<S: ReleaseSource + ?Sized>(
     source: &S,
     content_ref: Option<&str>,
 ) -> Result<UpdateOutcome, CacheError> {
+    // #11470: never pin, or call "already current", a release below the minimum.
+    update_with_minimum(
+        cache,
+        source,
+        content_ref,
+        super::min_content::MIN_CONTENT_TAG,
+    )
+}
+
+/// [`update`] with the minimum tag named (#11470).
+///
+/// Why: the cache tests publish `content-v0.x` fixtures, far below the real
+/// minimum, to exercise everything else about an update.
+/// What: as [`update`], and a target below `minimum` is refused before
+/// anything is fetched: [`CacheError::BelowMinimum`] for a `content_ref`,
+/// [`CacheError::NoQualifyingRelease`] for the newest release. A pin that
+/// verifies is never reported current while it is below `minimum`.
+/// Test: `update_refuses_when_no_release_meets_the_minimum`,
+/// `update_refuses_a_content_ref_below_the_minimum`,
+/// `update_moves_a_stale_pin_to_the_first_qualifying_release`.
+pub fn update_with_minimum<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+    content_ref: Option<&str>,
+    minimum: &str,
+) -> Result<UpdateOutcome, CacheError> {
     if let Some(tag) = content_ref {
         content::validate_tag(tag)?;
     }
     let _guard = UpdateGuard::acquire(cache)?;
-    update_locked(cache, source, content_ref)
+    update_locked(cache, source, content_ref, Some(minimum))
 }
 
 /// Installs the newest release when, and only when, no lock is present
@@ -351,7 +403,7 @@ pub fn install_if_missing<S: ReleaseSource + ?Sized>(
     if cache.join(LOCK_FILE_NAME).symlink_metadata().is_ok() {
         return Ok(None);
     }
-    update_locked(cache, source, None).map(Some)
+    update_locked(cache, source, None, None).map(Some)
 }
 
 /// The body of [`update`], run while the caller holds the update lock.
@@ -359,6 +411,7 @@ fn update_locked<S: ReleaseSource + ?Sized>(
     cache: &Path,
     source: &S,
     content_ref: Option<&str>,
+    minimum: Option<&str>,
 ) -> Result<UpdateOutcome, CacheError> {
     let current = match read_lock(cache) {
         Ok(lock) => lock,
@@ -373,6 +426,20 @@ fn update_locked<S: ReleaseSource + ?Sized>(
         Some(tag) => tag.to_owned(),
         None => latest_tag(source, &fallback)?,
     };
+    // #11470: checked before the "already current" answer and before a fetch.
+    if let Some(minimum) = minimum.filter(|m| super::min_content::is_below(&target, m)) {
+        return Err(match content_ref {
+            Some(_) => CacheError::BelowMinimum {
+                tag: target,
+                minimum: minimum.to_owned(),
+            },
+            None => CacheError::NoQualifyingRelease {
+                newest: target,
+                minimum: minimum.to_owned(),
+                fallback,
+            },
+        });
+    }
     if let Some((tag, sha256)) = verified.filter(|(tag, _)| *tag == target) {
         return Ok(UpdateOutcome {
             tag,
@@ -540,7 +607,7 @@ fn outcome(lock: ContentLock, action: UpdateAction) -> UpdateOutcome {
 /// Test: `update_never_installs_a_draft_or_a_pre_release`,
 /// `update_passes_over_a_404_top_tag_but_not_a_403_or_5xx`,
 /// `github_source_reads_a_404_tag_listing_as_a_failure`.
-fn latest_tag<S: ReleaseSource + ?Sized>(
+pub(crate) fn latest_tag<S: ReleaseSource + ?Sized>(
     source: &S,
     fallback: &Fallback,
 ) -> Result<String, CacheError> {
