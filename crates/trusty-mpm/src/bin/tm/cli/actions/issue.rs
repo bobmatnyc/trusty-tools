@@ -111,6 +111,9 @@ pub(crate) enum IssueCmd {
         /// Print JSON.
         #[arg(long)]
         json: bool,
+        /// Ignore the 10-minute cache: fetch now and rewrite it.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Resolve a mid-transition issue carrying multiple state labels.
     Repair {

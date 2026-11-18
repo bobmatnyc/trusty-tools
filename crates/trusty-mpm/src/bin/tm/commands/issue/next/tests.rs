@@ -356,10 +356,16 @@ fn a_fresh_cache_is_read_without_fetching() {
         calls: Cell::new(0),
         answer: Ok(one_issue_snap()),
     };
-    let (_, cached) = cached_snapshot(&source, "o/r", Some(&path), 1_000).expect("first");
+    let (_, cached) = cached_snapshot(&source, "o/r", Some(&path), 1_000, false).expect("first");
     assert!(!cached);
-    let (hit, cached) =
-        cached_snapshot(&source, "o/r", Some(&path), 1_000 + CACHE_TTL_SECS - 1).expect("hit");
+    let (hit, cached) = cached_snapshot(
+        &source,
+        "o/r",
+        Some(&path),
+        1_000 + CACHE_TTL_SECS - 1,
+        false,
+    )
+    .expect("hit");
     assert!(cached);
     assert_eq!(hit, one_issue_snap());
     assert_eq!(source.calls.get(), 1);
@@ -373,9 +379,9 @@ fn a_stale_cache_is_refetched() {
         calls: Cell::new(0),
         answer: Ok(one_issue_snap()),
     };
-    cached_snapshot(&source, "o/r", Some(&path), 1_000).expect("first");
+    cached_snapshot(&source, "o/r", Some(&path), 1_000, false).expect("first");
     let (_, cached) =
-        cached_snapshot(&source, "o/r", Some(&path), 1_000 + CACHE_TTL_SECS).expect("stale");
+        cached_snapshot(&source, "o/r", Some(&path), 1_000 + CACHE_TTL_SECS, false).expect("stale");
     assert!(!cached);
     assert_eq!(source.calls.get(), 2);
 }
@@ -388,13 +394,13 @@ fn a_rate_limit_fails_closed() {
         calls: Cell::new(0),
         answer: Ok(one_issue_snap()),
     };
-    cached_snapshot(&good, "o/r", Some(&path), 1_000).expect("seed the cache");
+    cached_snapshot(&good, "o/r", Some(&path), 1_000, false).expect("seed the cache");
     let limited = CountingSource {
         calls: Cell::new(0),
         answer: Err("API rate limit exceeded for user ID 1".into()),
     };
     // The stale cache must not stand in for the refused read.
-    let err = cached_snapshot(&limited, "o/r", Some(&path), 1_000 + CACHE_TTL_SECS)
+    let err = cached_snapshot(&limited, "o/r", Some(&path), 1_000 + CACHE_TTL_SECS, false)
         .expect_err("rate limit is an error");
     assert!(matches!(err, NextError::RateLimited { .. }), "{err}");
     assert!(err.to_string().contains("no issues returned"), "{err}");
@@ -412,6 +418,33 @@ fn rate_limit_texts_are_recognised() {
 /// A `gh` fake that answers each GraphQL operation by name and records them.
 struct FakeGh {
     seen: RefCell<Vec<String>>,
+    /// How the fake misbehaves; `Fault::None` answers every page well.
+    fault: Fault,
+}
+
+/// One way a GraphQL reply can go wrong.
+#[derive(Clone, Copy, PartialEq)]
+enum Fault {
+    None,
+    /// Every reply is `{"data":{}}`.
+    EmptyData,
+    /// `repository` is null, with no `errors`.
+    NullRepository,
+    /// The issues reply has no `issues` connection.
+    NoIssuesConnection,
+    /// Page 2 of the board query fails.
+    BoardPage2,
+    /// Page 2 of the issues query fails.
+    IssuesPage2,
+}
+
+impl FakeGh {
+    fn new(fault: Fault) -> Self {
+        Self {
+            seen: RefCell::new(Vec::new()),
+            fault,
+        }
+    }
 }
 
 impl CommandRunner for FakeGh {
@@ -429,7 +462,31 @@ impl CommandRunner for FakeGh {
             .to_string();
         let second_page = args.contains(&"cursor=c1");
         self.seen.borrow_mut().push(op.clone());
+        let fault = self.fault;
+        if fault == Fault::EmptyData {
+            return Ok(CommandOutput {
+                success: true,
+                stdout: r#"{"data":{}}"#.into(),
+                stderr: String::new(),
+            });
+        }
+        if second_page
+            && ((fault == Fault::BoardPage2 && op == "IntakeBoard")
+                || (fault == Fault::IssuesPage2 && op == "IntakeIssues"))
+        {
+            anyhow::bail!("gh: HTTP 502 on page 2 of {op}");
+        }
         let data = match op.as_str() {
+            "IntakeMeta" if fault == Fault::NullRepository => {
+                serde_json::json!({"viewer": {"login": "me"}, "repository": null})
+            }
+            "IntakeIssues" if fault == Fault::NoIssuesConnection => {
+                serde_json::json!({"repository": {}})
+            }
+            "IntakeIssues" if fault == Fault::IssuesPage2 => {
+                serde_json::json!({"repository": {"issues": {"pageInfo": {"hasNextPage": true, "endCursor": "c1"},
+                "nodes": []}}})
+            }
             "IntakeMeta" => {
                 serde_json::json!({"viewer": {"login": "me"}, "repository": {"projectsV2": {"nodes": [
                 {"id": "P1", "number": 45, "closed": false}, {"id": "P2", "number": 9, "closed": true}]}}})
@@ -463,9 +520,7 @@ impl CommandRunner for FakeGh {
 
 #[test]
 fn status_is_read_in_one_batched_query_per_open_board() {
-    let fake = FakeGh {
-        seen: RefCell::new(Vec::new()),
-    };
+    let fake = FakeGh::new(Fault::None);
     let source = GhSource {
         client: BoardClient::new(&fake),
     };
@@ -526,6 +581,7 @@ fn cli_parses_issue_next_flags() {
         "--limit",
         "5",
         "--json",
+        "--refresh",
     ])
     .unwrap();
     let Command::Issue {
@@ -535,6 +591,7 @@ fn cli_parses_issue_next_flags() {
                 goal,
                 limit,
                 json,
+                refresh,
             },
         ..
     } = cli.command.unwrap()
@@ -542,8 +599,8 @@ fn cli_parses_issue_next_flags() {
         panic!("not `issue next`");
     };
     assert_eq!(
-        (repo.as_deref(), goal.as_deref(), limit, json),
-        (Some("o/r"), Some("G01"), 5, true)
+        (repo.as_deref(), goal.as_deref(), limit, json, refresh),
+        (Some("o/r"), Some("G01"), 5, true, true)
     );
     let bare = Cli::try_parse_from(["trusty-mpm", "issue", "next"]).unwrap();
     assert!(matches!(
@@ -552,9 +609,119 @@ fn cli_parses_issue_next_flags() {
             cmd: IssueCmd::Next {
                 limit: 10,
                 json: false,
+                refresh: false,
                 ..
             },
             ..
         }
     ));
+}
+
+/// Run `cached_snapshot` over a `FakeGh` with `fault`; return the result and
+/// whether a cache file exists afterwards.
+fn fetch_through(fault: Fault) -> (Result<Snapshot, NextError>, bool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache/o-r.json");
+    let fake = FakeGh::new(fault);
+    let source = GhSource {
+        client: BoardClient::new(&fake),
+    };
+    let got = cached_snapshot(&source, "o/r", Some(&path), 1_000, false).map(|(s, _)| s);
+    (got, path.exists())
+}
+
+#[test]
+fn a_malformed_graphql_reply_fails_closed_and_is_not_cached() {
+    for fault in [
+        Fault::EmptyData,
+        Fault::NullRepository,
+        Fault::NoIssuesConnection,
+    ] {
+        let (got, cached) = fetch_through(fault);
+        assert!(
+            matches!(got, Err(NextError::Fetch { .. })),
+            "a malformed reply must be an error, got {got:?}"
+        );
+        assert!(!cached, "a malformed reply was cached");
+    }
+}
+
+#[test]
+fn a_page_two_failure_fails_closed_and_is_not_cached() {
+    for fault in [Fault::BoardPage2, Fault::IssuesPage2] {
+        let (got, cached) = fetch_through(fault);
+        assert!(
+            got.is_err(),
+            "a page-2 failure must be an error, got {got:?}"
+        );
+        assert!(!cached, "a partial read was cached");
+    }
+}
+
+#[test]
+fn a_garbage_cache_file_is_refetched() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("o-r.json");
+    std::fs::write(&path, b"{not json").expect("write garbage");
+    let source = CountingSource {
+        calls: Cell::new(0),
+        answer: Ok(one_issue_snap()),
+    };
+    let (snap, cached) =
+        cached_snapshot(&source, "o/r", Some(&path), 1_000, false).expect("refetch");
+    assert!(!cached);
+    assert_eq!(snap, one_issue_snap());
+    assert_eq!(source.calls.get(), 1);
+    let (_, cached) = cached_snapshot(&source, "o/r", Some(&path), 1_001, false).expect("hit");
+    assert!(cached, "the refetch did not rewrite the garbage file");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_cache_is_private_to_the_user() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("cache/o-r.json");
+    let source = CountingSource {
+        calls: Cell::new(0),
+        answer: Ok(one_issue_snap()),
+    };
+    cached_snapshot(&source, "o/r", Some(&path), 1_000, false).expect("first");
+    let mode =
+        |p: &std::path::Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode(path.parent().expect("dir")), 0o700, "cache dir mode");
+    assert_eq!(mode(&path), 0o600, "cache file mode");
+    let leftovers: Vec<_> = std::fs::read_dir(path.parent().expect("dir"))
+        .expect("read_dir")
+        .map(|e| e.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        leftovers,
+        vec![std::ffi::OsString::from("o-r.json")],
+        "temp file left behind"
+    );
+}
+
+#[test]
+fn refresh_bypasses_and_rewrites_the_cache() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("o-r.json");
+    let old = CountingSource {
+        calls: Cell::new(0),
+        answer: Ok(one_issue_snap()),
+    };
+    cached_snapshot(&old, "o/r", Some(&path), 1_000, false).expect("seed");
+    let mut newer = one_issue_snap();
+    newer.issues[0].title = "retitled".into();
+    let fresh = CountingSource {
+        calls: Cell::new(0),
+        answer: Ok(newer.clone()),
+    };
+    let (got, cached) = cached_snapshot(&fresh, "o/r", Some(&path), 1_001, true).expect("refresh");
+    assert!(!cached, "--refresh read the cache");
+    assert_eq!(fresh.calls.get(), 1);
+    assert_eq!(got, newer);
+    let (hit, cached) = cached_snapshot(&old, "o/r", Some(&path), 1_002, false).expect("hit");
+    assert!(cached);
+    assert_eq!(hit, newer, "--refresh did not rewrite the cache");
 }

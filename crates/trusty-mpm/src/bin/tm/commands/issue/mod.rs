@@ -240,6 +240,7 @@ fn dispatch<S: TicketSystem>(
             goal,
             limit,
             json,
+            refresh,
         } => {
             next::run(
                 runner,
@@ -248,6 +249,7 @@ fn dispatch<S: TicketSystem>(
                     goal,
                     limit,
                     json,
+                    refresh,
                 },
             )?;
         }

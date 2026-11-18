@@ -6,9 +6,11 @@
 //! What: [`IntakeSource`] (the seam the tests fake), [`GhSource`] (paged
 //! GraphQL through [`BoardClient`]: one repo query, the label pages, one
 //! items query per linked board at 100 a page, the open-issue pages), and
-//! [`cached_snapshot`]. A rate-limit answer is [`NextError::RateLimited`].
+//! [`cached_snapshot`]. A rate-limit answer is [`NextError::RateLimited`]; a
+//! reply missing a connection is [`NextError::Fetch`] and is never cached.
 //! Test: `a_fresh_cache_is_read_without_fetching`,
-//! `a_stale_cache_is_refetched`, `a_rate_limit_fails_closed`.
+//! `a_stale_cache_is_refetched`, `a_rate_limit_fails_closed`,
+//! `a_malformed_graphql_reply_fails_closed_and_is_not_cached`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +23,34 @@ use super::model::{BoardStatus, IssueRow, Snapshot};
 use crate::commands::issue::board::client::BoardClient;
 use crate::commands::issue::board::error::BoardError;
 use crate::commands::issue::board::snapshot::{next_cursor, nodes, split_repo, text};
+
+/// The connection at `path` under `data`, checked for shape.
+///
+/// What: every key on `path` must be present and non-null, the connection
+/// must carry a `nodes` array, and a `hasNextPage: true` page must carry an
+/// `endCursor`. Anything else is [`NextError::Fetch`], so a malformed reply
+/// fails closed instead of reading as an empty repo (code-critic BLOCK).
+/// Test: `a_malformed_graphql_reply_fails_closed_and_is_not_cached`.
+fn conn_of<'v>(data: &'v Value, path: &[&str]) -> Result<&'v Value, NextError> {
+    let malformed = |why: &str| NextError::Fetch {
+        detail: format!("malformed GraphQL reply at `{}`: {why}", path.join(".")),
+    };
+    let mut v = data;
+    for key in path {
+        v = v
+            .get(key)
+            .filter(|x| !x.is_null())
+            .ok_or_else(|| malformed(&format!("`{key}` is missing or null")))?;
+    }
+    if !v["nodes"].is_array() {
+        return Err(malformed("no `nodes` array"));
+    }
+    let page = &v["pageInfo"];
+    if page["hasNextPage"].as_bool() == Some(true) && page["endCursor"].as_str().is_none() {
+        return Err(malformed("`hasNextPage` without `endCursor`"));
+    }
+    Ok(v)
+}
 
 /// Cache lifetime, seconds (owner ruling: 10 minutes).
 pub(crate) const CACHE_TTL_SECS: u64 = 600;
@@ -77,12 +107,18 @@ impl GhSource<'_> {
             doc,
             &[("owner", Some(owner)), ("name", Some(name))],
         )?;
-        let boards = nodes(&data["repository"]["projectsV2"])
+        let login = text(&data["viewer"]["login"]);
+        if login.is_empty() {
+            return Err(NextError::Fetch {
+                detail: "malformed GraphQL reply: `viewer.login` is missing or empty".into(),
+            });
+        }
+        let boards = nodes(conn_of(&data, &["repository", "projectsV2"])?)
             .iter()
             .filter(|p| p["closed"].as_bool() != Some(true))
             .map(|p| (text(&p["id"]), p["number"].as_u64().unwrap_or(0)))
             .collect();
-        Ok((text(&data["viewer"]["login"]), boards))
+        Ok((login, boards))
     }
 
     fn labels(&self, owner: &str, name: &str) -> Result<Vec<String>, NextError> {
@@ -101,7 +137,7 @@ impl GhSource<'_> {
                     ("cursor", cursor.as_deref()),
                 ],
             )?;
-            let conn = &data["repository"]["labels"];
+            let conn = conn_of(&data, &["repository", "labels"])?;
             out.extend(nodes(conn).iter().map(|n| text(&n["name"])));
             match next_cursor(conn) {
                 Some(c) => cursor = Some(c),
@@ -128,7 +164,7 @@ impl GhSource<'_> {
                     ("cursor", cursor.as_deref()),
                 ],
             )?;
-            let conn = &data["node"]["items"];
+            let conn = conn_of(&data, &["node", "items"])?;
             for n in nodes(conn) {
                 let c = &n["content"];
                 let ours = c["__typename"].as_str() == Some("Issue")
@@ -169,7 +205,7 @@ impl GhSource<'_> {
                     ("cursor", cursor.as_deref()),
                 ],
             )?;
-            let conn = &data["repository"]["issues"];
+            let conn = conn_of(&data, &["repository", "issues"])?;
             out.extend(nodes(conn).iter().map(|n| {
                 IssueRow {
                     number: n["number"].as_u64().unwrap_or(0),
@@ -232,20 +268,24 @@ pub(crate) fn cache_path(repo: &str) -> Option<PathBuf> {
 }
 
 /// `repo`'s snapshot from the cache at `path` when younger than
-/// [`CACHE_TTL_SECS`] at `now`, else from `source`, written back to `path`.
+/// [`CACHE_TTL_SECS`] at `now` and `refresh` is false, else from `source`,
+/// written back to `path`.
 ///
-/// What: an unreadable or stale cache is refetched. A fetch failure is
-/// returned as is and the old cache is never used in its place. A cache write
+/// What: an unreadable or stale cache is refetched; `refresh` skips the read
+/// and rewrites the file. A fetch failure is returned as is, nothing is
+/// written, and the old cache is never used in its place. A cache write
 /// failure is reported on stderr and does not fail the read.
 /// Test: `a_fresh_cache_is_read_without_fetching`,
-/// `a_stale_cache_is_refetched`, `a_rate_limit_fails_closed`.
+/// `a_stale_cache_is_refetched`, `a_rate_limit_fails_closed`,
+/// `refresh_bypasses_and_rewrites_the_cache`.
 pub(crate) fn cached_snapshot(
     source: &dyn IntakeSource,
     repo: &str,
     path: Option<&Path>,
     now: u64,
+    refresh: bool,
 ) -> Result<(Snapshot, bool), NextError> {
-    if let Some(hit) = path.and_then(|p| read_cache(p, repo, now)) {
+    if !refresh && let Some(hit) = path.and_then(|p| read_cache(p, repo, now)) {
         return Ok((hit, true));
     }
     let snapshot = source.fetch(repo)?;
@@ -254,18 +294,58 @@ pub(crate) fn cached_snapshot(
             fetched_at: now,
             snapshot: snapshot.clone(),
         };
-        let written = p
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| {
-                let json = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
-                std::fs::write(p, json)
-            });
-        if let Err(e) = written {
+        if let Err(e) = write_cache(p, &file) {
             eprintln!("tm issue next: cache not written to {}: {e}", p.display());
         }
     }
     Ok((snapshot, false))
+}
+
+/// Write `file` to `path` atomically, private to the user.
+///
+/// What: the directory is created 0700 (and narrowed to 0700 if it exists);
+/// the JSON goes to a 0600 temp file in that directory, then is renamed over
+/// `path`, so a reader never sees a half-written file. The cache holds
+/// private issue bodies.
+/// Test: `the_cache_is_private_to_the_user`.
+fn write_cache(path: &Path, file: &CacheFile) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache path has no parent directory"))?;
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        builder.mode(0o700);
+        builder.create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    builder.create(dir)?;
+    let json = serde_json::to_vec(file).map_err(std::io::Error::other)?;
+    let name = path
+        .file_name()
+        .map_or_else(|| "cache".into(), |n| n.to_string_lossy().into_owned());
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    // A leftover temp file keeps its old mode; remove it so `mode` applies.
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let result = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(&json).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn read_cache(path: &Path, repo: &str, now: u64) -> Option<Snapshot> {

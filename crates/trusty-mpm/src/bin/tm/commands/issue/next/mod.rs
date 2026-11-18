@@ -101,6 +101,8 @@ pub(crate) struct NextArgs {
     pub(crate) limit: usize,
     /// JSON output.
     pub(crate) json: bool,
+    /// Skip the cache read and rewrite the cache from a fresh fetch.
+    pub(crate) refresh: bool,
 }
 
 /// `tm issue next` entry point.
@@ -132,7 +134,8 @@ pub(crate) fn run(runner: &dyn CommandRunner, args: NextArgs) -> anyhow::Result<
         .unwrap_or(0);
     let source = fetch::GhSource { client };
     let cache = fetch::cache_path(&repo);
-    let (snap, cached) = fetch::cached_snapshot(&source, &repo, cache.as_deref(), now)?;
+    let (snap, cached) =
+        fetch::cached_snapshot(&source, &repo, cache.as_deref(), now, args.refresh)?;
     let map = LabelMap::detect(&snap.repo_labels, ovr.as_ref());
     let outcome = model::rank(&snap, &map, goal.as_ref(), args.limit);
     if args.json {

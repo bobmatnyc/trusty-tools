@@ -5,7 +5,7 @@ open issues that are ready to take, ranked, and it never lists an issue that is
 not ready.
 
 ```bash
-tm issue next [--repo OWNER/REPO] [--goal <id>] [--limit N] [--json]
+tm issue next [--repo OWNER/REPO] [--goal <id>] [--limit N] [--json] [--refresh]
 ```
 
 `--repo` defaults to the current directory's repo. `--limit` defaults to 10.
@@ -74,4 +74,15 @@ The snapshot is cached for 10 minutes at
 `~/.trusty-tools/trusty-mpm/issue-next-cache/<owner>-<repo>.json`; the ranking
 is recomputed from it on each run. A rate-limit refusal or any other read
 failure exits non-zero and lists nothing. An expired cache is never used in
-place of a failed read.
+place of a failed read. A reply that lacks a connection the query asked for
+(`repository`, `labels`, `items`, `issues`), lacks `viewer.login`, or reports
+a next page with no cursor is a read failure too, and is not cached.
+`--refresh` skips the cache read and rewrites the file from a fresh fetch.
+
+The cache holds issue bodies, so its directory is created `0700` and the file
+`0600`; the file is written to a temp file in the same directory and renamed
+into place.
+
+The list can be up to 10 minutes old. The consuming agent re-reads the one
+issue it picks (state, assignee and board Status) before it claims it, and
+drops the issue if it closed, gained another assignee, or left a ready Status.

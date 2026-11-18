@@ -277,6 +277,10 @@ tm issue next --repo OWNER/REPO --goal G01 --limit 5 --json # for scripts
   `tm issue repair` candidate.
 - **Rate limit:** the command exits non-zero and lists nothing. Do not fall
   back to `gh issue list`.
+- **Re-read before claiming.** The list can be up to 10 minutes old. Before
+  claiming the one issue you pick, re-read it (`gh issue view <n> --json
+  state,assignees` and its board Status) and drop it if it closed, gained
+  another assignee, or left a ready Status. `--refresh` skips the cache.
 - Adversarially review a taken issue before working it, as before.
 
 Mapping and override file: `docs/reference/issue-next.md` in trusty-tools.
