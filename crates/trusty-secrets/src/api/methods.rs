@@ -64,6 +64,11 @@ pub mod method {
     pub const TICKET_VOID: &str = "secrets.ticket.void";
     /// Whether a ticket is pending (#10459, DOC-86 §4).
     pub const TICKET_PENDING: &str = "secrets.ticket.pending";
+    /// Return one value to `trusty-secrets remote-gate`, for an allowlisted
+    /// host and project (#11464).
+    pub const REMOTE_RESOLVE: &str = "secrets.remote.resolve";
+    /// A remote host's preflight through `remote-gate` (#11464).
+    pub const REMOTE_DOCTOR: &str = "secrets.remote.doctor";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

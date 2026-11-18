@@ -38,6 +38,7 @@ use super::errors::ErrorKind;
 use super::exec;
 use super::grant::GrantRegistry;
 use super::methods::{self, Caller, MethodFn};
+use super::remote;
 use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
 use super::ticket::TicketStore;
@@ -293,6 +294,14 @@ pub struct State {
     /// nothing. #10459 PR1: from the password database, like
     /// `architect_records`.
     pub(crate) tm_bin_dir: Option<PathBuf>,
+    /// The owner uid of an executable file; tests give a fake (#11464).
+    pub(crate) exe_owner: fn(&Path) -> Option<u32>,
+}
+
+/// The uid owning the file at `path`, from `stat`; `None` when unreadable.
+pub(crate) fn file_owner(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.uid())
 }
 
 impl State {
@@ -375,6 +384,7 @@ impl State {
             architect_records: super::architect::records_dir(account_home),
             tickets: Arc::new(TicketStore::os_default()),
             tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),
+            exe_owner: file_owner,
         }
     }
 
@@ -437,7 +447,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 13] = [
+pub(crate) const METHODS: [(&str, MethodFn); 15] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -454,6 +464,9 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
     (method::TICKET_MINT, ticket_methods::mint),
     (method::TICKET_VOID, ticket_methods::void),
     (method::TICKET_PENDING, ticket_methods::pending),
+    // #11464: the remote gate's two methods.
+    (method::REMOTE_RESOLVE, remote::resolve),
+    (method::REMOTE_DOCTOR, remote::doctor),
 ];
 
 /// The `secrets.*` router over `state`.
