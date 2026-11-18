@@ -68,6 +68,9 @@ and no fix round for it, unless the user asks.
 A project ruling that sets a stricter bar for a named project (for example
 cto-reports, "MEDIUMs fixed") stays in force for that project only.
 
+**Acceptance criteria** set an issue's good-enough bar; the rule lives in
+`tm-ticketing`, `references/ticket-content.md`.
+
 ## Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets
 
 A document reported "goals only" was closed after one table row was deleted,
