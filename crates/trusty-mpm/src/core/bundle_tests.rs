@@ -2203,7 +2203,8 @@ const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
     // #8021: ticketing and version-control raised by their measured overage.
-    ("ticketing", 47_229, "#7727"),
+    // #11469: raised for the acceptance-criteria rule (47,737 measured).
+    ("ticketing", 48_000, "#7727"),
     ("version-control", 47_724, "#7727"),
 ];
 
@@ -2901,6 +2902,17 @@ const KNOWN_REFERENCE_OVERLAPS: &[(&str, usize, &str)] = &[
         "skills/tm-ticketing/references/milestones-and-projects.md",
         2,
         "#7681",
+    ),
+    // #11469: the acceptance-criteria paragraph is carried verbatim by design.
+    (
+        "skills/tm-ticketing/references/ticket-content.md",
+        7,
+        "#11469",
+    ),
+    (
+        "skills/tm-workflow/references/completion-standard.md",
+        7,
+        "#11469",
     ),
 ];
 

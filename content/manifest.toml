@@ -168,7 +168,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/ticketing.md"
-version = "0.1.3"
+version = "0.2.0"
 
 [[member]]
 path = "agents/trusty-agents/agents/assistant/persona.md"
@@ -668,7 +668,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-ticketing.md"
-version = "2.2.0"
+version = "2.3.0"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"

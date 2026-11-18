@@ -49,10 +49,12 @@ use crate::core::trusty_tools_config::ResolvedTicketing;
 /// What: the seven fields the requirements read, plus the three relationship
 /// fields. `gh` 2.98 serves `parent`, `blockedBy` and `subIssues` from both
 /// verbs, so the audit needs no separate `gh api` call for them. `title` is
-/// read by `tm pr open` for a phase issue's `[EPIC_N PHASE_M]` tag (#9571).
-/// Test: `json_fields_cover_every_audited_requirement`.
-pub const AUDIT_JSON_FIELDS: &str = "number,title,milestone,projectItems,labels,comments,state,\
-     createdAt,parent,blockedBy,subIssues";
+/// read by `tm pr open` for a phase issue's `[EPIC_N PHASE_M]` tag (#9571);
+/// `body` by the acceptance-criteria row (#11469).
+/// Test: `json_fields_cover_every_audited_requirement`,
+/// `json_fields_request_the_issue_body`.
+pub const AUDIT_JSON_FIELDS: &str = "number,title,body,milestone,projectItems,labels,comments,\
+     state,createdAt,parent,blockedBy,subIssues";
 
 /// The comment prefix that excuses an unset milestone (#7067's escape hatch).
 pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
@@ -154,6 +156,9 @@ pub struct IssueFacts {
     /// Issue title; `tm pr open` reads its phase tag (#9571).
     #[serde(default)]
     pub title: String,
+    /// Issue body; searched for acceptance criteria (#11469).
+    #[serde(default)]
+    pub body: String,
     /// The single milestone, or `None` when unset.
     #[serde(default)]
     pub milestone: Option<TitleRef>,
@@ -202,6 +207,8 @@ pub enum Verdict {
     Skip,
     /// Reported for the reader; never gating.
     Info,
+    /// A requirement is unmet but not yet gating (#11469); never exits 1.
+    Warn,
 }
 
 impl Verdict {
@@ -213,6 +220,7 @@ impl Verdict {
             Self::Fail => "FAIL",
             Self::Skip => "SKIP",
             Self::Info => "INFO",
+            Self::Warn => "WARN",
         }
     }
 }
@@ -283,6 +291,15 @@ const REQ_PROJECT: &str = "project";
 const REQ_MILESTONE: &str = "milestone";
 const REQ_COMPONENT: &str = "component label";
 const REQ_RELATIONSHIPS: &str = "relationships";
+const REQ_ACCEPTANCE: &str = "acceptance criteria";
+
+/// The warning an issue body with no acceptance criteria gets (#11469).
+///
+/// Why: the row only warns for one release, so the text must name the rule and
+/// both accepted forms for the filer to fix it without opening the standard.
+pub const ACCEPTANCE_WARNING: &str = "no acceptance criteria — TICKETING.md \"Acceptance \
+     criteria\" rule: add an `Acceptance criteria:` list or an `## Acceptance criteria` \
+     heading (warn only; fails from a later release)";
 
 /// The requirement columns a batch summary table carries.
 pub const SUMMARY_REQUIREMENTS: &[&str] = &[REQ_PROJECT, REQ_MILESTONE, REQ_COMPONENT];
@@ -294,7 +311,7 @@ pub const SUMMARY_REQUIREMENTS: &[&str] = &[REQ_PROJECT, REQ_MILESTONE, REQ_COMP
 /// requirement, what it found. Taking [`ResolvedTicketing`] rather than
 /// hardcoded booleans is what keeps the audit and `tm issue standard` reporting
 /// the same rules.
-/// What: four rows in a fixed order. `project` and `milestone` are PASS/FAIL
+/// What: five rows in a fixed order. `project` and `milestone` are PASS/FAIL
 /// only when `project_required` / `milestone_required` are set and INFO
 /// otherwise; an unset milestone with a `no-milestone: <reason>` comment is
 /// SKIP with the reason quoted. `component label` requires at least one label
@@ -319,6 +336,7 @@ pub fn audit_issue(
         project_row(facts, ticketing),
         milestone_row(facts, ticketing),
         component_row(facts, components),
+        acceptance_row(facts),
         relationships_row(facts),
     ];
     IssueAudit {
@@ -492,6 +510,42 @@ fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
         verdict,
         detail,
     }
+}
+
+/// The `acceptance criteria` row — PASS or WARN, never FAIL (#11469).
+///
+/// Why: the acceptance-criteria rule (TICKETING.md) warns for one release
+/// before it gates, so an issue filed before the rule never turns the audit red.
+/// What: PASS when any body line, with `*` emphasis removed, is a labelled
+/// `Acceptance criteria:` list head or a `#`-heading whose text is exactly
+/// `Acceptance` or `Acceptance criteria` (case-insensitive, optional trailing
+/// `:`); otherwise WARN with [`ACCEPTANCE_WARNING`]. Testability is not judged.
+/// Test: `a_labelled_acceptance_criteria_list_passes`,
+/// `an_acceptance_heading_passes`,
+/// `a_body_without_acceptance_criteria_warns_and_does_not_fail`.
+fn acceptance_row(facts: &IssueFacts) -> AuditRow {
+    let (verdict, detail) = if has_acceptance_criteria(&facts.body) {
+        (Verdict::Pass, "present".to_string())
+    } else {
+        (Verdict::Warn, ACCEPTANCE_WARNING.to_string())
+    };
+    AuditRow::new(REQ_ACCEPTANCE, verdict, detail)
+}
+
+/// Whether `body` carries an acceptance-criteria label or heading.
+fn has_acceptance_criteria(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.replace('*', "").trim().to_ascii_lowercase();
+        if line.starts_with("acceptance criteria:") {
+            return true;
+        }
+        let Some(heading) = line.strip_prefix('#') else {
+            return false;
+        };
+        let text = heading.trim_start_matches('#').trim();
+        let text = text.strip_suffix(':').unwrap_or(text).trim_end();
+        text == "acceptance" || text == "acceptance criteria"
+    })
 }
 
 /// The `relationships` row — always INFO.

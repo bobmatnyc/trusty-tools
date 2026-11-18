@@ -189,6 +189,14 @@ Ship and close. Work beyond this needs an explicit user request.
   fix uses that one round. Never widen scope.
   Detail: `Skill(skill="tm-workflow")`.
 
+**Acceptance criteria.** Every bug, feature, task and epic issue states one to
+four testable acceptance criteria, each a check that can fail for a named
+reason; an epic states them on its phase issues. They set the good-enough bar:
+the issue closes when each criterion has evidence. Anything beyond the bar
+becomes a follow-up issue filed at close, with its own criteria and the
+`stretch` label; it never widens this issue's scope. The closing note lists
+every criterion with its evidence, plus the follow-up issue numbers or "none".
+
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
 Unbudgeted: `git status/add/commit/log/diff/pull/stash`, ≤3 config/doc file
