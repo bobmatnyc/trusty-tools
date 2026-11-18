@@ -545,7 +545,7 @@ fn acceptance_row(facts: &IssueFacts) -> AuditRow {
 /// indented deeper than the label count, and the first other non-blank line
 /// ends the section. A criterion must not be a placeholder (`...`, `TBD`,
 /// `TODO`, `none`). A heading is a `#` run followed by whitespace.
-fn has_acceptance_criteria(body: &str) -> bool {
+pub fn has_acceptance_criteria(body: &str) -> bool {
     // #11469: `None` = not collecting; `Some(None)` = under a heading;
     // `Some(Some(indent))` = under a bare label at that indent.
     let mut collecting: Option<Option<usize>> = None;
