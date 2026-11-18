@@ -24,6 +24,8 @@
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
+- `CLAUDE.md` costs every turn. Needed on every prompt → `CLAUDE.md`.
+  Needed only sometimes → a skill, `docs/`, or memory.
 
 ## Completion Standard
 
@@ -33,6 +35,7 @@ Ship and close. Work beyond this needs an explicit user request.
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Criteria: `Skill(skill="tm-ticketing")`.
   Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
@@ -45,6 +48,3 @@ Ship and close. Work beyond this needs an explicit user request.
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
   Detail: `Skill(skill="tm-workflow")`.
-
-**Acceptance criteria:** 1–4 testable per issue; the close cites each, plus
-`stretch` follow-ups or "none". `Skill(skill="tm-ticketing")`.
