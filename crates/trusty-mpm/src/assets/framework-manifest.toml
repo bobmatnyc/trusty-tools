@@ -303,6 +303,7 @@ universal = [
   "tm-delegation-patterns",
   "tm-doctor",
   "tm-epic",
+  "tm-estimation",
   "tm-git-file-tracking",
   "tm-init",
   "tm-issues-prune",

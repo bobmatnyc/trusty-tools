@@ -615,6 +615,10 @@ path = "skills/tm-epic.md"
 version = "0.1.0"
 
 [[member]]
+path = "skills/tm-estimation.md"
+version = "0.1.0"
+
+[[member]]
 path = "skills/tm-git-file-tracking.md"
 version = "1.0.0"
 
