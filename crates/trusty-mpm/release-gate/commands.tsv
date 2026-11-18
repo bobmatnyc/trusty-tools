@@ -183,6 +183,7 @@ issue states	SAFE	$H	issue states	-	0	-	YAML only
 issue standard	SAFE	$H	issue standard	-	0	-	config only, no gh
 issue seed-config	SAFE	$H	issue seed-config	-	0	-	writes the user config in temp HOME
 issue audit	NETWORK	$H	issue audit N	-	0	-	excluded (rule 4: only content update runs). 2 to 4 gh calls (issue view x2, plus board GraphQL if configured)
+issue next	NETWORK	$H	issue next --repo bobmatnyc/trusty-tools --limit 5	-	0	-	excluded (rule 4: only content update runs). Batched GraphQL: meta, label pages, one items query per board page, issue pages; 10-minute cache
 issue epic create	SKIP	-	-	-	-	-	files issues
 issue epic sync	SKIP	-	-	-	-	-	edits a tracker issue body
 issue epic defer	SKIP	-	-	-	-	-	edits a tracker issue body
