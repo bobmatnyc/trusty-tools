@@ -1,0 +1,22 @@
+[
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"fixture-capture\", \"version\": \"0\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"experimental\":{},\"prompts\":{\"listChanged\":false},\"resources\":{\"subscribe\":false,\"listChanged\":false},\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"trusty-browser\",\"version\":\"1.30.0\"}}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+  "recv": null,
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": [\"a.txt\"]}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"UploadsDisabled\\\",\\\"message\\\":\\\"Uploads are off: start the MCP server with --upload-root DIR to allow files under DIR\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"page_upload\", \"arguments\": {\"lease\": \"L1\", \"ref\": \"e9\", \"paths\": []}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool page_upload: {\\\"ok\\\":false,\\\"error\\\":\\\"UploadsDisabled\\\",\\\"message\\\":\\\"Uploads are off: start the MCP server with --upload-root DIR to allow files under DIR\\\"}\"}],\"isError\":true}}",
+  "frames": []
+ }
+]
