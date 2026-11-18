@@ -19,7 +19,9 @@
 #   TRUSTY_SANDBOX=1, TRUSTY_DATA_DIR_OVERRIDE, TMUX_TMPDIR, TMUX_SOCKET (that socket)
 #   and TRUSTY_MPM_SOCKET, all under S (plus GITHUB_TOKEN/GH_TOKEN when set,
 #   for `content update` only). A row passes when its exit equals the table's
-#   expected exit; any other exit fails the gate. SKIP and NETWORK rows never
+#   expected exit and its stdout+stderr contains the table's expected-output
+#   substring (`-` for none; required when the expected exit is not 0, so an
+#   error row cannot pass on the wrong error). A lane that runs no row fails. SKIP and NETWORK rows never
 #   run. After each lane it proves the host is as it was: the real
 #   ~/.trusty-mpm/config.toml and ~/.trusty-tools/trusty-mpm/config.yaml hash
 #   the same, `tmux ls` on the user server prints the same, the count of
@@ -31,8 +33,9 @@
 #     TAG (`content update --content-ref TAG`); the 1.14.8 replay is v2.4.0.
 #   --calibrate prints each row's actual exit and output tail and never fails
 #     on a mismatch; it exists to pin a table's `?` exits once.
-# Exit: 0 every row matched; 1 a row or the host check failed; 2 usage or a
-#   table with an unpinned (`?`) exit.
+# Exit: 0 every row matched; 1 a row, an empty lane or the host check failed;
+#   2 usage, a table with an unpinned (`?`) exit, or a non-zero-exit row with
+#   no expected output.
 # Test: scripts/release-gate-selftest.sh (stub binary, no network).
 # Portability: bash 3.2 (macOS) and bash 5 (Linux).
 
@@ -66,6 +69,12 @@ if [ "${CALIBRATE}" -eq 0 ] && awk -F'\t' '!/^#/ && ($2=="SAFE"||$2=="SANDBOX"||
   echo "release-gate: ${TABLE} has unpinned (?) exits; run --calibrate and pin them" >&2
   exit 2
 fi
+# #11470 F3: a row expecting an error names the error it expects.
+if [ "${CALIBRATE}" -eq 0 ] && awk -F'\t' '!/^#/ && ($2=="SAFE"||$2=="SANDBOX"||$2=="CONTENT") && $6!="0" && ($7==""||$7=="-")' "${TABLE}" | grep -q .; then
+  echo "release-gate: ${TABLE} has a non-zero-exit row with no expected output:" >&2
+  awk -F'\t' '!/^#/ && ($2=="SAFE"||$2=="SANDBOX"||$2=="CONTENT") && $6!="0" && ($7==""||$7=="-") {print "  " $1}' "${TABLE}" >&2
+  exit 2
+fi
 
 # --- host state ----------------------------------------------------------
 REAL_HOME="$(cd ~ && pwd -P)"
@@ -95,6 +104,7 @@ host_check() {
 
 # --- one lane --------------------------------------------------------------
 FAILED=0
+LANE_ROWS=0 PASSED=0
 S="" H="" FX="" PUB="" DAEMON_PID=""
 
 setup() {
@@ -115,9 +125,9 @@ setup() {
   printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"release-gate","version":"0"}}}' > "$FX/initialize.json"
 }
 
-# run_row <cls> <cwd> <invocation> <stdin> <expected> <label>
+# run_row <cls> <cwd> <invocation> <stdin> <expected> <want-output> <label>
 run_row() {
-  local cwd="$2" inv="$3" stdin="$4" expected="$5" label="$6" rc=0
+  local cwd="$2" inv="$3" stdin="$4" expected="$5" want="$6" label="$7" rc=0
   local -a args env_args
   cwd="${cwd//\$H/$H}"; stdin="${stdin//\$FX/$FX}"
   inv="${inv//\$H/$H}"; inv="${inv//\$FX/$FX}"; inv="${inv//\$PUB/$PUB}"
@@ -141,23 +151,29 @@ run_row() {
   [ "${rc}" = 142 ] && rc=124
   if [ "${CALIBRATE}" -eq 1 ]; then
     printf 'CAL\t%s\t%s\t%s\n' "${label}" "${rc}" "$(tail -n 3 "$S/out" | tr '\t\n' '  ' | cut -c1-300)"
-  elif [ "${rc}" = "${expected}" ]; then
-    echo "[PASS] tm ${args[*]} (exit ${rc})" >&2
-  else
+  elif [ "${rc}" != "${expected}" ]; then
     echo "[FAIL] tm ${args[*]}: exit ${rc}, expected ${expected}:" >&2
     tail -n 15 "$S/out" | sed 's/^/       /' >&2
     FAILED=$((FAILED + 1))
+  elif [ -n "${want}" ] && [ "${want}" != "-" ] && ! grep -qF -- "${want}" "$S/out"; then
+    echo "[FAIL] tm ${args[*]}: exit ${rc}, but the output lacks \"${want}\":" >&2
+    tail -n 15 "$S/out" | sed 's/^/       /' >&2
+    FAILED=$((FAILED + 1))
+  else
+    echo "[PASS] tm ${args[*]} (exit ${rc})" >&2
+    PASSED=$((PASSED + 1))
   fi
   return 0
 }
 
 # run_class <class> — every row of that class, in table order.
 run_class() {
-  local path cls cwd inv stdin exp reason
-  while IFS=$'\t' read -r path cls cwd inv stdin exp reason; do
+  local path cls cwd inv stdin exp want reason
+  while IFS=$'\t' read -r path cls cwd inv stdin exp want reason; do
     case "${path}" in ''|'#'*) continue ;; esac
     [ "${cls}" = "$1" ] || continue
-    run_row "${cls}" "${cwd}" "${inv}" "${stdin}" "${exp}" "${path}"
+    run_row "${cls}" "${cwd}" "${inv}" "${stdin}" "${exp}" "${want}" "${path}"
+    LANE_ROWS=$((LANE_ROWS + 1))
   done < "${TABLE}"
 }
 
@@ -202,14 +218,14 @@ stop_daemon() {
 }
 
 run_lane() {
-  local lane="$1" before t0
-  before="$(host_state)"; t0=$(date +%s)
+  local lane="$1" before t0 failed0="${FAILED}" passed0="${PASSED}"
+  before="$(host_state)"; t0=$(date +%s); LANE_ROWS=0
   setup
   echo "== lane ${lane}: candidate ${BIN} ($("${BIN}" --version 2>/dev/null || echo '?')), sandbox ${S}" >&2
   if [ "${lane}" = content ]; then
     run_class CONTENT
   else
-    run_row CONTENT "\$H" "content update" - 0 "content update (setup)"
+    run_row CONTENT "\$H" "content update" - 0 - "content update (setup)"
     published_bundle || true
     if [ "${lane}" = sandbox ]; then
       if start_daemon; then run_class SANDBOX; else FAILED=$((FAILED + 1)); fi
@@ -218,9 +234,14 @@ run_lane() {
       run_class SAFE
     fi
   fi
+  # #11470: a lane whose class ran no row proved nothing.
+  if [ "${LANE_ROWS}" -eq 0 ]; then
+    echo "[FAIL] lane ${lane} ran 0 rows" >&2
+    FAILED=$((FAILED + 1))
+  fi
   rm -rf "$S"
   host_check "$S" "${before}" || FAILED=$((FAILED + 1))
-  echo "== lane ${lane}: $(( $(date +%s) - t0 )) s" >&2
+  echo "== lane ${lane}: $(( $(date +%s) - t0 )) s, ${LANE_ROWS} rows, $((PASSED - passed0)) PASS, $((FAILED - failed0)) FAIL" >&2
 }
 
 trap 'stop_daemon; [ -n "$S" ] && rm -rf "$S"' EXIT

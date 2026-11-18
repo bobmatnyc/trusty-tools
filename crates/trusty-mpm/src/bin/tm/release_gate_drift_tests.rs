@@ -99,3 +99,35 @@ fn every_release_gate_row_names_a_command() {
         .collect();
     assert!(stale.is_empty(), "rows naming no tm command: {stale:?}");
 }
+
+/// The rows of `table` that break its format: not eight columns, or a
+/// runnable row expecting a non-zero exit with no expected output.
+fn malformed(table: &str) -> Vec<String> {
+    table
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .filter(|l| {
+            let cols: Vec<&str> = l.split('\t').collect();
+            if cols.len() != 8 {
+                return true;
+            }
+            let runnable = matches!(cols[1], "SAFE" | "SANDBOX" | "CONTENT");
+            runnable && cols[5] != "0" && matches!(cols[6], "" | "-")
+        })
+        .map(|l| l.split('\t').next().unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// #11470 F3: a row expecting an error names the error text it expects.
+#[test]
+fn every_error_row_names_its_expected_output() {
+    let bad = malformed(TABLE);
+    assert!(bad.is_empty(), "malformed release-gate rows: {bad:?}");
+}
+
+/// The check catches an error row whose expected output is blanked.
+#[test]
+fn an_error_row_without_expected_output_is_reported() {
+    let blanked = "sessions stop\tSANDBOX\t$H\tsessions stop nosuch\t-\t1\t-\tr\n";
+    assert_eq!(malformed(blanked), vec!["sessions stop".to_owned()]);
+}

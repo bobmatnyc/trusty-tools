@@ -10,7 +10,8 @@
 #   lacks it) and must fail; case 2 a minimum above every published release
 #   must fail; case 3 a covering release passes; case 4 a file served from
 #   its pre-D07 supervisor path counts; case 5 a source with no
-#   MIN_CONTENT_TAG cannot run (exit 2).
+#   MIN_CONTENT_TAG cannot run (exit 2); case 6 a newest release that covers
+#   everything over a minimum that lacks a file must fail and name the fix.
 # Usage: bash scripts/check-content-release-coverage-selftest.sh
 # Test: this IS the test; ci.yml runs it.
 
@@ -72,6 +73,13 @@ expect "a pre-D07 supervisor path counts" 0 \
 
 source_tree "${WORK}/s5" ""
 expect "no MIN_CONTENT_TAG" 2 --source-root "${WORK}/s5" --releases-dir "${WORK}/r3"
+
+# #11470 F1: a host pinned to the minimum gets the minimum's files, so the
+# minimum must carry them too, whatever the newest release carries.
+expect "the minimum lacks a file the newest carries" 1 \
+  --source-root "${WORK}/s1" --releases-dir "${WORK}/r3"
+grep -q "raise MIN_CONTENT_TAG" "${WORK}/out" \
+  || { echo "FAIL case 6 does not say to raise MIN_CONTENT_TAG"; FAIL=1; }
 
 [ "${FAIL}" -eq 0 ] && echo "check-content-release-coverage-selftest: all cases pass"
 exit "${FAIL}"

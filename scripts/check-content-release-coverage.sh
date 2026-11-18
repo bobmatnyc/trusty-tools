@@ -12,7 +12,9 @@
 #   core/framework_content.rs, every `content_path` in core/bundle.rs). It
 #   finds the newest published, non-draft, non-pre-release content-v* release
 #   (the one `tm content update` pins) and fails unless that release is at or
-#   above MIN_CONTENT_TAG and its bundle carries every required file.
+#   above MIN_CONTENT_TAG and its bundle carries every required file. The
+#   bundle at MIN_CONTENT_TAG must be published and carry them too, because tm
+#   accepts a pin at the minimum.
 # Usage:
 #   scripts/check-content-release-coverage.sh
 #   scripts/check-content-release-coverage.sh --source-root DIR --releases-dir DIR
@@ -99,17 +101,19 @@ if [[ "${NEWEST_KEY}" < "$(version_key "${MIN_TAG}")" ]]; then
   exit 1
 fi
 
-if [ -n "${RELEASES_DIR}" ]; then
-  BUNDLE="${RELEASES_DIR}/${NEWEST}.tar.gz"
-else
-  if ! gh release download "${NEWEST}" -R "${REPO}" -p "${NEWEST}.tar.gz" -D "${WORK}" \
-      2> "${WORK}/gh.err"; then
-    echo "[FAIL] content-coverage: could not download ${NEWEST}: $(cat "${WORK}/gh.err")" >&2
-    exit 2
+# fetch_bundle <tag> — the bundle's path on stdout; exit 2 when it cannot be had.
+fetch_bundle() {
+  if [ -n "${RELEASES_DIR}" ]; then
+    echo "${RELEASES_DIR}/$1.tar.gz"
+    return 0
   fi
-  BUNDLE="${WORK}/${NEWEST}.tar.gz"
-fi
-tar tzf "${BUNDLE}" | sed 's|^\./||' | sort -u > "${WORK}/carried"
+  if ! gh release download "$1" -R "${REPO}" -p "$1.tar.gz" -D "${WORK}" --clobber \
+      2> "${WORK}/gh.err"; then
+    echo "[FAIL] content-coverage: could not download $1: $(cat "${WORK}/gh.err")" >&2
+    return 2
+  fi
+  echo "${WORK}/$1.tar.gz"
+}
 
 # A required file may still be served from its pre-D07 path
 # (architect_compat::legacy_instruction_path): architect/<f> from
@@ -121,14 +125,21 @@ legacy_path() {
       echo "instructions/output-styles/trusty-mpm-supervisor.md" ;;
   esac
 }
-MISSING=""
-while read -r path; do
-  grep -qxF "${path}" "${WORK}/carried" && continue
-  legacy="$(legacy_path "${path}")"
-  [ -n "${legacy}" ] && grep -qxF "${legacy}" "${WORK}/carried" && continue
-  MISSING="${MISSING}${path}"$'\n'
-done < "${WORK}/required"
-MISSING="${MISSING%$'\n'}"
+
+# missing_in <bundle> — the required files the bundle lacks, one per line.
+missing_in() {
+  local path legacy
+  tar tzf "$1" | sed 's|^\./||' | sort -u > "${WORK}/carried"
+  while read -r path; do
+    grep -qxF "${path}" "${WORK}/carried" && continue
+    legacy="$(legacy_path "${path}")"
+    [ -n "${legacy}" ] && grep -qxF "${legacy}" "${WORK}/carried" && continue
+    echo "${path}"
+  done < "${WORK}/required"
+}
+
+BUNDLE="$(fetch_bundle "${NEWEST}")" || exit 2
+MISSING="$(missing_in "${BUNDLE}")"
 if [ -n "${MISSING}" ]; then
   echo "[FAIL] content-coverage: ${NEWEST}, the newest published content release, lacks files" >&2
   echo "       trusty-mpm requires; publish a content release that carries them and raise" >&2
@@ -137,4 +148,26 @@ if [ -n "${MISSING}" ]; then
   exit 1
 fi
 
-echo "[PASS] content-coverage: ${NEWEST} (>= ${MIN_TAG}) carries all $(wc -l < "${WORK}/required" | tr -d ' ') required files" >&2
+# #11470 F1: tm accepts any pin at or above MIN_CONTENT_TAG, so a host pinned
+# to the minimum itself must find every required file there too.
+if [ "${MIN_TAG}" != "${NEWEST}" ]; then
+  if ! grep -qxF "${MIN_TAG}" "${WORK}/tags"; then
+    echo "[FAIL] content-coverage: ${MIN_TAG} (MIN_CONTENT_TAG) is not a published content" >&2
+    echo "       release; raise MIN_CONTENT_TAG to a published release that carries every" >&2
+    echo "       required file." >&2
+    exit 1
+  fi
+  BUNDLE="$(fetch_bundle "${MIN_TAG}")" || exit 2
+  MISSING="$(missing_in "${BUNDLE}")"
+  if [ -n "${MISSING}" ]; then
+    echo "[FAIL] content-coverage: ${MIN_TAG}, the MIN_CONTENT_TAG release, lacks files trusty-mpm" >&2
+    echo "       requires, so a host pinned to it breaks; raise MIN_CONTENT_TAG to a release" >&2
+    echo "       that carries them (${NEWEST} does):" >&2
+    printf '%s\n' "${MISSING}" | sed 's/^/         /' >&2
+    exit 1
+  fi
+fi
+
+CHECKED="${NEWEST}"
+[ "${MIN_TAG}" = "${NEWEST}" ] || CHECKED="${NEWEST} and ${MIN_TAG}"
+echo "[PASS] content-coverage: ${CHECKED} (MIN_CONTENT_TAG ${MIN_TAG}) carry all $(wc -l < "${WORK}/required" | tr -d ' ') required files" >&2
