@@ -152,6 +152,12 @@ impl DesktopLease {
         self.release(session, now)
     }
 
+    /// Drop every claim, holder and queue (the lockout).
+    pub fn clear(&mut self) {
+        self.holder = None;
+        self.queue.clear();
+    }
+
     /// Drop every claim on `grant` (revoked or expired). Returns the new holder when it moved.
     pub fn drop_grant(&mut self, grant: &str, now: f64) -> Option<Claim> {
         self.queue.retain(|c| c.grant != grant);

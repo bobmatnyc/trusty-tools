@@ -1,35 +1,34 @@
-//! Grants: operator-only mint, sensitive apps, persistence, expiry (issue #11460, Phase 3).
+//! Grants: consent-only mint, sensitive apps, persistence, expiry (issue #11460, Phases 3-4).
+//!
+//! Every grant here is minted through the consent flow on `operator.sock`
+//! with the fake dialog (`common::rig::consent`).
 
 mod common;
 
 use std::os::unix::fs::PermissionsExt;
 
-use common::rig::{Rig, T0, mint};
+use common::rig::{Rig, T0, consent, grant_req};
 use common::short_tmp;
-use trusty_computer::grants::{GrantError, Grants, OperatorMint};
-use trusty_computer::manifest::LeaseScope;
+use serde_json::{Value, json};
+use trusty_computer::grants::{GrantError, Grants};
 
-const SCOPE: LeaseScope = LeaseScope {
-    pid: 4242,
-    window_id: 7,
-};
+fn mint_via(rig: &Rig, req: &Value) -> Value {
+    consent(&rig.server.operator, &rig.dialog, req)
+}
 
 #[test]
 fn grants_survive_a_broker_restart() {
-    let dir = short_tmp();
-    let path = dir.path().join("grants.json");
-    let mut grants = Grants::load(&path, T0).expect("load");
-    let g = grants
-        .mint(OperatorMint::stub("dev.x", SCOPE), T0)
-        .expect("mint");
+    let rig = Rig::new();
+    let g = rig.mint(1);
     assert!(g.id.starts_with("g-") && g.id.len() == 14, "{}", g.id);
+    let path = rig.state().join("grants.json");
     let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
     assert_eq!(mode, 0o600);
     let again = Grants::load(&path, T0 + 1.0).expect("reload");
     let back = again.get(&g.id).expect("kept");
     assert_eq!(
         (back.scope, &back.bundle_id, &back.tools),
-        (SCOPE, &g.bundle_id, &g.tools)
+        (g.scope, &g.bundle_id, &g.tools)
     );
 }
 
@@ -48,56 +47,52 @@ fn malformed_grants_file_is_refused() {
 #[test]
 fn mint_refuses_sensitive_apps_and_denied_tools() {
     let rig = Rig::new();
-    let mut term = OperatorMint::stub("com.apple.Terminal", SCOPE);
-    let refused = rig
-        .broker
-        .operator_mint(term.clone())
-        .expect_err("sensitive");
-    assert_eq!(refused["code"], "sensitive_app");
-    term.allow_sensitive = true;
-    let g = rig.broker.operator_mint(term).expect("allowed");
-    assert!(g.sensitive);
-    let line = rig.audit().last().cloned().expect("line");
-    assert_eq!(
-        (&line["op"], &line["sensitive"]),
-        (&"mint".into(), &true.into())
-    );
-    let mut bad = mint(&["kill_app"], 1);
-    assert_eq!(
-        rig.broker.operator_mint(bad.clone()).expect_err("deny")["code"],
-        "bad_tool"
-    );
-    bad.extra_tools.clear();
-    bad.ttl = 0.0;
-    assert_eq!(
-        rig.broker.operator_mint(bad).expect_err("ttl")["code"],
-        "bad_ttl"
-    );
+    let shown = rig.dialog.shown();
+    let mut term = grant_req(&[], 1);
+    term["bundle_id"] = json!("com.apple.Terminal");
+    assert_eq!(mint_via(&rig, &term)["code"], "sensitive_app");
+    let mut bad = grant_req(&["kill_app"], 1);
+    assert_eq!(mint_via(&rig, &bad)["code"], "bad_tool");
+    bad["tools"] = json!([]);
+    bad["ttl"] = json!(0);
+    assert_eq!(mint_via(&rig, &bad)["code"], "bad_ttl");
+    bad["bundle_id"] = json!("x\" & do shell script \"id");
+    assert_eq!(mint_via(&rig, &bad)["code"], "bad_bundle");
+    assert_eq!(rig.dialog.shown(), shown, "no dialog for a refused request");
+    term["allow_sensitive"] = json!(true);
+    let g = mint_via(&rig, &term);
+    assert_eq!(g["result"]["grant"]["sensitive"], true, "{g}");
+    let mint = rig
+        .audit()
+        .into_iter()
+        .rfind(|l| l["op"] == "mint")
+        .expect("mint line");
+    assert_eq!(mint["sensitive"], true);
 }
 
 #[test]
 fn mint_write_failure_refuses() {
-    let dir = short_tmp();
-    let path = dir.path().join("grants.json");
-    let mut grants = Grants::load(&path, T0).expect("load");
-    std::fs::create_dir(dir.path().join("grants.json.tmp")).expect("block the temp file");
-    std::fs::create_dir_all(dir.path().join("grants.json.tmp/x")).expect("non-empty");
-    let err = grants
-        .mint(OperatorMint::stub("dev.x", SCOPE), T0)
-        .expect_err("store");
-    assert_eq!(err.code(), "grant_store");
-    assert!(Grants::load(&path, T0).expect("reload").get("g-").is_none());
+    let rig = Rig::new();
+    let tmp = rig.state().join("grants.json.tmp");
+    std::fs::create_dir_all(tmp.join("x")).expect("block the temp file");
+    let reply = mint_via(&rig, &grant_req(&[], 1));
+    assert_eq!(reply["code"], "grant_store", "{reply}");
+    let path = rig.state().join("grants.json");
+    assert_eq!(Grants::load(&path, T0).expect("reload").iter().count(), 1);
 }
 
 #[test]
 fn mint_audit_failure_revokes_the_grant() {
     let rig = Rig::new();
+    let mut conn = common::rig::Conn::open(&rig.server.operator);
+    let challenge = conn.send(&grant_req(&[], 1));
     std::fs::remove_file(rig.audit_path()).expect("rm");
     std::fs::create_dir(rig.audit_path()).expect("mkdir");
-    let err = rig.broker.operator_mint(mint(&[], 1)).expect_err("audit");
-    assert_eq!(err["code"], "audit_failed");
+    let err = conn.send(&json!({"op": "grant_confirm",
+        "challenge": challenge["result"]["challenge"], "code": rig.dialog.last_code()}));
+    assert_eq!(err["code"], "audit_failed", "{err}");
     let text = std::fs::read_to_string(rig.state().join("grants.json")).expect("grants");
-    let rows: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let rows: Value = serde_json::from_str(&text).expect("json");
     let rows = rows.as_array().expect("rows");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows.iter().filter(|r| r["revoked"] == true).count(), 1);
@@ -105,11 +100,9 @@ fn mint_audit_failure_revokes_the_grant() {
 
 #[test]
 fn expired_idle_and_revoked_grants_are_refused() {
-    let dir = short_tmp();
-    let mut grants = Grants::load(&dir.path().join("grants.json"), T0).expect("load");
-    let g = grants
-        .mint(OperatorMint::stub("dev.x", SCOPE), T0)
-        .expect("mint");
+    let rig = Rig::new();
+    let g = rig.grant.clone();
+    let mut grants = Grants::load(&rig.state().join("grants.json"), T0).expect("load");
     assert!(grants.live(&g.id, T0 + 299.0).is_ok());
     let idle = grants.live(&g.id, T0 + 300.0).expect_err("idle");
     assert!(idle.to_string().contains("idle"), "{idle}");

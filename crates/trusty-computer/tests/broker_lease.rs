@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 fn connect(rig: &Rig, grant: &str) -> (Conn, Value) {
     let mut conn = Conn::open(&rig.server.agent);
-    let reply = conn.send(&json!({"op": "connect", "grant_id": grant}));
+    let reply = conn.send(&json!({"op": "connect", "code": rig.code(grant)}));
     (conn, reply)
 }
 
@@ -30,10 +30,10 @@ fn wait_held(conn: &mut Conn) {
 #[test]
 fn second_session_is_queued_fifo_while_first_holds() {
     let mut rig = Rig::new();
-    let (mut two, r2) = connect(&rig, &rig.grant.id);
-    let (mut three, r3) = connect(&rig, &rig.grant.id);
-    assert_eq!(r2["result"], json!({"lease": "queued", "position": 1}));
-    assert_eq!(r3["result"], json!({"lease": "queued", "position": 2}));
+    let (mut two, r2) = connect(&rig, &rig.mint(WINDOW).id);
+    let (mut three, r3) = connect(&rig, &rig.mint(WINDOW).id);
+    assert_eq!(r2["result"]["position"], 1, "{r2}");
+    assert_eq!(r3["result"]["position"], 2, "{r3}");
     assert_eq!(rig.conn.send(&json!({"op": "release"}))["ok"], true);
     assert_eq!(lease_of(&mut two)["lease"], "held");
     assert_eq!(
@@ -46,7 +46,7 @@ fn second_session_is_queued_fifo_while_first_holds() {
 #[test]
 fn queued_session_call_is_refused() {
     let rig = Rig::new();
-    let (mut two, _) = connect(&rig, &rig.grant.id);
+    let (mut two, _) = connect(&rig, &rig.mint(WINDOW).id);
     let reply = two.send(&call(&rig.grant.id, "list_apps", "q1", json!({})));
     assert_eq!(reply["code"], "lease_not_held", "{reply}");
     assert!(rig.agent_calls().is_empty());
@@ -59,7 +59,7 @@ fn queued_session_call_is_refused() {
 #[test]
 fn idle_holder_loses_the_lease() {
     let mut rig = Rig::new();
-    let (mut two, _) = connect(&rig, &rig.grant.id);
+    let (mut two, _) = connect(&rig, &rig.mint(WINDOW).id);
     rig.advance(119.0);
     assert_eq!(rig.call("list_apps", "a1", json!({}))["ok"], true);
     rig.advance(121.0);
@@ -72,7 +72,7 @@ fn idle_holder_loses_the_lease() {
 #[test]
 fn disconnect_releases_the_lease() {
     let mut rig = Rig::new();
-    let (mut two, _) = connect(&rig, &rig.grant.id);
+    let (mut two, _) = connect(&rig, &rig.mint(WINDOW).id);
     rig.conn = Conn::open(&rig.server.agent); // drops the holder's connection
     wait_held(&mut two);
     assert!(rig.audit().iter().any(|l| l["op"] == "disconnect"));

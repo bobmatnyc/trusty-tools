@@ -98,10 +98,14 @@ fn connect_refusals() {
         "grant_required"
     );
     let unknown = conn.send(&json!({"op": "connect", "grant_id": "g-nope"}));
-    assert_eq!(unknown["code"], "no_grant");
-    let mismatch = rig
-        .conn
-        .send(&json!({"op": "connect", "grant_id": other.id}));
+    assert_eq!(unknown["code"], "grant_not_bound");
+    let unbound = conn.send(&json!({"op": "connect", "grant_id": rig.grant.id}));
+    assert_eq!(
+        unbound["code"], "grant_not_bound",
+        "a grant id alone is not enough"
+    );
+    let code = rig.code(&other.id);
+    let mismatch = rig.conn.send(&json!({"op": "connect", "code": code}));
     assert_eq!(mismatch["code"], "lease_grant_mismatch");
 }
 

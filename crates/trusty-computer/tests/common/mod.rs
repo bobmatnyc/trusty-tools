@@ -20,6 +20,7 @@ use std::thread;
 
 use serde_json::{Value, json};
 
+pub mod dialog;
 pub mod rig;
 
 /// A pid (or window id) the fake answers with a bounded `isError` refusal, as the real daemon does.

@@ -4,9 +4,10 @@
 //! gates see the final layout (plan section 2).
 //! What: `serve --state DIR` runs the supervised bounded daemon (Phase 2 form,
 //! see `trusty_computer::serve`); `broker --state DIR` runs the broker on
-//! `agent.sock` and `operator.sock` until SIGTERM; every other verb prints
-//! usage and exits 2 until Phases 4 and 6.
-//! Test: `live_bounded_daemon_drives_fixture` in `tests/live_supervisor.rs`.
+//! `agent.sock` and `operator.sock` until SIGTERM or a `lockout`, with the
+//! real `osascript` consent dialog; `grant`, `grants`, `revoke`, `status`,
+//! `lease` and `lockout` are the operator verbs (`operator_cli`).
+//! Test: `live_bounded_daemon_drives_fixture`, `no_tty_grant_never_reaches_the_broker`.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -17,10 +18,13 @@ usage: trusty-computer <command>
 commands (issue #11460):
   serve --state DIR        run the supervised bounded daemon (Phase 2 form)
   broker --state DIR       run the broker (agent.sock, operator.sock)
-  grant <bundle-id>        mint a grant code for one app (not implemented yet)
-  revoke <grant-id>        end a grant and its lease (not implemented yet)
-  grants | status | stop   operator queries (not implemented yet)
-  install-service          sign, write the launchd plist, bootstrap (not implemented yet)";
+  grant <bundle-id> --pid N --window N [--ttl 30m] [--idle-ttl 5m] [--tools a,b] [--allow-sensitive]
+                           confirm in the dialog, type its code, get a one-use tc- code
+  revoke <grant-id>        end a grant and its lease
+  grants | status | lease  operator queries
+  lockout                  revoke every grant, drop the lease, stop the daemon and broker
+  install-service          sign, write the launchd plist, bootstrap (not implemented yet)
+every operator verb takes --state DIR (default ~/.trusty/computer)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -29,6 +33,20 @@ fn main() -> ExitCode {
             ExitCode::from(trusty_computer::serve::run(Path::new(dir)))
         }
         [verb, flag, dir] if verb == "broker" && flag == "--state" => broker(Path::new(dir)),
+        [verb, ..]
+            if [
+                "grant", "grants", "revoke", "status", "lease", "lockout", "--state",
+            ]
+            .contains(&verb.as_str()) =>
+        {
+            match trusty_computer::operator_cli::run(&args) {
+                2 => {
+                    eprintln!("{USAGE}");
+                    ExitCode::from(2)
+                }
+                code => ExitCode::from(code),
+            }
+        }
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
@@ -49,7 +67,8 @@ fn broker(state: &Path) -> ExitCode {
     let started = supervisor::Supervisor::new(launcher::CuaAppLauncher, state)
         .map_err(|e| e.to_string())
         .and_then(|sup| {
-            broker::Broker::new(sup, state, broker::wall_clock()).map_err(|e| e.to_string())
+            let dialog = Arc::new(trusty_computer::consent::OsascriptDialog);
+            broker::Broker::new(sup, state, broker::wall_clock(), dialog).map_err(|e| e.to_string())
         })
         .and_then(|b| {
             broker_server::BrokerServer::bind(state)
@@ -74,7 +93,7 @@ fn broker(state: &Path) -> ExitCode {
         server.agent.display(),
         server.operator.display()
     );
-    while !TERM.load(std::sync::atomic::Ordering::SeqCst) {
+    while !TERM.load(std::sync::atomic::Ordering::SeqCst) && !broker.shutdown_requested() {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let _ = broker.lock().supervisor.stop();

@@ -2,7 +2,7 @@
 //!
 //! Each case keeps the spike's name with a `broker_` prefix; the spike's
 //! parametrized confirmation case is two tests. The rig adds what the spike
-//! had not: a grant from the operator stub and a held lease.
+//! had not: a grant from the consent flow and a held lease.
 
 mod common;
 

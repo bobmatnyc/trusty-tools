@@ -5,8 +5,8 @@
 //! What: a [`Grant`] names one bundle id and the one window it may touch
 //! (pid plus window id, the bounded manifest's unit), a tool subset, a TTL
 //! and an idle TTL. [`Grants::mint`] takes an [`OperatorMint`], which only
-//! the operator path builds (Phase 3: [`OperatorMint::stub`]; the consent
-//! flow is Phase 4). Sensitive apps need `allow_sensitive`. Every change is
+//! the consent flow builds (`broker_operator.rs`: dialog confirmed and its
+//! code entered). Sensitive apps need `allow_sensitive`. Every change is
 //! written 0600 and fsynced before it takes effect; a write failure refuses.
 //! Test: `tests/broker_grants.rs`.
 
@@ -107,15 +107,15 @@ pub struct OperatorMint {
 }
 
 impl OperatorMint {
-    /// Phase 3 stub of the operator path; Phase 4 replaces it with the consent flow.
-    pub fn stub(bundle_id: &str, scope: LeaseScope) -> OperatorMint {
+    /// Built only by the consent flow once the dialog code was entered (#11460, Phase 4).
+    pub(crate) fn consented(req: crate::broker_operator::GrantRequest) -> OperatorMint {
         OperatorMint {
-            bundle_id: bundle_id.to_owned(),
-            scope,
-            extra_tools: Vec::new(),
-            ttl: DEFAULT_TTL,
-            idle_ttl: DEFAULT_IDLE_TTL,
-            allow_sensitive: false,
+            bundle_id: req.bundle_id,
+            scope: req.scope,
+            extra_tools: req.extra_tools,
+            ttl: req.ttl,
+            idle_ttl: req.idle_ttl,
+            allow_sensitive: req.allow_sensitive,
         }
     }
 }
@@ -247,22 +247,7 @@ impl Grants {
     /// Postcondition on Ok: `get(id)` is the grant and the file lists it.
     /// Test: `mint_refuses_sensitive_apps_and_denied_tools`, `mint_write_failure_refuses`.
     pub fn mint(&mut self, req: OperatorMint, now: f64) -> Result<Grant, GrantError> {
-        if !req.allow_sensitive && SENSITIVE_BUNDLES.contains(&req.bundle_id.as_str()) {
-            return Err(GrantError::Sensitive(req.bundle_id));
-        }
-        let valid = |t: f64| t.is_finite() && t > 0.0;
-        if !valid(req.ttl) || !valid(req.idle_ttl) {
-            return Err(GrantError::BadTtl);
-        }
-        let mut tools: BTreeSet<String> = DEFAULT_TOOLS.iter().map(|t| (*t).to_owned()).collect();
-        for tool in req.extra_tools {
-            match policy::rule(&tool) {
-                Some(rule) if rule.verdict != Verdict::Deny => {
-                    tools.insert(tool);
-                }
-                _ => return Err(GrantError::BadTool(tool)),
-            }
-        }
+        let tools = Grants::check(&req)?;
         let grant = Grant {
             id: random_id()?,
             sensitive: SENSITIVE_BUNDLES.contains(&req.bundle_id.as_str()),
@@ -281,6 +266,27 @@ impl Grants {
         Ok(grant)
     }
 
+    /// The tool set `req` would get, or why it is refused; checked before the dialog shows.
+    pub fn check(req: &OperatorMint) -> Result<BTreeSet<String>, GrantError> {
+        if !req.allow_sensitive && SENSITIVE_BUNDLES.contains(&req.bundle_id.as_str()) {
+            return Err(GrantError::Sensitive(req.bundle_id.clone()));
+        }
+        let valid = |t: f64| t.is_finite() && t > 0.0;
+        if !valid(req.ttl) || !valid(req.idle_ttl) {
+            return Err(GrantError::BadTtl);
+        }
+        let mut tools: BTreeSet<String> = DEFAULT_TOOLS.iter().map(|t| (*t).to_owned()).collect();
+        for tool in &req.extra_tools {
+            match policy::rule(tool) {
+                Some(rule) if rule.verdict != Verdict::Deny => {
+                    tools.insert(tool.clone());
+                }
+                _ => return Err(GrantError::BadTool(tool.clone())),
+            }
+        }
+        Ok(tools)
+    }
+
     /// Revoke `id`; it is refused at once even when the write fails.
     pub fn revoke(&mut self, id: &str) -> Result<(), GrantError> {
         let grant = self
@@ -290,6 +296,20 @@ impl Grants {
         grant.revoked = true;
         self.persist(&self.grants)?;
         Ok(())
+    }
+
+    /// Revoke every grant (the lockout); refused at once even when the write fails.
+    pub fn revoke_all(&mut self) -> Result<(), GrantError> {
+        for g in self.grants.values_mut() {
+            g.revoked = true;
+        }
+        self.persist(&self.grants)?;
+        Ok(())
+    }
+
+    /// Every grant, alive or not, in id order.
+    pub fn iter(&self) -> impl Iterator<Item = &Grant> {
+        self.grants.values()
     }
 
     /// The grant `id`, if it exists, alive or not.

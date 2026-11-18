@@ -6,9 +6,11 @@
 //! What: [`Broker`] holds one [`Inner`] under a mutex: the [`Supervisor`],
 //! the [`Audit`] log, the [`Grants`] table, the [`DesktopLease`], a
 //! [`Journal`] per grant and the last redacted snapshot per window.
-//! [`Broker::handle`] answers one request line for a session: `connect`,
-//! `release`, `status` and `call` on the agent socket; `status`, `start`,
-//! `stop` and `restart` on the operator socket. Every refusal is audited, and
+//! [`Broker::handle`] answers one request line for a session: `connect`
+//! (redeems a `tc-` code), `release`, `disconnect`, `grants`, `wait`,
+//! `refresh`, `status` and `call` on the agent socket; `status`, `start`,
+//! `stop`, `restart`, `grant_request`, `grant_confirm`, `grants`, `lease`,
+//! `revoke` and `lockout` on the operator socket (`broker_operator.rs`). Every refusal is audited, and
 //! an audit failure refuses. Whenever the lease moves, the broker rescopes
 //! the supervisor to the new holder's grant ([`Inner::moved`]). The call
 //! pipeline is in `broker_call.rs`.
@@ -16,13 +18,15 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
 use crate::audit::Audit;
+use crate::broker_operator::ConsentState;
+use crate::consent::{ConsentDialog, DIALOG_TIMEOUT};
 use crate::grants::{Grant, GrantError, Grants, OperatorMint};
 use crate::journal::Journal;
 use crate::launcher::Launcher;
@@ -67,6 +71,7 @@ pub struct Inner<L: Launcher> {
     pub(crate) snaps: HashMap<(u32, u64), (BTreeSet<String>, String)>,
     /// False after a failed rescope or restart; a call then rescopes first.
     pub(crate) scope_ready: bool,
+    pub(crate) consent: ConsentState,
 }
 
 /// The broker.
@@ -74,13 +79,22 @@ pub struct Broker<L: Launcher> {
     inner: Mutex<Inner<L>>,
     clock: Clock,
     sessions: AtomicU64,
+    dialog: Arc<dyn ConsentDialog>,
+    dialog_timeout: std::time::Duration,
+    pub(crate) shutdown: AtomicBool,
 }
 
 impl<L: Launcher> Broker<L> {
     /// A broker over `supervisor` whose audit log and grants live in `state`.
     ///
+    /// `dialog` shows the consent prompt; only the broker bin passes the real one.
     /// A malformed or shared `grants.json` refuses to start (fail closed).
-    pub fn new(supervisor: Supervisor<L>, state: &Path, clock: Clock) -> Result<Self, GrantError> {
+    pub fn new(
+        supervisor: Supervisor<L>,
+        state: &Path,
+        clock: Clock,
+        dialog: Arc<dyn ConsentDialog>,
+    ) -> Result<Self, GrantError> {
         let grants = Grants::load(&state.join("grants.json"), clock())?;
         Ok(Broker {
             inner: Mutex::new(Inner {
@@ -91,10 +105,28 @@ impl<L: Launcher> Broker<L> {
                 journals: HashMap::new(),
                 snaps: HashMap::new(),
                 scope_ready: false,
+                consent: ConsentState::default(),
             }),
             clock,
             sessions: AtomicU64::new(0),
+            dialog,
+            dialog_timeout: DIALOG_TIMEOUT,
+            shutdown: AtomicBool::new(false),
         })
+    }
+
+    /// The same broker with a shorter dialog timeout.
+    pub fn with_dialog_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.dialog_timeout = timeout;
+        self
+    }
+
+    pub(crate) fn dialog(&self) -> Arc<dyn ConsentDialog> {
+        Arc::clone(&self.dialog)
+    }
+
+    pub(crate) fn dialog_timeout(&self) -> std::time::Duration {
+        self.dialog_timeout
     }
 
     /// The state, locked. A poisoned lock is recovered: every field stays consistent per request.
@@ -102,7 +134,7 @@ impl<L: Launcher> Broker<L> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn now(&self) -> f64 {
+    pub(crate) fn now(&self) -> f64 {
         (self.clock)()
     }
 
@@ -115,6 +147,7 @@ impl<L: Launcher> Broker<L> {
     pub fn close_session(&self, ctx: &Ctx) {
         let now = self.now();
         let mut inner = self.lock();
+        inner.consent.unbind(&ctx.session);
         if inner.lease.position(&ctx.session).is_some() {
             let moved = inner.lease.disconnect(&ctx.session, now);
             let _ = inner.audited(base(ctx, "disconnect"), json!({"ok": true}));
@@ -122,55 +155,23 @@ impl<L: Launcher> Broker<L> {
         }
     }
 
-    /// Operator path: mint a grant. Phase 3 callers build [`OperatorMint::stub`].
+    /// Operator path, in process: mint a grant from a consented request.
     ///
-    /// Why: grants come only from the operator; an unaudited grant must not exist.
-    /// What: mints (persisted), then audits `mint`; an audit failure revokes it.
     /// Test: `mint_audit_failure_revokes_the_grant`, `mint_refuses_sensitive_apps_and_denied_tools`.
     pub fn operator_mint(&self, req: OperatorMint) -> Result<Grant, Value> {
         let now = self.now();
-        let mut inner = self.lock();
-        let bundle = req.bundle_id.clone();
-        let mut rec = Map::new();
-        rec.insert("op".into(), json!("mint"));
-        rec.insert("bundle_id".into(), json!(bundle));
-        let grant = match inner.grants.mint(req, now) {
-            Ok(g) => g,
-            Err(e) => {
-                rec.insert("refused".into(), json!(e.code()));
-                let _ = inner.audit.write(&rec);
-                return Err(refusal(e.code(), &e.to_string()));
-            }
-        };
-        rec.insert("grant".into(), json!(grant.id));
-        rec.insert("sensitive".into(), json!(grant.sensitive));
-        if let Err(e) = inner.audit.write(&rec) {
-            let _ = inner.grants.revoke(&grant.id);
-            return Err(refusal("audit_failed", &e.to_string()));
-        }
-        Ok(grant)
+        self.lock().mint(req, now)
     }
 
-    /// Operator path: revoke a grant and drop its lease claims.
+    /// Operator path, in process: revoke a grant and drop its lease claims.
     pub fn operator_revoke(&self, id: &str) -> Result<(), Value> {
         let now = self.now();
-        let mut inner = self.lock();
-        let result = inner.grants.revoke(id);
-        inner.journals.remove(id);
-        let moved = inner.lease.drop_grant(id, now);
         let ctx = Ctx {
             session: "operator".into(),
             uid: crate::private::uid(),
             operator: true,
         };
-        let mut rec = base(&ctx, "revoke");
-        rec.insert("grant".into(), json!(id));
-        let reply = match &result {
-            Ok(()) => json!({"ok": true}),
-            Err(e) => refusal(e.code(), &e.to_string()),
-        };
-        let reply = inner.audited(rec, reply);
-        inner.moved(moved, &ctx);
+        let reply = self.lock().revoke(id, base(&ctx, "revoke"), &ctx, now);
         if reply["ok"] == json!(true) {
             Ok(())
         } else {
@@ -186,6 +187,17 @@ impl<L: Launcher> Broker<L> {
     /// Test: `broker_bad_json_is_refused`, `every_gate_refusal_never_reaches_driver`.
     pub fn handle(&self, request: Option<&Value>, ctx: &Ctx) -> Value {
         let started = std::time::Instant::now();
+        // Ops that must not hold the broker lock while they wait.
+        if let Some(req) = request.and_then(Value::as_object)
+            && !self.lock().consent.locked_down
+        {
+            match (ctx.operator, req.get("op").and_then(Value::as_str)) {
+                (true, Some("grant_request")) => return self.grant_request(req, ctx),
+                (true, Some("lockout")) => return self.lockout(ctx),
+                (false, Some("wait")) => return self.wait(req, ctx),
+                _ => {}
+            }
+        }
         let now = self.now();
         let mut inner = self.lock();
         inner.tick(now, ctx);
@@ -201,8 +213,25 @@ impl<L: Launcher> Broker<L> {
         if let Some(rid) = req.get("request_id") {
             rec.insert("request_id".into(), rid.clone());
         }
+        if inner.consent.locked_down && op != "status" {
+            return inner.refuse(rec, "locked_out", "the operator locked the broker out");
+        }
+        let id = req.get("grant_id").and_then(Value::as_str).unwrap_or("");
         match (ctx.operator, op) {
             (_, "status") => inner.status(rec, ctx),
+            (true, "grant_confirm") => inner.grant_confirm(req, rec, now),
+            (true, "grants") => inner.list_grants(rec, now),
+            (true, "lease") => inner.lease_view(rec),
+            (true, "revoke") => inner.revoke(id, rec, ctx, now),
+            (false, "grants") => inner.session_grants(rec, ctx, now),
+            (false, "disconnect") => {
+                let moved = inner.lease.release(&ctx.session, now);
+                inner.consent.unbind(&ctx.session);
+                let reply = inner.audited(rec, json!({"ok": true}));
+                inner.moved(moved, ctx);
+                reply
+            }
+            (false, "refresh") => inner.refresh(id, rec, ctx, now),
             (false, "connect") => inner.connect(req, rec, ctx, now),
             (false, "release") => {
                 let moved = inner.lease.release(&ctx.session, now);
@@ -227,6 +256,11 @@ pub(crate) fn base(ctx: &Ctx, op: &str) -> Map<String, Value> {
 }
 
 impl<L: Launcher> Inner<L> {
+    /// The grant `id`, alive or not.
+    pub fn grant(&self, id: &str) -> Option<&Grant> {
+        self.grants.get(id)
+    }
+
     /// The `request_id` journal of `grant`, once it has one.
     pub fn journal(&self, grant: &str) -> Option<&Journal> {
         self.journals.get(grant)
@@ -330,9 +364,23 @@ impl<L: Launcher> Inner<L> {
         ctx: &Ctx,
         now: f64,
     ) -> Value {
-        let Some(grant) = req.get("grant_id").and_then(Value::as_str) else {
-            return self.refuse(rec, "grant_required", "connect needs a grant_id");
+        // #11460 Phase 4: a session reaches a grant only by redeeming its operator code.
+        let code = req.get("code").and_then(Value::as_str);
+        let grant = match (code, req.get("grant_id").and_then(Value::as_str)) {
+            (Some(code), _) => match self.redeem(code, &ctx.session, now) {
+                Ok(g) => g,
+                Err((c, detail)) => return self.refuse(rec, c, detail),
+            },
+            (None, Some(g)) if self.consent.bound(&ctx.session, g) => g.to_owned(),
+            (None, Some(g)) => {
+                rec.insert("grant".into(), json!(g));
+                return self.refuse(rec, "grant_not_bound", "redeem the operator's code first");
+            }
+            (None, None) => {
+                return self.refuse(rec, "grant_required", "connect needs a code");
+            }
         };
+        let grant = grant.as_str();
         rec.insert("grant".into(), json!(grant));
         if let Err(e) = self.grants.live(grant, now) {
             return self.refuse(rec, e.code(), &e.to_string());
@@ -344,7 +392,7 @@ impl<L: Launcher> Inner<L> {
                 rec.insert("lease".into(), json!("queued"));
                 self.audited(
                     rec,
-                    json!({"ok": true, "result": {"lease": "queued", "position": position}}),
+                    json!({"ok": true, "result": {"lease": "queued", "position": position, "grant": grant}}),
                 )
             }
             Ok(Connect::Held) => {
@@ -359,7 +407,10 @@ impl<L: Launcher> Inner<L> {
                         "the daemon could not be scoped to this grant",
                     );
                 }
-                self.audited(rec, json!({"ok": true, "result": {"lease": "held"}}))
+                self.audited(
+                    rec,
+                    json!({"ok": true, "result": {"lease": "held", "grant": grant}}),
+                )
             }
         }
     }

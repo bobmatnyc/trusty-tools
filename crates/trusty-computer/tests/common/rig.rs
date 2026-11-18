@@ -4,26 +4,31 @@
 //! Why: the broker tests must run every byte through the real sockets, peer
 //! check and pipeline, without the real cua-driver (issue #11460).
 //! What: [`Rig::new`] builds a [`Supervisor`] on [`FakeLauncher`] with a
-//! fixture, a [`Broker`] on a manual clock, binds [`BrokerServer`], mints one
-//! grant through the operator stub for this process's pid and window 1, and
-//! connects one agent session that holds the lease.
+//! fixture, a [`Broker`] on a manual clock and a [`FakeDialog`], binds
+//! [`BrokerServer`], mints one grant through the consent flow on
+//! `operator.sock` for this process's pid and window 1, and connects one
+//! agent session that redeems its code and holds the lease.
 //! Test: `tests/broker_spike.rs`.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use trusty_computer::broker::{Broker, Clock, Inner};
 use trusty_computer::broker_server::BrokerServer;
-use trusty_computer::grants::{Grant, OperatorMint};
-use trusty_computer::manifest::LeaseScope;
+use trusty_computer::grants::Grant;
 use trusty_computer::supervisor::Supervisor;
 
+use super::dialog::FakeDialog;
 use super::{FakeDaemon, FakeLauncher, FixtureState, short_tmp};
+
+/// The bundle id every rig grant names.
+pub const BUNDLE: &str = "dev.trusty.computer.fixture";
 
 /// The fixture window every rig grant names.
 pub const WINDOW: u64 = 1;
@@ -70,6 +75,8 @@ pub struct Rig {
     pub grant: Grant,
     pub conn: Conn,
     pub readback: PathBuf,
+    pub dialog: Arc<FakeDialog>,
+    codes: Mutex<HashMap<String, String>>,
 }
 
 /// A call request.
@@ -103,12 +110,17 @@ impl Rig {
         let millis = Arc::new(AtomicU64::new((T0 * 1000.0) as u64));
         let m = Arc::clone(&millis);
         let clock: Clock = Arc::new(move || m.load(Ordering::SeqCst) as f64 / 1000.0);
-        let broker = Arc::new(Broker::new(sup, &state, clock).expect("broker"));
+        let dialog = FakeDialog::confirming();
+        let broker = Broker::new(sup, &state, clock, dialog.clone()).expect("broker");
+        let broker = Arc::new(broker.with_dialog_timeout(Duration::from_millis(500)));
         let mut server = BrokerServer::bind(&state).expect("bind");
         server.spawn(Arc::clone(&broker));
-        let grant = broker.operator_mint(mint(extra, window)).expect("mint");
+        let minted = consent(&server.operator, &dialog, &grant_req(extra, window));
+        let id = minted["result"]["grant"]["id"].as_str().expect("grant id");
+        let grant = broker.lock().grant(id).cloned().expect("grant");
         let mut conn = Conn::open(&server.agent);
-        let reply = conn.send(&json!({"op": "connect", "grant_id": grant.id}));
+        let code = &minted["result"]["code"];
+        let reply = conn.send(&json!({"op": "connect", "code": code}));
         assert_eq!(reply["result"]["lease"], "held", "{reply}");
         Rig {
             dir,
@@ -118,6 +130,8 @@ impl Rig {
             grant,
             conn,
             readback,
+            dialog,
+            codes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -209,23 +223,46 @@ impl Rig {
         Conn::open(&self.server.operator).send(request)
     }
 
-    /// Mint another grant for this pid and `window`.
+    /// Mint another grant for this pid and `window`; its code is kept for [`Rig::code`].
     pub fn mint(&self, window: u64) -> Grant {
-        self.broker
-            .operator_mint(mint(&["type_text"], window))
-            .expect("mint")
+        let minted = consent(
+            &self.server.operator,
+            &self.dialog,
+            &grant_req(&["type_text"], window),
+        );
+        let id = minted["result"]["grant"]["id"]
+            .as_str()
+            .expect("grant id")
+            .to_owned();
+        let code = minted["result"]["code"].as_str().expect("code").to_owned();
+        self.codes.lock().expect("codes").insert(id.clone(), code);
+        self.broker.lock().grant(&id).cloned().expect("grant")
+    }
+
+    /// The one-use code of a grant from [`Rig::mint`].
+    pub fn code(&self, grant: &str) -> String {
+        self.codes
+            .lock()
+            .expect("codes")
+            .remove(grant)
+            .expect("a code for this grant")
     }
 }
 
-/// An operator stub mint for this pid and `window`, adding `extra` tools.
-pub fn mint(extra: &[&str], window: u64) -> OperatorMint {
-    let mut req = OperatorMint::stub(
-        "dev.trusty.computer.fixture",
-        LeaseScope {
-            pid: pid(),
-            window_id: window,
-        },
-    );
-    req.extra_tools = extra.iter().map(|t| (*t).to_owned()).collect();
-    req
+/// A `grant_request` for this pid and `window`, adding `extra` tools.
+pub fn grant_req(extra: &[&str], window: u64) -> Value {
+    json!({"op": "grant_request", "bundle_id": BUNDLE, "pid": pid(), "window_id": window,
+        "tools": extra})
+}
+
+/// The whole consent flow on `operator`: request, read the fake dialog's code, confirm.
+/// Answers the first refusal, or the `grant_confirm` reply.
+pub fn consent(operator: &Path, dialog: &FakeDialog, request: &Value) -> Value {
+    let mut conn = Conn::open(operator);
+    let reply = conn.send(request);
+    let Some(challenge) = reply["result"]["challenge"].as_str() else {
+        return reply;
+    };
+    let code = dialog.last_code();
+    conn.send(&json!({"op": "grant_confirm", "challenge": challenge, "code": code}))
 }

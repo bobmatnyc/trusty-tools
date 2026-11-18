@@ -4,8 +4,8 @@
 //! cua-driver: redaction of a real menu bar, a read-back confirmed click on
 //! the fixture, and a second session queued behind the first (plan section 8).
 //! What: launches `tests/fixtures/fixture.js`, builds an in-process broker on
-//! the real launcher in a temp state dir, mints one grant through the
-//! operator stub for the fixture's pid and window only, then over
+//! the real launcher in a temp state dir, mints two grants through the
+//! consent flow (fake dialog) for the fixture's pid and window only, then over
 //! `agent.sock` connects, snapshots (no `AXMenuBar` in the reply), clicks
 //! "Press Me" (confirmed, fixture click count +1), and checks that a second
 //! session is queued. It refuses to run unless `TRUSTY_SANDBOX=1`, so it never
@@ -22,11 +22,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::rig::Conn;
+use common::dialog::FakeDialog;
+use common::rig::{Conn, consent};
 use serde_json::json;
 use trusty_computer::broker::{Broker, wall_clock};
 use trusty_computer::broker_server::BrokerServer;
-use trusty_computer::grants::OperatorMint;
 use trusty_computer::launcher::CuaAppLauncher;
 use trusty_computer::manifest::LeaseScope;
 use trusty_computer::supervisor::Supervisor;
@@ -92,22 +92,34 @@ fn live_broker_drives_fixture_and_queues_second_session() {
     };
 
     let sup = Supervisor::new(CuaAppLauncher, &state).expect("supervisor");
-    let broker = Arc::new(Broker::new(sup, &state, wall_clock()).expect("broker"));
+    let dialog = FakeDialog::confirming();
+    let broker = Broker::new(sup, &state, wall_clock(), dialog.clone()).expect("broker");
+    let broker = Arc::new(broker);
     let mut server = BrokerServer::bind(&state).expect("bind");
     server.spawn(Arc::clone(&broker));
-    let grant = broker
-        .operator_mint(OperatorMint::stub(FIXTURE_BUNDLE, scope))
-        .expect("mint");
+    let req = json!({"op": "grant_request", "bundle_id": FIXTURE_BUNDLE, "pid": scope.pid,
+        "window_id": scope.window_id});
+    let mint = |what: &str| {
+        let reply = consent(&server.operator, &dialog, &req);
+        let id = reply["result"]["grant"]["id"]
+            .as_str()
+            .expect(what)
+            .to_owned();
+        let code = reply["result"]["code"].as_str().expect(what).to_owned();
+        (broker.lock().grant(&id).cloned().expect(what), code)
+    };
+    let (grant, code) = mint("first grant");
+    let (_, second_code) = mint("second grant");
     assert_eq!(
         (grant.bundle_id.as_str(), grant.scope),
         (FIXTURE_BUNDLE, scope)
     );
 
     let mut agent = Conn::open(&server.agent);
-    let held = agent.send(&json!({"op": "connect", "grant_id": grant.id}));
+    let held = agent.send(&json!({"op": "connect", "code": code}));
     assert_eq!(held["result"]["lease"], "held", "{held}");
     let mut second = Conn::open(&server.agent);
-    let queued = second.send(&json!({"op": "connect", "grant_id": grant.id}));
+    let queued = second.send(&json!({"op": "connect", "code": second_code}));
     assert_eq!(queued["result"]["lease"], "queued", "{queued}");
 
     let args = json!({"pid": pid, "window_id": wid});
