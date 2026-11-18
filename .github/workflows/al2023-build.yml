@@ -176,7 +176,8 @@ jobs:
             gzip \
             pkg-config \
             findutils \
-            binutils
+            binutils \
+            unzip
 
       # ------------------------------------------------------------------
       # 3. Install Rust 1.94 (workspace MSRV) via rustup inside the container.
@@ -216,31 +217,14 @@ jobs:
             al2023-1.94-search-
 
       # ------------------------------------------------------------------
-      # 5. Download the official ORT linux-x64 tarball at ORT_VERSION and
+      # 5. Download the ORT linux-x64 runtime (NuGet nupkg, SHA-256 pinned) and
       #    export ORT_DYLIB_PATH.
       # ------------------------------------------------------------------
       - name: Download ONNX Runtime ${{ env.ORT_VERSION }} (linux-x64)
         run: |
-          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-x64-${ORT_VERSION}.tgz"
-          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
-
-          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
-          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
-
-          mkdir -p "${ORT_DIR}"
-          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
-          rm "/tmp/${ORT_TARBALL}"
-
-          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
-          if [ -z "${DYLIB_PATH}" ]; then
-            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
-          fi
-          if [ -z "${DYLIB_PATH}" ]; then
-            echo "ERROR: libonnxruntime.so not found in ${ORT_DIR}/lib after extraction."
-            find "${ORT_DIR}" -name "*.so*" || true
-            exit 1
-          fi
+          # #11458: GitHub release assets 404; the NuGet nupkg is the
+          # checksum-pinned source (pin lives in the script).
+          DYLIB_PATH=$(./scripts/fetch_ort_nupkg.sh "${ORT_VERSION}" x64 "/opt/onnxruntime-${ORT_VERSION}")
 
           echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
           echo "Found libonnxruntime.so at: ${DYLIB_PATH}"

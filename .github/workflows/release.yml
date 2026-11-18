@@ -1075,7 +1075,7 @@ jobs:
         run: |
           dnf install -y --allowerasing \
             gcc gcc-c++ make openssl-devel perl \
-            curl tar gzip pkg-config findutils binutils file
+            curl tar gzip pkg-config findutils binutils file unzip
 
       # ── Linux runners (linux-zigbuild): install system deps ─────────────────
       # Same base toolchain as before; zigbuild only replaces the final linker,
@@ -1183,31 +1183,14 @@ jobs:
           # hardcoded `linux-x64` while the only AL2023 leg was x86_64; the new
           # aarch64 AL2023 leg needs `linux-aarch64`, and a wrong-arch download
           # would fail late and confusingly (ORT_DYLIB_PATH set to a library the
-          # loader rejects) rather than here. Upstream publishes both under the
-          # same v${ORT_VERSION} tag.
+          # loader rejects) rather than here. The nupkg carries both.
           case "${TARGET}" in
             aarch64-*) ORT_ARCH="aarch64" ;;
             *)         ORT_ARCH="x64" ;;
           esac
-          ORT_DIR="/opt/onnxruntime-${ORT_VERSION}"
-          ORT_TARBALL="onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz"
-          ORT_URL="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_TARBALL}"
-
-          echo "Downloading ORT ${ORT_VERSION} from ${ORT_URL}"
-          curl -fsSL --retry 3 --retry-delay 5 -o "/tmp/${ORT_TARBALL}" "${ORT_URL}"
-          mkdir -p "${ORT_DIR}"
-          tar -xzf "/tmp/${ORT_TARBALL}" -C "${ORT_DIR}" --strip-components=1
-          rm "/tmp/${ORT_TARBALL}"
-
-          DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so.${ORT_VERSION}" | head -1)
-          if [[ -z "${DYLIB_PATH}" ]]; then
-            DYLIB_PATH=$(find "${ORT_DIR}/lib" -name "libonnxruntime.so" | head -1)
-          fi
-          if [[ -z "${DYLIB_PATH}" ]]; then
-            echo "ERROR: libonnxruntime.so not found after extraction."
-            find "${ORT_DIR}" -name "*.so*" || true
-            exit 1
-          fi
+          # #11458: GitHub release assets 404; the NuGet nupkg (linux-x64 and
+          # linux-arm64 runtimes in one package) is the checksum-pinned source.
+          DYLIB_PATH=$(./scripts/fetch_ort_nupkg.sh "${ORT_VERSION}" "${ORT_ARCH}" "/opt/onnxruntime-${ORT_VERSION}")
 
           echo "ORT_DYLIB_PATH=${DYLIB_PATH}" >> "$GITHUB_ENV"
           echo "Found: ${DYLIB_PATH}"
@@ -1425,8 +1408,8 @@ jobs:
           LOAD_DYNAMIC_BUILD_FEATURES="${{ matrix.cargo_features }}"
           if [[ "${LOAD_DYNAMIC_BUILD_FEATURES}" == *"load-dynamic"* ]]; then
             case "${TARGET}" in
-              aarch64-*) ORT_ARCH="aarch64" ;;
-              *)         ORT_ARCH="x64" ;;
+              aarch64-*) ORT_ARCH="aarch64"; ORT_NUPKG_RID="arm64" ;;
+              *)         ORT_ARCH="x64"; ORT_NUPKG_RID="x64" ;;
             esac
             {
               printf 'Linux load-dynamic ORT build (portable across glibc versions)\n'
@@ -1444,12 +1427,14 @@ jobs:
               # the version comes from the job-level ORT_VERSION.
               printf 'Compatible ORT build: 1.24.x linux-%s (%s tested; needs glibc >= 2.27)\n' "${ORT_ARCH}" "${ORT_VERSION}"
               printf "Older runtimes fail at startup with: expected version >= '1.24.x'\n"
-              printf '  https://github.com/microsoft/onnxruntime/releases/tag/v%s\n' "${ORT_VERSION}"
+              printf '  https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime/%s\n' "${ORT_VERSION}"
               printf '\n'
               printf 'Example install:\n'
-              printf '  curl -fsSL https://github.com/microsoft/onnxruntime/releases/download/v%s/onnxruntime-linux-%s-%s.tgz \\\n' "${ORT_VERSION}" "${ORT_ARCH}" "${ORT_VERSION}"
-              printf '    | tar xz -C /opt\n'
-              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-linux-%s-%s/lib/libonnxruntime.so.%s\n' "${ORT_ARCH}" "${ORT_VERSION}" "${ORT_VERSION}"
+              # #11458: GitHub release assets 404; the NuGet nupkg is a zip.
+              printf '  curl -fsSL -o ort.nupkg https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/%s/microsoft.ml.onnxruntime.%s.nupkg\n' "${ORT_VERSION}" "${ORT_VERSION}"
+              printf '  mkdir -p /opt/onnxruntime-%s/lib\n' "${ORT_VERSION}"
+              printf '  unzip -j ort.nupkg "runtimes/linux-%s/native/libonnxruntime.so*" -d /opt/onnxruntime-%s/lib\n' "${ORT_NUPKG_RID}" "${ORT_VERSION}"
+              printf '  export ORT_DYLIB_PATH=/opt/onnxruntime-%s/lib/libonnxruntime.so\n' "${ORT_VERSION}"
             } > "${STAGING_DIR}/ORT-RUNTIME-NOTE.txt"
           fi
 
