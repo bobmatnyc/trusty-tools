@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::{ProtectedEnv, evaluate};
-use crate::commands::pm_guard_protected_hooks::{frontmatter_hooks, hook_named_paths};
+use crate::commands::pm_guard_protected_hooks::{
+    declares_hooks_key, frontmatter_hooks, hook_named_paths,
+};
 
 /// A scratch home and project, canonicalized.
 struct Fx {
@@ -614,5 +616,84 @@ fn an_unparseable_agent_file_declaring_hooks_still_denies_10937() {
             .write(&fx.project.join("notes.md"), "x")
             .unwrap_or_else(|| panic!("`{key}` must deny"));
         assert!(reason.contains("hooked.md"), "{key}: {reason}");
+    }
+}
+
+/// #11438: unparseable frontmatter whose only backslashes cannot spell a key
+/// (a Windows path, a regex class).
+const PLAIN_BACKSLASHES_11438: [&str; 2] = [
+    "---\nname: x\nversion: 1\nversion: 2\ndescription: \"Edits C:\\Users\\me\"\n---\n",
+    "---\nname: x\nversion: 1\nversion: 2\ndescription: \"match \\d+\"\n---\n",
+];
+
+/// #11438 path 1: `declares_hooks_key` ignores a backslash that starts no
+/// letter-producing escape and no fold. Fails on origin/main (any `\` counted).
+#[test]
+fn a_plain_backslash_is_not_a_hooks_key_11438() {
+    for text in PLAIN_BACKSLASHES_11438 {
+        assert!(!declares_hooks_key(text), "{text:?}");
+    }
+    assert!(
+        !declares_hooks_key("---\na: \"\\U0000\"\n---\n"),
+        "\\U needs 8 hex digits"
+    );
+    assert!(declares_hooks_key("---\na: \"ho\\x6fks\"\n---\n"));
+    assert!(declares_hooks_key("---\na: \"ho\\u006Fks\"\n---\n"));
+    assert!(declares_hooks_key("---\na: \"ho\\U0000006fks\"\n---\n"));
+}
+
+/// #11438 path 2: `frontmatter_hooks` reads unparseable frontmatter with a
+/// plain backslash as naming no hook. Fails on origin/main (`Err`).
+#[test]
+fn frontmatter_hooks_ignores_a_plain_backslash_11438() {
+    for text in PLAIN_BACKSLASHES_11438 {
+        assert_eq!(frontmatter_hooks(text), Ok(None), "{text:?}");
+    }
+}
+
+/// #11438 path 3: the home-agents scan skips an agent file whose only
+/// backslashes are plain. Fails on origin/main (every Write denied).
+#[test]
+fn the_home_agents_scan_skips_a_plain_backslash_11438() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/windows.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    for text in PLAIN_BACKSLASHES_11438 {
+        std::fs::write(&agent, text).expect("write agent");
+        assert_eq!(
+            fx.write(&fx.project.join("notes.md"), "x"),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+/// #11438: a YAML escaped line break folds `"ho\` + newline + `  oks"` into
+/// `hooks`, so it still denies on every path, with LF, CRLF and a lone CR,
+/// and with the YAML 1.1 breaks NEL, LS and PS.
+#[test]
+fn an_escaped_line_break_spelling_hooks_denies_11438() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/folded.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    // (line ending, fold break): LF, CRLF, a lone CR, NEL, LS and PS.
+    for (eol, fold) in [
+        ("\n", "\n"),
+        ("\r\n", "\r\n"),
+        ("\n", "\r"),
+        ("\n", "\u{85}"),
+        ("\n", "\u{2028}"),
+        ("\n", "\u{2029}"),
+    ] {
+        let text = format!(
+            "---{eol}name: x{eol}version: 1{eol}version: 2{eol}? \"ho\\{fold}  oks\"{eol}: x{eol}---{eol}"
+        );
+        assert!(declares_hooks_key(&text), "{fold:?}");
+        assert!(frontmatter_hooks(&text).is_err(), "{fold:?}");
+        std::fs::write(&agent, &text).expect("write agent");
+        let reason = fx
+            .write(&fx.project.join("notes.md"), "x")
+            .unwrap_or_else(|| panic!("{fold:?} fold must deny"));
+        assert!(reason.contains("folded.md"), "{fold:?}: {reason}");
     }
 }
