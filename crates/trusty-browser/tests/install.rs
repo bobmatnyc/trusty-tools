@@ -261,12 +261,14 @@ fn install_host_is_idempotent_and_refuses_a_foreign_file() {
     );
 }
 
+#[cfg(target_os = "macos")]
 /// Records every call; `print` answers with the configured outcome.
 struct FakeCtl {
     print: Outcome,
     calls: RefCell<Vec<Vec<String>>>,
 }
 
+#[cfg(target_os = "macos")]
 impl FakeCtl {
     fn new(code: i32, stdout: &str) -> FakeCtl {
         FakeCtl {
@@ -283,6 +285,7 @@ impl FakeCtl {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Launchctl for FakeCtl {
     fn run(&self, args: &[&str]) -> io::Result<Outcome> {
         self.calls
@@ -307,6 +310,7 @@ fn bin_pair(home: &Path) -> (PathBuf, PathBuf) {
     (exe, mcp)
 }
 
+#[cfg(target_os = "macos")]
 fn layout(home: &Path) -> Layout {
     Layout {
         home: home.to_path_buf(),
@@ -316,6 +320,7 @@ fn layout(home: &Path) -> Layout {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// A signer whose binary already satisfies the requirement.
 fn signed() -> Signer<'static> {
     let tool: &'static FakeSign = Box::leak(Box::new(FakeSign::new(&[true], Ok(()), "")));
@@ -325,6 +330,7 @@ fn signed() -> Signer<'static> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn plist_path(home: &Path) -> PathBuf {
     home.join("Library/LaunchAgents/com.trusty.browser.plist")
 }
