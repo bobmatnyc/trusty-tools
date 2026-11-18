@@ -669,14 +669,22 @@ fn the_home_agents_scan_skips_a_plain_backslash_11438() {
 }
 
 /// #11438: a YAML escaped line break folds `"ho\` + newline + `  oks"` into
-/// `hooks`, so it still denies on every path, with LF, CRLF and a lone CR.
+/// `hooks`, so it still denies on every path, with LF, CRLF and a lone CR,
+/// and with the YAML 1.1 breaks NEL, LS and PS.
 #[test]
 fn an_escaped_line_break_spelling_hooks_denies_11438() {
     let fx = Fx::new();
     let agent = fx.home.join(".claude/agents/folded.md");
     std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
-    // (line ending, fold break): LF, CRLF, and a lone CR at the fold.
-    for (eol, fold) in [("\n", "\n"), ("\r\n", "\r\n"), ("\n", "\r")] {
+    // (line ending, fold break): LF, CRLF, a lone CR, NEL, LS and PS.
+    for (eol, fold) in [
+        ("\n", "\n"),
+        ("\r\n", "\r\n"),
+        ("\n", "\r"),
+        ("\n", "\u{85}"),
+        ("\n", "\u{2028}"),
+        ("\n", "\u{2029}"),
+    ] {
         let text = format!(
             "---{eol}name: x{eol}version: 1{eol}version: 2{eol}? \"ho\\{fold}  oks\"{eol}: x{eol}---{eol}"
         );
