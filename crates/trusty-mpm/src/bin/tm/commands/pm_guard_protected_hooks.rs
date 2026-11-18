@@ -318,8 +318,8 @@ pub(crate) fn declares_hooks_key(text: &str) -> bool {
 /// narrowing to hex escapes alone missed the escaped line break, where
 /// `"ho\` + newline + `  oks"` folds to `hooks`.
 /// What: true for a `\` that starts `\x` + 2 hex digits, `\u` + 4, `\U` + 8
-/// (the escapes that can produce a letter), or is followed by LF or CR (a line
-/// fold). Every other backslash is ignored. `\\` pairs are not skipped, so a
+/// (the escapes that can produce a letter), or is followed by a line break
+/// that folds: LF, CR, or the YAML 1.1 NEL, LS and PS that libyaml reads. Every other backslash is ignored. `\\` pairs are not skipped, so a
 /// literal backslash before a hex run still counts (over-refusal is safe).
 /// Test: `an_escaped_line_break_spelling_hooks_denies_11438`,
 /// `a_plain_backslash_is_not_a_hooks_key_11438`,
@@ -336,6 +336,9 @@ fn escape_may_spell_hooks(block: &str) -> bool {
         b == b'\\'
             && match bytes.get(i + 1) {
                 Some(b'\n' | b'\r') => true,
+                // #11438: NEL (C2 85), LS (E2 80 A8), PS (E2 80 A9) fold in YAML 1.1.
+                Some(0xC2) => bytes.get(i + 2) == Some(&0x85),
+                Some(0xE2) => matches!(bytes.get(i + 2..i + 4), Some([0x80, 0xA8 | 0xA9])),
                 Some(b'x') => hex_run(i + 2, 2),
                 Some(b'u') => hex_run(i + 2, 4),
                 Some(b'U') => hex_run(i + 2, 8),
