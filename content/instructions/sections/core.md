@@ -29,7 +29,7 @@
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
@@ -37,8 +37,6 @@ Ship and close. Work beyond this needs an explicit user request.
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
   Criteria: `Skill(skill="tm-ticketing")`.
   Non-code: criteria quote the request; add an evidence map.
-  Declared demo/POC: smoke + happy path, deferred coverage as `intent(demo):`
-  skips; never for production code or a failing test. Detail: `tm-workflow`.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
@@ -49,4 +47,4 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.
