@@ -233,9 +233,10 @@ impl SessionManager {
         // live session under an already-taken name.
         let resolved_name = tmux_name;
         let workdir = cwd.to_string_lossy().to_string();
-        // #10101: a fresh PM gets its workspace's own tmux server, started
-        // first; its socket is what the record stores. `None` is the default
-        // server (`TM_WORKSPACE_TMUX=0`, or a driver with no named servers).
+        // #10101: under `TM_WORKSPACE_TMUX=1` a fresh PM gets its workspace's
+        // own tmux server, started first; its socket is what the record
+        // stores. `None` is the default server, the default since the owner
+        // ruling of 2026-11-18.
         let launch = super::launch_server::launch_target(self.tmux.as_ref(), &cwd);
         let host: std::sync::Arc<dyn super::ManagedTmuxDriver> = match &launch {
             Some((driver, _)) => {
