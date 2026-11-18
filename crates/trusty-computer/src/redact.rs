@@ -249,11 +249,12 @@ pub fn fingerprint(structured: &Map<String, Value>) -> String {
 /// Redact a whole daemon `get_window_state` result (structured and text parts).
 ///
 /// Why: the text content repeats the tree, so both parts must be stripped.
-/// What: a result without an object `structuredContent` passes through with
-/// no tokens, zero removed and an empty fingerprint. Otherwise every text
-/// part of `content` is stripped and `structuredContent` is replaced by
-/// [`strip_menu_bar`]'s output.
-/// Test: `snapshot_strips_menu_bar_from_structured_and_text`.
+/// What: every text part of `content` is stripped. A result without an
+/// object `structuredContent` then has no tokens, zero removed and an empty
+/// fingerprint (the broker refuses such a snapshot); otherwise
+/// `structuredContent` is replaced by [`strip_menu_bar`]'s output.
+/// Test: `snapshot_strips_menu_bar_from_structured_and_text`,
+/// `text_parts_are_stripped_without_a_structured_part`.
 pub fn redact_reply(result: &Value) -> Redacted {
     let passthrough = || Redacted {
         result: result.clone(),
@@ -264,28 +265,30 @@ pub fn redact_reply(result: &Value) -> Redacted {
     let Some(obj) = result.as_object() else {
         return passthrough();
     };
+    let mut out = obj.clone();
+    // #11460: the text parts are stripped whether or not a structured part exists.
+    if let Some(parts) = obj.get("content").and_then(Value::as_array) {
+        let content: Vec<Value> = parts
+            .iter()
+            .map(|part| match part.get("text").and_then(Value::as_str) {
+                Some(text) if part.is_object() => {
+                    let mut part = part.clone();
+                    part["text"] = Value::String(strip_markdown(text));
+                    part
+                }
+                _ => part.clone(),
+            })
+            .collect();
+        out.insert("content".to_owned(), Value::Array(content));
+    }
     let Some(structured) = obj.get("structuredContent").and_then(Value::as_object) else {
-        return passthrough();
+        return Redacted {
+            result: Value::Object(out),
+            ..passthrough()
+        };
     };
     let (structured, tokens, removed) = strip_menu_bar(structured);
-    let parts: &[Value] = obj
-        .get("content")
-        .and_then(Value::as_array)
-        .map_or(&[], Vec::as_slice);
-    let content: Vec<Value> = parts
-        .iter()
-        .map(|part| match part.get("text").and_then(Value::as_str) {
-            Some(text) if part.is_object() => {
-                let mut part = part.clone();
-                part["text"] = Value::String(strip_markdown(text));
-                part
-            }
-            _ => part.clone(),
-        })
-        .collect();
     let fingerprint = fingerprint(&structured);
-    let mut out = obj.clone();
-    out.insert("content".to_owned(), Value::Array(content));
     out.insert("structuredContent".to_owned(), Value::Object(structured));
     Redacted {
         result: Value::Object(out),

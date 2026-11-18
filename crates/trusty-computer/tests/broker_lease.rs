@@ -46,8 +46,9 @@ fn second_session_is_queued_fifo_while_first_holds() {
 #[test]
 fn queued_session_call_is_refused() {
     let rig = Rig::new();
-    let (mut two, _) = connect(&rig, &rig.mint(WINDOW).id);
-    let reply = two.send(&call(&rig.grant.id, "list_apps", "q1", json!({})));
+    let own = rig.mint(WINDOW).id;
+    let (mut two, _) = connect(&rig, &own);
+    let reply = two.send(&call(&own, "list_apps", "q1", json!({})));
     assert_eq!(reply["code"], "lease_not_held", "{reply}");
     assert!(rig.agent_calls().is_empty());
     assert_eq!(

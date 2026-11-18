@@ -31,10 +31,24 @@ pub const GRANT_CODE_TTL: f64 = 300.0;
 /// How long the dialog waits for the operator.
 pub const DIALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// What a dialog asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptKind {
+    /// Mint a grant for one app.
+    Grant,
+    /// Clear a persisted lockout (#11460).
+    Unlock,
+}
+
 /// What the dialog shows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
+    pub kind: PromptKind,
+    /// The resolved bundle id (never the requester's claim alone).
     pub bundle_id: String,
+    /// The app's display name, as LaunchServices reports it for `pid`.
+    pub app_name: String,
+    pub pid: u32,
     pub tools: Vec<String>,
     pub ttl_secs: u64,
     /// The six-digit code the operator types into the CLI.
@@ -42,15 +56,23 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    /// The dialog text.
+    /// The dialog text: the pid, the resolved app name and bundle for a grant.
     pub fn text(&self) -> String {
-        format!(
-            "Allow an agent to drive {} for {} min?\nTools: {}\nCode: {}",
-            self.bundle_id,
-            self.ttl_secs / 60,
-            self.tools.join(", "),
-            self.code
-        )
+        match self.kind {
+            PromptKind::Grant => format!(
+                "Allow an agent to drive {} ({}, pid {}) for {} min?\nTools: {}\nCode: {}",
+                self.app_name,
+                self.bundle_id,
+                self.pid,
+                self.ttl_secs / 60,
+                self.tools.join(", "),
+                self.code
+            ),
+            PromptKind::Unlock => format!(
+                "Clear the trusty-computer lockout and allow new grants?\nCode: {}",
+                self.code
+            ),
+        }
     }
 }
 

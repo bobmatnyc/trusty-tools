@@ -166,3 +166,37 @@ fn mcp_smoke_against_a_fake_broker() {
     let calls = rig.agent_calls();
     assert!(!calls.iter().any(|c| c == "launch_app"), "{calls:?}");
 }
+
+/// #11460 fix round: an argument outside a tool's schema never reaches the broker.
+#[test]
+fn undeclared_arguments_are_refused() {
+    let dir = common::short_tmp();
+    let mut server = trusty_computer::mcp::McpServer::new(dir.path().to_path_buf());
+    let cases = [
+        (
+            "computer_click",
+            json!({"pid": 1, "window_id": 1, "element_token": "t", "snapshot_id": "s", "element_index": 2}),
+        ),
+        (
+            "computer_key",
+            json!({"pid": 1, "key": "q", "modifiers": ["cmd"]}),
+        ),
+        (
+            "computer_read",
+            json!({"pid": 1, "window_id": 1, "include_screenshot": true}),
+        ),
+        (
+            "computer_connect",
+            json!({"code": "tc-x", "grant_id": "g-1"}),
+        ),
+    ];
+    for (name, args) in cases {
+        let args = args.as_object().expect("object").clone();
+        let reply = server.call(name, &args);
+        assert_eq!(reply["isError"], true, "{name}: {reply}");
+        assert_eq!(
+            reply["structuredContent"]["code"], "bad_args",
+            "{name}: {reply}"
+        );
+    }
+}

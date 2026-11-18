@@ -137,6 +137,9 @@ struct Shared {
     readback_broken: bool,
     /// `structuredContent.effect` of every non-snapshot result.
     effect: Option<String>,
+    /// `get_window_state` answers text only (`"text_only"`) or an `isError`
+    /// result carrying the whole tree (`"refused"`).
+    snapshot_mode: Option<&'static str>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -157,6 +160,7 @@ impl FakeDaemon {
             idle_locked: false,
             readback_broken: false,
             effect: None,
+            snapshot_mode: None,
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -199,6 +203,11 @@ impl FakeDaemon {
     /// Answer every later non-snapshot call with `structuredContent.effect`.
     pub fn set_effect(&self, effect: &str) {
         self.lock().effect = Some(effect.to_owned());
+    }
+
+    /// Answer every later `get_window_state` as [`Shared::snapshot_mode`] says.
+    pub fn set_snapshot_mode(&self, mode: &'static str) {
+        self.lock().snapshot_mode = Some(mode);
     }
 
     /// The fixture's current state.
@@ -273,6 +282,15 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     if name == "get_window_state" && state.readback_broken {
         return json!({"ok": false, "error": "snapshot failed", "exit_code": 1});
     }
+    if name == "get_window_state" && state.snapshot_mode.is_some() {
+        let mut snap = window_state(0);
+        let obj = snap.as_object_mut().expect("object");
+        obj.remove("structuredContent");
+        if state.snapshot_mode == Some("refused") {
+            obj.insert("isError".into(), json!(true));
+        }
+        return json!({"ok": true, "result": snap});
+    }
     if name == "get_window_state" {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
         return json!({"ok": true, "result": window_state(clicks)});
@@ -327,6 +345,8 @@ pub struct FakeLauncher {
     pub manifests: Vec<String>,
     /// When set, `start` fails (a rescope cannot complete).
     pub fail_start: bool,
+    /// When set, `owns` answers false (the pid does not serve the socket).
+    pub disown: bool,
 }
 
 impl FakeLauncher {
@@ -340,6 +360,7 @@ impl FakeLauncher {
             stops: 0,
             manifests: Vec::new(),
             fail_start: false,
+            disown: false,
         }
     }
 }
@@ -379,6 +400,6 @@ impl trusty_computer::launcher::Launcher for FakeLauncher {
         Ok(())
     }
     fn owns(&mut self, pid: u32, _socket: &Path) -> bool {
-        pid == 4242 && self.daemon.is_some()
+        !self.disown && pid == 4242 && self.daemon.is_some()
     }
 }

@@ -142,9 +142,21 @@ impl<L: Launcher> Supervisor<L> {
     /// the manifest, launches, waits for metadata, refuses (and stops) a daemon
     /// reporting another version, chmods the socket 0600, then `start_session`.
     /// Postcondition on Ok: `pid()` is the metadata pid and the socket answers.
+    /// Postcondition on Err: `pid()` and `scope()` are `None`, so no later
+    /// rescope mistakes an unverified daemon for a running one (#11460).
     /// Test: `supervisor_start_stop_restart`, `supervisor_refuses_unpinned_binary`,
-    /// `supervisor_stops_daemon_reporting_wrong_version`, `supervisor_start_is_idempotent_when_running`.
+    /// `supervisor_stops_daemon_reporting_wrong_version`, `supervisor_start_is_idempotent_when_running`,
+    /// `failed_start_clears_pid_and_scope`.
     pub fn start(&mut self, scope: LeaseScope) -> Result<Value, DriverError> {
+        let result = self.start_checked(scope);
+        if result.is_err() {
+            self.pid = None;
+            self.scope = None;
+        }
+        result
+    }
+
+    fn start_checked(&mut self, scope: LeaseScope) -> Result<Value, DriverError> {
         let binary = self.launcher.binary_version()?;
         if binary != self.pinned {
             return Err(DriverError::Version(format!(

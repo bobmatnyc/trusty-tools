@@ -24,7 +24,7 @@ use trusty_computer::broker_server::BrokerServer;
 use trusty_computer::grants::Grant;
 use trusty_computer::supervisor::Supervisor;
 
-use super::dialog::FakeDialog;
+use super::dialog::{FakeDialog, FakeResolver};
 use super::{FakeDaemon, FakeLauncher, FixtureState, short_tmp};
 
 /// The bundle id every rig grant names.
@@ -76,6 +76,7 @@ pub struct Rig {
     pub conn: Conn,
     pub readback: PathBuf,
     pub dialog: Arc<FakeDialog>,
+    pub resolver: Arc<FakeResolver>,
     codes: Mutex<HashMap<String, String>>,
 }
 
@@ -111,8 +112,12 @@ impl Rig {
         let m = Arc::clone(&millis);
         let clock: Clock = Arc::new(move || m.load(Ordering::SeqCst) as f64 / 1000.0);
         let dialog = FakeDialog::confirming();
+        let resolver = Arc::new(FakeResolver::default());
         let broker = Broker::new(sup, &state, clock, dialog.clone()).expect("broker");
-        let broker = Arc::new(broker.with_dialog_timeout(Duration::from_millis(500)));
+        let broker = broker
+            .with_dialog_timeout(Duration::from_millis(500))
+            .with_app_resolver(resolver.clone());
+        let broker = Arc::new(broker);
         let mut server = BrokerServer::bind(&state).expect("bind");
         server.spawn(Arc::clone(&broker));
         let minted = consent(&server.operator, &dialog, &grant_req(extra, window));
@@ -131,6 +136,7 @@ impl Rig {
             conn,
             readback,
             dialog,
+            resolver,
             codes: Mutex::new(HashMap::new()),
         }
     }

@@ -24,6 +24,9 @@ pub const PATH_WRITE_ARGS: [&str; 2] = ["debug_image_out", "screenshot_out_file"
 /// Maximum text an agent may type or set in one call, in code points.
 pub const MAX_TEXT_CHARS: usize = 2000;
 /// Chords that quit, close, hide or switch apps, or open system UI.
+///
+/// Keys are in [`canonical_key`] form; a chord holding every key of one of
+/// these, in any order and with any extra keys, is refused.
 pub const DENIED_CHORDS: [&[&str]; 7] = [
     &["cmd", "q"],
     &["cmd", "w"],
@@ -183,6 +186,15 @@ pub(crate) fn no_modifiers(args: &Map<String, Value>, _: &Scope) -> Result<(), P
 }
 
 pub(crate) fn element_addressed(args: &Map<String, Value>, _: &Scope) -> Result<(), PolicyError> {
+    // #11460: a token and a snapshot index together leave it open which one the daemon acts on.
+    if args.contains_key("element_token")
+        && (args.contains_key("snapshot_id") || args.contains_key("element_index"))
+    {
+        return Err(PolicyError::new(
+            "dual_address",
+            "name element_token or snapshot_id with element_index, not both",
+        ));
+    }
     let has_token = truthy(args.get("element_token"));
     let has_index = args.contains_key("element_index") && truthy(args.get("snapshot_id"));
     if !(has_token || has_index) {
@@ -217,12 +229,37 @@ pub(crate) fn text_bounded(args: &Map<String, Value>, _: &Scope) -> Result<(), P
     Ok(())
 }
 
-/// Refuse a chord of `keys` that is in [`DENIED_CHORDS`], compared as a set.
+/// The driver's name for `key`, lowercased, with every alias folded in.
+///
+/// Why: cua-driver 0.23.2 accepts `cmd/command`, `option/alt`, `ctrl/control`
+/// and `escape` (its `hotkey` help text), so `["command","q"]` must meet the
+/// same deny as `["cmd","q"]`.
+/// Test: `chord_aliases_order_and_supersets_are_denied`.
+pub fn canonical_key(key: &str) -> String {
+    let lower = key.trim().to_lowercase();
+    match lower.as_str() {
+        "command" | "\u{2318}" | "meta" | "super" | "win" | "windows" => "cmd",
+        "opt" | "alt" | "\u{2325}" => "option",
+        "control" | "\u{2303}" | "^" => "ctrl",
+        "\u{21e7}" => "shift",
+        "escape" | "\u{238b}" => "esc",
+        "spacebar" => "space",
+        "\u{21e5}" => "tab",
+        _ => return lower,
+    }
+    .to_owned()
+}
+
+/// Refuse a chord of `keys` holding every key of a [`DENIED_CHORDS`] entry.
+///
+/// What: keys are folded by [`canonical_key`] and compared as a set, so the
+/// order does not matter and a superset (`cmd+shift+q`) is refused too.
+/// Test: `chord_aliases_order_and_supersets_are_denied`.
 fn chord_safe(keys: &[&str]) -> Result<(), PolicyError> {
-    let chord: BTreeSet<String> = keys.iter().map(|k| k.to_lowercase()).collect();
+    let chord: BTreeSet<String> = keys.iter().map(|k| canonical_key(k)).collect();
     let denied = DENIED_CHORDS
         .iter()
-        .any(|d| d.len() == chord.len() && d.iter().all(|k| chord.contains(*k)));
+        .any(|d| d.iter().all(|k| chord.contains(*k)));
     if denied {
         let joined: Vec<&str> = chord.iter().map(String::as_str).collect();
         return Err(PolicyError::new("denied_chord", joined.join("+")));

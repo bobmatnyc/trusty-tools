@@ -2,13 +2,15 @@
 //!
 //! Why: each gate is a refusal the agent cannot route around, and each one
 //! fails closed (plan section 4, "Call pipeline"; spike `broker.py:79-167`).
-//! What, in order: `request_id` and grant id required; a repeat answers from
-//! the grant's journal (`replayed`); policy verdict and argument filter on the
-//! grant's pid and bundle; grant scope (live, tool granted, window); lease
-//! held by this session with this grant; daemon scoped to the grant; journal
-//! room; token gate against the last redacted snapshot of that window; audit
-//! `forward` (a failure refuses); the driver call; menu-bar strip of a
-//! snapshot; read-back confirmation of a mutating call; journal; audit `done`.
+//! What, in order: `request_id` and grant id required; the grant bound to
+//! this session, live, and its lease held by this session; only then a repeat
+//! answers from the grant's journal (`replayed`); policy verdict and argument
+//! filter on the grant's pid and bundle; grant scope (tool granted, window);
+//! daemon scoped to the grant; journal room; token gate against the last
+//! redacted snapshot of that window; audit `forward` (a failure refuses); the
+//! driver call; menu-bar strip of a snapshot (one with no structured part is
+//! refused) and of a `driver_refused` result; read-back confirmation of a
+//! mutating call; journal; audit `done`.
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -23,7 +25,7 @@ use crate::driver::{DriverError, is_manifest_idle};
 use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
 use crate::policy::{self, Verdict};
-use crate::redact::redact_reply;
+use crate::redact::{redact_reply, strip_markdown};
 use crate::supervisor::READ_ONLY_TOOLS;
 
 /// Tools that must name a token from the last redacted snapshot.
@@ -58,9 +60,12 @@ fn window_key(args: &Map<String, Value>) -> Option<(u32, u64)> {
 }
 
 /// The token a call names: `element_token`, else `snapshot_id:element_index`.
+///
+/// `None` when it names both (#11460: policy refuses that as `dual_address` first).
 fn named_token(args: &Map<String, Value>) -> Option<String> {
-    if let Some(t) = args.get("element_token").and_then(Value::as_str) {
-        return Some(t.to_owned());
+    let dual = args.contains_key("snapshot_id") || args.contains_key("element_index");
+    if let Some(t) = args.get("element_token") {
+        return t.as_str().filter(|_| !dual).map(str::to_owned);
     }
     let snap = args.get("snapshot_id")?;
     let index = args.get("element_index")?;
@@ -94,6 +99,18 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "grant_required", "a call needs a grant_id");
         };
         rec.insert("grant".into(), json!(grant_id));
+        // #11460: replay only to the session that holds this grant, so a
+        // request_id read from the audit log returns nothing to another one.
+        if !self.consent.bound(&ctx.session, grant_id) {
+            return self.refuse(rec, "grant_not_bound", "redeem the operator's code first");
+        }
+        let grant = match self.grants.live(grant_id, now) {
+            Ok(g) => g.clone(),
+            Err(e) => return self.refuse(rec, e.code(), &e.to_string()),
+        };
+        if let Err(e) = self.lease.check(&ctx.session, grant_id, now) {
+            return self.refuse(rec, e.code(), &e.to_string());
+        }
         if let Some(entry) = self.journals.get(grant_id).and_then(|j| j.replay(&rid)) {
             // A retry after a lost ack is answered from the journal, never re-run.
             let reply = entry.reply.clone();
@@ -108,10 +125,6 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
-        let grant = match self.grants.live(grant_id, now) {
-            Ok(g) => g.clone(),
-            Err(e) => return self.refuse(rec, e.code(), &e.to_string()),
-        };
         // 1. Policy verdict and argument filter, on the grant's app.
         let rule = match policy::check_call(&tool, &args, &grant.policy_scope()) {
             Ok(rule) => rule,
@@ -123,7 +136,7 @@ impl<L: Launcher> Inner<L> {
             Verdict::Deny => return self.refuse(rec, "denied_tool", &tool),
         };
         rec.insert("verdict".into(), json!(verdict));
-        // 2. Grant scope, per app.
+        // 2. Grant scope, per app (live was checked above).
         if !grant.tools.contains(&tool) {
             return self.refuse(rec, "tool_not_granted", &tool);
         }
@@ -137,10 +150,7 @@ impl<L: Launcher> Inner<L> {
                 "window_id is not the granted window",
             );
         }
-        // 3. Lease, then the daemon's scope.
-        if let Err(e) = self.lease.check(&ctx.session, grant_id, now) {
-            return self.refuse(rec, e.code(), &e.to_string());
-        }
+        // 3. The daemon's scope (the lease was checked above).
         if let Err(e) = self.ensure_scope(grant.scope) {
             return self.refuse(rec, "rescope_failed", &e);
         }
@@ -170,6 +180,26 @@ impl<L: Launcher> Inner<L> {
         self.grants.touch(grant_id, now);
         // 6. The driver call, then strip, confirm, journal, audit `done`.
         let (mut reply, outcome) = self.drive(&tool, &args, grant.scope);
+        if reply["code"] == json!("driver_refused") {
+            // #11460: a refusal can carry the tree it refused; strip it too.
+            reply["result"] = redact_reply(&reply["result"]).result;
+            if let Some(error) = reply["error"].as_str().map(strip_markdown) {
+                reply["error"] = json!(error);
+            }
+        }
+        let unstructured = tool == "get_window_state"
+            && reply["ok"] == json!(true)
+            && !reply["result"]["structuredContent"].is_object();
+        if unstructured {
+            // #11460: without a structured part the menu bar cannot be found; fail closed.
+            if let Some(k) = key {
+                self.snaps.remove(&k);
+            }
+            reply = refusal(
+                "redaction_failed",
+                "the snapshot has no structured part to redact",
+            );
+        }
         if reply["ok"] == json!(true) {
             if tool == "get_window_state" {
                 let red = redact_reply(&reply["result"]);

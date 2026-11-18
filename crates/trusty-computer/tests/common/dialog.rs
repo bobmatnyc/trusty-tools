@@ -6,9 +6,11 @@
 //! the code an operator would see.
 //! Test: `tests/consent_fail_closed.rs`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use trusty_computer::app_identity::{AppResolver, ResolvedApp};
 use trusty_computer::consent::{ConsentDialog, DialogOutcome, Prompt};
 
 /// What the fake does when asked.
@@ -72,5 +74,38 @@ impl ConsentDialog for FakeDialog {
                 DialogOutcome::Confirmed
             }
         }
+    }
+}
+
+/// A fake pid resolver: every pid is [`super::rig::BUNDLE`] unless [`FakeResolver::set`] says otherwise.
+#[derive(Debug, Default)]
+pub struct FakeResolver {
+    pub apps: Mutex<HashMap<u32, Result<ResolvedApp, String>>>,
+}
+
+impl FakeResolver {
+    /// Answer `bundle_id` (named `name`) for `pid`.
+    pub fn set(&self, pid: u32, bundle_id: &str, name: &str) {
+        let app = ResolvedApp {
+            bundle_id: bundle_id.to_owned(),
+            name: name.to_owned(),
+        };
+        self.apps.lock().expect("apps").insert(pid, Ok(app));
+    }
+}
+
+impl AppResolver for FakeResolver {
+    fn resolve(&self, pid: u32) -> Result<ResolvedApp, String> {
+        self.apps
+            .lock()
+            .expect("apps")
+            .get(&pid)
+            .cloned()
+            .unwrap_or_else(|| {
+                Ok(ResolvedApp {
+                    bundle_id: super::rig::BUNDLE.to_owned(),
+                    name: "Fixture".to_owned(),
+                })
+            })
     }
 }

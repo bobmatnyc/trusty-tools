@@ -16,7 +16,12 @@
 #   No other variable reaches the broker: no token, no CUA_* name besides the
 #   two pinned off, no SSH_AUTH_SOCK. FORWARDED: RUST_LOG, LANG, LC_ALL.
 #   Live cua-driver isolation: HOME=<dir>/home, so `~/.cua-driver` resolves to
-#   <dir>/home/.cua-driver, never the real one. The script refuses a --dir
+#   <dir>/home/.cua-driver, never the real one. The daemon gets that HOME
+#   too: the broker starts it with `/usr/bin/open -n -g -a CuaDriver`, and
+#   `open` hands the launched app the caller's environment ("Opened
+#   applications inherit environment variables", open(1)); a probe app opened
+#   from `env -i HOME=<x>` saw HOME=<x> with and without `--env HOME`
+#   (#11460 fix round). The script refuses a --dir
 #   that is, or lies inside, the real home's `.cua-driver` or `.trusty`
 #   directory, or that resolves to the real home. The broker's private driver
 #   socket is <dir>/state/driver/cua-driver.sock (plan section 3); a path over
@@ -26,8 +31,11 @@
 #   TRUSTY_SANDBOX=1 tells trusty loaders to read none.
 #   Teardown is kill-by-pid only: the child pid goes to <dir>/sandbox.pid; on
 #   EXIT, INT, TERM and under `--stop DIR` the script signals it only while its
-#   argv ends `serve --state <dir>/state`. TERM, 10 s, then KILL, 5 s. Never
-#   pkill, killall, a name match or launchctl.
+#   argv ends `serve --state <dir>/state`. TERM, 10 s, then KILL, 5 s. A
+#   KILLed broker cannot stop its daemon, so the script then runs
+#   `cua-driver stop --socket <dir>/state/driver/cua-driver.sock` under the
+#   same `env -i` (cua-driver path overridable by SANDBOX_CUA_DRIVER for the
+#   selftest). Never pkill, killall, a name match or launchctl.
 #   Binary freshness (#10755): a cargo artifact older than the trusty-computer
 #   sources refuses (scripts/lib/bin_fresh.sh) unless --allow-stale.
 #   Phase 0 note: `serve` is a stub that prints usage and exits 2 until Phase 3.
@@ -113,6 +121,15 @@ wait_dead() {
   ! is_alive "$1"
 }
 
+# stop_driver STATE: ask the daemon on STATE's private socket to stop.
+stop_driver() {
+  local state="$1" cua="${SANDBOX_CUA_DRIVER:-/Applications/CuaDriver.app/Contents/MacOS/cua-driver}"
+  [ -x "$cua" ] || { echo "$NAME: no $cua; the daemon on $state/driver/cua-driver.sock is not stopped" >&2; return 0; }
+  env -i "HOME=${state%/state}/home" "PATH=$SANDBOX_PATH" CUA_DRIVER_RS_TELEMETRY_ENABLED=false \
+    CUA_DRIVER_RS_UPDATE_CHECK=false "$cua" stop --socket "$state/driver/cua-driver.sock" || true
+  echo "$NAME: asked the daemon on $state/driver/cua-driver.sock to stop"
+}
+
 terminate_owned() {
   local pid="$1" state="$2"
   is_alive "$pid" || return 0
@@ -124,7 +141,8 @@ terminate_owned() {
   wait_dead "$pid" 100 && return 0
   if owned_pid "$pid" "$state"; then
     kill -KILL "$pid" 2>/dev/null || true
-    wait_dead "$pid" 50 && return 0
+    # #11460: a KILLed broker leaves its daemon running; stop it by socket.
+    wait_dead "$pid" 50 && { stop_driver "$state"; return 0; }
   fi
   echo "$NAME: pid $pid is still alive after TERM and KILL; sandbox.pid kept" >&2
   return 1

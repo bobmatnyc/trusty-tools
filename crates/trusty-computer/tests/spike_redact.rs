@@ -91,3 +91,19 @@ fn parent_cycle_ends_the_walk() {
     ]}});
     assert_eq!(redact_reply(&state).removed, 0);
 }
+
+/// #11460 fix round: a reply with only text parts still loses its menu bar.
+#[test]
+fn text_parts_are_stripped_without_a_structured_part() {
+    let mut state = window_state(0);
+    state
+        .as_object_mut()
+        .expect("object")
+        .remove("structuredContent");
+    let r = redact_reply(&state);
+    let text = r.result["content"][0]["text"].as_str().expect("text");
+    assert!(!text.contains("AXMenuBar"), "{text}");
+    assert!(!text.contains("Shut Down"), "{text}");
+    assert!(text.contains("Press Me"), "{text}");
+    assert!(r.tokens.is_empty());
+}

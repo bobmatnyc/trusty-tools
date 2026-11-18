@@ -8,8 +8,10 @@
 #   (1) --dry-run prints a sandbox HOME and the pinned telemetry/update-off
 #   vars and drops an exported secret and CUA_* name; (2) a real run passes
 #   exactly that env, runs `serve --state <dir>/state` with cwd <dir>/home and
-#   makes the state dir 0700; (3) --dir naming the real home refuses. It never
-#   reads, creates or removes anything under the real `~/.cua-driver`.
+#   makes the state dir 0700; (3) --dir naming the real home refuses; (4) a
+#   broker that ignores TERM is KILLed by --stop, and then a fake cua-driver
+#   (SANDBOX_CUA_DRIVER) is asked `stop --socket <dir>/state/driver/cua-driver.sock`.
+#   It never reads, creates or removes anything under the real `~/.cua-driver`.
 # Usage: scripts/sandbox_computer_daemon_selftest.sh
 # Portability: bash 3.2 (macOS) and bash 5 (Linux).
 
@@ -61,6 +63,33 @@ check "pidfile removed after exit" '[[ ! -e "$WORK/sb/sandbox.pid" ]]'
 
 REFUSAL="$("$LAUNCHER" --bin "$FAKE" --dir "$HOME" --dry-run 2>&1 || true)"
 check "--dir of the real home refuses" '[[ "$REFUSAL" == *"refused: --dir resolves to the real home"* ]]'
+
+# (4) KILL teardown stops the daemon by its private socket (#11460).
+STUBBORN="$WORK/bin/stubborn/trusty-computer"
+FAKE_CUA="$WORK/bin/cua-driver"
+mkdir -p "$WORK/bin/stubborn" "$WORK/sk"
+cat > "$STUBBORN" <<'SH'
+#!/bin/sh
+trap '' TERM
+: > "$HOME/../ready"
+while :; do sleep 0.2; done
+SH
+cat > "$FAKE_CUA" <<SH
+#!/bin/sh
+echo "\$@" > "$WORK/cua-argv.txt"
+echo "HOME=\$HOME" >> "$WORK/cua-argv.txt"
+SH
+chmod +x "$STUBBORN" "$FAKE_CUA"
+"$LAUNCHER" --bin "$STUBBORN" --dir "$WORK/sk" > "$WORK/kill.log" 2>&1 &
+BG=$!
+# Wait until the fake has set its TERM trap, or TERM would kill it first.
+for _ in $(seq 1 50); do [ -e "$WORK/sk/ready" ] && break; sleep 0.1; done
+SANDBOX_CUA_DRIVER="$FAKE_CUA" "$LAUNCHER" --stop "$WORK/sk" > "$WORK/stop.log" 2>&1 || true
+wait "$BG" 2>/dev/null || true
+CUA_SEEN="$(cat "$WORK/cua-argv.txt" 2>/dev/null || true)"
+check "KILL teardown runs cua-driver stop on the private socket" '[[ "$CUA_SEEN" == "stop --socket "*"/sk/state/driver/cua-driver.sock"* ]]'
+check "cua-driver stop runs with the sandbox HOME" '[[ "$CUA_SEEN" == *"HOME="*"/sk/home"* ]]'
+check "--stop reports the stopped pid" '[[ "$(cat "$WORK/stop.log")" == *"stopped pid"* ]]'
 
 [ "$FAILS" -eq 0 ] || { echo "$FAILS check(s) failed"; exit 1; }
 echo "all checks passed"

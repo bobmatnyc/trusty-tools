@@ -7,7 +7,7 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt;
 
-use common::rig::{Rig, T0, consent, grant_req};
+use common::rig::{Rig, T0, consent, grant_req, pid};
 use common::short_tmp;
 use serde_json::{Value, json};
 use trusty_computer::grants::{GrantError, Grants};
@@ -50,7 +50,9 @@ fn mint_refuses_sensitive_apps_and_denied_tools() {
     let shown = rig.dialog.shown();
     let mut term = grant_req(&[], 1);
     term["bundle_id"] = json!("com.apple.Terminal");
+    rig.resolver.set(pid(), "com.apple.Terminal", "Terminal");
     assert_eq!(mint_via(&rig, &term)["code"], "sensitive_app");
+    rig.resolver.apps.lock().expect("apps").clear();
     let mut bad = grant_req(&["kill_app"], 1);
     assert_eq!(mint_via(&rig, &bad)["code"], "bad_tool");
     bad["tools"] = json!([]);
@@ -60,6 +62,7 @@ fn mint_refuses_sensitive_apps_and_denied_tools() {
     assert_eq!(mint_via(&rig, &bad)["code"], "bad_bundle");
     assert_eq!(rig.dialog.shown(), shown, "no dialog for a refused request");
     term["allow_sensitive"] = json!(true);
+    rig.resolver.set(pid(), "com.apple.Terminal", "Terminal");
     let g = mint_via(&rig, &term);
     assert_eq!(g["result"]["grant"]["sensitive"], true, "{g}");
     let mint = rig

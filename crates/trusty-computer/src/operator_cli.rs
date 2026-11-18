@@ -1,4 +1,4 @@
-//! The operator CLI verbs: `grant`, `grants`, `revoke`, `status`, `lease`, `lockout`.
+//! The operator CLI verbs: `grant`, `grants`, `revoke`, `status`, `lease`, `lockout`, `unlock`.
 //!
 //! Why: the operator mints from a terminal; an agent running the same CLI in
 //! Bash has no `/dev/tty`, so it cannot type the dialog code (plan section 6;
@@ -7,6 +7,8 @@
 //! `grant` opens `/dev/tty` before it touches the socket (no TTY: exit 3,
 //! nothing sent), sends `grant_request`, reads the dialog code through a
 //! [`CodeSource`], sends `grant_confirm` and prints the one-use `tc-` code.
+//! `unlock` runs the same TTY-first flow with `unlock_request` and
+//! `unlock_confirm` to clear a persisted lockout (#11460).
 //! Test: `no_tty_grant_never_reaches_the_broker`, `wrong_code_refuses_and_locks_out`.
 
 use std::fs::OpenOptions;
@@ -74,9 +76,9 @@ impl OperatorClient {
     }
 }
 
-/// The grant flow after the TTY is open: request, read the code, confirm.
+/// The grant (or unlock) flow after the TTY is open: request, read the code, confirm.
 ///
-/// Returns the `grant_confirm` reply, or the first refusal.
+/// Returns the `grant_confirm` (or `unlock_confirm`) reply, or the first refusal.
 pub fn grant_flow(
     client: &mut OperatorClient,
     request: &Value,
@@ -87,7 +89,12 @@ pub fn grant_flow(
         return Ok(reply);
     };
     let code = tty.read_code("Code shown in the trusty-computer dialog: ")?;
-    client.send(&json!({"op": "grant_confirm", "challenge": challenge, "code": code}))
+    let confirm = if request["op"] == "unlock_request" {
+        "unlock_confirm"
+    } else {
+        "grant_confirm"
+    };
+    client.send(&json!({"op": confirm, "challenge": challenge, "code": code}))
 }
 
 /// `30m`, `90s`, `1h` or bare seconds.
@@ -183,11 +190,12 @@ pub fn run(args: &[String]) -> u8 {
         },
         ("revoke", [id]) => json!({"op": "revoke", "grant_id": id}),
         ("grants" | "status" | "lease" | "lockout", []) => json!({"op": verb}),
+        ("unlock", []) => json!({"op": "unlock_request"}),
         _ => return 2,
     };
     // The TTY first: with no terminal, nothing reaches the broker.
     let mut tty = None;
-    if verb == "grant" {
+    if verb == "grant" || verb == "unlock" {
         match DevTty::open() {
             Ok(t) => tty = Some(t),
             Err(e) => {

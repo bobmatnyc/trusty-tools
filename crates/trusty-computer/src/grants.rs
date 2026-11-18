@@ -55,6 +55,13 @@ pub const SENSITIVE_BUNDLES: [&str; 16] = [
     "com.apple.Passwords",
 ];
 
+/// True for a [`SENSITIVE_BUNDLES`] id in any letter case (bundle ids are case-insensitive).
+pub fn is_sensitive(bundle_id: &str) -> bool {
+    SENSITIVE_BUNDLES
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case(bundle_id))
+}
+
 /// Why a grant operation was refused; `code()` is the reply code.
 #[derive(Debug, thiserror::Error)]
 pub enum GrantError {
@@ -250,7 +257,7 @@ impl Grants {
         let tools = Grants::check(&req)?;
         let grant = Grant {
             id: random_id()?,
-            sensitive: SENSITIVE_BUNDLES.contains(&req.bundle_id.as_str()),
+            sensitive: is_sensitive(&req.bundle_id),
             bundle_id: req.bundle_id,
             scope: req.scope,
             tools,
@@ -268,7 +275,7 @@ impl Grants {
 
     /// The tool set `req` would get, or why it is refused; checked before the dialog shows.
     pub fn check(req: &OperatorMint) -> Result<BTreeSet<String>, GrantError> {
-        if !req.allow_sensitive && SENSITIVE_BUNDLES.contains(&req.bundle_id.as_str()) {
+        if !req.allow_sensitive && is_sensitive(&req.bundle_id) {
             return Err(GrantError::Sensitive(req.bundle_id.clone()));
         }
         let valid = |t: f64| t.is_finite() && t > 0.0;

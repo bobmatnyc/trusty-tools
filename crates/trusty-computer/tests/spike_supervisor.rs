@@ -68,6 +68,7 @@ fn supervisor_stops_daemon_reporting_wrong_version() {
     );
     assert_eq!(sup.launcher().stops, 1);
     assert_eq!(sup.running_version(), None);
+    assert_eq!((sup.pid(), sup.scope()), (None, None));
 }
 
 #[test]
@@ -76,4 +77,23 @@ fn supervisor_daemon_env_turns_off_telemetry_update_and_gate() {
     assert_eq!(get("CUA_DRIVER_RS_TELEMETRY_ENABLED"), Some("false"));
     assert_eq!(get("CUA_DRIVER_RS_UPDATE_CHECK"), Some("false"));
     assert_eq!(get("CUA_DRIVER_RS_PERMISSIONS_GATE"), Some("false"));
+}
+
+/// #11460 fix round: a failed `owns` check leaves no pid or scope behind,
+/// so a second start or rescope cannot treat the daemon as verified.
+#[test]
+fn failed_start_clears_pid_and_scope() {
+    let dir = short_tmp();
+    let mut launcher = FakeLauncher::new("0.23.2", None);
+    launcher.disown = true;
+    let mut sup = make(&dir, launcher);
+    let err = sup.start(SCOPE).expect_err("an unowned pid refuses");
+    assert!(err.to_string().contains("is not a daemon serving"), "{err}");
+    assert_eq!((sup.pid(), sup.scope()), (None, None));
+    let again = sup.start(SCOPE).expect_err("second start refuses too");
+    assert_eq!((sup.pid(), sup.scope()), (None, None), "{again}");
+    let rescope = sup
+        .rescope(SCOPE)
+        .expect_err("rescope must not pass as a no-op");
+    assert_eq!((sup.pid(), sup.scope()), (None, None), "{rescope}");
 }

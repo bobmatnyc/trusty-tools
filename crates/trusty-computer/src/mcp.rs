@@ -53,6 +53,17 @@ pub fn driver_tool(name: &str) -> Option<&'static str> {
     })
 }
 
+/// The argument names `name`'s schema declares; `None` for an unknown tool.
+///
+/// Why: an argument outside the schema (`snapshot_id`, `x`, `modifiers`)
+/// must never reach the broker, so the schema is the allow list (#11460).
+/// Test: `undeclared_arguments_are_refused`.
+pub fn declared_args(name: &str) -> Option<Vec<&'static str>> {
+    let tool = tools().iter().find(|t| t["name"] == name)?;
+    let props = tool.pointer("/inputSchema/properties")?.as_object()?;
+    Some(props.keys().map(String::as_str).collect())
+}
+
 /// The broker op of a non-call tool.
 fn broker_op(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -127,6 +138,10 @@ impl McpServer {
                 Err(e) => return tool_error("random_failed", &e.to_string()),
             },
         };
+        let declared = declared_args(name).unwrap_or_default();
+        if let Some(extra) = args.keys().find(|k| !declared.contains(&k.as_str())) {
+            return tool_error("bad_args", &format!("{name} takes no argument {extra}"));
+        }
         let mut req = match (broker_op(name), driver_tool(name)) {
             (Some(op), _) => {
                 let mut req = args.clone();

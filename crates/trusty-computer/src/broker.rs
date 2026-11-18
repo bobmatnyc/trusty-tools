@@ -17,13 +17,14 @@
 //! Test: `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
+use crate::app_identity::{AppResolver, LsappinfoResolver};
 use crate::audit::Audit;
 use crate::broker_operator::ConsentState;
 use crate::consent::{ConsentDialog, DIALOG_TIMEOUT};
@@ -72,6 +73,8 @@ pub struct Inner<L: Launcher> {
     /// False after a failed rescope or restart; a call then rescopes first.
     pub(crate) scope_ready: bool,
     pub(crate) consent: ConsentState,
+    /// `<state>/lockout`: present while a lockout holds, across restarts.
+    pub(crate) lockout_marker: PathBuf,
 }
 
 /// The broker.
@@ -81,6 +84,7 @@ pub struct Broker<L: Launcher> {
     sessions: AtomicU64,
     dialog: Arc<dyn ConsentDialog>,
     dialog_timeout: std::time::Duration,
+    resolver: Arc<dyn AppResolver>,
     pub(crate) shutdown: AtomicBool,
 }
 
@@ -89,6 +93,8 @@ impl<L: Launcher> Broker<L> {
     ///
     /// `dialog` shows the consent prompt; only the broker bin passes the real one.
     /// A malformed or shared `grants.json` refuses to start (fail closed).
+    /// A `<state>/lockout` marker starts the broker locked out (#11460):
+    /// every op but `status` and the operator unlock is refused.
     pub fn new(
         supervisor: Supervisor<L>,
         state: &Path,
@@ -96,6 +102,10 @@ impl<L: Launcher> Broker<L> {
         dialog: Arc<dyn ConsentDialog>,
     ) -> Result<Self, GrantError> {
         let grants = Grants::load(&state.join("grants.json"), clock())?;
+        let lockout_marker = state.join(crate::broker_unlock::LOCKOUT_MARKER);
+        let mut consent = ConsentState::default();
+        // #11460: an unreadable marker path is treated as present.
+        consent.locked_down = !matches!(lockout_marker.try_exists(), Ok(false));
         Ok(Broker {
             inner: Mutex::new(Inner {
                 supervisor,
@@ -105,12 +115,14 @@ impl<L: Launcher> Broker<L> {
                 journals: HashMap::new(),
                 snaps: HashMap::new(),
                 scope_ready: false,
-                consent: ConsentState::default(),
+                consent,
+                lockout_marker,
             }),
             clock,
             sessions: AtomicU64::new(0),
             dialog,
             dialog_timeout: DIALOG_TIMEOUT,
+            resolver: Arc::new(LsappinfoResolver),
             shutdown: AtomicBool::new(false),
         })
     }
@@ -119,6 +131,16 @@ impl<L: Launcher> Broker<L> {
     pub fn with_dialog_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.dialog_timeout = timeout;
         self
+    }
+
+    /// The same broker resolving pids with `resolver` (tests pass a fake).
+    pub fn with_app_resolver(mut self, resolver: Arc<dyn AppResolver>) -> Self {
+        self.resolver = resolver;
+        self
+    }
+
+    pub(crate) fn resolver(&self) -> Arc<dyn AppResolver> {
+        Arc::clone(&self.resolver)
     }
 
     pub(crate) fn dialog(&self) -> Arc<dyn ConsentDialog> {
@@ -188,6 +210,13 @@ impl<L: Launcher> Broker<L> {
     pub fn handle(&self, request: Option<&Value>, ctx: &Ctx) -> Value {
         let started = std::time::Instant::now();
         // Ops that must not hold the broker lock while they wait.
+        let op = request
+            .and_then(Value::as_object)
+            .and_then(|r| r.get("op"))
+            .and_then(Value::as_str);
+        if ctx.operator && op == Some("unlock_request") {
+            return self.unlock_request(ctx);
+        }
         if let Some(req) = request.and_then(Value::as_object)
             && !self.lock().consent.locked_down
         {
@@ -213,13 +242,15 @@ impl<L: Launcher> Broker<L> {
         if let Some(rid) = req.get("request_id") {
             rec.insert("request_id".into(), rid.clone());
         }
-        if inner.consent.locked_down && op != "status" {
+        let unlocking = ctx.operator && op == "unlock_confirm";
+        if inner.consent.locked_down && op != "status" && !unlocking {
             return inner.refuse(rec, "locked_out", "the operator locked the broker out");
         }
         let id = req.get("grant_id").and_then(Value::as_str).unwrap_or("");
         match (ctx.operator, op) {
             (_, "status") => inner.status(rec, ctx),
             (true, "grant_confirm") => inner.grant_confirm(req, rec, now),
+            (true, "unlock_confirm") => inner.unlock_confirm(req, rec, now),
             (true, "grants") => inner.list_grants(rec, now),
             (true, "lease") => inner.lease_view(rec),
             (true, "revoke") => inner.revoke(id, rec, ctx, now),

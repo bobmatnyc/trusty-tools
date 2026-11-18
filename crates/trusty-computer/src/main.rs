@@ -6,7 +6,7 @@
 //! see `trusty_computer::serve`); `broker --state DIR` runs the broker on
 //! `agent.sock` and `operator.sock` until SIGTERM or a `lockout`, with the
 //! real `osascript` consent dialog; `grant`, `grants`, `revoke`, `status`,
-//! `lease` and `lockout` are the operator verbs (`operator_cli`);
+//! `lease`, `lockout` and `unlock` are the operator verbs (`operator_cli`);
 //! `install-service` and `uninstall-service` manage the launchd job (`service_cli`).
 //! Test: `live_bounded_daemon_drives_fixture`, `no_tty_grant_never_reaches_the_broker`.
 
@@ -23,7 +23,9 @@ commands (issue #11460):
                            confirm in the dialog, type its code, get a one-use tc- code
   revoke <grant-id>        end a grant and its lease
   grants | status | lease  operator queries
-  lockout                  revoke every grant, drop the lease, stop the daemon and broker
+  lockout                  revoke every grant, drop the lease, stop the daemon and broker;
+                           persists across restarts until `unlock`
+  unlock                   clear a lockout: confirm in the dialog, type its code
   install-service [--state DIR] [--sign-identity ID | --no-sign]
                            sign both bins, write the com.trusty.computer plist, bootstrap
   uninstall-service [--state DIR]
@@ -45,7 +47,7 @@ fn main() -> ExitCode {
         }
         [verb, ..]
             if [
-                "grant", "grants", "revoke", "status", "lease", "lockout", "--state",
+                "grant", "grants", "revoke", "status", "lease", "lockout", "unlock", "--state",
             ]
             .contains(&verb.as_str()) =>
         {

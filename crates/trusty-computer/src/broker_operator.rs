@@ -3,14 +3,19 @@
 //! Why: a grant may exist only after the operator confirmed the helper
 //! dialog and typed its code; an agent that can speak to `operator.sock`
 //! still cannot mint without that code (plan section 6, issue #11460).
-//! What: `grant_request` validates the request, draws a six-digit code,
+//! What: `grant_request` validates the request, resolves the pid's real
+//! bundle through the [`AppResolver`](crate::app_identity::AppResolver) and
+//! refuses a mismatch (the sensitive check then reads the resolved bundle),
+//! draws a six-digit code,
 //! shows it in the [`ConsentDialog`] (no broker lock held) and on a confirm
 //! stores a challenge for [`DIALOG_CODE_TTL`]. `grant_confirm` checks the
 //! code, mints and answers a one-use `tc-` grant code valid
 //! [`GRANT_CODE_TTL`]. Five bad codes in 60 s lock minting out; five bad
 //! redeems lock redeeming out. A challenge dies after five bad codes.
-//! `lockout` revokes every grant, drops every code and the lease, stops the
-//! daemon and asks the broker process to exit. Every step is audited.
+//! `lockout` first writes the `<state>/lockout` marker (it survives a
+//! launchd restart; `broker_unlock` clears it), then revokes every grant,
+//! drops every code and the lease, stops the daemon and asks the broker
+//! process to exit. Every step is audited.
 //! Test: `tests/consent_fail_closed.rs`.
 
 use std::collections::{BTreeSet, HashMap};
@@ -20,7 +25,7 @@ use serde_json::{Map, Value, json};
 
 use crate::broker::{Broker, Ctx, Inner, base, refusal};
 use crate::consent::{
-    self, DIALOG_CODE_TTL, DialogOutcome, GRANT_CODE_TTL, Prompt, STRIKE_LIMIT, Strikes,
+    self, DIALOG_CODE_TTL, DialogOutcome, GRANT_CODE_TTL, Prompt, PromptKind, STRIKE_LIMIT, Strikes,
 };
 use crate::grants::{DEFAULT_IDLE_TTL, DEFAULT_TTL, Grant, Grants, OperatorMint};
 use crate::launcher::Launcher;
@@ -91,12 +96,14 @@ pub struct ConsentState {
     pending: HashMap<String, Pending>,
     /// `tc-` code -> (grant id, expiry).
     codes: HashMap<String, (String, f64)>,
-    mint_strikes: Strikes,
+    pub(crate) mint_strikes: Strikes,
     redeem_strikes: Strikes,
     /// session -> grants it redeemed a code for.
     bound: HashMap<String, BTreeSet<String>>,
     /// Set by the lockout; every op but `status` is refused after it.
     pub(crate) locked_down: bool,
+    /// The confirmed unlock dialog awaiting its code.
+    pub(crate) unlock: Option<crate::broker_unlock::UnlockChallenge>,
 }
 
 impl ConsentState {
@@ -130,17 +137,35 @@ impl<L: Launcher> Broker<L> {
     /// Operator op `grant_request`: validate, show the dialog, answer a challenge.
     ///
     /// Why: the dialog is the operator's confirmation and the only place the code appears.
-    /// What: refuses a bad or sensitive request before any dialog; refuses
-    /// `locked_out` during a lockout; maps a denied, timed-out or failed
-    /// dialog to `dialog_denied`, `dialog_timeout`, `dialog_failed`.
-    /// Test: `dialog_denied_refuses`, `dialog_timeout_refuses`.
+    /// What: refuses a bad request, a pid whose resolved bundle is not the
+    /// named one (`app_unresolved`, `bundle_mismatch`) and a sensitive
+    /// resolved bundle before any dialog; refuses `locked_out` during a
+    /// lockout; maps a denied, timed-out or failed dialog to
+    /// `dialog_denied`, `dialog_timeout`, `dialog_failed`. The dialog shows
+    /// the pid and the resolved app name and bundle.
+    /// Test: `dialog_denied_refuses`, `dialog_timeout_refuses`,
+    /// `grant_request_refuses_a_pid_of_another_app`, `sensitive_check_reads_the_resolved_bundle`.
     pub fn grant_request(&self, req: &Map<String, Value>, ctx: &Ctx) -> Value {
         let mut rec = base(ctx, "grant_request");
-        let parsed = match GrantRequest::from_json(req) {
+        let mut parsed = match GrantRequest::from_json(req) {
             Ok(p) => p,
             Err((code, detail)) => return self.lock().refuse(rec, code, &detail),
         };
         rec.insert("bundle_id".into(), json!(parsed.bundle_id));
+        // #11460: the pid, not the claim, names the app (no broker lock held).
+        let app = match self.resolver().resolve(parsed.scope.pid) {
+            Ok(app) => app,
+            Err(e) => return self.lock().refuse(rec, "app_unresolved", &e),
+        };
+        rec.insert("resolved_bundle_id".into(), json!(app.bundle_id));
+        if app.bundle_id != parsed.bundle_id {
+            let detail = format!(
+                "pid {} is {}, not {}",
+                parsed.scope.pid, app.bundle_id, parsed.bundle_id
+            );
+            return self.lock().refuse(rec, "bundle_mismatch", &detail);
+        }
+        parsed.bundle_id = app.bundle_id.clone();
         let tools = match Grants::check(&OperatorMint::consented(parsed.clone())) {
             Ok(t) => t,
             Err(e) => return self.lock().refuse(rec, e.code(), &e.to_string()),
@@ -156,7 +181,10 @@ impl<L: Launcher> Broker<L> {
                 Err(e) => return inner.refuse(rec, "random_failed", &e.to_string()),
             };
             Prompt {
-                bundle_id: parsed.bundle_id.clone(),
+                kind: PromptKind::Grant,
+                bundle_id: app.bundle_id,
+                app_name: app.name,
+                pid: parsed.scope.pid,
                 tools: tools.into_iter().collect(),
                 ttl_secs: parsed.ttl as u64,
                 code,
@@ -195,12 +223,15 @@ impl<L: Launcher> Broker<L> {
 
     /// Operator op `lockout`: the kill switch.
     ///
-    /// What: revokes every grant (persisted), drops every challenge, code,
-    /// binding, journal, snapshot and the lease, stops the daemon, and sets
-    /// the shutdown flag the broker bin exits on.
-    /// Test: `lockout_revokes_everything_and_stops`.
+    /// What: writes the lockout marker first, so it holds even when a later
+    /// step fails; revokes every grant (persisted), drops every challenge,
+    /// code, binding, journal, snapshot and the lease, stops the daemon, and
+    /// sets the shutdown flag the broker bin exits on.
+    /// Test: `lockout_revokes_everything_and_stops`, `lockout_survives_a_broker_restart`,
+    /// `lockout_marker_is_written_when_revoke_all_fails`.
     pub fn lockout(&self, ctx: &Ctx) -> Value {
         let mut inner = self.lock();
+        let marker = crate::broker_unlock::write_marker(&inner.lockout_marker);
         inner.consent = ConsentState {
             locked_down: true,
             ..ConsentState::default()
@@ -215,9 +246,10 @@ impl<L: Launcher> Broker<L> {
         let mut rec = base(ctx, "lockout");
         rec.insert("grants_persisted".into(), json!(revoked.is_ok()));
         rec.insert("daemon_stopped".into(), json!(stopped.is_ok()));
+        rec.insert("marker_persisted".into(), json!(marker.is_ok()));
         let _ = inner.audit.write(&rec);
         json!({"ok": true, "result": {"revoked": true, "daemon_stopped": stopped.is_ok(),
-            "grants_persisted": revoked.is_ok()}})
+            "grants_persisted": revoked.is_ok(), "marker_persisted": marker.is_ok()}})
     }
 
     /// True once `lockout` ran; the broker bin exits.

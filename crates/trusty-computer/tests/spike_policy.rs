@@ -146,3 +146,46 @@ admits!(filter_admits_window_state, "get_window_state", {"pid": 100, "window_id"
 admits!(filter_admits_launch_in_scope, "launch_app", {"bundle_id": "org.example.fixture"});
 admits!(filter_admits_check_permissions, "check_permissions", {});
 admits!(filter_admits_list_apps, "list_apps", {});
+
+/// #11460 fix round: aliases, key order and supersets of a denied chord are refused.
+#[test]
+fn chord_aliases_order_and_supersets_are_denied() {
+    let denied: [&[&str]; 9] = [
+        &["command", "q"],
+        &["cmd", "q", "shift"],
+        &["cmd", "shift", "q"],
+        &["q", "META"],
+        &["cmd", "option", "esc"],
+        &["command", "alt", "escape"],
+        &["esc", "opt", "cmd"],
+        &["\u{2318}", "\u{2325}", "escape"],
+        &["control", "command", "q"],
+    ];
+    for keys in denied {
+        let err = check_call("hotkey", &json!({"pid": 100, "keys": keys}), &scope())
+            .expect_err("a denied chord is refused");
+        assert_eq!(err.code, "denied_chord", "{keys:?}");
+    }
+    let key = json!({"pid": 100, "key": "Q", "modifiers": ["Command", "Shift"]});
+    let err = check_call("press_key", &key, &scope()).expect_err("press_key superset");
+    assert_eq!(err.code, "denied_chord");
+    let ok = json!({"pid": 100, "keys": ["command", "shift", "a"]});
+    check_call("hotkey", &ok, &scope()).expect("cmd+shift+a is not denied");
+}
+
+/// #11460 fix round: a call may not name a token and a snapshot index at once.
+#[test]
+fn token_and_snapshot_index_together_are_refused() {
+    for extra in [
+        json!({"snapshot_id": "s1", "element_index": 3}),
+        json!({"snapshot_id": "s1"}),
+        json!({"element_index": 3}),
+    ] {
+        let mut args = json!({"pid": 100, "element_token": "t"});
+        for (k, v) in extra.as_object().expect("object") {
+            args[k] = v.clone();
+        }
+        let err = check_call("click", &args, &scope()).expect_err("dual address");
+        assert_eq!(err.code, "dual_address", "{args}");
+    }
+}

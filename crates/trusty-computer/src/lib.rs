@@ -13,7 +13,8 @@
 //! `broker_call` (the call pipeline), [`broker_server`] (the sockets),
 //! [`grants`], [`lease`] and [`peer`] (the uid check). Phase 4 adds
 //! [`consent`] (dialog seam, codes, strikes), [`broker_operator`] (the consent
-//! flow and the lockout) and [`operator_cli`]. Phase 5 adds [`mcp`], the
+//! flow and the lockout), [`app_identity`] (the pid's real bundle) and
+//! [`operator_cli`]; `broker_unlock` persists the lockout across restarts. Phase 5 adds [`mcp`], the
 //! `trusty-computer-mcp` server. Phase 6 adds [`codesign`], [`launchd`] and
 //! [`service_cli`] (`install-service`, `uninstall-service`).
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
@@ -21,12 +22,14 @@
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
 //! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`.
 
+pub mod app_identity;
 pub mod audit;
 pub mod broker;
 mod broker_agent;
 mod broker_call;
 pub mod broker_operator;
 pub mod broker_server;
+mod broker_unlock;
 pub mod codesign;
 pub mod consent;
 pub mod driver;

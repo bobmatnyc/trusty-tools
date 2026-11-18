@@ -26,7 +26,7 @@ fn every_gate_refusal_never_reaches_driver() {
         ),
         (
             call("g-000000000000", "list_apps", "b", json!({})),
-            "no_grant",
+            "grant_not_bound",
         ),
         (
             json!({"op": "call", "grant_id": g, "tool": 7, "request_id": "c"}),
@@ -76,7 +76,15 @@ fn call_without_the_lease_is_refused() {
     let rig = Rig::new();
     let mut other = Conn::open(&rig.server.agent);
     let reply = other.send(&call(&rig.grant.id, "list_apps", "x", json!({})));
-    assert_eq!(reply["code"], "lease_not_held");
+    assert_eq!(reply["code"], "grant_not_bound", "an unbound session");
+    let queued_grant = rig.mint(2);
+    let code = rig.code(&queued_grant.id);
+    assert_eq!(
+        other.send(&json!({"op": "connect", "code": code}))["ok"],
+        true
+    );
+    let reply = other.send(&call(&queued_grant.id, "list_apps", "y", json!({})));
+    assert_eq!(reply["code"], "lease_not_held", "a bound, queued session");
     assert!(rig.agent_calls().is_empty());
 }
 
