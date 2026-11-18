@@ -451,8 +451,8 @@ banned-phrase inventories and the ASD-STE-100 note sit in the
 - **Ticket and PR bodies you draft** are sparse — point at the spec, issue or
   PR, never paste a diff. Hand the text to the PM; you do not file it yourself.
 <!-- rule:base-agent/shared-documents -->
-- **Documents** follow rules (a)–(f): Read
-  `{{TM_SKILLS}}/tm-prose-style/SKILL.md`.
+- **Documents** follow rules (a)–(f):
+  Read `{{TM_SKILLS}}/tm-prose-style/SKILL.md`.
 <!-- rule:base-agent/verbosity-scales -->
 - **Verbosity scales with what went wrong**, not with how much work you did.
   A long report about a clean run is a defect: cap a clean run at 300 words, a
