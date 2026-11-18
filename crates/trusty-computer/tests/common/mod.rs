@@ -20,6 +20,9 @@ use std::thread;
 
 use serde_json::{Value, json};
 
+/// A pid the fake answers with a bounded `isError` refusal, as the real daemon does.
+pub const OUT_OF_MANIFEST_PID: u64 = 99;
+
 /// The fixture app's observable state.
 #[derive(Debug, Clone)]
 pub struct FixtureState {
@@ -124,6 +127,7 @@ pub fn window_state(clicks: u64) -> Value {
 struct Shared {
     calls: Vec<(String, Value)>,
     fixture: Option<FixtureState>,
+    ended: Vec<String>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -140,6 +144,7 @@ impl FakeDaemon {
         let shared = Arc::new(Mutex::new(Shared {
             calls: Vec::new(),
             fixture,
+            ended: Vec::new(),
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -162,6 +167,11 @@ impl FakeDaemon {
     /// Every `call` received, in order.
     pub fn calls(&self) -> Vec<(String, Value)> {
         self.lock().calls.clone()
+    }
+
+    /// End `session`: later calls naming it get the daemon's session-ended refusal.
+    pub fn end_session(&self, session: &str) {
+        self.lock().ended.push(session.to_owned());
     }
 
     /// The fixture's current state.
@@ -207,6 +217,27 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     let args = req.get("args").cloned().unwrap_or_else(|| json!({}));
     let mut state = shared.lock().expect("fake daemon lock");
     state.calls.push((name.to_owned(), args.clone()));
+    let session = args
+        .get("session")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let Some(session) = session {
+        if name == "start_session" {
+            state.ended.retain(|s| *s != session);
+        } else if state.ended.contains(&session) {
+            // Exact cua-driver 0.23.2 text (tests/fixtures/evidence/session-ended-0.23.2.txt).
+            let error = format!(
+                "session '{session}' has ended; tool call '{name}' was rejected. Call start_session \
+                 with this id to revive it before issuing further actions, or use a new session id."
+            );
+            return json!({"ok": false, "error": error, "exit_code": 1});
+        }
+    }
+    if args.get("pid") == Some(&json!(OUT_OF_MANIFEST_PID)) {
+        let message = "protected resource is outside the capability manifest: desktop application pid 99 is outside the capability manifest";
+        return json!({"ok": true, "result": {"content": [{"type": "text", "text": message}], "isError": true,
+            "structuredContent": {"refusal": {"code": "bounded_resource_outside_manifest", "message": message}, "status": "refused"}}});
+    }
     if name == "get_window_state" {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
         return json!({"ok": true, "result": window_state(clicks)});
@@ -243,4 +274,63 @@ pub fn short_tmp() -> tempfile::TempDir {
         .prefix("tc-")
         .tempdir_in("/tmp")
         .expect("temp dir")
+}
+
+/// Starts and stops a [`FakeDaemon`] in-process, as `open -a CuaDriver` would.
+pub struct FakeLauncher {
+    pub binary: String,
+    pub daemon_version: String,
+    pub fixture: Option<FixtureState>,
+    pub daemon: Option<FakeDaemon>,
+    pub starts: u32,
+    pub stops: u32,
+    pub manifests: Vec<String>,
+}
+
+impl FakeLauncher {
+    pub fn new(binary: &str, daemon_version: Option<&str>) -> FakeLauncher {
+        FakeLauncher {
+            binary: binary.to_owned(),
+            daemon_version: daemon_version.unwrap_or(binary).to_owned(),
+            fixture: None,
+            daemon: None,
+            starts: 0,
+            stops: 0,
+            manifests: Vec::new(),
+        }
+    }
+}
+
+impl trusty_computer::launcher::Launcher for FakeLauncher {
+    fn binary_version(&mut self) -> Result<String, trusty_computer::driver::DriverError> {
+        Ok(self.binary.clone())
+    }
+    fn start(
+        &mut self,
+        socket: &Path,
+        manifest: &Path,
+    ) -> Result<(), trusty_computer::driver::DriverError> {
+        self.starts += 1;
+        self.manifests
+            .push(fs::read_to_string(manifest).expect("manifest written before start"));
+        let _ = fs::remove_file(socket);
+        self.daemon = Some(FakeDaemon::start(
+            socket,
+            &self.daemon_version,
+            self.fixture.clone(),
+        ));
+        Ok(())
+    }
+    fn stop(
+        &mut self,
+        _socket: &Path,
+        _pid: Option<u32>,
+    ) -> Result<(), trusty_computer::driver::DriverError> {
+        self.stops += 1;
+        self.daemon = None;
+        Ok(())
+    }
+    fn owns(&mut self, pid: u32, _socket: &Path) -> bool {
+        pid == 4242 && self.daemon.is_some()
+    }
 }
