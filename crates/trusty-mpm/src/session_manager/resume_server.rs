@@ -58,9 +58,7 @@ pub(crate) fn rehome_with(
     let routed = super::tmux_route::route(tmux, record)?;
     let dead = match routed.session_exists_checked(&record.tmux_name) {
         Ok(live) => !live,
-        Err(_) => {
-            crate::core::tmux_server::socket_answers(&socket, SOCKET_PROBE) == Some(false)
-        }
+        Err(_) => crate::core::tmux_server::socket_answers(&socket, SOCKET_PROBE) == Some(false),
     };
     if !dead {
         return Ok(false);

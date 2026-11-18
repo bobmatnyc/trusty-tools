@@ -61,7 +61,10 @@ async fn resuming_a_stopped_workspace_record_recreates_it_on_the_default_server(
 
     let resumed = mgr.resume(&id).await.expect("resume");
 
-    assert_eq!(resumed.tmux_socket, None, "the record left the workspace server");
+    assert_eq!(
+        resumed.tmux_socket, None,
+        "the record left the workspace server"
+    );
     assert_eq!(resumed.claude_session_id.as_deref(), Some("claude-10101"));
     assert_eq!(resumed.cwd, workdir);
     let calls = std::fs::read_to_string(&log).expect("log");
@@ -75,7 +78,9 @@ async fn resuming_a_stopped_workspace_record_recreates_it_on_the_default_server(
         "a pane was recreated off the default server: {calls}"
     );
     assert!(
-        !calls.lines().any(|l| l == format!("-L {SERVER} start-server")),
+        !calls
+            .lines()
+            .any(|l| l == format!("-L {SERVER} start-server")),
         "the workspace server was started: {calls}"
     );
 }
@@ -117,7 +122,8 @@ fn a_crashed_workspace_server_moves_the_record_to_the_default_server() {
     let workdir = dir.path().to_path_buf();
     // A socket file nothing listens on: a crashed server.
     drop(std::os::unix::net::UnixListener::bind(dir.path().join(SERVER)).expect("bind"));
-    let refuse = "if [ \"$1\" = -L ]; then echo 'error connecting (Connection refused)' >&2; exit 1; fi";
+    let refuse =
+        "if [ \"$1\" = -L ]; then echo 'error connecting (Connection refused)' >&2; exit 1; fi";
     let (_log, tmux) = driver(dir.path(), &workdir, refuse);
     let mut record = stopped_record(&ManagedSessionId::new(), dir.path(), &workdir);
     assert!(rehome_with(&tmux, &mut record, None).expect("probe"));
