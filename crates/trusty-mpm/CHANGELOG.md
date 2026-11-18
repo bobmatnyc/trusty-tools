@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.9] — 2026-11-18
+
+### Fixed
+
+- `tm pm-guard` no longer refuses unparseable skill or agent frontmatter whose only backslashes cannot spell a `hooks` key, such as `"C:\Users\me"` or `"match \d+"`. A hex escape (`\x`, `\u`, `\U`) or an escaped line break still fails closed.
+
 ## [1.14.8] — 2026-11-18
 
 ### Added
