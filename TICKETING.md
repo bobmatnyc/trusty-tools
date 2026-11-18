@@ -211,6 +211,10 @@ child Status, at least Groomed once selected, never set by hand. It closes when 
 The ticketing agent recomputes it on each child transition. The tracker/phase pattern below applies on top
 of this when the work has a gate between stages.
 
+**Intake.** A factory session takes its next issue with `tm issue next`: an open issue with a ready board Status or a ready
+`status:*` label, acceptance criteria, and no other assignee. Rule, ranking and label mapping:
+[docs/reference/issue-next.md](docs/reference/issue-next.md).
+
 **Labels.** `status:*` labels are retired after the hand-maintained period. `ws/<session>`, type,
 component and priority labels stay. Target commands: `tm issue transition N <Status>` writes the field;
 `tm issue current N` reads it. `issue-state.yaml` is the state model until the tooling lands.
