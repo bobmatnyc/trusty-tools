@@ -2,7 +2,7 @@
 
 Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` roster — the authority for which skills are bundled — joined to the content's `skills/` for each skill's frontmatter via a shared line parser. Every declared skill is `universal`: it deploys to every project, with no detection. Regenerate with `tm generate capabilities`.
 
-63 bundled skills.
+64 bundled skills.
 
 | Skill | Category | User-invocable | Description |
 |---|---|---|---|
@@ -47,6 +47,7 @@ Generated from the bundled `framework-manifest.toml`'s `[skill_categories]` rost
 | `tm-delegation-patterns` | pm-reference | no | Delegation matrices and agent-selection decision trees for the trusty-mpm PM, plus PM re-engagement of a parked or CI-waiting subagent — what to do when an agent hands back with CI pending, checks unsettled, or a backgrounded wait it expects to wake it |
 | `tm-doctor` |  | no | Run a full trusty-mpm system diagnostic checking instructions, agents, skills, memory, and search services |
 | `tm-epic` | pm-workflow | yes | Author a GitHub epic — one tracker issue plus one native sub-issue per phase — when a gate sits between stages. The gate test, the four rules, how to write acceptance criteria, the five tracker-update triggers, and the tm issue epic verbs that maintain the tracker. |
+| `tm-estimation` | pm-workflow | yes | Estimate work as two figures — engineer-hours for humans and agent wall-clock hours derived by task class from measured ratios — plus a separate human-wait line. Use when writing a plan, sizing a phase, quoting a time to the owner, or re-estimating after scope changes. Carries the class ratio table, the overrun checklist, and the time-tracking table every phase records. |
 | `tm-git-file-tracking` | pm-workflow | no | Protocol for tracking files immediately after agent creation, before marking work complete |
 | `tm-init` | pm-workflow | yes | Initialize or intelligently refresh a project for trusty-mpm — analyze the repo and scaffold or update CLAUDE.md (project instructions), register the project with the daemon, and offer update/context/catchup modes |
 | `tm-issues-prune` | pm-workflow | yes | Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred) |
