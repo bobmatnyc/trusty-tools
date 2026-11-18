@@ -13,6 +13,8 @@ repository.workspace = true
 authors.workspace = true
 # The spike fixtures and evidence under `tests/` stay in the repo.
 include = ["/src/**/*", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
+# Kept until the release (issue #11460).
+publish = false
 
 [[bin]]
 name = "trusty-computer"
@@ -21,6 +23,10 @@ path = "src/main.rs"
 [[bin]]
 name = "trusty-computer-mcp"
 path = "src/bin/trusty-computer-mcp.rs"
+
+[features]
+# Test-only hooks; a build with it refuses `install-service` (plan section 8).
+test-seams = []
 
 [dependencies]
 hex = { workspace = true }

@@ -6,7 +6,8 @@
 //! see `trusty_computer::serve`); `broker --state DIR` runs the broker on
 //! `agent.sock` and `operator.sock` until SIGTERM or a `lockout`, with the
 //! real `osascript` consent dialog; `grant`, `grants`, `revoke`, `status`,
-//! `lease` and `lockout` are the operator verbs (`operator_cli`).
+//! `lease` and `lockout` are the operator verbs (`operator_cli`);
+//! `install-service` and `uninstall-service` manage the launchd job (`service_cli`).
 //! Test: `live_bounded_daemon_drives_fixture`, `no_tty_grant_never_reaches_the_broker`.
 
 use std::path::Path;
@@ -23,7 +24,10 @@ commands (issue #11460):
   revoke <grant-id>        end a grant and its lease
   grants | status | lease  operator queries
   lockout                  revoke every grant, drop the lease, stop the daemon and broker
-  install-service          sign, write the launchd plist, bootstrap (not implemented yet)
+  install-service [--state DIR] [--sign-identity ID | --no-sign]
+                           sign both bins, write the com.trusty.computer plist, bootstrap
+  uninstall-service [--state DIR]
+                           bootout the job and remove its plist
 every operator verb takes --state DIR (default ~/.trusty/computer)";
 
 fn main() -> ExitCode {
@@ -33,6 +37,12 @@ fn main() -> ExitCode {
             ExitCode::from(trusty_computer::serve::run(Path::new(dir)))
         }
         [verb, flag, dir] if verb == "broker" && flag == "--state" => broker(Path::new(dir)),
+        [verb, rest @ ..] if verb == "install-service" || verb == "uninstall-service" => {
+            ExitCode::from(trusty_computer::service_cli::run(
+                verb == "install-service",
+                rest,
+            ))
+        }
         [verb, ..]
             if [
                 "grant", "grants", "revoke", "status", "lease", "lockout", "--state",

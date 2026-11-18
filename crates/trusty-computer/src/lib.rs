@@ -14,11 +14,12 @@
 //! [`grants`], [`lease`] and [`peer`] (the uid check). Phase 4 adds
 //! [`consent`] (dialog seam, codes, strikes), [`broker_operator`] (the consent
 //! flow and the lockout) and [`operator_cli`]. Phase 5 adds [`mcp`], the
-//! `trusty-computer-mcp` server.
+//! `trusty-computer-mcp` server. Phase 6 adds [`codesign`], [`launchd`] and
+//! [`service_cli`] (`install-service`, `uninstall-service`).
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
 //! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
-//! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`.
+//! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`.
 
 pub mod audit;
 pub mod broker;
@@ -26,10 +27,12 @@ mod broker_agent;
 mod broker_call;
 pub mod broker_operator;
 pub mod broker_server;
+pub mod codesign;
 pub mod consent;
 pub mod driver;
 pub mod grants;
 pub mod journal;
+pub mod launchd;
 pub mod launcher;
 pub mod lease;
 pub mod manifest;
@@ -42,4 +45,5 @@ pub mod private;
 pub mod pyvalue;
 pub mod redact;
 pub mod serve;
+pub mod service_cli;
 pub mod supervisor;
