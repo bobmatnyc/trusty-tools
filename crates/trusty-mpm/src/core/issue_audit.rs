@@ -624,10 +624,10 @@ fn strip_list_marker(line: &str) -> &str {
         s = r.trim_start();
     } else {
         let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if digits > 0 {
-            if let Some(r) = s[digits..].strip_prefix(['.', ')']) {
-                s = r.trim_start();
-            }
+        if digits > 0
+            && let Some(r) = s[digits..].strip_prefix(['.', ')'])
+        {
+            s = r.trim_start();
         }
     }
     for boxed in ["[ ]", "[x]", "[X]"] {
