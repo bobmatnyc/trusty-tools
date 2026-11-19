@@ -300,6 +300,7 @@ fn prepare_inproject_session_writes_statusline() {
         &fw,
         &session_id,
         worktree.path(),
+        worktree.path(),
         Some("https://github.com/owner/repo"),
     )
     .expect("prep succeeds (#4752: only a compiled-prompt write failure is fatal)");
@@ -364,6 +365,7 @@ async fn prepare_inproject_session_emits_stage_events_in_order() {
         prepare_inproject_session(
             &fw,
             &session_id,
+            worktree.path(),
             worktree.path(),
             Some("https://github.com/owner/repo"),
         )
@@ -930,7 +932,10 @@ async fn spawn_managed_on_main_creates_record_without_worktree() {
         &session_id,
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
-        local_path,
+        super::super::launch_on_main::Dirs {
+            placement: local_path,
+            launch: local_path,
+        },
         &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
@@ -1019,7 +1024,10 @@ async fn spawn_managed_on_main_never_writes_task_md_into_the_checkout() {
         &session_id,
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
-        local_path,
+        super::super::launch_on_main::Dirs {
+            placement: local_path,
+            launch: local_path,
+        },
         &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
@@ -1099,7 +1107,10 @@ async fn spawn_managed_on_main_writes_auto_memory_off_with_trusty_memory_down() 
         &ManagedSessionId::new(),
         &params,
         crate::runtime::RuntimeKind::ClaudeCode,
-        local_path,
+        super::super::launch_on_main::Dirs {
+            placement: local_path,
+            launch: local_path,
+        },
         &super::super::local_only_spawn::SessionSource::github("acme", "writing"),
     )
     .await
