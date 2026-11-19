@@ -226,3 +226,100 @@ fn migrate_records_counts_and_names_never_values() {
         "a value reached the audit log"
     );
 }
+
+/// The owner vault of the fixture's `Acme/Web` remote.
+const OWNER_VAULT: &str = "trusty/acme";
+const OWNER_VALUE: &str = "sk-fake-owner-pat";
+/// A Keychain item outside trusty's namespace, and what the fake reader holds.
+const ITEM_SERVICE: &str = "gh:github.com";
+const ITEM_ACCOUNT: &str = "octocat";
+const ITEM_VALUE: &str = "sk-fake-gh-item";
+
+fn fake_item(
+    service: &crate::api::methods::KeychainLabel,
+    account: &crate::api::methods::KeychainLabel,
+) -> Result<Option<SecretValue>, SecretsError> {
+    let held = service.as_str() == ITEM_SERVICE && account.as_str() == ITEM_ACCOUNT;
+    Ok(held.then(|| SecretValue::new(ITEM_VALUE)))
+}
+
+/// Why: #10524 x #10998 — a named copy made before the migration (one from
+/// a vault key, one from a Keychain item outside trusty's namespace) keeps
+/// reading its value after `migrate` and after `migrate --finish`, and
+/// `--finish` never removes a copy's source: the vault key now lives in the
+/// blob, the outside item is never touched. A variant whose `finish` deletes
+/// a copied key, or whose `migrate` skips it, fails the reads below.
+/// Test: itself.
+#[test]
+fn named_copy_reads_correctly_after_migrate_finish_10524() {
+    let fx = fixture();
+    let (items, mut state, _) = blob_state(&fx);
+    state.keychain_item_read = fake_item;
+    let kc = state.open(&BackendId::keychain()).unwrap();
+    let seed = SecretStore::new(Arc::clone(&kc), NamesIndex::at(&fx.settings.index_root));
+    seed.set(
+        &vault(OWNER_VAULT),
+        &key("GH_PAT"),
+        &SecretValue::new(OWNER_VALUE),
+    )
+    .unwrap();
+
+    let copy = |source: Value, to: &str| {
+        let params = json!({"project": fx.project(), "from_backend": "keychain",
+            "to_backend": "keychain", "keys": [to], "source": source});
+        methods::copy(&state, caller(), params).unwrap();
+    };
+    copy(
+        json!({"vault": {"vault": OWNER_VAULT, "key": "GH_PAT"}}),
+        "FROM_VAULT",
+    );
+    copy(
+        json!({"keychain_item": {"service": ITEM_SERVICE, "account": ITEM_ACCOUNT}}),
+        "FROM_ITEM",
+    );
+
+    let read = |v: &str, k: &str| {
+        kc.get(&vault(v), &key(k))
+            .unwrap()
+            .map(|s| s.expose().to_owned())
+    };
+    let check = |when: &str| {
+        for (v, k, want) in [
+            (PROJECT_VAULT, "FROM_VAULT", OWNER_VALUE),
+            (PROJECT_VAULT, "FROM_ITEM", ITEM_VALUE),
+            (OWNER_VAULT, "GH_PAT", OWNER_VALUE),
+        ] {
+            assert_eq!(read(v, k).as_deref(), Some(want), "{when}: {v}/{k}");
+        }
+        assert_eq!(
+            (fake_item)(
+                &crate::api::methods::KeychainLabel::new(ITEM_SERVICE).unwrap(),
+                &crate::api::methods::KeychainLabel::new(ITEM_ACCOUNT).unwrap(),
+            )
+            .unwrap()
+            .map(|s| s.expose().to_owned())
+            .as_deref(),
+            Some(ITEM_VALUE),
+            "{when}: the outside item"
+        );
+    };
+    check("before migrate");
+
+    step(&state, "migrate", false).unwrap();
+    check("after migrate");
+
+    step(&state, "finish", false).unwrap();
+    check("after finish");
+    let blob = items.raw(&ItemId::blob()).expect("the blob");
+    assert!(
+        !blob.contains(ITEM_SERVICE),
+        "the outside item entered the blob"
+    );
+    assert!(
+        items.raw(&ItemId::new(OWNER_VAULT, "GH_PAT")).is_none(),
+        "the source's per-item item survived finish"
+    );
+    let token = grant_in(&state, &fx.project(), &["FROM_VAULT", "FROM_ITEM"]);
+    assert_eq!(value_of(&state, &token, "FROM_VAULT"), OWNER_VALUE);
+    assert_eq!(value_of(&state, &token, "FROM_ITEM"), ITEM_VALUE);
+}
