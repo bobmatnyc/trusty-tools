@@ -646,8 +646,13 @@ already enables). See the [Cargo features](#cargo-features) note below.
 ## Reviewer model
 
 The default reviewer model is `us.anthropic.claude-sonnet-5-5` (Claude Sonnet 5.5) on AWS Bedrock.
-The verifier and summarizer default to Haiku 4.5
-(`us.anthropic.claude-haiku-4-5-20251001-v1:0`).
+The summarizer defaults to Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`). The verifier defaults to a
+different model family than the reviewer (#11527): Amazon Nova Pro
+(`us.amazon.nova-pro-v1:0`) on Bedrock, Gemini 2.5 Flash
+(`google/gemini-2.5-flash`) on OpenRouter. When the reviewer and verifier
+resolve to the same model id, trusty-review logs a warning; the override
+still applies.
 
 Override via:
 

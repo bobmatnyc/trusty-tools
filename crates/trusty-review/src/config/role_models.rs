@@ -82,9 +82,10 @@ impl RoleModels {
     /// carries any values the caller parsed from `--reviewer-model` etc.
     /// `file_models` carries parsed TOML table values.  Both may be `None` to
     /// skip that layer.  The built-in default is a `ModelTier` (#5971): the
-    /// reviewer asks for `Analysis`, the verifier and summarizer for
-    /// `Classification`, and the tier resolves against whichever provider won
-    /// its own chain.
+    /// reviewer asks for `Analysis`, the summarizer for `Classification`, and
+    /// the tier resolves against whichever provider won its own chain. The
+    /// verifier's built-in layer is a non-Claude model instead (#11527, see
+    /// `cross_family_verifier_default`); a same-model pair logs a warning.
     ///
     /// The verifier and summarizer take `Classification` for its COST, not
     /// because verifying or summarising IS classification (#5987).  The owner
@@ -137,7 +138,7 @@ impl RoleModels {
             env.reviewer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.reviewer.as_ref()),
-            ModelTier::Analysis,
+            |p| ModelTier::Analysis.resolve(p.provider_id()),
             crate::llm::models::DEFAULT_REVIEWER_MODEL,
             Provider::Bedrock,
             0.3,
@@ -151,7 +152,8 @@ impl RoleModels {
             env.verifier_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.verifier.as_ref()),
-            ModelTier::Classification,
+            // #11527: a different model family from the reviewer, not the tier.
+            cross_family_verifier_default,
             crate::llm::models::DEFAULT_VERIFIER_MODEL,
             Provider::Bedrock,
             1.0,
@@ -165,17 +167,44 @@ impl RoleModels {
             env.summarizer_model.as_deref(),
             env.provider.as_deref(),
             file_models.and_then(|f| f.summarizer.as_ref()),
-            ModelTier::Classification,
+            |p| ModelTier::Classification.resolve(p.provider_id()),
             crate::llm::models::DEFAULT_SUMMARIZER_MODEL,
             Provider::Bedrock,
             0.0,
             4096,
         );
-        Self {
+        let roles = Self {
             reviewer,
             verifier,
             summarizer,
+        };
+        // #11527: surface a reviewer/verifier pair that shares one model.
+        if let Some(message) = roles.same_model_warning() {
+            warn!("{message}");
         }
+        roles
+    }
+
+    /// Warning text when the reviewer and verifier resolve to the same model.
+    ///
+    /// Why: a verifier on the reviewer's own model repeats the reviewer's
+    /// errors instead of catching them (#11527). An operator may still choose
+    /// that pair, so it is a warning, never a refusal.
+    /// What: compares the two model ids after stripping any `bedrock/` /
+    /// `openrouter/` / `fireworks/` routing prefix; `Some` names the shared id.
+    /// Test: `config_tests::same_model_warning_fires_when_reviewer_and_verifier_match`,
+    /// `config_tests::default_verifier_is_a_different_family_from_the_reviewer`.
+    pub fn same_model_warning(&self) -> Option<String> {
+        let reviewer = crate::llm::strip_provider_prefix(&self.reviewer.model);
+        let verifier = crate::llm::strip_provider_prefix(&self.verifier.model);
+        (reviewer == verifier).then(|| {
+            format!(
+                "reviewer and verifier both resolve to model {reviewer:?}; the verifier \
+                 cannot catch errors its own model makes — set a different verifier \
+                 model (TRUSTY_REVIEW_VERIFIER_MODEL / --verifier-model) unless this is \
+                 intended"
+            )
+        })
     }
 
     /// Convenience: resolve with only env vars (no CLI, no config file).
@@ -283,6 +312,22 @@ pub struct FileModels {
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────
 
+/// Built-in verifier model for `provider`: a non-Claude family (#11527).
+///
+/// Why: every reviewer default is Claude, and a verifier from the same family
+/// shares its blind spots (owner ruling D52). The verifier's built-in layer
+/// therefore names a different family, not the `Classification` tier.
+/// What: Bedrock → Amazon Nova Pro, OpenRouter → Gemini 2.5 Flash; any other
+/// provider falls back to the `Classification` tier.
+/// Test: `config_tests::default_verifier_is_a_different_family_from_the_reviewer`.
+fn cross_family_verifier_default(provider: &Provider) -> Option<&'static str> {
+    match provider {
+        Provider::Bedrock => Some(crate::llm::models::DEFAULT_VERIFIER_MODEL),
+        Provider::OpenRouter => Some(crate::llm::models::OPENROUTER_VERIFIER_MODEL),
+        Provider::Fireworks => ModelTier::Classification.resolve(provider.provider_id()),
+    }
+}
+
 /// Parse one precedence layer's provider string, warning on a value that fails.
 ///
 /// Why: `resolve_role` used to collapse the CLI and env layers with
@@ -332,7 +377,7 @@ pub(super) fn resolve_role(
     env_model: Option<&str>,
     env_provider: Option<&str>,
     file: Option<&RoleConfigOverride>,
-    default_tier: ModelTier,
+    builtin_default: fn(&Provider) -> Option<&'static str>,
     default_model: &str,
     default_provider: Provider,
     default_temp: f32,
@@ -361,7 +406,7 @@ pub(super) fn resolve_role(
         .or(manifest_model)
         .or(env_model)
         .or(file.and_then(|f| f.model.as_deref()))
-        .or_else(|| default_tier.resolve(provider.provider_id()))
+        .or_else(|| builtin_default(&provider))
         .unwrap_or(default_model)
         .to_string();
 
