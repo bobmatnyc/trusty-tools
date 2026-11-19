@@ -124,10 +124,6 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-workflow",
     "verification-before-completion",
     // ---- trusty-agents bundled, non-coding ----
-    "cto-apex-framework",
-    "cto-bob-voice",
-    "cto-db",
-    "cto-duetto-org",
     "izzie-metro-north",
     "izzie-weather",
     "ticketing-epic",

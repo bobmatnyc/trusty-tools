@@ -21,7 +21,9 @@ use super::pairing::{
     issue_repl_pairing_code, load_paired_channels, new_pending_pairs, save_paired_channels,
     should_auto_pair, verify_pair_attempt,
 };
-use super::rbac::{SlackRbacConfig, VIRTUAL_CTO_MESSAGE, default_rbac_users, parse_rbac_users};
+use super::rbac::{
+    DEFAULT_PERSONA, SlackRbacConfig, VIRTUAL_CTO_MESSAGE, default_rbac_users, parse_rbac_users,
+};
 use super::{ENVELOPE_DEDUP_CAP, PairedChannels, dedup_check_and_record};
 
 #[test]
@@ -203,14 +205,14 @@ async fn dedup_skips_duplicate_envelopes() {
 fn rbac_unknown_user_returns_virtual_cto_message() {
     let cfg = SlackRbacConfig {
         users: default_rbac_users(),
-        default_persona: "cto-assistant".to_string(),
+        default_persona: DEFAULT_PERSONA.to_string(),
     };
     // A user id that is not in the default team table.
     assert!(cfg.user("U_UNKNOWN_999").is_none());
     // The handler returns `VIRTUAL_CTO_MESSAGE` verbatim for this case;
     // assert the constant carries the expected gating language.
     assert!(VIRTUAL_CTO_MESSAGE.starts_with(":lock:"));
-    assert!(VIRTUAL_CTO_MESSAGE.contains("Duetto engineering team"));
+    assert!(VIRTUAL_CTO_MESSAGE.contains("authorized team members"));
     assert!(VIRTUAL_CTO_MESSAGE.contains("don't have access to"));
 }
 
@@ -219,29 +221,29 @@ fn rbac_unknown_user_returns_virtual_cto_message() {
 #[test]
 fn rbac_config_parses_env_string() {
     let users = parse_rbac_users(
-        "U0A6V2W1M2R:Masa:ALL:*,\
-         U0ALDQLBU79:Andrea:ALL:cto-assistant,\
-         U09331EP3MX:Alex:ANALYTICS:cto-assistant+ctrl",
+        "U00000001:Alice:ALL:*,\
+         U00000002:Bob:ALL:assistant,\
+         U00000003:Carol:ANALYTICS:assistant+ctrl",
     );
     assert_eq!(users.len(), 3);
 
-    let masa = users.get("U0A6V2W1M2R").expect("masa entry");
-    assert_eq!(masa.name, "Masa");
-    assert_eq!(masa.tier, crate::rbac::ServiceTier::All);
-    assert!(masa.allowed_personas.is_none(), "`*` => unrestricted");
+    let alice = users.get("U00000001").expect("alice entry");
+    assert_eq!(alice.name, "Alice");
+    assert_eq!(alice.tier, crate::rbac::ServiceTier::All);
+    assert!(alice.allowed_personas.is_none(), "`*` => unrestricted");
 
-    let andrea = users.get("U0ALDQLBU79").expect("andrea entry");
-    assert_eq!(andrea.tier, crate::rbac::ServiceTier::All);
+    let bob = users.get("U00000002").expect("bob entry");
+    assert_eq!(bob.tier, crate::rbac::ServiceTier::All);
     assert_eq!(
-        andrea.allowed_personas.as_deref(),
-        Some(&["cto-assistant".to_string()][..])
+        bob.allowed_personas.as_deref(),
+        Some(&["assistant".to_string()][..])
     );
 
-    let alex = users.get("U09331EP3MX").expect("alex entry");
-    assert_eq!(alex.tier, crate::rbac::ServiceTier::Analytics);
+    let carol = users.get("U00000003").expect("carol entry");
+    assert_eq!(carol.tier, crate::rbac::ServiceTier::Analytics);
     assert_eq!(
-        alex.allowed_personas.as_deref(),
-        Some(&["cto-assistant".to_string(), "ctrl".to_string()][..])
+        carol.allowed_personas.as_deref(),
+        Some(&["assistant".to_string(), "ctrl".to_string()][..])
     );
 
     // Malformed / unknown-tier entries are skipped, not fatal.
@@ -255,38 +257,51 @@ fn rbac_config_parses_env_string() {
 #[test]
 fn switch_command_blocked_for_restricted_persona() {
     let users = default_rbac_users();
-    // Andrea is `ALL:cto-assistant` — only `cto-assistant` is allowed.
-    let andrea = users.get("U0ALDQLBU79").expect("andrea entry");
-    let allowed = andrea
+    // Bob is `ALL:assistant` — only `assistant` is allowed.
+    let bob = users.get("U00000002").expect("bob entry");
+    let allowed = bob
         .allowed_personas
         .as_ref()
-        .expect("andrea has a restricted allow-list");
+        .expect("bob has a restricted allow-list");
     // `ctrl` is NOT in the allow-list → switch must be rejected.
     assert!(!allowed.iter().any(|p| p == "ctrl"));
-    // `cto-assistant` IS in the allow-list → switch would be permitted.
-    assert!(allowed.iter().any(|p| p == "cto-assistant"));
+    // `assistant` IS in the allow-list → switch would be permitted.
+    assert!(allowed.iter().any(|p| p == "assistant"));
 
-    // Masa is `ALL:*` — unrestricted, may switch to anything incl. `ctrl`.
-    let masa = users.get("U0A6V2W1M2R").expect("masa entry");
+    // Alice is `ALL:*` — unrestricted, may switch to anything incl. `ctrl`.
+    let alice = users.get("U00000001").expect("alice entry");
     assert!(
-        masa.allowed_personas.is_none(),
+        alice.allowed_personas.is_none(),
         "unrestricted user may switch to any persona"
     );
 }
 
-/// Kartik Yellepeddi (U09J5EFTSA3) must be present in the default RBAC table
-/// with `ALL` tier and a `cto-assistant`-restricted persona allow-list —
-/// parity with the retiring custom `cto_bot`'s `BOT_ALLOWED_USERS` default
-/// table (#3852).
+/// The fallback table restricts its non-admin users to the default persona.
 #[test]
-fn default_rbac_users_includes_kartik_parity() {
+fn default_rbac_users_restrict_to_the_default_persona() {
     let users = default_rbac_users();
-    let kartik = users.get("U09J5EFTSA3").expect("kartik entry present");
-    assert_eq!(kartik.name, "Kartik");
-    assert_eq!(kartik.tier, crate::rbac::ServiceTier::All);
+    let dave = users.get("U00000004").expect("dave entry present");
+    assert_eq!(dave.tier, crate::rbac::ServiceTier::All);
     assert_eq!(
-        kartik.allowed_personas.as_deref(),
-        Some(&["cto-assistant".to_string()][..])
+        dave.allowed_personas.as_deref(),
+        Some(&[DEFAULT_PERSONA.to_string()][..])
+    );
+}
+
+/// #11513: the persona used when `SLACK_DEFAULT_PERSONA` is unset must ship in
+/// the bundled agents tree, so a fresh install never defaults to a deleted
+/// persona.
+#[test]
+fn default_persona_ships_in_the_bundle() {
+    let dir = crate::agents::bundled::content::test_support::repo_tree_dir(
+        crate::agents::bundled::BundledTreeKind::Agents,
+    );
+    let flat = dir.join(format!("{DEFAULT_PERSONA}.toml"));
+    let package = dir.join(DEFAULT_PERSONA).join("agent.toml");
+    assert!(
+        flat.is_file() || package.is_file(),
+        "default Slack persona `{DEFAULT_PERSONA}` is not in {}",
+        dir.display()
     );
 }
 
@@ -419,7 +434,7 @@ mod eventstream_tests {
             "C123".to_string(),
             "170000.001".to_string(),
             "im".to_string(),
-            "Masa".to_string(),
+            "Alice".to_string(),
             "hello world".to_string(),
         )
         .await;
@@ -430,7 +445,7 @@ mod eventstream_tests {
         assert_eq!(events[0].listener_id, "slack");
         assert_eq!(events[0].provider, "slack");
         assert_eq!(events[0].event_type, "message.im");
-        assert_eq!(events[0].from.as_deref(), Some("Masa"));
+        assert_eq!(events[0].from.as_deref(), Some("Alice"));
         assert!(events[0].included, "no filter set yet ⇒ default included");
     }
 
@@ -452,7 +467,7 @@ mod eventstream_tests {
             "C456".to_string(),
             "170000.002".to_string(),
             "im".to_string(),
-            "Andrea".to_string(),
+            "Bob".to_string(),
             "second message".to_string(),
         )
         .await;
@@ -472,7 +487,7 @@ mod eventstream_tests {
             "C456".to_string(),
             "170000.003".to_string(),
             "mpim".to_string(),
-            "Andrea".to_string(),
+            "Bob".to_string(),
             "group message".to_string(),
         )
         .await;
@@ -507,7 +522,7 @@ mod eventstream_tests {
             "C999".to_string(),
             "170000.999".to_string(),
             "im".to_string(),
-            "Masa".to_string(),
+            "Alice".to_string(),
             "should still publish despite append failure".to_string(),
         )
         .await;

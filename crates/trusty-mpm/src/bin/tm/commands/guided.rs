@@ -852,11 +852,11 @@ fn tm_connect_route(git_root: &std::path::Path) -> String {
 /// projects (Gitea, GitLab, bare SSH, etc.) are refused rather than having a
 /// clone attempt made against an unrecognised host (#1724 residual gap). We
 /// also need to recognise GitHub repos accessed via multi-account SSH host
-/// aliases (e.g. `git@github-duetto:owner/repo.git` via `~/.ssh/config`).
+/// aliases (e.g. `git@github-acme:owner/repo.git` via `~/.ssh/config`).
 /// What: extracts the host via [`github_host`], then accepts it when:
 ///   (a) host == `"github.com"` (the canonical GitHub host), OR
 ///   (b) host starts with `"github-"` or `"github_"` (SSH alias convention —
-///       e.g. `github-duetto`, `github-work`, `github_personal`).
+///       e.g. `github-acme`, `github-work`, `github_personal`).
 /// Decision — GitHub Enterprise (`github.mycompany.com`): NOT matched. GHE
 /// uses a dot separator after `github`, and the broader managed-clone
 /// infrastructure is not tested against GHE; erring on the side of safety
@@ -914,7 +914,7 @@ pub(crate) fn find_git_root(cwd: &std::path::Path) -> Option<std::path::PathBuf>
 /// Why: [`find_git_root`] happily walks *up* to an ancestor `.git`. That is
 /// correct for a subdirectory the operator actually committed, but WRONG when
 /// `cwd` is an unrelated directory that merely happens to live inside another
-/// repository's working-tree span — e.g. an untracked notes folder `~/Duetto/cto`
+/// repository's working-tree span — e.g. an untracked notes folder `~/Acme/cto`
 /// that case-folds onto the enclosing repo's tracked `CTO/` dir on a
 /// case-insensitive filesystem (APFS). Trusting the ancestor there made bare
 /// `tm` silently resolve to the ancestor repo's project and offer its sessions
@@ -968,13 +968,13 @@ pub(crate) fn cwd_owns_git_entry(cwd: &std::path::Path) -> bool {
 /// directory that DOES own its repo was wrongly adopted into an ancestor (#2542).
 /// `find_git_root` alone cannot tell an intentionally-nested tracked subdirectory
 /// apart from an unrelated directory that merely falls inside a repo's path span
-/// (the APFS case-fold collision that made `~/Duetto/cto` resolve to the enclosing
+/// (the APFS case-fold collision that made `~/Acme/cto` resolve to the enclosing
 /// `hotstats/hotstats-knowledgebase` repo). The tracked-tree check does.
 /// Separately, `git rev-parse --show-toplevel` walks *past* a `cwd/.git` that is
 /// present but transiently invalid (e.g. a partially-reconstructed gitdir left by
 /// a concurrent `git` rescue) all the way up to an ancestor repo — observed live
-/// as `~/Duetto/cto` (its own repo) being reported as "inside another repository's
-/// working tree (`~/Duetto`)". A directory that physically contains a `.git` entry
+/// as `~/Acme/cto` (its own repo) being reported as "inside another repository's
+/// working tree (`~/Acme`)". A directory that physically contains a `.git` entry
 /// IS a working-tree root; its identity is its OWN repo, never an ancestor's.
 /// What: (0) OWN-REPO-WINS — if `cwd` directly contains a `.git` entry (a
 /// directory for a normal repo, or a worktree/submodule gitlink *file*; matched by

@@ -522,7 +522,7 @@ run an ingest, get a truthful "N entities ingested", and still get nothing from
 `vector_search`. Two coherent remediations were on the table — **(a)** ingest also
 feeds the bound index, or **(b)** the store's index is (re)built over the KB tree
 — and (b) collided with a deliberate operator choice (the 200,090-chunk
-`bob-duetto/cto` index).
+`acme-admin/cto` index).
 
 **The owner chose (a)** (2026-07-25). Ingestion now feeds the bound index, and the
 operator's index-root configuration is left untouched. Shipped shape:
@@ -577,7 +577,7 @@ Every connector and every extractor inherits this; none of them may weaken it.
    than manufacturing a fresh silent failure. This is also why (a) never has to
    re-point an existing index root: a binding whose index cannot serve its tree
    is a configuration error, and it is now a loud one. (For `cto-assistant`
-   specifically: the `bob-duetto/cto` index remains a separate raw-search layer;
+   specifically: the `acme-admin/cto` index remains a separate raw-search layer;
    making its OKG tree searchable means binding an index registered over that
    tree.)
 7. **The backlog is visible where an operator looks.** `okg_sources` reports

@@ -655,7 +655,7 @@ mod tests {
     /// Real `gh auth status` output with two github.com accounts logged in.
     const MULTI_AUTH_STATUS: &str = "\
 github.com
-  ✓ Logged in to github.com account bob-duetto (keyring)
+  ✓ Logged in to github.com account acme-admin (keyring)
   - Active account: true
   - Git operations protocol: https
   - Token: gho_************************************
@@ -684,7 +684,7 @@ github.com
     fn parse_active_account_from_status_multi() {
         assert_eq!(
             parse_active_account_from_status(MULTI_AUTH_STATUS).as_deref(),
-            Some("bob-duetto")
+            Some("acme-admin")
         );
     }
 
@@ -721,14 +721,14 @@ github.com
     }
 
     /// Why: a mismatched account (the exact #2081 incident shape —
-    /// `bob-duetto` authenticated when `bobmatnyc` was expected) must be a loud
+    /// `acme-admin` authenticated when `bobmatnyc` was expected) must be a loud
     /// `Err`, never a silent pass.
     /// Test: itself.
     #[test]
     fn verify_active_account_mismatch() {
         let err =
-            verify_active_account(MULTI_AUTH_STATUS, Ok("bob-duetto"), "bobmatnyc").unwrap_err();
-        assert!(err.contains("bob-duetto"), "err: {err}");
+            verify_active_account(MULTI_AUTH_STATUS, Ok("acme-admin"), "bobmatnyc").unwrap_err();
+        assert!(err.contains("acme-admin"), "err: {err}");
         assert!(err.contains("bobmatnyc"), "err: {err}");
     }
 
