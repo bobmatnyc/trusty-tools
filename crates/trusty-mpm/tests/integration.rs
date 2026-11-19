@@ -138,6 +138,8 @@ mod tm_hook_pm_guard_unquoted_heredoc_expansion;
 // #10973: a compression-opportunity row per tool result.
 mod tm_hook_opportunity_10973;
 mod tm_hook_pretooluse_rewrite;
+// #7684: the project-rules carrier under each bypass and with pm-guard off.
+mod tm_hook_rules_carrier_7684;
 mod tm_hook_session_end_8980;
 mod tm_hook_session_start_8531;
 // #8433 P0 (D09): a tainted session's new id reads tainted at SessionStart.

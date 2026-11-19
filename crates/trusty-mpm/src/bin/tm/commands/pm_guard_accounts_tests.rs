@@ -176,10 +176,53 @@ fn any_agent_dispatch_gets_the_project_rules() {
         .expect("an ops dispatch carries both");
     assert!(prompt(&ops).contains(ACCOUNT_BLOCK_HEADING));
     assert!(prompt(&ops).contains(PROJECT_RULES_HEADING));
-    // No roster still carries the rules; `Task` carries nothing.
+    // No roster still carries the rules; so does `Task`, without accounts.
     assert!(account_rewrite(None, "Agent", Some(&dispatch("qa")), dir.path()).is_some());
+    let task = account_rewrite(Some(r()), "Task", Some(&dispatch("local-ops")), dir.path())
+        .expect("a Task dispatch carries the rules");
+    assert!(prompt(&task).contains(PROJECT_RULES_HEADING));
+    assert!(!prompt(&task).contains(ACCOUNT_BLOCK_HEADING));
+}
+
+/// #7684: a project with no `CLAUDE.md` leaves a non-ops dispatch untouched.
+#[test]
+fn no_claude_md_leaves_a_dispatch_unchanged() {
+    let dir = project("");
+    for tool in ["Agent", "Task"] {
+        assert_eq!(
+            account_rewrite(Some(r()), tool, Some(&dispatch("research")), dir.path()),
+            None,
+            "{tool}"
+        );
+    }
+    let payload = serde_json::json!({
+        "tool_name": "Agent", "cwd": dir.path(), "tool_input": dispatch("research"),
+    });
+    assert_eq!(rules_carrier_response(&payload, dir.path()), None);
+}
+
+/// #7684: the carrier object holds the rewritten input and no decision.
+#[test]
+fn carrier_response_holds_only_the_updated_input() {
+    use trusty_mpm::core::project_rules::PROJECT_RULES_HEADING;
+    let dir = project("");
+    std::fs::write(dir.path().join("CLAUDE.md"), "rule").expect("write CLAUDE.md");
+    let payload = serde_json::json!({
+        "tool_name": "Agent", "cwd": dir.path(), "tool_input": dispatch("research"),
+    });
+    let out = rules_carrier_response(&payload, Path::new("/")).expect("carried");
+    let hso = &out["hookSpecificOutput"];
+    assert!(hso.get("permissionDecision").is_none(), "{out}");
+    assert!(
+        prompt(&hso["updatedInput"]).contains(PROJECT_RULES_HEADING),
+        "{out}"
+    );
+    // The egress share: silent while pm-guard is on, the carrier when off.
+    assert_eq!(egress_rules_carrier(Some(&payload), || true), None);
+    assert_eq!(egress_rules_carrier(Some(&payload), || false), Some(out));
+    let read = serde_json::json!({"tool_name": "Read", "cwd": dir.path()});
     assert_eq!(
-        account_rewrite(Some(r()), "Task", Some(&dispatch("qa")), dir.path()),
+        egress_rules_carrier(Some(&read), || panic!("config read for a non-dispatch")),
         None
     );
 }

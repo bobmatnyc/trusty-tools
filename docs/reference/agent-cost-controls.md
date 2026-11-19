@@ -170,8 +170,14 @@ A user-authored agent file is never rewritten. An untracked file deployed
 before the stamp existed is still adopted, then refreshed on the next deploy.
 
 The project's build and test rules still reach the subagent. On every `Agent`
-dispatch, `tm hook --pm-guard` appends a `## Project rules (from CLAUDE.md)`
-block to the prompt (`crates/trusty-mpm/src/core/project_rules.rs`). The block
+or `Task` dispatch, `tm hook --pm-guard` appends a `## Project rules (from
+CLAUDE.md)` block to the prompt (`crates/trusty-mpm/src/core/project_rules.rs`).
+It does so under `TRUSTY_MPM_DISABLE_HOOKS` and `TRUSTY_MPM_PM_UNRESTRICTED`
+too, which lift enforcement only; divert workers set the first. With
+`[pm_guard] enabled = false` the pm-guard entry is gone, and
+`tm hook --egress-guard`, which every tm-written settings tier carries, appends
+the block instead. Exactly one hook appends it. A `CLAUDE.md` that cannot be
+read yields a one-line `project rules unavailable: <reason>` notice in the block. The block
 holds the regions of the nearest `CLAUDE.md` between `<!-- tm:agent-rules -->`
 and `<!-- /tm:agent-rules -->`; a file with no marker is carried whole. The
 block is capped at 16 KiB and a cut says so. The deployed agent files stay
@@ -179,3 +185,8 @@ project-free, so their update-check hashes do not change. In this repository
 the marked regions are Build and Test Commands, the Rust Test Ladder, the doc,
 `unwrap()` and SLOC rules, changelog fragments, stage-by-name and the crate
 aliases.
+
+A plain Claude Code session that uses tm's machine-global agents without tm's
+hooks has no carrier. Its subagents get neither the project CLAUDE.md nor the
+rules block; they run on their own prompt and the delegation brief only. Run
+such sessions through `tm`, or let `tm install` write the project hooks first.

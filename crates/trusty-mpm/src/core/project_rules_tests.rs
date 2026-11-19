@@ -80,3 +80,20 @@ fn this_repos_claude_md_carries_the_build_and_test_rules() {
     }
     assert!(rules.len() <= PROJECT_RULES_CAP_BYTES, "{}", rules.len());
 }
+
+/// #7684: an unreadable `CLAUDE.md` puts a notice in the block, never nothing.
+#[test]
+fn an_unreadable_claude_md_yields_a_notice() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join(CLAUDE_MD)).expect("mkdir CLAUDE.md");
+    let notice = rules_for(dir.path()).expect("a notice, not None");
+    assert!(notice.starts_with(RULES_UNAVAILABLE), "{notice}");
+    assert!(notice.contains(CLAUDE_MD), "{notice}");
+    assert!(!notice.contains('\n'), "{notice}");
+
+    let bad = tempfile::tempdir().expect("tempdir");
+    std::fs::write(bad.path().join(CLAUDE_MD), [0xff, 0xfe, 0x00]).expect("write");
+    let notice = rules_for(bad.path()).expect("a notice for invalid UTF-8");
+    assert!(notice.starts_with(RULES_UNAVAILABLE), "{notice}");
+    assert!(rules_block(&notice).contains(PROJECT_RULES_HEADING));
+}

@@ -94,7 +94,11 @@ pub fn compose_agent_for_deploy(
 /// subagent turn is resident cost the PM already pays once.
 /// What: Claude Code's `omitClaudeMd` subagent field. Claude Code older than
 /// v2.1.271 ignores the key, and Claude Code ignores it for a main-session
-/// `--agent`, so the PM keeps its CLAUDE.md.
+/// `--agent`, so the PM keeps its CLAUDE.md. The project rules reach the
+/// subagent through tm's `PreToolUse` hooks instead (pm-guard, or the egress
+/// guard when pm-guard is off); a Claude Code session without tm's hooks has
+/// no carrier, so its subagents get neither CLAUDE.md nor the rules
+/// (docs/reference/agent-cost-controls.md section 4).
 pub const OMIT_CLAUDE_MD_LINE: &str = "omitClaudeMd: true";
 
 /// Add [`OMIT_CLAUDE_MD_LINE`] as the first frontmatter key of `composed`.

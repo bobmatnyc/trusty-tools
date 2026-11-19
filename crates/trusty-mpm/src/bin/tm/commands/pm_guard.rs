@@ -398,6 +398,10 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // Guard 3: explicit operator override — "the user said you do it" — is
     // folded into `bypassed` above with Guard 2.
     if bypassed {
+        // #7684: a bypass lifts enforcement, never the project-rules carrier.
+        if let Some(rules) = pm_guard_accounts::rules_carrier_response(&payload, &hook_cwd) {
+            emit(rules);
+        }
         return Ok(());
     }
     // #7975 round 2: and a parsed payload that names no classifiable tool call

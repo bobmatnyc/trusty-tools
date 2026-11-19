@@ -11,7 +11,8 @@
 //! [`RULES_CLOSE`] when the file marks any, else the whole file. [`rules_block`]
 //! renders them under [`PROJECT_RULES_HEADING`], cut at
 //! [`PROJECT_RULES_CAP_BYTES`] on a line boundary with an in-band notice.
-//! FAIL-OPEN: an absent, blank or unreadable file yields no block.
+//! An absent or blank file yields no block; an unreadable one yields a
+//! one-line [`RULES_UNAVAILABLE`] notice in the block, never silence.
 //! Test: `project_rules_tests.rs`; the dispatch rewrite in
 //! `pm_guard_accounts_tests.rs`.
 
@@ -33,10 +34,13 @@ pub const PROJECT_RULES_HEADING: &str = "## Project rules (from CLAUDE.md)";
 pub const PROJECT_RULES_CAP_BYTES: usize = 16 * 1024;
 
 /// The nearest `CLAUDE.md` at or above `cwd`.
+///
+/// What: any entry by that name, not only a regular file, so one that cannot
+/// be read reaches [`rules_for`]'s notice instead of being skipped (#7684).
 pub fn claude_md_for(cwd: &Path) -> Option<PathBuf> {
     cwd.ancestors()
         .map(|dir| dir.join(CLAUDE_MD))
-        .find(|path| path.is_file())
+        .find(|path| path.exists())
 }
 
 /// The agent rules a `CLAUDE.md` body carries.
@@ -67,18 +71,24 @@ pub fn extract(body: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
+/// Opens the one-line notice carried in place of rules that could not be read.
+pub const RULES_UNAVAILABLE: &str = "project rules unavailable";
+
 /// The agent rules of the project containing `cwd`, or `None`.
 ///
-/// What: [`extract`] over [`claude_md_for`]; an unreadable file is logged at
-/// `warn` and yields `None`.
-/// Test: `rules_are_found_from_a_subdirectory`.
+/// What: [`extract`] over [`claude_md_for`]. An unreadable file is logged at
+/// `warn` and yields a one-line [`RULES_UNAVAILABLE`] notice naming the path
+/// and the error, so the agent knows its rules are missing (#7684).
+/// Test: `rules_are_found_from_a_subdirectory`,
+/// `an_unreadable_claude_md_yields_a_notice`.
 pub fn rules_for(cwd: &Path) -> Option<String> {
     let path = claude_md_for(cwd)?;
     match std::fs::read_to_string(&path) {
         Ok(body) => extract(&body),
+        // #7684: never drop the rules silently; the notice rides the dispatch.
         Err(err) => {
             tracing::warn!(path = %path.display(), "project rules not read: {err}");
-            None
+            Some(format!("{RULES_UNAVAILABLE}: {}: {err}", path.display()))
         }
     }
 }
