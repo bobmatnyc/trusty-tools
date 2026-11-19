@@ -27,9 +27,9 @@ fn build_gh_account_check_single_ok() {
 fn build_gh_account_check_multi_warn() {
     // Multiple logged-in accounts is the ambiguity that hid the admin-merge
     // bug: Warn, name both accounts, and point at `gh auth switch`.
-    let check = build_gh_account_check(answered(Some("bob-duetto"), &["bob-duetto", "bobmatnyc"]));
+    let check = build_gh_account_check(answered(Some("acme-admin"), &["acme-admin", "bobmatnyc"]));
     assert_eq!(check.status, CheckStatus::Warn);
-    assert!(check.message.contains("bob-duetto"));
+    assert!(check.message.contains("acme-admin"));
     assert!(check.message.contains("bobmatnyc"));
     assert!(check.message.contains("gh auth switch"));
 }
