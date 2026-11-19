@@ -233,6 +233,40 @@ fn load_github_installations_parses_known_orgs() {
     }
 }
 
+fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |k| map.get(k).cloned()
+}
+
+#[test]
+fn installations_new_default_org_vars() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", " 42 "),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "Acme"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 42)]);
+}
+
+#[test]
+fn installations_deprecated_var_still_resolves() {
+    let got =
+        super::installations_from(env_of(&[("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "777")]));
+    assert_eq!(got, vec![("duettoresearch".to_string(), 777)]);
+}
+
+#[test]
+fn installations_new_var_wins_over_deprecated() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", "1"),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "acme"),
+        ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "2"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 1)]);
+}
+
 // ── APEX retrieval removed (#4999) ──────────────────────────────────────
 
 /// #4999: the former APEX config env vars are inert — a deployment still

@@ -267,7 +267,8 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 | `GITHUB_APP_ID` | App numeric ID |
 | `GITHUB_APP_CLIENT_ID` | App OAuth client ID |
 | `GITHUB_APP_PRIVATE_KEY` | RSA PEM (`\n`-escaped newlines) |
-| `GITHUB_INSTALLATION_ID_DUETTORESEARCH` | acme org installation |
+| `GITHUB_INSTALLATION_ID_DEFAULT_ORG` | default org installation id |
+| `GITHUB_INSTALLATION_DEFAULT_ORG` | org (repo owner) the default installation id belongs to |
 | `GITHUB_INSTALLATION_ID_HOTSTATS` | hotstats org installation |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `X-Hub-Signature-256` |
 | `GITHUB_TOKEN` | PAT fallback |
