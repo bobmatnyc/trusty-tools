@@ -258,14 +258,14 @@ fn load_bundled_house_voice() {
         pkg.voice.system_addendum.contains("correctness"),
         "house addendum must mention correctness"
     );
-    // ar-T8f: the shipped default names no individual reviewer.
+    // #11513: the shipped default names no individual reviewer.
     assert!(
         pkg.meta.provenance.source_reviewers.is_empty(),
         "house must not name source reviewers"
     );
 }
 
-/// ar-T8f: a config still naming the retired shipped `duetto` voice loads the
+/// #11513: a config still naming the retired shipped `duetto` voice loads the
 /// shipped `house` voice instead of failing or dropping the voice.
 #[test]
 fn legacy_duetto_voice_resolves_to_house() {

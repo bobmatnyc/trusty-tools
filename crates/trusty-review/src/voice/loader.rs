@@ -47,7 +47,7 @@ const SHIPPED: &[&str] = &["house"];
 
 /// Retired shipped voice names and the shipped voice that replaced them.
 ///
-/// Why: ar-T8f replaced the shipped `duetto` voice with `house`; a config that
+/// Why: #11513 replaced the shipped `duetto` voice with `house`; a config that
 /// still names `duetto` must keep a voice rather than fail or drop it.
 /// What: consulted only after the user-config tiers miss, so a user's own
 /// `duetto` package still wins.
@@ -236,7 +236,7 @@ impl VoiceLoader {
 
         // 3. #9015: the instructional content, never a compiled-in default.
         let content = resolve_for_process()?;
-        // ar-T8f: a retired shipped name loads its replacement, with a warning.
+        // #11513: a retired shipped name loads its replacement, with a warning.
         let name = shipped_name_for(name);
         let path = content_path(&format!("voices/{name}/voice.toml"));
         let Some(text) = optional_text(&content, &path, SHIPPED.contains(&name))? else {

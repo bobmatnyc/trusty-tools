@@ -288,7 +288,7 @@ fn default_rbac_users_restrict_to_the_default_persona() {
     );
 }
 
-/// ar-T8f: the persona used when `SLACK_DEFAULT_PERSONA` is unset must ship in
+/// #11513: the persona used when `SLACK_DEFAULT_PERSONA` is unset must ship in
 /// the bundled agents tree, so a fresh install never defaults to a deleted
 /// persona.
 #[test]

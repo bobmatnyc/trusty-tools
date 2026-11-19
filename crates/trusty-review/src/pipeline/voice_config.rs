@@ -255,7 +255,7 @@ mod tests {
         );
     }
 
-    /// ar-T8f: `voice_package = "duetto"` keeps a voice addendum (the shipped
+    /// #11513: `voice_package = "duetto"` keeps a voice addendum (the shipped
     /// `house` voice) rather than silently reviewing with no voice.
     #[test]
     fn build_voice_config_legacy_duetto_keeps_a_voice() {

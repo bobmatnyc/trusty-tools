@@ -222,7 +222,7 @@ fn default_config_is_valid_toml() {
     // ADR-0014 + #3203/#3204: four services after the slack-user-proxy retire
     // and the gworkspace-mcp → trusty-mpm swap, plus trusty-memory and
     // trusty-search which moved off the dead OpenRPC stubs, plus the one
-    // surviving registry endpoint (gworkspace). ar-T8f removed the disabled
+    // surviving registry endpoint (gworkspace). #11513 removed the disabled
     // org-specific memory service.
     assert_eq!(servers.len(), 5, "shipped connector count drifted");
 

@@ -104,7 +104,7 @@ fn a_missing_file_names_the_remedy_for_its_source() {
 /// `content/instructions/trusty-review/` tree.
 #[test]
 fn the_required_files_are_the_checkout_content_tree() {
-    // ar-T8f (owner ruling D42): the tree also carries the one-release
+    // #11513: the tree also carries the one-release
     // placeholder at the retired voice path, which no current binary requires.
     let mut required: Vec<String> = REQUIRED_FILES
         .iter()
@@ -138,9 +138,9 @@ fn check_required_passes_the_checkout_content() {
     assert!(problems.is_empty(), "{problems:?}");
 }
 
-/// The `REQUIRED_FILES` of the trusty-review binary before ar-T8f (base
+/// The `REQUIRED_FILES` of the trusty-review binary before #11513 (base
 /// 2a340bdc78), which still names the retired voice path.
-const PRE_AR_T8F_REQUIRED_FILES: &[&str] = &[
+const PRE_HOUSE_VOICE_REQUIRED_FILES: &[&str] = &[
     "prompts/system_prompt_stock.md",
     "prompts/system_prompt_coverage_gating.md",
     "prompts/principles_addendum.md",
@@ -150,7 +150,7 @@ const PRE_AR_T8F_REQUIRED_FILES: &[&str] = &[
     "voices/duetto/voice.toml",
 ];
 
-/// ar-T8f (owner ruling D42): the bundle serves both the old and the new
+/// #11513: the bundle serves both the old and the new
 /// binary for one release, so the content can ship before or after the
 /// binary that only needs `house`.
 #[test]
@@ -158,7 +158,7 @@ fn the_bundle_satisfies_the_old_and_new_required_files() {
     let content = staged();
     for (which, list) in [
         ("new", REQUIRED_FILES),
-        ("pre-ar-T8f", PRE_AR_T8F_REQUIRED_FILES),
+        ("pre-house", PRE_HOUSE_VOICE_REQUIRED_FILES),
     ] {
         let missing: Vec<_> = list
             .iter()
@@ -168,7 +168,7 @@ fn the_bundle_satisfies_the_old_and_new_required_files() {
     }
 }
 
-/// ar-T8f (owner ruling D42): the retired voice path is a byte-for-byte copy
+/// #11513: the retired voice path is a byte-for-byte copy
 /// of `house`, so the placeholder cannot drift or gain text before it is
 /// deleted.
 #[test]
