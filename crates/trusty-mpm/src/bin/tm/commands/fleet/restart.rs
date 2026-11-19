@@ -73,7 +73,7 @@ pub(crate) struct Gate {
     pub(crate) request: bool,
 }
 
-/// What [`restart`] reads and runs; production passes the live tmux and relaunch.
+/// What `restart` reads and runs; production passes the live tmux and relaunch.
 pub(crate) struct Ops<'a> {
     /// The tmux server holding the Architect.
     pub(crate) tmux: &'a dyn Tmux,
@@ -134,10 +134,10 @@ pub(crate) fn restart(
     restart_with(dir, names, inside, wait, Gate::default(), ops)
 }
 
-/// [`restart`] with a requested checkpoint (G0b).
+/// `restart` with a requested checkpoint (G0b).
 ///
 /// Why: G0b — a quick restart of just the Architect, after it saved its state.
-/// What: as [`restart`]; with `gate.request` the busy gate runs first, then
+/// What: as `restart`; with `gate.request` the busy gate runs first, then
 /// [`request_checkpoint`], then the box must turn idle again. A timeout or a
 /// not-ready ledger always refuses (exit 4); no flag overrides it (Dpg). Every
 /// report whose exit is not 0 ends in a "NOT restarted" line.
