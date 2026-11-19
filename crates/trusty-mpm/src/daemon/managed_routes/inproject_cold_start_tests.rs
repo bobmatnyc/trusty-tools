@@ -100,7 +100,7 @@ fn alias_origin_checkout(tmp: &Path) -> std::path::PathBuf {
             "remote",
             "add",
             "origin",
-            "git@github-acme:acme-labs/APEX.git",
+            "git@github-acme:acme-labs/LEDGER.git",
         ],
     );
     base
@@ -112,12 +112,12 @@ fn alias_origin_checkout(tmp: &Path) -> std::path::PathBuf {
 #[test]
 fn an_ssh_alias_origin_matches_its_github_remote() {
     let aliases = acme_labs_aliases();
-    let want = canonical_remote("https://github.com/acme-labs/apex.git");
+    let want = canonical_remote("https://github.com/acme-labs/ledger.git");
     for url in [
-        "git@github-acme:acme-labs/APEX.git",
-        "github-acme:acme-labs/apex",
-        "ssh://git@github-acme/acme-labs/APEX.git",
-        "git+ssh://git@github-acme/acme-labs/apex",
+        "git@github-acme:acme-labs/LEDGER.git",
+        "github-acme:acme-labs/ledger",
+        "ssh://git@github-acme/acme-labs/LEDGER.git",
+        "git+ssh://git@github-acme/acme-labs/ledger",
     ] {
         assert_eq!(
             canonical_remote_with(url, &aliases),
@@ -159,7 +159,7 @@ fn an_ssh_alias_origin_checkout_matches_its_github_remote() {
 
     verify_remote_matches(
         &base,
-        "https://github.com/acme-labs/apex.git",
+        "https://github.com/acme-labs/ledger.git",
         &acme_labs_aliases(),
     )
     .expect("an alias origin is the repository its real host serves");
@@ -183,7 +183,7 @@ fn an_unreadable_ssh_config_never_turns_an_alias_into_a_match() {
         garbage,
     ] {
         let aliases = SshHostAliases::load(&config);
-        let err = verify_remote_matches(&base, "https://github.com/acme-labs/apex.git", &aliases)
+        let err = verify_remote_matches(&base, "https://github.com/acme-labs/ledger.git", &aliases)
             .expect_err("an unread alias must not match");
         assert!(
             matches!(err, ColdStartError::RemoteMismatch { .. }),

@@ -1594,10 +1594,10 @@ fn session_runtime_live_assumes_live_for_blank_session_name() {
 #[test]
 fn parse_pane_probes_reads_every_pane() {
     // Why (#3873): the happy shape — one row per pane, all three fields present.
-    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+    let panes = parse_pane_probes("tm-ledger-01\tzsh\t41234\ntm-ledger-01\tclaude\t41999\n")
         .expect("a well-formed two-pane listing must parse");
     assert_eq!(panes.len(), 2, "both panes must be returned");
-    assert_eq!(panes[0].session_name, "tm-apex-01");
+    assert_eq!(panes[0].session_name, "tm-ledger-01");
     assert_eq!(panes[0].pane_current_command, "zsh");
     assert_eq!(panes[0].pane_pid, Some(41234));
     assert_eq!(panes[1].pane_current_command, "claude");
@@ -1616,7 +1616,7 @@ fn parse_pane_probes_rejects_non_numeric_pid() {
     // (#2023 A: record flips, pane survives); the CLI reuses that same gate to
     // drive a `kill_session`, so it must be STRICTER than the daemon, not equal.
     assert_eq!(
-        parse_pane_probes("tm-apex-01\tzsh\tnotanumber\n"),
+        parse_pane_probes("tm-ledger-01\tzsh\tnotanumber\n"),
         None,
         "a non-numeric pid must read as CANNOT DETERMINE (None), never as a \
          one-gate dead verdict"
@@ -1628,7 +1628,7 @@ fn parse_pane_probes_rejects_missing_pid() {
     // Why (#3873 round 2): same MEDIUM, short-row variant — a row that stops
     // after the command word leaves the child gate with nothing to inspect.
     assert_eq!(
-        parse_pane_probes("tm-apex-01\tzsh\n"),
+        parse_pane_probes("tm-ledger-01\tzsh\n"),
         None,
         "a row missing the pid column must yield None"
     );
@@ -1640,7 +1640,7 @@ fn parse_pane_probes_rejects_smeared_row() {
     // `list-panes -a` enumeration — the whole row collapsed into one field. The
     // TAB delimiter makes it unparseable rather than silently mis-columned.
     assert_eq!(
-        parse_pane_probes("tm-apex-01_zsh_41234\n"),
+        parse_pane_probes("tm-ledger-01_zsh_41234\n"),
         None,
         "a smeared single-field row must yield None, never a guessed split"
     );
@@ -1651,7 +1651,7 @@ fn parse_pane_probes_rejects_extra_fields() {
     // Why (#3873): more columns than the format asked for means the reply is not
     // the shape we requested — refuse rather than guess which column is which.
     assert_eq!(
-        parse_pane_probes("tm-apex-01\tzsh\t41234\textra\n"),
+        parse_pane_probes("tm-ledger-01\tzsh\t41234\textra\n"),
         None,
         "an over-long row must yield None"
     );
@@ -1675,7 +1675,7 @@ fn parse_pane_probes_rejects_empty_command_field() {
     // Why (#3873): the other half of the #1813 shape — `pane_current_command`
     // came back EMPTY. An empty command must never be handed to `is_idle_shell`.
     assert_eq!(
-        parse_pane_probes("tm-apex-01\t\t41234\n"),
+        parse_pane_probes("tm-ledger-01\t\t41234\n"),
         None,
         "an empty command field must yield None"
     );
@@ -1690,10 +1690,10 @@ fn parse_pane_probes_rejects_empty_command_field() {
 fn panes_prove_session_dead_when_every_pane_is_a_bare_shell() {
     // Why (#3873): the actual defect shape, and the ONLY configuration allowed to
     // reach the destructive reconcile branch.
-    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tbash\t41999\n")
+    let panes = parse_pane_probes("tm-ledger-01\tzsh\t41234\ntm-ledger-01\tbash\t41999\n")
         .expect("listing must parse");
     assert!(
-        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        panes_prove_session_dead("tm-ledger-01", &panes, &AlwaysIdleProbe),
         "a session whose every pane is a bare shell must be proven dead"
     );
 }
@@ -1703,10 +1703,10 @@ fn panes_prove_session_dead_refuses_when_a_sibling_pane_is_live() {
     // Why (#2463): a manually-split managed session can have an idle pane
     // alongside a live agent pane. Convicting on the idle one would kill the live
     // agent with it. `claude` is not an idle shell, so the session is not dead.
-    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\ntm-apex-01\tclaude\t41999\n")
+    let panes = parse_pane_probes("tm-ledger-01\tzsh\t41234\ntm-ledger-01\tclaude\t41999\n")
         .expect("listing must parse");
     assert!(
-        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        !panes_prove_session_dead("tm-ledger-01", &panes, &AlwaysIdleProbe),
         "a sibling pane still running the agent must block the dead verdict"
     );
 }
@@ -1715,17 +1715,17 @@ fn panes_prove_session_dead_refuses_when_a_sibling_pane_is_live() {
 fn panes_prove_session_dead_refuses_a_prefix_matched_listing() {
     // Why (#3873 round 3, code-critic MEDIUM): THE case the membership check
     // exists for, and it is reachable rather than hypothetical. tmux
-    // PREFIX-MATCHES session targets: with only `tm-apex-01` alive,
-    // `has-session -t tm-apex` succeeds and `list-panes -s -t tm-apex` returns
-    // `tm-apex-01`'s panes. A record named `tm-apex` would then be handed a
+    // PREFIX-MATCHES session targets: with only `tm-ledger-01` alive,
+    // `has-session -t tm-ledger` succeeds and `list-panes -s -t tm-ledger` returns
+    // `tm-ledger-01`'s panes. A record named `tm-ledger` would then be handed a
     // well-formed listing describing a DIFFERENT, live session. Without the
     // membership check, `session_has_live_pane`'s filter matches nothing, reports
     // `false` ("no live pane"), and that reads as "dead" — and the `kill_session`
     // that follows prefix-matches onto that same live session. Deleting the check
     // in `panes_prove_session_dead` must turn this test RED.
-    let panes = parse_pane_probes("tm-apex-01\tzsh\t41234\n").expect("listing must parse");
+    let panes = parse_pane_probes("tm-ledger-01\tzsh\t41234\n").expect("listing must parse");
     assert!(
-        !panes_prove_session_dead("tm-apex", &panes, &AlwaysIdleProbe),
+        !panes_prove_session_dead("tm-ledger", &panes, &AlwaysIdleProbe),
         "a prefix-matched listing describes ANOTHER session — it must never \
          convict ours, whose own panes we have not actually seen"
     );
@@ -1739,7 +1739,7 @@ fn panes_prove_session_dead_refuses_a_wholly_foreign_listing() {
     // and "nothing" must never be convicted as "dead".
     let panes = parse_pane_probes("tm-other-99\tzsh\t41234\n").expect("listing must parse");
     assert!(
-        !panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        !panes_prove_session_dead("tm-ledger-01", &panes, &AlwaysIdleProbe),
         "a listing belonging entirely to another session must not prove ours dead"
     );
 }
@@ -1750,10 +1750,10 @@ fn panes_prove_session_dead_ignores_foreign_rows_beside_our_own() {
     // "any foreign row blocks the verdict" — our own panes, when present, are
     // still the ones that decide. A foreign LIVE pane must not rescue a session
     // whose own panes are all idle shells.
-    let panes = parse_pane_probes("tm-other-99\tclaude\t41000\ntm-apex-01\tzsh\t41234\n")
+    let panes = parse_pane_probes("tm-other-99\tclaude\t41000\ntm-ledger-01\tzsh\t41234\n")
         .expect("listing must parse");
     assert!(
-        panes_prove_session_dead("tm-apex-01", &panes, &AlwaysIdleProbe),
+        panes_prove_session_dead("tm-ledger-01", &panes, &AlwaysIdleProbe),
         "our own idle pane decides; a live pane in an unrelated session is not ours"
     );
 }
