@@ -265,6 +265,19 @@ fn load_bundled_house_voice() {
     );
 }
 
+/// ar-T8f: a config still naming the retired shipped `duetto` voice loads the
+/// shipped `house` voice instead of failing or dropping the voice.
+#[test]
+fn legacy_duetto_voice_resolves_to_house() {
+    let loader = VoiceLoader::bundled_only();
+    let pkg = loader
+        .load("duetto")
+        .expect("the retired shipped name must still load a voice");
+    assert_eq!(pkg.meta.name, "house");
+    assert_eq!(super::loader::shipped_name_for("duetto"), "house");
+    assert_eq!(super::loader::shipped_name_for("house"), "house");
+}
+
 /// Content older than #9015 lacks the shipped voice, or carries one that does
 /// not parse: the loader refuses naming the file and the remedy.
 ///

@@ -45,6 +45,33 @@ use super::types::VoicePackage;
 /// The voice packages that ship in the instructional content (#9015).
 const SHIPPED: &[&str] = &["house"];
 
+/// Retired shipped voice names and the shipped voice that replaced them.
+///
+/// Why: ar-T8f replaced the shipped `duetto` voice with `house`; a config that
+/// still names `duetto` must keep a voice rather than fail or drop it.
+/// What: consulted only after the user-config tiers miss, so a user's own
+/// `duetto` package still wins.
+/// Test: `legacy_duetto_voice_resolves_to_house`.
+const LEGACY_ALIASES: &[(&str, &str)] = &[("duetto", "house")];
+
+/// Maps a retired shipped voice name to its replacement, warning once per call.
+///
+/// Test: `legacy_duetto_voice_resolves_to_house`.
+pub(crate) fn shipped_name_for(name: &str) -> &str {
+    match LEGACY_ALIASES.iter().find(|(old, _)| *old == name) {
+        Some((old, new)) => {
+            tracing::warn!(
+                voice = old,
+                replacement = new,
+                "voice package `{old}` is deprecated; loading the shipped `{new}` voice. \
+                 Set `[voice] package = \"{new}\"` to silence this."
+            );
+            new
+        }
+        None => name,
+    }
+}
+
 /// Errors produced by the voice loader.
 ///
 /// Why: structured errors let callers decide whether to degrade silently
@@ -209,6 +236,8 @@ impl VoiceLoader {
 
         // 3. #9015: the instructional content, never a compiled-in default.
         let content = resolve_for_process()?;
+        // ar-T8f: a retired shipped name loads its replacement, with a warning.
+        let name = shipped_name_for(name);
         let path = content_path(&format!("voices/{name}/voice.toml"));
         let Some(text) = optional_text(&content, &path, SHIPPED.contains(&name))? else {
             return Err(VoiceLoaderError::NotFound {

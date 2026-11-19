@@ -255,6 +255,19 @@ mod tests {
         );
     }
 
+    /// ar-T8f: `voice_package = "duetto"` keeps a voice addendum (the shipped
+    /// `house` voice) rather than silently reviewing with no voice.
+    #[test]
+    fn build_voice_config_legacy_duetto_keeps_a_voice() {
+        let mut config = config_default_voice();
+        config.voice_package = Some("duetto".to_string());
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
+        assert!(
+            vc.voice_addendum.as_deref().is_some_and(|a| !a.is_empty()),
+            "the legacy duetto name must not drop the voice"
+        );
+    }
+
     /// build_voice_config degrades silently for an unknown package.
     ///
     /// Why: a typo in the voice name must not block reviews; the pipeline must
