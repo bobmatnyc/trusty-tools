@@ -126,15 +126,15 @@ fn live(st: &State, id: &str) -> bool {
     let s = |v: Result<Value, _>| v.is_ok_and(|v| !done(v));
     st.goals
         .iter()
-        .any(|g| g.id == id && s(serde_json::to_value(&g.status)))
+        .any(|g| g.id == id && s(serde_json::to_value(g.status)))
         || st
             .items
             .iter()
-            .any(|i| i.id == id && s(serde_json::to_value(&i.status)))
+            .any(|i| i.id == id && s(serde_json::to_value(i.status)))
         || st
             .tasks
             .iter()
-            .any(|t| t.id == id && s(serde_json::to_value(&t.status)))
+            .any(|t| t.id == id && s(serde_json::to_value(t.status)))
 }
 
 /// ilio `parent_goal` without the ad-hoc default: the block task's goal.
