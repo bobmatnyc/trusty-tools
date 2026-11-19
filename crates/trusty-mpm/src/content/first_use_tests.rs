@@ -457,8 +457,33 @@ fn a_session_outside_any_checkout_uses_the_installed_content() {
     install_from_file(&cache, &bundle_file(src.path(), tag, &bytes, true)).expect("pin");
 
     for fetch in [Fetch::Never, Fetch::OnFirstUse] {
-        let content = resolve_session_content_in(&session, Some(&cache), fetch)
+        let content = resolve_session_content_in(&session, Some(&cwd), Some(&cache), fetch)
             .expect("the installed bundle serves");
         assert_eq!(installed_tag(&content), tag, "{fetch:?}");
+    }
+}
+
+/// With nothing installed, a session outside any checkout composes from the
+/// cwd checkout, as `resolve_for_in` did, and never reaches the fetch.
+#[test]
+fn a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch() {
+    use crate::content::first_use::FETCH_OVERRIDE;
+    use crate::core::content_source::{Fetch, resolve_session_content_in};
+    use trusty_common::content::ContentSource;
+
+    let cwd = std::env::current_dir().expect("cwd");
+    let root = trusty_common::content::find_dev_checkout(&cwd).expect("cwd is in a checkout");
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join(".trusty-mpm/content");
+    std::fs::create_dir_all(&cache).unwrap();
+    let session = managed_workspace(home.path(), "acme", "widget");
+
+    FETCH_OVERRIDE.with(|f| f.set(Some(unreachable_fetch)));
+    let resolved =
+        resolve_session_content_in(&session, Some(&cwd), Some(&cache), Fetch::OnFirstUse);
+    FETCH_OVERRIDE.with(|f| f.set(None));
+    match resolved.expect("the cwd checkout serves").source() {
+        ContentSource::DevCheckout { root: got } => assert_eq!(got, &root),
+        other => panic!("expected the cwd checkout, got {other:?}"),
     }
 }
