@@ -17,6 +17,10 @@ use serde_json::{Map, Value};
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
 use trusty_mpm::core::mcp_config;
 
+/// Set to any value to skip [`run_and_print`]; the scratch-HOME integration
+/// tests set it so a `tm fleet init` run never spawns a real `cargo install`.
+pub(crate) const SKIP_ENV: &str = "TM_SKIP_MCP_AUTO_SETUP";
+
 /// The doctor check name.
 pub(crate) const CHECK: &str = "auto_setup_mcp";
 
@@ -233,6 +237,9 @@ pub(crate) fn report_lines(outcomes: &[Outcome]) -> Vec<String> {
 /// Why: G0b; a failure is printed, never returned, so it aborts nothing.
 /// Test: covered through [`ensure`] and [`report_lines`].
 pub(crate) fn run_and_print() {
+    if std::env::var_os(SKIP_ENV).is_some() {
+        return;
+    }
     println!("Setting up trusty-browser and trusty-computer MCP servers");
     let Some(env) = Env::live() else {
         println!("  skipped: no home directory");

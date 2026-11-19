@@ -192,6 +192,8 @@ pub fn isolate_spawned_tm<'a>(cmd: &'a mut Command, home: &Path) -> &'a mut Comm
     // #9396: a child under a scratch `$HOME` has no content installed; it
     // must report that, never fetch the release from GitHub.
     cmd.env(trusty_mpm::content::first_use::OFFLINE_ENV, "1");
+    // See G0b auto-setup: a scratch-HOME child never runs a real `cargo install`.
+    cmd.env("TM_SKIP_MCP_AUTO_SETUP", "1");
     for key in CHILD_STATE_ENV {
         cmd.env_remove(key);
     }
