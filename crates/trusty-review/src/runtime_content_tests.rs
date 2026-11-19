@@ -104,7 +104,13 @@ fn a_missing_file_names_the_remedy_for_its_source() {
 /// `content/instructions/trusty-review/` tree.
 #[test]
 fn the_required_files_are_the_checkout_content_tree() {
-    let mut required: Vec<String> = REQUIRED_FILES.iter().map(|r| content_path(r)).collect();
+    // ar-T8f (owner ruling D42): the tree also carries the one-release
+    // placeholder at the retired voice path, which no current binary requires.
+    let mut required: Vec<String> = REQUIRED_FILES
+        .iter()
+        .chain(["voices/duetto/voice.toml"].iter())
+        .map(|r| content_path(r))
+        .collect();
     required.sort();
     let tree: Vec<String> = repo_content_files().into_iter().map(|(p, _)| p).collect();
     assert_eq!(required, tree);
@@ -130,4 +136,46 @@ fn check_required_names_every_file_older_content_lacks() {
 fn check_required_passes_the_checkout_content() {
     let problems = check_required(&staged());
     assert!(problems.is_empty(), "{problems:?}");
+}
+
+/// The `REQUIRED_FILES` of the trusty-review binary before ar-T8f (base
+/// 2a340bdc78), which still names the retired voice path.
+const PRE_AR_T8F_REQUIRED_FILES: &[&str] = &[
+    "prompts/system_prompt_stock.md",
+    "prompts/system_prompt_coverage_gating.md",
+    "prompts/principles_addendum.md",
+    "templates/report-technical-dd.md",
+    "templates/report-technical-dd-cast.md",
+    "templates/review/strict-security.md",
+    "voices/duetto/voice.toml",
+];
+
+/// ar-T8f (owner ruling D42): the bundle serves both the old and the new
+/// binary for one release, so the content can ship before or after the
+/// binary that only needs `house`.
+#[test]
+fn the_bundle_satisfies_the_old_and_new_required_files() {
+    let content = staged();
+    for (which, list) in [
+        ("new", REQUIRED_FILES),
+        ("pre-ar-T8f", PRE_AR_T8F_REQUIRED_FILES),
+    ] {
+        let missing: Vec<_> = list
+            .iter()
+            .filter_map(|rel| require_text(&content, &content_path(rel)).err())
+            .collect();
+        assert!(missing.is_empty(), "{which} binary: {missing:?}");
+    }
+}
+
+/// ar-T8f (owner ruling D42): the retired voice path is a byte-for-byte copy
+/// of `house`, so the placeholder cannot drift or gain text before it is
+/// deleted.
+#[test]
+fn the_retired_voice_path_is_a_byte_copy_of_house() {
+    let content = staged();
+    let house = require_text(&content, &content_path("voices/house/voice.toml")).expect("house");
+    let legacy = require_text(&content, &content_path("voices/duetto/voice.toml"))
+        .expect("the placeholder ships for one release");
+    assert_eq!(legacy, house, "the placeholder must equal the house voice");
 }
