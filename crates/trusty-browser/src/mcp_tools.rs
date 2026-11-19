@@ -41,6 +41,9 @@ pub struct Tool {
 const LEASE: Field = field("lease", K::Str, D::Required);
 const REF: Field = field("ref", K::Str, D::Required);
 const RID: Field = field("request_id", K::OptStr, D::Null);
+const CAPTURE: Field = field("capture_id", K::Str, D::Required);
+const X: Field = field("x", K::Int, D::Required);
+const Y: Field = field("y", K::Int, D::Required);
 
 const fn tool(
     name: &'static str,
@@ -190,6 +193,45 @@ pub const CONNECT: &[Tool] = &[
         &["lease", "ref", "files", "request_id"],
     ),
     tool("page_downloads", &[LEASE], "page_downloads", &["lease"]),
+    // #11208: open a tab already leased to this session; close only a leased one.
+    tool(
+        "browser_open_tab",
+        &[field("url", K::Str, D::Required), RID],
+        "open_tab",
+        &["url", "request_id"],
+    ),
+    tool(
+        "browser_close_tab",
+        &[field("tab", K::Int, D::Required), RID],
+        "close_tab",
+        &["tab", "request_id"],
+    ),
+    // #11211: a PNG with a capture_id; coordinate input in that image's pixels.
+    tool(
+        "page_screenshot",
+        &[LEASE, field("ref", K::OptStr, D::Null)],
+        "page_screenshot",
+        &["lease", "ref"],
+    ),
+    tool(
+        "page_click_at",
+        &[LEASE, CAPTURE, X, Y, RID],
+        "page_click_at",
+        &["lease", "capture_id", "x", "y", "request_id"],
+    ),
+    tool(
+        "page_type_at",
+        &[
+            LEASE,
+            CAPTURE,
+            X,
+            Y,
+            field("text", K::Str, D::Required),
+            RID,
+        ],
+        "page_type_at",
+        &["lease", "capture_id", "x", "y", "text", "request_id"],
+    ),
     tool("browser_release", &[LEASE], "release", &["lease"]),
 ];
 

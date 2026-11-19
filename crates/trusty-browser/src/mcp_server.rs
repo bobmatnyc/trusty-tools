@@ -89,14 +89,35 @@ fn initialize(id: &Json, params: Option<&Json>) -> String {
     result_line(id, &text)
 }
 
-fn call_result(outcome: Result<Json, String>) -> Json {
+/// Split a screenshot reply into its PNG and the rest (#11211).
+///
+/// Why: an MCP client shows an `image` content block as a picture; base64
+/// inside text or `structuredContent` only costs the agent tokens.
+/// What: removes `data` from the reply and returns it as an image block.
+/// Test: `a_screenshot_reply_renders_an_image_block`.
+fn image_of(reply: &mut Json) -> Option<Json> {
+    let Json::Object(pairs) = reply else {
+        return None;
+    };
+    let at = pairs.iter().position(|(k, _)| k == "data")?;
+    let (_, data) = pairs.remove(at);
+    Some(Json::object([
+        ("type", Json::from("image")),
+        ("data", data),
+        ("mimeType", Json::from("image/png")),
+    ]))
+}
+
+fn call_result(outcome: Result<Json, String>, image: bool) -> Json {
     let text = |t: String| Json::object([("type", Json::from("text")), ("text", Json::Str(t))]);
     match outcome {
-        Ok(reply) => Json::object([
-            (
-                "content",
-                Json::Array(vec![text(reply.dumps_indent2().unwrap_or_default())]),
-            ),
+        Ok(mut reply) => Json::object([
+            ("content", {
+                let picture = if image { image_of(&mut reply) } else { None };
+                let mut blocks = vec![text(reply.dumps_indent2().unwrap_or_default())];
+                blocks.extend(picture);
+                Json::Array(blocks)
+            }),
             ("structuredContent", reply),
             ("isError", Json::Bool(false)),
         ]),
@@ -148,7 +169,8 @@ impl Server {
                 match name {
                     Some(name) => {
                         let name = name.to_owned();
-                        result(id, &call_result(self.call_tool(&name, &args)))
+                        let outcome = self.call_tool(&name, &args);
+                        result(id, &call_result(outcome, name == "page_screenshot"))
                     }
                     None => invalid_params(id),
                 }
@@ -171,5 +193,39 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_screenshot_reply_renders_an_image_block() {
+        let reply = Json::object([
+            ("ok", Json::Bool(true)),
+            ("capture_id", Json::from("c")),
+            ("data", Json::from("iVBORw0KGgo=")),
+        ]);
+        let out = call_result(Ok(reply.clone()), true);
+        let Some(Json::Array(content)) = out.get("content") else {
+            panic!("content")
+        };
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1].get("type"), Some(&Json::from("image")));
+        assert_eq!(content[1].get("mimeType"), Some(&Json::from("image/png")));
+        assert_eq!(content[1].get("data"), Some(&Json::from("iVBORw0KGgo=")));
+        let structured = out.get("structuredContent").expect("structured");
+        assert!(
+            structured.get("data").is_none(),
+            "no base64 in structuredContent"
+        );
+        assert_eq!(structured.get("capture_id"), Some(&Json::from("c")));
+        // Any other tool's reply is untouched.
+        let plain = call_result(Ok(reply), false);
+        let Some(Json::Array(c)) = plain.get("content") else {
+            panic!("content")
+        };
+        assert_eq!(c.len(), 1);
     }
 }
