@@ -5,7 +5,7 @@
 //! ruling Dpg: restart is its own verb, refused unless a fresh Intent Ledger
 //! checkpoint exists and the box is idle. No bypass flag: the owner overrides
 //! with `tm fleet relaunch`.
-//! What: [`restart`] refuses inside Claude Code (#10033, exit 2); takes the
+//! What: `restart` refuses inside Claude Code (#10033, exit 2); takes the
 //! `up` lock ([`super::up::UP_LOCK`]) without waiting (exit 1 when held) and
 //! keeps it to the end; gates on
 //! [`trusty_architect::ledger::fresh::ready`] over `<dir>/local/il` (exit 4,
