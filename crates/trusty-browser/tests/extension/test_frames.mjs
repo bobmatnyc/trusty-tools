@@ -46,7 +46,9 @@ function browser({frames, allowed = [TOP + "/*"], injected = null}) {
       }
       const f = target.frameIds ? frames.find(x => x.id === 0) : byDoc.get(target.documentIds[0]);
       if (!f || gone.has(f.document) || !reachable(f)) throw new Error("No frame with id");
-      return [{frameId:f.id, documentId:f.document, result:answer(f, func, args)}];
+      // `later` models a document that answers from another origin after discovery.
+      const now = target.documentIds && f.later ? {...f, origin:f.later} : f;
+      return [{frameId:f.id, documentId:f.document, result:answer(now, func, args)}];
     }},
   };
   const ctx = vm.createContext({chrome, TextEncoder, URL, setTimeout, clearTimeout, crypto:globalThis.crypto});
@@ -159,4 +161,41 @@ test("a page without cross-origin frames reads exactly as before", async () => {
   const r = plain(await ask(commands(b), "page_read", READ)).result;
   assert.deepEqual(Object.keys(r), ["document", "origin", "url", "title", "text", "elements", "truncated"]);
   assert.deepEqual(r.elements, [element("11.0", "Top button")]);
+});
+
+test("a root frame with an opaque origin is denied even under a profile-wide grant", async () => {
+  const b = browser({frames:page({origin:"null"}), allowed:["https://*/*"], injected:() => true});
+  const r = plain(await ask(commands(b), "page_read", READ)).result;
+  assert.deepEqual(r.denied_frames, [{origin:"null", reason:"opaque"}]);
+  assert.deepEqual(r.frames, [{id:0, origin:TOP, url:TOP + "/", document:"D0"}]);
+  assert.ok(!JSON.stringify(r).includes("CHILD-LABEL"));
+  assert.ok(!b.calls.some(c => c.target.documentIds), "no child document was injected");
+});
+
+test("a child that navigated between discovery and the pinned read is denied as navigated", async () => {
+  const allowed = [TOP + "/*", CHILD + "/*"];
+  // The document is gone by the time the pinned read runs.
+  const gone = browser({frames:page(), allowed});
+  gone.gone.add("D7");
+  const r = plain(await ask(commands(gone), "page_read", READ)).result;
+  assert.deepEqual(r.frames, [{id:0, origin:TOP, url:TOP + "/", document:"D0"}]);
+  assert.deepEqual(r.denied_frames, [{origin:CHILD, reason:"navigated"}]);
+  assert.ok(!JSON.stringify(r).includes("CHILD-LABEL"));
+  assert.ok(gone.calls.some(c => c.target.documentIds), "the pinned read was attempted");
+  // The same document answers from another origin.
+  const moved = browser({frames:page({later:GRAND}), allowed:[...allowed, GRAND + "/*"]});
+  const f = plain(await ask(commands(moved), "page_find", FIND)).result;
+  assert.deepEqual(f.matches, []);
+  assert.deepEqual(f.denied_frames, [{origin:CHILD, reason:"navigated"}]);
+  assert.ok(!JSON.stringify(f).includes("CHILD-LABEL"));
+});
+
+test("a failing permission check denies the child with no content", async () => {
+  const b = browser({frames:page(), allowed:["https://*/*"], injected:() => true});
+  b.chrome.permissions.contains = async () => { throw new Error("permissions unavailable"); };
+  const r = plain(await ask(commands(b), "page_read", READ)).result;
+  assert.deepEqual(r.denied_frames, [{origin:CHILD, reason:"no_permission"}]);
+  assert.deepEqual(r.frames, [{id:0, origin:TOP, url:TOP + "/", document:"D0"}]);
+  assert.ok(!JSON.stringify(r).includes("CHILD-LABEL"));
+  assert.ok(!b.calls.some(c => c.target.documentIds));
 });
