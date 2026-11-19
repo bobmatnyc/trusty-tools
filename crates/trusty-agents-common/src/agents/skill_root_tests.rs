@@ -45,3 +45,39 @@ fn compose_for_deploy_resolves_the_real_base_agent() {
         "BASE-AGENT's pointers must resolve to `{pointer}`"
     );
 }
+
+/// #7684: a deployed agent carries `omitClaudeMd: true` inside its frontmatter.
+#[test]
+fn compose_for_deploy_stamps_omit_claude_md() {
+    let src = tempfile::tempdir().unwrap();
+    for (file_name, contents) in repo_roster().iter() {
+        fs::write(src.path().join(file_name), contents).unwrap();
+    }
+    let root = std::env::temp_dir().join("tm-skills");
+    for name in ["engineer", "rust-engineer"] {
+        let composed = compose_agent_for_deploy(name, src.path(), &root).unwrap();
+        let fm = composed
+            .strip_prefix("---\n")
+            .and_then(|rest| rest.split("\n---\n").next())
+            .expect("composed agent opens with frontmatter");
+        assert_eq!(
+            fm.lines().filter(|l| *l == OMIT_CLAUDE_MD_LINE).count(),
+            1,
+            "{name} frontmatter must carry `omitClaudeMd: true` once:\n{fm}"
+        );
+    }
+}
+
+#[test]
+fn stamp_omit_claude_md_is_idempotent_and_skips_unfenced_text() {
+    let once = stamp_omit_claude_md("---\nname: a\n---\nbody\n");
+    assert_eq!(once, "---\nomitClaudeMd: true\nname: a\n---\nbody\n");
+    assert_eq!(stamp_omit_claude_md(&once), once);
+    let user = "---\nomitClaudeMd: false\n---\n";
+    assert_eq!(
+        stamp_omit_claude_md(user),
+        user,
+        "an explicit value is kept"
+    );
+    assert_eq!(stamp_omit_claude_md("no fence"), "no fence");
+}

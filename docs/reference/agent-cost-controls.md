@@ -152,3 +152,19 @@ dead owner's tree.
 The structural fix — making the check mechanical rather than a remembered step
 — is tracked in
 [#8250](https://github.com/bobmatnyc/trusty-tools/issues/8250).
+
+## 4. Deployed subagents start without CLAUDE.md (#7684)
+
+Every agent tm deploys carries `omitClaudeMd: true` as its first frontmatter
+key, stamped by `compose_agent_for_deploy` in
+`crates/trusty-agents-common/src/agents/skill_root.rs`. A subagent then loads
+no user, project or local CLAUDE.md; it takes its rules from its own prompt and
+the delegation brief. The PM keeps its CLAUDE.md: Claude Code ignores the key
+for a main-session `--agent`, and tm sets no session-wide exclude.
+
+The key needs Claude Code v2.1.271 or later. Older versions ignore it, so a
+subagent there still loads the full CLAUDE.md hierarchy. Check with
+`claude --version`.
+
+A user-authored agent file is never rewritten. An untracked file deployed
+before the stamp existed is still adopted, then refreshed on the next deploy.

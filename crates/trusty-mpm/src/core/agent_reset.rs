@@ -398,11 +398,15 @@ mod tests {
         let src = TempDir::new().unwrap();
         let tgt = TempDir::new().unwrap();
         write_sources(src.path());
-        // #4698: the deployer and `reset_agents` both stamp, so the file
-        // that must be adopted without a rewrite is the STAMPED spelling.
-        let composed =
-            compose_agent_with_provenance("engineer", src.path(), Provenance::FrameworkOwned)
-                .unwrap();
+        // #4698/#7684: the deployer and `reset_agents` both stamp
+        // `provenance:` and `omitClaudeMd:`, so the file that must be adopted
+        // without a rewrite is the deploy spelling.
+        let composed = trusty_agents_common::agents::skill_root::compose_agent_for_deploy(
+            "engineer",
+            src.path(),
+            &std::env::temp_dir(),
+        )
+        .unwrap();
         fs::write(tgt.path().join("engineer.md"), &composed).unwrap();
         let before = fs::metadata(tgt.path().join("engineer.md"))
             .unwrap()
