@@ -172,8 +172,9 @@ before the stamp existed is still adopted, then refreshed on the next deploy.
 The project's build and test rules still reach the subagent. On every `Agent`
 or `Task` dispatch, `tm hook --pm-guard` appends a `## Project rules (from
 CLAUDE.md)` block to the prompt (`crates/trusty-mpm/src/core/project_rules.rs`).
-It does so under `TRUSTY_MPM_DISABLE_HOOKS` and `TRUSTY_MPM_PM_UNRESTRICTED`
-too, which lift enforcement only; divert workers set the first. With
+Under `TRUSTY_MPM_DISABLE_HOOKS` or `TRUSTY_MPM_PM_UNRESTRICTED` the hook is
+off and appends nothing; divert workers set the first and so run without the
+block. With
 `[pm_guard] enabled = false` the pm-guard entry is gone, and
 `tm hook --egress-guard`, which every tm-written settings tier carries, appends
 the block instead. Exactly one hook appends it. A `CLAUDE.md` that cannot be
