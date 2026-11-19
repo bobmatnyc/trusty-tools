@@ -2,8 +2,9 @@
 //!
 //! Why: deployed agents start with `omitClaudeMd: true`, so a dispatch that
 //! reaches a subagent without the `## Project rules` block leaves it with no
-//! build or test rules at all. The pm-guard bypasses lift enforcement only,
-//! and `[pm_guard] enabled = false` removes the pm-guard entry, where the
+//! build or test rules at all. The pm-guard bypasses are operator escape
+//! hatches and turn the carrier off with the rest of the hook, and
+//! `[pm_guard] enabled = false` removes the pm-guard entry, where the
 //! always-installed egress guard carries the block instead.
 //! What: pipes an `Agent` dispatch whose `cwd` holds a `CLAUDE.md` into
 //! `tm hook --pm-guard` under each bypass variable, and into
@@ -100,9 +101,10 @@ fn carried_prompt(stdout: &str) -> String {
         .to_string()
 }
 
-/// Fails against 86f82e6cf3: there the bypass returned before any rewrite.
+/// An operator escape hatch means hooks off: no carrier, no output.
+/// Fails against 6aa6305d08, where the bypass still emitted the carrier.
 #[test]
-fn a_bypassed_dispatch_still_carries_the_rules() {
+fn a_bypassed_dispatch_carries_no_rules() {
     let project = project();
     let home = home("");
     for var in ["TRUSTY_MPM_DISABLE_HOOKS", "TRUSTY_MPM_PM_UNRESTRICTED"] {
@@ -114,11 +116,29 @@ fn a_bypassed_dispatch_still_carries_the_rules() {
             &dispatch(project.path()),
             &[(var, "1")],
         );
-        let prompt = carried_prompt(&out);
-        assert!(prompt.starts_with("look"), "{var}: {prompt}");
-        assert!(prompt.contains(HEADING), "{var}: {prompt}");
-        assert!(prompt.ends_with(RULE), "{var}: {prompt}");
+        assert_eq!(out.trim(), "", "{var}: the bypass must print nothing");
     }
+}
+
+/// Without a bypass the same dispatch carries the rules.
+#[test]
+fn an_unbypassed_dispatch_carries_the_rules() {
+    let project = project();
+    let home = home("");
+    // #9011: an enforcing pm-guard needs the agent roster to allow a dispatch.
+    common::stage_repo_content(home.path());
+    let data = tempfile::tempdir().expect("data dir");
+    let out = run(
+        "--pm-guard",
+        home.path(),
+        data.path(),
+        &dispatch(project.path()),
+        &[],
+    );
+    let prompt = carried_prompt(&out);
+    assert!(prompt.starts_with("look"), "{prompt}");
+    assert!(prompt.contains(HEADING), "{prompt}");
+    assert!(prompt.ends_with(RULE), "{prompt}");
 }
 
 /// Fails against 86f82e6cf3: with the pm-guard entry gone nothing carried the

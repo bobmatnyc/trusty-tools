@@ -397,11 +397,9 @@ pub(crate) async fn pm_guard(url: &str, started: std::time::Instant) -> anyhow::
     // worktree guard, instead of here.
     // Guard 3: explicit operator override — "the user said you do it" — is
     // folded into `bypassed` above with Guard 2.
+    // #7684: an operator escape hatch means hooks off, so the project-rules
+    // carrier yields too and the hook prints nothing.
     if bypassed {
-        // #7684: a bypass lifts enforcement, never the project-rules carrier.
-        if let Some(rules) = pm_guard_accounts::rules_carrier_response(&payload, &hook_cwd) {
-            emit(rules);
-        }
         return Ok(());
     }
     // #7975 round 2: and a parsed payload that names no classifiable tool call

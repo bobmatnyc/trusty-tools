@@ -87,14 +87,14 @@ fn rules_rewrite(tool_name: &str, input: Option<&Value>, cwd: &Path) -> Option<V
 /// The `PreToolUse` response that carries the project rules on a dispatch, or `None`.
 ///
 /// Why (#7684): deployed agents start with `omitClaudeMd: true`, so the rules
-/// carrier must run on every tm-managed path. A pm-guard bypass
+/// carrier must run on every hook-running tm path. A pm-guard bypass
 /// (`TRUSTY_MPM_DISABLE_HOOKS`, `TRUSTY_MPM_PM_UNRESTRICTED`, divert workers)
-/// lifts enforcement only, and `[pm_guard] enabled = false` removes the
+/// is hooks off and skips it, and `[pm_guard] enabled = false` removes the
 /// pm-guard entry, where the always-installed egress guard carries the rules.
 /// What: [`rules_rewrite`] over the payload's `tool_name`/`tool_input`, with
 /// the hook `cwd` (falling back to `fallback_cwd`), rendered as one
 /// `updatedInput` object with no permission decision.
-/// Test: `a_bypassed_dispatch_still_carries_the_rules`,
+/// Test: `an_unbypassed_dispatch_carries_the_rules`,
 /// `the_egress_carrier_runs_only_when_pm_guard_is_off`.
 pub(crate) fn rules_carrier_response(payload: &Value, fallback_cwd: &Path) -> Option<Value> {
     let tool_name = payload.get("tool_name").and_then(Value::as_str)?;
@@ -111,7 +111,7 @@ pub(crate) fn rules_carrier_response(payload: &Value, fallback_cwd: &Path) -> Op
 /// The egress guard's share of the rules carrier (#7684).
 ///
 /// What: [`rules_carrier_response`] only when `pm_guard_enabled()` is false,
-/// because an enabled pm-guard carries the rules itself (bypassed or not) and
+/// because an enabled pm-guard carries the rules itself (unless bypassed) and
 /// a hook prints one object; two carriers would rewrite the same input twice.
 /// The config is read only for a dispatch tool.
 /// Test: `the_egress_carrier_runs_only_when_pm_guard_is_off`.
