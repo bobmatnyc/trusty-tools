@@ -151,6 +151,21 @@ impl<'a> Writer<'a> {
     /// anything else is invalid (exit 2) and leaves `state.json` and
     /// `archive.jsonl` as they were.
     pub fn batch(&self, req: &BatchRequest) -> Result<BatchResponse, LedgerError> {
+        let paths = req.store.paths()?;
+        self.batch_at(&paths, req)
+    }
+
+    /// [`Writer::batch`] against the store in `paths`; `req.store` names the
+    /// session only (G0b: the `datg.py` store directory).
+    ///
+    /// # Errors
+    /// As [`Writer::batch`].
+    pub fn batch_at(
+        &self,
+        paths: &StorePaths,
+        req: &BatchRequest,
+    ) -> Result<BatchResponse, LedgerError> {
+        // See G0b IL auto-apply
         if req.request_id.len() > 128 || req.request_id.contains('\n') {
             return Err(bad("request_id: one line, <= 128 chars"));
         }
@@ -162,16 +177,15 @@ impl<'a> Writer<'a> {
         if dry_run && req.ops.len() > 1 {
             return Err(bad("a dry-run prune must be the only op"));
         }
-        let paths = req.store.paths()?;
         let _lock = lock(&paths.lock, Some(self.lock_wait))?;
-        recover(&paths)?;
-        if let Some(seen) = replay(&paths, &req.request_id)? {
+        recover(paths)?;
+        if let Some(seen) = replay(paths, &req.request_id)? {
             return Ok(seen);
         }
         let now = Now::at(self.clock.now_unix());
         let session = req.store.session.as_str();
         if let Some(refusal) = self.secret(req) {
-            append_notice(&paths, &now, session, "secret_refused", &refusal)?;
+            append_notice(paths, &now, session, "secret_refused", &refusal)?;
             return Err(bad(refusal));
         }
         let raw = match fs::read_to_string(&paths.state) {
@@ -190,7 +204,7 @@ impl<'a> Writer<'a> {
                 st.v
             )));
         }
-        let answered = answered_times(&paths)?;
+        let answered = answered_times(paths)?;
         let cx = Context {
             answered: &answered,
             now: &now,
@@ -213,7 +227,7 @@ impl<'a> Writer<'a> {
             });
         }
         let commit = Commit {
-            paths: &paths,
+            paths,
             now: &now,
             session,
             loaded_v: st.v,
@@ -388,6 +402,16 @@ impl Commit<'_> {
         complete(self.paths, &journal, faults)?;
         Ok(result)
     }
+}
+
+/// True when `log.jsonl` records a committed batch with `request_id` (G0b:
+/// an IL packet applied before). Reads without the lock.
+///
+/// # Errors
+/// [`LedgerError::Io`] when the log exists and cannot be read.
+pub fn seen(paths: &StorePaths, request_id: &str) -> Result<bool, LedgerError> {
+    // See G0b IL auto-apply
+    Ok(replay(paths, request_id)?.is_some())
 }
 
 /// The last `answered` time per id in `log.jsonl`, either log shape.
