@@ -1,10 +1,10 @@
 name: Trusty Browser
 on:
   pull_request:
-    paths: ["python/trusty-browser/**", ".github/workflows/trusty-browser.yml"]
+    paths: ["python/trusty-browser/**", "crates/trusty-browser/extension/**", "crates/trusty-browser/tests/js/**", ".github/workflows/trusty-browser.yml"]
   push:
     branches: [main]
-    paths: ["python/trusty-browser/**", ".github/workflows/trusty-browser.yml"]
+    paths: ["python/trusty-browser/**", "crates/trusty-browser/extension/**", "crates/trusty-browser/tests/js/**", ".github/workflows/trusty-browser.yml"]
 permissions:
   contents: read
 jobs:
@@ -22,3 +22,6 @@ jobs:
       - run: python -m playwright install chromium
       - run: python -m pytest -q
       - run: node --test tests/*.mjs
+      # #11211: the Rust crate's own extension tree, on the same fake-Chrome harness.
+      - run: node --test crates/trusty-browser/tests/js/*.test.mjs
+        working-directory: ${{ github.workspace }}

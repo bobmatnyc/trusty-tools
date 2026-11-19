@@ -12,8 +12,12 @@
 //! changed, and [`to_css`] maps its image pixels to viewport CSS pixels.
 //! Test: `image_pixels_map_to_css_at_1x_2x_and_zoomed`,
 //! `a_capture_goes_stale_by_age_lease_and_document`,
-//! `points_outside_the_viewport_are_refused`, `png_size_reads_the_ihdr` below;
-//! `close_tab_refuses_a_tab_this_session_does_not_lease` in `tests/parity_pages.rs`.
+//! `points_outside_the_viewport_are_refused`, `png_size_reads_the_ihdr`,
+//! `aspect_allows_rounding_and_refuses_a_resize` below;
+//! `close_tab_refuses_a_tab_this_session_does_not_lease`,
+//! `a_capture_whose_aspect_disagrees_with_its_region_is_stale`,
+//! `an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab` in
+//! `tests/parity_pages.rs`; the extension side in `tests/js/pages.test.mjs`.
 
 use std::sync::Arc;
 
@@ -35,6 +39,8 @@ pub const MAX_AGE: f64 = 5.0;
 pub const KEEP: usize = 16;
 /// Largest image coordinate accepted, in pixels.
 const MAX_COORD: i64 = 100_000;
+/// Largest relative gap between a capture's image and region aspect ratios.
+pub const ASPECT_TOLERANCE: f64 = 0.02;
 
 /// One screenshot, as a later coordinate action checks it.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +101,25 @@ pub fn fresh(
     let same = c.lease == lease && c.tab == tab && document == Some(c.document.as_str());
     if !same || now - c.taken > MAX_AGE || now < c.taken {
         return Err(Refusal::new("StaleCapture").with("tab", tab));
+    }
+    Ok(())
+}
+
+/// Refuse an image whose aspect ratio is not its region's (`StaleCapture`).
+///
+/// Why: the worker reads the viewport metrics, then captures; a resize in
+/// between yields a picture of another viewport, and [`to_css`] would map
+/// its pixels to offset points. What: the image height expected from its
+/// width and the region's aspect may differ from the real height by at most
+/// [`ASPECT_TOLERANCE`] of it, plus one pixel of rounding.
+/// Test: `a_capture_whose_aspect_disagrees_with_its_region_is_stale` in
+/// `tests/parity_pages.rs`, `aspect_allows_rounding_and_refuses_a_resize`.
+pub fn aspect_matches(c: &Capture) -> Result<(), Refusal> {
+    let [_, _, rw, rh] = c.region;
+    let [iw, ih] = c.image.map(f64::from);
+    let expected = iw * rh / rw;
+    if !expected.is_finite() || (ih - expected).abs() > expected * ASPECT_TOLERANCE + 1.0 {
+        return Err(Refusal::new("StaleCapture").with("tab", c.tab));
     }
     Ok(())
 }
@@ -189,36 +214,56 @@ async fn open_tab(
     }
     let peer = peer_of(core, grant)?;
     let url = request.get("url").cloned().unwrap_or(Json::Null);
-    let raw = send(
-        core,
-        grant,
-        None,
-        &peer,
-        "page_open_tab",
-        vec![("url", url)],
-    )
-    .await?;
-    let seen = pages::shaped(&raw, pages::OPENED)?;
+    let args = vec![("url", url)];
+    // #11211 review: once the worker may have created a tab, every answer is
+    // journaled, so a retry with this request_id never opens a second one.
+    let leased = match send(core, grant, None, &peer, "page_open_tab", args).await {
+        Ok(raw) => lease_opened(core, session, &peer, &raw),
+        Err(exc) if exc.code == "OutcomeUnknown" => Err(exc),
+        Err(exc) => return Err(exc.into()),
+    };
+    let (reply, tab, origin) = match leased {
+        Ok(done) => done,
+        Err(exc) => {
+            journal(session, request, &exc.response())?;
+            return Err(exc.into());
+        }
+    };
+    journal(session, request, &reply)?;
+    Ok((reply, Some(tab), hosted(origin.as_deref())?))
+}
+
+/// Lease the tab a worker opened: the reply, the tab and its origin when readable.
+fn lease_opened(
+    core: &Arc<Core>,
+    session: &Session,
+    peer: &Arc<crate::peer_conn::Peer>,
+    raw: &Json,
+) -> Result<(Json, i64, Option<String>), Refusal> {
+    let seen = pages::shaped(raw, pages::OPENED)?;
     let Some(Json::Int(tab)) = seen.get("tab").cloned() else {
-        return Err(Refusal::new("BrowserRefused").into());
+        return Err(Refusal::new("BrowserRefused"));
     };
     let access = seen.get("access") == Some(&Json::Bool(true));
-    let origin = seen.get("origin").and_then(Json::as_str).map(str::to_owned);
+    let origin = seen
+        .get("origin")
+        .and_then(Json::as_str)
+        .map(str::to_owned)
+        .filter(|_| access);
     let token = token_urlsafe(&*core.entropy, 24);
     {
         let mut inner = core.lock();
         let now = core.lease_clock.now();
         if let Some(c) = inner.active(&peer.generation, tab, now) {
             // A tab id Chrome just minted cannot be held; refuse rather than share it.
-            let holder = c.owner.clone();
-            return Err(Refusal::new("TabClaimed").with("holder", holder).into());
+            return Err(Refusal::new("TabClaimed").with("holder", c.owner.clone()));
         }
         let mut claim = claim_for(session, &peer.generation, tab, token.clone(), now);
         claim.document = seen
             .get("document")
             .and_then(Json::as_str)
             .map(str::to_owned);
-        claim.origin = origin.clone().filter(|_| access);
+        claim.origin = origin.clone();
         inner.claims.push(claim);
     }
     let mut reply = Json::object([
@@ -231,13 +276,7 @@ async fn open_tab(
             reply.insert(k, v);
         }
     }
-    journal(session, request, &reply)?;
-    let where_ = if access {
-        hosted(origin.as_deref())?
-    } else {
-        None
-    };
-    Ok((reply, Some(tab), where_))
+    Ok((reply, tab, origin))
 }
 
 /// Close a tab only when this session holds its lease (#11208).
@@ -266,7 +305,16 @@ async fn close_tab(
     }
     let key = Some((peer.generation.clone(), tab));
     let args = vec![("tab", Json::Int(tab))];
-    let raw = send(core, grant, key, &peer, "page_close_tab", args).await?;
+    let raw = match send(core, grant, key, &peer, "page_close_tab", args).await {
+        Ok(raw) => raw,
+        Err(exc) => {
+            // #11211 review: a close that may have run is not retried.
+            if exc.code == "OutcomeUnknown" {
+                journal(session, request, &exc.response())?;
+            }
+            return Err(exc.into());
+        }
+    };
     pages::shaped(&raw, pages::CLOSED)?;
     core.lock().drop_claim(&token);
     session.captures.retain(|c| c.tab != tab);
@@ -361,6 +409,8 @@ async fn screenshot(
         viewport,
         metrics: metrics.clone(),
     };
+    // #11211 review: a viewport resized between the metrics read and the shot.
+    aspect_matches(&capture)?;
     if session.captures.len() >= KEEP {
         session.captures.remove(0);
     }

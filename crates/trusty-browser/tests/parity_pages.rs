@@ -419,3 +419,82 @@ async fn a_capture_maps_clicks_and_goes_stale() {
     }
     broker.close().await;
 }
+
+/// #11211 review: a PNG whose aspect ratio is not its region's (the viewport
+/// resized between the metrics read and the shot) is refused `StaleCapture`
+/// and hands out no `capture_id`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_capture_whose_aspect_disagrees_with_its_region_is_stale() {
+    use base64::Engine as _;
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let lease = "YtbbXmIbar4-E6OcqOQZedqh522fyHj2";
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_read","lease":"{lease}"}}"#),
+    )
+    .await;
+    answer(
+        &mut worker,
+        r#"{"document":"d1","origin":"https://example.test","url":"https://example.test/","title":"t","text":"","elements":[],"truncated":false}"#,
+    )
+    .await;
+    recv_json(&mut a).await;
+    // An 800x600 region at 2x, but the picture is 1600x1000: 100 CSS px shorter.
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(1600u32.to_be_bytes());
+    png.extend(1000u32.to_be_bytes());
+    let data = base64::engine::general_purpose::STANDARD.encode(&png);
+    let metrics = r#"{"css_width":800,"css_height":600,"device_pixel_ratio":2,"zoom":1,"scroll_x":0,"scroll_y":0}"#;
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_screenshot","lease":"{lease}","ref":null}}"#),
+    )
+    .await;
+    let shot = format!(
+        r#"{{"document":"d1","data":"{data}","region":{{"x":0,"y":0,"width":800,"height":600}},"metrics":{metrics}}}"#
+    );
+    answer(&mut worker, &shot).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"StaleCapture","tab":7}"#
+    );
+    broker.close().await;
+}
+
+/// #11211 review: an `open_tab` whose outcome is unknown is journaled, so a
+/// retry with the same `request_id` answers the same refusal and sends the
+/// worker no second `page_open_tab`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let open = r#"{"op":"open_tab","request_id":"o1","url":"https://example.test/"}"#;
+    send_json(&mut a, open).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_open_tab")));
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let email = cmd.get("email").and_then(Json::as_str).expect("email");
+    let failed =
+        format!(r#"{{"id":"{id}","ok":false,"email":"{email}","error":"OutcomeUnknown"}}"#);
+    send_json(&mut worker, &failed).await;
+    let unknown = r#"{"ok":false,"error":"OutcomeUnknown"}"#;
+    assert_eq!(wire(&recv_json(&mut a).await), unknown);
+    send_json(&mut a, open).await;
+    let second = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut worker)).await;
+    assert!(
+        second.is_err(),
+        "a second page_open_tab reached the worker: {}",
+        second.map(|c| wire(&c)).unwrap_or_default()
+    );
+    assert_eq!(wire(&recv_json(&mut a).await), unknown);
+    broker.close().await;
+}

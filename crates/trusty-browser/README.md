@@ -152,10 +152,10 @@ The mode you use with a profile connected in the popup. No code is needed.
 | `page_upload` | Sets local files under `--upload-root` on an `<input type=file>`. |
 | `page_downloads` | Lists the newest downloads started from the tab's origin, with path and state. |
 | `browser_open_tab` | Opens a background tab at an `https` URL and returns it already leased to this session. |
-| `browser_close_tab` | Closes a tab this session leases; any other tab answers `TabNotLeased`. |
-| `page_screenshot` | Captures the viewport, or one element `ref`, as a PNG image with a `capture_id` and the viewport metrics. |
-| `page_click_at` | Clicks with a trusted mouse click at an image pixel of a `capture_id`. |
-| `page_type_at` | Clicks at an image pixel of a `capture_id`, then inserts text as trusted input. |
+| `browser_close_tab` | Closes a tab this session leases, including a user tab leased with `browser_select`; any other tab answers `TabNotLeased`. |
+| `page_screenshot` | Captures the viewport, or one element `ref`, as a PNG image with a `capture_id` and the viewport metrics. Viewport only; a `ref` scrolls its element into view. |
+| `page_click_at` | Clicks with a trusted mouse click at an image pixel of a `capture_id`. No hit-test: it can land inside a cross-origin iframe of the leased tab. Dismisses confirm and prompt dialogs. |
+| `page_type_at` | Clicks at an image pixel of a `capture_id`, then inserts up to 8192 characters into the focused element as trusted input. No hit-test, as `page_click_at`. |
 | `browser_release` | Releases a lease taken with `browser_select`. |
 
 ### Workflow mode (`--workflow NAME` or `--credential FILE`)

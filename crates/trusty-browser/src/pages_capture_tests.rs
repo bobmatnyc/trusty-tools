@@ -140,3 +140,16 @@ fn coordinate_ops_validate_capture_id_and_pixels() {
     let shot = Json::parse(br#"{"op":"page_screenshot","lease":"l","ref":null}"#).unwrap();
     assert_eq!(crate::pages::validate(&shot), Ok("page_screenshot"));
 }
+
+#[test]
+fn aspect_allows_rounding_and_refuses_a_resize() {
+    // Rounded image sizes of a 2x viewport and a tiny element pass.
+    assert!(aspect_matches(&shot([800.0, 600.0], 2.0, 1.0)).is_ok());
+    assert!(aspect_matches(&shot([1.4, 1.6], 2.0, 1.0)).is_ok());
+    // A viewport that lost 40 CSS px of height before the shot is refused.
+    let mut resized = shot([800.0, 600.0], 2.0, 1.0);
+    resized.image = [1600, 1120];
+    let err = aspect_matches(&resized).unwrap_err();
+    assert_eq!(err.code, "StaleCapture");
+    assert_eq!(err.details, vec![("tab".to_owned(), Json::Int(7))]);
+}

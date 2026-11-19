@@ -829,14 +829,23 @@ TrustyPages.commands = deps => {
   //   debugging bar resizes the viewport, so the metrics are read after the attach, as a coordinate action
   //   reads them), then CDP Page.captureScreenshot as PNG of the viewport or the element's visible box. A PNG
   //   over CAPTURE_BUDGET is retaken at half, then quarter scale; still too large answers CaptureTooLarge.
-  //   Bounded at 6 s; always detaches. Uses the existing debugger permission only.
-  // Test: live check (the Rust crate has no extension harness); `png_size_reads_the_ihdr` for the reply.
+  //   Bounded at 6 s; always detaches, and once it returns no leftover capture reaches a later attachment.
+  //   Uses the existing debugger permission only.
+  // Test: tests/js/pages.test.mjs `an oversized png is retaken at half and quarter scale, then refused CaptureTooLarge`,
+  //   `a screenshot whose attach fails on the same document answers DebuggerBusy`,
+  //   `a timed-out screenshot sends no capture after it returns`; `png_size_reads_the_ihdr`.
   async function capture(req) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     if (req.document === null) throw changed(await probe(req.tab));
     const first = await probe(req.tab);
     if (!first.access || first.document !== req.document) throw changed(first);
     const debuggee = {tabId:req.tab};
+    // #11294: as in act, a timed-out capture sends nothing after it returns.
+    let aborted = false;
+    const shotOf = params => {
+      if (aborted) throw refuse("OutcomeUnknown");
+      return chrome.debugger.sendCommand(debuggee, "Page.captureScreenshot", params);
+    };
     try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
       const now = await probe(req.tab);
       if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
@@ -847,6 +856,7 @@ TrustyPages.commands = deps => {
     try {
       return await Promise.race([bound, shoot()]);
     } finally {
+      aborted = true;
       clearTimeout(timer);
       await chrome.debugger.detach(debuggee).catch(() => {});
     }
@@ -860,7 +870,7 @@ TrustyPages.commands = deps => {
           params.clip = {x:region.x + metrics.scroll_x, y:region.y + metrics.scroll_y, width:region.width,
             height:region.height, scale};
         }
-        const shot = await chrome.debugger.sendCommand(debuggee, "Page.captureScreenshot", params);
+        const shot = await shotOf(params);
         if (typeof shot?.data !== "string") throw new Error("capture");
         if (shot.data.length <= CAPTURE_BUDGET) return {document:req.document, data:shot.data, region, metrics};
       }
@@ -931,16 +941,23 @@ TrustyPages.commands = deps => {
     }, atPoint(req)),
     page_screenshot:req => capture(req),
     // #11208: a new background tab; the broker leases it to the session that asked.
+    // Test: tests/js/pages.test.mjs `a tab that fails after it is created is closed and answers OutcomeUnknown`.
     async page_open_tab(req, row) {
       if (row.scope === "tab") throw refuse("OutOfScope");
       if (!urlAllowed(req.url)) throw refuse("InvalidUrl");
       const made = await chrome.tabs.create({url:req.url, active:false});
-      const wait = settle(made.id, 5000, true);
-      try { if ((await chrome.tabs.get(made.id)).status === "complete") wait.cancel(); } catch { wait.cancel(); }
-      await wait.done;
-      await deps.remember(made.id, new URL(req.url).origin);
-      const {access, document, origin, title} = await probe(made.id);
-      return {tab:made.id, window:made.windowId, access, document, origin, title};
+      try {
+        const wait = settle(made.id, 5000, true);
+        try { if ((await chrome.tabs.get(made.id)).status === "complete") wait.cancel(); } catch { wait.cancel(); }
+        await wait.done;
+        await deps.remember(made.id, new URL(req.url).origin);
+        const {access, document, origin, title} = await probe(made.id);
+        return {tab:made.id, window:made.windowId, access, document, origin, title};
+      } catch (error) {
+        // #11211 review: a tab the broker will never lease is closed, not left open; the answer stays unknown.
+        await chrome.tabs.remove(made.id).catch(() => {});
+        throw error;
+      }
     },
     // #11208: the broker sends this only for a tab the session leases; a tab grant never closes its tab.
     async page_close_tab(req, row) {
