@@ -56,10 +56,12 @@ pub struct BatchPlan {
 /// Why: the cap must cut the findings whose loss costs least.
 /// What: sorts candidates by effort (High first), then confidence, then
 /// position, and chunks them into batches of `batch_size`; a security finding
-/// takes a batch of its own (#11526). Batches past `max_calls` move to
+/// takes a batch of its own (#11526). Batches run in the impact order of
+/// their first member, and batches past `max_calls` move to
 /// `over_cap`. Both counts are clamped to ≥ 1.
 /// Test: `plan_batches_chunks_by_impact_and_caps_calls`,
-/// `plan_batches_cuts_the_lowest_impact_findings`.
+/// `plan_batches_cuts_the_lowest_impact_findings`,
+/// `plan_batches_cap_cuts_low_impact_security_after_a_high_batch`.
 pub fn plan_batches(
     findings: &[Finding],
     candidates: &[usize],
@@ -76,22 +78,26 @@ pub fn plan_batches(
             .then(a.cmp(&b))
     });
     // #11526: a security finding gets its own request, the only shape that
-    // carries the exploitability question and its schema.
-    let mut batches: Vec<Vec<usize>> = Vec::new();
-    let mut open: Vec<usize> = Vec::new();
-    for idx in ordered {
+    // carries the exploitability question and its schema. Each batch is keyed
+    // by the impact rank of its first member, so a non-security batch still
+    // open while security singletons are emitted keeps its place and the cap
+    // below still cuts the lowest-impact batches.
+    let mut keyed: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut open: Option<(usize, Vec<usize>)> = None;
+    for (rank, idx) in ordered.into_iter().enumerate() {
         if is_security_finding(&findings[idx]) {
-            batches.push(vec![idx]);
+            keyed.push((rank, vec![idx]));
             continue;
         }
-        open.push(idx);
-        if open.len() == batch_size {
-            batches.push(std::mem::take(&mut open));
+        let (_, members) = open.get_or_insert_with(|| (rank, Vec::new()));
+        members.push(idx);
+        if members.len() == batch_size {
+            keyed.extend(open.take());
         }
     }
-    if !open.is_empty() {
-        batches.push(open);
-    }
+    keyed.extend(open);
+    keyed.sort_by_key(|(rank, _)| *rank);
+    let mut batches: Vec<Vec<usize>> = keyed.into_iter().map(|(_, b)| b).collect();
     let over_cap = if batches.len() > max_calls {
         batches.split_off(max_calls).into_iter().flatten().collect()
     } else {

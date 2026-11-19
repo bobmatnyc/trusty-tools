@@ -196,3 +196,36 @@ async fn reachable_security_finding_records_the_rationale() {
         kept.consequence
     );
 }
+
+/// A CONFIRMED answer whose `reachability` is missing or not a recognised
+/// value keeps the finding CONFIRMED (#11526).
+#[tokio::test]
+async fn confirmed_without_valid_reachability_stays_confirmed() {
+    for text in [
+        r#"{"judgment":"CONFIRMED","reason":"present"}"#,
+        r#"{"judgment":"CONFIRMED","reason":"present","reachability":"MAYBE","reachability_reason":"x"}"#,
+    ] {
+        let verifier: Arc<dyn LlmProvider> = Arc::new(ScriptedVerifier {
+            text: text.to_string(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut findings = vec![finding("security")];
+        run_verification_round(
+            &verifier,
+            "m",
+            "+x\n",
+            Verdict::Block,
+            &mut findings,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            findings
+                .iter()
+                .any(|f| matches!(f.verified, Some(VerifyOutcome::Confirmed))),
+            "answer {text} must stay confirmed: {findings:?}"
+        );
+    }
+}
