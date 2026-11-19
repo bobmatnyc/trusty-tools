@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.4] — 2026-11-19
+
+### Documentation
+
+- Comments and examples use neutral `acme` org names.
+
 ## [0.70.3] — 2026-11-18
 
 ### Changed
