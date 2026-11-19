@@ -26,6 +26,7 @@ use crate::{
             VERIFY_MAX_TOKENS, VERIFY_TEMPERATURE, diff_and_rationale, finding_fields,
             verifier_request, verifier_system_prompt,
         },
+        verify_security::is_security_finding,
     },
 };
 
@@ -54,8 +55,9 @@ pub struct BatchPlan {
 ///
 /// Why: the cap must cut the findings whose loss costs least.
 /// What: sorts candidates by effort (High first), then confidence, then
-/// position, and chunks them into batches of `batch_size`. Batches past
-/// `max_calls` move to `over_cap`. Both counts are clamped to ≥ 1.
+/// position, and chunks them into batches of `batch_size`; a security finding
+/// takes a batch of its own (#11526). Batches past `max_calls` move to
+/// `over_cap`. Both counts are clamped to ≥ 1.
 /// Test: `plan_batches_chunks_by_impact_and_caps_calls`,
 /// `plan_batches_cuts_the_lowest_impact_findings`.
 pub fn plan_batches(
@@ -73,7 +75,23 @@ pub fn plan_batches(
             .then(fb.confidence.total_cmp(&fa.confidence))
             .then(a.cmp(&b))
     });
-    let mut batches: Vec<Vec<usize>> = ordered.chunks(batch_size).map(<[usize]>::to_vec).collect();
+    // #11526: a security finding gets its own request, the only shape that
+    // carries the exploitability question and its schema.
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    let mut open: Vec<usize> = Vec::new();
+    for idx in ordered {
+        if is_security_finding(&findings[idx]) {
+            batches.push(vec![idx]);
+            continue;
+        }
+        open.push(idx);
+        if open.len() == batch_size {
+            batches.push(std::mem::take(&mut open));
+        }
+    }
+    if !open.is_empty() {
+        batches.push(open);
+    }
     let over_cap = if batches.len() > max_calls {
         batches.split_off(max_calls).into_iter().flatten().collect()
     } else {

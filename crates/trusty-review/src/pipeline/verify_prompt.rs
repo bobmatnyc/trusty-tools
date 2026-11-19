@@ -20,6 +20,10 @@
 use crate::{
     llm::{ChatMessage, LlmRequest, ResponseSchema, strip_provider_prefix},
     models::Finding,
+    pipeline::verify_security::{
+        SECURITY_REACHABILITY_QUESTION, SECURITY_VERIFY_MAX_TOKENS, is_security_finding,
+        security_verify_response_schema,
+    },
 };
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -177,7 +181,9 @@ pub fn verify_response_schema() -> ResponseSchema {
 /// (#1618) is the caller-supplied PR description + discussion; when present and
 /// non-empty it is rendered as an "Author rationale" block so the verifier can
 /// refute a finding the author has already empirically addressed.  Absent ⇒ the
-/// user message is unchanged (back-compat).
+/// user message is unchanged (back-compat).  A security finding (#11526) also
+/// gets the exploitability question, the security schema and at least
+/// `SECURITY_VERIFY_MAX_TOKENS`.
 /// Test: `verify_request_contains_finding`, `verify_request_forces_schema`,
 /// `verify_request_includes_author_rationale`,
 /// `verify_request_omits_absent_author_rationale`.
@@ -201,13 +207,24 @@ pub fn build_verify_request(
         fields = finding_fields(finding),
         file = finding.file,
     );
+    let max_tokens = max_tokens.unwrap_or(VERIFY_MAX_TOKENS);
+    // #11526: security findings also get the exploitability question.
+    let (user_message, max_tokens, schema) = if is_security_finding(finding) {
+        (
+            format!("{user_message}{SECURITY_REACHABILITY_QUESTION}"),
+            max_tokens.max(SECURITY_VERIFY_MAX_TOKENS),
+            security_verify_response_schema(),
+        )
+    } else {
+        (user_message, max_tokens, verify_response_schema())
+    };
     verifier_request(
         verifier_model,
         verifier_system_prompt().to_string(),
         user_message,
         temperature.unwrap_or(VERIFY_TEMPERATURE),
-        max_tokens.unwrap_or(VERIFY_MAX_TOKENS),
-        verify_response_schema(),
+        max_tokens,
+        schema,
     )
 }
 
