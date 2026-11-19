@@ -98,14 +98,6 @@ pub enum AuditMethod {
     /// write it allows (#10459 PR1). It has no wire method.
     #[serde(rename = "secrets.ticket.redeem")]
     TicketRedeem,
-    /// `secrets.remote.resolve`, through `remote-gate`: one allow record
-    /// before the backend read, then a deny if it fails (#11464).
-    #[serde(rename = "secrets.remote.resolve")]
-    RemoteResolve,
-    /// `secrets.remote.doctor`, through `remote-gate`: one record per call
-    /// (#11464).
-    #[serde(rename = "secrets.remote.doctor")]
-    RemoteDoctor,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -274,16 +266,16 @@ pub struct AuditRecord {
     /// otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_wait: Option<BackendWait>,
-    /// On a `secrets.remote.*` record from the verified gate: the host its
-    /// `--host` names, pinned by the ssh key's forced command (#11464).
+    /// On a `secrets.resolve` record through `secrets.gate`: the host the
+    /// gate's `--host` names, pinned by the ssh key's forced command (#11464).
     /// `None` on every local call, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
-    /// On a `secrets.remote.*` record: the label the remote frame claimed,
+    /// On a `secrets.gate` record: the label the remote frame claimed,
     /// recorded and never trusted (#11464). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_agent: Option<RemoteAgent>,
-    /// On a `secrets.remote.*` record: the `<owner>/<repo>` the frame named,
+    /// On a `secrets.gate` record: the `<owner>/<repo>` the frame named,
     /// once validated (#11464). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_project: Option<String>,
@@ -296,7 +288,7 @@ pub struct AuditRecord {
 /// it for an identity.
 /// What: the label, validated to `[A-Za-z0-9._-]{1,64}`, and `verified`,
 /// which this build always writes `false`.
-/// Test: `remote_resolve_of_an_open_key_returns_it_with_a_remote_record`.
+/// Test: `gate_resolve_of_an_open_key_returns_it_with_a_remote_record`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RemoteAgent {

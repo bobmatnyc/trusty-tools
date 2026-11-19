@@ -3,9 +3,10 @@
 //! Why: AC3 — with no GUI-session server the gate exits 69 and starts no
 //! server; AC1 — an unlisted verb exits 13. Only the built binary proves
 //! the exit status and that stderr stays empty.
-//! What: every path is a flag into a `TempDir`. `PATH` holds only a fake
-//! `trusty-secrets` that writes a marker file if anything runs it, so a
-//! spawn by name would leave the marker.
+//! What: every path is a flag into a `TempDir`, which holds a checkout the
+//! allowlist maps. `PATH` finds first a fake `trusty-secrets` that writes a
+//! marker file if anything runs it, so a spawn by name would leave the
+//! marker; `/usr/bin` follows it for `git`.
 //! Test: itself.
 
 use std::io::Write;
@@ -24,7 +25,8 @@ fn run_gate(tmp: &Path, frame: &str) -> Output {
         .arg(tmp.join("run").join("secrets.sock"))
         .arg("--machine-config")
         .arg(tmp.join("config.yaml"))
-        .env("PATH", tmp.join("bin"))
+        // The fake first; `/usr/bin` for the checkout's `git` (#11464).
+        .env("PATH", format!("{}:/usr/bin", tmp.join("bin").display()))
         .env("HOME", tmp)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -40,14 +42,29 @@ fn run_gate(tmp: &Path, frame: &str) -> Output {
     child.wait_with_output().unwrap()
 }
 
-/// A temp dir with the allowlist and the marker-writing fake server.
+/// A temp dir with a checkout of `acme/web`, the allowlist mapping it, and
+/// the marker-writing fake server.
 fn setup() -> TempDir {
     let tmp = TempDir::new().unwrap();
-    std::fs::write(
-        tmp.path().join("config.yaml"),
-        "secrets:\n  remote_hosts:\n    evo-linux:\n      projects: [acme/web]\n",
-    )
-    .unwrap();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "git@github.com:acme/web.git"],
+    ] {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    let config = format!(
+        "secrets:\n  remote_hosts:\n    evo-linux:\n      projects:\n        acme/web: \"{}\"\n      keys: [API_KEY]\n",
+        repo.display()
+    );
+    std::fs::write(tmp.path().join("config.yaml"), config).unwrap();
     let bin = tmp.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let fake = bin.join("trusty-secrets");
@@ -70,7 +87,7 @@ fn remote_gate_with_no_server_exits_69_and_spawns_nothing() {
     assert_eq!(out.status.code(), Some(69), "{out:?}");
     assert_eq!(
         String::from_utf8(out.stdout).unwrap(),
-        "{\"error\":\"server_unavailable\",\"ok\":false}\n"
+        "{\"error\":\"studio_server_absent\",\"ok\":false}\n"
     );
     assert!(
         out.stderr.is_empty(),

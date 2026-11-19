@@ -1,0 +1,3 @@
+Added
+- `secrets.gate`, the one server method `remote-gate` uses, with two inner verbs, `resolve` and `doctor`. It answers only a `trusty-secrets` peer below a root `sshd` or `sshd-session` with no Claude Code ancestor; any other peer gets the new `gate_refused` error kind and one deny record. Its `resolve` is `secrets.resolve` with `agent_parent` forced true, so the grant token is still required and a key denied to agents is refused. Its records carry `host`, `remote_agent` (marked unverified) and `remote_project` (#11464).
+- `ProcessTable::comm`, a process's kernel short name and owner uid, readable across uids (#11464).

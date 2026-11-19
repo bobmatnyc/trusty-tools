@@ -50,7 +50,7 @@ mod sync_target_tests;
 #[path = "copy_source_tests.rs"]
 mod copy_source_tests;
 
-// #11464: the remote gate and `secrets.remote.*`; it shares these helpers.
+// #11464: the remote gate and `secrets.gate`; it shares these helpers.
 #[path = "remote_tests.rs"]
 mod remote_tests;
 

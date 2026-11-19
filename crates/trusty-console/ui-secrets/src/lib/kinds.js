@@ -51,6 +51,7 @@ export const KIND_TEXT = {
   agent_key_denied: 'The operator denied this key to agents (per-key deny).',
   ticket_refused: 'The secrets server refused a main-thread ticket.',
   remote_refused: 'The secrets server refused a remote-gate call.',
+  gate_refused: 'The secrets server refused a caller that is not the remote gate.',
   internal: 'The secrets server failed.',
 };
 
