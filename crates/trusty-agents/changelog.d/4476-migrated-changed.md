@@ -492,7 +492,7 @@ Changed
   "subagent" to the user — describe outcomes via "a specialist" / "my team",
   never internal mechanics or system/daemon names. `cto-assistant/agent.toml`
   is refactored from a hand-forked full copy (`role = "assistant"`, no
-  `extends`) to `extends = "assistant"`, keeping only its Duetto-specific
+  `extends`) to `extends = "assistant"`, keeping only its Acme-specific
   deltas (CTO ops DB tools, ticketing, extra git tools, org/APEX/voice
   skills, and its tuned `[llm]` sampling — see below) — it now also inherits
   the base's black-box posture and full gworkspace surface.

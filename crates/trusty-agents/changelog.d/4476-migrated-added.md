@@ -249,8 +249,8 @@ Added
     `python_skill::install_discovered_skill_plugins` once at boot,
     best-effort (a missing skills directory or a malformed manifest is
     logged and skipped, never fatal).
-  - **The bundled `cto_fixture.db` is FIXTURE data, not the real Duetto CTO
-    ops database** (`~/Duetto/cto/data/cto.db`, unreachable from this
+  - **The bundled `cto_fixture.db` is FIXTURE data, not the real Acme CTO
+    ops database** (`~/Acme/cto/data/cto.db`, unreachable from this
     environment) — set `CTO_DB_PATH` to the real file once it's reachable.
     See `.trusty-agents/skills/cto-db/python/README.md` for the full
     disclosure.
