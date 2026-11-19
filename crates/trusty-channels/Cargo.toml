@@ -61,6 +61,10 @@ required-features = ["unrouted-slack-mcp"]
 name = "canvas_push_http"
 required-features = ["unrouted-slack-mcp"]
 
+[[test]]
+name = "canvas_access_http"
+required-features = ["unrouted-slack-mcp"]
+
 [dependencies]
 # #8454 S2b: crate-config locates the host config.yaml.
 trusty-common = { workspace = true, features = ["credentials", "crate-config"] }

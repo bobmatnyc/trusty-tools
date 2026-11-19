@@ -72,6 +72,7 @@ use crate::slack::server::ToolCallError;
 
 mod args;
 mod canvas;
+mod canvas_access;
 mod clean;
 mod conversations;
 mod files;
@@ -123,6 +124,9 @@ pub(super) const CONVERSATIONS_CANVASES_CREATE: &str = "conversations.canvases.c
 /// Bot-scope, requires `canvases:write`: replaces a canvas's document content
 /// (issue #3612).
 pub(super) const CANVASES_EDIT: &str = "canvases.edit";
+/// Bot-scope, requires `canvases:write`: grants users or regular channels
+/// `read`/`write` access on a canvas the caller owns (#10890).
+pub(super) const CANVASES_ACCESS_SET: &str = "canvases.access.set";
 /// Bot-scope, requires `canvases:read`: looks up section ids/anchors within a
 /// canvas by section type and/or contained text (issue #3744 slice 1). Slack
 /// has no full-canvas-content-read method — this returns section anchors, not
@@ -195,6 +199,7 @@ pub async fn dispatch(
         "slack_read_canvas" => canvas::read_canvas(client, args).await,
         "slack_canvas_lookup_sections" => canvas::lookup_sections(client, args).await,
         "slack_canvas_push" => canvas::canvas_push(client, args).await,
+        "slack_canvas_access_set" => canvas_access::canvas_access_set(client, args).await,
         "slack_read_file" => files::read_file(client, args).await,
         "slack_search_emojis" => search::search_emojis(client, args).await,
         "slack_search_users" => search::search_users(client, args).await,

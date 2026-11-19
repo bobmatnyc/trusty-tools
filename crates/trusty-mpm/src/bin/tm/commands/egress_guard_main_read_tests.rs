@@ -44,6 +44,8 @@ const READS: &[&str] = &[
 const SENDS: &[&str] = &[
     "mcp__slack-mcp__slack_send_message",
     "mcp__slack-mcp__slack_create_canvas",
+    // #10890: an edit grant is a write; a subagent must stay denied.
+    "mcp__slack-mcp__slack_canvas_access_set",
     "mcp__gworkspace-mcp__compose_email",
     "mcp__gworkspace-mcp__download_gmail_attachment",
     "mcp__gmail__send_message",
