@@ -91,6 +91,9 @@ use crate::{
         verify_batch::{build_batch_request, file_diff_slice, parse_batch_judgments, plan_batches},
         verify_posted::{VerifyReport, enforce_outcomes},
         verify_prompt::build_verify_request,
+        verify_security::{
+            SECURITY_VERIFY_SCHEMA_NAME, apply_reachability, parse_reachability, record_note,
+        },
     },
 };
 
@@ -330,7 +333,7 @@ pub async fn run_verification_round_with_policy(
     // Each batch borrows its findings immutably to build its request; the
     // outcomes are applied afterwards, so no mutable borrow crosses an await.
     let calls = plan.batches.len();
-    let per_batch: Vec<Vec<(usize, VerifyOutcome, VerifierReach)>> = stream::iter(plan.batches)
+    let per_batch: Vec<Vec<(usize, Judged)>> = stream::iter(plan.batches)
         .map(|batch| {
             let evidence = policy
                 .per_file
@@ -359,17 +362,21 @@ pub async fn run_verification_round_with_policy(
             };
             async move {
                 let judged = verify_batch(verifier, req, batch.len(), policy).await;
-                batch
-                    .into_iter()
-                    .zip(judged)
-                    .map(|(idx, (outcome, reach))| (idx, outcome, reach))
-                    .collect()
+                batch.into_iter().zip(judged).collect()
             }
         })
         .buffer_unordered(policy.concurrency.max(1))
         .collect()
         .await;
-    let outcomes: Vec<_> = per_batch.into_iter().flatten().collect();
+    let mut outcomes = Vec::new();
+    for (idx, (outcome, reach, note)) in per_batch.into_iter().flatten() {
+        // #11526: a CONFIRMED security finding carries its reachability rationale.
+        if let Some(note) = note {
+            info!(file = %findings[idx].file, "{note}");
+            record_note(&mut findings[idx], &note);
+        }
+        outcomes.push((idx, outcome, reach));
+    }
 
     let report = enforce_outcomes(
         primary_verdict.clone(),
@@ -541,19 +548,24 @@ async fn verify_batch(
     req: crate::llm::LlmRequest,
     size: usize,
     policy: VerifyPolicy,
-) -> Vec<(VerifyOutcome, VerifierReach)> {
+) -> Vec<Judged> {
     let model = req.model.clone();
+    // #11526: only the security schema asks for reachability.
+    let security = req
+        .response_schema
+        .as_ref()
+        .is_some_and(|s| s.name == SECURITY_VERIFY_SCHEMA_NAME);
     let attempts = policy.max_attempts.max(1);
     let mut last_class = String::new();
     for attempt in 1..=attempts {
         match verifier.complete(req.clone()).await {
-            Ok(resp) => return judgments_for(&resp.text, size),
+            Ok(resp) => return judgments_for(&resp.text, size, security),
             Err(e) if e.is_alarm() => {
                 // Config/lifecycle failure: loud, and deterministic, so never retried.
                 let error_class = error_class(&e);
                 emit_verification_model_error(&model, &error_class, &e);
                 let outcome = VerifyOutcome::ErrorRefuted { error_class };
-                return vec![(outcome, VerifierReach::Failed); size];
+                return vec![(outcome, VerifierReach::Failed, None); size];
             }
             Err(e) => {
                 last_class = error_class(&e);
@@ -585,14 +597,22 @@ async fn verify_batch(
              the finding was neither confirmed nor refuted"
         ),
     };
-    vec![(outcome, VerifierReach::Failed); size]
+    vec![(outcome, VerifierReach::Failed, None); size]
 }
+
+/// One finding's verifier result: outcome, whether it was judged, and the
+/// reachability note a CONFIRMED security finding carries (#11526).
+pub(crate) type Judged = (VerifyOutcome, VerifierReach, Option<String>);
 
 /// Map a verifier answer to one outcome per finding.
 ///
 /// What: CONFIRMED / REFUTED / UNVERIFIABLE (#5309) are `Judged`; an entry
-/// the answer does not settle is `TruncationRefuted` and `Failed`.
-fn judgments_for(text: &str, size: usize) -> Vec<(VerifyOutcome, VerifierReach)> {
+/// the answer does not settle is `TruncationRefuted` and `Failed`. When
+/// `security` is set (#11526) the answer's reachability fields pass through
+/// `apply_reachability`, so CONFIRMED + UNREACHABLE is not confirmed.
+/// Test: `unreachable_security_finding_is_withheld_with_its_rationale`.
+fn judgments_for(text: &str, size: usize, security: bool) -> Vec<Judged> {
+    let reachability = security.then(|| parse_reachability(text)).flatten();
     let parsed: Vec<Option<Judgment>> = if size == 1 {
         vec![parse_judgment(text)]
     } else {
@@ -604,21 +624,30 @@ fn judgments_for(text: &str, size: usize) -> Vec<(VerifyOutcome, VerifierReach)>
     parsed
         .into_iter()
         .map(|judgment| match judgment {
-            Some(Judgment::Confirmed) => (VerifyOutcome::Confirmed, VerifierReach::Judged),
-            Some(Judgment::Refuted) => (VerifyOutcome::Refuted, VerifierReach::Judged),
+            Some(Judgment::Confirmed) => {
+                let (outcome, note) =
+                    apply_reachability(VerifyOutcome::Confirmed, reachability.as_ref());
+                (outcome, VerifierReach::Judged, note)
+            }
+            Some(Judgment::Refuted) => (VerifyOutcome::Refuted, VerifierReach::Judged, None),
             // #5309: the evidence is outside the diff — a judgment, not a failure.
             Some(Judgment::Unverifiable) => (
                 VerifyOutcome::Unverifiable {
                     reason: VERIFIER_UNVERIFIABLE_REASON.to_string(),
                 },
                 VerifierReach::Judged,
+                None,
             ),
             None => {
                 warn!(
                     text = %truncate(text, 120),
                     "verifier answer did not judge a finding — withholding it (#8904)"
                 );
-                (VerifyOutcome::TruncationRefuted, VerifierReach::Failed)
+                (
+                    VerifyOutcome::TruncationRefuted,
+                    VerifierReach::Failed,
+                    None,
+                )
             }
         })
         .collect()

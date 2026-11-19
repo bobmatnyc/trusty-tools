@@ -38,6 +38,30 @@ fn plan_batches_cuts_the_lowest_impact_findings() {
     assert_eq!(plan.over_cap, vec![0], "the Low finding is cut first");
 }
 
+/// #11526: security singletons emitted while a higher-impact non-security
+/// batch is still open must not push that batch past the cap.
+#[test]
+fn plan_batches_cap_cuts_low_impact_security_after_a_high_batch() {
+    let security = |file| Finding::new(file, "security", "a hole", "close it", 0.5, Effort::Low);
+    let findings = vec![
+        finding("src/a.rs", Effort::High, 0.9),
+        security("src/s1.rs"),
+        security("src/s2.rs"),
+        security("src/s3.rs"),
+    ];
+    let plan = plan_batches(&findings, &[0, 1, 2, 3], 5, 2);
+    assert_eq!(
+        plan.batches,
+        vec![vec![0], vec![1]],
+        "the High finding A is kept"
+    );
+    assert_eq!(
+        plan.over_cap,
+        vec![2, 3],
+        "the lowest-impact findings are cut"
+    );
+}
+
 #[test]
 fn file_diff_slice_keeps_only_the_named_files() {
     let diff = "diff --git a/src/a.rs b/src/a.rs\n+a\ndiff --git a/src/b.rs b/src/b.rs\n+b\n\
