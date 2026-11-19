@@ -710,7 +710,7 @@ global config schema is trivially addable following the same pattern in
 ```toml
 # .trusty-review.toml — committed at the repo root
 [voice]
-package = "duetto"
+package = "house"
 
 [review]
 template = "strict-security"

@@ -58,7 +58,7 @@ pub enum AllowSource {
     /// A directory strictly inside the named approved root.
     ///
     /// Why: `trusty-search.yaml` declares several named indexes over sub-roots
-    /// of one repo (`duetto-api`, `duetto-ui`), and `POST /indexes/:id/reindex`
+    /// of one repo (`acme-api`, `acme-ui`), and `POST /indexes/:id/reindex`
     /// can re-point an index at a narrower root. Refusing those would break a
     /// shipped feature. It costs nothing in blast radius: everything under
     /// `<approved>/…` is already indexable through `<approved>` itself, so

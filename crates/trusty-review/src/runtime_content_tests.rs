@@ -84,7 +84,7 @@ fn an_untrusted_checkout_override_is_refused_naming_the_variable() {
 /// variable; from an installed release it names `tm content update`.
 #[test]
 fn a_missing_file_names_the_remedy_for_its_source() {
-    let path = content_path("voices/duetto/voice.toml");
+    let path = content_path("voices/house/voice.toml");
     let dev = PromptContentError::Missing {
         origin: format!("{DEV_ORIGIN}/src/trusty-tools"),
         path: path.clone(),

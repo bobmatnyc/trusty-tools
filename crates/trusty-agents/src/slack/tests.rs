@@ -210,7 +210,7 @@ fn rbac_unknown_user_returns_virtual_cto_message() {
     // The handler returns `VIRTUAL_CTO_MESSAGE` verbatim for this case;
     // assert the constant carries the expected gating language.
     assert!(VIRTUAL_CTO_MESSAGE.starts_with(":lock:"));
-    assert!(VIRTUAL_CTO_MESSAGE.contains("Duetto engineering team"));
+    assert!(VIRTUAL_CTO_MESSAGE.contains("authorized team members"));
     assert!(VIRTUAL_CTO_MESSAGE.contains("don't have access to"));
 }
 

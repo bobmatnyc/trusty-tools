@@ -2,8 +2,8 @@
 //!
 //! Why: voice packages live at `~/.config/trusty-review/voices/<name>/voice.toml`
 //! (XDG convention, matching existing trusty-review config placement). The
-//! `duetto` package ships as product content (ADR-0064, #9015) at
-//! `instructions/trusty-review/voices/duetto/voice.toml`, read at runtime when
+//! `house` package ships as product content (ADR-0064, #9015) at
+//! `instructions/trusty-review/voices/house/voice.toml`, read at runtime when
 //! the user-config file is absent; content that lacks it, empties it or holds
 //! a voice that does not parse is a [`VoiceLoaderError::Content`], never a
 //! fallback.
@@ -16,8 +16,8 @@
 //!
 //! Discovery order: user-config dir wins over the content.
 //!
-//! Test: `load_bundled_duetto_voice`, `load_missing_voice_errors`,
-//! `load_from_custom_dir`, `list_includes_bundled_duetto` in voice/tests.rs;
+//! Test: `load_bundled_house_voice`, `load_missing_voice_errors`,
+//! `load_from_custom_dir`, `list_includes_bundled_house` in voice/tests.rs;
 //! `load_rejects_absolute_path_before_any_io`,
 //! `load_rejects_parent_traversal_before_any_io` in this module.
 //!
@@ -43,7 +43,7 @@ use crate::runtime_content::{
 use super::types::VoicePackage;
 
 /// The voice packages that ship in the instructional content (#9015).
-const SHIPPED: &[&str] = &["duetto"];
+const SHIPPED: &[&str] = &["house"];
 
 /// Errors produced by the voice loader.
 ///
@@ -103,7 +103,7 @@ pub enum VoiceLoaderError {
 /// `extra_dirs` lets tests inject a temp directory without touching the home dir.
 /// `skip_xdg` suppresses the XDG user-config lookup so tests can assert on the
 /// shipped voice exclusively (see `bundled_only()`).
-/// Test: `load_bundled_duetto_voice`, `load_from_custom_dir`.
+/// Test: `load_bundled_house_voice`, `load_from_custom_dir`.
 #[derive(Debug, Default)]
 pub struct VoiceLoader {
     /// Extra directories prepended to the search path (highest priority).
@@ -121,7 +121,7 @@ impl VoiceLoader {
     /// typical path for the CLI and daemon.
     /// What: creates a `VoiceLoader` with an empty `extra_dirs` list and
     /// `skip_xdg = false` (XDG search enabled).
-    /// Test: `load_bundled_duetto_voice`.
+    /// Test: `load_bundled_house_voice`.
     pub fn new() -> Self {
         Self::default()
     }
@@ -143,7 +143,7 @@ impl VoiceLoader {
     /// Construct a loader that skips the XDG user-config path entirely.
     ///
     /// Why: tests that assert on the SHIPPED voice must not accidentally load
-    /// an external `~/.config/trusty-review/voices/duetto/voice.toml` installed
+    /// an external `~/.config/trusty-review/voices/house/voice.toml` installed
     /// by a developer or CI machine — that would silently test the wrong thing.
     /// `bundled_only()` guarantees only the instructional content is reachable
     /// for any given voice name.
@@ -151,7 +151,7 @@ impl VoiceLoader {
     /// suppressed (achieved by pre-populating `extra_dirs` with an empty sentinel
     /// value and overriding `load` via the `skip_xdg` flag).  Internally this is
     /// equivalent to `with_extra_dirs(vec![])` PLUS setting `skip_xdg = true`.
-    /// Test: `bundled_duetto_matches_external_when_present` in tests_integration.rs.
+    /// Test: `bundled_house_matches_external_when_present` in tests_integration.rs.
     pub fn bundled_only() -> Self {
         Self {
             extra_dirs: vec![],
@@ -172,7 +172,7 @@ impl VoiceLoader {
     /// `VoiceLoaderError::NotFound` when nothing has that name, and
     /// `VoiceLoaderError::Content` when the content cannot be resolved, or a
     /// shipped voice is absent, empty or does not parse (#9015).
-    /// Test: `load_bundled_duetto_voice`, `load_missing_voice_errors`,
+    /// Test: `load_bundled_house_voice`, `load_missing_voice_errors`,
     /// `load_from_custom_dir`, `load_rejects_absolute_path_before_any_io`,
     /// `load_rejects_parent_traversal_before_any_io`.
     pub fn load(&self, name: &str) -> Result<VoicePackage, VoiceLoaderError> {
@@ -232,7 +232,7 @@ impl VoiceLoader {
     /// What: scans each search directory for subdirectories containing
     /// `voice.toml`; always includes the shipped voices, which the content
     /// serves (#9015: listing reads no content).  Returns an alphabetically sorted, deduplicated list.
-    /// Test: `list_includes_bundled_duetto`.
+    /// Test: `list_includes_bundled_house`.
     pub fn list(&self) -> Vec<String> {
         let mut names = std::collections::BTreeSet::new();
 
@@ -257,7 +257,7 @@ impl VoiceLoader {
     ///
     /// Why: private helper to avoid duplicating read+parse logic.
     /// What: reads the file contents and calls `toml::from_str`.
-    /// Test: exercised transitively by `load_bundled_duetto_voice`.
+    /// Test: exercised transitively by `load_bundled_house_voice`.
     fn parse_file(path: &Path) -> Result<VoicePackage, VoiceLoaderError> {
         let content = std::fs::read_to_string(path).map_err(|source| VoiceLoaderError::Io {
             path: path.to_path_buf(),
@@ -277,7 +277,7 @@ impl VoiceLoader {
 /// What: reads `base` directory entries; for each subdir, checks for a
 /// `voice.toml`; inserts the subdir name into `names`.  Any I/O error is
 /// silently skipped (the directory may not exist).
-/// Test: exercised transitively by `list_includes_bundled_duetto`.
+/// Test: exercised transitively by `list_includes_bundled_house`.
 fn collect_voice_names(base: &Path, names: &mut std::collections::BTreeSet<String>) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;

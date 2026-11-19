@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn accepts_bare_identifier() {
         assert!(is_valid_identifier("strict-security"));
-        assert!(is_valid_identifier("duetto"));
+        assert!(is_valid_identifier("house"));
         assert!(is_valid_identifier("my_voice-2"));
         assert!(is_valid_identifier("A1"));
     }

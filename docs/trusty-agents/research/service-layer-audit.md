@@ -22,7 +22,7 @@ the migration order so the consolidation can proceed in safe phases.
 | Google Workspace OpenRPC spec | `trusty-common/skills/gworkspace-calendar.md` | Markdown spec only | Spec, no implementation behind it. |
 | CTO DB OpenRPC spec | `trusty-common/skills/cto-db-openrpc.md` | Markdown spec only | Spec, no implementation behind it. |
 | trusty-izzie services | `trusty-izzie` (separate repo) | Rust service impls | Duplicate implementations of the same integrations. |
-| Python CTO bot services | `~/Duetto/cto/app/cto_bot/services/` | Python service impls | Independent Python reimplementation of CTO-domain integrations. |
+| Python CTO bot services | `~/Acme/cto/app/cto_bot/services/` | Python service impls | Independent Python reimplementation of CTO-domain integrations. |
 | Granola API client | (none — only `grn_` key + `public-api.granola.ai/v1/` referenced) | — | No coded client anywhere yet; each consumer would hand-roll one. |
 
 ## 2. Duplication Map

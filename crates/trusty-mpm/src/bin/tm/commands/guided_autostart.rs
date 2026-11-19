@@ -255,7 +255,7 @@ fn run_launchctl(args: &[String]) -> Option<super::guided_autostart_plan::Launch
 /// Extract the host token from a git remote URL (lowercased input expected).
 ///
 /// Why: `is_github_remote` needs to compare the host portion of the URL, not
-/// the whole string, so that `github-duetto` SSH aliases are matched without
+/// the whole string, so that `github-acme` SSH aliases are matched without
 /// also matching unrelated hosts that happen to contain `"github"`.
 /// What: handles scp-style (`git@HOST:path` → `HOST`), `https://[user@]HOST/…`,
 /// and `ssh://[user@]HOST/…`. Strips any trailing `:<port>` from scheme-style

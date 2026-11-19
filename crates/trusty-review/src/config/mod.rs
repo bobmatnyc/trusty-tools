@@ -346,7 +346,7 @@ pub struct ReviewConfig {
     /// Name of the voice package to load for the 3-layer prompt composition
     /// (stock → principles → voice).
     ///
-    /// `TRUSTY_REVIEW_VOICE_PACKAGE` env var or `[voice] package = "duetto"` in
+    /// `TRUSTY_REVIEW_VOICE_PACKAGE` env var or `[voice] package = "house"` in
     /// the TOML config.  Empty/absent = no voice package (opt-in).
     pub voice_package: Option<String>,
 

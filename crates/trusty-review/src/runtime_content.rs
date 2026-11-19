@@ -46,7 +46,7 @@ pub const REMEDY: &str = "run `tm content update`, or install by hand: `gh relea
 /// How [`describe_source`] names a dev checkout: this prefix, then the root.
 const DEV_ORIGIN: &str = "dev checkout ";
 
-/// The bundle path of `rel` under [`CONTENT_DIR`] (`voices/duetto/voice.toml`).
+/// The bundle path of `rel` under [`CONTENT_DIR`] (`voices/house/voice.toml`).
 pub fn content_path(rel: &str) -> String {
     format!("{CONTENT_DIR}/{rel}")
 }
@@ -262,7 +262,7 @@ pub const REQUIRED_FILES: &[&str] = &[
     "templates/report-technical-dd.md",
     "templates/report-technical-dd-cast.md",
     "templates/review/strict-security.md",
-    "voices/duetto/voice.toml",
+    "voices/house/voice.toml",
 ];
 
 /// Reads every [`REQUIRED_FILES`] entry from `content` (#10588).
@@ -283,7 +283,7 @@ pub fn check_required(content: &ResolvedContent) -> Vec<PromptContentError> {
 /// [`require_text`] where an absent file of a name this binary does not ship
 /// is `Ok(None)`: the caller's own not-found, not a content defect (#9015).
 ///
-/// Why: a shipped name (`duetto`, `strict-security`) absent from content is
+/// Why: a shipped name (`house`, `strict-security`) absent from content is
 /// stale content and must refuse; any other name may be an operator's own
 /// file that simply is not there, which each loader reports as before.
 pub(crate) fn optional_text(

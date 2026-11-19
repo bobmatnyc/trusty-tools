@@ -107,7 +107,7 @@ rust-version = "1.94"
 # NOTE: workspace-level license is MIT. All crates inherit this via `license.workspace = true`.
 license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-tools"
-authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+authors = ["bobmatnyc"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──

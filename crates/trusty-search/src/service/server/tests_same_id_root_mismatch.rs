@@ -20,7 +20,7 @@
 //! joined so the caller can verify rather than infer.
 //!
 //! Basename keying is a SEPARATE defect these tests do not address: ids are path
-//! basenames, so two distinct checkouts `.../bob-duetto/api` and
+//! basenames, so two distinct checkouts `.../acme-admin/api` and
 //! `.../bobmatnyc/api` both derive `api`. After this change the second is
 //! refused rather than silently bound to the first — loud instead of wrong, but
 //! still not registerable. Richer id derivation is its own change.

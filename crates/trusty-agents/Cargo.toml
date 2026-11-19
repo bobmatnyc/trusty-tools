@@ -217,9 +217,8 @@ lru = "0.16"
 #      and such an agent crate, wiring them at startup via
 #      `trusty_agents::install_plugins(...)` before calling
 #      `trusty_agents::run()`. No in-workspace launcher does this today: the
-#      last such crate (`cto-assistant`) was dissolved in #3732 once its four
-#      CTO DB tools became reachable declaratively via the `cto-db` Python
-#      skill. This `install_plugins` mechanism remains available for any
+#      last such crate was dissolved in #3732 once its tools became
+#      reachable declaratively via a Python skill. This `install_plugins` mechanism remains available for any
 #      future private launcher.
 trusty-agents-common = { path = "../trusty-agents-common", version = "0.10" }
 

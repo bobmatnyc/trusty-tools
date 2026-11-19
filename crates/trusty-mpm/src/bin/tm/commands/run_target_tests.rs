@@ -275,14 +275,14 @@ fn classify_rejects_empty_target() {
 #[test]
 fn classify_resolves_account_flag() {
     let target =
-        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap();
+        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("acme-admin")).unwrap();
     assert_eq!(
         target,
         RunTarget::Repo {
             owner: "bobmatnyc".into(),
             repo: "trusty-tools".into(),
             clone_url: "https://github.com/bobmatnyc/trusty-tools".into(),
-            account: Some("bob-duetto".into()),
+            account: Some("acme-admin".into()),
         }
     );
 }
@@ -292,15 +292,14 @@ fn classify_resolves_account_flag() {
 #[test]
 fn classify_resolves_embedded_account() {
     let target =
-        classify_run_target_with_account("bob-duetto@duettoresearch/poc-hotel-supply", None)
-            .unwrap();
+        classify_run_target_with_account("acme-admin@acme/poc-hotel-supply", None).unwrap();
     assert_eq!(
         target,
         RunTarget::Repo {
-            owner: "duettoresearch".into(),
+            owner: "acme".into(),
             repo: "poc-hotel-supply".into(),
-            clone_url: "https://github.com/duettoresearch/poc-hotel-supply".into(),
-            account: Some("bob-duetto".into()),
+            clone_url: "https://github.com/acme/poc-hotel-supply".into(),
+            account: Some("acme-admin".into()),
         }
     );
 }
@@ -309,11 +308,9 @@ fn classify_resolves_embedded_account() {
 /// refused rather than silently picking one.
 #[test]
 fn classify_rejects_conflicting_account() {
-    let err = classify_run_target_with_account(
-        "bob-duetto@duettoresearch/poc-hotel-supply",
-        Some("bobmatnyc"),
-    )
-    .expect_err("conflicting accounts must be refused");
+    let err =
+        classify_run_target_with_account("acme-admin@acme/poc-hotel-supply", Some("bobmatnyc"))
+            .expect_err("conflicting accounts must be refused");
     assert!(
         err.to_string().contains("conflicting account selection"),
         "{err}"
@@ -324,18 +321,16 @@ fn classify_rejects_conflicting_account() {
 /// error just because both spellings were used).
 #[test]
 fn classify_accepts_agreeing_account_flag_and_shorthand() {
-    let target = classify_run_target_with_account(
-        "bob-duetto@duettoresearch/poc-hotel-supply",
-        Some("bob-duetto"),
-    )
-    .unwrap();
+    let target =
+        classify_run_target_with_account("acme-admin@acme/poc-hotel-supply", Some("acme-admin"))
+            .unwrap();
     assert_eq!(
         target,
         RunTarget::Repo {
-            owner: "duettoresearch".into(),
+            owner: "acme".into(),
             repo: "poc-hotel-supply".into(),
-            clone_url: "https://github.com/duettoresearch/poc-hotel-supply".into(),
-            account: Some("bob-duetto".into()),
+            clone_url: "https://github.com/acme/poc-hotel-supply".into(),
+            account: Some("acme-admin".into()),
         }
     );
 }
@@ -345,20 +340,20 @@ fn classify_accepts_agreeing_account_flag_and_shorthand() {
 #[test]
 fn classify_bare_accepts_account_flag_and_shorthand() {
     let via_flag =
-        classify_bare_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap();
+        classify_bare_with_account("bobmatnyc/trusty-tools", Some("acme-admin")).unwrap();
     assert_eq!(
         via_flag.unwrap(),
-        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("bob-duetto")).unwrap()
+        classify_run_target_with_account("bobmatnyc/trusty-tools", Some("acme-admin")).unwrap()
     );
 
     let via_shorthand =
-        classify_bare_with_account("bob-duetto@duettoresearch/poc-hotel-supply", None).unwrap();
+        classify_bare_with_account("acme-admin@acme/poc-hotel-supply", None).unwrap();
     assert!(matches!(
         via_shorthand.unwrap(),
         RunTarget::Repo {
             account: Some(a),
             ..
-        } if a == "bob-duetto"
+        } if a == "acme-admin"
     ));
 }
 
@@ -386,16 +381,13 @@ fn toks(items: &[&str]) -> Vec<String> {
 #[test]
 fn bare_form_lifts_a_trailing_user_flag() {
     let (rest, account) = split_trailing_account(&toks(&[
-        "https://github.com/duettoresearch/jev-matching",
+        "https://github.com/acme/jev-matching",
         "--user",
-        "bob-duetto",
+        "acme-admin",
     ]))
     .expect("a trailing --user must be lifted, not refused");
-    assert_eq!(
-        rest,
-        toks(&["https://github.com/duettoresearch/jev-matching"])
-    );
-    assert_eq!(account.as_deref(), Some("bob-duetto"));
+    assert_eq!(rest, toks(&["https://github.com/acme/jev-matching"]));
+    assert_eq!(account.as_deref(), Some("acme-admin"));
 }
 
 /// The `=` form and the `--account` spelling behave identically.
@@ -437,14 +429,14 @@ fn bare_form_leaves_unrelated_tokens_alone() {
 /// Test: itself.
 #[test]
 fn bare_form_refuses_two_different_accounts_around_the_repository() {
-    let err = reconcile_bare_account(Some("bobmatnyc".into()), Some("bob-duetto".into()))
+    let err = reconcile_bare_account(Some("bobmatnyc".into()), Some("acme-admin".into()))
         .expect_err("a conflict must refuse");
     assert!(err.to_string().contains("conflicting account"), "{err}");
     assert_eq!(
-        reconcile_bare_account(Some("bob-duetto".into()), Some("bob-duetto".into()))
+        reconcile_bare_account(Some("acme-admin".into()), Some("acme-admin".into()))
             .expect("agreeing values collapse")
             .as_deref(),
-        Some("bob-duetto")
+        Some("acme-admin")
     );
 }
 
@@ -487,9 +479,9 @@ fn bare_form_trailing_user_reaches_the_repo_target() {
     use clap::Parser;
     let cli = crate::cli::Cli::try_parse_from([
         "tm",
-        "https://github.com/duettoresearch/jev-matching",
+        "https://github.com/acme/jev-matching",
         "--user",
-        "bob-duetto",
+        "acme-admin",
     ])
     .expect("the bare form parses");
     let Some(crate::cli::Command::External(tokens)) = cli.command else {
@@ -507,32 +499,25 @@ fn bare_form_trailing_user_reaches_the_repo_target() {
     else {
         panic!("expected a repository target, got {target:?}");
     };
-    assert_eq!(
-        (owner.as_str(), repo.as_str()),
-        ("duettoresearch", "jev-matching")
-    );
-    assert_eq!(account.as_deref(), Some("bob-duetto"));
+    assert_eq!((owner.as_str(), repo.as_str()), ("acme", "jev-matching"));
+    assert_eq!(account.as_deref(), Some("acme-admin"));
 }
 
 /// 🔴 #9090 REGRESSION: a trailing `--u <login>` is lifted like `--user`.
 ///
 /// Why this is the assertion: the owner's
-/// `tm duettoresearch/duetto-blast-mfes --u bob-duetto` was refused with
+/// `tm acme/acme-blast --u acme-admin` was refused with
 /// "takes no further arguments", because `--u` was not an account spelling.
 /// Test: itself.
 #[test]
 fn bare_form_lifts_a_trailing_u_flag() {
     for tokens in [
-        &["duettoresearch/duetto-blast-mfes", "--u", "bob-duetto"][..],
-        &["duettoresearch/duetto-blast-mfes", "--u=bob-duetto"][..],
+        &["acme/acme-blast", "--u", "acme-admin"][..],
+        &["acme/acme-blast", "--u=acme-admin"][..],
     ] {
         let (rest, account) = split_trailing_account(&toks(tokens)).expect("lifted");
-        assert_eq!(
-            rest,
-            toks(&["duettoresearch/duetto-blast-mfes"]),
-            "{tokens:?}"
-        );
-        assert_eq!(account.as_deref(), Some("bob-duetto"), "{tokens:?}");
+        assert_eq!(rest, toks(&["acme/acme-blast"]), "{tokens:?}");
+        assert_eq!(account.as_deref(), Some("acme-admin"), "{tokens:?}");
     }
 }
 
@@ -565,20 +550,20 @@ fn selected_account(argv: &[&str]) -> Option<String> {
 /// Test: itself.
 #[test]
 fn every_account_spelling_selects_the_account_in_every_form_and_position() {
-    const REPO: &str = "duettoresearch/duetto-blast-mfes";
+    const REPO: &str = "acme/acme-blast";
     for flag in ["--account", "--user", "--u"] {
         let cases: [Vec<&str>; 6] = [
-            vec!["tm", flag, "bob-duetto", REPO],
-            vec!["tm", REPO, flag, "bob-duetto"],
-            vec!["tm", "run", flag, "bob-duetto", REPO],
-            vec!["tm", "run", REPO, flag, "bob-duetto"],
-            vec!["tm", "register", flag, "bob-duetto", REPO],
-            vec!["tm", "register", REPO, flag, "bob-duetto"],
+            vec!["tm", flag, "acme-admin", REPO],
+            vec!["tm", REPO, flag, "acme-admin"],
+            vec!["tm", "run", flag, "acme-admin", REPO],
+            vec!["tm", "run", REPO, flag, "acme-admin"],
+            vec!["tm", "register", flag, "acme-admin", REPO],
+            vec!["tm", "register", REPO, flag, "acme-admin"],
         ];
         for argv in cases {
             assert_eq!(
                 selected_account(&argv).as_deref(),
-                Some("bob-duetto"),
+                Some("acme-admin"),
                 "{argv:?}"
             );
         }
@@ -592,9 +577,9 @@ fn every_account_spelling_selects_the_account_in_every_form_and_position() {
 fn preflight_refuses_a_broken_accounts_table_naming_the_file() {
     use trusty_mpm::core::gh_org_accounts::{AccountSource, OrgAccounts, ResolvedAccount};
     let path = std::path::Path::new("/home/u/.trusty-mpm/config.toml");
-    let broken = OrgAccounts::from_toml("[accounts]\nduettoresearch = bob-duetto\n", path)
+    let broken = OrgAccounts::from_toml("[accounts]\nacme = acme-admin\n", path)
         .expect_err("an unquoted login is a syntax error");
-    let origin = "https://github.com/duettoresearch/jev.git";
+    let origin = "https://github.com/acme/jev.git";
 
     let err = preflight_verdict(origin, Err(broken.to_string()))
         .expect_err("a broken table refuses the launch")
@@ -605,7 +590,7 @@ fn preflight_refuses_a_broken_accounts_table_naming_the_file() {
     assert!(err.contains("No session was started"), "{err}");
 
     let chosen = ResolvedAccount {
-        login: "bob-duetto".into(),
+        login: "acme-admin".into(),
         source: AccountSource::OrgMap,
     };
     preflight_verdict(origin, Ok(Some(chosen))).expect("a mapped account launches");

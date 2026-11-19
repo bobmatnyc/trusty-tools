@@ -608,19 +608,17 @@ fn same_url_reregistration_is_idempotent() {
 #[test]
 fn account_shorthand_classifies_and_looks_like_repo() {
     assert_eq!(
-        classify("bob-duetto@duettoresearch/poc-hotel-supply"),
+        classify("acme-admin@acme/poc-hotel-supply"),
         Positional::Shorthand {
-            account: Some("bob-duetto"),
-            owner: "duettoresearch",
+            account: Some("acme-admin"),
+            owner: "acme",
             repo: "poc-hotel-supply",
         }
     );
-    assert!(looks_like_repo(
-        "bob-duetto@duettoresearch/poc-hotel-supply"
-    ));
+    assert!(looks_like_repo("acme-admin@acme/poc-hotel-supply"));
     assert_eq!(
-        super::embedded_account("bob-duetto@duettoresearch/poc-hotel-supply"),
-        Some("bob-duetto")
+        super::embedded_account("acme-admin@acme/poc-hotel-supply"),
+        Some("acme-admin")
     );
 }
 
@@ -663,8 +661,8 @@ fn account_prefix_before_a_full_url_is_not_shorthand() {
 #[test]
 fn account_shorthand_resolves_to_the_same_url_as_plain_shorthand() {
     assert_eq!(
-        super::resolved_url("bob-duetto@duettoresearch/poc-hotel-supply").unwrap(),
-        "https://github.com/duettoresearch/poc-hotel-supply"
+        super::resolved_url("acme-admin@acme/poc-hotel-supply").unwrap(),
+        "https://github.com/acme/poc-hotel-supply"
     );
 }
 
@@ -706,7 +704,7 @@ fn resolve_account_agreeing_flag_and_embedded() {
 
 #[test]
 fn resolve_account_conflicting_flag_and_embedded_errors() {
-    let err = super::resolve_account(Some("bobmatnyc"), Some("bob-duetto")).unwrap_err();
+    let err = super::resolve_account(Some("bobmatnyc"), Some("acme-admin")).unwrap_err();
     assert!(
         err.to_string().contains("conflicting account selection"),
         "{err}"

@@ -1,6 +1,6 @@
 //! Per-user RBAC configuration for the Slack gateway (#480/#481).
 //!
-//! Why: The Slack bot is shared across the Duetto engineering team, but the
+//! Why: The Slack bot is shared across your team, but the
 //! underlying `cto-assistant` persona reaches sensitive HR/budget data. Each
 //! known user is pinned to a `ServiceTier` (gating the persona toolset) and an
 //! optional persona allow-list (gating `/slack-switch`); unknown users get a
@@ -16,7 +16,7 @@ use tracing::warn;
 
 /// Per-user RBAC config for Slack (#481).
 ///
-/// Why: The Slack bot is shared across the Duetto engineering team, but the
+/// Why: The Slack bot is shared across your team, but the
 /// underlying `cto-assistant` persona reaches sensitive HR/budget data. Each
 /// known user is pinned to a `ServiceTier` (which gates the persona toolset
 /// via `filter_tools_for_user`) and an optional persona allow-list (which
@@ -53,9 +53,9 @@ pub struct SlackRbacConfig {
 /// Why: Unknown users must NOT reach the LLM or any tool — the bot speaks as
 /// a general "Virtual CTO" with no internal-data access. Returned verbatim,
 /// bypassing `run_pm_task_with_persona` entirely.
-pub(super) const VIRTUAL_CTO_MESSAGE: &str = ":lock: This assistant is for Duetto engineering team members. \
+pub(super) const VIRTUAL_CTO_MESSAGE: &str = ":lock: This assistant is for authorized team members. \
 I can discuss general technology strategy and software architecture, but I don't have access to \
-internal Duetto data. Feel free to ask general questions.";
+internal data. Feel free to ask general questions.";
 
 impl SlackRbacConfig {
     /// Parse the RBAC config from process env.

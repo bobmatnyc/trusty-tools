@@ -25,12 +25,12 @@ use crate::identifier::is_valid_identifier;
 ///
 /// Why: voice package selection is opt-in; storing it in the config file lets
 /// teams configure a shared voice without setting env vars on every machine.
-/// What: `package` names the voice to load (e.g. `"duetto"`); `principles`
+/// What: `package` names the voice to load (e.g. `"house"`); `principles`
 /// toggles the universal principles layer (defaults to `true`).
 /// Test: covered indirectly by `ReviewConfig::from_env_and_file`.
 #[derive(Debug, Default, Deserialize)]
 pub struct VoiceFileConfig {
-    /// Name of the voice package to load (e.g. `"duetto"`).
+    /// Name of the voice package to load (e.g. `"house"`).
     /// `None` or empty = no voice package.
     #[serde(default)]
     pub package: Option<String>,

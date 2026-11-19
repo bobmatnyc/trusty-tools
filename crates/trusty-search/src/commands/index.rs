@@ -4,7 +4,7 @@
 //! contains a `trusty-search.yaml` file (issue: repo-level config), we
 //! transparently fan out into one register+reindex pass per declared index
 //! so a single `trusty-search index` command can populate multiple named
-//! slices (e.g. `duetto-api` and `duetto-ui`). When a repo instead contains
+//! slices (e.g. `acme-api` and `acme-ui`). When a repo instead contains
 //! a single-index `.trusty-search.yaml` dotfile (issue #30), its `name` and
 //! `exclude` values supply defaults that committed teammates and daemon
 //! restarts pick up automatically — CLI flags always override them.
@@ -135,8 +135,8 @@ pub async fn handle_index(
             for (i, idx) in selected.iter().enumerate() {
                 // Issue #929: print a clear banner before each index so the
                 // operator can distinguish back-to-back completion blocks when
-                // a YAML declares multiple indexes (e.g. duetto-backend +
-                // duetto-frontend). The banner is emitted for all counts,
+                // a YAML declares multiple indexes (e.g. acme-backend +
+                // acme-frontend). The banner is emitted for all counts,
                 // including the single-index case, so piped logs always carry
                 // the index name.
                 println!(
@@ -192,7 +192,7 @@ pub async fn handle_index(
 /// Choose which manifest-declared indexes one `trusty-search index` run touches.
 ///
 /// Why: #6920 — a `-n` that named no declared index used to be dropped, so
-/// `index --force -n flyr-duetto-monolith <root>` reindexed `duetto-backend`
+/// `index --force -n acme-monolith <root>` reindexed `acme-backend`
 /// instead and tore that index's HNSW snapshot during the #6910 recovery.
 /// Refusing is the ruling: the operator either meant a declared name or meant
 /// a different root, and both mistakes are cheap to correct and expensive to
@@ -501,17 +501,17 @@ mod tests {
         }
     }
 
-    /// #6920 regression: `-n flyr-duetto-monolith` on a root whose manifest
-    /// declares `duetto-backend` / `duetto-frontend` must fail, not fall back
+    /// #6920 regression: `-n acme-monolith` on a root whose manifest
+    /// declares `acme-backend` / `acme-frontend` must fail, not fall back
     /// to indexing the declared names. Before the fix this returned both
-    /// declared indexes and the reindex ran against `duetto-backend`.
+    /// declared indexes and the reindex ran against `acme-backend`.
     #[test]
     fn manifest_name_conflict_is_refused() {
-        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let cfg = manifest(&["acme-backend", "acme-frontend"]);
         let got = select_manifest_indexes(
-            Some("flyr-duetto-monolith"),
+            Some("acme-monolith"),
             &cfg,
-            Path::new("/repo/flyr-duetto-monolith"),
+            Path::new("/repo/acme-monolith"),
         );
         assert!(
             got.is_err(),
@@ -524,19 +524,19 @@ mod tests {
     /// name, the conflicting value, and both ways forward.
     #[test]
     fn manifest_name_conflict_message_names_manifest_and_ways_forward() {
-        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let cfg = manifest(&["acme-backend", "acme-frontend"]);
         let err = select_manifest_indexes(
-            Some("flyr-duetto-monolith"),
+            Some("acme-monolith"),
             &cfg,
-            Path::new("/repo/flyr-duetto-monolith"),
+            Path::new("/repo/acme-monolith"),
         )
         .expect_err("conflicting -n should error");
         let msg = err.to_string();
         for needle in [
-            "flyr-duetto-monolith",
-            "/repo/flyr-duetto-monolith/trusty-search.yaml",
-            "duetto-backend",
-            "duetto-frontend",
+            "acme-monolith",
+            "/repo/acme-monolith/trusty-search.yaml",
+            "acme-backend",
+            "acme-frontend",
             "omit --name",
             "pass one of the declared names",
         ] {
@@ -547,25 +547,24 @@ mod tests {
     /// A `-n` naming one declared index narrows the run to that index.
     #[test]
     fn manifest_name_match_selects_only_that_index() {
-        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
-        let got =
-            select_manifest_indexes(Some("duetto-frontend"), &cfg, Path::new("/repo/monolith"))
-                .expect("a declared name must be accepted");
+        let cfg = manifest(&["acme-backend", "acme-frontend"]);
+        let got = select_manifest_indexes(Some("acme-frontend"), &cfg, Path::new("/repo/monolith"))
+            .expect("a declared name must be accepted");
         assert_eq!(
             got.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
-            vec!["duetto-frontend"]
+            vec!["acme-frontend"]
         );
     }
 
     /// No `-n` keeps the historical fan-out over every declared index.
     #[test]
     fn manifest_without_cli_name_selects_every_index() {
-        let cfg = manifest(&["duetto-backend", "duetto-frontend"]);
+        let cfg = manifest(&["acme-backend", "acme-frontend"]);
         let got = select_manifest_indexes(None, &cfg, Path::new("/repo/monolith"))
             .expect("no -n must fan out");
         assert_eq!(
             got.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
-            vec!["duetto-backend", "duetto-frontend"]
+            vec!["acme-backend", "acme-frontend"]
         );
     }
 
