@@ -169,6 +169,7 @@ trusty-mpm	lib	daemon::doctor::doctor_instruction_fold::tests	reads test_support
 trusty-mpm	lib	daemon::doctor::doctor_output_style::tests	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	daemon::doctor::doctor_scaffold_tracking::tests::regenerated_paths_includes_all_output_styles	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	lib	daemon::doctor::doctor_session_profile::tests::an_agents_md_carrying_a_dropped_core_marker_does_not_hide_it	reads test_support::rc — composes the Architect prompt over the checkout (#8436)
+trusty-mpm	lib	content::bundle_cache::tests::first_use_tests::a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch	reads content::find_dev_checkout — the cwd checkout serves a session with nothing installed (#11499)
 trusty-mpm	lib	daemon::managed_routes::managed_checkout::tests::a_worktree_of_the_managed_checkout_composes_from_its_own_content	reads literal 'content/instructions/sections/identity.md' from a worktree's own content (#11499)
 trusty-mpm	lib	daemon::managed_routes::lifecycle::tests::ensure_deployment_complete_ok_when_already_complete	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
 trusty-mpm	test:env_serial	standalone_isolation::output_styles_deploy_to_config_dir_not_home	reads the checkout's content: FrameworkContent via test_support::rc / install::test_content_ref (#9012)
