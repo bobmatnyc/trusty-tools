@@ -10,8 +10,7 @@
 //! and names the fields that need ilio ([`ilio_fields`]). The three ilio
 //! rules the checker gained here ([`badid`], [`remind_problem`],
 //! [`pct_unchanged`]) run on every block, whichever path applies it.
-//! Test: `each_new_check_rejects_before_any_apply`,
-//! `a_block_with_new_runs_ilio_once_with_the_block_on_stdin` (trusty-mpm).
+//! Test: `route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks`.
 
 use std::io::Write as _;
 

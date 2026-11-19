@@ -182,3 +182,43 @@ fn il_write_failure_reports_an_error_and_leaves_the_store() -> R {
     assert_eq!(snapshot(&paths), before);
     Ok(())
 }
+
+#[test]
+fn route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks() -> R {
+    let tmp = tempfile::tempdir()?;
+    let paths = seed(tmp.path())?;
+    let scan = no_secrets;
+    let fence = |b: &str| format!("```il\n{b}\n```");
+    let covered = fence("task: free: x\ndone: d\npct: 5\nnext: n\nact: ran it");
+    assert_eq!(il::route(&paths, &covered, &scan)?, il::Route::Rust);
+    let pulse = fence("task: xa-T01\ndone: d\npct: 5\nnext: n");
+    let new = fence("task: free: x\ndone: d\npct: 5\nnew: A \"call\"\nnext: n");
+    for (text, want) in [(&pulse, vec!["pct"]), (&new, vec!["new"])] {
+        match il::route(&paths, text, &scan)? {
+            il::Route::Ilio { packet, fields } => {
+                assert_eq!(fields, want);
+                il::mark_applied(&paths, &packet)?;
+                assert_eq!(il::route(&paths, text, &scan)?, il::Route::Replay(packet));
+            }
+            other => panic!("{want:?}: {other:?}"),
+        }
+    }
+    let mut st: serde_json::Value = serde_json::from_str(&fs::read_to_string(&paths.state)?)?;
+    st["tasks"][0]["pct"] = serde_json::json!(40);
+    fs::write(&paths.state, st.to_string())?;
+    for (body, code) in [
+        ("task: xa-To1\ndone: d\npct: 5\nnext: n", "BADID"),
+        (
+            "task: xa-T01\ndone: d\npct: 50\nremind: xa-T01 at=2026-12-01\nnext: n",
+            "REMIND",
+        ),
+        ("task: xa-T01\ndone: d\npct: 40\nnext: n", "PCT-UNCHANGED"),
+    ] {
+        let got = il::route(&paths, &fence(body), &scan);
+        assert!(
+            matches!(&got, Err(IlError::Reject(r)) if r.code == code),
+            "{code}: {got:?}"
+        );
+    }
+    Ok(())
+}
