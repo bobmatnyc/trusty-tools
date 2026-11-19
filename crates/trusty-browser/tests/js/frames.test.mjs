@@ -165,6 +165,16 @@ test("a snapshot reports the tabs the leased tab opened", async () => {
   assert.deepEqual(r.result.popups, [{tab:9, window:3}]);
 });
 
+test("a snapshot caps the opened tabs it reports", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  f.tabs.get(7).frames = omni();
+  for (let id = 100; id < 160; id++) f.tabs.set(id, {url:"https://a.test/", opener:7, window:2});
+  const r = await f.command("page_snapshot", {grant, tab:7, document:"doc-7"});
+  assert.equal(r.result.popups.length, 50);
+  assert.equal(r.result.truncated, true);
+});
+
 test("a snapshot whose attach fails on the same document answers DebuggerBusy", async () => {
   const f = await codeFixture();
   const {grant} = await connectGrant(f);

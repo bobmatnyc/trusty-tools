@@ -576,6 +576,7 @@ TrustyPages.commands = deps => {
     VIEW.every(k => Number.isFinite(v[k]));
   // #11211: base64 characters a capture may carry, so the reply stays under the 1 MiB native frame limit.
   const CAPTURE_BUDGET = 700000;
+  const POPUP_MAX = 50;
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
@@ -1023,13 +1024,14 @@ TrustyPages.commands = deps => {
     // What: the frames' accessibility trees from TrustyFrames.snapshot over one debugger attachment, plus the
     //   tabs this tab opened (popups and new windows), reported for the agent to select; none is leased.
     // Test: tests/js/frames.test.mjs `a snapshot reads every frame's accessibility tree within the node budget`,
-    //   `a snapshot reports the tabs the leased tab opened`.
+    //   `a snapshot reports the tabs the leased tab opened`, `a snapshot caps the opened tabs it reports`.
     async page_snapshot(req) {
       await landed(req.tab);
       const {frames, truncated} = await debugged(req, 8000, ctx => TrustyFrames.snapshot(ctx));
-      const opened = (await chrome.tabs.query({})).filter(t => t.openerTabId === req.tab)
-        .map(t => ({tab:t.id, window:t.windowId}));
-      return {document:req.document, frames, popups:opened, truncated};
+      // The reply stays under the 1 MiB frame, so the list is cut at POPUP_MAX like the frames and nodes.
+      const all = (await chrome.tabs.query({})).filter(t => t.openerTabId === req.tab);
+      const opened = all.slice(0, POPUP_MAX).map(t => ({tab:t.id, window:t.windowId}));
+      return {document:req.document, frames, popups:opened, truncated:truncated || all.length > POPUP_MAX};
     },
     // #11208: a new background tab; the broker leases it to the session that asked.
     // Test: tests/js/pages.test.mjs `a tab that fails after it is created is closed and answers OutcomeUnknown`.

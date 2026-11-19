@@ -201,7 +201,7 @@ fn the_text_marks_cross_origin_canvas_and_refused_frames() {
         value: None,
     }];
     frames[4].refused = Some("PdfViewer".into());
-    let (text, list, table, cut) = assemble(&frames, "L", "d1");
+    let (text, list, table, cut) = assemble(&frames, "L", "d1", 0);
     assert!(!cut);
     assert!(table.issued.contains(&(1, 44)) && table.issued.contains(&(2, 42)));
     let want = concat!(
@@ -303,4 +303,67 @@ fn the_worker_caps_are_within_the_broker_refusals() {
     let body = format!(r#"{{"frames":[{}]}}"#, items.join(","));
     let raw = Json::parse(body.as_bytes()).expect("json");
     assert_eq!(frames_of(&raw).map(|f| f.len()), Ok(150));
+}
+
+/// A node whose name is `unit` repeated to the worker's 160-character cap.
+fn heavy(unit: &str, backend: i64) -> Node {
+    Node {
+        depth: 0,
+        role: "button".into(),
+        name: unit.repeat(160 / unit.chars().count()),
+        backend,
+        value: None,
+    }
+}
+
+#[test]
+fn an_encoded_reply_stays_within_one_frame() {
+    // #11362: the broker writes the reply `ensure_ascii`, so the text is budgeted
+    // as escaped bytes. CJK escapes 6x, an astral emoji 12x, a quote 4x.
+    let url = format!("https://a.test/{}", "x".repeat(2048 - 15));
+    let mut frames: Vec<Frame> = (0..150)
+        .map(|i| {
+            let parent = (i > 0).then_some("F0");
+            let mut f = frame(&format!("F{i}"), parent, "https://a.test", false, None);
+            f.url = url.clone();
+            f
+        })
+        .collect();
+    let units = ["\u{1f600}", "\"", "\u{6f22}", "\u{1f680}"];
+    for (n, f) in frames.iter_mut().enumerate() {
+        f.nodes = (1..=60)
+            .map(|b| heavy(units[(n + b as usize) % 4], b))
+            .collect();
+    }
+    let popups = Json::Array(
+        (0..50)
+            .map(|i| Json::object([("tab", Json::Int(i)), ("window", Json::Int(1))]))
+            .collect(),
+    );
+    let shell = reply_of(7, "d1", Json::Null, "", popups.clone(), true);
+    let reserved = shell.dumps(true).expect("dumps").len();
+    let (text, list, _, cut) = assemble(&frames, "L", "d1", reserved);
+    let reply = reply_of(7, "d1", list, &text, popups, cut);
+    let wire = crate::frame::encode(&reply).expect("the reply fits one frame");
+    assert!(wire.len() - crate::frame::HEADER <= crate::frame::MAX_FRAME);
+    assert!(cut, "the rows past the budget are dropped");
+    assert_eq!(reply.get("truncated"), Some(&Json::Bool(true)));
+    assert!(text.ends_with("[text truncated]\n"));
+}
+
+#[test]
+fn page_chosen_urls_that_cannot_be_cut_are_refused() {
+    // 150 CJK urls at the worker's 2048-character cap encode to ~1.8 MB alone.
+    let url = "\u{6f22}".repeat(2048);
+    let frames: Vec<String> = (0..150)
+        .map(|i| {
+            let parent = if i == 0 { "null".into() } else { "\"F0\"".to_owned() };
+            format!(
+                r#"{{"frame":"F{i}","parent":{parent},"loader":"L","url":"{url}","origin":"https://a.test","root":false,"owner":null,"refused":null,"nodes":[]}}"#
+            )
+        })
+        .collect();
+    let raw =
+        Json::parse(format!(r#"{{"frames":[{}]}}"#, frames.join(",")).as_bytes()).expect("json");
+    assert!(frames_of(&raw).is_err());
 }

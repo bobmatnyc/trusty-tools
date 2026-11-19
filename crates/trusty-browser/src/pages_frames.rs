@@ -37,9 +37,16 @@ use crate::refusal::Refusal;
 pub const MAX_FRAMES: usize = 200;
 /// Deepest node depth accepted; the worker stops at 40 (DEPTH_MAX).
 pub const MAX_DEPTH: i64 = 1000;
-/// Longest rendered snapshot text, in bytes; past it lines stop and the
-/// reply is `truncated`.
-pub const MAX_TEXT: usize = 512 * 1024;
+/// Largest encoded `page_snapshot` reply body, in bytes. The broker writes
+/// the reply through `frame::encode` (`ensure_ascii`), which refuses a body
+/// over `MAX_FRAME` (1 MiB) and so closes the client session; the text stops
+/// at this budget, counted as escaped bytes, so the whole reply stays under it.
+pub const MAX_ENCODED: usize = 900 * 1000;
+/// Most escaped bytes the frames' urls and origins may take, an origin counted
+/// twice (list and header line); past it the worker's reply is refused.
+const MAX_META: usize = 400 * 1000;
+/// The closing `[text truncated]\n` line, escaped, reserved from the budget.
+const CUT_LINE: usize = 20;
 /// Snapshots a session keeps, one per lease; the oldest is dropped first.
 pub const KEEP: usize = 16;
 /// Longest frame id or loader id, as the worker checks it.
@@ -261,6 +268,14 @@ pub fn frames_of(raw: &Json) -> Result<Vec<Frame>, Refusal> {
     if tops != 1 || frames.len() > MAX_FRAMES {
         return Err(refused());
     }
+    // #11362: urls and origins are page-chosen and cannot be cut from the list.
+    let meta: usize = frames
+        .iter()
+        .map(|f| esc_len(&f.url) + 2 * esc_len(&f.origin))
+        .sum();
+    if meta > MAX_META {
+        return Err(refused());
+    }
     Ok(frames)
 }
 
@@ -334,6 +349,17 @@ pub fn rects(frames: &[Frame], ordered: &[(usize, Option<usize>)]) -> Vec<Option
     out
 }
 
+/// Bytes `s` takes inside a JSON string under `frame::encode` (`ensure_ascii`).
+///
+/// Why: the budget counts what the wire carries, not raw UTF-8. What: asks
+/// [`Json::dumps`] for the escaped string, the same code `frame::encode` runs,
+/// and drops its two quotes. Escaping is per character, so the lengths of
+/// consecutive pieces add up to the length of their concatenation.
+/// Test: `an_encoded_reply_stays_within_one_frame`.
+fn esc_len(s: &str) -> usize {
+    Json::from(s).dumps(true).map_or(0, |d| d.len() - 2)
+}
+
 fn line(text: &mut String, ord: usize, n: &Node) {
     let indent = "  ".repeat(n.depth + 1);
     let label = if n.role == "StaticText" {
@@ -361,30 +387,72 @@ fn line(text: &mut String, ord: usize, n: &Node) {
 /// origin and every node's ref. What: frames in [`order`], each a header
 /// (ordinal, origin, cross-origin and out-of-process marks, parent and box)
 /// and its nodes indented by depth; a refused frame names its reason and the
-/// tools that still reach it. Past [`MAX_TEXT`] bytes no more node lines are
-/// written; the text ends with a `[text truncated]` line and the table holds
-/// only the nodes it named. The bool says whether the text was cut.
+/// tools that still reach it. `reserved` is the encoded size of the rest of
+/// the reply; the frames list, the header lines and the node lines together
+/// stay within [`MAX_ENCODED`] less that, each counted as its escaped bytes.
+/// Past it no more node lines are written; the text ends with a
+/// `[text truncated]` line and the table holds only the nodes it named. The
+/// bool says whether the text was cut.
 /// Test: `the_text_marks_cross_origin_canvas_and_refused_frames`,
-/// `the_text_stops_at_its_cap_and_issues_only_the_nodes_it_named`.
-pub fn assemble(frames: &[Frame], lease: &str, document: &str) -> (String, Json, FrameTable, bool) {
-    assemble_capped(frames, lease, document, MAX_TEXT)
+/// `the_text_stops_at_its_cap_and_issues_only_the_nodes_it_named`,
+/// `an_encoded_reply_stays_within_one_frame`.
+pub fn assemble(
+    frames: &[Frame],
+    lease: &str,
+    document: &str,
+    reserved: usize,
+) -> (String, Json, FrameTable, bool) {
+    assemble_capped(
+        frames,
+        lease,
+        document,
+        MAX_ENCODED.saturating_sub(reserved),
+    )
 }
 
-/// [`assemble`] with the text cap as a parameter.
+/// [`assemble`] with the encoded budget of the list and the text as a parameter.
 pub fn assemble_capped(
     frames: &[Frame],
     lease: &str,
     document: &str,
-    cap: usize,
+    budget: usize,
 ) -> (String, Json, FrameTable, bool) {
     let ordered = order(frames);
     let boxes = rects(frames, &ordered);
     let top = &frames[ordered[0].0].origin;
     let (mut text, mut list, mut table) = (String::new(), Vec::new(), Vec::new());
     let (mut issued, mut cut) = (HashSet::new(), false);
+    // Escaped bytes of everything but the node lines written so far.
+    let mut used = 0usize;
+    for (ord, (&(i, parent), rect)) in ordered.iter().zip(&boxes).enumerate() {
+        let f = &frames[i];
+        let rect = rect.map_or(Json::Null, |r| {
+            Json::object(
+                ["x", "y", "width", "height"]
+                    .into_iter()
+                    .zip(r)
+                    .map(|(k, v)| (k, Json::Float(v))),
+            )
+        });
+        let entry = Json::object([
+            ("frame", Json::Int(ord as i64)),
+            ("parent", parent.map_or(Json::Null, |p| Json::Int(p as i64))),
+            ("origin", Json::from(f.origin.as_str())),
+            ("url", Json::from(f.url.as_str())),
+            ("cross_origin", Json::Bool(f.origin != *top)),
+            ("out_of_process", Json::Bool(f.root)),
+            ("rect", rect),
+            ("refused", f.refused.clone().map_or(Json::Null, Json::from)),
+        ]);
+        used += entry.dumps(true).map_or(0, |d| d.len()) + 1;
+        list.push(entry);
+        table.push((f.id.clone(), f.loader.clone()));
+    }
+    let budget = budget.saturating_sub(CUT_LINE);
     for (ord, (&(i, parent), rect)) in ordered.iter().zip(&boxes).enumerate() {
         let f = &frames[i];
         let cross = f.origin != *top;
+        let before = text.len();
         let _ = write!(text, "frame f{ord} {}", f.origin);
         let marks: Vec<&str> = [(cross, "cross-origin"), (f.root, "out-of-process")]
             .into_iter()
@@ -408,35 +476,19 @@ pub fn assemble_capped(
             }
             None => text.push('\n'),
         }
+        used += esc_len(&text[before..]);
         for n in &f.nodes {
             let mut row = String::new();
             line(&mut row, ord, n);
-            if cut || text.len() + row.len() > cap {
+            let size = esc_len(&row);
+            if cut || used + size > budget {
                 cut = true;
                 break;
             }
             text.push_str(&row);
+            used += size;
             issued.insert((ord, n.backend));
         }
-        let rect = rect.map_or(Json::Null, |r| {
-            Json::object(
-                ["x", "y", "width", "height"]
-                    .into_iter()
-                    .zip(r)
-                    .map(|(k, v)| (k, Json::Float(v))),
-            )
-        });
-        list.push(Json::object([
-            ("frame", Json::Int(ord as i64)),
-            ("parent", parent.map_or(Json::Null, |p| Json::Int(p as i64))),
-            ("origin", Json::from(f.origin.as_str())),
-            ("url", Json::from(f.url.as_str())),
-            ("cross_origin", Json::Bool(cross)),
-            ("out_of_process", Json::Bool(f.root)),
-            ("rect", rect),
-            ("refused", f.refused.clone().map_or(Json::Null, Json::from)),
-        ]));
-        table.push((f.id.clone(), f.loader.clone()));
     }
     let table = FrameTable {
         lease: lease.to_owned(),
@@ -532,25 +584,35 @@ async fn snapshot(
     }
     let frames = frames_of(&raw)?;
     let popups = popups_of(&raw, grant)?;
-    let (text, list, table, cut) = assemble(&frames, &claim.token, doc);
-    let truncated = cut || matches!(raw.get("truncated"), Some(Json::Bool(true)));
+    let truncated = matches!(raw.get("truncated"), Some(Json::Bool(true)));
+    // The reply without its list and text: what the budget must leave room for.
+    let shell = reply_of(claim.tab, doc, Json::Null, "", popups.clone(), true);
+    let reserved = shell.dumps(true).map_or(0, |d| d.len());
+    let (text, list, table, cut) = assemble(&frames, &claim.token, doc, reserved);
+    let truncated = truncated || cut;
     session.frames.retain(|t| t.lease != claim.token);
     if session.frames.len() >= KEEP {
         session.frames.remove(0);
     }
     session.frames.push(table);
     crate::pages_ops::renew(core, &claim.token);
-    let mut reply = Json::object(ok_tab(claim.tab));
+    let reply = reply_of(claim.tab, doc, list, &text, popups, truncated);
+    Ok((reply, Some(claim.tab), hosted(claim.origin.as_deref())?))
+}
+
+/// The `page_snapshot` reply the broker writes to the client.
+pub fn reply_of(tab: i64, doc: &str, list: Json, text: &str, popups: Json, cut: bool) -> Json {
+    let mut reply = Json::object(ok_tab(tab));
     for (k, v) in [
         ("document", Json::from(doc)),
         ("frames", list),
         ("text", Json::from(text)),
         ("popups", popups),
-        ("truncated", Json::Bool(truncated)),
+        ("truncated", Json::Bool(cut)),
     ] {
         reply.insert(k, v);
     }
-    Ok((reply, Some(claim.tab), hosted(claim.origin.as_deref())?))
+    reply
 }
 
 #[cfg(test)]
