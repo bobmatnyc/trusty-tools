@@ -600,3 +600,20 @@ fn macos_live_ancestor_walk_probe() {
     println!("has_agent_ancestor({me}) = {verdict:?}");
     assert!(verdict.is_ok(), "the walk failed: {verdict:?}");
 }
+
+/// Why: #11464 critic M — the gate's sshd check needs the real uid, the
+/// first `Uid:` field; a missing or unparsable line refuses.
+/// Test: itself.
+#[test]
+fn linux_status_parser_reads_the_real_uid() {
+    let text = "Name:\tsshd-session\nUid:\t0\t501\t501\t501\nGid:\t0\n";
+    assert_eq!(status_uid(7, text), Ok(0));
+    assert_eq!(status_uid(7, "Uid:\t501\t0\t0\t0\n"), Ok(501));
+    for bad in ["Name:\tx\n", "Uid:\n", "Uid:\tx\t0\n"] {
+        assert_eq!(
+            status_uid(7, bad),
+            Err(ProcessError::Unreadable { pid: 7 }),
+            "{bad}"
+        );
+    }
+}

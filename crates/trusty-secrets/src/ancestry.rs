@@ -539,6 +539,18 @@ pub(crate) fn stat_comm(pid: u32, text: &str) -> Result<&str, ProcessError> {
     }
 }
 
+/// The real uid, the first field of the `Uid:` line of `/proc/<pid>/status`.
+///
+/// Test: `linux_status_parser_reads_the_real_uid`.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn status_uid(pid: u32, text: &str) -> Result<u32, ProcessError> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|real| real.parse().ok())
+        .ok_or(ProcessError::Unreadable { pid })
+}
+
 #[cfg(target_os = "linux")]
 mod os {
     use super::{
@@ -576,12 +588,13 @@ mod os {
         agent_verdict(&labels, || argv(pid))
     }
 
-    /// `comm` and the owner of `/proc/<pid>` (#11464).
+    /// `comm` and the real uid from `/proc/<pid>/status` (#11464).
+    // Critic M: never the owner of `/proc/<pid>`, which is root for any
+    // dumpable=0 process.
     pub(super) fn comm(pid: u32) -> Result<super::ProcComm, ProcessError> {
-        use std::os::unix::fs::MetadataExt;
-        let uid = std::fs::metadata(format!("/proc/{pid}"))
-            .map_err(|_| ProcessError::Unreadable { pid })?
-            .uid();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .map_err(|_| ProcessError::Unreadable { pid })?;
+        let uid = super::status_uid(pid, &status)?;
         let name = stat_comm(pid, &stat(pid)?)?.to_owned();
         Ok(super::ProcComm { name, uid })
     }
