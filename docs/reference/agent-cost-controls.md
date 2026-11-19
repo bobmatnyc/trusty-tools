@@ -158,8 +158,8 @@ The structural fix — making the check mechanical rather than a remembered step
 Every agent tm deploys carries `omitClaudeMd: true` as its first frontmatter
 key, stamped by `compose_agent_for_deploy` in
 `crates/trusty-agents-common/src/agents/skill_root.rs`. A subagent then loads
-no user, project or local CLAUDE.md; it takes its rules from its own prompt and
-the delegation brief. The PM keeps its CLAUDE.md: Claude Code ignores the key
+no user, project or local CLAUDE.md; it takes its rules from its own prompt,
+the delegation brief, and the project rules block below. The PM keeps its CLAUDE.md: Claude Code ignores the key
 for a main-session `--agent`, and tm sets no session-wide exclude.
 
 The key needs Claude Code v2.1.271 or later. Older versions ignore it, so a
@@ -168,3 +168,14 @@ subagent there still loads the full CLAUDE.md hierarchy. Check with
 
 A user-authored agent file is never rewritten. An untracked file deployed
 before the stamp existed is still adopted, then refreshed on the next deploy.
+
+The project's build and test rules still reach the subagent. On every `Agent`
+dispatch, `tm hook --pm-guard` appends a `## Project rules (from CLAUDE.md)`
+block to the prompt (`crates/trusty-mpm/src/core/project_rules.rs`). The block
+holds the regions of the nearest `CLAUDE.md` between `<!-- tm:agent-rules -->`
+and `<!-- /tm:agent-rules -->`; a file with no marker is carried whole. The
+block is capped at 16 KiB and a cut says so. The deployed agent files stay
+project-free, so their update-check hashes do not change. In this repository
+the marked regions are Build and Test Commands, the Rust Test Ladder, the doc,
+`unwrap()` and SLOC rules, changelog fragments, stage-by-name and the crate
+aliases.

@@ -146,3 +146,56 @@ fn block_composes_with_the_in_place_note() {
         updated
     );
 }
+
+/// #7684: a deployed agent starts with `omitClaudeMd: true`, so the project's
+/// build and test rules must ride on the dispatch prompt instead — for a
+/// non-ops agent too, and alongside the account block for an ops one.
+#[test]
+fn any_agent_dispatch_gets_the_project_rules() {
+    use trusty_mpm::core::project_rules::{PROJECT_RULES_HEADING, RULES_CLOSE, RULES_OPEN};
+    let dir = project(ACCOUNTS_TOML);
+    let md =
+        format!("private\n{RULES_OPEN}\nrun `cargo test -p x --no-fail-fast`\n{RULES_CLOSE}\n");
+    std::fs::write(dir.path().join("CLAUDE.md"), md).expect("write CLAUDE.md");
+
+    let out = account_rewrite(
+        Some(r()),
+        "Agent",
+        Some(&dispatch("rust-engineer")),
+        dir.path(),
+    )
+    .expect("a non-ops dispatch carries the rules");
+    let p = prompt(&out);
+    assert!(p.starts_with("deploy it"), "{p}");
+    assert!(p.contains(PROJECT_RULES_HEADING), "{p}");
+    assert!(p.ends_with("run `cargo test -p x --no-fail-fast`"), "{p}");
+    assert!(!p.contains("private"), "{p}");
+    assert!(!p.contains(ACCOUNT_BLOCK_HEADING), "{p}");
+
+    let ops = account_rewrite(Some(r()), "Agent", Some(&dispatch("local-ops")), dir.path())
+        .expect("an ops dispatch carries both");
+    assert!(prompt(&ops).contains(ACCOUNT_BLOCK_HEADING));
+    assert!(prompt(&ops).contains(PROJECT_RULES_HEADING));
+    // No roster still carries the rules; `Task` carries nothing.
+    assert!(account_rewrite(None, "Agent", Some(&dispatch("qa")), dir.path()).is_some());
+    assert_eq!(
+        account_rewrite(Some(r()), "Task", Some(&dispatch("qa")), dir.path()),
+        None
+    );
+}
+
+#[test]
+fn project_rules_are_appended_once() {
+    use trusty_mpm::core::project_rules::PROJECT_RULES_HEADING;
+    let dir = project("");
+    std::fs::write(dir.path().join("CLAUDE.md"), "rule").expect("write CLAUDE.md");
+    let once = account_rewrite(Some(r()), "Agent", Some(&dispatch("local-ops")), dir.path())
+        .expect("first pass rewrites");
+    assert_eq!(
+        account_rewrite(Some(r()), "Agent", Some(&once), dir.path()),
+        None
+    );
+    let composed = compose(Some(r()), "Agent", once, dir.path());
+    assert_eq!(prompt(&composed).matches(PROJECT_RULES_HEADING).count(), 1);
+    assert_eq!(prompt(&composed).matches(ACCOUNT_BLOCK_HEADING).count(), 1);
+}

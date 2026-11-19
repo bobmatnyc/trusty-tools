@@ -316,10 +316,8 @@ fn available_agent_names(source_dir: &Path) -> std::io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::agent_builder::compose_agent_with_provenance;
     use std::fs;
     use tempfile::TempDir;
-    use trusty_agents_common::agents::provenance::Provenance;
 
     fn write_sources(dir: &Path) {
         fs::write(
