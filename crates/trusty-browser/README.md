@@ -186,14 +186,21 @@ debugger once, sends CDP `Target.setAutoAttach` (flatten) so that each
 out-of-process iframe becomes a child session, and reads
 `Accessibility.getFullAXTree` per frame. It adds no permission. The broker numbers the frames
 depth-first and keeps their ids per lease. A ref `f1:41` is node 41 of frame 1
-of the lease's latest snapshot. A ref from an older snapshot, or from before
-the top document changed, answers `StaleElement`. A frame that navigated
+of the lease's latest snapshot. A ref from an older snapshot, from before
+the top document changed, or naming a node that snapshot did not list,
+answers `StaleElement`. A frame that navigated
 answers `DocumentChanged`, and one that was removed answers `StaleElement`.
-`page_click` sums each out-of-process frame's offset into viewport CSS pixels
-and sends trusted input. The other ref tools run their usual page function
+`page_click` sums each out-of-process frame's offset into viewport CSS pixels,
+hit-tests the point in the frame and in every parent document (an element
+covering the iframe answers `Obscured`), checks the frame's document again
+before the press, and sends trusted input. The other ref tools run their usual page function
 in an isolated world of that frame. `page_click_at` and `page_type_at` reach
 any frame already, because Chrome routes the input by position. The child
-sessions are detached, then the tab, before each tool returns. Coverage:
+sessions are detached, then the tab, before each tool returns. Frame actions
+run under the grant of the leased tab's top origin: a grant does not name the
+origins of the frames inside the tab. A snapshot stops at 150 frames, node
+depth 40 and about 700 KB, and then answers `truncated: true`; the text is
+capped too. Coverage:
 
 | Case | Behaviour |
 |---|---|
@@ -203,7 +210,7 @@ sessions are detached, then the tab, before each tool returns. Coverage:
 | Chrome's PDF viewer | Listed with `refused: PdfViewer`. `page_screenshot`, `page_click_at` and `page_type_at` reach it. |
 | A frame Chrome gives no tree for | Listed with `refused: FrameUnreachable`. |
 | Popups and new windows the tab opened | Listed in `popups` with tab and window ids; lease one with `browser_select`. A tab grant lists none. |
-| DevTools or another debugger on the tab | `page_snapshot` answers `page_read` with `fallback: page_read` and `reason: DebuggerBusy`; other debugger tools answer `DebuggerBusy`. |
+| DevTools or another debugger on the tab | `page_snapshot` answers `page_read` with `fallback: page_read`, `reason: DebuggerBusy`, `partial: true` and a `note` that cross-origin frames were not read; other debugger tools answer `DebuggerBusy`. |
 
 Chrome shows its "being debugged" bar while a debugger tool runs, as for
 `page_click` and `page_screenshot`.

@@ -581,5 +581,12 @@ async fn a_snapshot_routes_frame_refs_and_falls_back_on_a_busy_debugger() {
         wire(&reply)
     );
     assert_eq!(reply.get("reason"), Some(&Json::from("DebuggerBusy")));
+    assert_eq!(reply.get("partial"), Some(&Json::Bool(true)));
+    assert_eq!(
+        reply.get("note"),
+        Some(&Json::from(
+            "top document and same-origin frames only; cross-origin frames not read"
+        ))
+    );
     broker.close().await;
 }

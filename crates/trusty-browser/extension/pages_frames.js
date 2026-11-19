@@ -5,8 +5,22 @@ globalThis.TrustyFrames = (() => {
   // Chrome's built-in PDF viewer: another extension's frame, which chrome.debugger may not enter.
   const PDF_VIEWER = "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/";
   const AUTO = {autoAttach:true, waitForDebuggerOnStart:false, flatten:true};
-  // #11362: the snapshot stays under the 1 MiB native frame: at most this many nodes, names cut to NAME_MAX.
-  const NODE_BUDGET = 2500, NAME_MAX = 160;
+  // #11362: the snapshot stays under the 1 MiB native frame (native_host.rs MAX_FRAME drops the whole bridge
+  //   past it): at most NODE_BUDGET nodes, BYTE_BUDGET bytes of serialized nodes and frames, FRAME_MAX frames
+  //   and DEPTH_MAX node depth, names cut to NAME_MAX. pages_frames.rs refuses only past 200 frames, depth 1000.
+  const NODE_BUDGET = 2500, BYTE_BUDGET = 700000, FRAME_MAX = 150, DEPTH_MAX = 40, NAME_MAX = 160;
+  // The UTF-8 length of `v` as JSON; a lone surrogate counts as its six-byte escape.
+  const utf8 = v => {
+    let n = 0;
+    for (const ch of JSON.stringify(v)) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; }
+    return n;
+  };
+  // Spends `bytes` from the shared budget; false (and truncated) when it would overrun.
+  const spend = (budget, bytes) => {
+    if (budget.bytes < bytes) { budget.truncated = true; budget.bytes = 0; return false; }
+    budget.bytes -= bytes;
+    return true;
+  };
   const SKIP = new Set(["none", "generic", "InlineTextBox", "LineBreak"]);
   const ID = v => typeof v === "string" && v.length > 0 && v.length <= 64;
   const fail = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -91,14 +105,16 @@ globalThis.TrustyFrames = (() => {
   const treeOf = async (ctx, s) => (await ctx.send(s.id, "Page.getFrameTree"))?.frameTree;
 
   // A frame owner's content box, in its session's local-root viewport CSS pixels; null when unreadable.
-  async function ownerBox(ctx, sessionId, frameId) {
+  const ownerBox = async (ctx, sessionId, frameId) => (await owner(ctx, sessionId, frameId))?.box ?? null;
+  // A frame owner's backend node and content box ({node, box}); null when unreadable.
+  async function owner(ctx, sessionId, frameId) {
     try {
       const {backendNodeId} = await ctx.send(sessionId, "DOM.getFrameOwner", {frameId});
       const q = (await ctx.send(sessionId, "DOM.getBoxModel", {backendNodeId}))?.model?.content;
       if (!Array.isArray(q) || q.length !== 8 || !q.every(Number.isFinite)) return null;
       const xs = [q[0], q[2], q[4], q[6]], ys = [q[1], q[3], q[5], q[7]];
       const x = Math.min(...xs), y = Math.min(...ys);
-      return [x, y, Math.max(...xs) - x, Math.max(...ys) - y];
+      return {node:backendNodeId, box:[x, y, Math.max(...xs) - x, Math.max(...ys) - y]};
     } catch { return null; }
   }
 
@@ -106,8 +122,10 @@ globalThis.TrustyFrames = (() => {
   //   not a hand-written walker (#11362, F5, F8).
   // What: depth-first from the AX roots, drops ignored nodes and the SKIP roles (their children rise one
   //   level), keeps [depth, role, name, backendDOMNodeId, value] with name and value cut to NAME_MAX, and
-  //   stops at the shared `budget`, setting budget.truncated.
-  // Test: tests/js/frames.test.mjs `a snapshot reads every frame's accessibility tree within the node budget`.
+  //   stops at the shared `budget` (nodes left, serialized bytes left), setting budget.truncated. A node
+  //   deeper than DEPTH_MAX is dropped with its subtree, also setting budget.truncated.
+  // Test: tests/js/frames.test.mjs `a snapshot reads every frame's accessibility tree within the node budget`,
+  //   `a snapshot of 2500 CJK nodes and long URLs stays under the native frame and says it is truncated`.
   function compact(nodes, budget) {
     const byId = new Map(nodes.map(n => [n.nodeId, n])), out = [];
     const text = v => v === undefined || v === null ? null : String(v).replace(/\s+/g, " ").trim().slice(0, NAME_MAX);
@@ -116,9 +134,11 @@ globalThis.TrustyFrames = (() => {
       const keep = !n.ignored && !SKIP.has(role) && !(role === "StaticText" && !name) &&
         Number.isInteger(n.backendDOMNodeId);
       if (keep) {
-        if (budget.left <= 0) { budget.truncated = true; return; }
+        if (depth > DEPTH_MAX || budget.left <= 0) { budget.truncated = true; return; }
+        const row = [depth, role, name, n.backendDOMNodeId, text(n.value?.value)];
+        if (!spend(budget, utf8(row) + 1)) return;
         budget.left--;
-        out.push([depth, role, name, n.backendDOMNodeId, text(n.value?.value)]);
+        out.push(row);
       }
       for (const c of n.childIds || []) if (byId.has(c)) visit(byId.get(c), depth + (keep ? 1 : 0));
     };
@@ -132,12 +152,14 @@ globalThis.TrustyFrames = (() => {
   //   by that session. Per frame: its loader, URL, security origin, whether it is its session's root (an
   //   out-of-process frame), its owner box in the parent's local-root viewport, and Accessibility.getFullAXTree
   //   compacted. A PDF document or the PDF viewer is listed refused PdfViewer with no nodes, a tree Chrome will
-  //   not give FrameUnreachable. The top frame's tree failing throws.
+  //   not give FrameUnreachable. The top frame's tree failing throws. Past FRAME_MAX frames or the byte budget
+  //   (each frame's fields count, its nodes through compact) it stops and answers truncated: true.
   // Test: tests/js/frames.test.mjs `a snapshot reads every frame's accessibility tree within the node budget`,
-  //   `the pdf viewer and an unreadable frame are listed refused with a reason`.
+  //   `the pdf viewer and an unreadable frame are listed refused with a reason`,
+  //   `a snapshot of 2500 CJK nodes and long URLs stays under the native frame and says it is truncated`.
   async function snapshot(ctx) {
     await ctx.ready;
-    const frames = [], budget = {left:NODE_BUDGET, truncated:false};
+    const frames = [], budget = {left:NODE_BUDGET, bytes:BYTE_BUDGET, truncated:false};
     for (const s of ordered(ctx)) {
       let tree;
       try { tree = await treeOf(ctx, s); } catch (error) { if (s.id === null) throw error; continue; }
@@ -146,10 +168,12 @@ globalThis.TrustyFrames = (() => {
       const walk = async (node, parent, root) => {
         const f = node.frame;
         if (!root && owns(ctx, f.id)) return;
+        if (frames.length >= FRAME_MAX) { budget.truncated = true; return; }
         const ownerSession = root ? s.parent : s.id;
         const entry = {frame:String(f.id), parent, loader:String(f.loaderId ?? ""), url:String(f.url ?? "").slice(0, 2048),
           origin:String(f.securityOrigin ?? ""), root:root && s.id !== null,
           owner:parent === null ? null : await ownerBox(ctx, ownerSession, f.id), refused:null, nodes:[]};
+        if (!spend(budget, utf8(entry) + 32)) return; // 32: room for the `refused` reason
         if (f.mimeType === "application/pdf" || ctx.pdf.has(f.id)) entry.refused = "PdfViewer";
         else {
           try {
@@ -213,31 +237,59 @@ globalThis.TrustyFrames = (() => {
     return [Math.min(...xs), Math.min(...ys), Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)];
   }
 
-  // Why: a trusted click on a frame ref must land on that element, in top-viewport CSS pixels (#11362).
-  // What: locates the frame, scrolls the node into view, takes its content-quad centre, hit-tests it in the
-  //   frame (DOM.getNodeForLocation; another element not inside the target answers Obscured), then adds the
-  //   frame chain's offset. Only the frame's own document is hit-tested.
+  // Why: a trusted click on a frame ref must land on that element, in top-viewport CSS pixels (#11362); an
+  //   overlay in a parent document over the iframe would take the click instead.
+  // What: locates the frame, scrolls the node into view, takes its content-quad centre and hit-tests it in the
+  //   frame (DOM.getNodeForLocation). Then, per out-of-process level up to the top, adds the frame owner's
+  //   content-box origin and hit-tests that point in the parent session: the hit must be the owner element or
+  //   inside it. Any other hit at any level answers Obscured.
   // Test: tests/js/frames.test.mjs `a click inside a nested out-of-process frame lands at the summed offset`,
-  //   `a covered frame element answers Obscured`.
+  //   `a covered frame element answers Obscured`, `an overlay over the frame in its parent document answers Obscured`.
   async function point(ctx, ref) {
     const id = await locate(ctx, ref);
     const [left, top, width, height] = await quad(ctx, id, ref.node);
-    const cx = left + width / 2, cy = top + height / 2;
-    const hit = await ctx.send(id, "DOM.getNodeForLocation", {x:Math.round(cx), y:Math.round(cy),
-      includeUserAgentShadowDOM:false}).catch(() => null);
-    if (hit?.backendNodeId !== ref.node && !(await inside(ctx, id, ref.node, hit?.backendNodeId))) throw fail("Obscured");
-    const at = await offset(ctx, id);
-    return {ok:true, x:cx + at.x, y:cy + at.y};
+    let x = left + width / 2, y = top + height / 2;
+    await hitTest(ctx, id, ref.frame, ref.node, x, y);
+    for (let s = ctx.sessions.get(id); s && s.id !== null; s = ctx.sessions.get(s.parent)) {
+      const own = await owner(ctx, s.parent, s.frame);
+      if (!own) throw fail("StaleElement");
+      x += own.box[0];
+      y += own.box[1];
+      const frame = s.parentFrame ?? (await treeOf(ctx, ctx.sessions.get(s.parent)).catch(() => null))?.frame?.id;
+      await hitTest(ctx, s.parent, frame, own.node, x, y);
+    }
+    return {ok:true, x, y};
   }
-  async function inside(ctx, id, node, other) {
-    if (!Number.isInteger(other)) return false;
+  // The element at (x, y) of session `id` is `node` or inside it, else Obscured.
+  async function hitTest(ctx, id, frame, node, x, y) {
+    const hit = await ctx.send(id, "DOM.getNodeForLocation", {x:Math.round(x), y:Math.round(y),
+      includeUserAgentShadowDOM:false}).catch(() => null);
+    if (hit?.backendNodeId !== node && !(await inside(ctx, id, frame, node, hit?.backendNodeId))) throw fail("Obscured");
+  }
+  // Why: page script can replace Node.prototype.contains in its main world, so the check runs elsewhere (#11362).
+  // What: resolves both nodes in a fresh isolated world of `frame` and calls contains there; any failure is false.
+  // Test: tests/js/frames.test.mjs `the covered-element check resolves both nodes in an isolated world, not the page's`.
+  async function inside(ctx, id, frame, node, other) {
+    if (!Number.isInteger(other) || typeof frame !== "string") return false;
     try {
-      const outer = (await ctx.send(id, "DOM.resolveNode", {backendNodeId:node}))?.object?.objectId;
-      const inner = (await ctx.send(id, "DOM.resolveNode", {backendNodeId:other}))?.object?.objectId;
+      const world = await isolated(ctx, id, frame);
+      const outer = (await ctx.send(id, "DOM.resolveNode", {backendNodeId:node, executionContextId:world}))?.object?.objectId;
+      const inner = (await ctx.send(id, "DOM.resolveNode", {backendNodeId:other, executionContextId:world}))?.object?.objectId;
+      if (typeof outer !== "string" || typeof inner !== "string") return false;
       const r = await ctx.send(id, "Runtime.callFunctionOn", {objectId:outer, returnByValue:true,
-        functionDeclaration:"function(n){return this.contains(n)}", arguments:[{objectId:inner}]});
+        functionDeclaration:"function(n){return Node.prototype.contains.call(this, n)}", arguments:[{objectId:inner}]});
       return r?.result?.value === true;
     } catch { return false; }
+  }
+  // A new isolated world of `frame` in session `id`, as its execution context id; throws FrameScriptBlocked.
+  async function isolated(ctx, id, frame) {
+    let world;
+    try {
+      world = (await ctx.send(id, "Page.createIsolatedWorld", {frameId:frame, worldName:"trusty-browser",
+        grantUniveralAccess:false}))?.executionContextId;
+    } catch { throw fail("FrameScriptBlocked"); }
+    if (!Number.isInteger(world)) throw fail("FrameScriptBlocked");
+    return world;
   }
 
   // #11211, #11362: a frame ref's box in top-viewport CSS pixels, for an element screenshot.
@@ -260,12 +312,7 @@ globalThis.TrustyFrames = (() => {
   async function run(ctx, ref, other, func, args) {
     const id = await locate(ctx, ref);
     if (other && other.frame !== ref.frame) throw fail("NotDraggable");
-    let world;
-    try {
-      world = (await ctx.send(id, "Page.createIsolatedWorld", {frameId:ref.frame, worldName:"trusty-browser",
-        grantUniveralAccess:false}))?.executionContextId;
-    } catch { throw fail("FrameScriptBlocked"); }
-    if (!Number.isInteger(world)) throw fail("FrameScriptBlocked");
+    const world = await isolated(ctx, id, ref.frame);
     const resolve = async node => {
       try {
         const objectId = (await ctx.send(id, "DOM.resolveNode", {backendNodeId:node, executionContextId:world}))

@@ -89,6 +89,7 @@ fn frame_refs_parse_and_route_only_within_their_snapshot() {
             ("T2".into(), "L2".into()),
             ("T9".into(), String::new()),
         ],
+        issued: [(1, 41), (2, 1)].into_iter().collect(),
     }];
     let routed = route_ref(&tables, "L", 7, Some("d1"), &Json::from("f1:41")).expect("routed");
     assert_eq!(wire(&routed), r#"{"frame":"T2","loader":"L2","node":41}"#);
@@ -105,6 +106,7 @@ fn frame_refs_parse_and_route_only_within_their_snapshot() {
     for (lease, document, r) in [
         ("L", Some("d1"), "f3:1"),  // no such ordinal
         ("L", Some("d1"), "f2:1"),  // a frame with no document loader
+        ("L", Some("d1"), "f1:42"), // a node that snapshot never named
         ("M", Some("d1"), "f1:41"), // another lease's snapshot
         ("L", Some("d2"), "f1:41"), // the top document moved since the snapshot
         ("L", None, "f1:41"),
@@ -199,7 +201,9 @@ fn the_text_marks_cross_origin_canvas_and_refused_frames() {
         value: None,
     }];
     frames[4].refused = Some("PdfViewer".into());
-    let (text, list, table) = assemble(&frames, "L", "d1");
+    let (text, list, table, cut) = assemble(&frames, "L", "d1");
+    assert!(!cut);
+    assert!(table.issued.contains(&(1, 44)) && table.issued.contains(&(2, 42)));
     let want = concat!(
         "frame f0 https://app.test\n",
         "  button \"Export\" [f0:4]\n",
@@ -257,4 +261,47 @@ fn a_malformed_worker_snapshot_is_refused() {
         );
     }
     assert_eq!(frames_of(&Json::Null).map(|f| f.len()), refused);
+}
+
+#[test]
+fn the_text_stops_at_its_cap_and_issues_only_the_nodes_it_named() {
+    let mut frames = omni();
+    frames[0].nodes = (1..=50)
+        .map(|b| Node {
+            depth: 0,
+            role: "button".into(),
+            name: "\u{6f22}".repeat(160),
+            backend: b,
+            value: None,
+        })
+        .collect();
+    let (text, _, table, cut) = assemble_capped(&frames, "L", "d1", 2000);
+    assert!(cut);
+    assert!(text.ends_with("[text truncated]\n"), "{text}");
+    let named = text.matches("[f0:").count();
+    assert!(named > 0 && named < 50, "{named}");
+    assert_eq!(table.issued.len(), named);
+    assert!(!table.issued.contains(&(0, 50)));
+    assert!(
+        route_ref(&[table], "L", 7, Some("d1"), &Json::from("f0:50")).is_err(),
+        "a node cut from the text is refused"
+    );
+}
+
+#[test]
+fn the_worker_caps_are_within_the_broker_refusals() {
+    // pages_frames.js stops at 150 frames and depth 40; a reply at both caps parses.
+    let node = r#"[40,"button","Go",4,null]"#;
+    let mut items = vec![format!(
+        r#"{{"frame":"F0","parent":null,"loader":"L0","url":"https://a.test/","origin":"https://a.test","root":false,"owner":null,"refused":null,"nodes":[{node}]}}"#
+    )];
+    for i in 1..150 {
+        items.push(format!(
+            r#"{{"frame":"C{i}","parent":"F0","loader":"L{i}","url":"https://a.test/","origin":"https://a.test","root":false,"owner":null,"refused":null,"nodes":[{node}]}}"#
+        ));
+    }
+    let body = format!(r#"{{"frames":[{}]}}"#, items.join(","));
+    let raw = Json::parse(body.as_bytes()).expect("json");
+    assert_eq!(frames_of(&raw).map(|f| f.len()), Ok(150));
+    assert!(MAX_FRAMES >= 150 && MAX_DEPTH >= 40);
 }

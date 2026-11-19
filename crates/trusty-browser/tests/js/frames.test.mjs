@@ -65,8 +65,14 @@ function omni(over = {}) {
       if (!q) throw new Error("No node with given id found");
       return {quads:[q]};
     }
-    if (method === "DOM.getNodeForLocation") return {backendNodeId:model.hits[key] ?? Number(Object.keys(model.quads)
-      .find(k => k.startsWith(key + ":"))?.split(":")[1])};
+    if (method === "DOM.getNodeForLocation") {
+      if (model.hits[key] !== undefined) return {backendNodeId:model.hits[key]};
+      // A point over a frame owner hits the owner element, as Chrome's hit test does.
+      const owner = Object.entries(model.owners).find(([k, [, q]]) => k.startsWith(key + ":") &&
+        params.x >= q[0] && params.x <= q[4] && params.y >= q[1] && params.y <= q[5]);
+      if (owner) return {backendNodeId:owner[1][0]};
+      return {backendNodeId:Number(Object.keys(model.quads).find(k => k.startsWith(key + ":"))?.split(":")[1])};
+    }
     if (method === "Page.createIsolatedWorld") {
       if (!model.worlds[key]) throw new Error("Cannot create isolated world");
       return {executionContextId:model.worlds[key]};
@@ -249,4 +255,74 @@ test("a drag across two frames answers NotDraggable and a page refusal inside a 
   const field = await f.command("page_type", {grant, tab:7, document:"doc-7", ref:{frame:"T2", loader:"L2", node:41},
     text:"x"});
   assert.deepEqual([field.error, field.tab], ["NotEditable", 7]);
+});
+
+test("a snapshot of 2500 CJK nodes and long URLs stays under the native frame and says it is truncated", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const long = n => `https://app.test/${n}/` + "q".repeat(2000);
+  const cjk = "\u6f22".repeat(160);
+  const many = Array.from({length:2500}, (_, i) => node(i + 2, "StaticText", cjk, 1000 + i, {parentId:1}));
+  const children = Array.from({length:180}, (_, i) => ({frame:{id:`C${i}`, loaderId:`LC${i}`, url:long(i),
+    securityOrigin:"https://app.test"}}));
+  f.tabs.get(7).frames = omni({
+    trees:{null:{frame:{id:"F0", loaderId:"L0", url:long("top"), securityOrigin:"https://app.test"}, childFrames:children}},
+    ax:{F0:ax(node(1, "RootWebArea", "Insights", 1, {childIds:many.map(n => n.nodeId)}), ...many)}});
+  const r = await f.command("page_snapshot", {grant, tab:7, document:"doc-7"});
+  assert.equal(r.ok, true, JSON.stringify(r).slice(0, 300));
+  const bytes = Buffer.byteLength(JSON.stringify(r.result), "utf8");
+  assert.ok(bytes < 1024 * 1024, `the reply is ${bytes} bytes`);
+  assert.equal(r.result.truncated, true);
+  assert.ok(r.result.frames.length <= 150, `${r.result.frames.length} frames`);
+  // A node chain deeper than the depth cap stops there and says so.
+  const ctx = vm.createContext({});
+  vm.runInContext(await readFile(new URL("../../extension/pages_frames.js", import.meta.url), "utf8"), ctx);
+  const chain = Array.from({length:60}, (_, i) => node(i + 1, "group", `g${i}`, i + 1,
+    {...(i ? {parentId:i} : {}), childIds:[i + 2]}));
+  const budget = {left:2500, bytes:700000, truncated:false};
+  const out = ctx.TrustyFrames.compact(chain, budget);
+  assert.ok(out.every(([depth]) => depth <= 40), "no node is deeper than the cap");
+  assert.equal(budget.truncated, true);
+});
+
+test("the covered-element check resolves both nodes in an isolated world, not the page's", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  f.tabs.get(7).frames = omni({hits:{S3:99}});
+  f.chrome.debugger.sendCommand = (orig => async (d, m, p) => m === "Runtime.callFunctionOn" &&
+    /contains/.test(p.functionDeclaration) ? {result:{value:true}} : orig(d, m, p))(f.chrome.debugger.sendCommand);
+  const r = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:{frame:"T3", loader:"L3", node:42}});
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const resolved = sends(f, "DOM.resolveNode").filter(c => c.session === "S3").map(c => c.params);
+  assert.deepEqual(resolved, [{backendNodeId:42, executionContextId:78}, {backendNodeId:99, executionContextId:78}]);
+  const world = sends(f, "Page.createIsolatedWorld").filter(c => c.session === "S3")[0];
+  assert.equal(world?.params.frameId, "T3");
+});
+
+test("an overlay over the frame in its parent document answers Obscured", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  f.tabs.get(7).frames = omni({hits:{null:55}});
+  const r = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:{frame:"T3", loader:"L3", node:42}});
+  assert.deepEqual([r.error, r.tab], ["Obscured", 7]);
+  const probes = sends(f, "DOM.getNodeForLocation").map(c => [c.session ?? null, c.params.x, c.params.y]);
+  assert.deepEqual(probes.slice(0, 3), [["S3", 10, 11], ["S2", 20, 31], [null, 120, 231]], "each level is hit-tested");
+  assert.equal(sends(f, "Input.dispatchMouseEvent").length, 0);
+});
+
+test("a frame that navigates between the move and the press answers DocumentChanged", async () => {
+  const f = await codeFixture();
+  const {grant} = await connectGrant(f);
+  const base = omni();
+  let moved = false;
+  f.tabs.get(7).frames = async (method, params, session, emit) => {
+    if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved") moved = true;
+    const out = await base(method, params, session, emit);
+    if (moved && method === "Page.getFrameTree" && session === "S3")
+      return {frameTree:{frame:{...out.frameTree.frame, loaderId:"L3-new"}}};
+    return out;
+  };
+  const r = await f.command("page_click", {grant, tab:7, document:"doc-7", ref:{frame:"T3", loader:"L3", node:42}});
+  assert.deepEqual([r.error, r.tab], ["DocumentChanged", 7]);
+  assert.deepEqual(sends(f, "Input.dispatchMouseEvent").map(c => c.params.type), ["mouseMoved"]);
 });

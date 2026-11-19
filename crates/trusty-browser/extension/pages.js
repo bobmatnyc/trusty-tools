@@ -744,7 +744,8 @@ TrustyPages.commands = deps => {
   // Test: tests/test_worker.mjs `click drives trusted input and answers dialogs`,
   //   `stale document refuses before the page runs`, `trusted input rechecks the document before every event`,
   //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`,
-  //   `a timed-out click sends no input after a later attach`.
+  //   `a timed-out click sends no input after a later attach`,
+  //   tests/js/frames.test.mjs `a frame that navigates between the move and the press answers DocumentChanged`.
   // #11211: `aim` replaces the ref lookup with another source of the point (a captured coordinate).
   async function act(req, drive, aim) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
@@ -764,6 +765,8 @@ TrustyPages.commands = deps => {
         if (!(await answered)) throw refuse("OutcomeUnknown");
         const now = await probe(req.tab);
         if (!now.access || now.document !== req.document || now.origin !== first.origin) throw changed(now);
+        // #11362: a frame that navigated since its point was taken answers DocumentChanged before the press.
+        if (frames && params.type === "mousePressed") await framed(req, () => TrustyFrames.locate(frames, req.ref));
       }
       return raw(method, params);
     };

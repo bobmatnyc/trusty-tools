@@ -20,6 +20,7 @@
 //! `a_snapshot_routes_frame_refs_and_falls_back_on_a_busy_debugger` in
 //! `tests/parity_pages.rs`; the extension side in `tests/js/frames.test.mjs`.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -31,7 +32,14 @@ use crate::pyjson::Json;
 use crate::refusal::Refusal;
 
 /// Frames one snapshot may number; the ordinal has at most three digits.
+/// At or above the worker's own cap (150, `pages_frames.js` FRAME_MAX), so a
+/// capped reply is never refused.
 pub const MAX_FRAMES: usize = 200;
+/// Deepest node depth accepted; the worker stops at 40 (DEPTH_MAX).
+pub const MAX_DEPTH: i64 = 1000;
+/// Longest rendered snapshot text, in bytes; past it lines stop and the
+/// reply is `truncated`.
+pub const MAX_TEXT: usize = 512 * 1024;
 /// Snapshots a session keeps, one per lease; the oldest is dropped first.
 pub const KEEP: usize = 16;
 /// Longest frame id or loader id, as the worker checks it.
@@ -46,6 +54,8 @@ pub struct FrameTable {
     pub document: String,
     /// Frame id and loader id, by ordinal.
     pub frames: Vec<(String, String)>,
+    /// (ordinal, backend node id) of every node the snapshot's text named.
+    pub issued: HashSet<(usize, i64)>,
 }
 
 /// One accessibility node: depth, role, name, backend node id, value.
@@ -104,7 +114,8 @@ pub fn parse_ref(text: &str) -> Option<(usize, i64)> {
 /// Why: a ref must act only in the frame and document it was read from.
 /// What: a string that parses as [`parse_ref`] needs this lease's snapshot
 /// of the lease's current top document holding that ordinal, else
-/// `StaleElement`; the worker then refuses a navigated frame
+/// `StaleElement`, and so does a node that snapshot never named (#11362);
+/// the worker then refuses a navigated frame
 /// `DocumentChanged` and a detached one `StaleElement`.
 /// Test: `frame_refs_parse_and_route_only_within_their_snapshot`.
 pub(crate) fn resolve(session: &Session, claim: &Leased, value: &Json) -> Result<Json, Refusal> {
@@ -134,6 +145,9 @@ pub fn route_ref(
         .get(ord)
         .filter(|(_, l)| !l.is_empty())
         .ok_or_else(stale)?;
+    if !table.issued.contains(&(ord, node)) {
+        return Err(stale());
+    }
     Ok(Json::object([
         ("frame", Json::from(frame.as_str())),
         ("loader", Json::from(loader.as_str())),
@@ -168,7 +182,7 @@ fn node_of(v: &Json) -> Option<Node> {
         return None;
     };
     let depth = match depth {
-        Json::Int(d) if (0..=1000).contains(d) => usize::try_from(*d).ok()?,
+        Json::Int(d) if (0..=MAX_DEPTH).contains(d) => usize::try_from(*d).ok()?,
         _ => return None,
     };
     let backend = match backend {
@@ -347,13 +361,27 @@ fn line(text: &mut String, ord: usize, n: &Node) {
 /// origin and every node's ref. What: frames in [`order`], each a header
 /// (ordinal, origin, cross-origin and out-of-process marks, parent and box)
 /// and its nodes indented by depth; a refused frame names its reason and the
-/// tools that still reach it.
-/// Test: `the_text_marks_cross_origin_canvas_and_refused_frames`.
-pub fn assemble(frames: &[Frame], lease: &str, document: &str) -> (String, Json, FrameTable) {
+/// tools that still reach it. Past [`MAX_TEXT`] bytes no more node lines are
+/// written; the text ends with a `[text truncated]` line and the table holds
+/// only the nodes it named. The bool says whether the text was cut.
+/// Test: `the_text_marks_cross_origin_canvas_and_refused_frames`,
+/// `the_text_stops_at_its_cap_and_issues_only_the_nodes_it_named`.
+pub fn assemble(frames: &[Frame], lease: &str, document: &str) -> (String, Json, FrameTable, bool) {
+    assemble_capped(frames, lease, document, MAX_TEXT)
+}
+
+/// [`assemble`] with the text cap as a parameter.
+pub fn assemble_capped(
+    frames: &[Frame],
+    lease: &str,
+    document: &str,
+    cap: usize,
+) -> (String, Json, FrameTable, bool) {
     let ordered = order(frames);
     let boxes = rects(frames, &ordered);
     let top = &frames[ordered[0].0].origin;
     let (mut text, mut list, mut table) = (String::new(), Vec::new(), Vec::new());
+    let (mut issued, mut cut) = (HashSet::new(), false);
     for (ord, (&(i, parent), rect)) in ordered.iter().zip(&boxes).enumerate() {
         let f = &frames[i];
         let cross = f.origin != *top;
@@ -381,7 +409,14 @@ pub fn assemble(frames: &[Frame], lease: &str, document: &str) -> (String, Json,
             None => text.push('\n'),
         }
         for n in &f.nodes {
-            line(&mut text, ord, n);
+            let mut row = String::new();
+            line(&mut row, ord, n);
+            if cut || text.len() + row.len() > cap {
+                cut = true;
+                break;
+            }
+            text.push_str(&row);
+            issued.insert((ord, n.backend));
         }
         let rect = rect.map_or(Json::Null, |r| {
             Json::object(
@@ -407,8 +442,12 @@ pub fn assemble(frames: &[Frame], lease: &str, document: &str) -> (String, Json,
         lease: lease.to_owned(),
         document: document.to_owned(),
         frames: table,
+        issued,
     };
-    (text, Json::Array(list), table)
+    if cut {
+        text.push_str("[text truncated]\n");
+    }
+    (text, Json::Array(list), table, cut)
 }
 
 /// The tabs the leased tab opened, each `{tab, window}`, else `BrowserRefused`.
@@ -433,6 +472,10 @@ fn popups_of(raw: &Json, grant: &Grant) -> Result<Json, Refusal> {
     }))
 }
 
+/// The `note` of a `DebuggerBusy` fallback reply.
+pub const PARTIAL_NOTE: &str =
+    "top document and same-origin frames only; cross-origin frames not read";
+
 /// Run `page_snapshot`; `None` for any other op.
 pub async fn route(
     core: &Arc<Core>,
@@ -449,7 +492,8 @@ pub async fn route(
 ///
 /// Why/What: see the module doc. On `DebuggerBusy` (DevTools or another
 /// debugger holds the tab) it answers `page_read` of the top document with
-/// `fallback` and `reason` set, as #11362 asks.
+/// `fallback`, `reason`, `partial: true` and a `note` that cross-origin
+/// frames were not read, as #11362 asks.
 /// Test: `a_snapshot_routes_frame_refs_and_falls_back_on_a_busy_debugger`.
 async fn snapshot(
     core: &Arc<Core>,
@@ -471,6 +515,8 @@ async fn snapshot(
             let (mut reply, tab, host) = query(core, grant, &claim, "page_read", &read).await?;
             reply.insert("fallback", Json::from("page_read"));
             reply.insert("reason", Json::from("DebuggerBusy"));
+            reply.insert("partial", Json::Bool(true));
+            reply.insert("note", Json::from(PARTIAL_NOTE));
             return Ok((reply, tab, host));
         }
         Err(exc) => return Err(exc.into()),
@@ -484,10 +530,10 @@ async fn snapshot(
     if !crate::pairing::key_set_is(&raw, &keys) || claim.document.as_deref() != Some(doc) {
         return Err(refused().into());
     }
-    let truncated = matches!(raw.get("truncated"), Some(Json::Bool(true)));
     let frames = frames_of(&raw)?;
     let popups = popups_of(&raw, grant)?;
-    let (text, list, table) = assemble(&frames, &claim.token, doc);
+    let (text, list, table, cut) = assemble(&frames, &claim.token, doc);
+    let truncated = cut || matches!(raw.get("truncated"), Some(Json::Bool(true)));
     session.frames.retain(|t| t.lease != claim.token);
     if session.frames.len() >= KEEP {
         session.frames.remove(0);
