@@ -164,6 +164,8 @@ pub(crate) mod hook_rewrite_isolated;
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// See G0b auto-setup: install and register the browser and computer MCP servers.
+pub(crate) mod auto_setup;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
 // split out of `install` for the 500-SLOC production cap.
 pub(crate) mod install_skills;
