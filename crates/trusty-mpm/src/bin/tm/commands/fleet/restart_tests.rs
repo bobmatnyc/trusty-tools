@@ -216,4 +216,9 @@ fn a_failed_stop_types_no_resume_line_and_reports_not_restarted() {
     assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
     let last = r.lines.last().map_or("", String::as_str);
     assert!(last.starts_with("NOT restarted"), "{:?}", r.lines);
+    assert!(
+        r.lines.iter().any(|l| l.contains("claude may be stopped")),
+        "{:?}",
+        r.lines
+    );
 }

@@ -20,6 +20,11 @@ const NOW: f64 = 1_792_600_000.0;
 thread_local! {
     /// Seconds the fake `sleep` has advanced the fake clock.
     static SLEPT: Cell<f64> = const { Cell::new(0.0) };
+    /// Checkpoint-poll sleeps seen so far (the 2 s [`CHECKPOINT_POLL`] ones).
+    static POLLS: Cell<usize> = const { Cell::new(0) };
+    /// A ledger to write, as an Architect would, on the Nth poll sleep.
+    static WRITE_ON_POLL: std::cell::RefCell<Option<(usize, std::path::PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 fn now() -> f64 {
@@ -27,19 +32,43 @@ fn now() -> f64 {
 }
 fn sleep(d: Duration) {
     SLEPT.with(|s| s.set(s.get() + d.as_secs_f64()));
+    if d == CHECKPOINT_POLL {
+        let n = POLLS.with(|p| {
+            p.set(p.get() + 1);
+            p.get()
+        });
+        let target = WRITE_ON_POLL.with(|w| w.borrow().clone());
+        if let Some((at, dir)) = target
+            && n == at
+        {
+            ledger(&dir, now());
+        }
+    }
+}
+
+/// A ready ledger with this `session` object.
+fn put_ledger(dir: &Path, session: serde_json::Value) {
+    let d = dir.join("local/il/.trusty-mpm/datg");
+    std::fs::create_dir_all(&d).expect("datg dir");
+    let mut ses = serde_json::json!({
+        "task": "ship the restart verb", "next": "run the gates", "owed": [], "crons": []
+    });
+    ses.as_object_mut()
+        .expect("object")
+        .extend(session.as_object().expect("object").clone());
+    let state = serde_json::json!({
+        "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
+        "goals": [{"id": "ar-G01", "status": "active"}], "session": ses
+    });
+    std::fs::write(d.join("state.json"), state.to_string()).expect("state");
 }
 
 /// A ready ledger whose session was written at `written` epoch seconds.
 fn ledger(dir: &Path, written: f64) {
-    let d = dir.join("local/il/.trusty-mpm/datg");
-    std::fs::create_dir_all(&d).expect("datg dir");
-    let state = serde_json::json!({
-        "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
-        "goals": [{"id": "ar-G01", "status": "active"}],
-        "session": {"written_at": "2026-10-21T10:00Z", "written_epoch": written as i64,
-            "task": "ship the restart verb", "next": "run the gates", "owed": [], "crons": []}
-    });
-    std::fs::write(d.join("state.json"), state.to_string()).expect("state");
+    put_ledger(
+        dir,
+        serde_json::json!({"written_at": "2026-10-21T10:00Z", "written_epoch": written as i64}),
+    );
 }
 
 /// The box after `line` was typed (the guarded send checks this echo).
@@ -95,6 +124,7 @@ fn run_gate(
     relaunch: &dyn Fn() -> anyhow::Result<RelaunchReport>,
 ) -> (RestartReport, usize) {
     SLEPT.with(|s| s.set(0.0));
+    POLLS.with(|p| p.set(0));
     let calls = Cell::new(0);
     let counted = || {
         calls.set(calls.get() + 1);
@@ -123,12 +153,10 @@ fn a_requested_checkpoint_restarts_and_touches_only_the_architect() {
     let dir = home.path().join("architect");
     // A write after the request: the Architect answered the checkpoint.
     ledger(&dir, NOW + 30.0);
-    // Other sessions' records, with pids, must not change.
-    let others = home.path().join(".trusty-mpm/sessions.json");
-    std::fs::create_dir_all(others.parent().expect("parent")).expect("mkdir");
-    let before = r#"[{"name":"tm-proj-a","pid":4101},{"name":"tm-proj-b","pid":4102}]"#;
-    std::fs::write(&others, before).expect("others");
-    let tmux = tmux_with(&checkpointed_caps());
+    // Another project's session and pane exist on the same tmux server.
+    let tmux = tmux_with(&checkpointed_caps())
+        .fallback("list-sessions", "tm-architect\ntm-proj-a\n")
+        .fallback("list-panes", "%3 tm-architect\n%7 tm-proj-a\n");
     let (r, relaunches) = run_gate(&dir, &tmux, REQUEST, &ok_relaunch);
     assert_eq!((r.exit, relaunches), (0, 1), "{:?}", r.lines);
     assert_eq!(last(&r), "restarted");
@@ -140,13 +168,20 @@ fn a_requested_checkpoint_restarts_and_touches_only_the_architect() {
     );
     assert!(sends[0].iter().any(|a| a == CHECKPOINT), "{sends:?}");
     assert!(sends[2].iter().any(|a| a == RESUME), "{sends:?}");
-    // Every tmux call targets the Architect's pane or session, nothing else.
-    for call in tmux.calls() {
+    // Every tmux call targets the Architect's pane or session, never the other.
+    let calls = tmux.calls();
+    assert!(!calls.is_empty(), "the restart made tmux calls");
+    for call in &calls {
+        assert!(
+            !call
+                .iter()
+                .any(|a| a.contains("tm-proj-a") || a.contains("%7")),
+            "a call touched the other session: {call:?}"
+        );
         let target = call.iter().skip_while(|a| *a != "-t").nth(1);
         let t = target.map_or("", String::as_str);
         assert!(t == "%3" || t.contains("tm-architect"), "{call:?}");
     }
-    assert_eq!(std::fs::read_to_string(&others).expect("read"), before);
 }
 
 #[test]
@@ -170,6 +205,36 @@ fn a_checkpoint_timeout_refuses_with_exit_4() {
         "only the checkpoint request was typed"
     );
     assert!(SLEPT.with(Cell::get) >= 90.0, "the wait lasted 90 s");
+}
+
+#[test]
+fn a_ledger_without_an_exact_epoch_is_not_a_checkpoint() {
+    // `written_at` has minute precision: a write earlier in the request's own
+    // minute must not count as written after the request.
+    let tmp = tempfile::tempdir().expect("tmp");
+    let minute = iso(NOW);
+    put_ledger(
+        tmp.path(),
+        serde_json::json!({"written_at": format!("{}Z", &minute[..16])}),
+    );
+    let tmux = tmux_with(&checkpointed_caps()[..5]);
+    let (r, relaunches) = run_gate(tmp.path(), &tmux, REQUEST, &ok_relaunch);
+    assert_eq!((r.exit, relaunches), (4, 0), "{:?}", r.lines);
+    assert!(last(&r).starts_with("NOT restarted"), "{:?}", r.lines);
+    assert_eq!(tmux.sends().len(), 2, "only the request was typed");
+}
+
+#[test]
+fn a_write_landing_after_the_second_poll_restarts() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    ledger(tmp.path(), NOW - 600.0);
+    WRITE_ON_POLL.with(|w| *w.borrow_mut() = Some((2, tmp.path().to_path_buf())));
+    let tmux = tmux_with(&checkpointed_caps());
+    let (r, relaunches) = run_gate(tmp.path(), &tmux, REQUEST, &ok_relaunch);
+    WRITE_ON_POLL.with(|w| *w.borrow_mut() = None);
+    assert_eq!((r.exit, relaunches), (0, 1), "{:?}", r.lines);
+    assert_eq!(last(&r), "restarted");
+    assert_eq!(POLLS.with(Cell::get), 2, "the write landed on the 2nd poll");
 }
 
 #[test]
@@ -218,6 +283,11 @@ fn a_failed_relaunch_reports_not_restarted() {
         r.lines
     );
     assert!(!r.lines.iter().any(|l| l == "restarted"), "{:?}", r.lines);
+    assert!(
+        r.lines.iter().any(|l| l.contains("claude may be stopped")),
+        "{:?}",
+        r.lines
+    );
     assert_eq!(tmux.sends().len(), 2, "no resume line after the failure");
 }
 

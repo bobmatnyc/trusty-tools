@@ -61,6 +61,10 @@ pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_secs(90);
 /// The pause between two ledger reads while a checkpoint is awaited.
 const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 
+/// Said after a relaunch that began and failed: the old `claude` may be gone.
+const STOPPED_NOTE: &str = "the relaunch failed; claude may be stopped and the resume line was \
+     not typed. Check `tm fleet status`, then run `tm fleet relaunch`";
+
 /// How [`restart_with`] gets its checkpoint (G0b).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gate {
@@ -245,14 +249,13 @@ fn restart_inner(
         },
         Err(e) => {
             early.push(format!("FAILED  {e:#}"));
+            early.push(STOPPED_NOTE.to_owned());
             return RestartReport::done(1, early);
         }
     };
     // See G0b architect restart: a failed stop or launch types nothing into the pane.
     if report.exit != 0 {
-        report
-            .lines
-            .push("the relaunch failed; the resume line was not typed".to_owned());
+        report.lines.push(STOPPED_NOTE.to_owned());
         return report;
     }
     let sent = send_resume(ops, session);
@@ -343,8 +346,11 @@ pub(crate) fn resolve_architect(
 /// Types [`CHECKPOINT`] and waits up to [`CHECKPOINT_WAIT`] for a ledger
 /// write newer than the request (G0b).
 ///
-/// What: `Ok` lines on a fresh write; `Err` is the refusal: exit 1 when the
-/// line was not typed, exit 4 on a timeout.
+/// What: `Ok` lines on a fresh write carrying `written_epoch` (a minute-only
+/// `written_at` cannot prove the write followed the request); `Err` is the
+/// refusal: exit 1 when the line was not typed, exit 4 on a timeout.
+/// Test: `a_ledger_without_an_exact_epoch_is_not_a_checkpoint`,
+/// `a_write_landing_after_the_second_poll_restarts`.
 fn request_checkpoint(
     dir: &Path,
     session: &str,
@@ -362,7 +368,9 @@ fn request_checkpoint(
     let polls = CHECKPOINT_WAIT.as_secs() / CHECKPOINT_POLL.as_secs();
     for n in 0..=polls {
         let v = fresh(&il, Some(asked), None, (ops.now)());
-        if v.ok() {
+        // #11365 Dpg: without `session.written_epoch` the verdict floors the
+        // request to the minute, so an earlier write in that minute passes.
+        if v.ok() && has_exact_write(&il) {
             return Ok(vec![format!(
                 "checkpoint written ({})",
                 v.reasons.join("; ")
@@ -382,6 +390,15 @@ fn request_checkpoint(
             "{why}; claude was not stopped. Retry, or use `tm fleet relaunch`"
         )],
     ))
+}
+
+/// True when the ledger in `il` records `session.written_epoch`, the only
+/// write time precise enough to order against a request.
+fn has_exact_write(il: &Path) -> bool {
+    std::fs::read_to_string(il.join("state.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .is_some_and(|st| st["session"]["written_epoch"].is_i64())
 }
 
 /// True once [`IDLE_READS`] consecutive reads are idle; `None` gives up on
