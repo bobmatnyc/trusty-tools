@@ -203,6 +203,21 @@ fn architect_dir_from_config(home: &Path) -> Result<(PathBuf, RootSource), DashE
     Ok((dir.join(STORE_SUBDIR), source))
 }
 
+/// The Architect project directory: env [`ENV_ARCHITECT_PROJECT_DIR`], else
+/// the one Architect `home`'s user config records, else
+/// [`DEFAULT_ARCHITECT_DIR`]. `None` when it cannot be decided.
+///
+/// Test: `ilio_script_comes_from_the_env` (the env form).
+pub fn architect_dir(env: &dyn Fn(&str) -> Option<String>, home: Option<&Path>) -> Option<PathBuf> {
+    // G0b: `tm hook` finds `scripts/ilio.py` here.
+    if let Some(dir) = env(ENV_ARCHITECT_PROJECT_DIR).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    let home = home.filter(|h| h.is_absolute())?;
+    let (store, _) = architect_dir_from_config(home).ok()?;
+    store.ancestors().nth(2).map(Path::to_path_buf)
+}
+
 /// `home`'s user config, read strictly: a missing file is the default, an
 /// unreadable or malformed one is an error naming the file.
 fn read_user_config(home: &Path) -> Result<MpmConfig, String> {
