@@ -98,3 +98,35 @@ async fn lock_with_no_grant_says_so() {
     let err = refused.err.unwrap_or_default();
     assert!(err.contains("only from the command line"), "{err}");
 }
+
+/// Why: #10524 — the harness's Keychain is a memory double with no vault
+/// blob, so `migrate` is refused for every step and changes nothing; the
+/// flags map to their steps.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn migrate_without_a_blob_store_is_refused() {
+    use trusty_secrets::api::methods::MigrateStep;
+    let h = harness().await;
+    for args in [
+        &["migrate", "--dry-run"][..],
+        &["migrate"],
+        &["migrate", "--finish"],
+        &["migrate", "--rollback"],
+    ] {
+        let outcome = run(&h, "", args).await;
+        assert!(outcome.err.is_some(), "{args:?} succeeded");
+        assert_eq!(outcome.out, "", "{args:?}");
+    }
+    assert_eq!(
+        super::super::unlock::step_of(false, false),
+        MigrateStep::Migrate
+    );
+    assert_eq!(
+        super::super::unlock::step_of(true, false),
+        MigrateStep::Finish
+    );
+    assert_eq!(
+        super::super::unlock::step_of(false, true),
+        MigrateStep::Rollback
+    );
+}

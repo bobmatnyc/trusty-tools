@@ -243,6 +243,11 @@ pub(crate) async fn dispatch_with(
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
         SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,
         SecretsAction::Lock => unlock::lock(ctx, out).await,
+        SecretsAction::Migrate {
+            dry_run,
+            finish,
+            rollback,
+        } => unlock::migrate(ctx, unlock::step_of(finish, rollback), dry_run, out).await,
         // #10524: the presence prompt runs only from the command line.
         SecretsAction::Unlock => {
             anyhow::bail!("tm secrets unlock: runs only from the command line")

@@ -202,6 +202,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
   - `lock` — End the unlock grant now; the next read prompts again
+  - `migrate` — Move every trusty Keychain item into one Keychain item, so `tm secrets unlock` prompts once
   - `remove` — Remove one key of the project scope
   - `resolve` — Print one key's value inside a `tm secrets exec` grant
   - `set` — Add or replace one key of the project scope. The value comes from the clipboard
