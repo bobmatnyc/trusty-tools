@@ -656,8 +656,13 @@ still applies.
 
 The Bedrock verifier default needs `bedrock:InvokeModel` access to
 `amazon.nova-pro-v1:0` (through the `us.` cross-region inference profile) in
-the AWS account and region trusty-review runs in. Without that access the
-verifier call fails. Pick another verifier with
+the AWS account and region trusty-review runs in. When the startup liveness
+probe gets `AccessDenied` or `ModelNotFound` for this built-in default,
+trusty-review falls back to Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) and logs a warning naming
+both models. The fallback is probed too; if it also fails, live mode refuses
+to start. A verifier model you set explicitly never falls back: if it is
+denied, live mode refuses to start. Pick another verifier with
 `TRUSTY_REVIEW_VERIFIER_MODEL` (for example
 `TRUSTY_REVIEW_VERIFIER_MODEL=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`),
 `--verifier-model`, or `[models.verifier]` in the config file.
