@@ -11,6 +11,8 @@ fn env_in(tmp: &Path, cargo: Option<PathBuf>) -> Env {
     let install_cwd = tmp.join("cwd");
     std::fs::create_dir_all(&install_cwd).unwrap();
     Env {
+        cargo_home: tmp.join("cargo-home"),
+        install_timeout: Duration::from_secs(60),
         cargo_bin,
         cargo,
         config_dir: tmp.join("claude-config"),
@@ -58,7 +60,14 @@ fn fake_cargo_install_then_register() {
     assert_eq!(got["command"], want.to_string_lossy().as_ref());
     assert!(want.is_absolute());
     let log = std::fs::read_to_string(tmp.path().join("cargo.log")).unwrap();
-    assert!(log.contains("install trusty-browser --locked"), "{log}");
+    assert!(
+        log.contains("install trusty-browser --locked --root"),
+        "{log}"
+    );
+    assert!(
+        log.contains("cargo-home cwd="),
+        "--root is CARGO_HOME: {log}"
+    );
     assert!(log.contains("cwd="), "{log}");
 }
 
@@ -183,4 +192,43 @@ fn doctor_rows_report_each_fact() {
     let rows = doctor_rows(&env);
     assert!(rows.iter().all(|r| r.status == CheckStatus::Ok), "{rows:?}");
     assert!(rows[1].message.contains("command-path-exists=true"));
+}
+
+#[test]
+fn a_hung_cargo_install_is_killed_at_the_deadline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("hung-cargo");
+    // `exec` so the sleep is the child itself: killing it leaves no orphan.
+    std::fs::write(&path, "#!/bin/sh\nexec sleep 20\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut env = env_in(tmp.path(), Some(path));
+    env.install_timeout = Duration::from_secs(1);
+    let start = Instant::now();
+    let got = ensure_binary(&env, &SERVERS[0]);
+    let took = start.elapsed();
+    assert_eq!(
+        got,
+        Install::Missing("cargo install timed out after 1 s".into())
+    );
+    assert!(took < Duration::from_secs(10), "waited {took:?}");
+}
+
+#[test]
+fn doctor_rows_leave_a_malformed_config_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env_in(tmp.path(), None);
+    std::fs::create_dir_all(&env.config_dir).unwrap();
+    let file = env.config_dir.join(".claude.json");
+    std::fs::write(&file, "{ not json, oauth: secret").unwrap();
+    let rows = doctor_rows(&env);
+    assert!(
+        rows.iter().all(|r| r.status == CheckStatus::Unknown),
+        "{rows:?}"
+    );
+    assert_eq!(std::fs::read(&file).unwrap(), b"{ not json, oauth: secret");
+    let names: Vec<_> = std::fs::read_dir(&env.config_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names.len(), 1, "no .corrupt sibling: {names:?}");
 }

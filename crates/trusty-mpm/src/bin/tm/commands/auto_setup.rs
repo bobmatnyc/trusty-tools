@@ -12,6 +12,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 use trusty_mpm::core::doctor::{CheckStatus, DoctorCheck};
@@ -20,6 +21,12 @@ use trusty_mpm::core::mcp_config;
 /// Set to any value to skip [`run_and_print`]; the scratch-HOME integration
 /// tests set it so a `tm fleet init` run never spawns a real `cargo install`.
 pub(crate) const SKIP_ENV: &str = "TM_SKIP_MCP_AUTO_SETUP";
+
+/// How long one `cargo install` may run before it is killed (10 minutes).
+pub(crate) const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How often the install child is polled for exit.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// The doctor check name.
 pub(crate) const CHECK: &str = "auto_setup_mcp";
@@ -52,6 +59,11 @@ pub(crate) const SERVERS: [Server; 2] = [
 /// The paths and tools one run uses; tests point every field at a temp dir.
 #[derive(Debug, Clone)]
 pub(crate) struct Env {
+    /// `$CARGO_HOME`; passed to `cargo install --root` so the binary lands in
+    /// `cargo_bin`, the path registered in the config.
+    pub cargo_home: PathBuf,
+    /// Longest a `cargo install` may run before it is killed.
+    pub install_timeout: Duration,
     /// `$CARGO_HOME/bin`, where `cargo install` puts binaries.
     pub cargo_bin: PathBuf,
     /// The `cargo` executable, or `None` when none is on `PATH`.
@@ -75,6 +87,8 @@ impl Env {
             .filter(|p| p.is_file())
             .or_else(|| trusty_common::bin_resolve::resolve_binary("cargo"));
         Some(Self {
+            cargo_home,
+            install_timeout: INSTALL_TIMEOUT,
             cargo,
             config_dir: trusty_mpm::core::trusty_tools_config::managed_claude_config_dir()?,
             install_cwd: std::env::temp_dir(),
@@ -146,9 +160,12 @@ pub(crate) fn ensure(env: &Env) -> Vec<Outcome> {
 
 /// Make sure `cargo_bin/<bin>` exists, running `cargo install` when it does not.
 ///
-/// What: stdin is null; the child runs in `install_cwd`. A missing cargo, a
-/// spawn error, a non-zero exit, or an exit 0 that left no binary is `Missing`.
-/// Test: `cargo_install_failure_is_reported`, `fake_cargo_install_then_register`.
+/// What: stdin is null; the child runs in `install_cwd` with `--root
+/// <cargo_home>`. It is polled against `install_timeout`; on expiry it is
+/// killed and reaped. A missing cargo, a spawn error, a timeout, a non-zero
+/// exit, or an exit 0 that left no binary is `Missing`.
+/// Test: `cargo_install_failure_is_reported`, `fake_cargo_install_then_register`,
+/// `a_hung_cargo_install_is_killed_at_the_deadline`.
 fn ensure_binary(env: &Env, s: &Server) -> Install {
     let path = env.cargo_bin.join(s.bin);
     if path.is_file() {
@@ -161,12 +178,18 @@ fn ensure_binary(env: &Env, s: &Server) -> Install {
         "  installing {} (cargo install {} --locked)",
         s.bin, s.krate
     );
-    let status = Command::new(cargo)
-        .args(["install", s.krate, "--locked"])
+    let child = Command::new(cargo)
+        .args(["install", s.krate, "--locked", "--root"])
+        .arg(&env.cargo_home)
         .current_dir(&env.install_cwd)
         .stdin(Stdio::null())
-        .status();
+        .spawn();
+    let status = child.and_then(|c| wait_bounded(c, env.install_timeout));
     match status {
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Install::Missing(format!(
+            "cargo install timed out after {} s",
+            env.install_timeout.as_secs()
+        )),
         Ok(st) if st.success() && path.is_file() => Install::Installed,
         Ok(st) if st.success() => Install::Missing(format!(
             "`cargo install {}` succeeded but {} is absent",
@@ -175,6 +198,29 @@ fn ensure_binary(env: &Env, s: &Server) -> Install {
         )),
         Ok(st) => Install::Missing(format!("`cargo install {}` failed ({st})", s.krate)),
         Err(e) => Install::Missing(format!("cannot run cargo: {e}")),
+    }
+}
+
+/// Wait for `child` until `limit`; past it, kill and reap it.
+///
+/// What: polls `try_wait`; on expiry returns a `TimedOut` error after `kill`
+/// and `wait`, so no zombie is left.
+/// Test: `a_hung_cargo_install_is_killed_at_the_deadline`.
+fn wait_bounded(
+    mut child: std::process::Child,
+    limit: Duration,
+) -> std::io::Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + limit;
+    loop {
+        if let Some(st) = child.try_wait()? {
+            return Ok(st);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        std::thread::sleep(POLL_INTERVAL);
     }
 }
 
@@ -250,6 +296,27 @@ pub(crate) fn run_and_print() {
     }
 }
 
+/// Read one `mcpServers` entry without ever writing or renaming the config.
+///
+/// Why: the doctor must be read-only; `mcp_config::get_server` quarantines a
+/// malformed `.claude.json`. What: a missing file is `Ok(None)`; a read error,
+/// a parse failure or a non-object root is `Err`.
+/// Test: `doctor_rows_leave_a_malformed_config_untouched`.
+fn read_entry_readonly(config_dir: &Path, name: &str) -> Result<Option<Value>, String> {
+    let path = config_dir.join(".claude.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+    };
+    let root: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+    if !root.is_object() {
+        return Err(format!("{} is not a JSON object", path.display()));
+    }
+    Ok(root.get("mcpServers").and_then(|m| m.get(name)).cloned())
+}
+
 /// The doctor rows: per server, installed, registered, command path exists.
 ///
 /// Why: G0b item 3. What: `Ok` when all three hold; `Warn` naming what is
@@ -260,10 +327,10 @@ pub(crate) fn doctor_rows(env: &Env) -> Vec<DoctorCheck> {
         .iter()
         .map(|s| {
             let installed = env.cargo_bin.join(s.bin).is_file();
-            let entry = match mcp_config::get_server(&env.config_dir, s.bin) {
+            let entry = match read_entry_readonly(&env.config_dir, s.bin) {
                 Ok(e) => e,
                 Err(e) => {
-                    let msg = format!("{}: config unreadable: {e:#}", s.bin);
+                    let msg = format!("{}: config unreadable: {e}", s.bin);
                     return DoctorCheck::new(CHECK, CheckStatus::Unknown, msg);
                 }
             };
