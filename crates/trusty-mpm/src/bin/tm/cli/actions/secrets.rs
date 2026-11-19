@@ -14,6 +14,18 @@ use std::str::FromStr;
 
 use clap::Subcommand;
 
+/// Which parser `import` runs.
+// See G0b secrets JSON import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum ImportFormat {
+    /// `KEY=value` lines.
+    Dotenv,
+    /// A JSON object, flattened to `KEY_PATH` names.
+    Json,
+    /// A Google OAuth client JSON (`installed` or `web`).
+    GoogleOauth,
+}
+
 /// A free-text argument of `set`, redacted in `Debug`.
 ///
 /// Why: a caller who types the secret on the command line by mistake —
@@ -91,11 +103,24 @@ pub(crate) enum SecretsAction {
     /// A syntax error names the line number, never its text, and stores
     /// nothing. Any key that fails makes the exit status 1. The file is left
     /// in place.
+    ///
+    /// A `.json` file, or `--format json`, is a JSON object: nested keys
+    /// join with `_` and upper-case (`DB_PASSWORD`); an array or null is
+    /// refused by key name. A Google OAuth client JSON (`installed` or `web`
+    /// at the top), or `--google-oauth`, stores `client_id`, `client_secret`
+    /// and `project_id` as `google-oauth.<project_id>.CLIENT_ID` and so on.
     Import {
-        /// The dotenv file.
+        /// The dotenv, JSON or Google OAuth client file.
         path: PathBuf,
         /// Optional label applied to every key (`<group>.<KEY>`).
         group: Option<ArgText>,
+        // See G0b secrets JSON import.
+        /// The file format; default: by extension and content.
+        #[arg(long, value_enum, conflicts_with = "google_oauth")]
+        format: Option<ImportFormat>,
+        /// The file is a Google OAuth client JSON (`--format google-oauth`).
+        #[arg(long)]
+        google_oauth: bool,
     },
     /// Copy keys into this project's scope from a backend.
     ///
