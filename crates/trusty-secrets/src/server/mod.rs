@@ -63,6 +63,8 @@ pub mod errors;
 mod exec;
 mod gate;
 pub mod grant;
+// #10524: `secrets.migrate`, the vault blob migration.
+mod migrate;
 // #11215: the timestamp on the server's start and exit lines.
 #[cfg(test)]
 mod grant_fakes;
@@ -97,7 +99,7 @@ pub use ancestry::{
 pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
-    BackendWait, RemoteAgent, ServedFrom,
+    BackendWait, MigrationAudit, RemoteAgent, ServedFrom,
 };
 // #10524: why an unlock grant ended, as its audit records name it.
 pub use crate::store::grant_cache::DropReason as GrantDropReason;

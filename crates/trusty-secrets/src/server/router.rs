@@ -49,8 +49,8 @@ use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
 use crate::store::timeout_note::TimeoutNote;
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
-    open_backend_at_in, platform,
+    HeldKeychain, KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends,
+    open_backend, open_backend_at_in, platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -404,7 +404,15 @@ impl State {
                 backend: id.to_string(),
             });
         }
-        (self.backends)(id)
+        let backend = (self.backends)(id)?;
+        // #10524: Keychain reads answer from the unlock grant's held blob.
+        if id.as_str() == BackendId::KEYCHAIN {
+            return Ok(Arc::new(HeldKeychain::new(
+                backend,
+                Arc::clone(&self.cache),
+            )));
+        }
+        Ok(backend)
     }
 
     /// The whole-operation deadline for one request of `name`.
@@ -446,7 +454,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 16] = [
+pub(crate) const METHODS: [(&str, MethodFn); 17] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -468,6 +476,8 @@ pub(crate) const METHODS: [(&str, MethodFn); 16] = [
     // #10524: the 8 h unlock grant.
     (method::UNLOCK, unlock::unlock),
     (method::LOCK, unlock::lock),
+    // #10524: the vault blob migration.
+    (method::MIGRATE, super::migrate::migrate),
 ];
 
 /// The `secrets.*` router over `state`.

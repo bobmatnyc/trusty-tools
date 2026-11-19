@@ -342,3 +342,108 @@ fn grant_drop_reasons_serialize_as_snake_case() {
     let newer: DropReason = serde_json::from_str("\"reboot\"").unwrap();
     assert_eq!(newer, DropReason::Other);
 }
+
+/// Why: #10524 critic MEDIUM — a caller that read the clocks, then waited
+/// for the lock, could settle a stamp older than the last one seen; the
+/// stepped-back wall gap then read as a fault and dropped a live grant. The
+/// old stamp now shows no gap and never moves `last_seen` back. Against the
+/// pre-fix `settle` this test ends the grant with `fault`.
+/// Test: itself.
+#[test]
+fn grant_stale_stamp_after_a_newer_one_keeps_the_grant() {
+    let clocks = Clocks::new();
+    let cache = clocks.cache();
+    let generation = cache.open(TTL, alive());
+    clocks.both(5);
+    assert!(matches!(cache.check(), Status::Live { .. }));
+    clocks.both(3);
+    assert!(
+        matches!(cache.check(), Status::Live { generation: g, .. } if g == generation),
+        "a stale stamp ended the grant"
+    );
+    // `last_seen` stayed at 5: a jump to 20 is a 15 s gap on both clocks,
+    // not a sleep, and the grant is still live.
+    clocks.both(20);
+    assert!(matches!(cache.check(), Status::Live { .. }));
+    // A wall clock before the opening is still an unknown age.
+    clocks.wall.store(-1, Ordering::SeqCst);
+    assert_eq!(cache.check(), Status::Ended(DropReason::Fault));
+}
+
+/// A blob holding `KEY_A` = `value`.
+fn blob_of(value: &str) -> Blob {
+    let mut blob = Blob::default();
+    blob.insert(ItemId::new("trusty/acme/web", "KEY_A"), value);
+    blob
+}
+
+fn held_value(cache: &GrantCache, id: &ItemId) -> Option<String> {
+    match cache.held_get(id) {
+        HeldRead::Hit(value) => Some(value.expose().to_owned()),
+        HeldRead::Absent => Some("<absent>".to_owned()),
+        HeldRead::Off => None,
+    }
+}
+
+/// Why: #10524 AC1 — a held blob answers every item, absent ones included,
+/// only while its grant is live; it goes with the grant and never outlives
+/// it, and a stale generation holds nothing.
+/// Test: itself.
+#[test]
+fn grant_held_blob_answers_reads_and_ends_with_the_grant() {
+    let clocks = Clocks::new();
+    let cache = clocks.cache();
+    let (a, b) = (
+        ItemId::new("trusty/acme/web", "KEY_A"),
+        ItemId::new("trusty/acme/web", "KEY_B"),
+    );
+    assert!(!cache.hold(1, &blob_of("v")), "held with no grant");
+    let generation = cache.open(TTL, alive());
+    assert!(!cache.hold(generation + 1, &blob_of("v")));
+    assert!(cache.hold(generation, &blob_of("v")));
+    assert_eq!(held_value(&cache, &a).as_deref(), Some("v"));
+    assert_eq!(held_value(&cache, &b).as_deref(), Some("<absent>"));
+    clocks.both(8 * 3600);
+    assert_eq!(held_value(&cache, &a), None, "served past expiry");
+    assert!(!cache.holds_blob());
+}
+
+/// Why: #10524 — a write in flight, or one that failed, must never leave a
+/// stale held value served: its item reads the Keychain until the newest
+/// write lands. A variant that served the old value during or after a
+/// failed write fails this test; so does one that let an older write's end
+/// overwrite a newer one's.
+/// Test: itself.
+#[test]
+fn grant_held_write_in_flight_or_failed_reads_the_keychain() {
+    let cache = Clocks::new().cache();
+    let a = ItemId::new("trusty/acme/web", "KEY_A");
+    let generation = cache.open(TTL, alive());
+    assert!(cache.hold(generation, &blob_of("old")));
+    let first = cache.held_begin(&a).unwrap();
+    assert_eq!(held_value(&cache, &a), None, "served during a write");
+    cache.held_end(&a, first, Some("new"));
+    assert_eq!(held_value(&cache, &a).as_deref(), Some("new"));
+
+    let _failed = cache.held_begin(&a).unwrap();
+    assert_eq!(held_value(&cache, &a), None, "served after a failed write");
+
+    let older = cache.held_begin(&a).unwrap();
+    let newer = cache.held_begin(&a).unwrap();
+    cache.held_end(&a, older, Some("older"));
+    assert_eq!(held_value(&cache, &a), None, "an older write landed last");
+    cache.held_end(&a, newer, None);
+    assert_eq!(held_value(&cache, &a).as_deref(), Some("<absent>"));
+}
+
+/// Why: #10524 AC2 — a refused page lock holds no blob at all, and a refused
+/// lock on a write's value drops the held blob, so nothing unlocked is kept.
+/// Test: itself.
+#[test]
+fn grant_held_blob_with_a_refused_page_lock_holds_nothing() {
+    let (now, wall) = Clocks::new().pair();
+    let cache = GrantCache::with_lock(now, wall, |_, _| false);
+    let generation = cache.open(TTL, alive());
+    assert!(!cache.hold(generation, &blob_of("v")));
+    assert!(!cache.holds_blob());
+}

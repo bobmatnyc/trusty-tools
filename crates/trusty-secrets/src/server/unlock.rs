@@ -14,7 +14,10 @@
 //! grant's watcher flag, which ends the grant at the next check. Every drop
 //! is audited once with its typed reason. The grant lives in memory only:
 //! a server restart never restores it, and while it is live the idle exit
-//! is deferred ([`grant_keeps_serving`]). The router's peer-uid check and
+//! is deferred ([`grant_keeps_serving`]). #10524 (owner ruling 2026-11-19):
+//! when the Keychain holds the vault blob, unlock reads it once (the one
+//! prompt) and the grant holds it, so no later Keychain read prompts; a
+//! blob that cannot be read or held opens no grant. The router's peer-uid check and
 //! `secrets.resolve`'s grant, ancestry, agents-flag and audit checks still
 //! run before any value is served.
 //! Test: `unlock_tests.rs` beside this file.
@@ -28,11 +31,13 @@ use serde_json::Value;
 use super::ancestry::has_agent_ancestor;
 use super::audit::{AuditMethod, AuditRecord, AuditSink};
 use super::errors::ErrorKind;
-use super::gate::{Recording, audited, suppressed_by_machine};
+use super::gate::{Gate, Recording, audited, suppressed_by_machine};
 use super::methods::{Caller, to_json};
 use super::power::{PowerEvent, PowerHook, PowerSource, Subscription};
 use super::router::State;
+use crate::api::BackendId;
 use crate::api::methods::{LockResponse, UnlockResponse};
+use crate::store::KEYCHAIN_CALL_TIMEOUT;
 use crate::store::SecretCache;
 use crate::store::grant_cache::{DropReason, Status};
 use crate::store::platform::now_unix;
@@ -115,29 +120,93 @@ pub(crate) fn unlock(state: &State, caller: Caller, params: Value) -> Result<Val
         Recording::WriteAhead,
         |gate| {
             require_object(&params)?;
-            let peer = caller.pid().ok_or(ErrorKind::AgentUseRefused)?;
-            // #10524: an agent never opens the grant; unknown ancestry refuses.
-            let agent = has_agent_ancestor(state.grants.processes(), peer)
-                .map_err(|_| ErrorKind::AgentUseRefused)?;
-            gate.agent_parent(agent);
-            if agent {
-                return Err(ErrorKind::AgentUseRefused);
-            }
+            person_only(state, caller, gate)?;
             let dropper = Dropper::of(state);
             dropper.settle();
             gate.write_ahead()?;
             let ttl = state.settings.unlock_ttl;
-            open(state, &dropper, ttl)?;
+            let generation = open(state, &dropper, ttl)?;
+            // #10524: no blob held when one exists means no grant.
+            let blob_held = hold_blob(state, generation).inspect_err(|_| {
+                dropper.close(DropReason::Fault, Some(generation));
+            })?;
             to_json(&UnlockResponse {
                 expires_in_secs: ttl.as_secs(),
+                blob_held,
             })
         },
     )
 }
 
+/// Refuse a caller with no peer pid, a Claude Code ancestor, or an
+/// unreadable ancestry; record the verdict on `gate`.
+///
+/// Why: #10524 — an agent never opens the grant or migrates the Keychain.
+/// Test: `unlock_by_agent_descendant_is_refused_and_opens_nothing`,
+/// `migrate_by_agent_descendant_is_refused_and_changes_nothing`.
+pub(crate) fn person_only(
+    state: &State,
+    caller: Caller,
+    gate: &mut Gate<'_>,
+) -> Result<(), ErrorKind> {
+    let peer = caller.pid().ok_or(ErrorKind::AgentUseRefused)?;
+    let agent = has_agent_ancestor(state.grants.processes(), peer)
+        .map_err(|_| ErrorKind::AgentUseRefused)?;
+    gate.agent_parent(agent);
+    if agent {
+        return Err(ErrorKind::AgentUseRefused);
+    }
+    Ok(())
+}
+
+/// Read the Keychain's vault blob once and hold it in grant `generation`.
+///
+/// What: `Ok(false)` when there is no blob to hold: a sandboxed server, no
+/// Keychain, a backend with no blob store, or the per-item layout. A read
+/// that fails or outlasts [`KEYCHAIN_CALL_TIMEOUT`], or a blob the grant
+/// cannot hold (a refused page lock), is an error.
+/// Test: `migrate_then_unlock_reads_the_keychain_once`,
+/// `unlock_with_an_unreadable_blob_opens_no_grant`.
+fn hold_blob(state: &State, generation: u64) -> Result<bool, ErrorKind> {
+    if state.sandboxed || !state.keychain_compiled {
+        return Ok(false);
+    }
+    let Some(store) = state
+        .open(&BackendId::keychain())
+        .ok()
+        .and_then(|backend| backend.blob_store())
+    else {
+        return Ok(false);
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("trusty-secrets-blob-read".to_owned())
+        .spawn(move || {
+            let _ = tx.send(store.read_blob());
+        })
+        .map_err(|_| ErrorKind::Internal)?;
+    // See #7524: an abandoned read stays blocked on its prompt; it holds
+    // nothing and writes nothing.
+    let blob = match rx.recv_timeout(KEYCHAIN_CALL_TIMEOUT) {
+        Ok(read) => read.map_err(ErrorKind::from)?,
+        Err(_) => return Err(ErrorKind::BackendTimeout),
+    };
+    match blob {
+        None => Ok(false),
+        Some(blob) if state.cache.grant().hold(generation, &blob) => Ok(true),
+        Some(_) => Err(ErrorKind::Internal),
+    }
+}
+
+/// End a live grant after `secrets.migrate` changed the Keychain layout, so
+/// no grant keeps a snapshot of the old one (#10524).
+pub(crate) fn end_for_layout_change(state: &State) {
+    Dropper::of(state).close(DropReason::Revoked, None);
+}
+
 /// Subscribe, open the grant and start its sentinel; any failure leaves no
-/// grant.
-fn open(state: &State, dropper: &Dropper, ttl: Duration) -> Result<(), ErrorKind> {
+/// grant. Returns the grant's generation.
+fn open(state: &State, dropper: &Dropper, ttl: Duration) -> Result<u64, ErrorKind> {
     let watcher = Arc::new(AtomicBool::new(true));
     let generation = Arc::new(OnceLock::<u64>::new());
     let fired = Arc::new(AtomicBool::new(false));
@@ -175,7 +244,7 @@ fn open(state: &State, dropper: &Dropper, ttl: Duration) -> Result<(), ErrorKind
     std::thread::Builder::new()
         .name("trusty-secrets-grant".to_owned())
         .spawn(move || sentinel.run())
-        .map(drop)
+        .map(|_| opened)
         .map_err(|_| {
             // #10524: no sentinel, no grant; the deny record says why.
             state.cache.grant().close(DropReason::Fault, Some(opened));

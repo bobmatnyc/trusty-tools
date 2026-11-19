@@ -110,6 +110,10 @@ pub enum AuditMethod {
     /// logout or a fault, named by `grant_drop` (#10524). No wire method.
     #[serde(rename = "secrets.unlock.drop")]
     GrantDrop,
+    /// `secrets.migrate`: one record per call, naming the step, counts and
+    /// key names in `migration` (#10524).
+    #[serde(rename = "secrets.migrate")]
+    Migrate,
     /// A method a newer server audits. Never written by this build.
     #[serde(other)]
     Other,
@@ -312,6 +316,30 @@ pub struct AuditRecord {
     /// `grant` (#10524). `None` otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub served_from: Option<ServedFrom>,
+    /// On a `secrets.migrate` record: the step, its counts and key names,
+    /// and a failed step's fixed reason (#10524). Never a value. `None`
+    /// otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationAudit>,
+}
+
+/// What one `secrets.migrate` call did (#10524).
+///
+/// Test: `migrate_records_counts_and_names_never_values`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MigrationAudit {
+    /// The step.
+    pub step: crate::api::methods::MigrateStep,
+    /// Whether it was a dry run.
+    pub dry_run: bool,
+    /// Items moved or deleted.
+    pub items: usize,
+    /// The `vault/key` names of the value items.
+    pub keys: Vec<String>,
+    /// A failed step's reason: fixed text naming items, never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 /// The agent label a remote frame claimed (#11464).
@@ -403,6 +431,7 @@ impl AuditRecord {
             remote_project: None,
             grant_drop: None,
             served_from: None,
+            migration: None,
         }
     }
 

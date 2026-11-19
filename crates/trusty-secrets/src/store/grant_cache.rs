@@ -16,6 +16,14 @@
 //! fails closed: it is cleared, the window ends, and nothing is served.
 //! Nothing is ever written to disk. The cache is not a gate: the server
 //! consults it only after every check on the read path has passed.
+//! #10524 (owner ruling 2026-11-19): a grant may also hold the whole vault
+//! blob, read once at unlock ([`GrantCache::hold`]); every Keychain item read
+//! is then answered from it ([`GrantCache::held_get`]), absent items included.
+//! A write marks its item dirty until it lands ([`GrantCache::held_begin`],
+//! [`GrantCache::held_end`]); a dirty item reads from the Keychain, so a
+//! failed or racing write never leaves a stale value served. Each method takes
+//! the lock before it reads the clocks, and a stamp older than the last one
+//! seen never moves the window back.
 //! Test: `grant_cache_tests.rs` beside this file.
 
 use std::collections::HashMap;
@@ -28,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use super::cache::{CacheClock, OpenedUnder, WallClock};
 use super::locked::{LockedBuf, MemLock, os_mlock};
+use super::vault_blob::{Blob, ItemId};
 use crate::api::{BackendId, SecretKey, SecretValue, VaultName};
 
 /// How far the wall clock may run ahead of `Instant` between two checks
@@ -86,6 +95,26 @@ pub(crate) enum Lookup {
     Miss(u64),
 }
 
+/// A held-blob read's answer.
+pub(crate) enum HeldRead {
+    /// No live grant holds a blob, or the item has a write in flight: read
+    /// the Keychain.
+    Off,
+    /// The item's value, from the held blob.
+    Hit(SecretValue),
+    /// The held blob has no such item.
+    Absent,
+}
+
+/// The vault blob a grant holds, and its writes in flight.
+#[derive(Default)]
+struct Held {
+    items: HashMap<ItemId, LockedBuf>,
+    /// Item to the ticket of its newest write in flight.
+    dirty: HashMap<ItemId, u64>,
+    ticket: u64,
+}
+
 /// What one value is filed under.
 type Slot = (BackendId, VaultName, SecretKey);
 
@@ -114,6 +143,8 @@ struct Inner {
     generation: u64,
     /// How the last live window ended, until a check reports it.
     ended: Option<DropReason>,
+    /// The live window's vault blob, when unlock read one (#10524).
+    held: Option<Held>,
 }
 
 impl Inner {
@@ -122,6 +153,7 @@ impl Inner {
     fn end(&mut self, reason: DropReason) -> bool {
         self.epoch = self.epoch.wrapping_add(1);
         self.values.clear();
+        self.held = None;
         let was_live = self.window.take().is_some();
         if was_live {
             self.ended = Some(reason);
@@ -138,19 +170,20 @@ impl Inner {
         let reason = if !window.watcher.load(Ordering::SeqCst) {
             Some(DropReason::Fault)
         } else {
-            let wall_gap = now.wall.duration_since(window.last_seen.wall);
+            // #10524: a stamp older than the last one seen (a caller that read
+            // the clocks, then waited for the lock) shows no gap.
+            let wall_gap = now
+                .wall
+                .duration_since(window.last_seen.wall)
+                .unwrap_or_default();
             let wall_age = now.wall.duration_since(window.opened.wall);
             let mono_gap = now.at.saturating_duration_since(window.last_seen.at);
             let mono_age = now.at.saturating_duration_since(window.opened.at);
-            match (wall_gap, wall_age) {
-                // #10524: a stepped-back wall clock is an unknown age.
-                (Err(_), _) | (_, Err(_)) => Some(DropReason::Fault),
-                (Ok(gap), _) if gap.saturating_sub(mono_gap) >= SLEEP_GAP => {
-                    Some(DropReason::Sleep)
-                }
-                (_, Ok(age)) if age >= window.ttl || mono_age >= window.ttl => {
-                    Some(DropReason::Expired)
-                }
+            match wall_age {
+                // #10524: a wall clock before the opening is an unknown age.
+                Err(_) => Some(DropReason::Fault),
+                Ok(_) if wall_gap.saturating_sub(mono_gap) >= SLEEP_GAP => Some(DropReason::Sleep),
+                Ok(age) if age >= window.ttl || mono_age >= window.ttl => Some(DropReason::Expired),
                 _ => None,
             }
         };
@@ -158,7 +191,13 @@ impl Inner {
             Some(reason) => {
                 self.end(reason);
             }
-            None => window.last_seen = now,
+            // #10524: `last_seen` only moves forward, on each clock.
+            None => {
+                window.last_seen = Stamp {
+                    at: window.last_seen.at.max(now.at),
+                    wall: window.last_seen.wall.max(now.wall),
+                };
+            }
         }
     }
 
@@ -249,8 +288,8 @@ impl GrantCache {
     /// values never carry over. The grant is live only while `watcher`
     /// stays `true`.
     pub(crate) fn open(&self, ttl: Duration, watcher: Arc<AtomicBool>) -> u64 {
-        let now = self.stamp();
         let mut inner = self.lock();
+        let now = self.stamp();
         // #10524: the unlock record covers the replaced grant; the new
         // grant's watcher must not read the old one's ending as its own.
         inner.end(DropReason::Revoked);
@@ -289,8 +328,9 @@ impl GrantCache {
     /// [`Self::close`] (expiry, a dead watcher, a sleep gap, a fault), so
     /// the server audits each drop exactly once.
     pub(crate) fn check(&self) -> Status {
-        let now = self.stamp();
+        // #10524: lock first, so no older stamp settles after a newer one.
         let mut inner = self.lock();
+        let now = self.stamp();
         inner.settle(now);
         if let Some(reason) = inner.ended.take() {
             return Status::Ended(reason);
@@ -320,8 +360,8 @@ impl GrantCache {
         if !Self::caches(backend) || (!keychain && under.is_none()) {
             return Lookup::Off;
         }
-        let now = self.stamp();
         let mut inner = self.lock();
+        let now = self.stamp();
         inner.settle(now);
         if inner.window.is_none() {
             return Lookup::Off;
@@ -347,8 +387,8 @@ impl GrantCache {
         epoch: u64,
         value: &SecretValue,
     ) -> bool {
-        let now = self.stamp();
         let mut inner = self.lock();
+        let now = self.stamp();
         inner.settle(now);
         if inner.window.is_none() || inner.epoch != epoch {
             return false;
@@ -372,6 +412,91 @@ impl GrantCache {
         inner
             .values
             .retain(|(_, held_vault, held_key), _| held_vault != vault || held_key != key);
+    }
+
+    /// Hold `blob` for live grant `generation`, replacing any held blob.
+    ///
+    /// What: `false`, holding nothing, when that grant is not live or any
+    /// item's page lock is refused (#10524 AC2: no lock, no cache).
+    pub(crate) fn hold(&self, generation: u64, blob: &Blob) -> bool {
+        let mut inner = self.lock();
+        let now = self.stamp();
+        inner.settle(now);
+        if inner.window.as_ref().map(|w| w.generation) != Some(generation) {
+            return false;
+        }
+        let mut held = Held::default();
+        for (id, value) in blob.items() {
+            let Some(buf) = LockedBuf::new(value, self.lock_mem) else {
+                inner.held = None;
+                return false;
+            };
+            held.items.insert(id.clone(), buf);
+        }
+        inner.held = Some(held);
+        true
+    }
+
+    /// Item `id` from the held blob, settling the grant first.
+    pub(crate) fn held_get(&self, id: &ItemId) -> HeldRead {
+        let mut inner = self.lock();
+        let now = self.stamp();
+        inner.settle(now);
+        match inner.held.as_ref() {
+            Some(held) if !held.dirty.contains_key(id) => match held.items.get(id) {
+                Some(buf) => HeldRead::Hit(SecretValue::new(buf.as_str())),
+                None => HeldRead::Absent,
+            },
+            _ => HeldRead::Off,
+        }
+    }
+
+    /// Mark item `id` dirty before a write; the write's ticket, or `None`
+    /// when no blob is held.
+    pub(crate) fn held_begin(&self, id: &ItemId) -> Option<u64> {
+        let mut inner = self.lock();
+        let held = inner.held.as_mut()?;
+        held.ticket = held.ticket.wrapping_add(1);
+        held.dirty.insert(id.clone(), held.ticket);
+        Some(held.ticket)
+    }
+
+    /// The write with `ticket` on `id` landed with `value` (`None`: removed).
+    ///
+    /// What: applied only when it is still `id`'s newest write and the blob
+    /// is still held; then `id` is clean again. A write that failed never
+    /// calls this, so its item stays dirty and reads the Keychain. A refused
+    /// page lock drops the whole held blob.
+    pub(crate) fn held_end(&self, id: &ItemId, ticket: u64, value: Option<&str>) {
+        let mut inner = self.lock();
+        let lock_mem = self.lock_mem;
+        let Some(held) = inner.held.as_mut() else {
+            return;
+        };
+        if held.dirty.get(id) != Some(&ticket) {
+            return;
+        }
+        match value {
+            Some(value) => match LockedBuf::new(value, lock_mem) {
+                Some(buf) => {
+                    held.items.insert(id.clone(), buf);
+                }
+                None => {
+                    inner.held = None;
+                    return;
+                }
+            },
+            None => {
+                held.items.remove(id);
+            }
+        }
+        held.dirty.remove(id);
+    }
+
+    /// Whether the live grant holds a vault blob.
+    #[cfg(test)]
+    pub(crate) fn holds_blob(&self) -> bool {
+        self.lock().held.is_some()
     }
 
     /// The number of held values.

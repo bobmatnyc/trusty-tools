@@ -32,6 +32,11 @@ pub use exec::{
     UnlockResponse,
 };
 
+// #10524: the vault blob migration's request and response.
+#[path = "migrate.rs"]
+mod migrate;
+pub use migrate::{MigrateRequest, MigrateResponse, MigrateStep};
+
 // #10998: the source locator of a named copy.
 #[path = "copy_source.rs"]
 mod copy_source;
@@ -72,6 +77,8 @@ pub mod method {
     pub const UNLOCK: &str = "secrets.unlock";
     /// Drop the unlock grant (#10524).
     pub const LOCK: &str = "secrets.lock";
+    /// Move Keychain items into the vault blob, or back (#10524).
+    pub const MIGRATE: &str = "secrets.migrate";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

@@ -20,6 +20,10 @@ use crate::store::SecretCache;
 #[path = "unlock_tests.rs"]
 mod unlock_tests;
 
+// #10524: the vault blob's migration and the one-prompt unlock.
+#[path = "blob_unlock_tests.rs"]
+mod blob_unlock_tests;
+
 /// The project vault of the second fixture repo, `Acme/Api`.
 const API_VAULT: &str = "trusty/acme/api";
 

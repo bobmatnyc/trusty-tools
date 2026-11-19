@@ -171,6 +171,10 @@ pub struct RevokeResponse {
 pub struct UnlockResponse {
     /// Seconds until the grant expires, unless it drops sooner.
     pub expires_in_secs: u64,
+    /// Whether the grant holds the vault blob, so no Keychain read prompts
+    /// (#10524); `false` in the per-item layout, before `tm secrets migrate`.
+    #[serde(default)]
+    pub blob_held: bool,
 }
 
 /// `secrets.lock` response (#10524).
