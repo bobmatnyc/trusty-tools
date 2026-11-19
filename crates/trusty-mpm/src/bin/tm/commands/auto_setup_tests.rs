@@ -213,6 +213,50 @@ fn a_hung_cargo_install_is_killed_at_the_deadline() {
     assert!(took < Duration::from_secs(10), "waited {took:?}");
 }
 
+/// Whether `pid` still names a process (a zombie counts as alive).
+fn pid_alive(pid: i32) -> bool {
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+#[test]
+fn a_timeout_kills_the_whole_process_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("grandchild.pid");
+    let path = tmp.path().join("forking-cargo");
+    // A background grandchild: `Child::kill` on the shell alone would orphan it.
+    let script = format!(
+        "#!/bin/sh\nsleep 30 &\necho $! > '{}'\nwait\n",
+        pidfile.display()
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut env = env_in(tmp.path(), Some(path));
+    env.install_timeout = Duration::from_secs(1);
+    let got = ensure_binary(&env, &SERVERS[0]);
+    assert_eq!(
+        got,
+        Install::Missing("cargo install timed out after 1 s".into())
+    );
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("fake cargo wrote the grandchild pid")
+        .trim()
+        .parse()
+        .unwrap();
+    // The orphaned/killed grandchild is reaped by init asynchronously.
+    let gone_by = Instant::now() + Duration::from_secs(5);
+    while pid_alive(pid) && Instant::now() < gone_by {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let alive = pid_alive(pid);
+    if alive {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert!(!alive, "grandchild {pid} survived the timeout");
+}
+
 #[test]
 fn doctor_rows_leave_a_malformed_config_untouched() {
     let tmp = tempfile::tempdir().unwrap();

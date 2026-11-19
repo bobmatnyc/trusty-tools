@@ -79,9 +79,12 @@ impl Env {
     /// there or `PATH`, and tm's managed config dir. `None` without a home.
     pub(crate) fn live() -> Option<Self> {
         let home = dirs::home_dir()?;
+        // A relative `CARGO_HOME` would resolve against `install_cwd` (the temp
+        // dir) for `--root`, so make it absolute here.
         let cargo_home = std::env::var_os("CARGO_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".cargo"));
+        let cargo_home = std::path::absolute(&cargo_home).unwrap_or(cargo_home);
         let cargo_bin = cargo_home.join("bin");
         let cargo = Some(cargo_bin.join("cargo"))
             .filter(|p| p.is_file())
@@ -178,12 +181,15 @@ fn ensure_binary(env: &Env, s: &Server) -> Install {
         "  installing {} (cargo install {} --locked)",
         s.bin, s.krate
     );
-    let child = Command::new(cargo)
-        .args(["install", s.krate, "--locked", "--root"])
+    let mut cmd = Command::new(cargo);
+    cmd.args(["install", s.krate, "--locked", "--root"])
         .arg(&env.cargo_home)
         .current_dir(&env.install_cwd)
-        .stdin(Stdio::null())
-        .spawn();
+        .stdin(Stdio::null());
+    // Own process group, so a timeout can kill rustc and build scripts too.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    let child = cmd.spawn();
     let status = child.and_then(|c| wait_bounded(c, env.install_timeout));
     match status {
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => Install::Missing(format!(
@@ -203,25 +209,51 @@ fn ensure_binary(env: &Env, s: &Server) -> Install {
 
 /// Wait for `child` until `limit`; past it, kill and reap it.
 ///
-/// What: polls `try_wait`; on expiry returns a `TimedOut` error after `kill`
-/// and `wait`, so no zombie is left.
-/// Test: `a_hung_cargo_install_is_killed_at_the_deadline`.
+/// What: polls `try_wait`; on expiry, or on a `try_wait` error, SIGKILLs the
+/// child's whole process group (it leads one) and reaps the child. Expiry
+/// returns a `TimedOut` error.
+/// Test: `a_hung_cargo_install_is_killed_at_the_deadline`,
+/// `a_timeout_kills_the_whole_process_group`.
 fn wait_bounded(
     mut child: std::process::Child,
     limit: Duration,
 ) -> std::io::Result<std::process::ExitStatus> {
     let deadline = Instant::now() + limit;
     loop {
-        if let Some(st) = child.try_wait()? {
-            return Ok(st);
+        match child.try_wait() {
+            Ok(Some(st)) => return Ok(st),
+            Ok(None) => {}
+            Err(e) => {
+                kill_group_and_reap(&mut child);
+                return Err(e);
+            }
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_group_and_reap(&mut child);
             return Err(std::io::ErrorKind::TimedOut.into());
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// SIGKILL `child`'s process group, then reap `child`.
+///
+/// Why: `child.kill()` signals only cargo; rustc and build scripts survive it.
+/// What: the child is its own group leader (`process_group(0)`), so its pid is
+/// the pgid. Off unix it falls back to `Child::kill`.
+/// Test: `a_timeout_kills_the_whole_process_group`.
+fn kill_group_and_reap(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        use nix::sys::signal::{Signal, killpg};
+        let _ = killpg(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The entry `tm mcp add <bin> <abs path>` writes.
