@@ -478,7 +478,7 @@ fn required_id(v: &Value, what: &str, of: &str) -> Result<String, BoardError> {
 }
 
 /// `conn.nodes`, or empty.
-fn nodes(conn: &Value) -> Vec<Value> {
+pub(crate) fn nodes(conn: &Value) -> Vec<Value> {
     conn["nodes"]
         .as_array()
         .map(|a| a.iter().filter(|n| !n.is_null()).cloned().collect())
@@ -494,7 +494,7 @@ fn names(conn: &Value) -> Vec<String> {
 }
 
 /// `endCursor` when `hasNextPage` is true.
-fn next_cursor(conn: &Value) -> Option<String> {
+pub(crate) fn next_cursor(conn: &Value) -> Option<String> {
     let page = &conn["pageInfo"];
     if page["hasNextPage"].as_bool() == Some(true) {
         page["endCursor"].as_str().map(str::to_string)
@@ -503,6 +503,6 @@ fn next_cursor(conn: &Value) -> Option<String> {
     }
 }
 
-fn text(v: &Value) -> String {
+pub(crate) fn text(v: &Value) -> String {
     v.as_str().unwrap_or_default().to_string()
 }
