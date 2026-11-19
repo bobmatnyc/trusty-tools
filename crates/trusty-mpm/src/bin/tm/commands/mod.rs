@@ -149,6 +149,7 @@ pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
+pub(crate) mod il_auto_apply; // See G0b IL auto-apply
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
