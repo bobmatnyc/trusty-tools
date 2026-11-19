@@ -292,3 +292,21 @@ fn il_failed_act_append_is_retried_and_lands_once() -> R {
     assert_eq!(log.matches("merged the parser").count(), 1, "{log}");
     Ok(())
 }
+
+#[test]
+fn il_pending_marker_reads_unknown_until_applied() -> R {
+    let tmp = tempfile::tempdir()?;
+    let paths = seed(tmp.path())?;
+    let held = il::hold(&paths, std::time::Duration::from_secs(1))?;
+    // A second holder waits out its bound and is refused.
+    assert!(il::hold(&paths, std::time::Duration::from_millis(50)).is_err());
+    drop(held);
+    assert!(!il::pending_unknown(&paths, "il-x")?);
+    il::mark_pending(&paths, "il-x")?;
+    assert!(il::pending_unknown(&paths, "il-x")?);
+    il::mark_applied(&paths, "il-x")?;
+    assert!(!il::pending_unknown(&paths, "il-x")?);
+    il::clear_pending(&paths, "il-x")?;
+    il::clear_pending(&paths, "il-x")?;
+    Ok(())
+}

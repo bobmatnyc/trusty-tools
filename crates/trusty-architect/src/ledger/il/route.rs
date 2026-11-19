@@ -12,7 +12,7 @@
 //! [`pct_unchanged`]) run on every block, whichever path applies it.
 //! [`hold`] and the [`PENDING_DIR`] markers keep one ilio run per packet.
 //! Test: `route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks`,
-//! `two_concurrent_deliveries_apply_once`, `a_stale_pending_marker_is_not_re_run`.
+//! `il_pending_marker_reads_unknown_until_applied`.
 
 use std::io::Write as _;
 
