@@ -121,12 +121,12 @@ pub(crate) fn two_repo_registry() -> Vec<IndexIdentity> {
         entry(
             "code-intelligence-wt-abc",
             "/src/code-intelligence/.worktrees/abc",
-            Some("duettoresearch/code-intelligence"),
+            Some("acme-labs/code-intelligence"),
         ),
         entry(
             "code-intelligence-9f1c2e3a",
             "/src/code-intelligence",
-            Some("duettoresearch/code-intelligence"),
+            Some("acme-labs/code-intelligence"),
         ),
         entry(
             "trusty-tools-4e2cf878",

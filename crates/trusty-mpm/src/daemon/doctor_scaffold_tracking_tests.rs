@@ -131,7 +131,7 @@ fn check_ok_on_clean_repo() {
 
 #[test]
 fn check_warns_on_true_collision_only() {
-    // Reproduces the verified duetto-eve-agents#111 shape: a skill directory
+    // Reproduces the verified acme-eve-agents#111 shape: a skill directory
     // (SKILL.md + a reference file) is BOTH tm-managed (manifest says so) AND
     // committed to git — the true collision. Alongside it, plant TWO
     // decoys that must NOT be reported:
