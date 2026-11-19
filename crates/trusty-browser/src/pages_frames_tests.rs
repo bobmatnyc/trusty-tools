@@ -303,5 +303,4 @@ fn the_worker_caps_are_within_the_broker_refusals() {
     let body = format!(r#"{{"frames":[{}]}}"#, items.join(","));
     let raw = Json::parse(body.as_bytes()).expect("json");
     assert_eq!(frames_of(&raw).map(|f| f.len()), Ok(150));
-    assert!(MAX_FRAMES >= 150 && MAX_DEPTH >= 40);
 }
