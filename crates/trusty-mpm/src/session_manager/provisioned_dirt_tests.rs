@@ -365,3 +365,89 @@ fn a_corrupt_ledger_keeps_a_gitignored_claude_md_11221() {
     let refusal = ignored_output_refusal(&ws).expect("a corrupt ledger vouches for nothing");
     assert!(refusal.contains("CLAUDE.md"), "{refusal}");
 }
+
+/// The settings snapshot the spawn left in `ws/.claude/`, by tm's name shape.
+fn settings_snapshot(ws: &Path) -> PathBuf {
+    let found: Vec<PathBuf> = std::fs::read_dir(ws.join(".claude"))
+        .expect("the spawn wrote .claude/")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                crate::core::standalone::hooks::backup::is_snapshot_of("settings.json", n)
+            })
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "one settings snapshot: {found:?}");
+    found[0].clone()
+}
+
+/// 🔴 #11221 fail-open check: a `.bak` outside tm's exact snapshot shape, or
+/// one in tm's shape that the ledger never recorded, still keeps the clone.
+#[test]
+fn foreign_bak_files_still_keep_the_clone_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "foreign-bak", "target/\n");
+    let _home = spawn(&ws);
+    let _ = settings_snapshot(&ws);
+    assert_eq!(keep(&ws, ProvisioningDirt::Refuse), None, "premise: clean");
+    std::fs::create_dir_all(ws.join("sub/.claude")).expect("mkdir sub/.claude");
+    for rel in [
+        ".claude/settings.json.bak",
+        "notes.bak",
+        ".claude/settings.json.2026.bak",
+        ".claude/other.json.20260101T000000Z.bak",
+        "sub/.claude/settings.json.20260101T000000Z.bak",
+        ".claude/settings.json.20200101T000000Z.bak",
+    ] {
+        std::fs::write(ws.join(rel), "{}\n").expect("write the .bak");
+        assert!(
+            keep(&ws, ProvisioningDirt::Refuse).is_some(),
+            "{rel} must keep the clone"
+        );
+        std::fs::remove_file(ws.join(rel)).expect("remove the .bak");
+    }
+}
+
+/// #11221: tm's own snapshot edited after the spawn still keeps the clone.
+#[test]
+fn an_edited_settings_snapshot_still_keeps_the_clone_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "edited-snapshot", "target/\n");
+    let _home = spawn(&ws);
+    append(&settings_snapshot(&ws), "\n");
+    assert!(keep(&ws, ProvisioningDirt::Refuse).is_some());
+}
+
+/// #11221: beside tm's snapshot, a user file or an unpushed commit still
+/// keeps the clone.
+#[test]
+fn user_work_beside_the_snapshot_still_keeps_the_clone_11221() {
+    let fx = GitWorktreeFixture::new();
+    let ws = clone(&fx, "work-beside-snapshot", "target/\n");
+    let _home = spawn(&ws);
+    let _ = settings_snapshot(&ws);
+    std::fs::write(ws.join("findings.md"), "mine\n").expect("write findings");
+    assert!(
+        keep(&ws, ProvisioningDirt::Refuse).is_some(),
+        "untracked file"
+    );
+
+    git(&ws, &["add", "findings.md"]);
+    git(
+        &ws,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            "work",
+        ],
+    );
+    assert!(
+        keep(&ws, ProvisioningDirt::Refuse).is_some(),
+        "unpushed commit"
+    );
+}
