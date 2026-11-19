@@ -1098,7 +1098,7 @@ fn targets() -> Vec<Target> {
     new_session::targets_from_with(
         &[
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("ledger", "https://github.com/contoso/ledger"),
         ],
         &[],
         stub_checkout,
@@ -1115,7 +1115,7 @@ fn targets() -> Vec<Target> {
 fn fixture_checkout(name: &str) -> PathBuf {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
     match name {
-        "apex" => here.join("src").join("daemon"),
+        "ledger" => here.join("src").join("daemon"),
         "zeta" => here.join("src").join("client"),
         _ => here.join("src"),
     }
@@ -1205,13 +1205,13 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
     let Action::Create(request) = action else {
         panic!("expected a create action, got {action:?}");
     };
-    let apex = fixture_checkout("apex").display().to_string();
+    let ledger = fixture_checkout("ledger").display().to_string();
     assert_eq!(
         request,
         NewSessionRequest {
             register: None,
-            repo: apex.clone(),
-            label: "apex".to_string(),
+            repo: ledger.clone(),
+            label: "ledger".to_string(),
             name_hint: None,
         }
     );
@@ -1234,7 +1234,7 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
     assert_eq!(outcome, AttachOutcome::Attached);
     assert_eq!(
         calls.into_inner(),
-        vec![format!("create:{apex}")],
+        vec![format!("create:{ledger}")],
         "a registered project must not be registered again"
     );
 }
@@ -1247,25 +1247,25 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
 #[test]
 fn new_session_registered_target_carries_its_local_checkout() {
     let rows =
-        new_session::targets_from(&[project("cto", "https://github.com/bob-duetto/cto")], &[]);
+        new_session::targets_from(&[project("cto", "https://github.com/acme-admin/cto")], &[]);
     let Some(Target::Registered { repo, checkout, .. }) = rows.first() else {
         panic!("the registry row is not a target, got {rows:?}");
     };
     assert_eq!(
-        repo, "https://github.com/bob-duetto/cto",
+        repo, "https://github.com/acme-admin/cto",
         "the row keeps its identity"
     );
     let checkout = checkout.as_ref().expect("a GitHub row names a directory");
     assert!(checkout.is_absolute(), "{checkout:?}");
     assert!(
-        checkout.ends_with("bob-duetto/cto"),
+        checkout.ends_with("acme-admin/cto"),
         "not the managed clone path: {checkout:?}"
     );
 }
 
 /// Confirming a registered row sends its directory, never its URL (#7887).
 ///
-/// Why: the owner's `tm ls` sent `https://github.com/bob-duetto/cto` as
+/// Why: the owner's `tm ls` sent `https://github.com/acme-admin/cto` as
 /// `repo_url` and the daemon's ADR-0055 check refused it — trusty-mpm clones
 /// nothing, so the only form it accepts is a directory that already exists.
 /// Against the pre-fix picker this fails with that URL in `request.repo`.
@@ -1273,7 +1273,7 @@ fn new_session_registered_target_carries_its_local_checkout() {
 fn new_session_confirming_a_registered_project_sends_its_local_checkout() {
     let mut flow = NewSessionFlow::with_resolver(
         new_session::targets_from_with(
-            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[project("cto", "https://github.com/acme-admin/cto")],
             &[],
             stub_checkout,
         ),
@@ -1299,7 +1299,7 @@ fn new_session_confirming_a_registered_project_sends_its_local_checkout() {
 fn new_session_registered_project_without_a_checkout_names_the_clone_step() {
     let mut flow = NewSessionFlow::with_resolver(
         new_session::targets_from_with(
-            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[project("cto", "https://github.com/acme-admin/cto")],
             &[],
             missing_checkout,
         ),
@@ -1310,7 +1310,7 @@ fn new_session_registered_project_without_a_checkout_names_the_clone_step() {
             assert!(message.contains("/nonexistent/7887/cto"), "{message}");
             assert!(
                 message
-                    .contains("git clone https://github.com/bob-duetto/cto /nonexistent/7887/cto"),
+                    .contains("git clone https://github.com/acme-admin/cto /nonexistent/7887/cto"),
                 "{message}"
             );
         }
@@ -1545,7 +1545,7 @@ fn render_new_session_overlay_lists_the_registered_projects() {
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
     assert!(joined.contains("Start a new session in:"), "{joined}");
     // #7406: the row is the project's identity, not its stored URL.
-    assert!(joined.contains("duetto/apex"), "{joined}");
+    assert!(joined.contains("contoso/ledger"), "{joined}");
     assert!(!joined.contains("https://"), "{joined}");
     assert!(joined.contains("other — type a project path"), "{joined}");
     assert!(joined.contains("Esc cancels"), "{joined}");
@@ -1628,12 +1628,12 @@ fn stub_target(name: &str, repo: &str) -> Target {
 }
 
 /// Three registered rows, in the alphabetical order #7421 renders them:
-/// `acme/widgets`, `bobmatnyc/trusty-tools`, `duetto/apex`.
+/// `acme/widgets`, `bobmatnyc/trusty-tools`, `contoso/ledger`.
 fn three_projects() -> Vec<Target> {
     new_session::targets_from(
         &[
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("ledger", "https://github.com/contoso/ledger"),
             project("widgets", "https://github.com/acme/widgets"),
         ],
         &[],
@@ -1652,13 +1652,13 @@ fn new_session_preselects_the_cursor_sessions_project() {
     // The session spells the remote differently from the registry row; the
     // shared `repo_url_matches` is what makes the two agree.
     let mut cursor = session("a1", "Active", 1);
-    cursor.repo_url = Some("git@github.com:duetto/apex.git".to_string());
+    cursor.repo_url = Some("git@github.com:contoso/ledger.git".to_string());
     assert_eq!(new_session::preselect_index(&targets, Some(&cursor)), 2);
 
     let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
         .preselected_for(Some(&cursor));
     let rows = flow.rows();
-    assert_eq!(rows[2], "▸ duetto/apex", "{rows:?}");
+    assert_eq!(rows[2], "▸ contoso/ledger", "{rows:?}");
     assert!(!rows[0].starts_with('▸'), "{rows:?}");
 
     // A session with no `repo_url` is matched on its `owner/repo` source id.
@@ -1711,15 +1711,15 @@ fn new_session_rows_show_owner_repo_only() {
 #[test]
 fn new_session_labels_disambiguate_by_host() {
     let labels = new_session::row_labels(&[
-        target("apex", "https://github.com/duetto/apex"),
-        target("apex-gl", "https://gitlab.com/duetto/apex"),
+        target("ledger", "https://github.com/contoso/ledger"),
+        target("ledger-gl", "https://gitlab.com/contoso/ledger"),
         target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
     ]);
     assert_eq!(
         labels,
         vec![
-            "github.com/duetto/apex".to_string(),
-            "gitlab.com/duetto/apex".to_string(),
+            "github.com/contoso/ledger".to_string(),
+            "gitlab.com/contoso/ledger".to_string(),
             // Unique on its own, so it keeps the short form.
             "bobmatnyc/trusty-tools".to_string(),
         ]
@@ -1747,7 +1747,7 @@ fn new_session_targets_from_drops_a_scratchpad_registration() {
             ),
             project("gone", "/nonexistent/7406/no-such-checkout"),
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("ledger", "https://github.com/contoso/ledger"),
         ],
         &[],
         stub_checkout,
@@ -1756,7 +1756,7 @@ fn new_session_targets_from_drops_a_scratchpad_registration() {
         targets,
         vec![
             stub_target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            stub_target("apex", "https://github.com/duetto/apex"),
+            stub_target("ledger", "https://github.com/contoso/ledger"),
             Target::Other,
         ]
     );
@@ -1809,7 +1809,7 @@ fn render_new_session_rows_at_eighty_columns() {
 /// Six registrations, spelled in one order; the caller may reshuffle them.
 fn six_projects() -> Vec<Project> {
     vec![
-        project("apex", "https://github.com/duetto/apex"),
+        project("ledger", "https://github.com/contoso/ledger"),
         project("widgets", "https://github.com/acme/widgets"),
         project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
         project("zeta", "https://github.com/zed/zeta"),
@@ -1848,7 +1848,7 @@ fn new_session_order_is_independent_of_registry_iteration_order() {
         vec![
             "acme/widgets".to_string(),
             "bobmatnyc/trusty-tools".to_string(),
-            "duetto/apex".to_string(),
+            "contoso/ledger".to_string(),
             "early/early".to_string(),
             "mid/mid".to_string(),
             "zed/zeta".to_string(),
@@ -2436,15 +2436,15 @@ fn new_session_entry_from_the_filter_creates_a_clone_request() {
 #[test]
 fn new_session_entry_does_not_hijack_a_matching_filter() {
     let mut flow = NewSessionFlow::with_resolver(targets(), stub_identity);
-    for c in "duetto".chars() {
+    for c in "contoso".chars() {
         flow.apply(Input::Char(c));
     }
     assert_eq!(
         flow.apply(Input::Enter),
         Step::Create(NewSessionRequest {
             register: None,
-            repo: fixture_checkout("apex").display().to_string(),
-            label: "apex".to_string(),
+            repo: fixture_checkout("ledger").display().to_string(),
+            label: "ledger".to_string(),
             name_hint: None,
         })
     );
@@ -2605,7 +2605,7 @@ fn open_flow(state: &TuiState) -> &NewSessionFlow {
     }
 }
 
-/// `creating()`, moved onto `apex`, with the name step open and `name` typed.
+/// `creating()`, moved onto `ledger`, with the name step open and `name` typed.
 fn naming_apex(name: &str) -> TuiState {
     let sessions = fleet();
     let mut state = creating();
@@ -2617,12 +2617,12 @@ fn naming_apex(name: &str) -> TuiState {
     state
 }
 
-/// The request Enter on `apex` produces, named `name_hint`.
+/// The request Enter on `ledger` produces, named `name_hint`.
 fn apex_request(name_hint: Option<&str>) -> NewSessionRequest {
     NewSessionRequest {
         register: None,
-        repo: fixture_checkout("apex").display().to_string(),
-        label: "apex".to_string(),
+        repo: fixture_checkout("ledger").display().to_string(),
+        label: "ledger".to_string(),
         name_hint: name_hint.map(str::to_string),
     }
 }
@@ -2664,7 +2664,7 @@ fn new_session_name_ctrl_n_rejects_a_row_without_a_checkout() {
     let flow = || {
         NewSessionFlow::with_resolver(
             new_session::targets_from_with(
-                &[project("cto", "https://github.com/bob-duetto/cto")],
+                &[project("cto", "https://github.com/acme-admin/cto")],
                 &[],
                 missing_checkout,
             ),
@@ -2714,7 +2714,7 @@ fn new_session_name_rejects_an_empty_slug() {
 fn new_session_name_escape_returns_to_the_list_intact() {
     let sessions = fleet();
     let mut state = creating();
-    for c in "ap".chars() {
+    for c in "led".chars() {
         state.apply(Input::Char(c), &sessions);
     }
     let before = open_flow(&state).clone();
@@ -2722,7 +2722,7 @@ fn new_session_name_escape_returns_to_the_list_intact() {
         before
             .rows()
             .iter()
-            .any(|r| r.starts_with('▸') && r.contains("duetto/apex")),
+            .any(|r| r.starts_with('▸') && r.contains("contoso/ledger")),
         "{:?}",
         before.rows()
     );
@@ -2730,7 +2730,7 @@ fn new_session_name_escape_returns_to_the_list_intact() {
     state.apply(Input::Char('x'), &sessions);
     assert_eq!(state.apply(Input::Escape, &sessions), Action::Redraw);
     assert_eq!(open_flow(&state), &before, "filter and selection intact");
-    assert_eq!(open_flow(&state).filter(), "ap");
+    assert_eq!(open_flow(&state).filter(), "led");
 }
 
 #[test]
@@ -2755,7 +2755,7 @@ fn new_session_name_overlay_shows_the_text_and_preview() {
 
     let mut state = naming_apex("Auth Refactor");
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
-    assert!(joined.contains("in apex"), "{joined}");
+    assert!(joined.contains("in ledger"), "{joined}");
     assert!(joined.contains("> Auth Refactor"), "{joined}");
     assert!(joined.contains("tm-auth-refactor"), "{joined}");
     assert!(joined.contains("Esc goes back"), "{joined}");
@@ -2773,10 +2773,13 @@ fn render_help_overlay_lists_ctrl_n() {
 #[test]
 fn new_session_name_status_line_names_the_session() {
     use super::new_session_name::created_message;
-    assert_eq!(created_message(&apex_request(None)), "new session in apex");
+    assert_eq!(
+        created_message(&apex_request(None)),
+        "new session in ledger"
+    );
     assert_eq!(
         created_message(&apex_request(Some("auth-refactor"))),
-        "new session named auth-refactor in apex"
+        "new session named auth-refactor in ledger"
     );
 }
 
@@ -2852,7 +2855,7 @@ async fn new_session_name_reaches_the_create_leg() {
     assert_eq!(
         received.into_inner(),
         Some((
-            fixture_checkout("apex").display().to_string(),
+            fixture_checkout("ledger").display().to_string(),
             Some("auth-refactor".to_string())
         ))
     );

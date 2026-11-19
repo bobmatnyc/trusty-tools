@@ -299,7 +299,7 @@ fn isolated_instance_does_not_overwrite_dotfile() {
 /// of real-environment palaces the developer happens to have installed.
 ///
 /// Why zero-count instead of named-marker assertions: the previous approach
-/// used a hard-coded list of developer-specific palace names (`cto`, `duetto`,
+/// used a hard-coded list of developer-specific palace names (`cto`, `acme`,
 /// etc.) which caused the test to be brittle — it passed on machines where
 /// those projects did not exist, but would fail on any machine that happened
 /// to have a pin file for an unlisted project. A zero-count assertion is

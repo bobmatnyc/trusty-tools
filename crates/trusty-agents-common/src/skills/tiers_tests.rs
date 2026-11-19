@@ -301,15 +301,15 @@ fn list_source_stems_reads_directory_skills() {
     // an empty set for a directory-shaped tier, so the user tier was planned
     // as absent and every one of its skills was dropped.
     let src = TempDir::new().unwrap();
-    let skill = src.path().join("duetto-design-system");
+    let skill = src.path().join("acme-design-system");
     fs::create_dir_all(skill.join("references")).unwrap();
-    fs::write(skill.join("SKILL.md"), "# Duetto\n").unwrap();
+    fs::write(skill.join("SKILL.md"), "# Acme\n").unwrap();
     fs::write(skill.join("references").join("tokens.md"), "# T\n").unwrap();
     write_skill(src.path(), "flat-skill", "F");
 
     let stems = list_source_stems(src.path()).unwrap();
 
-    assert_eq!(stems, set(&["duetto-design-system", "flat-skill"]));
+    assert_eq!(stems, set(&["acme-design-system", "flat-skill"]));
 }
 
 #[test]

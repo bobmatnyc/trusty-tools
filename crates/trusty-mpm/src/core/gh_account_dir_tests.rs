@@ -20,7 +20,7 @@ use crate::core::gh_account_proof::{
 };
 
 /// The repository every github.com arm pins.
-pub(crate) const ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
+pub(crate) const ORIGIN: &str = "https://github.com/acme-labs/jev-matching";
 
 /// A `gh auth token` lookup: `(dir, host, login)`.
 type ProbeKey = (PathBuf, String, String);
@@ -304,7 +304,7 @@ fn the_user_check_is_sent_to_the_hosts_api() {
     let proven = prove_account_token(
         &sources(None, Some(&own)),
         "octo-pinned",
-        "https://ghe.corp/duettoresearch/jev-matching",
+        "https://ghe.corp/acme-labs/jev-matching",
         &probe,
         &check,
     )
