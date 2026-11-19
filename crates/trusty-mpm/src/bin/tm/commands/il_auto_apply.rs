@@ -414,8 +414,11 @@ fn datg_session() -> Option<String> {
         return Some(s);
     }
     let pane = std::env::var("TMUX_PANE").ok()?;
+    // #8443: `$TMUX_PANE` is a `%N` id, which the helper leaves bare; any other
+    // value is rendered exact.
+    let target = trusty_common::tmux::exact_window_target(&pane);
     let out = std::process::Command::new("tmux")
-        .args(["display-message", "-p", "-t", &pane, "#{session_name}"])
+        .args(["display-message", "-p", "-t", &target, "#{session_name}"])
         .output()
         .ok()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
