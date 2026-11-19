@@ -56,6 +56,18 @@ pub const OPS: &[(&str, &[&str])] = &[
     ("page_reload", &["op", "lease", "request_id"]),
     ("release", &["op", "lease"]),
     ("switch", &["op", "lease"]),
+    // #11208: tab lifecycle; #11211: screenshots and coordinate input.
+    ("open_tab", &["op", "request_id", "url"]),
+    ("close_tab", &["op", "request_id", "tab"]),
+    ("page_screenshot", &["op", "lease", "ref"]),
+    (
+        "page_click_at",
+        &["op", "lease", "request_id", "capture_id", "x", "y"],
+    ),
+    (
+        "page_type_at",
+        &["op", "lease", "request_id", "capture_id", "x", "y", "text"],
+    ),
 ];
 
 /// History ops: they act on the tab, not a document (`HISTORY`).
@@ -321,7 +333,8 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
     controls(request)?;
     for name in ["lease", "request_id", "ref", "target"] {
         let nullable = op == "page_scroll"
-            || (op == "page_press" && matches!(request.get(name), None | Some(Json::Null)));
+            || (matches!(op, "page_press" | "page_screenshot")
+                && matches!(request.get(name), None | Some(Json::Null)));
         if request.get(name).is_some() && !(name == "ref" && nullable) {
             request_string(request, name)?;
         }
@@ -329,6 +342,7 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
     if (op == "page_press" && !press_ok(request)) || (op == "page_scroll" && !scroll_ok(request)) {
         return Err(invalid());
     }
+    crate::pages_capture::validate(op, request)?;
     if let Some(tab) = request.get("tab")
         && !matches!(tab, Json::Int(t) if *t >= 0)
     {
@@ -447,6 +461,17 @@ pub const LANDED: Shape = &[
     ("origin", OPT),
     ("settled", &[Ty::Bool]),
 ];
+/// `OPENED` (`page_open_tab`, #11208).
+pub const OPENED: Shape = &[
+    ("tab", &[Ty::Int]),
+    ("window", &[Ty::Int]),
+    ("access", &[Ty::Bool]),
+    ("document", OPT),
+    ("origin", OPT),
+    ("title", OPT),
+];
+/// `CLOSED` (`page_close_tab`, #11208).
+pub const CLOSED: Shape = &[("closed", &[Ty::Bool])];
 /// `LISTED` (`page_downloads`).
 pub const LISTED: Shape = &[("origin", &[Ty::Str]), ("downloads", &[Ty::List])];
 /// `DOWNLOAD`: one entry of `LISTED`.

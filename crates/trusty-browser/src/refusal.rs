@@ -63,6 +63,13 @@ pub const MUTATING: &[&str] = &[
     "page_navigate",
     "page_upload",
     "page_drag",
+    // #11208, #11211: tab lifecycle and coordinate input change browser state.
+    "open_tab",
+    "close_tab",
+    "page_open_tab",
+    "page_close_tab",
+    "page_click_at",
+    "page_type_at",
 ];
 
 /// The only worker refusal fields relayed to the agent, in relay order.
@@ -96,6 +103,10 @@ pub const PAGE_ERRORS: &[&str] = &[
     "NoHistory",
     "NotDraggable",
     "InvalidUrl",
+    // #11211: capture and coordinate refusals.
+    "StaleCapture",
+    "OutOfViewport",
+    "CaptureTooLarge",
 ];
 
 /// Longest request string field, in code points.

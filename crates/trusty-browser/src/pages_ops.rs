@@ -19,6 +19,7 @@ use crate::entropy::token_urlsafe;
 use crate::grants::Grant;
 use crate::leases::{JOURNAL_LIMIT, Journal, TTL};
 use crate::pages::{self, HISTORY, Shape, Stop};
+use crate::pages_capture::{self as capture, Capture};
 use crate::pages_url::host;
 use crate::peer_conn::Peer;
 use crate::pyjson::Json;
@@ -34,6 +35,8 @@ pub struct Session {
     pub grant: String,
     /// Replies by `request_id`.
     pub journal: Journal,
+    /// Screenshots a coordinate action may name, oldest first (#11211).
+    pub captures: Vec<Capture>,
 }
 
 /// A reply, the operated tab and the result host.
@@ -56,35 +59,39 @@ const KEEP_LEASE: &[&str] = &[
     "InvalidRequest",
     "InvalidOperation",
     "NoHistory",
+    // #11211: a stale or out-of-view coordinate, or an oversized capture, keeps the lease.
+    "StaleCapture",
+    "OutOfViewport",
+    "CaptureTooLarge",
 ];
 
-fn hosted(origin: Option<&str>) -> Result<Option<String>, Stop> {
+pub(crate) fn hosted(origin: Option<&str>) -> Result<Option<String>, Stop> {
     host(origin).map_err(|_| Stop::Close)
 }
 
 /// The leased tab a page op acts on, as `leased` found it.
-struct Leased {
-    token: String,
-    tab: i64,
-    document: Option<String>,
-    origin: Option<String>,
-    peer: Arc<Peer>,
+pub(crate) struct Leased {
+    pub(crate) token: String,
+    pub(crate) tab: i64,
+    pub(crate) document: Option<String>,
+    pub(crate) origin: Option<String>,
+    pub(crate) peer: Arc<Peer>,
 }
 
 impl Leased {
-    fn key(&self) -> Option<(String, i64)> {
+    pub(crate) fn key(&self) -> Option<(String, i64)> {
         Some((self.peer.generation.clone(), self.tab))
     }
 }
 
-fn peer_of(core: &Core, grant: &Grant) -> Result<Arc<Peer>, Refusal> {
+pub(crate) fn peer_of(core: &Core, grant: &Grant) -> Result<Arc<Peer>, Refusal> {
     let peer = core.lock().peer(&grant.route.profile);
     peer.filter(|p| Some(p.generation.as_str()) == grant.generation.as_deref())
         .ok_or_else(|| Refusal::new("BrowserDisconnected"))
 }
 
 /// One page command with the contract's grant and lease fate on refusal (`Pages.send`).
-async fn send(
+pub(crate) async fn send(
     core: &Core,
     grant: &Grant,
     claim: Option<(String, i64)>,
@@ -137,7 +144,7 @@ async fn send(
 }
 
 /// The session's live lease named by the frame, inside the grant's scope (`Pages.leased`).
-fn leased(
+pub(crate) fn leased(
     core: &Core,
     session: &Session,
     grant: &Grant,
@@ -195,7 +202,7 @@ fn reply_with(head: Vec<(&str, Json)>, result: Json) -> Json {
     reply
 }
 
-fn ok_tab(tab: i64) -> Vec<(&'static str, Json)> {
+pub(crate) fn ok_tab(tab: i64) -> Vec<(&'static str, Json)> {
     vec![("ok", Json::Bool(true)), ("tab", Json::Int(tab))]
 }
 
@@ -228,6 +235,9 @@ pub async fn run(
             };
             return Ok((reply.clone(), seen, None));
         }
+    }
+    if let Some(ran) = capture::route(core, session, grant, op, request).await {
+        return ran;
     }
     let claim = leased(core, session, grant, request)?;
     let tab = claim.tab;
@@ -308,7 +318,7 @@ pub async fn run(
     Ok((reply, Some(tab), where_))
 }
 
-fn renew(core: &Core, token: &str) {
+pub(crate) fn renew(core: &Core, token: &str) {
     let deadline = core.lease_clock.now() + TTL;
     core.lock().with_claim(token, |c| c.deadline = deadline);
 }
@@ -436,18 +446,8 @@ async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) ->
             Some(c) => (c.token.clone(), false),
             None => {
                 let token = token_urlsafe(&*core.entropy, 24);
-                inner.claims.push(Claim {
-                    generation: peer.generation.clone(),
-                    tab,
-                    owner: session.owner.clone(),
-                    owner_session: session.id,
-                    token: token.clone(),
-                    deadline: now + TTL,
-                    busy: false,
-                    document: None,
-                    origin: None,
-                    indicator: false,
-                });
+                let claim = claim_for(session, &peer.generation, tab, token.clone(), now);
+                inner.claims.push(claim);
                 (token, true)
             }
         }
@@ -497,4 +497,26 @@ async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) ->
         None
     };
     Ok((reply_with(head, seen), Some(tab), where_))
+}
+
+/// A fresh code-session lease on `tab`, expiring [`TTL`] after `now`.
+pub(crate) fn claim_for(
+    session: &Session,
+    generation: &str,
+    tab: i64,
+    token: String,
+    now: f64,
+) -> Claim {
+    Claim {
+        generation: generation.to_owned(),
+        tab,
+        owner: session.owner.clone(),
+        owner_session: session.id,
+        token,
+        deadline: now + TTL,
+        busy: false,
+        document: None,
+        origin: None,
+        indicator: false,
+    }
 }

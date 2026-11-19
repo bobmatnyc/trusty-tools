@@ -151,6 +151,11 @@ The mode you use with a profile connected in the popup. No code is needed.
 | `page_reload` | Reloads the page. |
 | `page_upload` | Sets local files under `--upload-root` on an `<input type=file>`. |
 | `page_downloads` | Lists the newest downloads started from the tab's origin, with path and state. |
+| `browser_open_tab` | Opens a background tab at an `https` URL and returns it already leased to this session. |
+| `browser_close_tab` | Closes a tab this session leases, including a user tab leased with `browser_select`; any other tab answers `TabNotLeased`. |
+| `page_screenshot` | Captures the viewport, or one element `ref`, as a PNG image with a `capture_id` and the viewport metrics. Viewport only; a `ref` scrolls its element into view. |
+| `page_click_at` | Clicks with a trusted mouse click at an image pixel of a `capture_id`. No hit-test: it can land inside a cross-origin iframe of the leased tab. Dismisses confirm and prompt dialogs. |
+| `page_type_at` | Clicks at an image pixel of a `capture_id`, then inserts up to 8192 characters into the focused element as trusted input. No hit-test, as `page_click_at`. |
 | `browser_release` | Releases a lease taken with `browser_select`. |
 
 ### Workflow mode (`--workflow NAME` or `--credential FILE`)
@@ -164,7 +169,17 @@ A narrower mode for a QA workflow tied to one enrolled page and identity.
 | `browser_click` | Submits the marker to the enrolled page. |
 | `browser_release` | Releases the workflow's claim. |
 
-The tool set has no screenshot, console or network tool. See the comparison
+**Screenshots and coordinates.** `page_screenshot` uses CDP
+`Page.captureScreenshot` over the existing `debugger` permission and adds no
+permission. A coordinate action takes pixels of that image and its
+`capture_id`. The broker maps them to CSS pixels by the image-to-viewport
+ratio, which is `devicePixelRatio` (page zoom included) times any downscale
+taken to fit the 1 MiB frame. A capture older than 5 s, or one whose viewport
+size, ratio, zoom, scroll or document changed, answers `StaleCapture`, and a
+point outside the viewport answers `OutOfViewport`. The agent still never
+writes a selector.
+
+The tool set has no console or network tool. See the comparison
 below.
 
 ## Cut over from the Python package
@@ -240,7 +255,7 @@ test the products. Where a source did not answer, the cell says so.
 | Runs where | Local only | Browser local; control goes through Anthropic's bridge | Local | Hosted (Browserbase) or local (Stagehand) | Hosted or local | Local |
 | Consent model | One Connect per profile, in-popup; peer checks; audit log | Per-site permissions in the extension; admin allowlists on Team and Enterprise | Extension mode reuses your logged-in tabs; its consent step is not stated in the docs read | Not a user-session model; an account API key | Local debug port has no authentication | Dialog on `--autoConnect`; open port gives any local app control |
 | Isolation | Per-profile grant, per-tab lease, 60 s TTL | Tab group per session | Isolated mode uses an in-memory profile | Fresh profile per session; Contexts persist state | Temporary profile option | `--isolated` temporary profile |
-| Tool surface | 22 page and session tools | Console, DOM, GIF, screenshots, uploads | Snapshots plus opt-in caps (vision, network, storage, pdf) | `act`, `observe`, `extract` | Agent writes CDP code | Performance, network, console, screenshots, automation |
+| Tool surface | 27 page and session tools, screenshots | Console, DOM, GIF, screenshots, uploads | Snapshots plus opt-in caps (vision, network, storage, pdf) | `act`, `observe`, `extract` | Agent writes CDP code | Performance, network, console, screenshots, automation |
 | Browsers | Chrome on macOS | Chrome; Edge and Chromium forks detected | Chrome, Firefox, WebKit, Edge | Not stated in the pages read | Chrome, Chromium | Chrome (others unsupported) |
 | Cost and license | MIT, free | Needs Pro, Max, Ultra, Team or Enterprise plan | Apache-2.0, free | MIT SDK; Browserbase from $0 to $99 a month | MIT; cloud $0.06 per browser-hour | Apache-2.0, free |
 
@@ -249,7 +264,7 @@ test the products. Where a source did not answer, the cell says so.
 It controls only the Chrome profiles you pair, on your machine, with no hosted
 component. It adds a local audit log, per-profile consent that the owner can
 revoke, and a peer-verified native host. It is weaker on breadth: macOS and
-Chrome only, no screenshot, console or network tools, and no model of its own.
+Chrome only, no console or network tools, and no model of its own.
 The grant covers a profile, so a connected agent can address any tab on which
 Chrome has given the extension site access.
 

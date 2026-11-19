@@ -19,7 +19,11 @@ use trusty_browser::launchd;
 #[cfg(target_os = "macos")]
 use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
+/// The asset signature Python 0.7.0 publishes, as a migrated install still carries it.
 const PY_SIGNATURE: &str = "8189a4cbd58c1314d0a5d15ecf7c3bc40add49ce16adeb21ef7690711449b4e8";
+/// #11211: the embedded extension leads Python 0.7.0 (tabs, screenshots and coordinate input
+/// in pages.js), so this pins the Rust tree; update it with every extension change.
+const EMBEDDED_SIGNATURE: &str = "3b910cfa78634b9b0077487eaa3b019849dd397b01b9dc7a6e781a73fd5ca440";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
@@ -91,10 +95,10 @@ fn tree(root: &Path) -> String {
 }
 
 #[test]
-fn embedded_stamp_matches_python() {
+fn embedded_stamp_is_the_pinned_rust_tree() {
     let files = assets::embedded();
-    assert_eq!(assets::signature(&files), PY_SIGNATURE);
-    assert_eq!(assets::stamp(&files), &PY_SIGNATURE[..16]);
+    assert_eq!(assets::signature(&files), EMBEDDED_SIGNATURE);
+    assert_eq!(assets::stamp(&files), &EMBEDDED_SIGNATURE[..16]);
 }
 
 #[test]
@@ -132,7 +136,7 @@ fn fresh_publish_matches_python_tree() {
     assert_eq!(tree(&state), fixture("assets_fresh.tsv"));
     assert_eq!(
         assets::published(&state).as_deref(),
-        Some(&PY_SIGNATURE[..16])
+        Some(&EMBEDDED_SIGNATURE[..16])
     );
 }
 
@@ -149,10 +153,25 @@ fn republish_migrates_the_symlinked_layout_like_python() {
     fs::write(state.join("assets").join(&a).join("stale.js"), "old\n").expect("w");
     fs::write(state.join("assets").join(&a).join("worker.js"), "old\n").expect("w");
     fs::write(state.join("assets").join(&b).join("manifest.json"), "x\n").expect("w");
+    // The live tree Python 0.7.0 published carries its own stamp.
+    let py_manifest = format!(r#"{{"version_name":"0.7.0+{}"}}"#, &PY_SIGNATURE[..16]);
+    fs::write(
+        state.join("assets").join(&a).join("manifest.json"),
+        py_manifest,
+    )
+    .expect("w");
     std::os::unix::fs::symlink(Path::new("assets").join(&a), state.join("extension"))
         .expect("link");
+    assert_eq!(
+        assets::published(&state).as_deref(),
+        Some(&PY_SIGNATURE[..16])
+    );
     assets::extension_path(&state).expect("publish");
     assert_eq!(tree(&state), fixture("assets_migrated.tsv"));
+    assert_eq!(
+        assets::published(&state).as_deref(),
+        Some(&EMBEDDED_SIGNATURE[..16])
+    );
 }
 
 #[test]
@@ -363,7 +382,7 @@ fn install_service_writes_files_and_bootstraps() {
     assert_eq!(fs::metadata(&plist).expect("m").mode() & 0o777, 0o600);
     assert_eq!(
         assets::published(&l.state).as_deref(),
-        Some(&PY_SIGNATURE[..16])
+        Some(&EMBEDDED_SIGNATURE[..16])
     );
     let hosts = install_host::default_directory(dir.path()).expect("dir");
     assert!(hosts.join("com.trusty.browser.enroll.json").is_file());
