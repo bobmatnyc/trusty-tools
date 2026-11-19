@@ -70,6 +70,10 @@ pub struct RoleModels {
     pub verifier: RoleConfig,
     /// Summarizer: diff Stage-C classification.
     pub summarizer: RoleConfig,
+    /// True when the verifier model came from the built-in default, with no
+    /// CLI, manifest, env, or config-file model named (#11527). Only then may
+    /// the startup liveness gate fall back to `FALLBACK_VERIFIER_MODEL`.
+    pub verifier_from_builtin_default: bool,
 }
 
 impl RoleModels {
@@ -144,6 +148,15 @@ impl RoleModels {
             0.3,
             4096,
         );
+        // #11527: record whether any explicit layer named a verifier model.
+        let verifier_from_builtin_default = cli_overrides
+            .and_then(|c| c.verifier_model.as_deref())
+            .or(manifest.and_then(|m| m.verifier_model.as_deref()))
+            .or(env.verifier_model.as_deref())
+            .or(file_models
+                .and_then(|f| f.verifier.as_ref())
+                .and_then(|v| v.model.as_deref()))
+            .is_none();
         let verifier = resolve_role(
             cli_overrides.and_then(|c| c.verifier_model.as_deref()),
             cli_overrides.and_then(|c| c.provider.as_deref()),
@@ -177,6 +190,7 @@ impl RoleModels {
             reviewer,
             verifier,
             summarizer,
+            verifier_from_builtin_default,
         };
         // #11527: surface a reviewer/verifier pair that shares one model.
         if let Some(message) = roles.same_model_warning() {

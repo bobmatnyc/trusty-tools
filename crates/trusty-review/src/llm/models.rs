@@ -82,6 +82,15 @@ pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
 /// refuted and every review will APPROVE.
 pub const DEFAULT_VERIFIER_MODEL: &str = "us.amazon.nova-pro-v1:0";
 
+/// Verifier used when the built-in default is denied at startup (#11527).
+///
+/// Why: an account without Nova Pro access would otherwise refuse live mode
+/// after upgrading; the prior default (Haiku 4.5) keeps it running.
+/// What: the pre-#11527 verifier default. Only the liveness gate reads it, and
+/// only for a verifier left at the built-in default.
+/// Test: `pipeline::verify_liveness::tests::enforce_default_access_denied_falls_back`.
+pub const FALLBACK_VERIFIER_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
 /// Default verifier model when the verifier resolves to OpenRouter (#11527).
 ///
 /// Why: OpenRouter's reviewer default is Claude Opus; the verifier takes a

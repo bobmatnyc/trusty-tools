@@ -23,6 +23,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::ReviewConfig,
     llm::LlmProvider,
+    llm::models::{DEFAULT_VERIFIER_MODEL, FALLBACK_VERIFIER_MODEL},
     models::{Effort, Finding},
     pipeline::verify::{emit_verification_model_error, error_class},
     pipeline::verify_prompt::build_verify_request,
@@ -135,11 +136,18 @@ fn stub_probe_finding() -> Finding {
 /// returns `Err(reason)` so the daemon aborts startup; in dry-run mode the same
 /// conditions only warn and return `Ok` (a dry-run daemon never posts, so a dead
 /// verifier weakens the dry-run output but cannot corrupt a live review).
+/// A verifier left at the built-in default that is denied (`AccessDenied` /
+/// `ModelNotFound`) falls back to `FALLBACK_VERIFIER_MODEL` and rewrites
+/// `config.role_models.verifier.model` (#11527); an explicit model never does.
 /// Test: `enforce_disabled_is_ok`, `enforce_live_missing_verifier_refuses`,
 /// `enforce_live_model_unavailable_refuses`, `enforce_live_alive_ok`,
-/// `enforce_dry_run_model_unavailable_allows`.
+/// `enforce_dry_run_model_unavailable_allows`,
+/// `enforce_default_access_denied_falls_back`,
+/// `enforce_default_model_not_found_falls_back`,
+/// `enforce_explicit_denied_still_refuses`,
+/// `enforce_default_and_fallback_denied_refuses`.
 pub async fn enforce_verifier_liveness(
-    config: &ReviewConfig,
+    config: &mut ReviewConfig,
     verifier: Option<&Arc<dyn LlmProvider>>,
 ) -> Result<(), String> {
     // Gate only applies when verification + the liveness check are both on.
@@ -164,8 +172,14 @@ pub async fn enforce_verifier_liveness(
         );
     };
 
-    let model = &config.role_models.verifier.model;
-    match probe_verifier_liveness(verifier, model).await {
+    let model = config.role_models.verifier.model.clone();
+    let mut decision = probe_verifier_liveness(verifier, &model).await;
+    if let LivenessDecision::Refuse { error_class, .. } = &decision
+        && may_fall_back(config, &model, error_class)
+    {
+        decision = try_fallback_verifier(config, verifier, &model, error_class).await;
+    }
+    match decision {
         LivenessDecision::Ok => Ok(()),
         LivenessDecision::Refuse { reason, .. } => {
             if config.dry_run {
@@ -177,6 +191,64 @@ pub async fn enforce_verifier_liveness(
             }
         }
     }
+}
+
+/// True when a refused verifier may fall back to `FALLBACK_VERIFIER_MODEL`.
+///
+/// Why: an account without access to the new built-in default must keep
+/// running, but a model the operator named is a choice the gate must honour
+/// (#11527).
+/// What: the model is the built-in `DEFAULT_VERIFIER_MODEL`, no explicit layer
+/// named it, and the probe failed with `AccessDenied` or `ModelNotFound`.
+/// Test: `enforce_explicit_denied_still_refuses` and the fallback tests.
+fn may_fall_back(config: &ReviewConfig, model: &str, error_class: &str) -> bool {
+    config.role_models.verifier_from_builtin_default
+        && crate::llm::strip_provider_prefix(model) == DEFAULT_VERIFIER_MODEL
+        && matches!(error_class, "AccessDenied" | "ModelNotFound")
+}
+
+/// Probe `FALLBACK_VERIFIER_MODEL` and adopt it when it responds (#11527).
+///
+/// Why: the fallback must be proven alive too, or the gate would trade one
+/// dead verifier for another.
+/// What: logs a warning naming the denied model, the fallback, and the
+/// `TRUSTY_REVIEW_VERIFIER_MODEL` override; probes the fallback; on `Ok`
+/// writes it into `config.role_models.verifier.model` and re-emits the
+/// same-model warning when it now equals the reviewer.
+/// Test: `enforce_default_access_denied_falls_back`,
+/// `enforce_default_and_fallback_denied_refuses`.
+async fn try_fallback_verifier(
+    config: &mut ReviewConfig,
+    verifier: &Arc<dyn LlmProvider>,
+    denied: &str,
+    error_class: &str,
+) -> LivenessDecision {
+    warn!(
+        "{}",
+        fallback_warning(denied, FALLBACK_VERIFIER_MODEL, error_class)
+    );
+    let decision = probe_verifier_liveness(verifier, FALLBACK_VERIFIER_MODEL).await;
+    if decision == LivenessDecision::Ok {
+        config.role_models.verifier.model = FALLBACK_VERIFIER_MODEL.to_string();
+        if let Some(message) = config.role_models.same_model_warning() {
+            warn!("{message}");
+        }
+    }
+    decision
+}
+
+/// Warning text for a default verifier that falls back (#11527).
+///
+/// Why: the operator must learn which model was denied and how to pin one.
+/// What: names the denied model, the error class, the fallback, and the
+/// `TRUSTY_REVIEW_VERIFIER_MODEL` override.
+/// Test: `fallback_warning_names_models_and_override`.
+fn fallback_warning(denied: &str, fallback: &str, error_class: &str) -> String {
+    format!(
+        "default verifier model '{denied}' is unavailable ({error_class}); falling back \
+         to '{fallback}'. Grant access to '{denied}' or set \
+         TRUSTY_REVIEW_VERIFIER_MODEL to choose the verifier explicitly."
+    )
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -235,28 +307,36 @@ mod tests {
     #[tokio::test]
     async fn enforce_disabled_is_ok() {
         // Verification disabled → gate is a no-op even with a dead verifier.
-        let c = cfg(false, true, false);
-        assert!(enforce_verifier_liveness(&c, Some(&dead())).await.is_ok());
+        let mut c = cfg(false, true, false);
+        assert!(
+            enforce_verifier_liveness(&mut c, Some(&dead()))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn enforce_liveness_check_off_is_ok() {
-        let c = cfg(true, false, false);
-        assert!(enforce_verifier_liveness(&c, Some(&dead())).await.is_ok());
+        let mut c = cfg(true, false, false);
+        assert!(
+            enforce_verifier_liveness(&mut c, Some(&dead()))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
     async fn enforce_live_missing_verifier_refuses() {
         // Live mode, verification on, no verifier → refuse.
-        let c = cfg(true, true, false);
-        assert!(enforce_verifier_liveness(&c, None).await.is_err());
+        let mut c = cfg(true, true, false);
+        assert!(enforce_verifier_liveness(&mut c, None).await.is_err());
     }
 
     #[tokio::test]
     async fn enforce_live_model_unavailable_refuses() {
         // Live mode + dead verifier model → refuse (the incident path).
-        let c = cfg(true, true, false);
-        let res = enforce_verifier_liveness(&c, Some(&dead())).await;
+        let mut c = cfg(true, true, false);
+        let res = enforce_verifier_liveness(&mut c, Some(&dead())).await;
         assert!(res.is_err(), "live mode must refuse a dead verifier");
         assert!(
             res.unwrap_err().contains("refusing to start"),
@@ -266,9 +346,11 @@ mod tests {
 
     #[tokio::test]
     async fn enforce_live_alive_ok() {
-        let c = cfg(true, true, false);
+        let mut c = cfg(true, true, false);
         assert!(
-            enforce_verifier_liveness(&c, Some(&alive())).await.is_ok(),
+            enforce_verifier_liveness(&mut c, Some(&alive()))
+                .await
+                .is_ok(),
             "a live verifier must allow start"
         );
     }
@@ -276,17 +358,122 @@ mod tests {
     #[tokio::test]
     async fn enforce_dry_run_model_unavailable_allows() {
         // Dry-run never posts, so a dead verifier only warns — start is allowed.
-        let c = cfg(true, true, true);
+        let mut c = cfg(true, true, true);
         assert!(
-            enforce_verifier_liveness(&c, Some(&dead())).await.is_ok(),
+            enforce_verifier_liveness(&mut c, Some(&dead()))
+                .await
+                .is_ok(),
             "dry-run must not block startup on a dead verifier"
         );
     }
 
     #[tokio::test]
     async fn enforce_dry_run_missing_verifier_allows() {
-        let c = cfg(true, true, true);
-        assert!(enforce_verifier_liveness(&c, None).await.is_ok());
+        let mut c = cfg(true, true, true);
+        assert!(enforce_verifier_liveness(&mut c, None).await.is_ok());
+    }
+
+    // ── #11527: built-in default denied → fallback ───────────────────────────
+
+    /// Stub that fails with `err` for every model in `denied`, else responds.
+    struct DenyModels {
+        denied: Vec<&'static str>,
+        err: fn() -> LlmError,
+    }
+
+    #[async_trait]
+    impl LlmProvider for DenyModels {
+        fn name(&self) -> &str {
+            "deny-models"
+        }
+        async fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            if self.denied.contains(&req.model.as_str()) {
+                return Err((self.err)());
+            }
+            alive().complete(req).await
+        }
+    }
+
+    fn deny(denied: Vec<&'static str>, err: fn() -> LlmError) -> Arc<dyn LlmProvider> {
+        Arc::new(DenyModels { denied, err })
+    }
+
+    /// Live config whose verifier is `DEFAULT_VERIFIER_MODEL`, from `builtin`.
+    fn default_verifier_cfg(builtin: bool) -> ReviewConfig {
+        let mut c = cfg(true, true, false);
+        c.role_models.verifier.model = DEFAULT_VERIFIER_MODEL.to_string();
+        c.role_models.verifier_from_builtin_default = builtin;
+        c
+    }
+
+    #[tokio::test]
+    async fn enforce_default_access_denied_falls_back() {
+        let mut c = default_verifier_cfg(true);
+        let v = deny(vec![DEFAULT_VERIFIER_MODEL], || {
+            LlmError::AccessDenied("no nova".into())
+        });
+        assert!(enforce_verifier_liveness(&mut c, Some(&v)).await.is_ok());
+        assert_eq!(c.role_models.verifier.model, FALLBACK_VERIFIER_MODEL);
+    }
+
+    #[tokio::test]
+    async fn enforce_default_model_not_found_falls_back() {
+        let mut c = default_verifier_cfg(true);
+        let v = deny(vec![DEFAULT_VERIFIER_MODEL], || {
+            LlmError::ModelNotFound("no nova".into())
+        });
+        assert!(enforce_verifier_liveness(&mut c, Some(&v)).await.is_ok());
+        assert_eq!(c.role_models.verifier.model, FALLBACK_VERIFIER_MODEL);
+    }
+
+    #[tokio::test]
+    async fn enforce_explicit_denied_still_refuses() {
+        // Same model id, but named by the operator: fail closed (#11527).
+        let mut c = default_verifier_cfg(false);
+        let v = deny(vec![DEFAULT_VERIFIER_MODEL], || {
+            LlmError::AccessDenied("no nova".into())
+        });
+        let res = enforce_verifier_liveness(&mut c, Some(&v)).await;
+        assert!(res.is_err_and(|r| r.contains("refusing to start")));
+        assert_eq!(c.role_models.verifier.model, DEFAULT_VERIFIER_MODEL);
+    }
+
+    #[tokio::test]
+    async fn enforce_default_and_fallback_denied_refuses() {
+        let mut c = default_verifier_cfg(true);
+        let v = deny(
+            vec![DEFAULT_VERIFIER_MODEL, FALLBACK_VERIFIER_MODEL],
+            || LlmError::AccessDenied("no access".into()),
+        );
+        let res = enforce_verifier_liveness(&mut c, Some(&v)).await;
+        assert!(res.is_err_and(|r| r.contains(FALLBACK_VERIFIER_MODEL)));
+        assert_eq!(c.role_models.verifier.model, DEFAULT_VERIFIER_MODEL);
+    }
+
+    #[tokio::test]
+    async fn enforce_default_validation_error_still_refuses() {
+        // Only AccessDenied / ModelNotFound fall back; Validation keeps refusing.
+        let mut c = default_verifier_cfg(true);
+        let v = deny(vec![DEFAULT_VERIFIER_MODEL], || {
+            LlmError::Validation("bad request".into())
+        });
+        assert!(enforce_verifier_liveness(&mut c, Some(&v)).await.is_err());
+    }
+
+    #[test]
+    fn fallback_warning_names_models_and_override() {
+        let w = fallback_warning(
+            DEFAULT_VERIFIER_MODEL,
+            FALLBACK_VERIFIER_MODEL,
+            "AccessDenied",
+        );
+        for needle in [
+            DEFAULT_VERIFIER_MODEL,
+            FALLBACK_VERIFIER_MODEL,
+            "TRUSTY_REVIEW_VERIFIER_MODEL",
+        ] {
+            assert!(w.contains(needle), "warning must name {needle}: {w}");
+        }
     }
 
     // ── probe_verifier_liveness direct tests ─────────────────────────────────
