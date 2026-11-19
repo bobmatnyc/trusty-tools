@@ -89,7 +89,7 @@ fn a_parse_error_is_a_bad_file() {
 fn a_wildcard_is_a_bad_file() {
     for body in [
         "[mcp]\ndeny = [\"*\"]\n",
-        "[mcp]\nallow = [\"duetto-*\"]\n",
+        "[mcp]\nallow = [\"acme-*\"]\n",
         "[mcp]\ndeny = [\"mcp__?\"]\n",
     ] {
         let err = parse(body).unwrap_err();

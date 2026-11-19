@@ -1098,7 +1098,7 @@ fn targets() -> Vec<Target> {
     new_session::targets_from_with(
         &[
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("apex", "https://github.com/contoso/apex"),
         ],
         &[],
         stub_checkout,
@@ -1247,25 +1247,25 @@ async fn new_session_confirming_a_registered_project_creates_without_registering
 #[test]
 fn new_session_registered_target_carries_its_local_checkout() {
     let rows =
-        new_session::targets_from(&[project("cto", "https://github.com/bob-duetto/cto")], &[]);
+        new_session::targets_from(&[project("cto", "https://github.com/acme-admin/cto")], &[]);
     let Some(Target::Registered { repo, checkout, .. }) = rows.first() else {
         panic!("the registry row is not a target, got {rows:?}");
     };
     assert_eq!(
-        repo, "https://github.com/bob-duetto/cto",
+        repo, "https://github.com/acme-admin/cto",
         "the row keeps its identity"
     );
     let checkout = checkout.as_ref().expect("a GitHub row names a directory");
     assert!(checkout.is_absolute(), "{checkout:?}");
     assert!(
-        checkout.ends_with("bob-duetto/cto"),
+        checkout.ends_with("acme-admin/cto"),
         "not the managed clone path: {checkout:?}"
     );
 }
 
 /// Confirming a registered row sends its directory, never its URL (#7887).
 ///
-/// Why: the owner's `tm ls` sent `https://github.com/bob-duetto/cto` as
+/// Why: the owner's `tm ls` sent `https://github.com/acme-admin/cto` as
 /// `repo_url` and the daemon's ADR-0055 check refused it — trusty-mpm clones
 /// nothing, so the only form it accepts is a directory that already exists.
 /// Against the pre-fix picker this fails with that URL in `request.repo`.
@@ -1273,7 +1273,7 @@ fn new_session_registered_target_carries_its_local_checkout() {
 fn new_session_confirming_a_registered_project_sends_its_local_checkout() {
     let mut flow = NewSessionFlow::with_resolver(
         new_session::targets_from_with(
-            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[project("cto", "https://github.com/acme-admin/cto")],
             &[],
             stub_checkout,
         ),
@@ -1299,7 +1299,7 @@ fn new_session_confirming_a_registered_project_sends_its_local_checkout() {
 fn new_session_registered_project_without_a_checkout_names_the_clone_step() {
     let mut flow = NewSessionFlow::with_resolver(
         new_session::targets_from_with(
-            &[project("cto", "https://github.com/bob-duetto/cto")],
+            &[project("cto", "https://github.com/acme-admin/cto")],
             &[],
             missing_checkout,
         ),
@@ -1310,7 +1310,7 @@ fn new_session_registered_project_without_a_checkout_names_the_clone_step() {
             assert!(message.contains("/nonexistent/7887/cto"), "{message}");
             assert!(
                 message
-                    .contains("git clone https://github.com/bob-duetto/cto /nonexistent/7887/cto"),
+                    .contains("git clone https://github.com/acme-admin/cto /nonexistent/7887/cto"),
                 "{message}"
             );
         }
@@ -1545,7 +1545,7 @@ fn render_new_session_overlay_lists_the_registered_projects() {
     let joined = draw(110, 30, &sessions, &mut state).join("\n");
     assert!(joined.contains("Start a new session in:"), "{joined}");
     // #7406: the row is the project's identity, not its stored URL.
-    assert!(joined.contains("duetto/apex"), "{joined}");
+    assert!(joined.contains("contoso/apex"), "{joined}");
     assert!(!joined.contains("https://"), "{joined}");
     assert!(joined.contains("other — type a project path"), "{joined}");
     assert!(joined.contains("Esc cancels"), "{joined}");
@@ -1628,12 +1628,12 @@ fn stub_target(name: &str, repo: &str) -> Target {
 }
 
 /// Three registered rows, in the alphabetical order #7421 renders them:
-/// `acme/widgets`, `bobmatnyc/trusty-tools`, `duetto/apex`.
+/// `acme/widgets`, `bobmatnyc/trusty-tools`, `contoso/apex`.
 fn three_projects() -> Vec<Target> {
     new_session::targets_from(
         &[
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("apex", "https://github.com/contoso/apex"),
             project("widgets", "https://github.com/acme/widgets"),
         ],
         &[],
@@ -1652,13 +1652,13 @@ fn new_session_preselects_the_cursor_sessions_project() {
     // The session spells the remote differently from the registry row; the
     // shared `repo_url_matches` is what makes the two agree.
     let mut cursor = session("a1", "Active", 1);
-    cursor.repo_url = Some("git@github.com:duetto/apex.git".to_string());
+    cursor.repo_url = Some("git@github.com:contoso/apex.git".to_string());
     assert_eq!(new_session::preselect_index(&targets, Some(&cursor)), 2);
 
     let flow = NewSessionFlow::with_resolver(targets.clone(), stub_identity)
         .preselected_for(Some(&cursor));
     let rows = flow.rows();
-    assert_eq!(rows[2], "▸ duetto/apex", "{rows:?}");
+    assert_eq!(rows[2], "▸ contoso/apex", "{rows:?}");
     assert!(!rows[0].starts_with('▸'), "{rows:?}");
 
     // A session with no `repo_url` is matched on its `owner/repo` source id.
@@ -1711,15 +1711,15 @@ fn new_session_rows_show_owner_repo_only() {
 #[test]
 fn new_session_labels_disambiguate_by_host() {
     let labels = new_session::row_labels(&[
-        target("apex", "https://github.com/duetto/apex"),
-        target("apex-gl", "https://gitlab.com/duetto/apex"),
+        target("apex", "https://github.com/contoso/apex"),
+        target("apex-gl", "https://gitlab.com/contoso/apex"),
         target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
     ]);
     assert_eq!(
         labels,
         vec![
-            "github.com/duetto/apex".to_string(),
-            "gitlab.com/duetto/apex".to_string(),
+            "github.com/contoso/apex".to_string(),
+            "gitlab.com/contoso/apex".to_string(),
             // Unique on its own, so it keeps the short form.
             "bobmatnyc/trusty-tools".to_string(),
         ]
@@ -1747,7 +1747,7 @@ fn new_session_targets_from_drops_a_scratchpad_registration() {
             ),
             project("gone", "/nonexistent/7406/no-such-checkout"),
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "https://github.com/duetto/apex"),
+            project("apex", "https://github.com/contoso/apex"),
         ],
         &[],
         stub_checkout,
@@ -1756,7 +1756,7 @@ fn new_session_targets_from_drops_a_scratchpad_registration() {
         targets,
         vec![
             stub_target("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            stub_target("apex", "https://github.com/duetto/apex"),
+            stub_target("apex", "https://github.com/contoso/apex"),
             Target::Other,
         ]
     );
@@ -1809,7 +1809,7 @@ fn render_new_session_rows_at_eighty_columns() {
 /// Six registrations, spelled in one order; the caller may reshuffle them.
 fn six_projects() -> Vec<Project> {
     vec![
-        project("apex", "https://github.com/duetto/apex"),
+        project("apex", "https://github.com/contoso/apex"),
         project("widgets", "https://github.com/acme/widgets"),
         project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
         project("zeta", "https://github.com/zed/zeta"),
@@ -1848,7 +1848,7 @@ fn new_session_order_is_independent_of_registry_iteration_order() {
         vec![
             "acme/widgets".to_string(),
             "bobmatnyc/trusty-tools".to_string(),
-            "duetto/apex".to_string(),
+            "contoso/apex".to_string(),
             "early/early".to_string(),
             "mid/mid".to_string(),
             "zed/zeta".to_string(),
@@ -2436,7 +2436,7 @@ fn new_session_entry_from_the_filter_creates_a_clone_request() {
 #[test]
 fn new_session_entry_does_not_hijack_a_matching_filter() {
     let mut flow = NewSessionFlow::with_resolver(targets(), stub_identity);
-    for c in "duetto".chars() {
+    for c in "contoso".chars() {
         flow.apply(Input::Char(c));
     }
     assert_eq!(
@@ -2664,7 +2664,7 @@ fn new_session_name_ctrl_n_rejects_a_row_without_a_checkout() {
     let flow = || {
         NewSessionFlow::with_resolver(
             new_session::targets_from_with(
-                &[project("cto", "https://github.com/bob-duetto/cto")],
+                &[project("cto", "https://github.com/acme-admin/cto")],
                 &[],
                 missing_checkout,
             ),
@@ -2722,7 +2722,7 @@ fn new_session_name_escape_returns_to_the_list_intact() {
         before
             .rows()
             .iter()
-            .any(|r| r.starts_with('▸') && r.contains("duetto/apex")),
+            .any(|r| r.starts_with('▸') && r.contains("contoso/apex")),
         "{:?}",
         before.rows()
     );

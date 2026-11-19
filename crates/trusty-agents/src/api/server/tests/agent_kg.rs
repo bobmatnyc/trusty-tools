@@ -75,7 +75,7 @@ impl Fixtures {
             &root,
             "people",
             "bob",
-            "---\ntype: Person\ntitle: Bob\ndescription: The owner.\nworks_at: \"[[Duetto]]\"\n---\n",
+            "---\ntype: Person\ntitle: Bob\ndescription: The owner.\nworks_at: \"[[Globex]]\"\n---\n",
         );
         write_entity(
             &root,
@@ -86,8 +86,8 @@ impl Fixtures {
         write_entity(
             &root,
             "organizations",
-            "duetto",
-            "---\ntype: Organization\ntitle: Duetto\ndescription: A company.\n---\n",
+            "globex",
+            "---\ntype: Organization\ntitle: Globex\ndescription: A company.\n---\n",
         );
         self
     }
@@ -274,7 +274,7 @@ async fn kg_subjects_route_lists_okg_subjects() {
         json!([
             { "subject": "Ada", "count": 1 },
             { "subject": "Bob", "count": 1 },
-            { "subject": "Duetto", "count": 0 },
+            { "subject": "Globex", "count": 0 },
         ]),
         "{body}"
     );
@@ -352,7 +352,7 @@ async fn kg_query_route_returns_the_subjects_triples_and_definition() {
         json!([{
             "subject": "Bob",
             "predicate": "works_at",
-            "object": "Duetto",
+            "object": "Globex",
             "provenance": "people/bob.md",
         }]),
         "{body}"

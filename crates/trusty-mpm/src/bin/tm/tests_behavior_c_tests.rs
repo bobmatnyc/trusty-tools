@@ -859,9 +859,9 @@ fn guided_ls_tree_reports_tracked_dir_false_for_blank_lines() {
 #[test]
 fn guided_untracked_ancestor_message_names_root() {
     // Why: the operator must see WHICH enclosing repo was declined.
-    let msg = untracked_ancestor_message(std::path::Path::new("/Users/masa/Duetto"));
+    let msg = untracked_ancestor_message(std::path::Path::new("/Users/masa/Acme-Labs"));
     assert!(
-        msg.contains("/Users/masa/Duetto"),
+        msg.contains("/Users/masa/Acme-Labs"),
         "message must name the enclosing git root: {msg}"
     );
     assert!(
@@ -927,7 +927,7 @@ fn guided_classify_cwd_usable_for_tracked_subdir() {
 fn guided_classify_cwd_untracked_for_uncommitted_subdir() {
     // Why: the core #2534 regression — a directory that physically exists inside
     // a repo's working tree but is NOT in its tracked tree (the same shape as the
-    // APFS `~/Duetto/cto` case-fold collision) must be UntrackedInsideAncestor,
+    // APFS `~/Acme-Labs/cto` case-fold collision) must be UntrackedInsideAncestor,
     // NOT trusted as part of the enclosing repo.
     let tmp = tempdir_with_name("trusty_test_classify_untracked_2534");
     if !git_init_with_commit(&tmp) {
@@ -1942,10 +1942,10 @@ fn is_github_remote_accepts_github_com_https() {
 
 #[test]
 fn is_github_remote_accepts_github_hyphen_alias() {
-    // Why: `git@github-duetto:duettoresearch/aria.git` is the real-world repro
+    // Why: `git@github-acme:acme-labs/aria.git` is the real-world repro
     // case from the issue. Multi-account SSH aliases use `github-<name>`.
     assert!(
-        is_github_remote("git@github-duetto:duettoresearch/aria.git"),
+        is_github_remote("git@github-acme:acme-labs/aria.git"),
         "github-<alias> SSH remote must be recognised as GitHub"
     );
 }
@@ -2029,8 +2029,8 @@ fn is_github_remote_rejects_gitea_with_github_in_path() {
 fn github_host_extracts_scp_style() {
     // Why: the most common GitHub remote form is scp-style `git@HOST:path`.
     assert_eq!(
-        github_host("git@github-duetto:duettoresearch/aria.git"),
-        "github-duetto"
+        github_host("git@github-acme:acme-labs/aria.git"),
+        "github-acme"
     );
     assert_eq!(github_host("git@github.com:owner/repo.git"), "github.com");
 }
@@ -2056,19 +2056,19 @@ fn github_host_extracts_ssh_url_with_user() {
 #[test]
 fn guided_derive_project_accepts_github_ssh_alias() {
     // Why: `derive_project` uses `is_github_remote` internally. With the
-    // SSH-alias fix, a repo whose origin is `git@github-duetto:owner/repo.git`
+    // SSH-alias fix, a repo whose origin is `git@github-acme:owner/repo.git`
     // must return Some with the correct source_id.
     let tmp = tempdir_with_name("trusty_test_github_alias_derive_1705");
     let ok = git_init_with_commit(&tmp);
     if !ok {
         return;
     }
-    git_remote_add(&tmp, "git@github-duetto:duettoresearch/aria.git");
+    git_remote_add(&tmp, "git@github-acme:acme-labs/aria.git");
     let result = derive_project(&tmp);
     match result {
         Some((source_id, _workspace, _git_root)) => {
             assert_eq!(
-                source_id, "duettoresearch/aria",
+                source_id, "acme-labs/aria",
                 "source_id must be parsed correctly from alias remote"
             );
         }
@@ -2081,17 +2081,17 @@ fn guided_derive_project_accepts_github_ssh_alias() {
 #[tokio::test]
 #[serial_test::serial]
 async fn guided_fallback_does_not_refuse_github_ssh_alias_remote() {
-    // Why: before this fix, `git@github-duetto:duettoresearch/aria.git`
+    // Why: before this fix, `git@github-acme:acme-labs/aria.git`
     // triggered the "Auto-protected managed clones require a GitHub remote"
     // error because `is_github_remote` only matched `github.com`. The SSH alias
-    // host `github-duetto` was not recognised, so `fallback_protected` fell
+    // host `github-acme` was not recognised, so `fallback_protected` fell
     // into the non-GitHub refusal path. This test locks in the fix.
     // What: creates a real git repo, sets the SSH-alias remote, and calls
     // `fallback_protected`. Asserts the result is NOT the GitHub-remote
     // refusal error. (It may still be an Err from the clone attempt failing
     // due to the daemon being unreachable — that is expected and acceptable.)
     // Deliberately uses a fixture-only host/owner/repo (NOT the real
-    // `github-duetto` alias from the regression report above) — a developer
+    // `github-acme` alias from the regression report above) — a developer
     // machine may have a real, reachable SSH config entry with that exact
     // name (as this repo's own maintainer's machine does), which would let
     // `ensure_base_clone` actually succeed and make this test flaky/order-

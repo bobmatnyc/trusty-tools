@@ -201,7 +201,7 @@ it('renders the definitions that come with a page of triples', async () => {
       tree: 'izzie/okg',
       source: 'okg',
       connected: true,
-      data: [{ subject: 'Bob', predicate: 'works_at', object: 'Duetto', provenance: 'people/bob.md' }],
+      data: [{ subject: 'Bob', predicate: 'works_at', object: 'Acme', provenance: 'people/bob.md' }],
       definitions: [
         { subject: 'Bob', collection: 'people', slug: 'bob', type: 'Person', summary: 'The owner.', path: 'people/bob.md' },
       ],

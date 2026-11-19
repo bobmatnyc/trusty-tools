@@ -62,7 +62,7 @@ fn project_mcp_state_reports_each_declared_server() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
     let cfg = tmp.path().join("cfg");
-    mcp_json(&cwd, &["apex", "duetto-memory", "smuggled"]);
+    mcp_json(&cwd, &["apex", "mem-acme", "smuggled"]);
     settings(
         &cwd.join(".claude").join("settings.json"),
         json!({
@@ -81,7 +81,7 @@ fn project_mcp_state_reports_each_declared_server() {
                 approval: Approval::Enabled
             },
             ProjectMcpServer {
-                name: "duetto-memory".to_owned(),
+                name: "mem-acme".to_owned(),
                 approval: Approval::Prompt
             },
             ProjectMcpServer {

@@ -1,7 +1,7 @@
 //! Regression tests for #4081: a hallucinated dependency-version finding wore
 //! `code_provable: true` + `verified: "confirmed"` and drove `BLOCK` / `F`.
 //!
-//! The fixture is the reported case verbatim — `duettoresearch/APEX` PR 1717's
+//! The fixture is the reported case verbatim — `acme/APEX` PR 1717's
 //! one-line CI change (`ruff>=0.6.0` → `ruff==0.16.0`) and the finding text
 //! #4081 quotes in full. `ruff==0.16.0` was in fact the CURRENT latest release,
 //! and all ten checks on that PR were green on that exact dependency; the claim

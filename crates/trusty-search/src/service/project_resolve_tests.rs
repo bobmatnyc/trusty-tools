@@ -124,8 +124,8 @@ fn fleet() -> Vec<Candidate> {
         ),
         cand(
             "apex-9a4a584b",
-            "/w/duetto/apex",
-            Some("duetto/apex"),
+            "/w/acme-co/apex",
+            Some("acme-co/apex"),
             RootKind::MainCheckout,
             Some(5),
         ),
@@ -185,7 +185,7 @@ fn an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity() {
         ),
         cand(
             "cto-supervisor",
-            "/p/bob-duetto/cto-supervisor",
+            "/p/acme-admin/cto-supervisor",
             shared,
             RootKind::MainCheckout,
             None,
@@ -348,7 +348,7 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     // filesystem.
     for (id, dir, age) in [
         ("apex", "repos/APEX", 86_400),
-        ("apex-9a4a584b", "duetto/apex", 60),
+        ("apex-9a4a584b", "acme-co/apex", 60),
     ] {
         let root = tmp.path().join(dir);
         std::fs::create_dir_all(root.join(".git")).expect(".git");
@@ -363,7 +363,7 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
             .expect("mtime");
         rows.push(PersistedIndex {
             colocated: true,
-            repo_identity: Some("duettoresearch/apex".to_string()),
+            repo_identity: Some("acme/apex".to_string()),
             ..PersistedIndex::new(id, root)
         });
     }
@@ -373,7 +373,7 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     assert!(loaded.iter().all(|r| r.last_indexed_unix.is_none()));
 
     let candidates = gather_candidates(&loaded, &[]);
-    let query = ProjectQuery::Identity("duettoresearch/apex".into());
+    let query = ProjectQuery::Identity("acme/apex".into());
     let got = resolve(&query, &candidates, &live()).expect("resolves");
     assert_eq!(got.index.index_id, "apex-9a4a584b", "{got:?}");
     assert_eq!(got.index.kind, RootKind::MainCheckout);
@@ -440,7 +440,7 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     let mut corpora = Vec::new();
     for (id, dir, age) in [
         ("apex", "repos/APEX", 2 * 86_400),
-        ("apex-9a4a584b", "duetto/apex", 86_400),
+        ("apex-9a4a584b", "acme-co/apex", 86_400),
     ] {
         let root = tmp.path().join(dir);
         std::fs::create_dir_all(root.join(".git")).expect(".git");
@@ -458,7 +458,7 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
             .expect("mtime");
         rows.push(PersistedIndex {
             colocated: true,
-            repo_identity: Some("duettoresearch/apex".to_string()),
+            repo_identity: Some("acme/apex".to_string()),
             ..PersistedIndex::new(id, root.clone())
         });
         corpora.push((root, corpus));
@@ -491,7 +491,7 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
         runtime: Some(tokio::runtime::Handle::current()),
     };
     let got = tokio::task::spawn_blocking(move || {
-        let query = ProjectQuery::Identity("duettoresearch/apex".into());
+        let query = ProjectQuery::Identity("acme/apex".into());
         let first = resolve(&query, &candidates, &disk).expect("resolves");
         let second = resolve(&query, &candidates, &disk).expect("resolves again");
         assert_eq!(first, second, "a resolve must not change the next answer");
@@ -788,12 +788,12 @@ fn a_dotdot_query_path_matches_the_root_it_names() {
         let root = base.join(id).display().to_string();
         cand(id, &root, Some(identity), RootKind::Indeterminate, None)
     };
-    let real = vec![at("apex", "duetto/apex"), at("trusty-tools", REPO)];
+    let real = vec![at("apex", "acme/apex"), at("trusty-tools", REPO)];
     let query = ProjectQuery::Path(base.join("trusty-tools/../apex"));
     let got = resolve(&query, &real, &live()).expect("resolves");
     assert_eq!(got.index.index_id, "apex", "{query:?}");
 
-    let missing = ProjectQuery::Path("/w/bobmatnyc/trusty-tools/../../duetto/apex/src".into());
+    let missing = ProjectQuery::Path("/w/bobmatnyc/trusty-tools/../../acme-co/apex/src".into());
     let got = resolve(&missing, &fleet(), &NO_DERIVE).expect("resolves");
     assert_eq!(got.index.index_id, "apex-9a4a584b");
 }

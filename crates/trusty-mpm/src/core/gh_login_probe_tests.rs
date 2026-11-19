@@ -25,7 +25,7 @@ github.com
   - Token: gho_************************************
   - Token scopes: 'gist', 'project', 'read:org', 'repo', 'workflow'
 
-  ✓ Logged in to github.com account bob-duetto (keyring)
+  ✓ Logged in to github.com account acme-admin (keyring)
   - Active account: false
   - Git operations protocol: https
   - Token: gho_************************************
@@ -97,7 +97,7 @@ fn a_pinned_config_dir_with_two_accounts_is_seen_under_launchd() {
         state_root: Some(tmp.path().join("state")),
         own_config_dir: None,
     };
-    for login in ["bobmatnyc", "BOB-DUETTO"] {
+    for login in ["bobmatnyc", "ACME-ADMIN"] {
         let probe = probe_gh_login_with(login, &sources, BOUND, Arc::clone(&run));
         assert_eq!(accepted(&probe, login), login.to_ascii_lowercase());
     }
@@ -205,8 +205,8 @@ fn an_answer_elsewhere_outranks_an_unknown() {
         static_config_dir: Some(operator),
         ..AccountDirSources::default()
     };
-    let probe = probe_gh_login_with("bob-duetto", &sources, BOUND, Arc::clone(&run));
-    assert_eq!(accepted(&probe, "bob-duetto"), "bob-duetto");
+    let probe = probe_gh_login_with("acme-admin", &sources, BOUND, Arc::clone(&run));
+    assert_eq!(accepted(&probe, "acme-admin"), "acme-admin");
     let probe = probe_gh_login_with("typo-bot", &sources, BOUND, run);
     assert!(matches!(probe, GhAuthProbe::Inconclusive(_)), "{probe:?}");
 }
