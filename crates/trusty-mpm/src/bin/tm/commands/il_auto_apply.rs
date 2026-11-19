@@ -17,13 +17,17 @@
 //! Architect message or (c) the Architect's prompt (both `UserPromptSubmit`,
 //! the `prompt`). Each of those is logged once per packet as
 //! `il-auto-apply:PROPOSAL` in the denial store `list_recent_errors` reads,
-//! with the entry point and packet id, and writes nothing. [`run`] finds the
+//! with the entry point and packet id in the message and the fence body
+//! (scrubbed, 600 chars) in `command`, and writes nothing. [`run`] finds the
 //! session's `datg` store (`<launch dir>/.trusty-mpm/datg[/<session>]`) and
 //! routes an own-turn block (`il::route`): a replay is a no-op; a block whose
 //! applied fields the Rust writer covers is written in process; any other
 //! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`), under the store's
 //! `il::hold` lock and a pending marker, so a packet runs ilio at most once
-//! (`PENDING-UNKNOWN` when an earlier run left no result). A store-less
+//! (`PENDING-UNKNOWN` when an earlier run left no result; also recorded at
+//! mark time, before ilio runs, and dropped when the run reports). The lock
+//! wait (1.5 s) plus the ilio timeout (2 s) stay inside the `Stop` hook's 5 s
+//! kill. A store-less
 //! session records `NO-LEDGER` once per packet. A rejected or failed block is
 //! appended to the same denial store, check `il-auto-apply:<RULE>`, and is
 //! never reported as applied. [`on_hook`] never fails and never blocks the
@@ -40,14 +44,21 @@ use trusty_architect::ledger::il;
 use trusty_architect::ledger::store::{StorePaths, launch_dir};
 use trusty_architect::ledger::writer::Writer;
 use trusty_common::error_capture::TRUSTY_NO_BUG_CAPTURE_ENV;
+use trusty_common::error_capture::fingerprint::compute_fingerprint;
 use trusty_mpm::daemon::bug_report::{
     DeniedCall, append_denial, denial_record, pm_guard_denials_path,
 };
 
 /// The Architect's session name (ilio's default `who`).
 const ARCHITECT: &str = "tm-architect";
-/// How much longer than one ilio run a delivery waits for the apply lock.
-const LOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long a delivery waits for the store's apply lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1500);
+// The installed `Stop` hook is killed at 5 s (`core/standalone/hooks`): the
+// lock wait plus one ilio run must end well inside it.
+const _: () = assert!(LOCK_WAIT.as_millis() + ILIO_TIMEOUT.as_millis() < 4000);
+
+/// Chars of a proposal's fence body kept in its record.
+const PROPOSAL_BODY_CHARS: usize = 600;
 
 /// Cap on transcript bytes read from the tail (one final turn fits easily).
 const MAX_TRANSCRIPT_TAIL: u64 = 256 * 1024;
@@ -205,7 +216,9 @@ pub(crate) fn run(
         if !recorded(target, "PROPOSAL", &packet) {
             let why = "an IL block from outside the session's own turn is a proposal; the \
                        ledger is changed only by the session's own turns";
-            record(target, entry, session_id, &packet, "PROPOSAL", why);
+            let body = il::fence_body(&text).unwrap_or_default();
+            let body: String = body.chars().take(PROPOSAL_BODY_CHARS).collect();
+            record(target, entry, session_id, &packet, "PROPOSAL", &body, why);
         }
         return Outcome::Proposed(packet);
     }
@@ -213,7 +226,15 @@ pub(crate) fn run(
         // G0b critic: once per packet, never silently.
         if !recorded(target, "NO-LEDGER", &packet) {
             let why = format!("no datg store at {}", dir.display());
-            record(target, entry, session_id, &packet, "NO-LEDGER", &why);
+            record(
+                target,
+                entry,
+                session_id,
+                &packet,
+                "NO-LEDGER",
+                &packet,
+                &why,
+            );
         }
         return Outcome::NoLedger;
     }
@@ -225,11 +246,11 @@ pub(crate) fn run(
         .unwrap_or_else(|| ARCHITECT.to_owned());
     let paths = StorePaths::at(dir);
     let fail = |code: &str, why: &str| {
-        record(target, entry, session_id, &packet, code, why);
+        record(target, entry, session_id, &packet, code, &packet, why);
         Outcome::Failed(code.to_owned())
     };
     // G0b critic: one delivery at a time from route to the replay marker.
-    let _held = match il::hold(&paths, target.ilio_timeout + LOCK_SLACK) {
+    let _held = match il::hold(&paths, LOCK_WAIT) {
         Ok(f) => f,
         Err(e) => return fail(e.code(), &e.to_string()),
     };
@@ -254,6 +275,21 @@ pub(crate) fn run(
             if let Err(e) = il::mark_pending(&paths, &packet) {
                 return fail("WRITE", &format!("pending marker not written: {e}"));
             }
+            // Before ilio runs: a hook killed mid-run still leaves a record.
+            let why = format!(
+                "ilio.py apply of this packet started; marker {}/{packet} stays until it \
+                 reports; a record here with no applied result means the run was cut off",
+                il::PENDING_DIR
+            );
+            record(
+                target,
+                entry,
+                session_id,
+                &packet,
+                "PENDING-UNKNOWN",
+                &packet,
+                &why,
+            );
             let call = IlioCall {
                 script: target.ilio.as_deref(),
                 project: &launch_dir(&target.cwd),
@@ -266,6 +302,7 @@ pub(crate) fn run(
                     // A timeout or crash may have written; its marker stays.
                     if !matches!(code.as_str(), "ILIO-TIMEOUT" | "ILIO-EXIT") {
                         let _ = il::clear_pending(&paths, &packet);
+                        retract(target, "PENDING-UNKNOWN", &packet);
                     }
                     fail(&code, &format!("{why} (fields {})", fields.join(",")))
                 }
@@ -275,6 +312,7 @@ pub(crate) fn run(
                     } else if let Err(e) = il::clear_pending(&paths, &packet) {
                         eprintln!("tm hook: IL {packet} applied; pending marker kept: {e}");
                     }
+                    retract(target, "PENDING-UNKNOWN", &packet);
                     Outcome::IlioApplied(packet, summary)
                 }
             }
@@ -294,8 +332,47 @@ fn recorded(target: &Target, code: &str, packet: &str) -> bool {
         .is_some_and(|t| t.lines().any(|l| l.contains(&check) && l.contains(packet)))
 }
 
+/// Drops the `il-auto-apply:<code>` line for `packet` once the run it
+/// announced has reported, so a finished run leaves no false alarm.
+fn retract(target: &Target, code: &str, packet: &str) {
+    let Some(path) = target.denials.clone().or_else(pm_guard_denials_path) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let check = format!("check=il-auto-apply:{code} ");
+    let hit = |l: &str| l.contains(&check) && l.contains(packet);
+    if !text.lines().any(hit) {
+        return;
+    }
+    let kept: String = text
+        .lines()
+        .filter(|l| !hit(l))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let tmp = path.with_extension("jsonl.tmp");
+    if std::fs::write(&tmp, kept)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .is_err()
+    {
+        eprintln!("tm hook: il auto-apply `{code}` record for {packet} kept");
+    }
+}
+
 /// Appends the failure where `list_recent_errors` reads denials.
-fn record(target: &Target, entry: Entry, session_id: &str, packet: &str, code: &str, reason: &str) {
+///
+/// `command` is the field `denial_record` scrubs of secrets; the packet id
+/// goes in the message so each proposal has its own fingerprint.
+fn record(
+    target: &Target,
+    entry: Entry,
+    session_id: &str,
+    packet: &str,
+    code: &str,
+    command: &str,
+    reason: &str,
+) {
     if std::env::var_os(TRUSTY_NO_BUG_CAPTURE_ENV).is_some_and(|v| !v.is_empty()) {
         return;
     }
@@ -308,7 +385,7 @@ fn record(target: &Target, entry: Entry, session_id: &str, packet: &str, code: &
     let call = DeniedCall {
         check: &check,
         tool: entry.label(),
-        command: packet,
+        command,
         cwd: &cwd,
         session_id,
         reason,
@@ -317,7 +394,21 @@ fn record(target: &Target, entry: Entry, session_id: &str, packet: &str, code: &
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     let mut rec = denial_record(&call, now);
-    rec.message = format!("il auto-apply refused {} [{code}]", entry.label());
+    rec.message = if code == "PROPOSAL" {
+        format!("il auto-apply refused {} [{code}] {packet}", entry.label())
+    } else {
+        format!("il auto-apply refused {} [{code}]", entry.label())
+    };
+    if code == "PROPOSAL" {
+        // The fingerprint normaliser erases hex runs, and a packet id is
+        // one: spell it in letters it keeps, so each proposal is its own bug.
+        let spelled: String = packet
+            .chars()
+            .map(|c| c.to_digit(16).map_or(c, |d| char::from(b'g' + d as u8)))
+            .collect();
+        let keyed = format!("{} {spelled}", rec.message);
+        rec.fingerprint = compute_fingerprint(&rec.crate_target, &keyed, None, None);
+    }
     if let Err(err) = append_denial(&path, &rec) {
         eprintln!(
             "tm hook: il auto-apply `{code}` not recorded to {}: {err}",

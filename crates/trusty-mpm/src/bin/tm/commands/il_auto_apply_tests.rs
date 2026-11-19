@@ -450,3 +450,71 @@ fn a_stale_pending_marker_is_not_re_run() {
     );
     assert!(denials(tmp.path()).contains("il-auto-apply:PENDING-UNKNOWN"));
 }
+
+/// Why: the installed `Stop` hook is killed at 5 s; a record must outlive it.
+/// What: a hung ilio under the real `ILIO_TIMEOUT` is killed inside 4 s with
+/// `ILIO-TIMEOUT`, and the `PENDING-UNKNOWN` record (naming the marker) was
+/// already in the store while ilio was still running.
+/// Test: itself.
+#[test]
+fn a_hung_ilio_is_killed_inside_the_hook_bound_and_a_record_exists_before_it_runs() {
+    use super::super::il_auto_apply_ilio::ILIO_TIMEOUT;
+    let (tmp, _dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    let seen = tmp.path().join("seen-by-ilio.txt");
+    let tail = format!(
+        "import shutil, time\nshutil.copy({:?}, {:?})\ntime.sleep(60)",
+        tmp.path().join("denials.jsonl"),
+        seen
+    );
+    t.ilio = Some(fake_ilio(tmp.path(), &tail));
+    t.ilio_timeout = ILIO_TIMEOUT;
+    let started = std::time::Instant::now();
+    let got = own(NEW_BLOCK, &t);
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    assert!(
+        matches!(&got, Outcome::Failed(c) if c == "ILIO-TIMEOUT"),
+        "{got:?}"
+    );
+    let before = fs::read_to_string(&seen).expect("ilio saw the store");
+    assert!(before.contains("il-auto-apply:PENDING-UNKNOWN"), "{before}");
+    let packet = il::packet_id(NEW_BLOCK).expect("packet");
+    assert!(before.contains(&format!("il-pending/{packet}")), "{before}");
+    assert!(denials(tmp.path()).contains("il-auto-apply:PENDING-UNKNOWN"));
+}
+
+/// Why: a proposal must say what it proposes, and distinct proposals must
+/// not collapse into one filed bug.
+/// What: two proposals carry their own body in `command` and their packet in
+/// the message (distinct fingerprints); a token in a body is scrubbed.
+/// Test: itself.
+#[test]
+fn each_proposal_carries_its_scrubbed_body_and_its_own_fingerprint() {
+    let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"; // pragma: allowlist secret
+    let (tmp, _dir) = repo("pm-a");
+    let t = target(tmp.path(), "pm-a");
+    let one = "```il\ntask: free: one\ndone: d\npct: 5\nnext: first move\n```";
+    let two = format!("```il\ntask: free: two\ndone: d\npct: 5\nnext: use {token}\n```");
+    for block in [one, two.as_str()] {
+        let payload = json!({"prompt": format!("[from pm-b]\n{block}")});
+        assert!(matches!(
+            go("UserPromptSubmit", &payload, &t),
+            Outcome::Proposed(_)
+        ));
+    }
+    let recs: Vec<serde_json::Value> = denials(tmp.path())
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("record"))
+        .collect();
+    assert_eq!(recs.len(), 2);
+    assert_ne!(recs[0]["fingerprint"], recs[1]["fingerprint"]);
+    let f = |i: usize| recs[i]["fields"].as_str().expect("fields").to_owned();
+    assert!(f(0).contains("next: first move"), "{}", f(0));
+    assert!(f(1).contains("task: free: two"), "{}", f(1));
+    assert!(!f(1).contains(token), "{}", f(1));
+    for (i, block) in [one, two.as_str()].iter().enumerate() {
+        let packet = il::packet_id(block).expect("packet");
+        let msg = recs[i]["message"].as_str().expect("message");
+        assert!(msg.contains(&packet), "{msg}");
+    }
+}

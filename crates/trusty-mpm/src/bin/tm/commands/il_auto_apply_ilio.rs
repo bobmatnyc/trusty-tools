@@ -18,8 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// How long one `ilio.py apply` may run.
-pub(crate) const ILIO_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long one `ilio.py apply` may run. With the 1.5 s lock wait it totals
+/// 3.5 s, inside the installed `Stop` hook's 5 s kill.
+pub(crate) const ILIO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `ilio.py`: `$ILIO_SCRIPT`, else `<architect dir>/scripts/ilio.py`.
 ///
