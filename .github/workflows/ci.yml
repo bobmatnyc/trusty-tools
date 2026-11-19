@@ -39,6 +39,7 @@
 #               fixtures, unconditional
 #   fastembed-cache-selftest – the model-cache check and key sites, unconditional
 #   website-corpus – the website content gate, step-gated on its own relevance
+#   public-leaks – the public-content leak guard over every tracked file
 #   ci-gate  – "CI gate": one context that fails when any context it stands in
 #              for fails, or a job skipped without the classifier's say-so
 #              (#8378; scripts/ci-gate-verdict.sh holds the covered list)
@@ -3134,6 +3135,37 @@ jobs:
   # context whose job is missing from `needs:`. Its table of covered contexts
   # is the single list; ci-gate-selftest.sh holds it equal to `needs:` below.
   # --------------------------------------------------------------------------
+  # public-leaks: the public-content leak guard, beside the Architect leak
+  # gate above. Every tracked text file against scripts/public_leak_patterns.txt
+  # with the shrink-only scripts/public_leak_baseline.tsv. No path filter: a
+  # leak can enter any path. The private names (class PRIVATE_NAME) come only
+  # from the PUBLIC_LEAK_PRIVATE_NAMES Actions secret: one name per line,
+  # written to a runner-temp file; set it with
+  #   gh secret set PUBLIC_LEAK_PRIVATE_NAMES < names.txt
+  # The guard fails when the secret is absent or empty (a fork PR has no secrets).
+  # Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
+  # --------------------------------------------------------------------------
+  public-leaks:
+    name: Public-content leak guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Public-leak selftest (new hit fails, stale baseline fails)
+        run: bash scripts/check_public_leaks_selftest.sh
+
+      - name: Enforce public-content leak guard
+        if: ${{ !cancelled() }}
+        env:
+          PUBLIC_LEAK_PRIVATE_NAMES: ${{ secrets.PUBLIC_LEAK_PRIVATE_NAMES }}
+        run: |
+          umask 077
+          names="$RUNNER_TEMP/public-leak-private-names.txt"
+          printf '%s\n' "$PUBLIC_LEAK_PRIVATE_NAMES" >"$names"
+          PUBLIC_LEAK_PRIVATE_NAMES_FILE="$names" python3 scripts/check_content.py public-leaks
+
+  # --------------------------------------------------------------------------
   ci-gate:
     name: CI gate
     needs:
@@ -3157,6 +3189,7 @@ jobs:
         fastembed-cache-selftest,
         website-corpus,
         changelog-fragment,
+        public-leaks,
         test,
       ]
     if: ${{ always() }}

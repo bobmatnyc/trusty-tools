@@ -213,6 +213,8 @@ assert_eq "changelog-fragment row allows no skip" "1" \
 assert_eq "changelog-fragment unordered skip fails the gate" "1" \
   "$(verdict changelog-fragment=skipped out:docs_only=true)"
 assert_eq "changelog-fragment failed" "1" "$(verdict changelog-fragment=failure)"
+assert_eq "public-leaks failed" "1" "$(verdict public-leaks=failure)"
+assert_eq "public-leaks skipped (never allowed)" "1" "$(verdict public-leaks=skipped out:docs_only=true)"
 assert_eq "changelog-fragment cancelled" "1" "$(verdict changelog-fragment=cancelled)"
 cf_job="$(sed -n '/^  changelog-fragment:$/,/^  # ----/p' "$ci")"
 assert_eq "changelog-fragment has no job-level if or needs" "0" \
