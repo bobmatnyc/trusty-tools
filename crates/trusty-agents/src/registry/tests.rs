@@ -78,8 +78,8 @@ fn extract_github_repo_ssh_form() {
         Some("bobmatnyc/trusty-agents".into())
     );
     assert_eq!(
-        extract_github_repo("git@github.com:duettoresearch/duetto"),
-        Some("duettoresearch/duetto".into())
+        extract_github_repo("git@github.com:acme/acme"),
+        Some("acme/acme".into())
     );
 }
 

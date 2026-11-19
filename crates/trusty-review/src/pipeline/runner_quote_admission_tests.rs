@@ -101,7 +101,7 @@ async fn run_review_posts_a_finding_with_its_quoted_snippet() {
     assert!(json.get("withheld_by_reason").is_none(), "{json}");
 }
 
-/// #10782 closures 2-3, the duetto#11211 shape: an APPROVE whose every
+/// #10782 closures 2-3, the acme#11211 shape: an APPROVE whose every
 /// finding is a "confirm X" note with nothing to quote. The notes are
 /// withheld before the gate under `no_quote_pregate`, never `line_citation`.
 /// Architect ruling 09:02Z: pregate-only drops are not `all_withheld`; the

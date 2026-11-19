@@ -1338,7 +1338,7 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
 
 /// Why (#2534): bare `tm` run from a directory that physically sits inside a
 /// GitHub repo's working tree but is NOT part of its tracked tree (the same shape
-/// as the APFS `~/Duetto/cto` case-fold collision) must NOT inherit the enclosing
+/// as the APFS `~/Acme/cto` case-fold collision) must NOT inherit the enclosing
 /// repo's identity. It must NOT redirect to that repo's managed clone (which would
 /// attempt a real `git clone` of the github.com URL and fail on the network); it
 /// must route to the clean non-git fallback and return `Ok(())` without writing

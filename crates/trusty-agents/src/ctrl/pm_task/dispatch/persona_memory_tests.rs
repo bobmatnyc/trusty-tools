@@ -795,7 +795,7 @@ fn render_tags_every_drawer_with_its_source_palace() {
     let mem = PersonaMemory {
         binding: Some(binding_facts),
         identity: vec![drawer("owner-profile", "My name is Izzie.")],
-        recalled: vec![drawer("cto", "Duetto runs a quarterly planning cycle.")],
+        recalled: vec![drawer("cto", "Acme runs a quarterly planning cycle.")],
         health: MemoryHealth::Reachable,
     };
     let block = render_memory_block(&mem).expect("binding present");
@@ -805,7 +805,7 @@ fn render_tags_every_drawer_with_its_source_palace() {
         "identity drawer tagged: {block}"
     );
     assert!(
-        block.contains("(from palace `cto`) Duetto runs a quarterly planning cycle."),
+        block.contains("(from palace `cto`) Acme runs a quarterly planning cycle."),
         "fan-out drawer tagged: {block}"
     );
     assert!(
