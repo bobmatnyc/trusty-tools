@@ -85,6 +85,7 @@ pub mod verify_batch;
 pub mod verify_liveness;
 pub mod verify_posted;
 pub mod verify_prompt;
+pub mod verify_security;
 // Why: the narrative summary is written before the verification round on both
 // pipeline paths and nothing revisits it, so a refuted finding kept being cited
 // as a merge blocker (#4044).  Kept separate from `grade_reconcile` (which
