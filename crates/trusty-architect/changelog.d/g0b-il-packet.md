@@ -1,3 +1,4 @@
 Added
-- `ledger::il`: the IL packet parser and checker ported from `ilio.py` (last ```` ```il ```` fence, required fields, field order, 240-character lines, `pct`, ledger ids, `new:` kind, `act:` parts and datg's act limits), and `il::apply`, which writes a checked packet to a session's `datg` store with the bytes `datg.py` writes. A replayed packet is a no-op (G0b).
+- `ledger::il`: the IL packet parser and checker ported from `ilio.py` (last ```` ```il ```` fence, required fields, field order, 240-character lines, `pct`, ledger ids, BADID look-alike ids, the `remind:` form, a `pct` unchanged while `done:` claims progress, `new:` kind, `act:` parts and datg's act limits), and `il::apply`, which writes a checked packet to a session's `datg` store with the bytes `datg.py` writes. A replayed packet is a no-op (G0b).
+- `il::route` sends a block the Rust writer does not fully cover to `ilio.py apply`, and `il::mark_applied` records an ilio-applied packet so its replay is a no-op (G0b).
 - `StorePaths::at`, `Writer::batch_at` and `writer::seen`, so a batch can target the `.trusty-mpm/datg/<session>` store (G0b).

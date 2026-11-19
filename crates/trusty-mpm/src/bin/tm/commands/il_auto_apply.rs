@@ -10,7 +10,9 @@
 //! (b) an inbound session or Architect message and (c) the Architect's own
 //! prompt (both `UserPromptSubmit`, the `prompt`). [`run`] finds the
 //! session's `datg` store (`<launch dir>/.trusty-mpm/datg[/<session>]`) and
-//! applies the block. A rejected or failed block is appended to the denial
+//! routes the block (`il::route`): a replay is a no-op; a block whose
+//! applied fields the Rust writer covers is written in process; any other
+//! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`). A rejected or failed block is appended to the denial
 //! store `list_recent_errors` reads, check `il-auto-apply:<RULE>`, and is
 //! never reported as applied. [`on_hook`] never fails and never blocks the
 //! turn: every outcome goes to stderr only.
@@ -18,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::il_auto_apply_ilio::{ILIO_TIMEOUT, IlioCall, ilio_script, run_ilio};
 use serde_json::Value;
 use trusty_architect::SystemClock;
 use trusty_architect::ledger::fresh::state_dir;
@@ -60,6 +63,9 @@ pub(crate) struct Target {
     pub(crate) cwd: PathBuf,
     pub(crate) session: Option<String>,
     pub(crate) denials: Option<PathBuf>,
+    /// `ilio.py`, when found; the timeout one run gets.
+    pub(crate) ilio: Option<PathBuf>,
+    pub(crate) ilio_timeout: std::time::Duration,
 }
 
 /// What one hook run did.
@@ -69,8 +75,12 @@ pub(crate) enum Outcome {
     NoBlock,
     /// The session has no `datg` store.
     NoLedger,
-    /// The block was written, or was a replay.
+    /// The packet was applied before; nothing was written.
+    Replayed(String),
+    /// The Rust writer wrote the block.
     Applied(il::Applied),
+    /// `ilio.py apply` exited 0 on the block: (packet, its summary).
+    IlioApplied(String, String),
     /// Nothing (or, for `WRITE-ACT`, only the state) was written; the rule.
     Failed(String),
 }
@@ -143,12 +153,37 @@ pub(crate) fn run(
         .or_else(|| target.session.clone())
         .unwrap_or_else(|| ARCHITECT.to_owned());
     let paths = StorePaths::at(dir);
-    match il::apply(writer, &paths, &session, &who, &text) {
-        Ok(done) => Outcome::Applied(done),
-        Err(e) => {
-            let packet = il::packet_id(&text).unwrap_or_default();
-            record(target, entry, session_id, &packet, e.code(), &e.to_string());
-            Outcome::Failed(e.code().to_owned())
+    let packet = il::packet_id(&text).unwrap_or_default();
+    let fail = |code: &str, why: &str| {
+        record(target, entry, session_id, &packet, code, why);
+        Outcome::Failed(code.to_owned())
+    };
+    // G0b gap ruling: ilio applies the whole block, or Rust a covered one.
+    match il::route(&paths, &text, writer.scan) {
+        Err(e) => fail(e.code(), &e.to_string()),
+        Ok(il::Route::Replay(p)) => Outcome::Replayed(p),
+        Ok(il::Route::Rust) => match il::apply(writer, &paths, &session, &who, &text) {
+            Ok(done) if done.replayed => Outcome::Replayed(done.packet),
+            Ok(done) => Outcome::Applied(done),
+            Err(e) => fail(e.code(), &e.to_string()),
+        },
+        Ok(il::Route::Ilio { packet, fields }) => {
+            let call = IlioCall {
+                script: target.ilio.as_deref(),
+                project: &launch_dir(&target.cwd),
+                session: &session,
+                who: &who,
+                timeout: target.ilio_timeout,
+            };
+            match run_ilio(&call, &text) {
+                Err((code, why)) => fail(&code, &format!("{why} (fields {})", fields.join(","))),
+                Ok(summary) => {
+                    if let Err(e) = il::mark_applied(&paths, &packet) {
+                        eprintln!("tm hook: IL {packet} applied; replay marker not written: {e}");
+                    }
+                    Outcome::IlioApplied(packet, summary)
+                }
+            }
         }
     }
 }
@@ -213,16 +248,20 @@ pub(crate) fn on_hook(event: &str, payload: Option<&Value>, session_id: &str) {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| Path::new(".").to_path_buf());
+    let env = |k: &str| std::env::var(k).ok();
     let target = Target {
         cwd,
         session: datg_session(),
         denials: None,
+        ilio: ilio_script(&env, dirs::home_dir().as_deref()),
+        ilio_timeout: ILIO_TIMEOUT,
     };
     let scan = trusty_mpm::core::session_ref_publish::scan_for_credentials;
     let writer = Writer::new(&SystemClock, &scan);
     match run(event, payload, session_id, &target, &writer) {
-        Outcome::Applied(a) if a.replayed => eprintln!("tm hook: IL {} already applied", a.packet),
+        Outcome::Replayed(p) => eprintln!("tm hook: IL {p} already applied"),
         Outcome::Applied(a) => eprintln!("tm hook: IL {} applied, v{}", a.packet, a.v),
+        Outcome::IlioApplied(p, s) => eprintln!("tm hook: IL {p} applied by ilio.py: {s}"),
         Outcome::Failed(code) => eprintln!("tm hook: IL block NOT applied [{code}]"),
         Outcome::NoBlock | Outcome::NoLedger => {}
     }

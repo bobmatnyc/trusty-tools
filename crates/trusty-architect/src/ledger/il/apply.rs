@@ -18,7 +18,7 @@ use std::io::Write as _;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use super::{ACT_LIMITS, Reject, Row, act_parts, check};
+use super::{ACT_LIMITS, Reject, Row, act_parts, check, get};
 use crate::error::LedgerError;
 use crate::ledger::model::State;
 use crate::ledger::ops::Now;
@@ -107,14 +107,6 @@ struct ActLine {
 
 fn first(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
-}
-
-fn get<'a>(rows: &'a [Row], k: &str) -> &'a str {
-    // dict(rows): the last row of a field wins.
-    rows.iter()
-        .rev()
-        .find(|(f, _)| f == k)
-        .map_or("", |(_, v)| v.as_str())
 }
 
 fn done(v: Value) -> bool {

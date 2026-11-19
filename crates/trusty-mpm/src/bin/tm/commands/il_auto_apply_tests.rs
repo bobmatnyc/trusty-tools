@@ -10,7 +10,12 @@ use trusty_architect::ledger::writer::Writer;
 
 use super::{Entry, Outcome, Target, run, turn_text};
 
-const BLOCK: &str = "```il\ntask: xa-T01\ndone: d\npct: 5\nnext: ship it\nact: ran the gates\n```";
+/// Fully covered: a `free:` task, so `pct` lands on no task (ilio `task_id`).
+const BLOCK: &str =
+    "```il\ntask: free: ad hoc\ndone: d\npct: 5\nnext: ship it\nact: ran the gates\n```";
+/// Carries `new:`, so only ilio can apply it.
+const NEW_BLOCK: &str =
+    "```il\ntask: free: x\ndone: d\npct: 5\nnew: A \"call the vendor\"\nnext: n\n```";
 
 fn no_secrets(_: &str) -> Option<String> {
     None
@@ -36,6 +41,8 @@ fn target(root: &Path, session: &str) -> Target {
         cwd: root.to_path_buf(),
         session: Some(session.to_owned()),
         denials: Some(root.join("denials.jsonl")),
+        ilio: None,
+        ilio_timeout: std::time::Duration::from_secs(5),
     }
 }
 
@@ -89,7 +96,7 @@ fn each_entry_point_applies_the_block_to_its_own_session() {
         let log = fs::read_to_string(dir.join("log.jsonl")).expect("log");
         assert!(log.contains(&format!("\"kind\":\"act\",\"session\":\"{session}\"")));
         match go(event, &payload, &t) {
-            Outcome::Applied(a) => assert!(a.replayed, "{session}: replay"),
+            Outcome::Replayed(_) => {}
             other => panic!("{session} replay: {other:?}"),
         }
     }
@@ -149,4 +156,159 @@ fn no_block_and_no_ledger_do_nothing() {
         Outcome::NoLedger
     ));
     assert!(!empty.path().join("denials.jsonl").exists());
+}
+
+/// A fake `ilio.py` that records argv, the store env and stdin to
+/// `<dir>/ilio-call.json`, then runs `tail` (Python).
+fn fake_ilio(dir: &Path, tail: &str) -> PathBuf {
+    let path = dir.join("ilio.py");
+    let body = format!(
+        "import json, os, sys\n\
+         rec = {{'argv': sys.argv[1:], 'stdin': sys.stdin.read(),\n\
+         'env': [os.environ.get(k) for k in ('ILIO_PROJECT', 'DATG_SESSION', 'ILIO_WHO')]}}\n\
+         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ilio-call.json')\n\
+         calls = json.load(open(p)) if os.path.exists(p) else []\n\
+         json.dump(calls + [rec], open(p, 'w'))\n{tail}\n"
+    );
+    fs::write(&path, body).expect("fake ilio");
+    path
+}
+
+fn calls(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("ilio-call.json"))
+        .map(|t| serde_json::from_str(&t).expect("calls json"))
+        .unwrap_or_default()
+}
+
+fn denials(root: &Path) -> String {
+    fs::read_to_string(root.join("denials.jsonl")).unwrap_or_default()
+}
+
+#[test]
+fn a_fully_covered_block_takes_the_rust_path_and_never_runs_ilio() {
+    let (tmp, dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    t.ilio = Some(fake_ilio(tmp.path(), "print('wrote 1 op(s)')"));
+    let got = go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t);
+    assert!(
+        matches!(&got, Outcome::Applied(a) if a.acts == 1),
+        "{got:?}"
+    );
+    assert_eq!(next_of(&dir), "ship it");
+    assert!(calls(tmp.path()).is_empty(), "ilio ran on a covered block");
+}
+
+#[test]
+fn a_block_with_new_runs_ilio_once_with_the_block_on_stdin() {
+    let (tmp, dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    let script = fake_ilio(tmp.path(), "print('wrote 2 op(s)')");
+    t.ilio = Some(script.clone());
+    let before = fs::read(dir.join("state.json")).expect("state");
+    let prompt = format!("[from pm-a]\n{NEW_BLOCK}");
+    let got = go("UserPromptSubmit", &json!({"prompt": prompt}), &t);
+    assert!(
+        matches!(&got, Outcome::IlioApplied(_, s) if s == "wrote 2 op(s)"),
+        "{got:?}"
+    );
+    let c = calls(tmp.path());
+    assert_eq!(c.len(), 1, "{c:?}");
+    assert_eq!(c[0]["argv"], json!(["apply"]));
+    assert_eq!(c[0]["stdin"], json!(prompt));
+    let root = tmp.path().display().to_string();
+    assert_eq!(c[0]["env"], json!([root, "pm-a", "pm-a"]));
+    // The Rust ops did not also run.
+    assert_eq!(fs::read(dir.join("state.json")).expect("state"), before);
+    // A replay is a no-op on the ilio path.
+    let again = go("UserPromptSubmit", &json!({"prompt": prompt}), &t);
+    assert!(matches!(again, Outcome::Replayed(_)), "{again:?}");
+    assert_eq!(calls(tmp.path()).len(), 1, "ilio ran twice");
+    assert!(denials(tmp.path()).is_empty());
+}
+
+#[test]
+fn ilio_failures_are_never_applied() {
+    let cases = [
+        (None, "ILIO-MISSING"),
+        (Some("print('IL-REJECT KIND new: no'); sys.exit(1)"), "KIND"),
+        (Some("sys.exit(2)"), "ILIO-EXIT"),
+        (Some("import time; time.sleep(30)"), "ILIO-TIMEOUT"),
+    ];
+    for (tail, code) in cases {
+        let (tmp, dir) = repo("pm-a");
+        let mut t = target(tmp.path(), "pm-a");
+        t.ilio = Some(match tail {
+            Some(tail) => fake_ilio(tmp.path(), tail),
+            None => tmp.path().join("absent/ilio.py"),
+        });
+        t.ilio_timeout = std::time::Duration::from_millis(1500);
+        let got = go("UserPromptSubmit", &json!({"prompt": NEW_BLOCK}), &t);
+        assert!(
+            matches!(&got, Outcome::Failed(c) if c == code),
+            "{code}: {got:?}"
+        );
+        assert!(
+            denials(tmp.path()).contains(&format!("il-auto-apply:{code}")),
+            "{code}: {}",
+            denials(tmp.path())
+        );
+        assert!(
+            !dir.join(trusty_architect::ledger::il::APPLIED_FILE)
+                .exists(),
+            "{code}"
+        );
+    }
+}
+
+#[test]
+fn each_new_check_rejects_before_any_apply() {
+    let (tmp, dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    t.ilio = Some(fake_ilio(tmp.path(), "print('wrote')"));
+    let state = dir.join("state.json");
+    let mut st: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&state).expect("state")).expect("json");
+    st["tasks"][0]["pct"] = json!(40);
+    fs::write(&state, st.to_string()).expect("pct 40");
+    let before = fs::read(&state).expect("state");
+    let cases = [
+        ("task: xa-To1\\ndone: d\\npct: 5\\nnext: n", "BADID"),
+        (
+            "task: xa-T01\\ndone: d\\npct: 50\\nremind: xa-T01 tomorrow\\nnext: n",
+            "REMIND",
+        ),
+        (
+            "task: xa-T01\\ndone: wired it\\npct: 40\\nnext: n",
+            "PCT-UNCHANGED",
+        ),
+    ];
+    for (body, code) in cases {
+        let block = format!("```il\n{}\n```", body.replace("\\n", "\n"));
+        let got = go("UserPromptSubmit", &json!({"prompt": block}), &t);
+        assert!(
+            matches!(&got, Outcome::Failed(c) if c == code),
+            "{code}: {got:?}"
+        );
+        assert!(
+            denials(tmp.path()).contains(&format!("il-auto-apply:{code}")),
+            "{code}"
+        );
+    }
+    assert!(calls(tmp.path()).is_empty(), "ilio ran on a rejected block");
+    assert_eq!(fs::read(&state).expect("state"), before);
+}
+
+#[test]
+fn ilio_script_comes_from_the_env() {
+    use super::super::il_auto_apply_ilio::ilio_script;
+    let env = |k: &str| (k == "ARCHITECT_PROJECT_DIR").then(|| "/a/arch".to_owned());
+    assert_eq!(
+        ilio_script(&env, None),
+        Some(PathBuf::from("/a/arch/scripts/ilio.py"))
+    );
+    let explicit = |k: &str| (k == "ILIO_SCRIPT").then(|| "/x/ilio.py".to_owned());
+    assert_eq!(
+        ilio_script(&explicit, None),
+        Some(PathBuf::from("/x/ilio.py"))
+    );
 }

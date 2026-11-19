@@ -13,8 +13,10 @@
 //! Test: `tests/il_packet.rs`.
 
 mod apply;
+mod route;
 
 pub use apply::{Applied, IlError, apply};
+pub use route::{APPLIED_FILE, Route, ilio_fields, mark_applied, route};
 
 use crate::ledger::model::State;
 use crate::secret::SecretScan;
@@ -85,6 +87,14 @@ fn reject(code: &'static str, field: &str, expected: impl Into<String>) -> Rejec
         field: field.to_owned(),
         expected: expected.into(),
     }
+}
+
+/// The value of field `k` (ilio `dict(rows)`: the last row of a field wins).
+pub(crate) fn get<'a>(rows: &'a [Row], k: &str) -> &'a str {
+    rows.iter()
+        .rev()
+        .find(|(f, _)| f == k)
+        .map_or("", |(_, v)| v.as_str())
 }
 
 /// The body of the LAST ```` ```il ```` fence in `text` (ilio `FENCE`,
@@ -173,6 +183,10 @@ pub fn check(text: &str, st: &State, scan: SecretScan<'_>) -> Result<Vec<Row>, R
     for (k, v) in &rows {
         check_row(k, v, st, scan)?;
     }
+    // G0b gap ruling: ilio's apply-time rule, so no path writes past it.
+    if let Some(e) = route::pct_unchanged(&rows, st) {
+        return Err(reject("PCT-UNCHANGED", "pct", e));
+    }
     Ok(rows)
 }
 
@@ -199,7 +213,18 @@ fn check_row(k: &str, v: &str, st: &State, scan: SecretScan<'_>) -> Result<(), R
     {
         return Err(reject("PCT", "pct", "an integer 0-100"));
     }
+    if k == "remind" {
+        // G0b gap ruling: ilio `remind_problem`; `at`/`every` parse in ilio.
+        return match route::remind_problem(v, st) {
+            Some(e) => Err(reject("REMIND", "remind", e)),
+            None => Ok(()),
+        };
+    }
     if matches!(k, "task" | "open" | "close") && !v.starts_with("free:") {
+        if let Some(tok) = route::badid(v) {
+            let why = format!("{tok} is not base 34 (no o, no l; did you mean 0 or 1)");
+            return Err(reject("BADID", k, why));
+        }
         for tok in v.split([' ', ',']).filter(|t| !t.is_empty()) {
             let bare = tok.split_once('@').map_or(tok, |(id, _)| id);
             if id_like(bare) && !in_ledger(st, bare) {
