@@ -125,11 +125,11 @@ fn resolve_gh_account_env_with_success_returns_token_and_user() {
 /// Test: itself.
 #[test]
 fn resolve_gh_account_env_with_failure_returns_err() {
-    let result = resolve_gh_account_env_with(Some("bob-duetto"), None, |_| {
-        Err("account 'bob-duetto' is not logged in".to_string())
+    let result = resolve_gh_account_env_with(Some("acme-admin"), None, |_| {
+        Err("account 'acme-admin' is not logged in".to_string())
     });
     let err = result.expect("some").expect_err("err");
-    assert!(err.contains("bob-duetto"), "err: {err}");
+    assert!(err.contains("acme-admin"), "err: {err}");
 }
 
 /// Why: the account name passed to the resolver must be TRIMMED (leading/
@@ -445,18 +445,18 @@ async fn find_pinned_gh_identity_skips_an_unpinned_duplicate() {
 async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = ProjectRegistry::load(dir.path()).await.expect("load");
-    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-acme-admin");
     registry
         .register(project(
             "jev",
             "https://github.com/acme/widget",
-            Some("bob-duetto"),
+            Some("acme-admin"),
         ))
         .await
         .expect("register");
     registry
         .register(Project {
-            gh_account: Some("bob-duetto".to_string()),
+            gh_account: Some("acme-admin".to_string()),
             ..project_with_config_dir(
                 "jev-matching",
                 "https://github.com/acme/widget",
@@ -469,7 +469,7 @@ async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
     let found = agreed_pin(&registry, "https://github.com/acme/widget")
         .await
         .expect("one login must resolve to a pin");
-    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.account.as_deref(), Some("acme-admin"));
     assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
 }
 
@@ -483,7 +483,7 @@ async fn find_pinned_gh_identity_prefers_the_config_dir_pin_for_one_login() {
 async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = ProjectRegistry::load(dir.path()).await.expect("load");
-    let config_dir = PathBuf::from("/home/bob/.config/gh-bob-duetto");
+    let config_dir = PathBuf::from("/home/bob/.config/gh-acme-admin");
     registry
         .register(Project {
             gh_account: None,
@@ -493,10 +493,10 @@ async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pi
         .expect("register");
     registry
         .register(Project {
-            gh_account: Some("bob-duetto".to_string()),
+            gh_account: Some("acme-admin".to_string()),
             github: Some(GithubConfig {
                 config_dir: Some(config_dir.clone()),
-                account: Some("bob-duetto".to_string()),
+                account: Some("acme-admin".to_string()),
                 ..GithubConfig::default()
             }),
             ..project("widget", "https://github.com/acme/widget", None)
@@ -507,7 +507,7 @@ async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pi
     let found = agreed_pin(&registry, "https://github.com/acme/widget")
         .await
         .expect("a missing login is not a disagreement");
-    assert_eq!(found.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(found.account.as_deref(), Some("acme-admin"));
     assert_eq!(found.config_dir.as_deref(), Some(config_dir.as_path()));
 }
 
@@ -518,7 +518,7 @@ async fn find_pinned_gh_identity_inherits_the_login_for_a_no_login_config_dir_pi
 async fn find_pinned_gh_identity_refuses_disagreeing_pins() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry = ProjectRegistry::load(dir.path()).await.expect("load");
-    for (name, account) in [("widget-a", "bobmatnyc"), ("widget-b", "bob-duetto")] {
+    for (name, account) in [("widget-a", "bobmatnyc"), ("widget-b", "acme-admin")] {
         registry
             .register(project(
                 name,
@@ -902,10 +902,10 @@ async fn a_token_env_only_pin_spawns_as_before_without_the_map() {
 // ── #8510: an account-only spawn pin never falls back to "no identity" ─────
 
 /// A repository whose registry record pins only an account.
-const SPAWN_ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
+const SPAWN_ORIGIN: &str = "https://github.com/acme-labs/jev-matching";
 
 /// An Enterprise Server repository whose registry record pins only an account.
-const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
+const GHES_ORIGIN: &str = "https://ghe.corp/acme-labs/jev-matching";
 
 /// #9750 Q4: the proven-token credential tm's own git call still uses.
 fn proven_credential(
@@ -1173,14 +1173,14 @@ fn spawn_env_debug_redacts_every_token() {
 /// Test: itself.
 #[test]
 fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
-    let aliased = "git@github-duetto:duettoresearch/jev-matching.git";
+    let aliased = "git@github-acme:acme-labs/jev-matching.git";
     let aliases = crate::session_manager::ssh_host_alias::SshHostAliases::parse(
-        "Host github-duetto\n  HostName github.com\n",
+        "Host github-acme\n  HostName github.com\n",
     );
     let daemon_slug =
         crate::session_manager::worktree_repo_slug::parse_repo_slug(aliased, &aliases)
             .expect("the daemon resolves the alias");
-    assert_eq!(daemon_slug, "duettoresearch/jev-matching");
+    assert_eq!(daemon_slug, "acme-labs/jev-matching");
 
     let root = tempfile::tempdir().expect("tempdir");
     let dir = migrated_dir(root.path());
@@ -1204,7 +1204,7 @@ fn a_spawn_proves_an_ssh_aliased_origin_on_the_daemons_host() {
     let unresolved = crate::session_manager::ssh_host_alias::SshHostAliases::empty();
     let err = super::spawn_proof(&prover, "octo-pinned", aliased, &unresolved)
         .expect_err("an alias nothing renames names no host");
-    assert!(err.contains("'github-duetto'"), "got: {err}");
+    assert!(err.contains("'github-acme'"), "got: {err}");
     assert_eq!(probe.calls().len(), 1, "the refusal never runs gh");
 }
 
