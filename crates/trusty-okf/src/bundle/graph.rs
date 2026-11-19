@@ -252,11 +252,11 @@ mod tests {
         std::fs::create_dir_all(root.join("_sources")).unwrap();
         std::fs::write(
             root.join("people/bob.md"),
-            "---\ntype: Person\ntitle: Bob\nworks_at: \"[[Duetto]]\"\n---\n\nThe owner.\n",
+            "---\ntype: Person\ntitle: Bob\nworks_at: \"[[Acme]]\"\n---\n\nThe owner.\n",
         )
         .unwrap();
         std::fs::write(
-            root.join("orgs/duetto.md"),
+            root.join("orgs/acme.md"),
             "---\ntype: Org\ndescription: has [[Bob]]\n---\n",
         )
         .unwrap();
@@ -271,9 +271,9 @@ mod tests {
             .iter()
             .map(|t| (t.subject.as_str(), t.predicate.as_str(), t.object.as_str()))
             .collect();
-        assert_eq!(triples, vec![("Bob", "works_at", "Duetto")]);
+        assert_eq!(triples, vec![("Bob", "works_at", "Acme")]);
         let defs: Vec<_> = g.definitions.iter().map(|d| d.path.as_str()).collect();
-        assert_eq!(defs, vec!["orgs/duetto.md", "people/bob.md"]);
+        assert_eq!(defs, vec!["orgs/acme.md", "people/bob.md"]);
         assert_eq!(g.definitions[1].summary.as_deref(), Some("The owner."));
         let counts: Vec<_> = g.subject_counts().into_iter().map(|c| c.count).collect();
         assert_eq!(counts, vec![1, 0]);

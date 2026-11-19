@@ -377,7 +377,7 @@ fn item_has_test_coverage(item: &str, changed_files: &[String], identifiers: &[S
 ///
 /// Why: the reviewer LLM needs structured, citable context to raise
 /// `test-coverage` findings; citing the exact AC item and its source is
-/// actionable (#1413 top Duetto signal #4).
+/// actionable (#1413 top reviewer signal #4).
 /// What: for every test-related item in `tp_items` and `ac_items` with no
 /// per-item test coverage in the diff, emits one `ContextSnippet` titled
 /// `"Unmet AC: <item>"` with a source subtitle.  Returns an empty `Vec` when

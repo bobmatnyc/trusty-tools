@@ -391,8 +391,8 @@ pub fn canonical_remote(url: &str) -> String {
 
 /// [`canonical_remote`], with an SSH transport's host resolved through `aliases`.
 ///
-/// Why (#9089): `git@github-duetto:o/r.git`, where `~/.ssh/config` maps
-/// `Host github-duetto` to `github.com`, is the repository at
+/// Why (#9089): `git@github-acme:o/r.git`, where `~/.ssh/config` maps
+/// `Host github-acme` to `github.com`, is the repository at
 /// `https://github.com/o/r`. Keeping the alias as the host refused that
 /// checkout with `RemoteMismatch`. Same bug class as #7196.
 /// What: the [`canonical_remote`] steps, plus one: for an `ssh://` URL or an

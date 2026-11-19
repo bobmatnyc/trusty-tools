@@ -814,10 +814,10 @@ mod tests {
 
     #[test]
     fn account_change_log_line_logs_a_real_change() {
-        let line = account_change_log_line("widget", Some("bobmatnyc"), Some("bob-duetto"))
+        let line = account_change_log_line("widget", Some("bobmatnyc"), Some("acme-admin"))
             .expect("a real change must log");
         assert!(line.contains("widget"), "{line}");
-        assert!(line.contains("'bobmatnyc' -> 'bob-duetto'"), "{line}");
+        assert!(line.contains("'bobmatnyc' -> 'acme-admin'"), "{line}");
     }
 
     #[test]
@@ -853,7 +853,7 @@ mod tests {
 
     #[test]
     fn resolve_account_gh_config_dir_persists_a_built_dir() {
-        let dir = std::path::PathBuf::from("/home/bob/.trusty-mpm/gh-accounts/bob-duetto");
+        let dir = std::path::PathBuf::from("/home/bob/.trusty-mpm/gh-accounts/acme-admin");
         let (persisted, warning) = resolve_account_gh_config_dir(Ok(dir.clone()));
         assert_eq!(persisted, Some(dir));
         assert!(warning.is_none());

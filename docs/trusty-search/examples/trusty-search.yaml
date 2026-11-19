@@ -28,7 +28,7 @@
 version: 1
 
 indexes:
-  - name: duetto-api
+  - name: acme-api
     paths:
       - api/src/
       - services/
@@ -45,7 +45,7 @@ indexes:
       - "PMS"
       - "hotel pricing"
 
-  - name: duetto-ui
+  - name: acme-ui
     paths:
       - ui/src/
       - analytics-ui/src/

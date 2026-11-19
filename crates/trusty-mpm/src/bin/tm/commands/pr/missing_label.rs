@@ -2,7 +2,7 @@
 //!
 //! Why: `tm pr open` always passes `--label trusty-mpm`, and `gh pr create`
 //! refuses the whole create with `could not add label: 'trusty-mpm' not found`
-//! in a repository that never had that label — `duettoresearch/jev-matching`
+//! in a repository that never had that label — `acme/jev-matching`
 //! was one. The `ws/<session>` label is seeded before the create (#7513); the
 //! convention label is not, because seeding it with `--force` would restyle a
 //! label a project already owns.

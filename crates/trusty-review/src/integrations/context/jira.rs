@@ -257,7 +257,7 @@ impl JiraSource {
 
     /// Build the JQL string for the subject, preferring exact ticket-ID lookup.
     ///
-    /// Why: Duetto PR titles/descriptions conventionally name the ticket key, so
+    /// Why: PR titles/descriptions conventionally name the ticket key, so
     /// an exact `issueKey in (...)` lookup is both more precise and cheaper than
     /// full-text guessing — this is the incumbent's PRIMARY JIRA path
     /// (`pr_review_service.py:4068`, `:4076`).  Only when no key is present do we

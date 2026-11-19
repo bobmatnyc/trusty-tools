@@ -188,7 +188,7 @@ pub struct StoreStatus {
     /// while the HTTP probe itself still returns 2xx with a parseable body.
     /// HTTP reachability is not corpus health: a bare boolean `connected`
     /// collapsed those two into the same "green" outcome, which is exactly
-    /// how `cto-duetto` reported `connected: true` while answering zero
+    /// how `cto-acme` reported `connected: true` while answering zero
     /// queries. This field is the distinct degraded/failed signal the
     /// boolean cannot carry — empty when every present stage is healthy,
     /// non-empty (and `connected` forced to `false`) otherwise. Mirrors
