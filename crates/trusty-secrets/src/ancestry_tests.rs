@@ -413,6 +413,17 @@ mod os_table {
         let exe = OsProcessTable.executable(me).expect("own executable");
         let current = std::env::current_exe().expect("current_exe");
         assert_eq!(exe.file_name(), current.file_name());
+        // #11464 M-B: the short name and uid, also of root's pid 1, the
+        // read the gate check makes of a root `sshd`.
+        let own = OsProcessTable.comm(me).expect("own comm");
+        let file = current.file_name().and_then(|n| n.to_str()).unwrap();
+        assert!(
+            file.starts_with(&own.name) && !own.name.is_empty(),
+            "{own:?}"
+        );
+        // SAFETY: `getuid` has no preconditions and cannot fail.
+        assert_eq!(own.uid, unsafe { libc::getuid() });
+        assert_eq!(OsProcessTable.comm(1).map(|c| c.uid), Ok(0));
     }
 
     #[test]

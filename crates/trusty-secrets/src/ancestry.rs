@@ -77,6 +77,21 @@ pub enum ProcessError {
     ChainTooDeep,
 }
 
+/// A process's kernel short name and effective owner uid (#11464).
+///
+/// Why: critic M-B — the gate check must name a root `sshd` above the gate,
+/// and another uid's executable path is unreadable on macOS.
+/// What: macOS `pbsi_comm` and `pbsi_uid`; Linux `/proc/<pid>/stat` `comm`
+/// and the owner of `/proc/<pid>`. Both read across uids.
+/// Test: `os_table_reads_this_process`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcComm {
+    /// The short name (at most 15 bytes on macOS).
+    pub name: String,
+    /// The owner uid.
+    pub uid: u32,
+}
+
 /// The process table, behind a trait so a test can supply a fake one.
 ///
 /// Why: AC 7 of #9070 — the ancestry rules are proven against a table the
@@ -110,6 +125,15 @@ pub trait ProcessTable: Send + Sync {
     /// Test: `bridge_assertion_from_non_console_peer_is_refused`,
     /// `os_table_reads_this_process`.
     fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    /// The short name and owner uid of `pid` ([`ProcComm`], #11464).
+    ///
+    /// What: the default refuses, like `is_agent`, so a table that does not
+    /// read it never passes the gate check.
+    /// Test: `os_table_reads_this_process`.
+    fn comm(&self, pid: u32) -> Result<ProcComm, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 
@@ -445,6 +469,10 @@ impl ProcessTable for OsProcessTable {
         os::executable(pid)
     }
 
+    fn comm(&self, pid: u32) -> Result<ProcComm, ProcessError> {
+        os::comm(pid)
+    }
+
     fn start_unix_secs(&self, pid: u32) -> Result<u64, ProcessError> {
         launch::start_unix_secs(pid)
     }
@@ -546,6 +574,16 @@ mod os {
         labels.extend(exe.as_deref());
         // #9621: npm Claude Code is `node .../claude-code/cli.js`.
         agent_verdict(&labels, || argv(pid))
+    }
+
+    /// `comm` and the owner of `/proc/<pid>` (#11464).
+    pub(super) fn comm(pid: u32) -> Result<super::ProcComm, ProcessError> {
+        use std::os::unix::fs::MetadataExt;
+        let uid = std::fs::metadata(format!("/proc/{pid}"))
+            .map_err(|_| ProcessError::Unreadable { pid })?
+            .uid();
+        let name = stat_comm(pid, &stat(pid)?)?.to_owned();
+        Ok(super::ProcComm { name, uid })
     }
 
     /// `/proc/<pid>/exe` (#9066).
@@ -757,6 +795,15 @@ mod os {
         super::parse_procargs2(&buf).ok_or(unreadable)
     }
 
+    /// `pbsi_comm` and `pbsi_uid`, across uids (#11464).
+    pub(super) fn comm(pid: u32) -> Result<super::ProcComm, ProcessError> {
+        let info = short_info(pid)?;
+        Ok(super::ProcComm {
+            name: c_text(&info.pbsi_comm),
+            uid: info.pbsi_uid,
+        })
+    }
+
     /// `proc_pidpath` for `pid` (#9066).
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
         executable_path(pid)
@@ -804,6 +851,10 @@ mod os {
     }
 
     pub(super) fn executable(pid: u32) -> Result<std::path::PathBuf, ProcessError> {
+        Err(ProcessError::Unreadable { pid })
+    }
+
+    pub(super) fn comm(pid: u32) -> Result<super::ProcComm, ProcessError> {
         Err(ProcessError::Unreadable { pid })
     }
 
