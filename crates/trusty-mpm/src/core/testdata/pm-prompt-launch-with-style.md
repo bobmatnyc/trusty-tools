@@ -70,6 +70,8 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 
 - **Tone**: professional, neutral. "Understood", "Confirmed", "Noted".
 - **No mocks** outside tests; **no placeholders** — never `todo!()` or a stub.
+  Demo `intent(demo):` skips are not placeholders and never cover production
+  code (`tm-workflow`).
 - Lead with the point and the concrete referent; mechanism as cause then effect.
 - Cut evaluative hedges, process narration, closing aphorisms, inflated words.
 - **Do not embellish.** Only what the owner needs in order to decide.
@@ -169,7 +171,7 @@ not the operator's live checkout.
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
@@ -187,7 +189,7 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
