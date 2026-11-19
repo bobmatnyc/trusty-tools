@@ -10,7 +10,9 @@
 //! and names the fields that need ilio ([`ilio_fields`]). The three ilio
 //! rules the checker gained here ([`badid`], [`remind_problem`],
 //! [`pct_unchanged`]) run on every block, whichever path applies it.
-//! Test: `route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks`.
+//! [`hold`] and the [`PENDING_DIR`] markers keep one ilio run per packet.
+//! Test: `route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks`,
+//! `two_concurrent_deliveries_apply_once`, `a_stale_pending_marker_is_not_re_run`.
 
 use std::io::Write as _;
 
@@ -56,10 +58,13 @@ pub fn route(paths: &StorePaths, text: &str, scan: SecretScan<'_>) -> Result<Rou
         .map_err(|e| IlError::Write(crate::error::LedgerError::io(&paths.state)(e)))?;
     let st = State::from_json(&raw).map_err(IlError::Write)?;
     let packet = packet_id(text).unwrap_or_default();
-    if !packet.is_empty()
-        && (seen(paths, &packet).map_err(IlError::Write)? || ilio_applied(paths, &packet)?)
-    {
+    if !packet.is_empty() && ilio_applied(paths, &packet)? {
         return Ok(Route::Replay(packet));
+    }
+    // G0b critic: a committed batch whose acts are missing; `apply` appends
+    // them without re-checking the moved state.
+    if !packet.is_empty() && seen(paths, &packet).map_err(IlError::Write)? {
+        return Ok(Route::Rust);
     }
     let rows = check(text, &st, scan).map_err(IlError::Reject)?;
     let fields = ilio_fields(&rows, &st);
@@ -84,7 +89,7 @@ pub fn ilio_fields(rows: &[Row], st: &State) -> Vec<String> {
         .collect()
 }
 
-fn ilio_applied(paths: &StorePaths, packet: &str) -> Result<bool, IlError> {
+pub(crate) fn ilio_applied(paths: &StorePaths, packet: &str) -> Result<bool, IlError> {
     let path = paths.dir.join(APPLIED_FILE);
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok(text.lines().any(|l| l.trim() == packet)),
@@ -103,6 +108,53 @@ pub fn mark_applied(paths: &StorePaths, packet: &str) -> std::io::Result<()> {
         .create(true)
         .open(paths.dir.join(APPLIED_FILE))?
         .write_all(format!("{packet}\n").as_bytes())
+}
+
+/// The lock file, in the store dir, one delivery holds from route to marker.
+pub const APPLY_LOCK: &str = "il-apply.lock";
+/// The dir, in the store dir, holding one file per packet ilio is running.
+pub const PENDING_DIR: &str = "il-pending";
+
+/// Holds [`APPLY_LOCK`] until the file drops, so two deliveries of one
+/// packet never both apply it (G0b critic). `wait` bounds the wait.
+///
+/// # Errors
+/// [`IlError::Write`]: the lock is held past `wait`, or cannot be opened.
+pub fn hold(paths: &StorePaths, wait: std::time::Duration) -> Result<std::fs::File, IlError> {
+    crate::ledger::store::lock(&paths.dir.join(APPLY_LOCK), Some(wait)).map_err(IlError::Write)
+}
+
+fn pending_path(paths: &StorePaths, packet: &str) -> std::path::PathBuf {
+    paths.dir.join(PENDING_DIR).join(packet)
+}
+
+/// Records that `ilio.py apply` is about to run on `packet`.
+///
+/// # Errors
+/// The marker could not be written.
+pub fn mark_pending(paths: &StorePaths, packet: &str) -> std::io::Result<()> {
+    std::fs::create_dir_all(paths.dir.join(PENDING_DIR))?;
+    std::fs::write(pending_path(paths, packet), b"")
+}
+
+/// Drops the pending marker; a missing one is not an error.
+///
+/// # Errors
+/// The marker exists and could not be removed.
+pub fn clear_pending(paths: &StorePaths, packet: &str) -> std::io::Result<()> {
+    match std::fs::remove_file(pending_path(paths, packet)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// True when an earlier ilio run on `packet` left a pending marker and no
+/// applied record: its outcome is unknown, so it must not run again.
+///
+/// # Errors
+/// [`IlError::Write`] when the sidecar cannot be read.
+pub fn pending_unknown(paths: &StorePaths, packet: &str) -> Result<bool, IlError> {
+    Ok(pending_path(paths, packet).exists() && !ilio_applied(paths, packet)?)
 }
 
 /// `[a-z][a-z0-9]{1,7}-`: the length of a project-code prefix, if any.

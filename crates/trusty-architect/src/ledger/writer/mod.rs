@@ -62,6 +62,8 @@ pub enum CommitStep {
     /// `state.json` is replaced and its directory fsynced; the journal is
     /// not yet removed (#9758).
     Replaced,
+    /// IL apply: the batch committed; the `act` lines are not appended (G0b).
+    Acts,
 }
 
 /// Faults a commit runs through; production uses [`NoFaults`].

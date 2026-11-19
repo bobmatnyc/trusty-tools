@@ -155,7 +155,11 @@ fn no_block_and_no_ledger_do_nothing() {
         go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t2),
         Outcome::NoLedger
     ));
-    assert!(!empty.path().join("denials.jsonl").exists());
+    // G0b critic: recorded once per packet, never silently dropped.
+    let again = go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t2);
+    assert!(matches!(again, Outcome::NoLedger));
+    let rec = denials(empty.path());
+    assert_eq!(rec.matches("il-auto-apply:NO-LEDGER").count(), 1, "{rec}");
 }
 
 /// A fake `ilio.py` that records argv, the store env and stdin to
@@ -214,7 +218,8 @@ fn a_block_with_new_runs_ilio_once_with_the_block_on_stdin() {
     let c = calls(tmp.path());
     assert_eq!(c.len(), 1, "{c:?}");
     assert_eq!(c[0]["argv"], json!(["apply"]));
-    assert_eq!(c[0]["stdin"], json!(prompt));
+    // Only the fence goes to ilio, not the relay header around it.
+    assert_eq!(c[0]["stdin"], json!(format!("{NEW_BLOCK}\n")));
     let root = tmp.path().display().to_string();
     assert_eq!(c[0]["env"], json!([root, "pm-a", "pm-a"]));
     // The Rust ops did not also run.
@@ -311,4 +316,83 @@ fn ilio_script_comes_from_the_env() {
         ilio_script(&explicit, None),
         Some(PathBuf::from("/x/ilio.py"))
     );
+}
+
+#[test]
+fn a_hung_ilio_with_a_large_body_times_out_inside_the_deadline() {
+    use super::super::il_auto_apply_ilio::{IlioCall, run_ilio};
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let script = tmp.path().join("ilio.py");
+    fs::write(&script, "import time\ntime.sleep(60)\n").expect("hung ilio");
+    let text = format!("```il\nnext: {}\n```", "x".repeat(70_000));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let root = tmp.path().to_path_buf();
+    std::thread::spawn(move || {
+        let call = IlioCall {
+            script: Some(&script),
+            project: &root,
+            session: "pm-a",
+            who: "pm-a",
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let _ = tx.send(run_ilio(&call, &text));
+    });
+    let got = rx
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("run_ilio blocked past its deadline");
+    assert!(
+        matches!(&got, Err((c, _)) if c == "ILIO-TIMEOUT"),
+        "{got:?}"
+    );
+}
+
+#[test]
+fn two_concurrent_deliveries_apply_once() {
+    let (tmp, dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    t.ilio = Some(fake_ilio(
+        tmp.path(),
+        "import time; time.sleep(0.5); print('wrote 2 op(s)')",
+    ));
+    let payload = json!({"prompt": NEW_BLOCK});
+    let got: Vec<Outcome> = std::thread::scope(|s| {
+        let runs: Vec<_> = (0..2)
+            .map(|_| s.spawn(|| go("UserPromptSubmit", &payload, &t)))
+            .collect();
+        runs.into_iter().map(|h| h.join().expect("join")).collect()
+    });
+    assert_eq!(calls(tmp.path()).len(), 1, "ilio ran twice: {got:?}");
+    let applied = got
+        .iter()
+        .filter(|o| matches!(o, Outcome::IlioApplied(..)))
+        .count();
+    let replayed = got
+        .iter()
+        .filter(|o| matches!(o, Outcome::Replayed(_)))
+        .count();
+    assert_eq!((applied, replayed), (1, 1), "{got:?}");
+    let pending = dir.join(trusty_architect::ledger::il::PENDING_DIR);
+    assert_eq!(fs::read_dir(pending).expect("pending dir").count(), 0);
+}
+
+#[test]
+fn a_stale_pending_marker_is_not_re_run() {
+    use trusty_architect::ledger::il;
+    let (tmp, dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    t.ilio = Some(fake_ilio(tmp.path(), "print('wrote 2 op(s)')"));
+    let paths = trusty_architect::ledger::store::StorePaths::at(dir);
+    let packet = il::packet_id(NEW_BLOCK).expect("packet");
+    // A run killed after it started: a marker and no applied record.
+    il::mark_pending(&paths, &packet).expect("pending");
+    let got = go("UserPromptSubmit", &json!({"prompt": NEW_BLOCK}), &t);
+    assert!(
+        matches!(&got, Outcome::Failed(c) if c == "PENDING-UNKNOWN"),
+        "{got:?}"
+    );
+    assert!(
+        calls(tmp.path()).is_empty(),
+        "a stale pending packet re-ran ilio"
+    );
+    assert!(denials(tmp.path()).contains("il-auto-apply:PENDING-UNKNOWN"));
 }

@@ -7,7 +7,8 @@
 //! (`session next`, `close` for live ids, `act` records), commits the state
 //! ops in one [`Writer::batch_at`] (atomic replace, `written_epoch` set,
 //! request id = packet id) and then appends the `act` lines to `log.jsonl`
-//! as datg's `append_log` does. Fields ilio routes to the dashboard or to
+//! as datg's `append_log` does, then records the packet in `APPLIED_FILE`;
+//! a committed packet missing there gets its acts appended on a retry. Fields ilio routes to the dashboard or to
 //! `pulse` (`new`, `remind`, `pct`/`est`/`remaining`/`decided`/`delta`) are
 //! not applied and are named in [`Applied::skipped`].
 //! Test: `tests/il_packet.rs`.
@@ -61,7 +62,8 @@ pub enum IlError {
     Reject(Reject),
     /// The store could not be read or the batch was refused; nothing written.
     Write(LedgerError),
-    /// The state committed, but the `act` lines could not be appended.
+    /// The state committed, but the `act` lines (or the sidecar) could not
+    /// be appended; a retry of the packet appends them.
     Act(std::io::Error),
 }
 
@@ -83,7 +85,7 @@ impl std::fmt::Display for IlError {
             Self::Write(e) => write!(f, "IL-REJECT WRITE ledger: {e}"),
             Self::Act(e) => write!(
                 f,
-                "IL-PARTIAL WRITE-ACT log.jsonl: state written, acts lost: {e}"
+                "IL-PARTIAL WRITE-ACT log.jsonl: state written, acts pending a retry: {e}"
             ),
         }
     }
@@ -194,7 +196,8 @@ fn act_line(
 ///
 /// # Errors
 /// [`IlError::Reject`] or [`IlError::Write`] leave every file as it was;
-/// [`IlError::Act`] means the state committed and the act lines did not.
+/// [`IlError::Act`] means the state committed and the act lines did not;
+/// applying the same packet again appends them.
 pub fn apply(
     writer: &Writer<'_>,
     paths: &StorePaths,
@@ -208,8 +211,11 @@ pub fn apply(
     let st = State::from_json(&raw).map_err(IlError::Write)?;
     // A replay is answered before the check: the first apply may have
     // archived the ids the block closes, which would now read as stale.
+    // G0b critic: a packet is replayed only once its acts are written too
+    // (the APPLIED_FILE sidecar); a committed batch without it re-appends.
     let packet = super::packet_id(text).unwrap_or_default();
-    if !packet.is_empty() && seen(paths, &packet).map_err(IlError::Write)? {
+    let committed = !packet.is_empty() && seen(paths, &packet).map_err(IlError::Write)?;
+    if committed && super::route::ilio_applied(paths, &packet)? {
         let (v, events, acts, skipped) = (0, Vec::new(), 0, Vec::new());
         return Ok(Applied {
             packet,
@@ -220,7 +226,12 @@ pub fn apply(
             skipped,
         });
     }
-    let rows = check(text, &st, writer.scan).map_err(IlError::Reject)?;
+    let rows = if committed {
+        // Checked before the batch committed; the state has moved since.
+        super::parse_block(text).unwrap_or_default()
+    } else {
+        check(text, &st, writer.scan).map_err(IlError::Reject)?
+    };
     let skipped: Vec<String> = SKIPPED
         .iter()
         .filter(|f| rows.iter().any(|(k, _)| k == *f))
@@ -259,13 +270,22 @@ pub fn apply(
         if_v: None,
         ops,
     };
-    let resp = writer.batch_at(paths, &req).map_err(IlError::Write)?;
+    let (v, events) = if committed {
+        (st.v, Vec::new())
+    } else {
+        let resp = writer.batch_at(paths, &req).map_err(IlError::Write)?;
+        (resp.v, resp.events.into_iter().map(|e| e.id).collect())
+    };
     let mut text = String::new();
     for a in &acts {
         text += &serde_json::to_string(a).map_err(|e| IlError::Act(e.into()))?;
         text.push('\n');
     }
     if !text.is_empty() {
+        writer
+            .faults
+            .at(crate::ledger::writer::CommitStep::Acts, paths)
+            .map_err(IlError::Act)?;
         // datg `append_log`: O_APPEND, one write.
         OpenOptions::new()
             .append(true)
@@ -274,11 +294,13 @@ pub fn apply(
             .and_then(|mut f| f.write_all(text.as_bytes()))
             .map_err(IlError::Act)?;
     }
-    let events = resp.events.into_iter().map(|e| e.id).collect();
+    if !packet.is_empty() {
+        super::route::mark_applied(paths, &packet).map_err(IlError::Act)?;
+    }
     Ok(Applied {
         packet,
         replayed: false,
-        v: resp.v,
+        v,
         events,
         acts: acts.len(),
         skipped,

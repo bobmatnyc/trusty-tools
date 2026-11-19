@@ -14,9 +14,13 @@
 
 mod apply;
 mod route;
+mod secret;
 
 pub use apply::{Applied, IlError, apply};
-pub use route::{APPLIED_FILE, Route, ilio_fields, mark_applied, route};
+pub use route::{
+    APPLIED_FILE, APPLY_LOCK, PENDING_DIR, Route, clear_pending, hold, ilio_fields, mark_applied,
+    mark_pending, pending_unknown, route,
+};
 
 use crate::ledger::model::State;
 use crate::secret::SecretScan;
@@ -199,7 +203,8 @@ fn check_row(k: &str, v: &str, st: &State, scan: SecretScan<'_>) -> Result<(), R
     if k.chars().count() + 2 + v.chars().count() > cap {
         return Err(reject("LONG", k, format!("line over {cap} characters")));
     }
-    if scan(v).is_some() {
+    // ilio `SECRET` as well as the injected scan (G0b critic).
+    if scan(v).is_some() || secret::ilio_secret(v) {
         return Err(reject(
             "SECRET",
             k,

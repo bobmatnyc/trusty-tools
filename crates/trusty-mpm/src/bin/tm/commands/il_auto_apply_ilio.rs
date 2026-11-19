@@ -5,11 +5,13 @@
 //! existing `ilio.py apply` rather than a port.
 //! What: [`ilio_script`] finds `<architect dir>/scripts/ilio.py`
 //! (`$ILIO_SCRIPT`, else `architect_store::architect_dir`). [`run_ilio`]
-//! runs `python3 <script> apply` with no shell, the block on stdin and
+//! runs `python3 <script> apply` with no shell, the block's fence alone on
+//! stdin (written from a thread, inside the deadline) and
 //! `ILIO_PROJECT`/`DATG_SESSION`/`ILIO_WHO` naming the store, and kills it
 //! at the timeout. Every failure is a rule code; none is ever "applied".
 //! Test: `ilio_failures_are_never_applied`,
-//! `a_block_with_new_runs_ilio_once_with_the_block_on_stdin`.
+//! `a_block_with_new_runs_ilio_once_with_the_block_on_stdin`,
+//! `a_hung_ilio_with_a_large_body_times_out_inside_the_deadline`.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -68,10 +70,17 @@ pub(crate) fn run_ilio(call: &IlioCall<'_>, text: &str) -> Result<String, (Strin
         Ok(c) => c,
         Err(e) => return fail("ILIO-MISSING", format!("cannot run python3: {e}")),
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        // A write error shows up as ilio's own exit status.
-        let _ = stdin.write_all(text.as_bytes());
-    }
+    // G0b critic: only the fence ilio parses, written from a thread so a
+    // child that never reads cannot hold the hook past the deadline. The
+    // kill below closes the pipe and ends the write; a write error shows up
+    // as ilio's own exit status.
+    let fence = trusty_architect::ledger::il::fence_body(text)
+        .map_or_else(String::new, |b| format!("```il\n{b}```\n"));
+    let feed = child.stdin.take().map(|mut stdin| {
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(fence.as_bytes());
+        })
+    });
     let pipe = |r: Option<Box<dyn std::io::Read + Send>>| {
         std::thread::spawn(move || {
             let mut s = String::new();
@@ -91,6 +100,10 @@ pub(crate) fn run_ilio(call: &IlioCall<'_>, text: &str) -> Result<String, (Strin
             other => {
                 let _ = child.kill();
                 let _ = child.wait();
+                // The kill closed the pipe: the writer thread ends.
+                if let Some(feed) = feed {
+                    let _ = feed.join();
+                }
                 if let Err(e) = other {
                     return fail("ILIO-EXIT", format!("ilio.py apply wait failed: {e}"));
                 }
@@ -102,6 +115,9 @@ pub(crate) fn run_ilio(call: &IlioCall<'_>, text: &str) -> Result<String, (Strin
             }
         }
     };
+    if let Some(feed) = feed {
+        let _ = feed.join();
+    }
     let (out, err) = (
         out.join().unwrap_or_default(),
         err.join().unwrap_or_default(),

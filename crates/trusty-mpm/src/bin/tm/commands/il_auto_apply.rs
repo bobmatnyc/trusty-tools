@@ -12,7 +12,10 @@
 //! session's `datg` store (`<launch dir>/.trusty-mpm/datg[/<session>]`) and
 //! routes the block (`il::route`): a replay is a no-op; a block whose
 //! applied fields the Rust writer covers is written in process; any other
-//! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`). A rejected or failed block is appended to the denial
+//! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`), under the store's
+//! `il::hold` lock and a pending marker, so a packet runs ilio at most once
+//! (`PENDING-UNKNOWN` when an earlier run left no result). A store-less
+//! session records `NO-LEDGER` once per packet. A rejected or failed block is appended to the denial
 //! store `list_recent_errors` reads, check `il-auto-apply:<RULE>`, and is
 //! never reported as applied. [`on_hook`] never fails and never blocks the
 //! turn: every outcome goes to stderr only.
@@ -34,6 +37,8 @@ use trusty_mpm::daemon::bug_report::{
 
 /// The Architect's session name (ilio's default `who`).
 const ARCHITECT: &str = "tm-architect";
+/// How much longer than one ilio run a delivery waits for the apply lock.
+const LOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Which of the three entry points delivered the block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,7 +148,13 @@ pub(crate) fn run(
         return Outcome::NoBlock;
     }
     let dir = state_dir(&launch_dir(&target.cwd), target.session.as_deref());
+    let packet = il::packet_id(&text).unwrap_or_default();
     if !dir.join("state.json").is_file() {
+        // G0b critic: once per packet, never silently.
+        if !recorded(target, "NO-LEDGER", &packet) {
+            let why = format!("no datg store at {}", dir.display());
+            record(target, entry, session_id, &packet, "NO-LEDGER", &why);
+        }
         return Outcome::NoLedger;
     }
     let session = target.session.clone().unwrap_or_default();
@@ -153,11 +164,23 @@ pub(crate) fn run(
         .or_else(|| target.session.clone())
         .unwrap_or_else(|| ARCHITECT.to_owned());
     let paths = StorePaths::at(dir);
-    let packet = il::packet_id(&text).unwrap_or_default();
     let fail = |code: &str, why: &str| {
         record(target, entry, session_id, &packet, code, why);
         Outcome::Failed(code.to_owned())
     };
+    // G0b critic: one delivery at a time from route to the replay marker.
+    let _held = match il::hold(&paths, target.ilio_timeout + LOCK_SLACK) {
+        Ok(f) => f,
+        Err(e) => return fail(e.code(), &e.to_string()),
+    };
+    match il::pending_unknown(&paths, &packet) {
+        Ok(true) => {
+            let why = "an earlier ilio.py apply of this packet has no result; not re-run";
+            return fail("PENDING-UNKNOWN", why);
+        }
+        Ok(false) => {}
+        Err(e) => return fail(e.code(), &e.to_string()),
+    }
     // G0b gap ruling: ilio applies the whole block, or Rust a covered one.
     match il::route(&paths, &text, writer.scan) {
         Err(e) => fail(e.code(), &e.to_string()),
@@ -168,6 +191,9 @@ pub(crate) fn run(
             Err(e) => fail(e.code(), &e.to_string()),
         },
         Ok(il::Route::Ilio { packet, fields }) => {
+            if let Err(e) = il::mark_pending(&paths, &packet) {
+                return fail("WRITE", &format!("pending marker not written: {e}"));
+            }
             let call = IlioCall {
                 script: target.ilio.as_deref(),
                 project: &launch_dir(&target.cwd),
@@ -176,16 +202,36 @@ pub(crate) fn run(
                 timeout: target.ilio_timeout,
             };
             match run_ilio(&call, &text) {
-                Err((code, why)) => fail(&code, &format!("{why} (fields {})", fields.join(","))),
+                Err((code, why)) => {
+                    // A timeout or crash may have written; its marker stays.
+                    if !matches!(code.as_str(), "ILIO-TIMEOUT" | "ILIO-EXIT") {
+                        let _ = il::clear_pending(&paths, &packet);
+                    }
+                    fail(&code, &format!("{why} (fields {})", fields.join(",")))
+                }
                 Ok(summary) => {
                     if let Err(e) = il::mark_applied(&paths, &packet) {
                         eprintln!("tm hook: IL {packet} applied; replay marker not written: {e}");
+                    } else if let Err(e) = il::clear_pending(&paths, &packet) {
+                        eprintln!("tm hook: IL {packet} applied; pending marker kept: {e}");
                     }
                     Outcome::IlioApplied(packet, summary)
                 }
             }
         }
     }
+}
+
+/// True when the denial store already holds `il-auto-apply:<code>` for
+/// `packet`.
+fn recorded(target: &Target, code: &str, packet: &str) -> bool {
+    let check = format!("check=il-auto-apply:{code} ");
+    target
+        .denials
+        .clone()
+        .or_else(pm_guard_denials_path)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .is_some_and(|t| t.lines().any(|l| l.contains(&check) && l.contains(packet)))
 }
 
 /// Appends the failure where `list_recent_errors` reads denials.

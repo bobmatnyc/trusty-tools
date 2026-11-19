@@ -222,3 +222,73 @@ fn route_sends_uncovered_blocks_to_ilio_and_runs_the_new_checks() -> R {
     }
     Ok(())
 }
+
+#[test]
+fn il_secret_rules_match_ilio_on_the_rust_path() -> R {
+    // ilio `SECRET`, beyond the injected scan (which only knows `ghp_`).
+    let tmp = tempfile::tempdir()?;
+    let paths = seed(tmp.path())?;
+    let before = snapshot(&paths);
+    let bad = [
+        "act: rotated, password: hunter2hunter2",
+        "act: set API-KEY = abcdefgh1234",
+        "act: used sk-abcdefghij0123456789",
+        "act: pasted -----begin rsa private key",
+    ];
+    for row in bad {
+        let text = block(&format!("task: xa-T01\ndone: d\npct: 41\nnext: n\n{row}"));
+        match apply(&paths, &text) {
+            Err(e) => assert_eq!(e.code(), "SECRET", "{row}: {e}"),
+            Ok(a) => panic!("{row}: applied {a:?}"),
+        }
+    }
+    assert_eq!(snapshot(&paths), before);
+    let ok = block("task: xa-T01\ndone: d\npct: 41\nnext: n\nact: password: short");
+    apply(&paths, &ok)?;
+    Ok(())
+}
+
+/// Fails the commit once, at `step`.
+struct FailOnce(
+    trusty_architect::ledger::writer::CommitStep,
+    std::cell::Cell<bool>,
+);
+
+impl trusty_architect::ledger::writer::Faults for FailOnce {
+    fn at(
+        &self,
+        step: trusty_architect::ledger::writer::CommitStep,
+        _: &StorePaths,
+    ) -> std::io::Result<()> {
+        if step == self.0 && !self.1.replace(true) {
+            return Err(std::io::Error::other("injected act failure"));
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn il_failed_act_append_is_retried_and_lands_once() -> R {
+    use trusty_architect::ledger::writer::CommitStep;
+    let tmp = tempfile::tempdir()?;
+    let paths = seed(tmp.path())?;
+    let clock = FakeClock::new(START);
+    let scan = no_secrets;
+    let fault = FailOnce(CommitStep::Acts, std::cell::Cell::new(false));
+    let w = Writer {
+        faults: &fault,
+        ..Writer::new(&clock, &scan)
+    };
+    let first = il::apply(&w, &paths, "pm-small", "pm-small", BLOCK);
+    assert_eq!(
+        first.as_ref().map_err(IlError::code).err(),
+        Some("WRITE-ACT")
+    );
+    let again = il::apply(&w, &paths, "pm-small", "pm-small", BLOCK)?;
+    assert!(!again.replayed && again.acts == 1, "{again:?}");
+    let third = il::apply(&w, &paths, "pm-small", "pm-small", BLOCK)?;
+    assert!(third.replayed, "{third:?}");
+    let log = fs::read_to_string(&paths.log)?;
+    assert_eq!(log.matches("merged the parser").count(), 1, "{log}");
+    Ok(())
+}
