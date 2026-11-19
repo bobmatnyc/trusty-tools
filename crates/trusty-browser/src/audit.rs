@@ -31,6 +31,8 @@ pub const FIELDS: &[&str] = &[
     "reason",
     "email_domain",
     "replaced",
+    // #11301: the URL hosts of the cross-origin child frames a read returned.
+    "frames",
 ];
 
 /// Refusal reason codes (`docs/activation-codes.md`, "Refusal log").

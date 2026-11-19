@@ -348,7 +348,8 @@ async fn query(
     } else {
         pages::FOUND
     };
-    let result = pages::shaped(&raw, shape)?;
+    // #11301: the optional `frames` and `denied_frames` of a cross-origin child-frame read.
+    let result = crate::pages_frames::framed(&raw, shape)?;
     let document = opt_str(result.get("document"));
     let origin = opt_str(result.get("origin"));
     let changed = document != claim.document;
