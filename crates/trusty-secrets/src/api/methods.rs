@@ -27,8 +27,9 @@ use super::{BackendId, SecretKey, SecretValue, VaultName};
 #[path = "exec.rs"]
 mod exec;
 pub use exec::{
-    ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
-    RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
+    ExecGrantRequest, ExecGrantResponse, LockResponse, ResolveRequest, ResolveResponse,
+    RevokeRequest, RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
+    UnlockResponse,
 };
 
 // #10998: the source locator of a named copy.
@@ -67,6 +68,10 @@ pub mod method {
     /// The one entry `trusty-secrets remote-gate` uses: an inner `resolve`
     /// or `doctor` verb (#11464, owner ruling D3a).
     pub const GATE: &str = "secrets.gate";
+    /// Open the 8 h unlock grant (#10524).
+    pub const UNLOCK: &str = "secrets.unlock";
+    /// Drop the unlock grant (#10524).
+    pub const LOCK: &str = "secrets.lock";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

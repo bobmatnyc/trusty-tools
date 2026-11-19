@@ -161,6 +161,26 @@ pub struct RevokeResponse {
     pub revoked: bool,
 }
 
+/// `secrets.unlock` response (#10524).
+///
+/// What: how long the new unlock grant lives; never a value or a token.
+/// Unlock and `secrets.lock` take no params beyond the client's `project`,
+/// which the server ignores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct UnlockResponse {
+    /// Seconds until the grant expires, unless it drops sooner.
+    pub expires_in_secs: u64,
+}
+
+/// `secrets.lock` response (#10524).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct LockResponse {
+    /// Whether a live unlock grant was dropped.
+    pub locked: bool,
+}
+
 /// `secrets.set_agents_may_use` request, beside `project` (#9070 slice 3).
 ///
 /// Why: DOC-74 §15.8 — a key's agent deny is changed through the socket,

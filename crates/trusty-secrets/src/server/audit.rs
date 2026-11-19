@@ -98,7 +98,32 @@ pub enum AuditMethod {
     /// write it allows (#10459 PR1). It has no wire method.
     #[serde(rename = "secrets.ticket.redeem")]
     TicketRedeem,
+    /// `secrets.unlock`: one record per call, written before the grant
+    /// opens (#10524).
+    #[serde(rename = "secrets.unlock")]
+    Unlock,
+    /// `secrets.lock`: one record per call; `grant_drop: revoked` when it
+    /// ended a live grant (#10524).
+    #[serde(rename = "secrets.lock")]
+    Lock,
+    /// An unlock grant that ended without `secrets.lock`: expiry, sleep,
+    /// logout or a fault, named by `grant_drop` (#10524). No wire method.
+    #[serde(rename = "secrets.unlock.drop")]
+    GrantDrop,
     /// A method a newer server audits. Never written by this build.
+    #[serde(other)]
+    Other,
+}
+
+/// Where a `secrets.resolve` value came from (#10524).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ServedFrom {
+    /// Read while an unlock grant was live: answered from, or filled into,
+    /// the grant's cache.
+    Grant,
+    /// A source a newer server records. Never written by this build.
     #[serde(other)]
     Other,
 }
@@ -279,6 +304,14 @@ pub struct AuditRecord {
     /// once validated (#11464). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_project: Option<String>,
+    /// On a `secrets.lock` or `secrets.unlock.drop` record: why the unlock
+    /// grant ended (#10524). `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_drop: Option<crate::store::grant_cache::DropReason>,
+    /// On a `secrets.resolve` record read under a live unlock grant:
+    /// `grant` (#10524). `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub served_from: Option<ServedFrom>,
 }
 
 /// The agent label a remote frame claimed (#11464).
@@ -368,6 +401,8 @@ impl AuditRecord {
             host: None,
             remote_agent: None,
             remote_project: None,
+            grant_drop: None,
+            served_from: None,
         }
     }
 

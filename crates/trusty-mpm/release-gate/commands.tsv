@@ -153,6 +153,8 @@ secrets copy	SKIP	-	-	-	-	-	vault to vault copy; Keychain
 secrets assign	SKIP	-	-	-	-	-	vault to vault copy; Keychain
 secrets doctor	SKIP	-	-	-	-	-	probes the secrets socket and Keychain backend
 secrets resolve	SKIP	-	-	-	-	-	prints a value, only inside a `secrets exec` grant
+secrets unlock	SKIP	-	-	-	-	-	raises the Touch ID presence prompt and opens the trusty-secrets unlock grant (#10524)
+secrets lock	SKIP	-	-	-	-	-	ends the live trusty-secrets unlock grant (#10524)
 secrets exec	SKIP	-	-	-	-	-	resolves vault keys into a child env
 overseer status	SANDBOX	$H	overseer status	-	0	-	D: reads the overseer state through the daemon
 coordinator serve	SANDBOX	$H	coordinator serve --stdio	$FX/initialize.json	0	-	D: JSON-RPC over stdio to the daemon; aliases sm, session-manager, coord

@@ -18,6 +18,14 @@ mod backend;
     allow(dead_code, reason = "only the server's `State` builds a cache")
 )]
 mod cache;
+// #10524: the unlock grant's values, in locked pages; server only.
+#[cfg_attr(
+    not(feature = "server"),
+    allow(dead_code, reason = "only the server's `State` opens a grant")
+)]
+pub(crate) mod grant_cache;
+#[cfg_attr(not(feature = "server"), allow(dead_code))]
+mod locked;
 // #7524 P2-M1: the per-request deadline the server sets and the runner reads.
 #[cfg(any(feature = "server", feature = "cli-backends"))]
 pub(crate) mod deadline;

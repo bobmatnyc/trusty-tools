@@ -121,6 +121,9 @@ pub(crate) struct Gate<'a> {
     copy_source: Option<super::copy_source::CopySourceAudit>,
     // #11464: a remote-gate call's host, label and project.
     remote: Option<super::remote::RemoteAudit>,
+    // #10524: the unlock grant's drop reason and a read made under it.
+    grant_drop: Option<crate::store::grant_cache::DropReason>,
+    served_from: Option<super::audit::ServedFrom>,
     admitted: Option<Admitted>,
 }
 
@@ -162,6 +165,8 @@ pub(crate) fn audited(
         architect_refusal: None,
         copy_source: None,
         remote: None,
+        grant_drop: None,
+        served_from: None,
         admitted: None,
     };
     let result = body(&mut gate);
@@ -256,6 +261,16 @@ impl Gate<'_> {
     /// of this call (#11464).
     pub(crate) fn remote(&mut self, remote: super::remote::RemoteAudit) {
         self.remote = Some(remote);
+    }
+
+    /// Name why the unlock grant ended on this call's records (#10524).
+    pub(crate) fn grant_drop(&mut self, reason: crate::store::grant_cache::DropReason) {
+        self.grant_drop = Some(reason);
+    }
+
+    /// Mark this call's records as read under a live unlock grant (#10524).
+    pub(crate) fn served_from_grant(&mut self) {
+        self.served_from = Some(super::audit::ServedFrom::Grant);
     }
 
     /// Record why the Architect check refused this agent caller (#10459).
@@ -388,6 +403,8 @@ impl Gate<'_> {
         record.architect = self.architect.then_some(true);
         record.architect_refusal = self.architect_refusal;
         record.copy_source = self.copy_source.clone();
+        record.grant_drop = self.grant_drop;
+        record.served_from = self.served_from;
         // #11464: `host` only once the gate was verified; the label is never
         // trusted and says so.
         if let Some(remote) = &self.remote {

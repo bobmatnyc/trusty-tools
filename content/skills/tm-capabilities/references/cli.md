@@ -201,9 +201,11 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
+  - `lock` — End the unlock grant now; the next read prompts again
   - `remove` — Remove one key of the project scope
   - `resolve` — Print one key's value inside a `tm secrets exec` grant
   - `set` — Add or replace one key of the project scope. The value comes from the clipboard
+  - `unlock` — Approve once, with Touch ID or the login password, so Keychain and 1Password reads raise no prompt for 8 h
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL

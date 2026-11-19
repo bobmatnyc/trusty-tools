@@ -43,6 +43,7 @@ use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
 use super::ticket::TicketStore;
 use super::ticket_methods;
+use super::unlock;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
@@ -294,6 +295,11 @@ pub struct State {
     /// nothing. #10459 PR1: from the password database, like
     /// `architect_records`.
     pub(crate) tm_bin_dir: Option<PathBuf>,
+    /// Where the unlock grant hears of system sleep (#10524).
+    // Tests give a fake, so none registers with the OS.
+    pub(crate) power: Arc<dyn super::power::PowerSource>,
+    /// How often an unlock grant's sentinel checks it (#10524).
+    pub(crate) grant_tick: Duration,
 }
 
 impl State {
@@ -376,6 +382,8 @@ impl State {
             architect_records: super::architect::records_dir(account_home),
             tickets: Arc::new(TicketStore::os_default()),
             tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),
+            power: Arc::new(super::power::OsPower),
+            grant_tick: super::unlock::SENTINEL_TICK,
         }
     }
 
@@ -438,7 +446,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 14] = [
+pub(crate) const METHODS: [(&str, MethodFn); 16] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -457,6 +465,9 @@ pub(crate) const METHODS: [(&str, MethodFn); 14] = [
     (method::TICKET_PENDING, ticket_methods::pending),
     // #11464 D3a: the remote gate's one entry.
     (method::GATE, remote::gate),
+    // #10524: the 8 h unlock grant.
+    (method::UNLOCK, unlock::unlock),
+    (method::LOCK, unlock::lock),
 ];
 
 /// The `secrets.*` router over `state`.
@@ -742,8 +753,8 @@ pub(crate) async fn serve_state(
             source: Box::new(source),
         })?;
     let idle_timeout = state.settings.idle_timeout;
-    let grants = Arc::clone(&state.grants);
-    let router = Arc::new(build_router(Arc::new(state)));
+    let state = Arc::new(state);
+    let router = Arc::new(build_router(Arc::clone(&state)));
     let mut shutdown = std::pin::pin!(shutdown);
     let exit = loop {
         let exit = serve_until_idle(
@@ -756,10 +767,14 @@ pub(crate) async fn serve_state(
         .await;
         // #9070: an idle window that ends with a live grant starts another;
         // the listener stays bound throughout.
-        if serving_ends(exit, &grants) {
+        // #10524: a live unlock grant defers the idle exit too.
+        let unlocked = || matches!(exit, UdsServeExit::Idle) && unlock::grant_keeps_serving(&state);
+        if serving_ends(exit, &state.grants) && !unlocked() {
             break exit;
         }
     };
+    // #10524: the session is over; a live unlock grant ends as `logout`.
+    unlock::end_session(&state);
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))

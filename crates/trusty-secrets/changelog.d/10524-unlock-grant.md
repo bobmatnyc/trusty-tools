@@ -1,0 +1,3 @@
+Added
+- `secrets.unlock` and `secrets.lock` socket methods: an 8 h unlock grant held in the server's memory. While it is live, Keychain and CLI-backed values are read once and then served from zeroed-on-drop, `mlock`'d memory (a refused lock caches nothing). The grant drops on expiry (wall clock and `Instant`), system sleep, server shutdown (`logout`), a dead power watcher, or `secrets.lock`, and never survives a restart. An agent-descended caller cannot unlock. Audit records: `secrets.unlock`, `secrets.lock`, `secrets.unlock.drop` with a typed `grant_drop` reason, and `served_from: grant` on reads under the grant (#10524).
+- `TRUSTY_SECRETS_UNLOCK_TTL_SECS` shortens the grant for a sandbox check; it never lengthens it past 8 h (#10524).
