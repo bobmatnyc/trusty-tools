@@ -107,6 +107,8 @@ pub const PAGE_ERRORS: &[&str] = &[
     "StaleCapture",
     "OutOfViewport",
     "CaptureTooLarge",
+    // #11362: Chrome refused a script world in the frame (a sandboxed frame, say).
+    "FrameScriptBlocked",
 ];
 
 /// Longest request string field, in code points.

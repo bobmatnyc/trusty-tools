@@ -10,8 +10,9 @@ const source = await readFile(new URL("../../extension/worker.js",import.meta.ur
 const pagesSource = await readFile(new URL("../../extension/pages.js",import.meta.url),"utf8");
 const codesSource = await readFile(new URL("../../extension/codes.js",import.meta.url),"utf8");
 const readSource = await readFile(new URL("../../extension/pages_read.js",import.meta.url),"utf8");
+const framesSource = await readFile(new URL("../../extension/pages_frames.js",import.meta.url),"utf8");
 // importScripts by file name: pages.js loads pages_read.js itself (#11355); the indicator is stubbed.
-const scripts = {"pages.js":pagesSource, "pages_read.js":readSource, "codes.js":codesSource, "indicator.js":""};
+const scripts = {"pages.js":pagesSource, "pages_read.js":readSource, "pages_frames.js":framesSource, "codes.js":codesSource, "indicator.js":""};
 const loader = ctx => (...files) => { for (const file of files) vm.runInContext(scripts[file], ctx); };
 const id = "jabfhcolknbbdajilgpficniedhcfahc";
 // #11356: every page_read frame carries its read controls.
@@ -125,7 +126,8 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
     windows:{update:async (win, props) => { focused.push({win, ...props}); return {id:win}; }},
     tabs:{
       get:async tab => { if (!tabs.has(tab)) throw new Error("No tab with id: " + tab); return {id:tab, status:tabs.get(tab).status || "complete"}; },
-      query:async q => { queries.push(q); return [...tabs].map(([tid, t], index) => ({id:tid, windowId:1, index, active:t.active})); },
+      query:async q => { queries.push(q); return [...tabs].map(([tid, t], index) => ({id:tid, windowId:t.window ?? 1, index, active:t.active,
+        ...(t.opener ? {openerTabId:t.opener} : {})})); },
       update:async (tab, {url, active}) => {
         const t = tabs.get(tab);
         if (!t) throw new Error("No tab");
@@ -174,9 +176,15 @@ async function codeFixture({session:seed = {}, held = false, tabs:layout, live =
         cdp.push({tab:tabId, method:"attach"});
       },
       detach:async ({tabId}) => { cdp.push({tab:tabId, method:"detach"}); },
-      sendCommand:async ({tabId}, method, params) => {
-        cdp.push({tab:tabId, method, params});
+      // #11362: `sessionId` names a flat child session; `t.frames` (a CDP model, see frames.test.mjs)
+      // answers any method it knows before the defaults below.
+      sendCommand:async ({tabId, sessionId}, method, params) => {
+        cdp.push({tab:tabId, method, params, ...(sessionId ? {session:sessionId} : {})});
         const t = tabs.get(tabId);
+        if (t.frames) {
+          const out = await t.frames(method, params, sessionId ?? null, (...a) => chrome.debugger.onEvent.fire(...a));
+          if (out !== undefined) return out;
+        }
         if (t.hang === method) return new Promise(done => { t.release = () => done({}); });
         if (t.dialogFails && method === "Page.handleJavaScriptDialog") throw new Error("No dialog is showing");
         if (t.dialog && method === "Input.dispatchMouseEvent" && params.type === "mousePressed")

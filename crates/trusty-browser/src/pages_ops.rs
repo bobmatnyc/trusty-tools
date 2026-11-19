@@ -20,6 +20,7 @@ use crate::grants::Grant;
 use crate::leases::{JOURNAL_LIMIT, Journal, TTL};
 use crate::pages::{self, HISTORY, Shape, Stop};
 use crate::pages_capture::{self as capture, Capture};
+use crate::pages_frames::{self as frames, FrameTable};
 use crate::pages_url::host;
 use crate::peer_conn::Peer;
 use crate::pyjson::Json;
@@ -37,6 +38,8 @@ pub struct Session {
     pub journal: Journal,
     /// Screenshots a coordinate action may name, oldest first (#11211).
     pub captures: Vec<Capture>,
+    /// Each lease's latest snapshot frames, for frame-scoped refs (#11362).
+    pub frames: Vec<FrameTable>,
 }
 
 /// A reply, the operated tab and the result host.
@@ -63,6 +66,8 @@ const KEEP_LEASE: &[&str] = &[
     "StaleCapture",
     "OutOfViewport",
     "CaptureTooLarge",
+    // #11362: Chrome refused a script world in the frame (a sandboxed frame, say).
+    "FrameScriptBlocked",
 ];
 
 pub(crate) fn hosted(origin: Option<&str>) -> Result<Option<String>, Stop> {
@@ -239,6 +244,9 @@ pub async fn run(
     if let Some(ran) = capture::route(core, session, grant, op, request).await {
         return ran;
     }
+    if let Some(ran) = frames::route(core, session, grant, op, request).await {
+        return ran;
+    }
     let claim = leased(core, session, grant, request)?;
     let tab = claim.tab;
     match op {
@@ -261,7 +269,9 @@ pub async fn run(
         args.push(("url", field("url")));
     } else if !HISTORY.contains(&op) {
         let document = claim.document.clone().map_or(Json::Null, Json::from);
-        args.extend([("document", document), ("ref", field("ref"))]);
+        // #11362: a frame ref from page_snapshot goes to the worker as {frame, loader, node}.
+        let r#ref = frames::resolve(session, &claim, &field("ref"))?;
+        args.extend([("document", document), ("ref", r#ref)]);
         match op {
             "page_click" => args.extend(pages::controls(request)?),
             "page_type" => args.push(("text", field("text"))),
@@ -269,7 +279,10 @@ pub async fn run(
             "page_upload" => args.push(("files", field("files"))),
             "page_press" => args.extend([("key", field("key")), ("modifiers", field("modifiers"))]),
             "page_select" => args.push(("value", field("value"))),
-            "page_drag" => args.push(("target", field("target"))),
+            "page_drag" => args.push((
+                "target",
+                frames::resolve(session, &claim, &field("target"))?,
+            )),
             _ => {}
         }
     }
@@ -342,7 +355,7 @@ async fn tabs(core: &Core, grant: &Grant) -> Result<Ran, Refusal> {
     Ok((reply, None, None))
 }
 
-async fn query(
+pub(crate) async fn query(
     core: &Core,
     grant: &Grant,
     claim: &Leased,

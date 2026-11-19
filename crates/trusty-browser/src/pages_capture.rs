@@ -375,7 +375,9 @@ async fn screenshot(
 ) -> Result<Ran, Stop> {
     let claim = leased(core, session, grant, request)?;
     let document = claim.document.clone().map_or(Json::Null, Json::from);
-    let field = request.get("ref").cloned().unwrap_or(Json::Null);
+    // #11362: an element screenshot of a frame ref.
+    let field =
+        crate::pages_frames::resolve(session, &claim, request.get("ref").unwrap_or(&Json::Null))?;
     let args = vec![
         ("tab", Json::Int(claim.tab)),
         ("document", document),

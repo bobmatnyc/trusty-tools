@@ -36,7 +36,7 @@ macro_rules! embed {
 }
 
 /// Every extension file as `(relative path, bytes)`.
-pub const EMBEDDED: [(&str, &[u8]); 15] = embed![
+pub const EMBEDDED: [(&str, &[u8]); 16] = embed![
     "codes.js",
     "icons/trusty-browser-128.png",
     "icons/trusty-browser-16.png",
@@ -47,6 +47,7 @@ pub const EMBEDDED: [(&str, &[u8]); 15] = embed![
     "indicator_content.js",
     "manifest.json",
     "pages.js",
+    "pages_frames.js",
     "pages_read.js",
     "setup.css",
     "setup.html",
