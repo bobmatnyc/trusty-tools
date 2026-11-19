@@ -187,7 +187,7 @@ async fn build_app_state(mut config: ReviewConfig, dedup_need: DedupNeed) -> Res
         .map_err(|e| anyhow::anyhow!("failed to build LLM provider: {e}"))?;
 
     let verifier = cli_verify::build_verifier_for_mcp_stdio(&config).await?;
-    enforce_verifier_liveness(&config, verifier.as_ref())
+    enforce_verifier_liveness(&mut config, verifier.as_ref())
         .await
         .map_err(|reason| anyhow::anyhow!(reason))?;
 

@@ -77,8 +77,9 @@ TRUSTY_EVAL_LIVE=1 cargo test -p trusty-review --test model_eval \
 | `TRUSTY_EVAL_OUT_DIR` | `$CARGO_TARGET_DIR/model_eval` | report directory |
 | `TRUSTY_REVIEW_CAPTURE_DIR` | unset | raw reviewer replies, one 0600 JSON file per call; each row's `capture_files` names its files. Use a fresh dir per run (#9310) |
 
-The verifier is always Haiku 4.5 (`DEFAULT_VERIFIER_MODEL`), whatever the
-operator's config says.
+The verifier is always Haiku 4.5, whatever the operator's config says. It
+stays pinned there after #11527 moved the production verifier default to a
+different model family, so eval scores remain comparable across runs.
 
 **Cost cap.** Every reviewer and verifier call is metered with
 `estimate_bedrock_cost_usd` against one budget. Once the total reaches
