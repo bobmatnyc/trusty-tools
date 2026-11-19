@@ -15,13 +15,20 @@
 //! runs [`super::relaunch::relaunch`] (stop, bound launch with resume and
 //! remote control, poller), types [`RESUME`] through `send_guarded`, and
 //! appends one line to `inbox/restart.log`.
-//! Test: `restart_tests.rs`.
+//! G0b: [`restart_with`] first types [`CHECKPOINT`] into the idle Architect
+//! and waits up to [`CHECKPOINT_WAIT`] for a ledger write newer than the
+//! request (exit 4 on timeout unless `--force`); `--no-checkpoint` keeps the
+//! #11365 gate as it was. A failed relaunch step types nothing and reports
+//! "NOT restarted". [`resolve_architect`] finds the Architect by its fleet
+//! role. Only the Architect's pane and its relaunch are touched.
+//! Test: `restart_tests.rs`, `restart_checkpoint_tests.rs`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::bail;
 use trusty_architect::classify::parse_pane;
-use trusty_architect::ledger::fresh::{ready, state_dir};
+use trusty_architect::ledger::fresh::{fresh, ready, state_dir};
 use trusty_architect::poller::capture;
 use trusty_architect::{PaneId, Tmux, input_state_for_send, send_line_guarded};
 use trusty_mpm::session_manager::ArchitectRegistration;
@@ -42,6 +49,26 @@ const BOX_WAIT: Duration = Duration::from_secs(90);
 pub(crate) const RESUME: &str = "Resume from the Architect IL: run `python3 scripts/datg.py \
      --project local/il digest` and `python3 scripts/dashboard-db.py summary`; do not run \
      session_context_catchup.";
+
+/// The checkpoint request typed into the Architect (G0b).
+pub(crate) const CHECKPOINT: &str = "Checkpoint the Intent Ledger now for a restart: record \
+     task, next, owed and crons with `python3 scripts/datg.py --project local/il session set`, \
+     then stop.";
+
+/// How long a requested checkpoint gets to land in the ledger (G0b).
+pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_secs(90);
+
+/// The pause between two ledger reads while a checkpoint is awaited.
+const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
+
+/// How [`restart_with`] gets its checkpoint (G0b).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Gate {
+    /// Type [`CHECKPOINT`] and wait for the write; `false` is `--no-checkpoint`.
+    pub(crate) request: bool,
+    /// `--force`: a timeout or a not-ready ledger warns instead of refusing.
+    pub(crate) force: bool,
+}
 
 /// What [`restart`] reads and runs; production passes the live tmux and relaunch.
 pub(crate) struct Ops<'a> {
@@ -89,12 +116,60 @@ impl RestartReport {
 /// `inside_claude_code_restart_is_refused`,
 /// `an_idle_box_and_a_fresh_checkpoint_restart_and_send_one_resume_line`,
 /// `a_held_up_lock_refuses_the_restart_before_any_tmux_call`,
-/// `a_box_busy_just_before_relaunch_refuses`.
+/// `a_box_busy_just_before_relaunch_refuses`,
+/// `a_failed_stop_types_no_resume_line_and_reports_not_restarted`.
+/// G0b: the CLI calls [`restart_with`]; this `--no-checkpoint` form is the
+/// tests' entry.
+#[cfg(test)]
 pub(crate) fn restart(
     dir: &Path,
     names: &SessionNames,
     inside: bool,
     wait: Option<Duration>,
+    ops: &Ops<'_>,
+) -> RestartReport {
+    restart_with(dir, names, inside, wait, Gate::default(), ops)
+}
+
+/// [`restart`] with a requested checkpoint and `--force` (G0b).
+///
+/// Why: G0b — a quick restart of just the Architect, after it saved its state.
+/// What: as [`restart`]; with `gate.request` the busy gate runs first, then
+/// [`request_checkpoint`], then the box must turn idle again. `gate.force`
+/// turns a checkpoint timeout and a not-ready ledger into warnings. Every
+/// report whose exit is not 0 ends in a "NOT restarted" line.
+/// Test: `a_requested_checkpoint_restarts_and_touches_only_the_architect`,
+/// `a_checkpoint_timeout_refuses_with_exit_4`, `force_restarts_after_a_checkpoint_timeout`,
+/// `a_failed_stop_types_no_resume_line_and_reports_not_restarted`,
+/// `a_failed_relaunch_reports_not_restarted`.
+pub(crate) fn restart_with(
+    dir: &Path,
+    names: &SessionNames,
+    inside: bool,
+    wait: Option<Duration>,
+    gate: Gate,
+    ops: &Ops<'_>,
+) -> RestartReport {
+    // See G0b architect restart
+    let mut r = restart_inner(dir, names, inside, wait, gate, ops);
+    r.lines.push(if r.exit == 0 {
+        "restarted".to_owned()
+    } else {
+        format!(
+            "NOT restarted (exit {}); the state is as reported above",
+            r.exit
+        )
+    });
+    r
+}
+
+/// The body of [`restart_with`], without the closing status line.
+fn restart_inner(
+    dir: &Path,
+    names: &SessionNames,
+    inside: bool,
+    wait: Option<Duration>,
+    gate: Gate,
     ops: &Ops<'_>,
 ) -> RestartReport {
     let session = names.architect();
@@ -116,35 +191,46 @@ pub(crate) fn restart(
             return RestartReport::done(1, vec![format!("FAILED  {e}; nothing sent")]);
         }
     };
-    if let Some(r) = il_refusal(dir, session, ops) {
-        return r;
+    let mut early = Vec::new();
+    if !gate.request
+        && let Some(r) = il_refusal(dir, session, ops)
+    {
+        if !gate.force {
+            return r;
+        }
+        early = forced(r);
     }
     let pane = match pane_id(ops.tmux, session) {
         Ok(p) => p,
         Err(e) => return RestartReport::done(1, vec![format!("FAILED  {e}")]),
     };
-    let deadline = (ops.now)() + wait.map_or(0.0, |w| w.as_secs_f64());
-    let mut run = 0;
-    loop {
-        run = if idle(ops.tmux, &pane) { run + 1 } else { 0 };
-        if run >= IDLE_READS {
-            break;
+    if !wait_idle(ops, &pane, wait) {
+        return RestartReport::done(
+            2,
+            vec![format!(
+                "busy: tmux session {session} is not idle (a turn runs, or the input box is \
+                 not empty); nothing sent. Retry, or pass --wait <seconds>"
+            )],
+        );
+    }
+    if gate.request {
+        match request_checkpoint(dir, session, &pane, gate.force, ops) {
+            Ok(lines) => early.extend(lines),
+            Err(r) => return r,
         }
-        let gave_up = wait.is_none() && run == 0 || wait.is_some() && (ops.now)() >= deadline;
-        if gave_up {
-            return RestartReport::done(
-                2,
-                vec![format!(
-                    "busy: tmux session {session} is not idle (a turn runs, or the input box is \
-                     not empty); nothing sent. Retry, or pass --wait <seconds>"
-                )],
-            );
+        if !wait_idle(ops, &pane, Some(CHECKPOINT_WAIT)) {
+            early.push(format!(
+                "busy: tmux session {session} did not finish the checkpoint turn"
+            ));
+            return RestartReport::done(2, early);
         }
-        (ops.sleep)(IDLE_GAP);
     }
     // As `self-clear.sh`: the ledger may have changed during the idle wait.
     if let Some(r) = il_refusal(dir, session, ops) {
-        return r;
+        if !gate.force {
+            return r;
+        }
+        early.extend(forced(r));
     }
     if !idle(ops.tmux, &pane) {
         return RestartReport::done(
@@ -156,16 +242,25 @@ pub(crate) fn restart(
     }
     let mut report = match (ops.relaunch)() {
         Ok(r) => RestartReport {
-            lines: r
-                .steps
-                .iter()
-                .map(|s| s.render_line().trim().to_owned())
+            lines: early
+                .into_iter()
+                .chain(r.steps.iter().map(|s| s.render_line().trim().to_owned()))
                 .collect(),
             exit: if r.failed() { 1 } else { 0 },
             registration: r.registration,
         },
-        Err(e) => return RestartReport::done(1, vec![format!("FAILED  {e:#}")]),
+        Err(e) => {
+            early.push(format!("FAILED  {e:#}"));
+            return RestartReport::done(1, early);
+        }
     };
+    // See G0b architect restart: a failed stop or launch types nothing into the pane.
+    if report.exit != 0 {
+        report
+            .lines
+            .push("the relaunch failed; the resume line was not typed".to_owned());
+        return report;
+    }
     let sent = send_resume(ops, session);
     report.lines.push(match &sent {
         Ok(()) => "typed the resume line".to_owned(),
@@ -188,13 +283,14 @@ pub(crate) fn restart(
     report
 }
 
-/// [`restart`] against the live tmux server and [`super::relaunch::LIVE`].
+/// [`restart_with`] against the live tmux server and [`super::relaunch::LIVE`].
 pub(crate) fn restart_live(
     dir: &Path,
     home: &Path,
     names: &SessionNames,
     inside: bool,
     wait: Option<Duration>,
+    gate: Gate,
 ) -> RestartReport {
     let tmux = trusty_architect::SystemTmux::new();
     let relaunch = || super::relaunch::relaunch(dir, home, names, super::relaunch::LIVE);
@@ -208,7 +304,122 @@ pub(crate) fn restart_live(
         },
         sleep: std::thread::sleep,
     };
-    restart(dir, names, inside, wait, &ops)
+    restart_with(dir, names, inside, wait, gate, &ops)
+}
+
+/// The Architect's directory and session names, found by its fleet role (G0b).
+///
+/// Why: G0b — restart the session `tm fleet init` recorded as the Architect,
+/// never a session picked by a name string.
+/// What: the `[supervisor] projects` entries whose project requests the
+/// supervisor profile ([`super::config::architects`]); none is an error
+/// naming `tm fleet init`, and a `--dir` that is not one of them is refused.
+/// Test: `no_recorded_architect_is_a_clear_error`,
+/// `a_dir_that_is_not_the_recorded_architect_is_refused`,
+/// `the_recorded_architect_resolves`.
+pub(crate) fn resolve_architect(
+    dir: Option<&str>,
+    home: &Path,
+) -> anyhow::Result<(PathBuf, SessionNames)> {
+    // See G0b architect restart
+    let path = super::user_config_path(home);
+    let recorded = super::read_or_empty(&path)
+        .and_then(|raw| super::config::parse_user_config(&raw, &path))
+        .map(|(_, typed)| super::config::architects(&typed))?;
+    if recorded.is_empty() {
+        bail!(
+            "no Architect is recorded in {}; run `tm fleet init` first",
+            path.display()
+        );
+    }
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir = canon(&super::resolve_dir(dir, home)?);
+    if !recorded.iter().any(|r| canon(r) == dir) {
+        let list: Vec<String> = recorded.iter().map(|p| p.display().to_string()).collect();
+        bail!(
+            "{} is not the recorded Architect (fleet role supervisor); recorded: {}",
+            dir.display(),
+            list.join(", ")
+        );
+    }
+    let names = super::recorded_names(home).map_err(anyhow::Error::msg)?;
+    Ok((dir, names))
+}
+
+/// A refusal `--force` overrode, as warning lines.
+fn forced(r: RestartReport) -> Vec<String> {
+    let mut lines = vec!["warning: --force overrides the refusal below".to_owned()];
+    lines.extend(r.lines);
+    lines
+}
+
+/// Types [`CHECKPOINT`] and waits up to [`CHECKPOINT_WAIT`] for a ledger
+/// write newer than the request (G0b).
+///
+/// What: `Ok` lines on a fresh write, or on a timeout under `force`; `Err`
+/// is the refusal: exit 1 when the line was not typed, exit 4 on a timeout.
+fn request_checkpoint(
+    dir: &Path,
+    session: &str,
+    pane: &PaneId,
+    force: bool,
+    ops: &Ops<'_>,
+) -> Result<Vec<String>, RestartReport> {
+    let asked = (ops.now)();
+    if let Err(e) = type_line(ops, pane, CHECKPOINT) {
+        return Err(RestartReport::done(
+            1,
+            vec![format!("FAILED  the checkpoint request was not sent: {e}")],
+        ));
+    }
+    let il = state_dir(&dir.join("local/il"), Some(session));
+    let polls = CHECKPOINT_WAIT.as_secs() / CHECKPOINT_POLL.as_secs();
+    for n in 0..=polls {
+        let v = fresh(&il, Some(asked), None, (ops.now)());
+        if v.ok() {
+            return Ok(vec![format!(
+                "checkpoint written ({})",
+                v.reasons.join("; ")
+            )]);
+        }
+        if n < polls {
+            (ops.sleep)(CHECKPOINT_POLL);
+        }
+    }
+    let why = format!(
+        "no Intent Ledger write after the checkpoint request within {}s",
+        CHECKPOINT_WAIT.as_secs()
+    );
+    if force {
+        return Ok(vec![format!("warning: {why}; --force restarts anyway")]);
+    }
+    Err(RestartReport::done(
+        4,
+        vec![format!(
+            "{why}; claude was not stopped. Retry, or pass --force"
+        )],
+    ))
+}
+
+/// True once [`IDLE_READS`] consecutive reads are idle; `None` gives up on
+/// the first busy read, `Some(w)` after about `w` (also bounded by count, so
+/// a stalled clock cannot spin forever).
+fn wait_idle(ops: &Ops<'_>, pane: &PaneId, wait: Option<Duration>) -> bool {
+    let deadline = (ops.now)() + wait.map_or(0.0, |w| w.as_secs_f64());
+    let budget = wait.map_or(0, |w| w.as_secs() / IDLE_GAP.as_secs()) + 2 * IDLE_READS as u64;
+    let mut run = 0;
+    for _ in 0..budget {
+        run = if idle(ops.tmux, pane) { run + 1 } else { 0 };
+        if run >= IDLE_READS {
+            return true;
+        }
+        let gave_up = wait.is_none() && run == 0 || wait.is_some() && (ops.now)() >= deadline;
+        if gave_up {
+            return false;
+        }
+        (ops.sleep)(IDLE_GAP);
+    }
+    false
 }
 
 /// `Some(exit 4)` unless the Architect's ledger is ready; a read error refuses too.
@@ -257,11 +468,16 @@ fn send_resume(ops: &Ops<'_>, session: &str) -> Result<(), String> {
         }
         (ops.sleep)(Duration::from_secs(1));
     }
-    let reading = capture(ops.tmux, &pane)
+    type_line(ops, &pane, RESUME)
+}
+
+/// Types `line` and Enter into `pane` through the guarded send path.
+fn type_line(ops: &Ops<'_>, pane: &PaneId, line: &str) -> Result<(), String> {
+    let reading = capture(ops.tmux, pane)
         .map(|c| input_state_for_send(&c))
         .map_err(|e| e.to_string())?;
     let settle = || (ops.sleep)(Duration::from_millis(1500));
-    send_line_guarded(ops.tmux, &pane, reading, RESUME, settle).map_err(|e| e.to_string())
+    send_line_guarded(ops.tmux, pane, reading, line, settle).map_err(|e| e.to_string())
 }
 
 /// Appends `entry` to `<dir>/inbox/restart.log`.
@@ -288,3 +504,7 @@ fn iso(t: f64) -> String {
 #[cfg(test)]
 #[path = "restart_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "restart_checkpoint_tests.rs"]
+mod checkpoint_tests;

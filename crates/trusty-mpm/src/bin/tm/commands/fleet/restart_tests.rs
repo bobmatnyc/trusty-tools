@@ -187,3 +187,33 @@ fn a_box_busy_just_before_relaunch_refuses() {
     assert_eq!((r.exit, relaunches), (2, 0), "{:?}", r.lines);
     assert!(tmux.sends().is_empty());
 }
+
+/// See G0b architect restart: fails against pre-change main, which typed the
+/// resume line into the old pane after a failed stop and never said
+/// "NOT restarted".
+#[test]
+fn a_failed_stop_types_no_resume_line_and_reports_not_restarted() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    ledger(tmp.path(), READY, None);
+    let tmux = idle_tmux();
+    let calls = Cell::new(0);
+    let stop_failed = || {
+        calls.set(calls.get() + 1);
+        Ok(RelaunchReport {
+            steps: vec![Step::Failed("cannot stop claude (pid 4100)".into())],
+            session: "tm-architect".into(),
+            registration: None,
+        })
+    };
+    let ops = Ops {
+        tmux: &tmux,
+        relaunch: &stop_failed,
+        now,
+        sleep: no_sleep,
+    };
+    let r = restart(tmp.path(), &names(), false, None, &ops);
+    assert_eq!((r.exit, calls.get()), (1, 1), "{:?}", r.lines);
+    assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
+    let last = r.lines.last().map_or("", String::as_str);
+    assert!(last.starts_with("NOT restarted"), "{:?}", r.lines);
+}

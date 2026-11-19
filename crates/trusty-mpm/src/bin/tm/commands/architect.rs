@@ -28,8 +28,18 @@ pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
         None => super::architect_up::up(crate::cli::UpArgs::default()).await,
         Some(ArchitectAction::Up(args)) => super::architect_up::up(args).await,
         Some(ArchitectAction::Attach) => super::architect_up::attach(),
-        Some(ArchitectAction::Restart { wait, dir }) => {
-            super::architect_up::restart(wait, dir).await
+        Some(ArchitectAction::Restart {
+            wait,
+            dir,
+            force,
+            no_checkpoint,
+        }) => {
+            // See G0b architect restart
+            let gate = super::fleet::restart::Gate {
+                request: !no_checkpoint,
+                force,
+            };
+            super::architect_up::restart(wait, dir, gate).await
         }
         Some(other) => run(other),
     }

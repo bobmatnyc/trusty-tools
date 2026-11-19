@@ -116,10 +116,13 @@ pub(crate) enum ArchitectAction {
     Attach,
     /// Restart the Architect behind the checkpoint gate (#11365).
     ///
-    /// Refuses unless the Intent Ledger checkpoint is fresh (exit 4) and the
-    /// box is idle for 3 reads 5 s apart (exit 2). Then stops `claude`,
-    /// relaunches it bound with resume, restores the poller and types one
-    /// resume line. Refused inside Claude Code. No bypass flag.
+    /// Waits for an idle box (3 reads 5 s apart, exit 2), asks the Architect
+    /// for an Intent Ledger checkpoint and waits up to 90 s for the write
+    /// (exit 4), then stops and relaunches only the Architect's `claude`,
+    /// bound with resume, restores the poller and types one resume line.
+    /// Other sessions, the daemon and launchd are untouched. Refused inside
+    /// Claude Code and when no Architect is recorded (exit 2).
+    // See G0b architect restart
     Restart {
         /// Keep waiting for idle up to this many seconds.
         #[arg(long)]
@@ -127,6 +130,12 @@ pub(crate) enum ArchitectAction {
         /// The Architect directory (default: the one `tm fleet init` recorded).
         #[arg(long)]
         dir: Option<String>,
+        /// Restart even when the checkpoint does not land or is not ready.
+        #[arg(long)]
+        force: bool,
+        /// Do not ask for a checkpoint; require the existing one to be fresh.
+        #[arg(long)]
+        no_checkpoint: bool,
     },
 }
 
