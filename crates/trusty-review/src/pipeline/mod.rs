@@ -54,6 +54,7 @@ pub mod evidence_admission;
 // `citation_check` (path/content verification, #4042) since the two concerns
 // have independent marker sets and independent test surfaces.
 pub mod finding_hygiene;
+pub mod finding_yield;
 pub mod grade;
 // Why: reconciles the grade embedded in the raw `review_body` JSON with the
 // authoritative top-level grade so the two can never disagree (issue #1886).
