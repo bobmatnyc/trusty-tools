@@ -54,13 +54,26 @@ fn clone(fx: &GitWorktreeFixture, name: &str, gitignore: &str) -> PathBuf {
 
 /// Provision `ws` with the launch preparation a managed spawn runs, under a
 /// hermetic home that must outlive the test.
+///
+/// #11221: the hook binary is pinned. Left unset, it resolves an installed
+/// `tm` on `$PATH`; a CI runner has none, so the hooks write — and the
+/// settings snapshot it takes — never happened there.
 fn spawn(ws: &Path) -> tempfile::TempDir {
     let home = crate::test_support::hermetic_temp_dir();
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace_under(home.path(), ws);
-    crate::core::session_launch::prepare_session_with_home(&fw, ws, None, true, Some(home.path()))
-        .expect("the spawn preparation succeeds");
+    crate::core::session_launch::prepare_session_for_repair_under(
+        &fw,
+        ws,
+        None,
+        Some(Path::new(TEST_HOOK_EXE)),
+        Some(home.path()),
+    )
+    .expect("the spawn preparation succeeds");
     home
 }
+
+/// A stable-looking hook binary path; the hooks writer records it, never runs it.
+const TEST_HOOK_EXE: &str = "/usr/local/bin/tm";
 
 /// The compiled prompt the spawn wrote under `ws/.trusty-mpm/sessions/`.
 fn compiled_prompt(ws: &Path) -> PathBuf {
