@@ -1,22 +1,31 @@
-//! IL auto-apply: a turn carrying a ```` ```il ```` block updates THAT
-//! session's ledger from the hook (G0b).
+//! IL auto-apply: a block in THIS session's own turn updates THAT session's
+//! ledger from the hook; a block that arrives from elsewhere is only a
+//! proposal (G0b).
 //!
 //! Why: Bob: "all ledger updates should happen automatically on receiving an
-//! IL structured response with an IL packet". The block is parsed and
-//! written in process by `trusty_architect::ledger::il`, the port of the
-//! `ilio.py`/`datg.py` rules; nothing shells out to Python per message.
-//! What: [`turn_text`] picks the text each entry point carries: (a) a PM's
-//! agent handback (`PostToolUse` of `Agent`/`Task`, the `tool_response`),
-//! (b) an inbound session or Architect message and (c) the Architect's own
-//! prompt (both `UserPromptSubmit`, the `prompt`). [`run`] finds the
+//! IL structured response with an IL packet". Until the owner decides who may
+//! write the ledger, the safe rule holds: only the session's own output
+//! changes it (// See G0b IL authority (owner decision pending)). The block
+//! is parsed and written in process by `trusty_architect::ledger::il`, the
+//! port of the `ilio.py`/`datg.py` rules; nothing shells out to Python per
+//! message.
+//! What: [`turn_text`] picks the text each entry point carries. Applied: the
+//! session's own last assistant message, read from the `Stop` payload's
+//! `transcript_path` (screened against the Claude config directory, tail
+//! read only). Never applied: (a) a PM's agent handback (`PostToolUse` of
+//! `Agent`/`Task`, the `tool_response`) and (b) an inbound session or
+//! Architect message or (c) the Architect's prompt (both `UserPromptSubmit`,
+//! the `prompt`). Each of those is logged once per packet as
+//! `il-auto-apply:PROPOSAL` in the denial store `list_recent_errors` reads,
+//! with the entry point and packet id, and writes nothing. [`run`] finds the
 //! session's `datg` store (`<launch dir>/.trusty-mpm/datg[/<session>]`) and
-//! routes the block (`il::route`): a replay is a no-op; a block whose
+//! routes an own-turn block (`il::route`): a replay is a no-op; a block whose
 //! applied fields the Rust writer covers is written in process; any other
 //! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`), under the store's
 //! `il::hold` lock and a pending marker, so a packet runs ilio at most once
 //! (`PENDING-UNKNOWN` when an earlier run left no result). A store-less
-//! session records `NO-LEDGER` once per packet. A rejected or failed block is appended to the denial
-//! store `list_recent_errors` reads, check `il-auto-apply:<RULE>`, and is
+//! session records `NO-LEDGER` once per packet. A rejected or failed block is
+//! appended to the same denial store, check `il-auto-apply:<RULE>`, and is
 //! never reported as applied. [`on_hook`] never fails and never blocks the
 //! turn: every outcome goes to stderr only.
 //! Test: `il_auto_apply_tests.rs`.
@@ -40,9 +49,14 @@ const ARCHITECT: &str = "tm-architect";
 /// How much longer than one ilio run a delivery waits for the apply lock.
 const LOCK_SLACK: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Which of the three entry points delivered the block.
+/// Cap on transcript bytes read from the tail (one final turn fits easily).
+const MAX_TRANSCRIPT_TAIL: u64 = 256 * 1024;
+
+/// Which entry point delivered the block; only `OwnTurn` may write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Entry {
+    /// `Stop`: the session's own last assistant message.
+    OwnTurn,
     /// (a) `PostToolUse` of an `Agent`/`Task` call in a PM.
     AgentHandback,
     /// (b) `UserPromptSubmit` in a session other than the Architect.
@@ -52,8 +66,14 @@ pub(crate) enum Entry {
 }
 
 impl Entry {
+    /// Only the session's own output changes its ledger.
+    fn applies(self) -> bool {
+        self == Self::OwnTurn
+    }
+
     fn label(self) -> &'static str {
         match self {
+            Self::OwnTurn => "il:own-turn",
             Self::AgentHandback => "il:agent-handback",
             Self::InboundMessage => "il:inbound-message",
             Self::ArchitectPrompt => "il:architect-prompt",
@@ -68,6 +88,8 @@ pub(crate) struct Target {
     pub(crate) cwd: PathBuf,
     pub(crate) session: Option<String>,
     pub(crate) denials: Option<PathBuf>,
+    /// The Claude config directory a `Stop` transcript must sit under.
+    pub(crate) claude_config: Option<PathBuf>,
     /// `ilio.py`, when found; the timeout one run gets.
     pub(crate) ilio: Option<PathBuf>,
     pub(crate) ilio_timeout: std::time::Duration,
@@ -82,6 +104,9 @@ pub(crate) enum Outcome {
     NoLedger,
     /// The packet was applied before; nothing was written.
     Replayed(String),
+    /// The block came from outside the session's own turn: logged as a
+    /// proposal (its packet), nothing written.
+    Proposed(String),
     /// The Rust writer wrote the block.
     Applied(il::Applied),
     /// `ilio.py apply` exited 0 on the block: (packet, its summary).
@@ -105,13 +130,37 @@ fn response_text(v: &Value) -> Option<String> {
     }
 }
 
+/// The last assistant message of the `Stop` payload's transcript. The path
+/// is screened against `config` and only the file tail is read.
+fn own_turn_text(payload: &Value, config: Option<&Path>) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let raw = payload.get("transcript_path")?.as_str()?;
+    let path = trusty_mpm::core::session_record::contained_transcript_path(config?, raw)?;
+    if !std::fs::metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    let mut file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(MAX_TRANSCRIPT_TAIL)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_TRANSCRIPT_TAIL)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    trusty_mpm::core::idle_parking::last_assistant_text_from_transcript(&String::from_utf8_lossy(
+        &bytes,
+    ))
+}
+
 /// The entry point and text an event carries, when it can carry a block.
 pub(crate) fn turn_text(
     event: &str,
     payload: &Value,
     session: Option<&str>,
+    config: Option<&Path>,
 ) -> Option<(Entry, String)> {
     match event {
+        "Stop" => own_turn_text(payload, config).map(|t| (Entry::OwnTurn, t)),
         "PostToolUse" => {
             let tool = payload.get("tool_name")?.as_str()?;
             matches!(tool, "Agent" | "Task")
@@ -141,7 +190,9 @@ pub(crate) fn run(
     writer: &Writer<'_>,
 ) -> Outcome {
     // See G0b IL auto-apply
-    let Some((entry, text)) = turn_text(event, payload, target.session.as_deref()) else {
+    let session_name = target.session.as_deref();
+    let config = target.claude_config.as_deref();
+    let Some((entry, text)) = turn_text(event, payload, session_name, config) else {
         return Outcome::NoBlock;
     };
     if il::fence_body(&text).is_none() {
@@ -149,6 +200,15 @@ pub(crate) fn run(
     }
     let dir = state_dir(&launch_dir(&target.cwd), target.session.as_deref());
     let packet = il::packet_id(&text).unwrap_or_default();
+    if !entry.applies() {
+        // See G0b IL authority (owner decision pending): once per packet.
+        if !recorded(target, "PROPOSAL", &packet) {
+            let why = "an IL block from outside the session's own turn is a proposal; the \
+                       ledger is changed only by the session's own turns";
+            record(target, entry, session_id, &packet, "PROPOSAL", why);
+        }
+        return Outcome::Proposed(packet);
+    }
     if !dir.join("state.json").is_file() {
         // G0b critic: once per packet, never silently.
         if !recorded(target, "NO-LEDGER", &packet) {
@@ -284,7 +344,9 @@ fn datg_session() -> Option<String> {
 /// The hook's call: bounded, prints to stderr only, never fails the turn.
 pub(crate) fn on_hook(event: &str, payload: Option<&Value>, session_id: &str) {
     let Some(payload) = payload else { return };
-    let quick = turn_text(event, payload, None).is_some_and(|(_, t)| t.contains("```il"));
+    let config = trusty_mpm::core::session_record::claude_config_dir();
+    let quick = turn_text(event, payload, None, config.as_deref())
+        .is_some_and(|(_, t)| t.contains("```il"));
     if !quick {
         return;
     }
@@ -299,6 +361,7 @@ pub(crate) fn on_hook(event: &str, payload: Option<&Value>, session_id: &str) {
         cwd,
         session: datg_session(),
         denials: None,
+        claude_config: config,
         ilio: ilio_script(&env, dirs::home_dir().as_deref()),
         ilio_timeout: ILIO_TIMEOUT,
     };
@@ -308,6 +371,7 @@ pub(crate) fn on_hook(event: &str, payload: Option<&Value>, session_id: &str) {
         Outcome::Replayed(p) => eprintln!("tm hook: IL {p} already applied"),
         Outcome::Applied(a) => eprintln!("tm hook: IL {} applied, v{}", a.packet, a.v),
         Outcome::IlioApplied(p, s) => eprintln!("tm hook: IL {p} applied by ilio.py: {s}"),
+        Outcome::Proposed(p) => eprintln!("tm hook: IL {p} is a proposal, not applied"),
         Outcome::Failed(code) => eprintln!("tm hook: IL block NOT applied [{code}]"),
         Outcome::NoBlock | Outcome::NoLedger => {}
     }

@@ -5,3 +5,4 @@ Added
 - The IL checker refuses `ilio.py`'s own `SECRET` shapes (`password|secret|token|api_key` assignments, `sk-` keys, private-key headers, any case) as well as the injected scan (G0b).
 - An `il::apply` whose `act` lines fail after the batch commits is no longer a replay: applying the packet again appends the acts once, and the packet replays only after they land (G0b).
 - `il::hold`, `il::mark_pending`, `il::clear_pending` and `il::pending_unknown`: a per-store apply lock and pending markers, so one packet runs `ilio.py apply` at most once (G0b).
+- `il::apply` and `il::route` write only what the caller hands them; the `tm hook` caller hands them the session's own turn only, never a handback or inbound message (see G0b IL authority (owner decision pending)).

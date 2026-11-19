@@ -1,11 +1,13 @@
-//! G0b: each hook entry point applies an IL block to its session's store;
-//! a refused block writes nothing and lands in the denial store.
+//! G0b: a block in the session's own turn (`Stop`) is applied to its store;
+//! a block from a handback or an inbound message is only a proposal; a
+//! refused block writes nothing and lands in the denial store.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use trusty_architect::FakeClock;
+use trusty_architect::ledger::il;
 use trusty_architect::ledger::writer::Writer;
 
 use super::{Entry, Outcome, Target, run, turn_text};
@@ -41,6 +43,7 @@ fn target(root: &Path, session: &str) -> Target {
         cwd: root.to_path_buf(),
         session: Some(session.to_owned()),
         denials: Some(root.join("denials.jsonl")),
+        claude_config: Some(root.join("claude")),
         ilio: None,
         ilio_timeout: std::time::Duration::from_secs(5),
     }
@@ -59,47 +62,105 @@ fn next_of(dir: &Path) -> String {
     st["session"]["next"].as_str().unwrap_or("").to_owned()
 }
 
-#[test]
-fn each_entry_point_applies_the_block_to_its_own_session() {
-    let cases = [
-        (
-            "PostToolUse",
-            json!({"tool_name": "Agent", "tool_response": {"content": [{"type": "text", "text": BLOCK}]}}),
-            "pm-a",
-            Entry::AgentHandback,
-        ),
-        (
-            "UserPromptSubmit",
-            json!({"prompt": format!("[from pm-b]\n{BLOCK}")}),
-            "pm-b",
-            Entry::InboundMessage,
-        ),
-        (
-            "UserPromptSubmit",
-            json!({"prompt": BLOCK}),
-            "tm-architect",
-            Entry::ArchitectPrompt,
-        ),
-    ];
-    for (event, payload, session, entry) in cases {
-        let (tmp, dir) = repo(session);
-        let t = target(tmp.path(), session);
-        assert_eq!(
-            turn_text(event, &payload, Some(session)).map(|(e, _)| e),
-            Some(entry)
-        );
-        match go(event, &payload, &t) {
-            Outcome::Applied(a) => assert!(!a.replayed && a.acts == 1, "{session}: {a:?}"),
+/// A `Stop` payload whose transcript's last assistant message is `text`.
+fn stop_payload(t: &Target, text: &str) -> serde_json::Value {
+    let dir = t.claude_config.as_ref().expect("config").join("projects");
+    fs::create_dir_all(&dir).expect("projects dir");
+    let path = dir.join("s.jsonl");
+    let line =
+        json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}});
+    fs::write(&path, format!("{{\"type\":\"user\"}}\n{line}\n")).expect("transcript");
+    json!({"transcript_path": path})
+}
+
+/// The session's own turn ends with `text`.
+fn own(text: &str, t: &Target) -> Outcome {
+    go("Stop", &stop_payload(t, text), t)
+}
+
+/// A block from outside the own turn: proposal, ledger and log unchanged,
+/// one `il-auto-apply:PROPOSAL` record per packet even when it is replayed.
+fn assert_proposal(event: &str, payload: &serde_json::Value, session: &str, entry: Entry) {
+    let (tmp, dir) = repo(session);
+    let t = target(tmp.path(), session);
+    let before = (
+        fs::read(dir.join("state.json")).expect("state"),
+        fs::read(dir.join("log.jsonl")).expect("log"),
+    );
+    assert_eq!(
+        turn_text(event, payload, Some(session), None).map(|(e, _)| e),
+        Some(entry)
+    );
+    for _ in 0..2 {
+        match go(event, payload, &t) {
+            Outcome::Proposed(p) => assert_eq!(Some(p), il::packet_id(BLOCK)),
             other => panic!("{session}: {other:?}"),
         }
-        assert_eq!(next_of(&dir), "ship it", "{session}");
-        let log = fs::read_to_string(dir.join("log.jsonl")).expect("log");
-        assert!(log.contains(&format!("\"kind\":\"act\",\"session\":\"{session}\"")));
-        match go(event, &payload, &t) {
-            Outcome::Replayed(_) => {}
-            other => panic!("{session} replay: {other:?}"),
-        }
     }
+    let after = (
+        fs::read(dir.join("state.json")).expect("state"),
+        fs::read(dir.join("log.jsonl")).expect("log"),
+    );
+    assert_eq!(before, after, "{session}: a proposal changed the ledger");
+    let rec = denials(tmp.path());
+    assert_eq!(rec.matches("il-auto-apply:PROPOSAL").count(), 1, "{rec}");
+    assert!(rec.contains(entry.label()), "{rec}");
+    assert!(
+        rec.contains(&il::packet_id(BLOCK).expect("packet")),
+        "{rec}"
+    );
+}
+
+#[test]
+fn a_handback_block_is_a_proposal_and_leaves_the_ledger_unchanged() {
+    let payload = json!({"tool_name": "Agent", "tool_response": {"content": [{"type": "text", "text": BLOCK}]}});
+    assert_proposal("PostToolUse", &payload, "pm-a", Entry::AgentHandback);
+}
+
+#[test]
+fn an_inbound_block_is_a_proposal_and_leaves_the_ledger_unchanged() {
+    let from_pm = json!({"prompt": format!("[from pm-b]\n{BLOCK}")});
+    assert_proposal("UserPromptSubmit", &from_pm, "pm-b", Entry::InboundMessage);
+    let architect = json!({"prompt": BLOCK});
+    assert_proposal(
+        "UserPromptSubmit",
+        &architect,
+        "tm-architect",
+        Entry::ArchitectPrompt,
+    );
+}
+
+#[test]
+fn an_own_turn_block_is_applied_and_its_replay_is_a_no_op() {
+    let (tmp, dir) = repo("pm-a");
+    let t = target(tmp.path(), "pm-a");
+    let payload = stop_payload(&t, &format!("done.\n{BLOCK}"));
+    assert_eq!(
+        turn_text("Stop", &payload, Some("pm-a"), t.claude_config.as_deref()).map(|(e, _)| e),
+        Some(Entry::OwnTurn)
+    );
+    match go("Stop", &payload, &t) {
+        Outcome::Applied(a) => assert!(!a.replayed && a.acts == 1, "{a:?}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(next_of(&dir), "ship it");
+    let log = fs::read_to_string(dir.join("log.jsonl")).expect("log");
+    assert!(log.contains("\"kind\":\"act\",\"session\":\"pm-a\""));
+    assert!(matches!(go("Stop", &payload, &t), Outcome::Replayed(_)));
+    assert!(denials(tmp.path()).is_empty());
+}
+
+#[test]
+fn a_stop_transcript_outside_the_config_dir_is_not_read() {
+    let (tmp, dir) = repo("pm-a");
+    let t = target(tmp.path(), "pm-a");
+    let stray = tmp.path().join("stray.jsonl");
+    let line = json!({"type": "assistant", "message": {"content": BLOCK}});
+    fs::write(&stray, format!("{line}\n")).expect("stray");
+    let before = next_of(&dir);
+    let got = go("Stop", &json!({"transcript_path": stray}), &t);
+    assert!(matches!(got, Outcome::NoBlock), "{got:?}");
+    assert_eq!(next_of(&dir), before);
 }
 
 #[test]
@@ -111,13 +172,13 @@ fn a_rejected_block_writes_nothing_and_is_recorded_for_list_recent_errors() {
         "```il\ntask: xa-T01\ndone: d\npct: 5\nnext: n\nact: {}\n```",
         "y".repeat(250)
     );
-    let got = go("UserPromptSubmit", &json!({"prompt": bad}), &t);
+    let got = own(&bad, &t);
     assert!(matches!(&got, Outcome::Failed(c) if c == "LONG"), "{got:?}");
     assert_eq!(fs::read(dir.join("state.json")).expect("state"), before);
     let rec = fs::read_to_string(tmp.path().join("denials.jsonl")).expect("a denial record");
     assert!(rec.contains("il-auto-apply:LONG"), "{rec}");
     assert!(
-        rec.contains("il auto-apply refused il:inbound-message [LONG]"),
+        rec.contains("il auto-apply refused il:own-turn [LONG]"),
         "{rec}"
     );
 }
@@ -129,7 +190,7 @@ fn a_failed_write_is_never_reported_as_applied() {
     let t = target(tmp.path(), "pm-a");
     let _ = fs::remove_file(dir.join(".lock"));
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).expect("chmod");
-    let got = go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t);
+    let got = own(BLOCK, &t);
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod");
     assert!(
         matches!(&got, Outcome::Failed(c) if c == "WRITE"),
@@ -143,20 +204,14 @@ fn a_failed_write_is_never_reported_as_applied() {
 fn no_block_and_no_ledger_do_nothing() {
     let (tmp, _dir) = repo("pm-a");
     let t = target(tmp.path(), "pm-a");
-    assert!(matches!(
-        go("UserPromptSubmit", &json!({"prompt": "hi"}), &t),
-        Outcome::NoBlock
-    ));
+    assert!(matches!(own("hi", &t), Outcome::NoBlock));
     let read = json!({"tool_name": "Read", "tool_response": BLOCK});
     assert!(matches!(go("PostToolUse", &read, &t), Outcome::NoBlock));
     let empty = tempfile::tempdir().expect("tempdir");
     let t2 = target(empty.path(), "pm-a");
-    assert!(matches!(
-        go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t2),
-        Outcome::NoLedger
-    ));
+    assert!(matches!(own(BLOCK, &t2), Outcome::NoLedger));
     // G0b critic: recorded once per packet, never silently dropped.
-    let again = go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t2);
+    let again = own(BLOCK, &t2);
     assert!(matches!(again, Outcome::NoLedger));
     let rec = denials(empty.path());
     assert_eq!(rec.matches("il-auto-apply:NO-LEDGER").count(), 1, "{rec}");
@@ -193,7 +248,7 @@ fn a_fully_covered_block_takes_the_rust_path_and_never_runs_ilio() {
     let (tmp, dir) = repo("pm-a");
     let mut t = target(tmp.path(), "pm-a");
     t.ilio = Some(fake_ilio(tmp.path(), "print('wrote 1 op(s)')"));
-    let got = go("UserPromptSubmit", &json!({"prompt": BLOCK}), &t);
+    let got = own(BLOCK, &t);
     assert!(
         matches!(&got, Outcome::Applied(a) if a.acts == 1),
         "{got:?}"
@@ -210,7 +265,7 @@ fn a_block_with_new_runs_ilio_once_with_the_block_on_stdin() {
     t.ilio = Some(script.clone());
     let before = fs::read(dir.join("state.json")).expect("state");
     let prompt = format!("[from pm-a]\n{NEW_BLOCK}");
-    let got = go("UserPromptSubmit", &json!({"prompt": prompt}), &t);
+    let got = own(&prompt, &t);
     assert!(
         matches!(&got, Outcome::IlioApplied(_, s) if s == "wrote 2 op(s)"),
         "{got:?}"
@@ -225,7 +280,7 @@ fn a_block_with_new_runs_ilio_once_with_the_block_on_stdin() {
     // The Rust ops did not also run.
     assert_eq!(fs::read(dir.join("state.json")).expect("state"), before);
     // A replay is a no-op on the ilio path.
-    let again = go("UserPromptSubmit", &json!({"prompt": prompt}), &t);
+    let again = own(&prompt, &t);
     assert!(matches!(again, Outcome::Replayed(_)), "{again:?}");
     assert_eq!(calls(tmp.path()).len(), 1, "ilio ran twice");
     assert!(denials(tmp.path()).is_empty());
@@ -247,7 +302,7 @@ fn ilio_failures_are_never_applied() {
             None => tmp.path().join("absent/ilio.py"),
         });
         t.ilio_timeout = std::time::Duration::from_millis(1500);
-        let got = go("UserPromptSubmit", &json!({"prompt": NEW_BLOCK}), &t);
+        let got = own(NEW_BLOCK, &t);
         assert!(
             matches!(&got, Outcome::Failed(c) if c == code),
             "{code}: {got:?}"
@@ -289,7 +344,7 @@ fn each_new_check_rejects_before_any_apply() {
     ];
     for (body, code) in cases {
         let block = format!("```il\n{}\n```", body.replace("\\n", "\n"));
-        let got = go("UserPromptSubmit", &json!({"prompt": block}), &t);
+        let got = own(&block, &t);
         assert!(
             matches!(&got, Outcome::Failed(c) if c == code),
             "{code}: {got:?}"
@@ -354,10 +409,10 @@ fn two_concurrent_deliveries_apply_once() {
         tmp.path(),
         "import time; time.sleep(0.5); print('wrote 2 op(s)')",
     ));
-    let payload = json!({"prompt": NEW_BLOCK});
+    let payload = stop_payload(&t, NEW_BLOCK);
     let got: Vec<Outcome> = std::thread::scope(|s| {
         let runs: Vec<_> = (0..2)
-            .map(|_| s.spawn(|| go("UserPromptSubmit", &payload, &t)))
+            .map(|_| s.spawn(|| go("Stop", &payload, &t)))
             .collect();
         runs.into_iter().map(|h| h.join().expect("join")).collect()
     });
@@ -377,7 +432,6 @@ fn two_concurrent_deliveries_apply_once() {
 
 #[test]
 fn a_stale_pending_marker_is_not_re_run() {
-    use trusty_architect::ledger::il;
     let (tmp, dir) = repo("pm-a");
     let mut t = target(tmp.path(), "pm-a");
     t.ilio = Some(fake_ilio(tmp.path(), "print('wrote 2 op(s)')"));
@@ -385,7 +439,7 @@ fn a_stale_pending_marker_is_not_re_run() {
     let packet = il::packet_id(NEW_BLOCK).expect("packet");
     // A run killed after it started: a marker and no applied record.
     il::mark_pending(&paths, &packet).expect("pending");
-    let got = go("UserPromptSubmit", &json!({"prompt": NEW_BLOCK}), &t);
+    let got = own(NEW_BLOCK, &t);
     assert!(
         matches!(&got, Outcome::Failed(c) if c == "PENDING-UNKNOWN"),
         "{got:?}"
