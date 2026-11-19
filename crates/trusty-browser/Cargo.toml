@@ -1,6 +1,6 @@
 [package]
 name = "trusty-browser"
-version = "0.7.0"
+version = "0.8.0"
 description = "Trusty Browser broker and MCP server: lets local AI agents drive your own Chrome profile through paired, per-workflow grants"
 readme = "README.md"
 homepage = "https://trustytools.dev"
