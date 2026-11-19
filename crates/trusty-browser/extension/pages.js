@@ -4,8 +4,8 @@
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
 if (!globalThis.TrustyPageRead && typeof importScripts === "function") importScripts("pages_read.js");
 globalThis.TrustyPages = (() => {
-  // Returns [origin, title] and changes nothing; the InjectionResult supplies the documentId.
-  function pageProbe() { return [location.origin, document.title]; }
+  // Returns [origin, title, url] and changes nothing; the InjectionResult supplies the documentId.
+  function pageProbe() { return [location.origin, document.title, location.href.slice(0, 2048)]; }
 
   // Why: a trusted click must land only on the element a read of this document reported (#11294); the
   //   worker then drives real input at the point this returns.
@@ -507,8 +507,8 @@ globalThis.TrustyPages = (() => {
   }
   const modifiersAllowed = value => Array.isArray(value) && value.every(m => MODIFIERS.includes(m)) &&
     new Set(value).size === value.length;
-  const {pageInspect, pageRead, pageFind} = globalThis.TrustyPageRead;
-  return {pageProbe, pageInspect, pageRead, pageFind, pageTarget, pageHover, pageKeys, pageType, pagePress,
+  const {pageInspect, pageRead, pageFind, pageFrames} = globalThis.TrustyPageRead;
+  return {pageProbe, pageInspect, pageRead, pageFind, pageFrames, pageTarget, pageHover, pageKeys, pageType, pagePress,
     pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed, keyAllowed, modifiersAllowed};
 })();
 
@@ -517,7 +517,7 @@ globalThis.TrustyPages = (() => {
 //   then runs it against the explicit tab id. No path reads "the active tab".
 // Test: tests/test_worker.mjs `a tab grant never reaches another tab`, `stale document refuses before the page runs`.
 TrustyPages.commands = deps => {
-  const {pageProbe, pageInspect, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
+  const {pageProbe, pageInspect, pageFrames, pageTarget, pageHover, pageKeys, pageScroll, pageSelect, pageSetFiles, pageDrag, trusted, urlAllowed,
     keyAllowed, modifiersAllowed} = TrustyPages;
   // #11352: a TextDropped refusal also says what was typed and what landed.
   const RELAYED = ["tab","origin","access","document","typed","accepted","entered"];
@@ -526,6 +526,9 @@ TrustyPages.commands = deps => {
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
   const ref = v => typeof v === "string" && REF.test(v);
+  // #11301: a ref from a cross-origin child frame is "<frameKey>:<epoch>.<n>"; only scope_ref and within_ref take it.
+  const FRAME_REF = /^([0-9]{1,9}):([0-9]{1,9}\.[0-9]{1,6})$/;
+  const scopeRef = v => v === null || ref(v) || (typeof v === "string" && FRAME_REF.test(v));
   const bool = v => typeof v === "boolean";
   const term = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 200);
   const SCROLL_TO = ["down","up","top","bottom","element"];
@@ -542,10 +545,10 @@ TrustyPages.commands = deps => {
     page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
     // #11356: the broker always sends every read control.
-    page_read:{tab, document:doc, scope_ref:v => v === null || ref(v), viewport_only:bool, include_text:bool,
+    page_read:{tab, document:doc, scope_ref:scopeRef, viewport_only:bool, include_text:bool,
       max_chars:v => Number.isInteger(v) && v >= 1000 && v <= 250000},
     // #11357: at least one of role, name and text; within_ref limits the search to a subtree.
-    page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || ref(v),
+    page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:scopeRef,
       limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
     page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
@@ -564,16 +567,148 @@ TrustyPages.commands = deps => {
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
   const none = {access:false, document:null, origin:null, title:null};
 
-  async function probe(tabId) {
+  // `withUrl` adds the top document's url (#11301); page_tab's PROBE result carries none.
+  async function probe(tabId, withUrl = false) {
     let hit;
     try {
       [hit] = await chrome.scripting.executeScript({target:{tabId, frameIds:[0]}, func:pageProbe});
     } catch { return none; }
     if (!Array.isArray(hit?.result) || typeof hit.documentId !== "string" || typeof hit.result[0] !== "string") return none;
     await deps.remember(tabId, hit.result[0]);
-    return {access:true, document:hit.documentId, origin:hit.result[0], title:String(hit.result[1]).slice(0, 200)};
+    const seen = {access:true, document:hit.documentId, origin:hit.result[0], title:String(hit.result[1]).slice(0, 200)};
+    return withUrl ? {...seen, url:String(hit.result[2] ?? "").slice(0, 2048)} : seen;
   }
   async function needed(tabId) { return refuse("PermissionNeeded", {tab:tabId, origin:await deps.originOf(tabId)}); }
+
+  // #11301: cross-origin child frames for page_read and page_find (docs/activation-codes.md, "Element addressing").
+  const CHILD_FRAMES = 8, DENIED_FRAMES = 20, READ_LIMIT = 262144 - 512;
+  // "<tab>:<frameKey>" -> {document, origin, url} of the child document a read reported, so a frame-scoped ref
+  // names that document only.
+  const frameDocs = new Map();
+  // True only when Chrome holds host permission for `origin` itself; activeTab and a parent's grant do not count.
+  async function granted(origin) {
+    let url;
+    try { url = new URL(origin); } catch { return false; }
+    if (url.protocol !== "https:" && url.protocol !== "http:") return false;
+    try {
+      return await chrome.permissions.contains({origins:[url.protocol + "//" + url.hostname + "/*"]}) === true;
+    } catch { return false; }
+  }
+  // Why: a child frame's content may reach the agent only under host permission for that child's own origin
+  //   (#11301); the worker holds no webNavigation permission, so it finds frames by injecting.
+  // What: injects pageFrames into every frame. Each root child frame (its parent is cross-origin) is checked on
+  //   its own origin: an opaque origin, a missing permission or more than CHILD_FRAMES granted frames deny it.
+  //   Declared cross-origin children Chrome did not inject into are denied when their origin is not granted.
+  //   Answers null when the top frame did not answer, else {top, frames, denied}; it reads no child content.
+  // Test: tests/extension/test_frames.mjs `a granted child frame is read with attribution`,
+  //   `a child frame without host permission is denied with no content`, `grants are not inherited by grandchildren`.
+  async function framesOf(tabId) {
+    let hits;
+    try { hits = await chrome.scripting.executeScript({target:{tabId, allFrames:true}, func:pageFrames}); } catch { return null; }
+    const top = Array.isArray(hits) ? hits.find(h => h?.frameId === 0) : null;
+    if (typeof top?.documentId !== "string" || typeof top.result?.origin !== "string") return null;
+    const frames = [], denied = new Map(), seen = new Set();
+    const deny = (origin, reason) => { if (denied.size < DENIED_FRAMES && !denied.has(origin)) denied.set(origin, reason); };
+    const listed = h => Array.isArray(h.result.children) ? h.result.children.filter(o => typeof o === "string") : [];
+    const declared = listed(top);
+    const roots = hits.filter(h => Number.isInteger(h?.frameId) && h.frameId !== 0 && h.result?.root === true &&
+      typeof h.documentId === "string" && typeof h.result.origin === "string").sort((a, b) => a.frameId - b.frameId);
+    for (const h of roots) {
+      const origin = h.result.origin;
+      seen.add(origin);
+      if (!/^https?:\/\//.test(origin)) deny(origin, "opaque");
+      else if (!await granted(origin)) deny(origin, "no_permission");
+      else if (frames.length === CHILD_FRAMES) deny(origin, "frame_limit");
+      else {
+        frames.push({id:h.frameId, origin, url:String(h.result.url ?? "").slice(0, 2048), document:h.documentId});
+        declared.push(...listed(h));
+      }
+    }
+    for (const origin of declared) {
+      if (seen.has(origin)) continue;
+      seen.add(origin);
+      if (!await granted(origin)) deny(origin, "no_permission");
+    }
+    return {top, frames, denied:[...denied].map(([origin, reason]) => ({origin, reason}))};
+  }
+  const frameKey = (tab, id) => tab + ":" + id;
+  // A child entry's ref (and its container's) gain the frame key; every entry names its frame.
+  const inFrame = (id, entry) => id === 0 ? {...entry, frame:0} : {...entry, ref:id + ":" + entry.ref, frame:id,
+    ...(entry.in ? {in:{...entry.in, ref:id + ":" + entry.in.ref}} : {})};
+  const size = value => new TextEncoder().encode(JSON.stringify(value)).length;
+  // Cuts text first, then entries from the end (child frames come last), until `out` fits `budget`.
+  function fit(out, list, budget) {
+    for (let over = size(out) - budget; over > 0; over = size(out) - budget) {
+      out.truncated = true;
+      if (out.text) out.text = out.text.slice(0, Math.max(0, out.text.length - over));
+      else if (out[list].length) out[list].pop();
+      else break;
+    }
+    return out;
+  }
+  // Runs pageInspect in one child document only; null when it navigated or answered another origin.
+  async function childInspect(tabId, frame, mode, options) {
+    let hit;
+    try {
+      [hit] = await chrome.scripting.executeScript({target:{tabId, documentIds:[frame.document]}, func:pageInspect,
+        args:[mode, 512, {...options, frame:true}]});
+    } catch { return null; }
+    const result = hit?.result;
+    if (!result || result.error || hit.documentId !== frame.document || result.origin !== frame.origin) return null;
+    return result;
+  }
+  // Why: one result must say which frame each entry came from and which frames were withheld (#11301).
+  // What: adds `frames` ({id, origin, url, document}, the top first as id 0) and `denied_frames`, reads each
+  //   granted child with its share of the budget, appends its entries with frame-scoped refs, records
+  //   frameKey -> documentId for later scoped reads, then bounds the list to `limit` and the bytes to `budget`.
+  // Test: tests/extension/test_frames.mjs `a granted child frame is read with attribution`,
+  //   `the frame count and byte share stay inside the result budget`.
+  async function withFrames(req, base, plan, mode, options, limit, budget) {
+    const list = mode === "read" ? "elements" : "matches";
+    for (const key of [...frameDocs.keys()]) if (key.startsWith(req.tab + ":")) frameDocs.delete(key);
+    const url = base.url ?? String(plan.top.result.url ?? "").slice(0, 2048);
+    const out = {...base, [list]:base[list].map(e => inFrame(0, e))};
+    const frames = [{id:0, origin:base.origin, url, document:base.document}], denied = [...plan.denied];
+    for (const frame of plan.frames) {
+      const child = await childInspect(req.tab, frame, mode, options);
+      if (!Array.isArray(child?.[list])) {
+        if (!denied.some(d => d.origin === frame.origin)) denied.push({origin:frame.origin, reason:"navigated"});
+        continue;
+      }
+      frames.push(frame);
+      frameDocs.set(frameKey(req.tab, frame.id), {document:frame.document, origin:frame.origin, url:frame.url});
+      out[list].push(...child[list].map(e => inFrame(frame.id, e)));
+      if (child.truncated) out.truncated = true;
+    }
+    if (out[list].length > limit) { out[list].length = limit; out.truncated = true; }
+    return fit({...out, frames, denied_frames:denied.slice(0, DENIED_FRAMES)}, list, budget);
+  }
+  // Why: a frame-scoped ref must name the child document it was read from, never one the frame navigated to.
+  // What: looks up the frame key a read recorded (StaleElement when unknown), re-checks the child origin's
+  //   permission, and injects only into that documentId: a navigated frame's document is gone, so Chrome
+  //   refuses and the ref answers StaleElement.
+  // Test: tests/extension/test_frames.mjs `a child ref is refused once its frame navigated`.
+  async function frameScoped(req, mode, key, options) {
+    const [, id, local] = FRAME_REF.exec(req[key]);
+    const known = frameDocs.get(frameKey(req.tab, id));
+    if (!known) throw refuse("StaleElement", {tab:req.tab});
+    const top = await probe(req.tab, true);
+    if (!top.access || !await granted(known.origin)) throw await needed(req.tab);
+    const frame = {id:Number(id), ...known};
+    const result = await childInspect(req.tab, frame, mode, {...options, [key]:local});
+    const list = mode === "read" ? "elements" : "matches";
+    if (!Array.isArray(result?.[list])) {
+      frameDocs.delete(frameKey(req.tab, id));
+      throw refuse("StaleElement", {tab:req.tab});
+    }
+    const head = {document:top.document, origin:top.origin};
+    const out = mode === "read" ? {...head, url:top.url, title:top.title, text:result.text, elements:[],
+      truncated:result.truncated} : {...head, matches:[], truncated:result.truncated === true};
+    out[list] = result[list].map(e => inFrame(frame.id, e));
+    const frames = [{id:0, origin:top.origin, url:top.url, document:top.document},
+      {id:frame.id, origin:known.origin, url:known.url, document:known.document}];
+    return fit({...out, frames, denied_frames:[]}, list, mode === "read" ? Math.min(READ_LIMIT, req.max_chars) : READ_LIMIT);
+  }
 
   // Resolves true at the tab's next "complete" (after a "loading" unless `loading` is already true),
   // false after `ms` or on cancel.
@@ -771,34 +906,49 @@ TrustyPages.commands = deps => {
     page_tab:req => probe(req.tab),
     async page_read(req) {
       await landed(req.tab);
+      const options = {scope_ref:req.scope_ref, max_chars:req.max_chars, viewport_only:req.viewport_only,
+        include_text:req.include_text};
+      if (FRAME_REF.test(req.scope_ref ?? "")) return frameScoped(req, "read", "scope_ref", options);
+      // #11301: an unscoped read also reads the granted cross-origin child frames, which share half the budget.
+      const plan = req.scope_ref === null ? await framesOf(req.tab) : null;
+      const many = plan !== null && (plan.frames.length > 0 || plan.denied.length > 0);
+      const budget = Math.min(READ_LIMIT, req.max_chars);
+      const share = many ? Math.floor(budget / 2 / Math.max(1, plan.frames.length)) : 0;
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect,
-          args:["read", 512, {scope_ref:req.scope_ref, max_chars:req.max_chars, viewport_only:req.viewport_only,
-            include_text:req.include_text}]});
+          args:["read", 512, many ? {...options, max_chars:budget - share * plan.frames.length} : options]});
       } catch { throw await needed(req.tab); }
       const result = hit?.result;
       if (result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
       if (!result || typeof hit.documentId !== "string" || typeof result.origin !== "string") throw await needed(req.tab);
       await deps.remember(req.tab, result.origin);
-      return {document:hit.documentId, origin:result.origin, url:result.url, title:result.title,
+      const base = {document:hit.documentId, origin:result.origin, url:result.url, title:result.title,
         text:result.text, elements:result.elements, truncated:result.truncated};
+      if (!many || hit.documentId !== plan.top.documentId) return base;
+      return withFrames(req, base, plan, "read", {scope_ref:null, max_chars:Math.max(1, share),
+        viewport_only:req.viewport_only, include_text:false}, 500, budget);
     },
     // #11357: a read like page_read, of matches only.
     async page_find(req) {
       if (req.role === null && req.name === null && req.text === null) throw refuse("InvalidRequest");
       await landed(req.tab);
+      const terms = {role:req.role, name:req.name, text:req.text, within_ref:req.within_ref, limit:req.limit};
+      if (FRAME_REF.test(req.within_ref ?? "")) return frameScoped(req, "find", "within_ref", terms);
+      const plan = req.within_ref === null ? await framesOf(req.tab) : null;
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, frameIds:[0]}, func:pageInspect,
-          args:["find", 512, {role:req.role, name:req.name, text:req.text, within_ref:req.within_ref, limit:req.limit}]});
+          args:["find", 512, terms]});
       } catch { throw await needed(req.tab); }
       const result = hit?.result;
       if (result?.error === "StaleElement") throw refuse("StaleElement", {tab:req.tab});
       if (!result || typeof hit.documentId !== "string" || typeof result.origin !== "string" ||
           !Array.isArray(result.matches)) throw await needed(req.tab);
       await deps.remember(req.tab, result.origin);
-      return {document:hit.documentId, origin:result.origin, matches:result.matches, truncated:result.truncated === true};
+      const base = {document:hit.documentId, origin:result.origin, matches:result.matches, truncated:result.truncated === true};
+      if (!plan || !(plan.frames.length || plan.denied.length) || hit.documentId !== plan.top.documentId) return base;
+      return withFrames(req, base, plan, "find", {...terms, within_ref:null}, req.limit, READ_LIMIT);
     },
     page_click:req => act(req, trusted.click),
     page_type:req => inject(req, pageKeys, [req.ref, "type", req.text]),

@@ -281,6 +281,8 @@ async fn dispatch(core: &Arc<Core>, session: &mut Session, request: &Json) -> Re
         ("outcome", Some(outcome)),
         ("tab", tab.map(Json::Int)),
         ("origin", origin.map(Json::from)),
+        // #11301: the child origins a cross-origin frame read returned.
+        ("frames", crate::pages_frames::child_hosts(&reply)),
     ];
     if core.audit.write("operation", &line(&after, extra)).is_err() {
         // The op ran but is unrecorded: end the grant and release no result.
