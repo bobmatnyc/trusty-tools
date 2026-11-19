@@ -88,7 +88,7 @@ mod ticket_methods;
 mod tools;
 
 pub use ancestry::{
-    OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
+    OsProcessTable, ProcComm, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
 pub use architect::ArchitectRefusal;
@@ -111,9 +111,9 @@ pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
 pub use remote_gate::{
-    EXIT_REFUSED, EXIT_UNAVAILABLE, EXIT_USAGE, GATE_DEADLINE, GATE_SUBCOMMAND, GateConfig,
-    GateReply, MAX_FRAME_BYTES, gate_reply, run_from_args as run_remote_gate_from_args,
-    run_remote_gate,
+    EXIT_REFUSED, EXIT_UNAVAILABLE, EXIT_USAGE, FRAME_READ_TIMEOUT, GATE_DEADLINE, GATE_SUBCOMMAND,
+    GateConfig, GateReply, MAX_FRAME_BYTES, SERVER_ABSENT, gate_reply,
+    run_from_args as run_remote_gate_from_args, run_remote_gate,
 };
 pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,

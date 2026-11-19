@@ -1,11 +1,12 @@
-//! `secrets.remote.*` and `remote-gate` over real sockets (#11464).
+//! `secrets.gate` and `remote-gate` over real sockets (#11464, D3a).
 //!
 //! A child of `wire_tests`, so it shares that module's fixture: every path
 //! is under a `TempDir` and the backends are in memory. The socket peer of
 //! every call is this test process; a test makes it the verified gate by
-//! giving it a `trusty-secrets` executable in the fake process table.
-//! The fixture's machine config is also the account config the server
-//! re-checks, so each test writes its `remote_hosts` there.
+//! giving it a `trusty-secrets` executable below a root `sshd-session`
+//! (its parent 10) in the fake process table. The fixture's machine config
+//! is also the account config the server re-checks, so each test writes
+//! its `remote_hosts` there.
 //!
 //! Test: itself.
 
@@ -17,10 +18,11 @@ use std::time::Instant;
 use super::*;
 use crate::server::audit::RemoteAgent;
 use crate::server::methods::Caller;
-use crate::server::remote;
 use crate::server::remote_gate::{
-    EXIT_REFUSED, EXIT_UNAVAILABLE, GATE_DEADLINE, GateConfig, gate_reply, run_remote_gate,
+    EXIT_REFUSED, EXIT_UNAVAILABLE, GATE_DEADLINE, GateConfig, SERVER_ABSENT, gate_reply,
+    run_remote_gate,
 };
+use crate::server::{exec, remote};
 
 /// An executable path whose file name is the gate's.
 const GATE_EXE: &str = "/opt/trusty/bin/trusty-secrets";
@@ -35,34 +37,50 @@ fn account(fx: &Fixture, hosts: &str) {
     std::fs::write(&fx.settings.machine_config, yaml).unwrap();
 }
 
-/// `HOST` listing `PROJECT`.
-fn listed(fx: &Fixture) {
-    account(
-        fx,
-        &format!("    {HOST}:\n      projects: [\"{PROJECT}\"]\n"),
-    );
+/// One host entry mapping `project` to `dir` with `keys`.
+fn host_entry(host: &str, project: &str, dir: &str, keys: &str) -> String {
+    format!("    {host}:\n      projects:\n        \"{project}\": \"{dir}\"\n{keys}")
 }
 
-/// An executable path whose file name is sshd's.
-const SSHD_EXE: &str = "/usr/sbin/sshd";
+/// The key list both seeded keys are on.
+const BOTH_KEYS: &str = "      keys: [OPEN_KEY, API_KEY]\n";
 
-/// `procs_with_me`, with this process running the gate's executable below
-/// an sshd at its parent 10.
+/// `HOST` mapping `PROJECT` to the fixture's checkout, both keys listed.
+fn listed(fx: &Fixture) {
+    account(fx, &host_entry(HOST, PROJECT, &fx.project(), BOTH_KEYS));
+}
+
+/// `procs_with_me`, this process running the gate's executable below a
+/// root `sshd-session` at its parent 10.
 fn gate_procs() -> Arc<FakeProcs> {
     let procs = gate_procs_without_sshd();
-    procs.set_executable(10, SSHD_EXE);
+    procs.set_comm(10, "sshd-session", 0);
     procs
 }
 
-/// `procs_with_me` running the gate's executable, with no sshd above it.
+/// `procs_with_me` running the gate's executable below a user shell.
 fn gate_procs_without_sshd() -> Arc<FakeProcs> {
     let procs = procs_with_me();
     procs.set_executable(me(), GATE_EXE);
+    procs.set_comm(10, "zsh", 501);
     procs
 }
 
-fn remote_params(name: &str) -> Value {
-    json!({"host": HOST, "project": PROJECT, "key": name, "agent": "session-7"})
+/// `secrets.gate` `resolve` params for `name` under `token`.
+fn gate_params(token: &str, name: &str) -> Value {
+    json!({"verb": "resolve", "token": token, "key": name, "host": HOST,
+        "project": PROJECT, "agent": "session-7"})
+}
+
+/// A grant of `keys` to this process, minted straight on `state`.
+fn token_on(fx: &Fixture, state: &State, keys: &[&str]) -> String {
+    let answer = exec::grant(state, Caller::new(Some(me())), grant_params(fx, me(), keys));
+    answer.unwrap()["token"].as_str().unwrap().to_owned()
+}
+
+/// `secrets.gate` from this process, straight on `state`.
+fn gate_call(state: &State, params: Value) -> Result<Value, ErrorKind> {
+    remote::gate(state, Caller::new(Some(me())), params)
 }
 
 /// A started server over `procs`, `OPEN_KEY` open and `API_KEY` denied.
@@ -73,11 +91,11 @@ async fn serve(fx: &Fixture, procs: Arc<FakeProcs>) -> Running {
     fx.start_state(state).await
 }
 
-/// Records of `method` in the fixture's audit log.
-fn remote_records(fx: &Fixture, method: AuditMethod) -> Vec<AuditRecord> {
+/// `secrets.resolve` records in the fixture's audit log.
+fn resolve_records(fx: &Fixture) -> Vec<AuditRecord> {
     records(fx)
         .into_iter()
-        .filter(|r| r.method == method)
+        .filter(|r| r.method == AuditMethod::Resolve)
         .collect()
 }
 
@@ -91,13 +109,18 @@ fn gate_config(fx: &Fixture) -> GateConfig {
     }
 }
 
-/// Run the gate on `frame`; its exit status and its one reply line.
-async fn gate(config: &GateConfig, frame: &str) -> (u8, Value) {
+/// Run the gate on `input` as stdin; its exit status and its reply line.
+async fn gate_raw(config: &GateConfig, input: String) -> (u8, Value) {
     let mut out = Vec::new();
-    let status = run_remote_gate(config, Cursor::new(format!("{frame}\n")), &mut out).await;
+    let status = run_remote_gate(config, Cursor::new(input), &mut out).await;
     let text = String::from_utf8(out).unwrap();
     assert_eq!(text.lines().count(), 1, "{text}");
     (status, serde_json::from_str(&text).unwrap())
+}
+
+/// Run the gate on one `frame` line.
+async fn gate(config: &GateConfig, frame: &str) -> (u8, Value) {
+    gate_raw(config, format!("{frame}\n")).await
 }
 
 /// A socket that counts connections and never answers.
@@ -134,26 +157,31 @@ impl Drop for Silent {
     }
 }
 
-/// Why: AC5, AC6 — through the verified gate an open key resolves, and its
-/// write-ahead allow record carries `host`, the label marked unverified,
-/// the project, `agent_parent: true` and `default_policy: true`.
+/// Why: AC5, AC6 — through the verified gate, with a grant token, an open
+/// key resolves, and its write-ahead allow record carries `host`, the label
+/// marked unverified, the project, `agent_parent: true` and
+/// `default_policy: true`.
 /// Red when `host` or `remote_agent` is not recorded.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_resolve_of_an_open_key_returns_it_with_a_remote_record() {
+async fn gate_resolve_of_an_open_key_returns_it_with_a_remote_record() {
     let fx = fixture();
     listed(&fx);
     let server = serve(&fx, gate_procs()).await;
+    let token = granted(&fx, me(), &["OPEN_KEY"]).await;
     let response = call(
         &fx.settings.socket,
-        method::REMOTE_RESOLVE,
-        remote_params("OPEN_KEY"),
+        method::GATE,
+        gate_params(&token, "OPEN_KEY"),
     )
     .await;
     server.stop().await;
 
     assert_eq!(ok(response)["value"], OPEN_VALUE);
-    let rows = remote_records(&fx, AuditMethod::RemoteResolve);
+    let rows: Vec<_> = resolve_records(&fx)
+        .into_iter()
+        .filter(|r| r.host.is_some())
+        .collect();
     assert_eq!(rows.len(), 1, "{rows:?}");
     let row = &rows[0];
     assert_eq!(row.decision, AuditDecision::Allow);
@@ -166,300 +194,280 @@ async fn remote_resolve_of_an_open_key_returns_it_with_a_remote_record() {
     assert_eq!(row.key.as_ref().map(SecretKey::as_str), Some("OPEN_KEY"));
 }
 
-/// Why: AC5 — a key the project denies to agents is refused through the
-/// gate as it is to a local agent: no value, an allow then a deny record.
-/// Red when the remote path resolves with `agent_parent` false.
+/// Why: design S1 (a), critic M-C (iii) — the gate peer has no agent
+/// ancestor, so plain `secrets.resolve` hands it a denied key; through
+/// `secrets.gate` the forced `agent_parent` refuses it: no value, an allow
+/// then a deny record, both naming the host.
+/// Red when the gate entry does not force `agent_parent`.
 /// Test: itself.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_resolve_of_a_denied_key_is_refused() {
+#[test]
+fn gate_resolve_of_a_denied_key_is_refused() {
     let fx = fixture();
     listed(&fx);
-    let server = serve(&fx, gate_procs()).await;
-    let response = call(
-        &fx.settings.socket,
-        method::REMOTE_RESOLVE,
-        remote_params("API_KEY"),
-    )
-    .await;
-    server.stop().await;
-
+    seed(&fx, "API_KEY", SENTINEL_VALUE, false);
+    let procs = gate_procs();
     assert_eq!(
-        fixed_error(&response, method::REMOTE_RESOLVE),
-        ErrorKind::AgentKeyDenied
+        crate::ancestry::has_agent_ancestor(procs.as_ref(), me()),
+        Ok(false)
     );
-    assert_no_value(&response);
-    let rows = remote_records(&fx, AuditMethod::RemoteResolve);
+    let (state, _grants) = state_with(&fx, procs);
+    // Control: the same peer and grant through the local path reads it.
+    let plain_token = token_on(&fx, &state, &["API_KEY"]);
+    let plain = exec::resolve(
+        &state,
+        Caller::new(Some(me())),
+        resolve_params(&plain_token, "API_KEY"),
+    );
+    assert_eq!(plain.unwrap()["value"], SENTINEL_VALUE);
+    let token = token_on(&fx, &state, &["API_KEY"]);
+    let refused = gate_call(&state, gate_params(&token, "API_KEY"));
+    assert_eq!(refused, Err(ErrorKind::AgentKeyDenied));
+    let rows: Vec<_> = resolve_records(&fx)
+        .into_iter()
+        .filter(|r| r.host.is_some())
+        .collect();
     let decisions: Vec<_> = rows.iter().map(|r| r.decision).collect();
     assert_eq!(decisions, [AuditDecision::Allow, AuditDecision::Deny]);
-    assert!(rows.iter().all(|r| r.host.as_deref() == Some(HOST)));
+    assert!(rows.iter().all(|r| r.agent_parent == Some(true)));
 }
 
-/// Why: Fail-Open Check — a peer whose executable is not the gate's is
-/// refused before the allowlist, and its record names no host, since the
-/// host is trusted only from the verified gate.
-/// Red when `verify_gate` is skipped.
+/// Why: design S1 (b), Fail-Open Check — a peer running another
+/// executable, or the gate's executable under Claude Code, is refused with
+/// `GateRefused` before anything decodes; it leaves one deny record
+/// (critic LOW, as `bridged`) naming the key and no host.
+/// Red when `verify_gate` is skipped or accepts an agent ancestor.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_resolve_from_a_non_gate_peer_is_refused() {
+async fn gate_from_a_non_gate_peer_is_refused() {
     let fx = fixture();
     listed(&fx);
-    let procs = procs_with_me();
-    procs.set_executable(me(), "/usr/bin/python3");
-    let server = serve(&fx, procs).await;
+    let other = gate_procs();
+    other.set_executable(me(), "/usr/bin/python3");
+    let server = serve(&fx, other).await;
+    let token = granted(&fx, me(), &["OPEN_KEY"]).await;
     let response = call(
         &fx.settings.socket,
-        method::REMOTE_RESOLVE,
-        remote_params("OPEN_KEY"),
+        method::GATE,
+        gate_params(&token, "OPEN_KEY"),
     )
     .await;
     server.stop().await;
-
-    assert_eq!(
-        fixed_error(&response, method::REMOTE_RESOLVE),
-        ErrorKind::RemoteRefused
-    );
-    assert!(!wire(&response).contains(OPEN_VALUE));
-    let rows = remote_records(&fx, AuditMethod::RemoteResolve);
+    assert_eq!(fixed_error(&response, method::GATE), ErrorKind::GateRefused);
+    assert_no_value(&response);
+    let rows = resolve_records(&fx);
     assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].decision, AuditDecision::Deny);
+    assert_eq!(
+        shape(&rows[0]),
+        (
+            AuditMethod::Resolve,
+            AuditDecision::Deny,
+            Some("gate_refused"),
+            Some("OPEN_KEY")
+        )
+    );
     assert_eq!(rows[0].host, None);
-}
 
-/// Why: Fail-Open Check — a gate with Claude Code above it is a local
-/// agent, which must use a grant; an unreadable chain refuses too.
-/// Red when an agent ancestor or a read error passes `verify_gate`.
-/// Test: itself.
-#[test]
-fn remote_resolve_from_a_gate_under_an_agent_is_refused() {
-    let fx = fixture();
-    listed(&fx);
-    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
     let agent = gate_procs();
     agent.set_agent(10);
-    let unreadable = gate_procs();
-    unreadable.set_unreadable();
-    for procs in [agent, unreadable] {
-        let (state, _grants) = state_with(&fx, procs);
-        let refused = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
-        assert_eq!(refused, Err(ErrorKind::RemoteRefused));
-    }
+    let (state, _grants) = state_with(&fx, agent);
+    let refused = gate_call(&state, gate_params("t", "OPEN_KEY"));
+    assert_eq!(refused, Err(ErrorKind::GateRefused));
 }
 
-/// Why: #11464 critic M1 — a detached local process running the gate's
-/// executable has no Claude Code ancestor but never came in over ssh; with
-/// no sshd above it, or an sshd not owned by root, it is refused.
-/// Red when `verify_gate` does not require a root-owned sshd ancestor.
+/// Why: critic M-C (i), M1 — a detached local process running the gate's
+/// executable has no Claude Code ancestor but never came in over ssh: with
+/// no sshd above it, or an sshd not owned by root, it is refused. Both
+/// `sshd` and OpenSSH 9.8+'s `sshd-session` pass (M-B).
+/// Red when `verify_gate` does not require a root sshd ancestor.
 /// Test: itself.
 #[test]
-fn remote_resolve_from_a_gate_with_no_sshd_ancestor_is_refused() {
+fn gate_from_a_peer_with_no_sshd_ancestor_is_refused() {
     let fx = fixture();
     listed(&fx);
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
     let (state, _grants) = state_with(&fx, gate_procs_without_sshd());
-    let refused = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
-    assert_eq!(refused, Err(ErrorKind::RemoteRefused));
-    let renamed = gate_procs_without_sshd();
-    renamed.set_executable(10, "/tmp/evil/sshd");
-    let (mut state, _grants) = state_with(&fx, renamed);
-    state.exe_owner = |_| Some(501);
-    let refused = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
-    assert_eq!(refused, Err(ErrorKind::RemoteRefused));
-    let (state, _grants) = state_with(&fx, gate_procs());
-    let allowed = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
-    assert!(allowed.is_ok(), "{allowed:?}");
+    let refused = gate_call(&state, gate_params("t", "OPEN_KEY"));
+    assert_eq!(refused, Err(ErrorKind::GateRefused));
+    let user_sshd = gate_procs_without_sshd();
+    user_sshd.set_comm(10, "sshd", 501);
+    let (state, _grants) = state_with(&fx, user_sshd);
+    let refused = gate_call(&state, gate_params("t", "OPEN_KEY"));
+    assert_eq!(refused, Err(ErrorKind::GateRefused));
+    for name in ["sshd", "sshd-session"] {
+        let procs = gate_procs();
+        procs.set_comm(10, name, 0);
+        let (state, _grants) = state_with(&fx, procs);
+        let token = token_on(&fx, &state, &["OPEN_KEY"]);
+        let allowed = gate_call(&state, gate_params(&token, "OPEN_KEY"));
+        assert_eq!(allowed.unwrap()["value"], OPEN_VALUE, "{name}");
+    }
 }
 
-/// Why: #11464 critic M2 — the preflight writes its record before it opens
-/// the backend, so an unwritable log opens nothing.
-/// Red when `state.open` runs before the write-ahead record.
+/// Why: critic M-C (ii) — an unreadable table, an ancestor whose short name
+/// cannot be read, an agent walk that reaches an unreadable pid above a
+/// valid sshd, and a parent loop (`ChainTooDeep`) each refuse; no read
+/// failure falls back to the local-caller path.
+/// Red when an unreadable step answers "verified".
 /// Test: itself.
 #[test]
-fn remote_doctor_with_unwritable_audit_never_opens_the_backend() {
-    static OPENS: AtomicUsize = AtomicUsize::new(0);
+fn gate_with_unreadable_ancestry_is_refused() {
     let fx = fixture();
     listed(&fx);
-    let base = fx.backends();
-    let counting: BackendFactory = Arc::new(move |id: &BackendId| {
-        OPENS.fetch_add(1, Ordering::SeqCst);
-        base(id)
-    });
-    let mut state = fx.state(counting);
-    state.grants = Arc::new(GrantRegistry::new(
-        gate_procs(),
-        Arc::new(FakeClock::at(T0)),
-        DEFAULT_MAX_TTL,
-    ));
-    let params = json!({"host": HOST, "project": PROJECT});
-    // Create the log's directory, then lock it.
-    remote::doctor(&state, Caller::new(Some(me())), params.clone()).unwrap();
-    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
-    set_mode(&dir, 0o755);
-    let restore = RestoreMode(dir);
-    let before = OPENS.load(Ordering::SeqCst);
-    let refused = remote::doctor(&state, Caller::new(Some(me())), params);
-    let opens = OPENS.load(Ordering::SeqCst) - before;
-    drop(restore);
-    assert_eq!(refused, Err(ErrorKind::AuditUnavailable));
-    assert_eq!(opens, 0, "the backend was opened with no audit record");
-}
-
-/// Why: #11464 critic L1 — the allowlist compares the canonical names the
-/// scopes are built from, so the frame's spelling cannot reach the scopes
-/// or the record, and an entry that does not parse matches nothing.
-/// Test: itself.
-#[test]
-fn remote_project_spelling_never_reaches_the_scopes() {
-    let fx = fixture();
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
-    account(
-        &fx,
-        &format!("    {HOST}:\n      projects: [\"ACME/Web\"]\n"),
-    );
-    let (state, _grants) = state_with(&fx, gate_procs());
-    let params = json!({"host": HOST, "project": "acme/WEB"});
-    let answer = remote::doctor(&state, Caller::new(Some(me())), params).unwrap();
-    assert_eq!(answer["project_vault"], PROJECT_VAULT);
-    let rows = remote_records(&fx, AuditMethod::RemoteDoctor);
-    assert_eq!(rows[0].remote_project.as_deref(), Some(PROJECT));
-    account(
-        &fx,
-        &format!("    {HOST}:\n      projects: [\"acme/web/x\"]\n"),
-    );
-    let (state, _grants) = state_with(&fx, gate_procs());
-    let refused = remote::doctor(
-        &state,
-        Caller::new(Some(me())),
-        json!({"host": HOST, "project": PROJECT}),
-    );
-    assert_eq!(refused, Err(ErrorKind::RemoteRefused));
+    let unreadable = gate_procs();
+    unreadable.set_unreadable();
+    let no_comm = procs_with_me();
+    no_comm.set_executable(me(), GATE_EXE);
+    // The sshd check passes; only the agent walk reaches the unreadable 77.
+    let agent_walk = gate_procs();
+    agent_walk.add(10, 77, 100);
+    let looped = gate_procs();
+    looped.add(me(), 60, 4242).add(60, 61, 1).add(61, 60, 1);
+    looped.set_comm(60, "zsh", 501);
+    looped.set_comm(61, "zsh", 501);
+    for procs in [unreadable, no_comm, agent_walk, looped] {
+        let (state, _grants) = state_with(&fx, procs);
+        let refused = gate_call(&state, gate_params("t", "OPEN_KEY"));
+        assert_eq!(refused, Err(ErrorKind::GateRefused));
+    }
 }
 
 /// Why: Fail-Open Check — with no peer pid there is no gate to verify.
 /// Red when a missing pid skips the check.
 /// Test: itself.
 #[test]
-fn remote_resolve_with_no_peer_pid_is_refused() {
+fn gate_with_no_peer_pid_is_refused() {
     let fx = fixture();
     listed(&fx);
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
     let (state, _grants) = state_with(&fx, gate_procs());
-    let refused = remote::resolve(&state, Caller::new(None), remote_params("OPEN_KEY"));
-    assert_eq!(refused, Err(ErrorKind::RemoteRefused));
+    let token = token_on(&fx, &state, &["OPEN_KEY"]);
+    let refused = remote::gate(&state, Caller::new(None), gate_params(&token, "OPEN_KEY"));
+    assert_eq!(refused, Err(ErrorKind::GateRefused));
+}
+
+/// Why: design S1 (c) — the inner verbs are a closed enum: any other verb,
+/// odd casing, or none, through a verified gate peer, is refused and
+/// resolves nothing.
+/// Red when the entry dispatches an unknown verb.
+/// Test: itself.
+#[test]
+fn gate_unknown_inner_verb_is_refused() {
+    let fx = fixture();
+    listed(&fx);
+    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+    let (state, _grants) = state_with(&fx, gate_procs());
+    let token = token_on(&fx, &state, &["OPEN_KEY"]);
+    for verb in [
+        json!("set"),
+        json!("delete"),
+        json!("grant"),
+        json!("list"),
+        json!("Resolve"),
+        Value::Null,
+    ] {
+        let mut params = gate_params(&token, "OPEN_KEY");
+        params["verb"] = verb.clone();
+        let refused = gate_call(&state, params);
+        assert_eq!(refused, Err(ErrorKind::InvalidParams), "{verb}");
+    }
+    let mut params = gate_params(&token, "OPEN_KEY");
+    params.as_object_mut().unwrap().remove("verb");
+    assert_eq!(gate_call(&state, params), Err(ErrorKind::InvalidParams));
+    // The grant was never spent: nothing resolved.
+    let allowed = gate_call(&state, gate_params(&token, "OPEN_KEY"));
+    assert_eq!(allowed.unwrap()["value"], OPEN_VALUE);
+}
+
+/// Why: critic M-C (iv) — `agent_parent` is forced by the server, never read
+/// from the request: a body carrying it, either way, is refused, as is any
+/// other unknown field on either verb.
+/// Red when the request type accepts unknown fields.
+/// Test: itself.
+#[test]
+fn gate_request_carrying_agent_parent_is_refused() {
+    let fx = fixture();
+    listed(&fx);
+    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+    let (state, _grants) = state_with(&fx, gate_procs());
+    let token = token_on(&fx, &state, &["OPEN_KEY"]);
+    for flag in [false, true] {
+        let mut params = gate_params(&token, "OPEN_KEY");
+        params["agent_parent"] = json!(flag);
+        assert_eq!(gate_call(&state, params), Err(ErrorKind::InvalidParams));
+    }
+    let doctor = json!({"verb": "doctor", "agent_parent": false});
+    assert_eq!(gate_call(&state, doctor), Err(ErrorKind::InvalidParams));
+    assert!(gate_call(&state, json!({"verb": "doctor"})).is_ok());
+}
+
+/// Why: critic M-A, M-C (v) — the entry wraps `secrets.resolve` unchanged,
+/// so through a verified gate peer a missing token does not decode and a
+/// wrong one is `GrantRefused`, with a deny record and no value.
+/// Red when the gate entry skips `check_scoped`.
+/// Test: itself.
+#[test]
+fn gate_with_a_missing_or_wrong_token_is_refused() {
+    let fx = fixture();
+    listed(&fx);
+    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+    let (state, _grants) = state_with(&fx, gate_procs());
+    let mut missing = gate_params("t", "OPEN_KEY");
+    missing.as_object_mut().unwrap().remove("token");
+    assert_eq!(gate_call(&state, missing), Err(ErrorKind::InvalidParams));
+    let wrong = gate_call(&state, gate_params("not-a-token", "OPEN_KEY"));
+    assert_eq!(wrong, Err(ErrorKind::GrantRefused));
+    let rows = resolve_records(&fx);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].decision, AuditDecision::Deny);
+    assert_eq!(rows[0].host.as_deref(), Some(HOST));
+    assert_eq!(
+        rows[0].reason.as_ref().map(|r| r.as_str()),
+        Some("grant_refused")
+    );
 }
 
 /// Why: AC2 on the server — the allowlist is re-checked in the account's
-/// file, so a client that skips the gate's pre-check gains nothing: an
-/// unknown host, an unlisted project and a disabled host are refused.
+/// file: an unknown host, an unmapped project, a disabled host, an unlisted
+/// key, no key list, a corrupt or absent file all refuse, even with a valid
+/// grant.
 /// Red when the server trusts the gate's pre-check.
 /// Test: itself.
 #[test]
-fn remote_resolve_of_an_unlisted_project_is_refused_by_the_server() {
+fn gate_resolve_off_the_server_allowlist_is_refused() {
     let fx = fixture();
     seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
+    let dir = fx.project();
     let cases = [
-        format!("    other-host:\n      projects: [\"{PROJECT}\"]\n"),
-        format!("    {HOST}:\n      projects: [\"acme/other\"]\n"),
-        format!("    {HOST}:\n      enabled: false\n      projects: [\"{PROJECT}\"]\n"),
+        host_entry("other-host", PROJECT, &dir, BOTH_KEYS),
+        host_entry(HOST, "acme/other", &dir, BOTH_KEYS),
+        format!(
+            "{}      enabled: false\n",
+            host_entry(HOST, PROJECT, &dir, BOTH_KEYS)
+        ),
+        host_entry(HOST, PROJECT, &dir, "      keys: [API_KEY]\n"),
+        host_entry(HOST, PROJECT, &dir, ""),
     ];
     for hosts in cases {
         account(&fx, &hosts);
         let (state, _grants) = state_with(&fx, gate_procs());
-        let refused = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
+        let token = token_on(&fx, &state, &["OPEN_KEY"]);
+        let refused = gate_call(&state, gate_params(&token, "OPEN_KEY"));
         assert_eq!(refused, Err(ErrorKind::RemoteRefused), "{hosts}");
     }
-}
-
-/// Why: Fail-Open Check — no account config, or one that does not parse,
-/// is no allowlist, never an open one.
-/// Red when a missing or corrupt file reads as "allowed".
-/// Test: itself.
-#[test]
-fn remote_resolve_with_an_unreadable_account_config_is_refused() {
-    let fx = fixture();
-    seed(&fx, "OPEN_KEY", OPEN_VALUE, true);
-    std::fs::write(&fx.settings.machine_config, "secrets: [not, a, map\n").unwrap();
-    let (state, _grants) = state_with(&fx, gate_procs());
-    let corrupt = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
-    assert_eq!(corrupt, Err(ErrorKind::RemoteRefused));
+    listed(&fx);
     let (mut state, _grants) = state_with(&fx, gate_procs());
+    let token = token_on(&fx, &state, &["OPEN_KEY"]);
     state.file_consent_config = None;
-    let absent = remote::resolve(&state, Caller::new(Some(me())), remote_params("OPEN_KEY"));
+    let absent = gate_call(&state, gate_params(&token, "OPEN_KEY"));
     assert_eq!(absent, Err(ErrorKind::RemoteRefused));
 }
 
-/// Why: AC6, audit fail-closed — an unwritable log refuses the remote
-/// resolve before the backend is read.
-/// Red when the read runs before the write-ahead record.
-/// Test: itself.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_resolve_with_unwritable_audit_never_reads_the_backend() {
-    let fx = fixture();
-    listed(&fx);
-    seed(&fx, "API_KEY", SENTINEL_VALUE, true);
-    let (mut state, racing, _grants) = racing_state(&fx);
-    state.grants = Arc::new(GrantRegistry::new(
-        gate_procs(),
-        Arc::new(FakeClock::at(T0)),
-        DEFAULT_MAX_TTL,
-    ));
-    let server = fx.start_state(state).await;
-    // Open the log once, so its directory exists to lock.
-    let warm = call(
-        &fx.settings.socket,
-        method::REMOTE_DOCTOR,
-        json!({"host": HOST, "project": PROJECT}),
-    )
-    .await;
-    ok(warm);
-    let before = racing.reads.load(Ordering::SeqCst);
-    let dir = fx.settings.audit_log.parent().unwrap().to_path_buf();
-    set_mode(&dir, 0o755);
-    let restore = RestoreMode(dir);
-    let refused = call(
-        &fx.settings.socket,
-        method::REMOTE_RESOLVE,
-        remote_params("API_KEY"),
-    )
-    .await;
-    let reads = racing.reads.load(Ordering::SeqCst) - before;
-    drop(restore);
-    server.stop().await;
-
-    assert_eq!(
-        fixed_error(&refused, method::REMOTE_RESOLVE),
-        ErrorKind::AuditUnavailable
-    );
-    assert_no_value(&refused);
-    assert_eq!(reads, 0, "the backend was read with no audit record");
-}
-
-/// Why: the preflight names the backend and the project vault, reads no
-/// value, and leaves one record with the host.
-/// Test: itself.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_doctor_names_the_backend_and_leaves_one_record() {
-    let fx = fixture();
-    listed(&fx);
-    let server = serve(&fx, gate_procs()).await;
-    let response = call(
-        &fx.settings.socket,
-        method::REMOTE_DOCTOR,
-        json!({"host": HOST, "project": PROJECT}),
-    )
-    .await;
-    server.stop().await;
-
-    let answer = ok(response);
-    assert_eq!(answer["backend"], "keychain");
-    assert_eq!(answer["project_vault"], PROJECT_VAULT);
-    let rows = remote_records(&fx, AuditMethod::RemoteDoctor);
-    assert_eq!(rows.len(), 1, "{rows:?}");
-    assert_eq!(rows[0].host.as_deref(), Some(HOST));
-}
-
-/// Why: AC1 — a verb other than `resolve` or `doctor` exits 13 and sends
-/// nothing; AC2 — an unlisted project or unknown host exits 13 before any
-/// relay. The socket counts every connection.
+/// Why: AC1 — a verb other than `resolve` or `doctor` (odd casing
+/// included) exits 13 and sends nothing; so does a frame that is not one
+/// typed value on one line: an unknown field, a duplicate key, a second
+/// value, a second frame, over-size or not JSON. The socket counts every
+/// connection.
 /// Red when the gate relays first, or checks verbs by a deny list.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -468,49 +476,124 @@ async fn remote_gate_refuses_an_unlisted_verb_and_sends_nothing() {
     listed(&fx);
     let silent = silent_socket(&fx.settings.socket);
     let config = gate_config(&fx);
-    let frames = [
-        (
-            r#"{"method":"set","project":"acme/web","key":"K"}"#,
-            "method_refused",
+    let resolve = r#"{"method":"resolve","project":"acme/web","key":"OPEN_KEY"}"#;
+    let mut inputs: Vec<(String, &str)> = [
+        "set",
+        "delete",
+        "set_agents_may_use",
+        "grant",
+        "secrets.gate",
+        "Resolve",
+        "DOCTOR",
+    ]
+    .iter()
+    .map(|verb| {
+        let frame = format!(r#"{{"method":"{verb}","project":"acme/web","key":"OPEN_KEY"}}"#);
+        (format!("{frame}\n"), "method_refused")
+    })
+    .collect();
+    for bad in [
+        r#"{"method":"resolve","project":"acme/web","key":"OPEN_KEY","host":"x"}"#.to_owned(),
+        r#"{"method":"resolve","method":"doctor","project":"acme/web","key":"OPEN_KEY"}"#
+            .to_owned(),
+        format!("{resolve} {{}}"),
+        format!("{resolve}\n{resolve}"),
+        format!(
+            r#"{{"method":"resolve","project":"acme/web","key":"{}"}}"#,
+            "K".repeat(70_000)
         ),
-        (
-            r#"{"method":"grant","project":"acme/web","key":"K"}"#,
-            "method_refused",
-        ),
-        (
-            r#"{"method":"secrets.remote.resolve","project":"acme/web","key":"K"}"#,
-            "method_refused",
-        ),
-        (
-            r#"{"method":"resolve","project":"acme/other","key":"K"}"#,
-            "remote_refused",
-        ),
-        (
-            r#"{"method":"resolve","project":"acme/web","key":"K","host":"x"}"#,
-            "invalid_frame",
-        ),
-        ("not json", "invalid_frame"),
-    ];
-    for (frame, kind) in frames {
-        let (status, line) = gate(&config, frame).await;
-        assert_eq!(status, EXIT_REFUSED, "{frame}");
-        assert_eq!(line, json!({"ok": false, "error": kind}), "{frame}");
+        "not json".to_owned(),
+    ] {
+        inputs.push((format!("{bad}\n"), "invalid_frame"));
     }
-    let unknown = GateConfig {
-        host: "other-host".to_owned(),
-        ..config
-    };
-    let (status, _) = gate(
-        &unknown,
-        r#"{"method":"resolve","project":"acme/web","key":"K"}"#,
-    )
-    .await;
-    assert_eq!(status, EXIT_REFUSED);
+    for (input, kind) in inputs {
+        let (status, line) = gate_raw(&config, input.clone()).await;
+        assert_eq!(status, EXIT_REFUSED, "{input:.80}");
+        assert_eq!(line, json!({"ok": false, "error": kind}), "{input:.80}");
+    }
     assert_eq!(
         silent.accepted.load(Ordering::SeqCst),
         0,
         "a refused frame was relayed"
     );
+}
+
+/// Why: critic M3 — config failure is closed: a missing or unparsable
+/// file, an unknown host, a host with no `keys` or an empty list (for a
+/// `doctor` too), and a key not on the list each exit 13 with nothing
+/// relayed.
+/// Red when any of them reads as "allowed".
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_gate_config_failures_refuse_and_send_nothing() {
+    let fx = fixture();
+    let silent = silent_socket(&fx.settings.socket);
+    let config = gate_config(&fx);
+    let dir = fx.project();
+    let frame = r#"{"method":"resolve","project":"acme/web","key":"OPEN_KEY"}"#;
+    let refused = json!({"ok": false, "error": "remote_refused"});
+    std::fs::remove_file(&fx.settings.machine_config).unwrap();
+    assert_eq!(gate(&config, frame).await, (EXIT_REFUSED, refused.clone()));
+    std::fs::write(&fx.settings.machine_config, "secrets: [not, a, map\n").unwrap();
+    assert_eq!(gate(&config, frame).await, (EXIT_REFUSED, refused.clone()));
+    for hosts in [
+        host_entry("other-host", PROJECT, &dir, BOTH_KEYS),
+        host_entry(HOST, PROJECT, &dir, ""),
+        host_entry(HOST, PROJECT, &dir, "      keys: []\n"),
+        host_entry(HOST, PROJECT, &dir, "      keys: [API_KEY]\n"),
+    ] {
+        account(&fx, &hosts);
+        assert_eq!(
+            gate(&config, frame).await,
+            (EXIT_REFUSED, refused.clone()),
+            "{hosts}"
+        );
+    }
+    // A doctor names no key, so only the key-list check refuses it.
+    let doctor = r#"{"method":"doctor","project":"acme/web"}"#;
+    for keys in ["", "      keys: []\n"] {
+        account(&fx, &host_entry(HOST, PROJECT, &dir, keys));
+        assert_eq!(gate(&config, doctor).await, (EXIT_REFUSED, refused.clone()));
+    }
+    assert_eq!(silent.accepted.load(Ordering::SeqCst), 0);
+}
+
+/// Why: critic H2 — no checkout on this machine fails closed: no map entry,
+/// a mapped dir that is missing, one that is no checkout, and one whose
+/// `origin` names another repository each exit 13 and issue no grant.
+/// Red when the gate grants against a path it did not verify.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_gate_without_a_matching_checkout_refuses_and_sends_nothing() {
+    let fx = fixture();
+    let silent = silent_socket(&fx.settings.socket);
+    let config = gate_config(&fx);
+    let plain = fx.tmp.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let missing = fx.tmp.path().join("missing").display().to_string();
+    let frame =
+        |project: &str| format!(r#"{{"method":"resolve","project":"{project}","key":"OPEN_KEY"}}"#);
+    for (hosts, project) in [
+        (
+            host_entry(HOST, "acme/other", &fx.project(), BOTH_KEYS),
+            PROJECT,
+        ),
+        (host_entry(HOST, PROJECT, &missing, BOTH_KEYS), PROJECT),
+        (
+            host_entry(HOST, PROJECT, &plain.display().to_string(), BOTH_KEYS),
+            PROJECT,
+        ),
+        (
+            host_entry(HOST, "acme/other", &fx.project(), BOTH_KEYS),
+            "acme/other",
+        ),
+    ] {
+        account(&fx, &hosts);
+        let (status, line) = gate(&config, &frame(project)).await;
+        assert_eq!(status, EXIT_REFUSED, "{hosts}");
+        assert_eq!(line, json!({"ok": false, "error": "remote_refused"}));
+    }
+    assert_eq!(silent.accepted.load(Ordering::SeqCst), 0);
 }
 
 /// Why: AC3 — with no server socket the gate exits 69 with a fixed error
@@ -523,17 +606,17 @@ async fn remote_gate_with_no_server_exits_unavailable() {
     listed(&fx);
     let (status, line) = gate(
         &gate_config(&fx),
-        r#"{"method":"resolve","project":"acme/web","key":"K"}"#,
+        r#"{"method":"resolve","project":"acme/web","key":"OPEN_KEY"}"#,
     )
     .await;
     assert_eq!(status, EXIT_UNAVAILABLE);
-    assert_eq!(line, json!({"ok": false, "error": "server_unavailable"}));
+    assert_eq!(line, json!({"ok": false, "error": SERVER_ABSENT}));
     assert!(!fx.settings.socket.parent().unwrap().exists());
 }
 
-/// Why: AC4 — a server that never answers, or a frame that never ends,
-/// answers 69 at the deadline. The server's own remote deadline plus its
-/// body grace stays inside the gate's 10 s, so a reply is never cut off.
+/// Why: AC4, critic M5 — a server that never answers, or a frame that never
+/// ends, answers 13 (a timeout is never 69) at the deadline. The server's
+/// own gate deadline plus its body grace stays inside the gate's 10 s.
 /// Red when the relay or the frame read has no bound.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -551,15 +634,11 @@ async fn remote_gate_with_a_silent_server_answers_within_the_deadline() {
     let started = Instant::now();
     let (status, line) = gate(
         &config,
-        r#"{"method":"resolve","project":"acme/web","key":"K"}"#,
+        r#"{"method":"resolve","project":"acme/web","key":"OPEN_KEY"}"#,
     )
     .await;
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        started.elapsed()
-    );
-    assert_eq!(status, EXIT_UNAVAILABLE);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(status, EXIT_REFUSED);
     assert_eq!(line, json!({"ok": false, "error": "deadline_exceeded"}));
     assert_eq!(silent.accepted.load(Ordering::SeqCst), 1);
 
@@ -574,13 +653,15 @@ async fn remote_gate_with_a_silent_server_answers_within_the_deadline() {
     let started = Instant::now();
     let reply = gate_reply(&config, Stalled).await;
     assert!(started.elapsed() < Duration::from_secs(3));
-    assert_eq!(reply.status, EXIT_UNAVAILABLE);
+    assert_eq!(reply.status, EXIT_REFUSED);
 }
 
-/// Why: end to end — the gate relays to the running server: an open key
-/// resolves (exit 0, value on stdout only), a denied key exits 13, and no
-/// value reaches the logs or the audit file.
-/// Red when the gate drops `agent_parent` or relays the frame's host.
+/// Why: end to end — the gate grants, then resolves through `secrets.gate`:
+/// an open key resolves (exit 0, value on stdout only), a denied key exits
+/// 13 with a deny record, doctor answers, and no value or token reaches the
+/// logs, the audit file or the reply.
+/// Red when the gate drops the forced `agent_parent` or relays the frame's
+/// host.
 /// Test: itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_gate_relays_to_the_running_server() {
@@ -604,6 +685,7 @@ async fn remote_gate_relays_to_the_running_server() {
 
     assert_eq!(open, 0);
     assert_eq!(open_line["result"]["value"], OPEN_VALUE);
+    assert!(open_line["result"].get("token").is_none());
     assert_eq!(denied, EXIT_REFUSED);
     assert_eq!(
         denied_line,
@@ -614,16 +696,17 @@ async fn remote_gate_relays_to_the_running_server() {
     assert!(!audit.contains(SENTINEL_VALUE) && !audit.contains(OPEN_VALUE));
     let logs = captured();
     assert!(!logs.contains(SENTINEL_VALUE) && !logs.contains(OPEN_VALUE));
-    let rows = remote_records(&fx, AuditMethod::RemoteResolve);
+    let rows: Vec<_> = resolve_records(&fx);
     assert!(
         rows.iter().all(|r| r.host.as_deref() == Some(HOST)),
         "{rows:?}"
     );
+    let denies = rows.iter().filter(|r| r.decision == AuditDecision::Deny);
+    assert_eq!(denies.count(), 1, "{rows:?}");
 }
 
-/// Why: a server refusal of policy exits 13 and one of availability 69,
-/// an older server without the method (no kind) is 69, and only a result
-/// is exit 0; every failure line is the fixed kind alone.
+/// Why: critic M5 — every server error exits 13 with its fixed kind, one
+/// without a kind (an older server) too; only a result is exit 0.
 /// Test: itself.
 #[test]
 fn remote_gate_answer_table() {
@@ -632,24 +715,25 @@ fn remote_gate_answer_table() {
         jsonrpc: "2.0".to_owned(),
         id: json!(1),
         result: None,
-        error: Some(kind.to_rpc(method::REMOTE_RESOLVE)),
+        error: Some(kind.to_rpc(method::GATE)),
     };
-    for (kind, status) in [
-        (ErrorKind::AgentKeyDenied, EXIT_REFUSED),
-        (ErrorKind::RemoteRefused, EXIT_REFUSED),
-        (ErrorKind::NotFound, EXIT_REFUSED),
-        (ErrorKind::BackendTimeout, EXIT_UNAVAILABLE),
-        (ErrorKind::BackendLocked, EXIT_UNAVAILABLE),
-        (ErrorKind::AuditUnavailable, EXIT_UNAVAILABLE),
-        (ErrorKind::DeadlineExceeded, EXIT_UNAVAILABLE),
+    for kind in [
+        ErrorKind::AgentKeyDenied,
+        ErrorKind::RemoteRefused,
+        ErrorKind::GateRefused,
+        ErrorKind::GrantRefused,
+        ErrorKind::BackendTimeout,
+        ErrorKind::BackendLocked,
+        ErrorKind::AuditUnavailable,
+        ErrorKind::DeadlineExceeded,
     ] {
         let reply = answer(failing(kind));
-        assert_eq!(reply.status, status, "{kind:?}");
+        assert_eq!(reply.status, EXIT_REFUSED, "{kind:?}");
         assert_eq!(reply.line, json!({"ok": false, "error": kind.as_str()}));
     }
     let mut unknown = failing(ErrorKind::RemoteRefused);
     unknown.error.as_mut().unwrap().data = None;
-    assert_eq!(answer(unknown).status, EXIT_UNAVAILABLE);
+    assert_eq!(answer(unknown).status, EXIT_REFUSED);
     let success = RpcResponse {
         jsonrpc: "2.0".to_owned(),
         id: json!(1),
@@ -677,20 +761,45 @@ fn remote_label_validation_table() {
 }
 
 /// Why: the allowlist is exact: host and project compare without case, a
-/// disabled host or an absent entry allows nothing.
+/// key compares exactly, a disabled host, an absent entry or an empty key
+/// list allows nothing.
 /// Test: itself.
 #[test]
 fn remote_allowlist_table() {
     let machine: crate::store::config::MachineSecretsConfig = serde_yaml::from_str(
-        "remote_hosts:\n  evo-linux:\n    projects: [Acme/Web]\n  off:\n    enabled: false\n    projects: [acme/web]\n",
+        "remote_hosts:\n  evo-linux:\n    projects: {Acme/Web: /w}\n    keys: [K]\n  off:\n    enabled: false\n    projects: {acme/web: /w}\n    keys: [K]\n  nokeys:\n    projects: {acme/web: /w}\n",
     )
     .unwrap();
     let (owner, repo) = remote::parse_project("acme/web").unwrap();
-    assert!(remote::host_allows(&machine, "EVO-linux", &owner, &repo));
-    assert!(!remote::host_allows(&machine, "off", &owner, &repo));
-    assert!(!remote::host_allows(&machine, "nobody", &owner, &repo));
+    let k = key("K");
+    assert!(remote::host_allows(
+        &machine,
+        "EVO-linux",
+        &owner,
+        &repo,
+        &k
+    ));
+    assert!(!remote::host_allows(
+        &machine,
+        "evo-linux",
+        &owner,
+        &repo,
+        &key("k")
+    ));
+    for host in ["off", "nobody", "nokeys"] {
+        assert!(
+            !remote::host_allows(&machine, host, &owner, &repo, &k),
+            "{host}"
+        );
+    }
     let (owner, repo) = remote::parse_project("acme/other").unwrap();
-    assert!(!remote::host_allows(&machine, "evo-linux", &owner, &repo));
+    assert!(!remote::host_allows(
+        &machine,
+        "evo-linux",
+        &owner,
+        &repo,
+        &k
+    ));
 }
 
 /// Why: the command line pins `--host`; paths default under the account
