@@ -111,7 +111,15 @@ pub(super) async fn spawn_managed_local_only(
             return Ok(live);
         }
         return super::launch_on_main::spawn_managed_on_main(
-            state, session_id, params, runtime, local_path, &source,
+            state,
+            session_id,
+            params,
+            runtime,
+            super::launch_on_main::Dirs {
+                placement: local_path,
+                launch: local_path,
+            },
+            &source,
         )
         .await;
     }
