@@ -17,8 +17,8 @@
 //! appends one line to `inbox/restart.log`.
 //! G0b: [`restart_with`] first types [`CHECKPOINT`] into the idle Architect
 //! and waits up to [`CHECKPOINT_WAIT`] for a ledger write newer than the
-//! request (exit 4 on timeout unless `--force`); `--no-checkpoint` keeps the
-//! #11365 gate as it was. A failed relaunch step types nothing and reports
+//! request (exit 4 on timeout, always); `--no-checkpoint` skips the request
+//! and keeps the #11365 gate as it was, never bypassing it. A failed relaunch step types nothing and reports
 //! "NOT restarted". [`resolve_architect`] finds the Architect by its fleet
 //! role. Only the Architect's pane and its relaunch are touched.
 //! Test: `restart_tests.rs`, `restart_checkpoint_tests.rs`.
@@ -64,10 +64,9 @@ const CHECKPOINT_POLL: Duration = Duration::from_secs(2);
 /// How [`restart_with`] gets its checkpoint (G0b).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Gate {
-    /// Type [`CHECKPOINT`] and wait for the write; `false` is `--no-checkpoint`.
+    /// Type [`CHECKPOINT`] and wait for the write; `false` is `--no-checkpoint`,
+    /// which skips the request but keeps the #11365 fresh-ledger gate.
     pub(crate) request: bool,
-    /// `--force`: a timeout or a not-ready ledger warns instead of refusing.
-    pub(crate) force: bool,
 }
 
 /// What [`restart`] reads and runs; production passes the live tmux and relaunch.
@@ -131,15 +130,16 @@ pub(crate) fn restart(
     restart_with(dir, names, inside, wait, Gate::default(), ops)
 }
 
-/// [`restart`] with a requested checkpoint and `--force` (G0b).
+/// [`restart`] with a requested checkpoint (G0b).
 ///
 /// Why: G0b — a quick restart of just the Architect, after it saved its state.
 /// What: as [`restart`]; with `gate.request` the busy gate runs first, then
-/// [`request_checkpoint`], then the box must turn idle again. `gate.force`
-/// turns a checkpoint timeout and a not-ready ledger into warnings. Every
+/// [`request_checkpoint`], then the box must turn idle again. A timeout or a
+/// not-ready ledger always refuses (exit 4); no flag overrides it (Dpg). Every
 /// report whose exit is not 0 ends in a "NOT restarted" line.
 /// Test: `a_requested_checkpoint_restarts_and_touches_only_the_architect`,
-/// `a_checkpoint_timeout_refuses_with_exit_4`, `force_restarts_after_a_checkpoint_timeout`,
+/// `a_checkpoint_timeout_refuses_with_exit_4`,
+/// `no_checkpoint_with_a_not_ready_ledger_still_refuses`,
 /// `a_failed_stop_types_no_resume_line_and_reports_not_restarted`,
 /// `a_failed_relaunch_reports_not_restarted`.
 pub(crate) fn restart_with(
@@ -195,10 +195,7 @@ fn restart_inner(
     if !gate.request
         && let Some(r) = il_refusal(dir, session, ops)
     {
-        if !gate.force {
-            return r;
-        }
-        early = forced(r);
+        return r;
     }
     let pane = match pane_id(ops.tmux, session) {
         Ok(p) => p,
@@ -214,7 +211,7 @@ fn restart_inner(
         );
     }
     if gate.request {
-        match request_checkpoint(dir, session, &pane, gate.force, ops) {
+        match request_checkpoint(dir, session, &pane, ops) {
             Ok(lines) => early.extend(lines),
             Err(r) => return r,
         }
@@ -227,10 +224,7 @@ fn restart_inner(
     }
     // As `self-clear.sh`: the ledger may have changed during the idle wait.
     if let Some(r) = il_refusal(dir, session, ops) {
-        if !gate.force {
-            return r;
-        }
-        early.extend(forced(r));
+        return r;
     }
     if !idle(ops.tmux, &pane) {
         return RestartReport::done(
@@ -346,23 +340,15 @@ pub(crate) fn resolve_architect(
     Ok((dir, names))
 }
 
-/// A refusal `--force` overrode, as warning lines.
-fn forced(r: RestartReport) -> Vec<String> {
-    let mut lines = vec!["warning: --force overrides the refusal below".to_owned()];
-    lines.extend(r.lines);
-    lines
-}
-
 /// Types [`CHECKPOINT`] and waits up to [`CHECKPOINT_WAIT`] for a ledger
 /// write newer than the request (G0b).
 ///
-/// What: `Ok` lines on a fresh write, or on a timeout under `force`; `Err`
-/// is the refusal: exit 1 when the line was not typed, exit 4 on a timeout.
+/// What: `Ok` lines on a fresh write; `Err` is the refusal: exit 1 when the
+/// line was not typed, exit 4 on a timeout.
 fn request_checkpoint(
     dir: &Path,
     session: &str,
     pane: &PaneId,
-    force: bool,
     ops: &Ops<'_>,
 ) -> Result<Vec<String>, RestartReport> {
     let asked = (ops.now)();
@@ -390,13 +376,10 @@ fn request_checkpoint(
         "no Intent Ledger write after the checkpoint request within {}s",
         CHECKPOINT_WAIT.as_secs()
     );
-    if force {
-        return Ok(vec![format!("warning: {why}; --force restarts anyway")]);
-    }
     Err(RestartReport::done(
         4,
         vec![format!(
-            "{why}; claude was not stopped. Retry, or pass --force"
+            "{why}; claude was not stopped. Retry, or use `tm fleet relaunch`"
         )],
     ))
 }

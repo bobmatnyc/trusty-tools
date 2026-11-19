@@ -1,4 +1,4 @@
-//! Tests for G0b `tm architect restart`: the requested checkpoint, `--force`,
+//! Tests for G0b `tm architect restart`: the requested checkpoint,
 //! the role-based resolver, the failure arms, and that only the Architect is
 //! touched. Temporary HOME, `ScriptedTmux` and a fake relaunch only.
 
@@ -111,10 +111,7 @@ fn run_gate(
     (r, calls.get())
 }
 
-const REQUEST: Gate = Gate {
-    request: true,
-    force: false,
-};
+const REQUEST: Gate = Gate { request: true };
 
 fn last(r: &RestartReport) -> &str {
     r.lines.last().map_or("", String::as_str)
@@ -176,21 +173,15 @@ fn a_checkpoint_timeout_refuses_with_exit_4() {
 }
 
 #[test]
-fn force_restarts_after_a_checkpoint_timeout() {
+fn no_checkpoint_with_a_not_ready_ledger_still_refuses() {
+    // No ledger at all: `--no-checkpoint` skips the request but keeps the
+    // #11365 gate, so nothing is typed and nothing is relaunched.
     let tmp = tempfile::tempdir().expect("tmp");
-    ledger(tmp.path(), NOW - 600.0);
-    let tmux = tmux_with(&checkpointed_caps());
-    let gate = Gate {
-        request: true,
-        force: true,
-    };
-    let (r, relaunches) = run_gate(tmp.path(), &tmux, gate, &ok_relaunch);
-    assert_eq!((r.exit, relaunches), (0, 1), "{:?}", r.lines);
-    assert!(
-        r.lines.iter().any(|l| l.contains("--force")),
-        "{:?}",
-        r.lines
-    );
+    let tmux = tmux_with(&[]);
+    let (r, relaunches) = run_gate(tmp.path(), &tmux, Gate::default(), &ok_relaunch);
+    assert_eq!((r.exit, relaunches), (4, 0), "{:?}", r.lines);
+    assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
+    assert!(last(&r).starts_with("NOT restarted"), "{:?}", r.lines);
 }
 
 #[test]

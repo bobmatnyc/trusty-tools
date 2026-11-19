@@ -121,7 +121,8 @@ pub(crate) enum ArchitectAction {
     /// (exit 4), then stops and relaunches only the Architect's `claude`,
     /// bound with resume, restores the poller and types one resume line.
     /// Other sessions, the daemon and launchd are untouched. Refused inside
-    /// Claude Code and when no Architect is recorded (exit 2).
+    /// Claude Code and when no Architect is recorded (exit 2). No bypass
+    /// flag (ruling Dpg): the owner overrides with `tm fleet relaunch`.
     // See G0b architect restart
     Restart {
         /// Keep waiting for idle up to this many seconds.
@@ -130,10 +131,7 @@ pub(crate) enum ArchitectAction {
         /// The Architect directory (default: the one `tm fleet init` recorded).
         #[arg(long)]
         dir: Option<String>,
-        /// Restart even when the checkpoint does not land or is not ready.
-        #[arg(long)]
-        force: bool,
-        /// Do not ask for a checkpoint; require the existing one to be fresh.
+        /// Do not ask for a checkpoint; the existing one must still be fresh.
         #[arg(long)]
         no_checkpoint: bool,
     },

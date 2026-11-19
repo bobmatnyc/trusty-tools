@@ -31,13 +31,11 @@ pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
         Some(ArchitectAction::Restart {
             wait,
             dir,
-            force,
             no_checkpoint,
         }) => {
             // See G0b architect restart
             let gate = super::fleet::restart::Gate {
                 request: !no_checkpoint,
-                force,
             };
             super::architect_up::restart(wait, dir, gate).await
         }
