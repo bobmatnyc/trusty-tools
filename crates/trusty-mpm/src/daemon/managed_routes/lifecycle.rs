@@ -485,7 +485,10 @@ async fn spawn_managed_routed(
                     &session_id,
                     &params,
                     runtime,
-                    &placement,
+                    super::launch_on_main::Dirs {
+                        placement: &placement,
+                        launch: local_path,
+                    },
                     &SessionSource::github(&gh.owner, &gh.repo),
                 )
                 .await;
@@ -832,7 +835,8 @@ pub(super) async fn spawn_managed_inproject(
     // must land in `<worktree>/.claude/{agents,skills}` (where Claude Code's
     // project-skill discovery looks), not the real `$HOME/.claude`.
     let fw = crate::core::paths::FrameworkPaths::for_managed_workspace(&worktree);
-    prepare_inproject_session(&fw, session_id, &worktree, source.repo_url.as_deref())?;
+    let repo_url = source.repo_url.as_deref();
+    prepare_inproject_session(&fw, session_id, &worktree, &worktree, repo_url)?;
 
     // #1919: announce the tmux
     // stage right before the record (and its tmux session name) is created.
