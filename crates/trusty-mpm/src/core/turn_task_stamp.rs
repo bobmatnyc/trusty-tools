@@ -4,11 +4,15 @@
 //! the transcript. The owner ruled that the PM harness stamps the current IL
 //! task into each turn, and that the PM sets that task through datg when it
 //! switches. This module reads datg's state; it never writes it.
-//! What: [`state_path`] resolves the datg `state.json` the way `datg.py`
-//! does (`$DATG_SESSION`, then the tmux session of `$TMUX_PANE`, then the
-//! legacy single directory). [`stamp_from_state`] turns the session
-//! record's `current` field into `Task: <id>@<MMDD>` when that id names an
-//! active (`open` or `running`) task. [`hook_output`] wraps the stamp as
+//! What: [`resolve_stamp`] picks the ledger store and the stamp, dbatg first.
+//! The dbatg MCP/CLI store `.trusty-mpm/dbatg/<session>/state.json` is the
+//! canonical ledger today (#10068 renamed the store root from `datg`);
+//! [`dbatg_stamp_from_state`] reads its `session.task` line, which must begin
+//! with an IL task id. The prototype `datg.py` store
+//! `.trusty-mpm/datg/<session>/state.json` is the fallback, read by
+//! [`stamp_from_state`] from its `session.current` field. [`state_path`]
+//! resolves a datg `state.json` the way `datg.py` does; [`dbatg_state_path`]
+//! resolves the dbatg one. [`hook_output`] wraps the stamp as
 //! `UserPromptSubmit` `additionalContext`. Every failure yields `None`.
 //! Test: `turn_task_stamp_tests.rs`, `tests/tm_hook_turn_task_11398.rs`.
 
@@ -27,6 +31,11 @@ pub const TURN_TASK_EVENT: &str = "UserPromptSubmit";
 
 /// The datg session-record field naming the PM's current task (#11398).
 pub const CURRENT_FIELD: &str = "current";
+
+/// The dbatg session-record field naming the PM's task (#11398). dbatg writes
+/// a free-text line here (`SessionRecord.task`, at most 160 characters); the
+/// hook stamps it only when the line begins with a task id.
+pub const DBATG_TASK_FIELD: &str = "task";
 
 /// Task statuses datg counts as active (`datg_task.py` `ACTIVE`).
 const ACTIVE: [&str; 2] = ["open", "running"];
@@ -51,6 +60,19 @@ static IL_TASK_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
 fn datg_base(project: &Path) -> PathBuf {
     project.join(".trusty-mpm").join("datg")
 }
+
+/// The `<project>/.trusty-mpm/dbatg` base directory (`STORE_ROOT` in
+/// `trusty-architect`'s ledger store).
+fn dbatg_base(project: &Path) -> PathBuf {
+    project.join(".trusty-mpm").join("dbatg")
+}
+
+/// The leading task id of a dbatg `session.task` line: `<code>-T<xx>`
+/// followed by the end of the text or a non-identifier character.
+static LEADING_TASK_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^([a-z][a-z0-9]{1,7}-T[0-9a-km-np-z]{2})(?:[^A-Za-z0-9_-]|$)")
+        .expect("static leading task-id regex")
+});
 
 /// Whether `name` is a session `datg.py` accepts and `base/name/state.json` exists.
 fn session_state(base: &Path, name: &str) -> Option<PathBuf> {
@@ -120,27 +142,104 @@ pub fn stamp_from_state(text: &str) -> Option<String> {
     if !IL_TASK_ID_RE.is_match(current) {
         return None;
     }
+    active_stamp(&state, current)
+}
+
+/// `Task: <id>[@<MMDD>]` when `id` names an `open` or `running` task in `state`.
+fn active_stamp(state: &Value, id: &str) -> Option<String> {
     let task = state.get("tasks")?.as_array()?.iter().find(|t| {
-        t.get("id").and_then(Value::as_str) == Some(current)
+        t.get("id").and_then(Value::as_str) == Some(id)
             && t.get("status")
                 .and_then(Value::as_str)
                 .is_some_and(|s| ACTIVE.contains(&s))
     })?;
     Some(match task_mmdd(task) {
-        Some(mmdd) => format!("Task: {current}@{mmdd}"),
-        None => format!("Task: {current}"),
+        Some(mmdd) => format!("Task: {id}@{mmdd}"),
+        None => format!("Task: {id}"),
     })
 }
 
-/// Read at most [`MAX_STATE_BYTES`] of `path` and stamp it; `None` on any error.
-pub fn read_stamp(path: &Path) -> Option<String> {
+/// The stamp line for a dbatg `state.json` text, or `None` (#11398).
+///
+/// Why: the dbatg MCP/CLI is the installed ledger writer. A PM sets its task
+/// with a `session` op, which writes `session.task` (free text); no writer
+/// installed anywhere sets datg's `session.current`.
+/// What: `session.task`, trimmed, must begin with an IL task id (`tt-T0b`,
+/// `tt-T0b: fix the hook`) that is the id of an `open` or `running` task in
+/// `tasks`. The id is never searched for later in the line: free text may
+/// name several tasks, and a wrong id is worse than none. A dbatg task has no
+/// `created`, so the stamp is `Task: <id>`. Anything else → `None`.
+/// Test: `a_dbatg_session_task_is_stamped`, `each_dbatg_fail_open_case_is_silent`.
+pub fn dbatg_stamp_from_state(text: &str) -> Option<String> {
+    let state: Value = serde_json::from_str(text).ok()?;
+    let line = state.get("session")?.get(DBATG_TASK_FIELD)?.as_str()?;
+    let id = LEADING_TASK_ID_RE.captures(line.trim())?.get(1)?.as_str();
+    active_stamp(&state, id)
+}
+
+/// Read at most [`MAX_STATE_BYTES`] of `path`; `None` on any error.
+fn read_state(path: &Path) -> Option<String> {
     let mut text = String::new();
     std::fs::File::open(path)
         .ok()?
         .take(MAX_STATE_BYTES)
         .read_to_string(&mut text)
         .ok()?;
-    stamp_from_state(&text)
+    Some(text)
+}
+
+/// Read a datg `state.json` and stamp it; `None` on any error.
+pub fn read_stamp(path: &Path) -> Option<String> {
+    stamp_from_state(&read_state(path)?)
+}
+
+/// The dbatg `state.json` for this session (#11398).
+///
+/// Why: the dbatg store is keyed like dbatg's own `own_session`: `$DBATG_SESSION`,
+/// then the tmux session of the pane.
+/// What: `$DBATG_SESSION` when valid and its `state.json` exists; else the
+/// tmux session `tmux` returns when valid and present; else `None`. There is
+/// no legacy single-directory form.
+/// Test: `the_dbatg_session_resolves_like_dbatg_own_session`.
+pub fn dbatg_state_path(
+    project: &Path,
+    dbatg_session: Option<&OsStr>,
+    tmux: impl FnOnce() -> Option<String>,
+) -> Option<PathBuf> {
+    let base = dbatg_base(project);
+    dbatg_session
+        .and_then(OsStr::to_str)
+        .and_then(|name| session_state(&base, name))
+        .or_else(|| tmux().and_then(|name| session_state(&base, &name)))
+}
+
+/// The turn's stamp from whichever ledger store exists, dbatg first (#11398).
+///
+/// Why: the dbatg MCP/CLI writes `.trusty-mpm/dbatg/<session>/` (field
+/// `session.task`); `datg.py` wrote `.trusty-mpm/datg/<session>/` (field
+/// `session.current`). Both can sit side by side in one project.
+/// What: when a dbatg store resolves for the session, its answer is final,
+/// including "no task": the datg store is then an older prototype ledger and
+/// would name a stale task. Only when no dbatg store resolves is the datg
+/// store read. The tmux lookup runs at most once for both. `None` when
+/// neither store names an active task.
+/// Test: `dbatg_wins_over_datg_when_both_exist`,
+/// `a_dbatg_store_without_a_task_never_falls_back_to_datg`.
+pub fn resolve_stamp(
+    project: &Path,
+    dbatg_session: Option<&OsStr>,
+    datg_session: Option<&OsStr>,
+    tmux: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    // Two reads of one lookup: a closure over shared refs is `Copy`.
+    let tmux = std::cell::Cell::new(Some(tmux));
+    let cache = std::cell::OnceCell::new();
+    let lookup = || cache.get_or_init(|| tmux.take().and_then(|f| f())).clone();
+    if let Some(path) = dbatg_state_path(project, dbatg_session, lookup) {
+        return dbatg_stamp_from_state(&read_state(&path)?);
+    }
+    let path = state_path(project, datg_session, lookup)?;
+    read_stamp(&path)
 }
 
 /// The `UserPromptSubmit` hook response carrying `stamp` as `additionalContext`.

@@ -163,3 +163,137 @@ fn the_session_resolves_like_datg() {
     let bad = || Some("../pm-a".to_owned());
     assert_eq!(state_path(multi.path(), None, bad), None, "bad name");
 }
+
+/// A dbatg `state.json` shaped like the dbatg MCP's own write (#11398): the
+/// `trusty-architect` `State` — `code`, `v`, `config`, `goals`, `items`,
+/// `tasks` (no `created`), `next` — with `session.task` free text.
+fn dbatg_state(session_task: Option<&str>, tasks: serde_json::Value) -> String {
+    let mut session = json!({
+        "written_at": "2026-11-19T01:40Z",
+        "written_epoch": 1_795_052_400,
+        "next": "dolor sit",
+    });
+    if let Some(t) = session_task {
+        session["task"] = json!(t);
+    }
+    json!({
+        "code": "tt", "v": 9, "config": {"mode": "warn"},
+        "goals": [], "items": [], "tasks": tasks,
+        "next": {"G": "02", "D": "01", "A": "01", "T": "0d"},
+        "session": session,
+    })
+    .to_string()
+}
+
+/// A dbatg task record: no `created`.
+fn dbatg_task(id: &str, status: &str) -> serde_json::Value {
+    json!({ "id": id, "goal": "tt-G01", "title": "t", "status": status, "to": "", "outcome": "" })
+}
+
+#[test]
+fn a_dbatg_session_task_is_stamped() {
+    let tasks = json!([
+        dbatg_task("tt-T0b", "open"),
+        dbatg_task("tt-T0c", "running")
+    ]);
+    let cases = [
+        ("tt-T0b", "Task: tt-T0b"),
+        ("tt-T0c: fix the hook", "Task: tt-T0c"),
+        ("  tt-T0b - wiring the stamp", "Task: tt-T0b"),
+    ];
+    for (line, want) in cases {
+        let got = dbatg_stamp_from_state(&dbatg_state(Some(line), tasks.clone()));
+        assert_eq!(got.as_deref(), Some(want), "{line}");
+    }
+}
+
+#[test]
+fn each_dbatg_fail_open_case_is_silent() {
+    let tasks = json!([dbatg_task("tt-T0b", "open"), dbatg_task("tt-T0c", "done")]);
+    let cases = [
+        ("no task line", dbatg_state(None, tasks.clone())),
+        (
+            "free text only",
+            dbatg_state(Some("waiting on the owner"), tasks.clone()),
+        ),
+        (
+            "id not leading",
+            dbatg_state(Some("after tt-T0b lands"), tasks.clone()),
+        ),
+        (
+            "id with a suffix",
+            dbatg_state(Some("tt-T0bx"), tasks.clone()),
+        ),
+        ("done task", dbatg_state(Some("tt-T0c"), tasks.clone())),
+        ("unknown task", dbatg_state(Some("tt-T0d"), tasks.clone())),
+        (
+            "no tasks array",
+            json!({"session": {"task": "tt-T0b"}}).to_string(),
+        ),
+        ("malformed", "{not json".to_owned()),
+    ];
+    for (why, text) in cases {
+        assert_eq!(dbatg_stamp_from_state(&text), None, "{why}");
+    }
+}
+
+/// Write `<project>/.trusty-mpm/<root>/<session>/state.json` with `text`.
+fn put_text(project: &Path, root: &str, session: &str, text: &str) {
+    let dir = project.join(".trusty-mpm").join(root).join(session);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("state.json"), text).unwrap();
+}
+
+#[test]
+fn the_dbatg_session_resolves_like_dbatg_own_session() {
+    let none = || -> Option<String> { None };
+    let project = tempdir().unwrap();
+    assert_eq!(dbatg_state_path(project.path(), None, none), None);
+    put_text(project.path(), "dbatg", "pm-a", "{}");
+    put_text(project.path(), "dbatg", "pm-b", "{}");
+    let base = project.path().join(".trusty-mpm/dbatg");
+    let env = Some(OsStr::new("pm-a"));
+    let got = dbatg_state_path(project.path(), env, || Some("pm-b".into()));
+    assert_eq!(got, Some(base.join("pm-a/state.json")));
+    let got = dbatg_state_path(project.path(), None, || Some("pm-b".into()));
+    assert_eq!(got, Some(base.join("pm-b/state.json")));
+    let bad = || Some("../pm-a".to_owned());
+    assert_eq!(dbatg_state_path(project.path(), None, bad), None);
+}
+
+#[test]
+fn dbatg_wins_over_datg_when_both_exist() {
+    let project = tempdir().unwrap();
+    let dbatg = dbatg_state(Some("tt-T0b: now"), json!([dbatg_task("tt-T0b", "open")]));
+    let datg = state(
+        Some("tt-T0c"),
+        json!([task("tt-T0c", "open", Some("2026-11-02"))]),
+    );
+    put_text(project.path(), "dbatg", "pm-a", &dbatg);
+    put_text(project.path(), "datg", "pm-a", &datg);
+    let env = Some(OsStr::new("pm-a"));
+    let got = resolve_stamp(project.path(), env, env, || None);
+    assert_eq!(got.as_deref(), Some("Task: tt-T0b"));
+    // The datg store alone still answers (the fallback).
+    let only_datg = tempdir().unwrap();
+    put_text(only_datg.path(), "datg", "pm-a", &datg);
+    let got = resolve_stamp(only_datg.path(), env, env, || None);
+    assert_eq!(got.as_deref(), Some("Task: tt-T0c@1102"));
+}
+
+#[test]
+fn a_dbatg_store_without_a_task_never_falls_back_to_datg() {
+    let project = tempdir().unwrap();
+    let dbatg = dbatg_state(Some("waiting on the owner"), json!([]));
+    let datg = state(
+        Some("tt-T0c"),
+        json!([task("tt-T0c", "open", Some("2026-11-02"))]),
+    );
+    put_text(project.path(), "dbatg", "pm-a", &dbatg);
+    put_text(project.path(), "datg", "pm-a", &datg);
+    let env = Some(OsStr::new("pm-a"));
+    assert_eq!(resolve_stamp(project.path(), env, env, || None), None);
+    // Neither store: nothing.
+    let bare = tempdir().unwrap();
+    assert_eq!(resolve_stamp(bare.path(), env, env, || None), None);
+}
