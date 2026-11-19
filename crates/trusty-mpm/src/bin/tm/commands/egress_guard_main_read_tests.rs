@@ -178,10 +178,14 @@ fn an_unknown_family_tool_is_a_write_11273() {
     }
     let fx = fixture();
     let log = log_of(&fx);
+    // #11521: a stamped main thread may call it; its subagent may not.
     let renamed = call(&fx, "mcp__slack-mcp__slack_fetch_and_post");
-    let (check, _) = denied(run(&renamed, &pm_env(&fx), &log), "an unknown tool");
-    assert_eq!(check, "egress-family");
-    assert_eq!(lines(&log), 0);
+    assert_eq!(run(&renamed, &pm_env(&fx), &log), Verdict::Allow);
+    for (sub, env) in subagent_calls(&fx, "mcp__gmail__fetch_and_post", &pm_env(&fx)) {
+        let (check, _) = denied(run(&sub, &env, &log), "an unknown subagent tool");
+        assert_eq!(check, "egress-family");
+    }
+    assert_eq!(lines(&log), 1);
 }
 
 /// #11273: every listed read is a read; the send and write tools are not.
