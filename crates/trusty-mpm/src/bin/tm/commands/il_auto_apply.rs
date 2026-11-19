@@ -25,7 +25,8 @@
 //! goes, whole, to `ilio.py apply` (`il_auto_apply_ilio`), under the store's
 //! `il::hold` lock and a pending marker, so a packet runs ilio at most once
 //! (`PENDING-UNKNOWN` when an earlier run left no result; also recorded at
-//! mark time, before ilio runs, and dropped when the run reports). The lock
+//! mark time, before ilio runs; a `PENDING-RESOLVED` line for the same packet
+//! follows when the run reports; the denial file is append-only, never rewritten). The lock
 //! wait (1.5 s) plus the ilio timeout (2 s) stay inside the `Stop` hook's 5 s
 //! kill. A store-less
 //! session records `NO-LEDGER` once per packet. A rejected or failed block is
@@ -302,7 +303,8 @@ pub(crate) fn run(
                     // A timeout or crash may have written; its marker stays.
                     if !matches!(code.as_str(), "ILIO-TIMEOUT" | "ILIO-EXIT") {
                         let _ = il::clear_pending(&paths, &packet);
-                        retract(target, "PENDING-UNKNOWN", &packet);
+                        let why = "ilio.py reported a failure before writing";
+                        resolve_pending(target, entry, session_id, &packet, why);
                     }
                     fail(&code, &format!("{why} (fields {})", fields.join(",")))
                 }
@@ -312,7 +314,8 @@ pub(crate) fn run(
                     } else if let Err(e) = il::clear_pending(&paths, &packet) {
                         eprintln!("tm hook: IL {packet} applied; pending marker kept: {e}");
                     }
-                    retract(target, "PENDING-UNKNOWN", &packet);
+                    let why = "ilio.py apply reported success";
+                    resolve_pending(target, entry, session_id, &packet, why);
                     Outcome::IlioApplied(packet, summary)
                 }
             }
@@ -332,32 +335,19 @@ fn recorded(target: &Target, code: &str, packet: &str) -> bool {
         .is_some_and(|t| t.lines().any(|l| l.contains(&check) && l.contains(packet)))
 }
 
-/// Drops the `il-auto-apply:<code>` line for `packet` once the run it
-/// announced has reported, so a finished run leaves no false alarm.
-fn retract(target: &Target, code: &str, packet: &str) {
-    let Some(path) = target.denials.clone().or_else(pm_guard_denials_path) else {
-        return;
-    };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return;
-    };
-    let check = format!("check=il-auto-apply:{code} ");
-    let hit = |l: &str| l.contains(&check) && l.contains(packet);
-    if !text.lines().any(hit) {
-        return;
-    }
-    let kept: String = text
-        .lines()
-        .filter(|l| !hit(l))
-        .map(|l| format!("{l}\n"))
-        .collect();
-    let tmp = path.with_extension("jsonl.tmp");
-    if std::fs::write(&tmp, kept)
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .is_err()
-    {
-        eprintln!("tm hook: il auto-apply `{code}` record for {packet} kept");
-    }
+/// Appends `il-auto-apply:PENDING-RESOLVED <packet>`: the run its earlier
+/// `PENDING-UNKNOWN` announced has reported. The store only grows; every
+/// reader pairs the two (`drop_resolved_pending`, which `list_recent_errors` applies).
+fn resolve_pending(target: &Target, entry: Entry, session_id: &str, packet: &str, why: &str) {
+    record(
+        target,
+        entry,
+        session_id,
+        packet,
+        "PENDING-RESOLVED",
+        packet,
+        why,
+    );
 }
 
 /// Appends the failure where `list_recent_errors` reads denials.

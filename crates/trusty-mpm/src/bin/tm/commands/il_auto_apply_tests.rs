@@ -283,7 +283,52 @@ fn a_block_with_new_runs_ilio_once_with_the_block_on_stdin() {
     let again = own(&prompt, &t);
     assert!(matches!(again, Outcome::Replayed(_)), "{again:?}");
     assert_eq!(calls(tmp.path()).len(), 1, "ilio ran twice");
-    assert!(denials(tmp.path()).is_empty());
+    // Replaces the old "store empty after success": the store is append-only,
+    // so success leaves PENDING-UNKNOWN then PENDING-RESOLVED, and the replay
+    // adds nothing and never reports PENDING-UNKNOWN.
+    assert_eq!(codes(tmp.path()), ["PENDING-UNKNOWN", "PENDING-RESOLVED"]);
+}
+
+/// The `il-auto-apply` codes in the denial store, in file order.
+fn codes(root: &Path) -> Vec<String> {
+    denials(root)
+        .lines()
+        .filter_map(|l| l.split_once("check=il-auto-apply:"))
+        .map(|(_, r)| r.split(' ').next().unwrap_or("").to_owned())
+        .collect()
+}
+
+/// Why: nothing rewrites the denial store (G0b ruling): a writer that appends
+/// during an ilio run must not lose its line.
+/// What: a fake ilio appends a foreign line mid-run; afterwards the store is
+/// the pre-run bytes, the foreign line, then the RESOLVED record, and the
+/// pending reader treats the packet as cleared.
+/// Test: itself.
+#[test]
+fn a_concurrent_append_during_the_run_is_preserved() {
+    use trusty_mpm::daemon::bug_report::drop_resolved_pending;
+    let (tmp, _dir) = repo("pm-a");
+    let mut t = target(tmp.path(), "pm-a");
+    let store = tmp.path().join("denials.jsonl");
+    let tail =
+        format!("open({store:?}, 'a').write('{{\"foreign\": 1}}\\n')\nprint('wrote 2 op(s)')");
+    t.ilio = Some(fake_ilio(tmp.path(), &tail));
+    let got = own(NEW_BLOCK, &t);
+    assert!(matches!(got, Outcome::IlioApplied(..)), "{got:?}");
+    let lines: Vec<String> = denials(tmp.path()).lines().map(str::to_owned).collect();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[0].contains("il-auto-apply:PENDING-UNKNOWN"));
+    assert_eq!(lines[1], "{\"foreign\": 1}");
+    assert!(lines[2].contains("il-auto-apply:PENDING-RESOLVED"));
+    let recs: Vec<_> = lines[0..1]
+        .iter()
+        .chain(&lines[2..])
+        .map(|l| serde_json::from_str(l).expect("record"))
+        .collect();
+    assert!(
+        drop_resolved_pending(recs).is_empty(),
+        "pending not cleared"
+    );
 }
 
 #[test]
