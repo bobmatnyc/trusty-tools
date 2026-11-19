@@ -897,11 +897,9 @@ Not published: pre-publish gate failed on RUSTSEC-2026-0436/0429; superseded by 
 
 ### Removed
 
-- Internal knowledge-base retrieval no longer runs during a review. The `apex_context` module,
-  the `apex_index` / `apex_path_prefixes` config surface (env vars
-  `TRUSTY_SEARCH_APEX_INDEX` / `TRUSTY_REVIEW_APEX_PATH_PREFIXES`, now ignored),
-  the `[apex: …]` inline-citation form, and the `ReviewContext::apex_results`
-  field are gone. Knowledge-base context was cited 0 times across 69 audited findings at
+- Internal knowledge-base retrieval no longer runs during a review. The retrieval module, its config surface (`*_index`, `*_path_prefixes`) and its two env vars (now ignored),
+  the matching inline-citation form, and the `*_results` field on the review context
+  are gone. Knowledge-base context was cited 0 times across 69 audited findings at
   ~0.001 relevance, so the owner ruling dropped the retrieval step rather than
   forcing citation (#4999). GitHub and JIRA/Confluence context retrieval are
   unchanged.
@@ -2031,7 +2029,7 @@ a new public module.
 
 ### Fixed
 
-- verify `code_provable` finding citations against the actual diff before grading, so a confabulated finding whose cited content is not present in the cited file can no longer fail-close a clean PR (closes #2881). A diff-provable finding that quotes content which lives in a different changed file (the repro attributed a new vitest test file's content to a large regenerated bundle) is downgraded to advisory — its `code_provable` flag and its `source_citation` are cleared and its confidence lowered — instead of driving the deterministic BLOCK / REQUEST_CHANGES floor. Applied on both the unified and map-reduce review paths. The check is fail-open and high-precision: the prompt-mandated inline bracket citations (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`) are skipped before quote extraction so a correctly-cited finding is never false-downgraded, and findings that quote nothing concrete, cite an un-indexed file, or whose quote is grounded in the cited file are left untouched. Residual gap: a fabrication expressed purely in paraphrase (no verbatim code quote) is not caught — the deterministic check requires a concrete quote to verify against. ([#2882](https://github.com/bobmatnyc/trusty-tools/pull/2882)) ([`d7a7459`](https://github.com/bobmatnyc/trusty-tools/commit/d7a7459a704e8b3b6a22418f7eef2b38974e23d9))
+- verify `code_provable` finding citations against the actual diff before grading, so a confabulated finding whose cited content is not present in the cited file can no longer fail-close a clean PR (closes #2881). A diff-provable finding that quotes content which lives in a different changed file (the repro attributed a new vitest test file's content to a large regenerated bundle) is downgraded to advisory — its `code_provable` flag and its `source_citation` are cleared and its confidence lowered — instead of driving the deterministic BLOCK / REQUEST_CHANGES floor. Applied on both the unified and map-reduce review paths. The check is fail-open and high-precision: the prompt-mandated inline bracket citations (`[code: … ]`, `[jira: … ]`, `[gh: … ]`) are skipped before quote extraction so a correctly-cited finding is never false-downgraded, and findings that quote nothing concrete, cite an un-indexed file, or whose quote is grounded in the cited file are left untouched. Residual gap: a fabrication expressed purely in paraphrase (no verbatim code quote) is not caught — the deterministic check requires a concrete quote to verify against. ([#2882](https://github.com/bobmatnyc/trusty-tools/pull/2882)) ([`d7a7459`](https://github.com/bobmatnyc/trusty-tools/commit/d7a7459a704e8b3b6a22418f7eef2b38974e23d9))
 
 ## [0.9.1] — 2026-07-16
 
