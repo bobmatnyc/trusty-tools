@@ -498,3 +498,95 @@ async fn an_unknown_open_tab_is_journaled_and_never_opens_a_second_tab() {
     assert_eq!(wire(&recv_json(&mut a).await), unknown);
     broker.close().await;
 }
+
+/// #11362: `page_snapshot` numbers the worker's frames, hands out
+/// `f<frame>:<node>` refs that route to the worker as `{frame, loader, node}`,
+/// refuses a ref no snapshot holds, and answers `page_read` with `fallback`
+/// when another debugger holds the tab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_routes_frame_refs_and_falls_back_on_a_busy_debugger() {
+    let dir = state_dir();
+    let state = dir.path();
+    let broker = Broker::start(options(state, Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(state, Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let lease = "YtbbXmIbar4-E6OcqOQZedqh522fyHj2";
+    let read_result = r#"{"document":"d1","origin":"https://app.test","url":"https://app.test/","title":"t","text":"","elements":[],"truncated":false}"#;
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"page_read","lease":"{lease}"}}"#),
+    )
+    .await;
+    answer(&mut worker, read_result).await;
+    recv_json(&mut a).await;
+    let snap = format!(r#"{{"op":"page_snapshot","lease":"{lease}"}}"#);
+    send_json(&mut a, &snap).await;
+    let frames = concat!(
+        r#"{"document":"d1","truncated":false,"popups":[{"tab":9,"window":1}],"frames":["#,
+        r#"{"frame":"F0","parent":null,"loader":"L0","url":"https://app.test/","origin":"https://app.test","root":false,"owner":null,"refused":null,"nodes":[[0,"button","Export",4,null]]},"#,
+        r#"{"frame":"T2","parent":"F0","loader":"L2","url":"https://embed.test/omni","origin":"https://embed.test","root":true,"owner":[100,200,400,300],"refused":null,"nodes":[[0,"textbox","Ask",41,"why"]]}"#,
+        "]}"
+    );
+    let cmd = answer(&mut worker, frames).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_snapshot")));
+    assert_eq!(cmd.get("document"), Some(&Json::from("d1")));
+    let reply = recv_json(&mut a).await;
+    assert_eq!(
+        reply.get("text").and_then(Json::as_str),
+        Some(concat!(
+            "frame f0 https://app.test\n  button \"Export\" [f0:4]\n",
+            "frame f1 https://embed.test (cross-origin, out-of-process) in f0 at 100,200 400x300\n",
+            "  textbox \"Ask\" = \"why\" [f1:41]\n"
+        )),
+        "{}",
+        wire(&reply)
+    );
+    assert_eq!(
+        wire(reply.get("popups").expect("popups")),
+        r#"[{"tab":9,"window":1}]"#
+    );
+    let click = |rid: &str, r: &str| {
+        format!(r#"{{"op":"page_click","lease":"{lease}","request_id":"{rid}","ref":"{r}"}}"#)
+    };
+    send_json(&mut a, &click("fc1", "f1:41")).await;
+    let cmd = answer(&mut worker, r#"{"document":"d1"}"#).await;
+    assert_eq!(
+        wire(cmd.get("ref").expect("ref")),
+        r#"{"frame":"T2","loader":"L2","node":41}"#
+    );
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":true,"tab":7,"document":"d1"}"#
+    );
+    // An ordinal the snapshot never numbered reaches no worker.
+    send_json(&mut a, &click("fc2", "f5:1")).await;
+    assert_eq!(
+        wire(&recv_json(&mut a).await),
+        r#"{"ok":false,"error":"StaleElement","tab":7}"#
+    );
+    send_json(&mut a, &snap).await;
+    let cmd = recv_json(&mut worker).await;
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    let busy = format!(r#"{{"id":"{id}","ok":false,"error":"DebuggerBusy","tab":7}}"#);
+    send_json(&mut worker, &busy).await;
+    let cmd = answer(&mut worker, read_result).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_read")));
+    assert_eq!(cmd.get("include_text"), Some(&Json::Bool(true)));
+    let reply = recv_json(&mut a).await;
+    assert_eq!(
+        reply.get("fallback"),
+        Some(&Json::from("page_read")),
+        "{}",
+        wire(&reply)
+    );
+    assert_eq!(reply.get("reason"), Some(&Json::from("DebuggerBusy")));
+    assert_eq!(reply.get("partial"), Some(&Json::Bool(true)));
+    assert_eq!(
+        reply.get("note"),
+        Some(&Json::from(
+            "top document and same-origin frames only; cross-origin frames not read"
+        ))
+    );
+    broker.close().await;
+}

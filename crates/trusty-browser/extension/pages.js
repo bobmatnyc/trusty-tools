@@ -3,6 +3,8 @@
 // the read (#11355). Top-level code touches no `chrome` API. The `page*` function declarations are injected by chrome.scripting.executeScript, so each one
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
 if (!globalThis.TrustyPageRead && typeof importScripts === "function") importScripts("pages_read.js");
+// #11362: frame-scoped refs and the all-frames snapshot over CDP.
+if (!globalThis.TrustyFrames && typeof importScripts === "function") importScripts("pages_frames.js");
 globalThis.TrustyPages = (() => {
   // Returns [origin, title] and changes nothing; the InjectionResult supplies the documentId.
   function pageProbe() { return [location.origin, document.title]; }
@@ -553,7 +555,9 @@ TrustyPages.commands = deps => {
   const REF = /^[0-9]{1,9}\.[0-9]{1,6}$/;
   const tab = v => Number.isInteger(v) && v >= 0;
   const doc = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 8192);
-  const ref = v => typeof v === "string" && REF.test(v);
+  // #11362: a ref is a top-document registry ref or a frame-scoped ref ({frame, loader, node}) from page_snapshot.
+  const topRef = v => typeof v === "string" && REF.test(v);
+  const ref = v => topRef(v) || TrustyFrames.isRef(v);
   const bool = v => typeof v === "boolean";
   const term = v => v === null || (typeof v === "string" && v.length > 0 && v.length <= 200);
   const SCROLL_TO = ["down","up","top","bottom","element"];
@@ -572,14 +576,15 @@ TrustyPages.commands = deps => {
     VIEW.every(k => Number.isFinite(v[k]));
   // #11211: base64 characters a capture may carry, so the reply stays under the 1 MiB native frame limit.
   const CAPTURE_BUDGET = 700000;
+  const POPUP_MAX = 50;
   const SPECS = {
     page_tabs:{}, page_tab:{tab}, page_click:{tab, document:doc, ref, dialog},
     page_drag:{tab, document:doc, ref, target:ref},
     // #11356: the broker always sends every read control.
-    page_read:{tab, document:doc, scope_ref:v => v === null || ref(v), viewport_only:bool, include_text:bool,
+    page_read:{tab, document:doc, scope_ref:v => v === null || topRef(v), viewport_only:bool, include_text:bool,
       max_chars:v => Number.isInteger(v) && v >= 1000 && v <= 250000},
     // #11357: at least one of role, name and text; within_ref limits the search to a subtree.
-    page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || ref(v),
+    page_find:{tab, document:doc, role:term, name:term, text:term, within_ref:v => v === null || topRef(v),
       limit:v => Number.isInteger(v) && v >= 1 && v <= 50},
     page_hover:{tab, document:doc, ref},
     page_type:{tab, document:doc, ref, text:v => typeof v === "string" && v.length <= 8192},
@@ -597,6 +602,8 @@ TrustyPages.commands = deps => {
     page_open_tab:{url:v => typeof v === "string" && v.length > 0 && v.length <= 8192},
     page_close_tab:{tab},
     page_screenshot:{tab, document:doc, ref:v => v === null || ref(v)},
+    // #11362: every frame's accessibility tree, cross-origin and out-of-process frames included.
+    page_snapshot:{tab, document:doc},
     page_click_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog},
     page_type_at:{tab, document:doc, x:coord, y:coord, metrics:view, dialog,
       text:v => typeof v === "string" && v.length <= 8192},
@@ -677,6 +684,14 @@ TrustyPages.commands = deps => {
       const now = await probe(req.tab);
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
+    // #11362: a frame ref runs the same page function inside its frame, over the debugger.
+    const fref = TrustyFrames.isRef(req.ref) ? req.ref : null, other = TrustyFrames.isRef(req.target) ? req.target : null;
+    if (fref || other) {
+      if (!fref) throw refuse("NotDraggable", {tab:req.tab});
+      const marked = args.map(a => a === req.ref ? "@el" : other && a === req.target ? "@other" : a);
+      const result = await debugged(req, 6000, ctx => TrustyFrames.run(ctx, fref, other, func, marked));
+      return settled(req, func, result, true);
+    }
     let hit;
     try {
       [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]}, func, args});
@@ -686,7 +701,13 @@ TrustyPages.commands = deps => {
       if (now.access && now.document === req.document) throw refuse("OutcomeUnknown");
       throw refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
     }
-    const result = hit?.result, error = result?.error;
+    return settled(req, func, hit?.result, hit?.documentId === req.document);
+  }
+
+  // The reply of one injected page function: its refusal, or what it did in the contract's shape; `same` says
+  //   the function ran in the lease's document.
+  function settled(req, func, result, same) {
+    const error = result?.error;
     if (["StaleElement","NotEditable","NotSelectable","NoSuchOption","NotDraggable"].includes(error)) {
       throw refuse(error, {tab:req.tab});
     }
@@ -695,7 +716,7 @@ TrustyPages.commands = deps => {
       throw refuse(error, {tab:req.tab, typed:result.typed, accepted:result.accepted,
         entered:result.entered.slice(0, 8192)});
     }
-    if (result?.ok !== true || hit.documentId !== req.document) throw refuse("OutcomeUnknown");
+    if (result?.ok !== true || !same) throw refuse("OutcomeUnknown");
     // #11352: maxlength cut the typed text; the typing still succeeded.
     if (func === pageKeys && result.truncated === true) {
       if (!counts) throw refuse("OutcomeUnknown");
@@ -724,7 +745,8 @@ TrustyPages.commands = deps => {
   // Test: tests/test_worker.mjs `click drives trusted input and answers dialogs`,
   //   `stale document refuses before the page runs`, `trusted input rechecks the document before every event`,
   //   `a no-access tab is never debugger-attached`, `a failed dialog answer or a hung command answers OutcomeUnknown`,
-  //   `a timed-out click sends no input after a later attach`.
+  //   `a timed-out click sends no input after a later attach`,
+  //   tests/js/frames.test.mjs `a frame that navigates between the move and the press answers DocumentChanged`.
   // #11211: `aim` replaces the ref lookup with another source of the point (a captured coordinate).
   async function act(req, drive, aim) {
     const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
@@ -744,6 +766,8 @@ TrustyPages.commands = deps => {
         if (!(await answered)) throw refuse("OutcomeUnknown");
         const now = await probe(req.tab);
         if (!now.access || now.document !== req.document || now.origin !== first.origin) throw changed(now);
+        // #11362: a frame that navigated since its point was taken answers DocumentChanged before the press.
+        if (frames && params.type === "mousePressed") await framed(req, () => TrustyFrames.locate(frames, req.ref));
       }
       return raw(method, params);
     };
@@ -760,6 +784,8 @@ TrustyPages.commands = deps => {
       answered = raw("Page.handleJavaScriptDialog", {accept}).then(() => true, () => false);
     };
     chrome.debugger.onEvent.addListener(answer);
+    // #11362: a frame ref is located through the frame sessions of this same attachment.
+    const frames = TrustyFrames.isRef(req.ref) && !aim ? TrustyFrames.open(req.tab, chrome.debugger) : null;
     const bound = new Promise((_, reject) => {
       timer = setTimeout(() => reject(refuse("OutcomeUnknown")), 5000);
     });
@@ -769,6 +795,7 @@ TrustyPages.commands = deps => {
       aborted = true;
       clearTimeout(timer);
       chrome.debugger.onEvent.removeListener(answer);
+      await frames?.close();
       await chrome.debugger.detach(debuggee).catch(() => {});
     }
     return seen ? {document:req.document, dialog:seen} : {document:req.document};
@@ -783,6 +810,7 @@ TrustyPages.commands = deps => {
     }
 
     async function target() {
+      if (frames) return framePoint(req, frames);
       let hit;
       try {
         [hit] = await chrome.scripting.executeScript({target:{tabId:req.tab, documentIds:[req.document]},
@@ -852,17 +880,20 @@ TrustyPages.commands = deps => {
       throw changed(now);
     }
     let timer;
+    // #11362: a frame ref's box comes through the frame sessions of this same attachment.
+    const frames = TrustyFrames.isRef(req.ref) ? TrustyFrames.open(req.tab, chrome.debugger) : null;
     const bound = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("capture")), 6000); });
     try {
       return await Promise.race([bound, shoot()]);
     } finally {
       aborted = true;
       clearTimeout(timer);
+      await frames?.close();
       await chrome.debugger.detach(debuggee).catch(() => {});
     }
 
     async function shoot() {
-      const {region: box, metrics} = await viewOf(req, req.ref);
+      const {region: box, metrics} = frames ? await frameView(req, frames) : await viewOf(req, req.ref);
       const region = box || {x:0, y:0, width:metrics.css_width, height:metrics.css_height};
       for (const scale of [1, 0.5, 0.25]) {
         const params = {format:"png", captureBeyondViewport:false};
@@ -875,6 +906,55 @@ TrustyPages.commands = deps => {
         if (shot.data.length <= CAPTURE_BUDGET) return {document:req.document, data:shot.data, region, metrics};
       }
       throw refuse("CaptureTooLarge", {tab:req.tab});
+    }
+  }
+
+  // #11362: a frame refusal carries the tab, as a top-document one does.
+  const FRAME_ERRORS = ["StaleElement","DocumentChanged","Obscured","NotDraggable","FrameScriptBlocked"];
+  async function framed(req, work) {
+    try { return await work(); } catch (error) {
+      if (error?.fields && FRAME_ERRORS.includes(error.message)) throw refuse(error.message, {tab:req.tab});
+      throw error;
+    }
+  }
+  const framePoint = (req, frames) => framed(req, () => TrustyFrames.point(frames, req.ref));
+  // #11362: an element screenshot of a frame ref: the top viewport's metrics and the node's box, clipped to them.
+  async function frameView(req, frames) {
+    const {metrics} = await viewOf(req, null);
+    const box = await framed(req, () => TrustyFrames.region(frames, req.ref));
+    const x = Math.max(0, box.x), y = Math.max(0, box.y);
+    const width = Math.min(metrics.css_width, box.x + box.width) - x, height = Math.min(metrics.css_height, box.y + box.height) - y;
+    if (!(width >= 1 && height >= 1)) throw refuse("OutOfViewport", {tab:req.tab});
+    return {region:{x, y, width, height}, metrics};
+  }
+
+  // Why: the snapshot and frame-ref page functions need the debugger and its frame sessions, under the same
+  //   rules as act and capture (#11362).
+  // What: probes, attaches chrome.debugger once (DebuggerBusy when another debugger holds a tab still on the
+  //   lease's document, DocumentChanged otherwise), opens the frame sessions, runs `body` within `ms`
+  //   (OutcomeUnknown past it), then always closes the child sessions and detaches. Frame refusals carry the tab.
+  // Test: tests/js/frames.test.mjs `every child session is detached before the tab, and nothing is sent after close`,
+  //   `a snapshot whose attach fails on the same document answers DebuggerBusy`.
+  async function debugged(req, ms, body) {
+    const changed = now => refuse("DocumentChanged", {tab:req.tab, access:now.access, document:now.document});
+    if (req.document === null) throw changed(await probe(req.tab));
+    const first = await probe(req.tab);
+    if (!first.access || first.document !== req.document) throw changed(first);
+    const debuggee = {tabId:req.tab};
+    try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
+      const now = await probe(req.tab);
+      if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
+      throw changed(now);
+    }
+    const frames = TrustyFrames.open(req.tab, chrome.debugger);
+    let timer;
+    const bound = new Promise((_, reject) => { timer = setTimeout(() => reject(refuse("OutcomeUnknown")), ms); });
+    try {
+      return await Promise.race([bound, framed(req, () => body(frames))]);
+    } finally {
+      clearTimeout(timer);
+      await frames.close();
+      await chrome.debugger.detach(debuggee).catch(() => {});
     }
   }
 
@@ -940,6 +1020,19 @@ TrustyPages.commands = deps => {
       await send("Input.insertText", {text:req.text});
     }, atPoint(req)),
     page_screenshot:req => capture(req),
+    // Why: the agent must read every frame of its tab, the cross-origin embeds included (#11362).
+    // What: the frames' accessibility trees from TrustyFrames.snapshot over one debugger attachment, plus the
+    //   tabs this tab opened (popups and new windows), reported for the agent to select; none is leased.
+    // Test: tests/js/frames.test.mjs `a snapshot reads every frame's accessibility tree within the node budget`,
+    //   `a snapshot reports the tabs the leased tab opened`, `a snapshot caps the opened tabs it reports`.
+    async page_snapshot(req) {
+      await landed(req.tab);
+      const {frames, truncated} = await debugged(req, 8000, ctx => TrustyFrames.snapshot(ctx));
+      // The reply stays under the 1 MiB frame, so the list is cut at POPUP_MAX like the frames and nodes.
+      const all = (await chrome.tabs.query({})).filter(t => t.openerTabId === req.tab);
+      const opened = all.slice(0, POPUP_MAX).map(t => ({tab:t.id, window:t.windowId}));
+      return {document:req.document, frames, popups:opened, truncated:truncated || all.length > POPUP_MAX};
+    },
     // #11208: a new background tab; the broker leases it to the session that asked.
     // Test: tests/js/pages.test.mjs `a tab that fails after it is created is closed and answers OutcomeUnknown`.
     async page_open_tab(req, row) {

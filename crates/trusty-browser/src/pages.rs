@@ -60,6 +60,7 @@ pub const OPS: &[(&str, &[&str])] = &[
     ("open_tab", &["op", "request_id", "url"]),
     ("close_tab", &["op", "request_id", "tab"]),
     ("page_screenshot", &["op", "lease", "ref"]),
+    ("page_snapshot", &["op", "lease"]),
     (
         "page_click_at",
         &["op", "lease", "request_id", "capture_id", "x", "y"],

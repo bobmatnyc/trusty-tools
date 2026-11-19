@@ -213,6 +213,8 @@ pub const CONNECT: &[Tool] = &[
         "page_screenshot",
         &["lease", "ref"],
     ),
+    // #11362: every frame's accessibility tree, with frame-scoped refs.
+    tool("page_snapshot", &[LEASE], "page_snapshot", &["lease"]),
     tool(
         "page_click_at",
         &[LEASE, CAPTURE, X, Y, RID],

@@ -45,6 +45,7 @@ pub mod mcp_upload;
 pub mod native_host;
 pub mod pages;
 pub mod pages_capture;
+pub mod pages_frames;
 mod pages_ops;
 pub mod pages_url;
 pub mod pairing;

@@ -154,6 +154,7 @@ The mode you use with a profile connected in the popup. No code is needed.
 | `browser_open_tab` | Opens a background tab at an `https` URL and returns it already leased to this session. |
 | `browser_close_tab` | Closes a tab this session leases, including a user tab leased with `browser_select`; any other tab answers `TabNotLeased`. |
 | `page_screenshot` | Captures the viewport, or one element `ref`, as a PNG image with a `capture_id` and the viewport metrics. Viewport only; a `ref` scrolls its element into view. |
+| `page_snapshot` | Reads every frame of the tab, cross-origin and out-of-process iframes included, as the browser's accessibility tree. Each node carries a frame ref `f<frame>:<node>` that every ref tool accepts. Also lists the tabs this tab opened. |
 | `page_click_at` | Clicks with a trusted mouse click at an image pixel of a `capture_id`. No hit-test: it can land inside a cross-origin iframe of the leased tab. Dismisses confirm and prompt dialogs. |
 | `page_type_at` | Clicks at an image pixel of a `capture_id`, then inserts up to 8192 characters into the focused element as trusted input. No hit-test, as `page_click_at`. |
 | `browser_release` | Releases a lease taken with `browser_select`. |
@@ -178,6 +179,41 @@ taken to fit the 1 MiB frame. A capture older than 5 s, or one whose viewport
 size, ratio, zoom, scroll or document changed, answers `StaleCapture`, and a
 point outside the viewport answers `OutOfViewport`. The agent still never
 writes a selector.
+
+**Frames.** `page_read` and `page_find` read the top document and its
+same-origin frames. `page_snapshot` reads every frame. It attaches the
+debugger once, sends CDP `Target.setAutoAttach` (flatten) so that each
+out-of-process iframe becomes a child session, and reads
+`Accessibility.getFullAXTree` per frame. It adds no permission. The broker numbers the frames
+depth-first and keeps their ids per lease. A ref `f1:41` is node 41 of frame 1
+of the lease's latest snapshot. A ref from an older snapshot, from before
+the top document changed, or naming a node that snapshot did not list,
+answers `StaleElement`. A frame that navigated
+answers `DocumentChanged`, and one that was removed answers `StaleElement`.
+`page_click` sums each out-of-process frame's offset into viewport CSS pixels,
+hit-tests the point in the frame and in every parent document (an element
+covering the iframe answers `Obscured`), checks the frame's document again
+before the press, and sends trusted input. The other ref tools run their usual page function
+in an isolated world of that frame. `page_click_at` and `page_type_at` reach
+any frame already, because Chrome routes the input by position. The child
+sessions are detached, then the tab, before each tool returns. Frame actions
+run under the grant of the leased tab's top origin: a grant does not name the
+origins of the frames inside the tab. A snapshot stops at 150 frames, node
+depth 40 and about 700 KB, and then answers `truncated: true`; the text is
+capped too. Coverage:
+
+| Case | Behaviour |
+|---|---|
+| Cross-origin or out-of-process iframe, nested too | Read and acted on. |
+| `about:blank`, `srcdoc` and sandboxed frames | Read and acted on. A frame where Chrome refuses an isolated world answers `FrameScriptBlocked` for the page-function tools; `page_click` and the coordinate tools still work. |
+| Canvas | Pixels only: the node is marked, and is read with `page_screenshot` and acted on with `page_click_at`. |
+| Chrome's PDF viewer | Listed with `refused: PdfViewer`. `page_screenshot`, `page_click_at` and `page_type_at` reach it. |
+| A frame Chrome gives no tree for | Listed with `refused: FrameUnreachable`. |
+| Popups and new windows the tab opened | Listed in `popups` with tab and window ids; lease one with `browser_select`. A tab grant lists none. |
+| DevTools or another debugger on the tab | `page_snapshot` answers `page_read` with `fallback: page_read`, `reason: DebuggerBusy`, `partial: true` and a `note` that cross-origin frames were not read; other debugger tools answer `DebuggerBusy`. |
+
+Chrome shows its "being debugged" bar while a debugger tool runs, as for
+`page_click` and `page_screenshot`.
 
 The tool set has no console or network tool. See the comparison
 below.
