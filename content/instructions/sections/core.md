@@ -29,7 +29,7 @@
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
@@ -47,4 +47,4 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.

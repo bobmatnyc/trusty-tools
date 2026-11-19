@@ -182,6 +182,32 @@ expect_log "the run phase is invoked with the selected filterset" \
 expect_log "the run phase does not pass the feature list" "nextest run .*--features" absent
 STUB_RUN_RC=100 expect_exit 1 "a failing selected test fails the gate" "-"
 
+# ── #11489: an `intent(demo):` intention is governed by the demo lint, not
+#    the ratchet. Baseline 2 holds the three-test default set minus the
+#    selected row; the intention is a fourth unselected test and stays green. ──
+
+mkdir -p "${REPO}/crates/crate-a/src"
+printf '[package]\nname = "crate-a"\n' > "${REPO}/crates/crate-a/Cargo.toml"
+printf '#[test]\n#[ignore = "intent(demo): the error path is owed"]\nfn owed_case() {}\n' \
+  > "${REPO}/crates/crate-a/src/lib.rs"
+git -C "$REPO" add crates
+sed 's/"embed::tests::loads_model": {"ignored": true},/&\n    "demo::tests::owed_case": {"ignored": true},/' \
+  "${WORK}/fx/default.json" > "${WORK}/fx/intent.json"
+write_manifest 2
+STUB_DEFAULT_JSON="${WORK}/fx/intent.json" STUB_FEAT_JSON="${WORK}/fx/intent.json" \
+  expect_exit 0 "an intent(demo): test is listed, not counted against the baseline" \
+  "INTENTION	crate-a	demo::tests::owed_case" --list-only
+STUB_DEFAULT_JSON="${WORK}/fx/intent.json" STUB_FEAT_JSON="${WORK}/fx/intent.json" \
+  expect_exit 0 "the summary reports the intention count separately" \
+  "2 NOT run \(baseline 2\); 1 intent\(demo\): intention" --list-only
+write_manifest 2 "$(printf 'crate-a\tdemo::tests::owed_case\tfixture')"
+STUB_DEFAULT_JSON="${WORK}/fx/intent.json" STUB_FEAT_JSON="${WORK}/fx/intent.json" \
+  expect_exit 1 "a RUN row selecting an intention is refused" \
+  "FAIL	INTENTION-SELECTED	crate-a	demo::tests::owed_case" --list-only
+git -C "$REPO" rm -rq --cached crates
+rm -rf "${REPO}/crates"
+write_manifest 3
+
 # ── The captured-stream entry point needs both streams ──
 
 expect_exit 0 "--from-list scores a captured pair of streams" "3 NOT run" \
