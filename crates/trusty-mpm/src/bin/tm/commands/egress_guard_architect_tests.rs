@@ -348,12 +348,12 @@ fn architect_allow_needs_its_audit_line() {
     assert_eq!(audited(deny.clone(), Some(allowed), None, TIME), deny);
 }
 
-/// 🔴 #11273: an unbound Architect (stamp, no launch record) keeps the
-/// family and Bash deny here, now naming `tm fleet bind`; the main-session
-/// read pass after this lift passes its read, never its send, and never its
+/// 🔴 #11521: an unbound Architect (stamp, no launch record) keeps the
+/// family and Bash deny here, with no `tm fleet bind` hint; the main-session
+/// pass after this lift passes its read and its send (#11521), never its
 /// subagent's read.
 #[test]
-fn unbound_architect_reads_pass_after_this_lift_and_sends_do_not_11273() {
+fn unbound_architect_reads_and_sends_pass_after_this_lift_11521() {
     use crate::commands::egress_guard_main_read::lift as main_read;
     let fx = fixture();
     let env = spoof_env(&fx);
@@ -365,7 +365,7 @@ fn unbound_architect_reads_pass_after_this_lift_and_sends_do_not_11273() {
     for (call, want_allow) in [
         (read_call, true),
         (sub_read, false),
-        (slack_send(&fx), false),
+        (slack_send(&fx), true),
     ] {
         let read: Result<Value, HookStdinError> = Ok(call.clone());
         let first = verdict(&read, &table, |p| evaluate(p, &env, config));
@@ -380,7 +380,8 @@ fn unbound_architect_reads_pass_after_this_lift_and_sends_do_not_11273() {
     match first {
         Verdict::Deny { check, reason } => {
             assert_eq!(check, BASH_CHECK);
-            assert!(reason.contains("tm fleet bind"), "{reason}");
+            // #11521: the deny no longer tells the user to bind.
+            assert!(!reason.contains("tm fleet bind"), "{reason}");
         }
         Verdict::Allow => panic!("an unbound Architect's Bash send must be denied"),
     }
