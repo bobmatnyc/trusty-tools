@@ -113,6 +113,14 @@ jobs:
       - name: No TCP listener outside the allowlist (ADR-0032)
         run: bash scripts/check_no_tcp_listeners.sh
 
+      # #11489: an `intent(demo):` test intention may appear only under a
+      # declared demo path. Pure text scan; selftest first.
+      - name: Demo-intention lint selftest (must reject a marker outside demo paths)
+        run: bash scripts/check_demo_intentions_selftest.sh
+
+      - name: Demo test intentions only in declared demo paths
+        run: bash scripts/check_demo_intentions.sh
+
   # Test-only workspace dev-dependency edges (#8341). A separate job because it
   # is the one gate in this file that needs cargo: `cargo metadata --no-deps`
   # reads the member manifests and nothing else — no registry index, no network,
