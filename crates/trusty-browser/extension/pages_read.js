@@ -221,7 +221,10 @@ globalThis.TrustyPageRead = (() => {
     const scope = options.scope_ref == null ? null : resolve(options.scope_ref);
     if (options.scope_ref != null && !scope) return {error:"StaleElement"};
     const budget = Math.min(LIMIT, options.max_chars ?? LIMIT);
-    const ordered = within(scope ?? document).map((el, index) => ({el, index, far:distance(el)}))
+    // #11301: a cross-origin child frame's own viewport says nothing about the tab's, so its entries carry no
+    // distance: they keep document order and viewport_only does not filter them.
+    const far = options.frame === true ? () => 0 : distance;
+    const ordered = within(scope ?? document).map((el, index) => ({el, index, far:far(el)}))
       .filter(c => !options.viewport_only || c.far === 0)
       .sort((a, b) => a.far - b.far || a.index - b.index);
     const result = {origin:location.origin, url:cut(location.href, 2048), title:cut(document.title, 200),
@@ -252,9 +255,39 @@ globalThis.TrustyPageRead = (() => {
     result.truncated = truncated;
     return result;
   }
+  // Why: the worker learns a tab's cross-origin child frames without the webNavigation permission (#11301).
+  // What: injected into every frame (allFrames). `root` is true for the top frame and for a frame whose parent
+  //   is cross-origin; only a root's read is reported, since a root's walk already covers its same-origin
+  //   descendants. A root also lists `children`: the declared origins (from `src`) of the shown cross-origin
+  //   http(s) frames its walk reaches, at most 50, for the denied list. Reads no page content.
+  // Test: tests/extension/test_frames.mjs `a granted child frame is read with attribution`.
+  function pageFrames() {
+    let root = window === window.top;
+    if (!root) {
+      try { root = window.parent.location.origin !== location.origin; } catch { root = true; }
+    }
+    const children = new Set();
+    const shown = el => el.getClientRects().length > 0 &&
+      el.ownerDocument.defaultView.getComputedStyle(el).visibility === "visible";
+    function scan(node) {
+      for (const el of node.querySelectorAll("*")) {
+        if (el.shadowRoot) scan(el.shadowRoot);
+        if (el.localName !== "iframe" && el.localName !== "frame" || !shown(el)) continue;
+        let inner = null;
+        try { inner = el.contentDocument; } catch { inner = null; }
+        if (inner) { scan(inner); continue; }
+        try {
+          const url = new URL(el.getAttribute("src") || "about:blank", el.ownerDocument.baseURI);
+          if (url.protocol === "https:" || url.protocol === "http:") children.add(url.origin);
+        } catch { /* An unparsable src names no origin. */ }
+      }
+    }
+    if (root) scan(document);
+    return {origin:location.origin, url:location.href.slice(0, 2048), root, children:[...children].slice(0, 50)};
+  }
   // In-page entry point for tests and the live check; the worker injects pageInspect itself.
   const pageRead = (reserve, options = {}) => pageInspect("read", reserve, options);
   const pageFind = options => pageInspect("find", 512, {role:null, name:null, text:null, within_ref:null, limit:10,
     ...options});
-  return {pageInspect, pageRead, pageFind};
+  return {pageInspect, pageRead, pageFind, pageFrames};
 })();
