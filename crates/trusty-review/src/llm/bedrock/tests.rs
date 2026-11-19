@@ -593,6 +593,10 @@ fn forced_tool_choice_capability_per_model_id_shape() {
             true,
         ),
         ("us.anthropic.claude-opus-4-8", true),
+        // #11527: the default verifier; a live Converse call with a forced
+        // `toolChoice` returned a `tool_use` answer.
+        ("us.amazon.nova-pro-v1:0", true),
+        ("bedrock/us.amazon.nova-pro-v1:0", true),
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
         // #9292: region prefixes absent from the shared prefix list.
         (

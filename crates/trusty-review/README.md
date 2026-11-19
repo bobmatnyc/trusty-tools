@@ -654,6 +654,14 @@ different model family than the reviewer (#11527): Amazon Nova Pro
 resolve to the same model id, trusty-review logs a warning; the override
 still applies.
 
+The Bedrock verifier default needs `bedrock:InvokeModel` access to
+`amazon.nova-pro-v1:0` (through the `us.` cross-region inference profile) in
+the AWS account and region trusty-review runs in. Without that access the
+verifier call fails. Pick another verifier with
+`TRUSTY_REVIEW_VERIFIER_MODEL` (for example
+`TRUSTY_REVIEW_VERIFIER_MODEL=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`),
+`--verifier-model`, or `[models.verifier]` in the config file.
+
 Override via:
 
 - CLI flag: `--reviewer-model bedrock/us.anthropic.claude-haiku-4-5`
