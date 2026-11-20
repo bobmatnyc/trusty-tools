@@ -6,6 +6,20 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.10.0] — 2026-11-20
+
+### Breaking
+
+- `AgentContentError::BelowMinimum` sits before `Write`, so the implicit discriminants of `Write` and later variants change (`enum_no_repr_variant_discriminant_changed`); bumped to 0.10.0 (#11470).
+
+### Added
+
+- `AgentContentError::BelowMinimum`: the pinned content release is older than the oldest one the harness reads; the harness supplies the remedy (#11470).
+
+### Documentation
+
+- Doc comments no longer name a removed persona crate or org-specific skills.
+
 ## [0.9.6] — 2026-11-13
 
 ### Changed
