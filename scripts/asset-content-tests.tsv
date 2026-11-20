@@ -41,6 +41,7 @@ trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoste
 trusty-agents-common	lib	agents::deployer::tests::stock_tcode_roster_deploys_every_frontmatter_key	reads literal 'content/agents'
 trusty-agents-common	lib	agents::roster_tools_tests	reads repo_roster (content/agents), literal '../../content/skills'
 trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_resolves_the_real_base_agent	reads repo_roster (content/agents)
+trusty-agents-common	lib	agents::skill_root_tests::compose_for_deploy_stamps_omit_claude_md	reads repo_roster (content/agents) (#7684)
 trusty-agents-common	lib	harness_doc::tests	reads HarnessDoc::load over the checkout content (#9011)
 trusty-code	lib	agents::deploy::deploy_tests	runtime: stages load_tm_agent_sources (content/agents via the cwd checkout) and composes the roster
 trusty-code	lib	agents::md_loader::tests::embedded_agent_skill_pointers_open_with_read_file	runtime: composes rust-engineer from trusty-agents-common .md, asserts its skill pointers
