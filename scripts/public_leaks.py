@@ -13,9 +13,9 @@ What: scans `git ls-files` (or the paths given, for the pre-commit hook) with
   with scripts/public_leak_baseline.tsv, which can only shrink: a count above
   the baseline fails, a count below it passes with a note, and an entry whose
   hits are all gone fails with "delete the entry". PRIVATE_NAME is never
-  baselined: every hit fails unless its (path, matched run) pair is listed,
-  with a reason, in scripts/public_leak_private_allowlist.tsv. No matched text
-  is printed.
+  baselined: every hit fails unless its (path, sha256 of the matched run) pair
+  is listed, with a hit count and a reason, in
+  scripts/public_leak_private_allowlist.tsv. No matched text is printed.
   Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
 Test: scripts/check_public_leaks_selftest.sh
 """
@@ -154,21 +154,28 @@ def _allow_keys(rel):
     return {rel, "sha256:" + hashlib.sha256(rel.encode("utf-8")).hexdigest()}
 
 
-TOKEN_RE = re.compile(r"[a-z0-9]+")
+DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _token_key(token):
+    """`sha256:<hex>` of a matched run, the only form a token takes in the allowlist."""
+    return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def read_allowlist(path, fail):
-    """`{(path-key, token): False}` of PRIVATE_NAME hits accepted, one row per alias.
+    """`{(path-key, token-digest): [allowed, used]}` of PRIVATE_NAME hits accepted.
 
-    Why: the owner kept the deprecated org-named aliases, removed in the next
-      major release (#11535); a whole-file exemption would also pass any other
-      private name in that file, so each row names the one run it accepts.
-    What: rows are path<TAB>token<TAB>reason naming an issue (#N). path is the
-      plain path or `sha256:<hex of the path>`; token is the lowercased
-      alphanumeric run the hit matched (e.g. the env-var segment). The value
-      flips to True once a hit uses the row; an unused row is stale.
+    Why: deprecated aliases kept until the next major release (#11535) must
+      pass, but neither a whole-file exemption nor an unbounded row may let a
+      new private name through, and the allowlist must not spell the names.
+    What: rows are path<TAB>sha256:<hex of token><TAB>count<TAB>reason naming an
+      issue (#N). path is the plain path or `sha256:<hex of the path>`; token is
+      the lowercased alphanumeric run the hit matched. count caps the row's hits
+      the way a baseline row does. A duplicate (path, token) row fails.
     Test: selftest cases private-allowlisted, private-allow-other-token,
-      private-allow-other-path, private-allow-stale, private-allow-reason.
+      private-allow-other-path, private-allow-count-grew,
+      private-allow-count-shrank, private-allow-duplicate, private-allow-stale,
+      private-allow-reason.
     """
     allowed = {}
     if not path.is_file():
@@ -177,19 +184,24 @@ def read_allowlist(path, fail):
         if not line.strip() or line.startswith("#"):
             continue
         f = line.split("\t")
-        if len(f) != 3 or not TOKEN_RE.fullmatch(f[1]) or not re.search(r"#[0-9]+", f[2]):
-            raise fail(f"ALLOWLIST: {ALLOW_REL}:{num}: expected path<TAB>token<TAB>reason naming an issue (#N)")
-        allowed[(f[0], f[1])] = False
+        if (len(f) != 4 or not DIGEST_RE.fullmatch(f[1]) or not f[2].isdigit() or int(f[2]) < 1
+                or not re.search(r"#[0-9]+", f[3])):
+            raise fail(f"ALLOWLIST: {ALLOW_REL}:{num}: expected "
+                       "path<TAB>sha256:<hex of token><TAB>count>=1<TAB>reason naming an issue (#N)")
+        if (f[0], f[1]) in allowed:
+            raise fail(f"ALLOWLIST: {ALLOW_REL}:{num}: duplicate (path, token) row")
+        allowed[(f[0], f[1])] = [int(f[2]), 0]
     return allowed
 
 
 def _excused(allow, cls, rel, token):
-    """True when a PRIVATE_NAME hit's (path, token) pair is allowlisted; marks the row used."""
+    """True when a PRIVATE_NAME hit's (path, token) pair has a row; counts the use."""
     if cls != PRIVATE:
         return False
+    tok = _token_key(token)
     for key in _allow_keys(rel):
-        if (key, token) in allow:
-            allow[(key, token)] = True
+        if (key, tok) in allow:
+            allow[(key, tok)][1] += 1
             return True
     return False
 
@@ -214,12 +226,16 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
             if any(not _excused(allow, cls, rel, tok) for tok in bad):
                 hits[(rel, cls)] += 1
                 lines.setdefault((rel, cls), 0)
-    errors = []
+    errors, notes = [], 0
     if have_private:
         scanned_keys = {k for r, _ in files for k in _allow_keys(r)}
-        for (key, token), used in sorted(allow.items()):
-            if not used and (not paths or key in scanned_keys):
+        for (key, _), (cap, used) in sorted(allow.items()):
+            if used > cap:  # #11535: shrink-only, like the baseline
+                errors.append(f"{PRIVATE}: {key}: {used} allowlisted hit(s), {ALLOW_REL} allows {cap}")
+            elif not used and (not paths or key in scanned_keys):
                 errors.append(f"STALE_ALLOWLIST: {key}: a row matches no PRIVATE_NAME hit — delete the row from {ALLOW_REL}")
+            elif used < cap and not paths:
+                notes += 1
     baseline_path = root / BASELINE_REL
     if update:
         if paths:
@@ -230,7 +246,6 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
         return
     base = read_baseline(baseline_path, fail)
     scanned = {rel for rel, _ in files}
-    notes = 0
     for key, n in sorted(hits.items()):
         allowed = base.get(key, 0)
         if n > allowed:
@@ -243,6 +258,6 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
     if errors:
         errors.append("Remove the private content, or move it out of tree; see the header of " + PATTERNS_REL)
         raise fail("\n".join(errors))
-    shrink = f"; {notes} baseline count(s) can shrink (run --update-baseline)" if notes else ""
+    shrink = f"; {notes} baseline count(s) can shrink (run --update-baseline, or lower the allowlist count)" if notes else ""
     print(f"check_content public-leaks: {len(files)} file(s) scanned, {sum(hits.values())} baselined hit(s) — OK{shrink}")
 

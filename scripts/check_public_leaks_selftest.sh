@@ -23,6 +23,9 @@
 #   private-allowlisted   the hit's (path, token) is allowlisted OK
 #   private-allow-other-token  same path, a different name    FAIL PRIVATE_NAME
 #   private-allow-other-path   same token, another file       FAIL PRIVATE_NAME
+#   private-allow-count-grew   one more hit than the row's count  FAIL
+#   private-allow-count-shrank fewer hits than the count     OK, with a shrink note
+#   private-allow-duplicate    a repeated (path, token) row   FAIL
 #   private-allow-stale   an allowlist row with no hit        FAIL STALE_ALLOWLIST
 #   private-allow-reason  an allowlist row with no #N reason  FAIL
 #   private-allow-digest  the hit's path given as sha256:<hex> OK
@@ -47,6 +50,7 @@ LAST=""
 J=""
 EH="E${J}VO_HOST"  # spliced, like every planted line
 NAMES="$TMP_ROOT/names.txt"
+TOK="sha256:$(printf %s zorpcorp | shasum -a 256 | cut -d' ' -f1)"  # allowlist rows store the token digest
 printf '# synthetic\nzorp\n' >"$NAMES"
 
 new_repo() {
@@ -171,7 +175,7 @@ expect private-baselined 1 "FAIL BASELINE: scripts/public_leak_baseline.tsv:2: P
 ARGS="--update-baseline" expect private-update 0 "baseline rewritten, 0 entr" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 if grep -qi orp "$REPO/scripts/public_leak_baseline.tsv"; then echo "FAIL private-no-plaintext: name in baseline"; fail=1; else echo "ok   private-no-plaintext"; fi
 expect private-unlisted 1 "FAIL PRIVATE_NAME: notes.md:1" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
-printf 'notes.md\tzorpcorp\tdeprecated alias (#1)\n' >"$REPO/scripts/public_leak_private_allowlist.tsv"
+printf 'notes.md\t%s\t1\tdeprecated alias (#1)\n' "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allowlisted 0 "OK" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 # #11535: the row names one alias; another name in that file, or the alias elsewhere, still fails.
 w notes.md 'built for ZorpCorp clients' 'the zorpinc account'
@@ -180,15 +184,23 @@ w notes.md 'built for ZorpCorp clients'
 w other.md 'built for ZorpCorp clients'
 expect private-allow-other-path 1 "FAIL PRIVATE_NAME: other.md:1" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 git -C "$REPO" rm -q -f other.md
-printf 'doc.md\tzorpcorp\tlegacy placeholder (#1)\n' >"$REPO/scripts/public_leak_private_allowlist.tsv"
+# #11535: a row's count caps its hits, shrink-only like the baseline.
+w notes.md 'built for ZorpCorp clients' 'ZorpCorp again'
+expect private-allow-count-grew 1 "FAIL PRIVATE_NAME: notes.md: 2 allowlisted hit(s)" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+printf 'notes.md\t%s\t3\tdeprecated alias (#1)\n' "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
+expect private-allow-count-shrank 0 "1 baseline count(s) can shrink" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+printf 'notes.md\t%s\t2\tdeprecated alias (#1)\n' "$TOK" "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
+expect private-allow-duplicate 1 "FAIL ALLOWLIST: scripts/public_leak_private_allowlist.tsv:2: duplicate" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+w notes.md 'built for ZorpCorp clients'
+printf 'doc.md\t%s\t1\tlegacy placeholder (#1)\n' "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allow-stale 1 "FAIL STALE_ALLOWLIST: doc.md" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 NOTES_DIGEST="sha256:$(printf %s notes.md | shasum -a 256 | cut -d' ' -f1)"
-printf '%s\tzorpcorp\tlegacy placeholder (#1)\n' "$NOTES_DIGEST" >"$REPO/scripts/public_leak_private_allowlist.tsv"
+printf '%s\t%s\t1\tlegacy placeholder (#1)\n' "$NOTES_DIGEST" "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allow-digest 0 "OK" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 DOC_DIGEST="sha256:$(printf %s doc.md | shasum -a 256 | cut -d' ' -f1)"
-printf '%s\tzorpcorp\tlegacy placeholder (#1)\n' "$DOC_DIGEST" >"$REPO/scripts/public_leak_private_allowlist.tsv"
+printf '%s\t%s\t1\tlegacy placeholder (#1)\n' "$DOC_DIGEST" "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allow-digest-stale 1 "FAIL STALE_ALLOWLIST: $DOC_DIGEST" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
-printf 'notes.md\tzorpcorp\tno issue pointer\n' >"$REPO/scripts/public_leak_private_allowlist.tsv"
+printf 'notes.md\t%s\t1\tno issue pointer\n' "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allow-reason 1 "FAIL ALLOWLIST: scripts/public_leak_private_allowlist.tsv:1" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 
 new_repo private-absent
