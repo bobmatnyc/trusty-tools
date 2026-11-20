@@ -50,6 +50,10 @@ mod sync_target_tests;
 #[path = "copy_source_tests.rs"]
 mod copy_source_tests;
 
+// #11464: the remote gate and `secrets.gate`; it shares these helpers.
+#[path = "remote_tests.rs"]
+mod remote_tests;
+
 /// The project vault of the fixture's `Acme/Web` remote.
 const PROJECT_VAULT: &str = "trusty/acme/web";
 /// A value whose text appears nowhere else in the crate.

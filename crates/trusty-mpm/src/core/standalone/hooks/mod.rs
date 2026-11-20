@@ -138,7 +138,9 @@ pub fn mpm_hook_command(exe_override: Option<&Path>) -> Result<String, StableHoo
 /// to must be resolved by the SAME rule the writers persist — a second resolver
 /// could hand the repair a path the writer would have refused.
 pub fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, StableHookExeError> {
+    let test_exe = test_hook_exe();
     let running = exe_override
+        .or(test_exe.as_deref())
         .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
         .or_else(|| {
             std::env::current_exe()
@@ -147,6 +149,26 @@ pub fn resolve_stable_hook_exe(exe_override: Option<&Path>) -> Result<PathBuf, S
         });
 
     resolve_stable_hook_exe_with(running, trusty_common::bin_resolve::resolve_binary)
+}
+
+/// The env var a debug-build test harness names its stand-in hook binary in.
+pub const TEST_HOOK_EXE_ENV: &str = "TRUSTY_MPM_TEST_HOOK_EXE";
+
+/// A debug build's stand-in for the running binary, from [`TEST_HOOK_EXE_ENV`].
+///
+/// Why (#10612): an Architect launch now refuses when no stable hook binary
+/// resolves, and a test binary under `target/` with no installed `tm` on a CI
+/// runner resolves none. The value still passes every gate in
+/// [`resolve_stable_hook_exe_with`]; a release build never reads it.
+/// Test: `architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op`,
+/// `a_managed_resume_under_an_owner_file_carries_the_same_policy`.
+fn test_hook_exe() -> Option<PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os(TEST_HOOK_EXE_ENV)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Testable core of [`resolve_stable_hook_exe`] with its I/O sources injected.

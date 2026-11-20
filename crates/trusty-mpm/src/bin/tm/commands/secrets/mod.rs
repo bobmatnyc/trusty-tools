@@ -43,6 +43,11 @@ mod exec_stub;
 mod exec_token;
 #[cfg(unix)]
 mod exec_wire;
+// See G0b secrets JSON import.
+#[cfg(unix)]
+mod import_json;
+#[cfg(all(test, unix))]
+mod import_json_tests;
 #[cfg(unix)]
 mod paste;
 // #9072: `tm secrets resolve`, the tier-3 grant client.
@@ -173,8 +178,16 @@ pub(crate) async fn dispatch_with(
         SecretsAction::Remove { key, group } => {
             verbs::remove(ctx, key.text(), group.as_ref().map(|g| g.text()), out).await
         }
-        SecretsAction::Import { path, group } => {
-            verbs::import(ctx, &path, group.as_ref().map(|g| g.text()), out).await
+        SecretsAction::Import {
+            path,
+            group,
+            format,
+            google_oauth,
+        } => {
+            // See G0b secrets JSON import.
+            let format = format.or(google_oauth.then_some(crate::cli::ImportFormat::GoogleOauth));
+            let group = group.as_ref().map(|g| g.text());
+            verbs::import(ctx, &path, group, format, out).await
         }
         SecretsAction::Copy {
             from,

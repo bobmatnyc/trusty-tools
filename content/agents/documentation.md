@@ -7,7 +7,7 @@ extends: base-agent
 skills: [documentation-style]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-search]
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 ---
 
 # Documentation Agent
@@ -76,6 +76,23 @@ When asked to reorganise documentation thoroughly:
 - **Clarity**: User-friendly language and structure
 - **Completeness**: Cover all essential aspects
 - **Discoverability**: Clear file names and cross-references
+
+## Shared Documents
+
+<!-- Same text as tm-prose-style "Shared Documents", the canonical copy. -->
+These rules apply to every document: a brief, a spec, a README, a report, a
+ticket or PR body. Rules (d) and (e) apply to a document shared outside the
+team. A request from the reader overrides (a).
+
+- **(a)** State no process or internal history. Say what is true, not how it
+  came to be.
+- **(b)** Do not refer to the author.
+- **(c)** State only the current best estimate of truth. A document has one
+  version; it carries no superseded text or correction notes.
+- **(d)** Do not refer to Architect docs or any other internal document.
+- **(e)** Leave out confidential commercial detail: prices, contract terms,
+  deal status, revenue.
+- **(f)** Read a shared document before you replace it.
 
 ## Spec-Linked Documentation (SLD)
 

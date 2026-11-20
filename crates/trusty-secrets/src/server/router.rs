@@ -38,6 +38,7 @@ use super::errors::ErrorKind;
 use super::exec;
 use super::grant::GrantRegistry;
 use super::methods::{self, Caller, MethodFn};
+use super::remote;
 use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
 use super::ticket::TicketStore;
@@ -437,7 +438,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 13] = [
+pub(crate) const METHODS: [(&str, MethodFn); 14] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -454,6 +455,8 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
     (method::TICKET_MINT, ticket_methods::mint),
     (method::TICKET_VOID, ticket_methods::void),
     (method::TICKET_PENDING, ticket_methods::pending),
+    // #11464 D3a: the remote gate's one entry.
+    (method::GATE, remote::gate),
 ];
 
 /// The `secrets.*` router over `state`.

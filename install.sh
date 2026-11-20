@@ -14,7 +14,8 @@
 #      release, downloads + checksum-verifies the tarball, installs
 #      `trusty-installer` (and the `tctl` alias), adds the install dir to PATH
 #      when a new shell would miss it (zsh: without a prompt, #11280), then
-#      runs `trusty-installer install` to finish bootstrap.
+#      runs `trusty-installer install` to finish bootstrap. Under `curl | sh`
+#      prompts read /dev/tty; with no terminal at all it needs -y (#11430).
 # Test: `sh -n install.sh` for POSIX syntax; `shellcheck --shell=sh install.sh`
 #      for lint; tests/test-install-path.sh for PATH handling (host-only, temp
 #      HOME); manual run on macOS arm64 + Linux x86_64; run with
@@ -32,6 +33,11 @@
 #                          API rate limit from 60/hr (unauthenticated, easily
 #                          exhausted behind a shared/NAT'd IP) to 5000/hr.
 #                          Never required — the tokenless path still works.
+#   CI                     Non-empty (as CI runners set it) without -y or
+#                          TRUSTY_YES=1: stop before installing anything, even
+#                          when a terminal opens (#11430). `docker run -t`
+#                          without -i, and other runners that give a pty
+#                          nobody types at, must pass -y.
 #
 # Exit status: 0 on success; 1 when install.sh itself aborts; a failed
 # `trusty-installer install` bootstrap's own status (1-3) unchanged; 4 when
@@ -56,6 +62,8 @@ REPO_URL="https://github.com/${REPO}"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
 RELEASE_DL_BASE="${REPO_URL}/releases/download"
 TAG_PREFIX="${CRATE}-v"
+# The published one-liner's URL, named in the no-terminal error (#11430).
+INSTALL_SH_URL="https://raw.githubusercontent.com/${REPO}/main/install.sh"
 # Default install dir — the canonical cargo bin dir, matching every other
 # write path (#5777 / #4964: two destinations meant PATH order decided which
 # copy ran). Honours CARGO_HOME like cargo itself; no Rust toolchain needed —
@@ -331,24 +339,48 @@ resolve_version() {
 # Prompt handling
 # ---------------------------------------------------------------------------
 
+# Why (#11430): under `curl … | sh` stdin is the pipe carrying this script,
+#      but the user still sits at a terminal that /dev/tty reaches.
+#      `[ -r /dev/tty ]` is not enough: the node is world-readable even in a
+#      process with no controlling terminal, where opening it fails (ENXIO).
+# What: returns 0 iff /dev/tty opens, i.e. a controlling terminal exists.
+# Test: `test_curl_pipe_with_terminal_bootstraps_from_tty`,
+#      `test_curl_pipe_without_terminal_stops_before_bootstrap` in
+#      tests/test-install-path.sh.
+_have_tty() {
+    ( : </dev/tty ) 2>/dev/null
+}
+
 # Why: Honor non-interactive mode (CI, piped curl) while still letting an
 #      interactive user confirm side-effecting steps.
-# What: Return 0 (yes) without asking when ASSUME_YES=1; otherwise prompt.
-#      A non-tty stdin with no -y/TRUSTY_YES defaults to "no" to stay safe.
+# What: Return 0 (yes) without asking when ASSUME_YES=1; otherwise prompt on
+#      stdin when it is a terminal, else on /dev/tty when one opens (#11430,
+#      `curl | sh`). With no terminal at all and no -y/TRUSTY_YES it warns
+#      and returns 1 (no) to stay safe.
 # Test: With ASSUME_YES=1 returns 0 immediately; interactively, "y" returns 0
-#      and anything else returns 1.
+#      and anything else returns 1; `test_curl_pipe_confirm_reads_tty` (piped
+#      stdin, terminal answers "y") and `test_bash_no_tty_still_skips` in
+#      tests/test-install-path.sh.
 confirm() {
     _prompt="$1"
+    # #11430: a failed read (e.g. the /dev/tty redirect) must never leave an
+    # inherited or earlier `_reply` to be taken as "yes".
+    _reply=""
     if [ "${ASSUME_YES}" = "1" ]; then
         return 0
     fi
-    # If stdin is not a terminal (e.g. piped curl without -y), do not block.
-    if [ ! -t 0 ]; then
+    if [ -t 0 ]; then
+        printf '%s [y/N] ' "${_prompt}"
+        read -r _reply
+    elif _have_tty; then
+        # #11430: stdin is the `curl | sh` pipe; ask on the user's terminal.
+        printf '%s [y/N] ' "${_prompt}" >/dev/tty
+        read -r _reply </dev/tty
+    else
+        # No terminal anywhere (CI, container) and no -y: do not block.
         warn "non-interactive shell and no -y/TRUSTY_YES; skipping: ${_prompt}"
         return 1
     fi
-    printf '%s [y/N] ' "${_prompt}"
-    read -r _reply
     case "${_reply}" in
         y | Y | yes | YES)
             return 0
@@ -357,6 +389,30 @@ confirm() {
             return 1
             ;;
     esac
+}
+
+# Why (#11430): with no terminal at all (CI, a container) and no -y,
+#      `tctl install` refuses with exit 3 (#2112). Finding that out after the
+#      download and the PATH edit left a half-done install and a misleading
+#      "components failed to bootstrap" banner.
+#      A CI runner can hand the script a pty nobody types at (`docker run -t`
+#      without -i), where the prompt would wait forever.
+# What: returns 0 when ASSUME_YES=1, or when CI is empty and stdin is a
+#      terminal or /dev/tty opens. Otherwise (no terminal, or CI set) prints
+#      one error naming `| sh -s -- -y` and TRUSTY_YES=1 and exits 1. main
+#      calls it before any download or file change.
+# Test: `test_curl_pipe_without_terminal_stops_before_bootstrap`,
+#      `test_ci_with_terminal_stops_before_bootstrap` in
+#      tests/test-install-path.sh.
+require_consent_terminal() {
+    if [ "${ASSUME_YES}" = "1" ]; then
+        return 0
+    fi
+    # #11430 (owner decision): CI set counts as no terminal, even with a pty.
+    if [ -z "${CI:-}" ] && { [ -t 0 ] || _have_tty; }; then
+        return 0
+    fi
+    die "no terminal to confirm the install (or CI is set) and no -y given; nothing was installed. Re-run with: curl -sSf ${INSTALL_SH_URL} | sh -s -- -y  (or set TRUSTY_YES=1)"
 }
 
 # ---------------------------------------------------------------------------
@@ -637,8 +693,9 @@ _update_zsh_path() {
 # What: Returns early (no probe, no edit) for an unsafe dir or
 #      TRUSTY_NO_MODIFY_PATH=1. zsh: delegates to `_update_zsh_path`. bash and
 #      other shells: if the dir is not on the installer's $PATH, appends an
-#      export line to each RC file after `confirm` (a non-tty stdin without
-#      -y/TRUSTY_YES still skips), idempotently. Returns 1 when a write failed
+#      export line to each RC file after `confirm` (#11430: under `curl | sh`
+#      it asks on /dev/tty; with no terminal and no -y/TRUSTY_YES it skips),
+#      idempotently. Returns 1 when a write failed
 #      (an `error:` line is printed and no "Added" line), 0 otherwise.
 # Test: `test_zsh_writes_only_zshenv`, `test_bash_writes_both_files`,
 #      `test_bash_already_on_path_is_noop`, `test_bash_no_tty_still_skips`,
@@ -816,15 +873,18 @@ download_and_install() {
 #      installs each platform component and exits non-zero (2) if any member
 #      failed (see crates/trusty-installer/src/commands/install.rs) — that exit
 #      code must propagate instead of being swallowed (#1992 finding 4 / #2038).
-# What: Invoke `trusty-installer install` (or `trusty-installer install -y` in
-#      non-interactive mode), capture its exit status, then print the macOS Full
-#      Disk Access note (macOS only). Returns the captured bootstrap exit status
-#      as this function's own exit status (via `return`) so the caller can act
-#      on it.
-# Test: Confirm the binary at its absolute path is invoked; in non-interactive
-#      mode the -y flag is passed; on macOS the FDA box is printed; a non-zero
-#      exit from the bootstrap command is captured and returned rather than
-#      swallowed.
+#      #11430: `tctl install` asks for consent only when its stdin is a
+#      terminal (#2112), and under `curl | sh` stdin is the script pipe.
+# What: Invoke `trusty-installer install -y` when ASSUME_YES=1; otherwise
+#      `trusty-installer install`, with stdin from /dev/tty when stdin is not a
+#      terminal but /dev/tty opens, so the user answers its prompt. Captures
+#      its exit status, then prints the macOS Full Disk Access note (macOS
+#      only). Returns the captured bootstrap exit status as this function's
+#      own exit status (via `return`) so the caller can act on it.
+# Test: `test_curl_pipe_with_terminal_bootstraps_from_tty`,
+#      `test_yes_bootstraps_with_yes_flag` in tests/test-install-path.sh; on
+#      macOS the FDA box is printed; a non-zero exit from the bootstrap
+#      command is captured and returned rather than swallowed.
 post_install() {
     _bin_path="$1"
     _bootstrap_status=0
@@ -833,6 +893,9 @@ post_install() {
     say "Bootstrapping the platform with '${BIN} install'..."
     if [ "${ASSUME_YES}" = "1" ]; then
         "${_bin_path}" install -y || _bootstrap_status=$?
+    elif [ ! -t 0 ] && _have_tty; then
+        # #11430: give `tctl install` the user's terminal, not the script pipe.
+        "${_bin_path}" install </dev/tty || _bootstrap_status=$?
     else
         "${_bin_path}" install || _bootstrap_status=$?
     fi
@@ -1015,6 +1078,10 @@ main() {
         esac
         shift
     done
+
+    # #11430: no terminal (or CI set) and no -y means no one can confirm;
+    # stop now, before the download, the PATH edit or any other change.
+    require_consent_terminal
 
     # Required tools.
     need_cmd curl || die "'curl' is required but not found on PATH"

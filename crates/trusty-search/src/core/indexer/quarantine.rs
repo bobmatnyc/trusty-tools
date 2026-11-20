@@ -5,10 +5,10 @@
 //! and sets [`CodeIndexer::corpus_open_failed`] — but the handle otherwise
 //! stays fully live, watcher included. In the #4122 production incident that
 //! combination turned a *recoverable* outage into permanent data loss: the
-//! file watcher for `duettoresearch-hackathon-tm-hackathon-01` kept accepting
+//! file watcher for `acme-hackathon-tm-hackathon-01` kept accepting
 //! incremental writes from unrelated file saves, so `chunk_count` climbed
 //! `0 → 68 → 1334` and a FRESH, PARTIAL corpus was persisted over the
-//! never-opened original. The sibling index `cto-duetto` hit the identical
+//! never-opened original. The sibling index `cto-acme` hit the identical
 //! open failure in the same boot, took no watcher writes, and recovered all
 //! 200,090 chunks on the next restart. Watcher-writes-during-failure was the
 //! sole difference between full recovery and unrecoverable loss.
@@ -421,7 +421,7 @@ impl CodeIndexer {
     /// Lift the write quarantine after a corpus open succeeds (issue #4122).
     ///
     /// Why: quarantining forever on one transient failure would be a new
-    /// outage, not a fix — the #4122 contrast case (`cto-duetto`) recovered
+    /// outage, not a fix — the #4122 contrast case (`cto-acme`) recovered
     /// cleanly on the next boot and MUST keep doing so. A successful
     /// `CorpusStore::open` is precisely the event that makes writes safe
     /// again, so [`CodeIndexer::set_corpus_store`] — the single sink every

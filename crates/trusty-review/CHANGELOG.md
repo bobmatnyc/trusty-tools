@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.42.0] — 2026-11-16
+
+### Fixed
+
+- A `review_pr` miss on an index the trusty-search daemon lists as parked now says the index is parked and points at trusty-search `ensure_project`, instead of telling the operator to index the checkout (#11417). `SearchClient` gains `list_parked_index_ids`, which defaults to none.
+
+### Changed
+
+- MCP `review_pr` on a repo with no trusty-search index now returns a DEGRADED diff-only review (banner, `degraded_reason`, search `unavailable` in `context_sources`) instead of an error, unless `TRUSTY_REVIEW_REQUIRE_SEARCH=true`. The webhook and CLI GitHub-PR runs still fail closed (#11409).
+
 ## [0.41.0] — 2026-11-11
 
 ### Breaking
@@ -887,11 +897,9 @@ Not published: pre-publish gate failed on RUSTSEC-2026-0436/0429; superseded by 
 
 ### Removed
 
-- APEX/KB retrieval no longer runs during a review. The `apex_context` module,
-  the `apex_index` / `apex_path_prefixes` config surface (env vars
-  `TRUSTY_SEARCH_APEX_INDEX` / `TRUSTY_REVIEW_APEX_PATH_PREFIXES`, now ignored),
-  the `[apex: …]` inline-citation form, and the `ReviewContext::apex_results`
-  field are gone. APEX context was cited 0 times across 69 audited findings at
+- Internal knowledge-base retrieval no longer runs during a review. The retrieval module, its config surface (`*_index`, `*_path_prefixes`) and its two env vars (now ignored),
+  the matching inline-citation form, and the `*_results` field on the review context
+  are gone. Knowledge-base context was cited 0 times across 69 audited findings at
   ~0.001 relevance, so the owner ruling dropped the retrieval step rather than
   forcing citation (#4999). GitHub and JIRA/Confluence context retrieval are
   unchanged.
@@ -1008,7 +1016,7 @@ Not published: pre-publish gate failed on RUSTSEC-2026-0436/0429; superseded by 
 - A finding citing a line beyond the cited file's last diffed line is now dropped. Citation integrity previously verified quoted content only, so a misattributed finding that quoted nothing substantial survived with its severity intact — the shape behind 5 of the 19 fabricated-or-partial findings in #4999's audit. The check reads the `@@` hunk headers, covers both sides of each hunk plus Stage-B-dropped hunks, and fails open when no header parses (#4999).
 - **`trusty-review run` no longer posts live on the strength of an ambient env var alone.** `cmd_run` passed `TriggerDecision::None`, so whether a run published a GitHub comment depended entirely on whatever `PR_INTELLIGENCE_DRY_RUN` happened to be set to in the calling shell — with nothing at the call site indicating it would happen. That published an unintended `REQUEST_CHANGES` review to PR #4436 from a run meant only as a local pre-merge check. `run` now takes an explicit `--live` flag: passing it forces a live post (even over a stale `PR_INTELLIGENCE_DRY_RUN=true`), and omitting it forces a dry-run (even over a stale `PR_INTELLIGENCE_DRY_RUN=false`) — the env var no longer gates this command at all. `run` also prints the resolved posting mode to stderr before doing any work. See [#4460](https://github.com/bobmatnyc/trusty-tools/issues/4460).
 - **A findings-parse failure now fails closed instead of rendering `Findings: none`.** A model that returned its `findings` array double-encoded — a JSON *string* holding the array — made the whole response fail to deserialize; the verdict-keyword scan then salvaged the verdict, discarded the evidence, and printed `APPROVE` with `Findings: none`, indistinguishable from a genuinely clean review. Two changes: the parser now decodes a double-encoded `findings` string a second time, so the findings usually survive; and when the structured payload still cannot be parsed, the keyword-scanned token feeds the fail-safe *reason* rather than becoming the verdict, so the run reports `UNKNOWN` plus a `Pipeline error:` line naming the lost findings. See [#4491](https://github.com/bobmatnyc/trusty-tools/issues/4491).
-- `[confluence: "Page Title" — "excerpt"]` is now a recognised inline citation form. `BRACKET_CITATION_RE` matched four bracket forms and the two system prompts mandated the same four, but `duettoresearch/code-intelligence` emits a fifth — so a Confluence excerpt survived the pre-scan strip and was read as an ungrounded free-text code quote, tripping the fabrication check on prose the model had cited correctly. The regex and both prompt grammars now list all five. See #5022.
+- `[confluence: "Page Title" — "excerpt"]` is now a recognised inline citation form. `BRACKET_CITATION_RE` matched four bracket forms and the two system prompts mandated the same four, but an internal review tool emits a fifth — so a Confluence excerpt survived the pre-scan strip and was read as an ungrounded free-text code quote, tripping the fabrication check on prose the model had cited correctly. The regex and both prompt grammars now list all five. See #5022.
 - The report's `Data gaps:` line no longer names a section the same report renders populated. Gaps are recorded as the polish pass walks the document, so dropping the Authorship & Key-Person Risk section's unsynthesised narrative paragraph recorded the enclosing heading as a gap — and nothing revisited that once the section's authorship table filled in with six authors, a bus factor and a trajectory. The gap list is now filtered against the finished body: a label matching a heading whose span carries content is dropped, while a genuinely collapsed section is still named. Same stale-emptiness class as #6029. See #6039.
 - A review whose PR-metadata fetch produced no head SHA no longer posts. The dedup claim in `run_review` and the `complete()` call in `finalize_review` are both keyed on the head SHA, and `decide_action` never read it — so a failed `fetch_github_pr_meta` fell back to an empty SHA, continued, and could post live with the claim never taken and never completed; a retry after the same failure posted a duplicate, and the stranded-claim block could never engage. `run_review` now aborts before the diff is loaded when posting is reachable and the SHA is empty, and `finalize_review` downgrades such a run to log-only as a second guard for the webhook path. Same fail-open family as #5126/#5113/#5020. See #6062.
 - A GREEN finding now carries its `file:line`, and only a GREEN carrying one is credited as a clean signal in Security Posture. Greens were admitted as bare titles with no file, no line and no quote — 0 of 23 in one report — and five of them were then cited as security strengths a reader had no way to check. One, "Raw SQL string interpolation via multi-line concatenation for PR upsert", describes a defect and was listed as a strength. The verification guardrail now holds for every band, and the bullet renders `title — \`file:line\`` without any elaboration.
@@ -2021,7 +2029,7 @@ a new public module.
 
 ### Fixed
 
-- verify `code_provable` finding citations against the actual diff before grading, so a confabulated finding whose cited content is not present in the cited file can no longer fail-close a clean PR (closes #2881). A diff-provable finding that quotes content which lives in a different changed file (the repro attributed a new vitest test file's content to a large regenerated bundle) is downgraded to advisory — its `code_provable` flag and its `source_citation` are cleared and its confidence lowered — instead of driving the deterministic BLOCK / REQUEST_CHANGES floor. Applied on both the unified and map-reduce review paths. The check is fail-open and high-precision: the prompt-mandated inline bracket citations (`[code: … ]`, `[jira: … ]`, `[gh: … ]`, `[apex: … ]`) are skipped before quote extraction so a correctly-cited finding is never false-downgraded, and findings that quote nothing concrete, cite an un-indexed file, or whose quote is grounded in the cited file are left untouched. Residual gap: a fabrication expressed purely in paraphrase (no verbatim code quote) is not caught — the deterministic check requires a concrete quote to verify against. ([#2882](https://github.com/bobmatnyc/trusty-tools/pull/2882)) ([`d7a7459`](https://github.com/bobmatnyc/trusty-tools/commit/d7a7459a704e8b3b6a22418f7eef2b38974e23d9))
+- verify `code_provable` finding citations against the actual diff before grading, so a confabulated finding whose cited content is not present in the cited file can no longer fail-close a clean PR (closes #2881). A diff-provable finding that quotes content which lives in a different changed file (the repro attributed a new vitest test file's content to a large regenerated bundle) is downgraded to advisory — its `code_provable` flag and its `source_citation` are cleared and its confidence lowered — instead of driving the deterministic BLOCK / REQUEST_CHANGES floor. Applied on both the unified and map-reduce review paths. The check is fail-open and high-precision: the prompt-mandated inline bracket citations (`[code: … ]`, `[jira: … ]`, `[gh: … ]`) are skipped before quote extraction so a correctly-cited finding is never false-downgraded, and findings that quote nothing concrete, cite an un-indexed file, or whose quote is grounded in the cited file are left untouched. Residual gap: a fabrication expressed purely in paraphrase (no verbatim code quote) is not caught — the deterministic check requires a concrete quote to verify against. ([#2882](https://github.com/bobmatnyc/trusty-tools/pull/2882)) ([`d7a7459`](https://github.com/bobmatnyc/trusty-tools/commit/d7a7459a704e8b3b6a22418f7eef2b38974e23d9))
 
 ## [0.9.1] — 2026-07-16
 

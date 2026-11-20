@@ -54,7 +54,7 @@
 - Conceptual queries work well when intent is classified correctly
 - KG expansion never triggered (bug #90 — zero symbols extracted from Rust code)
 
-## Phase 2: duetto-cto (Medium, 16,586 files)
+## Phase 2: acme-cto (Medium, 16,586 files)
 
 ### Result: OOM Crash Loop
 
@@ -68,9 +68,9 @@
 
 **Root Cause**: ORT ONNX arena pre-allocates buffers before `TRUSTY_MEMORY_LIMIT_MB` soft cap can trigger (bug #89). The embedding pipeline allocates tensors for the largest batch it has ever seen, and the soft cap polls RSS only after batch commits. On a 16k-file repo, this race condition allows RAM to be exhausted before the cap can halt indexing.
 
-**Search Results on Partial Index**: All queries returned ❌ Miss — insufficient chunk coverage (851 / ~200,000 estimated chunks for duetto-cto) makes search results unreliable.
+**Search Results on Partial Index**: All queries returned ❌ Miss — insufficient chunk coverage (851 / ~200,000 estimated chunks for acme-cto) makes search results unreliable.
 
-## Phase 3: duetto-main (Large)
+## Phase 3: acme-main (Large)
 
 **Status**: Skipped — Phase 2 RSS never recovered below 4 GB gate after crashes. Attempting Phase 3 with residual memory pressure would compound the OOM risk.
 

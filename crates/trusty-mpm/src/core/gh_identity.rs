@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn binding_removes_the_inherited_identity_vars() {
         let c = GithubConfig {
-            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            config_dir: Some(PathBuf::from("/cfg/acme")),
             ..cfg()
         };
         let env = resolve_gh_env(Some(&c)).expect("ok");
@@ -828,7 +828,7 @@ mod tests {
     #[test]
     fn apply_to_removes_then_sets() {
         let c = GithubConfig {
-            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            config_dir: Some(PathBuf::from("/cfg/acme")),
             ..cfg()
         };
         let env = resolve_gh_env(Some(&c)).expect("ok");
@@ -845,10 +845,7 @@ mod tests {
             .collect();
         assert!(seen.contains(&("GH_TOKEN".to_string(), None)), "{seen:?}");
         assert!(
-            seen.contains(&(
-                ENV_GH_CONFIG_DIR.to_string(),
-                Some("/cfg/duetto".to_string())
-            )),
+            seen.contains(&(ENV_GH_CONFIG_DIR.to_string(), Some("/cfg/acme".to_string()))),
             "{seen:?}"
         );
     }

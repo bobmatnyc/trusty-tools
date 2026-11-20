@@ -46,6 +46,8 @@ pub(crate) mod phase_title;
 pub(crate) mod queue_check;
 // #8638: one latest-run rule for every rollup reader (queue-check, wait).
 pub(crate) mod rollup;
+// Dr4: the `rung:N` label `tm pr open` writes and `tm pr queue-check` reads.
+pub(crate) mod rung_label;
 
 #[cfg(test)]
 #[path = "tests.rs"]

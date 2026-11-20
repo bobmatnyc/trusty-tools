@@ -28,7 +28,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use super::platform::{self, Symlinks};
-use crate::api::{BackendId, OwnerName, RepoName, SecretsError, VaultName};
+use crate::api::{BackendId, OwnerName, RepoName, SecretKey, SecretsError, VaultName};
 
 /// Machine config file, relative to `$HOME` (DOC-74 §6.1).
 pub const MACHINE_CONFIG_SUBPATH: &str = ".trusty-tools/trusty-common/config.yaml";
@@ -72,9 +72,73 @@ pub struct MachineSecretsConfig {
     /// a `projects` entry for the checkout's `<owner>/<repo>`.
     #[serde(default)]
     pub vercel: Option<VercelSection>,
+    /// The hosts `trusty-secrets remote-gate` serves, keyed by the `--host`
+    /// name an `authorized_keys` forced command pins (#11464).
+    // #11464: read only from the account's own file, never a tracked one.
+    #[serde(default)]
+    pub remote_hosts: BTreeMap<String, RemoteHostConfig>,
+}
+
+/// One `secrets.remote_hosts` entry: whether the host is on, the projects
+/// it may resolve keys of, and the keys (#11464).
+///
+/// Why: the gate trusts the host, never the agent label a frame carries, so
+/// the only narrowing is this per-host entry in an untracked file.
+/// What: `enabled` defaults to on. `projects` maps `<owner>/<repo>` to the
+/// absolute checkout on this machine the gate grants against; names compare
+/// in the canonical (lowercased) form the scopes use. `keys` is the exact
+/// list of key names the host may resolve; absent or empty allows none.
+/// Unknown keys are ignored.
+/// Test: `remote_allowlist_table`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RemoteHostConfig {
+    /// `false` revokes the host without removing its entry.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// `<owner>/<repo>` to the checkout directory on this machine.
+    #[serde(default)]
+    pub projects: BTreeMap<String, PathBuf>,
+    /// The key names this host may resolve.
+    #[serde(default)]
+    pub keys: Vec<String>,
+}
+
+impl RemoteHostConfig {
+    /// The checkout mapped to `<owner>/<repo>`, when this host is on.
+    pub fn project_dir(&self, owner: &OwnerName, repo: &RepoName) -> Option<&Path> {
+        // #11464 critic L1: compare canonical names, the same lowercased
+        // `OwnerName`/`RepoName` the scopes are built from; an entry that
+        // does not parse matches nothing.
+        if self.enabled == Some(false) {
+            return None;
+        }
+        self.projects
+            .iter()
+            .find(|(project, _)| {
+                project.split_once('/').is_some_and(|(o, r)| {
+                    OwnerName::new(o).is_ok_and(|o| &o == owner)
+                        && RepoName::new(r).is_ok_and(|r| &r == repo)
+                })
+            })
+            .map(|(_, dir)| dir.as_path())
+    }
+
+    /// Whether this host is on and lists `key` exactly.
+    pub fn allows_key(&self, key: &SecretKey) -> bool {
+        self.enabled != Some(false) && self.keys.iter().any(|k| k == key.as_str())
+    }
 }
 
 impl MachineSecretsConfig {
+    /// The `remote_hosts` entry for `host`, compared ASCII case-insensitively.
+    pub fn remote_host(&self, host: &str) -> Option<&RemoteHostConfig> {
+        self.remote_hosts
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(host))
+            .map(|(_, entry)| entry)
+    }
+
     /// Whether this machine enables the CLI-backed backend `id`.
     ///
     /// Why: #7519 P1 carry-over (a) — a delete sweeps every enabled CLI

@@ -266,6 +266,46 @@ pub struct AuditRecord {
     /// otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend_wait: Option<BackendWait>,
+    /// On a `secrets.resolve` record through `secrets.gate`: the host the
+    /// gate's `--host` names, pinned by the ssh key's forced command (#11464).
+    /// `None` on every local call, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// On a `secrets.gate` record: the label the remote frame claimed,
+    /// recorded and never trusted (#11464). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_agent: Option<RemoteAgent>,
+    /// On a `secrets.gate` record: the `<owner>/<repo>` the frame named,
+    /// once validated (#11464). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_project: Option<String>,
+}
+
+/// The agent label a remote frame claimed (#11464).
+///
+/// Why: the Studio cannot read the remote host's process tree, so the label
+/// is the remote side's word; `verified: false` keeps any reader from taking
+/// it for an identity.
+/// What: the label, validated to `[A-Za-z0-9._-]{1,64}`, and `verified`,
+/// which this build always writes `false`.
+/// Test: `gate_resolve_of_an_open_key_returns_it_with_a_remote_record`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RemoteAgent {
+    /// The claimed label.
+    pub label: String,
+    /// Always `false`: nothing on this host verified the label.
+    pub verified: bool,
+}
+
+impl RemoteAgent {
+    /// An unverified `label`.
+    pub fn unverified(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            verified: false,
+        }
+    }
 }
 
 /// How a timed-out backend call ended (#11215).
@@ -325,6 +365,9 @@ impl AuditRecord {
             ticket: None,
             copy_source: None,
             backend_wait: None,
+            host: None,
+            remote_agent: None,
+            remote_project: None,
         }
     }
 

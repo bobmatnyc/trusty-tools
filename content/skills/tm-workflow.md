@@ -3,7 +3,7 @@ name: tm-workflow
 description: The single trusty-mpm delivery workflow — phases and gates, the ticketing/workflow/version-control ownership boundary and handoff, worktree and branch discipline, changelog, PR body, review gate, squash-merge, cleanup, and how a project customizes the workflow via CLAUDE.md
 user-invocable: true
 metadata:
-  version: "2.2.0"
+  version: "2.3.0"
 category: pm-workflow
 tags: [workflow, delivery-chain, pr, branch-protection, worktree, changelog, customization, verification-gates, pm-required]
 effort: medium
@@ -135,12 +135,12 @@ resolves here: find the section name in the middle column.
 | Task | Sections | File |
 |---|---|---|
 | Pick the phases a task runs, brief each phase, honour an override | "The 5-Phase Model and Its Dispatch Briefs", "Sprint, then Harden — the Rest of the Doctrine" | [references/phases.md](references/phases.md) |
-| Decide whether work is done and which findings block it; do deterministic work deterministically | "Completion Standard — the Full Text", "Deterministic Work" | [references/completion-standard.md](references/completion-standard.md) |
+| Decide whether work is done and which findings block it; judge a non-code deliverable (quoted criteria, evidence map, no proxy targets); do deterministic work deterministically; test declared demo/POC work | "Completion Standard — the Full Text", "Demo and POC Work — Minimal Tests, Named Intentions", "Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets", "Deterministic Work" | [references/completion-standard.md](references/completion-standard.md) |
 | Choose how wide a test gate runs at each stage | "Test Scope Widens by Stage" | [references/test-scope.md](references/test-scope.md) |
 | Provision a worktree, keep the main checkout fresh, isolate a dispatch, clean up after merge | "Worktree Discipline (Mandatory Before Any Source Edit)", including "Keep the main checkout fresh"; "Task-Owned Cleanup" | [references/worktree-discipline.md](references/worktree-discipline.md) |
 | Read another session on this repo; own, check or hand off the merge queue | "Concurrent Sessions on One Repo", "Merge-Queue Ownership — the Procedure" | [references/concurrent-sessions-and-merge-queue.md](references/concurrent-sessions-and-merge-queue.md) |
 | Write the changelog entry a PR owes | "Changelog Requirement (Before Merge)" | [references/changelog.md](references/changelog.md) |
-| Handle a red gate the branch did not cause; run the review gate | "Baseline-Failure Protocol (Red That Isn't Yours)", "The trusty-review Gate" | [references/baseline-and-review.md](references/baseline-and-review.md) |
+| Handle a red gate the branch did not cause; run the critic and review gates | "Baseline-Failure Protocol (Red That Isn't Yours)", "Critic before PR open", "The trusty-review Gate" | [references/baseline-and-review.md](references/baseline-and-review.md) |
 | Customize the workflow through `CLAUDE.md`; inspect the resolved prompt; pick an output style | "How the PM Prompt Is Assembled", "The One Customization Surface", "Trigger Phrases", "Inspecting the Resolved Prompt", "Output Style Selection (#8533)" | [references/customizing.md](references/customizing.md) |
 | Open these files from an agent with no `Skill` tool | the Read path | [references/README.md](references/README.md) |
 
@@ -239,7 +239,8 @@ nine fields are.
    aggregate run", itemized.
 8. `## Docs` — documentation/changelog status.
 9. `## Review` — review-finding disposition: fixed here, kept on the parent,
-   or separately ticketed.
+   or separately ticketed. Rung 5-6: cite the pinned `code-critic` verdict
+   (references/baseline-and-review.md, "Critic before PR open").
 
 🔴 **Fields 6 and 7 are answered, never omitted.** A clean run writes the single
 word `none` under each — that is a valid whole section, and it is the disclosure

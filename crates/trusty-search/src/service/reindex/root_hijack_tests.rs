@@ -142,7 +142,7 @@ async fn reindex_refuses_untrusted_root_move_and_preserves_corpus() {
     let data_dir = tempfile::tempdir().expect("data dir");
 
     // root_a: the index's REAL, persisted root (simulates
-    // `/Users/masa/Duetto/cto`).
+    // `/Users/masa/Acme/cto`).
     let root_a = tempfile::tempdir().expect("root a");
     // root_b: an unrelated directory the in-memory handle gets hijacked to
     // (simulates the unrelated trusty-tools git worktree from the

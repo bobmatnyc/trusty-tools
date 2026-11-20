@@ -276,6 +276,9 @@ pub(crate) async fn install(
         eprintln!("warning: failed to install Claude Code hooks: {e:#}");
     }
 
+    // See G0b auto-setup: failures print and never abort the install.
+    crate::commands::auto_setup::run_and_print();
+
     println!("Framework installed. Run `trusty-mpm daemon` to start.");
     Ok(())
 }

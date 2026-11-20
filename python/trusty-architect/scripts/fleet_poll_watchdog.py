@@ -4,11 +4,12 @@ Why: the poller outlives the Architect, so it is the one process that can see th
 frozen (architect-watchdog.py's rules) and raise that to the owner.
 What: architect_busy reads the Architect's pane (no keys); architect_transcript_mtime its newest transcript;
 run_architect_relaunch the one relaunch path; watchdog_alerts runs architect-watchdog.step once a cycle and
-returns (alerts, log phrase). The relaunch needs scripts/session-relaunch.sh; while that script is not
-installed it reports "failed" before touching tmux, so after two polls the watchdog stops and raises
-architect_relaunch_failed. Names from the poller are read through `P` (bind()), as in the other modules.
+returns (alerts, log phrase). The relaunch is `tm architect up`, the bound launch path (#11367); while
+`tm` is not installed it reports "failed" before touching tmux, so after two polls the watchdog stops and
+raises architect_relaunch_failed. Names from the poller are read through `P` (bind()), as in the other modules.
 Test: tests/test_fleet_poll_watchdog_wiring.py
 """
+import json
 import os
 import subprocess
 
@@ -26,37 +27,54 @@ def _alive(pane):
     return pane["cmd"] not in P.SHELLS and not pane["cmd"].startswith("-")
 
 
-def run_architect_relaunch(lister=None, runner=None, tmux_fn=None):
+LAUNCHES = {"init", "respawn_and_launch", "launch"}  # `tm architect up` actions that start a claude
+
+
+def _up(runner, *extra):
+    """(exit code, parsed --json report or None) of one `tm architect up` run."""
+    r = runner([P.TM_BIN, "architect", "up", "--json", "--dir", P.ROOT, *extra],
+               capture_output=True, text=True, timeout=P.watchdog.RELAUNCH_TIMEOUT)
+    try:
+        report = json.loads(r.stdout or "")
+    except ValueError:
+        report = None
+    return r.returncode, report if isinstance(report, dict) else None
+
+
+def _state(report):
+    observed = (report or {}).get("observed")
+    return observed.get("state") if isinstance(observed, dict) else None
+
+
+def run_architect_relaunch(lister=None, runner=None):
     """Relaunch the Architect session. Returns ("ok"|"failed"|"aborted", detail).
 
-    Why: the dead-Architect branch of the watchdog needs one real relaunch.
-    What: fails with no tmux call while session-relaunch.sh is not installed; re-lists panes and aborts if a
-    live (non-shell) Architect pane now exists; creates the detached tmux session in ROOT when it is missing;
-    runs session-relaunch.sh; then confirms the pane left the shell.
-    Test: test_relaunch_aborts_when_live, test_relaunch_creates_missing_session,
-    test_relaunch_fails_on_script_error, test_relaunch_without_the_script_never_touches_tmux
+    Why: the dead-Architect branch of the watchdog needs one real relaunch, and a `claude` with no
+    launch record loses its pm-guard anchor exemptions (#11367).
+    What: fails, touching nothing, while `tm` is not installed; re-lists panes and aborts if a live
+    (non-shell) Architect pane now exists; runs `tm architect up --json`, the bound launch path. Fails
+    closed unless up exits 0, names this session and took a launch action, and a following
+    `up --dry-run` observes the Architect live and bound by its launch record.
+    Test: test_relaunch_aborts_when_live, test_relaunch_runs_the_bound_launch_path,
+    test_relaunch_fails_closed, test_relaunch_without_tm_never_touches_tmux
     """
-    lister, runner, tmux_fn = lister or P.list_panes, runner or subprocess.run, tmux_fn or P.tmux
-    script = P.RELAUNCH_SCRIPT
-
-    def live():
-        mine = [p for p in lister() if P.is_architect_pane(p)]
-        return mine, [p for p in mine if _alive(p)]
-
-    if not os.path.isfile(script):
-        return "failed", f"{os.path.basename(script)} is not installed"
+    lister, runner = lister or P.list_panes, runner or subprocess.run
+    if not P.TM_BIN or not os.path.isfile(P.TM_BIN):
+        return "failed", "tm is not installed"
     try:
-        mine, alive = live()
-        if alive:
+        if [p for p in lister() if P.is_architect_pane(p) and _alive(p)]:
             return "aborted", "a live claude process exists"
-        if not mine:
-            tmux_fn("new-session", "-d", "-s", P.ARCHITECT, "-c", P.ROOT)
-        r = runner([script, P.ARCHITECT], capture_output=True, text=True,
-                   timeout=P.watchdog.RELAUNCH_TIMEOUT)
-        if r.returncode != 0:
-            return "failed", f"{os.path.basename(script)} exit {r.returncode}"
-        return ("ok", f"{os.path.basename(script)} exit 0") if live()[1] else (
-            "failed", "pane still at a shell after relaunch")
+        code, report = _up(runner)
+        if code != 0 or report is None:
+            return "failed", f"tm architect up exit {code}"
+        if report.get("session") != P.ARCHITECT:
+            return "failed", f"tm architect up acted on {report.get('session')!r}, not {P.ARCHITECT}"
+        if report.get("action") not in LAUNCHES:
+            return "failed", f"tm architect up did {report.get('action')} ({_state(report)})"
+        code, report = _up(runner, "--dry-run")
+        if code != 0 or _state(report) != "live_bound":
+            return "failed", f"no launch record binds the relaunched Architect ({_state(report)})"
+        return "ok", "tm architect up: live and bound"
     except subprocess.TimeoutExpired:
         return "failed", f"timeout after {P.watchdog.RELAUNCH_TIMEOUT}s"
     except (OSError, P.TmuxError) as e:

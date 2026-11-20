@@ -252,6 +252,14 @@ pub struct ProjectLevelConfig {
     /// Test: `bad_accounts_keep_the_rest_of_the_config`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accounts: Option<crate::core::project_accounts::RawAccounts>,
+
+    /// `[stale_copy]`: the stale-copy guard's registered and locked artifacts (#10574).
+    ///
+    /// What: raw TOML validated by [`crate::core::stale_copy::stale_copy_for`],
+    /// so a bad entry turns off only that guard. Absent means the guard is off.
+    /// Test: `state_is_active_from_a_subdirectory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_copy: Option<crate::core::stale_copy::RawStaleCopy>,
 }
 
 /// The `[style]` table of `.trusty-mpm.toml` (#8533).

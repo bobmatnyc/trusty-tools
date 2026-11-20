@@ -67,6 +67,18 @@
 # - a hanging .zshenv or a missing zsh falls back to adding the line
 # - bash keeps its prompt-or-skip behaviour under a non-tty stdin
 #
+# #11430 additions: `tctl install` refused (exit 3) under `curl | sh`
+# because its stdin was the script pipe. These cases run the whole `main`
+# piped into `sh`, with a fake curl and a stub trusty-installer:
+# - a controlling terminal (a pty from script(1)): the bootstrap runs
+#   without -y and with the terminal on stdin; confirm() asks there too
+# - no controlling terminal (a new session via perl setsid) and no -y:
+#   exit 1 before any download, one error naming `| sh -s -- -y` and
+#   TRUSTY_YES=1, bootstrap never run
+# - CI=1 with a terminal and no -y: the same early stop (owner decision)
+# - -y / TRUSTY_YES=1: `install -y` as before
+# A skipped case is counted; any skip fails the suite unless ALLOW_SKIP=1.
+#
 # Every case runs against a temp HOME with ZDOTDIR and the TRUSTY_* knobs
 # removed from the environment; the real $HOME is never touched.
 #
@@ -83,6 +95,15 @@ INSTALL_SH="$REPO_ROOT/install.sh"
 
 PASS=0
 FAIL=0
+SKIP=0
+
+# skip <reason> — records a skipped test. #11430: skips are counted and turn
+# the suite red unless ALLOW_SKIP=1, so a host that cannot run a case never
+# reports green.
+skip() {
+    echo "  SKIP: $1"
+    SKIP=$((SKIP + 1))
+}
 
 assert_eq() {
     local actual="$1" expected="$2" desc="$3"
@@ -110,7 +131,8 @@ count_matches() {
 
 # Environment knobs that must not leak from the developer's shell into a
 # test: a real ZDOTDIR would point writes at the developer's own .zshenv.
-HERMETIC_ENV=(env -u ZDOTDIR -u TRUSTY_NO_MODIFY_PATH -u TRUSTY_YES -u ASSUME_YES -u TRUSTY_INSTALL_DIR)
+# #11430: a CI runner's CI=true would make install.sh stop early.
+HERMETIC_ENV=(env -u ZDOTDIR -u TRUSTY_NO_MODIFY_PATH -u TRUSTY_YES -u ASSUME_YES -u TRUSTY_INSTALL_DIR -u CI)
 
 # Runs maybe_update_path("$FAKE_HOME/.local/bin") inside a fresh subshell
 # with $HOME/$SHELL overridden, sourcing install.sh in source-only mode.
@@ -225,7 +247,7 @@ test_bash_already_on_path_is_noop() {
 test_login_interactive_zsh_sources_dir_exactly_once() {
     echo "--- test_login_interactive_zsh_sources_dir_exactly_once ---"
     if ! command -v zsh >/dev/null 2>&1; then
-        echo "  SKIP: zsh not available on this host"
+        skip "zsh not available on this host"
         return
     fi
     local home
@@ -342,7 +364,7 @@ test_dir_as_prefix_of_longer_path_does_not_block_real_write() {
 # skip_without_zsh — prints a SKIP line and returns 1 when zsh is absent.
 skip_without_zsh() {
     if ! command -v zsh >/dev/null 2>&1; then
-        echo "  SKIP: zsh not available on this host"
+        skip "zsh not available on this host"
         return 1
     fi
     return 0
@@ -568,7 +590,7 @@ test_unwritable_zshenv_reports_failure() {
     echo "--- test_unwritable_zshenv_reports_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -593,7 +615,7 @@ test_readonly_home_reports_failure() {
     echo "--- test_readonly_home_reports_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -656,14 +678,18 @@ test_no_zsh_falls_back_to_adding() {
     rm -rf "$home"
 }
 
-# bash keeps the pre-#11280 behaviour: a non-tty stdin without -y skips.
+# bash keeps the pre-#11280 behaviour: with no terminal at all and no -y it
+# skips. #11430: run with no controlling terminal, since `confirm` now asks
+# on /dev/tty when one exists.
 test_bash_no_tty_still_skips() {
     echo "--- test_bash_no_tty_still_skips ---"
+    skip_without_no_ctty || return
     local home dir out
     home=$(new_home)
     dir="$home/.cargo/bin"
 
-    out=$(run_curl_pipe "$home" /bin/bash "$dir")
+    out=$(no_ctty "${HERMETIC_ENV[@]}" HOME="$home" SHELL=/bin/bash TRUSTY_INSTALL_SOURCE_ONLY=1 \
+        sh -c '. "$1"; maybe_update_path "$2"' _ "$INSTALL_SH" "$dir" </dev/null 2>&1)
 
     assert_eq "$([[ -e "$home/.bashrc" || -e "$home/.bash_profile" ]] && echo yes || echo no)" "no" "no bash rc file written"
     assert_eq "$(has_text "$out" "Skipped PATH modification")" "yes" "prints the manual instructions"
@@ -674,7 +700,7 @@ test_bash_no_tty_still_skips() {
 test_unwritable_bashrc_reports_failure() {
     echo "--- test_unwritable_bashrc_reports_failure ---"
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -712,7 +738,7 @@ test_finish_install_reports_path_failure() {
     echo "--- test_finish_install_reports_path_failure ---"
     skip_without_zsh || return
     if [[ "$(id -u)" == "0" ]]; then
-        echo "  SKIP: root ignores file permissions"
+        skip "root ignores file permissions"
         return
     fi
     local home dir out st
@@ -779,8 +805,251 @@ test_probe_leaves_no_stray_sleep() {
     rm -rf "$home"
 }
 
+# ---------------------------------------------------------------------------
+# #11430: `curl | sh` consent. stdin is the script pipe, so `tctl install`
+# (which asks only when its stdin is a terminal, #2112) refused with exit 3.
+# These cases run install.sh's whole `main` with the script piped into `sh`,
+# a fake `curl` serving a local release fixture (no network) and a stub
+# `trusty-installer` that records its arguments and whether its stdin is a
+# terminal. The install dir is under a temp HOME.
+# ---------------------------------------------------------------------------
+
+FIXTURE_VERSION="0.0.1"
+
+# no_ctty <cmd...> — runs <cmd> in a new session, so it has no controlling
+# terminal even when this suite runs from one. Exit status is <cmd>'s.
+no_ctty() {
+    perl -MPOSIX -e '
+        my $pid = fork;
+        die "fork: $!" unless defined $pid;
+        if ($pid) { waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8) }
+        POSIX::setsid() or die "setsid: $!";
+        exec @ARGV or die "exec: $!";
+    ' "$@"
+}
+
+# with_pty <cmd...> — runs <cmd> on a new pseudo-terminal, which becomes its
+# controlling terminal. util-linux and BSD `script` differ in arguments.
+with_pty() {
+    if script --version >/dev/null 2>&1; then
+        SHELL=/bin/bash script -qec "$(printf '%q ' "$@")" /dev/null
+    else
+        script -q /dev/null "$@"
+    fi
+}
+
+# skip_without_no_ctty / skip_without_pty — print SKIP and return 1 when the
+# host cannot give a command no terminal / a terminal.
+skip_without_no_ctty() {
+    if ! command -v perl >/dev/null 2>&1; then
+        skip "perl not installed (needed to drop the controlling terminal)"
+        return 1
+    fi
+    if [[ "$(no_ctty sh -c '( : </dev/tty ) 2>/dev/null && echo tty || echo none' </dev/null)" != "none" ]]; then
+        skip "could not drop the controlling terminal"
+        return 1
+    fi
+}
+skip_without_pty() {
+    if ! command -v script >/dev/null 2>&1; then
+        skip "script(1) not installed (needed for a pseudo-terminal)"
+        return 1
+    fi
+    if ! with_pty sh -c '( : </dev/tty ) 2>/dev/null && echo tty' </dev/null 2>&1 | grep -q tty; then
+        skip "script(1) did not provide a controlling terminal"
+        return 1
+    fi
+}
+
+# make_release_fixture <dir> — builds, under <dir>:
+#   dl/   the release tarball (stub trusty-installer + tctl) and its .sha256
+#   bin/  a fake `curl` that copies dl/<basename of URL> to its -o file and
+#         logs each URL to <dir>/curl.log; anything else exits 22
+#   stub.log is written by the stub: "args=<args> stdin_tty=<yes|no>".
+# The stub mimics `tctl install`'s #2112 gate: no -y and no terminal on
+# stdin prints the refusal and exits 3; otherwise exits 0.
+make_release_fixture() {
+    local fx="$1" target name
+    target=$(run_sourced "$fx" /bin/sh 'detect_target')
+    name="trusty-installer-${FIXTURE_VERSION}-${target}"
+    mkdir -p "$fx/dl/$name" "$fx/bin"
+    cat >"$fx/dl/$name/trusty-installer" <<EOF
+#!/bin/sh
+if [ -t 0 ]; then t=yes; else t=no; fi
+printf 'args=%s stdin_tty=%s\n' "\$*" "\$t" >>"$fx/stub.log"
+case " \$* " in *" -y "*) exit 0 ;; esac
+if [ "\$t" = no ]; then
+    echo "tctl install: refusing to install without confirmation in a non-interactive context" >&2
+    exit 3
+fi
+exit 0
+EOF
+    cp "$fx/dl/$name/trusty-installer" "$fx/dl/$name/tctl"
+    chmod 755 "$fx/dl/$name/trusty-installer" "$fx/dl/$name/tctl"
+    tar -czf "$fx/dl/$name.tar.gz" -C "$fx/dl" "$name"
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$fx/dl" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
+    else
+        (cd "$fx/dl" && shasum -a 256 "$name.tar.gz" >"$name.tar.gz.sha256")
+    fi
+    cat >"$fx/bin/curl" <<EOF
+#!/bin/sh
+out=""; url=""
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        -o | -H | -w) [ "\$1" = -o ] && out="\$2"; shift ;;
+        -*) ;;
+        *) url="\$1" ;;
+    esac
+    shift
+done
+printf '%s\n' "\$url" >>"$fx/curl.log"
+src="$fx/dl/\${url##*/}"
+[ -f "\$src" ] && [ -n "\$out" ] || exit 22
+cp "\$src" "\$out"
+EOF
+    chmod 755 "$fx/bin/curl"
+}
+
+# curl_pipe_main_cmd <home> <fixture> [install.sh args...] — sets CMD to the
+# argv that runs `cat install.sh | sh -s -- <args>` with a hermetic env: the
+# fixture's fake curl first on a system-only PATH, a pinned version, the
+# install dir under <home>, and no PATH edit. Callers prefix it with
+# no_ctty / with_pty, and may add NAME=value pairs in the EXTRA_ENV array.
+curl_pipe_main_cmd() {
+    local home="$1" fx="$2"
+    shift 2
+    CMD=("${HERMETIC_ENV[@]}" -u CARGO_HOME HOME="$home" SHELL=/bin/sh
+        PATH="$fx/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        TRUSTY_VERSION="$FIXTURE_VERSION" TRUSTY_INSTALL_DIR="$home/.cargo/bin"
+        TRUSTY_NO_MODIFY_PATH=1 ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"}
+        bash -c 'f="$1"; shift; cat "$f" | sh -s -- "$@"' _ "$INSTALL_SH" "$@")
+}
+
+# (a) piped stdin + a terminal: `trusty-installer install` gets the terminal
+# on stdin (no -y), so the user sees and answers tctl's prompt.
+test_curl_pipe_with_terminal_bootstraps_from_tty() {
+    echo "--- test_curl_pipe_with_terminal_bootstraps_from_tty ---"
+    skip_without_pty || return
+    local home fx out st
+    home=$(new_home)
+    fx=$(new_home)
+    make_release_fixture "$fx"
+    curl_pipe_main_cmd "$home" "$fx"
+
+    with_pty "${CMD[@]}" </dev/null >"$fx/out.raw" 2>&1
+    st=$?
+    out=$(tr -d '\r' <"$fx/out.raw")
+
+    assert_eq "$(cat "$fx/stub.log" 2>/dev/null)" "args=install stdin_tty=yes" \
+        "bootstrap runs once, without -y, with the terminal on stdin"
+    assert_eq "$st" "0" "install.sh exits 0"
+    assert_eq "$(has_text "$out" "failed to bootstrap")" "no" "no bootstrap-failure banner"
+
+    rm -rf "$home" "$fx"
+}
+
+# (b) piped stdin + no terminal + no -y: stop before any download, with one
+# message naming both ways to proceed non-interactively.
+test_curl_pipe_without_terminal_stops_before_bootstrap() {
+    echo "--- test_curl_pipe_without_terminal_stops_before_bootstrap ---"
+    skip_without_no_ctty || return
+    local home fx out st
+    home=$(new_home)
+    fx=$(new_home)
+    make_release_fixture "$fx"
+    curl_pipe_main_cmd "$home" "$fx"
+
+    out=$(no_ctty "${CMD[@]}" </dev/null 2>&1)
+    st=$?
+
+    assert_eq "$st" "1" "install.sh exits 1"
+    assert_eq "$(has_text "$out" "| sh -s -- -y")" "yes" "message names | sh -s -- -y"
+    assert_eq "$(has_text "$out" "TRUSTY_YES=1")" "yes" "message names TRUSTY_YES=1"
+    assert_eq "$(grep -c '^error:' <<<"$out")" "1" "exactly one error line"
+    assert_eq "$(has_text "$out" "failed to bootstrap")" "no" "no bootstrap-failure banner"
+    assert_eq "$([[ -e "$fx/stub.log" ]] && echo invoked || echo never)" "never" "bootstrap never invoked"
+    assert_eq "$([[ -e "$fx/curl.log" ]] && echo yes || echo no)" "no" "nothing downloaded"
+    assert_eq "$([[ -e "$home/.cargo/bin/trusty-installer" ]] && echo yes || echo no)" "no" "nothing installed"
+
+    rm -rf "$home" "$fx"
+}
+
+# CI set + a terminal + piped stdin + no -y: the owner decision treats CI as
+# no terminal (a pty nobody types at), so the same early stop applies.
+test_ci_with_terminal_stops_before_bootstrap() {
+    echo "--- test_ci_with_terminal_stops_before_bootstrap ---"
+    skip_without_pty || return
+    local home fx out st
+    home=$(new_home)
+    fx=$(new_home)
+    make_release_fixture "$fx"
+    EXTRA_ENV=(CI=1)
+    curl_pipe_main_cmd "$home" "$fx"
+    unset EXTRA_ENV
+
+    with_pty "${CMD[@]}" </dev/null >"$fx/out.raw" 2>&1
+    st=$?
+    out=$(tr -d '\r' <"$fx/out.raw")
+
+    assert_eq "$st" "1" "install.sh exits 1"
+    assert_eq "$(has_text "$out" "| sh -s -- -y")" "yes" "message names | sh -s -- -y"
+    assert_eq "$(has_text "$out" "TRUSTY_YES=1")" "yes" "message names TRUSTY_YES=1"
+    assert_eq "$([[ -e "$fx/stub.log" ]] && echo invoked || echo never)" "never" "bootstrap never invoked"
+    assert_eq "$([[ -e "$fx/curl.log" ]] && echo yes || echo no)" "no" "nothing downloaded"
+
+    rm -rf "$home" "$fx"
+}
+
+# (c) -y and TRUSTY_YES=1 keep `install -y`, with or without a terminal.
+test_yes_bootstraps_with_yes_flag() {
+    echo "--- test_yes_bootstraps_with_yes_flag ---"
+    skip_without_no_ctty || return
+    local home fx st mode
+    for mode in flag env; do
+        home=$(new_home)
+        fx=$(new_home)
+        make_release_fixture "$fx"
+        if [[ "$mode" == flag ]]; then
+            curl_pipe_main_cmd "$home" "$fx" -y
+        else
+            EXTRA_ENV=(TRUSTY_YES=1)
+            curl_pipe_main_cmd "$home" "$fx"
+            unset EXTRA_ENV
+        fi
+
+        no_ctty "${CMD[@]}" </dev/null >/dev/null 2>&1
+        st=$?
+
+        assert_eq "$(cat "$fx/stub.log" 2>/dev/null)" "args=install -y stdin_tty=no" "${mode}: bootstrap runs install -y"
+        assert_eq "$st" "0" "${mode}: install.sh exits 0"
+        rm -rf "$home" "$fx"
+    done
+}
+
+# confirm() under `curl | sh` asks on the terminal: bash's PATH prompt is
+# answered "y" there, so the export line is written.
+test_curl_pipe_confirm_reads_tty() {
+    echo "--- test_curl_pipe_confirm_reads_tty ---"
+    skip_without_pty || return
+    local home dir out
+    home=$(new_home)
+    dir="$home/.cargo/bin"
+
+    # The answer is typed into the pty; the sleep keeps script(1) from
+    # sending EOF before the prompt reads it.
+    out=$( { printf 'y\n'; sleep 2; } | with_pty "${HERMETIC_ENV[@]}" HOME="$home" SHELL=/bin/bash \
+        TRUSTY_INSTALL_SOURCE_ONLY=1 \
+        bash -c 'printf "" | sh -c ". \"\$1\"; maybe_update_path \"\$2\"" _ "$1" "$2"' _ "$INSTALL_SH" "$dir" 2>&1 | tr -d '\r')
+
+    assert_eq "$(has_text "$out" "[y/N]")" "yes" "the prompt is shown on the terminal"
+    assert_eq "$(count_matches "$home/.bashrc" "PATH='${dir}'")" "1" "the terminal's \"y\" wrote .bashrc"
+
+    rm -rf "$home"
+}
+
 echo "==========================================================="
-echo "install.sh PATH-handling test suite (#3874, #3897, #11280)"
+echo "install.sh PATH and consent test suite (#3874, #3897, #11280, #11430)"
 echo "==========================================================="
 test_zsh_writes_only_zshenv
 test_bash_writes_both_files
@@ -814,10 +1083,19 @@ test_unwritable_bashrc_reports_failure
 test_finish_install_reports_path_failure
 test_finish_install_success_and_bootstrap_failure
 test_probe_leaves_no_stray_sleep
+test_curl_pipe_with_terminal_bootstraps_from_tty
+test_curl_pipe_without_terminal_stops_before_bootstrap
+test_ci_with_terminal_stops_before_bootstrap
+test_yes_bootstraps_with_yes_flag
+test_curl_pipe_confirm_reads_tty
 
 echo "==========================================================="
-echo "Result: $PASS passed, $FAIL failed"
+echo "Result: $PASS passed, $FAIL failed, $SKIP skipped"
 echo "==========================================================="
 
 [[ "$FAIL" -eq 0 ]] || exit 1
+if [[ "$SKIP" -ne 0 && "${ALLOW_SKIP:-0}" != "1" ]]; then
+    echo "error: $SKIP test(s) skipped; set ALLOW_SKIP=1 to accept a partial run" >&2
+    exit 1
+fi
 exit 0

@@ -1,2 +1,0 @@
-Fixed
-- Linux: the known limit in the `restart` entry is fixed. A `start --foreground --data-dir X` sibling that runs without `TRUSTY_DATA_DIR` in its environment no longer blocks the default daemon: `stop` no longer refuses with `RunningUnserved`, and `restart` of a healthy default daemon stops it and starts a new one instead of leaving it down. `stop` and `restart` tell the sibling apart by its `--data-dir` argument, which names a directory other than the default data dir (#11085).

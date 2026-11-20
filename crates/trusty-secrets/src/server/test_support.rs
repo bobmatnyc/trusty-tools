@@ -18,7 +18,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::ancestry::{OsProcessTable, ProcessError, ProcessTable, StartTime};
+use super::ancestry::{OsProcessTable, ProcComm, ProcessError, ProcessTable, StartTime};
 use super::grant::{DEFAULT_MAX_TTL, GrantRegistry, SystemClock};
 use super::router::{BackendFactory, ServeError, ServeExit, StartEnv, State, serve_state};
 use super::settings::ServerSettings;
@@ -44,6 +44,10 @@ impl ProcessTable for FixedAgentTable {
 
     fn executable(&self, pid: u32) -> Result<PathBuf, ProcessError> {
         OsProcessTable.executable(pid)
+    }
+
+    fn comm(&self, pid: u32) -> Result<ProcComm, ProcessError> {
+        OsProcessTable.comm(pid)
     }
 }
 

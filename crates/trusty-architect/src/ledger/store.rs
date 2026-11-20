@@ -64,9 +64,19 @@ impl StorePaths {
                 "bad session name {session:?}"
             )));
         }
-        let dir = launch_dir.join(STORE_ROOT).join(session);
+        Ok(Self::at(launch_dir.join(STORE_ROOT).join(session)))
+    }
+
+    /// The store files inside `dir`, whatever root holds it.
+    ///
+    /// Why: G0b IL auto-apply writes the store `datg.py` writes,
+    /// `.trusty-mpm/datg/<session>`, not the port's [`STORE_ROOT`].
+    /// What: the same file names as [`StorePaths::new`], under `dir`.
+    /// Test: `il_apply_matches_datg_bytes`.
+    pub fn at(dir: PathBuf) -> Self {
+        // See G0b IL auto-apply
         let file = |name: &str| dir.join(name);
-        Ok(Self {
+        Self {
             state: file("state.json"),
             log: file("log.jsonl"),
             archive: file("archive.jsonl"),
@@ -75,7 +85,7 @@ impl StorePaths {
             lock: file(".lock"),
             journal: file("state.json.journal"),
             dir,
-        })
+        }
     }
 }
 

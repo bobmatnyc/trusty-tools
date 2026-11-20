@@ -14,7 +14,7 @@
 trusty-search is a **machine-wide daemon that holds every registered index fully
 resident in RAM**. The design was explicitly tuned for "zero cold-start" (HNSW stays
 hot; see `crates/trusty-search/CLAUDE.md` "Performance Targets"). That assumption breaks
-on the Duetto production fleet:
+on the Acme production fleet:
 
 - **~0.5–2 GB resident per index** (HNSW arena + BM25 posting lists + petgraph KG +
   redb page cache + chunk-text map).
@@ -84,7 +84,7 @@ This is the single biggest lever and the most subtle one.
 holds `N × 384 × 4 bytes` of vector arena plus graph overhead. At the 1M-element cap
 (`DEFAULT_HNSW_MAX_ELEMENTS = 1_000_000`, `store.rs:48`) that is ~1.5 GB of raw vectors
 plus graph — the comment at `store.rs:47` estimates "~6 GB at 1M × 384-dim × 4 bytes plus
-graph overhead". A typical Duetto index (tens of thousands of chunks) is in the 0.1–0.5 GB
+graph overhead". A typical Acme index (tens of thousands of chunks) is in the 0.1–0.5 GB
 range **when promoted**, and a small fraction of that when left in mmap-view.
 
 ### 1.2 Lexical / BM25 — fully in RAM, never evicted
@@ -269,7 +269,7 @@ deterministic ~100 ms RPC beats an unbounded fault storm.**
   the swaps — Lance is Rust-native, $30M Series A (June 2025), active. **Adapter fit:** good
   behind #692 (it's also a `KvStore`-ish columnar store, cross-refs the #692 backing-store
   question directly). **Build cost:** medium-high (new dep, IVF-PQ training pipeline, format
-  migration). Best strategic fit **if** Duetto wants object-store-backed indexes.
+  migration). Best strategic fit **if** Acme wants object-store-backed indexes.
 
 #### 2.5 Qdrant on-disk + quantization (noted, not embedded)
 
@@ -401,7 +401,7 @@ the per-index cost; #705 caps the aggregate.** They compose.
   highest-maturity out-of-core swap, our RRF fusion is rank-based so exact BM25 parity isn't
   required, and it can subsume the chunk store. **Prefer Tantivy over DiskANN.**
 - **Defer DiskANN (§2.3).** Our per-index scale is far below where it pays for its low Rust
-  maturity. **Consider Lance/LanceDB (§2.4) only if** Duetto wants self-hosted
+  maturity. **Consider Lance/LanceDB (§2.4) only if** Acme wants self-hosted
   object-store-backed indexes instead of a managed AWS service — it's the strongest *Rust*
   larger-than-RAM engine and IVF's bounded reads are EFS-friendlier than DiskANN, but it's a
   bigger lift than going managed.
@@ -462,7 +462,7 @@ numbers, not one:
    This is the number that decides mmap-view (§2.1) vs managed (§2.9) for the fleet.
 
 Configurations to sweep: `{f32, f16, int8}` × `{heap, mmap-view}` × `{local NVMe, EFS-Std,
-EFS-IA}`, on a representative Duetto-sized index (tens of thousands of chunks), plus one
+EFS-IA}`, on a representative Acme-sized index (tens of thousands of chunks), plus one
 synthetic large index near the 1M cap. Record results as a versioned snapshot under
 `docs/trusty-search/regression-testing/` per the doc conventions, and feed the deltas into
 the cross-release tracker (#129).

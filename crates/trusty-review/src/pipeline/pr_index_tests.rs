@@ -121,12 +121,12 @@ pub(crate) fn two_repo_registry() -> Vec<IndexIdentity> {
         entry(
             "code-intelligence-wt-abc",
             "/src/code-intelligence/.worktrees/abc",
-            Some("duettoresearch/code-intelligence"),
+            Some("acme-labs/code-intelligence"),
         ),
         entry(
             "code-intelligence-9f1c2e3a",
             "/src/code-intelligence",
-            Some("duettoresearch/code-intelligence"),
+            Some("acme-labs/code-intelligence"),
         ),
         entry(
             "trusty-tools-4e2cf878",
@@ -290,6 +290,88 @@ async fn operator_pin_is_used_only_for_its_own_repo() {
                 );
             }
             (got, want) => panic!("{pin}/{origin}: got {got:?}, want {want:?}"),
+        }
+    }
+}
+
+/// Resolve `acme/unindexed` (absent from `two_repo_registry`) on `surface`.
+async fn resolve_unindexed(
+    surface: InvocationSurface,
+    require_search: Option<bool>,
+) -> Result<PrIndex, RepoIndexError> {
+    resolve_pr_index(
+        &Registry::new(Some(two_repo_registry())),
+        &startup_config(require_search),
+        surface,
+        "acme",
+        "unindexed",
+        IndexPin::Prefer,
+    )
+    .await
+}
+
+/// #11409: the MCP tool's `Interactive` surface reviews an unindexed repo as a
+/// DEGRADED diff-only review whose notice names the repo and the fix, unless
+/// the operator required search.
+#[tokio::test]
+async fn interactive_no_index_degrades_to_diff_only() {
+    for require in [None, Some(false)] {
+        let index = resolve_unindexed(InvocationSurface::Interactive, require)
+            .await
+            .unwrap_or_else(|e| panic!("{require:?}: Interactive must degrade: {e}"));
+        let PrIndex::DiffOnly(notice) = index else {
+            panic!("{require:?}: want DiffOnly, got {index:?}");
+        };
+        for needle in ["DEGRADED", "acme/unindexed", "trusty-search index <path>"] {
+            assert!(notice.contains(needle), "{needle}: {notice}");
+        }
+    }
+}
+
+/// #11409: an explicit `require_search = true` fails closed on the
+/// interactive surface, and the hosted surfaces (webhook drain, service
+/// `review`, CLI GitHub-PR `run`) fail closed even with search opted out.
+#[tokio::test]
+async fn no_index_fails_closed_when_required_or_hosted() {
+    for (surface, require) in [
+        (InvocationSurface::Interactive, Some(true)),
+        (InvocationSurface::Hosted, None),
+        (InvocationSurface::Hosted, Some(false)),
+    ] {
+        let got = resolve_unindexed(surface, require).await;
+        assert!(
+            matches!(got, Err(RepoIndexError::NoIndex { .. })),
+            "{surface:?}/{require:?}: {got:?}"
+        );
+    }
+}
+
+/// #11409 regression: an unreadable registry keeps its #8649 behaviour on the
+/// interactive surface — DiffOnly by default, the `Registry` error when
+/// search is required.
+#[tokio::test]
+async fn unreadable_registry_is_unchanged_on_the_interactive_surface() {
+    let registry = Registry::new(None);
+    for (require, want_degrade) in [(None, true), (Some(true), false)] {
+        let got = resolve_pr_index(
+            &registry,
+            &startup_config(require),
+            InvocationSurface::Interactive,
+            "acme",
+            "widget",
+            IndexPin::Prefer,
+        )
+        .await;
+        if want_degrade {
+            assert!(
+                matches!(got, Ok(PrIndex::DiffOnly(ref n)) if n.contains("#8649") && n.contains("DEGRADED")),
+                "{got:?}"
+            );
+        } else {
+            assert!(
+                matches!(got, Err(RepoIndexError::Registry { .. })),
+                "{got:?}"
+            );
         }
     }
 }

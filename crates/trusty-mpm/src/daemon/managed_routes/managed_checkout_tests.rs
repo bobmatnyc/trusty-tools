@@ -186,3 +186,155 @@ fn deny_worktree_fallback_permits_the_fallback_when_none_was_requested() {
         "no worktree was requested, so the local-path fallback stays available"
     );
 }
+
+/// Copies every regular file under `from` into `to`.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for entry in std::fs::read_dir(from).expect("read dir").flatten() {
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type().expect("file type");
+        if kind.is_dir() {
+            copy_tree(&src, &dst);
+        } else if kind.is_file() {
+            std::fs::copy(&src, &dst).expect("copy");
+        }
+    }
+}
+
+/// A trusty-tools checkout at `root` carrying the repository's `content/`.
+fn content_checkout(root: &Path) {
+    let repo = crate::core::content_source::test_support::repo_root();
+    copy_tree(&repo.join("content"), &root.join("content"));
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("Cargo.toml");
+}
+
+/// A managed checkout with a `.git` directory and a worktree admin entry
+/// `fresh` whose `commondir` points back at it.
+fn managed_with_admin(managed: &Path) {
+    let admin = managed.join(".git/worktrees/fresh");
+    std::fs::create_dir_all(&admin).expect("admin dir");
+    std::fs::write(admin.join("commondir"), "../..\n").expect("commondir");
+}
+
+/// Writes a worktree `.git` file at `worktree` naming `admin`.
+fn worktree_marker(worktree: &Path, admin: &Path) {
+    std::fs::create_dir_all(worktree).expect("worktree dir");
+    let line = format!("gitdir: {}\n", admin.display());
+    std::fs::write(worktree.join(".git"), line).expect(".git file");
+}
+
+/// Capture every WARN line `body` logs.
+fn captured<T>(body: impl FnOnce() -> T) -> (T, Vec<String>) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    crate::test_support::enable_event_capture();
+    let buffer = trusty_common::log_buffer::LogBuffer::new(64);
+    let subscriber = tracing_subscriber::registry().with(
+        trusty_common::log_buffer::LogBufferLayer::new(buffer.clone()),
+    );
+    let out = tracing::subscriber::with_default(subscriber, body);
+    (out, buffer.tail(64))
+}
+
+/// A launch from a linked worktree of the managed checkout runs there and
+/// composes its PM prompt from the worktree's own `content/`.
+///
+/// Why: the defect — the session composed from the stale managed checkout.
+/// What: marks the worktree's `identity.md` with a token the managed copy
+/// lacks, resolves the placement, composes the prompt through the calls
+/// `build_prompt_file_in` makes, and asserts the token is present.
+/// Test: this function IS the test.
+#[test]
+#[serial_test::serial]
+fn a_worktree_of_the_managed_checkout_composes_from_its_own_content() {
+    let _lock = crate::core::trusty_tools_config::env_test_lock();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let _env = ReposRootGuard::set(tmp.path());
+    let managed = tmp.path().join("an-owner").join("a-repo");
+    content_checkout(&managed);
+    managed_with_admin(&managed);
+    let worktree = managed.join(".claude/worktrees/fresh");
+    worktree_marker(&worktree, &managed.join(".git/worktrees/fresh"));
+    content_checkout(&worktree);
+    let identity = worktree.join("content/instructions/sections/identity.md");
+    let mut text = std::fs::read_to_string(&identity).expect("identity.md");
+    text.push_str("\nWORKTREE-ONLY-MARKER-D3I\n");
+    std::fs::write(&identity, text).expect("mark identity.md");
+
+    let placement = resolve_placement(&worktree, &gh(), ORIGIN).expect("placement");
+    let content = crate::core::content_source::framework_content_for(&placement).expect("content");
+    let prompt = crate::core::session_launch::build_system_prompt_for_profile(
+        &content,
+        &placement,
+        None,
+        false,
+        crate::core::session_profile::SessionProfile::Pm,
+    );
+    assert!(
+        prompt.contains("WORKTREE-ONLY-MARKER-D3I"),
+        "the prompt must carry the worktree's content change"
+    );
+    assert_eq!(placement, worktree, "a linked worktree is managed");
+}
+
+/// A worktree whose git admin directory is gone falls back to the managed
+/// checkout with a warning.
+#[test]
+fn a_pruned_worktree_falls_back_to_the_managed_checkout() {
+    let _lock = crate::core::trusty_tools_config::env_test_lock();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let _env = ReposRootGuard::set(tmp.path());
+    let managed = tmp.path().join("an-owner").join("a-repo");
+    std::fs::create_dir_all(managed.join(".git")).expect("seed a base clone");
+    let worktree = managed.join(".claude/worktrees/gone");
+    worktree_marker(&worktree, &managed.join(".git/worktrees/gone"));
+
+    let (placement, lines) = captured(|| resolve_placement(&worktree, &gh(), ORIGIN));
+
+    assert_eq!(placement.expect("fallback"), managed);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.contains("admin directory is missing")),
+        "{lines:#?}"
+    );
+}
+
+/// A launch directory that no longer exists falls back to the managed
+/// checkout with a warning.
+#[test]
+fn a_removed_worktree_falls_back_to_the_managed_checkout() {
+    let _lock = crate::core::trusty_tools_config::env_test_lock();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let _env = ReposRootGuard::set(tmp.path());
+    let managed = tmp.path().join("an-owner").join("a-repo");
+    managed_with_admin(&managed);
+    let worktree = managed.join(".claude/worktrees/fresh");
+
+    let (placement, lines) = captured(|| resolve_placement(&worktree, &gh(), ORIGIN));
+
+    assert_eq!(placement.expect("fallback"), managed);
+    assert!(
+        lines.iter().any(|l| l.contains("does not exist")),
+        "{lines:#?}"
+    );
+}
+
+/// A linked worktree of a different repository is not managed: the launch
+/// redirects to the managed checkout exactly as before.
+#[test]
+fn a_foreign_worktree_redirects_to_the_managed_checkout() {
+    let _lock = crate::core::trusty_tools_config::env_test_lock();
+    let tmp = tempfile::TempDir::new().expect("temp dir");
+    let _env = ReposRootGuard::set(tmp.path());
+    let managed = tmp.path().join("an-owner").join("a-repo");
+    std::fs::create_dir_all(managed.join(".git")).expect("seed a base clone");
+    let foreign = tempfile::TempDir::new().expect("foreign");
+    managed_with_admin(foreign.path());
+    let worktree = foreign.path().join("wt");
+    worktree_marker(&worktree, &foreign.path().join(".git/worktrees/fresh"));
+
+    let placement = resolve_placement(&worktree, &gh(), ORIGIN).expect("redirect");
+
+    assert_eq!(placement, managed);
+}

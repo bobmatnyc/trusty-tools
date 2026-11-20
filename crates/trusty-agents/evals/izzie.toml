@@ -71,14 +71,6 @@ input = "Can you write me a Python function to parse JSON from a file?"
 response_must_contain = ["engineer"]
 response_must_not_contain = ["```python", "def ", "import json"]
 
-# 10. Not the CTO Assistant: Duetto org question redirects to /switch cto.
-[[eval]]
-id = "redirect_org_to_cto"
-description = "Duetto org structure question redirects to CTO assistant"
-input = "How many engineers are on the Duetto platform team?"
-response_must_contain = ["cto"]
-response_must_not_contain = ["engineers on the platform", "headcount"]
-
 # 11. Tool routing: past discussion query routes to granola tools.
 [[eval]]
 id = "past_discussion_granola"
@@ -90,7 +82,7 @@ response_must_contain = ["notes"]
 [[eval]]
 id = "email_gworkspace_routing"
 description = "Email search query routes to gworkspace or explains requirement"
-input = "Can you find that email from the Duetto CFO last week?"
+input = "Can you find that email from the CFO last week?"
 response_must_contain = ["email"]
 
 # 13. Approval framing: compose email shows draft and asks confirmation first.

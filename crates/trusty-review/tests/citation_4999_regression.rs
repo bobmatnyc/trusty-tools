@@ -6,7 +6,7 @@
 //! is attributed to file B with BOTH files in the diff. Five of those 17 also
 //! cite a line beyond the cited file's last diffed line.
 //!
-//! The issue asks for a fixture built from `duetto-blast-mfes#429`: a Storybook
+//! The issue asks for a fixture built from `acme-blast-mfes#429`: a Storybook
 //! story — the FIRST file in the diff — claimed committed at `src/index.ts`
 //! "overwriting the package barrel", at severity critical / confidence 0.9,
 //! which drove a D grade and REQUEST_CHANGES on a clean PR.

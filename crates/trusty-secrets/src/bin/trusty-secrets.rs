@@ -47,6 +47,13 @@ fn main() -> ExitCode {
         // SAFETY: no other thread exists yet — the runtime starts below.
         unsafe { std::env::remove_var(var) };
     }
+    // #11464: the ssh forced-command front relays to the GUI-session server
+    // and never serves or spawns one.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(trusty_secrets::server::GATE_SUBCOMMAND.as_ref())
+    {
+        return remote_gate();
+    }
     let onepassword_token = take_onepassword_env();
     // #7524 P2-M2: doctor's tool detection only; never the 1Password `op`.
     let search_path = std::env::var_os("PATH");
@@ -70,6 +77,27 @@ fn main() -> ExitCode {
             eprintln!("trusty-secrets: cannot start the runtime: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Run `remote-gate` on a single-threaded runtime (#11464).
+///
+/// What: the exit status is the gate's; a runtime that will not start is
+/// [`trusty_secrets::server::EXIT_UNAVAILABLE`], with no value read.
+#[cfg(unix)]
+fn remote_gate() -> ExitCode {
+    use trusty_secrets::server::{EXIT_UNAVAILABLE, run_remote_gate_from_args};
+    match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => {
+            let status = runtime.block_on(run_remote_gate_from_args(std::env::args_os().skip(1)));
+            // The frame reader may still block on stdin; do not join it.
+            runtime.shutdown_background();
+            ExitCode::from(status)
+        }
+        Err(_) => ExitCode::from(EXIT_UNAVAILABLE),
     }
 }
 

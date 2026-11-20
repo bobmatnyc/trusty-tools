@@ -1,31 +1,20 @@
 [meta]
-name = "duetto"
+name = "house"
 version = "0.1.0"
-description = "Anonymized blended house voice synthesized from standout Duetto human reviewers"
-generated_at = "2026-06-04"
+description = "Neutral house review voice: correctness first, evidence-backed, scope-disciplined"
+generated_at = "2026-11-19"
 pipeline_version = "tr-voice-0.1"
-corpus_cutoff = "2024-12-01"
-llm_model = "opus (per-reviewer analysis + synthesis)"
+corpus_cutoff = ""
+llm_model = ""
 
 [meta.provenance]
-source_reviewers = ["Anna", "Carlos", "Yancy", "Bill", "Shiv", "Ian Farmer"]
-reviewers_count = 6
-total_comments_analyzed = 828
+source_reviewers = []
+reviewers_count = 0
+total_comments_analyzed = 0
 notes = """
-Synthesized from per-reviewer Opus analysis of historical Duetto code reviews (pre-2024-12-01).
-Corpus caveats folded into the weighting:
-- Author-reply skew: across several corpora a large share of inline comments are the reviewer \
-writing as the PR AUTHOR (explaining intent / replying to other reviewers) rather than \
-reviewing others' code; reviewer-directed signal was separated where possible (notably for \
-Carlos and Ian Farmer).
-- Shiv's corpus is sparse and uneven (61 records / 28 PRs, heavily concentrated in two large \
-integration PRs); his severity/approve signals are suggestive, not definitive.
-- Ian Farmer's corpus is heavily ops/DevOps-weighted (~62 of 79 records are bash/zsh deploy & \
-service scripts); only the transferable design-for-failure principle was generalized in, with \
-bash-idiom and merge-gatekeeping specifics deliberately excluded.
-The blend weights toward the high-confidence convergent core (Anna / Carlos / Yancy / Bill) and \
-folds in Shiv's integration-boundary + input-fixture-integrity lens and Ian's design-for-failure \
-principle as generalized distinctive additions.
+Hand-written default voice. It is not derived from any named reviewer or \
+organisation's review corpus. Replace or extend it with a generated voice \
+package of your own under ~/.config/trusty-review/voices/<name>/voice.toml.
 """
 
 [voice]
@@ -52,8 +41,8 @@ comment_length = "short"      # short, single-issue comments that lead with the 
 
 [custom]
 # User edits go here. Anything you add in this section overrides or extends the
-# generated [voice]/[knobs] above and is preserved across re-generation of the
-# base voice package (the synthesis step only rewrites [meta]/[voice]/[knobs]).
+# [voice]/[knobs] above and is preserved across re-generation of the base voice
+# package (the synthesis step only rewrites [meta]/[voice]/[knobs]).
 # Example:
 #   [custom.voice]
 #   extra_addendum = "Also flag any use of <internal-deprecated-API>."

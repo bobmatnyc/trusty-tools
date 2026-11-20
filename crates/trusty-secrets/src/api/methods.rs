@@ -64,6 +64,9 @@ pub mod method {
     pub const TICKET_VOID: &str = "secrets.ticket.void";
     /// Whether a ticket is pending (#10459, DOC-86 §4).
     pub const TICKET_PENDING: &str = "secrets.ticket.pending";
+    /// The one entry `trusty-secrets remote-gate` uses: an inner `resolve`
+    /// or `doctor` verb (#11464, owner ruling D3a).
+    pub const GATE: &str = "secrets.gate";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

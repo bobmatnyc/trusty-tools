@@ -63,7 +63,7 @@ trust_project_mcp_json = false
 # `tasks_list`, ...) that had drifted from the real binary's tool surface —
 # the actual `trusty-gworkspace-mcp` tools are named `compose_email`,
 # `search_gmail_messages`, `manage_calendars`, `get_document`, etc. (see the
-# `assistant`/`cto-assistant` agent.toml `[tools].allow` lists, and
+# `assistant` agent.toml `[tools].allow` lists, and
 # `crates/trusty-gworkspace/src/tools.rs`). That mismatch was not cosmetic:
 # `mcp_service_tool_executors()` (crates/trusty-agents/src/tools/
 # mcp_service_tools.rs) spawns the service's `command` and calls
@@ -142,8 +142,8 @@ description = "Return the standard trusty-console metrics report for trusty-mpm:
 
 # Granola — meeting notes, transcripts, and action items (#256).
 # Enabled by default; harmless when the binary is absent (the harness
-# logs and continues). Used heavily by the personal-assistant and
-# cto-assistant for meeting recall.
+# logs and continues). Used heavily by the personal-assistant
+# for meeting recall.
 [[mcp.services]]
 name = "granola-notes"
 description = "Granola meeting notes and transcripts"
@@ -209,16 +209,6 @@ args = ["serve"]
 transport = "stdio"
 enabled = true
 discover = true
-
-# Duetto org memory service — Duetto-internal HTTP MCP (#256).
-# Disabled by default since it's only reachable on Duetto infrastructure.
-# Enable with `mcp_enable duetto-memory` when on a Duetto-connected machine.
-[[mcp.services]]
-name = "duetto-memory"
-description = "Duetto org memory service (Duetto infra only)"
-url = "https://mcp-services.dev.duettosystems.com/memory/mcp"
-transport = "http"
-enabled = false
 
 # GitHub identities for the ticketing agent (#243).
 # Each identity points to env vars holding a token + default repo, so

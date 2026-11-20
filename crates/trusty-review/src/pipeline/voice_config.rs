@@ -13,7 +13,7 @@
 //! refuses.
 //!
 //! Test: `build_voice_config_no_voice` (principles on),
-//! `build_voice_config_principles_off`, `build_voice_config_duetto_bundled`,
+//! `build_voice_config_principles_off`, `build_voice_config_house_bundled`,
 //! `build_voice_config_unknown_voice_degrades`,
 //! `build_voice_config_review_template_bundled`,
 //! `build_voice_config_unknown_review_template_degrades`,
@@ -39,7 +39,7 @@ use crate::{
 /// with [`ReviewerPrompts::principles`] from the content `prompts` came from
 /// (#9991); when it is off, reads no principles content. Loads the named voice
 /// package (if any) via `VoiceLoader` — the content's
-/// `duetto`, or a user-config package — degrading with a warning to no-voice
+/// `house`, or a user-config package — degrading with a warning to no-voice
 /// for an unknown or rejected name; loads the named review template (if any,
 /// issue #2995) via `ReviewTemplateLoader` the same way. An unknown name is
 /// never fatal. Content that cannot supply a name it ships (not installed,
@@ -50,7 +50,7 @@ use crate::{
 /// [`PromptContentError`] from the principles read (`Missing`, `Invalid`) or
 /// from either loader's `Content` arm. With principles off and no voice or
 /// template configured, no content is read.
-/// Test: `build_voice_config_no_voice`, `build_voice_config_duetto_bundled`,
+/// Test: `build_voice_config_no_voice`, `build_voice_config_house_bundled`,
 /// `build_voice_config_review_template_bundled`,
 /// `build_voice_config_unknown_review_template_degrades`,
 /// `build_voice_config_refuses_when_the_content_lacks_the_voice`,
@@ -223,35 +223,48 @@ mod tests {
         );
     }
 
-    /// build_voice_config loads the bundled duetto voice.
+    /// build_voice_config loads the bundled house voice.
     ///
-    /// Why: the bundled `duetto` fixture must be discoverable without external files.
-    /// What: sets voice_package to "duetto"; asserts voice_addendum and voice_name
+    /// Why: the bundled `house` fixture must be discoverable without external files.
+    /// What: sets voice_package to "house"; asserts voice_addendum and voice_name
     /// are Some and contain expected content.
     /// Test: uses shipped content voice; no network.
     #[test]
     #[serial_test::serial]
-    fn build_voice_config_duetto_bundled() {
+    fn build_voice_config_house_bundled() {
         let mut config = config_default_voice();
-        config.voice_package = Some("duetto".to_string());
+        config.voice_package = Some("house".to_string());
         config.voice_principles = true;
         let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         assert!(
             vc.voice_addendum.is_some(),
-            "duetto voice must produce a non-None addendum"
+            "house voice must produce a non-None addendum"
         );
         assert!(
             !vc.voice_addendum.as_deref().unwrap_or("").is_empty(),
-            "duetto addendum must be non-empty"
+            "house addendum must be non-empty"
         );
         assert_eq!(
             vc.voice_name.as_deref(),
-            Some("duetto"),
-            "voice_name must be set to \"duetto\""
+            Some("house"),
+            "voice_name must be set to \"house\""
         );
         assert!(
             vc.has_any_addendum(),
-            "duetto + principles must report has_any_addendum=true"
+            "house + principles must report has_any_addendum=true"
+        );
+    }
+
+    /// #11513: `voice_package = "duetto"` keeps a voice addendum (the shipped
+    /// `house` voice) rather than silently reviewing with no voice.
+    #[test]
+    fn build_voice_config_legacy_duetto_keeps_a_voice() {
+        let mut config = config_default_voice();
+        config.voice_package = Some("duetto".to_string());
+        let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
+        assert!(
+            vc.voice_addendum.as_deref().is_some_and(|a| !a.is_empty()),
+            "the legacy duetto name must not drop the voice"
         );
     }
 
@@ -284,23 +297,23 @@ mod tests {
         );
     }
 
-    /// Full pipeline: principles + duetto produce a combined addendum with correct order.
+    /// Full pipeline: principles + house produce a combined addendum with correct order.
     ///
     /// Why: the combined_addendum must have principles before the voice addendum;
     /// this mirrors the intended injection order in the system prompt.
-    /// What: loads duetto; asserts principles text precedes duetto content.
+    /// What: loads house; asserts principles text precedes house content.
     /// Test: uses shipped content voice.
     #[test]
     #[serial_test::serial]
     fn build_voice_config_combined_ordering() {
         let mut config = config_default_voice();
-        config.voice_package = Some("duetto".to_string());
+        config.voice_package = Some("house".to_string());
         config.voice_principles = true;
         let vc = build_voice_config(&config, prompts()).expect("content supplies the voice config");
         let combined = vc.combined_addendum();
         // The principles layer mentions "Review principles" heading.
         let p_pos = combined.find("Review principles").unwrap_or(usize::MAX);
-        // Duetto mentions correctness / data and control flow.
+        // House mentions correctness / data and control flow.
         let v_pos = combined
             .find("data and control flow")
             .or_else(|| combined.find("correctness first"))
@@ -309,7 +322,7 @@ mod tests {
             p_pos != usize::MAX,
             "combined must contain principles heading"
         );
-        assert!(v_pos != usize::MAX, "combined must contain duetto content");
+        assert!(v_pos != usize::MAX, "combined must contain house content");
         assert!(
             p_pos < v_pos,
             "principles must come before voice content in combined addendum"
@@ -390,7 +403,7 @@ system_addendum = ""
     /// build_voice_config loads the bundled `strict-security` review template.
     ///
     /// Why: the bundled template must be discoverable without external files,
-    /// mirroring `build_voice_config_duetto_bundled` for voice packages.
+    /// mirroring `build_voice_config_house_bundled` for voice packages.
     /// What: sets `review_template` to `"strict-security"`; asserts
     /// `review_template`/`review_template_name` are populated and the addendum
     /// composes into `combined_addendum` after voice/principles.
@@ -464,7 +477,7 @@ system_addendum = ""
     ///
     /// Why: a stale content release must stop the review, not silently drop
     /// the voice or the template the operator configured.
-    /// What: content without `voices/duetto/voice.toml`, then without
+    /// What: content without `voices/house/voice.toml`, then without
     /// `templates/review/strict-security.md`; each configured name returns the
     /// `Missing` error naming its path. No content is read with neither set.
     /// Test: this test itself.
@@ -475,13 +488,13 @@ system_addendum = ""
             content_path,
             test_support::{OverrideGuard, installed_without},
         };
-        let voice = content_path("voices/duetto/voice.toml");
+        let voice = content_path("voices/house/voice.toml");
         let template = content_path("templates/review/strict-security.md");
         for (path, set_voice) in [(&voice, true), (&template, false)] {
             let _guard = OverrideGuard::content(installed_without(path));
             let mut config = config_default_voice();
             if set_voice {
-                config.voice_package = Some("duetto".to_string());
+                config.voice_package = Some("house".to_string());
             } else {
                 config.review_template = Some("strict-security".to_string());
             }
