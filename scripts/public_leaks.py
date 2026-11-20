@@ -13,8 +13,9 @@ What: scans `git ls-files` (or the paths given, for the pre-commit hook) with
   with scripts/public_leak_baseline.tsv, which can only shrink: a count above
   the baseline fails, a count below it passes with a note, and an entry whose
   hits are all gone fails with "delete the entry". PRIVATE_NAME is never
-  baselined: every hit fails unless its path is listed, with a reason, in
-  scripts/public_leak_private_allowlist.tsv. No matched text is printed.
+  baselined: every hit fails unless its (path, matched run) pair is listed,
+  with a reason, in scripts/public_leak_private_allowlist.tsv. No matched text
+  is printed.
   Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
 Test: scripts/check_public_leaks_selftest.sh
 """
@@ -153,19 +154,44 @@ def _allow_keys(rel):
     return {rel, "sha256:" + hashlib.sha256(rel.encode("utf-8")).hexdigest()}
 
 
+TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
 def read_allowlist(path, fail):
-    """Paths (or `sha256:<hex>` path digests) whose PRIVATE_NAME hits are accepted; each row needs a reason with an issue pointer."""
-    allowed = set()
+    """`{(path-key, token): False}` of PRIVATE_NAME hits accepted, one row per alias.
+
+    Why: the owner kept the deprecated org-named aliases, removed in the next
+      major release (#11535); a whole-file exemption would also pass any other
+      private name in that file, so each row names the one run it accepts.
+    What: rows are path<TAB>token<TAB>reason naming an issue (#N). path is the
+      plain path or `sha256:<hex of the path>`; token is the lowercased
+      alphanumeric run the hit matched (e.g. the env-var segment). The value
+      flips to True once a hit uses the row; an unused row is stale.
+    Test: selftest cases private-allowlisted, private-allow-other-token,
+      private-allow-other-path, private-allow-stale, private-allow-reason.
+    """
+    allowed = {}
     if not path.is_file():
         return allowed
     for num, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
         f = line.split("\t")
-        if len(f) != 2 or not re.search(r"#[0-9]+", f[1]):
-            raise fail(f"ALLOWLIST: {ALLOW_REL}:{num}: expected path<TAB>reason naming an issue (#N)")
-        allowed.add(f[0])
+        if len(f) != 3 or not TOKEN_RE.fullmatch(f[1]) or not re.search(r"#[0-9]+", f[2]):
+            raise fail(f"ALLOWLIST: {ALLOW_REL}:{num}: expected path<TAB>token<TAB>reason naming an issue (#N)")
+        allowed[(f[0], f[1])] = False
     return allowed
+
+
+def _excused(allow, cls, rel, token):
+    """True when a PRIVATE_NAME hit's (path, token) pair is allowlisted; marks the row used."""
+    if cls != PRIVATE:
+        return False
+    for key in _allow_keys(rel):
+        if (key, token) in allow:
+            allow[(key, token)] = True
+            return True
+    return False
 
 
 def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
@@ -175,25 +201,25 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
     files = list(_tracked(root, paths))
     if not files and not paths:
         raise fail("SCAN_ROOT: git ls-files returned no text files")
+    allow = read_allowlist(root / ALLOW_REL, fail)
     hits, lines = Counter(), {}
-    for cls, rel, num, _ in leak_findings(files, rules):
+    for cls, rel, num, shown in leak_findings(files, rules):
+        if _excused(allow, cls, rel, shown):
+            continue
         hits[(rel, cls)] += 1
         lines.setdefault((rel, cls), num)
     for rel, _ in files:  # a path that itself names a private place is a hit too
-        for cls, rx, allow in rules:
-            if any(allow is None or not allow.fullmatch(m.group(0)) for m in rx.finditer(rel)):
+        for cls, rx, ok in rules:
+            bad = [m.group(0) for m in rx.finditer(rel) if ok is None or not ok.fullmatch(m.group(0))]
+            if any(not _excused(allow, cls, rel, tok) for tok in bad):
                 hits[(rel, cls)] += 1
                 lines.setdefault((rel, cls), 0)
-    allow = read_allowlist(root / ALLOW_REL, fail)
     errors = []
     if have_private:
-        private_keys = {k for rel, cls in hits if cls == PRIVATE for k in _allow_keys(rel)}
         scanned_keys = {k for r, _ in files for k in _allow_keys(r)}
-        for rel in sorted(allow - private_keys):
-            if not paths or rel in scanned_keys:
-                errors.append(f"STALE_ALLOWLIST: {rel}: no PRIVATE_NAME hit left — delete the row from {ALLOW_REL}")
-        for key in [k for k in hits if k[1] == PRIVATE and allow & _allow_keys(k[0])]:
-            del hits[key]
+        for (key, token), used in sorted(allow.items()):
+            if not used and (not paths or key in scanned_keys):
+                errors.append(f"STALE_ALLOWLIST: {key}: a row matches no PRIVATE_NAME hit — delete the row from {ALLOW_REL}")
     baseline_path = root / BASELINE_REL
     if update:
         if paths:

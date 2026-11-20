@@ -1,15 +1,20 @@
-# Paths whose PRIVATE_NAME hits the public-content leak guard accepts.
-# Format: path<TAB>reason naming an issue (#N). Every other PRIVATE_NAME hit fails.
+# PRIVATE_NAME hits the public-content leak guard accepts, one row per alias.
+# Format: path<TAB>token<TAB>reason naming an issue (#N). token is the lowercased
+# alphanumeric run the hit matched; any other private name in the same file fails.
 # A path that itself spells a private name is given as sha256:<hex of the path>;
 # that matches the one file only. Compute: printf %s <path> | shasum -a 256
-# A row whose path has no hit left fails too; delete it then.
-sha256:dd2de5356df7ef821f9d0fc308fb448f6dae3eac61382a2924fff45bc58f096d	legacy voice placeholder kept for compatibility; its path names the org, the content does not (#11515)
-crates/trusty-review/src/voice/loader.rs	maps the legacy voice name to the house voice (#11515)
-crates/trusty-review/src/voice/tests.rs	tests the legacy voice alias (#11515)
-content/CONTENT-CHANGELOG.md	release history records the legacy voice path (#11515)
-crates/trusty-review/CHANGELOG.md	release history records the legacy voice path (#11515)
-crates/trusty-review/changelog.d/11513-remove-org-specific-content.md	fragment records the legacy voice path (#11513)
-crates/trusty-review/src/config/mod.rs	deprecated installation-id fallback env var, kept for one release (#11524)
-crates/trusty-review/src/config/config_tests.rs	tests the deprecated installation-id fallback env var (#11524)
-crates/trusty-review/src/pipeline/voice_config.rs	tests the legacy voice alias (#11515)
-crates/trusty-review/src/runtime_content_tests.rs	tests the legacy voice placeholder file (#11515)
+# A row no hit uses fails as stale; delete it then.
+#
+# See #11535: these are the deprecated org-named aliases (the voice package name
+# and the GITHUB_INSTALLATION_ID_<org> env var), kept with their deprecation
+# warning by owner ruling; they and these rows are removed in the next major release.
+sha256:dd2de5356df7ef821f9d0fc308fb448f6dae3eac61382a2924fff45bc58f096d	duetto	legacy voice placeholder path; the content does not name the org (#11515, #11535)
+crates/trusty-review/src/voice/loader.rs	duetto	deprecated voice-package alias, warns on use (#11515, #11535)
+crates/trusty-review/src/voice/tests.rs	duetto	tests the deprecated voice-package alias (#11515, #11535)
+crates/trusty-review/src/pipeline/voice_config.rs	duetto	tests the deprecated voice-package alias (#11515, #11535)
+crates/trusty-review/src/runtime_content_tests.rs	duetto	tests the legacy voice placeholder path (#11515, #11535)
+crates/trusty-review/src/config/mod.rs	duettoresearch	deprecated installation-id env var alias, warns on use (#11524, #11535)
+crates/trusty-review/src/config/config_tests.rs	duettoresearch	tests the deprecated installation-id env var alias (#11524, #11535)
+content/CONTENT-CHANGELOG.md	duetto	release history documents the deprecated voice alias (#11515, #11535)
+crates/trusty-review/CHANGELOG.md	duetto	release history documents the deprecated voice alias (#11515, #11535)
+crates/trusty-review/changelog.d/11513-remove-org-specific-content.md	duetto	fragment documents the deprecated voice alias (#11513, #11535)
