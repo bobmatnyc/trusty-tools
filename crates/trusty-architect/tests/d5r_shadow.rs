@@ -10,8 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cycle_support::{Env, QuietHost, TestResult, config_at, fleet, screen};
 use serde_json::{Map, json};
 use trusty_architect::FakeClock;
+use trusty_architect::classify::alert;
 use trusty_architect::poller::prepare_shadow;
-use trusty_architect::poller::routines::{RoutinesError, push_due, routine_alerts};
+use trusty_architect::poller::push::{PushRoute, push_step};
+use trusty_architect::poller::routines::{RoutinesError, routine_alerts};
 
 fn now() -> f64 {
     SystemTime::now()
@@ -99,18 +101,36 @@ fn routines_relative_stamp_is_an_error() -> TestResult {
     Ok(())
 }
 
+/// `push_step` with the channel unset: the bookkeeping alone.
+fn push_due(other: &mut Map<String, serde_json::Value>, on: bool, now: f64) -> Vec<String> {
+    let failing = if on {
+        vec![alert("architect_dead", "dead", "dead", "s", "", now)]
+    } else {
+        Vec::new()
+    };
+    let route = PushRoute {
+        channel: None,
+        recipient: None,
+        sender: None,
+        hands_off: false,
+        supervisor: "s",
+    };
+    let (alerts, lines) = push_step(other, &failing, now, &route);
+    assert!(alerts.is_empty(), "{alerts:?}");
+    lines
+}
+
 #[test]
 fn push_due_fires_once_after_thirty_minutes_and_clears() {
     let mut other = Map::new();
-    assert!(push_due(&mut other, &[], 0.0, None).is_empty());
+    assert!(push_due(&mut other, false, 0.0).is_empty());
     assert!(
         !other.contains_key("push"),
         "no failure leaves the state untouched"
     );
-    let key = vec!["architect_dead:dead".to_owned()];
-    assert!(push_due(&mut other, &key, 1000.0, None).is_empty());
-    assert!(push_due(&mut other, &key, 2799.0, None).is_empty());
-    let due = push_due(&mut other, &key, 2800.0, None);
+    assert!(push_due(&mut other, true, 1000.0).is_empty());
+    assert!(push_due(&mut other, true, 2799.0).is_empty());
+    let due = push_due(&mut other, true, 2800.0);
     assert_eq!(
         due,
         [
@@ -118,19 +138,18 @@ fn push_due_fires_once_after_thirty_minutes_and_clears() {
         ]
     );
     assert!(
-        push_due(&mut other, &key, 9000.0, None).is_empty(),
+        push_due(&mut other, true, 9000.0).is_empty(),
         "reported once"
     );
     // Cleared, then failing again: a fresh 30 minutes.
-    assert!(push_due(&mut other, &[], 9100.0, None).is_empty());
+    assert!(push_due(&mut other, false, 9100.0).is_empty());
     assert_eq!(other["push"], json!({}));
-    assert!(push_due(&mut other, &key, 9200.0, Some("slack")).is_empty());
-    let due = push_due(&mut other, &key, 11_000.0, Some("slack"));
-    assert!(due[0].contains("channel slack has no sender in this build; nothing sent"));
+    assert!(push_due(&mut other, true, 9200.0).is_empty());
+    assert_eq!(push_due(&mut other, true, 11_000.0).len(), 1);
     // A corrupt record is replaced, not trusted.
     other.insert("push".to_owned(), json!([1]));
     assert_eq!(
-        push_due(&mut other, &key, 0.0, None),
+        push_due(&mut other, true, 0.0),
         ["push: state record was not an object; reset"]
     );
     assert!(other["push"].is_object());

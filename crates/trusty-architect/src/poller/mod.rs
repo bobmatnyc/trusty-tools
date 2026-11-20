@@ -46,6 +46,7 @@ mod listing;
 mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
 mod messages;
+pub mod push;
 mod pyfmt;
 pub mod routines;
 mod run;
@@ -54,6 +55,7 @@ pub mod self_refresh;
 mod session;
 mod shadow;
 mod sink;
+pub mod slack;
 mod state;
 pub mod steps;
 mod triage;

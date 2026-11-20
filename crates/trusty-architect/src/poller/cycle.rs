@@ -34,9 +34,11 @@ use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 use super::listing::{Pane, capture, list_panes};
-use super::routines::{push_due, routine_alerts};
+use super::push::{PushRoute, push_step};
+use super::routines::routine_alerts;
 use super::self_ctx_alerts::self_ctx_alerts;
 use super::self_refresh::self_refresh_fault_alerts;
+use super::slack::PushSender;
 use super::state::PollState;
 use super::steps::ledger_shim::run_ledger_shim;
 use super::steps::scripts::ScriptSteps;
@@ -96,6 +98,9 @@ pub struct Sensors<'a, T: Tmux + ?Sized> {
     /// The script steps and the subprocess seam the zone watch reads
     /// through; `None` turns both off (df-T7i P1b; tests).
     pub steps: Option<&'a ScriptSteps<'a>>,
+    /// Sends the owner push (#9779 D5t); `None` makes a due push with a
+    /// channel set a `push_failed` alert.
+    pub pusher: Option<&'a dyn PushSender>,
 }
 
 /// `cycle()`'s dry-run line for one watched pane (988152c line 1527), with
@@ -313,12 +318,17 @@ pub fn collect<T: Tmux + ?Sized>(
             failing.push(alert("routine_stale", "config", &detail, sup, "", now));
         }
     }
-    let keys: Vec<String> = failing
-        .iter()
-        .map(|a| format!("{}:{}", a.kind, a.fingerprint))
-        .collect();
-    let channel = s.config.push_channel.as_deref();
-    log.extend(push_due(&mut state.other, &keys, now, channel));
+    // #9779 D5t: an overdue failure is a Slack DM; a failed send alerts.
+    let route = PushRoute {
+        channel: s.config.push_channel.as_deref(),
+        recipient: s.config.push_recipient.as_deref(),
+        sender: s.pusher,
+        hands_off: s.dry_run,
+        supervisor: &s.config.supervisor,
+    };
+    let (push_failed, lines) = push_step(&mut state.other, &failing, now, &route);
+    log.extend(lines);
+    candidates.extend(push_failed);
     candidates.extend(failing);
     let quiet = read_quiet_sessions(&s.config.quiet_sessions);
     candidates.retain(|a| !(a.kind == "idle" && quiet.contains(&a.session)));

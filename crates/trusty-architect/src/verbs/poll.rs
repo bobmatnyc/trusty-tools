@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use super::VerbError;
 use crate::clock::SystemClock;
 use crate::error::RunError;
+use crate::poller::slack::{SEND_TIMEOUT, SLACK_POST_URL, SlackDm, SystemCurl, env_token};
 use crate::poller::steps::notify_macos::Osascript;
 use crate::poller::steps::scripts::{ScriptSteps, SystemSubprocess};
 use crate::poller::steps::usage::ScriptProbe;
@@ -110,6 +111,13 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
     };
     // df-T7i P1b: the run_* scripts, zone watch and self-refresh start.
     let steps = ScriptSteps::new(&SystemSubprocess, config);
+    // #9779 D5t: the owner push; sends only with ARCHITECT_PUSH_CHANNEL=slack.
+    let slack = SlackDm {
+        curl: &SystemCurl,
+        token: &env_token,
+        url: SLACK_POST_URL.to_owned(),
+        timeout: SEND_TIMEOUT,
+    };
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
@@ -121,6 +129,7 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
         messages,
         relauncher: Some(&relauncher),
         steps: Some(&steps),
+        pusher: Some(&slack),
         dry_run: args.dry_run,
     };
     let result = if args.once || args.dry_run {

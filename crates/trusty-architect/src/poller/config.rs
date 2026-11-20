@@ -125,8 +125,10 @@ pub struct Config {
     /// routine list. A missing file turns the check off.
     pub routines: PathBuf,
     /// `ARCHITECT_PUSH_CHANNEL`: where an overdue failure is pushed. Ships
-    /// unset; this build sends nothing either way (D5r).
+    /// unset (nothing sent); `slack` sends a DM (D5r, D5t).
     pub push_channel: Option<String>,
+    /// `ARCHITECT_PUSH_SLACK_USER`: the Slack user id the DM goes to (D5t).
+    pub push_recipient: Option<String>,
     /// Shadow run: outputs go to `<inbox>/shadow/`, no lock, no keys, no
     /// relaunch, no notification, no mutating step (#9779, plan section 3).
     pub shadow: bool,
@@ -257,6 +259,7 @@ impl Config {
             frozen_minutes: lenient("FROZEN_MIN", FROZEN_MIN_DEFAULT),
             routines: path("ARCHITECT_ROUTINES_FILE", root.join("local/routines.json")),
             push_channel: get("ARCHITECT_PUSH_CHANNEL").filter(|v| !v.is_empty()),
+            push_recipient: get("ARCHITECT_PUSH_SLACK_USER").filter(|v| !v.is_empty()),
             shadow: false,
         })
     }
