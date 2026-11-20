@@ -33,6 +33,25 @@ fn rules_are_found_from_a_subdirectory() {
     assert_eq!(rules_for(&sub).as_deref(), Some("use --no-fail-fast"));
 }
 
+/// #7684: a subdirectory `CLAUDE.md` adds to the git root's rules, never
+/// replaces them; the root rules come first. A `CLAUDE.md` above the git root
+/// is not carried.
+#[test]
+fn nested_claude_md_rules_follow_the_root_rules() {
+    let outer = tempfile::tempdir().expect("tempdir");
+    std::fs::write(outer.path().join(CLAUDE_MD), "outside the repo").expect("write");
+    let root = outer.path().join("repo");
+    let sub = root.join("crates/x");
+    std::fs::create_dir_all(&sub).expect("mkdir");
+    std::fs::create_dir(root.join(".git")).expect("mkdir .git");
+    std::fs::write(root.join(CLAUDE_MD), "root rules").expect("write");
+    std::fs::write(sub.join(CLAUDE_MD), "nested rules").expect("write");
+    assert_eq!(
+        rules_for(&sub).as_deref(),
+        Some("root rules\n\nnested rules")
+    );
+}
+
 #[test]
 fn block_carries_the_heading_and_rules() {
     let block = rules_block("rule");

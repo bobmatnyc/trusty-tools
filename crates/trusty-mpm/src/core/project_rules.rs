@@ -6,8 +6,8 @@
 //! so project text cannot live in them; it reaches the agent at dispatch time
 //! through the same `updatedInput` rewrite that carries the account block
 //! (#11390).
-//! What: [`rules_for`] finds the nearest `CLAUDE.md` at or above the hook's
-//! cwd and returns its agent rules: the regions between [`RULES_OPEN`] and
+//! What: [`rules_for`] collects every `CLAUDE.md` from the hook's cwd up to
+//! the git root and returns their agent rules, root first: the regions between [`RULES_OPEN`] and
 //! [`RULES_CLOSE`] when the file marks any, else the whole file. [`rules_block`]
 //! renders them under [`PROJECT_RULES_HEADING`], cut at
 //! [`PROJECT_RULES_CAP_BYTES`] on a line boundary with an in-band notice.
@@ -33,14 +33,30 @@ pub const PROJECT_RULES_HEADING: &str = "## Project rules (from CLAUDE.md)";
 /// Largest rules text one block carries, in bytes.
 pub const PROJECT_RULES_CAP_BYTES: usize = 16 * 1024;
 
-/// The nearest `CLAUDE.md` at or above `cwd`.
+/// Every `CLAUDE.md` from `cwd` up to its git root, root first.
 ///
-/// What: any entry by that name, not only a regular file, so one that cannot
-/// be read reaches [`rules_for`]'s notice instead of being skipped (#7684).
-pub fn claude_md_for(cwd: &Path) -> Option<PathBuf> {
-    cwd.ancestors()
-        .map(|dir| dir.join(CLAUDE_MD))
-        .find(|path| path.exists())
+/// What: walks `cwd`'s ancestors inclusive and stops at the first one holding
+/// a `.git` entry (a checkout or a linked worktree). Outside any git repo it
+/// keeps only the nearest file, so a stray `CLAUDE.md` above the project is
+/// never carried. Any entry by that name counts, not only a regular file, so
+/// one that cannot be read reaches [`rules_for`]'s notice (#7684).
+/// Test: `nested_claude_md_rules_follow_the_root_rules`,
+/// `rules_are_found_from_a_subdirectory`.
+pub fn claude_mds_for(cwd: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for dir in cwd.ancestors() {
+        let path = dir.join(CLAUDE_MD);
+        if path.exists() {
+            found.push(path);
+        }
+        if dir.join(".git").exists() {
+            found.reverse();
+            return found;
+        }
+    }
+    // #7684: no git root; today's nearest-file behaviour.
+    found.truncate(1);
+    found
 }
 
 /// The agent rules a `CLAUDE.md` body carries.
@@ -76,21 +92,27 @@ pub const RULES_UNAVAILABLE: &str = "project rules unavailable";
 
 /// The agent rules of the project containing `cwd`, or `None`.
 ///
-/// What: [`extract`] over [`claude_md_for`]. An unreadable file is logged at
-/// `warn` and yields a one-line [`RULES_UNAVAILABLE`] notice naming the path
-/// and the error, so the agent knows its rules are missing (#7684).
+/// What: [`extract`] over each file of [`claude_mds_for`], root first, joined
+/// by a blank line; files yielding no rules are skipped. An unreadable file is
+/// logged at `warn` and contributes a one-line [`RULES_UNAVAILABLE`] notice
+/// naming the path and the error, so the agent knows those rules are missing.
+/// The size cap applies to the joined text in [`rules_block`].
 /// Test: `rules_are_found_from_a_subdirectory`,
+/// `nested_claude_md_rules_follow_the_root_rules`,
 /// `an_unreadable_claude_md_yields_a_notice`.
 pub fn rules_for(cwd: &Path) -> Option<String> {
-    let path = claude_md_for(cwd)?;
-    match std::fs::read_to_string(&path) {
-        Ok(body) => extract(&body),
-        // #7684: never drop the rules silently; the notice rides the dispatch.
-        Err(err) => {
-            tracing::warn!(path = %path.display(), "project rules not read: {err}");
-            Some(format!("{RULES_UNAVAILABLE}: {}: {err}", path.display()))
-        }
-    }
+    let parts: Vec<String> = claude_mds_for(cwd)
+        .iter()
+        .filter_map(|path| match std::fs::read_to_string(path) {
+            Ok(body) => extract(&body),
+            // #7684: never drop the rules silently; the notice rides the dispatch.
+            Err(err) => {
+                tracing::warn!(path = %path.display(), "project rules not read: {err}");
+                Some(format!("{RULES_UNAVAILABLE}: {}: {err}", path.display()))
+            }
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 /// Render the `## Project rules` block appended to a dispatch prompt.
