@@ -13,29 +13,36 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-# #11239: code mode runs against the real broker and fake extension of these tests.
+# #11239: connect mode runs against the real broker and fake extension of these tests.
 from test_activation_codes import FakeBrowser, Rig, clock, short  # noqa: F401
 
-from trusty_browser import agent_mcp, codes, service
+from trusty_browser import agent_mcp, service
 
 CODE_TOOLS = {
+    "browser_profiles",
     "browser_connect",
     "browser_disconnect",
     "browser_tabs",
     "browser_select",
+    "browser_switch",
     "page_read",
+    "page_find",
     "page_click",
+    "page_hover",
     "page_type",
     "page_scroll",
     "page_press",
     "page_select",
+    "page_drag",
     "page_navigate",
     "page_upload",
     "page_downloads",
+    "page_back",
+    "page_forward",
+    "page_reload",
     "browser_release",
 }
 
@@ -112,7 +119,7 @@ def test_workflow_mcp_over_uds():
 
 
 class Agent:
-    """A code-mode MCP server subprocess plus a broker the test starts and stops."""
+    """A connect-mode MCP server subprocess plus a broker the test starts and stops."""
 
     def __init__(self, state: Path) -> None:
         self.rig = Rig(state)
@@ -125,17 +132,23 @@ class Agent:
         self.upload_root: Path | None = None
 
     @contextlib.asynccontextmanager
-    async def broker(self):
+    async def broker(self, two=False):
         rig = self.rig
         if rig.alpha is None:
             rig.alpha = rig.seed("alpha")
+        if two and getattr(rig, "beta", None) is None:
+            rig.beta = rig.seed("beta")
         async with service.Broker(rig.state) as broker:
             rig.broker = broker
             rig.a = await FakeBrowser(rig, rig.alpha).pair()
+            browsers = [rig.a]
+            if two:
+                rig.b = await FakeBrowser(rig, rig.beta).pair()
+                browsers.append(rig.b)
             try:
                 yield broker
             finally:
-                for writer in rig.writers + [rig.a.writer]:
+                for writer in rig.writers + [b.writer for b in browsers]:
                     writer.close()
 
     @contextlib.asynccontextmanager
@@ -178,15 +191,18 @@ class Agent:
         assert prefix == "Error executing tool " + name
         return json.loads(frame)
 
-    async def mint(self, scope="profile", tab=None) -> str:
-        return (await self.rig.mint(self.rig.alpha, scope, tab))["code"]
+    async def connect(self, row=None) -> dict:
+        """The user's popup Connect for ``row`` (alpha by default)."""
+        made = await self.rig.grant(row or self.rig.alpha)
+        assert made["ok"], made
+        return made
 
-    async def settled(self) -> None:
+    async def detached(self, grant: str) -> None:
         for _ in range(500):
-            if not self.rig.broker.grants:
+            if not self.rig.broker.grants[grant].sessions:
                 return
             await asyncio.sleep(0.01)
-        raise AssertionError("grant did not end")
+        raise AssertionError("session did not detach")
 
 
 def drive(short, body, upload_root: Path | None = None) -> Agent:
@@ -209,31 +225,27 @@ def unavailable(frame: dict) -> bool:
     }
 
 
-def test_code_mode_starts_and_lists_tools_with_no_broker(short, clock):
+def test_connect_mode_starts_and_lists_tools_with_no_broker(short, clock):
     async def body(agent):
         tools = (await agent.session.list_tools()).tools
         assert {tool.name for tool in tools} == CODE_TOOLS
         connect = next(t for t in tools if t.name == "browser_connect")
-        props = connect.inputSchema["properties"]
-        assert set(props) == {"code", "code_file"}
+        assert set(connect.inputSchema["properties"]) == {"profile"}
         assert not connect.inputSchema.get("required")
-        assert props["code"]["type"] == props["code_file"]["type"] == "string"
-        assert "prefer code_file" in props["code"]["description"]
-        assert "Prefer code_file" in connect.description
+        assert "code" not in json.dumps(connect.inputSchema)
+        assert "browser_profiles" in connect.description
         select = next(t for t in tools if t.name == "browser_select")
         assert select.inputSchema["properties"]["tab"]["type"] == "integer"
-        assert unavailable(
-            await agent.refused("browser_connect", code=codes.new_code())
-        )
+        assert unavailable(await agent.refused("browser_connect"))
+        assert unavailable(await agent.refused("browser_profiles"))
         assert not short.exists()  # No credential read, no socket, no file.
         short.mkdir(mode=0o700)
         with socket.socket(socket.AF_UNIX) as stale:
             stale.bind(str(short / "agent.sock"))
-        assert unavailable(
-            await agent.refused("browser_connect", code=codes.new_code())
-        )
+        assert unavailable(await agent.refused("browser_connect"))
         async with agent.broker():
-            assert (await agent.ok("browser_connect", code=await agent.mint()))["ok"]
+            await agent.connect()
+            assert (await agent.ok("browser_connect"))["ok"]
 
     drive(short, body)
 
@@ -243,13 +255,19 @@ def test_tools_before_connect_answer_not_connected(short, clock):
         for name, args in [
             ("browser_tabs", {}),
             ("browser_select", {"tab": 7}),
+            ("browser_switch", {"lease": "l"}),
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
+            ("page_hover", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
             ("page_press", {"lease": "l", "key": "Enter", "request_id": "r"}),
             (
                 "page_select",
                 {"lease": "l", "ref": "1.0", "value": "", "request_id": "r"},
+            ),
+            (
+                "page_drag",
+                {"lease": "l", "ref": "1.0", "target": "1.1", "request_id": "r"},
             ),
             (
                 "page_navigate",
@@ -267,19 +285,23 @@ def test_tools_before_connect_answer_not_connected(short, clock):
     drive(short, body)
 
 
-def test_connect_returns_grant_facts_and_tools_work_within_the_grant(short, clock):
+def test_connect_needs_no_code_and_attaches_to_the_connected_profile(short, clock):
     async def body(agent):
         async with agent.broker() as broker:
-            minted = await agent.rig.mint(agent.rig.alpha, "tab", 7)
-            reply = await agent.ok("browser_connect", code=minted["code"])
+            # Nothing connected in the popup: a clear error, and no session.
+            frame = await agent.refused("browser_connect")
+            assert frame == {"ok": False, "error": "NotConnected"}
+            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
+            made = await agent.connect()
+            reply = await agent.ok("browser_connect")
             assert reply == {
                 "ok": True,
-                "grant": minted["grant"],
-                "scope": "tab",
+                "grant": made["grant"],
+                "scope": "profile",
                 "profile": agent.rig.alpha["profile"],
-                "tab": 7,
+                "email": agent.rig.alpha["email"],
             }
-            assert broker.grants[minted["grant"]].state == "active"
+            assert len(broker.grants[made["grant"]].sessions) == 1
             claim = await agent.ok("browser_select", tab=7)
             assert claim["tab"] == 7 and claim["access"] is True
             lease = claim["lease"]
@@ -289,103 +311,73 @@ def test_connect_returns_grant_facts_and_tools_work_within_the_grant(short, cloc
                 "page_click", lease=lease, ref="1.0", request_id="c"
             )
             assert clicked == {"ok": True, "tab": 7, "document": "d7-1"}
+            # #11293: a profile grant may bring its own leased tab to the front.
+            assert await agent.ok("browser_switch", lease=lease) == {
+                "ok": True,
+                "tab": 7,
+                "window": 1,
+                "focused": True,
+            }
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
-            assert await agent.refused("browser_select", tab=9) == {
-                "ok": False,
-                "error": "OutOfScope",
-                "tab": 9,
-            }
-            assert not broker.claims
-
-    drive(short, body)
-
-
-def test_second_connect_is_refused_and_spends_no_code(short, clock):
-    async def body(agent):
-        async with agent.broker() as broker:
-            first = await agent.mint()
-            await agent.ok("browser_connect", code=first)
-            second = await agent.rig.mint(agent.rig.alpha)
-            frame = await agent.refused("browser_connect", code=second["code"])
+            frame = await agent.refused("browser_connect")
             assert frame["error"] == "AlreadyConnected"
-            assert broker.grants[second["grant"]].state == "code"
-            assert (await agent.ok("browser_select", tab=7))["lease"]
-            await agent.ok("browser_disconnect")
-            reply = await agent.ok("browser_connect", code=second["code"])
-            assert reply["grant"] == second["grant"]
+            assert (await agent.ok("browser_select", tab=9))["lease"]
 
     drive(short, body)
 
 
-def test_code_refusals_reach_the_agent_and_leave_no_session(short, clock):
+def test_connect_with_several_profiles_needs_an_explicit_choice(short, clock):
     async def body(agent):
-        async with agent.broker():
-
-            async def refused(code):
-                frame = await agent.refused("browser_connect", code=code)
-                missing = await agent.refused("browser_tabs")
-                assert missing["error"] == "NotConnected"
-                return frame
-
-            refusal = {"ok": False, "error": "CodeRefused"}
-            assert await refused(codes.new_code()) == refusal
-            used = await agent.mint()
-            assert (await agent.rig.redeem(used))[0]["ok"]
-            assert await refused(used) == refusal
-            late = await agent.mint()
-            clock[0] += codes.CODE_TTL
-            assert await refused(late) == refusal
-            for _ in range(codes.FAIL_LIMIT - 1):
-                assert await refused(codes.new_code()) == refusal
-            good = await agent.mint()
-            assert await refused(good) == {
-                "ok": False,
-                "error": "RedeemLocked",
-                "retry_after_s": 60,
+        async with agent.broker(two=True):
+            rig = agent.rig
+            assert await agent.ok("browser_profiles") == {"ok": True, "profiles": []}
+            alpha = (await agent.connect())["grant"]
+            beta = (await agent.connect(rig.beta))["grant"]
+            listed = (await agent.ok("browser_profiles"))["profiles"]
+            assert {(p["profile"], p["grant"]) for p in listed} == {
+                (rig.alpha["profile"], alpha),
+                (rig.beta["profile"], beta),
             }
-            clock[0] += 60
-            assert (await agent.ok("browser_connect", code=good))["ok"]
+            frame = await agent.refused("browser_connect")
+            assert frame["error"] == "ProfileChoiceRequired"
+            assert sorted(p["grant"] for p in frame["profiles"]) == sorted([alpha, beta])
+            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
+            reply = await agent.ok("browser_connect", profile=rig.beta["profile"])
+            assert reply["grant"] == beta
+            assert (await agent.ok("browser_tabs"))["ok"]
+            assert rig.b.sent("page_tabs") and rig.a.sent("page_tabs") == []
 
     drive(short, body)
 
 
-def test_scope_and_audit_refusals_reach_the_agent_and_leave_no_session(short, clock):
+def test_attach_refusals_reach_the_agent_and_leave_no_session(short, clock):
     async def body(agent):
         async with agent.broker() as broker:
             rig = agent.rig
 
-            async def refused(code):
-                frame = await agent.refused("browser_connect", code=code)
+            async def refused(**args):
+                frame = await agent.refused("browser_connect", **args)
                 missing = await agent.refused("browser_tabs")
                 assert missing["error"] == "NotConnected"
                 return frame
 
-            closed = await agent.mint("tab", 7)
-            saved = rig.a.tabs.pop(7)
-            assert await refused(closed) == {"ok": False, "error": "TabClosed"}
-            rig.a.tabs[7] = saved
-            held, limited = [await agent.mint("tab", 7) for _ in range(2)]
-            assert (await rig.redeem(held))[0]["ok"]
-            assert await refused(limited) == {
-                "ok": False,
-                "error": "GrantLimit",
-                "limit": "tab",
-            }
-            await rig.operator(op="revoke_grants")
+            await agent.connect()
             real = broker.audit.write
 
             def broken(*_a, **_k):
                 raise OSError("disk full")
 
-            audited = await agent.mint()
             broker.audit.write = broken
-            assert await refused(audited) == {"ok": False, "error": "AuditUnavailable"}
+            assert await refused() == {"ok": False, "error": "AuditUnavailable"}
             broker.audit.write = real
-            away = await agent.mint()
+            assert (await refused(profile="nobody"))["error"] == "NotConnected"
+            bad = await agent.refused("browser_connect", profile="")
+            assert bad["error"] == "InvalidRequest"
             await rig.a.leave()
-            assert await refused(away) == {"ok": False, "error": "BrowserDisconnected"}
             rig.a = await FakeBrowser(rig, rig.alpha).pair("boot-two")
-            assert (await agent.ok("browser_connect", code=away))["ok"]
+            assert await refused() == {"ok": False, "error": "NotConnected"}
+            await agent.connect()
+            assert (await agent.ok("browser_connect"))["ok"]
 
     drive(short, body)
 
@@ -393,9 +385,8 @@ def test_scope_and_audit_refusals_reach_the_agent_and_leave_no_session(short, cl
 def test_grant_ended_drops_the_session(short, clock):
     async def body(agent):
         async with agent.broker():
-            grant = (await agent.ok("browser_connect", code=await agent.mint()))[
-                "grant"
-            ]
+            await agent.connect()
+            grant = (await agent.ok("browser_connect"))["grant"]
             await agent.rig.operator(op="revoke_grant", grant=grant)
             assert await agent.refused("browser_tabs") == {
                 "ok": False,
@@ -404,33 +395,35 @@ def test_grant_ended_drops_the_session(short, clock):
             }
             after = await agent.refused("browser_tabs")
             assert after["error"] == "NotConnected" and after["reason"] == "revoked"
-            assert (await agent.ok("browser_connect", code=await agent.mint()))["ok"]
+            await agent.connect()
+            assert (await agent.ok("browser_connect"))["ok"]
             await agent.ok("browser_disconnect")
             assert "reason" not in await agent.refused("browser_tabs")
 
     drive(short, body)
 
 
-def test_disconnect_and_shutdown_end_the_grant(short, clock):
+def test_disconnect_and_shutdown_keep_the_profile_connected(short, clock):
     agent = Agent(short)
 
-    # The server's exit (stdin closed) must end the grant it holds.
+    # #11239 ruling Dpj: the user's Connect outlives any one agent.
     async def scenario():
         async with agent.broker():
+            grant = (await agent.connect())["grant"]
             async with agent.serve():
-                await agent.ok("browser_connect", code=await agent.mint())
+                await agent.ok("browser_connect")
                 assert await agent.ok("browser_disconnect") == {
                     "ok": True,
                     "disconnected": True,
                 }
-                await agent.settled()
-                assert agent.rig.outcomes("grant_end") == ["closed"]
+                await agent.detached(grant)
                 missing = await agent.refused("browser_tabs")
                 assert missing["error"] == "NotConnected"
-                await agent.ok("browser_connect", code=await agent.mint())
-                assert agent.rig.broker.grants
-            await agent.settled()
-            assert agent.rig.outcomes("grant_end") == ["closed", "closed"]
+                await agent.ok("browser_connect")
+            await agent.detached(grant)
+            assert grant in agent.rig.broker.grants
+            assert agent.rig.outcomes("grant_end") == []
+            assert agent.rig.outcomes("detach") == ["ok", "ok"]
 
     asyncio.run(scenario())
 
@@ -438,73 +431,36 @@ def test_disconnect_and_shutdown_end_the_grant(short, clock):
 def test_broker_loss_mid_session_answers_unavailable_then_reconnects(short, clock):
     async def body(agent):
         async with agent.broker():
-            await agent.ok("browser_connect", code=await agent.mint())
+            await agent.connect()
+            await agent.ok("browser_connect")
         assert unavailable(await agent.refused("browser_tabs"))
         assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
         async with agent.broker():
-            await agent.ok("browser_connect", code=await agent.mint())
+            await agent.connect()
+            await agent.ok("browser_connect")
             assert (await agent.ok("browser_select", tab=7))["lease"]
         # A dead session never blocks a new connect as AlreadyConnected.
-        assert unavailable(
-            await agent.refused("browser_connect", code=codes.new_code())
-        )
+        assert unavailable(await agent.refused("browser_connect"))
         async with agent.broker():
-            assert (await agent.ok("browser_connect", code=await agent.mint()))["ok"]
+            await agent.connect()
+            assert (await agent.ok("browser_connect"))["ok"]
 
     drive(short, body)
 
 
-def test_code_never_appears_in_results_logs_or_files(short, clock):
-    used: list[str] = []
-
+def test_the_browser_key_never_appears_in_results_or_logs(short, clock):
     async def body(agent):
-        down = codes.new_code()
-        used.append(down)
-        await agent.refused("browser_connect", code=down)
         async with agent.broker():
-            first, second = await agent.mint(), await agent.mint()
-            used.extend([first, second])
-            await agent.ok("browser_connect", code=first)
-            await agent.refused("browser_connect", code=second)
+            await agent.connect()
+            await agent.ok("browser_connect")
             await agent.ok("browser_tabs")
+            await agent.ok("browser_profiles")
             await agent.ok("browser_disconnect")
-            assert (await agent.refused("browser_connect", code=first))[
-                "error"
-            ] == "CodeRefused"
 
     agent = drive(short, body)
-    needles = [c for code in used for c in (code, code[3:].replace("-", ""))]
-    for text in agent.texts:
-        assert not any(n.lower() in text.lower() for n in needles), text
-    assert agent.errlog.read_text()  # The server did log; the code is not in it.
-    for root in (short, agent.home, agent.errlog):
-        for path in [root] if root.is_file() else root.rglob("*"):
-            if path.is_file():
-                data = path.read_bytes().lower()
-                assert not any(n.lower().encode() in data for n in needles), path
-
-
-def test_non_string_code_is_refused_without_quoting_it(short, clock):
-    async def body(agent):
-        async with agent.broker() as broker:
-            secret = await agent.mint()
-            for value in (424242, [secret], {"code": secret}, None):
-                result = await agent.session.call_tool(
-                    "browser_connect", {"code": value}
-                )
-                assert result.isError
-                text = result.content[0].text
-                frame = json.loads(text.partition(": ")[2])
-                assert frame == {
-                    "ok": False,
-                    "error": "InvalidRequest",
-                    "message": "code must be a string",
-                }
-                assert "424242" not in text and secret not in text
-            assert all(g.state == "code" for g in broker.grants.values())
-            assert (await agent.ok("browser_connect", code=secret))["ok"]
-
-    drive(short, body)
+    key = agent.rig.alpha["key"]
+    assert not any(key in text for text in agent.texts)
+    assert key not in agent.errlog.read_text()
 
 
 def code_file(folder: Path, name: str, content: str, mode: int = 0o600) -> Path:
@@ -516,138 +472,12 @@ def code_file(folder: Path, name: str, content: str, mode: int = 0o600) -> Path:
     return path
 
 
-def assert_code_absent(agent: Agent, codes_used: list[str]) -> None:
-    """No result, error text, stderr line, state or audit file carries a code."""
-    needles = [c for code in codes_used for c in (code, code[3:].replace("-", ""))]
-    for text in agent.texts:
-        assert not any(n.lower() in text.lower() for n in needles), text
-    for root in (agent.rig.state, agent.home, agent.errlog):
-        for path in [root] if root.is_file() else root.rglob("*"):
-            if path.is_file():
-                data = path.read_bytes().lower()
-                assert not any(n.lower().encode() in data for n in needles), path
-
-
-def _group(f, s):
-    return code_file(f, "c", s, 0o640), "must be owner-only (mode 0600 or 0400)"
-
-
-def _world(f, s):
-    return code_file(f, "c", s, 0o604), "must be owner-only (mode 0600 or 0400)"
-
-
-def _missing(f, s):
-    f.mkdir(mode=0o700)
-    return f / "absent", "does not exist"
-
-
-def _symlink(f, s):
-    (f / "link").symlink_to(code_file(f, "real", s))
-    return f / "link", "is a symlink"
-
-
-def _empty(f, s):
-    return code_file(f, "c", ""), "is empty"
-
-
-def _blank(f, s):
-    return code_file(f, "c", " \n\t\n"), "is empty"
-
-
-def _unreadable(f, s):
-    return code_file(f, "c", s, 0o200), "cannot be read"
-
-
-def _oversize(f, s):
-    return code_file(f, "c", s + " " * 1024), "is larger than 1024 bytes"
-
-
-@pytest.mark.parametrize(
-    "arm",
-    [_group, _world, _missing, _symlink, _empty, _blank, _unreadable, _oversize],
-    ids=lambda arm: arm.__name__[1:],
-)
-def test_code_file_refusals_name_the_path_never_the_code(short, clock, arm):
-    secrets: list[str] = []
-
-    async def body(agent):
-        async with agent.broker() as broker:
-            minted = await agent.rig.mint(agent.rig.alpha)
-            secrets.append(minted["code"])
-            path, reason = arm(short.parent / "codes", minted["code"])
-            frame = await agent.refused("browser_connect", code_file=str(path))
-            assert frame == {
-                "ok": False,
-                "error": "CodeFileRefused",
-                "message": f"code_file {path}: {reason}",
-            }
-            assert (await agent.refused("browser_tabs"))["error"] == "NotConnected"
-            assert broker.grants[minted["grant"]].state == "code"  # Nothing sent.
-
-    assert_code_absent(drive(short, body), secrets)
-
-
-@pytest.mark.parametrize("given", ["both", "neither"])
-def test_connect_takes_exactly_one_of_code_and_code_file(short, clock, given):
-    secrets: list[str] = []
-
-    async def body(agent):
-        async with agent.broker() as broker:
-            minted = await agent.rig.mint(agent.rig.alpha)
-            secrets.append(minted["code"])
-            path = code_file(short.parent / "codes", "c", minted["code"])
-            args = {"code": minted["code"], "code_file": str(path)}
-            frame = await agent.refused(
-                "browser_connect", **(args if given == "both" else {})
-            )
-            assert frame == {
-                "ok": False,
-                "error": "InvalidRequest",
-                "message": "Give exactly one of code or code_file",
-            }
-            assert broker.grants[minted["grant"]].state == "code"
-
-    assert_code_absent(drive(short, body), secrets)
-
-
-def test_code_file_redeems_through_the_same_redeem_as_code(short, clock):
-    secrets: list[str] = []
-
-    async def body(agent):
-        folder = short.parent / "codes"
-        async with agent.broker() as broker:
-            unknown = codes.new_code()
-            secrets.append(unknown)
-            path = code_file(folder, "unknown", unknown + "\n")
-            assert await agent.refused("browser_connect", code_file=str(path)) == {
-                "ok": False,
-                "error": "CodeRefused",
-            }
-            minted = await agent.rig.mint(agent.rig.alpha, "tab", 7)
-            secrets.append(minted["code"])
-            path = code_file(folder, "good", "  " + minted["code"] + " \n", 0o400)
-            reply = await agent.ok("browser_connect", code_file=str(path))
-            assert reply == {
-                "ok": True,
-                "grant": minted["grant"],
-                "scope": "tab",
-                "profile": agent.rig.alpha["profile"],
-                "tab": 7,
-            }
-            assert broker.grants[minted["grant"]].state == "active"
-            assert (await agent.ok("browser_select", tab=7))["lease"]
-            await agent.ok("browser_disconnect")
-            frame = await agent.refused("browser_connect", code_file=str(path))
-            assert frame == {"ok": False, "error": "CodeRefused"}
-
-    assert_code_absent(drive(short, body), secrets)
-
-
 def test_end_to_end_page_session_through_the_mcp_server(short, clock):
     async def body(agent):
         async with agent.broker() as broker:
             rig = agent.rig
-            reply = await agent.ok("browser_connect", code=await agent.mint())
+            await agent.connect()
+            reply = await agent.ok("browser_connect")
             assert reply["scope"] == "profile"
             tabs = (await agent.ok("browser_tabs"))["tabs"]
             assert [t["tab"] for t in tabs] == [7, 8, 9]
@@ -709,6 +539,11 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                     "changed": changed,
                     "value": "ca",
                 }
+            # #11287: hover runs on the lease like a click.
+            hovered = await agent.ok(
+                "page_hover", lease=lease, ref="1.0", request_id="h"
+            )
+            assert hovered == {"ok": True, "tab": 7, "document": "d7-1"}
             landed = await agent.ok(
                 "page_navigate",
                 lease=lease,
@@ -716,6 +551,11 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 request_id="n",
             )
             assert landed["access"] is True and landed["settled"] is True
+            back = await agent.ok("page_back", lease=lease, request_id="b")
+            assert back["ok"] and back["origin"] == landed["origin"]
+            assert (await agent.ok("page_forward", lease=lease, request_id="f"))["ok"]
+            reloaded = await agent.ok("page_reload", lease=lease, request_id="r")
+            assert reloaded["settled"] is True and reloaded["tab"] == 7
             assert rig.a.done == [
                 ("page_type", "1.0", "hello"),
                 ("page_click", "1.0", None),
@@ -724,6 +564,7 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 ("page_press", "1.0", None),
                 ("page_select", "1.0", "ca"),
                 ("page_select", "1.0", "ca"),
+                ("page_hover", "1.0", None),
             ]
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert not broker.claims
@@ -731,8 +572,8 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 "ok": True,
                 "disconnected": True,
             }
-            await agent.settled()
-            assert rig.outcomes("grant_end") == ["closed"]
+            await agent.detached(reply["grant"])
+            assert rig.outcomes("grant_end") == []
 
     drive(short, body)
 
@@ -747,7 +588,8 @@ def test_page_upload_reads_local_files_and_refuses_bad_paths(short, clock):
     async def body(agent):
         async with agent.broker():
             rig = agent.rig
-            await agent.ok("browser_connect", code=await agent.mint())
+            await agent.connect()
+            await agent.ok("browser_connect")
             lease = (await agent.ok("browser_select", tab=7))["lease"]
             for path, reason in [
                 (folder / "missing.txt", "does not exist"),
@@ -809,7 +651,8 @@ def test_page_upload_is_refused_without_an_upload_root(short, clock):
 
     async def body(agent):
         async with agent.broker():
-            await agent.ok("browser_connect", code=await agent.mint())
+            await agent.connect()
+            await agent.ok("browser_connect")
             lease = (await agent.ok("browser_select", tab=7))["lease"]
             frame = await agent.refused(
                 "page_upload",

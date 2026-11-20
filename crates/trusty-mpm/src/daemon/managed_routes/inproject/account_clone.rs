@@ -58,7 +58,7 @@ impl AccountCloneEnv {
 /// <account>`) directly and unconditionally. That selector is documented, in
 /// this same crate, as NOT discriminating between logged-in accounts on a
 /// keyring-backed `gh` install (macOS's default, and the exact `#7166`
-/// scenario) — `-u bobmatnyc` and `-u bob-duetto` can return the identical
+/// scenario) — `-u bobmatnyc` and `-u acme-admin` can return the identical
 /// value, so the clone would silently authenticate as whichever account
 /// happened to be globally active, not the one requested. Two changes close
 /// that:

@@ -187,7 +187,7 @@ Credential priority (highest → lowest, applied per-agent at dispatch time — 
    call through the `claude` CLI subprocess (`ClaudeCodeAgentRunner`). This is
    the default for specialist/task agents (`engineer`, `qa-agent`,
    `ticketing-agent`, etc.). As of #3358, the Assistant + persona agents
-   (`assistant`, `pm`, `cto-assistant`, `izzie`, `personal-assistant`) no
+   (`assistant`, `pm`, `izzie`, `personal-assistant`) no
    longer declare `runner = "claude-code"` — they fall back to `Subprocess`
    and route via `AnthropicDirect`/`OpenRouter` instead (see path 2/3 below).
    `ctrl` never used the claude-code runner — it runs a local Ollama model.

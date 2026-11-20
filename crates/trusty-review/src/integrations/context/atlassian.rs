@@ -6,7 +6,7 @@
 //! code-intelligence already uses so an existing deployment migrates drop-in
 //! (RESOLVED decision on #550: reuse `ATLASSIAN_API_TOKEN` et al.).
 //!
-//! ## Env-var contract (matched to code-intelligence / Duetto cto reference)
+//! ## Env-var contract (matched to the code-intelligence reference)
 //!
 //! Token  (any of, first non-empty wins):
 //!   - `ATLASSIAN_API_TOKEN`   (canonical; what extract_confluence_authors.py reads)

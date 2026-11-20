@@ -54,6 +54,7 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         "content/agents/security.md",
         &["security/claude-session-trailer"],
     ),
+    ("content/agents/BASE-OPS.md", &["base-ops/account-whoami"]),
     (
         "content/agents/local-ops.md",
         &[
@@ -108,6 +109,7 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         &[
             "code-review-standards/github-token-protected-push",
             "code-review-standards/format-interpolated-payload",
+            "code-review-standards/related-path-check",
         ],
     ),
     (
@@ -159,7 +161,16 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
             "tm-delegation-patterns/pm-re-engagement",
             "tm-delegation-patterns/worktree-check-first",
             "tm-delegation-patterns/no-blind-poll",
+            "tm-delegation-patterns/brief-sources-preserve-fields",
         ],
+    ),
+    (
+        "content/skills/tm-delegation-patterns/references/briefs-and-criteria.md",
+        &["tm-delegation-patterns/handback-source-check"],
+    ),
+    (
+        "content/skills/tm-delegation-patterns/references/workflow-chains.md",
+        &["tm-delegation-patterns/bug-fix-related-path-sweep"],
     ),
     (
         "content/skills/tm-init.md",
@@ -197,11 +208,31 @@ pub(super) const PINNED_RULES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "content/skills/tm-owner-scenarios.md",
+        &[
+            "tm-owner-scenarios/four-fields",
+            "tm-owner-scenarios/no-numbered-ui-steps",
+            "tm-owner-scenarios/owner-cost-in-review-minutes",
+        ],
+    ),
+    (
         "content/skills/tm-workflow.md",
         &[
             "tm-workflow/auto-merge-read",
             "tm-workflow/clean-tree-before-gate",
         ],
+    ),
+    (
+        "content/skills/tm-workflow/references/completion-standard.md",
+        &[
+            "tm-workflow/criteria-quote-the-request",
+            "tm-workflow/evidence-map",
+            "tm-workflow/no-proxy-targets",
+        ],
+    ),
+    (
+        "content/skills/tm-workflow/references/phases.md",
+        &["tm-workflow/docs-skip-keeps-evidence"],
     ),
     (
         "content/skills/tm-workflow/references/worktree-discipline.md",

@@ -4,7 +4,7 @@ Production systemd unit for the `trusty-search` HTTP daemon on Linux/EC2 (EBS).
 
 ## Why this unit exists (#694)
 
-On the Duetto EC2/EBS fleet, an abrupt SIGKILL during a shutdown flush
+On the Acme EC2/EBS fleet, an abrupt SIGKILL during a shutdown flush
 corrupted `index.redb` (unrecoverable).  Two mitigations were already shipped:
 
 1. **redb 4.x** (trusty-common 0.12+) defaults to `Durability::Immediate` —

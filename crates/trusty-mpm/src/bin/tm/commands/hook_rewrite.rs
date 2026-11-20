@@ -122,6 +122,8 @@ const ORCHESTRATOR_EXCLUSIONS: &[&str] = &[
 /// guard above runs against `<cmd>` alone, a `<cmd>` that is itself a `cd` is
 /// refused, and the result keeps the prefix verbatim in front:
 /// `cd <dir> && { <cmd>; <exit sentinel>; } | tm compress --tool "…"`.
+/// #10973: a `<cmd>` that chains with `&&`/`;` or ends in `| <reader>` is
+/// judged segment by segment in [`super::hook_rewrite_chain`].
 /// Test: `rewrite_appends_compress_pipe_for_plain_command`,
 /// `rewrite_accepts_one_leading_cd_before_a_covered_command`,
 /// `rewrite_refuses_every_other_cd_chain`,
@@ -155,7 +157,13 @@ pub(crate) fn compression_rewrite_decision(command: &str) -> Result<String, Skip
     if !cd_prefix.is_empty() && first_command_token(inner).as_deref() == Some("cd") {
         return Err(SkipReason::Chained);
     }
-    let tool = compressible_tool_decision(inner)?;
+    let tool = match compressible_tool_decision(inner) {
+        // #10973: a chain is judged segment by segment, never as a raw string.
+        Err(SkipReason::Chained) => {
+            super::hook_rewrite_chain::chain_tool_decision(inner, cd_prefix.is_empty())?
+        }
+        other => other?,
+    };
     // #7384: the brace group carries the wrapped command's exit status into the
     // filter, which a pipeline otherwise discards.
     Ok(format!(
@@ -562,6 +570,7 @@ fn has_unsafe_pipe_composition(command: &str) -> bool {
         || command.contains(';')
         || command.contains('>')
         || command.contains('<')
+        || command.contains('\n') // #10973 critic: a line break is a second command
 }
 
 /// Whether wrapping `command` in a brace group would change what runs.
@@ -898,8 +907,10 @@ mod tests {
 
     #[test]
     fn rewrite_skips_chained_commands() {
+        // #10973: `cargo build && cargo test` is now compressed
+        // (`a_safe_chain_is_compressed`); `||` and a `cd` segment stay refused.
         assert_eq!(
-            rewrite_bash_command_for_compression("cargo build && cargo test"),
+            rewrite_bash_command_for_compression("cargo build || cargo test"),
             None
         );
         assert_eq!(rewrite_bash_command_for_compression("cd /tmp; ls"), None);

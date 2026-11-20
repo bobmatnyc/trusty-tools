@@ -248,6 +248,11 @@ session at a time:
 <supervisor>/scripts/session-relaunch.sh [--stop-tasks] <session> [log]
 ```
 
+Not for the Architect session: relaunch it with `tm architect up` (or
+`tm architect restart` for a live one), which records the launch so the
+pm-guard keeps its anchor exemptions. The poller's watchdog does the same
+(#11367).
+
 - `<session>` is the tmux session name (the `name` column of `tm sessions ls`,
   for example `tm-dogfood`).
 - Precondition: step 3 is verified for this session, and its input box is empty

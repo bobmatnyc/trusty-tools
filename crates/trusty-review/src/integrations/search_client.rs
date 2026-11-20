@@ -147,12 +147,24 @@ pub struct IndexIdentity {
 /// Deserialising directly as `Vec<IndexInfo>` fails with
 /// `invalid type: map, expected a sequence`.  This wrapper absorbs the envelope
 /// so callers receive a plain `Vec<IndexInfo>`.
-/// What: single-field struct; `indexes` maps to the daemon's top-level key.
-/// Test: `list_indexes_parses_daemon_envelope`.
+/// What: `indexes` maps to the daemon's top-level key; `parked` (#11417) holds
+/// the registered-but-not-live rows the daemon lists apart, absent when none.
+/// Test: `list_indexes_parses_daemon_envelope`,
+/// `no_index_names_a_parked_id_and_points_at_ensure_project`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct ListIndexesResponse<T = IndexInfo> {
     /// The list of registered indexes.
     pub(crate) indexes: Vec<T>,
+    /// #11417: cold or map-parked registrations, by id.
+    #[serde(default)]
+    pub(crate) parked: Vec<ParkedRow>,
+}
+
+/// One row of the daemon's `parked` list; only the id is read (#11417).
+#[derive(Debug, Deserialize)]
+pub(crate) struct ParkedRow {
+    /// The parked index id.
+    pub(crate) id: String,
 }
 
 /// A single search result item returned by `POST /indexes/{id}/search`.
@@ -266,6 +278,18 @@ pub trait SearchClient: Send + Sync {
         Err(SearchClientError::Unavailable(
             "repo identities not supported by this search client".to_string(),
         ))
+    }
+
+    /// The ids of registered indexes the daemon lists as parked (#11417).
+    ///
+    /// Why: a parked index is absent from the live list, so a review miss must
+    /// say it is parked and name `ensure_project`, not suggest a reindex.
+    /// What: the `parked` array of the unfiltered index list. The default body
+    /// answers none: it only adds a hint to a miss that is already an error.
+    /// `HttpSearchClient` overrides it.
+    /// Test: `no_index_names_a_parked_id_and_points_at_ensure_project`.
+    async fn list_parked_index_ids(&self) -> Result<Vec<String>, SearchClientError> {
+        Ok(Vec::new())
     }
 
     /// Read the status of ONE index (#6686).
@@ -425,7 +449,7 @@ impl HttpSearchClient {
     async fn get_index_list<T: serde::de::DeserializeOwned>(
         &self,
         repo_identity: Option<&str>,
-    ) -> Result<Vec<T>, SearchClientError> {
+    ) -> Result<ListIndexesResponse<T>, SearchClientError> {
         // #9214: `search.indexes.list` takes the same fields as the query string.
         if let Some(socket) = self.transport.socket_path() {
             let mut params = serde_json::json!({ "details": true });
@@ -433,8 +457,7 @@ impl HttpSearchClient {
                 params["repo_identity"] = identity.into();
             }
             let value = call_socket(socket, METHOD_INDEXES_LIST, params, SEARCH_TIMEOUT).await?;
-            let envelope: ListIndexesResponse<T> = decode(value, "list indexes response")?;
-            return Ok(envelope.indexes);
+            return decode(value, "list indexes response");
         }
         // #9214 phase C: delete — the HTTP leg, from here to the end of the fn.
         let url = format!("{}/indexes", self.base_url);
@@ -463,9 +486,8 @@ impl HttpSearchClient {
             });
         }
 
-        let envelope: ListIndexesResponse<T> = serde_json::from_str(&body)
-            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))?;
-        Ok(envelope.indexes)
+        serde_json::from_str(&body)
+            .map_err(|e| SearchClientError::Parse(format!("list indexes response: {e}")))
     }
 }
 
@@ -507,7 +529,7 @@ impl SearchClient for HttpSearchClient {
     }
 
     async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
-        self.get_index_list(None).await
+        Ok(self.get_index_list(None).await?.indexes)
     }
 
     // #8649: same request, read with each entry's `repo_identity` kept.
@@ -515,7 +537,13 @@ impl SearchClient for HttpSearchClient {
         &self,
         repo_identity: Option<&str>,
     ) -> Result<Vec<IndexIdentity>, SearchClientError> {
-        self.get_index_list(repo_identity).await
+        Ok(self.get_index_list(repo_identity).await?.indexes)
+    }
+
+    // #11417: the unfiltered list's `parked` rows.
+    async fn list_parked_index_ids(&self) -> Result<Vec<String>, SearchClientError> {
+        let envelope = self.get_index_list::<IndexIdentity>(None).await?;
+        Ok(envelope.parked.into_iter().map(|row| row.id).collect())
     }
 
     // #6686: the per-index probe the required-context gate decides on.

@@ -1,7 +1,7 @@
 //! `extends` chain resolution and the merged owner policy (#8988 PR 1a).
 //!
-//! Why: an org can share one owner's policy (`duettoresearch` extends
-//! `bob-duetto`) without copying it, so the child must merge over its parent.
+//! Why: an org can share one owner's policy (`acme` extends
+//! `acme-admin`) without copying it, so the child must merge over its parent.
 //! What: [`resolve_chain`] reads `<repos_root>/<owner>/.trusty-mpm-owner.toml`
 //! and each parent it `extends`, at most [`MAX_CHAIN`] files, and merges them
 //! root-first: `deny` is the union, a child `allow` replaces its parent's, a

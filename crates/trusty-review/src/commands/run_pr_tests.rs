@@ -155,10 +155,7 @@ fn two_repos() -> Registry {
     };
     Registry(Some(vec![
         entry("main", "someone/scratch"),
-        entry(
-            "code-intelligence-9f1c2e3a",
-            "duettoresearch/code-intelligence",
-        ),
+        entry("code-intelligence-9f1c2e3a", "acme-labs/code-intelligence"),
         entry("trusty-tools-4e2cf878", "bobmatnyc/trusty-tools"),
     ]))
 }
@@ -420,7 +417,7 @@ async fn github_run_resolves_its_own_repo_index() {
     let config = unpinned_config();
     for (owner, repo, want) in [
         (
-            "duettoresearch",
+            "acme-labs",
             "code-intelligence",
             "code-intelligence-9f1c2e3a",
         ),

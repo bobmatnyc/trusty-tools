@@ -191,7 +191,8 @@ fn a_bash_opportunity_row_records_why_no_rewrite_applied() {
     for (command, reason) in [
         ("cd /x && grep -n foo big.txt", "compressed"),
         ("cd /x && cd /y && grep -n foo big.txt", "chained"),
-        ("grep -n foo big.txt | head", "chained"),
+        // #10973: a trailing reader now compresses; `||` stays refused.
+        ("grep -n foo big.txt || head", "chained"),
     ] {
         let row = bash_row(command, cwd.path(), &grep_matches());
         assert_eq!(row["skip_reason"], reason, "{command}: {row}");

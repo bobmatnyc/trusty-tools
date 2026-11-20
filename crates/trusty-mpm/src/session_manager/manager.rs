@@ -1057,6 +1057,9 @@ impl SessionManager {
         }
         // #8942: the Architect is relaunched by `tm fleet init`, never here.
         super::architect::refuse_protected(&record, super::architect::ProtectedVerb::Resume)?;
+        // #10101: a stopped record on a dead workspace server is recreated on
+        // the default server unless `TM_WORKSPACE_TMUX=1` (ruling 2026-11-18).
+        super::resume_server::rehome_to_default(self.tmux.as_ref(), &mut record)?;
 
         // #3823: guarantee the tmux SERVER exists before the FIRST tmux call
         // below (`session_exists_checked`'s `list-sessions` probe), so a cold

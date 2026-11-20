@@ -62,7 +62,7 @@ mod wait;
 mod watch;
 
 pub(crate) use agent::AgentAction;
-pub(crate) use architect::ArchitectAction;
+pub(crate) use architect::{ArchitectAction, UpArgs};
 pub(crate) use architect_dashboard::{DashboardArgs, DashboardVerb};
 pub(crate) use auth::AuthAction;
 pub(crate) use catalog::CatalogAction;
@@ -91,7 +91,7 @@ pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
 };
 pub(crate) use repair::RepairAction;
-pub(crate) use secrets::{ArgText, SecretsAction};
+pub(crate) use secrets::{ArgText, ImportFormat, SecretsAction};
 pub(crate) use services::ServicesAction;
 pub(crate) use sessctl::SessctlAction;
 pub(crate) use session::SessionAction;

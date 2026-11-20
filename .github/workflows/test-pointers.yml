@@ -53,6 +53,12 @@ on:
     # No `paths` / `paths-ignore` here — see the header comment above.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # Merge queue (owner ruling Dpu). Every required context must also report,
+  # under the same name, on the queue commit. On this event the diff base is
+  # `github.event.merge_group.base_sha`: steps read it as MERGE_GROUP_BASE_SHA,
+  # or as the `before` SHA where a step already diffs a push range.
+  merge_group:
+    types: [checks_requested]
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -106,21 +112,29 @@ jobs:
 
       # #5311: the `paths:` filter this replaces on the pull_request trigger.
       # Asked here, the job still reports on a PR that changes none of the
-      # lint's inputs — which is what a required context needs. The `else` arm
-      # is the `push` trigger, the only other one this workflow has: it keeps
+      # lint's inputs — which is what a required context needs. A merge_group
+      # run diffs from the queue's base_sha. The `else` arm is the `push`
+      # trigger, the only other one this workflow has: it keeps
       # its `paths:` filter, so a push that reaches this job already changed a
       # lint input and the answer is `true` by construction.
       - name: Classify pointer-lint inputs from the diff
         id: detect
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            POINTER_LINT_BASE="origin/${BASE_REF}" \
-              bash scripts/detect-pointer-lint-inputs.sh > /dev/null
-          else
-            echo "pointer_inputs_changed=true" >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ github.event_name }}" in
+            pull_request) base="origin/${BASE_REF}" ;;
+            # Queue commit: no `paths:` filter applies, so classify the
+            # combined diff against the queue's base.
+            merge_group) base="${MERGE_GROUP_BASE_SHA:?merge_group carries no base_sha}" ;;
+            *)
+              echo "pointer_inputs_changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          POINTER_LINT_BASE="${base}" \
+            bash scripts/detect-pointer-lint-inputs.sh > /dev/null
 
       # Scan-floor mutation self-test (issue #4618): re-proves in CI that this
       # gate REFUSES a vacuous scan. Without it the floor is untested code and a

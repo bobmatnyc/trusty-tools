@@ -30,7 +30,7 @@ const SOURCE_NAME: &str = "jira";
 
 /// JIRA ticket-key pattern: an uppercase project key, a hyphen, and a number.
 ///
-/// Why: Duetto PR titles/descriptions conventionally carry the ticket key
+/// Why: PR titles/descriptions conventionally carry the ticket key
 /// (e.g. `PROJ-123`); matching the incumbent's `_JIRA_TICKET_RE`
 /// (`pr_review_service.py:342`) lets us fetch those EXACT tickets instead of
 /// keyword-guessing.  Compiled once (a `LazyLock`, the one allowed global-state

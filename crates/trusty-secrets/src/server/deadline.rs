@@ -28,6 +28,10 @@ pub(crate) const WRITE_DEADLINE: Duration = Duration::from_secs(120);
 /// The deadline for every other method; none of them runs a vendor CLI.
 pub(crate) const READ_DEADLINE: Duration = Duration::from_secs(15);
 
+/// The deadline for `secrets.gate` (#11464): the router answers by this
+/// plus [`BODY_GRACE`], inside the gate's 10 s.
+pub(crate) const REMOTE_DEADLINE: Duration = Duration::from_secs(7);
+
 /// How much longer a client waits than the server's deadline.
 pub(crate) const CLIENT_MARGIN: Duration = Duration::from_secs(15);
 
@@ -56,6 +60,8 @@ pub(crate) fn request_deadline(name: &str) -> Duration {
         | method::GRANT
         | method::RESOLVE
         | method::SET_AGENTS_MAY_USE => WRITE_DEADLINE,
+        // #11464: inside the gate's 10 s, plus `BODY_GRACE`.
+        method::GATE => REMOTE_DEADLINE,
         _ => READ_DEADLINE,
     }
 }

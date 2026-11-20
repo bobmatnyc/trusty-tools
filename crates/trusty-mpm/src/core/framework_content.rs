@@ -74,6 +74,7 @@ pub const REQUIRED_INSTRUCTIONS: &[&str] = &[
     "output-styles/trusty-mpm.md",
     "output-styles/trusty-mpm-teacher.md",
     "output-styles/trusty-mpm-research.md",
+    "output-styles/owner-plain.md",
     "output-styles/trusty-mpm-architect.md",
     "sm_instructions/SM_INSTRUCTIONS.md",
     "sm_instructions/SM_WORKFLOW.md",

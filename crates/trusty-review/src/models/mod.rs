@@ -30,7 +30,7 @@ use crate::config::constants::REVIEW_VERSION;
 
 // ─── Verdict ──────────────────────────────────────────────────────────────────
 
-/// Review verdict tier aligned to the duetto-code-intelligence board grades.
+/// Review verdict tier aligned to the code-review board grades.
 ///
 /// Why: the pipeline maps LLM output to one of these tiers to drive the
 /// GitHub review action (approve vs request-changes vs block) and the

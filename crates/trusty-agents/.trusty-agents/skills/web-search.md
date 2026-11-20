@@ -61,8 +61,6 @@ Tavily quota is exhausted.
 
 - Personal data (calendar, email, notes) — use the gworkspace / granola /
   trusty-search tools instead
-- Internal Duetto info — that lives in cto-* skills and the org database, not
-  on the public web
 - Anything Masa just told you in this conversation
 
 ## Response style

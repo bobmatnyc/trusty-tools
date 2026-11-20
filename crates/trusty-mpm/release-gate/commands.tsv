@@ -1,0 +1,248 @@
+# tm release gate command table (#11470). trusty-mpm owns it.
+# Columns: path, class, cwd, invocation, stdin, expected exit, expected output,
+# reason. Expected output is a substring the row's stdout+stderr must carry, `-`
+# for none; a row whose expected exit is not 0 must name one.
+# Classes: SAFE and SANDBOX run in their lanes; CONTENT runs first in every lane;
+# NETWORK and SKIP never run. `drift_test` fails on a clap command with no row.
+content update	CONTENT	$H	content update	-	0	-	the one NETWORK row the gate runs: it fetches the published content
+fleet init	CONTENT	$H	fleet init --no-launch	-	0	-	--no-launch: no tmux session, no claude, no poller, nothing registered
+content install	SAFE	$H	content install --from $PUB	-	0	-	no network; the "published content" fixture of the gate
+install	SAFE	$H	install	-	0	-	writes $H/.trusty-mpm/framework and $H/.claude; the fixture for later steps
+content status	SAFE	$H	content status	-	0	-	after content install
+services init	SAFE	$H	services init	-	0	-	writes $H/.claude-mpm/services.yaml
+mcp add	SAFE	$H	mcp add gate-m /bin/echo	-	0	-	writes tm-owned CLAUDE_CONFIG_DIR in temp HOME
+dbatg init	SAFE	$H/proj	DBATG_SESSION=s1 dbatg init --code gate --project $H/proj --session s1	-	0	-	store file under the project
+dbatg add	SAFE	$H/proj	DBATG_SESSION=s1 dbatg add --title t --project $H/proj --session s1 G	-	0	-	
+register	SAFE	$H	register https://github.com/o/r gate-a	-	0	-	persists alias to URL, no clone (standalone.rs:37)
+architect dashboard set	SAFE	$H	architect dashboard set --root $H/dash --json {} gate d1	-	0	-	writes only $H/dash
+architect dashboard update	SAFE	$H	architect dashboard update --root $H/dash --json {} gate d1	-	0	-	after set
+projects register	SANDBOX	$H	projects register --repo-url https://example.invalid/o/r.git gate-p	-	0	-	D: registry write in the sandbox daemon; a clone is NOT triggered by register (unverified)
+project init	SANDBOX	$H/proj	project init	-	0	-	D: registers with daemon; deprecated alias of projects register
+status	SANDBOX	$H	status	-	0	-	D: probes the daemon socket
+start	SKIP	-	-	-	-	-	spawns a daemon; under TRUSTY_SANDBOX it refuses (#9556); sandbox_daemon.sh is the only sanctioned launcher
+serve	SKIP	-	-	-	-	-	alias of start; `serve --stdio` MCP bridge also autostarts a daemon
+stop	SKIP	-	-	-	-	-	sysinfo walk of the HOST process table, SIGTERM/SIGKILL on every `tm daemon` (commands/daemon.rs:377), not scoped by HOME
+restart	SKIP	-	-	-	-	-	stop (host-wide kill) then start
+project list	SANDBOX	$H	project list	-	0	-	D: deprecated alias of projects list
+project info	SANDBOX	$H/proj	project info	-	0	-	D: after project init
+project trust	SAFE	$H	project trust --dir $H/proj	-	0	-	writes consent file under temp HOME; then --revoke
+sessions start	SKIP	-	-	-	-	-	launches a Claude session (claude binary, credentials)
+sessions stop	SANDBOX	$H	sessions stop nosuch	-	1	session 'nosuch' not found	DT: negative case, unknown id
+sessions list	SANDBOX	$H	sessions list	-	0	-	D
+sessions tui	SKIP	-	-	-	-	-	interactive ratatui, needs a TTY
+sessions info	SANDBOX	$H	sessions info nosuch	-	1	session 'nosuch' not found	D: negative case
+sessions instructions	SAFE	$H	sessions instructions --dir $H/proj	-	0	-	composes launch text locally (daemon use unverified)
+sessions events	SANDBOX	$H	sessions events nosuch	-	1	session 'nosuch' not found	D: negative case
+sessions breakers	SANDBOX	$H	sessions breakers	-	0	-	D
+sessions pause	SANDBOX	$H	sessions pause nosuch	-	1	session 'nosuch' not found	DT: negative case
+sessions resume	SANDBOX	$H	sessions resume nosuch	-	1	session 'nosuch' not found	DT: negative case
+sessions run	SANDBOX	$H	sessions run nosuch true	-	1	session 'nosuch' not found	DT: negative case; a positive case would type into a pane
+sessions output	SANDBOX	$H	sessions output nosuch	-	1	session 'nosuch' not found	DT: negative case
+sessions new	SKIP	-	-	-	-	-	spawns a managed session: tmux + claude + credentials
+sessions ls	SANDBOX	$H	sessions ls --no-prune	-	0	-	D: --no-prune is the read that changes nothing
+sessions activity	SANDBOX	$H	sessions activity nosuch	-	1	invalid session id: nosuch	D: negative case
+sessions send	SANDBOX	$H	sessions send nosuch hi	-	1	managed session nosuch not found	DT: negative case (injects text into a pane)
+sessions answer	SANDBOX	$H	sessions answer nosuch yes	-	1	managed session nosuch not found	DT: negative case
+sessions attach	SANDBOX	$H	sessions attach nosuch	-	1	managed session nosuch not found	DT: only prints the attach command; negative case
+sessions decommission	SANDBOX	$H	sessions decommission nosuch	-	1	managed session nosuch not found	D: removes a workspace dir; negative case only
+sessions delete	SANDBOX	$H	sessions delete nosuch	-	1	invalid session id: nosuch	D: negative case
+sessions archive	SANDBOX	$H	sessions archive nosuch	-	1	`nosuch` is not a session id	D: moves a project dir to $H/.trusty-tools/archive; negative case
+sessions rename	SANDBOX	$H	sessions rename nosuch new	-	1	managed session 'nosuch' not found	D: negative case
+sessions rebind	SANDBOX	$H	sessions rebind nosuch	-	1	managed session 'nosuch' not found	DT: negative case
+sessions catchup	SAFE	$H	sessions catchup --json	-	0	-	reads git status + fail-open trusty-memory socket (absent in temp HOME)
+sessions sync-assets	SANDBOX	$H	sessions sync-assets nosuch	-	1	managed session 'nosuch' not found	D: negative case
+sessions prune-worktrees	SANDBOX	$H/proj	sessions prune-worktrees	-	0	-	D: deletes worktree dirs; empty registry; check for a dry-run flag
+sessions reconcile-worktrees	SANDBOX	$H	sessions reconcile-worktrees --json	-	0	-	D: read-only report
+sessions adopt-worktree	SANDBOX	$H	sessions adopt-worktree --as nosuch $H/proj	-	1	UUID parsing failed	D: negative case
+sessions disk	SANDBOX	$H	sessions disk --json	-	0	-	D
+projects list	SANDBOX	$H	projects list	-	0	-	D
+projects show	SANDBOX	$H	projects show gate-p	-	0	-	D: after register
+projects status	SANDBOX	$H	projects status gate-p	-	0	-	D
+projects config set	SANDBOX	$H	projects config gate-p set description gate	-	0	-	D: FIELD from --help; NAME precedes the verb
+projects config unset	SANDBOX	$H	projects config gate-p unset description	-	0	-	D
+projects config tags	SANDBOX	$H	projects config gate-p tags --add t	-	0	-	D
+projects deliverables list	SANDBOX	$H	projects deliverables list gate-p	-	0	-	D
+projects deliverables add	SANDBOX	$H	projects deliverables add gate-p --name d --kind chore --estimate S	-	0	-	D: KIND/ESTIMATE per --help; alias `create`
+projects deliverables show	SANDBOX	$H	projects deliverables show gate-p 00000000-0000-0000-0000-000000000000	-	1	deliverable not found	D: ID from add output
+projects deliverables set-status	SANDBOX	$H	projects deliverables set-status gate-p 00000000-0000-0000-0000-000000000000 in-progress	-	1	deliverable not found	D: state machine edge from proposed
+projects milestones list	SANDBOX	$H	projects milestones list gate-p	-	0	-	D
+projects milestones add	SANDBOX	$H	projects milestones add gate-p --name m --target-date 2030-01-01	-	1	premature end of input	pinned 1: OBSERVED DEFECT: 'premature end of input' on a valid add. D: alias `create`
+projects milestones show	SANDBOX	$H	projects milestones show gate-p 00000000-0000-0000-0000-000000000000	-	1	milestone not found	D
+manager status	SANDBOX	$H	manager status	-	0	-	D: deterministic, no LLM
+manager digest	SKIP	-	-	-	-	-	calls an inference provider (needs key, outward); deterministic fallback exists but then the smoke tests the fallback only
+manager chat	SKIP	-	-	-	-	-	LLM turn, needs a provider key
+manager route	SKIP	-	-	-	-	-	advisory route via LLM (needs a provider key); not verified to have a no-LLM path
+events	SANDBOX	$H	events	-	0	-	D
+doctor	SANDBOX	$H	doctor	-	0	-	D: any FAIL row exits non-zero, so a clean HOME with no installed content fails; run after install; runs read-only `launchctl list`; `--network` row spawns gcloud, never use
+validate	SAFE	$H	validate --path $H/ws	-	1	deployment is INCOMPLETE	pinned 1: an empty workspace reports an INCOMPLETE deployment. local diff engine; an empty workspace likely reports drift (pin on calibration run)
+hooks clean	SAFE	$H/proj	hooks clean	-	0	-	edits only project .claude/settings*.json in cwd
+agent list	SAFE	$H	agent list --json	-	0	-	after install
+agent show	SAFE	$H	agent show engineer --json	-	0	-	after install; name from agent list
+generate capabilities	SKIP	-	-	-	-	-	writes content/skills/tm-capabilities* in a source checkout; `--check` needs the source tree; CI already runs scripts/check_capabilities.sh
+health	SANDBOX	$H	health	-	0	-	D
+tui	SKIP	-	-	-	-	-	interactive ratatui, needs a TTY
+telegram pair	SANDBOX	$H	telegram pair	-	0	-	D: POST /pair/request on the sandbox daemon; makes no Telegram call
+telegram status	SANDBOX	$H	telegram status	-	0	-	D
+telegram start	SKIP	-	-	-	-	-	starts the bot: bot token, outward polling
+telegram stop	SKIP	-	-	-	-	-	`pkill -f "telegram start"` kills host processes, not scoped by HOME (telegram.rs:106)
+slack start	SKIP	-	-	-	-	-	starts the Socket Mode bot: Slack tokens, outward
+slack stop	SAFE	$H	slack stop	-	0	-	PID-file under $HOME/.trusty-mpm/slack.pid; none exists in temp HOME
+reinstall	SAFE	$H	reinstall	-	0	-	without --binary; `--binary` runs cargo install (reinstall.rs:280) and is never smoked
+hook	SAFE	$H	hook --pm-guard	$FX/pretooluse.json	0	-	local classify, no daemon; fixture on stdin; deny verdicts may use another exit
+prompt-feedback	SAFE	$H	prompt-feedback --summary	-	0	-	reads empty ledger under temp HOME
+divert bulk-read	SKIP	-	-	-	-	-	calls a cheap worker model (credential, outward)
+memory recall	SKIP	-	-	-	-	-	needs a trusty-memory daemon; no sanctioned memory sandbox script exists
+memory remember	SKIP	-	-	-	-	-	writes a palace; same
+memory note	SKIP	-	-	-	-	-	writes a palace; same
+memory forget	SKIP	-	-	-	-	-	deletes a drawer; same
+memory rename	SKIP	-	-	-	-	-	moves a palace; same
+memory import	SKIP	-	-	-	-	-	bulk write into a palace; same
+memory import-auto-memory	SKIP	-	-	-	-	-	reads Claude's auto-memory store, writes a palace
+compress	SAFE	$H	compress --tool 'cargo test'	$FX/lines.txt	0	-	stdin filter
+wait	SAFE	$H	wait --for file --path $FX/present --timeout 5	-	0	-	`--for check` is NETWORK, see wait --for check
+build-lease	SAFE	$H	build-lease status	-	0	-	flock slots under $H/.trusty-mpm/build-slots; a build after `--` is never smoked
+worktrees	SAFE	$H	worktrees --json --no-size --no-fetch	-	0	-	ledger under temp HOME; --no-fetch avoids git fetch
+daemon	SKIP	-	-	-	-	-	runs only through scripts/sandbox_daemon.sh, which the SANDBOX lane starts; that start covers it
+supervisor	SKIP	-	-	-	-	-	24/7 fleet observer over tmux panes
+launch	SKIP	-	-	-	-	-	deploys and starts claude in tmux; credentials, TTY
+connect	SKIP	-	-	-	-	-	starts or attaches a claude session
+attach	SKIP	-	-	-	-	-	opens the multipane TUI; needs a TTY
+optimizer status	SANDBOX	$H	optimizer status	-	0	-	D: reads the policy through the daemon
+optimizer set	SAFE	$H	optimizer set trim	-	0	-	LEVEL from --help; rewrites the policy file in temp HOME
+fleet status	SAFE	$H	fleet status --json	-	1	the Architect is not fully set up	pinned 1: no Architect is set up in this HOME. read-only; exit when not set up unverified
+fleet relaunch	SKIP	-	-	-	-	-	restarts the Architect claude in tmux
+fleet bind	SKIP	-	-	-	-	-	binds the running Architect claude; needs that session
+fleet project add	SANDBOX	$H	fleet project add gate-p	-	1	no Architect directory at	pinned 1: no Architect directory in this HOME. D: needs registered project
+fleet project remove	SANDBOX	$H	fleet project remove gate-p	-	1	no Architect directory at	pinned 1: no Architect directory in this HOME. D
+fleet project list	SANDBOX	$H	fleet project list	-	1	no Architect directory at	pinned 1: no Architect directory in this HOME. D: lists live sessions
+architect poll	SANDBOX	$H	architect poll --once --dry-run	-	0	-	T: reads tmux via TMUX_SOCKET; unset means the default (live) server
+architect classify	SAFE	$H	architect classify $FX/pane.txt	-	0	-	pure parse
+architect input-state	SANDBOX	$H	architect input-state =gate:	-	0	-	T: needs a tmux server; negative target
+architect quiet	SAFE	$H	architect quiet --file $FX/state.json	-	0	-	reads a state file
+architect self-ctx	SAFE	$H	architect self-ctx $FX/empty	-	1	no interactive transcript with assistant usage	pinned 1: the empty dir holds no transcript. reads transcripts under a dir
+architect dashboard get	SAFE	$H	architect dashboard get --root $H/dash gate d1	-	0	-	in-process store; exit 1/2/3 per #10063
+architect dashboard list	SAFE	$H	architect dashboard list --root $H/dash gate	-	0	-	
+architect dashboard batch	SAFE	$H	architect dashboard batch --root $H/dash $FX/ops.json	-	2	batch needs a non-empty list of ops	pinned 2: an empty ops list is refused. 
+architect dashboard pruned	SAFE	$H	architect dashboard pruned --root $H/dash	-	0	-	
+architect dashboard validate	SAFE	$H	architect dashboard validate --root $H/dash	-	3	No such file or directory	pinned 3: no dashboard schemas under this HOME. exit 1 on a problem
+architect dashboard fsck	SAFE	$H	architect dashboard fsck --root $H/dash	-	0	-	exit 1 on a problem
+architect dashboard tally	SAFE	$H	architect dashboard tally --root $H/dash	-	0	-	
+architect dashboard footer	SAFE	$H	architect dashboard footer --root $H/dash	-	2	footer needs --tailnet or DASHBOARD_TAILNET_URL	pinned 2: no --tailnet URL is given. 
+architect dashboard ids	SAFE	$H	architect dashboard ids --root $H/dash P	-	0	-	
+architect up	SKIP	-	-	-	-	-	brings up the Architect session: tmux + claude, then attaches
+architect attach	SKIP	-	-	-	-	-	attaches to the Architect tmux session; TTY
+architect restart	SKIP	-	-	-	-	-	restarts the Architect behind a checkpoint gate
+presence local	SKIP	-	-	-	-	-	Touch ID / login password prompt, owner present
+presence request	SKIP	-	-	-	-	-	asks an enrolled device to approve; outward, owner present
+presence wait	SKIP	-	-	-	-	-	waits for a human grant
+presence devices add	SKIP	-	-	-	-	-	passkey enrolment, incomplete (#8878), owner present
+presence devices list	SKIP	-	-	-	-	-	loads or creates the presence grant key, a login-Keychain item (presence.rs:45)
+presence devices revoke	SKIP	-	-	-	-	-	needs Touch ID or login password
+dbatg update	SAFE	$H/proj	DBATG_SESSION=s1 dbatg update --title t2 --project $H/proj --session s1 gate-G01	-	0	-	flags per --help
+dbatg close	SAFE	$H/proj	DBATG_SESSION=s1 dbatg close --project $H/proj --session s1 gate-G01	-	2	Usage: tm dbatg close --outcome <OUTCOME>	pinned 2: OBSERVED: clap requires --outcome, and a goal refuses one. 
+dbatg batch	SAFE	$H/proj	DBATG_SESSION=s1 dbatg batch --project $H/proj --session s1 --file $FX/dbatg-ops.json	-	0	-	
+dbatg prune	SAFE	$H/proj	DBATG_SESSION=s1 dbatg prune --project $H/proj --session s1	-	0	-	
+dbatg show	SAFE	$H/proj	DBATG_SESSION=s1 dbatg show --brief --project $H/proj --session s1	-	0	-	
+env set	SKIP	-	-	-	-	-	value comes from the login Keychain; needs the Architect binding and a pm-guard grant
+env keys	SKIP	-	-	-	-	-	refused without the Architect binding and a pm-guard grant
+secrets set	SKIP	-	-	-	-	-	value from the clipboard; trusty-secrets backend / Keychain
+secrets list	SKIP	-	-	-	-	-	needs the trusty-secrets socket; sandbox_secrets_console.sh is a different harness (#9793)
+secrets remove	SKIP	-	-	-	-	-	deletes a vault key
+secrets import	SKIP	-	-	-	-	-	loads a dotenv into the vault
+secrets copy	SKIP	-	-	-	-	-	vault to vault copy; Keychain
+secrets assign	SKIP	-	-	-	-	-	vault to vault copy; Keychain
+secrets doctor	SKIP	-	-	-	-	-	probes the secrets socket and Keychain backend
+secrets resolve	SKIP	-	-	-	-	-	prints a value, only inside a `secrets exec` grant
+secrets unlock	SKIP	-	-	-	-	-	raises the Touch ID presence prompt and opens the trusty-secrets unlock grant (#10524)
+secrets lock	SKIP	-	-	-	-	-	ends the live trusty-secrets unlock grant (#10524)
+secrets migrate	SKIP	-	-	-	-	-	moves the login Keychain's trusty items into one vault blob item; Keychain (#10524)
+secrets exec	SKIP	-	-	-	-	-	resolves vault keys into a child env
+overseer status	SANDBOX	$H	overseer status	-	0	-	D: reads the overseer state through the daemon
+coordinator serve	SANDBOX	$H	coordinator serve --stdio	$FX/initialize.json	0	-	D: JSON-RPC over stdio to the daemon; aliases sm, session-manager, coord
+services list	SKIP	-	-	-	-	-	probes the manifest's service ports on the host, so the result follows the owner's live services; calibration saw a 60 s hang
+services status	SKIP	-	-	-	-	-	probes the manifest's service ports on the host, so the result follows the owner's live services; calibration saw a 60 s hang
+services port	SKIP	-	-	-	-	-	pinned 0: trusty-memory is not running in this HOME. probes the manifest's service ports on the host, so the result follows the owner's live services; calibration saw a 60 s hang
+services url	SKIP	-	-	-	-	-	pinned 0: trusty-memory is not running in this HOME. probes the manifest's service ports on the host, so the result follows the owner's live services; calibration saw a 60 s hang
+services health	SKIP	-	-	-	-	-	HTTP probe of a manifest port on the host; a live service of the owner could answer
+services log	SKIP	-	-	-	-	-	pinned 0?: trusty-memory has no log in this HOME. probes the manifest's service ports on the host, so the result follows the owner's live services; calibration saw a 60 s hang
+services restart	SKIP	-	-	-	-	-	`sh -c <restart_cmd>` from the manifest (services.rs:153)
+repair deploy	SAFE	$H	repair deploy	-	0	-	~/.claude of temp HOME
+repair push-guard	SAFE	$H	repair push-guard --path $H/proj --dry-run	-	0	-	
+repair session-store	SAFE	$H	repair session-store --path $H/s.json --dry-run	-	1	No such file or directory	pinned 1: no session store at the --path's companion file in this HOME. 
+repair savings-ledger	SAFE	$H	repair savings-ledger --root $H --dry-run	-	0	-	
+repair delegation	SANDBOX	$H	repair delegation --list $H	-	0	-	D: lists through the daemon
+auth set-token	SKIP	-	-	-	-	-	stores a token; macOS Keychain, not HOME-scoped
+auth clear-token	SKIP	-	-	-	-	-	Keychain delete
+auth status	SKIP	-	-	-	-	-	reads the Keychain entry
+catalog sync	NETWORK	$H	catalog sync --force	-	0	-	excluded (rule 4: only content update runs). 0 REST calls, 1 git clone over HTTPS of the claude-mpm repo
+catalog ls	SAFE	$H	catalog ls --json	-	0	-	after catalog sync
+catalog status	SAFE	$H	catalog status --json	-	0	-	
+catalog apply	NETWORK	$H	catalog apply	-	0	-	excluded (rule 4: only content update runs). sync (cached TTL after catalog sync: 0 calls) then local redeploy
+ticket	SKIP	-	-	-	-	-	issue to branch to PR to close: writes to GitHub
+issue seed-labels	SKIP	-	-	-	-	-	creates labels in a real repo
+issue transition	SKIP	-	-	-	-	-	edits issue labels
+issue current	NETWORK	$H	issue current N --repo bobmatnyc/trusty-tools	-	0	-	excluded (rule 4: only content update runs). 1 gh call (issue view)
+issue states	SAFE	$H	issue states	-	0	-	YAML only
+issue standard	SAFE	$H	issue standard	-	0	-	config only, no gh
+issue seed-config	SAFE	$H	issue seed-config	-	0	-	writes the user config in temp HOME
+issue audit	NETWORK	$H	issue audit N	-	0	-	excluded (rule 4: only content update runs). 2 to 4 gh calls (issue view x2, plus board GraphQL if configured)
+issue next	NETWORK	$H	issue next --repo bobmatnyc/trusty-tools --limit 5	-	0	-	excluded (rule 4: only content update runs). Batched GraphQL: meta, label pages, one items query per board page, issue pages; 10-minute cache
+issue epic create	SKIP	-	-	-	-	-	files issues
+issue epic sync	SKIP	-	-	-	-	-	edits a tracker issue body
+issue epic defer	SKIP	-	-	-	-	-	edits a tracker issue body
+issue epic close	SKIP	-	-	-	-	-	closes an issue
+issue board init	NETWORK	$H	issue board init --owner O --repo O/R (dry run)	-	0	-	excluded (rule 4: only content update runs). dry run unless --apply; 1 to 3 GraphQL calls
+issue board apply	NETWORK	$H	issue board apply (dry run)	-	0	-	excluded (rule 4: only content update runs). dry run unless --apply; 2 to 4 calls
+issue board check	NETWORK	$H	issue board check	-	0	-	excluded (rule 4: only content update runs). 2 to 4 calls (GraphQL + `api --include`)
+issue board show	SAFE	$H	issue board show	-	0	-	embedded spec
+issue board add	SKIP	-	-	-	-	-	adds an issue to a real board
+issue repair	SKIP	-	-	-	-	-	edits issue labels
+pr open	SKIP	-	-	-	-	-	opens a pull request
+pr merge	SKIP	-	-	-	-	-	squash-merges a PR
+pr queue-check	NETWORK	$H	pr queue-check N --repo O/R	-	0	-	excluded (rule 4: only content update runs). 3 calls with an explicit PR (pr view, branch, required_status_checks); without PR: 1 list + 3 per open PR
+pr cleanup	SKIP	-	-	-	-	-	deletes branches and worktrees
+watch poll	SKIP	-	-	-	-	-	dispatches agents for matched issues
+watch listen	SKIP	-	-	-	-	-	long-running dispatcher
+ls	SANDBOX	$H	ls --plain --no-prune	-	0	-	D: non-interactive flags only; bare `ls` is a picker
+f	SKIP	-	-	-	-	-	interactive filter picker, needs a TTY
+load	NETWORK	$H	load gate-a	-	0	-	excluded (rule 4: only content update runs). git clone, 0 REST calls; needs a clone-able alias URL
+run	SKIP	-	-	-	-	-	starts a claude session for a repo
+path	SAFE	$H	path gate-a	-	1	alias 'gate-a' is registered but not loaded	pinned 1: gate-a is registered, not loaded. negative until load; prints path after
+shell-init	SAFE	$H	shell-init zsh	-	0	-	prints text
+login	SKIP	-	-	-	-	-	Keychain login prompt
+update	NETWORK	$H	update gate-a	-	0	-	excluded (rule 4: only content update runs). git pull, 0 REST calls
+sessctl run	SKIP	-	-	-	-	-	registers and starts a session backend for any project name (calibration made `nosuch-0`)
+sessctl connect	SANDBOX	$H	sessctl connect nosuch	-	1	session nosuch not found	D: negative case; a real connect is interactive
+sessctl stop	SANDBOX	$H	sessctl stop nosuch	-	1	session nosuch not found	D: negative case
+sessctl auth	SANDBOX	$H	sessctl auth nosuch	-	1	session nosuch not found	D: negative case
+sessctl list	SANDBOX	$H	sessctl list	-	0	-	D
+meta run	SKIP	-	-	-	-	-	boots PM plus sub-agents against an LLM; `--demo` canned path not verified
+statusline	SAFE	$H	statusline	$FX/empty.json	0	-	stdin JSON
+commit-trailers	SAFE	$H	commit-trailers	-	0	-	reads local stores
+banner	SAFE	$H	banner	-	0	-	seeds $H/.trusty-mpm/banner.txt
+mcp share	SAFE	$H	mcp share gate-m	-	0	-	retired (#7892), prints why
+mcp unshare	SAFE	$H	mcp unshare gate-m	-	0	-	retired
+mcp list	SAFE	$H	mcp list --json	-	0	-	
+mcp get	SAFE	$H	mcp get gate-m	-	0	-	
+mcp test	SAFE	$H	mcp test gate-m	-	1	server closed stdout before responding	pinned 1: /bin/echo is not an MCP server. real handshake against /bin/echo (not an MCP server) may fail; use a fixture MCP server
+config keys set	SKIP	-	-	-	-	-	stores an API key; File-0600 or OS keyring tier
+config keys list	SKIP	-	-	-	-	-	may read the OS keyring tier; the gate never touches the Keychain
+config keys test	SKIP	-	-	-	-	-	live provider auth probe, needs a key
+config keys unset	SKIP	-	-	-	-	-	may touch the OS keyring
+wait --for check	NETWORK	$H	wait --for check --pr N --repo O/R --timeout 20	-	0	-	excluded (rule 4: only content update runs). gh pr checks per poll; 1 to 3 calls; exit 75 means pending
+session <verb>	SANDBOX	$H	session list	-	0	-	HIDDEN top-level alias of `sessions`, prints a deprecation notice once; one parity smoke
+internal-spawn-disclaimed	SKIP	-	-	-	-	-	HIDDEN: posix_spawn of argv[0] with TCC disclaimed, runs any program
+sessions managed-stop	SANDBOX	$H	sessions managed-stop nosuch	-	1	managed session nosuch not found	HIDDEN deprecated alias of stop; negative case
+sessions runtime-stop	SANDBOX	$H	sessions runtime-stop nosuch	-	1	managed session nosuch not found	HIDDEN deprecated alias of stop
+sessions managed-resume	SANDBOX	$H	sessions managed-resume nosuch	-	1	managed session nosuch not found	HIDDEN deprecated alias of resume
+secrets __exec-stub	SKIP	-	-	-	-	-	HIDDEN internal helper of `secrets exec`; never run by hand
+<url> (external subcommand)	SKIP	-	-	-	-	-	`tm <url>` or `tm <owner/repo>` clones and runs a session (Command::External)
+mcp remove	SAFE	$H	mcp remove gate-m	-	0	-	last of the add chain
+rm	SAFE	$H	rm gate-a	-	0	-	deletes only the alias project dir under temp HOME
+architect dashboard delete	SAFE	$H	architect dashboard delete --root $H/dash gate d1	-	0	-	
+projects decommission	SANDBOX	$H	projects decommission gate-p	-	0	-	D: last in the chain
+sessions clean	SANDBOX	$H	sessions clean	-	0	-	D: reaps dead sessions of the sandbox registry
+sessions prune-idle	SANDBOX	$H	sessions prune-idle	-	0	-	D: empty registry, no-op
+sessions prune	SANDBOX	$H	sessions prune --state ephemeral	-	0	-	D: state values per --help; empty registry
+sessions decommission-ephemeral	SANDBOX	$H	sessions decommission-ephemeral	-	0	-	D: tears down EVERY ephemeral session; safe only on the pinned sandbox socket
+serve --stdio	SANDBOX	$H	serve --stdio	$FX/initialize.json	0	-	stdin MCP initialize smoke against the sandbox daemon (rule 7)

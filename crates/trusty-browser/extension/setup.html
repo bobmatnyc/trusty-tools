@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trusty Browser</title>
+  <link rel="stylesheet" href="setup.css">
+</head>
+<body>
+  <main>
+    <h1>Trusty Browser</h1>
+    <div id="stage" aria-hidden="true">
+      <div id="robot">
+        <img src="icons/trusty-browser.webp" width="424" height="388" alt="">
+        <span class="eye left"><span class="iris"></span></span>
+        <span class="eye right"><span class="iris"></span></span>
+      </div>
+    </div>
+    <section id="offline" hidden aria-label="Not connected">
+      <p id="connect-help">Let local agents use this Chrome profile</p>
+      <button id="connect" aria-describedby="connect-help" disabled>Connect</button>
+    </section>
+    <section id="online" hidden aria-label="Connected">
+      <p><span id="badge" class="badge">Connected</span> <span id="connected-email"></span></p>
+      <p>Local agents can use every tab in this profile.</p>
+      <button class="secondary" id="disconnect">Disconnect</button>
+      <p class="forget"><a href="#" id="forget">Forget this profile</a></p>
+    </section>
+    <output id="status" aria-live="polite"></output>
+    <button class="secondary" id="retry" hidden>Retry</button>
+  </main>
+  <script src="setup.js"></script>
+</body>
+</html>

@@ -5,14 +5,14 @@
 **Accepted:** 2026-06-15 (owner sign-off)
 **Issues:** [#1246] (this RFC)
 **Related:** [#1237] (`TicketSystem` trait), [#1244] (`tm ticket` `TicketSystem`/`CommandRunner` seam), [#1220] (`~/.trusty-tools/<crate>/config.yaml` convention)
-**Cross-repo:** bob-duetto/unicorn-factory ADR-0004 (harness → trusty-mpm migration), bob-duetto/unicorn-factory#100 (first consumer — adopt the YAML model), bob-duetto/unicorn-factory#103 (migration PR), bob-duetto/unicorn-factory#97 (epic)
+**Cross-repo:** acme-admin/unicorn-factory ADR-0004 (harness → trusty-mpm migration), acme-admin/unicorn-factory#100 (first consumer — adopt the YAML model), acme-admin/unicorn-factory#103 (migration PR), acme-admin/unicorn-factory#97 (epic)
 **Author:** Bob Matsuoka
 
 ---
 
 ## 1. Problem Statement
 
-The **Unicorn Factory** (bob-duetto/unicorn-factory) drives autonomous coding
+The **Unicorn Factory** (acme-admin/unicorn-factory) drives autonomous coding
 agents ("unicorns") whose *entire visible state* lives in GitHub artifacts —
 issues, labels, assignees, comments, milestones, PRs. The product north star is
 unambiguous:
@@ -41,7 +41,7 @@ This hardcoding has three problems:
    **trusty-mpm**. The ADR explicitly names this RFC's subsystem as a dependency:
    issue state management must move **out of the harness** into a YAML-configurable
    subsystem **owned by trusty-tools**, with the Unicorn Factory as its first
-   consumer (bob-duetto/unicorn-factory#100 is blocked on it).
+   consumer (acme-admin/unicorn-factory#100 is blocked on it).
 
 ### 1.1 Goals
 
@@ -918,7 +918,7 @@ recorded calls, assertions on `(program, args)`.
 ## 8. Backward-Compat / Migration (unicorn-factory #100)
 
 The default YAML **must reproduce the current `github_client.py` behavior
-end-to-end** (behavior-preserving). Migration path for bob-duetto/unicorn-factory
+end-to-end** (behavior-preserving). Migration path for acme-admin/unicorn-factory
 (ADR-0004 / #103 / child #100):
 
 1. **Freeze the default YAML.** The committed
@@ -1073,6 +1073,6 @@ default noted.
 | `crates/trusty-mpm/src/core/error.rs` | Existing `#[from] serde_yaml::Error` thiserror variant |
 | `crates/trusty-mpm/Cargo.toml` | `serde_yaml.workspace = true` (already present) |
 | `docs/trusty-mpm/design/RFC-session-manager-mcp-console.md` | Sibling RFC; format/convention this doc mirrors |
-| (cross-repo) `bob-duetto/unicorn-factory` `src/unicorn/{github_client,executor,ticket_builder,manifest}.py` | The hardcoded model the default YAML reproduces; the exact source-extracted schema (with line references) is in #1246 / §2.5 / §4.3 |
+| (cross-repo) `acme-admin/unicorn-factory` `src/unicorn/{github_client,executor,ticket_builder,manifest}.py` | The hardcoded model the default YAML reproduces; the exact source-extracted schema (with line references) is in #1246 / §2.5 / §4.3 |
 | #1246 appended schema ("Concrete schema — current Unicorn Factory model") | The authoritative, source-confirmed model transcribed into §4.2/§4.3 |
 | (cross-repo) unicorn-factory ADR-0004 / #100 / #103 | Migration driver; #100 is the first consumer unblocked by this RFC |

@@ -184,6 +184,7 @@ scripts/test_dashboard_wontdo.py	tests/test_dashboard_wontdo.py
 # profile and Notion modules, which dashboard-serve.py imports optionally.
 scripts/dashboard_attach.py
 scripts/dashboard_projects.py
+scripts/dashboard_toml.py
 scripts/dashboard_archctx.py
 scripts/brief_ids.py
 scripts/brief-id.py

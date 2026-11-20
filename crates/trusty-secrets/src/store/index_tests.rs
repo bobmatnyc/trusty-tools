@@ -297,3 +297,19 @@ fn index_lock_timeout_fails_closed() {
     assert!(matches!(err, SecretsError::LockTimeout { .. }), "{err:?}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
+
+/// Why: #10524 — the blob migration enumerates every indexed vault; a
+/// missing root is no vaults, and a stray file is skipped, never an error.
+/// Test: itself.
+#[test]
+fn index_vaults_lists_each_indexed_vault() {
+    let (dir, index) = fixture();
+    let missing = NamesIndex::at(dir.path().join("absent"));
+    assert!(missing.vaults().unwrap().is_empty());
+    let owner = VaultName::new("trusty/acme").unwrap();
+    index.upsert(&vault(), &key("A"), 1, 1).unwrap();
+    index.upsert(&owner, &key("B"), 1, 1).unwrap();
+    std::fs::write(index.root().join("notes.txt"), "x").unwrap();
+    std::fs::write(index.root().join("bad%2Fname.json"), "{}").unwrap();
+    assert_eq!(index.vaults().unwrap(), vec![owner, vault()]);
+}

@@ -1,0 +1,18 @@
+{
+  "note": "throwaway key generated for these fixtures; deleted from the Keychain after capture",
+  "keychain_service": "com.trusty.browser.fixture-capture",
+  "key_b64": "OI4PIInZ32DveenelmHixDt3OJHCY05CfXG6+UI+rTY=",
+  "aad_prefix": "browser:",
+  "pairings": [
+    {
+      "profile": "73670307-8744-4354-b70b-4ec41884ea1f",
+      "email": "alpha@example.test",
+      "key": "87a137e06357287677f2dddd91cde649500669a35f2e6f044617ff8b42f31de0"
+    },
+    {
+      "profile": "1fbb8745-fca2-434e-8092-2940b0116d3d",
+      "email": "bêta.ünï@exämple.test",
+      "key": "95e53cc1252baad4e88c5a17f7ae99eda18f5562a3a30578831d3c511afde561"
+    }
+  ]
+}

@@ -14,9 +14,9 @@ fn map(raw: &str) -> OrgAccounts {
 #[test]
 fn accounts_table_parses() {
     let accounts = map(
-        "[models]\ndefault = \"sonnet\"\n\n[accounts]\nduettoresearch = \"bob-duetto\"\nbobmatnyc = \"bobmatnyc\"\n",
+        "[models]\ndefault = \"sonnet\"\n\n[accounts]\nacme-labs = \"acme-admin\"\nbobmatnyc = \"bobmatnyc\"\n",
     );
-    assert_eq!(accounts.account_for("duettoresearch"), Some("bob-duetto"));
+    assert_eq!(accounts.account_for("acme-labs"), Some("acme-admin"));
     assert_eq!(accounts.account_for("bobmatnyc"), Some("bobmatnyc"));
     assert_eq!(accounts.account_for("acme"), None);
 }
@@ -33,9 +33,9 @@ fn absent_accounts_table_is_empty() {
 /// GitHub org names ignore case, so the lookup does too.
 #[test]
 fn org_lookup_ignores_case() {
-    let accounts = map("[accounts]\nDuettoResearch = \"bob-duetto\"\n");
-    for org in ["duettoresearch", "DUETTORESEARCH", "DuettoResearch"] {
-        assert_eq!(accounts.account_for(org), Some("bob-duetto"), "{org}");
+    let accounts = map("[accounts]\nAcme-Labs = \"acme-admin\"\n");
+    for org in ["acme-labs", "ACME-LABS", "Acme-Labs"] {
+        assert_eq!(accounts.account_for(org), Some("acme-admin"), "{org}");
     }
 }
 
@@ -50,15 +50,15 @@ fn orgs_differing_only_in_case_are_refused() {
 #[test]
 fn a_malformed_accounts_table_is_an_error() {
     for (raw, needle) in [
-        ("accounts = \"bob-duetto\"\n", "must be a table"),
-        ("[accounts]\nduettoresearch = 1\n", "must be a string"),
-        ("[accounts]\nduettoresearch = \"\"\n", "is not a gh login"),
+        ("accounts = \"acme-admin\"\n", "must be a table"),
+        ("[accounts]\nacme-labs = 1\n", "must be a string"),
+        ("[accounts]\nacme-labs = \"\"\n", "is not a gh login"),
         (
-            "[accounts]\nduettoresearch = \"bob duetto\"\n",
+            "[accounts]\nacme-labs = \"bob acme-labs\"\n",
             "is not a gh login",
         ),
         (
-            "[accounts]\n\"duetto research\" = \"bob-duetto\"\n",
+            "[accounts]\n\"acme-labs research\" = \"acme-admin\"\n",
             "not a GitHub org",
         ),
     ] {
@@ -78,13 +78,13 @@ fn a_malformed_accounts_table_is_an_error() {
 #[test]
 fn a_syntax_error_with_an_accounts_header_is_an_error() {
     for raw in [
-        "[accounts]\nduettoresearch = bob-duetto\n",
+        "[accounts]\nacme-labs = acme-admin\n",
         "[models]\ndefault = sonnet\n\n  [ accounts ]  # work orgs\nacme = \"octo\"\n",
-        "[\"accounts\"]\nduettoresearch = bob-duetto\n",
-        "['accounts']\nduettoresearch = bob-duetto\n",
-        "accounts = { duettoresearch = \"bob-duetto\" }\noops = bare\n",
-        "accounts.duettoresearch = \"bob-duetto\"\noops = bare\n",
-        "\"accounts\".duettoresearch = \"bob-duetto\"\noops = bare\n",
+        "[\"accounts\"]\nacme-labs = acme-admin\n",
+        "['accounts']\nacme-labs = acme-admin\n",
+        "accounts = { acme_labs = \"acme-admin\" }\noops = bare\n",
+        "accounts.acme-labs = \"acme-admin\"\noops = bare\n",
+        "\"accounts\".acme-labs = \"acme-admin\"\noops = bare\n",
         "[accounts.sub]\nx = bare\n",
         "[[accounts]]\nx = bare\n",
     ] {
@@ -117,11 +117,11 @@ fn load_reads_the_table_from_the_root() {
     let dir = tempfile::tempdir().expect("tempdir");
     std::fs::write(
         dir.path().join("config.toml"),
-        "[accounts]\nduettoresearch = \"bob-duetto\"\n",
+        "[accounts]\nacme-labs = \"acme-admin\"\n",
     )
     .expect("write");
     let accounts = OrgAccounts::load(dir.path()).expect("loads");
-    assert_eq!(accounts.account_for("duettoresearch"), Some("bob-duetto"));
+    assert_eq!(accounts.account_for("acme-labs"), Some("acme-admin"));
 
     std::fs::write(dir.path().join("config.toml"), "[accounts]\nx = 1\n").expect("write");
     assert!(OrgAccounts::load(dir.path()).is_err());
@@ -162,35 +162,35 @@ fn resolve(
 /// 🔴 #9091: flag beats registry pin beats map beats default.
 #[test]
 fn flag_beats_pin_beats_map_beats_default() {
-    let load = || Ok(map("[accounts]\nduettoresearch = \"bob-duetto\"\n"));
-    let duetto = origin("DuettoResearch");
+    let load = || Ok(map("[accounts]\nacme-labs = \"acme-admin\"\n"));
+    let acme_labs = origin("Acme-Labs");
     let got = |r: Result<Option<ResolvedAccount>, String>| {
         r.expect("resolves").map(|r| (r.login, r.source))
     };
     assert_eq!(
         got(resolve(
             Some("bobmatnyc"),
-            &duetto,
+            &acme_labs,
             || Ok(Some(pin("p"))),
             load
         )),
         Some(("bobmatnyc".into(), AccountSource::Explicit))
     );
     assert_eq!(
-        got(resolve(None, &duetto, || Ok(Some(pin("pinned"))), load)),
+        got(resolve(None, &acme_labs, || Ok(Some(pin("pinned"))), load)),
         Some(("pinned".into(), AccountSource::RegistryPin))
     );
     assert_eq!(
-        got(resolve(None, &duetto, || Ok(None), load)),
-        Some(("bob-duetto".into(), AccountSource::OrgMap))
+        got(resolve(None, &acme_labs, || Ok(None), load)),
+        Some(("acme-admin".into(), AccountSource::OrgMap))
     );
     // A pin naming no login still wins: the map is not consulted.
     let no_login = || Ok(Some(RegistryPin::default()));
-    assert_eq!(got(resolve(None, &duetto, no_login, load)), None);
+    assert_eq!(got(resolve(None, &acme_labs, no_login, load)), None);
     assert_eq!(got(resolve(None, &origin("acme"), || Ok(None), load)), None);
     // A blank flag is no flag: the map applies.
     assert_eq!(
-        got(resolve(Some("  "), &duetto, || Ok(None), load)).map(|(_, s)| s),
+        got(resolve(Some("  "), &acme_labs, || Ok(None), load)).map(|(_, s)| s),
         Some(AccountSource::OrgMap)
     );
 }
@@ -201,13 +201,13 @@ fn flag_beats_pin_beats_map_beats_default() {
 #[test]
 fn a_flag_never_reads_the_map() {
     let resolved = resolve(
-        Some("bob-duetto"),
-        &origin("duettoresearch"),
+        Some("acme-admin"),
+        &origin("acme-labs"),
         || panic!("the registry must not be read when a flag is given"),
         || panic!("the map must not be loaded when a flag is given"),
     )
     .expect("ok");
-    assert_eq!(resolved.map(|r| r.login).as_deref(), Some("bob-duetto"));
+    assert_eq!(resolved.map(|r| r.login).as_deref(), Some("acme-admin"));
     let local = resolve(
         None,
         "/tmp/some/local/repo",
@@ -225,7 +225,7 @@ fn a_load_failure_is_returned_not_read_as_unmapped() {
         None,
         &origin("acme"),
         || Ok(None),
-        || parse("[accounts]\nduettoresearch = bob-duetto\n"),
+        || parse("[accounts]\nacme-labs = acme-admin\n"),
     )
     .expect_err("a broken table must refuse");
     assert!(
@@ -247,20 +247,14 @@ fn a_load_failure_is_returned_not_read_as_unmapped() {
 fn owner_of_reads_the_remote_owner() {
     let aliases = SshHostAliases::parse("Host github-bob\n  HostName github.com\n");
     for (url, owner) in [
-        (
-            "https://github.com/DuettoResearch/jev.git",
-            Some("DuettoResearch"),
-        ),
-        (
-            "git@github.com:duettoresearch/jev.git",
-            Some("duettoresearch"),
-        ),
-        ("git@github-bob:duettoresearch/jev", Some("duettoresearch")),
-        ("git@github-unknown:duettoresearch/jev", None),
-        ("https://gitlab.com/duettoresearch/jev.git", None),
-        ("git@gitlab.com:duettoresearch/jev.git", None),
-        ("https://bitbucket.org/duettoresearch/jev.git", None),
-        ("https://ghe.corp/duettoresearch/jev.git", None),
+        ("https://github.com/Acme-Labs/jev.git", Some("Acme-Labs")),
+        ("git@github.com:acme-labs/jev.git", Some("acme-labs")),
+        ("git@github-bob:acme-labs/jev", Some("acme-labs")),
+        ("git@github-unknown:acme-labs/jev", None),
+        ("https://gitlab.com/acme-labs/jev.git", None),
+        ("git@gitlab.com:acme-labs/jev.git", None),
+        ("https://bitbucket.org/acme-labs/jev.git", None),
+        ("https://ghe.corp/acme-labs/jev.git", None),
         ("/tmp/some/local/repo", None),
         ("file:///tmp/some/repo", None),
     ] {
@@ -272,11 +266,11 @@ fn owner_of_reads_the_remote_owner() {
 #[test]
 fn an_unpinned_origin_takes_the_mapped_account() {
     let aliases = SshHostAliases::empty();
-    let load = || Ok(map("[accounts]\nduettoresearch = \"bob-duetto\"\n"));
-    let pinned = org_map_pin("git@github.com:DuettoResearch/jev.git", &aliases, load)
+    let load = || Ok(map("[accounts]\nacme-labs = \"acme-admin\"\n"));
+    let pinned = org_map_pin("git@github.com:Acme-Labs/jev.git", &aliases, load)
         .expect("not refused")
         .expect("mapped");
-    assert_eq!(pinned.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(pinned.account.as_deref(), Some("acme-admin"));
     assert_eq!(pinned.config_dir, None);
     assert_eq!(pinned.source, AccountSource::OrgMap);
     assert_eq!(
@@ -313,11 +307,11 @@ fn a_broken_table_fails_the_spawn_closed() {
 #[test]
 fn an_org_map_refusal_names_the_table_not_the_registry() {
     let mapped = crate::core::gh_account::PinnedGhIdentity {
-        account: Some("bob-duetto".into()),
+        account: Some("acme-admin".into()),
         config_dir: None,
         source: AccountSource::OrgMap,
     };
-    let env = crate::core::gh_account::pinned_spawn_env(&mapped, &origin("duetto"), None, |_| {
+    let env = crate::core::gh_account::pinned_spawn_env(&mapped, &origin("acme-inc"), None, |_| {
         Err("no candidate token".into())
     })
     .expect("a pin")

@@ -1,4 +1,4 @@
-"""Exercise the popup's single activation gesture, motion and recovery in Chromium."""
+"""Exercise the popup's one-click Connect, Disconnect, motion and recovery in Chromium (#11239)."""
 
 from pathlib import Path
 
@@ -6,36 +6,132 @@ from playwright.sync_api import expect, sync_playwright
 
 from trusty_browser import service
 
+POPUP = Path(service.__file__).with_name("extension") / "setup.html"
 
-def test_activation_popup():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
+# A fake worker: `status` reflects whether a grant stands; `connect` makes one unless told to fail.
+FAKE = """
+    window.calls = [];
+    window.held = %(held)s;
+    window.connectFails = %(fails)s;
+    let grant = null;
+    window.chrome = {
+      permissions:{
+        contains:async () => window.held,
+        request:async () => { window.calls.push('permission'); window.held = window.allow !== false; return window.held; },
+      },
+      runtime:{sendMessage:async m => {
+        window.calls.push(m.type);
+        if (m.type === 'status') return {ok:true, email:'qa@example.test', profile:grant ? 'p' : null, connected:grant};
+        if (m.type === 'connect') {
+          if (window.refusal) return window.refusal;
+          if (window.connectFails) return {ok:false, error:'AuditUnavailable'};
+          grant = 'g-0000000000aa'; return {ok:true, grant, profile:'p'};
+        }
+        if (m.type === 'revoke_grants') { grant = null; return {ok:true, revoked:1}; }
+        if (m.type === 'unpair') { grant = null; return {ok:true, profile:'p'}; }
+        throw Error('unexpected request ' + m.type);
+      }}};
+"""
+
+
+def popup(driver, held="false", fails="false", height=420):
+    browser = driver.chromium.launch()
+    page = browser.new_page(viewport={"width": 284, "height": height})
+    page.add_init_script(FAKE % {"held": held, "fails": fails})
+    page.goto(POPUP.as_uri())
+    return browser, page
+
+
+def test_connect_is_one_click_and_disconnect_revokes_at_once():
     with sync_playwright() as driver:
-        browser = driver.chromium.launch()
+        browser, page = popup(driver)
         try:
-            page = browser.new_page(viewport={"width": 284, "height": 300})
-            page.add_init_script("""
-                window.calls = [];
-                let permitted = false;
-                const target = {tab:1,url:'https://test.example/app'};
-                const route = {...target,document:'doc-1',email:'qa@example.test',account:'QA'};
-                window.chrome = {permissions:{request:async () => {
-                    window.calls.push('grant'); return true;
-                }},runtime:{sendMessage:async m => {
-                    window.calls.push(m.type);
-                    if (m.type === 'preview') return permitted ? {ok:true,route} :
-                        {ok:true,...target,permissionPattern:'https://test.example/*'};
-                    if (m.type === 'enable') {permitted = true; return {ok:true};}
-                    if (m.type === 'activate') return {ok:true,workflow:'trusty-managed'};
-                    if (m.type === 'code_preview') return {ok:true,paired:false,email:'qa@example.test',
-                        profile:null,target:null};
-                    throw Error('unexpected request');
-                }}};
-            """)
-            page.goto(popup.as_uri())
-            activate = page.get_by_role("button", name="Enroll this site's workflow")
-            expect(activate).to_be_enabled()
-            expect(page.get_by_text("Connect this site's workflow to Trusty Browser", exact=True)).to_be_visible()
-            assert page.get_by_role("textbox").count() == 0
+            connect = page.get_by_role("button", name="Connect", exact=True)
+            expect(connect).to_be_enabled()
+            assert page.get_by_role("textbox").count() == 0  # no code, nothing to paste
+            connect.click()
+            expect(page.locator("#badge")).to_be_visible()
+            expect(page.locator("#badge")).to_have_text("Connected")
+            expect(page.locator("#connected-email")).to_have_text("qa@example.test")
+            calls = page.evaluate("window.calls")
+            # The permission is asked inside the click, before the worker connects.
+            assert calls == ["status", "permission", "connect", "status"]
+            assert "tb-" not in page.locator("main").inner_text()
+            page.get_by_role("button", name="Disconnect").click()
+            expect(connect).to_be_visible()
+            expect(page.locator("#online")).to_be_hidden()
+            expect(page.get_by_role("status")).to_have_text("Disconnected")
+            assert page.evaluate("window.calls").count("revoke_grants") == 1
+        finally:
+            browser.close()
+
+
+def test_a_connect_whose_grant_creation_fails_does_not_show_connected():
+    with sync_playwright() as driver:
+        browser, page = popup(driver, held="true", fails="true")
+        try:
+            page.get_by_role("button", name="Connect", exact=True).click()
+            expect(page.get_by_role("status")).to_have_text("AuditUnavailable")
+            expect(page.locator("#online")).to_be_hidden()
+            expect(page.get_by_role("button", name="Connect", exact=True)).to_be_enabled()
+            # A held permission is not asked again.
+            assert "permission" not in page.evaluate("window.calls")
+        finally:
+            browser.close()
+
+
+def test_a_refused_connect_shows_the_broker_reason_code():
+    # Owner ruling Dqw 2026-11-16: never a bare "Unauthorized".
+    with sync_playwright() as driver:
+        browser, page = popup(driver, held="true")
+        try:
+            page.evaluate(
+                "window.refusal = {ok:false, error:'Unauthorized', reason:'host_codesign'}"
+            )
+            page.get_by_role("button", name="Connect", exact=True).click()
+            expect(page.get_by_role("status")).to_have_text("Unauthorized (host_codesign)")
+            expect(page.locator("#online")).to_be_hidden()
+        finally:
+            browser.close()
+
+
+def test_forget_unpairs_and_disconnect_does_not():
+    with sync_playwright() as driver:
+        browser, page = popup(driver, held="true")
+        try:
+            connect = page.get_by_role("button", name="Connect", exact=True)
+            connect.click()
+            page.get_by_role("button", name="Disconnect").click()
+            expect(page.get_by_role("status")).to_have_text("Disconnected")
+            assert "unpair" not in page.evaluate("window.calls")
+            connect.click()
+            forget = page.get_by_role("link", name="Forget this profile")
+            expect(forget).to_be_visible()
+            forget.click()
+            expect(page.get_by_role("status")).to_have_text("Forgotten")
+            expect(connect).to_be_visible()
+            assert page.evaluate("window.calls").count("unpair") == 1
+        finally:
+            browser.close()
+
+
+def test_a_declined_permission_does_not_connect():
+    with sync_playwright() as driver:
+        browser, page = popup(driver)
+        try:
+            page.evaluate("window.allow = false")
+            page.get_by_role("button", name="Connect", exact=True).click()
+            expect(page.get_by_role("status")).to_contain_text("needs access to your sites")
+            assert "connect" not in page.evaluate("window.calls")
+            expect(page.locator("#online")).to_be_hidden()
+        finally:
+            browser.close()
+
+
+def test_the_robot_follows_the_pointer_and_holds_still_under_reduced_motion():
+    with sync_playwright() as driver:
+        browser, page = popup(driver, height=300)
+        try:
             head = page.locator("#robot > img")
             bounds = head.bounding_box()
             page.mouse.move(260, 80)
@@ -45,267 +141,24 @@ def test_activation_popup():
             for eye in page.locator(".eye").all():
                 assert float(eye.evaluate('el => el.style.getPropertyValue("--look-x")')[:-1]) < 0
             assert head.bounding_box() == bounds
-            expect(head).to_have_css("transform", "none")
             page.emulate_media(reduced_motion="reduce")
             for iris in page.locator(".iris").all():
                 expect(iris).to_have_css("transform", "none")
-            activate.focus()
-            page.keyboard.press("Enter")
-            expect(page.get_by_role("status")).to_have_text("Extension active")
-            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
-            assert page.evaluate("window.calls") == [
-                "code_preview", "preview", "grant", "enable", "preview", "activate", "code_preview"]
-            expect(page.locator("#access")).to_be_hidden()
-            page.get_by_text("Activation details", exact=True).click()
-            expect(page.locator("#workflow")).to_have_text("trusty-managed")
-            expect(page.locator("#account")).to_have_text("QA")
         finally:
             browser.close()
 
 
-CODE_POPUP = """
-    window.calls = [];
-    window.access = %s;
-    window.grants = [{grant:'g-0000000000aa',scope:'profile',profile:'p',state:'active',idle_s:65}];
-    let active = 42;
-    window.chrome = {
-      tabs:{query:async q => { window.calls.push({query:q}); return [{id:active++}]; }},
-      permissions:{request:async () => { window.calls.push('permission'); return false; }},
-      runtime:{sendMessage:async m => {
-        window.calls.push(m);
-        if (m.type === 'preview') return {ok:true,enrolled:'w',route:{email:'qa@example.test',url:'https://a.test/',account:'QA'}};
-        if (m.type === 'code_preview') return {ok:true,paired:false,email:'qa@example.test',profile:'p',
-          target:{tab:m.tab,access:window.access,origin:window.access ? 'https://a.test' : null,title:window.access ? 'Alpha' : null}};
-        if (m.type === 'grants') return {ok:true,grants:window.grants};
-        if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
-          scope:m.scope,profile:'p',...(m.tab === undefined ? {} : {tab:m.tab}),expires_at:Date.now() / 1000 + 2.5};
-        if (m.type === 'revoke_grant') return {ok:true,revoked:1};
-        throw Error('unexpected request ' + m.type);
-      }}};
-"""
-
-
-def sent(page, kind):
-    return [c for c in page.evaluate("window.calls") if isinstance(c, dict) and c.get("type") == kind]
-
-
-def test_code_popup_offers_tab_first_and_forgets_the_code():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
+def test_an_unreachable_service_offers_retry():
     with sync_playwright() as driver:
         browser = driver.chromium.launch()
         try:
-            page = browser.new_page(viewport={"width": 284, "height": 700})
-            page.add_init_script(CODE_POPUP % "true")
-            page.goto(popup.as_uri())
-            tab_choice = page.get_by_role("button", name="Give access to this tab")
-            profile_choice = page.get_by_role("button", name="Give access to the whole profile (every tab in this profile)")
-            expect(tab_choice).to_be_enabled()
-            assert tab_choice.evaluate(
-                "(a, b) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)",
-                profile_choice.element_handle())
-            expect(page.locator("#target")).to_have_text("https://a.test — Alpha")
-            expect(page.locator("#grants li")).to_contain_text("agent connected, idle 1:05")
-            tab_choice.click()
-            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            expect(page.locator("#countdown")).to_have_text("0:03")
-            calls = page.evaluate("window.calls")
-            # Owner ruling Dki: a tab mint relies on activeTab and requests no host permission.
-            assert "permission" not in calls
-            assert sent(page, "mint") == [{"type": "mint", "scope": "tab", "tab": 42}]
-            assert [c for c in calls if isinstance(c, dict) and "query" in c] == [
-                {"query": {"active": True, "currentWindow": True}}]
-            assert all(c.get("tab") == 42 for c in sent(page, "code_preview"))
-            expect(page.get_by_text("Code expired", exact=True)).to_be_visible(timeout=5000)
-            expect(page.locator("#code")).to_have_value("")
-            assert "tb-" not in page.locator("main").inner_text()
-            page.get_by_role("button", name="Disconnect", exact=True).click()
-            page.wait_for_function("window.calls.some(c => c.type === 'revoke_grant')")
-            assert sent(page, "revoke_grant") == [{"type": "revoke_grant", "grant": "g-0000000000aa"}]
-            page.get_by_role("button", name="New code").click()
-            profile_choice.click()
-            expect(page.locator("#code-scope")).to_have_text("Whole profile (every tab in this profile)")
-            calls = page.evaluate("window.calls")
-            assert calls.index("permission") < calls.index(sent(page, "mint")[1])
-            page.get_by_role("button", name="Cancel code").click()
-            page.wait_for_function("window.calls.filter(c => c.type === 'revoke_grant').length === 2")
-            assert sent(page, "revoke_grant")[-1] == {"type": "revoke_grant", "grant": "g-0000000000bb"}
-            expect(page.locator("#code")).to_have_value("")
-        finally:
-            browser.close()
-
-
-def test_code_popup_disables_the_tab_choice_without_page_access():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
-    with sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 284, "height": 700})
-            page.add_init_script(CODE_POPUP % "false")
-            page.goto(popup.as_uri())
-            expect(page.locator("#target")).to_have_text("Open a web page and click Trusty Browser on it")
-            expect(page.get_by_role("button", name="Give access to this tab")).to_be_disabled()
-            expect(page.get_by_role("button", name="Give access to the whole profile (every tab in this profile)")).to_be_enabled()
-        finally:
-            browser.close()
-
-
-PAIR_POPUP = """
-    window.calls = [];
-    let paired = false, held = false;
-    const removedListeners = [];
-    // Chrome's own sequence: the worker removes https://*/* after the revoke reply, on `grant_end` last.
-    const workerRemoves = () => setTimeout(() => {
-      held = false;
-      window.removed = true;
-      for (const fn of removedListeners) fn({origins:['https://*/*'], permissions:[]});
-    }, 50);
-    window.chrome = {
-      tabs:{query:async () => [{id:42}]},
-      permissions:{request:async p => { window.calls.push({permission:p.origins}); held = true; return true; },
-        contains:async () => held, onRemoved:{addListener:fn => removedListeners.push(fn)}},
-      runtime:{sendMessage:async m => {
-        window.calls.push(m.type);
-        if (m.type === 'code_preview') return {ok:true,paired,email:'qa@example.test',profile:paired ? 'p' : null,
-          target:{tab:m.tab,access:true,origin:'https://a.test',title:'Alpha'}};
-        if (m.type === 'preview') return {ok:false,error:'Open a supported signed-in site in the active tab.'};
-        if (m.type === 'pair') {
-          if (window.pairFails) return {ok:false,error:'No signed-in Chrome account.'};
-          paired = true; return {ok:true,profile:'p'};
-        }
-        if (m.type === 'unpair') { paired = false; held = false; return {ok:true,profile:'p'}; }
-        if (m.type === 'grants') return {ok:true,grants:[]};
-        if (m.type === 'revoke_grant') { if (window.lastCodeEnds) workerRemoves(); return {ok:true,revoked:1}; }
-        if (m.type === 'mint') return {ok:true,code:'tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA',grant:'g-0000000000bb',
-          scope:m.scope,profile:'p',tab:m.tab,expires_at:Date.now() / 1000 + 300};
-        throw Error('unexpected request ' + m.type);
-      }}};
-"""
-
-
-PROFILE_CHOICE = "Give access to the whole profile (every tab in this profile)"
-
-
-def permission_requests(page):
-    return [c["permission"] for c in page.evaluate("window.calls") if isinstance(c, dict) and "permission" in c]
-
-
-def test_a_tab_mint_requests_no_host_permission_and_issues_a_code():
-    """#11239, owner ruling Dki: a tab mint never shows Chrome's all-sites prompt.
-
-    The permission is absent, so the pre-fix popup asked for https://*/* in the
-    tab click; in Chrome that prompt closes the popup and no code is issued.
-    """
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
-    with sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 284, "height": 800})
-            page.add_init_script(PAIR_POPUP)
-            page.goto(popup.as_uri())
-            page.get_by_role("button", name="Pair this profile", exact=True).click()
-            page.get_by_role("button", name="Give access to this tab").click()
-            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            expect(page.locator("#code-scope")).to_have_text("This tab")
-            assert permission_requests(page) == []
-            assert page.evaluate("window.calls").count("mint") == 1
-        finally:
-            browser.close()
-
-
-def test_pairing_popup_activates_mints_and_disconnects_a_profile():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
-    with sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 284, "height": 800})
-            page.add_init_script(PAIR_POPUP)
-            page.goto(popup.as_uri())
-            expect(page.get_by_text("Let an agent use this browser with an activation code", exact=True)).to_be_visible()
-            expect(page.locator("#access")).to_be_hidden()
-            expect(page.get_by_role("button", name="Enroll this site's workflow")).to_be_visible()
-            page.get_by_role("button", name="Pair this profile", exact=True).click()
-            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 2")
-            expect(page.get_by_role("status")).to_have_text("Profile paired: qa@example.test")
-            calls = page.evaluate("window.calls")
-            # Contract "All-https access": the Pair this profile click sends `pair` only and requests nothing.
-            assert calls.index("pair") < calls.index("code_preview", 1)
-            assert permission_requests(page) == []
-            expect(page.get_by_role("button", name="Give access to this tab")).to_be_enabled()
-            expect(page.locator("#unpaired")).to_be_hidden()
-            for workflow_control in ("#activate", "#details", "#transfer"):
-                expect(page.locator(workflow_control)).to_be_hidden()
-            expect(page.locator("#paired-email")).to_have_text("qa@example.test")
-            expect(page.locator("#activate-help")).to_be_hidden()
-            # A tab mint asks for nothing (owner ruling Dki); activeTab covers the clicked tab.
-            page.get_by_role("button", name="Give access to this tab").click()
-            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            assert permission_requests(page) == []
-            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
-            page.get_by_role("button", name="Cancel code").click()
-            # The first profile mint asks for all-https access once, before it sends `mint`.
-            page.get_by_role("button", name=PROFILE_CHOICE).click()
-            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
-            calls = page.evaluate("window.calls")
-            assert permission_requests(page) == [["https://*/*"]]
-            assert calls.index({"permission": ["https://*/*"]}) < len(calls) - 1 - calls[::-1].index("mint")
-            # The permission is held now, so a second profile mint mints without asking again.
-            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 4")
-            page.get_by_role("button", name="Cancel code").click()
-            page.get_by_role("button", name=PROFILE_CHOICE).click()
-            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 3")
-            assert permission_requests(page) == [["https://*/*"]]
-            page.get_by_role("button", name="Disconnect this profile").click()
-            expect(page.get_by_text("Let an agent use this browser with an activation code", exact=True)).to_be_visible()
-            expect(page.locator("#access")).to_be_hidden()
-            expect(page.locator("#paired")).to_be_hidden()
-            expect(page.locator("#code")).to_have_value("")
-            assert "unpair" in page.evaluate("window.calls")
-            assert "tb-" not in page.locator("main").inner_text()
-            expect(page.get_by_role("button", name="Enroll this site's workflow")).to_be_visible()
-        finally:
-            browser.close()
-
-
-def test_a_failed_pair_click_shows_the_error_and_no_success_text():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
-    with sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 284, "height": 800})
-            page.add_init_script("window.pairFails = true;")
-            page.add_init_script(PAIR_POPUP)
-            page.goto(popup.as_uri())
-            page.get_by_role("button", name="Pair this profile", exact=True).click()
-            expect(page.get_by_role("status")).to_have_text("No signed-in Chrome account.")
-            expect(page.get_by_role("status")).not_to_contain_text("Profile paired")
-            expect(page.get_by_role("button", name="Pair this profile", exact=True)).to_be_enabled()
-        finally:
-            browser.close()
-
-
-def test_a_mint_click_asks_again_after_the_worker_removed_the_permission():
-    popup = Path(service.__file__).with_name("extension") / "setup.html"
-    with sync_playwright() as driver:
-        browser = driver.chromium.launch()
-        try:
-            page = browser.new_page(viewport={"width": 284, "height": 800})
-            page.add_init_script("window.lastCodeEnds = true;")
-            page.add_init_script(PAIR_POPUP)
-            page.goto(popup.as_uri())
-            page.get_by_role("button", name="Pair this profile", exact=True).click()
-            page.get_by_role("button", name=PROFILE_CHOICE).click()
-            expect(page.locator("#code")).to_have_value("tb-7K3M9Q-1ZXD4R-H8V2NB-QW6TPA")
-            page.wait_for_function("window.calls.filter(c => c === 'code_preview').length === 3")
-            assert permission_requests(page) == [["https://*/*"]]
-            # Cancel code ends the last code; the worker then removes https://*/* (contract "All-https access").
-            page.get_by_role("button", name="Cancel code").click()
-            page.wait_for_function("window.removed === true")
-            page.get_by_role("button", name=PROFILE_CHOICE).click()
-            page.wait_for_function("window.calls.filter(c => c === 'mint').length === 2")
-            calls = page.evaluate("window.calls")
-            assert permission_requests(page) == [["https://*/*"], ["https://*/*"]]
-            second_ask = len(calls) - 1 - calls[::-1].index({"permission": ["https://*/*"]})
-            second_mint = len(calls) - 1 - calls[::-1].index("mint")
-            assert second_ask < second_mint
+            page = browser.new_page()
+            page.add_init_script("""
+                window.chrome = {permissions:{contains:async () => false},
+                  runtime:{sendMessage:async () => ({ok:false, error:'Specified native messaging host not found.'})}};
+            """)
+            page.goto(POPUP.as_uri())
+            expect(page.get_by_role("button", name="Retry")).to_be_visible()
+            expect(page.get_by_role("status")).to_contain_text("could not reach its local service")
         finally:
             browser.close()

@@ -796,7 +796,7 @@ id = "gmail-personal"
 name = "gmail-personal"
 provider = ""
 event_types = ["message.received"]
-wake_filter = { from = ["*@duetto.com"] }
+wake_filter = { from = ["*@example.org"] }
 "#);
     let ch = cfg(r#"
 [agent]
@@ -1539,33 +1539,4 @@ content = "c"
         Some("openrouter"),
         "a child with no pin inherits the base's"
     );
-}
-
-/// #11043: the bundled `cto-assistant` package keeps its Bedrock pin (#7878)
-/// after it merges over the bundled `assistant` it extends.
-#[test]
-fn bundled_cto_assistant_keeps_its_bedrock_pin_through_extends() {
-    let dir = crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    );
-    // #11043: a directory package keeps its prompt in persona.md, so stand in
-    // a placeholder `system_prompt.content` before the strict parse.
-    let read = |rel: &str| {
-        let raw = std::fs::read_to_string(dir.join(rel)).expect("read a bundled agent template");
-        let mut table: toml::Table = toml::from_str(&raw).expect("bundled agent TOML parses");
-        let prompt = table
-            .entry("system_prompt")
-            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-        if let Some(prompt) = prompt.as_table_mut() {
-            prompt
-                .entry("content")
-                .or_insert_with(|| toml::Value::String("placeholder".to_string()));
-        }
-        toml::to_string(&table).expect("re-serialize bundled agent TOML")
-    };
-    let base = cfg(&read("assistant/agent.toml"));
-    let cto = cfg(&read("cto-assistant/agent.toml"));
-    assert_eq!(cto.agent.extends.as_deref(), Some("assistant"));
-    let merged = merge_extends(base, cto);
-    assert_eq!(merged.agent.provider_id.as_deref(), Some("bedrock"));
 }

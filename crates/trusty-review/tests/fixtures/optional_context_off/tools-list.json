@@ -151,7 +151,7 @@
     "name": "review_diff"
   },
   {
-    "description": "Probe trusty-review service liveness and configuration. Returns the current configuration (dry_run mode, reviewer model) and dependency reachability. Safe to call without any credentials.",
+    "description": "Probe trusty-review service liveness and configuration. Returns the current configuration (dry_run mode, reviewer model), dependency reachability, and finding_yield (posted vs verifier-refuted finding counts per review, aggregated per repo and per PR). Safe to call without any credentials.",
     "inputSchema": {
       "properties": {},
       "type": "object"

@@ -33,7 +33,7 @@ pub(crate) struct LaunchHost {
 impl LaunchHost {
     /// The server a fresh PM at `workspace` launches on: the daemon's rule,
     /// [`trusty_mpm::session_manager::launch_server::cli_launch_server`]
-    /// (`TM_WORKSPACE_TMUX=0` keeps the default server).
+    /// (the default server unless `TM_WORKSPACE_TMUX=1`).
     /// Test: `a_cli_host_is_the_workspace_server`.
     pub(crate) fn for_workspace(workspace: &Path) -> Self {
         match trusty_mpm::session_manager::launch_server::cli_launch_server(workspace) {

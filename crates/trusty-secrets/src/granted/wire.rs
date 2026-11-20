@@ -163,9 +163,13 @@ fn read_frame(stream: &mut UnixStream, deadline: Instant) -> Result<Vec<u8>, Gra
     let mut frame = Vec::new();
     let mut buf = [0u8; 8192];
     loop {
-        stream
-            .set_read_timeout(Some(remaining(deadline)?))
-            .map_err(GrantedError::Transport)?;
+        // #10396: Darwin's setsockopt answers EINVAL once both directions are
+        // shut (our half-close plus the server's close). The data left is
+        // already buffered, so the read below cannot block; keep reading.
+        match stream.set_read_timeout(Some(remaining(deadline)?)) {
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
+            other => other.map_err(GrantedError::Transport)?,
+        }
         let n = match stream.read(&mut buf) {
             Ok(n) => n,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,

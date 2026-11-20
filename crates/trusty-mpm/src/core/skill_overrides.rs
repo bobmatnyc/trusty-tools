@@ -111,7 +111,7 @@ pub const SKILL_FAMILY_TABLE: &[SkillFamily] = &[
     },
     SkillFamily {
         name: "react-design-system",
-        skills: &["duetto-design-system"],
+        skills: &["acme-design-system"],
         relevant_stacks: &["nextjs-engineer", "react-engineer"],
     },
     SkillFamily {
@@ -148,7 +148,7 @@ pub const SKILL_FAMILY_TABLE: &[SkillFamily] = &[
 /// Every other table skill must appear in the bundled roster.
 /// Test: `every_table_skill_is_bundled_or_vouched_for`.
 pub const UNBUNDLED_TABLE_SKILLS: &[&str] =
-    &["breeze-voice", "cto-kb-ingest", "duetto-design-system"];
+    &["breeze-voice", "cto-kb-ingest", "acme-design-system"];
 
 /// The skills [`SKILL_FAMILY_TABLE`] turns off for a project with `stacks`.
 ///

@@ -37,9 +37,9 @@ fn sample_state() -> SearchTuiState {
             ..Default::default()
         },
         IndexRow {
-            id: "duetto".into(),
+            id: "dev-acme".into(),
             chunk_count: 900,
-            root_path: "/tmp/duetto".into(),
+            root_path: "/tmp/dev-acme".into(),
             ..Default::default()
         },
     ];

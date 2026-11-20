@@ -72,7 +72,7 @@ index = "cto-assistant"
 
 [tools]
 allow = ["vector_search"]
-search_indexes = ["cto-duetto"]
+search_indexes = ["cto-acme"]
 enforce_search_indexes = true
 "#;
 
@@ -200,7 +200,7 @@ async fn knowledge_route_surfaces_attached_search_indexes() {
             .expect("search_indexes must be present");
         assert_eq!(
             search_indexes,
-            &[serde_json::Value::String("cto-duetto".to_string())],
+            &[serde_json::Value::String("cto-acme".to_string())],
             "the attached corpus must not be silently omitted: {body:?}"
         );
         assert_eq!(body["enforce_search_indexes"], true);
@@ -311,7 +311,7 @@ scopes = ["memory.read", "memory.write"]
 /// CRITICAL regression (code-critic, PR #4119 / issue #4115): a store whose
 /// corpus failed to open (HTTP 2xx, `status: "ready"`, `chunk_count: 0`, but
 /// every staged-pipeline lane `Failed`) must render `connected: false` — the
-/// exact `cto-duetto` false-green this route inherited from `/stores` before
+/// exact `cto-acme` false-green this route inherited from `/stores` before
 /// `stores::status::resolve_store_statuses` was fixed at the source.
 #[tokio::test]
 async fn knowledge_route_reports_corpus_open_failed_as_not_connected() {
@@ -319,15 +319,15 @@ async fn knowledge_route_reports_corpus_open_failed_as_not_connected() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("cto-assistant.toml"),
-            "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\nmodel = \"claude-sonnet-4-6\"\ndescription = \"test\"\n\n[[stores]]\nname = \"cto-duetto-kb\"\nindex = \"cto-duetto\"\n",
+            "[agent]\nname = \"cto-assistant\"\nrole = \"assistant\"\nmodel = \"claude-sonnet-4-6\"\ndescription = \"test\"\n\n[[stores]]\nname = \"cto-acme-kb\"\nindex = \"cto-acme\"\n",
         )
         .unwrap();
 
         let base = crate::uds_mock::spawn(|_method: &str, params: serde_json::Value| {
             Box::pin(async move {
-                if params["index_id"] == "cto-duetto" {
+                if params["index_id"] == "cto-acme" {
                     Ok(serde_json::json!({
-                        "index_id": "cto-duetto",
+                        "index_id": "cto-acme",
                         "chunk_count": 0,
                         "status": "ready",
                         "stages": {

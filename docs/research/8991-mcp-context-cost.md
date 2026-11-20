@@ -29,7 +29,7 @@ Capture environment:
 
 Installed versions: trusty-memory 0.33.0, trusty-search 0.61.0, trusty-review 0.38.3, trusty-mpm 1.8.2. The source at `main` is newer for trusty-mpm: `crates/trusty-mpm/src/mcp/tools/mod.rs:54` pins 39 tools, the capture returned 36. The three missing (`ask_owner`, `sessions_chat`, `dbatg`) were not measured; `sessions_chat` is hidden by the bridge unless `--allow-chat` (`serve_stdio.rs:339-352`).
 
-Not measured: apex, duetto-code-intelligence, duetto-memory, duetto-product-intelligence (`.mcp.json:3-18`, authenticated HTTP servers), heygen, notion, the claude.ai connectors, trusty-kb (stdio start failed in the capture harness), trusty-analyze (its MCP wrapper needs a daemon). The issue asks for these too; they need an authenticated session and are not shipped by this repo.
+Not measured: apex, acme-code-intelligence, acme-memory, acme-product-intelligence (`.mcp.json:3-18`, authenticated HTTP servers), heygen, notion, the claude.ai connectors, trusty-kb (stdio start failed in the capture harness), trusty-analyze (its MCP wrapper needs a daemon). The issue asks for these too; they need an authenticated session and are not shipped by this repo.
 
 Tool-search state: grep of `crates`, `scripts`, `docs`, project and user settings found no `ENABLE_TOOL_SEARCH`, `alwaysLoad`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` or `CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH`. `.mcp.json` sets no `alwaysLoad` on any server. Claude Code 2.1.310 is installed. Per the Claude Code MCP docs (https://code.claude.com/docs/en/mcp, "Scale with MCP tool search"), tool search is the default and only tool names and server instructions load at session start. I did not run `/context` to confirm the deferred state of a live session.
 

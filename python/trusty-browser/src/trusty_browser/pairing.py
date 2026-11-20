@@ -9,7 +9,9 @@ import uuid
 from pathlib import Path
 
 from trusty_browser import enrollment
+from trusty_browser.audit import Audit, email_domain
 from trusty_browser.enrollment import browser_key
+from trusty_browser.protocol import Refusal
 
 # #11239: per-profile pairing for activation codes; contract in
 # docs/activation-codes.md, "pair". Tests live in tests/test_pairing.py.
@@ -68,41 +70,59 @@ def credential_row(
     return row if secrets.compare_digest(browser_key(state, row), key) else None
 
 
+def conflict(state: Path, reason: str, profile: str, email: str) -> Refusal:
+    Audit(state).refuse("pair", reason, profile=profile, email_domain=email_domain(email))
+    return Refusal("EnrollmentConflict", reason=reason)
+
+
 def pair_profile(
     db: sqlite3.Connection, state: Path, request: dict[str, object]
-) -> dict[str, object]:
-    """Store one sealed browser key for a profile; an identical repeat changes nothing.
+) -> tuple[dict[str, object], str | None]:
+    """Store one sealed browser key for a profile; return the reply and any replaced profile.
 
-    Why: a profile with no workflow enrollment still needs a credential to mint
-    codes and pair its native port (#11239). What: refuses a profile or email that
-    holds an enrollment or another pairing with ``EnrollmentConflict``.
+    Why: a profile with no workflow enrollment still needs a credential to pair its
+    native port (#11239); a profile that lost its extension storage pairs again
+    under a new id and must not be locked out (owner ruling Dqw 2026-11-16).
+    What: an identical repeat changes nothing. With no route and exactly one
+    pairing of the same email under another profile id, that row is replaced in
+    this transaction and its profile id returned, for the caller to detach.
+    A route on the profile or email, or a stored profile with another email or
+    key, refuses ``EnrollmentConflict`` and changes nothing.
     Test: `test_pair_is_idempotent_and_seals_exactly_one_key`,
-    `test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing`.
+    `test_conflicting_pair_answers_enrollment_conflict_and_changes_nothing`,
+    `test_a_same_email_repair_replaces_the_old_pairing_and_ends_its_grants`.
     """
     fields = triple(request) if set(request) == {"op", *CREDENTIAL} else None
     if fields is None:
         raise ValueError("InvalidEnrollment")
     profile, email, key = fields
+    replaced = None
     with db:
         db.execute("BEGIN IMMEDIATE")
         if db.execute(
             "SELECT 1 FROM routes WHERE profile=? OR email=?", (profile, email)
         ).fetchone():
-            raise ValueError("EnrollmentConflict")
-        row = db.execute(
+            raise conflict(state, "enroll_conflict_route", profile, email)
+        rows = db.execute(
             "SELECT * FROM pairings WHERE profile=? OR email=?", (profile, email)
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if len(rows) == 1 and rows[0]["profile"] != profile:
+            # Only an email match reaches here: a new profile id for the same account.
+            replaced = str(rows[0]["profile"])
+            db.execute("DELETE FROM pairings WHERE profile=?", (replaced,))
+            rows = []
+        if not rows:
             db.execute(
                 "INSERT INTO pairings VALUES (?,?,?)",
                 (profile, email, enrollment.seal(state, "browser:" + profile, key)),
             )
         elif not (
-            (row["profile"], row["email"]) == (profile, email)
-            and secrets.compare_digest(browser_key(state, row), key)
+            len(rows) == 1
+            and rows[0]["email"] == email
+            and secrets.compare_digest(browser_key(state, rows[0]), key)
         ):
-            raise ValueError("EnrollmentConflict")
-    return {"ok": True, "profile": profile}
+            raise conflict(state, "enroll_conflict_key", profile, email)
+    return {"ok": True, "profile": profile}, replaced
 
 
 def unpair_profile(

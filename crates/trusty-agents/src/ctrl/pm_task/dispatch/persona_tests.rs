@@ -476,103 +476,6 @@ fn persona_max_turns_with_tools_honors_config_override() {
     assert_eq!(persona_max_turns(true, &llm), 12);
 }
 
-/// #3938 regression pin: the bundled `cto-assistant` DIRECTORY PACKAGE must
-/// carry enough Google scope to survive the dispatch-time scope
-/// intersection for its Gmail/Tasks surface.
-///
-/// Why: the package (`.trusty-agents/agents/cto-assistant/agent.toml`) WINS
-/// over the flat `cto-assistant.toml` in `by_name_unresolved_src_in`, and
-/// when it was converted from the flat form its `scopes = [...]` line was
-/// dropped. With none declared it inherited only the base assistant's
-/// `google.read` by union (`extends::merge_extends`) — a pattern that
-/// matches NO scope any gworkspace tool advertises (every dotted scope is
-/// `google.<family>.<access>`; see `registry::google_scope`), so
-/// `agent_can_use` denied the whole Gmail/Tasks surface even though every
-/// tool was allowlisted by name. Asserting on the checked-in package rather
-/// than a synthetic fixture is the point: this pins the SHIPPED config, so
-/// re-dropping the line (or converting another agent the same way) fails
-/// here instead of at a user's dispatch.
-/// What: resolves the real package through the real loader (`by_name_in`,
-/// including its `extends = "assistant"` union), derives each tool's dotted
-/// scope from the real `trusty-gworkspace` `rpc.discover` document through
-/// the real `parse_manifest` -> `x-google-scopes` mapping, and runs the real
-/// `filter_persona_tool_names` gate. No daemon, no network, no LLM.
-#[test]
-fn cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection() {
-    // The scoped gworkspace tools this persona is built around: Gmail triage
-    // (#473, inherited from the base's Gmail surface) and Google Tasks
-    // (#472/#485, this package's own delta). `create_draft` / `create_task`
-    // are deliberately absent — they are legacy names gworkspace no longer
-    // exposes, so they carry no scope and are filtered by registration, not
-    // by scope (see `skills::manifest::builtin::gworkspace`).
-    const GMAIL_AND_TASKS: &[&str] = &[
-        "search_gmail_messages",
-        "get_gmail_message_content",
-        "modify_gmail_messages",
-        "list_tasks",
-        "complete_task",
-    ];
-
-    let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    );
-    let cfg = AgentConfig::by_name_in(&[agents_dir], "cto-assistant")
-        .expect("bundled cto-assistant directory package resolves");
-
-    let manifest = crate::tools::registry::discovery::parse_manifest(
-        "gworkspace",
-        &trusty_gworkspace::openrpc::discover_response(),
-    )
-    .expect("gworkspace rpc.discover document parses");
-    let tool_scopes: std::collections::HashMap<String, String> = manifest
-        .tools
-        .iter()
-        .map(|t| (t.name.clone(), t.scope.clone()))
-        .collect();
-
-    // Guard against a vacuous pass: every name below must still BE a scoped
-    // gworkspace tool, otherwise the scope gate would wave it through on the
-    // `None` branch and prove nothing.
-    for name in GMAIL_AND_TASKS {
-        assert!(
-            tool_scopes.contains_key(*name),
-            "{name} no longer advertises a gworkspace scope — refresh this list"
-        );
-    }
-
-    let allow = cfg
-        .tools
-        .allow
-        .clone()
-        .expect("cto-assistant declares [tools].allow");
-    let scope_patterns: Vec<ScopePattern> = cfg
-        .tools
-        .scopes
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(ScopePattern::new)
-        .collect();
-
-    let all_names: Vec<String> = GMAIL_AND_TASKS.iter().map(|s| (*s).to_string()).collect();
-    let allowed_by_tier: std::collections::HashSet<String> = all_names.iter().cloned().collect();
-
-    let survivors = filter_persona_tool_names(
-        all_names.clone(),
-        &allow,
-        &allowed_by_tier,
-        &tool_scopes,
-        &scope_patterns,
-    );
-
-    assert_eq!(
-        survivors, all_names,
-        "cto-assistant's Gmail/Tasks tools were scope-denied at dispatch; \
-         resolved [tools].scopes = {:?}",
-        cfg.tools.scopes
-    );
-}
-
 /// #3987 (option B) pinned against the SHIPPED base template: the bundled
 /// `assistant` declares NO dead scope pattern.
 ///
@@ -644,7 +547,7 @@ fn base_assistant_declares_no_dead_scope_patterns() {
 /// tool's dotted scope from the real `trusty-gworkspace` `rpc.discover`
 /// document through the real `parse_manifest`, and runs the real
 /// `filter_persona_tool_names` gate. No daemon, no network, no LLM — same
-/// harness shape as `cto_assistant_package_gmail_and_tasks_tools_survive_scope_intersection`
+/// harness shape as the other shipped-persona scope tests in this module
 /// (#3985).
 #[test]
 fn base_assistant_scope_grants_cover_every_allowlisted_gworkspace_tool() {
@@ -797,8 +700,8 @@ fn base_assistant_scope_grants_cover_every_declared_memory_scope() {
 /// #7992: the sibling half of the test above, for the personas the base fix
 /// could not reach.
 ///
-/// Why: `cto-assistant.toml` and `izzie.toml` are FLAT manifests shadowed by
-/// same-named directory packages, so `AgentConfig::by_name` never loads them
+/// Why: `izzie.toml` is a FLAT manifest shadowed by a
+/// same-named directory package, so `AgentConfig::by_name` never loads them
 /// while the package resolves — but the loader falls back to exactly these
 /// files when a package's `extends` chain fails
 /// (`AgentConfig::extends_shadow_fallback_in`), and the REPL / Telegram
@@ -825,7 +728,8 @@ fn shadowed_flat_persona_scope_grants_cover_every_declared_memory_scope() {
     let agents_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
         crate::agents::bundled::BundledTreeKind::Agents,
     );
-    for name in ["izzie", "cto-assistant"] {
+    let name = "izzie";
+    {
         let path = agents_dir.join(format!("{name}.toml"));
         let cfg = AgentConfig::load(&path)
             .unwrap_or_else(|e| panic!("shadowed flat manifest '{name}.toml' parses: {e}"));
@@ -859,9 +763,8 @@ fn shadowed_flat_persona_scope_grants_cover_every_declared_memory_scope() {
 
 /// #3987 the negative half: a live family/wildcard pattern is never flagged,
 /// and option B introduces no double-grant weirdness in the overlays.
-/// `izzie` ships blanket `google.*`; `cto-assistant` ships the narrow
-/// `google.gmail.*` / `google.tasks.*` pair (#3985), which the base now also
-/// grants — `extends::union_opt_vec` dedups exact string matches, so the
+/// `izzie` ships blanket `google.*` over the base's grants —
+/// `extends::union_opt_vec` dedups exact string matches, so the
 /// duplicates collapse rather than accumulating.
 #[test]
 fn shipped_agents_with_live_google_patterns_are_not_flagged() {
@@ -871,7 +774,8 @@ fn shipped_agents_with_live_google_patterns_are_not_flagged() {
         crate::agents::bundled::BundledTreeKind::Agents,
     );
     let reachable = dead_scope::reachable_scopes(std::iter::empty::<String>());
-    for name in ["izzie", "cto-assistant"] {
+    let name = "izzie";
+    {
         let cfg = AgentConfig::by_name_in(std::slice::from_ref(&agents_dir), name)
             .unwrap_or_else(|e| panic!("bundled {name} resolves: {e}"));
         let scopes = cfg.tools.scopes.clone().unwrap_or_default();

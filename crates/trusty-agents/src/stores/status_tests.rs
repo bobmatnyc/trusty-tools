@@ -50,8 +50,8 @@ async fn mock_daemon() -> MockMemoryDaemon {
                 // Issue #4115's exact real-world shape: reachable,
                 // `status: "ready"`, `chunk_count: 0`, but every
                 // stage failed to open — the false-green case.
-                "cto-duetto" => Ok(json!({
-                    "index_id": "cto-duetto",
+                "cto-acme" => Ok(json!({
+                    "index_id": "cto-acme",
                     "chunk_count": 0,
                     "status": "ready",
                     "stages": {
@@ -148,8 +148,8 @@ async fn reports_corpus_open_failed_as_not_connected() {
     let stores = stores_toml(
         r#"
 [[stores]]
-name = "cto-duetto-kb"
-index = "cto-duetto"
+name = "cto-acme-kb"
+index = "cto-acme"
 "#,
     );
     let out = resolve_store_statuses("cto-assistant", &stores, Some(base.socket()), None).await;

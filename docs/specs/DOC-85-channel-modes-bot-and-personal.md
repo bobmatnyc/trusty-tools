@@ -112,10 +112,10 @@ Notion credential per use (Bob ruling, 12:17Z; De6; PD-5). Refs and scopes only.
 
 | Use | Mode | Ref | Registry key | Store scope |
 |---|---|---|---|---|
-| Trusty brief sharing (a brief synced to Docs or Notion) | personal | `NOTION.NOTION_PAT` | `notion-user` | `trusty/bob-duetto` |
-| APEX Companion | bot | `NOTION.NOTION_CONNECTOR_APEX_COMPANION` | `notion-companion` | `trusty/duettoresearch` |
-| mcp-services and all internal tooling | bot | `NOTION.NOTION_CONNECTOR_ARIA` | `notion-aria` | `trusty/duettoresearch` |
-| CTO bot | bot | `NOTION.NOTION_CONNECTOR_CTO_ASSISTANT` | `notion-cto` | `trusty/duettoresearch` |
+| Trusty brief sharing (a brief synced to Docs or Notion) | personal | `NOTION.NOTION_PAT` | `notion-user` | `trusty/acme-admin` |
+| APEX Companion | bot | `NOTION.NOTION_CONNECTOR_APEX_COMPANION` | `notion-companion` | `trusty/acme` |
+| mcp-services and all internal tooling | bot | `NOTION.NOTION_CONNECTOR_ARIA` | `notion-aria` | `trusty/acme` |
+| CTO bot | bot | `NOTION.NOTION_CONNECTOR_CTO_ASSISTANT` | `notion-cto` | `trusty/acme` |
 
 `NOTION.NOTION_PAT` is never accepted in `bot_ref` (Ddb is resolved by De6).
 

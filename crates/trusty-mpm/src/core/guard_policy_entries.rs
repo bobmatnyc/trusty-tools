@@ -442,6 +442,41 @@ pub static TMUX_KILL_SERVER: GuardPolicy = policy(
     CHECKPOINT_FIRST,
 );
 
+/// #11353 (owner ruling Dq7): the Fable cap, applied where a live subagent's
+/// model is decided — the PM's `Agent`/`Task` dispatch.
+pub static FABLE_CAP: GuardPolicy = policy(
+    "GP-051",
+    "fable-cap",
+    "Only PM, engineer (incl. any *-engineer) and research agents run on a Fable model; any other dispatch that would is refused.",
+    "#11353 (owner ruling Dq7)",
+    PM_ARCHITECT,
+    false,
+    GUARD_STAYS_ON,
+);
+
+/// #10574: a replacing write to a registered artifact (`[stale_copy] paths`)
+/// starts from the version last observed, or is refused (owner ruling Dr8 B).
+pub static STALE_INPUT_HASH: GuardPolicy = policy(
+    "GP-052",
+    "stale-input-hash",
+    "No replacing write to a registered artifact that changed since it was last read, was never read, or whose record store cannot be read.",
+    "#10574 (owner ruling Dr8)",
+    PM_AGENT,
+    false,
+    None,
+);
+
+/// #10574: a `[stale_copy] locked` artifact refuses every write.
+pub static LOCKED_PATH_WRITE: GuardPolicy = policy(
+    "GP-053",
+    "locked-path-write",
+    "No write to a locked artifact, whatever its hash.",
+    "#10574 (owner ruling Dr8)",
+    PM_AGENT,
+    false,
+    None,
+);
+
 /// Every entry once, in id order.
 pub static POLICIES: &[&GuardPolicy] = &[
     &POLICY_LOOKUP_MISS,
@@ -495,4 +530,7 @@ pub static POLICIES: &[&GuardPolicy] = &[
     &EGRESS_GUARD_PANIC,
     &GUARD_TIMEOUT,
     &TMUX_KILL_SERVER,
+    &FABLE_CAP,
+    &STALE_INPUT_HASH,
+    &LOCKED_PATH_WRITE,
 ];

@@ -1403,7 +1403,7 @@ async fn review_handler_resolves_each_repo_to_its_own_index() {
     let state = scoped_state(Some(two_repo_registry()));
     for (owner, repo, want) in [
         (
-            "duettoresearch",
+            "acme-labs",
             "code-intelligence",
             "code-intelligence-9f1c2e3a",
         ),

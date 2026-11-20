@@ -1,0 +1,63 @@
+[package]
+name = "trusty-browser"
+version = "0.8.0"
+description = "Trusty Browser broker and MCP server: lets local AI agents drive your own Chrome profile through paired, per-workflow grants"
+readme = "README.md"
+homepage = "https://trustytools.dev"
+keywords = ["browser", "chrome", "mcp", "automation", "agents"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# The embedded extension (`extension/**`, read by `include_bytes!`) ships;
+# the parity fixtures and capture scripts under `tests/` stay in the repo.
+include = [
+    "/src/**/*",
+    "/extension/**/*",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+]
+
+[features]
+# Exposes the enrollment `HostCheck` seam to integration tests only; never
+# enable it in a release build (see review af942b9e95 #4).
+test-seams = []
+
+[[bin]]
+name = "trusty-browser"
+path = "src/main.rs"
+
+[[bin]]
+name = "trusty-browser-mcp"
+path = "src/bin/trusty-browser-mcp.rs"
+
+[dependencies]
+aes-gcm = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+libc = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+# The launchd label registry (`launchd_labels::BROWSER`, #4919); no features.
+trusty-common = { workspace = true }
+# The shared JSON-RPC envelope types; never rmcp (plan section 2).
+trusty-mcp = { workspace = true }
+unicode-normalization = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true }
+
+[dev-dependencies]
+# Self dev-dependency: turns on `test-seams` for this crate's own test targets only.
+trusty-browser = { path = ".", features = ["test-seams"] }

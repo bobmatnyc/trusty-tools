@@ -397,21 +397,8 @@ pub(crate) fn takeover(dir: &Path, home: &Path, port: u16, host: &dyn Host, l: &
 #[cfg(target_os = "macos")]
 pub(crate) fn render_plist(dir: &Path, port: u16) -> anyhow::Result<String> {
     use trusty_common::launchd::{KeepAlive, LaunchdConfig};
-    // #10606: prefer a python3 >= 3.11 (tomllib); an older one still runs and the dashboard warns.
+    // #10606: prefer a python3 >= 3.11 (tomllib); an older one runs at full function via dashboard_toml.
     let python = python::dashboard_python();
-    if python.below_floor() {
-        eprintln!(
-            "warning: the dashboard will run {} ({}); it needs Python {}.{} or newer, so its \
-             Projects view shows no TOML stack or config",
-            python.path.display(),
-            python.version.map_or_else(
-                || "version unknown".to_owned(),
-                |(a, b)| format!("Python {a}.{b}")
-            ),
-            python::PYTHON_FLOOR.0,
-            python::PYTHON_FLOOR.1
-        );
-    }
     LaunchdConfig {
         label: label(),
         exe_path: python.path,

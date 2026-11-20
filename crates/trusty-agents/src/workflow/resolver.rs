@@ -418,9 +418,11 @@ impl ConflictResolver {
     /// on 4xx/5xx, and OpenRouter's error payload is well-formed JSON, so
     /// without it an expired key or a rate limit parsed cleanly into a
     /// *missing* `choices` key and produced an empty file. See
-    /// `extract_llm_content`.
+    /// `extract_llm_content`. Under a provider lock it is refused before the
+    /// request (#10978); the caller degrades to a non-LLM resolution.
     /// Test: `extract_llm_content_*` (parsing); the HTTP layer is exercised by
-    /// `llm_resolve_rejects_http_error_bodies`.
+    /// `llm_resolve_rejects_http_error_bodies`; the lock by
+    /// `llm_resolve_is_refused_under_the_provider_lock`.
     async fn llm_resolve(
         &self,
         path: &Path,
@@ -428,6 +430,8 @@ impl ConflictResolver {
         b: &[u8],
         conflicted: &[u8],
     ) -> anyhow::Result<String> {
+        // #10978: file contents never leave for OpenRouter under the lock.
+        crate::llm::provider_lock::refuse_off_provider("workflow conflict resolver (OpenRouter)")?;
         let prompt = format!(
             "Two agents produced conflicting versions of `{}`. \
              Produce a single merged version that incorporates the best of both. \

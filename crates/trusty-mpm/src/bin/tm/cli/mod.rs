@@ -103,9 +103,9 @@ pub(crate) struct Cli {
     /// global `!gh auth git-credential` helper, a fixed SSH key) — the
     /// account with visibility into the repo is simply never tried. This flag
     /// names it explicitly. It is a clap `global = true` flag, so it parses
-    /// anywhere in the invocation: `tm --account bob-duetto <url>`, `tm run
-    /// --account bob-duetto <owner>/<repo>`, and `tm register --account
-    /// bob-duetto <owner>/<repo>` all bind the same field. The
+    /// anywhere in the invocation: `tm --account acme-admin <url>`, `tm run
+    /// --account acme-admin <owner>/<repo>`, and `tm register --account
+    /// acme-admin <owner>/<repo>` all bind the same field. The
     /// `<account>@<owner>/<repo>` shorthand
     /// (`commands::register_args::classify`) is the terser
     /// equivalent for the bare/`run` managed-repo forms; passing both is only
@@ -126,7 +126,7 @@ pub(crate) struct Cli {
     /// concurrently-running session under a different account is unaffected.
     /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
     /// second one — the owner reached for that spelling (`tm <url> --user
-    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// acme-admin`) and got a clap parse error. One arg means one field, so
     /// every parse position and the `is_name_segment` validation in
     /// [`crate::commands::register_args::resolve_account`] carry over
     /// unchanged; no validation against `gh auth status` exists for either
@@ -173,7 +173,7 @@ pub(crate) struct Cli {
 /// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
 fn non_blank_login(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
-        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+        return Err("needs a gh login — e.g. `--user acme-admin`.".to_string());
     }
     Ok(value.to_string())
 }
@@ -633,6 +633,22 @@ pub(crate) enum Command {
         /// Always exits 0.
         #[arg(long)]
         standing_rules: bool,
+        /// Run in turn-task mode (#11398): on `UserPromptSubmit`, stamp
+        /// `Task: <id>@<MMDD>` from datg's `current` field. PM sessions only.
+        /// Always exits 0.
+        #[arg(long)]
+        turn_task: bool,
+        /// Run the minimal pm-guard in shadow mode (#11431): judge a
+        /// `PreToolUse` call on parsed facts (rules 1-3, 5) and log each
+        /// would-refuse to `~/.trusty-mpm/guard/shadow.jsonl`. Never blocks;
+        /// always exits 0.
+        #[arg(long)]
+        pm_guard_shadow: bool,
+        /// Run in completion-evidence mode (#10575): on `Stop`, warn when the
+        /// final message claims completion with no evidence map or sets an
+        /// invented size target. Warn-only; always exits 0.
+        #[arg(long)]
+        completion_evidence: bool,
     },
     /// Read back the prompt critiques `tm hook --prompt-feedback` captured
     /// (#7688).
@@ -842,8 +858,8 @@ pub(crate) enum Command {
         dir: Option<String>,
         /// Active output style id for this launch (HR-4). Overrides the
         /// `[style] active` config key. Bundled ids: `trusty-mpm` (default),
-        /// `trusty-mpm-teacher`, `trusty-mpm-research`. An unknown id falls back
-        /// to the default.
+        /// `trusty-mpm-teacher`, `trusty-mpm-research`, `owner-plain`. An
+        /// unknown id falls back to the default.
         #[arg(long)]
         style: Option<String>,
         /// Run this session in its own git worktree instead of the project's
@@ -919,12 +935,13 @@ pub(crate) enum Command {
     /// The Architect's deterministic commands: the poller and its readers.
     ///
     /// `poll`, `classify`, `input-state`, `quiet` and `self-ctx` replace the
-    /// Architect's Python scripts with the same arguments and output.
-    // #9822. Test: `cli_parses_architect_verbs`.
+    /// Architect's Python scripts with the same arguments and output. With
+    /// no verb, `tm architect` is `tm architect up` plus attach.
+    // #9822, #11364. Test: `cli_parses_architect_verbs`.
     Architect {
-        /// Architect action to perform.
+        /// Architect action to perform; none means `up` and attach.
         #[command(subcommand)]
-        action: ArchitectAction,
+        action: Option<ArchitectAction>,
     },
     /// Prove you are at the Studio, so the Architect may write trust anchors.
     ///

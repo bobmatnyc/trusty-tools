@@ -5,7 +5,7 @@
 //! Practices, Bacchelli & Bird ICSE 2013, Sadowski et al. ICSE-SEIP 2018,
 //! SmartBear/Cisco study, Conventional Comments) distilled into a reusable
 //! injectable prompt component.  This layer captures WHAT the field considers
-//! effective code review — distinct from HOW the Duetto team reviews (the voice
+//! effective code review — distinct from HOW a particular team reviews (the voice
 //! layer).  It is composed BETWEEN the stock base prompt and the voice layer:
 //! stock → principles → voice.  It is a product prompt, so a fix to it must not
 //! need a crate release: the text lives in

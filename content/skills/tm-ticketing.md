@@ -3,7 +3,7 @@ name: tm-ticketing
 description: The single authority on issues — whether one should exist, deduplication disposition, title/body style, labels, milestones, lifecycle comments, attribution, and the project-root TICKETING.md that overrides these defaults
 user-invocable: true
 metadata:
-  version: "2.2.0"
+  version: "2.3.0"
 category: pm-workflow
 tags: [tickets, issues, promotion-gate, deduplication, labels, pm-required]
 effort: medium
@@ -121,6 +121,21 @@ markdown link, never a bare number, in every artifact you author.
 - Commits: `[d027ef1](https://github.com/<owner>/<repo>/commit/d027ef1)`. A bare
   short SHA is acceptable only inside a table of many.
 - Tickets in another tracker: link to that tracker's issue URL.
+
+## Every issue: acceptance criteria
+
+**Acceptance criteria.** Every bug, feature, task and epic issue states one to
+four testable acceptance criteria, each a check that can fail for a named
+reason; an epic states them on its phase issues. They set the good-enough bar:
+the issue closes when each criterion has evidence. Anything beyond the bar
+becomes a follow-up issue filed at close, with its own criteria and the
+`stretch` label; it never widens this issue's scope. The closing note lists
+every criterion with its evidence, plus the follow-up issue numbers or "none".
+
+An agent-filed body writes them as a labelled `Acceptance criteria:` list with
+no heading; the issue templates use an `## Acceptance criteria` heading.
+`tm issue audit` warns when neither is present. Writing good criteria:
+`tm-epic`, "Writing acceptance criteria".
 
 ## Every issue: milestone, relationships, state
 

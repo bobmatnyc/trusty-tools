@@ -35,7 +35,7 @@ fn every_entry_binds_at_least_one_role() {
 }
 
 /// #11273: the family and Bash rows still bind a subagent (and the PM and
-/// Architect for sends), the family row names the main-session read, and
+/// Architect's Bash sends), the family row names the #11521 main-thread rule, and
 /// GP-047 binds both main-session roles.
 #[test]
 fn egress_rows_state_the_split_rule_11273() {
@@ -45,7 +45,12 @@ fn egress_rows_state_the_split_rule_11273() {
         }
         assert!(p.summary.contains("launch record"), "{}", p.summary);
     }
-    assert!(EGRESS_FAMILY.summary.contains("main session may read"));
+    // #11521: a stamped main thread may read, send and write.
+    assert!(
+        EGRESS_FAMILY.summary.contains("may read, send and write"),
+        "{}",
+        EGRESS_FAMILY.summary
+    );
     assert_eq!(
         EGRESS_ARCHITECT_AUDIT_UNWRITABLE.applies,
         &[Role::Pm, Role::Architect][..]

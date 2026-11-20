@@ -103,20 +103,29 @@ fn pm_main_thread_dm_send_and_bare_canvas_are_allowed_and_audited() {
     assert!(!text.contains("BODY-11194"), "no body in the audit: {text}");
 }
 
-/// 🔴 #11194: another channel, a missing `channel`, a canvas naming another
-/// channel, and a subagent's DM send all stay denied with no audit line.
+/// 🔴 #11521: a PM main thread's send to another channel, with no channel,
+/// and a canvas naming another channel pass through the main-session lift,
+/// one audit line each; a subagent's DM send stays denied with no line.
 #[test]
-fn pm_dm_allow_refuses_every_other_target_and_subagents() {
+fn pm_main_thread_sends_anywhere_and_subagents_are_refused_11521() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let other = call(
         SEND,
         serde_json::json!({ "channel": "C0SYNTH0001", "text": "x" }),
     );
-    assert_denied(&run_in(tmp.path(), &other, &[]), "other channel");
+    assert_allowed(&run_in(tmp.path(), &other, &[]), "other channel");
     let missing = call(SEND, serde_json::json!({ "text": "x" }));
-    assert_denied(&run_in(tmp.path(), &missing, &[]), "missing channel");
+    assert_allowed(&run_in(tmp.path(), &missing, &[]), "missing channel");
     let canvas = call(CANVAS, serde_json::json!({ "channel_id": "C0SYNTH0001" }));
-    assert_denied(&run_in(tmp.path(), &canvas, &[]), "canvas other channel");
+    assert_allowed(&run_in(tmp.path(), &canvas, &[]), "canvas other channel");
+    let text = audit(tmp.path());
+    assert_eq!(text.lines().count(), 3, "{text}");
+    assert!(
+        text.lines()
+            .all(|l| l.starts_with("egress-main-read-allowed ")),
+        "{text}"
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
     let dm = serde_json::json!({ "channel": OWNER_DM, "text": "x" });
     let mut sub = call(SEND, dm.clone());
     sub["agent_id"] = serde_json::json!("agent-synth-1");
@@ -171,6 +180,34 @@ fn pm_main_session_read_passes_and_subagent_read_is_denied_11273() {
         "unwritable audit denies: {stdout}"
     );
     assert!(stdout.contains("#11273"), "{stdout}");
+}
+
+/// 🔴 #11521: a self-cleared Architect — the stamp, no launch record —
+/// creates a Slack canvas with one audit line; its subagent's and an
+/// unstamped session's canvas stay denied; an unwritable audit denies.
+#[test]
+fn self_cleared_architect_canvas_create_is_allowed_11521() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let canvas = call(
+        "mcp__slack-mcp__slack_canvas_create",
+        serde_json::json!({ "title": "t", "markdown": "BODY-11521" }),
+    );
+    let stamp = Some("supervisor");
+    assert_allowed(&run_stamped(tmp.path(), &canvas, &[], stamp), "Architect");
+    let mut sub = canvas.clone();
+    sub["agent_id"] = serde_json::json!("agent-synth-1");
+    assert_denied(&run_stamped(tmp.path(), &sub, &[], stamp), "subagent");
+    assert_denied(&run_stamped(tmp.path(), &canvas, &[], None), "unstamped");
+    let text = audit(tmp.path());
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("role=architect"), "{text}");
+    assert!(!text.contains("BODY-11521"), "{text}");
+
+    let blocked = tempfile::tempdir().expect("tempdir");
+    std::fs::write(blocked.path().join("trusty-mpm"), "x").expect("write blocker");
+    let out = run_stamped(blocked.path(), &canvas, &[], stamp);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("\"deny\""), "{stdout}");
 }
 
 /// 🔴 #11194: an allowed DM send whose audit line cannot be written denies.

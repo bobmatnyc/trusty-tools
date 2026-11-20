@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>KeepAlive</key>
+	<true/>
+	<key>Label</key>
+	<string>com.trusty.browser</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/tmp/tb-venv-p1/bin/python3</string>
+		<string>/private/tmp/tb-venv-p1/lib/python3.12/site-packages/trusty_browser/service.py</string>
+		<string>--state</string>
+		<string>/private/tmp/p4-cap/home/.trusty/browser</string>
+		<string>serve</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardErrorPath</key>
+	<string>/private/tmp/p4-cap/home/.trusty/browser/service.stderr.log</string>
+	<key>StandardOutPath</key>
+	<string>/private/tmp/p4-cap/home/.trusty/browser/service.stdout.log</string>
+	<key>Umask</key>
+	<integer>63</integer>
+</dict>
+</plist>

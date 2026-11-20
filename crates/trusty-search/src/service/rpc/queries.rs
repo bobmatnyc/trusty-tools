@@ -23,7 +23,8 @@
 //! ## Two param shapes, because the routes have two argument shapes
 //!
 //! `search.typeahead` is the only one whose HTTP form is a path segment plus a
-//! QUERY STRING, so it carries slice 2's [`reads::IndexScoped`]: the `{id}`
+// #11451: absolute path; stable and docs.rs nightly resolve `//!` scope differently.
+//! QUERY STRING, so it carries slice 2's [`reads::IndexScoped`](crate::service::rpc::reads::IndexScoped): the `{id}`
 //! becomes an `index_id` field beside the flattened query fields.
 //!
 //! The other five take a request BODY, and a body is ONE JSON document axum

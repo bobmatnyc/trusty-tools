@@ -605,9 +605,11 @@ pub fn build_agent_command_configured(
     explicit: Option<&str>,
     alternate_screen: bool,
 ) -> String {
-    let model = crate::core::config::resolve_agent_model(
+    // #11353: pass the frontmatter role so the Fable gate can see it.
+    let model = crate::core::config::resolve_agent_model_for_role(
         config,
         &agent.name,
+        Some(&agent.role),
         agent.model.as_deref(),
         explicit,
     );

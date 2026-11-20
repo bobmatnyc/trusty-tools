@@ -1843,6 +1843,44 @@ check10_crate_size() {
   return "$rc"
 }
 
+# ===========================================================================
+# CHECK 11 — the candidate tm runs against published content (#11470)
+# ===========================================================================
+# trusty-mpm only. trusty-mpm 1.14.8 required a content file no published
+# content release carried, and every earlier check read the repository's own
+# content/ tree or checked versions and tags. This builds the candidate tm
+# from this commit (or takes PREFLIGHT_TM_BIN, an absolute path), checks the
+# newest published content release covers MIN_CONTENT_TAG and every required
+# file (scripts/check-content-release-coverage.sh), and runs the command
+# table in a clean HOME, three lanes (scripts/release-gate.sh). Any
+# unexpected exit fails. No override: a release whose binary cannot run on
+# published content must not publish.
+check11_published_content() {
+  if [ "${PKG_NAME}" != "trusty-mpm" ]; then
+    echo "[PASS] published-content: not trusty-mpm, nothing to run" >&2
+    return 0
+  fi
+  local bin="${PREFLIGHT_TM_BIN:-}" rc=0
+  if ! bash "${REPO_ROOT}/scripts/check-content-release-coverage.sh"; then
+    echo "[FAIL] published-content: no published content release covers this tm" >&2
+    return 1
+  fi
+  if [ -z "${bin}" ]; then
+    if ! (cd "${REPO_ROOT}" && cargo build --release --locked -q -p trusty-mpm --bin tm) >&2; then
+      echo "[FAIL] published-content: could not build the candidate tm" >&2
+      return 1
+    fi
+    bin="$(cd "${REPO_ROOT}" && cargo metadata --format-version 1 --no-deps \
+      | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/tm"
+  fi
+  "${REPO_ROOT}/scripts/release-gate.sh" --bin "${bin}" --lane all || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    echo "[FAIL] published-content: the candidate tm failed the release gate (exit ${rc})" >&2
+    return 1
+  fi
+  echo "[PASS] published-content: ${bin} passed every lane against published content" >&2
+}
+
 # ---------------------------------------------------------------------------
 # preflight_ok_summary — the final OK lines, printed only when no check failed.
 # A recorded break lists every entry and never reads "Safe to publish"
@@ -1854,10 +1892,10 @@ preflight_ok_summary() {
     # #5620: "passed all 7 checks" must not absorb a check-5 outcome that verified
     # nothing. The same distinction the check line draws, drawn again at the line
     # an operator is most likely to read on its own.
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but the" >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 11 checks, but the" >&2
     echo "  public API was NOT VERIFIED: ${SEMVER_NOT_VERIFIED}. See the check 5 line above." >&2
   elif [ -n "${SEMVER_RECORDED_BREAKS:-}" ]; then
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks, but it SHIPS" >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 11 checks, but it SHIPS" >&2
     echo "  A PUBLIC-API BREAK: ${SEMVER_RECORDED_BREAKS}." >&2
     printf '%s\n' "${SEMVER_RECORDED_LIST:-}" | sed 's/^/    /' >&2
     echo "  Land the record in the post-release PR. See the check 5 line above." >&2
@@ -1867,13 +1905,13 @@ preflight_ok_summary() {
   elif [ -n "${SEMVER_TYPES_ADVISORY:-}" ]; then
     # The type differ blocks nothing, so without this the summary would say
     # "safe to publish" over a listed set of type changes nobody has confirmed.
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks." >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 11 checks." >&2
     echo "  ADVISORY, not blocking: ${SEMVER_TYPES_ADVISORY}. See the semver-types line above." >&2
   else
-    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 10 checks. Safe to publish." >&2
+    echo "preflight-publish: OK — ${PKG_NAME} ${VERSION} passed all 11 checks. Safe to publish." >&2
   fi
   if [ -n "${GATE_NOT_VERIFIED:-}" ]; then
-    # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 10 checks"
+    # Same reasoning as the SEMVER_NOT_VERIFIED line above: "passed all 11 checks"
     # must not absorb a check-8 outcome that read nothing.
     echo "preflight-publish: NOTE — ${GATE_NOT_VERIFIED}. See the check 8 line above." >&2
   fi
@@ -1893,7 +1931,7 @@ TMP_CRATESIZE="$(mktemp "${TMPDIR:-/tmp}/preflight-publish.cratesize.XXXXXX")"
 trap 'rm -f "$TMP_BODY" "$TMP_SEMVER" "$TMP_PARITY" "$TMP_UIBUNDLE" "$TMP_CHANGELOG" "$TMP_CRATESIZE"' EXIT
 
 # ---------------------------------------------------------------------------
-# Run all 10 checks. Always run every check (rather than short-circuiting) so
+# Run all 11 checks. Always run every check (rather than short-circuiting) so
 # --check-only and normal mode share one code path and a single run always
 # reports the full picture — a partial preflight is how gaps get missed.
 # ---------------------------------------------------------------------------
@@ -1910,6 +1948,7 @@ check7_ui_bundle;           [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check8_prepublish_gate;     [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check9_changelog_assembled; [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 check10_crate_size;         [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
+check11_published_content;  [ $? -eq 0 ] || FAILURES=$((FAILURES + 1))
 set -e
 
 if [ "$FAILURES" -gt 0 ]; then

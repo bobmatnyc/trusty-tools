@@ -14,6 +14,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
+use super::super::PrepError;
 use super::super::hook_group_diff::project_hook_group_gaps_with;
 use super::super::project_hooks::{
     project_managed_hook_additions_for_profile, project_managed_hook_additions_with_pm_guard,
@@ -183,6 +184,26 @@ fn architect_hook_settings_golden() {
     .expect("pm additions");
     for direct_commands in [false, true] {
         let mut expected = pm.clone();
+        // #11398: the PM's turn-task group (its last `UserPromptSubmit` group)
+        // is PM-only; the Architect block is unchanged.
+        let pm_submit = expected["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .expect("UserPromptSubmit");
+        let turn_task = pm_submit.pop().expect("the PM turn-task group");
+        assert!(
+            turn_task.to_string().contains(" hook --turn-task"),
+            "{turn_task}"
+        );
+        // #10575: likewise the PM's completion-evidence group, its last `Stop` group.
+        let evidence = expected["hooks"]["Stop"]
+            .as_array_mut()
+            .expect("Stop")
+            .pop()
+            .expect("the PM completion-evidence group");
+        assert!(
+            evidence.to_string().contains(" hook --completion-evidence"),
+            "{evidence}"
+        );
         expected["hooks"]["PreToolUse"][0] = json!({
             "matcher": "",
             "hooks": [guard_entry(true)]
@@ -594,4 +615,96 @@ fn a_refused_re_merge_never_leaves_the_architect_hooks_stripped() {
         "the strip {strip:?} left a gap the refused merge could not close: {merge:?}"
     );
     assert_eq!(before, std::fs::read_to_string(&path).unwrap());
+}
+
+/// A project under `home` with `profile` set and allow-listed as an Architect
+/// project, whose `.claude/settings.json` is a DIRECTORY so the hook write
+/// fails (#10612).
+fn unwritable_hooks_project(home: &Path, project: &Path, profile: &str) {
+    let root = home.join(".trusty-mpm");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        format!(
+            "[architect]\nprojects = [{:?}]\n",
+            project.display().to_string()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".trusty-mpm.toml"),
+        format!("profile = \"{profile}\"\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(project.join(".claude/settings.json")).unwrap();
+}
+
+/// Runs the launch writer for `project` under `home` and returns its result.
+fn try_launch(project: &Path, home: &Path) -> Result<super::super::PrepReport, PrepError> {
+    let _home = EnvVarGuard::set("HOME", home);
+    let fw = crate::core::paths::FrameworkPaths::under(home);
+    let mut host = super::super::HostInputs::with_home(Some(home));
+    host.hook_exe = Some(Path::new(EXE));
+    super::super::prepare_session_inner(&fw, project, None, true, None, None, host)
+}
+
+/// #10612 (Fail-Open Check): an Architect launch whose hook write fails is a
+/// fatal error naming the settings path; on main it returned `Ok` with
+/// `hooks_written: false` and the session started without its guard.
+#[test]
+#[serial_test::serial]
+fn an_architect_launch_whose_hook_write_fails_is_refused_10612() {
+    let project = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    unwritable_hooks_project(home.path(), project.path(), "supervisor");
+    let err = try_launch(project.path(), home.path())
+        .expect_err("an Architect without its pm-guard hooks must not launch");
+    assert!(err.is_fatal(), "{err:?}");
+    let settings = project.path().join(".claude/settings.json");
+    match &err {
+        PrepError::ArchitectHooks { path, .. } => assert_eq!(*path, settings),
+        other => panic!("expected PrepError::ArchitectHooks, got {other:?}"),
+    }
+    assert!(err.to_string().contains(&settings.display().to_string()));
+}
+
+/// #10612 error arm: the same failure for a PM session keeps the #2149
+/// best-effort rule — the launch prepares, reporting `hooks_written: false`.
+#[test]
+#[serial_test::serial]
+fn a_pm_launch_whose_hook_write_fails_still_starts_10612() {
+    let project = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    unwritable_hooks_project(home.path(), project.path(), "pm");
+    let report = try_launch(project.path(), home.path()).expect("a PM launch still prepares");
+    assert!(!report.hooks_written);
+}
+
+/// #10612: an Architect resume whose settings file cannot be merged fails
+/// closed with the path-naming error; a PM resume still returns `Ok`. On
+/// main both returned `Ok` and the Architect resumed unguarded.
+#[test]
+fn an_architect_resume_with_unmergeable_settings_is_refused_10612() {
+    for (profile, refused) in [("supervisor", true), ("pm", false)] {
+        let project = tempdir().unwrap();
+        let base = tempdir().unwrap();
+        let fw = architect_fw(base.path(), project.path());
+        std::fs::write(
+            project.path().join(".trusty-mpm.toml"),
+            format!("profile = \"{profile}\"\n"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+        std::fs::write(project.path().join(".claude/settings.json"), "{ not json").unwrap();
+        let result =
+            super::super::ensure_project_hooks_with(&fw, project.path(), Some(Path::new(EXE)));
+        if refused {
+            assert!(
+                matches!(result, Err(PrepError::ArchitectHooks { .. })),
+                "{result:?}"
+            );
+        } else {
+            assert!(result.is_ok(), "{profile}: {result:?}");
+        }
+    }
 }

@@ -293,9 +293,9 @@ pub struct ReviewConfig {
     pub github_token: String,
     /// Installation IDs keyed by org name (case-insensitive).
     ///
-    /// Populated from `GITHUB_INSTALLATION_ID_DUETTORESEARCH` and
-    /// `GITHUB_INSTALLATION_ID_HOTSTATS` plus any additional
-    /// `GITHUB_INSTALLATION_ID_<ORG>` env vars (case-folded to lowercase).
+    /// Populated from `GITHUB_INSTALLATION_ID_DEFAULT_ORG` (org named by
+    /// `GITHUB_INSTALLATION_DEFAULT_ORG`) and `GITHUB_INSTALLATION_ID_HOTSTATS`.
+    /// A deprecated per-org variable is still read as a fallback.
     pub github_installations: Vec<(String, u64)>,
 
     // ── Trigger classification (Phase 1, #582 / REV-703) ───────────────────
@@ -346,7 +346,7 @@ pub struct ReviewConfig {
     /// Name of the voice package to load for the 3-layer prompt composition
     /// (stock → principles → voice).
     ///
-    /// `TRUSTY_REVIEW_VOICE_PACKAGE` env var or `[voice] package = "duetto"` in
+    /// `TRUSTY_REVIEW_VOICE_PACKAGE` env var or `[voice] package = "house"` in
     /// the TOML config.  Empty/absent = no voice package (opt-in).
     pub voice_package: Option<String>,
 
@@ -720,28 +720,66 @@ impl ReviewConfig {
     }
 }
 
+/// Neutral env var carrying the installation id of the default org.
+const DEFAULT_ORG_ID_ENV: &str = "GITHUB_INSTALLATION_ID_DEFAULT_ORG";
+/// Env var naming the org (repo owner) that `DEFAULT_ORG_ID_ENV` belongs to.
+const DEFAULT_ORG_NAME_ENV: &str = "GITHUB_INSTALLATION_DEFAULT_ORG";
+/// Deprecated env var and the org name it implied, kept so an operator who
+/// still sets it resolves the same installation id.
+const DEPRECATED_DEFAULT_ORG: (&str, &str) =
+    ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "duettoresearch");
+
 /// Load GitHub installation IDs from env vars.
 ///
 /// Why: the bot may be installed in multiple GitHub orgs; each org has its own
 /// installation ID.  This helper collects all known installation env vars into
 /// a uniform `Vec<(org_name, installation_id)>` list.
-/// What: reads the two well-known env vars (`GITHUB_INSTALLATION_ID_DUETTORESEARCH`,
-/// `GITHUB_INSTALLATION_ID_HOTSTATS`) plus any `GITHUB_INSTALLATION_ID_<ORG>`
-/// pattern (not supported dynamically yet — only the two known orgs are read for
-/// the MVP).  Invalid or empty values are silently skipped.
-/// Test: covered indirectly by `config_github_fields_from_env`.
+/// What: delegates to [`installations_from`] with the process environment.
+/// Test: `installations_new_default_org_vars`,
+/// `installations_deprecated_var_still_resolves`; env wiring is covered by
+/// `load_github_installations_parses_known_orgs`.
 fn load_github_installations() -> Vec<(String, u64)> {
-    let known = [
-        ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "duettoresearch"),
-        ("GITHUB_INSTALLATION_ID_HOTSTATS", "hotstats"),
-    ];
+    installations_from(|name| std::env::var(name).ok())
+}
+
+/// Pure core of [`load_github_installations`], reading through `get`.
+///
+/// Why: a lookup closure keeps the logic testable without mutating process env.
+/// What: reads `GITHUB_INSTALLATION_ID_HOTSTATS` (org `hotstats`) and the
+/// default org: `GITHUB_INSTALLATION_ID_DEFAULT_ORG` with the org named by
+/// `GITHUB_INSTALLATION_DEFAULT_ORG` (lowercased).  When the neutral id is
+/// unset, the deprecated per-org variable is read instead, with a
+/// `tracing::warn!` naming the replacement.  Invalid or empty values are
+/// skipped.
+/// Test: `installations_new_default_org_vars`,
+/// `installations_deprecated_var_still_resolves`,
+/// `installations_new_var_wins_over_deprecated`.
+fn installations_from(get: impl Fn(&str) -> Option<String>) -> Vec<(String, u64)> {
+    let parse = |name: &str| get(name).and_then(|v| v.trim().parse::<u64>().ok());
     let mut installations = Vec::new();
-    for (env_var, org_name) in &known {
-        if let Ok(val) = std::env::var(env_var)
-            && let Ok(id) = val.trim().parse::<u64>()
+
+    if let Some(id) = parse(DEFAULT_ORG_ID_ENV) {
+        match get(DEFAULT_ORG_NAME_ENV)
+            .map(|n| n.trim().to_lowercase())
+            .filter(|n| !n.is_empty())
         {
-            installations.push((org_name.to_string(), id));
+            Some(org) => installations.push((org, id)),
+            None => {
+                warn!("{DEFAULT_ORG_ID_ENV} is set but {DEFAULT_ORG_NAME_ENV} is not; ignoring")
+            }
         }
+    } else {
+        let (old_var, old_org) = DEPRECATED_DEFAULT_ORG;
+        if let Some(id) = parse(old_var) {
+            warn!(
+                "{old_var} is deprecated; set {DEFAULT_ORG_ID_ENV} and {DEFAULT_ORG_NAME_ENV} instead"
+            );
+            installations.push((old_org.to_string(), id));
+        }
+    }
+
+    if let Some(id) = parse("GITHUB_INSTALLATION_ID_HOTSTATS") {
+        installations.push(("hotstats".to_string(), id));
     }
     installations
 }

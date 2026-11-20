@@ -107,7 +107,7 @@ rust-version = "1.94"
 # NOTE: workspace-level license is MIT. All crates inherit this via `license.workspace = true`.
 license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-tools"
-authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+authors = ["bobmatnyc"]
 
 [workspace.dependencies]
 # ── Internal crates (path deps so the monorepo builds without publish cycles) ──
@@ -120,17 +120,17 @@ trusty-code = { path = "crates/trusty-code", version = "0.8" }
 # is the first upload. Bumped to 0.2 by #7940's delegation seam (a required
 # new `ReplEvent::ToolInvocation` field is breaking pre-1.0).
 trusty-code-tui = { path = "crates/trusty-code-tui", version = "0.2" }
-trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.9.5" }
-trusty-common = { path = "crates/trusty-common", version = "0.70" }
+trusty-agents-common = { path = "crates/trusty-agents-common", version = "0.10.0" }
+trusty-common = { path = "crates/trusty-common", version = "0.70.5" }
 # #7521: secret storage and its on-demand socket (DOC-74 §15.2). Defaults off
 # here so each member names the features it needs (#5466 pattern).
-trusty-secrets = { path = "crates/trusty-secrets", version = "0.7.0", default-features = false }
+trusty-secrets = { path = "crates/trusty-secrets", version = "0.9", default-features = false }
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
 # #8454 S2c: the deny-by-default channel route policy; trusty-mpm reads it
 # for `tm doctor`.
-trusty-channels = { path = "crates/trusty-channels", version = "0.2.0" }
+trusty-channels = { path = "crates/trusty-channels", version = "0.3.0" }
 # trusty-embedderd: embedding daemon — referenced by trusty-search so
 # `cargo install trusty-search` produces both binaries from one command.
 # Why: `default-features = false` HERE, not only on the member entry (mirrors
@@ -164,7 +164,7 @@ trusty-mpm = { path = "crates/trusty-mpm", version = "1.0.0" }
 #      this line existed. Both consumers name what they need: trusty-analyze's
 #      `review` feature pulls `trusty-review/mcp`; trusty-mpm's dev-dependency
 #      only touches `integrations`, which is unconditional.
-trusty-review = { path = "crates/trusty-review", version = "0.41", default-features = false }
+trusty-review = { path = "crates/trusty-review", version = "0.42", default-features = false }
 # trusty-console: web dashboard for trusty services. As of #1318 the standalone
 # `trusty-console` crate is the SOLE producer of the `trusty-console` binary
 # (de-bundled from the host crates for single-owner-per-binary). It is still a
@@ -180,7 +180,7 @@ trusty-console = { path = "crates/trusty-console", version = "0.14" }
 trusty-progress = { path = "crates/trusty-progress", version = "0.3.0" }
 # trusty-architect: the Architect's poller library behind `tm architect` (#9171, #9822).
 # A leaf: it never depends on trusty-mpm or on any crate that does.
-trusty-architect = { path = "crates/trusty-architect", version = "0.2" }
+trusty-architect = { path = "crates/trusty-architect", version = "0.3" }
 # trusty-installer: the pinned, fail-closed prebuilt download entry point
 # (#5491, #5495) is also consumed as a library by trusty-audit, which now
 # builds from bobmatnyc/trusty-git-analytics against the crates.io release.
@@ -503,6 +503,8 @@ scip = "0.7"
 protobuf = "3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 hmac = "0.12"
+# AES-256-GCM for trusty-browser vault sealing (Python `cryptography` AESGCM parity).
+aes-gcm = "0.11"
 hex = "0.4"
 ort = "2.0.0-rc.10"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
@@ -529,6 +531,8 @@ tree-sitter-ruby = "0.23"
 tree-sitter-php = "0.23"
 tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
+# #11431: the minimal pm-guard parses shell with a real grammar (MIT).
+tree-sitter-bash = "0.25"
 tree-sitter-c-sharp = "=0.23.1"
 tree-sitter-kotlin-ng = "1.1"
 tree-sitter-swift = "=0.7.0"

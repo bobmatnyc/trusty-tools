@@ -462,7 +462,7 @@ fn extract_spans_skips_prompt_mandated_citation_grammar() {
 /// REGRESSION (#5022): a `[confluence: …]` citation is stripped like the other
 /// bracket forms, so its excerpt never reaches the generic quote scan.
 ///
-/// Why: `duettoresearch/code-intelligence` emits this fifth form
+/// Why: `acme/code-intelligence` emits this fifth form
 /// (`pr_review_service.py:377,909`). `BRACKET_CITATION_RE` matched only four,
 /// so the excerpt inside the bracket survived the strip and was scanned as an
 /// ungrounded free-text code quote — tripping the #4042 fabrication check on

@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.1] — 2026-11-16
+
+### Fixed
+
+- Linux: `start` and `restart` pass `RUST_LOG_BUFFER` to the daemon they spawn, so its in-memory log buffer keeps the filter a shell-started daemon would use (#11085).
+
+### Changed
+
+- The Linux lifecycle restart tests scan an injected process table of their own processes, so a host trusty-memory daemon no longer changes their result (#11085). `restart` behaviour is unchanged.
+
+## [1.0.0] — 2026-11-15
+
+### Fixed
+
+- `memory_recall` and `memory_recall_deep` open a cold palace on the blocking pool and wait at most `TRUSTY_RECALL_OPEN_WAIT_SECS` (15 s); past that they answer a retryable `palace_opening` error (JSON-RPC code `-32007`, `error.data` with `kind`, `retryable`, `palace`, `waited_ms`) while the open goes on, so a retry finds the palace (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a `memory_recall_all` `scope: "all"` walk stops at `TRUSTY_RECALL_ALL_DEADLINE_SECS` (20 s) and returns the results gathered so far; every response carries `deadline_exceeded` and `palaces_not_reached`, unreached palaces count under the `deadline` reason, and no detached reopen runs after a deadline hit (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- the chat `recall_memories` tool and the per-message chat context use the same bounded open: the tool answers `{error, kind: "palace_opening", retryable: true, palace, waited_ms}`, and the context says the palace is still opening (or that the recall failed) instead of reading as "no relevant memories" (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- recalls of one palace that miss the cache together share one open, so callers and retries no longer each park a blocking thread on it; a failed open reaches every caller waiting on it and the next call tries again, and a caller whose shared open hit the open-queue bound waits out its own open wait and answers `palace_opening` instead of an internal error (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+- a zero, negative or non-numeric `TRUSTY_RECALL_OPEN_WAIT_SECS` / `TRUSTY_RECALL_ALL_DEADLINE_SECS` falls back to its default; the open wait is capped at three quarters of `TRUSTY_OPEN_QUEUE_TIMEOUT_SECS` and the deadline at 3600 s, so no value can panic the daemon (Refs [#11255](https://github.com/bobmatnyc/trusty-tools/issues/11255))
+
+### Changed
+
+- trusty-memory 1.0.0: stability release; the public API surface, wire formats and on-disk formats are now covered by Semantic Versioning, so a breaking change needs a major version from here on (owner ruling Dnx)
+
 ## [0.36.8] — 2026-11-14
 
 ### Added

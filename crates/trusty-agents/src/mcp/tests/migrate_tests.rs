@@ -32,8 +32,8 @@ enabled = true
 discover = true
 
 [[mcp.services]]
-name = "duetto-memory"
-description = "Duetto org memory"
+name = "acme-memory"
+description = "Acme org memory"
 url = "https://example.invalid/memory/mcp"
 transport = "http"
 enabled = false
@@ -83,13 +83,13 @@ fn converts_a_legacy_stdio_service() {
 #[test]
 fn converts_a_legacy_http_service() {
     let (servers, _) = migrate::convert(LEGACY);
-    let duetto = servers
+    let acme = servers
         .iter()
-        .find(|s| s.name == "duetto-memory")
-        .expect("duetto migrated");
-    assert!(!duetto.enabled);
+        .find(|s| s.name == "acme-memory")
+        .expect("acme migrated");
+    assert!(!acme.enabled);
     assert_eq!(
-        extensions::endpoint_url(duetto),
+        extensions::endpoint_url(acme),
         Some("https://example.invalid/memory/mcp")
     );
 }
@@ -157,7 +157,7 @@ fn migration_reports_what_moved() {
     let (_, report) = migrate::convert(LEGACY);
     assert_eq!(
         report.services,
-        ["granola-notes", "trusty-memory", "duetto-memory"]
+        ["granola-notes", "trusty-memory", "acme-memory"]
     );
     assert!(report.summary().contains("gworkspace"));
     assert!(!report.is_empty());

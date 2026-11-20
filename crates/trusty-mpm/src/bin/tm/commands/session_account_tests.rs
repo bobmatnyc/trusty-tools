@@ -78,7 +78,7 @@ fn project(name: &str, repo_url: &str) -> Project {
         tags: vec![],
         description: None,
         gh_user: None,
-        gh_account: Some("bob-duetto".to_string()),
+        gh_account: Some("acme-admin".to_string()),
         github: None,
         commit_name: None,
         commit_email: None,
@@ -129,9 +129,9 @@ fn pin_targets_names_a_new_record_from_the_origin() {
 #[test]
 fn pin_notice_names_the_account_it_replaces() {
     assert_eq!(
-        pin_notice("itinerary", Some("bob-duetto"), "bobmatnyc"),
+        pin_notice("itinerary", Some("acme-admin"), "bobmatnyc"),
         "tm: every session of project 'itinerary' now runs as gh account 'bobmatnyc' \
-         (was 'bob-duetto')"
+         (was 'acme-admin')"
     );
     assert!(pin_notice("itinerary", None, "bobmatnyc").ends_with("(was unpinned)"));
     assert!(pin_notice("itinerary", Some(" "), "bobmatnyc").ends_with("(was unpinned)"));

@@ -1338,7 +1338,7 @@ async fn guided_fallback_blocks_non_github_git_checkout() {
 
 /// Why (#2534): bare `tm` run from a directory that physically sits inside a
 /// GitHub repo's working tree but is NOT part of its tracked tree (the same shape
-/// as the APFS `~/Duetto/cto` case-fold collision) must NOT inherit the enclosing
+/// as the APFS `~/Acme/cto` case-fold collision) must NOT inherit the enclosing
 /// repo's identity. It must NOT redirect to that repo's managed clone (which would
 /// attempt a real `git clone` of the github.com URL and fail on the network); it
 /// must route to the clean non-git fallback and return `Ok(())` without writing
@@ -2156,7 +2156,7 @@ async fn guided_fallback_leaves_no_tmux_session_behind() {
     // #10101 D3c: a launch refuses an unreachable daemon, so a stub answers.
     let (_seen, url) = crate::test_support::launch_stub::spawn_empty().await;
     // #10101: the PM's workspace server, named for the base clone that owns
-    // the session worktree; empty under `TM_WORKSPACE_TMUX=0`. Killed on
+    // the session worktree; empty unless `TM_WORKSPACE_TMUX=1`. Killed on
     // every exit path, panic included.
     let workspace = trusty_mpm::session_manager::launch_server::cli_launch_server(&base)
         .map(|(server, _)| server);
@@ -2562,5 +2562,42 @@ fn launch_claude_spec_follows_the_configured_renderer() {
         let line = crate::test_support::spec_text(&spec);
         let want = crate::test_support::renderer_operand(alternate_screen);
         assert!(line.contains(want), "want {want:?} in: {line}");
+    }
+}
+
+/// #11353: the `tm launch` spec carries its `--model` as the launch-model
+/// stamp, and that stamp decides an `inherit` dispatch of a capped role.
+#[test]
+fn a_managed_launch_stamps_its_model_for_the_fable_cap() {
+    let cwd = std::path::Path::new("/work/p");
+    let config = trusty_mpm::core::config::MpmConfig::default();
+    for (model, refused) in [("claude-opus-5-5", false), ("claude-fable-5-2", true)] {
+        let spec = crate::commands::launch::launch_claude_spec(
+            cwd,
+            None,
+            model,
+            None,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .expect("a PM spec builds");
+        let stamp = spec
+            .env_set
+            .iter()
+            .find(|(k, _)| k == trusty_mpm::core::session_profile::LAUNCH_MODEL_ENV)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(stamp, Some(model), "the stamp names the launch model");
+        let deny = crate::commands::pm_guard_fable::fable_cap_refusal(
+            &config,
+            "qa",
+            Some("qa"),
+            crate::commands::pm_guard_fable::DispatchModel {
+                frontmatter: Some("inherit"),
+                parent: stamp,
+                ..Default::default()
+            },
+        );
+        assert_eq!(deny.is_some(), refused, "{model}: {deny:?}");
     }
 }

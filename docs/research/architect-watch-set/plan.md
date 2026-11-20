@@ -116,11 +116,11 @@ Projects view, watch state per registered project:
 ┌─ Projects ──────────────────────────────────────────────────────────────────────────────┐
 │ Project              Repo                                Sessions  Watch                 │
 ├──────────────────────────────────────────────────────────────────────────────────────────┤
-│ mcp-services         duettoresearch/mcp-services         2 live    ● Watched     [Unwatch] │
-│ model-usage-monitor  duettoresearch/model-usage-monitor  3 live    ● Watched     [Unwatch] │
+│ mcp-services         acme/mcp-services         2 live    ● Watched     [Unwatch] │
+│ model-usage-monitor  acme/model-usage-monitor  3 live    ● Watched     [Unwatch] │
 │ trusty-tools         bobmatnyc/trusty-tools              2 live    ○ Not watched [Watch]   │
-│ concept-lab          duettoresearch/concept-lab          0         ○ Not watched [Watch]   │
-│ pegasus-ui           duettoresearch/pegasus-ui           0  ⚠ path missing  ○ Not watched [Watch] │
+│ concept-lab          acme/concept-lab          0         ○ Not watched [Watch]   │
+│ pegasus-ui           acme/pegasus-ui           0  ⚠ path missing  ○ Not watched [Watch] │
 └──────────────────────────────────────────────────────────────────────────────────────────┘
  Registered projects only (projects.json). Watch state from local/watch.json.
 ```
@@ -153,7 +153,7 @@ Unwatch confirmation:
 A failed request:
 
 ```text
-│ concept-lab   duettoresearch/concept-lab   0   ✕ Watch failed   [Retry] [Dismiss]
+│ concept-lab   acme/concept-lab   0   ✕ Watch failed   [Retry] [Dismiss]
                                                tm fleet project add: path does not exist
 ```
 

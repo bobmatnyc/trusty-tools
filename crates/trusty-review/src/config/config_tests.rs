@@ -233,6 +233,40 @@ fn load_github_installations_parses_known_orgs() {
     }
 }
 
+fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let map: std::collections::HashMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |k| map.get(k).cloned()
+}
+
+#[test]
+fn installations_new_default_org_vars() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", " 42 "),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "Acme"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 42)]);
+}
+
+#[test]
+fn installations_deprecated_var_still_resolves() {
+    let got =
+        super::installations_from(env_of(&[("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "777")]));
+    assert_eq!(got, vec![("duettoresearch".to_string(), 777)]);
+}
+
+#[test]
+fn installations_new_var_wins_over_deprecated() {
+    let got = super::installations_from(env_of(&[
+        ("GITHUB_INSTALLATION_ID_DEFAULT_ORG", "1"),
+        ("GITHUB_INSTALLATION_DEFAULT_ORG", "acme"),
+        ("GITHUB_INSTALLATION_ID_DUETTORESEARCH", "2"),
+    ]));
+    assert_eq!(got, vec![("acme".to_string(), 1)]);
+}
+
 // ── APEX retrieval removed (#4999) ──────────────────────────────────────
 
 /// #4999: the former APEX config env vars are inert — a deployment still
@@ -567,7 +601,8 @@ fn role_models_openrouter_cost_roles_resolve_classification_tier() {
         ..Default::default()
     };
     let roles = RoleModels::from_env(&env);
-    assert_eq!(roles.verifier.model, "anthropic/claude-haiku-4.5");
+    // #11527: the verifier takes a non-Claude family, not the tier.
+    assert_eq!(roles.verifier.model, "google/gemini-2.5-flash");
     assert_eq!(roles.summarizer.model, "anthropic/claude-haiku-4.5");
 }
 
@@ -588,15 +623,11 @@ fn role_models_bedrock_reviewer_keeps_sonnet_default() {
         "Bedrock's opus tiers are unmapped by ruling — the pinned Sonnet default must survive"
     );
     assert_eq!(roles.reviewer.model, "us.anthropic.claude-sonnet-5-5");
-    for (role, model) in [
-        ("verifier", &roles.verifier.model),
-        ("summarizer", &roles.summarizer.model),
-    ] {
-        assert_eq!(
-            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "{role} default stays Haiku 4.5"
-        );
-    }
+    assert_eq!(roles.verifier.model, "us.amazon.nova-pro-v1:0");
+    assert_eq!(
+        roles.summarizer.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "summarizer default stays Haiku 4.5"
+    );
 }
 
 /// Why: the two cost-driven roles must keep the value they had — only the
@@ -605,15 +636,11 @@ fn role_models_bedrock_reviewer_keeps_sonnet_default() {
 #[test]
 fn role_models_bedrock_cost_roles_resolve_the_same_id_as_before() {
     let roles = RoleModels::from_env(&RoleEnv::default());
-    for (role, model) in [
-        ("verifier", &roles.verifier.model),
-        ("summarizer", &roles.summarizer.model),
-    ] {
-        assert_eq!(
-            model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "{role} must still resolve the date-versioned Bedrock Haiku profile"
-        );
-    }
+    // #11527 moved the verifier off Haiku; the summarizer keeps it.
+    assert_eq!(
+        roles.summarizer.model, "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "summarizer must still resolve the date-versioned Bedrock Haiku profile"
+    );
 }
 
 /// Why: a tier default that outranked an explicitly-named model id would break
@@ -786,3 +813,46 @@ fn config_manifest_layer_beats_a_local_config_file() {
 
 // resolve_index and wiring-path tests are in the sibling file to stay under
 // the 500-line cap (#610).  See `config_resolve_index_tests.rs`.
+
+/// Why: #11527 — the default verifier must not share the reviewer's model
+/// family, on either default provider.
+/// What: resolves defaults for Bedrock and OpenRouter; asserts the reviewer is
+/// Claude, the verifier is not, and no same-model warning fires.
+#[test]
+fn default_verifier_is_a_different_family_from_the_reviewer() {
+    for provider in [None, Some("openrouter".to_string())] {
+        let env = RoleEnv {
+            provider,
+            ..Default::default()
+        };
+        let roles = RoleModels::from_env(&env);
+        assert!(roles.reviewer.model.contains("claude"), "{roles:?}");
+        assert!(!roles.verifier.model.contains("claude"), "{roles:?}");
+        assert_eq!(roles.same_model_warning(), None);
+    }
+}
+
+/// Why: #11527 — an operator may still pin both roles to one model, and that
+/// override must win, but the pair must be flagged.
+/// What: CLI names the same id for reviewer and verifier (one with a routing
+/// prefix); asserts the override stands and the warning names the model.
+#[test]
+fn same_model_warning_fires_when_reviewer_and_verifier_match() {
+    let cli = RoleCliOverrides {
+        reviewer_model: Some("us.anthropic.claude-sonnet-5-5".to_string()),
+        verifier_model: Some("bedrock/us.anthropic.claude-sonnet-5-5".to_string()),
+        ..Default::default()
+    };
+    let roles = RoleModels::resolve(Some(&cli), &RoleEnv::default(), None);
+    assert_eq!(
+        roles.verifier.model,
+        "bedrock/us.anthropic.claude-sonnet-5-5"
+    );
+    let warning = roles
+        .same_model_warning()
+        .expect("same reviewer and verifier model must warn");
+    assert!(
+        warning.contains("us.anthropic.claude-sonnet-5-5"),
+        "{warning}"
+    );
+}

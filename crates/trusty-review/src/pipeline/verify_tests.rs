@@ -682,11 +682,15 @@ fn parse_judgment_negated_verdict_is_not_that_verdict() {
         assert_eq!(parse_judgment(negated), None, "{negated:?}");
     }
     // The unjudged reading is withheld as a verifier failure, never a refutation.
-    let outcomes = judgments_for("not REFUTED", 1);
+    let outcomes = judgments_for("not REFUTED", 1, false);
     assert!(
         matches!(
             outcomes.as_slice(),
-            [(VerifyOutcome::TruncationRefuted, VerifierReach::Failed)]
+            [(
+                VerifyOutcome::TruncationRefuted,
+                VerifierReach::Failed,
+                None
+            )]
         ),
         "{outcomes:?}"
     );

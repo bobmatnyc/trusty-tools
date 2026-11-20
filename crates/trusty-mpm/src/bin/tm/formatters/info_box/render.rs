@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn welcome_panel_smoke_render() {
         let data = WelcomeData {
-            project: "duetto-research/trusty-tools".to_string(),
+            project: "acme/trusty-tools".to_string(),
             workspace: "/Users/masa/Projects/trusty-tools".to_string(),
             user: "masa".to_string(),
             reconnecting: false,

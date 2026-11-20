@@ -595,6 +595,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == "PostToolUse" || event == SUBAGENT_STOP_EVENT {
         super::hook_observer::observe(&event, stdin_payload.as_ref(), &session_id);
     }
+    // See G0b IL auto-apply: an IL block in this turn updates this session's ledger.
+    super::il_auto_apply::on_hook(&event, stdin_payload.as_ref(), &session_id);
 
     // #2610: on turn-end events (main agent Stop / delegated SubagentStop),
     // flag a final message that "parks" the agent — one that ends the turn to

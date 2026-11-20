@@ -141,7 +141,7 @@ Agent packages live in the user's local agent directory (e.g., `~/.trusty-agents
 ### 4.2 CTO Assistant — Work assistant (code/analysis focused)
 
 - **Role:** Handles work analysis, code review context, technical decisions.
-- **Bound to:** Duetto work email account (via gworkspace multi-tenant identity #3795).
+- **Bound to:** Acme work email account (via gworkspace multi-tenant identity #3795).
 - **Listeners:** `gmail-work` (if event-connected; not required for MVP).
 - **Typical actions:** Search work mail, fetch meeting notes, analyze codebase context.
 - **Created by:** User add-agent flow (from template).

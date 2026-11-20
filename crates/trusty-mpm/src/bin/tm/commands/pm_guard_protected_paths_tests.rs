@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::{ProtectedEnv, evaluate};
-use crate::commands::pm_guard_protected_hooks::{frontmatter_hooks, hook_named_paths};
+use crate::commands::pm_guard_protected_hooks::{
+    declares_hooks_key, frontmatter_hooks, hook_named_paths,
+};
 
 /// A scratch home and project, canonicalized.
 struct Fx {
@@ -528,4 +530,170 @@ fn an_unresolvable_path_entry_is_an_error() {
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The #10937 agent shape: a spaced `name`, `webhooks` prose, and a duplicate
+/// key, which a lenient parser accepts and `serde_yaml` rejects.
+const UNPARSEABLE_AGENT_10937: &str = "---\nname: Clerk Operations\nversion: 1.0.0\ntags: [auth, \
+                                       webhooks]\nversion: 1.0.1\n---\nRoute '/api/webhooks(.*)' \
+                                       to the handler.\n";
+
+/// 🔴 REGRESSION (#10937): one unparseable agent file with no `hooks` key
+/// refused every Write on origin/main.
+#[test]
+fn an_unparseable_agent_file_without_hooks_is_skipped_10937() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/clerk-ops.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    std::fs::write(&agent, UNPARSEABLE_AGENT_10937).expect("write agent");
+    assert!(
+        frontmatter_hooks(UNPARSEABLE_AGENT_10937).is_err(),
+        "fixture must not parse"
+    );
+    assert_eq!(fx.write(&fx.project.join("notes.md"), "x"), None);
+    // The rule itself still denies a protected target.
+    denied(
+        fx.write(&fx.project.join(".claude/settings.json"), "{}"),
+        "a settings file beside a skipped agent",
+    );
+}
+
+/// #10937: an unreadable agent file is skipped, not a fleet-wide refusal.
+#[test]
+fn an_unreadable_agent_file_is_skipped_10937() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/locked.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    std::fs::write(&agent, "---\nhooks: {}\n---\n").expect("write agent");
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read_to_string(&agent).is_ok() {
+        return; // Running as root: the file stays readable, nothing to prove.
+    }
+    let verdict = fx.write(&fx.project.join("notes.md"), "x");
+    std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o644)).expect("chmod back");
+    assert_eq!(verdict, None);
+}
+
+/// #10937 error arm: a read error other than permission denied (here,
+/// non-UTF-8 bytes) still refuses.
+#[test]
+fn a_non_utf8_agent_file_still_denies_10937() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/binary.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    std::fs::write(&agent, b"---\nhooks: \xff\xfe\n---\n").expect("write agent");
+    let reason = fx
+        .write(&fx.project.join("notes.md"), "x")
+        .unwrap_or_else(|| panic!("a non-UTF-8 agent file must deny"));
+    assert!(reason.contains("binary.md"), "{reason}");
+}
+
+/// #10937 error arm: unparseable frontmatter that declares a top-level
+/// `hooks` key still fails closed, in each spelling.
+#[test]
+fn an_unparseable_agent_file_declaring_hooks_still_denies_10937() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/hooked.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    for key in [
+        "hooks:",
+        "\"hooks\":",
+        "'hooks' :",
+        "{hooks: [unclosed",
+        // Code-critic round on #10937: each spelling below was skipped.
+        "  hooks:",
+        "? hooks\n: x",
+        "!!str hooks:",
+        "\"ho\\x6fks\":",
+        "y: &a {k: 1, hooks: x}\n<<: *a",
+        "z: {a: 1, hooks: x}",
+        "<<: {k: 1}\nw: [hooks]",
+    ] {
+        let text = format!("---\nname: x\nversion: 1\nversion: 2\n{key} x\n---\n");
+        std::fs::write(&agent, &text).expect("write agent");
+        let reason = fx
+            .write(&fx.project.join("notes.md"), "x")
+            .unwrap_or_else(|| panic!("`{key}` must deny"));
+        assert!(reason.contains("hooked.md"), "{key}: {reason}");
+    }
+}
+
+/// #11438: unparseable frontmatter whose only backslashes cannot spell a key
+/// (a Windows path, a regex class).
+const PLAIN_BACKSLASHES_11438: [&str; 2] = [
+    "---\nname: x\nversion: 1\nversion: 2\ndescription: \"Edits C:\\Users\\me\"\n---\n",
+    "---\nname: x\nversion: 1\nversion: 2\ndescription: \"match \\d+\"\n---\n",
+];
+
+/// #11438 path 1: `declares_hooks_key` ignores a backslash that starts no
+/// letter-producing escape and no fold. Fails on origin/main (any `\` counted).
+#[test]
+fn a_plain_backslash_is_not_a_hooks_key_11438() {
+    for text in PLAIN_BACKSLASHES_11438 {
+        assert!(!declares_hooks_key(text), "{text:?}");
+    }
+    assert!(
+        !declares_hooks_key("---\na: \"\\U0000\"\n---\n"),
+        "\\U needs 8 hex digits"
+    );
+    assert!(declares_hooks_key("---\na: \"ho\\x6fks\"\n---\n"));
+    assert!(declares_hooks_key("---\na: \"ho\\u006Fks\"\n---\n"));
+    assert!(declares_hooks_key("---\na: \"ho\\U0000006fks\"\n---\n"));
+}
+
+/// #11438 path 2: `frontmatter_hooks` reads unparseable frontmatter with a
+/// plain backslash as naming no hook. Fails on origin/main (`Err`).
+#[test]
+fn frontmatter_hooks_ignores_a_plain_backslash_11438() {
+    for text in PLAIN_BACKSLASHES_11438 {
+        assert_eq!(frontmatter_hooks(text), Ok(None), "{text:?}");
+    }
+}
+
+/// #11438 path 3: the home-agents scan skips an agent file whose only
+/// backslashes are plain. Fails on origin/main (every Write denied).
+#[test]
+fn the_home_agents_scan_skips_a_plain_backslash_11438() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/windows.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    for text in PLAIN_BACKSLASHES_11438 {
+        std::fs::write(&agent, text).expect("write agent");
+        assert_eq!(
+            fx.write(&fx.project.join("notes.md"), "x"),
+            None,
+            "{text:?}"
+        );
+    }
+}
+
+/// #11438: a YAML escaped line break folds `"ho\` + newline + `  oks"` into
+/// `hooks`, so it still denies on every path, with LF, CRLF and a lone CR,
+/// and with the YAML 1.1 breaks NEL, LS and PS.
+#[test]
+fn an_escaped_line_break_spelling_hooks_denies_11438() {
+    let fx = Fx::new();
+    let agent = fx.home.join(".claude/agents/folded.md");
+    std::fs::create_dir_all(agent.parent().expect("dir")).expect("mkdir agents");
+    // (line ending, fold break): LF, CRLF, a lone CR, NEL, LS and PS.
+    for (eol, fold) in [
+        ("\n", "\n"),
+        ("\r\n", "\r\n"),
+        ("\n", "\r"),
+        ("\n", "\u{85}"),
+        ("\n", "\u{2028}"),
+        ("\n", "\u{2029}"),
+    ] {
+        let text = format!(
+            "---{eol}name: x{eol}version: 1{eol}version: 2{eol}? \"ho\\{fold}  oks\"{eol}: x{eol}---{eol}"
+        );
+        assert!(declares_hooks_key(&text), "{fold:?}");
+        assert!(frontmatter_hooks(&text).is_err(), "{fold:?}");
+        std::fs::write(&agent, &text).expect("write agent");
+        let reason = fx
+            .write(&fx.project.join("notes.md"), "x")
+            .unwrap_or_else(|| panic!("{fold:?} fold must deny"));
+        assert!(reason.contains("folded.md"), "{fold:?}: {reason}");
+    }
 }

@@ -23,8 +23,8 @@
 #       `chore(<crate>): release …` or `chore(<crate>): assemble <ver>
 #       changelog`, or whose head branch starts `chore/release-` or
 #       `release/`, or reads `chore/<crate>-<ver>-changelog`;
-#     - a push whose head commit subject has that title shape (a squash merge
-#       keeps the PR title as the subject);
+#     - a push, or a merge_group queue commit, whose head commit subject has
+#       that title shape (a squash merge keeps the PR title as the subject);
 #     - a workflow_dispatch, the manual run used to check a branch before a cut.
 #   A push that bumps a crate version changes a Cargo.toml, so the `changes`
 #   job already calls it Cargo-relevant and it gets `ordinary` or `release`.
@@ -39,7 +39,8 @@
 #   DOCS_ONLY          needs.changes.outputs.docs_only
 #   PR_TITLE           github.event.pull_request.title
 #   PR_HEAD_REF        github.event.pull_request.head.ref
-#   HEAD_COMMIT_MSG    github.event.head_commit.message (push only)
+#   HEAD_COMMIT_MSG    github.event.head_commit.message (push) or
+#                      github.event.merge_group.head_commit.message
 #
 # Output: the scope on stdout. When $GITHUB_OUTPUT is set, also `scope=<scope>`.
 #
@@ -83,7 +84,7 @@ case "$event" in
         ;;
     esac
     ;;
-  push)
+  push | merge_group)
     # The subject is the first line of the commit message. Parameter
     # expansion, NOT `printf … | head -n 1`: under `set -euo pipefail` `head`
     # exits after its first line and printf's later write (a multi-line

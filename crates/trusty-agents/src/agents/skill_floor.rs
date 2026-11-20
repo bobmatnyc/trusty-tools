@@ -103,9 +103,13 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-doctor",
     // #8376: PM ticket-authoring skill, non-coding like `tm-issues-prune`.
     "tm-epic",
+    // tm-estimation: PM planning skill, non-coding like `tm-epic`.
+    "tm-estimation",
     "tm-git-file-tracking",
     "tm-init",
     "tm-issues-prune",
+    // #10576: PM owner-scenario authoring skill, non-coding like `tm-epic`.
+    "tm-owner-scenarios",
     "tm-postmortem",
     "tm-prose-style",
     "tm-secrets",
@@ -120,10 +124,6 @@ pub(crate) const ASSISTANT_REACHABLE_SKILLS: &[&str] = &[
     "tm-workflow",
     "verification-before-completion",
     // ---- trusty-agents bundled, non-coding ----
-    "cto-apex-framework",
-    "cto-bob-voice",
-    "cto-db",
-    "cto-duetto-org",
     "izzie-metro-north",
     "izzie-weather",
     "ticketing-epic",

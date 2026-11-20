@@ -2,7 +2,7 @@
 //!
 //! Why: The original design placed `ToolExecutor` / `AgentPlugin` / `ToolResult`
 //!      inside the host crate's `lib.rs`. That created a hard cargo dependency
-//!      cycle (trusty-agents → cto-assistant → trusty-agents), because external agent
+//!      cycle (trusty-agents → agent crate → trusty-agents), because external agent
 //!      crates need the trait to implement it AND `trusty-agents` needs the agent
 //!      crate to inject the plugin at startup. Cargo cannot resolve circular
 //!      path dependencies even when they are logically one-directional at the
@@ -289,10 +289,10 @@ pub trait ToolExecutor: Send + Sync {
 /// What: Holds the persona name the plugin's tools apply to plus an
 ///       `Arc<dyn ToolExecutor>` per tool. Cloning is cheap (Arc reference
 ///       counts) so the plugin can be reused across sessions.
-/// Test: `cargo test -p cto-assistant agent_plugin_targets_cto_assistant`.
+/// Test: indirectly, by the trusty-agents python_skill tests that build plugins.
 #[derive(Clone)]
 pub struct AgentPlugin {
-    /// Persona name (e.g. `"cto-assistant"`) this plugin's tools belong to.
+    /// Persona name (e.g. `"example-assistant"`) this plugin's tools belong to.
     pub persona_name: String,
     /// Tool executors to register when the named persona becomes active.
     pub tools: Vec<Arc<dyn ToolExecutor>>,
@@ -323,7 +323,7 @@ mod tests {
     ///
     /// Why: Dispatch paths branch on this predicate to decide whether to feed
     ///      the LLM an `is_error: true` tool result. This assertion used to
-    ///      live in `crates/cto-assistant`, deleted in #3732 — it belongs
+    ///      live in a downstream agent crate, deleted in #3732 — it belongs
     ///      beside the type it covers, not in a downstream agent crate.
     /// What: Asserts `ok` is not an error while `err`/`fatal` both are.
     /// Test: self.

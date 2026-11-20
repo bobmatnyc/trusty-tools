@@ -133,6 +133,11 @@ impl FleetEnv {
             // TMUX_TMPDIR above is what keeps tmux off the operator's server.
             .env("TRUSTY_MPM_ALLOW_HOST_STATE", "1")
             .env("PATH", path)
+            // #10612: an Architect launch needs a stable hook exe; CI has no `tm`.
+            .env(
+                trusty_mpm::core::standalone::hooks::TEST_HOOK_EXE_ENV,
+                "/usr/local/bin/tm",
+            )
             .output()
             .expect("spawn tm")
     }
@@ -1963,4 +1968,160 @@ fn fleet_init_seeds_the_watch_list_from_live_sessions() {
         text(&out)
     );
     assert_eq!(std::fs::read(dir.join("local/watch.json")).unwrap(), before);
+}
+
+// --- #11364: `tm architect up` against the private tmux server ---
+
+/// `tm architect up --no-attach --dir <dir>`.
+fn up(env: &FleetEnv, dir: &Path) -> Output {
+    env.tm(&["architect", "up", "--no-attach", "--dir", dir_arg(dir)])
+}
+
+/// #11364: from no session, `up` starts a bound Architect; a second `up`
+/// launches nothing more.
+#[test]
+fn architect_up_starts_a_bound_architect_and_a_second_up_is_a_no_op() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(env.has_session("tm-architect"), "{}", text(&out));
+    assert_eq!(env.recorded_pids().len(), 1, "{}", text(&out));
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("the Architect runs bound"),
+        "{}",
+        text(&out)
+    );
+    assert_eq!(env.launches(2).len(), 1, "a second up launched again");
+}
+
+/// #11364 closure: two concurrent `up` calls leave one session and one launch.
+#[test]
+fn architect_up_racing_a_second_up_yields_one_architect() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    std::fs::create_dir_all(&dir).expect("dir");
+    let outs: Vec<Output> = std::thread::scope(|s| {
+        let a = s.spawn(|| up(&env, &dir));
+        let b = s.spawn(|| up(&env, &dir));
+        vec![a.join().expect("a"), b.join().expect("b")]
+    });
+    for out in &outs {
+        assert!(out.status.success(), "{}", text(out));
+    }
+    assert_eq!(env.launches(2).len(), 1, "two launches: {}", text(&outs[1]));
+    assert_eq!(env.recorded_pids().len(), 1);
+}
+
+/// #11364: a pane at a shell gets a bound `claude`.
+#[test]
+fn architect_up_launches_bound_into_a_pane_at_a_shell() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [first] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    kill_and_wait(first);
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(env.launches(2).len(), 2, "{}", text(&out));
+    assert_eq!(env.status_json()["binding"]["ok"], true, "{}", text(&out));
+}
+
+/// #11364 closure: a live unbound `claude` is reported and never killed.
+#[test]
+fn architect_up_reports_and_never_kills_an_unbound_claude() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [first] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    kill_and_wait(first);
+    let fake = env.bin.path().join("claude").display().to_string();
+    env.send_line("tm-architect", &format!("{fake} --replaced"));
+    let replaced = env.claude_pid_with("--replaced").expect("replacing claude");
+    let out = up(&env, &dir);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(
+        text(&out).contains("unbound: guard exemptions are off"),
+        "{}",
+        text(&out)
+    );
+    assert!(
+        trusty_mpm::core::process::is_process_alive(replaced),
+        "up killed it"
+    );
+}
+
+/// #11364 closure: from inside Claude Code, `up` neither starts nor stops `claude`.
+#[test]
+fn architect_up_inside_claude_code_starts_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    let args = ["architect", "up", "--no-attach", "--dir", dir_arg(&dir)];
+    let out = env.tm_in_session(&args, None, &[("CLAUDECODE", OsStr::new("1"))]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(!env.has_session("tm-architect"), "{}", text(&out));
+}
+
+// --- #11365: `tm architect restart` gates against the private tmux server ---
+
+/// Writes the Architect's Intent Ledger under `dir/local/il`, written at
+/// `written` epoch seconds, plus a stamp when `changed` is given.
+fn write_il(dir: &Path, written: u64, changed: Option<u64>) {
+    let d = dir.join("local/il/.trusty-mpm/datg");
+    std::fs::create_dir_all(&d).expect("datg dir");
+    let state = serde_json::json!({
+        "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
+        "goals": [{"id": "ar-G01", "status": "active"}],
+        "session": {"written_at": "2026-10-21T10:00Z", "written_epoch": written,
+            "task": "ship the restart verb", "next": "run the gates", "owed": [], "crons": []}
+    });
+    std::fs::write(d.join("state.json"), state.to_string()).expect("state");
+    if let Some(c) = changed {
+        std::fs::write(d.join("stamp.json"), format!("{{\"changed_epoch\": {c}}}")).expect("stamp");
+    }
+}
+
+/// #11365 closure: a stale IL exits 4 and the running `claude` survives.
+#[test]
+fn architect_restart_with_a_stale_checkpoint_exits_4_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    write_il(&dir, 1_792_576_800, Some(1_792_576_900));
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(4), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert!(!dir.join("inbox/restart.log").exists());
+}
+
+/// #11365 closure: a box that is not idle exits 2 and the `claude` survives.
+#[test]
+fn architect_restart_on_a_busy_box_exits_2_and_stops_nothing() {
+    let env = FleetEnv::new();
+    let dir = env.dir();
+    assert!(up(&env, &dir).status.success());
+    let [pid] = env.recorded_pids()[..] else {
+        panic!("one record: {:?}", env.recorded_pids());
+    };
+    // Fresh: no stamp. The fake `claude` draws no input box, so it is never idle.
+    write_il(&dir, 1_792_576_800, None);
+    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out));
+    assert!(
+        trusty_mpm::core::process::is_process_alive(pid),
+        "restart stopped claude"
+    );
+    assert_eq!(env.launches(2).len(), 1, "restart launched a claude");
 }

@@ -11,12 +11,12 @@
 # How it is gated: docs/reference/content-release.md
 
 [bundle]
-version = "2.5.0"
+version = "2.7.0"
 schema_major = 1
 
 [[member]]
 path = "agents/BASE-AGENT.md"
-version = "0.3.0"
+version = "0.4.0"
 
 [[member]]
 path = "agents/BASE-ENGINEER.md"
@@ -60,7 +60,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/documentation.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "agents/dotnet-engineer.md"
@@ -92,7 +92,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/local-ops.md"
-version = "0.1.2"
+version = "0.1.3"
 
 [[member]]
 path = "agents/memory-manager.md"
@@ -168,19 +168,11 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/ticketing.md"
-version = "0.1.3"
+version = "0.2.0"
 
 [[member]]
 path = "agents/trusty-agents/agents/assistant/persona.md"
-version = "0.1.0"
-
-[[member]]
-path = "agents/trusty-agents/agents/cto-assistant/events/slack.md"
-version = "0.1.0"
-
-[[member]]
-path = "agents/trusty-agents/agents/cto-assistant/persona.md"
-version = "0.1.0"
+version = "0.1.1"
 
 [[member]]
 path = "agents/trusty-agents/agents/ctrl/persona.md"
@@ -192,11 +184,11 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/trusty-agents/agents/izzie/persona.md"
-version = "0.1.0"
+version = "1.0.0"
 
 [[member]]
 path = "agents/trusty-agents/agents/writing-assistant/persona.md"
-version = "0.1.0"
+version = "1.0.0"
 
 [[member]]
 path = "agents/trusty-agents/workflows/VERSIONING.md"
@@ -248,7 +240,7 @@ version = "0.1.0"
 
 [[member]]
 path = "agents/trusty-code/web-qa.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "agents/typescript-engineer.md"
@@ -264,7 +256,7 @@ version = "0.1.3"
 
 [[member]]
 path = "agents/web-qa.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "agents/web-ui-engineer.md"
@@ -337,6 +329,10 @@ version = "0.1.0"
 [[member]]
 path = "instructions/architect/skills/tm-fleet-check.md"
 version = "0.1.0"
+
+[[member]]
+path = "instructions/output-styles/owner-plain.md"
+version = "1.0.0"
 
 [[member]]
 path = "instructions/trusty-code/skills/api-design-patterns/SKILL.md"
@@ -472,7 +468,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/code-review-standards.md"
-version = "1.1.0"
+version = "1.2.1"
 
 [[member]]
 path = "skills/condition-based-waiting.md"
@@ -592,7 +588,7 @@ version = "1.1.0"
 
 [[member]]
 path = "skills/tm-circuit-breaker.md"
-version = "1.0.0"
+version = "1.0.1"
 
 [[member]]
 path = "skills/tm-cli-operations.md"
@@ -600,7 +596,7 @@ version = "1.1.1"
 
 [[member]]
 path = "skills/tm-delegation-patterns.md"
-version = "1.2.1"
+version = "1.3.1"
 
 [[member]]
 path = "skills/tm-doctor.md"
@@ -608,6 +604,10 @@ version = "0.1.0"
 
 [[member]]
 path = "skills/tm-epic.md"
+version = "0.1.0"
+
+[[member]]
+path = "skills/tm-estimation.md"
 version = "0.1.0"
 
 [[member]]
@@ -620,11 +620,15 @@ version = "1.0.1"
 
 [[member]]
 path = "skills/tm-issues-prune.md"
-version = "1.2.0"
+version = "1.3.0"
 
 [[member]]
 path = "skills/tm-memory-import.md"
 version = "1.0.0"
+
+[[member]]
+path = "skills/tm-owner-scenarios.md"
+version = "0.1.0"
 
 [[member]]
 path = "skills/tm-postmortem.md"
@@ -632,7 +636,7 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-prose-style.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/tm-secrets.md"
@@ -660,19 +664,19 @@ version = "1.0.0"
 
 [[member]]
 path = "skills/tm-ticketing.md"
-version = "2.2.0"
+version = "2.3.0"
 
 [[member]]
 path = "skills/tm-tool-usage-guide.md"
-version = "1.0.1"
+version = "1.0.2"
 
 [[member]]
 path = "skills/tm-verification-protocols.md"
-version = "1.0.0"
+version = "1.1.0"
 
 [[member]]
 path = "skills/tm-workflow.md"
-version = "2.2.0"
+version = "2.3.0"
 
 [[member]]
 path = "skills/tm.md"

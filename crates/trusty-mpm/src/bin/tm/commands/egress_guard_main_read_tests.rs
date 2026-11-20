@@ -44,6 +44,8 @@ const READS: &[&str] = &[
 const SENDS: &[&str] = &[
     "mcp__slack-mcp__slack_send_message",
     "mcp__slack-mcp__slack_create_canvas",
+    // #10890: an edit grant is a write; a subagent must stay denied.
+    "mcp__slack-mcp__slack_canvas_access_set",
     "mcp__gworkspace-mcp__compose_email",
     "mcp__gworkspace-mcp__download_gmail_attachment",
     "mcp__gmail__send_message",
@@ -178,10 +180,14 @@ fn an_unknown_family_tool_is_a_write_11273() {
     }
     let fx = fixture();
     let log = log_of(&fx);
+    // #11521: a stamped main thread may call it; its subagent may not.
     let renamed = call(&fx, "mcp__slack-mcp__slack_fetch_and_post");
-    let (check, _) = denied(run(&renamed, &pm_env(&fx), &log), "an unknown tool");
-    assert_eq!(check, "egress-family");
-    assert_eq!(lines(&log), 0);
+    assert_eq!(run(&renamed, &pm_env(&fx), &log), Verdict::Allow);
+    for (sub, env) in subagent_calls(&fx, "mcp__gmail__fetch_and_post", &pm_env(&fx)) {
+        let (check, _) = denied(run(&sub, &env, &log), "an unknown subagent tool");
+        assert_eq!(check, "egress-family");
+    }
+    assert_eq!(lines(&log), 1);
 }
 
 /// #11273: every listed read is a read; the send and write tools are not.
@@ -211,15 +217,43 @@ fn every_listed_read_is_a_read_and_sends_are_writes_11273() {
     }
 }
 
-/// 🔴 #11273 criterion 3: a subagent's read stays denied under every launch
-/// role — an `agent_id` payload, or `CLAUDE_MPM_SUB_AGENT` — and audits
-/// nothing.
+/// The reads of [`READS`] in the Gmail and Google Workspace class (GP-043).
+const GWORKSPACE_CLASS: &[&str] = &[
+    "mcp__gworkspace-mcp__search_gmail_messages",
+    "mcp__gworkspace-mcp__list_message_attachments",
+    "mcp__gworkspace-mcp__get_gmail_message_content",
+    "mcp__gmail__read_email",
+];
+
+/// A call from a subagent: an `agent_id` payload, or `CLAUDE_MPM_SUB_AGENT`.
+fn subagent_calls(fx: &Fixture, tool: &str, env: &HookEnv) -> [(Value, HookEnv); 2] {
+    let mut dispatched = call(fx, tool);
+    dispatched["agent_id"] = json!("agent-7");
+    let nested = HookEnv {
+        sub_agent: true,
+        ..env.clone()
+    };
+    [(dispatched, env.clone()), (call(fx, tool), nested)]
+}
+
+/// 🔴 #11273 criterion 3: an Architect subagent's read stays denied in every
+/// family, and a PM subagent's outside the GP-043 Gmail/Workspace class, under
+/// an `agent_id` payload or `CLAUDE_MPM_SUB_AGENT`; nothing is audited.
 #[test]
 fn subagent_reads_stay_denied_11273() {
     let fx = fixture();
     let log = log_of(&fx);
-    for env in [pm_env(&fx), spoof_env(&fx), architect_env(&fx)] {
-        for tool in READS {
+    let pm_other: Vec<&str> = READS
+        .iter()
+        .copied()
+        .filter(|t| !GWORKSPACE_CLASS.contains(t))
+        .collect();
+    for (env, tools) in [
+        (pm_env(&fx), pm_other.as_slice()),
+        (spoof_env(&fx), READS),
+        (architect_env(&fx), READS),
+    ] {
+        for tool in tools {
             let mut dispatched = call(&fx, tool);
             dispatched["agent_id"] = json!("agent-7");
             let (check, _) = denied(run(&dispatched, &env, &log), "an agent_id read");
@@ -288,18 +322,23 @@ fn malformed_payload_reads_stay_denied_11273() {
     assert_eq!(lines(&log), 0);
 }
 
-/// 🔴 #11273 criteria 2 and 3 (the forge case): a session with the
-/// main-thread payload and a stamp but no launch record gets reads only. A
-/// PM keeps exactly the #11194 owner-DM send; an unbound Architect gets no
-/// send at all, and no Bash channel command.
+/// 🔴 #11521 (flips #11273's forge case): a stamped PM or Architect main
+/// thread with no launch record may send and write in every family, one
+/// audit line per call with no body. The Bash arm (GP-044) is unchanged.
 #[test]
-fn main_session_sends_without_a_record_stay_denied_11273() {
+fn main_session_sends_without_a_record_are_allowed_11521() {
     let fx = fixture();
     let log = log_of(&fx);
+    let mut expected = 0;
     for (who, env) in [("pm", pm_env(&fx)), ("unbound architect", spoof_env(&fx))] {
         for tool in SENDS {
-            let (check, _) = denied(run(&call(&fx, tool), &env, &log), tool);
-            assert_eq!(check, "egress-family", "{who} {tool}");
+            assert_eq!(
+                run(&call(&fx, tool), &env, &log),
+                Verdict::Allow,
+                "{who} {tool}"
+            );
+            expected += 1;
+            assert_eq!(lines(&log), expected, "{who} {tool}: one audit line");
         }
         let bash = payload(
             &fx,
@@ -309,14 +348,61 @@ fn main_session_sends_without_a_record_stay_denied_11273() {
         let (check, _) = denied(run(&bash, &env, &log), "a Bash send");
         assert_eq!(check, BASH_CHECK, "{who}");
     }
-    assert_eq!(lines(&log), 0);
     let dm = payload(&fx, SEND_TOOL, json!({ "channel": OWNER_DM, "text": BODY }));
     assert_eq!(run(&dm, &pm_env(&fx), &log), Verdict::Allow, "#11194 kept");
-    denied(
-        run(&dm, &spoof_env(&fx), &log),
-        "an unbound Architect DM send",
+    assert_eq!(run(&dm, &spoof_env(&fx), &log), Verdict::Allow);
+    assert_eq!(lines(&log), expected + 2);
+    let text = std::fs::read_to_string(&log).expect("audit log");
+    assert!(!text.contains(BODY), "{text}");
+}
+
+/// 🔴 #11521: a self-cleared Architect — the stamp set, no launch record —
+/// creates a Slack canvas and writes Notion, each with one audit line.
+#[test]
+fn self_cleared_architect_writes_slack_and_notion_11521() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let env = spoof_env(&fx);
+    for tool in [
+        "mcp__slack-mcp__slack_canvas_create",
+        "mcp__notion__notion-update-page",
+    ] {
+        assert_eq!(run(&call(&fx, tool), &env, &log), Verdict::Allow, "{tool}");
+    }
+    let text = std::fs::read_to_string(&log).expect("audit log");
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(
+        text.lines()
+            .all(|l| l.starts_with(ALLOWED_AUDIT) && l.contains("role=architect")),
+        "{text}"
     );
-    assert_eq!(lines(&log), 1);
+}
+
+/// 🔴 #11521: the write lift is main-thread only — a subagent's and an
+/// unstamped main thread's canvas create stay denied; a write whose audit
+/// line cannot be written denies.
+#[test]
+fn subagent_and_unstamped_writes_stay_denied_11521() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let tool = "mcp__slack-mcp__slack_canvas_create";
+    for env in [spoof_env(&fx), pm_env(&fx)] {
+        for (sub, env) in subagent_calls(&fx, tool, &env) {
+            let (check, _) = denied(run(&sub, &env, &log), "a subagent write");
+            assert_eq!(check, "egress-family");
+        }
+    }
+    let unstamped = HookEnv {
+        stamp: None,
+        ..pm_env(&fx)
+    };
+    let (check, _) = denied(run(&call(&fx, tool), &unstamped, &log), "unstamped");
+    assert_eq!(check, "egress-family");
+    assert_eq!(lines(&log), 0);
+    let dir = fx.home.join("a-directory");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let (check, _) = denied(run(&call(&fx, tool), &spoof_env(&fx), &dir), "no audit");
+    assert_eq!(check, AUDIT_CHECK);
 }
 
 /// 🔴 #11273 criterion 5: an inert Bash mention passes for a subagent, a PM
@@ -348,20 +434,24 @@ fn inert_bash_mention_passes_for_every_role_11273() {
     assert_eq!(lines(&log), 0);
 }
 
-/// 🔴 #11273 criterion 2: an unbound Architect's send is told to run
-/// `tm fleet bind`; a PM's and a subagent's deny carry no such hint.
+/// 🔴 #11521 criterion 3: an unbound Architect's send passes, and no deny —
+/// its subagent's send, its Bash channel command — names `tm fleet bind`.
 #[test]
-fn unbound_architect_send_is_denied_and_told_to_bind_11273() {
+fn unbound_architect_send_passes_and_no_deny_says_bind_11521() {
     let fx = fixture();
     let log = log_of(&fx);
     let send = call(&fx, "mcp__slack-mcp__slack_send_message");
-    let (_, reason) = denied(run(&send, &spoof_env(&fx), &log), "an unbound send");
-    assert!(reason.contains("tm fleet bind"), "{reason}");
-    let (_, reason) = denied(run(&send, &pm_env(&fx), &log), "a PM send");
-    assert!(!reason.contains("tm fleet bind"), "{reason}");
+    assert_eq!(run(&send, &spoof_env(&fx), &log), Verdict::Allow);
     let mut dispatched = send.clone();
     dispatched["agent_id"] = json!("agent-7");
     let (_, reason) = denied(run(&dispatched, &spoof_env(&fx), &log), "a subagent");
+    assert!(!reason.contains("tm fleet bind"), "{reason}");
+    let bash = payload(
+        &fx,
+        "Bash",
+        json!({ "command": "curl https://hooks.slack.com/x" }),
+    );
+    let (_, reason) = denied(run(&bash, &spoof_env(&fx), &log), "a Bash send");
     assert!(!reason.contains("tm fleet bind"), "{reason}");
 }
 
@@ -491,4 +581,67 @@ fn only_a_family_deny_is_judged_11273() {
         &pm_env(&fx),
     );
     assert_eq!((v, allowed), (first, None));
+}
+
+/// 🔴 GP-043 (owner ruling 2026-11-16): a PM main session and a PM subagent
+/// each pass a Gmail or Google Workspace read, each with one audit line.
+#[test]
+fn pm_subagent_gworkspace_reads_pass_gp_043() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let mut expected = 0;
+    for tool in GWORKSPACE_CLASS {
+        assert_eq!(
+            run(&call(&fx, tool), &pm_env(&fx), &log),
+            Verdict::Allow,
+            "pm {tool}"
+        );
+        expected += 1;
+        for (sub, env) in subagent_calls(&fx, tool, &pm_env(&fx)) {
+            assert_eq!(run(&sub, &env, &log), Verdict::Allow, "pm subagent {tool}");
+            expected += 1;
+        }
+    }
+    assert_eq!(lines(&log), expected);
+    let text = std::fs::read_to_string(&log).expect("audit");
+    assert!(text.contains("role=pm-subagent"), "{text}");
+    assert!(!text.contains(BODY), "{text}");
+}
+
+/// 🔴 GP-043: a PM subagent's Gmail/Workspace send or write stays denied, and
+/// so does an unknown or unlisted gworkspace tool (fail closed). The PM's
+/// main thread may call each of them (#11521).
+#[test]
+fn pm_subagent_other_family_and_unlisted_reads_stay_denied_gp_043() {
+    let fx = fixture();
+    let log = log_of(&fx);
+    let gated = [
+        "mcp__gworkspace-mcp__compose_email",
+        "mcp__gworkspace-mcp__send_draft",
+        "mcp__gworkspace-mcp__modify_gmail_messages",
+        "mcp__gworkspace-mcp__download_gmail_attachment",
+        "mcp__gworkspace-mcp__send_notification_email",
+        "mcp__gmail__send_message",
+        // Unknown or unclassified: fail closed.
+        "mcp__gworkspace-mcp__get_gmail_everything",
+        "mcp__gworkspace-mcp__search_gmail_messages_v2",
+        "mcp__gworkspace-mcp__list_messages_and_reply",
+    ];
+    let main_log = fx.home.join("main.log");
+    for tool in gated {
+        let v = run(&call(&fx, tool), &pm_env(&fx), &main_log);
+        assert_eq!(v, Verdict::Allow, "pm {tool} (#11521)");
+        for (sub, env) in subagent_calls(&fx, tool, &pm_env(&fx)) {
+            let (check, _) = denied(run(&sub, &env, &log), tool);
+            assert_eq!(check, "egress-family", "pm subagent {tool}");
+        }
+    }
+    let unstamped = HookEnv {
+        stamp: None,
+        ..pm_env(&fx)
+    };
+    for (sub, env) in subagent_calls(&fx, GWORKSPACE_CLASS[0], &unstamped) {
+        denied(run(&sub, &env, &log), "an unstamped subagent read");
+    }
+    assert_eq!(lines(&log), 0);
 }

@@ -144,8 +144,8 @@ pub async fn exchange_installation_token(
 
 /// Resolve a GitHub App installation token for a specific org owner.
 ///
-/// Why: the bot may be installed in multiple orgs (e.g. `duettoresearch`,
-/// `hotstats`); the correct installation token is selected by org name.
+/// Why: the bot may be installed in multiple orgs (e.g. `acme`,
+/// `acme-labs`); the correct installation token is selected by org name.
 /// (spec REV-402).  This is the App-mode mechanism only — the run-mode
 /// strategy (App vs PAT/`gh`) is decided one layer up in `strategy.rs`.
 /// What: requires App credentials (`app_id` + `private_key`) and a matching

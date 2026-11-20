@@ -1,11 +1,11 @@
 //! The python3 the dashboard's LaunchAgent runs (#10606).
 //!
-//! Why: the dashboard reads TOML with `tomllib`, which needs Python 3.11. The
-//! first `python3` found can be macOS's 3.9 at `/usr/bin/python3`, and then the
-//! Projects view loses its stack and config rows.
+//! Why: the dashboard reads TOML with `tomllib` from Python 3.11. The first
+//! `python3` found can be macOS's 3.9 at `/usr/bin/python3`, where it falls
+//! back to its shipped `dashboard_toml` reader (#10606); 3.11+ is preferred.
 //! What: [`choose`] takes the first candidate at or above [`PYTHON_FLOOR`] and
-//! falls back to the first candidate when none qualifies. The dashboard then
-//! reports the old Python itself, on stderr, in `/config.json` and on the page.
+//! falls back to the first candidate when none qualifies; the dashboard runs
+//! on either.
 //! Test: `the_dashboard_prefers_a_python_at_or_above_the_floor`,
 //! `the_dashboard_falls_back_to_the_first_python_below_the_floor`,
 //! `the_python_probe_gives_up_on_a_shim_that_leaves_stdout_held`.
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// The lowest Python the dashboard runs at full function (`tomllib`).
+/// The lowest Python with `tomllib`; preferred, not required (#10606).
 pub(crate) const PYTHON_FLOOR: (u32, u32) = (3, 11);
 
 /// How long one `python3 -c` version probe may run.

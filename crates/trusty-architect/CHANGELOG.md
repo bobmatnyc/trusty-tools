@@ -6,6 +6,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.0] — 2026-11-20
+
+### Added
+
+- `ledger::il`: the IL packet parser and checker ported from `ilio.py` (last ```` ```il ```` fence, required fields, field order, 240-character lines, `pct`, ledger ids, BADID look-alike ids, the `remind:` form, a `pct` unchanged while `done:` claims progress, `new:` kind, `act:` parts and datg's act limits), and `il::apply`, which writes a checked packet to a session's `datg` store with the bytes `datg.py` writes. A replayed packet is a no-op (G0b).
+- `il::route` sends a block the Rust writer does not fully cover to `ilio.py apply`, and `il::mark_applied` records an ilio-applied packet so its replay is a no-op (G0b).
+- `StorePaths::at`, `Writer::batch_at` and `writer::seen`, so a batch can target the `.trusty-mpm/datg/<session>` store (G0b).
+- The IL checker refuses `ilio.py`'s own `SECRET` shapes (`password|secret|token|api_key` assignments, `sk-` keys, private-key headers, any case) as well as the injected scan (G0b).
+- An `il::apply` whose `act` lines fail after the batch commits is no longer a replay: applying the packet again appends the acts once, and the packet replays only after they land (G0b).
+- `il::hold`, `il::mark_pending`, `il::clear_pending` and `il::pending_unknown`: a per-store apply lock and pending markers, so one packet runs `ilio.py apply` at most once (G0b).
+- `il::apply` and `il::route` write only what the caller hands them; the `tm hook` caller hands them the session's own turn only, never a handback or inbound message (see G0b IL authority (owner decision pending)).
+
+## [0.2.3] — 2026-11-16
+
+### Added
+
+- `send_line_guarded` types one line through `send_guarded` and presses Enter only after the line echoes in the box; otherwise it returns the new `SendError::NotEchoed` (#11365).
+- `ledger::fresh` ports the `datg.py fresh` and `datg.py ready` verdicts (exit 0, 1 or 2) so `tm architect restart` can gate on a fresh Intent Ledger checkpoint; an unreadable ledger is never fresh (#11366).
+
+### Fixed
+
+- The dashboard store stamps `created` and `updated` from its own clock on every write and ignores a client value for either; `created` keeps the stored value, and one batch uses one write time for every document and its change-log line (#10678).
+- Dashboard store reads (`get`, `list`, `snapshot`) take `<root>/.lock` shared with the store's bounded wait, so a read never lands between the files of one batch and the task, session and header documents of one write are seen together; `snapshot` reads every collection under one lock. A read behind a writer that never lets go is `Unavailable` within the wait (#10679).
+- A pending "answered" event now carries the owner's typed `answer_note` after the button label (`Other: <text>`), matching the Python prototype (#10765).
+
 ## [0.2.2] — 2026-11-13
 
 ### Fixed

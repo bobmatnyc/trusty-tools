@@ -1,13 +1,13 @@
 //! Issue #4122 regression tests: an index whose durable corpus failed to open
 //! must REFUSE incremental/watcher writes until a corpus open succeeds.
 //!
-//! Why: in production, `duettoresearch-hackathon-tm-hackathon-01` failed its
+//! Why: in production, `acme-hackathon-tm-hackathon-01` failed its
 //! redb corpus open at warm boot (`corpus_open_failed: true`, `chunk_count:
 //! 0`) but its file watcher stayed `active: true`. Ordinary, unrelated file
 //! saves in the worktree kept flowing into the handle, so `chunk_count`
 //! climbed `0 → 68 → 1334` and a FRESH, PARTIAL corpus was persisted over the
 //! never-opened original — which is now unrecoverable. The sibling index
-//! `cto-duetto` hit the identical open failure in the same boot, took no
+//! `cto-acme` hit the identical open failure in the same boot, took no
 //! watcher writes, and recovered all 200,090 chunks on the next restart.
 //! Watcher-writes-during-failure was the ONLY difference between clean
 //! recovery and permanent loss.
@@ -18,7 +18,7 @@
 //!      `spawn_watch_loop` + OS watcher, with a healthy sibling index in the
 //!      same test as the positive control.
 //!   2. `successful_reopen_lifts_quarantine_and_leaves_corpus_intact`
-//!      — the `cto-duetto` recovery case. Guards against over-refusal: a
+//!      — the `cto-acme` recovery case. Guards against over-refusal: a
 //!      quarantine that never lifts is a new outage, not a fix.
 //!   3. `quarantine_refusal_emits_error_level_diagnostic`
 //!      — the refusal must reach a diagnostic surface operators actually
@@ -260,7 +260,7 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
         0,
         "#4122: a write-quarantined index must not grow a chunk corpus from \
          watcher writes — this is the 0 → 68 → 1334 climb that destroyed \
-         duettoresearch-hackathon-tm-hackathon-01"
+         acme-hackathon-tm-hackathon-01"
     );
     assert!(
         broken.refused_incremental_writes() > 0,
@@ -277,7 +277,7 @@ async fn quarantined_index_refuses_watcher_write_and_chunk_count_stays_zero() {
 ///
 /// Why: refusing writes forever on one transient failure would trade a data
 /// loss bug for an availability bug. The incident's contrast case
-/// (`cto-duetto`) failed its open in the same boot and recovered its full
+/// (`cto-acme`) failed its open in the same boot and recovered its full
 /// 200,090-chunk corpus on the next restart — that path must keep working.
 /// This test pins BOTH halves of the boundary: refused while broken, accepted
 /// again after a successful reopen, with the original corpus still intact.
@@ -365,7 +365,7 @@ async fn successful_reopen_lifts_quarantine_and_leaves_corpus_intact() {
     assert!(
         !indexer.is_write_quarantined(),
         "#4122: a successful corpus open MUST lift the quarantine — this is \
-         the cto-duetto recovery path and it must not be broken by the fix"
+         the cto-acme recovery path and it must not be broken by the fix"
     );
     assert_eq!(
         indexer.refused_incremental_writes(),

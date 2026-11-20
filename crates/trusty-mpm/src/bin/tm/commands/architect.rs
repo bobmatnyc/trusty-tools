@@ -22,6 +22,19 @@ use trusty_architect::verbs::{self, InputTarget, Output, PollArgs, VerbError};
 
 use crate::cli::ArchitectAction;
 
+/// `tm architect [verb]`: no verb is `up` plus attach (#11364); returns the exit code.
+pub(crate) async fn run_any(action: Option<ArchitectAction>) -> i32 {
+    match action {
+        None => super::architect_up::up(crate::cli::UpArgs::default()).await,
+        Some(ArchitectAction::Up(args)) => super::architect_up::up(args).await,
+        Some(ArchitectAction::Attach) => super::architect_up::attach(),
+        Some(ArchitectAction::Restart { wait, dir }) => {
+            super::architect_up::restart(wait, dir).await
+        }
+        Some(other) => run(other),
+    }
+}
+
 /// Runs `action` against this process's environment; returns the exit code.
 pub(crate) fn run(action: ArchitectAction) -> i32 {
     // #10063: the dashboard verbs keep the store's exit classes (1, 2, 3).
@@ -87,8 +100,11 @@ fn execute(
             };
             dir.and_then(|d| verbs::self_ctx(&d))
         }
-        ArchitectAction::Dashboard(_) => Err(VerbError::Usage(
-            "dashboard runs through `run`, never `execute`".to_owned(),
+        ArchitectAction::Dashboard(_)
+        | ArchitectAction::Up(_)
+        | ArchitectAction::Attach
+        | ArchitectAction::Restart { .. } => Err(VerbError::Usage(
+            "dashboard, up and attach run through `run_any`, never `execute`".to_owned(),
         )),
     };
     match result {
@@ -191,7 +207,9 @@ mod tests {
         let mut argv = vec!["tm", "architect"];
         argv.extend_from_slice(args);
         match Cli::try_parse_from(argv).map(|c| c.command) {
-            Ok(Some(Command::Architect { action })) => action,
+            Ok(Some(Command::Architect {
+                action: Some(action),
+            })) => action,
             other => panic!("expected tm architect, got {other:?}"),
         }
     }

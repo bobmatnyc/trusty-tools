@@ -1175,7 +1175,7 @@ fn approx(a: f32, b: f32) -> bool {
 ///
 /// Why: replaces the old env-mutating `env_override_defaults_when_unset`.  Any
 /// future refactor that accidentally changes a default value (calibrated over the
-/// duetto review board) is caught here — with zero process-env access.
+/// acme review board) is caught here — with zero process-env access.
 /// What: asserts the four `defaults()` fields equal `LOW_CONFIDENCE_THRESHOLD`
 /// (0.65), `FLOOR_MIN_CONFIDENCE` (0.80), `SOLO_MEDIUM_ESCALATION_CONFIDENCE`
 /// (0.90, #1897), `FLOOR_COUNT_MIN_CONFIDENCE` (0.50).
@@ -1484,7 +1484,7 @@ fn parse_threshold_rejects_invalid_and_out_of_range() {
 
 // ── #PR84 citability gate (RULE 1 + RULE 2) ──────────────────────────────────
 //
-// Regression coverage for the `duetto-eve-agents` PR #84 mis-grade: trusty-review
+// Regression coverage for the `acme-eve-agents` PR #84 mis-grade: trusty-review
 // returned BLOCK / Grade F on a SINGLE finding it self-tagged `effort: high`,
 // `confidence: 0.65`, `verified: confirmed` — a FALSE, non-citable claim about
 // Vercel routing behaviour (contradicted by Vercel's docs, disproven in prod).

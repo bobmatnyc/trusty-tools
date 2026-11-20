@@ -33,9 +33,9 @@ fn workspace_host() -> LaunchHost {
     LaunchHost::of_socket(Some(&dir.join("tm-ws-proj-abc"))).expect("in the socket dir")
 }
 
-/// #10101: the CLI's host is the daemon's rule for the workspace — its
-/// `tm-ws-` server and that server's socket, or the default server under the
-/// opt-out.
+/// #10101: the CLI's host is the daemon's rule for the workspace — the
+/// default server, or its `tm-ws-` server and that server's socket under
+/// `TM_WORKSPACE_TMUX=1`.
 #[test]
 fn a_cli_host_is_the_workspace_server() {
     let dir = tempfile::tempdir().expect("tempdir");

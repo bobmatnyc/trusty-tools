@@ -23,6 +23,10 @@ mod fix_bar_criterion;
 #[path = "bundle_data_design_tests.rs"]
 mod data_design;
 
+// Owner ruling 2026-11-16: the issue-cluster rule in the PM prompt and version-control.
+#[path = "bundle_issue_cluster_tests.rs"]
+mod issue_cluster;
+
 /// A skill file's text from the checkout's content (#9012: skills are runtime
 /// content, no longer compiled-in constants).
 fn skill_text(path: &str) -> &'static str {
@@ -705,19 +709,19 @@ fn every_bundled_style_reads_from_content() {
 }
 
 #[test]
-fn output_style_registry_has_four_distinct_ids() {
-    // HR-4 bundles three PM styles; #8453 adds the supervisor style. Ids and
-    // file names are distinct.
-    assert_eq!(OUTPUT_STYLES.len(), 4);
+fn output_style_registry_has_five_distinct_ids() {
+    // HR-4 bundles three PM styles; #10576 adds `owner-plain`; #8453 adds the
+    // supervisor style. Ids and file names are distinct.
+    assert_eq!(OUTPUT_STYLES.len(), 5);
     let mut ids: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.id).collect();
     ids.sort_unstable();
     ids.dedup();
-    assert_eq!(ids.len(), 4, "style ids must be distinct");
+    assert_eq!(ids.len(), 5, "style ids must be distinct");
 
     let mut files: Vec<&str> = OUTPUT_STYLES.iter().map(|s| s.file_name).collect();
     files.sort_unstable();
     files.dedup();
-    assert_eq!(files.len(), 4, "style file names must be distinct");
+    assert_eq!(files.len(), 5, "style file names must be distinct");
 }
 
 #[test]
@@ -727,7 +731,12 @@ fn the_pm_styles_are_every_style_but_the_architect_style() {
     let pm: Vec<&str> = pm_output_styles().map(|s| s.id).collect();
     assert_eq!(
         pm,
-        ["trusty-mpm", "trusty-mpm-teacher", "trusty-mpm-research"]
+        [
+            "trusty-mpm",
+            "trusty-mpm-teacher",
+            "trusty-mpm-research",
+            "owner-plain"
+        ]
     );
     assert!(OUTPUT_STYLES.iter().any(|s| s.id
         == crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID
@@ -2194,7 +2203,9 @@ const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
     // #8021: ticketing and version-control raised by their measured overage.
-    ("ticketing", 47_229, "#7727"),
+    // #11469: +160 for the acceptance-criteria bullet and close-note line, kept
+    // resident because the ticketing agent has no `Skill` tool.
+    ("ticketing", 47_389, "#7727"),
     ("version-control", 47_724, "#7727"),
 ];
 
@@ -3301,6 +3312,25 @@ fn research_report_carries_findings_not_just_a_memory_pointer_8015() {
     );
 }
 
+/// #8566: the rule named a `docs/research/` block that does not exist; the real
+/// Claude Code check refuses a subagent `Write` by file name, so a research
+/// agent asked for `findings.md` gave up and the PM saved the file itself.
+#[test]
+fn research_names_the_real_report_file_name_block_8566() {
+    let body = agent("research.md");
+    let rule = body
+        .lines()
+        .find(|line| line.contains("**Return Findings as Text**"))
+        .expect("research.md carries the report-carries-findings rule");
+    assert!(
+        !rule.contains("subagent writes under `docs/research/`"),
+        "research.md still names the nonexistent docs/research/ block"
+    );
+    for name in ["FINDINGS*.md", "REPORT*.md", "research-findings.md"] {
+        assert!(rule.contains(name), "research.md rule is missing `{name}`");
+    }
+}
+
 /// #8022: closing a sibling tab dropped the web-qa agent's MCP tab group,
 /// and the agent had no recovery step — a `computer` call on a still-open
 /// tab in that group then failed with a stale cross-extension error.
@@ -3492,4 +3522,210 @@ fn session_resume_skill_does_not_realign_to_a_dead_window_8408() {
         ),
         "tm-session-resume.md must name the tmux-session resolution route"
     );
+}
+
+/// Why: #11390 — ops agents name the account and run its whoami before any
+/// permission ask, so no approval is requested of the wrong account.
+/// What: `BASE-OPS.md` carries the marker, and the rule names the whoami step
+/// and the stop-and-report outcome. Mutation: delete the marker and this fails.
+/// Test: this test.
+#[test]
+fn base_ops_names_the_account_before_a_permission_ask_11390() {
+    let base_ops = agent("BASE-OPS.md");
+    assert!(has_rule(base_ops, "base-ops/account-whoami"));
+    let rule = rule_sentence(base_ops, "base-ops/account-whoami").expect("rule text");
+    assert!(rule.contains("whoami"), "{rule}");
+    assert!(
+        plain(base_ops).contains("never log in or switch accounts"),
+        "BASE-OPS.md must say a mismatch is reported, not fixed"
+    );
+}
+
+/// Why: #10577 — a bug fix reached one path and missed its siblings; the Bug
+/// Fix chain had no step that lists the other callers and data states.
+/// What: the chain carries the sweep (callers via trusty-search, data states)
+/// and the `Shared-behaviour paths` field; the brief template names the field;
+/// `code-review-standards` carries the critic check. Mutation: delete a marker
+/// or the field name and this fails.
+/// Test: this test.
+#[test]
+fn bug_fix_chain_sweeps_related_paths_10577() {
+    let chains = skill_text("skills/tm-delegation-patterns/references/workflow-chains.md");
+    assert!(has_rule(
+        chains,
+        "tm-delegation-patterns/bug-fix-related-path-sweep"
+    ));
+    let sweep = plain(chains);
+    for needle in [
+        "get_call_chain",
+        "Data states",
+        "Shared-behaviour paths:",
+        "Low-risk text edit",
+    ] {
+        assert!(sweep.contains(needle), "the sweep lost `{needle}`");
+    }
+    assert!(
+        plain(skill_text("skills/tm-delegation-patterns.md"))
+            .contains("Shared-behaviour paths: [Bug fix only"),
+        "the brief template must carry the Shared-behaviour paths field"
+    );
+    let critic = skill_text("skills/code-review-standards.md");
+    assert!(has_rule(critic, "code-review-standards/related-path-check"));
+    let check = plain(critic);
+    assert!(check.contains("Shared-behaviour paths` lists the other callers"));
+    assert!(check.contains("Skip the check for a Low-risk text edit"));
+}
+
+/// Why: #10573 — helpers drafted owner scenarios without the owner-persona
+/// file because a brief named no sources and no hand-back reported them.
+/// What: the brief template carries `Sources (path @ revision, role)`,
+/// `Preserve` and the hand-back line; `briefs-and-criteria` carries the
+/// `Read` / `Not found` / `Not read` lines and the PM's check before accepting.
+/// Mutation: delete a field, a marker or a hand-back heading and this fails.
+/// Test: this test.
+#[test]
+fn briefs_name_sources_and_hand_back_read_lines_10573() {
+    let patterns = skill_text("skills/tm-delegation-patterns.md");
+    assert!(has_rule(
+        patterns,
+        "tm-delegation-patterns/brief-sources-preserve-fields"
+    ));
+    let template = plain(patterns);
+    for needle in [
+        "Sources (path @ revision, role):",
+        "Preserve:",
+        "Hand-back: Read / Not found / Not read",
+        "Shared-behaviour paths: [Bug fix only",
+    ] {
+        assert!(
+            template.contains(needle),
+            "the brief template lost `{needle}`"
+        );
+    }
+    let brief = skill_text("skills/tm-delegation-patterns/references/briefs-and-criteria.md");
+    assert!(has_rule(
+        brief,
+        "tm-delegation-patterns/handback-source-check"
+    ));
+    let check = plain(brief);
+    for needle in [
+        "Read: docs/owner-persona.md @",
+        "Not found:",
+        "Not read:",
+        "PM check before accepting",
+        "a source is on no line",
+        "line is a claim, not proof",
+    ] {
+        assert!(
+            check.contains(needle),
+            "the hand-back check lost `{needle}`"
+        );
+    }
+}
+
+/// Why: #10575 — a "goals only" document closed after one deleted row, and an
+/// invented word count cut owner rules, because Done had no non-code test.
+/// What: `completion-standard.md` carries `tm-workflow/criteria-quote-the-request`,
+/// `tm-workflow/evidence-map` (four lists) and `tm-workflow/no-proxy-targets`
+/// with `INVENTED_TARGET` and `OWNER-REQUESTED-LIMIT` as WARNING codes;
+/// `phases.md` carries `tm-workflow/docs-skip-keeps-evidence`; CORE names both.
+/// Mutation: delete a marker, a list label or a code and this fails.
+/// Test: this test.
+#[test]
+fn non_code_deliverables_quote_the_request_and_map_evidence_10575() {
+    let standard = skill_text("skills/tm-workflow/references/completion-standard.md");
+    for id in [
+        "tm-workflow/criteria-quote-the-request",
+        "tm-workflow/evidence-map",
+        "tm-workflow/no-proxy-targets",
+    ] {
+        assert!(has_rule(standard, id), "completion-standard lost `{id}`");
+    }
+    let flat = plain(standard);
+    for needle in [
+        "section headed `Evidence map`",
+        "- Verified —",
+        "- Helper-reported —",
+        "- Unfinished —",
+        "- Untested —",
+        "\"not finished: 12 of 24 rewritten, none checked yet\"",
+        "Size is never the measure",
+        "| `INVENTED_TARGET` | WARNING |",
+        "| `OWNER-REQUESTED-LIMIT: \"<owner's exact words>\"` | WARNING clears |",
+        "An unrecorded quote keeps `INVENTED_TARGET`",
+        "Owner ruling Dr8: these warn first and deny nothing",
+    ] {
+        assert!(flat.contains(needle), "completion-standard lost `{needle}`");
+    }
+    assert!(
+        !flat.contains("Cross-vendor") && !flat.contains("cross-vendor"),
+        "gap 4 is closed by ruling D5f; no cross-vendor reviewer here"
+    );
+    let phases = skill_text("skills/tm-workflow/references/phases.md");
+    assert!(has_rule(phases, "tm-workflow/docs-skip-keeps-evidence"));
+    assert!(plain(phases).contains("A skip drops the agent, never the evidence"));
+    assert!(
+        plain(instruction_text("sections/core.md"))
+            .contains("Non-code: criteria quote the request; add an evidence map.")
+    );
+}
+
+/// The style body after its frontmatter, without the `## ` sections named in
+/// `drop` (#10576: what `owner-plain` must share with the default).
+fn style_body_without(text: &str, drop: &[&str]) -> String {
+    let body = text.splitn(3, "---\n").nth(2).unwrap_or(text);
+    body.split("\n## ")
+        .filter(|s| !drop.iter().any(|d| s.starts_with(d)))
+        .collect::<Vec<_>>()
+        .join("\n## ")
+}
+
+/// Why: #10576 — click-by-click owner scenarios cost the owner a month, and
+/// reporting to a non-technical owner was optimistic and irregular.
+/// What: `[style] active = "owner-plain"` resolves a bundled style that equals
+/// the default outside `PM Response Format` and `Reporting to the Owner`, and
+/// carries the cadence, correction and verified-versus-reported rules; the
+/// `tm-owner-scenarios` skill pins `tm-owner-scenarios/four-fields`,
+/// `tm-owner-scenarios/no-numbered-ui-steps` and
+/// `tm-owner-scenarios/owner-cost-in-review-minutes`.
+/// Mutation: drop the registry row, edit another section, or delete a marker.
+/// Test: this test.
+#[test]
+fn owner_plain_style_and_owner_scenarios_skill_10576() {
+    let mut cfg = crate::core::config::MpmConfig::default();
+    cfg.style.active = Some("owner-plain".to_string());
+    let style = crate::core::output_style::resolve_active_style(&cfg, None)
+        .expect("`[style] active = \"owner-plain\"` selects a bundled style");
+    assert_eq!(style.id, "owner-plain");
+    let owner = style.content(rc());
+    assert!(owner.contains("\nname: owner-plain\n"));
+    let sections = ["PM Response Format", "Reporting to the Owner"];
+    assert_eq!(
+        style_body_without(owner, &sections),
+        style_body_without(instruction_text("output-styles/trusty-mpm.md"), &sections),
+        "owner-plain may differ from the default only in {sections:?}"
+    );
+    let flat = plain(owner);
+    for needle in [
+        "at least hourly while work runs",
+        "Send nothing when nothing changed",
+        "Correct an earlier overclaim in the next message and in every handoff",
+        "Verified (you opened it), Helper-reported (an agent said so), Unfinished, Untested",
+        "review time in minutes",
+        "Skill(skill=\"tm-owner-scenarios\")",
+    ] {
+        assert!(flat.contains(needle), "owner-plain lost `{needle}`");
+    }
+    let skill = skill_text("skills/tm-owner-scenarios.md");
+    for id in [
+        "tm-owner-scenarios/four-fields",
+        "tm-owner-scenarios/no-numbered-ui-steps",
+        "tm-owner-scenarios/owner-cost-in-review-minutes",
+    ] {
+        assert!(has_rule(skill, id), "tm-owner-scenarios lost `{id}`");
+    }
+    for needle in ["`Intent:`", "`Situation:`", "`Result:`", "`Trace:`"] {
+        assert!(skill.contains(needle), "tm-owner-scenarios lost {needle}");
+    }
+    assert!(skill.contains("scripts/check_owner_scenarios.py --matrix"));
 }

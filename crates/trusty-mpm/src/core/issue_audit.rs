@@ -49,10 +49,12 @@ use crate::core::trusty_tools_config::ResolvedTicketing;
 /// What: the seven fields the requirements read, plus the three relationship
 /// fields. `gh` 2.98 serves `parent`, `blockedBy` and `subIssues` from both
 /// verbs, so the audit needs no separate `gh api` call for them. `title` is
-/// read by `tm pr open` for a phase issue's `[EPIC_N PHASE_M]` tag (#9571).
-/// Test: `json_fields_cover_every_audited_requirement`.
-pub const AUDIT_JSON_FIELDS: &str = "number,title,milestone,projectItems,labels,comments,state,\
-     createdAt,parent,blockedBy,subIssues";
+/// read by `tm pr open` for a phase issue's `[EPIC_N PHASE_M]` tag (#9571);
+/// `body` by the acceptance-criteria row (#11469).
+/// Test: `json_fields_cover_every_audited_requirement`,
+/// `json_fields_request_the_issue_body`.
+pub const AUDIT_JSON_FIELDS: &str = "number,title,body,milestone,projectItems,labels,comments,\
+     state,createdAt,parent,blockedBy,subIssues";
 
 /// The comment prefix that excuses an unset milestone (#7067's escape hatch).
 pub const NO_MILESTONE_PREFIX: &str = "no-milestone:";
@@ -154,6 +156,9 @@ pub struct IssueFacts {
     /// Issue title; `tm pr open` reads its phase tag (#9571).
     #[serde(default)]
     pub title: String,
+    /// Issue body; searched for acceptance criteria (#11469).
+    #[serde(default)]
+    pub body: String,
     /// The single milestone, or `None` when unset.
     #[serde(default)]
     pub milestone: Option<TitleRef>,
@@ -202,6 +207,8 @@ pub enum Verdict {
     Skip,
     /// Reported for the reader; never gating.
     Info,
+    /// A requirement is unmet but not yet gating (#11469); never exits 1.
+    Warn,
 }
 
 impl Verdict {
@@ -213,6 +220,7 @@ impl Verdict {
             Self::Fail => "FAIL",
             Self::Skip => "SKIP",
             Self::Info => "INFO",
+            Self::Warn => "WARN",
         }
     }
 }
@@ -283,6 +291,15 @@ const REQ_PROJECT: &str = "project";
 const REQ_MILESTONE: &str = "milestone";
 const REQ_COMPONENT: &str = "component label";
 const REQ_RELATIONSHIPS: &str = "relationships";
+const REQ_ACCEPTANCE: &str = "acceptance criteria";
+
+/// The warning an issue body with no acceptance criteria gets (#11469).
+///
+/// Why: the row only warns for one release, so the text must name the rule and
+/// both accepted forms for the filer to fix it without opening the standard.
+pub const ACCEPTANCE_WARNING: &str = "no acceptance criteria — TICKETING.md \"Acceptance \
+     criteria\" rule: add an `Acceptance criteria:` list or an `## Acceptance criteria` \
+     heading (warn only; fails from a later release)";
 
 /// The requirement columns a batch summary table carries.
 pub const SUMMARY_REQUIREMENTS: &[&str] = &[REQ_PROJECT, REQ_MILESTONE, REQ_COMPONENT];
@@ -294,7 +311,7 @@ pub const SUMMARY_REQUIREMENTS: &[&str] = &[REQ_PROJECT, REQ_MILESTONE, REQ_COMP
 /// requirement, what it found. Taking [`ResolvedTicketing`] rather than
 /// hardcoded booleans is what keeps the audit and `tm issue standard` reporting
 /// the same rules.
-/// What: four rows in a fixed order. `project` and `milestone` are PASS/FAIL
+/// What: five rows in a fixed order. `project` and `milestone` are PASS/FAIL
 /// only when `project_required` / `milestone_required` are set and INFO
 /// otherwise; an unset milestone with a `no-milestone: <reason>` comment is
 /// SKIP with the reason quoted. `component label` requires at least one label
@@ -319,6 +336,7 @@ pub fn audit_issue(
         project_row(facts, ticketing),
         milestone_row(facts, ticketing),
         component_row(facts, components),
+        acceptance_row(facts),
         relationships_row(facts),
     ];
     IssueAudit {
@@ -492,6 +510,162 @@ fn component_row(facts: &IssueFacts, components: &ComponentLabels) -> AuditRow {
         verdict,
         detail,
     }
+}
+
+/// The `acceptance criteria` row — PASS or WARN, never FAIL (#11469).
+///
+/// Why: the acceptance-criteria rule (TICKETING.md) warns for one release
+/// before it gates, so an issue filed before the rule never turns the audit red.
+/// What: PASS when [`has_acceptance_criteria`] finds a label or heading with
+/// at least one real criterion under it; otherwise WARN with
+/// [`ACCEPTANCE_WARNING`]. Testability is not judged.
+/// Test: `a_labelled_acceptance_criteria_list_passes`,
+/// `an_acceptance_heading_passes`,
+/// `a_body_without_acceptance_criteria_warns_and_does_not_fail`,
+/// `an_unfilled_template_warns`, `a_tbd_label_warns`,
+/// `a_heading_inside_a_code_fence_warns`,
+/// `a_bulleted_label_with_real_items_passes`,
+/// `a_criterion_starting_with_an_issue_reference_passes`.
+fn acceptance_row(facts: &IssueFacts) -> AuditRow {
+    let (verdict, detail) = if has_acceptance_criteria(&facts.body) {
+        (Verdict::Pass, "present".to_string())
+    } else {
+        (Verdict::Warn, ACCEPTANCE_WARNING.to_string())
+    };
+    AuditRow::new(REQ_ACCEPTANCE, verdict, detail)
+}
+
+/// Whether `body` carries at least one real acceptance criterion (#11469).
+///
+/// What: lines inside fenced code blocks and `<!-- -->` comments (multi-line
+/// too) are ignored. A marker is an `Acceptance criteria:` label, bulleted or
+/// not, or an `Acceptance` / `Acceptance criteria` heading. Text after the
+/// label on its own line counts as the criterion. Under a heading, any line
+/// up to the next heading counts. Under a bare label, only list items or lines
+/// indented deeper than the label count, and the first other non-blank line
+/// ends the section. A criterion must not be a placeholder (`...`, `TBD`,
+/// `TODO`, `none`). A heading is a `#` run followed by whitespace.
+pub fn has_acceptance_criteria(body: &str) -> bool {
+    // #11469: `None` = not collecting; `Some(None)` = under a heading;
+    // `Some(Some(indent))` = under a bare label at that indent.
+    let mut collecting: Option<Option<usize>> = None;
+    for raw in visible_lines(body) {
+        let indent = raw.len() - raw.trim_start().len();
+        let is_list_item = strip_list_marker(&raw).len() < raw.trim_start().len();
+        let line = raw.replace('*', "");
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        if let Some(text) = heading_text(&lower) {
+            let text = text.strip_suffix(':').unwrap_or(text).trim_end();
+            collecting = (text == "acceptance" || text == "acceptance criteria").then_some(None);
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let item = strip_list_marker(line);
+        if item
+            .to_ascii_lowercase()
+            .starts_with("acceptance criteria:")
+        {
+            let rest = &item["acceptance criteria:".len()..];
+            if is_real_criterion(rest) {
+                return true;
+            }
+            collecting = rest.trim().is_empty().then_some(Some(indent));
+            continue;
+        }
+        match collecting {
+            Some(Some(label_indent)) if !is_list_item && indent <= label_indent => {
+                collecting = None;
+            }
+            Some(_) if is_real_criterion(item) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// The text after a Markdown heading's `#` run, or `None` when `line` is not
+/// a heading: the run must be followed by whitespace, so `#11469` is not one.
+fn heading_text(line: &str) -> Option<&str> {
+    let rest = line.trim_start_matches('#');
+    (rest.len() < line.len() && rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+}
+
+/// `body`'s lines with fenced code blocks and HTML comments removed.
+fn visible_lines(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let (mut in_fence, mut in_comment) = (false, false);
+    for raw in body.lines() {
+        if !in_comment
+            && (raw.trim_start().starts_with("```") || raw.trim_start().starts_with("~~~"))
+        {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let mut kept = String::new();
+        let mut rest = raw;
+        loop {
+            if in_comment {
+                match rest.find("-->") {
+                    Some(i) => {
+                        rest = &rest[i + 3..];
+                        in_comment = false;
+                    }
+                    None => break,
+                }
+            } else {
+                match rest.find("<!--") {
+                    Some(i) => {
+                        kept.push_str(&rest[..i]);
+                        rest = &rest[i + 4..];
+                        in_comment = true;
+                    }
+                    None => {
+                        kept.push_str(rest);
+                        break;
+                    }
+                }
+            }
+        }
+        out.push(kept);
+    }
+    out
+}
+
+/// `line` without a leading `-`/`*`/`+` bullet, `1.`/`1)` number or `[ ]` box.
+fn strip_list_marker(line: &str) -> &str {
+    let mut s = line.trim_start();
+    if let Some(r) = s.strip_prefix(['-', '+', '*']) {
+        s = r.trim_start();
+    } else {
+        let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if digits > 0
+            && let Some(r) = s[digits..].strip_prefix(['.', ')'])
+        {
+            s = r.trim_start();
+        }
+    }
+    for boxed in ["[ ]", "[x]", "[X]"] {
+        if let Some(r) = s.strip_prefix(boxed) {
+            return r.trim_start();
+        }
+    }
+    s
+}
+
+/// Whether `text` (list marker already stripped) states a criterion.
+fn is_real_criterion(text: &str) -> bool {
+    let text = strip_list_marker(text)
+        .trim()
+        .trim_end_matches(['.', '…'])
+        .trim();
+    !text.is_empty()
+        && !["tbd", "todo", "none", "n/a"].contains(&text.to_ascii_lowercase().as_str())
 }
 
 /// The `relationships` row — always INFO.

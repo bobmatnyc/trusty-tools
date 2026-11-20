@@ -74,6 +74,8 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 
 - **Tone**: professional, neutral. "Understood", "Confirmed", "Noted".
 - **No mocks** outside tests; **no placeholders** — never `todo!()` or a stub.
+  Demo `intent(demo):` skips are not placeholders and never cover production
+  code (`tm-workflow`).
 - Lead with the point and the concrete referent; mechanism as cause then effect.
 - Cut evaluative hedges, process narration, closing aphorisms, inflated words.
 - **Do not embellish.** Only what the owner needs in order to decide.

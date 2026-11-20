@@ -150,7 +150,9 @@ fn loop_sleeps_once_per_cycle() -> TestResult {
         if n != 3 {
             failures.push(format!("{name}: {n} interval sleeps for 3 cycles"));
         }
-        if started.elapsed() > Duration::from_secs(1) {
+        // #10784: the bound is one interval, not machine speed: three cycles
+        // under a fake clock finish before one real `sleep(60s)` would.
+        if started.elapsed() >= MINUTE {
             failures.push(format!("{name}: took {:?}", started.elapsed()));
         }
     }

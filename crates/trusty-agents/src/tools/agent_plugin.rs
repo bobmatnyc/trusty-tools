@@ -1,7 +1,7 @@
 //! Agent plugin injection point.
 //!
 //! Why: The ctrl loop previously hard-coded per-persona tool registration
-//!      (`if persona_name == "cto-assistant" { register(cto_db_tools()) }`).
+//!      (`if persona_name == "<persona>" { register(<persona>_tools()) }`).
 //!      That coupled `trusty-agents` directly to every agent's tool surface and
 //!      forced sensitive agent logic (HR/budget queries) to live inside the
 //!      host binary. `AgentPlugin` decouples this: a plugin source constructs
@@ -9,7 +9,7 @@
 //!      `plugin.persona_name` against the active persona at session start.
 //!      The live producer is now `crate::tools::python_skill`, which turns a
 //!      DECLARED Python skill directory into plugins — so no agent's tools
-//!      require Rust any more (the last such crate, `cto-assistant`, was
+//!      require Rust any more (the last such crate was
 //!      dissolved in #3732). An out-of-workspace private launcher can still
 //!      inject its own plugins via `trusty_agents::install_plugins(...)`.
 //! What: A named bundle of `ToolExecutor`s associated with a specific

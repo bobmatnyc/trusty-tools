@@ -21,7 +21,7 @@ type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 const GM: &str = "a2@example.com";
 const MASA: &str = "a3@example.com";
-const DUETTO: &str = "a5@example.com";
+const ACME: &str = "a5@example.com";
 
 fn t(s: &str) -> TestResult<UtcTime> {
     Ok(UtcTime::parse_iso(s)?)
@@ -85,7 +85,7 @@ fn fleet(extra: Vec<Value>) -> Vec<Value> {
         ),
         row(
             "2026-10-07T16:18:00Z",
-            DUETTO,
+            ACME,
             json!(0),
             Value::Null,
             json!(50),
@@ -202,7 +202,7 @@ fn test_plan_names_best_next_account_and_skips_exhausted_5h() -> TestResult {
     let now = t("2026-10-07T16:20:00Z")?;
     let p = plan(&rows(fleet(vec![gm_6030()]))?, now, Some(GM))?; // 60% -> 84% in 1.7 h
     assert!(p.need);
-    assert_eq!(p.next.as_ref().map(|(a, _)| a.as_str()), Some(DUETTO)); // lowest weekly (50%)
+    assert_eq!(p.next.as_ref().map(|(a, _)| a.as_str()), Some(ACME)); // lowest weekly (50%)
     assert!(
         p.skipped
             .contains(&(MASA.to_owned(), "5h window at 100%".to_owned()))
@@ -222,7 +222,7 @@ fn test_plan_no_cutover_when_healthy_and_limit_reached_means_now() -> TestResult
         .into_iter()
         .filter(|r| r["account"] != GM)
         .collect();
-    assert!(!plan(&rows(healthy)?, now, Some(DUETTO))?.need);
+    assert!(!plan(&rows(healthy)?, now, Some(ACME))?.need);
     let p = plan(&rows(fleet(vec![]))?, now, Some(MASA))?;
     assert!(p.need);
     assert_eq!(p.switch_at, Some(now));
@@ -240,7 +240,7 @@ fn test_runway_capacity_hours_and_gap() -> TestResult {
     let now = t("2026-10-07T16:20:00Z")?;
     let rw = runway(&rows(fleet(vec![]))?, now)?;
     let close = |a: f64, b: f64| (a - b).abs() <= b.abs() * 1e-6;
-    // masa, gmail, r, support, bob, duetto
+    // masa, gmail, r, support, bob, acme
     assert!(
         close(rw.left, 73.0 + 16.0 + 11.0 + 4.0 + 7.0 + 50.0),
         "{}",
@@ -272,7 +272,7 @@ fn test_alerts_week_thresholds_and_5h_exhaustion_name_next_account() -> TestResu
         .filter(|(k, _)| k.starts_with("wk>=80"))
         .map(|(_, d)| d)
         .collect();
-    assert!(!wk.is_empty() && wk[0].as_str().unwrap_or_default().contains(DUETTO));
+    assert!(!wk.is_empty() && wk[0].as_str().unwrap_or_default().contains(ACME));
     assert!(!out.keys().any(|k| k.starts_with("wk>=90")));
     assert!(out.keys().any(|k| k.starts_with("cutover:")));
     let exhaust = fleet(vec![
@@ -336,10 +336,10 @@ fn test_alert_detail_fits_poller_cap() -> TestResult {
         GM,
     )? {
         let head: String = d.chars().take(DETAIL_MAX).collect();
-        assert!(head.contains(DUETTO), "{k}");
+        assert!(head.contains(ACME), "{k}");
         // The poller's own alert() keeps the same head.
         assert!(
-            alert("usage", &k, &d, "", "", 0.0).detail.contains(DUETTO),
+            alert("usage", &k, &d, "", "", 0.0).detail.contains(ACME),
             "{k}"
         );
     }

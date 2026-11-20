@@ -739,37 +739,50 @@ async fn unreadable_verdict_is_forwarded_identically_every_time() {
 
 // ─── #9066 F1, F2: the wait for the accept-time lookup ───────────────────────
 
-/// Finds the agent pid 500, but only after the verdict bound has passed.
-struct Stalled;
+/// Finds the agent pid 500, but only once the test releases it.
+// #10784: a gate the test opens, not a fixed sleep, so the lookup answers only
+// after the request has returned, however slow the host is.
+struct Stalled(std::sync::Mutex<std::sync::mpsc::Receiver<()>>);
 
 impl PidResolver for Stalled {
     fn pid_of(&self, _local: SocketAddr, _peer: SocketAddr) -> Option<u32> {
-        std::thread::sleep(VERDICT_BOUND + std::time::Duration::from_secs(1));
+        let _ = self.0.lock().expect("lock").recv();
         Some(500)
+    }
+}
+
+/// Opens the [`Stalled`] gate on drop, so a failed assertion cannot leave
+/// the blocking task (and the runtime's shutdown) waiting.
+struct Release(std::sync::mpsc::Sender<()>);
+
+impl Drop for Release {
+    fn drop(&mut self) {
+        let _ = self.0.send(());
     }
 }
 
 #[tokio::test]
 async fn a_lookup_slower_than_the_bound_is_unreadable() {
     let table: Arc<dyn ProcessTable> = Arc::new(family());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _release = Release(tx);
     let lookup = PeerLookup::start(
-        Stalled,
+        Stalled(std::sync::Mutex::new(rx)),
         Arc::clone(&table),
         OWN.parse().expect("addr"),
         "127.0.0.1:50000".parse().expect("addr"),
     );
-    let started = std::time::Instant::now();
-    let (status, sent) = wire_assertion_for(table, Some(lookup)).await;
-    let took = started.elapsed();
+    // The lookup never answers while the request runs, so a request that
+    // waits on it past VERDICT_BOUND fails here instead of hanging.
+    let (status, sent) =
+        tokio::time::timeout(VERDICT_BOUND * 5, wire_assertion_for(table, Some(lookup)))
+            .await
+            .expect("the request waited on the lookup past the verdict bound");
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         sent,
         json!({ "agent_parent": true, "source": "unreadable" }),
         "a timed-out lookup never yields the late `mapped` answer"
-    );
-    assert!(
-        took < VERDICT_BOUND + std::time::Duration::from_millis(500),
-        "the request waited {took:?}, past the {VERDICT_BOUND:?} bound"
     );
 }
 
@@ -931,7 +944,7 @@ fn console_kind_table_matches_the_server_error_kinds() {
         .filter_map(|rest| rest.split('"').next())
         .collect();
     let console: HashSet<&str> = UPSTREAM_KINDS.iter().map(|(k, _, _)| *k).collect();
-    assert_eq!(server.len(), 39);
+    assert_eq!(server.len(), 41);
     assert_eq!(console, server);
 
     let deadline = secrets_source("server/deadline.rs");

@@ -135,7 +135,7 @@ mod tests {
             ),
             project("gone", "/nonexistent/7406/no-such-checkout"),
             project("trusty-tools", "https://github.com/bobmatnyc/trusty-tools"),
-            project("apex", "git@github.com:duetto/apex.git"),
+            project("apex", "git@github.com:acme/apex.git"),
         ]
     }
 

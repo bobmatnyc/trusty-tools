@@ -22,6 +22,18 @@ fn scratch_home() -> tempfile::TempDir {
         .expect("scratch home")
 }
 
+/// Record a non-Fable parent model for `session_id` under `home` (#11353).
+///
+/// Why: a capped role's `inherit` dispatch is refused while the parent model
+/// is unknown; these cases assert the builder cap, not the Fable cap.
+fn record_opus_parent(home: &Path, session_id: &str) {
+    trusty_mpm::core::session_model::record_session_model(
+        &home.join(".trusty-mpm"),
+        session_id,
+        "claude-opus-5-5",
+    );
+}
+
 /// Run `tm hook <args>` with `payload` on stdin; return stdout.
 fn run_hook(home: &Path, args: &[&str], payload: &Value) -> String {
     run_hook_against(home, args, payload, UNREACHABLE_DAEMON)
@@ -154,6 +166,7 @@ fn hook_emits_the_guards_lease_rewrite_for_a_heavy_build() {
 #[test]
 fn a_dispatch_is_never_refused_by_a_builder_cap() {
     let home = scratch_home();
+    record_opus_parent(home.path(), "s-8261");
     for agent in ["rust-engineer", "typescript-engineer", "local-ops"] {
         let payload = json!({
             "hook_event_name": "PreToolUse",
@@ -258,13 +271,14 @@ fn agent_bash_payload(cwd: &Path, agent: &str, command: &str) -> Value {
     payload
 }
 
-/// 2026-09-25 report (duettoresearch/cto-reports): a read-only `local-ops`
+/// 2026-09-25 report (acme-labs/cto-reports): a read-only `local-ops`
 /// dispatch — process and service checks, no compiler — was refused by the
 /// builder cap at a measured load of 71.9. Admission now follows the build
 /// command, so the dispatch is admitted on the same loaded host.
 #[test]
 fn a_read_only_local_ops_dispatch_is_admitted_on_a_loaded_host() {
     let home = scratch_home();
+    record_opus_parent(home.path(), "5f0e2c1a-1111-4222-8333-944445555666");
     let url = spawn_refusing_daemon(
         r#"{"claimed":false,"cap":1,"ceiling":12,"holders":[{"agent":"rust-engineer","elapsed_secs":600}],
             "capacity_reason":"1-minute load 71.9 is above 32.0 (16 logical cores x builders.load_factor 2.0)"}"#,
@@ -298,7 +312,7 @@ fn a_rust_engineer_dispatch_never_consults_the_builder_cap() {
     );
 }
 
-/// 2026-09-24 trigger (mac-duetto): a light `typescript-engineer` dispatch was
+/// 2026-09-24 trigger (mac-acme): a light `typescript-engineer` dispatch was
 /// refused as "builder 2 of 1" on free memory 5059 MB. It is admitted now.
 #[test]
 fn a_light_typescript_engineer_dispatch_is_admitted_under_memory_pressure() {

@@ -7,13 +7,23 @@
 characters. Not "Bug in system".
 
 🔴 **Body**: a concise problem/outcome statement, the decisive evidence, and
-**one to four observable closure conditions**. Nothing else. The form is binding
+**one to four acceptance criteria**. Nothing else. The form is binding
 and is specified once in the agent asset (`assets/agents/ticketing.md`, "Sparse
 Ticket Bodies") — no structured headings, point rather than restate, cite file
 and symbol rather than line numbers, and stop when the body fills a short screen.
 Most tickets do all of it in under ten lines.
 
-Alongside the closure conditions, a **defect** ticket must let the reader tell
+**Acceptance criteria.** Every bug, feature, task and epic issue states one to
+four testable acceptance criteria, each a check that can fail for a named
+reason; an epic states them on its phase issues. They set the good-enough bar:
+the issue closes when each criterion has evidence. Anything beyond the bar
+becomes a follow-up issue filed at close, with its own criteria and the
+`stretch` label; it never widens this issue's scope. The closing note lists
+every criterion with its evidence, plus the follow-up issue numbers or "none".
+
+Write them as a labelled `Acceptance criteria:` list, never a heading.
+
+Alongside the acceptance criteria, a **defect** ticket must let the reader tell
 the confidence state (`references/promotion-gate.md`, §3); a feature, task, epic, or spec ticket carries none.
 Every ticket, defect or not, conveys its relationship to parent work,
 including the search/dispatch outcome — a fact about the issue, not a heading

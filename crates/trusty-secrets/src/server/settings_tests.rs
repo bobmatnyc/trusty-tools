@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{
-    CACHE_MAX_AGE_ENV, DEFAULT_CACHE_MAX_AGE, INDEX_DIR_ENV, SOCKET_SUBPATH, ServerSettings,
-    SettingsError,
+    CACHE_MAX_AGE_ENV, DEFAULT_CACHE_MAX_AGE, DEFAULT_UNLOCK_TTL, INDEX_DIR_ENV, SOCKET_SUBPATH,
+    ServerSettings, SettingsError, UNLOCK_TTL_ENV,
 };
 use crate::store::INDEX_SUBDIR;
 
@@ -272,5 +272,26 @@ fn settings_cache_max_age_flag_env_default() {
             matches!(refused, Err(SettingsError::InvalidCacheMaxAge)),
             "{bad:?}: {refused:?}"
         );
+    }
+}
+
+/// Why: #10524 — the unlock grant lives 8 h; its variable may shorten it for
+/// a sandbox check and never lengthen it, since the first spawner's
+/// environment reaches the server every client shares.
+/// Test: itself.
+#[test]
+fn settings_unlock_ttl_env_only_shortens() {
+    let socket = Path::new("/tmp/trusty-secrets-10524/s.sock");
+    let parsed = |var: Option<&'static str>| {
+        let env = move |name: &str| var.filter(|_| name == UNLOCK_TTL_ENV).map(str::to_owned);
+        parse_settings(serve_args(Some(socket), &[]), env)
+            .map(|s| s.unlock_ttl)
+            .unwrap()
+    };
+    assert_eq!(DEFAULT_UNLOCK_TTL, Duration::from_secs(8 * 3600));
+    assert_eq!(parsed(None), DEFAULT_UNLOCK_TTL);
+    assert_eq!(parsed(Some("60")), Duration::from_secs(60));
+    for ignored in ["86400", "0", "soon", ""] {
+        assert_eq!(parsed(Some(ignored)), DEFAULT_UNLOCK_TTL, "{ignored:?}");
     }
 }

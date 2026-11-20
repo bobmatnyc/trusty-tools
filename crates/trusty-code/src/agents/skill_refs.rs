@@ -43,6 +43,8 @@ pub const REFERENCED_SKILLS: &[&str] = &[
     // #8010: BASE-AGENT's revert/bisect rule points here (#7628).
     "git-workflow",
     "self-improvement-loop",
+    // #11481: BASE-AGENT's Write Plainly section points here.
+    "tm-prose-style",
     "verification-before-completion",
 ];
 
@@ -65,7 +67,7 @@ pub fn referenced_skill(relative: &Path) -> Option<&'static str> {
 
 /// The text of every [`REFERENCED_SKILLS`] entry, read from one content source.
 ///
-/// Why: the roster deploy writes all four beside the agents; it must fail as a
+/// Why: the roster deploy writes every one beside the agents; it must fail as a
 /// whole rather than deploy pointers to files it could not write.
 /// What: `(relative path, text)` pairs, the relative path `<skill>/SKILL.md`.
 /// Test: `materialize_skill_refs_writes_readable_files`.

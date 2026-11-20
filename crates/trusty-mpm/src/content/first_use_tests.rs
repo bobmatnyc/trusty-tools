@@ -415,12 +415,14 @@ fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
     assert!(err.to_string().contains("tm content update"), "{err}");
 
     let src = tempfile::tempdir().unwrap();
-    let bytes = bundle(A, 1, A.as_bytes());
-    install_from_file(&cache, &bundle_file(src.path(), A, &bytes, true)).expect("pin A");
+    // #11470: at the minimum, so the launch resolver serves it.
+    let tag = crate::content::min_content::MIN_CONTENT_TAG;
+    let bytes = bundle(tag, 1, tag.as_bytes());
+    install_from_file(&cache, &bundle_file(src.path(), tag, &bytes, true)).expect("pin");
     for fetch in [Fetch::Never, Fetch::OnFirstUse] {
         let content = resolve_for_in(Some(&project), None, Some(&cache), fetch)
             .expect("the installed bundle serves");
-        assert_eq!(installed_tag(&content), A);
+        assert_eq!(installed_tag(&content), tag);
     }
 
     let content = resolve_for_in(Some(&stale), None, Some(&cache), Fetch::Never)
@@ -431,4 +433,57 @@ fn a_managed_workspace_resolves_the_cache_once_a_bundle_lands() {
     assert!(msg.contains(&stale.display().to_string()), "{msg}");
     assert!(msg.contains("git pull"), "{msg}");
     assert!(!msg.contains("tm content update"), "{msg}");
+}
+
+/// A session outside any checkout composes from the installed release, even
+/// when the process cwd sits inside a trusty-tools checkout (the test binary
+/// runs from this repository's crate directory).
+#[test]
+fn a_session_outside_any_checkout_uses_the_installed_content() {
+    use crate::core::content_source::{Fetch, resolve_session_content_in};
+
+    let cwd = std::env::current_dir().expect("cwd");
+    assert!(
+        trusty_common::content::find_dev_checkout(&cwd).is_some(),
+        "precondition: the test cwd is inside a checkout"
+    );
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join(".trusty-mpm/content");
+    std::fs::create_dir_all(&cache).unwrap();
+    let session = managed_workspace(home.path(), "acme", "widget");
+    let src = tempfile::tempdir().unwrap();
+    let tag = crate::content::min_content::MIN_CONTENT_TAG;
+    let bytes = bundle(tag, 1, tag.as_bytes());
+    install_from_file(&cache, &bundle_file(src.path(), tag, &bytes, true)).expect("pin");
+
+    for fetch in [Fetch::Never, Fetch::OnFirstUse] {
+        let content = resolve_session_content_in(&session, Some(&cwd), Some(&cache), fetch)
+            .expect("the installed bundle serves");
+        assert_eq!(installed_tag(&content), tag, "{fetch:?}");
+    }
+}
+
+/// With nothing installed, a session outside any checkout composes from the
+/// cwd checkout, as `resolve_for_in` did, and never reaches the fetch.
+#[test]
+fn a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch() {
+    use crate::content::first_use::FETCH_OVERRIDE;
+    use crate::core::content_source::{Fetch, resolve_session_content_in};
+    use trusty_common::content::ContentSource;
+
+    let cwd = std::env::current_dir().expect("cwd");
+    let root = trusty_common::content::find_dev_checkout(&cwd).expect("cwd is in a checkout");
+    let home = tempfile::tempdir().unwrap();
+    let cache = home.path().join(".trusty-mpm/content");
+    std::fs::create_dir_all(&cache).unwrap();
+    let session = managed_workspace(home.path(), "acme", "widget");
+
+    FETCH_OVERRIDE.with(|f| f.set(Some(unreachable_fetch)));
+    let resolved =
+        resolve_session_content_in(&session, Some(&cwd), Some(&cache), Fetch::OnFirstUse);
+    FETCH_OVERRIDE.with(|f| f.set(None));
+    match resolved.expect("the cwd checkout serves").source() {
+        ContentSource::DevCheckout { root: got } => assert_eq!(got, &root),
+        other => panic!("expected the cwd checkout, got {other:?}"),
+    }
 }

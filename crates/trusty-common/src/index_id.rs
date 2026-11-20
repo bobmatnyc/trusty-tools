@@ -200,7 +200,7 @@ pub fn derive_checkout_index_id(checkout: &Path) -> Option<String> {
 /// registration guard has to answer "is this the tree I already have?" — and on
 /// macOS APFS (case-insensitive, case-preserving) the obvious answer is wrong.
 /// `canonicalize` preserves the case each path was spelled with rather than
-/// normalising it, so `/Users/bob/Duetto/CTO` and `/Users/bob/Duetto/cto`
+/// normalising it, so `/Users/bob/Acme/CTO` and `/Users/bob/Acme/cto`
 /// canonicalize to two different strings over ONE inode and string equality
 /// misses the match entirely. Two guards need this same answer — trusty-search's
 /// `find_root_path_collision` (same tree, different id) and trusty-common's

@@ -5,18 +5,6 @@
   "background": {
     "service_worker": "worker.js"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "http://127.0.0.1/*"
-      ],
-      "js": [
-        "indicator_content.js",
-        "content.js"
-      ],
-      "run_at": "document_end"
-    }
-  ],
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA8OprZD/ku63SpKOqJXpR5e6ybdC6Z/mW7kgGNZAObELjxrULcJRZOMB4h97KsK2WxCtCrUAbzk0BYtyPPLFqZJuYteRfBuy0Z+7dUENN0OJiZbrWiqEA6S/YwwDMcvZLuRHPK3px50Wcf9xBT6s/czAnM2JTrNk7JmKgmZFMkl3YNEjnm3DOdaRFMHuNY2GP6/Yh/3Qo08AZB405jIjy1Fyw2bFNOPH4WERcFF7IUUuWARHBhvlsnKK3FxFZtBVBB3PWGOxso+M/K4gjkbUW3Vh2h2yH/PI651noXFQxe5RztPISbrxBn40FPJY8pZrfWIj/zR0OETNyrJ9FVuKCcwIDAQAB",
   "description": "Connect Trusty workflows to the right signed-in browser profile.",
   "permissions": [
@@ -27,7 +15,8 @@
     "alarms",
     "scripting",
     "activeTab",
-    "downloads"
+    "downloads",
+    "debugger"
   ],
   "short_name": "Trusty Browser",
   "icons": {

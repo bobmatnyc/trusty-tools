@@ -178,7 +178,6 @@ nothing.
 |---|---|
 | `assistant` | Base productivity template; the default persona and the `extends` target for the rest. |
 | `izzie` | Personal assistant — mail, calendar, weather, transit. |
-| `cto-assistant` | Duetto org and engineering work — ops data, tickets, git. |
 | `writing-assistant` | Long-form drafting, editing and review (#8186). Binds its own OKG store; ships gmail/slack/telegram channel bindings DISABLED, to be enabled against an operator-defined global channel. |
 
 ### Agent TOML (`.trusty-agents/agents/*.toml`)

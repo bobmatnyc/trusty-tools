@@ -25,6 +25,8 @@ pub(crate) mod audit;
 pub(crate) mod board;
 pub(crate) mod config;
 pub(crate) mod epic;
+// `tm issue next`: the factory intake by status signal.
+pub(crate) mod next;
 pub(crate) mod ops;
 pub(crate) mod seed_ticketing;
 pub(crate) mod standard;
@@ -232,6 +234,24 @@ fn dispatch<S: TicketSystem>(
         // #10276: routed before backend construction in `issue`.
         IssueCmd::Board(board_cmd) => {
             return board::run_cli(board_cmd, TicketSystemKind::Gh);
+        }
+        IssueCmd::Next {
+            repo,
+            goal,
+            limit,
+            json,
+            refresh,
+        } => {
+            next::run(
+                runner,
+                next::NextArgs {
+                    repo,
+                    goal,
+                    limit,
+                    json,
+                    refresh,
+                },
+            )?;
         }
         IssueCmd::Repair { issue, config } => {
             let (model, source) = load_model_with_source(config.as_deref(), lifecycle)?;

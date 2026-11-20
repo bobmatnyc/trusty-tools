@@ -174,6 +174,16 @@ pub trait SecretBackend: Send + Sync + fmt::Debug {
             operation: item.operation(),
         })
     }
+    /// The vault blob store under this backend, if it has one (#10524).
+    ///
+    /// Why: the server's unlock reads the whole blob once (one prompt) and
+    /// `secrets.migrate` moves per-item Keychain items into it.
+    /// What: `None` by default; the Keychain backend answers its store.
+    /// Test: `blob_keychain_values_and_controls_share_the_blob`.
+    #[doc(hidden)]
+    fn blob_store(&self) -> Option<Arc<super::vault_blob::BlobStore>> {
+        None
+    }
 }
 
 /// Whether this build links an OS Keychain backend (macOS only, #9064).

@@ -207,8 +207,8 @@ before the corresponding work begins:
 1. **Model strategy:** what is the default model routing policy for
    trusty-agents personas (OpenRouter vs. Bedrock; model tier selection)?
 
-2. **Relationship to duetto-intelligence gateway:** how do trusty-agents
-   personas interact with the duetto-intelligence MCP gateway — do they call
+2. **Relationship to acme-intelligence gateway:** how do trusty-agents
+   personas interact with the acme-intelligence MCP gateway — do they call
    it as a tool, or does trusty-agents embed the gateway logic directly?
 
 3. **open-mpm-agent-api retirement:** once `tool-registry` lands in

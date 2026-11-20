@@ -617,7 +617,7 @@ mod tests {
         // via `FrameworkPaths::default()`. That function takes NO path
         // argument — it resolves purely from `dirs::home_dir()` — so it is
         // structurally incapable of varying between invocations from
-        // different project workspaces (e.g. `duettoresearch/apex` vs
+        // different project workspaces (e.g. `acme/apex` vs
         // `trusty-tools`): there is no "which project am I in" input for it
         // to consult in the first place. Calling it twice must yield the
         // identical root, proving it is a pure, argument-free resolution.

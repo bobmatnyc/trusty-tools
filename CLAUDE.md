@@ -51,7 +51,12 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 - 🔴 **k8s, container work and builds run on EVO whenever possible** via
   `Skill(skill="instance-evo")` (owner ruling 2026-11-14). Never start
   Rancher Desktop, Docker or a local k8s on this Mac. Mac-only work stays on
-  the Mac: macOS-gated tests, the Apple release build, signing.
+  the Mac: macOS-gated tests, the Apple release build, signing. Rung 3 and 4
+  gates follow it: `check` and `clippy` now, `test` once the failing-test-name
+  and ci_result conditions are deployed. Run from a clean committed worktree
+  with the `evo` wrapper (MPM-Utils), logged by `evo-gate-log`. Scope is the crate
+  (rung 3) or the crate plus direct dependents (rung 4). CI stays the gate of
+  record.
 - 🟡 **Crate name ≠ directory name.** `-p <crate>` takes the `name` field from
   the crate's `Cargo.toml`; exceptions are in Abbreviations & Aliases below.
 - 🟡 Golden-refresh and exit-137 gotchas:
@@ -73,7 +78,10 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
-`cargo test --workspace` is a publish gate, not inner-loop proof.
+`cargo test --workspace` is a publish gate, not inner-loop proof. Only declared
+demo/POC work may defer tests, as `#[ignore = "intent(demo): …"]` intentions
+that never cover production code or replace a failing test:
+[test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 🔴 **Markdown under `crates/*/src/assets/**` is rung 3, not rung 1.** It is
 `include_str!`-embedded into the binary and asserted on by bundle tests, so a

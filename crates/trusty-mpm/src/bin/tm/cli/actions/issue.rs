@@ -94,6 +94,27 @@ pub(crate) enum IssueCmd {
     /// Create, reconcile, check and attach to the repo's standard GitHub Projects board (#10276).
     #[command(subcommand)]
     Board(BoardCmd),
+    /// List the ready issues to take next, ranked by goal, priority and age.
+    ///
+    /// Ready means a ready board Status or a ready status label; an issue
+    /// without acceptance criteria or assigned to someone else is skipped.
+    Next {
+        /// `owner/repo`; defaults to the current directory's repo.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Goal id (`G01`) from the Architect's goals.md, ranked first.
+        #[arg(long)]
+        goal: Option<String>,
+        /// Most issues to list.
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+        /// Ignore the 10-minute cache: fetch now and rewrite it.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Resolve a mid-transition issue carrying multiple state labels.
     Repair {
         /// Issue number.

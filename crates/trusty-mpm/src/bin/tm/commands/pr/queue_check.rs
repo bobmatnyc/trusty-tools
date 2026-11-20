@@ -13,13 +13,17 @@
 //!   1. `isDraft: true`
 //!   2. a hold label (`do-not-merge*`, `hold`)
 //!   3. `reviewDecision: CHANGES_REQUESTED`
-//!   4. an unresolved `code-critic` BLOCK in the PR comments
-//!   5. `mergeable: CONFLICTING` or `mergeStateStatus: DIRTY` — a real
+//!   4. an unresolved `code-critic` BLOCK, judged by
+//!      [`critic_verdict::assess`] (trusted authors, pinned to a commit)
+//!   5. no `rung:N` test-ladder label, or a doubled or malformed one (Dr4)
+//!   6. a `rung:5` or `rung:6` PR with no APPROVE or WARN pinned to the head
+//!      (Dr4)
+//!   7. `mergeable: CONFLICTING` or `mergeStateStatus: DIRTY` — a real
 //!      conflict GitHub already detected; `UNKNOWN` on either field, or
 //!      either field missing from the payload, is pending (GitHub has not
 //!      finished computing it, or the response shape changed) and NEVER
 //!      reads as mergeable (#8670)
-//!   6. a required status context missing, pending, or not `SUCCESS` on the
+//!   8. a required status context missing, pending, or not `SUCCESS` on the
 //!      head SHA — pending while any run has no result, else judged on its
 //!      latest run (#8638)
 //!
@@ -29,12 +33,15 @@
 //! gates" — a hand-copied list already cost PR #5836 a merge); the same read
 //! is available standalone as `scripts/required-checks.sh`.
 //!
-//! Test: the sibling `tests.rs` — `queue_*`.
+//! Test: the sibling `tests.rs` — `queue_*`; `queue_check_critic_tests.rs` —
+//! `dr4_*`.
 
 use serde::{Deserialize, Serialize};
 
 // #8638: one rollup entry shape and one latest-run rule, shared with `tm wait`.
+use super::critic_verdict::{self, VerdictView};
 use super::rollup::{RollupEntry, deciding_runs};
+use super::rung_label;
 use super::{EXIT_BLOCKED, EXIT_OK, GhRunner, argv, repo_slug};
 use crate::cli::PrQueueCheckArgs;
 
@@ -80,13 +87,6 @@ struct Label {
     name: String,
 }
 
-/// One PR comment.
-#[derive(Debug, Deserialize)]
-struct Comment {
-    #[serde(default)]
-    body: String,
-}
-
 /// The single-PR view the stop conditions are evaluated against.
 #[derive(Debug, Deserialize)]
 struct PrView {
@@ -114,8 +114,10 @@ struct PrView {
     #[serde(default)]
     #[serde(rename = "statusCheckRollup")]
     rollup: Vec<RollupEntry>,
-    #[serde(default)]
-    comments: Vec<Comment>,
+    /// Dr4: `headRefOid`, `comments` and `reviews`, read by the one strong
+    /// critic reader, [`critic_verdict::assess`].
+    #[serde(flatten)]
+    critic: VerdictView,
 }
 
 /// Evaluate the stop-condition table against one PR view.
@@ -126,7 +128,7 @@ struct PrView {
 /// What: returns the first stop reason, or `None` when the PR is mergeable.
 /// Test: `queue_stop_order_prefers_draft`, `queue_stop_order_prefers_hold`,
 /// `queue_stop_order_prefers_changes_requested`,
-/// `queue_stop_order_prefers_critic_block`,
+/// `dr4_stop_order_prefers_critic_block`,
 /// `queue_required_context_missing`, `queue_required_context_not_success`,
 /// `queue_duplicate_cancelled_then_success_is_mergeable`,
 /// `queue_duplicate_success_then_failure_is_blocked`,
@@ -152,8 +154,12 @@ fn stop_reason(view: &PrView, required: &[String]) -> Option<String> {
     {
         return Some("review decision CHANGES_REQUESTED".to_string());
     }
-    if latest_critic_verdict(&view.comments) == Some(CriticVerdict::Block) {
-        return Some("unresolved code-critic BLOCK in the PR comments".to_string());
+    // Dr4: one critic reader, so the author-trust check and the head pin apply.
+    if let Some(refusal) = critic_verdict::assess(&view.critic).refusal {
+        return Some(refusal);
+    }
+    if let Some(reason) = rung_reason(view) {
+        return Some(reason);
     }
     if let Some(reason) = mergeability_reason(view) {
         return Some(reason);
@@ -243,39 +249,40 @@ fn mergeability_reason(view: &PrView) -> Option<String> {
     None
 }
 
-/// A `code-critic` verdict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CriticVerdict {
-    /// The critic blocked the change.
-    Block,
-    /// The critic approved, or warned without blocking.
-    Cleared,
-}
-
-/// The most recent `code-critic` verdict across a PR's comments.
+/// The Dr4 test-ladder stop: a recorded rung, and a pinned verdict for 5-6.
 ///
-/// Why: a BLOCK is unresolved only when no LATER comment cleared it, so the
-/// answer is the last verdict in comment order, not "does a BLOCK exist".
-/// What: considers only comments that name `code-critic` (case-insensitive),
-/// and reads the last standalone `BLOCK` / `APPROVE` / `WARN` token in each.
-/// Comments are returned by `gh` oldest-first, so the final match wins.
-/// Test: `queue_critic_block_then_approve_is_clear`,
-/// `queue_critic_ignores_unrelated_comments`.
-fn latest_critic_verdict(comments: &[Comment]) -> Option<CriticVerdict> {
-    let mut latest = None;
-    for c in comments {
-        if !c.body.to_ascii_lowercase().contains("code-critic") {
-            continue;
+/// Why (owner ruling Dr4): a high-risk PR merged with no code-critic review,
+/// because nothing recorded its rung and nothing demanded a verdict.
+/// What: refuses a PR with no `rung:N` label, with a doubled or malformed one
+/// ([`rung_label::recorded`]), and a rung 5 or 6 PR whose head carries no
+/// trusted APPROVE or WARN ([`critic_verdict::cleared_on_head`]). Rungs 1-4
+/// need no verdict.
+/// Test: `dr4_no_rung_label_is_refused`, `dr4_two_rung_labels_are_refused`,
+/// `dr4_rung_5_with_no_verdict_is_refused`,
+/// `dr4_rung_5_with_approve_pinned_to_an_old_sha_is_refused`,
+/// `dr4_rung_6_with_approve_pinned_to_head_passes`,
+/// `dr4_rung_3_with_no_verdict_passes`.
+fn rung_reason(view: &PrView) -> Option<String> {
+    let rung = match rung_label::recorded(view.labels.iter().map(|l| l.name.as_str())) {
+        Err(reason) => return Some(reason),
+        Ok(None) => {
+            return Some(
+                "no test-ladder rung recorded (label rung:N); open with tm pr open --rung"
+                    .to_string(),
+            );
         }
-        for token in c.body.split(|ch: char| !ch.is_ascii_alphabetic()) {
-            match token {
-                "BLOCK" => latest = Some(CriticVerdict::Block),
-                "APPROVE" | "WARN" => latest = Some(CriticVerdict::Cleared),
-                _ => {}
-            }
-        }
+        Ok(Some(n)) => n,
+    };
+    if rung_label::CRITIC_RUNGS.contains(&rung) && !critic_verdict::cleared_on_head(&view.critic) {
+        let head = view
+            .critic
+            .head_oid()
+            .unwrap_or_else(|| "(unknown)".to_string());
+        return Some(format!(
+            "rung {rung} PR has no code-critic verdict on head {head}"
+        ));
     }
-    latest
+    None
 }
 
 /// Read the live required status-check contexts for `base`.
@@ -408,7 +415,8 @@ fn list_open_prs<R: GhRunner>(gh: &R, slug: &str, base: &str) -> anyhow::Result<
 ///
 /// #8670: `mergeable,mergeStateStatus` join the requested fields so
 /// [`mergeability_reason`] has something to read; a prior version of this
-/// call omitted them entirely.
+/// call omitted them entirely. Dr4: `headRefOid,reviews` join them for
+/// [`critic_verdict::assess`].
 fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
     let n = pr.to_string();
     let a = argv(&[
@@ -418,7 +426,8 @@ fn pr_view<R: GhRunner>(gh: &R, slug: &str, pr: u64) -> anyhow::Result<PrView> {
         "--repo",
         slug,
         "--json",
-        "isDraft,labels,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,comments",
+        "isDraft,labels,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,comments,\
+         headRefOid,reviews",
     ]);
     let stdout = gh.run(&a)?.stdout_ok(&a)?;
     serde_json::from_str(&stdout)

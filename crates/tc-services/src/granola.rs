@@ -1,7 +1,7 @@
 //! Granola meeting-notes service — native HTTP client over the Granola
 //! public API.
 //!
-//! Why: The Trusty personas (cto-assistant, izzie) need read access to
+//! Why: The Trusty personas (assistant, izzie) need read access to
 //! Granola meeting documents and transcripts. Previously this was reached
 //! through an MCP subprocess; a native `reqwest` client keeps the call
 //! in-process, removes the subprocess/OAuth churn, and lets every Rust

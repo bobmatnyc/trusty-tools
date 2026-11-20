@@ -1346,8 +1346,8 @@ fn cli_url_flag_equal_to_default_is_still_some() {
 /// subcommand — the shape `tm --account <login> <owner>/<repo>` needs.
 #[test]
 fn cli_parses_account_flag_global() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "--account", "bob-duetto", "status"]).unwrap();
-    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    let cli = Cli::try_parse_from(["trusty-mpm", "--account", "acme-admin", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("acme-admin"));
 }
 
 /// A global flag also parses AFTER the subcommand — `tm run --account
@@ -1360,11 +1360,11 @@ fn cli_account_flag_after_subcommand() {
         "trusty-mpm",
         "run",
         "--account",
-        "bob-duetto",
+        "acme-admin",
         "bobmatnyc/trusty-tools",
     ])
     .unwrap();
-    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(cli.account.as_deref(), Some("acme-admin"));
     assert!(matches!(cli.command, Some(Command::Run { .. })));
 }
 
@@ -1372,23 +1372,23 @@ fn cli_account_flag_after_subcommand() {
 /// `--account <login>`.
 ///
 /// Why this is the assertion: the owner's report was
-/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto`
+/// `tm https://github.com/acme-labs/jev-matching --user acme-admin`
 /// failing at clap parsing. `--user` is the spelling `gh` itself uses for the
 /// same concept (`gh auth token -u`), so it has to be accepted, and it has to
 /// land on `cli.account` — an alias that parsed into a SECOND field would give
 /// the two spellings different behaviour downstream.
 #[test]
 fn cli_parses_user_alias_for_account_global() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "bob-duetto", "status"]).unwrap();
-    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    let cli = Cli::try_parse_from(["trusty-mpm", "--user", "acme-admin", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("acme-admin"));
 }
 
 /// 🔴 #9090 REGRESSION: `--u <login>` binds the same field as `--account`.
 /// The form × position matrix is in `run_target_tests.rs`.
 #[test]
 fn cli_parses_u_alias_for_account_global() {
-    let cli = Cli::try_parse_from(["trusty-mpm", "--u", "bob-duetto", "status"]).unwrap();
-    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    let cli = Cli::try_parse_from(["trusty-mpm", "--u", "acme-admin", "status"]).unwrap();
+    assert_eq!(cli.account.as_deref(), Some("acme-admin"));
 }
 
 /// 🔴 #5850 REGRESSION (fail-open): a blank `--user`/`--account` given BEFORE
@@ -1423,12 +1423,12 @@ fn cli_user_alias_after_subcommand() {
     let cli = Cli::try_parse_from([
         "trusty-mpm",
         "run",
-        "https://github.com/duettoresearch/jev-matching",
+        "https://github.com/acme-labs/jev-matching",
         "--user",
-        "bob-duetto",
+        "acme-admin",
     ])
     .unwrap();
-    assert_eq!(cli.account.as_deref(), Some("bob-duetto"));
+    assert_eq!(cli.account.as_deref(), Some("acme-admin"));
     assert!(matches!(cli.command, Some(Command::Run { .. })));
 }
 
@@ -1879,7 +1879,10 @@ fn cli_exact_match_wins_over_prefix_ambiguity() {
             // prompt-feedback capture.
             prompt_feedback: false,
             egress_guard: false,
-            standing_rules: false
+            standing_rules: false,
+            turn_task: false,
+            pm_guard_shadow: false,
+            completion_evidence: false
         }
     ));
 

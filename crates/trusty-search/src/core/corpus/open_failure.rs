@@ -6,7 +6,7 @@
 //! *"redb corpus could not be opened (incompatible or corrupted format); run
 //! `trusty-search index <path> --force` to rebuild from source"*. That wording
 //! names the one cause that is permanent and prescribes the one remedy that is
-//! destructive. In the 2026-07-29 `cto-duetto` incident the daemon reported it
+//! destructive. In the 2026-07-29 `cto-acme` incident the daemon reported it
 //! while simultaneously reporting `indexes_skipped_timeout: 18` — daemon-wide
 //! contention — and the corpus was verified intact at 201,206 chunks. The same
 //! conflation had already cost one index to a `--force` rebuild on 2026-07-27.

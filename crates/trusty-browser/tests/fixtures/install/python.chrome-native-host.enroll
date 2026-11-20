@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /tmp/tb-venv-p1/bin/python3 /private/tmp/tb-venv-p1/lib/python3.12/site-packages/trusty_browser/native_host.py --socket /private/tmp/p4-cap/home/.trusty/browser/enrollment.sock "$@"

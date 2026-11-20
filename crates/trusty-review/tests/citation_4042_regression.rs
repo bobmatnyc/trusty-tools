@@ -3,7 +3,7 @@
 //! #2882).
 //!
 //! The fixture reproduces the issue's "centerpiece" shape as closely as
-//! possible without access to the reporter's private repo (`duettoresearch/
+//! possible without access to the reporter's private repo (`acme/
 //! code-intelligence`, not reachable from this environment): a real TS module
 //! (`src/lib/team-registration-early-access.ts`) diffed ALONGSIDE a Drizzle
 //! JSON snapshot and a Vitest test file — the exact "adjacent `.json` /

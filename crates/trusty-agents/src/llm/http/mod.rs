@@ -294,6 +294,8 @@ pub(super) async fn create_chat_completion_lenient(
 ) -> Result<CreateChatCompletionResponse> {
     use async_openai::config::Config;
 
+    // #10978: this client is the OpenRouter transport; refuse under the lock.
+    crate::llm::provider_lock::refuse_off_provider("OpenRouter chat completion")?;
     let config = client.config();
     let url = config.url("/chat/completions");
     let headers = config.headers();
@@ -388,6 +390,9 @@ pub(super) async fn send_raw_completion(
     // adapter that overrides the base URL) goes to its native server instead
     // of OpenRouter. Adapters with no auth (ollama) leave `auth_header_value`
     // empty; we skip the Authorization header in that case.
+    // #10978: raw HTTP reaches Anthropic, Fireworks, AtlasCloud, Ollama or
+    // OpenRouter — never Bedrock, which uses the AWS SDK.
+    crate::llm::provider_lock::refuse_off_provider("raw HTTP chat completion")?;
     let endpoint = adapter.api_endpoint(false);
     let url = format!(
         "{}/chat/completions",
@@ -509,6 +514,8 @@ pub(super) async fn send_anthropic_native_completion(
     Vec<ChatCompletionMessageToolCall>,
     TokenUsage,
 )> {
+    // #10978: the Anthropic Messages API is not Bedrock.
+    crate::llm::provider_lock::refuse_off_provider("Anthropic Messages API")?;
     let url = format!("{}/messages", endpoint.base_url.trim_end_matches('/'));
     // backon retry: same transient-only policy as the OpenRouter path.
     let json: serde_json::Value = with_llm_retry(|| async {

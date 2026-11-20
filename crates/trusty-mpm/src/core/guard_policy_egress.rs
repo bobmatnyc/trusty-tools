@@ -57,14 +57,15 @@ pub static EGRESS_MALFORMED_MCP_NAME: GuardPolicy = policy(
     GUARD_STAYS_ON,
 );
 
-// #11273 (owner ruling 2026-11-14): reads pass for a PM or Architect main
-// session; sends and writes need the tm launch record (only the Architect has
-// one today), bar a PM's owner-DM send (#11194). Subagents are unchanged.
+// #11521: a PM or Architect stamped main thread may read, send and write,
+// with no launch record (the #11273 record rule was never asked for).
+// GP-043 (owner ruling 2026-11-16): a PM's subagents may also read Gmail and
+// Google Workspace; every other subagent call is unchanged.
 pub static EGRESS_FAMILY: GuardPolicy = policy(
     "GP-043",
     "egress-family",
-    "No messaging or mail family call (Slack, Gmail, Notion, chat); a main session may read, and a send or write needs the tm launch record (bar a PM's owner-DM send).",
-    "#8454, #10387, #10447, #11194, #11273",
+    "No messaging or mail family call (Slack, Gmail, Notion, chat) from a subagent, an unknown thread or an unstamped session. A main thread with a valid PM or Architect stamp may read, send and write with no launch record and no bind step (#11521); a PM's subagent may read Gmail and Google Workspace. Every allow writes one audit line or denies.",
+    "#8454, #10387, #10447, #11194, #11273, #11521",
     ALL,
     true,
     OUTWARD_ACTION,

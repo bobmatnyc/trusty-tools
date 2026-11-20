@@ -359,7 +359,7 @@ which skills are available to a *specific* subagent" beyond
 `skills:` preload list). Because it is blunt, `skillOverrides` is the wrong
 tool for "give `engineer` fewer skills than `research`" — it is the right
 tool for "this project never uses the `aws-agents:*`, `aws-core:*`,
-`claude-in-chrome`, `duetto-design-system`, `xlsx`, `breeze-voice`,
+`claude-in-chrome`, `acme-design-system`, `xlsx`, `breeze-voice`,
 `cto-kb-ingest` skill families, so hide them for every agent and the PM
 alike":
 
@@ -376,7 +376,7 @@ alike":
     "aws-agents:agents-pay": "off",
     "aws-core:*": "off",
     "claude-in-chrome": "off",
-    "duetto-design-system": "off",
+    "acme-design-system": "off",
     "xlsx": "off",
     "breeze-voice": "off",
     "cto-kb-ingest": "off"
@@ -514,7 +514,7 @@ during this research session.
 | # | Slice | What ships | Expected saving per affected turn | Why this size |
 |---|---|---|---|---|
 | **1** | **Per-agent `tools:` allowlist, roster-wide** (§C) | Add `tools:` to all ~38 non-BASE agent assets under `content/agents/`, per the table in §C; extend `agent_builder`/`bundle` tests to assert every composed agent has a non-empty `Some(tools)` | Removes full tool **and MCP JSON schemas** for every server/tool the role doesn't use — this is the single largest lever in the measured 44.7K baseline (150 MCP tools' schemas dwarf their ~151 *names*, which alone are only a few KB). Precedented, mechanically simple (frontmatter-only, no new settings-file plumbing), reversible per-agent. | **Do this first.** No new tm-source code path — `tools:` parsing, merging, and deployment already exist and are exercised by `trusty-code`'s four forks. Zero risk to the PM (agent-scoped, not session-wide). Immediately measurable with the existing roster via `tm session instructions`-style before/after, no probe agents needed. |
-| **2** | **`skillOverrides` for this project's irrelevant skill families** (§C) | `tm` computes an `"off"` map for skill namespaces the project's stack profile rules out (`aws-*`, `claude-in-chrome`, `duetto-design-system`, `xlsx`, `breeze-voice`, `cto-kb-ingest`, …) and writes it to `.claude/settings.json` at `prepare_session` | Shrinks the ~131-entry skills listing (session-wide, so this benefits the PM and every agent in one write) — a project like this one with ~50+ irrelevant AWS/Chrome/Duetto entries in the listing is paying their description bytes on every single turn, PM included, today | Second because it is session-wide and easy to get wrong (an "off" skill a human still wants to `/`-invoke by hand disappears from the menu too, per the doc's "Hidden" column) — needs a short allow/deny review, not a rebuild |
+| **2** | **`skillOverrides` for this project's irrelevant skill families** (§C) | `tm` computes an `"off"` map for skill namespaces the project's stack profile rules out (`aws-*`, `claude-in-chrome`, `acme-design-system`, `xlsx`, `breeze-voice`, `cto-kb-ingest`, …) and writes it to `.claude/settings.json` at `prepare_session` | Shrinks the ~131-entry skills listing (session-wide, so this benefits the PM and every agent in one write) — a project like this one with ~50+ irrelevant AWS/Chrome/Acme entries in the listing is paying their description bytes on every single turn, PM included, today | Second because it is session-wide and easy to get wrong (an "off" skill a human still wants to `/`-invoke by hand disappears from the menu too, per the doc's "Hidden" column) — needs a short allow/deny review, not a rebuild |
 | **3** | **`CLAUDE_CODE_DISABLE_AUTO_MEMORY`** (§D) | `settings.rs` gains `autoMemoryEnabled: false`; `claude_code.rs::env_bin_prefix` gains the env var; two new tests | Removes `MEMORY.md` (measured 5.6KB for this project alone) plus its per-session read/write overhead, for the PM and every subagent | Third: small, isolated, two known write sites, no design ambiguity (§D has no open question, unlike §B) |
 | **4** | **Repo-rule migration off `CLAUDE.md` and onto skills/briefs** (§B, path ii) | Author a `trusty-tools-rust-gates`-style skill carrying the test ladder / SLOC cap / changelog-fragment rules; add it to `skills:` for `rust-engineer`, `engineer`, `qa`, `local-ops`; update `BASE-AGENT.md`'s dispatch-brief guidance to name this as the carrier | Makes goal (2) true in substance (agents stop *needing* `CLAUDE.md`) without touching `claudeMdExcludes` at all, so it carries none of §B's PM-regression risk | Fourth: requires deciding exactly which rules move, a judgment call the earlier three slices don't require |
 | **5** | **`claudeMdExcludes`, if goal (2) must be literal-zero-bytes** (§B, path i) | Write `claudeMdExcludes` for the project/ancestor/user `CLAUDE.md` paths at project settings tier; widen the compiled prompt to carry whatever prose the PM would otherwise lose; update the `instruction_pipeline.rs:587-589` / `claude_md_sections.rs:28-29` comments so they stay true | Only slice that gets a dispatched agent to **zero** `CLAUDE.md` bytes, provably | Last and optional: highest blast radius (session-wide, touches the PM's own instruction path, has two open sub-questions in §B — `/init`/`/memory` interaction, and the compensating-channel completeness) that slices 1-4 do not have, and it should not ship until slice 4 has already removed most of the reason a subagent would miss `CLAUDE.md` |

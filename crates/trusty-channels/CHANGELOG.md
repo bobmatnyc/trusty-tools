@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.3.0] — 2026-11-20
+
+### Added
+
+- `slack-mcp` gains `slack_canvas_access_set`, which calls `canvases.access.set` to grant users or regular channels `read` or `write` access on a bot-owned canvas, so a canvas shared as a link can be edited. It refuses `owner`, DM channel ids, and calls that name both or neither of `user_ids` and `channel_ids`. Needs the `canvases:write` scope the canvas tools already use (#10890).
+
+## [0.2.2] — 2026-11-16
+
+### Fixed
+
+- slack-mcp: `slack_list_channels` pages with `cursor`/`next_cursor` and lists private channels by default, falling back to public channels (and reporting the `types` listed) when the token lacks `groups:read`; channel reads that get `channel_not_found` name the bot user to invite (#11271).
+
 ## [0.2.1] — 2026-11-10
 
 ### Changed

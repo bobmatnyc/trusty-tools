@@ -3,7 +3,7 @@ name: code-review-standards
 description: Adversarial code review rubric — severity taxonomy, the 80% confidence filter, and the APPROVE/WARN/BLOCK verdict protocol. Loaded by the code-critic agent as its primary review reference.
 user-invocable: false
 metadata:
-  version: "1.1.0"
+  version: "1.2.1"
 category: agent-reference
 tags: [code-review, severity, verdict, quality-gate, code-critic]
 effort: low
@@ -90,12 +90,11 @@ finding that doesn't obviously fit the first two.
    checklist item on the parent issue. The default for every other finding,
    missing tests on non-safety paths included. It starts no fix round.
 3. **`Promote`** — reserved for a defect that is genuinely separable work
-   someone would schedule on its own, never the default landing spot for a
-   LOW finding that just doesn't feel worth fixing right now. The critic only
-   *recommends* `Promote` — it does not file the issue itself and does not
-   instruct anyone else to file one. Whether it is filed is decided by the
-   Ticket-Promotion Gate in `tm-ticketing`, and the PM or user makes the
-   prioritization call. Do not re-derive that gate's criteria here.
+   someone would schedule on its own, never a landing spot for a LOW finding
+   not worth fixing now. The critic only *recommends* `Promote`; it does not
+   file or ask anyone to file the issue. The Ticket-Promotion Gate in
+   `tm-ticketing` decides, and the PM or user prioritizes. Do not re-derive
+   that gate's criteria here.
 
 **An APPROVE verdict does not generate tickets.** Approving means zero CRITICAL
 and zero HIGH findings; the MEDIUM/LOW observations that remain default to
@@ -118,11 +117,9 @@ CRITICAL or HIGH: silent data loss, or a broken contract.
    - A third outcome is also acceptable: **reported degradation** — the
      failure reaches the caller in the response body (e.g. a
      `{"connected": false, "reason": ...}` field), and that field is under
-     test. The caller can see and act on it. Contrast within one branch:
-     `knowledge_pipeline.rs::search_socket` discards its error via `.ok()`
-     (undocumented fail-open) while `knowledge_pipeline/indexing.rs` turns
-     the same missing-socket case into an explicit, tested response field
-     (reported degradation).
+     test. Contrast: `knowledge_pipeline.rs::search_socket` discards its error
+     via `.ok()` (fail-open); `knowledge_pipeline/indexing.rs` turns the same
+     missing socket into a tested response field (reported degradation).
 2. **Name the alarm, then break it.** Identify which check is supposed to catch
    this loss, then ask whether it can report healthy while the loss occurs.
    Aggregates and summaries hide single-item failures.
@@ -137,12 +134,22 @@ CRITICAL or HIGH: silent data loss, or a broken contract.
    first match and closes the pipe; a large producer gets SIGPIPE, so the
    pipeline status is non-zero although the match was found. Measured:
    `printf '%s\n' "$big" | grep -q '^1$'` on 200,000 lines gave PIPESTATUS
-   `141 0` and the `if` took the false branch. Flag it. Capture the output
+   `141 0` and the `if` took the false branch. Flag it; capture the output
    first, or match without `-q`.
 7. **Check a pre-filtered `gh` stub.** A stub that answers `gh` with a list
    already narrowed to the expected rows cannot show a script that skips its
    own filter or pagination; the test passes for the wrong reason. Require the
    unfiltered list, with rows that must be rejected.
+
+## Related-Path Check
+
+<!-- rule:code-review-standards/related-path-check -->
+A bug fix that reaches one path and misses its siblings ships green. For a bug
+fix, check that the brief's `Shared-behaviour paths` lists the other callers and
+data states of the changed code, each with a test or a stated reason. Find
+callers yourself (`get_call_chain` or `grep`); do not trust the list. A path
+that reaches the same fault, unfixed and untested, is HIGH.
+Skip the check for a Low-risk text edit.
 
 ## CI Push-Permission Check
 
@@ -166,25 +173,22 @@ permissive default that reads exactly like a real pass (#7550, #7624).
 ## Check Block Transient-State Coverage
 
 A Terraform `check` block validated only against the final steady-state plan
-misses failures that appear only during resource replacement. Two observed
-failures: `timecmp` raised on the empty `expire_time` a not-yet-issued
-certificate reports, and `timestamp()` deferred an entire plan to "could not
-be evaluated" where `plantimestamp()` was needed. Both passed a green
-steady-state plan and broke mid-replacement.
+misses failures that appear only during resource replacement. Two observed:
+`timecmp` raised on the empty `expire_time` a not-yet-issued certificate
+reports, and `timestamp()` deferred a whole plan to "could not be evaluated"
+where `plantimestamp()` was needed. Both passed a green steady-state plan.
 
-Require a check block to be reviewed against the transient states a resource
-passes through during creation and replacement, not only the field values
-present once everything has settled (#8144).
+Require a check block to be reviewed against the transient states of resource
+creation and replacement, not only the settled field values (#8144).
 
 ## Check Block Red-Path Coverage
 
 A check block on a scoped data source has two independent failure paths: an
 assertion failure (the read succeeds, the value is wrong) and a read failure
-(the host is unreachable). Terraform converts a read failure to a warning
-automatically, but that behavior is only proven by testing it. An
-`https_listener` check validated on a 404 response only left the
-unreachable-host path — the one carrying load during certificate
-provisioning — untested until a late review caught it.
+(the host is unreachable; Terraform downgrades it to a warning, which only a
+test proves). An `https_listener` check validated on a 404 left the
+unreachable-host path, the one carrying load during certificate provisioning,
+untested until a late review caught it.
 
 Require evidence for both paths, the happy-path assertion failure and the
 error-path read failure, before accepting a check block's coverage claim
@@ -193,10 +197,9 @@ error-path read failure, before accepting a check block's coverage claim
 ## Lifecycle-Guard Escape-Path Verification
 
 An acceptance record marked a documented `prevent_destroy` recovery path MET
-on the strength of prose, without running it. The documented recovery was
-wrong in two independent ways when tried: re-creating a certificate under the
-same name returned 409, and destroying it while still attached to the target
-proxy returned 400 `resourceInUse`.
+on prose, without running it. Tried, it was wrong twice: re-creating a
+certificate under the same name returned 409, and destroying it while attached
+to the target proxy returned 400 `resourceInUse`.
 
 For any change adding `prevent_destroy` or another lifecycle guard, require
 the acceptance record to state how the documented escape path was actually
@@ -205,10 +208,9 @@ unverified, never MET (#8132).
 
 ## Liveness Criteria Require a Sampled Check
 
-A single HTTPS request checked right after a managed certificate reports
-ACTIVE can still fail on a transient TLS handshake error. One failing request
-reports a false red; one lucky success reports a false green over an endpoint
-that is mostly failing.
+A single HTTPS request right after a managed certificate reports ACTIVE can
+fail on a transient TLS handshake error: one failure is a false red, one lucky
+success a false green over an endpoint that is mostly failing.
 
 Require a liveness acceptance criterion — "the certificate is live", "the
 endpoint answers" — to cite a sample with a stated count, N/M requests over T

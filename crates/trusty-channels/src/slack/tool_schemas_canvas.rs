@@ -1,4 +1,4 @@
-//! JSON-Schema builders for the six `slack_*canvas*` MCP tools.
+//! JSON-Schema builders for the seven `slack_*canvas*` MCP tools.
 //!
 //! Why: split out of [`super::tools`] (issue #3744 slice 2) — adding
 //! `slack_canvas_push`'s schema pushed `tools.rs`'s single `vec![...]`
@@ -8,7 +8,7 @@
 //! them in one file — mirroring `handlers::canvas`'s own split from the rest
 //! of `handlers` — keeps that context together rather than splitting
 //! arbitrarily by line count.
-//! What: [`canvas_tools`] returns the six canvas tool definitions in
+//! What: [`canvas_tools`] returns the seven canvas tool definitions in
 //! `tool_list_response`'s exact `{name, description, inputSchema}` shape
 //! (built through [`super::tools::tool`], the same private-to-`slack`
 //! constructor `tools.rs` itself uses) as a `Vec<Value>` that
@@ -16,7 +16,7 @@
 //! has no `tool_list_response`/`is_known_tool` of its own — `tools.rs` stays
 //! the single source of truth for the combined surface and its tests.
 //! Test: `super::tools::canvas_split_tests::canvas_tools_are_present_after_the_file_split`
-//! asserts all six names survive the split into the combined response; the
+//! asserts all seven names survive the split into the combined response; the
 //! shared `tool_list_has_expected_count` / `every_tool_name_is_unique` /
 //! `known_tools_match_registry` tests in `tools.rs` cover these schemas the
 //! same as every other tool's.
@@ -25,8 +25,8 @@ use serde_json::{json, Value};
 
 use super::tools::tool;
 
-/// Build the six canvas tool schemas, in the same order they previously
-/// appeared inline in `tools.rs`.
+/// Build the seven canvas tool schemas; the first six in the order they
+/// previously appeared inline in `tools.rs`.
 pub(super) fn canvas_tools() -> Vec<Value> {
     vec![
         tool(
@@ -177,6 +177,41 @@ pub(super) fn canvas_tools() -> Vec<Value> {
             }),
             &["canvas_id", "markdown", "mode"],
         ),
+        // #10890: edit grants for a bot-owned canvas shared as a link.
+        tool(
+            "slack_canvas_access_set",
+            "Grant read or write access on a canvas the bot owns (canvases.access.set). \
+             A canvas made without channel_id is owned by the bot, so people opening \
+             its link can only view it; grant write to let them edit. Give exactly one \
+             of user_ids or channel_ids (1-20 ids). channel_ids takes regular channels \
+             only — a DM id fails, so grant a person through user_ids. access_level is \
+             read or write; this tool never grants owner. Paid Slack plans only. \
+             Requires scope canvases:write.",
+            json!({
+                "canvas_id": { "type": "string", "description": "Canvas ID (e.g. F0123ABCD)." },
+                "access_level": {
+                    "type": "string",
+                    "enum": ["read", "write"],
+                    "description": "\"write\" lets the targets edit; \"read\" lets them view.",
+                },
+                "user_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "User IDs (U...) to grant. Use this for a person.",
+                },
+                "channel_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "description": "Regular channel IDs (C...) whose members get access. \
+                        Not a DM or group-DM id.",
+                },
+            }),
+            &["canvas_id", "access_level"],
+        ),
     ]
 }
 
@@ -185,9 +220,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn returns_exactly_the_six_canvas_tools() {
+    fn returns_exactly_the_seven_canvas_tools() {
         let tools = canvas_tools();
-        assert_eq!(tools.len(), 6);
+        assert_eq!(tools.len(), 7);
         for t in &tools {
             assert!(t["name"].as_str().unwrap().contains("canvas"));
         }

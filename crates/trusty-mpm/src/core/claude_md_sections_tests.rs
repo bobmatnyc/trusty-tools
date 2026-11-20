@@ -1458,7 +1458,7 @@ const FOLDED_ROUTING_MAPPINGS_PROMPT: &[(&str, &str)] = &[
         "browser triggers → web-qa",
     ),
     (
-        "never chrome-devtools, claude-in-chrome, or playwright",
+        "`web-qa` on trusty-browser, never claude-in-chrome or chrome-devtools",
         "the browser-tool ban",
     ),
     (

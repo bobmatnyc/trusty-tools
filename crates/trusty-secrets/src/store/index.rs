@@ -111,6 +111,41 @@ impl NamesIndex {
         self.root.join(format!("{}.json", vault.file_stem()))
     }
 
+    /// Every vault with an index file, sorted (#10524).
+    ///
+    /// What: the `*.json` file stems under the root that decode to a valid
+    /// vault; other files are skipped. A missing root is no vaults; any other
+    /// I/O failure is an error, never an empty list.
+    /// Test: `index_vaults_lists_each_indexed_vault`.
+    pub fn vaults(&self) -> Result<Vec<VaultName>, SecretsError> {
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => {
+                return Err(SecretsError::Io {
+                    path: self.root.clone(),
+                    source,
+                });
+            }
+        };
+        let mut vaults = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|source| SecretsError::Io {
+                path: self.root.clone(),
+                source,
+            })?;
+            let name = entry.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+                continue;
+            };
+            if let Ok(vault) = VaultName::new(&stem.replace("%2F", "/")) {
+                vaults.push(vault);
+            }
+        }
+        vaults.sort();
+        Ok(vaults)
+    }
+
     /// Every key in `vault`, sorted by name. A missing file is an empty vault.
     ///
     /// Test: `index_rows_round_trip_without_plaintext`,

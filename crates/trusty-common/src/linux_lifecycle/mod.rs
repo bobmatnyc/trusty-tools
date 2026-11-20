@@ -29,7 +29,18 @@
 //!   returns only once the spawned pid serves the socket. A failed start kills
 //!   and reaps the child it spawned, so nothing it started is left running.
 //! - [`restart`] is [`stop`], then [`start`]; `NotRunning` counts as stopped,
-//!   and any stop error returns before a spawn.
+//!   and any stop error returns before a spawn. While the daemon serves, a
+//!   restart first scans for another process that is this instance, which
+//!   would make the start refuse, and returns
+//!   [`LifecycleError::RestartBlocked`] before any signal (#11085).
+//! - [`stop_pid`] and [`restart_pid`] act on a daemon the caller identified
+//!   by pid, such as one whose socket bind failed (#11085). The pid is pinned
+//!   and must be proven this instance — binary, `liveness_args`,
+//!   `instance_env` and `instance_path_args` — and the socket unserved or
+//!   served by that pid, before any signal.
+//!
+//! A process whose argv gives an `instance_path_args` flag only values naming
+//! another path is a sibling, never this instance (#11085).
 //!
 //! Waits are condition waits: pid exit is a pidfd becoming readable, and the
 //! stopped signal and readiness are polled conditions with a deadline. None of
@@ -51,9 +62,15 @@
 //! [`stop`]: crate::linux_lifecycle::stop()
 //! [`start`]: crate::linux_lifecycle::start()
 //! [`restart`]: crate::linux_lifecycle::restart()
+//! [`stop_pid`]: crate::linux_lifecycle::stop_pid()
+//! [`restart_pid`]: crate::linux_lifecycle::restart_pid()
+//! [`LifecycleError::RestartBlocked`]: crate::linux_lifecycle::LifecycleError::RestartBlocked
 
 mod error;
+mod instance;
 mod liveness;
+pub mod passthrough;
+mod pid;
 mod process;
 mod start;
 mod stop;
@@ -66,9 +83,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub use error::LifecycleError;
+pub use liveness::ProcessTable;
+pub use pid::{
+    restart_pid, restart_pid_with, restart_pid_with_table, stop_pid, stop_pid_with,
+    stop_pid_with_table,
+};
 pub use process::{PinnedProcess, Signal};
-pub use start::{RestartOutcome, StartOutcome, restart, restart_with, start};
-pub use stop::{KernelDelivery, SignalDelivery, StopOutcome, stop, stop_with};
+pub use start::{
+    RestartOutcome, StartOutcome, restart, restart_with, restart_with_table, start,
+    start_with_table,
+};
+pub use stop::{KernelDelivery, SignalDelivery, StopOutcome, stop, stop_with, stop_with_table};
 
 /// How long one connect attempt may take before the answer is "inconclusive".
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -107,15 +132,17 @@ pub enum StoppedSignal {
 /// `stop_grace` bounds the SIGTERM wait, `kill_wait` bounds the SIGKILL wait
 /// and the stopped-signal wait, and `ready_timeout` bounds [`start`].
 /// `liveness_args` tells the daemon from a stdio bridge of the same binary
-/// when the socket does not answer, and `instance_env` tells this instance
-/// from a sibling instance of it; `working_dir`, `env_passthrough` and
-/// `instance_env` shape the spawned process (#11098).
+/// when the socket does not answer, and `instance_env` and
+/// `instance_path_args` tell this instance from a sibling instance of it;
+/// `working_dir`, `env_passthrough` and `instance_env` shape the spawned
+/// process (#11098, #11085).
 /// `#[non_exhaustive]`: build it with [`DaemonDescriptor::new`] or
 /// [`DaemonDescriptor::with_install_dir`], then assign the public fields.
 /// Test: `descriptor_rejects_a_binary_name_with_a_path_separator`,
 /// `descriptor_new_uses_the_canonical_bin_dir`,
 /// `descriptor_rejects_bad_spawn_and_liveness_fields`,
-/// `descriptor_pins_the_data_dir_override_as_its_default_instance_key`.
+/// `descriptor_pins_the_data_dir_override_as_its_default_instance_key`,
+/// `descriptor_rejects_bad_instance_path_args`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DaemonDescriptor {
@@ -142,8 +169,9 @@ pub struct DaemonDescriptor {
     /// every one of these as a whole argument means the daemon still runs:
     /// `stop` and `start` refuse with [`LifecycleError::RunningUnserved`].
     /// Empty (the default) counts every process of `binary`, stdio bridges
-    /// included, which fails closed; a consumer sets the daemon-only
-    /// arguments, such as `["serve", "--foreground"]`.
+    /// included, which fails closed for the scan; [`stop_pid`] and
+    /// [`restart_pid`] refuse an empty list (#11085). A consumer sets the
+    /// daemon-only arguments, such as `["serve", "--foreground"]`.
     pub liveness_args: Vec<String>,
     /// The spawned daemon's working directory; `/` by default (#11098).
     ///
@@ -167,9 +195,25 @@ pub struct DaemonDescriptor {
     /// The constructors set `TRUSTY_DATA_DIR_OVERRIDE` to the caller's value.
     /// A consumer adds every other variable that selects its data dir or
     /// socket — trusty-search adds `TRUSTY_DATA_DIR` — and puts any argv that
-    /// does so, such as `--data-dir <dir>`, in `liveness_args` as well.
+    /// does so, such as `--data-dir <dir>`, in `liveness_args` as well, and
+    /// the flag in `instance_path_args`.
     /// Empty counts every argv match as this instance.
     pub instance_env: Vec<(String, Option<OsString>)>,
+    /// Argv flags whose value names the instance's directory (#11085).
+    ///
+    /// Each entry is a flag, such as `--data-dir`, and the absolute path this
+    /// instance runs with — for the default instance, the default directory.
+    /// A process that matches `binary` and `liveness_args` but gives the flag
+    /// (`--data-dir X` or `--data-dir=X`) only values naming another path is a
+    /// sibling, whatever its environment, and the scan ignores it. A process
+    /// without the flag is unaffected. Values are compared by path components,
+    /// then by `canonicalize`; a relative or unresolvable value, or a flag
+    /// with no value, counts as this instance for the scan, never as a
+    /// sibling, and [`stop_pid`] and [`restart_pid`] refuse such a process
+    /// with [`LifecycleError::InstanceUndecided`]. List each
+    /// alias of a flag as its own entry. Empty (the default) changes nothing.
+    /// This field does not touch `spawn_args`.
+    pub instance_path_args: Vec<(String, PathBuf)>,
 }
 
 impl DaemonDescriptor {
@@ -256,6 +300,7 @@ impl DaemonDescriptor {
                 crate::data_dir::DATA_DIR_OVERRIDE_ENV.to_string(),
                 std::env::var_os(crate::data_dir::DATA_DIR_OVERRIDE_ENV),
             )],
+            instance_path_args: Vec::new(),
         };
         desc.validate()?;
         Ok(desc)
@@ -312,6 +357,19 @@ impl DaemonDescriptor {
                 .is_some_and(|v| v.as_encoded_bytes().contains(&0))
             {
                 return bad("instance_env values must not contain NUL");
+            }
+        }
+        // #11085: a relative path never rules a sibling out, so it could never
+        // tell one apart; `=` would make `<flag>=<value>` ambiguous.
+        let mut flags = std::collections::HashSet::new();
+        for (flag, path) in &self.instance_path_args {
+            if bad_name(flag) || !flags.insert(flag.as_str()) {
+                return bad(
+                    "instance_path_args flags must be unique, non-empty, without '=' or NUL",
+                );
+            }
+            if !path.is_absolute() || path.as_os_str().as_encoded_bytes().contains(&0) {
+                return bad("instance_path_args paths must be absolute, without NUL");
             }
         }
         Ok(())

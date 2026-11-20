@@ -103,7 +103,6 @@ below; every file in this directory is linked.
 | [ai-commander-tmux-client.md](./ai-commander-tmux-client.md) | AI Commander tmux client |
 | [tm-tmux-manager-spec.md](./tm-tmux-manager-spec.md) | tmux-manager specification |
 | [tm-promptable-architecture-2026-05.md](./tm-promptable-architecture-2026-05.md) | Promptable architecture |
-| [cto-bot-port-analysis.md](./cto-bot-port-analysis.md) | CTO-bot port analysis |
 | [openrpc-trusty-contract.md](./openrpc-trusty-contract.md) | OpenRPC trusty contract (wire format) |
 | [projects-feature-foundation.md](./projects-feature-foundation.md) | Projects-feature foundation |
 | [service-layer-audit.md](./service-layer-audit.md) | Service-layer audit |

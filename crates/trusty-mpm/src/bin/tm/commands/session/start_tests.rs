@@ -948,8 +948,9 @@ async fn session_start_in_place_launches_on_the_workspace_server_10101() {
 
     // The workspace server the rule names (`cli_launch_server`), spelled with
     // pieces that predate it so this test also runs against a pre-#10101 tree.
-    let opted_out = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "0");
-    let expected = (!opted_out).then(|| {
+    // #10101: the workspace server is opt-in (`TM_WORKSPACE_TMUX=1`).
+    let opted_in = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "1");
+    let expected = opted_in.then(|| {
         let server = trusty_mpm::core::tmux_server::workspace_server_name(target.path());
         let socket = trusty_mpm::core::tmux_server::ambient_socket_dir().join(&server);
         (server, socket)
@@ -970,7 +971,7 @@ async fn session_start_in_place_launches_on_the_workspace_server_10101() {
                 "every call must reach {server}: {argv}"
             );
         }
-        // `TM_WORKSPACE_TMUX=0` in this environment: the default server.
+        // `TM_WORKSPACE_TMUX` is not `1` here: the default server.
         None => {
             assert!(posts[0]["tmux_socket"].is_null(), "{posts:?}");
             assert!(!new_session.starts_with("-L "), "{new_session}");

@@ -173,8 +173,10 @@ pub fn tool_descriptors() -> Value {
         {
             "name": "review_health",
             "description": "Probe trusty-review service liveness and configuration. \
-                           Returns the current configuration (dry_run mode, reviewer model) \
-                           and dependency reachability. Safe to call without any credentials.",
+                           Returns the current configuration (dry_run mode, reviewer model), \
+                           dependency reachability, and finding_yield (posted vs \
+                           verifier-refuted finding counts per review, aggregated per \
+                           repo and per PR). Safe to call without any credentials.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -346,7 +348,9 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// `reviewer_model`, and a `deps` object with `reachable` and tri-state
 /// `state` (`"ok"`/`"unreachable"`/`"timeout"`) for each dep.  When inference
 /// is not `"ok"` OR a required dep is unreachable, `status` becomes
-/// `"degraded"`.
+/// `"degraded"`.  #11525 adds `finding_yield`: posted and verifier-refuted
+/// finding counts from the review log directory, in total, per repo and per
+/// PR (`pipeline::finding_yield::summarize_yield`).
 ///
 /// #4254: `dry_run` is the value a review invoked through THIS surface
 /// executes with — computed by `surface_dry_run` from the same
@@ -357,7 +361,8 @@ async fn call_review_diff(args: &Value, state: &AppState) -> Result<Value, ToolE
 /// live-configured daemon is told why rather than left to guess.
 /// Test: `review_health_inference_ok`, `review_health_inference_auth_error_degraded`,
 /// `review_health_required_dep_down_degraded`, `review_health_optional_dep_down_ok`,
-/// `review_health_reports_the_dry_run_the_review_path_executes`.
+/// `review_health_reports_the_dry_run_the_review_path_executes`,
+/// `review_health_reports_finding_yield`.
 async fn call_review_health(state: &AppState) -> Value {
     let reviewer_model = state.config.role_models.reviewer.model.clone();
 
@@ -380,9 +385,18 @@ async fn call_review_health(state: &AppState) -> Value {
         MCP_REVIEW_ALLOW_POSTING,
     );
 
+    // #11525: posted vs verifier-refuted findings, per PR and per repo.
+    let finding_yield = match crate::pipeline::finding_yield::summarize_yield(&state.config.log_dir)
+    {
+        Ok(summary) => serde_json::to_value(summary)
+            .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+        Err(e) => serde_json::json!({ "error": e.to_string() }),
+    };
+
     let result = serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
+        "finding_yield": finding_yield,
         "dry_run": dry_run,
         "dry_run_reason": dry_run_reason.map(|r| r.as_str()),
         "reviewer_model": reviewer_model,

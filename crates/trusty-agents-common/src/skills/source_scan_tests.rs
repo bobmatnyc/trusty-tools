@@ -33,9 +33,9 @@ fn scan_finds_directory_shaped_skill() {
     // #4949: `<stem>/SKILL.md` is a skill. Before the fix the top-level
     // `is_file()` test rejected the directory and the scan returned nothing.
     let src = TempDir::new().unwrap();
-    let skill = src.path().join("duetto-design-system");
+    let skill = src.path().join("acme-design-system");
     fs::create_dir_all(skill.join("references")).unwrap();
-    fs::write(skill.join("SKILL.md"), "# Duetto\n").unwrap();
+    fs::write(skill.join("SKILL.md"), "# Acme\n").unwrap();
     fs::write(skill.join("metadata.json"), "{}\n").unwrap();
     fs::write(skill.join("references").join("tokens.md"), "# Tokens\n").unwrap();
 
@@ -43,7 +43,7 @@ fn scan_finds_directory_shaped_skill() {
 
     assert_eq!(scan.skills.len(), 1, "got {:?}", scan);
     let found = &scan.skills[0];
-    assert_eq!(found.stem, "duetto-design-system");
+    assert_eq!(found.stem, "acme-design-system");
     assert_eq!(found.entry, skill.join("SKILL.md"));
     // Every carried file travels — not just `references/*.md`. `SKILL.md`
     // itself is the entry point, never an extra.

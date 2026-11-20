@@ -42,13 +42,13 @@ fn plan_sends_a_github_origin_to_the_managed_clone() {
 
 /// A GitHub SSH host alias is still GitHub.
 ///
-/// Why: `git@github-duetto:owner/repo.git` reaches the managed clone through
+/// Why: `git@github-acme:owner/repo.git` reaches the managed clone through
 /// `is_github_remote`'s alias rule; routing it to the live checkout would
 /// silently downgrade every multi-account setup.
 /// Test: this is the test.
 #[test]
 fn plan_sends_a_github_ssh_alias_origin_to_the_managed_clone() {
-    let url = "git@github-duetto:duettoresearch/aria.git";
+    let url = "git@github-acme:acme/aria.git";
     assert_eq!(plan_for_origin(Some(url)), OriginPlan::ManagedClone(url));
 }
 

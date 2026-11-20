@@ -238,9 +238,15 @@ fn is_executable(path: &Path) -> bool {
 /// The frontmatter `hooks` values of the skill and agent Markdown under
 /// `base` (`skills/` and `agents/`, one directory level deep).
 ///
-/// What: a missing directory or file has none; `Err(path)` for one that
-/// cannot be read, or frontmatter that mentions `hooks` and does not parse
-/// (fail-closed, #8928 fix round).
+/// What: a missing directory or file has none. #10937: a file that cannot be
+/// read (Claude Code cannot read it either) and frontmatter that does not
+/// parse but declares no top-level `hooks` key are skipped with a stderr
+/// warning, so one stray agent file no longer refuses every write.
+/// Fail-closed (#8928 fix round): `Err(path)` for frontmatter that does not
+/// parse and declares a top-level `hooks` key ([`declares_hooks_key`]).
+/// Test: `an_unparseable_agent_file_without_hooks_is_skipped_10937`,
+/// `an_unreadable_agent_file_is_skipped_10937`,
+/// `an_unparseable_agent_file_declaring_hooks_still_denies_10937`.
 fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
     let mut out = Vec::new();
     for kind in ["skills", "agents"] {
@@ -248,19 +254,110 @@ fn frontmatter_hook_values(base: &Path) -> Result<Vec<Value>, PathBuf> {
             let text = match std::fs::read_to_string(&file) {
                 Ok(text) => text,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                // #10937: skip and log a file Claude Code cannot read either;
+                // every other read error (EIO, non-UTF-8) still refuses.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    skipped(&file, &e.to_string());
+                    continue;
+                }
                 Err(_) => return Err(file),
             };
-            if !text.contains("hooks") {
+            // #10937: an escape may spell `hooks`, so it is parsed too.
+            // #11438: only an escape that can produce a letter, or a fold.
+            if !text.contains("hooks") && !escape_may_spell_hooks(&frontmatter_block(&text)) {
                 continue;
             }
             match frontmatter_hooks(&text) {
                 Ok(None) => {}
                 Ok(Some(hooks)) => out.push(serde_json::to_value(hooks).map_err(|_| file.clone())?),
-                Err(()) => return Err(file),
+                Err(()) if declares_hooks_key(&text) => return Err(file),
+                // #10937: no `hooks` key to hide, so the file names no hook.
+                Err(()) => skipped(
+                    &file,
+                    "frontmatter does not parse and declares no `hooks` key",
+                ),
             }
         }
     }
     Ok(out)
+}
+
+/// Logs a skill or agent file the hook-path scan skipped (#10937).
+fn skipped(file: &Path, why: &str) {
+    eprintln!(
+        "tm pm-guard: skipped `{}` in the hook-path scan: {why}",
+        file.display()
+    );
+}
+
+/// Whether `text`'s frontmatter may carry a `hooks` key a lenient parser
+/// would read (#10937): a word-bounded `hooks` anywhere (indented, explicit
+/// `? hooks`, tagged, quoted, or inside a flow mapping), a `<<` merge key, or
+/// a backslash escape that could spell the key ([`escape_may_spell_hooks`]).
+///
+/// Why: a frontmatter that does not parse may still be read by Claude Code,
+/// so any plausible `hooks` key keeps the scan fail-closed; prose such as
+/// `webhooks` does not. Over-refusal on an unparseable file is the safe side.
+/// Test: `an_unparseable_agent_file_declaring_hooks_still_denies_10937`.
+pub(crate) fn declares_hooks_key(text: &str) -> bool {
+    let block = frontmatter_block(text);
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let bounded = block.match_indices("hooks").any(|(i, _)| {
+        let before = block[..i].chars().next_back().is_none_or(|c| !word(c));
+        let after = block[i + 5..].chars().next().is_none_or(|c| !word(c));
+        before && after
+    });
+    // #11438: `C:\Users` or `\d+` hides no key; a hex escape or a fold may.
+    bounded || block.contains("<<") || escape_may_spell_hooks(&block)
+}
+
+/// Whether `block` holds a backslash that a YAML double-quoted scalar could
+/// turn into part of a `hooks` key (#11438).
+///
+/// Why: refusing every backslash denied `description: "C:\Users\me"`; a
+/// narrowing to hex escapes alone missed the escaped line break, where
+/// `"ho\` + newline + `  oks"` folds to `hooks`.
+/// What: true for a `\` that starts `\x` + 2 hex digits, `\u` + 4, `\U` + 8
+/// (the escapes that can produce a letter), or is followed by a line break
+/// that folds: LF, CR, or the YAML 1.1 NEL, LS and PS that libyaml reads.
+/// Every other backslash is ignored. `\\` pairs are not skipped, so a
+/// literal backslash before a hex run still counts (over-refusal is safe).
+/// Test: `an_escaped_line_break_spelling_hooks_denies_11438`,
+/// `a_plain_backslash_is_not_a_hooks_key_11438`,
+/// `frontmatter_hooks_ignores_a_plain_backslash_11438`,
+/// `the_home_agents_scan_skips_a_plain_backslash_11438`.
+fn escape_may_spell_hooks(block: &str) -> bool {
+    let bytes = block.as_bytes();
+    let hex_run = |from: usize, n: usize| {
+        bytes
+            .get(from..from + n)
+            .is_some_and(|run| run.iter().all(u8::is_ascii_hexdigit))
+    };
+    bytes.iter().enumerate().any(|(i, &b)| {
+        b == b'\\'
+            && match bytes.get(i + 1) {
+                Some(b'\n' | b'\r') => true,
+                // #11438: NEL (C2 85), LS (E2 80 A8), PS (E2 80 A9) fold in YAML 1.1.
+                Some(0xC2) => bytes.get(i + 2) == Some(&0x85),
+                Some(0xE2) => matches!(bytes.get(i + 2..i + 4), Some([0x80, 0xA8 | 0xA9])),
+                Some(b'x') => hex_run(i + 2, 2),
+                Some(b'u') => hex_run(i + 2, 4),
+                Some(b'U') => hex_run(i + 2, 8),
+                _ => false,
+            }
+    })
+}
+
+/// The frontmatter block of `text`: the lines between the opening `---` and
+/// the next `---`, or every line after the opening one when none closes it.
+fn frontmatter_block(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let block: Vec<&str> = text
+        .lines()
+        .skip(1)
+        .take_while(|l| l.trim_end() != "---")
+        .collect();
+    block.join("\n")
 }
 
 /// The `.md` files in `dir`, and in its subdirectories `depth` levels down.
@@ -375,7 +472,9 @@ pub(crate) fn frontmatter_hooks(text: &str) -> Result<Option<serde_yaml::Value>,
     }
     let block: Vec<&str> = lines.take_while(|l| l.trim_end() != "---").collect();
     let block = block.join("\n");
-    let mentions = block.to_ascii_lowercase().contains("hooks");
+    // #10937: a backslash escape may spell `hooks` (`"ho\x6fks"`).
+    // #11438: only a letter-producing escape or a line fold counts.
+    let mentions = block.to_ascii_lowercase().contains("hooks") || escape_may_spell_hooks(&block);
     match serde_yaml::from_str::<serde_yaml::Value>(&block) {
         Ok(serde_yaml::Value::Mapping(map)) => Ok(map.get("hooks").cloned()),
         _ if mentions => Err(()),

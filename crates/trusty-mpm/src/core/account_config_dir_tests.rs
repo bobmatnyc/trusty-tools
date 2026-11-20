@@ -16,8 +16,8 @@ github.com:
     git_protocol: https
     users:
         bobmatnyc:
-        bob-duetto:
-    user: bob-duetto
+        acme-admin:
+    user: acme-admin
 ";
 
 /// `TWO_ACCOUNT_HOSTS_YML` with synthetic logins, for the #8510 tests.
@@ -66,13 +66,13 @@ fn ensure_account_config_dir_builds_from_operator_hosts_yml() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
-        .expect("bob-duetto is a known account");
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin")
+        .expect("acme-admin is a known account");
 
-    assert_eq!(dir, state_root.join("gh-accounts").join("bob-duetto"));
+    assert_eq!(dir, state_root.join("gh-accounts").join("acme-admin"));
     assert!(dir.join("hosts.yml").is_file());
     let written = std::fs::read_to_string(dir.join("hosts.yml")).unwrap();
-    assert!(written.contains("bob-duetto"), "{written}");
+    assert!(written.contains("acme-admin"), "{written}");
     assert!(
         !written.contains("bobmatnyc"),
         "the built hosts.yml must name ONLY the selected account: {written}"
@@ -90,15 +90,15 @@ fn ensure_account_config_dir_uses_the_canonical_spelling() {
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
     // Note the deliberately wrong case on input.
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "BOB-DUETTO")
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "ACME-ADMIN")
         .expect("case-insensitive match must succeed");
 
     // The directory path itself is keyed on the CALLER's spelling (matches
     // register_args'/the CLI's own case handling of --account), but the
     // hosts.yml content inside it is gh's canonical spelling.
-    assert_eq!(dir, state_root.join("gh-accounts").join("BOB-DUETTO"));
+    assert_eq!(dir, state_root.join("gh-accounts").join("ACME-ADMIN"));
     let written = std::fs::read_to_string(dir.join("hosts.yml")).unwrap();
-    assert!(written.contains("bob-duetto"), "{written}");
+    assert!(written.contains("acme-admin"), "{written}");
 }
 
 /// A login the operator's `hosts.yml` does NOT name is refused, with the
@@ -128,7 +128,7 @@ fn ensure_account_config_dir_refuses_when_operator_has_no_hosts_yml() {
     let operator_dir = tmp.path().join("empty-operator-dir");
     std::fs::create_dir_all(&operator_dir).unwrap();
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin")
         .expect_err("no hosts.yml at all must refuse");
     assert!(err.contains("gh auth login"), "{err}");
 }
@@ -141,7 +141,7 @@ fn ensure_account_config_dir_reuses_an_existing_dir_untouched() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin")
         .expect("first build succeeds");
     let sentinel = "hand-edited-by-the-operator, must survive reuse";
     std::fs::write(dir.join("hosts.yml"), sentinel).unwrap();
@@ -150,7 +150,7 @@ fn ensure_account_config_dir_reuses_an_existing_dir_untouched() {
     // account at all, an already-built dir must still be reused as-is.
     let empty_operator_dir = tmp.path().join("now-empty-operator-dir");
     std::fs::create_dir_all(&empty_operator_dir).unwrap();
-    let dir2 = ensure_account_config_dir(&state_root, &empty_operator_dir, "bob-duetto")
+    let dir2 = ensure_account_config_dir(&state_root, &empty_operator_dir, "acme-admin")
         .expect("an existing dir must be reused, not rebuilt or refused");
 
     assert_eq!(dir, dir2);
@@ -172,7 +172,7 @@ fn ensure_account_config_dir_copies_config_yml_when_present() {
         Some("version: \"1\"\ngit_protocol: ssh\n"),
     );
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin").unwrap();
     assert_eq!(
         std::fs::read_to_string(dir.join("config.yml")).unwrap(),
         "version: \"1\"\ngit_protocol: ssh\n"
@@ -256,11 +256,11 @@ fn ensure_account_config_dir_adds_the_version_to_a_reused_dir() {
 /// `gh_account` parser and names exactly one account.
 #[test]
 fn render_single_account_hosts_yml_round_trips_through_the_parser() {
-    let text = render_single_account_hosts_yml("bob-duetto");
+    let text = render_single_account_hosts_yml("acme-admin");
     let status =
         crate::core::gh_account::parse_gh_account_status_from_hosts_yml(&text).expect("must parse");
-    assert_eq!(status.active.as_deref(), Some("bob-duetto"));
-    assert_eq!(status.logged_in, vec!["bob-duetto".to_string()]);
+    assert_eq!(status.active.as_deref(), Some("acme-admin"));
+    assert_eq!(status.logged_in, vec!["acme-admin".to_string()]);
     assert!(!status.is_ambiguous());
 }
 
@@ -314,9 +314,9 @@ fn ensure_account_config_dir_refuses_a_forward_slash() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob/duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob/acme")
         .expect_err("a path separator must be refused");
-    assert!(err.contains("bob/duetto"), "{err}");
+    assert!(err.contains("bob/acme"), "{err}");
 }
 
 #[test]
@@ -325,9 +325,9 @@ fn ensure_account_config_dir_refuses_a_backslash() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob\\duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob\\acme")
         .expect_err("a path separator must be refused");
-    assert!(err.contains("bob\\duetto"), "{err}");
+    assert!(err.contains("bob\\acme"), "{err}");
 }
 
 // -----------------------------------------------------------------------
@@ -347,11 +347,11 @@ fn ensure_account_config_dir_refuses_a_symlinked_dir() {
     std::fs::create_dir_all(state_root.join("gh-accounts")).unwrap();
     std::os::unix::fs::symlink(
         &real_target,
-        state_root.join("gh-accounts").join("bob-duetto"),
+        state_root.join("gh-accounts").join("acme-admin"),
     )
     .expect("create symlink");
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin")
         .expect_err("a pre-planted symlinked dir must be refused");
     assert!(err.contains("symlink"), "{err}");
 }
@@ -363,13 +363,13 @@ fn ensure_account_config_dir_refuses_a_symlinked_hosts_yml() {
     let state_root = tmp.path().join("state");
     let operator_dir = fake_operator_gh_config_dir(tmp.path(), TWO_ACCOUNT_HOSTS_YML, None);
 
-    let dir = state_root.join("gh-accounts").join("bob-duetto");
+    let dir = state_root.join("gh-accounts").join("acme-admin");
     std::fs::create_dir_all(&dir).unwrap();
     let real_target = tmp.path().join("some-real-file");
     std::fs::write(&real_target, "not a hosts.yml").unwrap();
     std::os::unix::fs::symlink(&real_target, dir.join("hosts.yml")).expect("create symlink");
 
-    let err = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto")
+    let err = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin")
         .expect_err("a pre-planted symlinked hosts.yml must be refused");
     assert!(err.contains("symlink"), "{err}");
 }
@@ -416,7 +416,7 @@ fn ensure_account_config_dir_sets_restrictive_permissions() {
         Some("git_protocol: ssh\n"),
     );
 
-    let dir = ensure_account_config_dir(&state_root, &operator_dir, "bob-duetto").unwrap();
+    let dir = ensure_account_config_dir(&state_root, &operator_dir, "acme-admin").unwrap();
 
     let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
     assert_eq!(dir_mode, 0o700, "dir mode was {dir_mode:o}");

@@ -311,7 +311,11 @@ fn session_id_exists_in(cwd: &Path, projects_dir: &Path, id: &str) -> bool {
 /// the provisioning itself is covered in `core::managed_config`;
 /// `prepare_managed_config_writes_no_mcp_json` and
 /// `prepare_managed_config_writes_no_mcp_approval` cover the deletions.
-fn prepare_managed_config(fw: &FrameworkPaths, tmux_name: &str, cwd: &Path) -> std::path::PathBuf {
+fn prepare_managed_config(
+    fw: &FrameworkPaths,
+    tmux_name: &str,
+    cwd: &Path,
+) -> Result<std::path::PathBuf, RuntimeError> {
     prepare_managed_config_with_exe(fw, tmux_name, cwd, None)
 }
 
@@ -346,7 +350,7 @@ fn prepare_managed_config_with_exe(
     tmux_name: &str,
     cwd: &Path,
     hook_exe: Option<&Path>,
-) -> std::path::PathBuf {
+) -> Result<std::path::PathBuf, RuntimeError> {
     // #8233: the layout the caller named, never `dirs::home_dir()`.
     let config_dir = fw.managed_claude_config_dir();
 
@@ -380,8 +384,15 @@ fn prepare_managed_config_with_exe(
     // The message is terse and the "non-fatal" framing lives in the comment
     // above: this file sits one line under the 500-SLOC cap, and a wrapped
     // `tracing::warn!` costs four more.
-    if let Err(e) = crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
-        tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}");
+    // #10612: an Architect's failed merge refuses the spawn; any other is logged.
+    match crate::core::session_launch::ensure_project_hooks(cwd, hook_exe) {
+        Err(e @ crate::core::session_launch::PrepError::ArchitectHooks { .. }) => {
+            return Err(RuntimeError::Spawn(e.to_string()));
+        }
+        Err(e) => {
+            tracing::warn!(session = %tmux_name, cwd = %cwd.display(), "hook merge failed: {e}")
+        }
+        Ok(()) => {}
     }
 
     // Seed workspace trust into <config_dir>/.claude.json (isolation invariant:
@@ -395,7 +406,7 @@ fn prepare_managed_config_with_exe(
         );
     }
 
-    config_dir
+    Ok(config_dir)
 }
 
 /// Owned pieces of an in-place `claude` relaunch command, built for direct
@@ -584,7 +595,7 @@ fn build_inplace_resume_command_with(
     cwd: &Path,
     claude_session_id: Option<&str>,
 ) -> Result<InPlaceResumeCommand, RuntimeError> {
-    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd);
+    let config_dir = prepare_managed_config(fw, "in-place-relaunch", cwd)?;
     // #7422: compose the session-scoped MCP file BEFORE anything else, so the
     // fail-closed gate does not depend on a binary lookup succeeding first. A
     // failure here abandons the relaunch rather than dropping the flag, which
@@ -823,7 +834,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
         // present, and `user` is the tier it relocates. The older comment here
         // claimed the project layer under `project,local`; see
         // `prepare_managed_config`. Non-fatal throughout (closes #1696).
-        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd)?;
         // #7422: compose this session's MCP config before anything else, so the
         // fail-closed gate does not depend on a binary lookup succeeding first.
         // Fatal by design — the only fallback is a spawn with no
@@ -975,7 +986,7 @@ impl RuntimeAdapter for ClaudeCodeAdapter {
     ) -> Result<(), RuntimeError> {
         // #8405: same config read as `spawn` — a restart is where #8405 was seen.
         let alternate_screen = self.configured_alternate_screen();
-        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd);
+        let config_dir = prepare_managed_config(&self.fw, tmux_name, cwd)?;
         // #7422: same fail-closed MCP composition as `spawn`, in the same
         // position — a resumed pane must not be the one path that still loads
         // every shared server. #8233: under the same named state home.

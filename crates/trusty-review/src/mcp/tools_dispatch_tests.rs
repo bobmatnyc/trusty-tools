@@ -718,7 +718,7 @@ impl LlmProvider for PromptCapture {
 /// The `context` argument reaches the reviewer prompt as the PR description,
 /// for a real `diff --git` diff. Before #8654 it was written as a `# Context:`
 /// diff preamble, which the parser discarded as an unattributable section —
-/// the canary from duettoresearch/code-intelligence#5906 never reached the
+/// the canary from acme-labs/code-intelligence#5906 never reached the
 /// model.
 #[tokio::test]
 async fn review_diff_context_reaches_the_reviewer_prompt() {

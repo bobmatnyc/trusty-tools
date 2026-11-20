@@ -168,14 +168,15 @@ pub(crate) use ansi_c_decode::{Decoded, decode_ansi_c, decode_ansi_c_lenient};
 // argv token is an interpreter's PROGRAM, and whether a word is regex syntax.
 // #8723: and which tokens are prose a `printf`/`echo` writes into a file.
 // #10685: and whether a printer-only command can run anything nested.
-pub(crate) use bash_tokens::{
-    TEXT_PRINTERS, TokenizeError, has_regex_quantifier, program_text_indices, prose_write_indices,
-    runs_a_nested_command, tokenize, without_glob_metacharacters,
-};
+// #10974: and whether a nested-command marker sits outside single quotes.
 // #7743: the argv-side answer to "does this redirect token name a FILE", used
 // by the sibling secret-copy rule.
 // #8869: and by the secret-read key-consumer rule, with the input-side parser.
-pub(crate) use bash_tokens::{RedirectRole, redirect_role};
+pub(crate) use bash_tokens::{
+    RedirectRole, TEXT_PRINTERS, TokenizeError, has_live_nested_marker, has_regex_quantifier,
+    program_text_indices, prose_write_indices, redirect_role, runs_a_nested_command, tokenize,
+    without_glob_metacharacters,
+};
 pub(crate) use credential_print::input_redirect_operand;
 // #7266: everything after the first export is shared with
 // `crate::commands::pm_guard_secret_read`, so a READ of a secret-bearing file

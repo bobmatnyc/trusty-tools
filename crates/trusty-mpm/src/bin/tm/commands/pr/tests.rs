@@ -2464,7 +2464,7 @@ const REQUIRED: &str = "Clippy\nRust tests\n";
 /// `extra`.
 fn view_json(extra: &str) -> String {
     format!(
-        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        r#"{{"isDraft":false,"labels":[{{"name":"rung:3"}}],"reviewDecision":"APPROVED",
             "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
@@ -2551,7 +2551,7 @@ fn queue_stop_order_prefers_hold() {
 
 #[test]
 fn queue_stop_order_prefers_changes_requested() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"CHANGES_REQUESTED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"CHANGES_REQUESTED",
         "statusCheckRollup":[],
         "comments":[{"body":"code-critic verdict: BLOCK"}]}"#;
     let reason = first_reason(json).expect("blocked");
@@ -2559,39 +2559,8 @@ fn queue_stop_order_prefers_changes_requested() {
 }
 
 #[test]
-fn queue_stop_order_prefers_critic_block() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
-        "statusCheckRollup":[],
-        "comments":[{"body":"code-critic verdict: BLOCK"}]}"#;
-    let reason = first_reason(json).expect("blocked");
-    assert!(reason.contains("code-critic BLOCK"), "{reason}");
-}
-
-#[test]
-fn queue_critic_block_then_approve_is_clear() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
-        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
-        "statusCheckRollup":[
-          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
-          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
-        "comments":[{"body":"code-critic: BLOCK"},{"body":"code-critic: APPROVE"}]}"#;
-    assert_eq!(first_reason(json), None);
-}
-
-#[test]
-fn queue_critic_ignores_unrelated_comments() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
-        "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
-        "statusCheckRollup":[
-          {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
-          {"name":"Rust tests","status":"COMPLETED","conclusion":"SUCCESS"}],
-        "comments":[{"body":"we should BLOCK bad merges in general"}]}"#;
-    assert_eq!(first_reason(json), None);
-}
-
-#[test]
 fn queue_required_context_missing() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"APPROVED",
         "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}],"comments":[]}"#;
     let reason = first_reason(json).expect("blocked");
@@ -2600,7 +2569,7 @@ fn queue_required_context_missing() {
 
 #[test]
 fn queue_required_context_not_success() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"APPROVED",
         "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
@@ -2613,7 +2582,7 @@ fn queue_required_context_not_success() {
 #[test]
 fn queue_accepts_status_context() {
     // A StatusContext entry carries `context`/`state`, not `name`/`conclusion`.
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"APPROVED",
         "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"context":"Clippy","state":"SUCCESS"},
@@ -2629,7 +2598,7 @@ fn queue_accepts_status_context() {
 /// gate, not the new mergeability one.
 fn duplicate_run_view(runs: &str) -> String {
     format!(
-        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        r#"{{"isDraft":false,"labels":[{{"name":"rung:3"}}],"reviewDecision":"APPROVED",
             "mergeable":"MERGEABLE","mergeStateStatus":"CLEAN",
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS",
@@ -2735,7 +2704,7 @@ fn queue_single_run_is_unchanged() {
 /// gate and the required-context loop remain live.
 fn mergeability_view(mergeable: &str, merge_state: &str) -> String {
     format!(
-        r#"{{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+        r#"{{"isDraft":false,"labels":[{{"name":"rung:3"}}],"reviewDecision":"APPROVED",
             "mergeable":{mergeable},"mergeStateStatus":{merge_state},
             "statusCheckRollup":[
               {{"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"}},
@@ -2784,7 +2753,7 @@ fn queue_merge_state_unknown_is_pending() {
 /// never read as mergeable (#8670 acceptance criterion).
 #[test]
 fn queue_mergeable_field_missing_is_pending() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"APPROVED",
         "mergeStateStatus":"CLEAN",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
@@ -2798,7 +2767,7 @@ fn queue_mergeable_field_missing_is_pending() {
 /// omitted `mergeStateStatus`.
 #[test]
 fn queue_merge_state_field_missing_is_pending() {
-    let json = r#"{"isDraft":false,"labels":[],"reviewDecision":"APPROVED",
+    let json = r#"{"isDraft":false,"labels":[{"name":"rung:3"}],"reviewDecision":"APPROVED",
         "mergeable":"MERGEABLE",
         "statusCheckRollup":[
           {"name":"Clippy","status":"COMPLETED","conclusion":"SUCCESS"},
@@ -2823,7 +2792,7 @@ fn queue_mergeable_clean_happy_path_is_admitted() {
 fn queue_exits_1_when_any_pr_blocked() {
     let gh = FakeGh::new().on("branches/main/protection", REQUIRED).on(
         "pr view",
-        r#"{"isDraft":true,"labels":[],"reviewDecision":null,
+        r#"{"isDraft":true,"labels":[{"name":"rung:3"}],"reviewDecision":null,
                 "statusCheckRollup":[],"comments":[]}"#,
     );
     assert_eq!(
@@ -3757,3 +3726,7 @@ mod phase_title_open;
 // #10724: `tm pr merge` against code-critic verdicts.
 #[path = "merge_critic_tests.rs"]
 mod merge_critic;
+
+// Dr4: queue-check's rung label and pinned code-critic verdict gate.
+#[path = "queue_check_critic_tests.rs"]
+mod queue_check_critic;

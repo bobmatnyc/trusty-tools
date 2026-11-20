@@ -611,22 +611,22 @@ fn resolver_reason_label() {
 
 /// A row holding only a GitHub URL resolves to its managed clone directory.
 ///
-/// #7887's core claim: `bob-duetto/cto` IS `<repos_root>/bob-duetto/cto`, and
+/// #7887's core claim: `acme-admin/cto` IS `<repos_root>/acme-admin/cto`, and
 /// never the URL the registry stores.
 #[test]
 fn local_checkout_for_derives_the_managed_clone_path() {
-    let project = proj("cto", "https://github.com/bob-duetto/cto");
+    let project = proj("cto", "https://github.com/acme-admin/cto");
     assert_eq!(
         local_checkout_for(&project),
         Some(
             crate::daemon::managed_routes::inproject::repos_root()
-                .join("bob-duetto")
+                .join("acme-admin")
                 .join("cto")
         )
     );
     // An `ssh` remote names the same checkout as its `https` spelling.
     assert_eq!(
-        local_checkout_for(&proj("cto", "git@github.com:bob-duetto/cto.git")),
+        local_checkout_for(&proj("cto", "git@github.com:acme-admin/cto.git")),
         local_checkout_for(&project)
     );
 }

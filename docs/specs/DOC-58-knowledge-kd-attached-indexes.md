@@ -239,7 +239,7 @@ deduped derivation, not the raw resolver. Do not "fix" this back to
 **Status:** Draft
 
 - **KD-11** The Knowledge pane's K-d sub-surface supports **attach and detach of existing indexes only.** Attach appends an `index_id` to `tools.search_indexes` (a config write, a #3935/#3890-style `PATCH` follow-on — the write contract itself is out of scope for this addendum and lands with #4010); detach removes it. Neither action creates or deletes a trusty-search index.
-- **KD-12** **Index *creation* stays CLI/ops-only, per #4011.** The GUI's attach picker lists only indexes the trusty-search daemon already reports via `list_indexes` (`crates/trusty-search/src/mcp/tools/descriptors.rs`) — it never offers an inline "create a new index" action. This is a deliberate narrowing: `create_index` over an external/cross-org directory (the APEX/Duetto driver, §8) writes a `.gitignore` inside a tree the GUI's operator does not own, which is exactly the confirmation-gated action #4011's runbook defines. A GUI shortcut around that gate would defeat the reason #4011 exists.
+- **KD-12** **Index *creation* stays CLI/ops-only, per #4011.** The GUI's attach picker lists only indexes the trusty-search daemon already reports via `list_indexes` (`crates/trusty-search/src/mcp/tools/descriptors.rs`) — it never offers an inline "create a new index" action. This is a deliberate narrowing: `create_index` over an external/cross-org directory (the APEX/Acme driver, §8) writes a `.gitignore` inside a tree the GUI's operator does not own, which is exactly the confirmation-gated action #4011's runbook defines. A GUI shortcut around that gate would defeat the reason #4011 exists.
 - **KD-13** Rendering follows DOC-57 §8.3's G-4 ("never fabricate"): an attached index that the daemon cannot currently reach renders as **NOT CONNECTED** with its `reason` (§5.1), never as silently absent and never as falsely connected — the same rule K-a's `StoreStatus` already follows.
 
 ---
@@ -259,7 +259,7 @@ deduped derivation, not the raw resolver. Do not "fix" this back to
 
 This walks the two-tier principle (§2) and K-d (§3–§7) through epic #4007's concrete driver, without prescribing #4015's implementation — it is illustrative, showing how the pieces defined above compose.
 
-1. **Ops attaches the corpus (CLI, not GUI — KD-12).** An operator runs `create_index({id: "apex", root_path: "/Users/masa/trusty-mpm-projects/bob-duetto/apex"})` against the trusty-search daemon, following #4011's runbook (external/cross-org directory, explicit confirmation). This step touches trusty-search only; it does not touch `cto-assistant`'s config at all.
+1. **Ops attaches the corpus (CLI, not GUI — KD-12).** An operator runs `create_index({id: "apex", root_path: "/Users/masa/trusty-mpm-projects/acme-admin/apex"})` against the trusty-search daemon, following #4011's runbook (external/cross-org directory, explicit confirmation). This step touches trusty-search only; it does not touch `cto-assistant`'s config at all.
 2. **`cto-assistant` declares the attachment (K-d, §3.2).** Its `agent.toml` gains:
    ```toml
    [tools]

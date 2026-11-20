@@ -1250,7 +1250,7 @@ fn gh_command_applies_the_resolved_gh_env() {
 fn gh_command_removes_an_inherited_token_when_a_config_dir_binds() {
     let env = crate::core::gh_identity::resolve_gh_env(Some(
         &crate::core::trusty_tools_config::GithubConfig {
-            config_dir: Some(PathBuf::from("/cfg/duetto")),
+            config_dir: Some(PathBuf::from("/cfg/acme")),
             ..Default::default()
         },
     ))
@@ -1278,7 +1278,7 @@ fn gh_command_removes_an_inherited_token_when_a_config_dir_binds() {
         .find(|(k, _)| *k == "GH_CONFIG_DIR")
         .and_then(|(_, v)| v)
         .expect("GH_CONFIG_DIR must still be set");
-    assert_eq!(value, "/cfg/duetto");
+    assert_eq!(value, "/cfg/acme");
 }
 
 /// Why (#6668): with no binding the spawn must stay exactly as ambient as it

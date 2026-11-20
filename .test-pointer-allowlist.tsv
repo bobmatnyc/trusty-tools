@@ -910,7 +910,6 @@ crates/trusty-mpm/src/session_manager/naming_tests.rs	reconcile_flags_unresolvab
 crates/trusty-mpm/src/tui/health/probes.rs	project_search_counts
 crates/trusty-mpm/tests/session_manager_mvp.rs	session_manager_answer_clears_pending
 crates/trusty-mpm/tests/spawned_tm_home_isolation.rs	the_rules_detect_what_they_are_shown
-crates/trusty-review/src/config/mod.rs	config_github_fields_from_env
 crates/trusty-review/src/integrations/context/conformance.rs	parse_bullet_accepts_tab_separator
 crates/trusty-review/src/integrations/github/auth/app.rs	install_token_exchange_returns_transport_on_unreachable
 crates/trusty-review/src/pipeline/grade.rs	synthesis_high_confidence_demoted_high_floors_to_request_changes

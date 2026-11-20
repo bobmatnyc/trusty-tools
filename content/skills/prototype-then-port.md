@@ -17,6 +17,11 @@ first, prove parity second, cut over last.
 
 Source: Owner ruling 2026-10-30.
 
+A prototype declared as demo/POC work owes a smoke run, the core happy
+path, and named `intent(demo):` intentions for the rest. The port converts
+every intention into a real test. Rule: `tm-workflow`, "Demo and POC Work" in
+`references/completion-standard.md`.
+
 ## Port trigger
 
 Port only when all three hold:

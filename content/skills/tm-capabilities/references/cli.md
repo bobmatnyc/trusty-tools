@@ -8,6 +8,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `list` — List every deployed agent with its declared skills
   - `show` — Show one agent's metadata and per-skill resolution
 - `architect` — The Architect's deterministic commands: the poller and its readers
+  - `attach` — Attach to the Architect's tmux session (switch-client inside tmux)
   - `classify` — Print one pane capture's facts as JSON (`parse_pane`)
   - `dashboard` — Read and write the Architect's dashboard store (`dashboard-db.py`)
     - `batch` — Apply a JSON list of ops (or `{"ops": [...]}`), all or none
@@ -25,7 +26,9 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `input-state` — Classify each pane's input box (`input-state.py`)
   - `poll` — The deterministic fleet poller (`fleet-poll.py`)
   - `quiet` — Print the quiet-session list, sorted, one name per line
+  - `restart` — Restart the Architect behind the checkpoint gate (#11365)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
+  - `up` — Bring the Architect up from any state, then attach (#11364)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)
   - `clear-token` — Remove the stored token, if present
@@ -101,6 +104,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
     - `create` — File an epic tracker and its phase issues from a committed plan document
     - `defer` — Append one row to a tracker's `deferred` block (#8448)
     - `sync` — Regenerate a tracker's `phases` block from its live child issues
+  - `next` — List the ready issues to take next, ranked by goal, priority and age
   - `repair` — Resolve a mid-transition issue carrying multiple state labels
   - `seed-config` — Write the default lifecycle model and the `agents.ticketing` block to the user config path
   - `seed-labels` — Create any missing labels (states + extra families) in the repo
@@ -197,9 +201,12 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `exec` — Run a command with project keys in its environment or on its stdin
   - `import` — Load every `KEY=value` of a dotenv file into the project scope
   - `list` — Print the key names of the project and owner scopes, never a value
+  - `lock` — End the unlock grant now; the next read prompts again
+  - `migrate` — Move every trusty Keychain item into one Keychain item, so `tm secrets unlock` prompts once
   - `remove` — Remove one key of the project scope
   - `resolve` — Print one key's value inside a `tm secrets exec` grant
   - `set` — Add or replace one key of the project scope. The value comes from the clipboard
+  - `unlock` — Approve once, with Touch ID or the login password, so Keychain and 1Password reads raise no prompt for 8 h
 - `serve` — Alias for `start` — start the daemon if not running, no-op if it is
 - `services` — Inspect and probe workspace service daemons
   - `health` — Probe the health endpoint and print OK or FAIL

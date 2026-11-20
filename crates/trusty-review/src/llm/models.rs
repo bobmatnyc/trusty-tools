@@ -66,20 +66,38 @@
 // Bob 2026-10-05: Sonnet 5.5 default
 pub const DEFAULT_REVIEWER_MODEL: &str = "us.anthropic.claude-sonnet-5-5";
 
-/// Default model for the verifier role (per-finding verification round) — Bedrock Haiku 4.5.
+/// Default model for the verifier role (per-finding verification round) — Bedrock Amazon Nova Pro.
 ///
-/// Why: verifier calls are short (single-word output) and high-volume; the
-/// cheapest Haiku-tier Bedrock model keeps latency and cost low.
-/// What: `us.anthropic.claude-haiku-4-5-20251001-v1:0` is the verified Haiku 4.5
-/// cross-region inference profile id (date-stamped, as required by Bedrock).
-/// The previous short form `us.anthropic.claude-haiku-4-5` produced HTTP 400
-/// ValidationException — this is the correct full id.
+/// Why: the verifier checks the reviewer's findings, and the reviewer default
+/// is Claude; a verifier from another model family does not share the
+/// reviewer's blind spots (#11527, owner ruling D52). Verifier calls are short
+/// and high-volume, so a mid-priced model fits.
+/// What: `us.amazon.nova-pro-v1:0` is the US cross-region inference profile for
+/// Nova Pro (`aws bedrock get-inference-profile` reported ACTIVE in us-east-1 on
+/// 2026-11-19). Until #11527 this was Haiku 4.5.
 /// Override via `TRUSTY_REVIEW_VERIFIER_MODEL`.
 ///
 /// CRITICAL: the verifier model MUST be a foundation-lifecycle ACTIVE model
 /// (spec REV-340).  If this slug is inactive, every finding will be silently
 /// refuted and every review will APPROVE.
-pub const DEFAULT_VERIFIER_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+pub const DEFAULT_VERIFIER_MODEL: &str = "us.amazon.nova-pro-v1:0";
+
+/// Verifier used when the built-in default is denied at startup (#11527).
+///
+/// Why: an account without Nova Pro access would otherwise refuse live mode
+/// after upgrading; the prior default (Haiku 4.5) keeps it running.
+/// What: the pre-#11527 verifier default. Only the liveness gate reads it, and
+/// only for a verifier left at the built-in default.
+/// Test: `pipeline::verify_liveness::tests::enforce_default_access_denied_falls_back`.
+pub const FALLBACK_VERIFIER_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+/// Default verifier model when the verifier resolves to OpenRouter (#11527).
+///
+/// Why: OpenRouter's reviewer default is Claude Opus; the verifier takes a
+/// different family for the same reason as [`DEFAULT_VERIFIER_MODEL`].
+/// What: Google Gemini 2.5 Flash, which supports the strict `json_schema`
+/// structured output the verifier request forces.
+pub const OPENROUTER_VERIFIER_MODEL: &str = "google/gemini-2.5-flash";
 
 /// Default model for the summarizer role (diff Stage-C classification) — Bedrock Haiku 4.5.
 ///
@@ -152,14 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn default_verifier_and_summarizer_are_haiku() {
-        for (name, id) in [
-            ("verifier", DEFAULT_VERIFIER_MODEL),
-            ("summarizer", DEFAULT_SUMMARIZER_MODEL),
-        ] {
+    fn default_summarizer_is_haiku_and_verifier_is_not_claude() {
+        assert!(
+            DEFAULT_SUMMARIZER_MODEL.contains("haiku"),
+            "summarizer default should be Haiku-tier: {DEFAULT_SUMMARIZER_MODEL}"
+        );
+        // #11527: the verifier default is a different family from the reviewer.
+        for id in [DEFAULT_VERIFIER_MODEL, OPENROUTER_VERIFIER_MODEL] {
             assert!(
-                id.contains("haiku"),
-                "{name} default should be Haiku-tier: {id}"
+                !id.contains("anthropic") && !id.contains("claude"),
+                "verifier default must not be Claude: {id}"
             );
         }
     }
@@ -215,16 +235,12 @@ mod tests {
     ///
     /// Why: `us.anthropic.claude-haiku-4-5` (without date stamp) is rejected by
     /// Bedrock with HTTP 400 ValidationException — the full id is required.
-    /// What: asserts both DEFAULT_VERIFIER_MODEL and DEFAULT_SUMMARIZER_MODEL
-    /// use the correct date-versioned id, and that the compare set also contains it.
+    /// What: asserts DEFAULT_SUMMARIZER_MODEL uses the correct date-versioned
+    /// id, and that the compare set also contains it.
     /// Test: this test itself.
     #[test]
     fn haiku_default_has_correct_date_versioned_id() {
         const EXPECTED_HAIKU: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
-        assert_eq!(
-            DEFAULT_VERIFIER_MODEL, EXPECTED_HAIKU,
-            "DEFAULT_VERIFIER_MODEL must use the date-versioned Haiku 4.5 id"
-        );
         assert_eq!(
             DEFAULT_SUMMARIZER_MODEL, EXPECTED_HAIKU,
             "DEFAULT_SUMMARIZER_MODEL must use the date-versioned Haiku 4.5 id"

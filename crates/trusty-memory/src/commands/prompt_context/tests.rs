@@ -180,7 +180,7 @@ fn select_relevant_triples_drops_creator_provenance_triples() {
         "tag:creator:client=trusty-memory-mcp",
         "tag:creator:source=mcp",
         "tag:creator:version=0.23.1",
-        "tag:creator:cwd=/users/bob/duetto/cto",
+        "tag:creator:cwd=/users/bob/acme/cto",
     ]
     .iter()
     .map(|s| RawTriple {
@@ -448,7 +448,7 @@ fn compose_injection_caps_kg_section_bytes() {
     );
 }
 
-/// Why (#5819): a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note
+/// Why (#5819): a drawer tagged `creator:cwd=/Users/bob/Acme/cto` — a note
 /// about a different repository — was recalled into `trusty-tools` sessions
 /// turn after turn. The drawer lives in this palace, so palace resolution
 /// cannot exclude it; its own provenance tag is the only signal.
@@ -467,10 +467,7 @@ fn project_scope_drops_foreign_cwd_drawer() {
         score: Some(0.7),
     };
     let drawers = vec![
-        mk(
-            "duetto",
-            vec!["creator:cwd=/Users/bob/Duetto/cto".to_string()],
-        ),
+        mk("acme", vec!["creator:cwd=/Users/bob/Acme/cto".to_string()]),
         mk("untagged", vec!["worktree".to_string()]),
         mk(
             "in-tree",
@@ -730,7 +727,7 @@ fn project_scope_counts_what_it_drops() {
         vec![
             mk(root),
             mk("/users/bob/proj/trusty-tools/crates/trusty-memory"),
-            mk("/users/bob/duetto/cto"),
+            mk("/users/bob/acme/cto"),
             mk("/users/bob/proj/some-other-repo"),
         ],
         Some(root),

@@ -311,7 +311,7 @@ gh pr view <PR-NUMBER> --json checks,reviews
 - **Note:** When you pause a session (`tm sessions stop`), the worktree is automatically cleaned up after a grace period if the session is not resumed. On a fresh install, this is unlikely to matter, but it's good to know if you pause and walk away for hours.
 
 ### GitHub CLI Drift on Multi-Account Setups
-- **Note:** If you use multiple GitHub accounts (e.g., bob-duetto + personal), `gh` may drift to an unexpected account on subsequent commands. Verify `gh auth status` after opening a PR if you're unsure which account was used.
+- **Note:** If you use multiple GitHub accounts (e.g., acme-admin + personal), `gh` may drift to an unexpected account on subsequent commands. Verify `gh auth status` after opening a PR if you're unsure which account was used.
 
 ---
 

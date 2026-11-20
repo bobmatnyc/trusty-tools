@@ -28,25 +28,30 @@ fn keychain_capabilities_are_read_write_only() {
     assert_eq!(KeychainBackend::new().id().as_str(), "keychain");
 }
 
+#[cfg(target_os = "macos")]
+fn item() -> ItemId {
+    ItemId::new("trusty/acme/web", "API_KEY")
+}
+
 /// Why: fail closed — a locked or broken keychain must surface as an error,
 /// never read as "no such secret". Downgrading the failure arm to `Ok(None)`
-/// fails this test.
+/// fails this test. #10524: values and control items share this mapper, so
+/// a failed control lookup never reads as "no deny" either.
 /// Test: itself.
 #[test]
 #[cfg(target_os = "macos")]
-fn keychain_get_maps_no_entry_to_none_and_failures_to_errors() {
-    let (vault, key) = names();
-    let hit = map_get(&vault, &key, Ok(FAKE_VALUE.to_string())).unwrap();
-    assert_eq!(hit.unwrap().expose(), FAKE_VALUE);
-
+fn keychain_read_maps_no_entry_to_none_and_failures_to_errors() {
+    let id = item();
+    let hit = map_read(&id, Ok(FAKE_VALUE.to_string())).unwrap();
+    assert_eq!(hit.unwrap().as_str(), FAKE_VALUE);
     assert!(
-        map_get(&vault, &key, Err(keyring::Error::NoEntry))
+        map_read(&id, Err(keyring::Error::NoEntry))
             .unwrap()
             .is_none()
     );
 
     let locked = keyring::Error::NoStorageAccess("keychain is locked".into());
-    let err = map_get(&vault, &key, Err(locked)).unwrap_err();
+    let err = map_read(&id, Err(locked)).unwrap_err();
     match err {
         SecretsError::Backend {
             backend,
@@ -68,32 +73,11 @@ fn keychain_get_maps_no_entry_to_none_and_failures_to_errors() {
 /// Test: itself.
 #[test]
 #[cfg(target_os = "macos")]
-fn keychain_delete_maps_no_entry_to_false_and_failures_to_errors() {
-    let (vault, key) = names();
-    assert!(map_delete(&vault, &key, Ok(())).unwrap());
-    assert!(!map_delete(&vault, &key, Err(keyring::Error::NoEntry)).unwrap());
-    let err = map_delete(
-        &vault,
-        &key,
-        Err(keyring::Error::PlatformFailure("errSecIO".into())),
-    )
-    .unwrap_err();
-    assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
-}
-
-/// Why: #9070, #10386 — a control lookup that failed must never read as
-/// "no deny" nor as present, and a missing item is absent. Mapping the
-/// failure arm to `Ok(true)` or `Ok(false)` fails this test.
-/// Test: itself.
-#[test]
-#[cfg(target_os = "macos")]
-fn keychain_flag_maps_no_entry_to_off_and_failures_to_errors() {
-    let (vault, key) = names();
-    let key = Some(&key);
-    assert!(map_flag(&vault, key, Ok("1".to_string())).unwrap());
-    assert!(!map_flag(&vault, key, Err(keyring::Error::NoEntry)).unwrap());
-    let locked = keyring::Error::NoStorageAccess("keychain is locked".into());
-    let err = map_flag(&vault, key, Err(locked)).unwrap_err();
+fn keychain_remove_maps_no_entry_to_false_and_failures_to_errors() {
+    let id = item();
+    assert!(map_remove(&id, Ok(())).unwrap());
+    assert!(!map_remove(&id, Err(keyring::Error::NoEntry)).unwrap());
+    let err = map_remove(&id, Err(keyring::Error::PlatformFailure("errSecIO".into()))).unwrap_err();
     assert!(matches!(err, SecretsError::Backend { .. }), "{err:?}");
 }
 
@@ -131,9 +115,8 @@ fn keychain_agents_account_is_vault_then_key() {
 #[test]
 #[cfg(target_os = "macos")]
 fn keychain_error_text_never_carries_value_bytes() {
-    let (vault, key) = names();
     let leaked = keyring::Error::BadEncoding(FAKE_VALUE.as_bytes().to_vec());
-    let err = map_get(&vault, &key, Err(leaked)).unwrap_err();
+    let err = map_read(&item(), Err(leaked)).unwrap_err();
     let shown = format!("{err} / {err:?}");
     assert!(!shown.contains(FAKE_VALUE), "{shown}");
     assert!(shown.contains("not valid UTF-8"), "{shown}");

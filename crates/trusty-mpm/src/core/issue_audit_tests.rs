@@ -497,14 +497,21 @@ fn relationships_report_what_is_set() {
 fn render_audit_prints_one_line_per_requirement() {
     let text = render_audit(&audit_issue(&parse(COMPLIANT), &standard(), &components()));
     assert!(text.starts_with("#7093\n"), "{text}");
-    for requirement in ["project", "milestone", "component label", "relationships"] {
+    // #11469: the acceptance-criteria row is the sixth line.
+    for requirement in [
+        "project",
+        "milestone",
+        "component label",
+        "acceptance criteria",
+        "relationships",
+    ] {
         assert!(
             text.lines()
                 .any(|l| l.trim_start().starts_with(requirement)),
             "a `{requirement}` line renders: {text}"
         );
     }
-    assert_eq!(text.lines().count(), 5, "{text}");
+    assert_eq!(text.lines().count(), 6, "{text}");
 }
 
 #[test]
@@ -542,4 +549,141 @@ fn the_since_window_keeps_an_issue_with_no_timestamp() {
     // mode this whole command exists to catch.
     let facts = IssueFacts::default();
     assert!(created_on_or_after(&facts, "2026-09-08"));
+}
+
+// #11469: the acceptance-criteria row reads the issue body and only warns.
+
+/// The compliant fixture with `body` set to `body`.
+fn with_body(body: &str) -> IssueFacts {
+    let mut facts = parse(COMPLIANT);
+    facts.body = body.to_string();
+    facts
+}
+
+#[test]
+fn json_fields_request_the_issue_body() {
+    assert!(
+        AUDIT_JSON_FIELDS.split(',').any(|f| f == "body"),
+        "AUDIT_JSON_FIELDS must request `body`: {AUDIT_JSON_FIELDS}"
+    );
+}
+
+#[test]
+fn a_labelled_acceptance_criteria_list_passes() {
+    for body in [
+        "Watcher misses renames.\n\nAcceptance criteria:\n- a rename is reindexed",
+        "acceptance CRITERIA: the probe prints ok",
+        "**Acceptance criteria:**\n1. exits 0",
+    ] {
+        let audit = audit_issue(&with_body(body), &standard(), &components());
+        assert_eq!(
+            row(&audit, "acceptance criteria").verdict,
+            Verdict::Pass,
+            "{body:?}"
+        );
+    }
+}
+
+#[test]
+fn an_acceptance_heading_passes() {
+    for body in [
+        "## Acceptance\n\nExternally observable.",
+        "## Acceptance criteria\n\n1. the probe exits 0",
+        "### acceptance Criteria\n- x",
+    ] {
+        let audit = audit_issue(&with_body(body), &standard(), &components());
+        assert_eq!(
+            row(&audit, "acceptance criteria").verdict,
+            Verdict::Pass,
+            "{body:?}"
+        );
+    }
+}
+
+#[test]
+fn a_body_without_acceptance_criteria_warns_and_does_not_fail() {
+    for body in [
+        "",
+        "Something is broken. The acceptance of this is unclear.",
+        "## Acceptance testing notes",
+    ] {
+        let audit = audit_issue(&with_body(body), &standard(), &components());
+        let row = row(&audit, "acceptance criteria");
+        assert_eq!(row.verdict, Verdict::Warn, "{body:?}");
+        assert_eq!(row.verdict.tag(), "WARN");
+        assert!(
+            row.detail.contains("TICKETING.md") && row.detail.contains("Acceptance criteria:"),
+            "the warning names the rule: {}",
+            row.detail
+        );
+        assert!(!audit.failed(), "a warning never fails the audit");
+    }
+}
+
+/// Asserts each body in `bodies` gets `want` on the acceptance row.
+fn assert_acceptance(bodies: &[&str], want: Verdict) {
+    for body in bodies {
+        let audit = audit_issue(&with_body(body), &standard(), &components());
+        assert_eq!(row(&audit, "acceptance criteria").verdict, want, "{body:?}");
+    }
+}
+
+#[test]
+fn an_unfilled_template_warns() {
+    assert_acceptance(
+        &[
+            "## Acceptance criteria\n\n1. ...\n",
+            "## Acceptance criteria\n\n<!--\nAcceptance criteria: one to four checks\n-->\n\n1. ...\n\n## Notes\nmore",
+            "## Acceptance criteria\n\n- ...\n- …",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_tbd_label_warns() {
+    assert_acceptance(
+        &[
+            "Acceptance criteria: TBD",
+            "Acceptance criteria: todo.",
+            "- **Acceptance criteria:** none",
+            "Acceptance criteria:\n- TBD",
+            "Acceptance criteria:\n- TBD\n\nSee #thread for logs",
+            "Acceptance criteria:\n\nNotes: later",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_heading_inside_a_code_fence_warns() {
+    assert_acceptance(
+        &[
+            "Template:\n```\n## Acceptance criteria\n1. exits 0\n```\n",
+            "~~~md\nAcceptance criteria: exits 0\n~~~",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
+fn a_criterion_starting_with_an_issue_reference_passes() {
+    assert_acceptance(
+        &[
+            "## Acceptance criteria\n#11469 must reindex",
+            "Acceptance criteria:\n- #11469 must reindex",
+        ],
+        Verdict::Pass,
+    );
+}
+
+#[test]
+fn a_bulleted_label_with_real_items_passes() {
+    assert_acceptance(
+        &[
+            "- Acceptance criteria:\n  - a rename is reindexed\n  - the probe exits 0",
+            "* **Acceptance criteria:** the audit prints WARN",
+        ],
+        Verdict::Pass,
+    );
 }

@@ -459,7 +459,7 @@ mod tests {
     fn sender_glob_matches_leading_and_trailing_wildcard() {
         assert!(sender_glob_matches("dad@family.com", "*@family.com"));
         assert!(!sender_glob_matches("dad@work.com", "*@family.com"));
-        assert!(sender_glob_matches("bob@duetto.com", "bob@*"));
+        assert!(sender_glob_matches("bob@example.com", "bob@*"));
         assert!(sender_glob_matches(
             "exact@example.com",
             "exact@example.com"
@@ -506,7 +506,7 @@ mod tests {
                 include_labels: vec![],
                 subject_contains: vec![],
                 snippet_contains: vec![],
-                from: vec!["*@duetto.com".to_string()],
+                from: vec!["*@example.org".to_string()],
                 exclude_labels: vec![],
             },
         };

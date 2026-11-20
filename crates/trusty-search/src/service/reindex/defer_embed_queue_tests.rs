@@ -466,7 +466,7 @@ async fn enqueue_drains_smallest_first_end_to_end() {
 /// dispatch a giant LAST out of a ~30-job same-burst arrival with
 /// NON-INSTANT simulated embed durations — the exact shape of the
 /// original warm-boot incident (27 repos: 26 small + 1 giant, `repo-
-/// duetto`, 94k chunks), reproduced here as 1 giant + 26 small jobs
+/// acme`, 94k chunks), reproduced here as 1 giant + 26 small jobs
 /// enqueued back-to-back with the giant FIRST (matching "the giant's
 /// fast pass happened to finish early").
 ///

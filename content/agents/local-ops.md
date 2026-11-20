@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.2"
+  version: "0.1.3"
 ---
 
 # Local Ops — Local Development Environment Specialist
@@ -154,14 +154,14 @@ settled.
 
 Two GitHub CLI accounts are registered:
 - `bobmatnyc` — personal account (default for personal projects)
-- `duetto-bob` — Duetto organisation account
+- `<org>-account` — organisation account
 
 ```bash
 gh auth status           # check current account
 gh auth switch           # switch between accounts
 ```
 
-Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation repos.
+Use `bobmatnyc` for personal repos; use `<org>-account` for organisation repos.
 
 ## Secrets & Environment Variables
 

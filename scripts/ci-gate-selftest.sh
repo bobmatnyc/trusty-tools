@@ -144,6 +144,10 @@ assert_eq "test missing from needs"                     "1" "$(verdict_on push d
 assert_eq "test skipped on push"                        "1" "$(verdict_on push test=skipped)"
 assert_eq "test skipped on workflow_dispatch"           "1" "$(verdict_on workflow_dispatch test=skipped)"
 assert_eq "test skipped on pull_request (by design)"    "0" "$(verdict_on pull_request test=skipped)"
+assert_eq "test skipped on merge_group (by design)"     "0" "$(verdict_on merge_group test=skipped)"
+assert_eq "test failed on merge_group"                  "1" "$(verdict_on merge_group test=failure)"
+assert_eq "test skipped on an unknown event"            "1" "$(verdict_on schedule test=skipped)"
+assert_eq "clippy skipped on merge_group (not pr_skip)" "1" "$(verdict_on merge_group clippy=skipped)"
 assert_eq "test skipped, EVENT_NAME unset (fail closed)" "1" "$(verdict test=skipped)"
 assert_eq "test skipped, EVENT_NAME empty (fail closed)" "1" "$(verdict_on '' test=skipped)"
 assert_eq "NEEDS_JSON not an object"                    "2" \

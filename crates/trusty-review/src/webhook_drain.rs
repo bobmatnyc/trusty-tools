@@ -224,7 +224,7 @@ impl ConfiguredReviewPipeline {
 /// Mirrors `commands::serve::build_app_state` deliberately: the drain runs the
 /// same pipeline the HTTP webhook route ran, so it must not run it with weaker
 /// dependencies. In particular `DedupNeed::Required` — see the module docs.
-async fn build_deps(config: ReviewConfig) -> Result<Built> {
+async fn build_deps(mut config: ReviewConfig) -> Result<Built> {
     let reviewer_model = config.role_models.reviewer.model.clone();
     let default_provider = config.role_models.reviewer.provider.clone();
     let llm = crate::llm::build_provider(&reviewer_model, &default_provider, &config)
@@ -232,7 +232,7 @@ async fn build_deps(config: ReviewConfig) -> Result<Built> {
         .map_err(|e| anyhow::anyhow!("build the reviewer LLM provider: {e}"))?;
 
     let verifier = crate::llm::build_verifier_required(&config).await?;
-    enforce_verifier_liveness(&config, verifier.as_ref())
+    enforce_verifier_liveness(&mut config, verifier.as_ref())
         .await
         .map_err(|reason| anyhow::anyhow!(reason))?;
 

@@ -19,7 +19,7 @@ _spec.loader.exec_module(fp)
 MOVED = {
     "_cfg": ["ROOT", "INBOX", "EVENTS", "ALERTS", "STATE", "LOG", "SOCKET", "WORKSPACE_PREFIX", "ARCHITECT",
              "POLL_SESSION", "SKIP_SESSIONS", "SHELLS", "EVENT_TYPES", "DISK_HIGH", "LOAD_FACTOR_DEFAULT",
-             "QUIET_SESSIONS_FILE", "RELAUNCH_SCRIPT"],
+             "QUIET_SESSIONS_FILE", "TM_BIN"],
     "_io": ["TmuxError", "log", "tmux", "socket_dir", "workspace_servers", "list_panes", "is_architect_pane", "_rows", "capture",
             "capture_pane", "send_to_architect", "read_events", "swap_used_mb", "host_alerts"],
     "_alerts": ["resolve_context_bar", "self_ctx_alerts", "il_cron_alerts", "ctx_watch_alerts"],

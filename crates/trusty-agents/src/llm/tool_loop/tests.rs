@@ -192,3 +192,22 @@ async fn compress_success_result_survives_unwritable_sink() {
         "the blocked .trusty-agents file must not have been silently replaced with a dir"
     );
 }
+
+/// Why: #10978 — the shared-inference branch always routes to OpenRouter, so
+/// under the provider lock it must refuse before any request. With no
+/// credential, the unguarded path fails locally instead of the refusal.
+/// Test: itself.
+#[test]
+#[serial_test::serial]
+fn dispatch_turn_shared_is_refused_under_the_provider_lock() {
+    let got = crate::llm::provider_lock::block_on_locked_without_credentials(
+        super::turn::dispatch_turn_shared("claude-sonnet-4-6", &[], &[], 0.0, 16, &[]),
+    );
+    let Err(err) = got else {
+        panic!("refused under the lock");
+    };
+    assert!(
+        err.to_string().contains("provider lock = bedrock"),
+        "{err:#}"
+    );
+}

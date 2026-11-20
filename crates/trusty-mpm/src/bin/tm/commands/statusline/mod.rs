@@ -807,8 +807,8 @@ mod tests {
     /// Test: itself.
     #[test]
     fn render_gh_account_segment_multi() {
-        let seg = render_gh_account_segment(Some("bob-duetto"), 2).expect("segment");
-        assert_eq!(seg, "@bob-duetto\u{26a0}");
+        let seg = render_gh_account_segment(Some("acme-admin"), 2).expect("segment");
+        assert_eq!(seg, "@acme-admin\u{26a0}");
         assert!(seg.contains('\u{26a0}'), "multi-account marker must appear");
     }
 

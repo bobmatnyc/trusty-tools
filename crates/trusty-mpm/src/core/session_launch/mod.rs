@@ -24,13 +24,19 @@ mod entry;
 // that pin the layout reach it as `super::entry::isolated_framework_paths`.
 pub use entry::{
     prepare_isolated_session, prepare_isolated_session_under, prepare_session,
-    prepare_session_for_managed, prepare_session_for_repair_in, prepare_session_for_repair_under,
-    prepare_session_with_home, prepare_session_with_home_in, prepare_session_with_repo_url,
-    prepare_session_with_repo_url_and_exe, prepare_session_with_style,
-    prepare_session_with_style_and_native,
+    prepare_session_for_managed, prepare_session_for_managed_from, prepare_session_for_repair_in,
+    prepare_session_for_repair_under, prepare_session_with_home, prepare_session_with_home_in,
+    prepare_session_with_repo_url, prepare_session_with_repo_url_and_exe,
+    prepare_session_with_style, prepare_session_with_style_and_native,
 };
 // #10459: the Architect's exec-form PM-guard and prompt-hook groups.
 mod architect_hooks;
+// #11398: the PM-only `tm hook --turn-task` group.
+mod turn_task_hooks;
+// #11431: the shadow minimal pm-guard group, every session.
+mod shadow_guard_hooks;
+// #10575: the PM-only `tm hook --completion-evidence` group.
+mod completion_evidence_hooks;
 // #10459: `HostInputs`, moved out for the line cap.
 mod host_inputs;
 use host_inputs::HostInputs;
@@ -349,8 +355,8 @@ pub struct PrepReport {
     /// Whether the `trusty-memory` hook block was written to the project's
     /// `.claude/settings.json`.
     ///
-    /// `false` when writing the project hooks failed; the session still
-    /// launches, it just won't fire the trusty-memory hooks.
+    /// `false` when writing the project hooks failed; a PM session still
+    /// launches without them, an Architect's is refused (#10612).
     pub hooks_written: bool,
     /// Incremental catch-up context to inject as seed context for this session.
     ///
@@ -535,6 +541,16 @@ pub enum PrepError {
     /// whose version cannot be read. Fatal: refused before any write.
     #[error("{0}")]
     ClaudeVersion(#[from] crate::core::architect_claude_version::ArchitectVersionError),
+    /// #10612: an Architect's project hooks could not be written, so it would
+    /// run without the exec-form pm-guard. Fatal: the launch is refused.
+    /// Test: `an_architect_launch_whose_hook_write_fails_is_refused_10612`.
+    #[error("refusing the Architect launch: pm-guard hooks not written to {path}: {source}")]
+    ArchitectHooks {
+        /// The project settings file the hooks belong in.
+        path: PathBuf,
+        /// The write failure.
+        source: Box<PrepError>,
+    },
 }
 
 impl PrepError {
@@ -552,7 +568,10 @@ impl PrepError {
         // #9012: no content means no instructions — the same condition.
         matches!(
             self,
-            Self::Instructions { .. } | Self::Content { .. } | Self::ClaudeVersion(_)
+            Self::Instructions { .. }
+                | Self::Content { .. }
+                | Self::ClaudeVersion(_)
+                | Self::ArchitectHooks { .. }
         )
     }
 }
@@ -614,8 +633,7 @@ pub(super) fn prepare_session_inner(
     let crate::core::content_source::LaunchContent {
         framework: content,
         roster,
-    } = crate::core::content_source::launch_content_for(project_dir)
-        .map_err(|source| PrepError::Content { source })?;
+    } = host.launch_content(project_dir)?;
 
     // Resolve the effective harness manifest (HR-2 / DOC-17) and materialize the
     // provisioning plan it implies. The NORMATIVE precedence is
@@ -1022,13 +1040,10 @@ pub(super) fn prepare_session_inner(
         // #10459: exec form + `onFailure: "block"` for the Architect only.
         architect_hooks::ArchitectHooks::for_profile(profile, &config),
     );
-    let hooks_written = match write_project_hooks_with(project_dir, additions) {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!("failed to write trusty-mpm project hooks: {err}");
-            false
-        }
-    };
+    // #10612: an Architect whose hook write fails is refused, never launched
+    // without its exec-form guard.
+    let written = write_project_hooks_with(project_dir, additions);
+    let hooks_written = architect_hooks::require_hooks_written(profile, project_dir, written)?;
 
     // #4181 (ADR-0042): tm no longer writes MCP config into the workspace. The
     // four framework builtins and every `tm mcp add` server are declared once in

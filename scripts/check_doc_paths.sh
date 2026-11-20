@@ -146,7 +146,8 @@ list_scanned_files() {
 }
 
 # Why: `case`'s `*` matches `/` as well, so a `crates/*/README.md` glob would
-#   also admit crates/trusty-agents/.trusty-agents/skills/cto-db/python/README.md
+#   also admit a bundled skill package README such as
+#   crates/trusty-agents/.trusty-agents/skills/<skill>/python/README.md
 #   — a bundled asset payload, five levels down, whose paths are not this
 #   checkout's paths. The depth-1 rule needs a pattern that cannot cross `/`.
 # What: prints only the in-scope paths from stdin. See SCOPE in the header.

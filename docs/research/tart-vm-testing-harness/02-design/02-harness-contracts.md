@@ -112,7 +112,7 @@ PASS  iff  for every in-scope package p:
 
 > **Amendment, 2026-08-04 — the emptiness guard, recorded as a deliberate
 > STRENGTHENING rather than a bug fix
-> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+> ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).**
 >
 > The predicate above is a **universal quantifier** over `health_scope`, and a
 > universal over the empty set is **vacuously true**. So `verify_stack_doctor`
@@ -793,7 +793,7 @@ slot claimed by the first `die()` and never overwritten — held in the global
 created `O_EXCL`) that `vmtest_cleanup` reconciles into the global.
 
 > **Amendment, 2026-08-04 — the implementation sentence, not the rule
-> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** This
+> ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).** This
 > paragraph previously read *"a single global `VMTEST_EXIT`"*. **The rule above is
 > unchanged and is exactly what the amendment restores:** a global cannot cross a
 > fork, so a `die` inside a command substitution, a for-list, a heredoc
@@ -2498,7 +2498,7 @@ testing. No signature is given for anything.
 
 > **Amendment, 2026-08-04 — the out-path convention is widened from "several
 > values" to "any value, when the function can `die`"
-> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+> ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).**
 >
 > **The two conventions as originally written were jointly unimplementable.** In
 > bash, the only way to capture a function's stdout is a command substitution,
@@ -2847,7 +2847,7 @@ die() {
 }
 ```
 
-> **Amendment, 2026-08-04 — the side-channel write ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+> **Amendment, 2026-08-04 — the side-channel write ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).**
 > The body above carried only the `VMTEST_EXIT` assignment until this date, and
 > the implementation was character-identical to it. **A shell global cannot cross
 > a fork**, so every `die` that fired inside `$( )`, `<( )`, a for-list or a
@@ -2955,7 +2955,7 @@ scenario_install_local() {
 > do not need one, because for them `verify_binaries` already is the whole claim.
 
 > **Amendment, 2026-08-04 — the skeleton was prescribing the defect
-> ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).** The loop
+> ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).** The loop
 > above read `for _dir in $(tsv_scope_crate_dirs)` until this date, and all three
 > shipped scenario files were faithful implementations of it. **A for-list's exit
 > status is discarded outright**: a `die 60` inside that substitution neither

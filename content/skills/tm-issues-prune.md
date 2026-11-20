@@ -3,7 +3,7 @@ name: tm-issues-prune
 description: Prune, organize, prioritize, and suggest next tasks from a project's GitHub issue backlog — natural-language PM delegation pattern (gh-first, JIRA deferred)
 user-invocable: true
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
 category: pm-workflow
 tags: [tickets, github, backlog, pm-required, triage, prioritization]
 effort: medium
@@ -251,10 +251,45 @@ State explicitly which `gh`-observable fact justified each ranking
 decision. If two issues tie on every heuristic, say so rather than
 inventing a tiebreak.
 
+## Factory Intake: `tm issue next`
+
+A factory session takes its next issue with `tm issue next`, never by its own
+pass over `gh issue list`. This is the default intake for every factory
+session.
+
+```bash
+tm issue next --repo OWNER/REPO --goal G01 --limit 5        # text
+tm issue next --repo OWNER/REPO --goal G01 --limit 5 --json # for scripts
+```
+
+- **Ready** means a ready board Status (`Ready for Development`) or a ready
+  `status:*` label. Either counts. Intake uses the repo's existing labels and
+  creates none.
+- **Skipped:** an issue with no acceptance criteria, an issue assigned to
+  someone else, and an issue with no ready signal.
+- **Ranked** by the session's goal (`--goal`, from the Architect's
+  `goals.md`), then priority label (`P0`-`P3`, `priority:*`), then age,
+  oldest first. Each result names its signal and the reason it ranks where it
+  does.
+- **No board and no ready label:** the command says so and lists nothing.
+  Raise the repo to the Architect to groom.
+- **Label and board disagree:** the issue is still listed and is marked as a
+  `tm issue repair` candidate.
+- **Rate limit:** the command exits non-zero and lists nothing. Do not fall
+  back to `gh issue list`.
+- **Re-read before claiming.** The list can be up to 10 minutes old. Before
+  claiming the one issue you pick, re-read it (`gh issue view <n> --json
+  state,assignees` and its board Status) and drop it if it closed, gained
+  another assignee, or left a ready Status. `--refresh` skips the cache.
+- Adversarially review a taken issue before working it, as before.
+
+Mapping and override file: `docs/reference/issue-next.md` in trusty-tools.
+
 ## Suggest Next Workflow
 
 Runs last, over the ranked list, to recommend a short, concrete slate of
-next tasks:
+next tasks. In a factory session the ranked list is the output of
+`tm issue next` (above):
 
 1. **Select 3-7 candidates** from the top of the ranked list, adjusted for
    dependency sequencing: this repo's layer priority is API/daemon routes

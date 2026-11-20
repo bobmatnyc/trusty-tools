@@ -39,6 +39,16 @@ Risk labels map onto the rungs (1–2 Low, 3–4 Normal, 5–6 High).
 - 🔴 **Scope down, never scope away.** A lower rung is a claim about blast radius
   you must be able to prove. Never licence to make a red gate green by deleting,
   `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing coverage.
+- **Declared demo/POC work** — declared on the issue or brief, cited in the PR
+  body — ships a smoke run plus the core happy path, and records deferred
+  coverage as `#[ignore = "intent(demo): <what is owed>"]`. Markers may appear
+  only under paths in `scripts/demo-intention-paths.txt`
+  (`scripts/check_demo_intentions.sh`); the ignored-test ratchet does not count
+  them. An intention is not coverage, never applies to production code, and
+  never replaces a failing test; promotion converts every one
+  (`git grep -n 'intent(demo):' -- <promoted paths>`). Rule:
+  `content/skills/tm-workflow/references/completion-standard.md`, "Demo and POC
+  Work".
 
 ## Per-Rung Gate Commands
 

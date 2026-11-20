@@ -1,7 +1,7 @@
 //! Tests for the voice module: types, principles, loader, and VoiceConfig layering.
 //!
 //! Why: comprehensive coverage ensures the 3-layer pipeline (stock→principles→voice)
-//! is assembled correctly, the bundled duetto fixture parses cleanly, and all
+//! is assembled correctly, the bundled house fixture parses cleanly, and all
 //! fallback paths (no voice, principles-only, full stack) work as specified.
 //! What: unit tests for VoicePackage serde, principles content, VoiceLoader
 //! discovery (bundled + filesystem), and VoiceConfig composition.
@@ -237,38 +237,51 @@ fn principles_contains_do_not_flag_guardrails() {
 
 // ── VoiceLoader — shipped voice (instructional content, #9015) ───────────────
 
-/// The shipped duetto voice loads correctly and has expected content.
+/// The shipped house voice loads correctly and has expected content.
 ///
-/// Why: the content's `voices/duetto/voice.toml` must parse cleanly at
+/// Why: the content's `voices/house/voice.toml` must parse cleanly at
 /// runtime; a malformed one refuses every review that selects the voice.
-/// What: loads `duetto` via `VoiceLoader::new()` and asserts key fields.
+/// What: loads `house` via `VoiceLoader::new()` and asserts key fields.
 /// Test: reads the staged checkout content; no external paths.
 #[test]
-fn load_bundled_duetto_voice() {
+fn load_bundled_house_voice() {
     let loader = VoiceLoader::new();
     // Under `cfg(test)` the content is the staged checkout copy (no
-    // ~/.config/trusty-review/voices/duetto required for the test to pass).
-    let pkg = loader.load("duetto").expect("bundled duetto must load");
-    assert_eq!(pkg.meta.name, "duetto", "meta.name must be duetto");
+    // ~/.config/trusty-review/voices/house required for the test to pass).
+    let pkg = loader.load("house").expect("bundled house must load");
+    assert_eq!(pkg.meta.name, "house", "meta.name must be house");
     assert!(
         !pkg.voice.system_addendum.is_empty(),
-        "duetto voice.system_addendum must be non-empty"
+        "house voice.system_addendum must be non-empty"
     );
     assert!(
         pkg.voice.system_addendum.contains("correctness"),
-        "duetto addendum must mention correctness"
+        "house addendum must mention correctness"
     );
-    // Provenance sanity.
+    // #11513: the shipped default names no individual reviewer.
     assert!(
-        pkg.meta.provenance.reviewers_count >= 5,
-        "duetto must have >= 5 source reviewers"
+        pkg.meta.provenance.source_reviewers.is_empty(),
+        "house must not name source reviewers"
     );
+}
+
+/// #11513: a config still naming the retired shipped `duetto` voice loads the
+/// shipped `house` voice instead of failing or dropping the voice.
+#[test]
+fn legacy_duetto_voice_resolves_to_house() {
+    let loader = VoiceLoader::bundled_only();
+    let pkg = loader
+        .load("duetto")
+        .expect("the retired shipped name must still load a voice");
+    assert_eq!(pkg.meta.name, "house");
+    assert_eq!(super::loader::shipped_name_for("duetto"), "house");
+    assert_eq!(super::loader::shipped_name_for("house"), "house");
 }
 
 /// Content older than #9015 lacks the shipped voice, or carries one that does
 /// not parse: the loader refuses naming the file and the remedy.
 ///
-/// Why (#9015): a review that selects `duetto` must refuse rather than run
+/// Why (#9015): a review that selects `house` must refuse rather than run
 /// with no voice or a compiled-in copy.
 /// What: content without `voice.toml`, then with it unparseable; both are
 /// `VoiceLoaderError::Content` naming the path and `tm content update`.
@@ -279,14 +292,14 @@ fn a_stale_release_without_the_shipped_voice_refuses() {
         content_path,
         test_support::{OverrideGuard, installed_with, installed_without},
     };
-    let path = content_path("voices/duetto/voice.toml");
+    let path = content_path("voices/house/voice.toml");
     for (case, content) in [
         ("absent", installed_without(&path)),
         ("unparseable", installed_with(&path, b"[meta\n")),
     ] {
         let _guard = OverrideGuard::content(content);
         let err = VoiceLoader::bundled_only()
-            .load("duetto")
+            .load("house")
             .expect_err("a shipped voice the content lacks must refuse");
         assert!(
             matches!(err, super::loader::VoiceLoaderError::Content(_)),
@@ -420,31 +433,31 @@ fn load_rejects_parent_traversal_before_any_io() {
 ///
 /// Why: regression guard — the security fix must not break the normal
 /// bundled/override resolution path.
-/// What: asserts the bundled `duetto` fixture still resolves.
+/// What: asserts the bundled `house` fixture still resolves.
 /// Test: this test itself; no network.
 #[test]
 fn load_valid_bare_name_still_resolves() {
     let loader = VoiceLoader::bundled_only();
-    assert!(loader.load("duetto").is_ok());
+    assert!(loader.load("house").is_ok());
 }
 
 /// Custom dir takes priority over the shipped content voice for the same name.
 ///
 /// Why: operators must be able to override bundled packages without changing
 /// the binary.
-/// What: writes a duetto voice.toml to a temp dir with different content;
+/// What: writes a house voice.toml to a temp dir with different content;
 /// asserts the loader returns the custom version, not the bundled one.
 /// Test: tempfile-based.
 #[test]
 fn custom_dir_takes_priority_over_bundled() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let voice_dir = dir.path().join("duetto");
+    let voice_dir = dir.path().join("house");
     std::fs::create_dir_all(&voice_dir).unwrap();
     std::fs::write(
         voice_dir.join("voice.toml"),
         r#"
 [meta]
-name = "duetto"
+name = "house"
 version = "99.0.0"
 
 [voice]
@@ -454,7 +467,7 @@ system_addendum = "Overridden for test."
     .unwrap();
 
     let loader = VoiceLoader::with_extra_dirs(vec![dir.path().to_path_buf()]);
-    let pkg = loader.load("duetto").expect("custom duetto must load");
+    let pkg = loader.load("house").expect("custom house must load");
     // The custom version has version 99.0.0, not the bundled 0.1.0.
     assert_eq!(
         pkg.meta.version, "99.0.0",
@@ -466,19 +479,19 @@ system_addendum = "Overridden for test."
     );
 }
 
-/// list() always includes the bundled duetto.
+/// list() always includes the bundled house.
 ///
-/// Why: `voice list` must show duetto even when the user-config dir is absent.
+/// Why: `voice list` must show house even when the user-config dir is absent.
 /// What: constructs a loader with an empty extra_dirs list, calls list(),
-/// and asserts "duetto" is present.
+/// and asserts "house" is present.
 /// Test: no filesystem writes.
 #[test]
-fn list_includes_bundled_duetto() {
+fn list_includes_bundled_house() {
     let loader = VoiceLoader::new();
     let names = loader.list();
     assert!(
-        names.contains(&"duetto".to_string()),
-        "list must include bundled duetto; got: {names:?}"
+        names.contains(&"house".to_string()),
+        "list must include bundled house; got: {names:?}"
     );
 }
 
@@ -503,11 +516,11 @@ fn list_includes_extra_dir_voices() {
     let names = loader.list();
     assert!(names.contains(&"alpha".to_string()));
     assert!(names.contains(&"beta".to_string()));
-    assert!(names.contains(&"duetto".to_string())); // always present
+    assert!(names.contains(&"house".to_string())); // always present
 }
 
 // ── VoiceConfig composition tests ────────────────────────────────────────────
 // Extracted to tests_voice_config.rs to keep this file under the 500-line cap (#610).
 
-// ── Integration tests (duetto + drift-check) ─────────────────────────────────
+// ── Integration tests (house + drift-check) ─────────────────────────────────
 // Extracted to tests_integration.rs to keep this file under the 500-line cap (#610).

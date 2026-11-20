@@ -3,7 +3,7 @@ name: tm-tool-usage-guide
 description: Detailed tool usage patterns and examples for the trusty-mpm PM agent
 user-invocable: false
 metadata:
-  version: "1.0.1"
+  version: "1.0.2"
 category: pm-reference
 tags: [tools, mcp, delegation, pm-required]
 effort: medium
@@ -168,7 +168,7 @@ log`, `git diff`; `tm memory recall|remember|note` when the
   Engineer, or Edit/Write directly (CB#14).
 - Implementation commands (`npm start`, `docker run`, `cargo build --release`
   as a deploy step) → the appropriate Ops agent.
-- Browser automation (`mcp__claude-in-chrome__*`, `mcp__playwright__*`) →
+- Browser automation (`mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*`) →
   Web QA (CB#6).
 
 ## Forbidden MCP Tools for the PM
@@ -178,6 +178,6 @@ log`, `git diff`; `tm memory recall|remember|note` when the
 | Code modification | `Edit`, `Write` of source **past the direct-action budget** — delegate once a task will take more than 3 direct actions, or the moment a 3-action estimate stops holding mid-flight (#4594). Non-source writes and `.git/COMMIT_EDITMSG` are unbudgeted | `engineer` |
 | Deep investigation | `Grep`/`Glob` used repeatedly | Research |
 | Ticketing | `mcp__mcp-ticketer__*`, `mcp__github__*` issue/PR tools, `WebFetch` on ticket URLs | ticketing agent (see `tm-ticketing`) |
-| Browser | `mcp__claude-in-chrome__*`, `mcp__playwright__*` | web-qa |
+| Browser | `mcp__trusty-browser__*`, `mcp__claude-in-chrome__*`, `mcp__playwright__*` | web-qa (on trusty-browser) |
 
 See `tm-circuit-breaker` for the full enforcement model and `tm-delegation-patterns` for agent selection.

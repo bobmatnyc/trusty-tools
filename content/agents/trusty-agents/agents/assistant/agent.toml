@@ -10,7 +10,7 @@
 # therefore now carries a professional, un-personalized display identity
 # (`display_name = "Assistant"`), REVERSING the prior "bases are nameless"
 # decision (2026-07-18). It remains the `extends` base for the named personas
-# (`../izzie/`, `../cto-assistant/`); each of those overrides `display_name`
+# (`../izzie/`, `../writing-assistant/`); each of those overrides `display_name`
 # via child-Some-wins per-key merge (`agents::extends::merge_extends`), so the
 # generic "Assistant" identity is only ever seen when the base is used
 # directly as the default. A user's own `extends = "assistant"` overlay may
@@ -40,7 +40,7 @@ hidden = true
 model = "claude-sonnet-4-6"
 description = "General-purpose productivity assistant (base template; personalize via `extends`)"
 # #3738: the generic default persona's professional display identity. Named
-# personas (izzie, cto-assistant) override these via `extends`; a user overlay
+# personas (izzie, writing-assistant) override these via `extends`; a user overlay
 # may override them too. Kept intentionally plain — no personal name.
 display_name = "Assistant"
 prompt_label = "assistant"
@@ -98,7 +98,7 @@ allow = [
   # cross-project read primitive: a prompt-injection exfiltration shape. Still
   # read-only and registry-bounded, but the reach was new and unintended.
   # Personas that genuinely need git RE-DECLARE it themselves — see
-  # `../cto-assistant/agent.toml`, which is a coding assistant, not a
+  # `../example-assistant/agent.toml`, which is a coding assistant, not a
   # mail-ingesting one. Do not restore a git grant to this base file.
   # Pinned by `bundled_personas_pin_git_reach` (agents/tests/loading.rs).
   # OKG builder (epic #3052): grow this assistant's own knowledge graph from
@@ -263,7 +263,7 @@ allow = [
 # worse than none.
 #
 # Personalization overlays are UNIONED with this list (`extends::merge_extends`
-# -> `union_opt_vec`, deduped), so `../cto-assistant/`'s narrow
+# -> `union_opt_vec`, deduped), so `../example-assistant/`'s narrow
 # `google.gmail.*` / `google.tasks.*` (#3985) now collapse into these as exact
 # duplicates, and `../izzie/`'s blanket `google.*` remains a superset. Both are
 # deliberately left declared: an overlay whose whole purpose is Gmail should

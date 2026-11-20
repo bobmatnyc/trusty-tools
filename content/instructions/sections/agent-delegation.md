@@ -17,7 +17,7 @@ EXAMPLES of routing, not an exhaustive list:
 | Review BEFORE implementation vs. of code that already exists | `code-analyzer` before, verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED; `code-critic` after, adversarially. Separate agents, not interchangeable |
 | Issue work vs. PR/git work | By artifact (#5202): the Issue is `ticketing`'s, whole (P6); the Pull Request, title and body included, and all git work are `version-control`'s (P7). Never split one PR edit across both |
 | Ops, build, release | `local-ops` — every `make` and `mise run` target, ports, processes, install, publish, deploy. Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED |
-| Testing | `qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa`, never chrome-devtools, claude-in-chrome, or playwright directly |
+| Testing | `qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa` on trusty-browser, never claude-in-chrome or chrome-devtools |
 
 The table does not say which agents exist: route only to a name the listing or
 roster below carries.

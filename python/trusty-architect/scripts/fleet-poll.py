@@ -90,7 +90,7 @@ LOCK, HOLD = _cfg.LOCK, _cfg.HOLD
 ARCHITECT, POLL_SESSION, SKIP_SESSIONS = _cfg.ARCHITECT, _cfg.POLL_SESSION, _cfg.SKIP_SESSIONS
 SHELLS, EVENT_TYPES = _cfg.SHELLS, _cfg.EVENT_TYPES
 DISK_HIGH, LOAD_FACTOR_DEFAULT = _cfg.DISK_HIGH, _cfg.LOAD_FACTOR_DEFAULT
-QUIET_SESSIONS_FILE, RELAUNCH_SCRIPT = _cfg.QUIET_SESSIONS_FILE, _cfg.RELAUNCH_SCRIPT
+QUIET_SESSIONS_FILE, TM_BIN = _cfg.QUIET_SESSIONS_FILE, _cfg.TM_BIN
 
 # Pure pane parsing and alert evaluation live in fleet-classify.py (#8891).
 # These names stay fleet-poll attributes, as they were before the split.

@@ -1,15 +1,16 @@
-// Activation-code state in the worker (#11239, docs/activation-codes.md): the worker grant table, the
-// optional https://*/* permission, the per-profile pairing and the popup's code flow. The worker loads this
-// file with importScripts; top-level code touches no `chrome` API.
+// Connect state in the worker (#11239, docs/activation-codes.md): the worker grant table, the optional
+// https://*/* permission, the per-profile pairing and the popup's one-click Connect and Disconnect. The worker
+// loads this file with importScripts; top-level code touches no `chrome` API.
 globalThis.TrustyCodes = deps => {
-  const {bootstrap, identity, pageOps, reconnect} = deps;
+  const {bootstrap, identity, reconnect, online} = deps;
   const ALL_HTTPS = {origins:["https://*/*"]};
-  // CODE_TTL (300 s) plus a minute. A broker this worker has not reached for that long holds no code or grant
-  // of the profile: every grant ends with its pairing generation, and every code expires.
-  const QUIET_MS = 360000;
+  // RECONNECT_GRACE (45 s) plus a minute. A broker this worker has not reached for that long holds no grant of
+  // the profile: a lost port ends every grant of its pairing generation after the grace.
+  const QUIET_MS = 105000;
+  // The one wait before Connect retries after a fresh pair (owner ruling Dqw 2026-11-16).
+  const PAIR_RETRY_MS = 750;
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
   const HEX64 = /^[0-9a-f]{64}$/;
-  const tabId = value => Number.isInteger(value) && value >= 0;
   const object = value => value && typeof value === "object" ? value : {};
   const watchers = new Set();
   let chain = Promise.resolve(), minting = 0, busy = false;
@@ -29,7 +30,7 @@ globalThis.TrustyCodes = deps => {
   // Why: https://*/* must not outlive the profile's last code or grant, and must not end before it.
   // What: applies `edit` to the stored {grant: {scope, tab}} table and sets the badge. Only with `none` (the
   //   broker reported that the profile holds nothing live) does it remove the permission, and then only when
-  //   the table is empty and no mint is in flight; a failed table write still removes it.
+  //   the table is empty and no connect is in flight; a failed table write still removes it.
   // Test: tests/test_worker.mjs `grant_end with last true removes the permission and last false keeps it`,
   //   `the pairing acknowledgement prunes the table to its live list`.
   function changeTable(edit, none = false) {
@@ -48,7 +49,7 @@ globalThis.TrustyCodes = deps => {
     watchers.add(fresh);
     return fresh;
   }
-  // Keeps the rows a broker list names, plus rows minted while that list was in flight.
+  // Keeps the rows a broker list names, plus rows connected while that list was in flight.
   function keepListed(listed, fresh, none) {
     watchers.delete(fresh);
     return changeTable(t => Object.fromEntries(Object.entries(t).filter(([g]) => listed.has(g) || fresh.has(g))), none);
@@ -75,13 +76,13 @@ globalThis.TrustyCodes = deps => {
     await keepListed(listed, fresh, listed.size === 0);
     return reply.grants;
   }
-  // Why: a failed mint, or a `last` end beside a row the broker did not count, gets no later contract signal.
+  // Why: a failed connect, or a `last` end beside a row the broker did not count, gets no later contract signal.
   // What: asks the broker for the profile's list and prunes to it, dropping the permission when it is empty.
   //   No credential, or a broker that matches none, means nothing can be live. Any other failure keeps the
-  //   table and drops the permission only when the table is empty and no mint is in flight: a grant missing
+  //   table and drops the permission only when the table is empty and no connect is in flight: a grant missing
   //   from the table answers UnknownGrant, so nothing live can use it (contract "All-https access", signal 6).
   // Test: tests/test_worker.mjs `failure branches never leave a grant usable or a permission held`,
-  //   `a failed mint whose grants call also fails releases an unused permission`.
+  //   `a failed connect whose grants call also fails releases an unused permission`.
   async function reconcile() {
     try { await listGrants(await credential()); } catch (error) {
       const none = (error.response?.error || error.message) === "NotEnrolled";
@@ -91,7 +92,7 @@ globalThis.TrustyCodes = deps => {
   async function ended(grant, last) {
     let next = null;
     try { next = await changeTable(t => { delete t[grant]; return t; }, last); } catch { /* Settled below. */ }
-    // A row left beside `last` is a mint racing this end or a missed end; the broker's list tells which.
+    // A row left beside `last` is a connect racing this end or a missed end; the broker's list tells which.
     if (last && (next === null || Object.keys(next).length)) void reconcile();
   }
   const offline = {
@@ -110,34 +111,45 @@ globalThis.TrustyCodes = deps => {
     await keepListed(new Set(live), fresh, live.length === 0);
   }
   // Why: a broker that stays unreachable sends no acknowledgement, yet then holds nothing of this profile.
-  // What: after QUIET_MS without an acknowledgement and without a mint, empties the table and the permission.
+  // What: after QUIET_MS without an acknowledgement and without a connect, empties the table and the permission.
   // Test: tests/test_worker.mjs `an unreachable broker ends the table and the permission after the code lifetime`.
   async function tick() {
     const {offline_since:since} = await chrome.storage.session.get("offline_since");
     if (Number.isFinite(since) && Date.now() - since >= QUIET_MS) await changeTable(() => ({}), true);
   }
 
-  async function mint(msg, cred) {
-    const {scope} = msg;
-    if (!["tab","profile"].includes(scope) || (scope === "tab") !== Object.hasOwn(msg, "tab") ||
-        (scope === "tab" && !tabId(msg.tab))) throw new Error("InvalidMint");
+  // Why: one Connect click grants the whole profile to local agents (#11239 owner ruling 03:37Z).
+  // What: pairs first when the profile has no credential, waits for the native port's acknowledgement, then
+  //   asks the broker for the standing profile grant and records it. Nothing is recorded unless the broker
+  //   answered ok with a well-formed grant; a grant the table cannot hold is revoked again.
+  //   Right after a fresh pair the native port is still reconnecting, so a `BrowserDisconnected` answer is
+  //   retried once after PAIR_RETRY_MS (owner ruling Dqw 2026-11-16).
+  // Test: tests/test_worker.mjs `connect pairs an unpaired profile and records the broker's grant`,
+  //   `a connect whose grant creation fails records nothing`, `connect after lost storage re-pairs and succeeds`,
+  //   `connect retries exactly once and only after a fresh pair`.
+  async function connectProfile() {
+    const fresh = !(await stored()).credential;
+    if (fresh) await pair();
+    const cred = await credential();
     minting++;
-    let reply;
+    let grant;
     try {
-      // #11239: the probe counts as in flight, so no sweep drops the permission this click just granted.
-      if (scope === "tab" && !(await pageOps().probe(msg.tab)).access) throw new Error("PermissionNeeded");
-      reply = await bootstrap({op:"mint", ...cred, scope, ...(scope === "tab" ? {tab:msg.tab} : {})});
-      const {code, grant, expires_at} = reply;
-      if (typeof grant !== "string" || !/^g-[0-9a-f]{1,64}$/.test(grant)) throw new Error("Invalid mint reply");
+      const ask = async () => { await online(); return bootstrap({op:"connect", ...cred}); };
+      let reply;
+      try { reply = await ask(); } catch (error) {
+        if (!fresh || (error.response?.error || error.message) !== "BrowserDisconnected") throw error;
+        await new Promise(resolve => setTimeout(resolve, PAIR_RETRY_MS));
+        reply = await ask();
+      }
+      grant = reply.grant;
+      if (typeof grant !== "string" || !/^g-[0-9a-f]{1,64}$/.test(grant) || reply.scope !== "profile" ||
+          reply.profile !== cred.profile) throw new Error("Invalid connect reply");
       try {
-        if (typeof code !== "string" || !/^tb-[0-9A-Z]{6}(-[0-9A-Z]{6}){3}$/.test(code) || reply.scope !== scope ||
-            (scope === "tab" && reply.tab !== msg.tab) || !Number.isFinite(expires_at)) throw new Error("Invalid mint reply");
         for (const fresh of watchers) fresh.add(grant);
-        await changeTable(t => ({...t, [grant]:{scope, tab:scope === "tab" ? msg.tab : null}}));
-      } catch (error) {
-        // A code the worker cannot honour is cancelled rather than left redeemable.
-        try { await bootstrap({op:"revoke_grant", ...cred, grant}); } catch { /* It expires within CODE_TTL. */ }
-        throw new Error(error.message === "Invalid mint reply" ? error.message : "Could not record the grant.");
+        await changeTable(t => ({...t, [grant]:{scope:"profile", tab:null}}));
+      } catch {
+        try { await bootstrap({op:"revoke_grant", ...cred, grant}); } catch { /* The browser close ends it. */ }
+        throw new Error("Could not record the grant.");
       }
     } catch (error) {
       minting--;
@@ -146,11 +158,10 @@ globalThis.TrustyCodes = deps => {
     }
     minting--;
     await offline.minted();
-    return {ok:true, code:reply.code, grant:reply.grant, scope, profile:reply.profile,
-      ...(scope === "tab" ? {tab:msg.tab} : {}), expires_at:reply.expires_at};
+    return {ok:true, grant, profile:cred.profile};
   }
 
-  // Why: a profile with no workflow enrollment needs its own credential to mint codes (contract "pair").
+  // Why: a profile with no workflow enrollment needs its own credential to connect (contract "pair").
   // What: keeps one `pairing_pending` triple across interruptions, sends `pair`, and on `ok` moves it to
   //   `pairing` and reconnects. A failure that leaves no credential also leaves no permission.
   // Test: tests/test_worker.mjs `pair records the pairing only on ok and retries with the same fields`.
@@ -180,7 +191,7 @@ globalThis.TrustyCodes = deps => {
     reconnect();
     return {ok:true, profile:data.profile};
   }
-  // Why: Disconnect this profile ends every code and grant and the pairing itself (contract "pair").
+  // Why: the popup's "Forget this profile" ends every grant and the pairing itself (contract "pair").
   // What: marks the pairing before sending `unpair`, so a retry after a lost reply treats Unauthorized as
   //   done; then empties the table, removes the permission and the pairing, and reconnects.
   // Test: tests/test_worker.mjs `unpair removes the permission and the pairing record`.
@@ -208,31 +219,29 @@ globalThis.TrustyCodes = deps => {
     } finally { busy = false; }
   }
 
-  // Why: the popup's code flow — preview, pair, mint, list and revoke.
-  // What: routes one popup message. No path reads the active tab; `tab` is always the popup's explicit id.
-  // Test: tests/test_worker.mjs `code preview probes the tab the popup names and never the active tab`,
-  //   `a mint without a pairing is refused`.
+  // Why: the popup's Connect state comes from the broker, so a browser restart shows Connect again.
+  // What: no credential is never connected; otherwise the broker's grant list for this profile decides.
+  // Test: tests/test_worker.mjs `status reports connected only while the broker lists a grant`.
+  async function status() {
+    const {credential:found} = await stored();
+    const email = await identity();
+    if (!found) return {ok:true, email, profile:null, connected:null};
+    const grants = await listGrants(await credential());
+    const live = grants.find(entry => entry?.state === "active");
+    return {ok:true, email, profile:found.profile, connected:live ? live.grant : null};
+  }
+
+  // Why: the popup's messages — status, Connect, Disconnect (revoke_grants) and the grant list.
+  // What: routes one popup message. No path reads the active tab.
+  // Test: tests/test_worker.mjs `status reports connected only while the broker lists a grant`,
+  //   `a grants call without a credential is refused`.
   async function setup(msg) {
-    if (msg.type === "code_preview") {
-      if (msg.tab !== null && !tabId(msg.tab)) throw new Error("InvalidRequest");
-      const {pairing, credential:found} = await stored();
-      const email = await identity();
-      const seen = msg.tab === null ? null : await pageOps().probe(msg.tab);
-      return {ok:true, paired:!!pairing, email, profile:found?.profile ?? null,
-        target:seen && {tab:msg.tab, access:seen.access, origin:seen.origin, title:seen.title}};
-    }
+    if (msg.type === "status") return status();
+    if (msg.type === "connect") return exclusive(connectProfile);
     if (msg.type === "pair") return exclusive(pair);
     if (msg.type === "unpair") return exclusive(unpair);
     const cred = await credential();
-    if (msg.type === "mint") return mint(msg, cred);
-    if (msg.type === "grants") {
-      const grants = await Promise.all((await listGrants(cred)).map(async entry => {
-        if (entry?.scope !== "tab" || !tabId(entry.tab)) return entry;
-        const seen = await pageOps().probe(entry.tab);
-        return {...entry, origin:seen.origin, title:seen.title};
-      }));
-      return {ok:true, grants};
-    }
+    if (msg.type === "grants") return {ok:true, grants:await listGrants(cred)};
     if (msg.type === "revoke_grant") {
       if (typeof msg.grant !== "string" || !msg.grant) throw new Error("InvalidRequest");
       const drop = () => changeTable(t => { delete t[msg.grant]; return t; });
@@ -244,8 +253,9 @@ globalThis.TrustyCodes = deps => {
       await drop();
       return {ok:true, revoked:reply.revoked};
     }
+    // Disconnect (#11239): the broker ends every grant of the profile at once, so the permission goes too.
     const {revoked} = await bootstrap({op:"revoke_grants", ...cred});
-    await changeTable(() => ({}));
+    await changeTable(() => ({}), true);
     return {ok:true, revoked};
   }
   return {setup, credential, stored, readTable, ended, acknowledged, watchMints,

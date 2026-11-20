@@ -105,6 +105,41 @@ pub fn append_denial(path: &Path, record: &CapturedError) -> std::io::Result<()>
         .write_all(line.as_bytes())
 }
 
+/// Drops the `il-auto-apply` pending bookkeeping a later resolution cleared.
+///
+/// Why: the denial store is append-only (G0b): a finished ilio run appends
+/// `il-auto-apply:PENDING-RESOLVED <packet>` after its `PENDING-UNKNOWN`
+/// instead of editing the file, so a reader must pair the two or a finished
+/// run reads as an open alarm.
+/// What: `records` is one store in file order. Walking newest first, a
+/// `PENDING-UNKNOWN` whose packet (the scrubbed `command` field) has a
+/// `PENDING-RESOLVED` after it is dropped; every `PENDING-RESOLVED` is dropped
+/// too, as bookkeeping. A pending with no later resolution, or a new one after
+/// a resolution, stays.
+/// Test: `resolved_pending_is_cleared_and_an_open_one_stays`.
+#[must_use]
+pub fn drop_resolved_pending(records: Vec<CapturedError>) -> Vec<CapturedError> {
+    const PENDING: &str = "check=il-auto-apply:PENDING-UNKNOWN ";
+    const RESOLVED: &str = "check=il-auto-apply:PENDING-RESOLVED ";
+    fn packet(fields: &str) -> &str {
+        fields
+            .split_once("command=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map_or("", |(p, _)| p)
+    }
+    let mut resolved = std::collections::HashSet::new();
+    let mut kept: Vec<CapturedError> = Vec::with_capacity(records.len());
+    for r in records.into_iter().rev() {
+        if r.fields.starts_with(RESOLVED) {
+            resolved.insert(packet(&r.fields).to_owned());
+        } else if !(r.fields.starts_with(PENDING) && resolved.contains(packet(&r.fields))) {
+            kept.push(r);
+        }
+    }
+    kept.reverse();
+    kept
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +192,38 @@ mod tests {
         let blocked = tmp.path().join("blocked");
         std::fs::create_dir(&blocked).expect("mkdir");
         assert!(append_denial(&blocked, &record).is_err());
+    }
+
+    #[test]
+    fn resolved_pending_is_cleared_and_an_open_one_stays() {
+        let rec = |code: &str, packet: &str| {
+            denial_record(
+                &DeniedCall {
+                    check: &format!("il-auto-apply:{code}"),
+                    tool: "Stop",
+                    command: packet,
+                    cwd: "/w",
+                    session_id: "s",
+                    reason: "r",
+                },
+                1,
+            )
+        };
+        let kept = drop_resolved_pending(vec![
+            rec("PENDING-UNKNOWN", "il-a"),
+            rec("PENDING-UNKNOWN", "il-b"),
+            rec("PENDING-RESOLVED", "il-a"),
+            rec("WRITE", "il-a"),
+        ]);
+        let got: Vec<String> = kept.iter().map(|r| r.fields.clone()).collect();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(got[0].contains("PENDING-UNKNOWN") && got[0].contains("\"il-b\""));
+        assert!(got[1].contains("il-auto-apply:WRITE"));
+        // A pending raised again after its resolution is open.
+        let again = drop_resolved_pending(vec![
+            rec("PENDING-RESOLVED", "il-a"),
+            rec("PENDING-UNKNOWN", "il-a"),
+        ]);
+        assert_eq!(again.len(), 1);
     }
 }

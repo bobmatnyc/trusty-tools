@@ -1840,7 +1840,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2822,7 +2822,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3194,7 +3194,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5763,9 +5763,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -6590,7 +6590,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6711,7 +6711,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -8042,7 +8042,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8863,7 +8863,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8922,7 +8922,7 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10563,7 +10563,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11300,6 +11300,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-c"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11477,7 +11487,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents"
-version = "0.39.5"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -11572,7 +11582,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.9.6"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11675,7 +11685,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -11687,8 +11697,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-browser"
+version = "0.8.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "hmac 0.12.1",
+ "keyring",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "trusty-browser",
+ "trusty-common",
+ "trusty-mcp",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "trusty-channels"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11717,7 +11752,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11787,7 +11822,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.0"
+version = "0.70.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12086,7 +12121,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "1.0.0"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12136,7 +12171,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.6"
+version = "1.14.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12192,6 +12227,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "trusty-agents-common",
  "trusty-architect",
  "trusty-channels",
@@ -12256,7 +12293,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.41.0"
+version = "0.42.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12292,7 +12329,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "1.0.0"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -12387,7 +12424,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",
@@ -13480,7 +13517,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

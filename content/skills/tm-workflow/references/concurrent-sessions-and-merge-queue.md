@@ -58,6 +58,20 @@ BLOCK in the PR comments. A critic verdict is a PR comment, so
 (`gh pr view <PR> --comments`) before a batch merge, once per PR, not once per
 batch.
 
+**trusty-review gate before every merge (owner instruction 2026-11-16).**
+Before any PR merge, the merge-queue owner or the PM runs trusty-review
+`review_pr` at the PR's final head SHA.
+
+- Merge only on APPROVE, or APPROVE* with a recorded note, plus green required
+  checks.
+- Record the verdict, grade, finding count and head SHA in one PR comment.
+- If the head moves, re-run `review_pr` before merge.
+- The Architect's merge pin stays the authority; the verdict is input to it. A
+  BLOCK or REQUEST_CHANGES stops the merge until it is fixed or the owner
+  overrules it.
+- It applies to every repo the fleet merges in. Repos whose PRs the current
+  GitHub account cannot read start when credentials are provided.
+
 **Holding someone else's PR.** Convert it to draft (`gh pr ready --undo <PR>`) or
 apply the hold label. Send the message too, for awareness — but the message is
 never the hold. It loses the race; tonight's incident had a block arrive four
@@ -70,4 +84,6 @@ list — the handoff is a notification, and the PRs are the record.
 On a repository with `tm pr open`, `tm pr queue-check [--base main] [<pr>]` runs
 this whole table itself — draft, hold label, `CHANGES_REQUESTED`, an unresolved
 `code-critic` BLOCK, then the live required contexts, in that order — and exits
-nonzero on the first stop condition it finds.
+nonzero on the first stop condition it finds. It also refuses a PR with no single
+well-formed `rung:N` label (set by `tm pr open --rung N`), and a `rung:5` or
+`rung:6` PR with no trusted APPROVE or WARN verdict pinned to its head (Dr4).

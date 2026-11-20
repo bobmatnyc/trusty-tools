@@ -31,6 +31,12 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # Merge queue (owner ruling Dpu). Every required context must also report,
+  # under the same name, on the queue commit. On this event the diff base is
+  # `github.event.merge_group.base_sha`: steps read it as MERGE_GROUP_BASE_SHA,
+  # or as the `before` SHA where a step already diffs a push range.
+  merge_group:
+    types: [checks_requested]
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push
@@ -106,6 +112,14 @@ jobs:
 
       - name: No TCP listener outside the allowlist (ADR-0032)
         run: bash scripts/check_no_tcp_listeners.sh
+
+      # #11489: an `intent(demo):` test intention may appear only under a
+      # declared demo path. Pure text scan; selftest first.
+      - name: Demo-intention lint selftest (must reject a marker outside demo paths)
+        run: bash scripts/check_demo_intentions_selftest.sh
+
+      - name: Demo test intentions only in declared demo paths
+        run: bash scripts/check_demo_intentions.sh
 
   # Test-only workspace dev-dependency edges (#8341). A separate job because it
   # is the one gate in this file that needs cargo: `cargo metadata --no-deps`

@@ -6,6 +6,39 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.5] — 2026-11-20
+
+### Documentation
+
+- Test data in the search monitor TUI tests uses the neutral `dev-acme` project name instead of a real organisation's ([#11519](https://github.com/bobmatnyc/trusty-tools/issues/11519)).
+
+## [0.70.4] — 2026-11-19
+
+### Documentation
+
+- Comments and examples use neutral `acme` org names.
+
+## [0.70.3] — 2026-11-18
+
+### Changed
+
+- Exempt three more paths from the launchd-label source scan in the `launchd_labels` tests (#11440).
+
+## [0.70.2] — 2026-11-16
+
+### Added
+
+- `linux_lifecycle::passthrough::MEMORY_DAEMON` and `SEARCH_DAEMON`: the non-credential variables a Linux-started trusty-memory or trusty-search daemon keeps. Both daemons' descriptors and trusty-console's read them, so a daemon a console bridge auto-starts gets the same settings as one its own `start` spawns (#11085). Both lists carry `RUST_LOG_BUFFER`, the log-buffer filter both daemons read through `tracing_init`.
+- `linux_lifecycle::stop_pid`, `stop_pid_with`, `restart_pid` and `restart_pid_with` stop or restart a daemon the caller identified by pid, such as a trusty-console whose socket bind failed. The pid is pinned with a pidfd and must be proven this instance (binary, `liveness_args`, `instance_env`, `instance_path_args`) before any signal; a pid that is gone falls back to the socket path, and a live pid that is not this instance is the new `LifecycleError::NotThisInstance` (#11085).
+- Before any signal, `stop_pid` and `restart_pid` also refuse: a descriptor with empty `liveness_args` (`InvalidDescriptor`); a pid whose `instance_path_args` flag has no value, or a relative or unresolvable one (the new `LifecycleError::InstanceUndecided`); a socket served by another pid (the new `LifecycleError::ServedByAnother` for `stop_pid`, `RestartBlocked` naming that pid for `restart_pid`); and a socket that cannot be probed (`ProbeInconclusive`). `restart_pid` returns `BinaryMissing` before its stop when the install binary is absent (#11085).
+- `DaemonDescriptor::instance_path_args` declares argv flags, such as `--data-dir`, whose value names the instance's directory. A process that gives such a flag only values naming another path is a sibling and no longer blocks `stop`, `start` or `restart`; a relative or unresolvable value still counts as this instance for that scan. Descriptors that leave it empty behave as before (#11085).
+- `linux_lifecycle::ProcessTable` and `stop_with_table`, `start_with_table`, `restart_with_table`, `stop_pid_with_table` and `restart_pid_with_table`: the liveness scan can read an injected process table instead of `/proc`, so a lifecycle test no longer depends on the host's processes (#11085). The existing entry points scan `/proc` as before, and a stop by pid still reads its pinned process in the real `/proc`.
+
+### Fixed
+
+- `linux_lifecycle::restart` no longer stops a healthy daemon that its start would then refuse to replace. While the daemon serves, another process that the `/proc` scan reads as this instance now fails the restart with the new `LifecycleError::RestartBlocked` before any signal, and the running daemon stays up (#11085).
+- `linux_lifecycle::restart` checks that the install binary exists before it stops anything, so a restart during an upgrade that briefly removed the binary returns `BinaryMissing` and leaves the running daemon up instead of stopping it and starting nothing (#11085).
+
 ## [0.70.0] — 2026-11-12
 
 ### Added

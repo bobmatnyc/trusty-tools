@@ -550,12 +550,7 @@ async fn the_object_key_comes_from_the_source_root_s_git_origin() {
     if !git(&["init"]) {
         return; // no usable git on this runner
     }
-    let _ = git(&[
-        "remote",
-        "add",
-        "origin",
-        "git@github.com:duettoresearch/pricing.git",
-    ]);
+    let _ = git(&["remote", "add", "origin", "git@github.com:acme/pricing.git"]);
     std::fs::write(logs.join("trusty-code.log"), "INFO a line\n").expect("write log file");
 
     let dest = tmp.path().join("dest");
@@ -576,17 +571,14 @@ async fn the_object_key_comes_from_the_source_root_s_git_origin() {
     };
 
     let plan = plan_of(&config, tmp.path());
-    assert_eq!(
-        plan.destinations[0].target.key_prefix(),
-        "duettoresearch/pricing"
-    );
+    assert_eq!(plan.destinations[0].target.key_prefix(), "acme/pricing");
 
     let status = run_tick(&plan, &state, &mut RetentionDebounce::new()).await;
     assert_eq!(status.outcome, DrainOutcome::Success, "{}", status.detail);
     assert_eq!(status.uploaded, 1, "{}", status.detail);
 
     let key = dest
-        .join("duettoresearch")
+        .join("acme")
         .join("pricing")
         .join("trusty-code")
         .join("trusty-code.log");

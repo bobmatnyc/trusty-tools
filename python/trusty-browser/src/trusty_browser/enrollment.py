@@ -14,6 +14,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from trusty_browser.audit import Audit, email_domain
 from trusty_browser.vault import seal, unseal
 
 
@@ -272,6 +273,18 @@ def finish_removals(db: sqlite3.Connection, state: Path) -> None:
             )
 
 
+def unauthorized(
+    state: Path, site: str, request: dict[str, object], profile: object = None
+) -> ValueError:
+    """Log a refused ``remove`` or ``status`` (ruling Dqw 2026-11-16); return its error."""
+    known = profile if isinstance(profile, str) else None
+    Audit(state).refuse(
+        site, site + "_unauthorized", profile=known,
+        email_domain=email_domain(request.get("email")),
+    )  # fmt: skip
+    return ValueError("Unauthorized")
+
+
 def remove(
     db: sqlite3.Connection,
     state: Path,
@@ -293,7 +306,7 @@ def remove(
                     (registration_id(request),),
                 ).fetchone()
             ):
-                raise ValueError("Unauthorized")
+                raise unauthorized(state, "remove", request)
             return None
         original = original_fields(row, state)
         if request is not None and (
@@ -302,7 +315,7 @@ def remove(
                 registration_id(original), registration_id(request)
             )
         ):
-            raise ValueError("Unauthorized")
+            raise unauthorized(state, "remove", request, row["profile"])
         retire(db, row, original)
     return str(row["profile"])
 
@@ -388,7 +401,7 @@ def status(
     ).fetchone():
         result = "revoked"
     else:
-        raise ValueError("Unauthorized")
+        raise unauthorized(state, "status", request)
     return {"ok": True, "workflow": request["workflow"], "state": result}
 
 

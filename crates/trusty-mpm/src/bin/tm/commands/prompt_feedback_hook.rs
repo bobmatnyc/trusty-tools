@@ -350,7 +350,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Test: `reads_the_final_message_from_the_tail_of_a_large_transcript`,
 /// `joins_multi_block_assistant_messages`,
 /// `an_unreadable_transcript_writes_nothing`.
-fn final_assistant_message(path: &Path) -> Option<String> {
+pub(crate) fn final_assistant_message(path: &Path) -> Option<String> {
     use std::io::{BufRead as _, Seek as _};
 
     let file = std::fs::File::open(path).ok()?;

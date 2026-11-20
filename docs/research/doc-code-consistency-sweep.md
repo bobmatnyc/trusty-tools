@@ -136,7 +136,7 @@ unsafe, or a test pinning a wrong value.
   `handle_tool_call`, `dispatch`. The env var is
   `pub const ENV_CTO_DB_PATH: &str = "CTO_DB_PATH"` — no `TRUSTY_` prefix, so a
   reader who exports `TRUSTY_CTO_DB_PATH` is silently ignored and the tool reads
-  the hardcoded `$HOME/Duetto/cto/data/cto.db` instead.
+  the hardcoded `$HOME/Acme/cto/data/cto.db` instead.
 - **Verified by:** `crates/trusty-cto-db/src/lib.rs::resolve_db_path`
 - **Status:** new
 
@@ -146,7 +146,7 @@ unsafe, or a test pinning a wrong value.
 - **Claim:** "`TRUSTY_CTO_DB_PATH`: SQLite database file location (default:
   `~/.trusty/cto.db`)"
 - **Source:** env var is `CTO_DB_PATH`; the default is
-  `$HOME/Duetto/cto/data/cto.db` (`resolve_db_path`). Both halves are wrong.
+  `$HOME/Acme/cto/data/cto.db` (`resolve_db_path`). Both halves are wrong.
 - **Verified by:** as H6
 - **Status:** new
 

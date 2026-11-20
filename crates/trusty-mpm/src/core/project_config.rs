@@ -241,6 +241,25 @@ pub struct ProjectLevelConfig {
     /// Test: `project_config_parses_profile`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+
+    /// The account NAME each third-party CLI must be acting as (#11390).
+    ///
+    /// Why: an ops agent that asks for a permission on the wrong account wastes
+    /// the owner's approval or grants the wrong one.
+    /// What: `[accounts.<service>]` tables, kept as raw TOML here and
+    /// validated by [`crate::core::project_accounts::accounts_for`], so a bad
+    /// entry drops only the accounts, never the rest of this file.
+    /// Test: `bad_accounts_keep_the_rest_of_the_config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<crate::core::project_accounts::RawAccounts>,
+
+    /// `[stale_copy]`: the stale-copy guard's registered and locked artifacts (#10574).
+    ///
+    /// What: raw TOML validated by [`crate::core::stale_copy::stale_copy_for`],
+    /// so a bad entry turns off only that guard. Absent means the guard is off.
+    /// Test: `state_is_active_from_a_subdirectory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_copy: Option<crate::core::stale_copy::RawStaleCopy>,
 }
 
 /// The `[style]` table of `.trusty-mpm.toml` (#8533).

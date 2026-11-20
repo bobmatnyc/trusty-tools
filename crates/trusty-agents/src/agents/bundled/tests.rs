@@ -477,7 +477,7 @@ fn refresh_backs_up_differing_content() {
 /// preserved a hand-edit and every later one overwrote the file while
 /// skipping the backup. Two edit-then-reprovision cycles lost the second
 /// edit with no error, no warning, and no recoverable copy — which is how a
-/// `cto-assistant` tool grant was destroyed on 2026-07-31.
+/// persona tool grant was destroyed on 2026-07-31.
 /// What: edits a bundled file, reprovisions, edits it differently,
 /// reprovisions again, then asserts BOTH edits are still readable from
 /// archived backups. Against the pre-fix code the second pass reports
@@ -861,24 +861,12 @@ fn ensure_deployed_blocks_on_externally_held_pass_lock() {
 /// impossible to miss (#3878 code-critic MEDIUM-1). The agent name is carried
 /// explicitly rather than derived from the path because the two layouts spell
 /// it differently (`izzie/agent.toml` vs `izzie.toml`).
-const SEED_SPELLINGS: &[(&str, &str)] = &[
-    ("izzie/agent.toml", "izzie"),
-    ("izzie.toml", "izzie"),
-    ("cto-assistant/agent.toml", "cto-assistant"),
-    ("cto-assistant.toml", "cto-assistant"),
-];
+const SEED_SPELLINGS: &[(&str, &str)] = &[("izzie/agent.toml", "izzie"), ("izzie.toml", "izzie")];
 
 /// The OKG store binding each persona's seeds must declare, keyed by agent
 /// name: `(agent_name, index, palace, tree)`.
-const EXPECTED_BINDINGS: &[(&str, &str, &str, &str)] = &[
-    ("izzie", "bob-kb", "owner-profile", "okg://izzie"),
-    (
-        "cto-assistant",
-        "cto-assistant",
-        "cto",
-        "okg://cto-assistant",
-    ),
-];
+const EXPECTED_BINDINGS: &[(&str, &str, &str, &str)] =
+    &[("izzie", "bob-kb", "owner-profile", "okg://izzie")];
 
 /// #3816/#3864: every embedded seed spelling of each demo persona must carry
 /// its OKG store binding.

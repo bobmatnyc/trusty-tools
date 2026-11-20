@@ -10,7 +10,8 @@
 //! timestamps, schema version), [`store`] (layout, launch-dir anchoring,
 //! code registry, `init`), [`rpc`] (the `mpm.dbatg.*` request and response
 //! types) and [`writer`] (#9758: the batch writer the daemon, the MCP tool
-//! and `tm dbatg` share, with `ops` applying each batch op).
+//! and `tm dbatg` share, with `ops` applying each batch op) and [`fresh`]
+//! (#11366: the `datg.py fresh`/`ready` verdict the restart gate reads).
 //! Test: `tests/ledger_contract.rs`, against scrubbed goldens from four live
 //! prototype stores in `tests/fixtures/ledger/`; `tests/ledger_writer.rs` and
 //! `tests/ledger_writer_parity.rs` for the writer.
@@ -18,7 +19,10 @@
 //! # Spec References
 //! - [`SPEC-LEDGER-02~draft`](docs/specs/DOC-82-portfolio-intent-ledger-dashboard.md#SPEC-LEDGER-02~draft)
 
+pub mod fresh;
 pub mod ids;
+// See G0b IL auto-apply: the IL packet parser, checker and apply.
+pub mod il;
 pub mod limits;
 pub mod model;
 mod ops;

@@ -14,7 +14,7 @@ test('a palace counted off disk shows its real numbers, not a dash', () => {
   // The defect this prevents (#6372): the tab printed `—` for every row whose
   // `cached` was false, so 92 populated palaces read as empty.
   const disk = {
-    id: 'duetto',
+    id: 'acme',
     cached: false,
     stats_source: 'disk',
     drawer_count: 412,

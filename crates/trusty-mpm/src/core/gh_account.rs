@@ -5,7 +5,7 @@
 //! active. When a host has several accounts logged in (the common
 //! personal + work + bot setup), `gh` uses whichever one is marked active in its
 //! `hosts.yml` — and that is easy to get wrong. This directly caused a silent
-//! failure: the active account was a non-admin identity (`bob-duetto`) instead
+//! failure: the active account was a non-admin identity (`acme-admin`) instead
 //! of the repo owner (`bobmatnyc`), so `gh pr merge --admin` kept failing with
 //! "1 approving review required" until the account was switched. This module
 //! makes the active account (and the multi-account ambiguity that hides the bug)
@@ -432,7 +432,7 @@ pub(crate) use enforce::api_login_scoped;
 //
 // #5851 changed WHICH mechanism selects the account. `gh auth token -u
 // <account>` was the original selector, but on a keyring-backed host that
-// flag does not discriminate: `-u bobmatnyc` and `-u bob-duetto` return the
+// flag does not discriminate: `-u bobmatnyc` and `-u acme-admin` return the
 // identical value, so the credential a session got followed the global
 // active account rather than the project's. A project that configures
 // `github.config_dir` is now pinned with `GH_CONFIG_DIR` instead, which does
@@ -453,7 +453,7 @@ pub const GH_USER_ENV_VAR: &str = "GH_USER";
 /// Why: `gh auth token -u <login>` has no "active account" side effect,
 /// unlike `gh auth switch`, so it is safe to call from concurrently-spawning
 /// sessions. It is nonetheless a WEAK selector: measured on gh 2.89.0 against
-/// a keyring-backed credential store, `-u bobmatnyc` and `-u bob-duetto`
+/// a keyring-backed credential store, `-u bobmatnyc` and `-u acme-admin`
 /// return the identical value, so the token follows the global active
 /// account rather than the one named (#5851). A project that pins
 /// `github.config_dir` never reaches this function; one that does not still
@@ -1076,15 +1076,15 @@ mod spawn_env_tests;
 mod tests {
     use super::*;
 
-    /// A `hosts.yml` with two accounts logged in and `bob-duetto` active — the
+    /// A `hosts.yml` with two accounts logged in and `acme-admin` active — the
     /// exact shape that produced the admin-merge bug on the dev host.
     const MULTI_HOSTS_YML: &str = "\
 github.com:
     git_protocol: https
     users:
         bobmatnyc:
-        bob-duetto:
-    user: bob-duetto
+        acme-admin:
+    user: acme-admin
 ";
 
     /// A single-account `hosts.yml` (only the active user, no `users` map).
@@ -1097,7 +1097,7 @@ github.com:
     /// Real `gh auth status` output with two github.com accounts logged in.
     const MULTI_AUTH_STATUS: &str = "\
 github.com
-  ✓ Logged in to github.com account bob-duetto (keyring)
+  ✓ Logged in to github.com account acme-admin (keyring)
   - Active account: true
   - Git operations protocol: https
   - Token: gho_************************************
@@ -1130,7 +1130,7 @@ github.com
     fn parse_active_account_present() {
         assert_eq!(
             parse_active_account_from_hosts_yml(MULTI_HOSTS_YML).as_deref(),
-            Some("bob-duetto")
+            Some("acme-admin")
         );
         assert_eq!(
             parse_active_account_from_hosts_yml(SINGLE_HOSTS_YML).as_deref(),
@@ -1172,9 +1172,9 @@ github.com
     #[test]
     fn parse_gh_account_status_multi_from_users_map() {
         let status = parse_gh_account_status_from_hosts_yml(MULTI_HOSTS_YML).expect("some");
-        assert_eq!(status.active.as_deref(), Some("bob-duetto"));
+        assert_eq!(status.active.as_deref(), Some("acme-admin"));
         assert!(status.logged_in.contains(&"bobmatnyc".to_string()));
-        assert!(status.logged_in.contains(&"bob-duetto".to_string()));
+        assert!(status.logged_in.contains(&"acme-admin".to_string()));
         assert_eq!(status.logged_in.len(), 2);
         assert!(status.is_ambiguous());
     }
@@ -1206,7 +1206,7 @@ github.com
     fn parse_logged_in_multiple() {
         assert_eq!(
             parse_logged_in_accounts(MULTI_AUTH_STATUS),
-            vec!["bob-duetto".to_string(), "bobmatnyc".to_string()]
+            vec!["acme-admin".to_string(), "bobmatnyc".to_string()]
         );
     }
 
@@ -1231,7 +1231,7 @@ github.com
     /// output shape, including the `(GH_TOKEN)` annotation.
     const TOKEN_AUTH_STATUS: &str = "\
 github.com
-  ✓ Logged in to github.com account mac-duetto (GH_TOKEN)
+  ✓ Logged in to github.com account acme-mac (GH_TOKEN)
   - Active account: true
   - Git operations protocol: https
   - Token scopes: 'repo', 'workflow'
@@ -1243,10 +1243,10 @@ github.com
     #[test]
     fn parse_auth_status_active_from_marker() {
         let status = parse_gh_account_status_from_auth_status(MULTI_AUTH_STATUS);
-        assert_eq!(status.active.as_deref(), Some("bob-duetto"));
+        assert_eq!(status.active.as_deref(), Some("acme-admin"));
         assert_eq!(
             status.logged_in,
-            vec!["bob-duetto".to_string(), "bobmatnyc".to_string()]
+            vec!["acme-admin".to_string(), "bobmatnyc".to_string()]
         );
         assert!(status.is_ambiguous());
     }
@@ -1265,9 +1265,9 @@ github.com
         // A non-active account is still a valid choice for a project.
         assert_eq!(
             status
-                .canonical_logged_in_login("  bob-duetto  ")
+                .canonical_logged_in_login("  acme-admin  ")
                 .as_deref(),
-            Some("bob-duetto")
+            Some("acme-admin")
         );
     }
 
@@ -1290,8 +1290,8 @@ github.com
     #[test]
     fn parse_auth_status_token_auth() {
         let status = parse_gh_account_status_from_auth_status(TOKEN_AUTH_STATUS);
-        assert_eq!(status.active.as_deref(), Some("mac-duetto"));
-        assert_eq!(status.logged_in, vec!["mac-duetto".to_string()]);
+        assert_eq!(status.active.as_deref(), Some("acme-mac"));
+        assert_eq!(status.logged_in, vec!["acme-mac".to_string()]);
         assert!(!status.is_ambiguous());
     }
 
@@ -1320,7 +1320,7 @@ github.com
         let GhAuthProbe::Answered(status) = probe else {
             panic!("token-auth probe must answer under GH_DOCTOR_TIMEOUT, got {probe:?}");
         };
-        assert_eq!(status.active.as_deref(), Some("mac-duetto"));
+        assert_eq!(status.active.as_deref(), Some("acme-mac"));
     }
 
     /// Why: a probe that outruns its bound must report UNKNOWN, never an empty

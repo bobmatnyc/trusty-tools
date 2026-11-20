@@ -32,6 +32,12 @@ on:
     # `ready_for_review` covers a draft being marked ready. Matches ci.yml.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # Merge queue (owner ruling Dpu). Every required context must also report,
+  # under the same name, on the queue commit. On this event the diff base is
+  # `github.event.merge_group.base_sha`: steps read it as MERGE_GROUP_BASE_SHA,
+  # or as the `before` SHA where a step already diffs a push range.
+  merge_group:
+    types: [checks_requested]
 
 # Per-COMMIT concurrency group on push so a merge never cancels the previous
 # merge's verification (#4179); per-ref group on pull_request so a new push

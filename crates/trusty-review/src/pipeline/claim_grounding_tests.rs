@@ -1,7 +1,7 @@
 //! Unit tests for `claim_grounding` (#4081).
 //!
 //! Fixtures use the VERBATIM finding #4081 reports (the `ruff==0.16.0` claim
-//! against `duettoresearch/APEX` PR 1717) so they stay traceable to the reported
+//! against `acme/LEDGER` PR 1717) so they stay traceable to the reported
 //! evidence, plus the negative cases that keep the guard from over-firing.
 
 use super::*;

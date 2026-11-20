@@ -11,7 +11,8 @@
 //! and any "reuse the lowest free slot" scheme is a provable no-op.
 //!
 //! What: [`SessionManager::sweep_terminal_records`] hard-deletes records in a
-//! terminal state ([`ManagedSessionState::is_terminal`]) once they have sat
+// #11451: absolute path; stable and docs.rs nightly resolve `//!` scope differently.
+//! terminal state ([`ManagedSessionState::is_terminal`](crate::session_manager::ManagedSessionState::is_terminal)) once they have sat
 //! there longer than [`TERMINAL_RECORD_RETENTION_DAYS`], and releases each
 //! evicted record's slot so the number becomes available again.
 //! [`retention_verdict`] is the pure decision function it drives.

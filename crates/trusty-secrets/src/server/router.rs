@@ -38,17 +38,19 @@ use super::errors::ErrorKind;
 use super::exec;
 use super::grant::GrantRegistry;
 use super::methods::{self, Caller, MethodFn};
+use super::remote;
 use super::sandbox::{self, SandboxEnv};
 use super::settings::ServerSettings;
 use super::ticket::TicketStore;
 use super::ticket_methods;
+use super::unlock;
 use crate::api::methods::method;
 use crate::api::{BackendId, SecretValue, SecretsError};
 use crate::store::config::{MachineSecretsConfig, load_machine_at};
 use crate::store::timeout_note::TimeoutNote;
 use crate::store::{
-    KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends, open_backend,
-    open_backend_at_in, platform,
+    HeldKeychain, KEYCHAIN_COMPILED, NamesIndex, SecretBackend, SecretCache, cli_backends,
+    open_backend, open_backend_at_in, platform,
 };
 
 /// Maps a configured backend id to an implementation.
@@ -293,6 +295,11 @@ pub struct State {
     /// nothing. #10459 PR1: from the password database, like
     /// `architect_records`.
     pub(crate) tm_bin_dir: Option<PathBuf>,
+    /// Where the unlock grant hears of system sleep (#10524).
+    // Tests give a fake, so none registers with the OS.
+    pub(crate) power: Arc<dyn super::power::PowerSource>,
+    /// How often an unlock grant's sentinel checks it (#10524).
+    pub(crate) grant_tick: Duration,
 }
 
 impl State {
@@ -375,6 +382,8 @@ impl State {
             architect_records: super::architect::records_dir(account_home),
             tickets: Arc::new(TicketStore::os_default()),
             tm_bin_dir: super::ticket_checks::tm_bin_dir(account_home),
+            power: Arc::new(super::power::OsPower),
+            grant_tick: super::unlock::SENTINEL_TICK,
         }
     }
 
@@ -395,7 +404,15 @@ impl State {
                 backend: id.to_string(),
             });
         }
-        (self.backends)(id)
+        let backend = (self.backends)(id)?;
+        // #10524: Keychain reads answer from the unlock grant's held blob.
+        if id.as_str() == BackendId::KEYCHAIN {
+            return Ok(Arc::new(HeldKeychain::new(
+                backend,
+                Arc::clone(&self.cache),
+            )));
+        }
+        Ok(backend)
     }
 
     /// The whole-operation deadline for one request of `name`.
@@ -437,7 +454,7 @@ impl fmt::Debug for State {
 pub(crate) const MAX_BLOCKING_CALLS: usize = 64;
 
 /// Every method this socket serves, with its body.
-pub(crate) const METHODS: [(&str, MethodFn); 13] = [
+pub(crate) const METHODS: [(&str, MethodFn); 17] = [
     (method::SCOPES, methods::scopes),
     (method::LIST, methods::list),
     (method::SET, methods::set),
@@ -454,6 +471,13 @@ pub(crate) const METHODS: [(&str, MethodFn); 13] = [
     (method::TICKET_MINT, ticket_methods::mint),
     (method::TICKET_VOID, ticket_methods::void),
     (method::TICKET_PENDING, ticket_methods::pending),
+    // #11464 D3a: the remote gate's one entry.
+    (method::GATE, remote::gate),
+    // #10524: the 8 h unlock grant.
+    (method::UNLOCK, unlock::unlock),
+    (method::LOCK, unlock::lock),
+    // #10524: the vault blob migration.
+    (method::MIGRATE, super::migrate::migrate),
 ];
 
 /// The `secrets.*` router over `state`.
@@ -739,8 +763,8 @@ pub(crate) async fn serve_state(
             source: Box::new(source),
         })?;
     let idle_timeout = state.settings.idle_timeout;
-    let grants = Arc::clone(&state.grants);
-    let router = Arc::new(build_router(Arc::new(state)));
+    let state = Arc::new(state);
+    let router = Arc::new(build_router(Arc::clone(&state)));
     let mut shutdown = std::pin::pin!(shutdown);
     let exit = loop {
         let exit = serve_until_idle(
@@ -753,10 +777,14 @@ pub(crate) async fn serve_state(
         .await;
         // #9070: an idle window that ends with a live grant starts another;
         // the listener stays bound throughout.
-        if serving_ends(exit, &grants) {
+        // #10524: a live unlock grant defers the idle exit too.
+        let unlocked = || matches!(exit, UdsServeExit::Idle) && unlock::grant_keeps_serving(&state);
+        if serving_ends(exit, &state.grants) && !unlocked() {
             break exit;
         }
     };
+    // #10524: the session is over; a live unlock grant ends as `logout`.
+    unlock::end_session(&state);
     remove_socket(&socket);
     drop(listener);
     Ok(ServeExit::from_uds(exit))

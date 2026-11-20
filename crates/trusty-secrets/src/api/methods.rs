@@ -27,9 +27,15 @@ use super::{BackendId, SecretKey, SecretValue, VaultName};
 #[path = "exec.rs"]
 mod exec;
 pub use exec::{
-    ExecGrantRequest, ExecGrantResponse, ResolveRequest, ResolveResponse, RevokeRequest,
-    RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
+    ExecGrantRequest, ExecGrantResponse, LockResponse, ResolveRequest, ResolveResponse,
+    RevokeRequest, RevokeResponse, SetAgentsMayUseRequest, SetAgentsMayUseResponse, TOKEN_FD_ENV,
+    UnlockResponse,
 };
+
+// #10524: the vault blob migration's request and response.
+#[path = "migrate.rs"]
+mod migrate;
+pub use migrate::{MigrateRequest, MigrateResponse, MigrateStep};
 
 // #10998: the source locator of a named copy.
 #[path = "copy_source.rs"]
@@ -64,6 +70,15 @@ pub mod method {
     pub const TICKET_VOID: &str = "secrets.ticket.void";
     /// Whether a ticket is pending (#10459, DOC-86 §4).
     pub const TICKET_PENDING: &str = "secrets.ticket.pending";
+    /// The one entry `trusty-secrets remote-gate` uses: an inner `resolve`
+    /// or `doctor` verb (#11464, owner ruling D3a).
+    pub const GATE: &str = "secrets.gate";
+    /// Open the 8 h unlock grant (#10524).
+    pub const UNLOCK: &str = "secrets.unlock";
+    /// Drop the unlock grant (#10524).
+    pub const LOCK: &str = "secrets.lock";
+    /// Move Keychain items into the vault blob, or back (#10524).
+    pub const MIGRATE: &str = "secrets.migrate";
 }
 
 /// Which kind of scope a vault serves (DOC-74 §15.3).

@@ -175,16 +175,23 @@ class Peer:
 PAGE_WAIT = 8.0  # the worker answers within 7 s
 # #11291: a scroll can load content, so it is journaled like a click; #11286:
 # page_press and #11285: page_select too.
+# #11292: history and reload change the page, so they are journaled like navigate.
+HISTORY = {"page_back", "page_forward", "page_reload"}
 MUTATING = {
+    *HISTORY,
     "page_click",
+    "page_hover",
     "page_type",
     "page_press",
     "page_select",
     "page_scroll",
     "page_navigate",
     "page_upload",
+    "page_drag",
 }
+# #11352: TextDropped also carries typed, accepted and entered.
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
+REFUSAL_FIELDS += ("typed", "accepted", "entered")
 # Worker names for a command it could not finish; relayed without fields.
 UNFINISHED = {"OutcomeUnknown", "BrowserDisconnected"}
 PAGE_ERRORS = UNFINISHED | {
@@ -199,8 +206,13 @@ PAGE_ERRORS = UNFINISHED | {
     "NavigationPending",  # #11354: page_read before a navigation settled
     "StaleElement",
     "NotEditable",
+    "TextDropped",  # #11352: a field refused some of the typed text
     "NotSelectable",
     "NoSuchOption",
+    "Obscured",
+    "DebuggerBusy",
+    "NoHistory",
+    "NotDraggable",
     "InvalidUrl",
 }
 

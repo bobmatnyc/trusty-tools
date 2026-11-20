@@ -34,6 +34,7 @@ use super::gate::{Recording, audited};
 use super::grant::{GrantError, GrantRequest, GrantScope, GrantToken};
 use super::methods::{Caller, decode, split_project, to_json};
 use super::project::ProjectContext;
+use super::remote::RemoteAudit;
 use super::router::State;
 use crate::api::SecretRef;
 use crate::api::methods::{
@@ -191,12 +192,34 @@ pub(crate) fn grant(state: &State, caller: Caller, params: Value) -> Result<Valu
 /// `resolve_second_call_does_not_reread_cli_backend`,
 /// `warm_cache_still_refuses_revoked_token`.
 pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Value, ErrorKind> {
+    resolve_with(state, caller, params, None)
+}
+
+/// The `secrets.resolve` body, for a local caller or the verified gate.
+///
+/// What: #11464 critic M-A — `remote` is `Some` only from `secrets.gate`.
+/// Then `agent_parent` is forced `true` (the gate under sshd would judge
+/// `false`), and every record names the remote subject. Every other check
+/// is [`resolve`]'s, unchanged: a grant token, `check_scoped`, the
+/// write-ahead record, the spend.
+/// Test: `gate_resolve_of_a_denied_key_is_refused`,
+/// `gate_with_a_missing_or_wrong_token_is_refused`.
+pub(crate) fn resolve_with(
+    state: &State,
+    caller: Caller,
+    params: Value,
+    remote: Option<RemoteAudit>,
+) -> Result<Value, ErrorKind> {
+    let forced = remote.is_some();
     audited(
         state,
         caller,
         AuditMethod::Resolve,
         Recording::WriteAhead,
         |gate| {
+            if let Some(remote) = remote {
+                gate.remote(remote);
+            }
             let request: ResolveRequest = decode_object(params)?;
             gate.key(&request.key);
             // #9070: the peer pid is the kernel's, read by the router.
@@ -210,7 +233,9 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             // #9070 slice 3: the caller's own ancestry counts too, so a grant
             // a non-agent registered for an agent's pid opens no denied
             // key to it. An unreadable ancestor refuses.
-            let agent_parent = scope.agent_parent
+            // #11464 D3a: the gate's reads are all agent reads.
+            let agent_parent = forced
+                || scope.agent_parent
                 || has_agent_ancestor(state.grants.processes(), peer)
                     .map_err(|_| ErrorKind::GrantRefused)?;
             gate.agent_parent(agent_parent);
@@ -221,6 +246,10 @@ pub(crate) fn resolve(state: &State, caller: Caller, params: Value) -> Result<Va
             }
             let project = ProjectContext::resolve(state, &scope.project)?;
             gate.project(&project);
+            // #10524: a read under a live unlock grant says so on its record.
+            if super::unlock::live_for_read(state) {
+                gate.served_from_grant();
+            }
             // #9621: the allow record before the backend is opened or read,
             // so an audit log that cannot be written refuses with no read;
             // it also precedes the spend, so an audit failure spends nothing.

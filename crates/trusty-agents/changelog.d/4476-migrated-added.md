@@ -249,8 +249,8 @@ Added
     `python_skill::install_discovered_skill_plugins` once at boot,
     best-effort (a missing skills directory or a malformed manifest is
     logged and skipped, never fatal).
-  - **The bundled `cto_fixture.db` is FIXTURE data, not the real Duetto CTO
-    ops database** (`~/Duetto/cto/data/cto.db`, unreachable from this
+  - **The bundled `cto_fixture.db` is FIXTURE data, not the real internal CTO
+    ops database** (an org workspace path, unreachable from this
     environment) — set `CTO_DB_PATH` to the real file once it's reachable.
     See `.trusty-agents/skills/cto-db/python/README.md` for the full
     disclosure.
@@ -356,7 +356,7 @@ Added
   `[[stores]]` binding is the *curated* knowledge tier — one OKG store per
   agent, and that stays. Everything else an agent should be able to search (a
   third-party repo, a shared doc corpus) now has a second, uncurated tier:
-  `[tools] search_indexes = ["apex", "cto-projects"]`, a plain list of
+  `[tools] search_indexes = ["kb", "projects"]`, a plain list of
   trusty-search index ids with no tree, palace, or ingestion behind them. The
   list unions base-first through `extends` exactly like `[tools].allow` and
   `scopes`, so a CTO Assistant extending a base Assistant adds `cto-projects`

@@ -192,12 +192,10 @@ scopes = ["memory.read", "memory.write", "search.read", "google.*"]
 # `.trusty-agents/skills/<name>.md` file.
 #   izzie-weather      — weather for the home city (Open-Meteo + NWS)
 #   izzie-metro-north  — real-time MTA Metro North schedules and alerts
-#   cto-bob-voice      — Masa's Slack writing style for drafting on his behalf
 # #482: the system prompt body (personal deltas) lives in persona.md.
 skills = [
     "izzie-weather",
     "izzie-metro-north",
-    "cto-bob-voice",
 ]
 
 # --- Channels (#3820, #7609, DOC-54 SPEC-AGENTS-04/06) — the third

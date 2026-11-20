@@ -1,0 +1,4 @@
+crate   trusty-mpm
+version 1.14.9
+reason  #11487: Verdict gains a Warn variant in core/issue_audit.rs. No external library consumers (crates.io reverse dependencies: 0); the enum is internal to the `tm issue audit` output. Internal numbering policy (owner ruling 2026-09-26): a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  enum_variant_added variant Verdict:Warn

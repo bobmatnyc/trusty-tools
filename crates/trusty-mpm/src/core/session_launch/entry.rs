@@ -182,6 +182,7 @@ pub fn prepare_session_for_repair_in(
             hook_exe,
             palace_registry: None,
             claude_config_dir,
+            content_dir: None,
         },
     )
 }
@@ -208,6 +209,25 @@ pub fn prepare_session_for_managed(
     repo_url: Option<&str>,
     session_id: &str,
 ) -> Result<PrepReport, PrepError> {
+    prepare_session_for_managed_from(fw, project_dir, project_dir, repo_url, session_id)
+}
+
+/// [`prepare_session_for_managed`] composing from `session_dir`, the
+/// directory the session was launched for, rather than `project_dir`.
+///
+/// Why: a launch redirected to the managed checkout (ADR-0037) runs there,
+/// but that checkout can be stale; its content must come from the session's
+/// own checkout or the installed release, never the managed tree.
+/// What: content from the checkout enclosing `session_dir`, else the pinned
+/// release; every other step is [`prepare_session_for_managed`]'s.
+/// Test: `a_redirected_launch_composes_from_the_session_worktree`.
+pub fn prepare_session_for_managed_from(
+    fw: &FrameworkPaths,
+    project_dir: &Path,
+    session_dir: &Path,
+    repo_url: Option<&str>,
+    session_id: &str,
+) -> Result<PrepReport, PrepError> {
     let native = crate::core::output_style::claude_supports_native_output_style();
     prepare_session_inner(
         fw,
@@ -216,7 +236,10 @@ pub fn prepare_session_for_managed(
         native,
         repo_url,
         Some(session_id),
-        HostInputs::with_home(dirs::home_dir().as_deref()),
+        HostInputs {
+            content_dir: Some(session_dir),
+            ..HostInputs::with_home(dirs::home_dir().as_deref())
+        },
     )
 }
 

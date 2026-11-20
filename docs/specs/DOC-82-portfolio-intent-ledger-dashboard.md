@@ -1,10 +1,10 @@
 # DOC-82 — Portfolio Intent Ledger and Dashboard: Data Contract, Session Reporting and Architect Aggregation
 
 **Status:** Draft (owner ruling recorded; implementation tracked in issues A-G, linked in §8.3)
-**Spec ID:** `SPEC-LEDGER-01~draft` … `SPEC-LEDGER-08~draft` (DOC-82)
+**Spec ID:** `SPEC-LEDGER-01~draft` … `SPEC-LEDGER-09~draft` (DOC-82)
 **Subsystem:** `trusty-architect` (shared Ledger and dashboard data layer, `tm architect dashboard`); `trusty-mpm` (`tm dbatg`, `tm init`, `tm fleet init`, `tm doctor`, daemon methods, MCP tool); `trusty-console` (dashboard route)
 **Owner:** Bob Matsuoka
-**Last-updated:** 2026-10-27 (LDG-1.2 scoped to PM projects, owner ruling D9d)
+**Last-updated:** 2026-11-17 (LDG-2.1.1, LDG-2.2.1, LDG-2.2.3 and LDG-9.1.4 amended; §9.6 questions 1 and 2 resolved by owner ruling Duq: §9 wins; earlier: §9 IL-talk added 2026-11-16, Refs ar-G01)
 **DOC-N claim:** `DOC-82`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). `docs/specs/README.md` names `DOC-82` as next free; no tracked file on `origin/main` (18fabeb8ff) and no open PR names it (checked 2026-10-19). Re-verify before merge.
 **Placement:** No Architect spec exists in `docs/specs/` on `origin/main`. This is therefore a new DOC for the `trusty-architect` crate's Ledger and dashboard contract, not a section of an existing spec. When a general trusty-architect spec lands, it links here.
 **Builds on:** [#9756](https://github.com/bobmatnyc/trusty-tools/issues/9756) (every PM keeps a structured plan the Architect ingests), [#9171](https://github.com/bobmatnyc/trusty-tools/issues/9171) (Architect launcher crate), [DOC-73](./DOC-73-unified-mpm-code-agents-dashboard.md) (console dashboard), [ADR-0032](../adr/0032-no-service-owns-http-console-is-the-only-http-surface.md) (console is the only HTTP surface).
@@ -44,12 +44,12 @@ Source of truth: the dashboard JSON Schema set (JSON Schema 2020-12, 14 files), 
 
 | Collection | Record | Schema | Id | Writer |
 |---|---|---|---|---|
-| `items` | decision (kind question), ask (action), task (task), request R | `items.schema.json` | D, A, T, R + 2 hex | Architect; owner via page (answers) |
-| `goals` | goal | `goals.schema.json` | G + 2 hex | Architect; owner via reorder docs |
+| `items` | decision (kind question), ask (action), task (task) | `items.schema.json` | D, A, T + 2 base-34 digits | Architect; owner via page (answers) |
+| `goals` | goal | `goals.schema.json` | G + 2 base-34 digits | Architect; owner via reorder docs |
 | `goal_reorders`, `goal_removals` | owner rulings on goals | same-named schemas | doc id free | owner (page) |
 | `step_progress` | per-step done flags of an item | `step_progress.schema.json` | = item id | owner/Architect |
-| `sessions` | one row per tmux session | `sessions.schema.json` | S + 2 hex | Architect (feed, poller) |
-| `questions` | answered owner question, kept until cleared | `questions.schema.json` | Q + 2 hex | Architect writes; owner clears |
+| `sessions` | one row per tmux session | `sessions.schema.json` | S + 2 base-34 digits | Architect (feed, poller) |
+| `questions` | answered owner question, kept until cleared | `questions.schema.json` | Q + 2 base-34 digits | Architect writes; owner clears |
 | `briefs` | one-paragraph brief | `briefs.schema.json` | `<date>-<slug>` | Architect/PM |
 | `accounts` | plan usage meter | `accounts.schema.json` | account slug | poller |
 | `effort_tunes` | owner effort setting | `effort_tunes.schema.json` | doc id | owner |
@@ -60,16 +60,16 @@ Source of truth: the dashboard JSON Schema set (JSON Schema 2020-12, 14 files), 
 
 ### 2.2 Ids
 
-- **LDG-2.2.1** Every id MUST be `<Prefix><hex2>` in its own store, Prefix one uppercase letter: G goal, P priority, A ask, D decision, T task, S session, Q answered question, R owner request, B brief (PM ledger). Hex digits are 0-9a-f only. Check: `ID_RE` in the Rust crate equals `^[A-Z][0-9a-f]{2}$` and a property test rejects every other form.
-- **LDG-2.2.2** A PM-ledger id MUST carry its code: `<code>-<Prefix><hex2>`; the code matches `^[a-z][a-z0-9]{1,7}$`, is unique per host (code registry, #9757), and is never reused by another live session. Check: `init` with a registered code exits non-zero and writes nothing.
-- **LDG-2.2.3** There is one counter per prefix per store. The next id MUST be computed from the store (first free id after the highest used, wrapping past `ff` to the lowest free; none when full), never advanced by hand or kept as a stored counter in the Architect store. A PM store keeps `next` in `state.json` and MUST refuse an id already in use. Ids are ephemeral, so an archived id is free and MUST be reissued like any other (Bob ruling 2026-10-24, #10235; permanent records live in tickets, ADRs, specs and memory). Check: the prototype's id unit tests pass in Rust; a wrap test returns the lowest free id; a test reuses an archived id and a test refuses a live one.
+- **LDG-2.2.1** Every id MUST be `<Prefix><d2>` in its own store, Prefix one uppercase letter: G goal, P priority, A ask, D decision, T task, S session, Q answered question, B brief (PM ledger); each `d` is a base-34 digit (`0-9`, `a-z` without `o` and `l`), the grammar of LDG-9.1.4. The letter `R` is not an item prefix: `R` means only an IL-talk library reply, `R<2 digits>-<letter>` (LDG-9.2.1). An owner request is stored as an ask `A` (Owner ruling Duq, 2026-11-17; no new prefix). `@MMDD` is a message-side stamp and is NOT part of the stored id: a message that carries one is checked against the stored `created` of the record (LDG-2.3.2), and a mismatch is `STALE-ID` (LDG-9.1.4). Ids that use only `0-9a-f` stay valid, because hex is a subset of base 34. Check: `ID_RE` in the Rust crate equals `^[A-Z][0-9a-km-np-z]{2}$` (with the optional PM `<code>-` of LDG-2.2.2) and a property test accepts every hex id and every base-34 id, and rejects an `o`, an `l`, an uppercase digit, a stored `@MMDD` suffix and the letter `R` as an item prefix.
+- **LDG-2.2.2** A PM-ledger id MUST carry its code: `<code>-<Prefix><d2>` (base-34 digits, LDG-2.2.1); the code matches `^[a-z][a-z0-9]{1,7}$`, is unique per host (code registry, #9757), and is never reused by another live session. Check: `init` with a registered code exits non-zero and writes nothing.
+- **LDG-2.2.3** There is one counter per prefix per store. The next id MUST be computed from the store (first free id after the highest used, wrapping past `zz`, the last of 34 x 34 = 1,156 ids per prefix, to the lowest free; none when full; digits count in base 34 as in LDG-2.2.1, so `09` is followed by `0a` and `0z` by `10`), never advanced by hand or kept as a stored counter in the Architect store. A PM store keeps `next` in `state.json` and MUST refuse an id already in use. Ids are ephemeral, so an archived id is free and MUST be reissued like any other (Bob ruling 2026-10-24, #10235; permanent records live in tickets, ADRs, specs and memory). Check: the prototype's id unit tests pass in Rust; a wrap test returns the lowest free id and skips the digits `o` and `l`; a test reuses an archived id and a test refuses a live one.
 - **LDG-2.2.4** Ids recycle. A store MUST keep at least 64 free ids per prefix; the retire candidates are the oldest `done` records by `done_at`. Retirement archives first (LDG-2.8.4), then deletes. Creating new ids is held when the owner does not engage existing ones. Check: a `retire_candidates` test; deletion is refused when the archive write fails.
 - **LDG-2.2.5** A recycled id MUST NOT collide with a live reference. A record MUST NOT be retired while another live record names it in `links`, `depends_on` or `goal`. Check: `fsck` reports dangling references; a retire test with a dependent open item refuses.
 
 ### 2.3 Records: goals, decisions, asks, tasks
 
 - **LDG-2.3.1** Goal. Required: `kind` (standing|directed|factory), `rank`, `title`, `lifecycle` (active|parked|done|removed), `updated`. A factory goal MUST have `board {label,url}`; lifecycle `parked` MUST have a `parked` object; a non-parked active goal MUST NOT. Check: schema test plus invariants test.
-- **LDG-2.3.2** Item (D, A, T, R). Required: `kind` (question|action|task), `status`, `title`, `session`, `goal`, `rank`, `created`, `updated`. Status lifecycle: `open` -> `answered` (D, A, by the owner) -> `done` (with `done_at` and a one-line verified `outcome`); `open` -> `wont_do` or `cancelled` (terminal). Parked is a flag on an open item, not a status. A task also has `running`/`open` in the PM ledger (gap G3). Check: a status transition table test rejects `done` -> `open` and `answered` on a task.
+- **LDG-2.3.2** Item (D, A, T). Required: `kind` (question|action|task), `status`, `title`, `session`, `goal`, `rank`, `created`, `updated`. Status lifecycle: `open` -> `answered` (D, A, by the owner) -> `done` (with `done_at` and a one-line verified `outcome`); `open` -> `wont_do` or `cancelled` (terminal). Parked is a flag on an open item, not a status. A task also has `running`/`open` in the PM ledger (gap G3). Check: a status transition table test rejects `done` -> `open` and `answered` on a task.
 - **LDG-2.3.3** Decision options. A D item MUST carry `options` (2 to 4), exactly one with `recommended: true`, listed first; each option MUST carry `markers {work, scope, risk}`, integers -3..3. A D item MUST carry `specs [{label,url}]` or the literal detail text "no spec". Check: `validate` flags a D item that lacks markers on an option, lacks a recommended option, or has neither specs nor "no spec" in `detail`. Enforcement level is DECIDED in [§8](#SPEC-LEDGER-08~draft) (decision 4): a warning in the store, a hard check in the PM writer for D items that carry `esc: architect`.
 - **LDG-2.3.4** Field limits MUST be schema-enforced: `title` at most 120 characters; `detail`, `answer`, `outcome` at most one paragraph (no blank line); a long explanation goes to a brief linked from `doc`/`brief` (pattern `^[^/]+/docs/briefs/.+[.]md$`). Check: schema `maxLength` and a no-blank-line invariant; an over-limit write is refused with exit 2 and files untouched.
 - **LDG-2.3.5** Secrets: a write containing a secret-shaped value MUST be refused and the log line MUST record the refusal without the value ([#9758](https://github.com/bobmatnyc/trusty-tools/issues/9758)). Check: a fixture with a key-shaped string.
@@ -156,7 +156,7 @@ The Architect methods carry the daemon router's `mpm.` prefix (owner ruling D34,
 
 - **LDG-5.1** The Architect MUST read every session's report into one portfolio view, deterministically, without an LLM turn: ingest reads each store's outbox above `acked_seq`, applies idempotently, writes `acks.json`, and updates the dashboard store. The wake decision stays with the poller triage ([#9801](https://github.com/bobmatnyc/trusty-tools/issues/9801) slice 3). Check: ingest with the Architect killed and restarted loses no line and advances `acked_seq` (#9760).
 - **LDG-5.2** The portfolio view MUST contain: (a) the owner queue across all projects (open D, A, T, answered-not-relayed, parked, running), (b) goals in rank order with the sessions mapped to each, (c) sessions with state, progress, ctx and usage, (d) accounts and host bands, (e) the answered-questions list. Check: the view over a fixture of three sessions equals a golden snapshot.
-- **LDG-5.3** Namespacing. The portfolio id of a record is `<code>-<Prefix><hex2>`. Architect-owned records use the Architect's code (example code `ab`); the existing bare ids in the Architect store (`D01`) are the same records as `ab-D01` and MUST stay valid in display and input (a bare id means the Architect's code). A PM record ingested into the dashboard store MUST keep its PM id and be stored with `origin: {code, session, id, rev}`; the Architect never renumbers or mints an id in a PM's namespace. Display is DECIDED ([§8](#SPEC-LEDGER-08~draft) decision 3): storage prefixes everything, input accepts bare ids as the Architect's code, and bare ids display only inside the Architect's own pages. Check: ingest of `cd-D01` and Architect `D01` yields two distinct records; display of both is unambiguous.
+- **LDG-5.3** Namespacing. The portfolio id of a record is `<code>-<Prefix><d2>` (base-34 digits, LDG-2.2.1). Architect-owned records use the Architect's code (example code `ab`); the existing bare ids in the Architect store (`D01`) are the same records as `ab-D01` and MUST stay valid in display and input (a bare id means the Architect's code). A PM record ingested into the dashboard store MUST keep its PM id and be stored with `origin: {code, session, id, rev}`; the Architect never renumbers or mints an id in a PM's namespace. Display is DECIDED ([§8](#SPEC-LEDGER-08~draft) decision 3): storage prefixes everything, input accepts bare ids as the Architect's code, and bare ids display only inside the Architect's own pages. Check: ingest of `cd-D01` and Architect `D01` yields two distinct records; display of both is unambiguous.
 - **LDG-5.4** Dedupe. Ingest is idempotent on `(code, id)` with higher `rev` winning (#9760). A PM decision that restates an Architect ruling is not deduplicated by text; it is matched to the ruling by id reference (`links`) and answered by relay only when covered by a stored ruling or the routine class ([#9764](https://github.com/bobmatnyc/trusty-tools/issues/9764)). An item whose `epoch` changed (store re-initialised) is held, not merged. Check: the acceptance tests of #9760 and #9764.
 - **LDG-5.5** Ownership of ids across sessions: a PM owns the ids in its code and is the only writer of them (LDG-3.6). The Architect owns the ids in `ar`, plus the owner-facing numbering of the dashboard (D, A, T the owner sees). When the owner needs a single list, the page shows the portfolio id, not a renumbered one, and the Architect MUST NOT renumber, reorder or drop numbered items the owner has seen. Check: ids shown before and after a pass are a superset of the earlier ones.
 - **LDG-5.6** Session-local data MUST stay out of the portfolio view: the PM `log.jsonl`, rotated logs, `archive.jsonl`, tasks that are not blocked, escalated or owner-visible, the full session record (only `task`, `next`, `waiting_on`, `owed` summary, `ctx_use` are projected), raw `outbox.jsonl`. Tasks appear in the owner queue only when `esc` is set or the PM sets `visible: true` (DECIDED, [§8](#SPEC-LEDGER-08~draft) decision 5). Check: the ingest projection test lists exactly the projected fields.
@@ -190,10 +190,10 @@ These 17 gaps MUST close before the port removes the prototype. Closure rule, **
 | # | Gap | Proposed fix |
 |---|---|---|
 | G1 | The PM ledger has no JSON Schema: `state.json`, session record, `archive.jsonl` line, `log.jsonl` line, `outbox.jsonl` and `acks.json` are defined only in prototype code and the prototype Ledger spec. [#9757](https://github.com/bobmatnyc/trusty-tools/issues/9757) plans the schema. | Add `schemas/ledger/*.json`; Rust types generated from, or checked against, them. |
-| G2 | Three id grammars: PM `^([a-z][a-z0-9]{1,7})-([GDAT])([0-9a-f]{2})$`, dashboard `^([A-Z])([0-9a-f]{2})$`, and a permissive document-id regex in the store (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$`). | One grammar (LDG-2.2, LDG-5.3); the store regex stays a path-safety check only. |
+| G2 | Three id grammars: PM `^([a-z][a-z0-9]{1,7})-([GDAT])([0-9a-km-np-z]{2})$`, dashboard `^([A-Z])([0-9a-km-np-z]{2})$`, and a permissive document-id regex in the store (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$`). | One grammar (LDG-2.2, LDG-5.3); the store regex stays a path-safety check only. |
 | G3 | Task status: the PM ledger allows `open\|running\|done`; the items schema has no `running`. | Add `running` for kind task, or map to `open` plus `run_start`; pick one. |
 | G4 | Kind vocabulary: PM `kind` for D/A items is derived (`question`/`action`) and tasks sit in a separate `tasks[]`; the dashboard has one `items` collection with `kind` task. | One `kind` enum in both; PM `state.json` keeps lists but each record carries `kind`. |
-| G5 | `items.goal` and `briefs.goal` match `^G[0-9a-f]{2}$`, so a PM goal id such as `ab-G02` cannot validate. | Pattern `^([a-z][a-z0-9]{1,7}-)?G[0-9a-f]{2}$`, plus a `code` field on every ingested record. |
+| G5 | `items.goal` and `briefs.goal` match `^G[0-9a-f]{2}$` (hex only), so a PM goal id such as `ab-G02` cannot validate. | Pattern `^([a-z][a-z0-9]{1,7}-)?G[0-9a-km-np-z]{2}$`, plus a `code` field on every ingested record. |
 | G6 | `priorities` is an id collection and prefix P is in the id rule, but there is no `priorities` schema and no collection on disk. | Define it, or remove P from the id rule; goals carry `rank`. |
 | G7 | Markers and specs are required by the dashboard conventions but optional in `items.schema.json` (`option.markers`, `specs`), and no code checks them. | Schema `required` plus invariant, at the level decided in §8 decision 4. |
 | G8 | Timestamp precision: items, goals and sessions require seconds; the PM session record uses ISO minute (`boundary_at`, `written_at`). | One precision (seconds), normalized on write (LDG-2.3.6). |
@@ -258,3 +258,121 @@ Implementation is tracked in issues A-G, linked below. Each issue body carries t
 - **G.** [#10068](https://github.com/bobmatnyc/trusty-tools/issues/10068): this DOC, plus renaming `datg` to `dbatg` in #9757.
 
 **LDG-8.1** Each of issues A-F MUST carry acceptance criteria that cite the `LDG-` ids of this DOC. Check: review of each issue body at filing.
+
+---
+
+## 9. IL-talk: talking through the Ledger {#SPEC-LEDGER-09~draft}
+
+**ID:** SPEC-LEDGER-09~draft
+
+Owner direction, 2026-11-16 (Refs ar-G01): "Let's spec IL-talk as part of the IL spec in trusty." This section records IL-talk as it runs today in the Architect's private project and states the contract the Rust port keeps. Status: prototype in Python; the Architect has used it as its standard since the owner ruling of 2026-11-15 00:48Z, and PM-to-agent use was prototyped on 2026-11-15 (task ar-T4d). No code in this repository implements it yet.
+
+**Terms.** **IL-talk**: sessions exchange ledger ids, one closing `il` block per turn and library replies instead of prose. **ILIO**: the name of the Architect's response model that introduced IL-talk. **`il` block**: the fenced block of §9.1. **R reply**: a library reply of §9.2. **Prototype scripts**: `ilio.py`, `il_agent.py`, `datg.py`, `architect-mcp.py`.
+
+**Sources, all in the Architect's private project (not in this repository).** `ARCHITECT.md` line 37; `.claude/skills/il-response-model/SKILL.md`; `.claude/skills/il-agent-read/SKILL.md`; `scripts/ilio.py`; `scripts/il_agent.py`; `scripts/architect-mcp.py`; `scripts/pm_intake.py`; `scripts/datg.py`; `scripts/README.md` (rows for `datg.py`, `architect-mcp.py`); `local/ilio/r-library.json`; `local/briefs/2026-11-12-il-response-model-spec.md` (the ILIO spec); `local/briefs/2026-11-15-il-talk-agents.md`; `docs/specs/SPEC-IL-01.md`. Requirements below say "today" where they describe the prototype and MUST where they bind the port. Anything the sources leave undefined is an **Open question**, collected in §9.6.
+
+### 9.1 `il` blocks
+
+- **LDG-9.1.1** An `il` block is a fenced block whose info string is `il`. When a message holds several, only the last is read. Each line is `<field>: <text>`. Check: `parse` over a message with two blocks returns the second (`test_ilio.py` in the Architect project).
+- **LDG-9.1.2** The fields, in this fixed order, are: `goal`, `task`, `done`, `pct`, `est`, `remaining`, `open`, `new`, `close`, `next`, `delta`, `need`, `decided`, `evidence`, `refs`, `error`, `feedback`, `merge`. `goal`, `task`, `done`, `pct` and `next` are required. A field out of order, an unknown field or a missing required field is rejected. Check: reject codes `ORDER`, `FIELD`, `MISSING`.
+
+| Field | Content today |
+|---|---|
+| `goal`, `task` | Ledger ids. A task id carries its creation day: `ar-T01@1115`. |
+| `done` | What was done, with a sha or path; or an R reply (§9.2); or `free: <text>`. |
+| `pct` | Integer 0 to 100. |
+| `est`, `remaining` | Time estimate and what is left. |
+| `open` | Ledger D and A ids the reader should look at. |
+| `new` | A new item for the PM or Architect to file: `<D\|A\|T> "title" [goal <id>] [opts a\|b*]`. A decision's detail may be prose. |
+| `close` | Ledger ids to close. The outcome comes from `evidence`, else from `done`. |
+| `next` | The next step. For a PM or the Architect, it becomes the session record's `next` (LDG-2.4.1). |
+| `delta`, `evidence` | What changed and the proof, labelled `[VERIFIED]` or `[REPORTED]`, with a command or path. |
+| `need` | What the sender needs from the receiver. An agent proposes a decision or follow-up here. |
+| `decided`, `refs` | As in DOC-89 (compact handback v0). |
+| `error`, `feedback` | A failure that fits no other field; feedback on the brief or prompt. |
+| `merge` | Undefined (open question 5). |
+
+- **LDG-9.1.3** A line, field name included, MUST NOT exceed 240 characters. `pct` MUST be an integer 0 to 100. A value that matches a secret pattern MUST be rejected; a secret's location is written instead. Check: reject codes `LONG`, `PCT`, `SECRET`.
+- **LDG-9.1.4** IL-talk ids today are `[<code>-]<G|D|A|T><2 digits>[@MMDD]`, where `@MMDD` is a message-side stamp and not part of the stored id. Digits are base 34 (`0-9`, `a-z` without `o` and `l`). The parser rejects an `o` or an `l` with a hint and never corrects it (`BADID`). A task id left in a message that outlives the conversation carries its `@MMDD` stamp, because ids recycle (LDG-2.2.3); a stamp that differs from the holder's creation day, or an id absent from the ledger, is `STALE-ID`. LDG-2.2.1 adopts this grammar for stored ids (Owner ruling Duq, 2026-11-17: §9 wins); the stamp is checked against the stored `created` and is never stored in the id.
+- **LDG-9.1.5** A rejection is one line, at most 200 characters: `IL-REJECT <code> <field>: <expected>`. Today a rejected turn gets one retry; a second failure is logged and accepted with a warn flag. The Stop hook (`ilio-stop`) validates and records every text turn, and blocks once only when `ILIO_MODE=enforce`; the default is warn. Check: `test_ilio.py`.
+- **LDG-9.1.6** Where blocks appear today. (a) Every Architect turn that is not an owner-facing reply: a poll wake, a heartbeat, an MCP or cross-session message, a relay it sends, a PM handback it reads. The turn ends with exactly one block and nothing beside it. (b) A PM turn. (c) The closing message of an agent a PM dispatched (§9.3). (d) The dashboard chat view, which renders a block as a card. An owner-facing reply (the owner typed it, a dashboard chat post, a voice relay) is prose with the dashboard footer and carries no block. Check: the footer hook skips a turn that holds a block.
+- **LDG-9.1.7** Who writes the store. Only the PM or the Architect writes, and only from its own block: `apply` writes the session `next`, a `new:` item and `close:` ids through the Ledger writer. Today that writer is `datg.py`; in the port it is the daemon method of LDG-3.3, and the block MUST NOT be a second write path around it. Check: a block with `new:` produces the same record as the equivalent `dbatg.add`.
+- **LDG-9.1.8** At a context clear the session first updates its session record, then runs `collapse`, which archives done items and checks that every id that was open, running, answered or owed before is still in the table or the archive. If the check fails, the clear MUST NOT run. Check: the `INVARIANT FAILED` path in `test_ilio.py`.
+
+### 9.2 The R reply library
+
+`R` means only a library reply. It is not a ledger item type or id prefix (LDG-2.1.1, LDG-2.2.1, amended by Owner ruling Duq, 2026-11-17).
+
+- **LDG-9.2.1** An R reply is a named, lettered option with `{slot}` placeholders, written `R<2 digits>-<letter>` plus `slot=value` pairs, for example `R02-a sha=abc1234`. A sender puts it in `done:`; a script (`relay`, `expand`) prints the filled text, and the relay carries that text, not the code. An unknown code is rejected (`RREF`). A text that fits no option is written `done: free: <text>`. Check: `relay` on a known and an unknown code.
+- **LDG-9.2.2** Today the library holds five replies. The library file is `local/ilio/r-library.json` in the Architect project; the port's home for it is open (open question 4).
+
+| Code | Title | Option text (slots in braces) | Use |
+|---|---|---|---|
+| R01 | MCP reply waiting | **a**: an MCP reply for you is in (sent `{time}`); read it and continue. **b**: your MCP message `{msg}` is answered; read the reply and continue. | The Architect answered a message a PM sent through `architect_send`. The reply alone does not wake an idle PM, so the Architect relays this to the PM's pane. |
+| R02 | Pin request | **a**: pinned at `{sha}`; merge when green, with `--match-head-commit {sha}`; any new commit voids the pin. **b**: not pinned: `{reason}`. **c**: hold: wait for `{event}`, then ask again. | A PM asks the Architect to pin a PR head for merge. |
+| R03 | Builder band notice | **a**: builder band is OPEN (start queued builder work under your own cap). **b**: HOLD (start no new builder; running ones may finish). **c**: STOP NEW (start no builder, critic or compile agent until told). | The Architect tells PMs the state of the builder band. |
+| R04 | Acknowledge | **a**: received; no action needed. **b**: received; continue with your next queued item. **c**: received; wait for my follow-up before acting. | The Architect acknowledges a message. |
+| R05 | Clear and resume | **a**: context cleared at your IL ready; resume from your Intent Ledger digest; do not run `session_context_catchup`. | The Architect has cleared a session's context after verifying its digest. |
+
+- **LDG-9.2.3** A free line costs full tokens and is counted. The same free text three times becomes a library candidate, proposed in `new:`. A proposed row is never used in the turn that proposes it, and the owner reviews it before it joins the library. Check: the ILIO spec §3.4; no test covers the proposal path (open question 4).
+- **LDG-9.2.4** A PM or the Architect MAY quote an R reply in a dispatch to an agent (§9.3). The agent's `brief` prints it expanded. Check: `test_il_agent.py`.
+
+### 9.3 Agent read rules
+
+Who reads the Ledger, and when.
+
+| Reader | When | How today |
+|---|---|---|
+| PM | Session start and resume after a clear | The SessionStart hook injects the digest (`datg-hook.sh`); the resume line says to run `datg.py --project <dir> digest` (SPEC-IL-01 §6). A resume reads the digest and nothing else. |
+| Architect, own ledger | Session start and resume | The digest (`AGENTS.md` item 6), the stable id table (`ilio.py table`), and the rules plus R rows injected by `ilio-start`. |
+| Architect, a PM's ledger | Before it clears a PM's context | `digest` and `fresh` (`trusty-context-refresh`, step 2). |
+| Dispatched agent | At the start of its task | One read-only `brief` of its task row (LDG-9.3.3). |
+| Outside MCP caller | On demand | `architect_status` (§9.4). |
+
+- **LDG-9.3.1** Freshness. `fresh` exits 0 when the session record was written after the last state change, 1 when it is stale (no write recorded, a change after the last write, or a write older than the limit), 2 when the state is unreadable. A stale digest is not a checkpoint: the Architect asks the PM to update its ledger and re-checks, and never clears on a stale digest (LDG-4.3 sets the PM's write duty). The digest budget is 3,000 tokens.
+- **LDG-9.3.2** A resume MUST read the digest and MUST NOT run `session_context_catchup` or `/tm-session-resume`; both are retired for refreshes. Crons and Monitors survive a clear; the resumed session re-creates none.
+- **LDG-9.3.3** A PM dispatches an agent with four lines: `Goal: <id>`, `Task: <id>@MMDD`, `IL: <brief command>` and an optional `Ask:`. Ids are checked against the ledger before the prompt is built. The agent runs the `IL:` line exactly as written. `brief` is read-only and prints the goal and its done-when, the task row, the PM's open D and A items on that goal (up to 5), owed rows that name the task, any quoted R reply expanded, the rules and an `il` block template. Check: a test hashes the store before and after (`test_il_agent.py`).
+- **LDG-9.3.4** An agent MUST NOT write the ledger. It MUST NOT create a task: its work stacks on the task in its prompt, and a follow-up goes in `need:`. It MUST NOT write a secret value. It MUST NOT read the ledger files or run `datg.py` or `ilio.py` directly: `brief` holds what it needs.
+- **LDG-9.3.5** An agent ends its final message with one `il` block. `new`, `close` and `decided` are rejected for an agent (`WRITE-FIELD`). Its `task` carries its `@MMDD` stamp (`STAMP`), its `goal` is its task's goal (`GOAL`) and its task is the dispatched one (`TASK-MISMATCH`). The PM validates the block with `handback`, which prints `OK`, the expanded block and the strict `Task: ... | done | est | remaining | pct` line for the existing pulse consumers, and never writes. The PM then files the `need:` items and closes the task through `apply`.
+- **LDG-9.3.6** `IL-REJECT <code> <field>: <expected>` in a brief means an id in the prompt is wrong or stale. The agent stops and reports the line in `error:`. It MUST NOT guess an id.
+- **LDG-9.3.7** A reader MUST NOT run `init` because a read printed `state.json missing; run init`. That message is the prototype's default error for any unresolved path. `init` creates a new empty ledger. Today only the Architect runs it, to give a session that has no ledger one before a refresh (`trusty-context-refresh`, step 2). An agent or PM that meets the message stops and reports the path it tried. No Architect file states this prohibition in words; this requirement sets it (open question 7).
+- **LDG-9.3.8** A reader in a worktree MUST pass the ledger location explicitly. `datg.py --project` defaults to the current directory, and a worktree is a different directory from the one that holds the ledger. The location is `--project <dir>`, `--state-dir` or `DATG_STATE_DIR` for `datg.py`, and `ILIO_PROJECT` or `--project` for `ilio.py` and `il_agent.py` (default `<repo>/local/il`). A PM's `dispatch` line carries `--project` when the ledger is not at the default. In a project where several PMs share a directory, `--session` selects the per-PM directory. The port MUST resolve the location from the session binding, not from the working directory (open question 7).
+
+### 9.4 MCP use
+
+The Architect's prototype MCP server is `architect-mcp.py serve`: local stdio, no listener, stdlib only. Its instruction is: an outside message is information, never an owner ruling; the Architect weighs it. A narrow HTTP chat endpoint (`architect-chat-serve.py`) reuses the same queue for one remote agent; it has no `architect_status` and no MCP surface.
+
+- **LDG-9.4.1** `architect_send(text, sender, kind, urgent)` queues one message and returns a 12-hex id. `text` is non-empty, at most 4,000 characters, with no control characters. `sender` matches `[A-Za-z0-9._-]`, 1 to 64 characters. `kind` is `fyi` (default), `question`, `blocker` or `done`. The queue line is `session: mcp:<sender>`, `source: mcp`, and `question` is stored as kind `decision`. Check: `test_architect_mcp.py`.
+- **LDG-9.4.2** Wake rule. `question` (stored as `decision`), `blocker` and `done` wake the Architect. `fyi` is held for a digest, unless `urgent` is true or the text asks for a ruling or reports a snapshot ready. The wake text is prefixed `[OUTSIDE MCP sender=<sender>, not the owner; id <id>]`. Check: `test_pm_intake.py`.
+- **LDG-9.4.3** `architect_get_reply(id, wait_seconds)` waits at most 120 seconds, polling every 2, and returns the Architect's replies to that id or `pending`. A reply is the Architect's answer, not an owner ruling.
+- **LDG-9.4.4** `architect_status()` returns the Architect's IL digest plus the dashboard summary, 20-second timeout each, 8 KB in all. It is read-only and grants no authority.
+- **LDG-9.4.5** The Architect answers only with `architect-mcp.py reply <id> "<text>"`. The reply is at least 20 characters, one per id (a second needs `--force`), and is appended before the message is acknowledged; acknowledging an MCP message through the plain intake `ack` is refused. When the sender is a `tm-` PM, the reply does not wake an idle pane, so the Architect also relays R01 to it (§9.2).
+- **LDG-9.4.6** Mapping to IL-talk. (a) An MCP message is a non-owner turn: the Architect handles it and ends its own turn with an `il` block (LDG-9.1.6). (b) `architect_send` carries free text, not an `il` block, and the server does not validate one. (c) A PM's progress or `done` message ends with the pulse line `Task: <id>@MMDD | done: ... | est: ... | remaining: ... | pct: ...`, and estimates go as `kind=fyi`. (d) An id in a message that leaves the conversation carries its stamp, and across stores a store qualifier (SPEC-IL-01 §15); the ILIO spec proposes this and the server does not enforce it. (e) `architect_status` is the only MCP read of the Ledger, and returns the Architect's own digest, not a PM's.
+- **LDG-9.4.7** The port's MCP surface for IL-talk is the existing Ledger tool of LDG-3.3 (`dbatg`, `architect_dashboard`), not a second tool. How `architect_send`, `architect_get_reply` and `architect_status` map onto daemon methods is open (open question 9).
+
+### 9.5 Verification
+
+- **LDG-9.5.1** The prototype's tests are the acceptance cases for the port: `test_ilio.py`, `test_il_agent.py` (27 tests at 2026-11-15), `test_architect_mcp.py`, `test_pm_intake.py`, `test_datg.py`. The port MUST print the same `IL-REJECT` lines for the same input until the prototype is removed (LDG-1.5). Check: a parity test per verb, as LDG-3.3 requires.
+
+### 9.6 Open questions
+
+1. **R prefix.** LDG-2.1.1 and LDG-2.2.1 give `R` to an owner request in `items`. IL-talk gives `R` to a library reply. The ILIO spec recommends R for replies and deleting the owner-request use; no ruling is recorded. Which wins, or does the reply library take another prefix? Resolved 2026-11-17 by owner ruling Duq: §9 wins; LDG-2.1.1/2.2.1 amended.
+2. **Id grammar.** LDG-2.2.1 fixes ids as `<Prefix><hex2>`. IL-talk uses base-34 digits and an `@MMDD` stamp on task ids. Does the port adopt base 34 and the stamp, and does the stamp need a stored creation day on every record? Resolved 2026-11-17 by owner ruling Duq: §9 wins; LDG-2.1.1/2.2.1 amended. The stamp is checked against the existing stored `created` (LDG-2.3.2); no new field.
+3. **Field order and `open`.** DOC-89 orders `need`, `delta`, `open`, `decided`, `refs`, `next` and uses `open` for questions with an owner. The `il` block orders `open` before `next` and `delta`, and uses `open` for ledger ids. Is the `il` block a superset, a wrapper, or a separate format?
+4. **R library home.** Where does the library live in the port (a Ledger collection, a file under the data root), who versions it, and who reviews a proposed row? The sender-written R items and the proposal path of the ILIO spec §3.4 have no tests in the sources.
+5. **`merge:`.** The field list names it and the ILIO spec says a PM "may list `merge:` ids" before a clear. No source defines its content or what reads it.
+6. **Adoption.** The owner has not answered the three questions in `2026-11-15-il-talk-agents.md`: whether an agent also writes the pulse line or the PM derives it, the pilot scope (the Architect's agents only, one PM warn-only for three days, or hold), and the reading channel (the agent runs the script, or the PM pastes the brief). The reconcile brief of 2026-11-16 also records the ILIO sessions of the `ai-` code as stopped under ruling Dnj; the effect on the trial is not stated.
+7. **Reader rules.** The prohibition on `init` after `state.json missing` and the explicit-location rule for worktrees (LDG-9.3.7, LDG-9.3.8) are derived from `datg.py` behaviour and the port notes of the 2026-11-15 brief, not from a written rule. Does the owner confirm them? Which session binding resolves the location in the port?
+8. **Agent validation.** The hook runner skips agents, so no automatic check of an agent's `il` block runs today; the PM runs `handback` by hand. The brief proposes a SubagentStop hook in warn mode; nothing decides it. The agent's Bash allowlist and the pm-guard must also permit the one read-only `brief` command; neither is specified.
+9. **Port verbs.** The brief proposes `tm il brief|dispatch|handback`. LDG-3.3 names `tm dbatg`. Which verb group carries `ilio` verbs (`table`, `check`, `apply`, `collapse`), and how do the three MCP tools of §9.4 map to daemon methods?
+10. **MCP validation.** Should `architect_send` validate an `il` block or an id stamp, and should a reply to an MCP sender be an R expansion? The sources say neither.
+
+### 9.7 Consequences of the 2026-11-17 ruling
+
+Follow-ups for consumers; none is implemented by this amendment.
+
+- `trusty-architect` `ids.rs`: widen `LedgerId` and `is_bare_id` to base-34 digits, drop any `R` item handling, and update the "lowest free" and wrap logic (LDG-2.2.3) to count to 34 per digit. Rewrite the test `ledger_id_grammar_accepts_exactly_the_one_form` and the writer-parity fixtures (`crates/trusty-architect/tests/ledger_writer_parity.rs`).
+- `items.schema.json` and the other id patterns: base-34 class; remove `R` from the `items` id pattern (gaps G2, G5).
+- Architect-side `datg` and `task_tag` scripts (private project): they already emit base-34 ids and stamps; confirm they reject the `R` item prefix and compare the stamp to `created`.
+- tm `--turn-task` stamp (#11398): `Task: <id>@MMDD` no longer needs the stamp stripped before id parsing; the parser splits the stamp off and checks it.
+- A stored `R` item, if one exists in a prototype store, is migrated to an `A` item.

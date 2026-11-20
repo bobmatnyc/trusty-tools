@@ -894,3 +894,33 @@ fn review_pr_schema_lists_spec_docs_and_claude_md() {
         );
     }
 }
+
+/// #11525: `review_health` reports finding yield from the review log directory.
+///
+/// What: writes two reviews of one PR (one with a refuted finding) into a temp
+/// log dir, then asserts the per-repo and per-PR aggregates.
+#[tokio::test]
+async fn review_health_reports_finding_yield() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (posted, refuted) in [(2usize, 1usize), (1, 0)] {
+        let mut r = crate::models::ReviewResult::new("acme", "api", 7, "t", "u");
+        r.findings_count = posted;
+        if refuted > 0 {
+            r.withheld_by_reason.insert("refuted".to_string(), refuted);
+        }
+        crate::pipeline::finding_yield::append_yield_row(&r, dir.path());
+    }
+    let mut config = ReviewConfig::load(None);
+    config.log_dir = dir.path().to_path_buf();
+    let state = AppState::new(config, Arc::new(OkLlmTool), Arc::new(FakeSearchTool), None);
+    let result = call_review_health(&state).await;
+    let text = result["content"][0]["text"].as_str().expect("text field");
+    let health: Value = serde_json::from_str(text).expect("valid JSON");
+    let y = &health["finding_yield"];
+    assert_eq!(y["total"]["reviews"], 2, "{y}");
+    assert_eq!(y["by_repo"][0]["key"], "acme/api", "{y}");
+    assert_eq!(y["by_repo"][0]["posted"], 3, "{y}");
+    assert_eq!(y["by_repo"][0]["refuted"], 1, "{y}");
+    assert_eq!(y["by_pr"][0]["key"], "acme/api#7", "{y}");
+    assert_eq!(y["by_pr"][0]["reviews"], 2, "{y}");
+}

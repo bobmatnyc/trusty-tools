@@ -41,8 +41,10 @@ mod quiet_list;
 mod register;
 // #9092: restart the Architect's `claude` in its session and bind it.
 mod relaunch;
+pub(crate) mod restart; // #11365
 mod seed;
 mod session_name;
+pub(crate) mod up; // #11364
 // #8939: `tm env` checks the same binding `tm fleet status` reports.
 pub(crate) mod status;
 
@@ -64,6 +66,14 @@ pub(crate) use self::seed::wiring::{
     CHECK as SEED_WIRING_CHECK, doctor_row as seed_wiring_doctor_row,
 };
 pub(crate) use self::status::status;
+// #11364: what `tm architect up|attach|restart` reuse.
+pub(crate) use self::register::register as register_architect;
+pub(crate) use self::session_name::recorded_names;
+
+/// Whether this process runs inside a Claude Code session (#10033 markers).
+pub(crate) fn inside_claude_code() -> bool {
+    !inside_claude::present_markers(|name| std::env::var_os(name)).is_empty()
+}
 
 /// Dispatch `tm fleet <action>` against the process home.
 ///
@@ -107,6 +117,8 @@ pub(crate) async fn run(action: FleetAction) -> anyhow::Result<()> {
                 report.steps.push(register::register(&reg).await);
             }
             print!("{}", report.render());
+            // See G0b auto-setup: reports its own failures, never fails init.
+            crate::commands::auto_setup::run_and_print();
             if report.failed() {
                 bail!("tm fleet init failed; see the FAILED step above");
             }

@@ -123,9 +123,9 @@ fn fleet() -> Vec<Candidate> {
             Some(1_000),
         ),
         cand(
-            "apex-9a4a584b",
-            "/w/duetto/apex",
-            Some("duetto/apex"),
+            "ledger-9a4a584b",
+            "/w/acme-co/ledger",
+            Some("acme-co/ledger"),
             RootKind::MainCheckout,
             Some(5),
         ),
@@ -185,7 +185,7 @@ fn an_exact_id_or_owned_path_wins_over_repos_sharing_its_content_identity() {
         ),
         cand(
             "cto-supervisor",
-            "/p/bob-duetto/cto-supervisor",
+            "/p/acme-admin/cto-supervisor",
             shared,
             RootKind::MainCheckout,
             None,
@@ -333,7 +333,7 @@ fn an_absent_corpus_sorts_last_among_main_checkouts() {
 }
 
 /// Why: #9169 — `last_indexed_unix` has no production writer, so every live
-/// tie fell to the lowest id (`apex` over `apex-9a4a584b`). Recency must come
+/// tie fell to the lowest id (`ledger` over `ledger-9a4a584b`). Recency must come
 /// from something a real index has: its corpus file.
 /// What: two main checkouts of one repo registered as registration writes
 /// them (round-tripped through `indexes.toml`, no recency field), each with an
@@ -344,11 +344,11 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let now = SystemTime::now();
     let mut rows = Vec::new();
-    // Distinct parents: `APEX` and `apex` are one directory on a case-insensitive
+    // Distinct parents: `LEDGER` and `ledger` are one directory on a case-insensitive
     // filesystem.
     for (id, dir, age) in [
-        ("apex", "repos/APEX", 86_400),
-        ("apex-9a4a584b", "duetto/apex", 60),
+        ("ledger", "repos/LEDGER", 86_400),
+        ("ledger-9a4a584b", "acme-co/ledger", 60),
     ] {
         let root = tmp.path().join(dir);
         std::fs::create_dir_all(root.join(".git")).expect(".git");
@@ -363,7 +363,7 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
             .expect("mtime");
         rows.push(PersistedIndex {
             colocated: true,
-            repo_identity: Some("duettoresearch/apex".to_string()),
+            repo_identity: Some("acme/ledger".to_string()),
             ..PersistedIndex::new(id, root)
         });
     }
@@ -373,11 +373,11 @@ fn the_most_recently_written_corpus_wins_between_two_main_checkouts() {
     assert!(loaded.iter().all(|r| r.last_indexed_unix.is_none()));
 
     let candidates = gather_candidates(&loaded, &[]);
-    let query = ProjectQuery::Identity("duettoresearch/apex".into());
+    let query = ProjectQuery::Identity("acme/ledger".into());
     let got = resolve(&query, &candidates, &live()).expect("resolves");
-    assert_eq!(got.index.index_id, "apex-9a4a584b", "{got:?}");
+    assert_eq!(got.index.index_id, "ledger-9a4a584b", "{got:?}");
     assert_eq!(got.index.kind, RootKind::MainCheckout);
-    assert_eq!(ids(&got.duplicates), ["apex"]);
+    assert_eq!(ids(&got.duplicates), ["ledger"]);
     assert!(got.index.corpus_modified_unix > got.duplicates[0].corpus_modified_unix);
 }
 
@@ -413,8 +413,8 @@ fn a_stamped_corpus_beats_an_unstamped_one_whatever_its_mtime() {
     assert_eq!(ids(&got.duplicates), ["loaded", "older"]);
 }
 
-/// Why: #9169 — live, `apex-9a4a584b` was force-reindexed at 08:02Z and the
-/// stale `apex` was only cold-loaded at 10:00Z, which rewrote its
+/// Why: #9169 — live, `ledger-9a4a584b` was force-reindexed at 08:02Z and the
+/// stale `ledger` was only cold-loaded at 10:00Z, which rewrote its
 /// `index.redb`, so the mtime picked the stale index.
 /// What: reindex A, then B a day later (each commit stamps its corpus), then
 /// load A into a resident handle, which leaves A's file the newest. The
@@ -439,8 +439,8 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     let mut rows = Vec::new();
     let mut corpora = Vec::new();
     for (id, dir, age) in [
-        ("apex", "repos/APEX", 2 * 86_400),
-        ("apex-9a4a584b", "duetto/apex", 86_400),
+        ("ledger", "repos/LEDGER", 2 * 86_400),
+        ("ledger-9a4a584b", "acme-co/ledger", 86_400),
     ] {
         let root = tmp.path().join(dir);
         std::fs::create_dir_all(root.join(".git")).expect(".git");
@@ -458,7 +458,7 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
             .expect("mtime");
         rows.push(PersistedIndex {
             colocated: true,
-            repo_identity: Some("duettoresearch/apex".to_string()),
+            repo_identity: Some("acme/ledger".to_string()),
             ..PersistedIndex::new(id, root.clone())
         });
         corpora.push((root, corpus));
@@ -471,10 +471,10 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     let (a_root, a_corpus) = &corpora[0];
     let b_corpus = &corpora[1].1;
 
-    let mut indexer = CodeIndexer::new("apex", a_root.clone());
+    let mut indexer = CodeIndexer::new("ledger", a_root.clone());
     indexer.set_corpus_store(Arc::new(CorpusStore::open(a_corpus).expect("load A")));
     let handle = Arc::new(IndexHandle::bare(
-        IndexId::new("apex"),
+        IndexId::new("ledger"),
         Arc::new(tokio::sync::RwLock::new(indexer)),
         a_root.clone(),
     ));
@@ -484,14 +484,14 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     );
     let b_before = mtime(b_corpus);
 
-    let candidates = gather_candidates(&rows, &[("apex".to_string(), a_root.clone())]);
+    let candidates = gather_candidates(&rows, &[("ledger".to_string(), a_root.clone())]);
     let disk = LiveDisk {
         names: WorktreeDirNames::default(),
-        resident: [("apex".to_string(), handle)].into_iter().collect(),
+        resident: [("ledger".to_string(), handle)].into_iter().collect(),
         runtime: Some(tokio::runtime::Handle::current()),
     };
     let got = tokio::task::spawn_blocking(move || {
-        let query = ProjectQuery::Identity("duettoresearch/apex".into());
+        let query = ProjectQuery::Identity("acme/ledger".into());
         let first = resolve(&query, &candidates, &disk).expect("resolves");
         let second = resolve(&query, &candidates, &disk).expect("resolves again");
         assert_eq!(first, second, "a resolve must not change the next answer");
@@ -499,9 +499,9 @@ async fn a_reload_of_the_older_corpus_does_not_make_it_the_newest() {
     })
     .await
     .expect("resolve task");
-    assert_eq!(got.index.index_id, "apex-9a4a584b", "{got:?}");
+    assert_eq!(got.index.index_id, "ledger-9a4a584b", "{got:?}");
     assert_eq!(got.index.reindexed_unix, Some(unix(86_400)));
-    assert_eq!(ids(&got.duplicates), ["apex"]);
+    assert_eq!(ids(&got.duplicates), ["ledger"]);
     assert_eq!(got.duplicates[0].reindexed_unix, Some(unix(2 * 86_400)));
     assert_eq!(mtime(b_corpus), b_before, "reading B's stamp rewrote B");
 }
@@ -717,15 +717,15 @@ fn a_repo_with_only_worktree_indexes_has_no_live_index() {
 fn a_name_shared_by_two_repos_is_ambiguous() {
     let mut fleet = fleet();
     fleet.push(cand(
-        "apex",
-        "/Users/test/repos/APEX",
-        Some("test/apex"),
+        "ledger",
+        "/Users/test/repos/LEDGER",
+        Some("test/ledger"),
         RootKind::MainCheckout,
         Some(1),
     ));
-    match resolve(&ProjectQuery::Name("APEX".into()), &fleet, &NO_DERIVE) {
+    match resolve(&ProjectQuery::Name("LEDGER".into()), &fleet, &NO_DERIVE) {
         Err(ResolveMiss::Ambiguous { matches }) => {
-            assert_eq!(ids(&matches), ["apex", "apex-9a4a584b"]);
+            assert_eq!(ids(&matches), ["ledger", "ledger-9a4a584b"]);
         }
         other => panic!("expected Ambiguous, got {other:?}"),
     }
@@ -772,7 +772,7 @@ fn a_path_outside_every_root_falls_back_to_the_derived_identity() {
     ));
 }
 
-/// Why: #9169 — `/w/trusty-tools/../apex` names apex; matched by raw
+/// Why: #9169 — `/w/trusty-tools/../ledger` names ledger; matched by raw
 /// components it resolved to trusty-tools.
 /// What: an existing path is canonicalised through [`LiveDisk`]; a missing one
 /// is normalised lexically.
@@ -781,21 +781,21 @@ fn a_path_outside_every_root_falls_back_to_the_derived_identity() {
 fn a_dotdot_query_path_matches_the_root_it_names() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).expect("canonical tempdir");
-    for name in ["apex", "trusty-tools"] {
+    for name in ["ledger", "trusty-tools"] {
         std::fs::create_dir_all(base.join(name).join(".git")).expect(".git");
     }
     let at = |id: &str, identity: &str| {
         let root = base.join(id).display().to_string();
         cand(id, &root, Some(identity), RootKind::Indeterminate, None)
     };
-    let real = vec![at("apex", "duetto/apex"), at("trusty-tools", REPO)];
-    let query = ProjectQuery::Path(base.join("trusty-tools/../apex"));
+    let real = vec![at("ledger", "acme/ledger"), at("trusty-tools", REPO)];
+    let query = ProjectQuery::Path(base.join("trusty-tools/../ledger"));
     let got = resolve(&query, &real, &live()).expect("resolves");
-    assert_eq!(got.index.index_id, "apex", "{query:?}");
+    assert_eq!(got.index.index_id, "ledger", "{query:?}");
 
-    let missing = ProjectQuery::Path("/w/bobmatnyc/trusty-tools/../../duetto/apex/src".into());
+    let missing = ProjectQuery::Path("/w/bobmatnyc/trusty-tools/../../acme-co/ledger/src".into());
     let got = resolve(&missing, &fleet(), &NO_DERIVE).expect("resolves");
-    assert_eq!(got.index.index_id, "apex-9a4a584b");
+    assert_eq!(got.index.index_id, "ledger-9a4a584b");
 }
 
 /// Why: #9169 — the resolver runs in the free lane with no deadline, so one

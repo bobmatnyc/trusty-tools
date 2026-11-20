@@ -566,7 +566,7 @@ therefore **bidirectional in effect**: an index bound for reading also receives
 OKG output.
 
 So if extraction from a bound store were automatic, binding a **populated**
-corpus — an existing code or document index, such as the 201k-chunk `cto-duetto`
+corpus — an existing code or document index, such as the 201k-chunk `cto-acme`
 index — would mix generated entities into a store the user bound only to *read*.
 
 **S-13.2** Explicit-only extraction is the mitigation, and it is the whole

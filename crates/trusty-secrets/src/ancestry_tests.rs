@@ -413,6 +413,17 @@ mod os_table {
         let exe = OsProcessTable.executable(me).expect("own executable");
         let current = std::env::current_exe().expect("current_exe");
         assert_eq!(exe.file_name(), current.file_name());
+        // #11464 M-B: the short name and uid, also of root's pid 1, the
+        // read the gate check makes of a root `sshd`.
+        let own = OsProcessTable.comm(me).expect("own comm");
+        let file = current.file_name().and_then(|n| n.to_str()).unwrap();
+        assert!(
+            file.starts_with(&own.name) && !own.name.is_empty(),
+            "{own:?}"
+        );
+        // SAFETY: `getuid` has no preconditions and cannot fail.
+        assert_eq!(own.uid, unsafe { libc::getuid() });
+        assert_eq!(OsProcessTable.comm(1).map(|c| c.uid), Ok(0));
     }
 
     #[test]
@@ -588,4 +599,21 @@ fn macos_live_ancestor_walk_probe() {
     let verdict = has_agent_ancestor(&table, me);
     println!("has_agent_ancestor({me}) = {verdict:?}");
     assert!(verdict.is_ok(), "the walk failed: {verdict:?}");
+}
+
+/// Why: #11464 critic M — the gate's sshd check needs the real uid, the
+/// first `Uid:` field; a missing or unparsable line refuses.
+/// Test: itself.
+#[test]
+fn linux_status_parser_reads_the_real_uid() {
+    let text = "Name:\tsshd-session\nUid:\t0\t501\t501\t501\nGid:\t0\n";
+    assert_eq!(status_uid(7, text), Ok(0));
+    assert_eq!(status_uid(7, "Uid:\t501\t0\t0\t0\n"), Ok(501));
+    for bad in ["Name:\tx\n", "Uid:\n", "Uid:\tx\t0\n"] {
+        assert_eq!(
+            status_uid(7, bad),
+            Err(ProcessError::Unreadable { pid: 7 }),
+            "{bad}"
+        );
+    }
 }

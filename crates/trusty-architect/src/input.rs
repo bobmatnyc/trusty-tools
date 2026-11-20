@@ -213,8 +213,59 @@ pub fn send_guarded<T: Tmux + ?Sized>(
     Ok(())
 }
 
+/// Types `text` into `pane` and submits it, each step guarded (#11365).
+///
+/// Why: `tm architect restart` types one resume line; after typing, the box
+/// holds that line, so a second [`send_guarded`] for Enter would refuse.
+/// What: [`send_guarded`] types `text`; `settle` runs (the caller's echo
+/// delay); one `capture-pane` must then show the box starting with the first
+/// 60 characters of `text` (as `self-clear.sh` checks), else
+/// [`SendError::NotEchoed`] and no Enter. Then Enter.
+/// Test: `send_line_guarded_presses_enter_only_after_the_echo`.
+pub fn send_line_guarded<T: Tmux + ?Sized>(
+    tmux: &T,
+    pane: &PaneId,
+    observed: SendReading,
+    text: &str,
+    settle: impl FnOnce(),
+) -> Result<(), SendError> {
+    send_guarded(tmux, pane, observed, Keys::Literal(text))?;
+    settle();
+    let cap = tmux.run(&["capture-pane", "-e", "-p", "-t", pane.as_target()])?;
+    let want: String = text.chars().take(60).collect();
+    if !classify_input(&cap).1.starts_with(&want) {
+        return Err(SendError::NotEchoed {
+            pane: pane.to_string(),
+        });
+    }
+    send_keys(tmux, pane, Keys::Named(&[crate::NamedKey::Enter]))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn send_line_guarded_presses_enter_only_after_the_echo() -> Result<(), crate::TmuxError> {
+        use crate::{ScriptedTmux, input_state_for_send};
+        let pane = PaneId::parse("%7")?;
+        let empty = input_state_for_send("out\n────────────\n❯ \n────────────\n");
+        assert!(empty.accepts_input(), "fixture box must read empty");
+        let echoed = ScriptedTmux::new().fallback("send-keys", "").script(
+            "capture-pane",
+            "out\n────────────\n❯ hello there\n────────────\n",
+        );
+        assert!(send_line_guarded(&echoed, &pane, empty, "hello there", || ()).is_ok());
+        assert_eq!(echoed.sends().len(), 2, "{:?}", echoed.sends());
+        let lost = ScriptedTmux::new()
+            .fallback("send-keys", "")
+            .script("capture-pane", "out\n────────────\n❯ \n────────────\n");
+        let empty = input_state_for_send("out\n────────────\n❯ \n────────────\n");
+        let r = send_line_guarded(&lost, &pane, empty, "hello there", || ());
+        assert!(matches!(r, Err(SendError::NotEchoed { .. })), "{r:?}");
+        assert_eq!(lost.sends().len(), 1, "no Enter without the echo");
+        Ok(())
+    }
+
     use super::*;
     use crate::{FakeTmux, NamedKey};
 

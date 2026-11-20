@@ -82,4 +82,43 @@ pub(crate) enum ArchitectAction {
     /// found a problem), 2 a refused request, 3 an unreadable or locked store.
     // #10063: owner ruling D34 fixes the conflict exit at 1.
     Dashboard(DashboardArgs),
+    /// Bring the Architect up from any state, then attach (#11364).
+    ///
+    /// Idempotent and locked: starts what is missing, never stops or
+    /// restarts a live `claude`. Inside Claude Code it only ensures a bound
+    /// Architect. Exit codes: 0 up, 1 a step failed, 2 refused.
+    Up(UpArgs),
+    /// Attach to the Architect's tmux session (switch-client inside tmux).
+    Attach,
+    /// Restart the Architect behind the checkpoint gate (#11365).
+    ///
+    /// Refuses unless the Intent Ledger checkpoint is fresh (exit 4) and the
+    /// box is idle for 3 reads 5 s apart (exit 2). Then stops `claude`,
+    /// relaunches it bound with resume, restores the poller and types one
+    /// resume line. Refused inside Claude Code. No bypass flag.
+    Restart {
+        /// Keep waiting for idle up to this many seconds.
+        #[arg(long)]
+        wait: Option<u64>,
+        /// The Architect directory (default: the one `tm fleet init` recorded).
+        #[arg(long)]
+        dir: Option<String>,
+    },
+}
+
+/// `tm architect up` flags (#11364).
+#[derive(Debug, Default, Clone, clap::Args)]
+pub(crate) struct UpArgs {
+    /// Bring it up but do not attach.
+    #[arg(long)]
+    pub(crate) no_attach: bool,
+    /// Print the step plan and change nothing.
+    #[arg(long)]
+    pub(crate) dry_run: bool,
+    /// Print the report as JSON (implies --no-attach).
+    #[arg(long)]
+    pub(crate) json: bool,
+    /// The Architect directory (default: the one `tm fleet init` recorded).
+    #[arg(long)]
+    pub(crate) dir: Option<String>,
 }

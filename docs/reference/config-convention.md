@@ -255,13 +255,13 @@ rules.
 ```toml
 # Which gh account clones and spawns sessions for a GitHub org.
 [accounts]
-duettoresearch = "bob-duetto"
+acme = "acme-admin"
 ```
 
 Each key is a GitHub org (or user) name, matched without case, and each value
 is a `gh` login already logged in on this host. Only github.com repositories
 are mapped. An SSH host alias is resolved through `~/.ssh/config` first, so
-`git@github-bob:duettoresearch/x` maps when `github-bob` names github.com.
+`git@github-bob:acme/x` maps when `github-bob` names github.com.
 gitlab.com, Bitbucket and GitHub Enterprise Server remotes are never mapped.
 
 Precedence, highest first. For a github.com remote, clone, spawn and the

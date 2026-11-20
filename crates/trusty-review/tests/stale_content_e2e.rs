@@ -236,7 +236,7 @@ fn a_stale_release_without_the_configured_voice_or_template_refuses_run() {
         (
             "voice",
             VOICE_PATH,
-            &[("TRUSTY_REVIEW_VOICE_PACKAGE", "duetto")],
+            &[("TRUSTY_REVIEW_VOICE_PACKAGE", "house")],
         ),
         (
             "template",

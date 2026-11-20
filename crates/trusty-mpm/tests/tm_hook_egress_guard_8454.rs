@@ -194,8 +194,8 @@ fn egress_denies_subagent_payload() {
 }
 
 /// 🔴 #11273: a stamped PM or Architect main session's family read passes
-/// with one audit line; the same read from its subagent, and a stamped
-/// session's send, stay denied.
+/// with one audit line, and so does its send (#11521); the same calls from
+/// its subagent, and an unstamped session's send, stay denied.
 #[test]
 fn egress_main_session_read_passes_and_subagent_read_stays_denied_11273() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -211,15 +211,31 @@ fn egress_main_session_read_passes_and_subagent_read_stays_denied_11273() {
         })
         .to_string();
         assert_denied(&run_in(tmp.path(), sub.as_bytes(), &env), "subagent read");
+        // #11521: a stamped main session's send passes too, audited.
         let send = payload("mcp__Google-Chat__send_message");
-        assert_denied(&run_in(tmp.path(), &send, &env), "stamped send");
+        assert_allowed(&run_in(tmp.path(), &send, &env), "stamped send");
+        let sub_send = serde_json::json!({
+            "session_id": "s-8454",
+            "agent_id": "agent-1",
+            "tool_name": "mcp__Google-Chat__send_message",
+            "tool_input": {},
+        })
+        .to_string();
+        assert_denied(
+            &run_in(tmp.path(), sub_send.as_bytes(), &env),
+            "subagent send",
+        );
     }
+    assert_denied(
+        &run_in(tmp.path(), &payload("mcp__Google-Chat__send_message"), &[]),
+        "unstamped send",
+    );
     let log = tmp
         .path()
         .join("trusty-mpm")
         .join("egress-architect-allowed.log");
     let text = std::fs::read_to_string(log).expect("audit log");
-    assert_eq!(text.lines().count(), 2, "{text}");
+    assert_eq!(text.lines().count(), 4, "{text}");
     assert!(
         text.lines()
             .all(|l| l.starts_with("egress-main-read-allowed "))

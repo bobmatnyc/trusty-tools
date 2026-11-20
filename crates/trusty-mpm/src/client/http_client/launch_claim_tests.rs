@@ -345,10 +345,11 @@ async fn tui(
 }
 
 /// The workspace server the CLI rule names for `dir`, or `None` when this
-/// environment opts out (`TM_WORKSPACE_TMUX=0`).
+/// environment does not opt in (`TM_WORKSPACE_TMUX=1`).
 fn expected_server(dir: &Path) -> Option<(String, PathBuf)> {
-    let opted_out = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "0");
-    (!opted_out).then(|| {
+    // #10101: the workspace server is opt-in (`TM_WORKSPACE_TMUX=1`).
+    let opted_in = std::env::var("TM_WORKSPACE_TMUX").is_ok_and(|v| v.trim() == "1");
+    opted_in.then(|| {
         let server = crate::core::tmux_server::workspace_server_name(dir);
         let socket = crate::core::tmux_server::ambient_socket_dir().join(&server);
         (server, socket)

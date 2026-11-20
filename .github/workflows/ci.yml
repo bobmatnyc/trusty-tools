@@ -148,6 +148,12 @@ on:
     # (also non-default) covers a draft being marked ready.
     types: [opened, synchronize, reopened, ready_for_review, edited]
     branches: [main]
+  # Merge queue (owner ruling Dpu). Every required context must also report,
+  # under the same name, on the queue commit. On this event the diff base is
+  # `github.event.merge_group.base_sha`: steps read it as MERGE_GROUP_BASE_SHA,
+  # or as the `before` SHA where a step already diffs a push range.
+  merge_group:
+    types: [checks_requested]
   # On-demand run of the whole workflow, including the `test-shard` matrix that
   # no longer runs on `pull_request` (see that job's `if:`). Without this there
   # is no way at all to get the workspace suite to run against a branch before
@@ -284,6 +290,14 @@ jobs:
       # #8716: the rustdoc-links job's scope decision and the gate's own
       # fail-closed arms. Neither needs a doc build; the gate's selftest scores
       # captured cargo streams. It ran in no workflow before this step.
+      # #11470: the release gates for a trusty-mpm publish — published content
+      # coverage and the clean-HOME command walk — driven with fixtures and a
+      # stub binary; no network, no toolchain.
+      - name: Release content-gate selftests (#11470)
+        run: |
+          bash scripts/check-content-release-coverage-selftest.sh
+          bash scripts/release-gate-selftest.sh
+
       - name: Rustdoc scope + link-gate selftests (#8716)
         run: |
           bash scripts/rustdoc-links-scope-selftest.sh
@@ -426,7 +440,7 @@ jobs:
             exit 0
           fi
 
-          before="${{ github.event.before }}"
+          before="${{ github.event.merge_group.base_sha || github.event.before }}"
           if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
             echo "push has no usable before SHA — verifying in full"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -447,7 +461,7 @@ jobs:
             exit 0
           fi
 
-          before="${{ github.event.before }}"
+          before="${{ github.event.merge_group.base_sha || github.event.before }}"
           if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
             echo "push has no usable before SHA — running CUDA check fail closed"
             echo "embedder_cuda_relevant=true" >> "$GITHUB_OUTPUT"
@@ -475,7 +489,7 @@ jobs:
         env:
           UI_CRATES: "trusty-agents-ui trusty-code-gui"
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_BEFORE: ${{ github.event.merge_group.base_sha || github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
@@ -527,7 +541,7 @@ jobs:
         id: detect-shell-gates
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_BEFORE: ${{ github.event.merge_group.base_sha || github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           bash scripts/ci-gate-relevance.sh teardown-guard > /dev/null
@@ -733,7 +747,7 @@ jobs:
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message || github.event.merge_group.head_commit.message }}
         run: bash scripts/rustdoc-links-scope.sh
 
       - name: Free disk space
@@ -897,7 +911,7 @@ jobs:
     #
     # TO RUN IT ON A BRANCH: Actions → CI → "Run workflow" against that branch
     # (the `workflow_dispatch` trigger at the top of this file).
-    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-latest
     # #10618: 60, not 45 — the nextest `ci` profile's 35 m HNSW bound must fire
     # (and name the test) before this job cap does.
@@ -1487,7 +1501,7 @@ jobs:
     # Identical to `test-shard`'s condition — see the reasoning there. The two
     # must stay in lockstep: `test` requires BOTH, so a divergence would make
     # the roll-up unsatisfiable on whichever trigger they disagree about.
-    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1570,7 +1584,7 @@ jobs:
   test:
     name: Rust tests (pre-publish gate)
     needs: [changes, test-shard, test-doc]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1657,12 +1671,12 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
 
       - name: Install stable toolchain
-        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
       # Both selectors' fixtures run before the step that consults them.
       - name: Crate-selection selftests
-        if: github.event_name == 'pull_request' && needs.changes.outputs.docs_only != 'true'
+        if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.docs_only != 'true'
         run: |
           bash scripts/select-test-crates_selftest.sh
           bash scripts/ci-affected-test-plan-selftest.sh
@@ -1672,10 +1686,11 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" != "pull_request" ]; then
+          if [ "$EVENT_NAME" != "pull_request" ] && [ "$EVENT_NAME" != "merge_group" ]; then
             # scripts/ci-affected-test-plan.sh's own --event-name arm decides
             # trusty_common: false on a docs-only push (#8236), true
             # otherwise, including a missing/failed docs-only signal (fail
@@ -1685,11 +1700,16 @@ jobs:
           fi
           # An unresolvable merge-base passes an empty range, which the
           # selector answers with EVERY crate (its FAIL OPEN rule).
+          # merge_group plans the combined queue commit against base_sha.
+          base="origin/${BASE_REF}"
+          if [ "$EVENT_NAME" = "merge_group" ]; then
+            base="${MERGE_GROUP_BASE_SHA}"
+          fi
           range=""
-          if merge_base="$(git merge-base "origin/${BASE_REF}" HEAD)"; then
+          if merge_base="$(git merge-base "${base}" HEAD)"; then
             range="${merge_base}..HEAD"
           else
-            echo "::warning::cannot resolve a merge-base against origin/${BASE_REF} — testing every crate"
+            echo "::warning::cannot resolve a merge-base against ${base} — testing every crate"
           fi
           bash scripts/ci-affected-test-plan.sh --docs-only "${DOCS_ONLY}" -- --range "$range"
 
@@ -2877,7 +2897,7 @@ jobs:
         id: relevance
         env:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_BEFORE: ${{ github.event.merge_group.base_sha || github.event.before }}
           EVENT_NAME: ${{ github.event_name }}
         run: bash scripts/ci-website-relevance.sh corpus
 
@@ -2939,7 +2959,8 @@ jobs:
   # NO job-level `if:` and NO dependency on `changes`: a Cargo-inert (docs or
   # content) PR is exactly the PR these gates exist for, and `CI gate` accepts
   # no skip for this row (scripts/ci-gate-verdict.sh). The gate compares a
-  # branch with its base, so every step runs on a `pull_request` and on a
+  # branch with its base, so every step runs on a `pull_request`, on a
+  # `merge_group` (diffing the queue commit against base_sha) and on a
   # `workflow_dispatch` from a ref other than main (diffing against main), and
   # nothing else: a push to main, or a dispatch on main, reports success without
   # work. A dispatch on a PR branch must not report a green row for no work.
@@ -2957,7 +2978,7 @@ jobs:
       # TAGS, which the #6695 release-window evidence path and the #8388 bump
       # gate read; with no tags in the checkout both refuse (fail closed).
       - uses: actions/checkout@v5
-        if: ${{ github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main') }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main') }}
         with:
           fetch-depth: 0
 
@@ -2965,7 +2986,7 @@ jobs:
       # REFUSES a vacuous scan. Runs before the real gate — a gate that cannot
       # fail makes the real run's green meaningless.
       - name: Scan-floor selftest (must refuse an empty scan)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_scan_floor_selftest.sh changelog_fragment changelog_fragment_tool_error
 
       # Fragment-validation selftest. The gate asks the release assembler
@@ -2973,14 +2994,14 @@ jobs:
       # disagree; this proves the assembler still REJECTS a malformed fragment,
       # including the four-categories-in-one-file case from the 1.3.3 release.
       - name: Fragment-validation selftest (must reject a malformed fragment)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/assemble_changelog_selftest.sh
 
       # Stale-base selftest (#5018): a branch touching crate A only, with crate
       # B released on main since the fork point. The gate must refuse the stale
       # base, pass against the live branch, and still fail a missing fragment.
       - name: Stale-base selftest (must refuse a pinned base.sha)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_changelog_base_selftest.sh
 
       # Release-window selftest (#6695): the fragment gate and
@@ -2990,7 +3011,7 @@ jobs:
       # written into an already-tagged section, one outside the cut section,
       # and a stranded fragment.
       - name: Release-window selftest (both changelog gates must agree)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_changelog_release_window_selftest.sh
 
       # Crate-attribution selftest (#4576): nested crate source was selected by
@@ -2999,7 +3020,7 @@ jobs:
       # build.rs / tests/ / benches/ / testdata/ / dist bundles / Cargo.toml
       # still need no fragment.
       - name: Crate-attribution selftest (must not drop nested crate source)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_changelog_attribution_selftest.sh
 
       # Shared-classification selftest (#5765): this gate and
@@ -3007,42 +3028,49 @@ jobs:
       # selftest re-proves the classification and that neither has grown a
       # private copy.
       - name: Source-classification selftest (both gates share one definition)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_source_class_selftest.sh
 
       # Author-mode selftest (#6947): `--staged` and `--file` must not weaken
       # the DEFAULT verdict this job runs below.
       - name: Author-mode selftest (--staged and --file must not weaken the gate)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_changelog_staged_selftest.sh
 
       # Bump-mode selftest (#5674): `bump-version.sh --no-changelog` leaves the
       # fragments this gate demands in place, and a release cut still assembles
       # them (PR #5673).
       - name: Bump-mode selftest (a mid-PR bump must not eat fragments)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/bump_version_selftest.sh
 
       # Assembler-gate selftest (#7439): the failing and passing branches of
       # the assembled-sections gate below, including a PR that deletes a
       # CHANGELOG.md (the #7359 pipefail bug).
       - name: Assembler-gate selftest (deletion passes, hand-written section fails)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check-pr-changelog-assembled-selftest.sh
 
       # #8388: the content/ gates (ADR-0064) — manifest, member versions, the
       # bundle-version bump and the content changelog arm of the fragment gate
       # — each refuse their failure cases before the real runs below.
       - name: Content gates selftest (#8388)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_content_selftest.sh
+
+      # #10576: the owner-scenario lint must still fail a UI-script scenario, a
+      # missing field, an unknown trace ID and a prose-only block. Valid on
+      # merge_group like the other steps in this job.
+      - name: Owner-scenario lint selftest (#10576)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_owner_scenarios_selftest.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot, so the merge base cannot lag behind the merge
       # ref's own first parent. See the ATTRIBUTION note in
       # scripts/check_changelog_fragment.sh (PR #5018 / run 31431273762).
       - name: Refresh the base branch ref
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: |
           git fetch --no-tags --quiet origin \
             "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
@@ -3051,29 +3079,29 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
 
       - name: Enforce per-PR changelog fragment
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         env:
-          CHANGELOG_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+          CHANGELOG_GATE_BASE: ${{ github.event.merge_group.base_sha || format('origin/{0}', github.event.pull_request.base.ref || 'main') }}
         run: bash scripts/check_changelog_fragment.sh
 
       # #8388: content/manifest.toml lists every versioned content member and
       # its bundle version is never below one of them.
       - name: Enforce content manifest and member versions (#8388)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: python3 scripts/check_content.py tree
 
       # #9996: the Architect leak patterns (owner names, orgs, hosts, Slack ids,
       # emails) over content/instructions/architect/**.
       - name: Enforce Architect leak gate on content (#9996)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: python3 scripts/check_content.py leaks
 
       # #8388: a content member change must land under a bundle version no
       # content-v* tag has used, and the version never goes down.
       - name: Enforce content bundle version bump (#8388)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         env:
-          CONTENT_GATE_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+          CONTENT_GATE_BASE: ${{ github.event.merge_group.base_sha || format('origin/{0}', github.event.pull_request.base.ref || 'main') }}
         run: python3 scripts/check_content.py bump
 
       # Merge-time half of the changelog-assembler gate (#6406); the
@@ -3082,9 +3110,9 @@ jobs:
       # fires ONLY on a NEW version heading. Base is origin/<base ref>, never
       # `github.event.pull_request.base.sha` (#5018).
       - name: Enforce assembled CHANGELOG sections (no stranded fragments)
-        if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         env:
-          PR_CHANGELOG_ASSEMBLED_BASE: origin/${{ github.event.pull_request.base.ref || 'main' }}
+          PR_CHANGELOG_ASSEMBLED_BASE: ${{ github.event.merge_group.base_sha || format('origin/{0}', github.event.pull_request.base.ref || 'main') }}
         run: bash scripts/check-pr-changelog-assembled.sh
 
   # --------------------------------------------------------------------------

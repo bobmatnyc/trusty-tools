@@ -64,7 +64,7 @@ async fn test_load_chunks_missing_file_returns_zero() {
 /// fix, `spawn_incremental_persist` was called once per committed batch
 /// and each invocation spawned a detached task that cloned the full
 /// chunk corpus + serialized it to JSON. A reindex with N batches stacked
-/// N tasks; for the duetto-cto / duetto monorepos that meant 46–174 GB
+/// N tasks; for the acme-cto / acme monorepos that meant 46–174 GB
 /// of concurrent allocation and an OS kill.
 ///
 /// Why: prove that rapid-fire calls coalesce — the protocol guarantees

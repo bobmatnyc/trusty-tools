@@ -100,7 +100,7 @@ impl TrustyAgentsRepl {
                 "  Assistant       generic productivity assistant (default)"
             );
             let _ = writeln!(out, "  Izzie           friendly personal assistant");
-            let _ = writeln!(out, "  CTO Bot         strategic Duetto-aware advisor");
+            let _ = writeln!(out, "  CTO Bot         strategic Acme-aware advisor");
             let _ = writeln!(
                 out,
                 "  ctrl            project-aware orchestrator (deprecated)"

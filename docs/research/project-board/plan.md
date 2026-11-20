@@ -107,7 +107,7 @@ trusty-mpm is used across many unrelated GitHub repositories, but only one board
 - **O1** `tm issue board init --owner <org|user> --repo <owner/repo> --apply` on an owner with no same-title or repo-linked project creates a GitHub Projects v2 board carrying the standard fields of `board-v1.yaml` — Status with the 9 options, colours and descriptions of [#45](https://github.com/users/bobmatnyc/projects/45); Hold declared and off; the four date fields — links the repo, and prints the `project:` block for `issue-state.yaml`. Nothing is copied from [#45](https://github.com/users/bobmatnyc/projects/45).
 - **O2** Every issue opened through the trusty-mpm workflow lands on the repo's board by code: `tm issue epic create` through the shared Projects module, and the ticketing agent through `tm issue board add <N>` after each `gh issue create`.
 - **O3** trusty-tools' own ticketing behaviour is unchanged: TICKETING.md rules, `status:*` labels and [#45](https://github.com/users/bobmatnyc/projects/45) as they are today. `tm issue board check` run against [#45](https://github.com/users/bobmatnyc/projects/45) with trusty-tools' `project:` block reports no drift, with Crate and Agents reported as repo extras.
-- **O4** model-usage-monitor (duettoresearch org) has a live board created by `init`, its open issues backfilled with Status set from labels under the explicit flag, and `check` clean.
+- **O4** model-usage-monitor (acme org) has a live board created by `init`, its open issues backfilled with Status set from labels under the explicit flag, and `check` clean.
 
 ### Ratified decisions
 
@@ -208,7 +208,7 @@ the tracker.
 - GitHub only: refuse on a non-GitHub tracker.
 - `tm generate capabilities` regenerated in the same PR, plus the content bump.
 - Fake-`gh` tests for every error path; dry-run tests for `init` and `apply`.
-- Live check on model-usage-monitor (duettoresearch org): `init --owner duettoresearch`, standard fields only, no Published, no On Preview; open issues backfilled with Status from labels under the explicit flag; `check` clean; its TICKETING.md set to `set_project: yes` naming the board; the owner turns on auto-add in the UI.
+- Live check on model-usage-monitor (acme org): `init --owner acme`, standard fields only, no Published, no On Preview; open issues backfilled with Status from labels under the explicit flag; `check` clean; its TICKETING.md set to `set_project: yes` naming the board; the owner turns on auto-add in the UI.
 - Changelog fragment under `crates/trusty-mpm/changelog.d/`.
 
 #### Acceptance criteria
@@ -223,7 +223,7 @@ the tracker.
 - **AC8** One fake-`gh` test per attach-failure arm: missing-scope refusal → one `no-project:` comment, exit 0, and a second run adds no second comment; 502 → exit non-zero, no comment; SSO 403 → exit non-zero, no comment; deleted project → exit non-zero, no comment. A test feeds the open subagent `gh` token failure text from [#9750](https://github.com/bobmatnyc/trusty-tools/issues/9750) and asserts it is classified as a non-scope error, not a scope refusal.
 - **AC9** `tm issue board init` on a repo whose tracker is not GitHub exits non-zero naming the tracker; a test asserts it.
 - **AC10** `./scripts/check_capabilities.sh` exits 0 on the PR branch and the content bump is in the diff.
-- **AC11** Live check: model-usage-monitor's board exists, created by `init --owner duettoresearch`; `check` output in the PR body shows no drift, no Published, no On Preview, every open issue on the board with Status set from its label, and the token scopes line. Its TICKETING.md names the board with `set_project: yes`.
+- **AC11** Live check: model-usage-monitor's board exists, created by `init --owner acme`; `check` output in the PR body shows no drift, no Published, no On Preview, every open issue on the board with Status set from its label, and the token scopes line. Its TICKETING.md names the board with `set_project: yes`.
 - **AC12** `cargo test -p trusty-mpm --no-fail-fast`, `cargo clippy -p trusty-mpm --all-targets -- -D warnings` and `cargo fmt --check` exit 0; `SKIP_UI_BUILD=1 cargo check --workspace` exits 0.
 - **AC13** Closing comment on [#9397](https://github.com/bobmatnyc/trusty-tools/issues/9397), [#9400](https://github.com/bobmatnyc/trusty-tools/issues/9400) and [#9402](https://github.com/bobmatnyc/trusty-tools/issues/9402) with the trial results and the module path and API.
 

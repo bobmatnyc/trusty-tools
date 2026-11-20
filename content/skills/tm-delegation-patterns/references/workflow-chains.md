@@ -39,9 +39,26 @@ or by `local-ops` dispatched there, where `terraform apply` reads
 
 ## Bug Fix
 
-**Chain**: Research (reproduce/investigate) → Code Analysis → Engineer (fix)
-→ Ops (deploy, if applicable) → Ops (verify) → `web-qa`/`api-qa` (regression)
-→ **Version Control** (PR).
+**Chain**: Research (reproduce/investigate) → Code Analysis → **related-path
+sweep** → Engineer (fix) → Ops (deploy, if applicable) → Ops (verify) →
+`web-qa`/`api-qa` (regression) → **Version Control** (PR).
+
+<!-- rule:tm-delegation-patterns/bug-fix-related-path-sweep -->
+**Related-path sweep.** A fix often reaches one path and misses the others that
+share the behaviour. Before the engineer is briefed, list:
+
+1. **Callers.** Every other entry point that reaches the changed code. Use
+   trusty-search `get_call_chain` (direction `callers`) on the function. Where
+   the project is not indexed, `grep` for the symbol.
+2. **Data states.** Every input state the code branches on: empty, missing,
+   zero, boundary, each enum arm. Include the state that fails.
+
+The engineer brief carries both lists as `Shared-behaviour paths:`, one line per
+caller and per state, each marked `fixed here`, `covered by <test>` or
+`out of scope: <reason>`. QA names a test for each path that matters, plus one
+that would have caught the original bug. A brief with one path and one test for
+a bug in shared code goes back at brief review. Skip the sweep for a Low-risk
+text edit.
 
 ## Platform-Specific Deploy
 

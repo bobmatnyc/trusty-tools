@@ -90,10 +90,10 @@ async fn run_review_uses_supplied_prompts_without_loading() {
 #[tokio::test]
 async fn run_review_without_the_configured_voice_fails_closed_before_any_fetch() {
     use crate::runtime_content::{content_path, test_support::installed_without};
-    let voice = content_path("voices/duetto/voice.toml");
+    let voice = content_path("voices/house/voice.toml");
     let _guard = OverrideGuard::content(installed_without(&voice));
     let mut config = hermetic_config();
-    config.voice_package = Some("duetto".to_string());
+    config.voice_package = Some("house".to_string());
 
     let source = FakePrSource::new(BODY, &billing_diff());
     let seen = observe_with(&config, source, legacy_caller(), ReviewOptions::default()).await;

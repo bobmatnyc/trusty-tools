@@ -559,7 +559,7 @@ pub(crate) fn resolve_external(
 ///
 /// Why: the bare form `tm <url>` reaches clap's `External` catch-all, and clap
 /// applies no global flag to the argv it collects there — so the owner's
-/// `tm https://github.com/duettoresearch/jev-matching --user bob-duetto` was
+/// `tm https://github.com/acme/jev-matching --user acme-admin` was
 /// refused with "takes no further arguments" while the identical invocation
 /// with the flag FIRST worked. The flag has no other meaning in this position,
 /// so lifting it is a rewrite of nothing.
@@ -596,7 +596,7 @@ pub(crate) fn split_trailing_account(
         // `resolve_account` treats a blank flag as absent, which would clone
         // as the global account the operator meant to override.
         let Some(login) = login.filter(|l| !l.trim().is_empty()) else {
-            anyhow::bail!("'{token}' needs a gh login — e.g. `--user bob-duetto`.");
+            anyhow::bail!("'{token}' needs a gh login — e.g. `--user acme-admin`.");
         };
         if let Some(existing) = account.as_deref()
             && existing != login

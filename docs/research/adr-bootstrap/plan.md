@@ -225,14 +225,14 @@ filing session. The 2026-10-15 owner-approved metadata is reused.
 - Title at creation: `[EPIC] tm-adr bootstraps and maintains a generic ADR setup in any project`; retitled `[EPIC <N>] …` after read-back.
 - Body: the generated body already carries `Supersedes [#9924](https://github.com/bobmatnyc/trusty-tools/issues/9924).` from the summary; confirm it after creation.
 - Labels: `epic`, `dx`, `area:agent-prompts`, `ws/tm-trusty-tools-adr-init`.
-- Milestone: `trusty-mpm 1.9.0`. Project #45, Status Backlog. Assignee `mac-duetto`.
+- Milestone: `trusty-mpm 1.9.0`. Project #45, Status Backlog. Assignee `acme-mac`.
 - Comment in the same dispatch: `no-component-label: no crate owns content/skills/tm-adr/ or .github/workflows/`.
 - Close rule: both phases closed; closing comment maps O1–O4 to evidence.
 
 ### Phase 1
 
 - Title: `[EPIC_<N> PHASE_1] tm-adr 2.1.0 ships generic content, adr-standard.md, init/status scripts and CI self-tests`.
-- Labels: `enhancement`, `dx`, `area:agent-prompts`, `ws/tm-trusty-tools-adr-init`. Milestone: parent's. Project #45, Backlog. Parent `<N>`. Assignee `mac-duetto`.
+- Labels: `enhancement`, `dx`, `area:agent-prompts`, `ws/tm-trusty-tools-adr-init`. Milestone: parent's. Project #45, Backlog. Parent `<N>`. Assignee `acme-mac`.
 - Rung 3: ships executable code into this repo's CI and every bootstrapped repo's CI, and edits `doc-numbers.yml`; no crate source changes.
 - Close rule: Merged.
 - PR title: `feat(tm-adr): [EPIC_<N> PHASE_1] ship generic tm-adr 2.1.0 with adr-standard, init and status scripts`.
@@ -241,7 +241,7 @@ filing session. The 2026-10-15 owner-approved metadata is reused.
 ### Phase 2
 
 - Title: `[EPIC_<N> PHASE_2] trusty-tools adopts the shipped check_adr.sh and cuts DOC-46 to a pointer`.
-- Labels: `chore`, `ci`, `dx`, `area:ci`, `ws/tm-trusty-tools-adr-init`. Milestone: parent's. Project #45, Backlog. Parent `<N>`; blocked-by `<P1>`. Assignee `mac-duetto`.
+- Labels: `chore`, `ci`, `dx`, `area:ci`, `ws/tm-trusty-tools-adr-init`. Milestone: parent's. Project #45, Backlog. Parent `<N>`; blocked-by `<P1>`. Assignee `acme-mac`.
 - Rung 3: behaviour change in a gate script and a spec cut, verified by the script's self-test and the Doc numbers workflow; no crate touched.
 - Close rule: Merged.
 - PR title: `chore(adr): [EPIC_<N> PHASE_2] run the shipped check_adr.sh in doc-numbers.yml and cut DOC-46 to a pointer`.
@@ -252,6 +252,6 @@ filing session. The 2026-10-15 owner-approved metadata is reused.
 1. Commit this document to `origin/main` through a PR; record the permalink SHA.
 2. Create the label `ws/tm-trusty-tools-adr-init` if it does not exist; run `tm issue seed-labels`.
 3. `tm issue epic create --from docs/research/adr-bootstrap/plan.md --milestone "trusty-mpm 1.9.0" --component dx --project 45 --session tm-trusty-tools-adr-init --phase-type enhancement`.
-4. Post-create edits (the CLI sets neither assignee nor Project Status): assignee `mac-duetto` on all three; Project #45 Status Backlog on all three; Phase 2 type `chore`; `area:*` on all three; `ci` on Phase 2; blocked-by P1 → P2 if not set; confirm the `ws/` label landed.
+4. Post-create edits (the CLI sets neither assignee nor Project Status): assignee `acme-mac` on all three; Project #45 Status Backlog on all three; Phase 2 type `chore`; `area:*` on all three; `ci` on Phase 2; blocked-by P1 → P2 if not set; confirm the `ws/` label landed.
 5. `no-component-label` comment on each issue.
 6. `tm issue audit` on all three; `tm issue epic sync <N>`.

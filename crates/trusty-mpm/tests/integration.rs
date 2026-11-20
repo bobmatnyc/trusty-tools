@@ -100,9 +100,13 @@ mod tm_hook_pm_guard_architect_envfile_8939;
 mod tm_hook_pm_guard_architect_pane_8902;
 mod tm_hook_pm_guard_binary_operands_10672;
 mod tm_hook_pm_guard_build_lease;
+// #10574: the stale-copy guard, fixture F2.
 mod tm_hook_pm_guard_credential_print;
 mod tm_hook_pm_guard_deny_capture;
 mod tm_hook_pm_guard_false_positives;
+mod tm_hook_pm_guard_stale_copy_10574;
+// #11353: GP-051 on the live `Agent` dispatch path.
+mod tm_hook_pm_guard_fable_11353;
 // #10033: `tm fleet relaunch` denied for every hooked session, under each bypass.
 mod tm_hook_pm_guard_fleet_relaunch_10033;
 mod tm_hook_pm_guard_head_switch;
@@ -140,6 +144,12 @@ mod tm_hook_session_start_8531;
 mod tm_hook_session_start_taint_8433;
 // #10960: the Architect's standing-rules block, per turn and at resume.
 mod tm_hook_standing_rules_10960;
+// #11398: the PM's per-turn `Task: <id>@<MMDD>` stamp from datg.
+mod tm_hook_turn_task_11398;
+// #10575: the warn-only completion-evidence Stop check.
+mod tm_hook_completion_evidence_10575;
+// #11431: the shadow minimal pm-guard never blocks.
+mod tm_hook_pm_guard_shadow_11431;
 mod tm_ls_state_colors;
 // #9621: `tm secrets exec` on a fake socket, and live on a real server.
 mod tm_secrets_exec;

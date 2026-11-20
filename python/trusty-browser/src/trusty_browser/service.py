@@ -14,21 +14,17 @@ import time  # noqa: F401 -- tests/test_service.py patches service.time
 from pathlib import Path
 from typing import BinaryIO, Self
 
-from trusty_browser import pairing
+from trusty_browser import assets, codes, pairing
+from trusty_browser.audit import email_domain
 from trusty_browser.enrollment import (
     browser_key,
     database,
     digest,
     finish_removals,
-    inspect_conflict,
-    register,
     remove,
-    replace,
-    resolve_workflow,
-    status,
 )
 from trusty_browser.grants import OPERATOR_OPS, POPUP_OPS, RELAYED
-from trusty_browser.mac_peer import verify_chrome_host
+from trusty_browser.mac_peer import HostRefused, verify_chrome_host
 from trusty_browser.pages import Pages
 from trusty_browser.protocol import (
     Claim,
@@ -114,14 +110,33 @@ class Broker(Pages):
                 "SELECT * FROM routes WHERE workflow = ?",
                 (string(request, "workflow"),),
             ).fetchone()
-        if not isinstance(row, sqlite3.Row) or (
-            not browser
-            and not secrets.compare_digest(
-                row["ticket"], digest(string(request, "ticket"))
-            )
+        if not isinstance(row, sqlite3.Row):
+            raise self.refused("service" if browser else "agent", "route_unknown", request)
+        if not browser and not secrets.compare_digest(
+            row["ticket"], digest(string(request, "ticket"))
         ):
-            raise Refusal("Unauthorized")
+            raise self.refused("agent", "ticket_mismatch", request)
         return row
+
+    def refused(self, site: str, reason: str, request: Frame | None = None) -> Refusal:
+        """Log a refusal (ruling Dqw 2026-11-16) and return its ``Unauthorized`` reply.
+
+        Test: `test_each_refusal_site_writes_one_domain_only_audit_line`.
+        """
+        request = request or {}
+        profile = pairing.profile_id(request.get("profile"))
+        domain = email_domain(request.get("email"))
+        self.audit.refuse(site, reason, profile=profile, email_domain=domain)
+        return Refusal("Unauthorized", reason=reason)
+
+    def peer_ok(self, writer: asyncio.StreamWriter, site: str) -> None:
+        """``verify_peer``, logging a refusal as ``peer_uid``."""
+        try:
+            verify_peer(writer)
+        except Refusal as exc:
+            self.audit.refuse(site, "peer_uid")
+            exc.response["reason"] = "peer_uid"
+            raise
 
     async def pair(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -154,7 +169,7 @@ class Broker(Pages):
         if response.get("type") != "proof" or not secrets.compare_digest(
             expected.encode(), string(response, "proof").encode()
         ):
-            raise Refusal("Unauthorized")
+            raise self.refused("service", "proof_mismatch", hello)
         return row, incarnation
 
     def forget(self, peer: Peer) -> None:
@@ -173,7 +188,7 @@ class Broker(Pages):
     ) -> None:
         self.writers.add(writer)
         try:
-            verify_peer(writer)
+            self.peer_ok(writer, "enrollment")
             try:
                 await asyncio.wait_for(
                     asyncio.to_thread(
@@ -181,8 +196,15 @@ class Broker(Pages):
                     ),
                     7,
                 )
-            except (PermissionError, OSError, TimeoutError):
-                raise Refusal("Unauthorized") from None
+            except (PermissionError, OSError, TimeoutError) as exc:
+                reason = (
+                    exc.code
+                    if isinstance(exc, HostRefused)
+                    else "host_timeout"
+                    if isinstance(exc, TimeoutError)
+                    else "host_not_native_host"
+                )
+                raise self.refused("enrollment", reason) from None
             # Read the enrollment key only after OS authentication.
             request = await asyncio.wait_for(read_frame(reader), 5)
             assert self.db is not None
@@ -204,6 +226,8 @@ class Broker(Pages):
             }
             if isinstance(exc, Refusal) and str(exc) in RELAYED:  # #11239
                 reply = exc.response
+            elif isinstance(exc, Refusal) and "reason" in exc.response:
+                reply["reason"] = exc.response["reason"]  # ruling Dqw: the popup shows it
             with contextlib.suppress(ConnectionError, TimeoutError):
                 await write_frame(writer, reply)
         except EOFError:
@@ -214,39 +238,18 @@ class Broker(Pages):
 
     async def enrollment_request(self, request: Frame) -> Frame:
         assert self.db is not None
+        """The extension's ops on enrollment.sock: pair, unpair, connect, list and revoke.
+
+        #11239: the workflow enroll ops (resolve, status, enroll, replace,
+        unenroll) and code mint are gone; each answers ``InvalidRequest``.
+        Test: `test_removed_enroll_and_code_ops_are_refused`.
+        """
         op = string(request, "op")
-        if op == "mint":  # #11239: codes are minted only on this socket.
-            return await self.mint(request)
         if op in ("pair", "unpair"):
             return await self.pairing_request(request)
         if op in POPUP_OPS:
             return await self.popup_grants(request)
-        if op == "resolve":
-            return resolve_workflow(self.db, request)
-        workflow = string(request, "workflow")
-        if op == "status":
-            return status(self.db, self.state, request)
-        if op == "unenroll":
-            await self.revoke(workflow, request)
-            return {"ok": True, "workflow": workflow}
-        if op == "replace":
-            retired = replace(self.db, self.state, request)
-            if retired is not None:
-                await self.detach(retired)
-            request = {k: v for k, v in request.items() if k != "previous_version"}
-            request["op"] = "enroll"
-        try:
-            return register(self.db, self.state, request)
-        except ValueError as exc:
-            if op == "enroll" and str(exc) == "EnrollmentConflict":
-                prior = inspect_conflict(self.db, workflow)
-                if prior is not None:
-                    return {
-                        "ok": False,
-                        "error": "EnrollmentConflict",
-                        "previous": prior,
-                    }
-            raise
+        raise Refusal("InvalidRequest")
 
     async def pairing_request(self, request: Frame) -> Frame:
         """The extension's ``pair`` and ``unpair``; contract "pair".
@@ -258,13 +261,19 @@ class Broker(Pages):
         op, profile = request["op"], request.get("profile")
         try:
             if op == "pair":
-                reply = pairing.pair_profile(self.db, self.state, request)
+                reply, replaced = pairing.pair_profile(self.db, self.state, request)
+                if replaced is not None:  # ruling Dqw 2026-11-16: newest pairing wins
+                    await self.detach(replaced)
+                    self.audit.best_effort(
+                        "pair_replaced", profile=reply["profile"], replaced=replaced,
+                        outcome="ok",
+                    )  # fmt: skip
             else:
                 fields = pairing.triple(request)
                 if fields is None or set(request) != {"op", *pairing.CREDENTIAL}:
                     raise Refusal("InvalidEnrollment")
                 if not pairing.unpair_profile(self.db, self.state, request, fields[0]):
-                    raise Refusal("Unauthorized")
+                    raise self.refused("unpair", "unpair_bad_credential", request)
                 await self.detach(fields[0])
                 reply = {"ok": True, "profile": fields[0]}
         except ValueError as exc:
@@ -315,7 +324,7 @@ class Broker(Pages):
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
         try:
-            verify_peer(writer)
+            self.peer_ok(writer, "operator")
             req = await asyncio.wait_for(read_frame(reader), 5)
             if req.get("op") in OPERATOR_OPS:  # #11239
                 await write_frame(writer, await self.grant_operator(req))
@@ -339,7 +348,7 @@ class Broker(Pages):
         self.writers.add(writer)
         peer: Peer | None = None
         try:
-            verify_peer(writer)
+            self.peer_ok(writer, "service")
             row, incarnation = await asyncio.wait_for(self.pair(reader, writer), 5)
             # Revocation may occur while the browser is computing its proof.
             current = self.route({"profile": row["profile"]}, True)
@@ -347,7 +356,7 @@ class Broker(Pages):
                 current["browser_key"] != row["browser_key"]
                 or current["ticket"] != row["ticket"]
             ):
-                raise Refusal("Unauthorized")
+                raise self.refused("service", "key_rotated", dict(row))
             name = row["profile"]
             if name in self.peers:
                 raise Refusal("DuplicateProfile")
@@ -356,6 +365,10 @@ class Broker(Pages):
             self.peer_back(peer)  # #11239: rebind grants across a worker restart.
             # #11239: ``live`` lets the worker prune grants whose end it missed.
             ack = {"ok": True, "generation": peer.generation, "live": self.live(name)}
+            # #11363: the worker reloads itself when it runs other assets than these.
+            stamp = assets.published(self.state)
+            if stamp is not None:
+                ack["assets"] = stamp
             await write_frame(writer, ack)
             while True:
                 reply = await read_frame(reader)
@@ -365,7 +378,7 @@ class Broker(Pages):
                 pending.set_result(reply)
         except Refusal as exc:
             with contextlib.suppress(ConnectionError, TimeoutError):
-                await write_frame(writer, exc.response)
+                await write_frame(writer, relayed(exc))
         except (EOFError, OSError, ValueError, TimeoutError):
             pass
         finally:
@@ -380,17 +393,20 @@ class Broker(Pages):
         self.writers.add(writer)
         session: Session | None = None
         try:
-            verify_peer(writer)
+            self.peer_ok(writer, "agent")
             hello = await asyncio.wait_for(read_frame(reader), 5)
-            if hello.get("op") == "redeem":  # #11239
-                session = await self.redeem(hello)
-                ack = self.redeemed(session)
-            elif (
-                set(hello) != {"op", "workflow", "ticket"} or hello.get("op") != "open"
-            ):
+            if hello.get("op") == "profiles":  # #11239: list, then close
+                if set(hello) != {"op"}:
+                    raise Refusal("InvalidRequest")
+                await self.expire(codes.clock())
+                await write_frame(writer, {"ok": True, "profiles": self.profiles()})
+                return
+            if hello.get("op") != "attach":
+                # #11239: the workflow ticket `open`, like redeem, is removed; a leftover
+                # routes row must not open a grant-free, unaudited session.
                 raise Refusal("InvalidRequest")
-            else:
-                session, ack = Session(self.route(hello, False)), {"ok": True}
+            session = await self.attach(hello)  # no code; Connect made the grant
+            ack = self.attached(session)
             self.sessions[writer] = session
             await write_frame(writer, ack)
             while True:
@@ -404,7 +420,7 @@ class Broker(Pages):
                     break
         except Refusal as exc:
             with contextlib.suppress(ConnectionError, TimeoutError):
-                await write_frame(writer, exc.response)
+                await write_frame(writer, relayed(exc))
         except (EOFError, OSError, ValueError, TimeoutError):
             pass
         finally:
@@ -417,6 +433,11 @@ class Broker(Pages):
                         await self.clear(claim)
             self.writers.discard(writer)
             writer.close()
+
+
+def relayed(exc: Refusal) -> Frame:
+    """A refusal for service.sock or agent.sock: reason codes go to the popup only."""
+    return {k: v for k, v in exc.response.items() if k != "reason"}
 
 
 async def operator_revoke(state: Path, workflow: str) -> None:

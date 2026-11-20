@@ -20,6 +20,7 @@ pub(crate) mod adopt_worktree;
 pub(crate) mod agent;
 // #9822: `tm architect <verb>`, daemon-less.
 pub(crate) mod architect;
+pub(crate) mod architect_up; // #11364
 // #10063: `tm architect dashboard <verb>`, in-process under the store lock.
 pub(crate) mod architect_dashboard;
 // #9167: the poller's wakes as trusty-events `message` events.
@@ -148,6 +149,8 @@ pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
+pub(crate) mod il_auto_apply; // See G0b IL auto-apply
+pub(crate) mod il_auto_apply_ilio; // See G0b IL auto-apply
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
@@ -155,12 +158,16 @@ pub(crate) mod hook_post;
 pub(crate) mod hook_rewrite;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
+// #10973: chained commands judged per segment.
+pub(crate) mod hook_rewrite_chain;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
 // #7975: the stdin payload read that names its failure, so a guard can deny on it.
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// See G0b auto-setup: install and register the browser and computer MCP servers.
+pub(crate) mod auto_setup;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
 // split out of `install` for the 500-SLOC production cap.
 pub(crate) mod install_skills;
@@ -248,6 +255,8 @@ pub(crate) mod repair_delegation_list;
 // #8547: which `subagent_type` names are known, and the refusal for the rest.
 pub(crate) mod pm_guard_dispatch_type;
 pub(crate) mod pm_guard_enter_worktree;
+// #11353: the Fable cap on the live dispatch path.
+pub(crate) mod pm_guard_fable;
 pub(crate) mod pm_guard_fanout;
 // #8878: the hard floor (D8) and the Architect exemption (D4 remainder, D5).
 pub(crate) mod pm_guard_floor;
@@ -310,6 +319,7 @@ pub(crate) mod pm_guard_secret_substitution_read;
 pub(crate) mod pm_guard_protected_hooks;
 pub(crate) mod pm_guard_protected_paths;
 // #8878: the trust-anchor write floor, which the bypass variables do not lift.
+pub(crate) mod pm_guard_accounts;
 pub(crate) mod pm_guard_trust_anchor;
 pub(crate) mod pm_guard_trust_anchor_paths;
 pub(crate) mod pm_guard_worktree_grant;
@@ -368,6 +378,14 @@ pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
 pub(crate) mod standing_rules_hook;
+// #10575: `tm hook --completion-evidence`, the warn-only Stop check.
+pub(crate) mod completion_evidence_hook;
+// #10574: the stale-copy guard for registered artifacts.
+pub(crate) mod pm_guard_stale_copy;
+// #11398: `tm hook --turn-task`, the PM's per-turn task stamp.
+pub(crate) mod turn_task_hook;
+// #11431: `tm hook --pm-guard-shadow`, the minimal fact-based guard, log-only.
+pub(crate) mod pm_guard_min;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
 // `tm doctor` uses — see its module doc for why the two disagreed.
 pub(crate) mod status_daemon;

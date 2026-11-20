@@ -1,35 +1,31 @@
-"""Mint, redeem, scope and revoke one-use activation codes for Broker; contract in docs/activation-codes.md."""
+"""Connect, attach, list and revoke standing profile grants for Broker; contract in docs/activation-codes.md."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import math
 import secrets
 import sqlite3
 import sys
-import time
 from pathlib import Path
 
 from trusty_browser import codes, pairing
 from trusty_browser.audit import Audit
-from trusty_browser.codes import CODE_TTL, RECONNECT_GRACE, Grant, Lockout
-from trusty_browser.enrollment import FIELDS, original_fields, registration_id
+from trusty_browser.codes import RECONNECT_GRACE, Grant
 from trusty_browser.leases import Leases
 from trusty_browser.protocol import Claim, Frame, Peer, Refusal, Session, string
 
 # Refusals relayed whole on enrollment.sock (#11239); anything else is EnrollmentFailed.
 RELAYED = {
-    "InvalidMint",
     "InvalidRequest",
     "NotEnrolled",
     "BrowserDisconnected",
-    "GrantLimit",
     "AuditUnavailable",
     "UnknownGrant",
 }
 OPERATOR_OPS = {"grants", "revoke_grant", "revoke_grants"}
-POPUP_OPS = OPERATOR_OPS
+# #11239: Connect is the popup's only way to create a grant; Disconnect is revoke_grants.
+POPUP_OPS = OPERATOR_OPS | {"connect"}
 
 
 def gone(grant: Grant) -> Refusal:
@@ -37,44 +33,28 @@ def gone(grant: Grant) -> Refusal:
 
 
 class Grants(Leases):
-    """Activation-code methods mixed into ``service.Broker``; tests in tests/test_activation_codes.py."""
+    """Grant methods mixed into ``service.Broker``; tests in tests/test_activation_codes.py."""
 
     state: Path
     sessions: dict[asyncio.StreamWriter, Session]
 
     def init_grants(self) -> None:
         self.grants: dict[str, Grant] = {}
-        self.codes: dict[str, Grant] = {}
-        self.spent: dict[str, tuple[str, float]] = {}
-        self.lockout = Lockout()
         self.audit = Audit(self.state)
         self.tasks: set[asyncio.Future[None]] = set()
         self.sweeper: asyncio.TimerHandle | None = None
         self.halted = False
 
-    def purge(self, now: float) -> None:
-        for digest, grant in list(self.codes.items()):
-            if grant.state == "code" and grant.deadline <= now:
-                del self.codes[digest]
-                self.grants.pop(grant.ident, None)
-                self.spent[digest] = ("expired", grant.deadline + CODE_TTL)
-                grant.state, grant.reason = "ended", "expired"
-                self.notify(grant, "expired")
-        for digest, (_, forget) in list(self.spent.items()):
-            if forget <= now:
-                del self.spent[digest]
-
     async def expire(self, now: float) -> None:
-        """Purge stale codes and end every grant whose reconnect grace ran out.
+        """End every grant whose reconnect grace ran out.
 
         Why: a grant lasts until its browser closes (#11239 owner ruling), so
         idleness never ends one; a worker that does not return within
         ``RECONNECT_GRACE`` means the browser is gone. What: runs before every
-        cap check and grant listing, and from the deadline sweep.
+        grant listing and attach, and from the deadline sweep.
         Test: `test_idle_profile_grants_stay_listed_past_the_old_timeout`,
         `test_a_grant_whose_worker_never_returns_ends_after_the_grace`.
         """
-        self.purge(now)
         for grant in list(self.grants.values()):
             if (
                 grant.state == "active"
@@ -83,203 +63,99 @@ class Grants(Leases):
             ):
                 await self.end(grant, "browser_gone")
 
-    def check_caps(
-        self, generation: str | None, tab: int | None, me: Grant | None
-    ) -> None:
-        live = [
-            g
-            for g in self.grants.values()
-            if g is not me and g.state in ("active", "pending")
-        ]
-        if (
-            tab is not None
-            and sum(
-                g.scope == "tab" and g.tab == tab and g.generation == generation
-                for g in live
-            )
-            >= codes.MAX_GRANTS_PER_TAB
-        ):
-            raise Refusal("GrantLimit", limit="tab")
-
     def record(self, event: str, grant: Grant | None, **fields: object) -> None:
-        """Fail-closed audit line for mint, redeem and admitted operations."""
+        """Fail-closed audit line for connect, attach and admitted operations."""
         try:
             self.audit.write(event, **(grant.fields() if grant else {}), **fields)
         except OSError:
             raise Refusal("AuditUnavailable") from None
 
-    def minter(self, request: Frame) -> sqlite3.Row:
-        """The row a mint frame proves: the credential triple, or phase 1's six fields."""
-        assert self.db is not None
-        if "workflow" not in request:
-            fields = pairing.triple(request)
-            if fields is None:
-                raise Refusal("InvalidMint")
-            row = pairing.credential_row(self.db, self.state, fields)
-        else:
-            if not all(isinstance(request[k], str) and request[k] for k in FIELDS):
-                raise Refusal("InvalidMint")
-            row = self.db.execute(
-                "SELECT * FROM routes WHERE workflow=? AND profile=?",
-                (request["workflow"], request["profile"]),
-            ).fetchone()
-            if row is not None and not secrets.compare_digest(
-                registration_id(original_fields(row, self.state)),
-                registration_id(request),
-            ):
-                row = None
-        if row is None:
-            raise Refusal("NotEnrolled")
-        return row
+    def profile_grant(self, profile: str) -> Grant | None:
+        for grant in self.grants.values():
+            if grant.state == "active" and grant.row["profile"] == profile:
+                return grant
+        return None
 
-    async def mint(self, request: Frame) -> Frame:
-        """Mint one code for the credential's profile; contract "mint".
+    async def connect(self, row: sqlite3.Row) -> Frame:
+        """Create the profile's standing grant; contract "connect".
 
-        Test: `test_mint_with_a_pairing_credential_succeeds_and_a_wrong_key_does_not`,
-        `test_mint_is_refused_for_an_unenrolled_profile`.
+        Why: one Connect click grants the whole profile to every same-user
+        local agent (#11239 owner rulings 03:37Z, Dpj). What: needs the
+        profile's paired browser, reuses a live grant, and writes the
+        fail-closed ``connect`` audit line before the grant exists.
+        Test: `test_connect_with_no_code_creates_a_standing_profile_grant`,
+        `test_connect_whose_audit_fails_creates_no_grant`.
         """
-        scope, tab = request.get("scope"), request.get("tab")
-        names = FIELDS if "workflow" in request else pairing.CREDENTIAL
-        expected = {"op", "scope", *names} | ({"tab"} if scope == "tab" else set())
-        if (
-            set(request) != expected
-            or scope not in ("profile", "tab")
-            or scope == "tab"
-            and (type(tab) is not int or tab < 0)
-        ):
-            raise Refusal("InvalidMint")
-        row = self.minter(request)
-        peer = self.peers.get(str(row["profile"]))
-        if scope == "tab" and peer is None:
+        profile = str(row["profile"])
+        peer = self.peers.get(profile)
+        if peer is None:
             raise Refusal("BrowserDisconnected")
-        generation = peer.generation if scope == "tab" and peer else None
         await self.expire(codes.clock())
-        self.check_caps(generation, tab if scope == "tab" else None, None)
-        code = codes.new_code()
-        digest = codes.code_digest(code)
-        assert digest is not None
-        grant = Grant(
-            "g-" + secrets.token_hex(6),
-            str(scope),
-            row,
-            tab if scope == "tab" else None,
-            generation,
-            digest,
-            codes.clock() + CODE_TTL,
-            incarnation=peer.incarnation if peer else None,
-        )
-        self.record("mint", grant, outcome="ok")
-        self.codes[digest] = grant
-        self.grants[grant.ident] = grant
-        self.arm()
-        reply: Frame = {"ok": True, "code": code, **grant.fields()}
-        del reply["origin"]
-        if grant.tab is None:
-            del reply["tab"]
-        return {**reply, "expires_at": time.time() + CODE_TTL}
-
-    def refuse(self, kind: str, grant: Grant | None, now: float) -> Refusal:
-        self.audit.best_effort(
-            "redeem", **(grant.fields() if grant else {}), outcome=kind
-        )
-        length = self.lockout.fail(now)
-        if length is not None:
-            self.audit.best_effort("lock", outcome=f"{int(length)}s")
-        return Refusal("CodeRefused")
-
-    async def redeem(self, hello: Frame) -> Session:
-        if set(hello) != {"op", "code"}:
-            raise Refusal("InvalidRequest")
-        code, now = string(hello, "code"), codes.clock()
-        if self.lockout.remaining(now) > 0:
-            self.audit.best_effort("redeem", outcome="locked")
-            raise Refusal(
-                "RedeemLocked", retry_after_s=math.ceil(self.lockout.remaining(now))
+        grant = self.profile_grant(profile)
+        if grant is None:
+            grant = Grant(
+                "g-" + secrets.token_hex(6),
+                "profile",
+                row,
+                None,
+                peer.generation,
+                incarnation=peer.incarnation,
+                last_used=codes.clock(),
             )
-        await self.expire(now)
-        digest = codes.code_digest(code)
-        grant = self.codes.get(digest) if digest else None
-        if grant is None or grant.state != "code":
-            if grant is not None:
-                kind = "contended"
-            else:
-                kind = self.spent[digest][0] if digest in self.spent else "wrong"
-            raise self.refuse(kind, grant, now)
-        grant.state = "pending"
-        try:
-            peer = await self.bind(grant)
-            if grant.state != "pending":
-                raise self.refuse("revoked", grant, now)
-            self.check_caps(grant.generation, grant.tab, grant)
-            self.record("redeem", grant, outcome="ok")
-        except Refusal as exc:
-            if grant.state == "pending" and str(exc) == "TabClosed":
-                self.consume(grant)
-                self.grants.pop(grant.ident, None)
-                grant.state, grant.reason = "ended", "tab_closed"
-                self.notify(grant, "tab_closed")
-            elif grant.state == "pending":
-                grant.state = "code"
-            self.arm()  # a sweep that fired while pending skipped this code
-            if str(exc) not in {"CodeRefused", "AuditUnavailable"}:
-                outcome = {
-                    "GrantLimit": "limit",
-                    "TabClosed": "tab_closed",
-                    "BrowserDisconnected": "browser_disconnected",
-                }
-                self.audit.best_effort(
-                    "redeem", **grant.fields(), outcome=outcome.get(str(exc), str(exc))
-                )
-            raise
-        except BaseException:
-            if grant.state == "pending":
-                grant.state = "code"
-            self.arm()
-            raise
-        self.consume(grant)
-        grant.state, grant.generation = "active", peer.generation
-        grant.incarnation, grant.grace_until = peer.incarnation, None
-        grant.session = Session(grant.row, grant=grant)
-        grant.last_used = codes.clock()
-        self.lockout.succeed()
-        self.arm()
-        return grant.session
+            self.record("connect", grant, outcome="ok")
+            self.grants[grant.ident] = grant
+        return {"ok": True, "grant": grant.ident, "scope": "profile", "profile": profile}
 
-    def redeemed(self, session: Session) -> Frame:
+    def connected(self) -> list[Grant]:
+        return [g for g in self.grants.values() if g.state == "active"]
+
+    def profiles(self) -> list[dict[str, object]]:
+        """The connected profiles an agent may attach to, for ``browser_profiles``."""
+        return [
+            {"profile": str(g.row["profile"]), "email": str(g.row["email"]), "grant": g.ident}
+            for g in self.connected()
+        ]
+
+    async def attach(self, hello: Frame) -> Session:
+        """Attach an agent session to a connected profile's grant; contract "attach".
+
+        Why: the agent needs no code; choosing among several connected
+        profiles must be explicit (#11239). What: ``profile`` names one;
+        without it exactly one connected profile is taken, none answers
+        ``NotConnected`` and several answer ``ProfileChoiceRequired`` with the
+        list. Writes the fail-closed ``attach`` audit line.
+        Test: `test_attach_needs_no_code_and_several_profiles_need_a_choice`.
+        """
+        if set(hello) - {"op", "profile"}:
+            raise Refusal("InvalidRequest")
+        await self.expire(codes.clock())
+        live = self.connected()
+        if "profile" in hello:
+            wanted = string(hello, "profile")
+            live = [g for g in live if g.row["profile"] == wanted]
+        if not live:
+            raise Refusal("NotConnected")
+        if len(live) > 1:
+            raise Refusal("ProfileChoiceRequired", profiles=self.profiles())
+        grant = live[0]
+        self.record("attach", grant, outcome="ok")
+        session = Session(grant.row, grant=grant)
+        grant.sessions.append(session)
+        return session
+
+    def attached(self, session: Session) -> Frame:
         grant = session.grant
         assert grant is not None
-        reply: Frame = {"ok": True, **grant.fields()}
-        del reply["origin"]
-        if grant.tab is None:
-            del reply["tab"]
-        return reply
-
-    def consume(self, grant: Grant) -> None:
-        self.codes.pop(grant.digest, None)
-        self.spent[grant.digest] = ("replay", grant.deadline + CODE_TTL)
-
-    async def bind(self, grant: Grant) -> Peer:
-        """Find the live peer for a redeem; a tab grant must still see its tab."""
-        peer = self.peers.get(str(grant.row["profile"]))
-        if grant.scope == "profile":
-            if peer is None:
-                raise Refusal("BrowserDisconnected")
-            return peer
-        if peer is None or peer.generation != grant.generation:
-            raise Refusal("TabClosed")
-        try:
-            # #11239: probe the granted tab by its id, never the active tab.
-            await peer.page("page_tab", grant.ident, tab=grant.tab)
-        except Refusal as exc:
-            if str(exc) in ("TabNotFound", "UnknownGrant"):
-                raise Refusal("TabClosed") from None
-            raise
-        if self.peers.get(str(grant.row["profile"])) is not peer:
-            raise Refusal("TabClosed")
-        return peer
+        return {
+            "ok": True,
+            "grant": grant.ident,
+            "scope": grant.scope,
+            "profile": str(grant.row["profile"]),
+            "email": str(grant.row["email"]),
+        }
 
     def live(self, profile: str) -> list[str]:
-        """Ids of the profile's unredeemed codes and live grants."""
+        """Ids of the profile's live grants."""
         return [g.ident for g in self.grants.values() if g.row["profile"] == profile]
 
     def notify(self, grant: Grant, reason: str) -> None:
@@ -287,7 +163,7 @@ class Grants(Leases):
 
         Why: the worker drops its row, and all-https access with the last one
         (#11239, "All-https access"). What: ``last`` is true when the profile
-        holds no other code or grant.
+        holds no other grant.
         Test: `test_grant_end_reaches_the_worker_on_every_end_route_with_last`.
         """
         profile = str(grant.row["profile"])
@@ -305,13 +181,13 @@ class Grants(Leases):
         task.add_done_callback(self.tasks.discard)
 
     def arm(self) -> None:
-        """Keep one loop callback at the earliest code or reconnect-grace deadline (no thread).
+        """Keep one loop callback at the earliest reconnect-grace deadline (no thread).
 
-        Why: code expiry and a lost browser must reach the worker without an
-        agent call (#11239, "All-https access"). What: called after mint,
-        redeem (either outcome), a peer loss and every sweep; an active grant
-        with a connected browser has no deadline; a no-op once ``halt`` ran.
-        Test: `test_a_refused_redeem_rearms_the_code_deadline`,
+        Why: a lost browser must reach the worker without an agent call
+        (#11239, "All-https access"). What: called after a peer loss or return
+        and every sweep; an active grant with a connected browser has no
+        deadline; a no-op once ``halt`` ran.
+        Test: `test_a_grant_whose_worker_never_returns_ends_after_the_grace`,
         `test_the_deadline_callback_never_runs_after_close`.
         """
         if self.sweeper is not None:
@@ -319,8 +195,7 @@ class Grants(Leases):
             self.sweeper = None
         if self.halted:
             return
-        due = [g.deadline for g in self.grants.values() if g.state == "code"]
-        due += [
+        due = [
             g.grace_until
             for g in self.grants.values()
             if g.state == "active" and g.grace_until is not None
@@ -357,21 +232,32 @@ class Grants(Leases):
         """End a grant synchronously; return its claims for indicator clearing."""
         if grant.state == "ended":
             return []
-        was = grant.state
         grant.state, grant.reason = "ended", reason
         self.grants.pop(grant.ident, None)
-        if was in ("code", "pending"):
-            self.codes.pop(grant.digest, None)
-            self.spent[grant.digest] = ("revoked", grant.deadline + CODE_TTL)
+        # #11239: the grant ends before any audit write, so a failed line never keeps it.
         self.audit.best_effort("grant_end", **grant.fields(), outcome=reason)
         self.notify(grant, reason)
-        if grant.session is None:
-            return []
-        owner = grant.session.owner
-        old = [(k, c) for k, c in self.claims.items() if c.owner == owner]
+        owners = {s.owner for s in grant.sessions}
+        old = [(k, c) for k, c in self.claims.items() if c.owner in owners]
         for key, _ in old:
             del self.claims[key]
         return [c for _, c in old]
+
+    def retire_soon(self, grant: Grant, reason: str) -> None:
+        """Retire from synchronous code and clear its claims in a task, so no stale lease outlives it.
+
+        Test: `test_a_browser_restart_ends_the_grant_at_reconnect`.
+        """
+        claims = self.retire(grant, reason)
+        if not claims:
+            return
+
+        async def run() -> None:
+            await asyncio.gather(*(self.clear(c) for c in claims), return_exceptions=True)
+
+        task = asyncio.ensure_future(run())
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     async def end(self, grant: Grant, reason: str) -> None:
         """End a grant, then clear its indicators; a failed clear never stops a caller's loop.
@@ -418,7 +304,7 @@ class Grants(Leases):
             if grant.incarnation:
                 grant.grace_until = until
             else:  # #11239: no incarnation to match on return, so no grace.
-                self.retire(grant, "browser_gone")
+                self.retire_soon(grant, "browser_gone")
         self.arm()
 
     def peer_back(self, peer: Peer) -> None:
@@ -426,9 +312,10 @@ class Grants(Leases):
 
         Why: ``incarnation`` lives in ``chrome.storage.session``, which survives
         a service-worker restart and is cleared when the browser closes. What:
-        same incarnation moves codes and active grants to the new generation
-        and audits ``grant_reuse``; a new or missing incarnation, or an audit
-        failure, ends them ``browser_gone``. Runs before the hello
+        same incarnation moves active grants to the new generation and audits
+        ``grant_reuse``; a new or missing incarnation, or an audit failure,
+        ends them ``browser_gone``, so after a browser restart the popup
+        offers Connect again (#11239 ruling Dpj). Runs before the hello
         acknowledgement, so its ``live`` list is current.
         Test: `test_a_grant_survives_a_worker_reconnect_within_the_grace`,
         `test_a_browser_restart_ends_the_grant_at_reconnect`,
@@ -438,7 +325,7 @@ class Grants(Leases):
         for grant in list(self.grants.values()):
             if (
                 grant.row["profile"] != profile
-                or grant.state not in ("code", "active")
+                or grant.state != "active"
                 or grant.generation in (None, peer.generation)
             ):
                 continue
@@ -447,7 +334,7 @@ class Grants(Leases):
                 and grant.grace_until is not None
                 and grant.grace_until <= codes.clock()
             ):
-                self.retire(grant, "browser_gone")
+                self.retire_soon(grant, "browser_gone")
                 continue
             # pair() refuses an empty incarnation (protocol.string); this guard
             # keeps an unset one from ever matching.
@@ -455,11 +342,11 @@ class Grants(Leases):
                 try:  # fail closed: a rebind the audit cannot record ends the grant
                     self.audit.write("grant_reuse", **grant.fields(), outcome="ok")
                 except OSError:
-                    self.retire(grant, "browser_gone")
+                    self.retire_soon(grant, "browser_gone")
                     continue
                 grant.generation, grant.grace_until = peer.generation, None
-            elif grant.state == "active":  # a stale tab code fails redeem as TabClosed
-                self.retire(grant, "browser_gone")
+            else:
+                self.retire_soon(grant, "browser_gone")
         self.arm()
 
     async def end_profile(self, profile: str) -> None:
@@ -468,8 +355,12 @@ class Grants(Leases):
                 await self.end(grant, "unenrolled")
 
     async def close_session(self, session: Session) -> None:
-        if session.grant is not None and session.grant.state == "active":
-            await self.end(session.grant, "closed")
+        """Detach one agent; the profile grant stays for the next agent (#11239 ruling Dpj)."""
+        grant = session.grant
+        if grant is not None and session in grant.sessions:
+            grant.sessions.remove(session)
+            if grant.state == "active":
+                self.audit.best_effort("detach", **grant.fields(), outcome="ok")
 
     async def check_live(self, grant: Grant) -> None:
         assert self.db is not None
@@ -490,10 +381,14 @@ class Grants(Leases):
             await self.end(grant, "unenrolled")
 
     async def grant_operator(self, request: Frame, profile: str | None = None) -> Frame:
-        """List or revoke codes and grants; ``profile`` narrows to one profile (popup).
+        """List or revoke grants; ``profile`` narrows to one profile (popup).
 
+        Why: Disconnect must end access at once and the full audit log must
+        record it (#11239 ruling 03:52Z). What: a revoke ends each grant
+        first, then writes the best-effort ``revoke`` line, so a failed audit
+        write never keeps a grant alive.
         Test: `test_revoke_one_and_all_refuse_the_next_call`,
-        `test_popup_list_and_revoke_see_only_the_credential_profile`.
+        `test_disconnect_whose_audit_fails_still_revokes_at_once`.
         """
         op = request.get("op")
         await self.expire(codes.clock())
@@ -515,12 +410,12 @@ class Grants(Leases):
         else:
             raise Refusal("InvalidRequest")
         for grant in targets:
-            self.audit.best_effort("revoke", **grant.fields(), outcome="ok")
             await self.end(grant, "revoked")
+            self.audit.best_effort("revoke", **grant.fields(), outcome="ok")
         return {"ok": True, "revoked": len(targets)}
 
     async def popup_grants(self, request: Frame) -> Frame:
-        """The popup's list and revoke on enrollment.sock, inside one credential's profile."""
+        """The popup's connect, list and revoke on enrollment.sock, inside one credential's profile."""
         assert self.db is not None
         fields = pairing.triple(request)
         if fields is None or request.get("op") not in POPUP_OPS:
@@ -529,4 +424,8 @@ class Grants(Leases):
         if row is None:
             raise Refusal("NotEnrolled")
         rest = {k: v for k, v in request.items() if k not in pairing.CREDENTIAL}
+        if rest.get("op") == "connect":
+            if set(rest) != {"op"}:
+                raise Refusal("InvalidRequest")
+            return await self.connect(row)
         return await self.grant_operator(rest, str(row["profile"]))

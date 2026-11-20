@@ -392,6 +392,7 @@ fn create_client_env_beats_store() {
 /// Why: when NO tier (env, `.env.local`, or store) resolves any of the three
 /// ctrl/PM credentials, `create_client()` must fail with the clear
 /// multi-provider error instead of building a client with an empty key.
+/// Under a provider lock (#10978) the same environment builds a keyless client.
 /// Test: itself.
 #[test]
 #[serial]
@@ -427,6 +428,15 @@ fn create_client_missing_everywhere_errors_clearly() {
         msg.contains("openrouter") && msg.contains("anthropic") && msg.contains("claude-code"),
         "error must name all three supported providers: {msg}"
     );
+
+    // #10978: under the provider lock no ambient credential is wanted; the
+    // client is built keyless instead of refusing a Bedrock-only setup.
+    {
+        let _locked = crate::llm::provider_lock::override_on_this_thread(Ok(Some(
+            crate::llm::provider_lock::ProviderLock::Bedrock,
+        )));
+        create_client().expect("the lock builds a keyless client");
+    }
 
     // SAFETY: locks still held.
     unsafe {

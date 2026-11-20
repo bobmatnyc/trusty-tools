@@ -915,20 +915,17 @@ fn init_refuses_a_mistyped_drop_option_before_any_call_10276() {
 fn init_refuses_a_checkout_of_another_repo_naming_both_10276() {
     let gh = FakeGh::new(sim());
     let opts = InitOptions {
-        repo: "duettoresearch/model-usage-monitor".into(),
+        repo: "acme/model-usage-monitor".into(),
         ..init_opts(true, &[])
     };
     let err = init(&BoardClient::new(&gh), &spec(), &opts).unwrap_err();
     assert!(
         matches!(&err, BoardError::WrongCheckout { repo, checkout }
-            if repo == "duettoresearch/model-usage-monitor" && checkout == "o/r"),
+            if repo == "acme/model-usage-monitor" && checkout == "o/r"),
         "{err}"
     );
     let text = err.to_string();
-    assert!(
-        text.contains("`duettoresearch/model-usage-monitor`"),
-        "{text}"
-    );
+    assert!(text.contains("`acme/model-usage-monitor`"), "{text}");
     assert!(text.contains("`o/r`"), "{text}");
     assert!(gh.mutations().is_empty(), "{:?}", gh.mutations());
     assert!(

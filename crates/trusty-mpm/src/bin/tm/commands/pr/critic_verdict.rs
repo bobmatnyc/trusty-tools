@@ -436,6 +436,27 @@ pub(crate) fn assess(view: &VerdictView) -> Assessment {
     }
 }
 
+/// Whether the latest trusted verdict pinned to the head is an APPROVE or WARN.
+///
+/// Why (Dr4): `tm pr queue-check` admits a rung 5 or 6 PR only with a critic
+/// verdict on the commit that would merge; [`assess`] alone answers "nothing
+/// blocks", which a PR with no verdict at all also satisfies.
+/// What: false when the head sha is invalid or no admitted verdict is pinned
+/// to it; otherwise true when the last one pinned to it is not a BLOCK. The
+/// caller still applies [`assess`]'s refusal first.
+/// Test: `dr4_rung_6_with_approve_pinned_to_head_passes`,
+/// `dr4_rung_5_with_approve_pinned_to_an_old_sha_is_refused`.
+pub(crate) fn cleared_on_head(view: &VerdictView) -> bool {
+    let Some(head) = view.head_oid() else {
+        return false;
+    };
+    collect(view)
+        .iter()
+        .rev()
+        .find(|p| p.sha.as_deref().is_some_and(|s| head.starts_with(s)))
+        .is_some_and(|p| p.verdict != Verdict::Block)
+}
+
 fn refuse(reason: String) -> Assessment {
     Assessment {
         refusal: Some(reason),

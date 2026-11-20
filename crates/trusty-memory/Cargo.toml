@@ -69,7 +69,7 @@ name = "trusty-memory"
 # 0.35.0 (Refs #9275): minor by owner ruling Dfa — palace format 2; trusty-common floor moves 0.60 -> 0.61; 0.34.0 skipped on purpose and never published (0.33.0 is live on crates.io).
 # 0.36.0 (Refs #9271): minor — owns the engine (`trusty_memory::engine` is a module, no longer a re-export of `trusty_common::memory_core`); trusty-common floor moves 0.63 -> 0.64; adds `embedder-test-support` and `memory-core-test-support`; subsumes the unpublished 0.35.1 (0.35.0 is live on crates.io).
 # 1.0.0: stability release (owner ruling Dnx); replaces the 0.36.9 line.
-version = "1.0.0"
+version = "1.0.2"
 edition.workspace = true
 description = "MCP server (stdio + Unix socket) for trusty-memory"
 license.workspace = true
@@ -160,7 +160,7 @@ trusty-mcp = { workspace = true, optional = true }
 # serving surface needs is switched on by `server` below (`config-cli` is what
 # pulls in clap). #9271: the engine moved here from trusty-common's
 # `memory-core`, so this names the trusty-common features it used to imply.
-trusty-common = { path = "../trusty-common", version = "0.70", default-features = false, features = [
+trusty-common = { path = "../trusty-common", version = "0.70.2", default-features = false, features = [
     "embedder",
     "embedder-bundled-ort",
     "credentials",

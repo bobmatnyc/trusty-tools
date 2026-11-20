@@ -18,6 +18,15 @@ replace the whole workflow section via a `WORKFLOW` marker in its `CLAUDE.md`
 | 4. QA | `web-qa` / `api-qa` / `qa` | All criteria verified with evidence | Engineer self-verified (ran full test suite, raw output shown), user says "no QA" |
 | 5. Documentation | `documentation` | Docs updated | No public API changes, internal refactor only |
 
+<!-- rule:tm-workflow/docs-skip-keeps-evidence -->
+**A skip drops the agent, never the evidence (#10575).** Phases 3 and 4 skip
+for docs-only work, so a document, scenario set, plan or brief reaches Done
+with no engineer or QA gate. It still owes the non-code Done test in
+`completion-standard.md`, "Non-Code Deliverables": criteria that quote the
+request, a `Read` of the final artifact after the last write, and a completion
+report with an evidence map (verified / helper-reported / unfinished /
+untested). Size is never the result.
+
 **Phase 1 — Research** (`research`). Required for ambiguous requirements,
 multiple possible approaches, or an unfamiliar codebase. Skipped when the user
 gave an explicit command or the task is simple operational work.
@@ -50,7 +59,8 @@ Requirements: complete code, error handling, test proof, and the changelog entry
 described in `changelog.md`. Skip only for docs-only/CI-only changes.
 
 **Phase 4 — QA.** Routing: `api-qa` for APIs, `web-qa` for UI, `qa` otherwise.
-The gate itself is `tm-verification-protocols`.
+The gate itself is `tm-verification-protocols`. For a non-code deliverable the
+QA evidence is the evidence map above.
 
 **Phase 5 — Documentation** (`documentation`). Skipped for an internal refactor
 with no public API change. A spec edit driven by an owner ruling carries a

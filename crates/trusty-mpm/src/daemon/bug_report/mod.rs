@@ -52,7 +52,8 @@ pub mod types;
 // ── Convenience re-exports ─────────────────────────────────────────────────────
 
 pub use denials::{
-    DeniedCall, PM_GUARD_DENIALS_FILE, append_denial, denial_record, pm_guard_denials_path,
+    DeniedCall, PM_GUARD_DENIALS_FILE, append_denial, denial_record, drop_resolved_pending,
+    pm_guard_denials_path,
 };
 pub use github::{GithubFilingError, extract_fingerprint, file_issue, file_issue_with};
 // Re-export token providers from the token module (Phase 4).

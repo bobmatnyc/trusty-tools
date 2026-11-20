@@ -16,9 +16,9 @@ index 0000000000..9facf11f6d
 +//! pre-#3427 install with no `.gitignore` guard), the NEXT session's
 +//! regeneration writes the same path back as local content — and a later
 +//! `git merge --ff-only origin/main` aborts with "your local changes would be
-+//! overwritten", exactly the `duettoresearch/duetto-eve-agents` reproduction
++//! overwritten", exactly the `acme/acme-eve-agents` reproduction
 +//! (28 commits stranded, resolved only by `git rm -r --cached` + a manual
-+//! `.gitignore`, duetto-eve-agents#111). This is Option 1 (prevent) of #3427;
++//! `.gitignore`, acme-eve-agents#111). This is Option 1 (prevent) of #3427;
 +//! [`crate::daemon::doctor_scaffold_tracking`] is Option 2 (detect + exact
 +//! remediation for a project that already committed these paths — a
 +//! `.gitignore` entry added AFTER the fact does not untrack anything already

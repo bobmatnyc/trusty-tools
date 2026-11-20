@@ -1,7 +1,7 @@
 # Writing Assistant — long-form drafting and editing overlay over the base
 # `assistant` agent (#8186, epic #8183).
 #
-# Third first-class assistant alongside `../izzie/` and `../cto-assistant/`,
+# Third first-class assistant alongside `../assistant/` and `../izzie/`,
 # built on the SAME machinery: a directory package (`agent.toml` +
 # `persona.md`) declaring `extends = "assistant"`, so the base's curated
 # gworkspace surface, black-box tool posture and persona body all arrive by
@@ -88,7 +88,7 @@ allow = [
   # `channel` reads and sends only on destinations already saved for THIS
   # assistant (`tools::channel`, fixed to the executing agent), so the grant
   # widens nothing beyond `writing-assistant.channels.json` — the same
-  # reasoning #7880 used for cto-assistant.
+  # reasoning #7880 used for the other assistants.
   "channel",
 ]
 # #8186: NO `scopes` line. The base's family grants
@@ -102,12 +102,10 @@ allow = [
 # gworkspace/memory set. Each name must be on the assistant skill floor
 # (`agents::skill_floor::ASSISTANT_REACHABLE_SKILLS`) or it is stripped before
 # injection — see `bundled_assistant_personas_declare_only_reachable_skills`.
-#   cto-bob-voice  — the owner's own writing voice, for drafting on his behalf
 #   tm-prose-style — the plain-prose rules this persona edits against
 #   web-search     — how to use `web_search` for source-gathering
 # #482: the system prompt body lives in persona.md.
 skills = [
-    "cto-bob-voice",
     "tm-prose-style",
     "web-search",
 ]

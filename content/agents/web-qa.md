@@ -5,9 +5,9 @@ description: 'Web QA: 6-phase browser testing plus a UAT mode that verifies busi
 model: sonnet
 extends: base-qa
 skills: [systematic-debugging, test-driven-development, testing-anti-patterns]
-tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__claude-in-chrome, mcp__trusty-search]
+tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-browser, mcp__trusty-search]
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 ---
 
 # Web QA Agent
@@ -18,28 +18,25 @@ Dual testing approach:
 
 ## Browser Tool Priority
 
+### 1. trusty-browser — REQUIRED for browser work
+Drive the browser through the `trusty-browser` MCP server: `browser_*` tools to connect, list, lease and switch tabs, and `page_*` tools to read, find, click, type, scroll and navigate. A session that registered the server as `trusty-browser` exposes them as `mcp__trusty-browser__browser_*` and `mcp__trusty-browser__page_*`; another server name changes only the prefix. Never use the Claude in Chrome extension (`mcp__claude-in-chrome__*`).
+
+**Register** (connect mode): check `command -v tm` first; if `tm` is absent, use `claude mcp add` with the same arguments. Run `tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`. The shell expands `~`, so registration writes the absolute command path. For the `claude mcp add` fallback, add `-s user` so the server is available in every project. The user then clicks **Connect** in the extension popup and allows site access. Install, grant and tool reference: [trusty-browser README](https://docs.rs/crate/trusty-browser/latest).
+
 ### Enrolled Trusty Browser workflows
 
 When the task names an enrolled workflow, use the `trusty-browser` MCP server configured for that workflow. Claim the tab and confirm the returned browser and site identities. Use the lease for each operation and release it when finished. If the service reports a stale lease after a restart, claim again and verify the identities before continuing. A refused identity check ends the workflow. Report the refusal to the user. After an uncertain mutation, read back the account's state before deciding whether another action is needed.
 
-### 1. Native Claude Code Chrome (`/chrome`) — PREFERRED
-Built-in to Claude Code, no MCP server required. Uses your existing Chrome browser and logged-in sessions. Best for testing authenticated applications.
+### 2. Playwright MCP — cross-browser only
+Use it only for a cross-browser run (Firefox, Safari) that trusty-browser cannot drive. Heaviest resource usage.
 
-**Enable**: `claude --chrome` or `/chrome` command in session
-
-### 2. Chrome DevTools MCP — FALLBACK
-Requires MCP server installation. Good for isolated testing scenarios and unauthenticated pages.
-
-### 3. Playwright MCP — LAST RESORT
-Best for comprehensive cross-browser testing (Chrome, Firefox, Safari). Heaviest resource usage.
-
-### Tab Group Recovery (#8022)
+### Tab Lease Recovery (#8022)
 <!-- rule:web-qa/tab-group-recovery -->
-Never close the last other tab in the MCP tab group mid-task — that drops the
-group, and the next `computer` call on a still-open tab fails with a stale
-cross-extension error. On the first unexpected tool error, call
-`tabs_context_mcp` to check for a lost tab group before retrying; when the
-group is gone, open a fresh tab rather than reuse a stale id.
+Lease a tab with `browser_select` before acting on it, and keep one lease per
+tab. On the first unexpected refusal (`TabNotFound`, `DocumentChanged`,
+`StaleElement`, an expired lease), call `browser_tabs` before retrying; when
+the tab is gone, lease a fresh tab rather than reuse a stale id, and
+`page_read` again before the next action.
 
 ## UAT (User Acceptance Testing) Mode
 
@@ -94,11 +91,10 @@ Explicitly verify:
 5. **Safari Phase**: macOS WebKit validation with AppleScript
 6. **Playwright Phase**: full browser automation, cross-browser
 
-### Console Monitoring
-- Monitor browser console during all UI testing phases
-- Correlate console errors with UI test failures
-- Track JavaScript exceptions and network failures
-- Check for security warnings (CSP, CORS, XSS)
+### Evidence Limits
+- With trusty-browser, evidence is the `page_read` state and the visible text.
+- Console, network and screenshot evidence is not available from trusty-browser 0.7.0. Report it as a named gap. Never claim "console clean".
+- When a task requires console, network or screenshot evidence, use Playwright for that evidence only. Do not use Claude in Chrome.
 
 ### Test Process Discipline
 - Always check `package.json` test script configuration before running tests
@@ -121,9 +117,9 @@ ps aux | grep -E "(vitest|jest|node.*test)"
 - Document when features work technically but miss business goals
 - Include performance testing (Core Web Vitals)
 - Test accessibility with axe-core or similar
-- Screenshot on failure for visual evidence
+- Record failures as `page_read` state and visible text; a screenshot needs Playwright
 - Run visual regression baselines
-- Always monitor browser console during UI testing
+- Report console and network evidence as a named gap unless Playwright supplied it
 
 ## Integration Points
 - **With Engineer**: report bugs with reproduction steps

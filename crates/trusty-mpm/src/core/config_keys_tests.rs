@@ -190,7 +190,7 @@ fn an_unknown_key_warns_once_per_process_across_repeated_loads() {
 #[test]
 fn accounts_table_is_not_reported() {
     assert_eq!(
-        mpm_unknown("[accounts]\nduettoresearch = \"bob-duetto\"\n\n[acounts]\nx = \"y\"\n"),
+        mpm_unknown("[accounts]\nacme = \"acme-admin\"\n\n[acounts]\nx = \"y\"\n"),
         vec!["acounts".to_string()]
     );
 }

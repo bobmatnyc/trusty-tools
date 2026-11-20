@@ -1,7 +1,7 @@
-//! Integration tests for the voice module: duetto through the full pipeline.
+//! Integration tests for the voice module: house through the full pipeline.
 //!
 //! Why: extracted from tests.rs to keep that file under the 500-line cap (#610).
-//! These tests exercise the end-to-end duetto path and drift detection between
+//! These tests exercise the end-to-end house path and drift detection between
 //! the shipped content voice and the external ~/.config copy.
 //! What: full stock→principles→voice pipeline test and the bundled vs. external
 //! drift-check test (skipped gracefully when the external file is absent).
@@ -11,21 +11,21 @@ use std::path::PathBuf;
 
 use super::{VoiceConfig, loader::VoiceLoader, principles::principles_addendum, types::*};
 
-/// Full stock→principles→voice pipeline with the duetto package.
+/// Full stock→principles→voice pipeline with the house package.
 ///
-/// Why: end-to-end test that confirms the duetto voice integrates cleanly
+/// Why: end-to-end test that confirms the house voice integrates cleanly
 /// into VoiceConfig's combined_addendum without truncation or escaping issues.
-/// What: loads duetto from shipped content voice, builds a full VoiceConfig,
+/// What: loads house from shipped content voice, builds a full VoiceConfig,
 /// asserts the combined addendum contains both layers in order.
 /// Test: uses shipped content voice; no network.
 #[test]
-fn full_pipeline_with_duetto_voice() {
+fn full_pipeline_with_house_voice() {
     let loader = VoiceLoader::new();
-    let pkg = loader.load("duetto").expect("bundled duetto must load");
+    let pkg = loader.load("house").expect("bundled house must load");
     let addendum = pkg.effective_addendum();
     assert!(
         !addendum.is_empty(),
-        "duetto effective_addendum must be non-empty"
+        "house effective_addendum must be non-empty"
     );
 
     let vc = VoiceConfig {
@@ -35,19 +35,19 @@ fn full_pipeline_with_duetto_voice() {
                 .expect("the checkout ships the principles"),
         ),
         voice_addendum: Some(addendum.clone()),
-        voice_name: Some("duetto".to_string()),
+        voice_name: Some("house".to_string()),
         ..Default::default()
     };
 
     let combined = vc.combined_addendum();
-    // Principles should appear before duetto content.
+    // Principles should appear before house content.
     assert!(
         combined.contains("Review principles") || combined.contains("BLOCK"),
         "combined must contain principles content"
     );
     assert!(
         combined.contains("correctness"),
-        "combined must contain duetto correctness guidance"
+        "combined must contain house correctness guidance"
     );
 
     // Principles before voice in ordering.
@@ -55,7 +55,7 @@ fn full_pipeline_with_duetto_voice() {
     // Both should exist and principles precedes voice.
     assert!(
         p_pos != usize::MAX,
-        "BLOCK should appear (from principles or duetto)"
+        "BLOCK should appear (from principles or house)"
     );
     assert!(
         vc.has_any_addendum(),
@@ -63,10 +63,10 @@ fn full_pipeline_with_duetto_voice() {
     );
 }
 
-/// The shipped duetto voice matches the external ~/.config version when present.
+/// The shipped house voice matches the external ~/.config version when present.
 ///
 /// Why: the content's voice (#9015) must stay in sync with the authoritative file
-/// at ~/.config/trusty-review/voices/duetto/voice.toml.  If they diverge, users
+/// at ~/.config/trusty-review/voices/house/voice.toml.  If they diverge, users
 /// with the external file get a different voice than those without.  This test
 /// guards against accidental drift.
 /// What: if the external file is absent (CI), skips gracefully.  When present,
@@ -75,14 +75,14 @@ fn full_pipeline_with_duetto_voice() {
 /// skips the XDG path so the assertion truly compares bundled vs. external.
 /// Test: conditional on external file presence; no network.
 #[test]
-fn bundled_duetto_matches_external_when_present() {
+fn bundled_house_matches_external_when_present() {
     let external_path: PathBuf = {
         let Some(cfg) = dirs::config_dir() else {
             return;
         };
         cfg.join("trusty-review")
             .join("voices")
-            .join("duetto")
+            .join("house")
             .join("voice.toml")
     };
     if !external_path.exists() {
@@ -90,12 +90,12 @@ fn bundled_duetto_matches_external_when_present() {
         return;
     }
 
-    // bundled_only() skips the XDG config dir, so `load("duetto")` can only
+    // bundled_only() skips the XDG config dir, so `load("house")` can only
     // return the instructional content's voice — never the external file.
     let loader_bundled = VoiceLoader::bundled_only();
     let bundled = loader_bundled
-        .load("duetto")
-        .expect("bundled duetto must load via bundled_only");
+        .load("house")
+        .expect("bundled house must load via bundled_only");
 
     // Read the external file directly (not through the loader) so we can
     // compare two clearly separated sources.

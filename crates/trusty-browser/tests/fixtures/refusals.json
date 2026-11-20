@@ -1,0 +1,218 @@
+[
+  {
+    "socket": "enrollment.sock",
+    "case": "enroll-host-refused",
+    "request": {
+      "op": "pair",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "key": "bc1755f18c664ce836300569acb31692fca2cbfa21aeb25edf99aa8127951418"
+    },
+    "reply": {
+      "ok": false,
+      "error": "Unauthorized",
+      "reason": "host_not_native_host"
+    }
+  },
+  {
+    "socket": "enrollment.sock",
+    "case": "enroll-conflict-key",
+    "request": {
+      "op": "pair",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "key": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "reply": {
+      "ok": false,
+      "error": "EnrollmentConflict",
+      "reason": "enroll_conflict_key"
+    }
+  },
+  {
+    "socket": "enrollment.sock",
+    "case": "enroll-invalid",
+    "request": {
+      "op": "pair",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "key": "bc1755f18c664ce836300569acb31692fca2cbfa21aeb25edf99aa8127951418",
+      "x": 1
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidEnrollment"
+    }
+  },
+  {
+    "socket": "enrollment.sock",
+    "case": "enroll-removed-op",
+    "request": {
+      "op": "enroll",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "key": "bc1755f18c664ce836300569acb31692fca2cbfa21aeb25edf99aa8127951418"
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidRequest"
+    }
+  },
+  {
+    "socket": "enrollment.sock",
+    "case": "enroll-unpair-bad",
+    "request": {
+      "op": "unpair",
+      "profile": "1fbb8745-fca2-434e-8092-2940b0116d3d",
+      "email": "bêta.ünï@exämple.test",
+      "key": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "reply": {
+      "ok": false,
+      "error": "Unauthorized",
+      "reason": "unpair_bad_credential"
+    }
+  },
+  {
+    "socket": "service.sock",
+    "case": "hello-profile-mismatch",
+    "request": {
+      "type": "hello",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "other@example.test",
+      "incarnation": "i",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "reply": {
+      "ok": false,
+      "error": "ProfileMismatch"
+    }
+  },
+  {
+    "socket": "service.sock",
+    "case": "hello-invalid-nonce",
+    "request": {
+      "type": "hello",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "incarnation": "i",
+      "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidNonce"
+    }
+  },
+  {
+    "socket": "service.sock",
+    "case": "hello-extra-field",
+    "request": {
+      "type": "hello",
+      "profile": "0dcdaf05-6de3-4872-9ad0-186105244c23",
+      "email": "alpha@example.test",
+      "incarnation": "i",
+      "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "x": 1
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidRequest"
+    }
+  },
+  {
+    "socket": "service.sock",
+    "case": "proof-mismatch",
+    "request": {
+      "type": "hello",
+      "profile": "1fbb8745-fca2-434e-8092-2940b0116d3d",
+      "email": "bêta.ünï@exämple.test",
+      "incarnation": "i",
+      "nonce": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "reply": {
+      "ok": false,
+      "error": "Unauthorized"
+    }
+  },
+  {
+    "socket": "agent.sock",
+    "case": "agent-attach-not-connected",
+    "request": {
+      "op": "attach"
+    },
+    "reply": {
+      "ok": false,
+      "error": "NotConnected"
+    }
+  },
+  {
+    "socket": "agent.sock",
+    "case": "agent-attach-extra",
+    "request": {
+      "op": "attach",
+      "x": 1
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidRequest"
+    }
+  },
+  {
+    "socket": "agent.sock",
+    "case": "select-no-request-id",
+    "request": {
+      "op": "select",
+      "tab": 7
+    },
+    "reply": {
+      "ok": false,
+      "error": "BrowserRefused"
+    }
+  },
+  {
+    "socket": "agent.sock",
+    "case": "unknown-op",
+    "request": {
+      "op": "nope"
+    },
+    "reply": {
+      "ok": false,
+      "error": "InvalidRequest"
+    }
+  },
+  {
+    "socket": "operator.sock",
+    "case": "operator-revoke-unknown",
+    "request": {
+      "op": "revoke_grant",
+      "grant": "g-000000000000"
+    },
+    "reply": {
+      "ok": false,
+      "error": "UnknownGrant"
+    }
+  },
+  {
+    "socket": "operator.sock",
+    "case": "operator-unpair-unknown",
+    "request": {
+      "op": "unpair",
+      "profile": "00000000-0000-4000-8000-000000000001"
+    },
+    "reply": {
+      "ok": false,
+      "error": "UnknownProfile"
+    }
+  },
+  {
+    "socket": "operator.sock",
+    "case": "operator-bad-op",
+    "request": {
+      "op": "bogus"
+    },
+    "reply": {
+      "ok": false,
+      "error": "RevokeFailed"
+    }
+  }
+]

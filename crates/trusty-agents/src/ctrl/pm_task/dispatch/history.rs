@@ -247,7 +247,8 @@ pub async fn run_pm_task_with_history(
 
         let local_global_cfg = crate::mcp::GlobalConfig::load().await;
         let local_cfg = &local_global_cfg.local_inference;
-        let local_qualifies = local_cfg.enabled
+        // #10978: `route_enabled` is off under a provider lock.
+        let local_qualifies = crate::local_inference::route_enabled(local_cfg)
             && crate::local_inference::qualifies_for_local_inference(
                 &IntentClass::Conversational,
                 user_input,

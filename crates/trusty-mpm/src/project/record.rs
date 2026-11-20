@@ -73,7 +73,7 @@ pub struct Project {
     /// Why: a host may have several `gh`-authenticated accounts; the operator
     /// who has admin rights on THIS project's repo may not be the ambient
     /// active `gh` account. #2081's motivating incident: a delegated agent's
-    /// active account (`bob-duetto`) lacked admin rights on
+    /// active account (`acme-admin`) lacked admin rights on
     /// `bobmatnyc/trusty-tools`, so `gh pr merge --admin` failed until the
     /// account was switched by hand. Storing the preferred login on the
     /// project record lets callers resolve a per-invocation, non-mutating `gh`

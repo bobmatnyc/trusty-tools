@@ -35,13 +35,14 @@ use super::{
 /// Resolve the index `review_pr` uses for `owner/repo`, or the degrade.
 ///
 /// Why: an unreadable registry is a search outage; on the interactive surface
-/// that degrades unless the operator required search. An unregistered repo is
-/// a configuration fault and never degrades (#6687).
+/// that degrades unless the operator required search. #11409: an unindexed
+/// repo degrades the same way, so a parked index no longer blocks a review.
 /// What: [`crate::pipeline::pr_index::resolve_pr_index`] against
 /// `state.search` and `state.config` on [`InvocationSurface::Interactive`].
 /// Test: `unreadable_registry_degrades_to_diff_only_when_search_is_not_required`,
 /// `registry_failure_is_an_error_when_search_is_required`,
-/// `missing_index_error_names_the_repo_and_the_index_id`.
+/// `missing_index_degrades_to_a_diff_only_review`,
+/// `missing_index_is_an_error_when_search_is_required`.
 pub(crate) async fn resolve_pr_index(
     state: &AppState,
     owner: &str,
@@ -86,7 +87,8 @@ async fn run_resolved(
 /// config and deps the review receives.
 /// What: parses the optional PR-context parameters (#9192), resolves the
 /// [`PrIndex`] — an unresolvable one is an in-band error naming the repo and
-/// index id, returned before any GitHub call — then resolves the GitHub
+/// index id, returned before any GitHub call; a missing index with search not
+/// required is `DiffOnly` (#11409) — then resolves the GitHub
 /// token, builds `ReviewDeps` and the `ReviewInput`, applies the index to
 /// both, and passes them with the parsed request to `run`.
 /// Test: `resolved_config_reaches_the_review_for_each_repo`,

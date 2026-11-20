@@ -31,6 +31,8 @@ pub enum ModelTier {
     Sonnet,
     /// Top tier — Opus family (PM, planner, architecture work).
     Opus,
+    /// #11353: Fable family — reserved for PM, engineer and research roles.
+    Fable,
 }
 
 impl ModelTier {
@@ -43,7 +45,9 @@ impl ModelTier {
     /// Test: `tier_parses_from_model_id`.
     pub fn from_model_id(model: &str) -> Self {
         let m = model.to_ascii_lowercase();
-        if m.contains("opus") {
+        if m.contains("fable") {
+            ModelTier::Fable
+        } else if m.contains("opus") {
             ModelTier::Opus
         } else if m.contains("haiku") {
             ModelTier::Haiku
@@ -508,6 +512,10 @@ mod tests {
         assert_eq!(
             ModelTier::from_model_id("claude-sonnet-4"),
             ModelTier::Sonnet
+        );
+        assert_eq!(
+            ModelTier::from_model_id("claude-fable-5-2"),
+            ModelTier::Fable
         );
         // Unknown ids fall back to Sonnet.
         assert_eq!(ModelTier::from_model_id("mystery-model"), ModelTier::Sonnet);

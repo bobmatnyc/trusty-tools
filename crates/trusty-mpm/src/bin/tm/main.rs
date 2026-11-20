@@ -73,6 +73,11 @@ mod divert_cli_tests;
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
 
+// #11470: every clap command has a row in the release-gate table.
+#[cfg(test)]
+#[path = "release_gate_drift_tests.rs"]
+mod release_gate_drift_tests;
+
 // #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
 // file rather than `tests.rs` because the `infer_subcommands` /
 // `external_subcommand` precedence it pins is one cohesive claim.
@@ -283,7 +288,9 @@ async fn main() -> anyhow::Result<()> {
     // #8378 PR-C: `tm content` is daemon-less as well.
     match cli.command {
         Some(Command::Fleet { action }) => return commands::fleet::run(action).await,
-        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
         Some(Command::Presence { action }) => return commands::presence::run(action),
         Some(Command::Env { action }) => return commands::env_file::run(action),
         Some(Command::Secrets { action }) => return commands::secrets::run(action).await,
@@ -600,7 +607,9 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Overseer { action }) => overseer(&client, &url, action).await,
         // #8436: dispatched before daemon resolution above; kept exhaustive.
         Some(Command::Fleet { action }) => commands::fleet::run(action).await,
-        Some(Command::Architect { action }) => std::process::exit(commands::architect::run(action)),
+        Some(Command::Architect { action }) => {
+            std::process::exit(commands::architect::run_any(action).await)
+        }
         Some(Command::Env { action }) => commands::env_file::run(action),
         Some(Command::Presence { action }) => commands::presence::run(action),
         Some(Command::Secrets { action }) => commands::secrets::run(action).await,

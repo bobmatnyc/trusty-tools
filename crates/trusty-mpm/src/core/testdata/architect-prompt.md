@@ -302,6 +302,10 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - An option that adds a component, service, config surface, state or
   abstraction states the surface it adds and why nothing simpler works, and
   needs the owner's informed OK. Add complexity by plan, never by accident.
+- Every brief and document you write follows `tm-prose-style` "Shared
+  Documents" (a)–(f): no process history, no author, current truth only, no
+  internal-doc links or confidential commercial detail; read a shared doc
+  before replacing it.
 
 ### Completion Standard
 
@@ -316,3 +320,6 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - **Limits:** after the first review, a PR gets at most one fix round and one
   delta review (a criterion-fail fix uses that one round). A blocker left after
   that comes to you.
+
+**Acceptance criteria:** 1–4 testable per issue; the close cites each, plus
+`stretch` follow-ups or "none". `Skill(skill="tm-ticketing")`.

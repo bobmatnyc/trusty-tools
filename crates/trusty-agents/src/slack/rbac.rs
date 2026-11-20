@@ -1,7 +1,7 @@
 //! Per-user RBAC configuration for the Slack gateway (#480/#481).
 //!
-//! Why: The Slack bot is shared across the Duetto engineering team, but the
-//! underlying `cto-assistant` persona reaches sensitive HR/budget data. Each
+//! Why: The Slack bot is shared across your team, and the persona it
+//! answers as can reach sensitive internal data. Each
 //! known user is pinned to a `ServiceTier` (gating the persona toolset) and an
 //! optional persona allow-list (gating `/slack-switch`); unknown users get a
 //! static Virtual-CTO reply that never touches the LLM.
@@ -16,8 +16,8 @@ use tracing::warn;
 
 /// Per-user RBAC config for Slack (#481).
 ///
-/// Why: The Slack bot is shared across the Duetto engineering team, but the
-/// underlying `cto-assistant` persona reaches sensitive HR/budget data. Each
+/// Why: The Slack bot is shared across your team, and the persona it
+/// answers as can reach sensitive internal data. Each
 /// known user is pinned to a `ServiceTier` (which gates the persona toolset
 /// via `filter_tools_for_user`) and an optional persona allow-list (which
 /// gates `/slack-switch`). Unknown users fall through to a Virtual-CTO reply.
@@ -44,18 +44,23 @@ pub struct SlackRbacConfig {
     /// Keyed by Slack user ID.
     pub(super) users: HashMap<String, SlackUserConfig>,
     /// Default persona for all messages (from `SLACK_DEFAULT_PERSONA`,
-    /// default `"cto-assistant"`).
+    /// default [`DEFAULT_PERSONA`]).
     pub default_persona: String,
 }
+
+/// Persona used when `SLACK_DEFAULT_PERSONA` is unset: one the bundle ships.
+///
+/// Test: `default_persona_ships_in_the_bundle` in `slack::tests`.
+pub const DEFAULT_PERSONA: &str = "assistant";
 
 /// Static reply for Slack users not in the RBAC table (#481).
 ///
 /// Why: Unknown users must NOT reach the LLM or any tool — the bot speaks as
 /// a general "Virtual CTO" with no internal-data access. Returned verbatim,
 /// bypassing `run_pm_task_with_persona` entirely.
-pub(super) const VIRTUAL_CTO_MESSAGE: &str = ":lock: This assistant is for Duetto engineering team members. \
+pub(super) const VIRTUAL_CTO_MESSAGE: &str = ":lock: This assistant is for authorized team members. \
 I can discuss general technology strategy and software architecture, but I don't have access to \
-internal Duetto data. Feel free to ask general questions.";
+internal data. Feel free to ask general questions.";
 
 impl SlackRbacConfig {
     /// Parse the RBAC config from process env.
@@ -64,7 +69,7 @@ impl SlackRbacConfig {
     /// back to a sensible hardcoded team list when `SLACK_RBAC_USERS` is
     /// absent so the bot is usable out of the box.
     /// What: `SLACK_DEFAULT_PERSONA` → `default_persona` (default
-    /// `"cto-assistant"`). `SLACK_RBAC_USERS` → comma-separated
+    /// [`DEFAULT_PERSONA`]). `SLACK_RBAC_USERS` → comma-separated
     /// `ID:Name:TIER:PERSONAS` entries; `PERSONAS` is `*` (unrestricted) or a
     /// `+`-separated allow-list.
     /// Test: `rbac_config_parses_env_string`.
@@ -72,7 +77,7 @@ impl SlackRbacConfig {
         let default_persona = std::env::var("SLACK_DEFAULT_PERSONA")
             .ok()
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "cto-assistant".to_string());
+            .unwrap_or_else(|| DEFAULT_PERSONA.to_string());
         let raw = std::env::var("SLACK_RBAC_USERS").ok();
         let users = match raw.as_deref() {
             Some(s) if !s.trim().is_empty() => parse_rbac_users(s),
@@ -144,19 +149,17 @@ pub(super) fn parse_rbac_users(raw: &str) -> HashMap<String, SlackUserConfig> {
 
 /// Hardcoded default team RBAC table used when `SLACK_RBAC_USERS` is unset.
 ///
-/// Why: The bot should be usable without ops first setting an env var.
-/// `Kartik` is carried over from the custom `cto_bot`'s `BOT_ALLOWED_USERS`
-/// default table (#3852 parity — same Slack id, same ALL tier) so the native
-/// connector doesn't regress access for anyone the retiring bot already let
-/// in.
+/// Why: The bot should be usable without ops first setting an env var. The
+/// ids and names are synthetic placeholders; a real deployment sets
+/// `SLACK_RBAC_USERS`.
 /// Test: `rbac_config_parses_env_string` (indirectly via from_env fallback),
-/// `default_rbac_users_includes_kartik_parity`.
+/// `default_rbac_users_restrict_to_the_default_persona`.
 pub(super) fn default_rbac_users() -> HashMap<String, SlackUserConfig> {
     parse_rbac_users(
-        "U0A6V2W1M2R:Masa:ALL:*,\
-         U0ALDQLBU79:Andrea:ALL:cto-assistant,\
-         U09331EP3MX:Alex:ANALYTICS:cto-assistant,\
-         U09J5EFTSA3:Kartik:ALL:cto-assistant",
+        "U00000001:Alice:ALL:*,\
+         U00000002:Bob:ALL:assistant,\
+         U00000003:Carol:ANALYTICS:assistant,\
+         U00000004:Dave:ALL:assistant",
     )
 }
 

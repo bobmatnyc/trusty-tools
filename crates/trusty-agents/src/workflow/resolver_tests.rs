@@ -300,6 +300,28 @@ async fn llm_resolve_accepts_normal_completion() {
     assert_eq!(got, "alpha\nbeta\n");
 }
 
+/// Why: #10978 — under the provider lock the resolver must not send file
+/// contents to OpenRouter. The stub answers 200, so without the guard this
+/// succeeds; it serves loopback only.
+/// Test: itself.
+#[tokio::test]
+async fn llm_resolve_is_refused_under_the_provider_lock() {
+    use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+    let _l = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+    let resolver = stub_resolver(serve_once(
+        "HTTP/1.1 200 OK",
+        r#"{"choices":[{"message":{"content":"alpha\nbeta\n"}}]}"#,
+    ));
+    let err = resolver
+        .llm_resolve(Path::new("f.txt"), b"alpha\n", b"beta\n", b"<<<<<<<\n")
+        .await
+        .expect_err("refused under the lock");
+    assert!(
+        err.to_string().contains("provider lock = bedrock"),
+        "{err:#}"
+    );
+}
+
 /// A configured-but-broken LLM must degrade to a *full* version, and say so.
 /// This is the end-to-end shape of the CRITICAL finding.
 #[tokio::test]

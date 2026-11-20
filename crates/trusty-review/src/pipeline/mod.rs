@@ -54,6 +54,7 @@ pub mod evidence_admission;
 // `citation_check` (path/content verification, #4042) since the two concerns
 // have independent marker sets and independent test surfaces.
 pub mod finding_hygiene;
+pub mod finding_yield;
 pub mod grade;
 // Why: reconciles the grade embedded in the raw `review_body` JSON with the
 // authoritative top-level grade so the two can never disagree (issue #1886).
@@ -84,6 +85,7 @@ pub mod verify_batch;
 pub mod verify_liveness;
 pub mod verify_posted;
 pub mod verify_prompt;
+pub mod verify_security;
 // Why: the narrative summary is written before the verification round on both
 // pipeline paths and nothing revisits it, so a refuted finding kept being cited
 // as a merge blocker (#4044).  Kept separate from `grade_reconcile` (which

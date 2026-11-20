@@ -236,7 +236,7 @@ fn mpm_architect_skills() -> Vec<String> {
 /// disk for the same reason as above — a new `.md` dropped into that tree must
 /// force a floor decision, not inherit one.
 /// What: a directory holding `SKILL.md` contributes the DIRECTORY name and is
-/// not descended into (its internals — `cto-db/python/**` — are not separate
+/// not descended into (its internals — a `python/**` package — are not separate
 /// skills); every other `.md` contributes its file stem, recursively, matching
 /// how `skills::registry` indexes the tree.
 fn trusty_agents_bundled_skills() -> Vec<String> {

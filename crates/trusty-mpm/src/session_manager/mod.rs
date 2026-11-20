@@ -74,6 +74,7 @@ pub mod restart_ops;
 pub mod resume_breaker;
 /// #8233 item 4: the per-session in-flight resume guard.
 pub(crate) mod resume_in_flight;
+pub(crate) mod resume_server;
 pub(crate) mod resume_workdir;
 /// Age-based eviction of terminal records and the slot numbers they hold.
 pub mod retention;

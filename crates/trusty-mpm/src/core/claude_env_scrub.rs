@@ -121,7 +121,11 @@ pub const INHERITED_SESSION_MARKERS: &[&str] = &[
 /// AFTER the scrub (`session_profile::launch_env`).
 /// Test: `both_helpers_clear_the_profile_stamp`,
 /// `the_env_prefix_really_drops_an_inherited_profile_stamp`.
-pub const INHERITED_TM_STAMPS: &[&str] = &[crate::core::session_profile::SESSION_PROFILE_ENV];
+// #11353: the launch-model stamp, so an unmanaged child never inherits it.
+pub const INHERITED_TM_STAMPS: &[&str] = &[
+    crate::core::session_profile::SESSION_PROFILE_ENV,
+    crate::core::session_profile::LAUNCH_MODEL_ENV,
+];
 
 /// Toolchain overrides a child spawn must never inherit (#8583).
 ///

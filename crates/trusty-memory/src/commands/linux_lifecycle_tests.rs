@@ -12,7 +12,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use trusty_common::linux_lifecycle::{
-    LifecycleError, PinnedProcess, Signal, SignalDelivery, StopOutcome, StoppedSignal,
+    LifecycleError, PinnedProcess, ProcessTable, Signal, SignalDelivery, StopOutcome, StoppedSignal,
 };
 
 use super::*;
@@ -198,11 +198,8 @@ fn lifecycle_fixture_entry() {
     std::process::exit(0);
 }
 
-/// Spawn the fixture as `<dir>/bin/<binary>` serving `socket`.
-///
-/// The test binary is hard-linked beside itself, so `/proc/<pid>/exe` names
-/// `binary` and the link stays on one filesystem.
-fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) -> Child {
+/// Hard-link the test binary as `<dir>/bin/<binary>`; returns the link.
+fn install_fixture(dir: &std::path::Path, binary: &str) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).expect("bin dir");
     let exe = std::env::current_exe().expect("current exe");
@@ -210,6 +207,15 @@ fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) 
     std::fs::hard_link(&exe, &link)
         .or_else(|_| std::fs::copy(&exe, &link).map(|_| ()))
         .expect("link the fixture");
+    link
+}
+
+/// Spawn the fixture as `<dir>/bin/<binary>` serving `socket`.
+///
+/// The test binary is hard-linked beside itself, so `/proc/<pid>/exe` names
+/// `binary` and the link stays on one filesystem.
+fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) -> Child {
+    let link = install_fixture(dir, binary);
     let child = Command::new(&link)
         // `--exact` matches the full test path, not the bare fn name.
         .args([
@@ -230,6 +236,21 @@ fn spawn_fixture(dir: &std::path::Path, binary: &str, socket: &std::path::Path) 
     child
 }
 
+/// A process table under `dir` holding only `pids`, each a link to its real
+/// `/proc` entry.
+///
+/// Why: #11085 — a scan of the live `/proc` fails closed on a host
+/// trusty-memory daemon whose environ it cannot read, which failed these
+/// tests on such a host.
+fn own_procs(dir: &std::path::Path, pids: &[u32]) -> ProcessTable {
+    std::fs::create_dir_all(dir).expect("proc table dir");
+    for pid in pids {
+        std::os::unix::fs::symlink(format!("/proc/{pid}"), dir.join(pid.to_string()))
+            .expect("link the proc entry");
+    }
+    ProcessTable::at(dir)
+}
+
 // AC2: a survivor fails the restart, names its pid, and nothing is started.
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_report_names_a_survivor_and_starts_nothing() {
@@ -247,11 +268,14 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data) };
     let mut desc =
         descriptor_for(Some(&data.clone().into_os_string()), socket.clone()).expect("descriptor");
-    // An install dir with no binary: a start that ran would fail BinaryMissing.
-    desc.install_dir = tmp.path().join("empty-install");
+    // #11085: restart checks the binary before its stop; the stop error
+    // below returns before any start.
+    desc.install_dir = tmp.path().join("bin");
     desc.stop_grace = Duration::from_millis(300);
     desc.kill_wait = Duration::from_millis(500);
-    let result = restart_with(&desc, &DropKill).await;
+    // #11085: the scan sees the fixture (the serving pid it leaves out) only.
+    let procs = own_procs(&run.path().join("proc"), &[fixture.id()]);
+    let result = restart_with(&desc, &DropKill, &procs).await;
     // SAFETY: as above.
     unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
 
@@ -262,36 +286,50 @@ async fn restart_report_names_a_survivor_and_starts_nothing() {
     let shown = format!("{err:#}");
     assert!(shown.contains(&fixture.id().to_string()), "{shown}");
     assert!(shown.contains("survived SIGKILL"), "{shown}");
-    assert!(!shown.contains("not installed"), "start ran: {shown}");
     assert!(alive, "the fixture survived, as the seam made it");
 }
 
 // AC11 / P-b: a daemon that is not running is a `stop` error and a `restart`
-// that reaches the start; here the start meets an empty install dir.
+// that reaches the start. #11085: the fixture binary is installed, so restart
+// passes its pre-stop binary check; the spawned fixture finds no socket
+// variable in its cleared environment and exits, so only a start that ran
+// fails this way.
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_of_a_daemon_that_is_not_running_goes_on_to_start() {
     let _env = crate::commands::env_test_lock().lock().await;
-    let tmp = tempfile::tempdir().expect("tempdir");
+    let exe_dir = std::env::current_exe().expect("exe");
+    let tmp = tempfile::tempdir_in(exe_dir.parent().expect("exe dir")).expect("tempdir");
     let data = tmp.path().join("data");
     std::fs::create_dir_all(&data).expect("data dir");
+    // A short directory: the exe-dir path would overrun sun_path's 108 bytes.
+    let run = tempfile::tempdir().expect("run dir");
+    install_fixture(tmp.path(), BINARY);
     // SAFETY: env_test_lock is held for the whole window the variable is set.
     unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &data) };
     let mut desc = descriptor_for(
         Some(&data.clone().into_os_string()),
-        tmp.path().join("absent.sock"),
+        run.path().join("absent.sock"),
     )
     .expect("descriptor");
-    desc.install_dir = tmp.path().join("empty-install");
-    let stop = stop_report(lc::stop(&desc).await);
-    let restart = restart_with(&desc, &KernelDelivery).await;
+    desc.install_dir = tmp.path().join("bin");
+    desc.spawn_args = [
+        "commands::linux_lifecycle::tests::lifecycle_fixture_entry",
+        "--exact",
+    ]
+    .map(String::from)
+    .to_vec();
+    // #11085: nothing of this test runs, so the scan sees an empty table.
+    let procs = own_procs(&run.path().join("proc"), &[]);
+    let stop = stop_report(lc::stop_with_table(&desc, &KernelDelivery, &procs).await);
+    let restart = restart_with(&desc, &KernelDelivery, &procs).await;
     // SAFETY: as above.
     unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
 
     let stop = stop.expect_err("stop on a stopped daemon exits 1");
     assert!(format!("{stop:#}").contains("No daemon running"));
-    let restart = format!("{:#}", restart.expect_err("no binary to start"));
+    let restart = format!("{:#}", restart.expect_err("the fixture exits at boot"));
     assert!(
-        restart.contains("not installed"),
+        restart.contains("exited before serving the socket"),
         "restart reached start: {restart}"
     );
 }

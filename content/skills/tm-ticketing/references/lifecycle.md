@@ -65,6 +65,8 @@ live verification stays open — at `status:merged` while nobody is working it, 
 back at `status:coded` once a follow-up fix PR is open (owner ruling 2026-09-07;
 the model declares `status:merged -> status:coded`). A fix PR carries `Refs #N`,
 never `Closes #N`, so a merge cannot auto-close something nobody has verified.
+The note lists each acceptance criterion with its evidence and the follow-up
+issue numbers, or "none" (`tm-ticketing`, "Every issue: acceptance criteria").
 
 **Docs-only exception (owner ruling 2026-09-09).** A docs-only issue may close
 directly from `status:merged` on merged-text evidence — a squash-merge SHA

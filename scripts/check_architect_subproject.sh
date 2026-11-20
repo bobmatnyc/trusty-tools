@@ -167,6 +167,7 @@ scripts/dashboard_pane_tail.py|crates/trusty-mpm/src/assets/architect/scripts/da
 scripts/dashboard_attach.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_attach.py
 scripts/dashboard_projects.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_projects.py
 scripts/dashboard_watch.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_watch.py
+scripts/dashboard_toml.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_toml.py
 scripts/dashboard_archctx.py|crates/trusty-mpm/src/assets/architect/scripts/dashboard_archctx.py
 scripts/brief_ids.py|crates/trusty-mpm/src/assets/architect/scripts/brief_ids.py
 scripts/brief-id.py|crates/trusty-mpm/src/assets/architect/scripts/brief-id.py

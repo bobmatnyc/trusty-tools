@@ -11,6 +11,8 @@ pub(crate) mod loading;
 mod params;
 // #3766: the configured bundled-template provider policy, end to end.
 mod provider_policy;
+// #10978: the provider lock through every agent-load path.
+mod provider_lock;
 
 use crate::agents::{AgentConfig, AgentInfo, ToolsConfig};
 
