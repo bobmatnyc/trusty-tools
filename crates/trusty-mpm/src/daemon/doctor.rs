@@ -295,6 +295,10 @@ use doctor_instruction_fold::check_instruction_fold;
 #[path = "doctor_tool_output_compression.rs"]
 mod doctor_tool_output_compression;
 use doctor_tool_output_compression::check_tool_output_compression;
+// #11033: daily `compress` row count, warns on a sharp drop.
+#[path = "doctor_compress_rows.rs"]
+mod doctor_compress_rows;
+use doctor_compress_rows::check_compress_rows;
 
 // #7617: whether the 💸 segment is wired at all — the settings tiers, the
 // readability of its two inputs, and the render rule. Three disappearances had
@@ -624,6 +628,8 @@ pub(crate) async fn run_doctor_with_claims(
         // answers a different question that used to share the word
         // "compression".
         check_tool_output_compression(&paths.root),
+        // #11033: compress rows per day, warns on a drop vs the 14-day median.
+        check_compress_rows(&paths.root),
         // #7617: and this one reports whether the 💸 segment can render AT ALL —
         // the `statusLine` entry in each tier, whether the ledger and the
         // per-session record store are readable, and whether the render rule
