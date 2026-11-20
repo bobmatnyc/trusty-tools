@@ -8,8 +8,11 @@
 //! account `<vault>/<key>`, present when the key is denied to agents; a
 //! vault's migration marker is service [`DENY_MIGRATED_SERVICE`], account
 //! `<vault>`; the pre-#10386 opt-in flag ([`AGENTS_SERVICE`], #9070) is read
-//! once by that migration. Every read goes to
-//! the OS; nothing is cached (§15.5). `keyring` errors are mapped to
+//! once by that migration. #10524: once `tm secrets migrate` has run, every
+//! one of these items lives inside the one vault blob item
+//! (`store::vault_blob`); before it, each is its own item, as above. Every
+//! read goes to the OS; nothing is cached here (§15.5); the server's unlock
+//! grant holds its own snapshot. `keyring` errors are mapped to
 //! fixed diagnostic text by `keyring_reason`, which drops the bytes a
 //! `BadEncoding` error carries. On any target but macOS the crate links no
 //! `keyring` (#9064), and every operation fails closed with
@@ -25,7 +28,13 @@
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
+use super::blob_keychain::BlobKeychain;
 use super::time_limit::TimeLimited;
+#[cfg(target_os = "macos")]
+use super::vault_blob::item_error;
+use super::vault_blob::{BlobStore, ItemId, ItemStore};
 use super::{Capabilities, ControlItem, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
@@ -59,8 +68,7 @@ pub(crate) const AGENTS_PUSH_ONLY_SERVICE: &str = "trusty-secrets.agents-push-on
 pub(crate) const DENY_MIGRATED_SERVICE: &str = "trusty-secrets.agents-deny-migrated";
 
 /// The text a control item stores. Only the item's presence is read.
-#[cfg(target_os = "macos")]
-const AGENTS_MARKER: &str = "1";
+pub(crate) const AGENTS_MARKER: &str = "1";
 
 /// The service holding `item`'s Keychain items.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -108,48 +116,68 @@ impl KeychainBackend {
     // #7524 P2-L7: one process-wide wrapper, so every `KeychainBackend`
     // sees which items still have an abandoned call running.
     fn limited() -> &'static TimeLimited {
-        static KEYCHAIN: LazyLock<TimeLimited> =
-            LazyLock::new(|| TimeLimited::new(Arc::new(OsKeychain), KEYCHAIN_CALL_TIMEOUT));
+        static KEYCHAIN: LazyLock<TimeLimited> = LazyLock::new(|| {
+            TimeLimited::new(
+                Arc::new(BlobKeychain::new(os_blob_store())),
+                KEYCHAIN_CALL_TIMEOUT,
+            )
+        });
         &KEYCHAIN
     }
 }
 
-/// The unbounded `keyring` calls; reached only through [`TimeLimited`].
-#[derive(Debug, Clone, Copy)]
-struct OsKeychain;
-
-impl OsKeychain {
-    #[cfg(target_os = "macos")]
-    fn entry(&self, vault: &VaultName, key: &SecretKey) -> Result<keyring::Entry, SecretsError> {
-        keyring::Entry::new(vault.as_str(), key.as_str()).map_err(|e| failure(vault, key, &e))
-    }
-
-    /// The control `item` for `key` in `vault` (#9070, #10386).
-    #[cfg(target_os = "macos")]
-    fn control_entry(
-        &self,
-        item: ControlItem,
-        vault: &VaultName,
-        key: Option<&SecretKey>,
-    ) -> Result<keyring::Entry, SecretsError> {
-        keyring::Entry::new(control_service(item), &agents_account(vault, key))
-            .map_err(|e| control_failure(vault, key, &e))
-    }
+/// The one OS item store every [`KeychainBackend`] shares, with the vault
+/// blob layered over it (#10524).
+///
+/// Why: the blob's write lock only orders writes when every caller in the
+/// process goes through the same [`BlobStore`].
+pub(crate) fn os_blob_store() -> Arc<BlobStore> {
+    static STORE: LazyLock<Arc<BlobStore>> =
+        LazyLock::new(|| Arc::new(BlobStore::new(Arc::new(OsItems))));
+    Arc::clone(&STORE)
 }
 
-/// A [`SecretsError::Backend`] for a failed control-item call; a per-vault
-/// item names key `(none)`.
+/// The unbounded `keyring` item calls; reached through [`TimeLimited`] or
+/// the server's unlock snapshot and migration, which bound them themselves.
+#[derive(Debug, Clone, Copy)]
+struct OsItems;
+
 #[cfg(target_os = "macos")]
-fn control_failure(
-    vault: &VaultName,
-    key: Option<&SecretKey>,
-    err: &keyring::Error,
-) -> SecretsError {
-    SecretsError::Backend {
-        backend: BackendId::KEYCHAIN.to_string(),
-        vault: vault.to_string(),
-        key: key.map_or_else(|| "(none)".to_string(), ToString::to_string),
-        reason: keyring_reason(err),
+fn os_entry(id: &ItemId) -> Result<keyring::Entry, SecretsError> {
+    keyring::Entry::new(&id.service, &id.account).map_err(|e| item_error(id, keyring_reason(&e)))
+}
+
+impl ItemStore for OsItems {
+    #[cfg(target_os = "macos")]
+    fn read(&self, id: &ItemId) -> Result<Option<Zeroizing<String>>, SecretsError> {
+        map_read(id, os_entry(id)?.get_password())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn read(&self, _: &ItemId) -> Result<Option<Zeroizing<String>>, SecretsError> {
+        Err(no_os_backend())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write(&self, id: &ItemId, text: &str) -> Result<(), SecretsError> {
+        os_entry(id)?
+            .set_password(text)
+            .map_err(|e| item_error(id, keyring_reason(&e)))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn write(&self, _: &ItemId, _: &str) -> Result<(), SecretsError> {
+        Err(no_os_backend())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn delete(&self, id: &ItemId) -> Result<bool, SecretsError> {
+        map_remove(id, os_entry(id)?.delete_credential())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn delete(&self, _: &ItemId) -> Result<bool, SecretsError> {
+        Err(no_os_backend())
     }
 }
 
@@ -179,65 +207,32 @@ pub(crate) fn keyring_reason(err: &keyring::Error) -> String {
     }
 }
 
-/// A [`SecretsError::Backend`] for a failed Keychain call.
-#[cfg(target_os = "macos")]
-pub(crate) fn failure(vault: &VaultName, key: &SecretKey, err: &keyring::Error) -> SecretsError {
-    SecretsError::Backend {
-        backend: BackendId::KEYCHAIN.to_string(),
-        vault: vault.to_string(),
-        key: key.to_string(),
-        reason: keyring_reason(err),
-    }
-}
-
-/// Map a `get_password` result: `NoEntry` is a miss, anything else an error.
+/// Map a `get_password` result: `NoEntry` is a miss, anything else an error
+/// whose text carries no value bytes.
 ///
-/// Test: `keychain_get_maps_no_entry_to_none_and_failures_to_errors`.
+/// Test: `keychain_read_maps_no_entry_to_none_and_failures_to_errors`,
+/// `keychain_error_text_never_carries_value_bytes`.
 #[cfg(target_os = "macos")]
-pub(crate) fn map_get(
-    vault: &VaultName,
-    key: &SecretKey,
+pub(crate) fn map_read(
+    id: &ItemId,
     result: keyring::Result<String>,
-) -> Result<Option<SecretValue>, SecretsError> {
+) -> Result<Option<Zeroizing<String>>, SecretsError> {
     match result {
-        Ok(value) => Ok(Some(SecretValue::new(value))),
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(failure(vault, key, &e)),
+        Err(e) => Err(item_error(id, keyring_reason(&e))),
     }
 }
 
 /// Map a `delete_credential` result: `NoEntry` is "nothing existed".
 ///
-/// Test: `keychain_delete_maps_no_entry_to_false_and_failures_to_errors`.
+/// Test: `keychain_remove_maps_no_entry_to_false_and_failures_to_errors`.
 #[cfg(target_os = "macos")]
-pub(crate) fn map_delete(
-    vault: &VaultName,
-    key: &SecretKey,
-    result: keyring::Result<()>,
-) -> Result<bool, SecretsError> {
+pub(crate) fn map_remove(id: &ItemId, result: keyring::Result<()>) -> Result<bool, SecretsError> {
     match result {
         Ok(()) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(failure(vault, key, &e)),
-    }
-}
-
-/// Map a control item lookup: present is `true`, `NoEntry` is `false`,
-/// anything else an error.
-///
-/// Why: #9070, #10386 — a lookup that failed must never read as "no deny",
-/// nor as present, so the caller sees the Keychain fault.
-/// Test: `keychain_flag_maps_no_entry_to_off_and_failures_to_errors`.
-#[cfg(target_os = "macos")]
-pub(crate) fn map_flag(
-    vault: &VaultName,
-    key: Option<&SecretKey>,
-    result: keyring::Result<String>,
-) -> Result<bool, SecretsError> {
-    match result {
-        Ok(_) => Ok(true),
-        Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(control_failure(vault, key, &e)),
+        Err(e) => Err(item_error(id, keyring_reason(&e))),
     }
 }
 
@@ -291,113 +286,10 @@ impl SecretBackend for KeychainBackend {
     ) -> Result<(), SecretsError> {
         Self::limited().set_control_item(item, vault, key, present)
     }
-}
 
-impl SecretBackend for OsKeychain {
-    fn id(&self) -> BackendId {
-        BackendId::keychain()
-    }
-
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::READ | Capabilities::WRITE
-    }
-
-    #[cfg(target_os = "macos")]
-    fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
-        map_get(vault, key, self.entry(vault, key)?.get_password())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn get(&self, _: &VaultName, _: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
-        Err(no_os_backend())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn set(
-        &self,
-        vault: &VaultName,
-        key: &SecretKey,
-        value: &SecretValue,
-    ) -> Result<(), SecretsError> {
-        self.entry(vault, key)?
-            .set_password(value.expose())
-            .map_err(|e| failure(vault, key, &e))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn set(&self, _: &VaultName, _: &SecretKey, _: &SecretValue) -> Result<(), SecretsError> {
-        Err(no_os_backend())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        map_delete(vault, key, self.entry(vault, key)?.delete_credential())
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn delete(&self, _: &VaultName, _: &SecretKey) -> Result<bool, SecretsError> {
-        Err(no_os_backend())
-    }
-
-    // #9070, #10386: control items are their own Keychain items, never index
-    // fields. Off macOS every call fails closed, like a value call.
-    fn holds_agent_controls(&self) -> bool {
-        true
-    }
-
-    #[cfg(target_os = "macos")]
-    fn control_item(
-        &self,
-        item: ControlItem,
-        vault: &VaultName,
-        key: Option<&SecretKey>,
-    ) -> Result<bool, SecretsError> {
-        map_flag(
-            vault,
-            key,
-            self.control_entry(item, vault, key)?.get_password(),
-        )
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn control_item(
-        &self,
-        _: ControlItem,
-        _: &VaultName,
-        _: Option<&SecretKey>,
-    ) -> Result<bool, SecretsError> {
-        Err(no_os_backend())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn set_control_item(
-        &self,
-        item: ControlItem,
-        vault: &VaultName,
-        key: Option<&SecretKey>,
-        present: bool,
-    ) -> Result<(), SecretsError> {
-        let entry = self.control_entry(item, vault, key)?;
-        if present {
-            return entry
-                .set_password(AGENTS_MARKER)
-                .map_err(|e| control_failure(vault, key, &e));
-        }
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(control_failure(vault, key, &e)),
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn set_control_item(
-        &self,
-        _: ControlItem,
-        _: &VaultName,
-        _: Option<&SecretKey>,
-        _: bool,
-    ) -> Result<(), SecretsError> {
-        Err(no_os_backend())
+    // #10524: the store itself, for the unlock snapshot and the migration.
+    fn blob_store(&self) -> Option<Arc<BlobStore>> {
+        Self::limited().blob_store()
     }
 }
 
