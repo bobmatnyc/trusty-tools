@@ -129,7 +129,10 @@ fn push_due_fires_once_after_thirty_minutes_and_clears() {
     assert!(due[0].contains("channel slack has no sender in this build; nothing sent"));
     // A corrupt record is replaced, not trusted.
     other.insert("push".to_owned(), json!([1]));
-    assert!(push_due(&mut other, &key, 0.0, None).is_empty());
+    assert_eq!(
+        push_due(&mut other, &key, 0.0, None),
+        ["push: state record was not an object; reset"]
+    );
     assert!(other["push"].is_object());
 }
 
@@ -247,6 +250,180 @@ fn routines_config_error_raises_an_alert_in_the_cycle() -> TestResult {
     let hit = rows.iter().find(|a| a["kind"] == "routine_stale");
     let hit = hit.ok_or_else(|| format!("no routine_stale alert in {alerts:?}"))?;
     assert_eq!(hit["fingerprint"], "config", "{hit}");
-    assert!(hit["detail"].as_str().is_some_and(|d| d.contains("parse")), "{hit}");
+    assert!(
+        hit["detail"].as_str().is_some_and(|d| d.contains("parse")),
+        "{hit}"
+    );
+    Ok(())
+}
+
+const DAY: f64 = 86_400.0;
+const HOUR: f64 = 3_600.0;
+
+/// A goal_reconcile routine over `goals`, 24 h interval, stale after 26 h.
+fn goal_routine(dir: &Path) -> TestResult<(std::path::PathBuf, std::path::PathBuf)> {
+    let goals = dir.join("goals");
+    fs::create_dir_all(&goals)?;
+    let list = json!([{
+        "name": "goal_reconcile", "goals_dir": goals,
+        "interval_s": DAY, "stale_after_s": 26.0 * HOUR,
+    }]);
+    Ok((routines_file(dir, &list.to_string())?, goals))
+}
+
+fn goal(goals: &Path, id: &str, doc: &serde_json::Value) -> TestResult {
+    fs::write(goals.join(format!("{id}.json")), doc.to_string())?;
+    Ok(())
+}
+
+/// 2026-11-20T00:00:00Z as epoch seconds.
+const T0: f64 = 1_795_132_800.0;
+
+fn fingerprints(path: &Path, now: f64) -> TestResult<Vec<(String, String)>> {
+    Ok(routine_alerts(path, "tm-architect", now)?
+        .into_iter()
+        .map(|a| (a.fingerprint, a.detail))
+        .collect())
+}
+
+#[test]
+fn goal_reconcile_fresh_goals_raise_nothing() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (path, goals) = goal_routine(dir.path())?;
+    let fresh = json!({"lifecycle": "active", "reconciled_at": "2026-11-20T00:00:00Z"});
+    goal(&goals, "G01", &fresh)?;
+    goal(&goals, "G02", &fresh)?;
+    assert!(fingerprints(&path, T0 + 25.0 * HOUR)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn goal_reconcile_flags_a_stale_active_goal() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (path, goals) = goal_routine(dir.path())?;
+    goal(
+        &goals,
+        "G01",
+        &json!({"lifecycle": "active", "reconciled_at": "2026-11-20T00:00:00Z"}),
+    )?;
+    goal(
+        &goals,
+        "G02",
+        &json!({"lifecycle": "active", "reconciled_at": "2026-11-19T22:00:00Z"}),
+    )?;
+    let got = fingerprints(&path, T0 + 25.0 * HOUR)?;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "goal_reconcile:G02");
+    assert!(
+        got[0]
+            .1
+            .contains("goal G02 last reconciled 27 h ago (stale after 26 h)"),
+        "{got:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_reconcile_skips_an_inactive_stale_goal() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (path, goals) = goal_routine(dir.path())?;
+    let old = "2026-10-01T00:00:00Z";
+    goal(
+        &goals,
+        "G01",
+        &json!({"lifecycle": "parked", "reconciled_at": old}),
+    )?;
+    goal(&goals, "G02", &json!({"lifecycle": "done"}))?;
+    goal(
+        &goals,
+        "G03",
+        &json!({"lifecycle": "active", "reconciled_at": old}),
+    )?;
+    let got = fingerprints(&path, T0)?;
+    let fps: Vec<_> = got.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(fps, ["goal_reconcile:G03"], "only the active one: {got:?}");
+    Ok(())
+}
+
+#[test]
+fn goal_reconcile_flags_a_missing_reconciled_at() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (path, goals) = goal_routine(dir.path())?;
+    goal(&goals, "G01", &json!({"lifecycle": "active"}))?;
+    goal(
+        &goals,
+        "G02",
+        &json!({"lifecycle": "active", "reconciled_at": "yesterday"}),
+    )?;
+    let got = fingerprints(&path, T0)?;
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got[0].1.contains("goal G01 never reconciled"), "{got:?}");
+    assert!(
+        got[1].1.contains("goal G02 reconciled_at \"yesterday\""),
+        "{got:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn goal_reconcile_unreadable_doc_fails_closed() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let (path, goals) = goal_routine(dir.path())?;
+    fs::write(goals.join("G01.json"), "{not json")?;
+    fs::create_dir(goals.join("G02.json"))?; // a read error, not a parse error
+    goal(&goals, "G03", &json!(["not", "an", "object"]))?;
+    let got = fingerprints(&path, T0)?;
+    let fps: Vec<_> = got.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(
+        fps,
+        [
+            "goal_reconcile:G01",
+            "goal_reconcile:G02",
+            "goal_reconcile:G03"
+        ],
+        "{got:?}"
+    );
+    assert!(got.iter().all(|(_, d)| d.contains("unreadable")), "{got:?}");
+    // A missing goals folder is one alert on the routine itself.
+    fs::remove_dir_all(&goals)?;
+    let got = fingerprints(&path, T0)?;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].0, "goal_reconcile");
+    assert!(got[0].1.contains("goals dir"), "{got:?}");
+    Ok(())
+}
+
+#[test]
+fn routines_stale_after_override() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let stamp = dir.path().join("brief.stamp");
+    fs::write(&stamp, "")?;
+    let list = json!([
+        {"name": "default", "stamp": stamp, "interval_s": HOUR},
+        {"name": "tight", "stamp": stamp, "interval_s": HOUR, "stale_after_s": 1.5 * HOUR},
+    ]);
+    let path = routines_file(dir.path(), &list.to_string())?;
+    let got = fingerprints(&path, now() + 1.75 * HOUR)?;
+    let fps: Vec<_> = got.iter().map(|(f, _)| f.as_str()).collect();
+    assert_eq!(fps, ["tight"], "default stays 2x interval: {got:?}");
+    for bad in [
+        json!([{"name": "x", "stamp": "/x", "interval_s": 60, "stale_after_s": 0}]),
+        json!([{"name": "x", "stamp": "/x", "goals_dir": "/g", "interval_s": 60}]),
+        json!([{"name": "x", "goals_dir": "rel/g", "interval_s": 60}]),
+        json!([{"name": "x", "interval_s": 60}]),
+    ] {
+        let p = routines_file(dir.path(), &bad.to_string())?;
+        let err = routine_alerts(&p, "s", now());
+        assert!(
+            matches!(err, Err(RoutinesError::Invalid { .. })),
+            "{bad}: {err:?}"
+        );
+    }
+    let typo = routines_file(
+        dir.path(),
+        r#"[{"name":"x","stamp":"/x","interval_s":60,"stale_after":1}]"#,
+    )?;
+    let err = routine_alerts(&typo, "s", now());
+    assert!(matches!(err, Err(RoutinesError::Parse { .. })), "{err:?}");
     Ok(())
 }
