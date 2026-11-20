@@ -32,6 +32,27 @@ pub(crate) fn control_item_id(
     ItemId::new(control_service(item), agents_account(vault, key))
 }
 
+/// `err` naming the item the caller asked for: `vault` and `key`, or
+/// `(none)` for a per-vault control item; other errors pass unchanged.
+///
+/// Why: #10524 merge condition — before `tm secrets migrate`, a failed call
+/// reads as it did on origin/main, never naming the blob item the store
+/// probed or a control item's service; the reason text is kept.
+/// Test: `no_blob_failures_name_the_requested_item`.
+fn as_requested(vault: &VaultName, key: Option<&SecretKey>, err: SecretsError) -> SecretsError {
+    match err {
+        SecretsError::Backend {
+            backend, reason, ..
+        } => SecretsError::Backend {
+            backend,
+            vault: vault.to_string(),
+            key: key.map_or_else(|| "(none)".to_string(), ToString::to_string),
+            reason,
+        },
+        other => other,
+    }
+}
+
 /// The Keychain backend's calls over a [`BlobStore`].
 #[derive(Debug, Clone)]
 pub(crate) struct BlobKeychain {
@@ -57,7 +78,8 @@ impl SecretBackend for BlobKeychain {
     fn get(&self, vault: &VaultName, key: &SecretKey) -> Result<Option<SecretValue>, SecretsError> {
         Ok(self
             .store
-            .get(&value_item(vault, key))?
+            .get(&value_item(vault, key))
+            .map_err(|e| as_requested(vault, Some(key), e))?
             .map(|v| SecretValue::new(v.as_str())))
     }
 
@@ -70,10 +92,13 @@ impl SecretBackend for BlobKeychain {
         self.store
             .put(&value_item(vault, key), Some(value.expose()))
             .map(drop)
+            .map_err(|e| as_requested(vault, Some(key), e))
     }
 
     fn delete(&self, vault: &VaultName, key: &SecretKey) -> Result<bool, SecretsError> {
-        self.store.put(&value_item(vault, key), None)
+        self.store
+            .put(&value_item(vault, key), None)
+            .map_err(|e| as_requested(vault, Some(key), e))
     }
 
     // #9070, #10386: control items are Keychain items, never index fields.
@@ -89,7 +114,8 @@ impl SecretBackend for BlobKeychain {
     ) -> Result<bool, SecretsError> {
         Ok(self
             .store
-            .get(&control_item_id(item, vault, key))?
+            .get(&control_item_id(item, vault, key))
+            .map_err(|e| as_requested(vault, key, e))?
             .is_some())
     }
 
@@ -104,6 +130,7 @@ impl SecretBackend for BlobKeychain {
         self.store
             .put(&id, present.then_some(AGENTS_MARKER))
             .map(drop)
+            .map_err(|e| as_requested(vault, key, e))
     }
 
     fn blob_store(&self) -> Option<Arc<BlobStore>> {
