@@ -36,6 +36,10 @@ PROTOTYPE = sys.argv[1]
 SCRATCH = tempfile.mkdtemp(prefix="regen-a3-")
 # Every path fleet-poll.py derives from the inbox lands in the scratch dir.
 os.environ["SUPERVISOR_INBOX_DIR"] = os.path.join(SCRATCH, "inbox")
+os.environ.pop("ARCHITECT_INBOX_DIR", None)
+# df-T7i P1b: the live dispatch_wake reads a self-clear marker and writes pm-wake-alert.json.
+os.environ["SELF_CLEAR_SUPPRESS"] = os.path.join(SCRATCH, "no-wake-suppress")
+os.environ["PM_WAKE_ALERT"] = os.path.join(SCRATCH, "pm-wake-alert.json")
 for var in ("LOAD_FACTOR", "SELF_CTX_WINDOW", "SELF_CTX_THRESHOLD", "PANE_CTX_WINDOW",
             "BAND_STOP_LOAD_FACTOR", "BAND_HOLD_LOAD_FACTOR", "BAND_OPEN_LOAD_FACTOR",
             "BAND_REHOLD_LOAD_FACTOR", "BAND_STOP_FREE_GIB", "BAND_HOLD_FREE_GIB",
@@ -81,6 +85,7 @@ BAND = [
     [15.9, 16, 300, 70, 0, "hold"], [15.9, 16, 300, 70, 0, "stop"], [18.0, 16, 300, 70, 0, "stop"],
     [30.5, 16, 300, 70, 0, "open"], [5.0, 16, 150, 70, 0, "open"], [5.0, 16, 150, 70, 0, "hold"],
     [5.0, 16, 300, 70, 0, "weird"], [4.0, 4, 250, 50, 0, None], [7.5, 4, 250, 50, 0, "open"],
+    [0.0, 16, 300, 70, 255, None], [0.0, 16, 300, 70, 256, None],
 ]
 
 BAND_ALERTS = [
@@ -95,8 +100,10 @@ BAND_ALERTS = [
 # --- host_alerts (injected probe values) -----------------------------------------
 
 
-def probe(loads, cores=16, disk=(100, 1, 500 * 2**30), swap=0, mem=60.0):
-    return {"loads": list(loads), "cores": cores, "disk": list(disk), "swap": swap, "mem": mem}
+def probe(loads, cores=16, disk=(100, 1, 500 * 2**30), swap=0, mem=60.0, activity=0):
+    # df-T7i P1b: the live band reads swap activity (vm_stat pages), not swap in use.
+    return {"loads": list(loads), "cores": cores, "disk": list(disk), "swap": swap, "mem": mem,
+            "activity": activity}
 
 
 HOST = [
@@ -116,6 +123,8 @@ HOST = [
     {"case": "first_band", "probe": probe((2.0, 2.0, 2.0), mem=None), "state": {}},
     {"case": "every_alert", "probe": probe((50.0, 40.0, 33.3), disk=(2**40, 2**40 - 2**30, 2**30),
                                            swap=2048.0, mem=10.0), "state": {"band": "open"}},
+    {"case": "idle_swap_keeps_open", "probe": probe((1.0, 1.0, 1.0), swap=6800.0, activity=255), "state": {"band": "open"}},
+    {"case": "active_swap_stops", "probe": probe((1.0, 1.0, 1.0), activity=256), "state": {"band": "open"}},
 ]
 
 
@@ -138,6 +147,7 @@ def run_host(case):
 
     fc.swap_used_mb = swap
     fc.mem_free_pct = lambda: p["mem"]
+    fc.swap_activity_pages = lambda: p["activity"]
     if "load_factor" in case:
         os.environ["LOAD_FACTOR"] = case["load_factor"]
     else:
@@ -264,7 +274,10 @@ def run_self_ctx(case):
             else:
                 os.environ.pop(var, None)
         size = os.path.getsize(fc.LOG) if os.path.exists(fc.LOG) else 0
-        alerts = fc.self_ctx_alerts(NOW)
+        try:
+            alerts = fc.self_ctx_alerts(NOW)
+        except ZeroDivisionError:  # df-T7i P1b: live ctx_bar.bar_pct divides by the window
+            alerts = {"raises": "ZeroDivisionError"}
         logged = (os.path.getsize(fc.LOG) if os.path.exists(fc.LOG) else 0) > size
         os.environ.pop("SELF_CTX_WINDOW", None)
         os.environ.pop("SELF_CTX_THRESHOLD", None)
@@ -570,6 +583,33 @@ DISPATCH = [
         [5, None, True, "dry-run: would send to %1: x"], [0, None, True, "sent to %1"]]},
     {"case": "raise_is_failed", "steps": [
         [1, None, False, {"raise": "refusing to send to %1 (session 'tm-api')"}]]},
+    # df-T7i P1b: woken alerts ride the wake as a one-line digest until a send clears them.
+    {"case": "woken_alerts_ride_the_digest", "steps": [
+        [2, None, False, "skipped: input typed",
+         [{"session": "tm-a", "kind": "idle", "detail": "idle 12 min, no agents running"},
+          {"session": "", "kind": "load", "detail": "load 30.0/31.0/31.0\n(15m)"}]],
+        [1, None, False, "sent to %1", [{"session": "tm-b", "kind": "ctx", "detail": "ctx 36%"},
+                                       {"session": "tm-a", "kind": "idle", "detail": "idle 12 min, no agents running"}]],
+        [1, None, False, "skipped: input typed", [{"session": "tm-c", "kind": "exited", "detail": "gone"}]]]},
+    # Held (non-wake) PM messages newer than the cutoff join the digest after the alerts; cap 8 items.
+    {"case": "held_pm_messages_join_the_digest", "messages": [
+        {"ts": "2025-10-09T08:50:00Z", "session": "tm-a", "kind": "progress", "text": "halfway  through\tthe port"},
+        {"ts": "2025-10-09T08:50:01Z", "session": "tm-a", "kind": "progress", "text": "which branch?"},
+        {"ts": "2025-10-09T08:50:02Z", "session": "tm-b", "kind": "fyi", "text": "Task: ab-T12@1119 | pct: 5\nmerged"},
+        {"ts": "2025-10-09T08:50:03Z", "session": "tm-b", "kind": "ack", "text": "Task: ab-T12@1119 ok?"},
+        {"ts": "2025-10-09T08:50:04Z", "session": "tm-b", "kind": "ack", "text": "see .trusty-mpm/sessions/x/session-20251009-085000.md"},
+        {"ts": "2025-10-09T08:50:05Z", "session": "tm-c", "kind": "done", "text": "finished"},
+        {"ts": "2025-10-09T08:50:06Z", "kind": "fyi", "text": "WHICHEVER works", "urgent": False},
+        {"ts": "2025-10-09T08:50:07Z", "session": "tm-d", "kind": "ack", "text": "Approve-ish not a word? no"},
+        {"ts": "2025-10-09T08:50:08Z", "session": "tm-d", "kind": "fyi", "text": "x", "urgent": True},
+        {"ts": "2025-10-09T08:00:00Z", "session": "tm-old", "kind": "fyi", "text": "before the cutoff"},
+        "not json",
+        {"ts": "bad", "session": "tm-e", "kind": "fyi", "text": "bad ts"},
+        {"ts": "2025-10-09T08:50:09Z", "session": "tm-e", "kind": "ack", "text": "a", "x": 1},
+        {"ts": "2025-10-09T08:50:10Z", "session": "tm-e", "kind": "ack", "text": "b"},
+        {"ts": "2025-10-09T08:50:11Z", "session": "tm-e", "kind": "ack", "text": "c"},
+        {"ts": "2025-10-09T08:50:12Z", "session": "tm-e", "kind": "progress", "text": "d" * 200}],
+     "steps": [[1, None, False, "skipped: input typed", [{"session": "tm-a", "kind": "idle", "detail": "idle"}]]]},
 ]
 
 
@@ -578,19 +618,24 @@ def dispatch_rows():
     rows = []
     try:
         fc.time = types.SimpleNamespace(time=lambda: NOW, sleep=lambda s: None)
+        msgs = os.path.join(os.environ["SUPERVISOR_INBOX_DIR"], "pm-messages.jsonl")
         for case in DISPATCH:
+            with open(msgs, "w", encoding="utf-8", newline="\n") as out:
+                out.write("".join((m if isinstance(m, str) else json.dumps(m)) + "\n"
+                                  for m in case.get("messages", [])))
             state = {}
-            for step, (new, logged, dry_run, result) in enumerate(case["steps"]):
+            for step, (new, logged, dry_run, result, *rest) in enumerate(case["steps"]):
                 calls = []
+                woken = rest[0] if rest else None
 
-                def fake_wake(n, panes, dry, lg, _r=result, _calls=calls):
-                    _calls.append([n, lg])
+                def fake_wake(n, panes, dry, lg, digest="", _r=result, _calls=calls):
+                    _calls.append([n, lg, digest])
                     if isinstance(_r, dict):
                         raise fc.TmuxError(_r["raise"])
                     return _r
 
                 fc.wake = fake_wake
-                got = fc.dispatch_wake(state, [], new, dry_run, logged)
+                got = fc.dispatch_wake(state, [], new, dry_run, logged, woken)
                 rows.append(json.dumps({"case": case["case"], "step": step, "result": got, "calls": calls,
                                         "state": state}, sort_keys=True))
     finally:
