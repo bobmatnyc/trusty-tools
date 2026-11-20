@@ -418,8 +418,13 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         Ok(summary)
     }
 
-    /// Takes the lock (not in a dry run), loads the state and logs the start.
-    fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
+    /// Takes the lock (not in a dry or shadow run), loads the state and logs
+    /// the start. `tm architect serve` holds the returned lock for its life.
+    ///
+    /// # Errors
+    /// [`RunError::AlreadyRunning`] when another poller holds the lock;
+    /// [`RunError::Io`] when the inbox, shadow dir or lock cannot be made.
+    pub fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
         let mut seeded = Vec::new();
         let lock = if self.dry_run {
             None

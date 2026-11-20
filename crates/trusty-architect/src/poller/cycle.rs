@@ -51,6 +51,7 @@ use crate::classify::{Alert, PaneInfo, alert, dedup, evaluate, fleet_plan_alerts
 use crate::error::{CycleError, TmuxError};
 use crate::quiet::{is_test_fixture_session, read_quiet_sessions};
 use crate::self_ctx::self_ctx_tokens;
+use crate::serve::serve_fault_alerts;
 use crate::tmux::Tmux;
 
 /// What one cycle found.
@@ -300,6 +301,8 @@ pub fn collect<T: Tmux + ?Sized>(
     for a in self_refresh_fault_alerts(&state.other, sup, now)
         .into_iter()
         .chain(sup_faults)
+        // #9779: `tm architect serve`'s source and panic faults.
+        .chain(serve_fault_alerts(&state.other, sup, now))
     {
         if !failing
             .iter()
