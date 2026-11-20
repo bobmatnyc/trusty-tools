@@ -1,0 +1,2 @@
+Fixed
+- A tm-stamped PM or Architect main thread may now send and write through every messaging family (Slack, Notion, Gmail, Google Chat), not only read, with no tm launch record and no `tm fleet bind` step. A self-cleared Architect can create a Slack canvas again. Subagents, unknown threads and unstamped sessions stay denied, each allow still writes one audit line, and the egress deny no longer tells the user to run `tm fleet bind` ([#11521](https://github.com/bobmatnyc/trusty-tools/issues/11521))

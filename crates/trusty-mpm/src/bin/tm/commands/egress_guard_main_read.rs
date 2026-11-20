@@ -1,25 +1,24 @@
-//! The main-session read pass of `tm hook --egress-guard` (#11273).
+//! The main-session pass of `tm hook --egress-guard` (#11273, #11521).
 //!
 //! Why: owner ruling 2026-11-14 — "Only PMs (including Architect) should be
-//! allowed egress", "Keep both subagent paths as they are", and "Split: reads
-//! pass for any main session; sends and writes need the tm launch record".
-//! A read needs only main-session evidence; a send or a write keeps the
-//! #10447 launch-record lift (`egress_guard_architect`) and the #11194
-//! owner-DM lift (`egress_guard_pm_dm`). No PM launch record exists yet, so a
-//! PM's sends stay exactly #11194's.
-//! What: [`lift`] runs after the #11194 lift. It judges only an
-//! `egress-family` deny. The tool must still classify as a family (by its
-//! server for a resource tool), [`tool_access`] must call it
-//! [`Access::Read`], and `egress_guard_pm_dm::main_thread_role` must name a
-//! PM or Architect main session. Then the deny lifts to an allow that
-//! [`audited`] lets stand only once one audit line is written.
+//! allowed egress" and "Keep both subagent paths as they are". #11273 also
+//! made a send or write need the tm launch record; the owner ruled that
+//! policy was never asked for (#11521). It denied a self-cleared Architect,
+//! whose new `claude` has no record, every send and write.
+//! What: [`lift`] runs after the #10447 launch-record lift and the #11194
+//! owner-DM lift. It judges only an `egress-family` deny. The tool must still
+//! classify as a family (by its server for a resource tool). When
+//! `egress_guard_pm_dm::main_thread_role` names a PM or Architect main
+//! session, any tool of the family — read, send or write — lifts to an
+//! allow, with no launch record and no bind step. Otherwise only a PM
+//! subagent's Gmail or Google Workspace [`Access::Read`] lifts (GP-043).
+//! [`audited`] lets each allow stand only once one audit line is written.
 //! [`tool_access`] is an explicit per-family list of read tool names, matched
 //! exactly and case-sensitively; every other tool of a family is a
-//! [`Access::Write`], so a new or renamed tool is treated as a send.
-//! FAIL-CLOSED: an unreadable payload, any other check (Bash included), an
-//! unknown or unlisted tool, a subagent (bar a PM subagent's Gmail or Google
-//! Workspace read, GP-043), an unknown thread and a missing or unknown stamp
-//! keep the deny; an audit line that cannot be written denies.
+//! [`Access::Write`], so a new or renamed tool is never a subagent read.
+//! FAIL-CLOSED: an unreadable payload, any other check (Bash included), a
+//! subagent (bar the GP-043 read class), an unknown thread and a missing or
+//! unknown stamp keep the deny; an audit line that cannot be written denies.
 //! Test: `egress_guard_main_read_tests.rs`.
 
 use std::path::Path;
@@ -226,13 +225,15 @@ fn read_role(payload: &Value, env: &HookEnv, family: &str) -> Option<MainRole> {
         .then_some(MainRole::PmSubagent)
 }
 
-/// Lift a family deny of a read tool for a PM or Architect main session.
+/// Lift a family deny for a PM or Architect main session (#11521).
 ///
 /// Why / What: see the module doc.
 /// Test: `main_session_reads_pass_in_every_family_11273`,
 /// `subagent_reads_stay_denied_11273`,
 /// `unknown_thread_or_unstamped_session_reads_stay_denied_11273`,
-/// `main_session_sends_without_a_record_stay_denied_11273`,
+/// `main_session_sends_without_a_record_are_allowed_11521`,
+/// `self_cleared_architect_writes_slack_and_notion_11521`,
+/// `subagent_and_unstamped_writes_stay_denied_11521`,
 /// `only_a_family_deny_is_judged_11273`.
 pub(crate) fn lift(
     first: Verdict,
@@ -252,13 +253,17 @@ pub(crate) fn lift(
     let Some(family) = family_of(tool, payload, table) else {
         return (first, None);
     };
-    // #11273: a send, a write or an unlisted tool keeps the deny.
-    if tool_access(tool, &family) != Access::Read {
-        return (first, None);
-    }
-    // #11273: an unknown thread or an unknown stamp keeps the deny.
-    let Some(role) = read_role(payload, env, &family) else {
-        return (first, None);
+    // #11521: a stamped main thread may read, send and write; anyone else
+    // (a PM subagent's GP-043 read class aside) keeps the deny.
+    let role = match main_thread_role(payload, env) {
+        Some(role) => role,
+        None if tool_access(tool, &family) == Access::Read => {
+            let Some(role) = read_role(payload, env, &family) else {
+                return (first, None);
+            };
+            role
+        }
+        None => return (first, None),
     };
     let session = payload.get("session_id").and_then(Value::as_str);
     let allowed = MainReadAllowed {
