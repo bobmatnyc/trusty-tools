@@ -220,7 +220,7 @@ lru = "0.16"
 #      last such crate was dissolved in #3732 once its tools became
 #      reachable declaratively via a Python skill. This `install_plugins` mechanism remains available for any
 #      future private launcher.
-trusty-agents-common = { path = "../trusty-agents-common", version = "0.10" }
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.11" }
 
 # [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
 # [patch] tables to live in the workspace root; see #460 for context).
