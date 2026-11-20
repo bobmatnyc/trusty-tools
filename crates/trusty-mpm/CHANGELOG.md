@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.10] — 2026-11-20
+
+### Added
+
+- `tm install` and `tm fleet init` install the `trusty-browser-mcp` and `trusty-computer-mcp` binaries with `cargo install --locked` when they are missing, then register them at user scope. An existing entry is kept and reported. `tm doctor` reports each server as installed, registered and command-path-exists (G0b). `cargo install` runs with `--root <CARGO_HOME>` and a 10-minute limit, after which cargo and every process it started are killed and it is reported as missing; a relative `CARGO_HOME` is made absolute first; the doctor rows never rewrite the config. Set `TM_SKIP_MCP_AUTO_SETUP` to opt out of this setup step.
+- `tm issue next [--repo] [--goal <id>] [--limit N] [--json] [--refresh]` lists the ready issues a factory session should take next. Ready is a ready board Status or a ready `status:*` label. Issues without acceptance criteria, or assigned to someone else, are skipped. Results rank by the session's goal in `goals.md`, then priority label, then age, and each names its signal and reason. A label/board disagreement marks the issue as a `tm issue repair` candidate. Board Status is read in one batched query per board and cached for 10 minutes; a rate limit or a malformed GraphQL reply exits non-zero with no list and writes no cache. `--refresh` bypasses and rewrites the cache. The cache directory is `0700`, the file `0600`, written atomically.
+- `tm hook` applies an IL block to the session's ledger only from the session's OWN turn: the last assistant message of the `Stop` payload's transcript (path screened against the Claude config directory, tail read only). A block in an agent handback (`PostToolUse` of `Agent`/`Task`) or in a `UserPromptSubmit` (inbound session or Architect message, Architect prompt) is never applied; it is logged once per packet as `il-auto-apply:PROPOSAL` where `list_recent_errors` reads, with the entry point and packet id, and the ledger is unchanged. See G0b IL authority (owner decision pending).
+- For an own-turn block, every applied field is covered: a block carrying `new:`, `remind:`, or `pct`/`est`/`remaining`/`decided`/`delta` for a ledger task goes, whole, to `ilio.py apply` (found through `$ILIO_SCRIPT` or the Architect directory, block on stdin, no shell, 2 s timeout, after at most a 1.5 s wait for the store lock: the installed `Stop` hook is killed at 5 s); any other block is written in process. A replayed packet is a no-op on both paths. A rejected block, or an ilio run that is missing, exits nonzero or times out, writes nothing, is never reported as applied, and is recorded where `list_recent_errors` reads it as `il-auto-apply:<rule>` (G0b).
+- IL auto-apply sends `ilio.py` only the fence, from a thread, so a child that never reads stdin cannot hold the hook past the timeout; holds a store lock and a pending marker across the ilio run, recording `il-auto-apply:PENDING-UNKNOWN` before ilio starts (left open if the hook is killed or ilio times out; a run that reports, with success or a failure before writing, appends `il-auto-apply:PENDING-RESOLVED <packet>` — the denial store is append-only and nothing rewrites or deletes it) and instead of re-running a packet whose earlier run left no result; and records `il-auto-apply:NO-LEDGER` once per packet for a session with no store (G0b).
+- An IL proposal record now carries the fence body (scrubbed, first 600 chars) in its `command` field and the packet id in its message, so each proposal has its own fingerprint and can be acted on (G0b).
+- `list_recent_errors` and its aggregation drop an `il-auto-apply:PENDING-UNKNOWN` that a later `PENDING-RESOLVED` for the same packet cleared, and the `PENDING-RESOLVED` bookkeeping lines themselves; an unresolved pending still shows (G0b).
+- `tm secrets import` reads JSON (`--format json`, or any `*.json` file): nested keys flatten to upper-snake names such as `DB_PASSWORD`, and an array or null is refused by key name.
+- `tm secrets import --google-oauth <file>` (also detected from an `installed` or `web` object) stores a Google OAuth client's `client_id`, `client_secret` and `project_id` as `google-oauth.<project_id>.CLIENT_ID` and so on. Output names keys only.
+- `tm-estimation` is in the bundled skill roster.
+- `tm issue audit` reads the issue body and adds an `acceptance criteria` row: PASS for a labelled `Acceptance criteria:` list or an `## Acceptance` / `## Acceptance criteria` heading (case-insensitive), otherwise WARN naming the TICKETING.md rule. WARN never fails the audit; making it fail after one release is a follow-up (#11469).
+
+### Fixed
+
+- A daemon-launched session composes its PM instructions from its own directory: the trusty-tools checkout or worktree it was launched in, otherwise the pinned installed content release. A launch redirected to run in the managed checkout no longer reads that checkout's working tree, The installed release outranks a checkout found from the daemon's cwd, which serves only when nothing is installed, so a session never fetches the content release where it did not before.
+- A session launched in a linked git worktree of the managed checkout runs in that worktree and composes its prompt from that worktree's `content/`. A removed worktree, or one whose git admin directory is gone, falls back to the managed checkout with a logged warning.
+- `tm hook --turn-task` now reads the dbatg ledger (`.trusty-mpm/dbatg/<session>/state.json`, `session.task` beginning with an open task id) before the datg store, so a live PM turn shows its Task id. A dbatg store without a task id shows nothing and never falls back to an older datg `session.current` (#11398).
+- A content pin older than the release this `tm` needs is refused before any file is read, and the message names `tm content update` only when a qualifying release is published; otherwise it says none is. `tm fleet init` on a host pinned to content-v2.4.0 no longer fails with a missing `owner-plain.md` (#11470).
+- `tm content update` no longer answers "already pinned and verified" for a pin below the minimum content release: it moves to the newest qualifying release, or says no release at or above the minimum is published. `--content-ref` below the minimum is refused (#11470).
+- The release gate checks that the content release at `MIN_CONTENT_TAG` carries every required file, not only the newest one, and a gate row expecting an error passes only when its output carries the expected error text; a lane that runs no row fails (#11470).
+- A tm-stamped PM or Architect main thread may now send and write through every messaging family (Slack, Notion, Gmail, Google Chat), not only read, with no tm launch record and no `tm fleet bind` step. A self-cleared Architect can create a Slack canvas again. Subagents, unknown threads and unstamped sessions stay denied, each allow still writes one audit line, and the egress deny no longer tells the user to run `tm fleet bind` ([#11521](https://github.com/bobmatnyc/trusty-tools/issues/11521))
+
+### Documentation
+
+- Comments and examples use neutral `acme` account, org and host names instead of a real organisation's.
+
 ## [1.14.9] — 2026-11-18
 
 ### Fixed
