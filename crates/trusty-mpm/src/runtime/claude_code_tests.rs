@@ -1060,7 +1060,8 @@ fn prepare_managed_config_writes_no_mcp_json_and_no_approval() {
         "test-session",
         cwd,
         Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    );
+    )
+    .expect("a PM spawn prepares");
 
     assert!(
         !cwd.join(".mcp.json").exists(),
@@ -1147,7 +1148,8 @@ fn prepare_managed_config_merges_the_project_hook_group() {
         "test-session",
         cwd,
         Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    );
+    )
+    .expect("a PM spawn prepares");
 
     let after: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings).expect("read settings"))
@@ -1192,7 +1194,8 @@ fn prepare_managed_config_writes_only_under_the_named_framework_root() {
         "test-session",
         cwd_root.path(),
         Some(std::path::Path::new(crate::test_support::STABLE_HOOK_EXE)),
-    );
+    )
+    .expect("a PM spawn prepares");
 
     assert!(
         config_dir.starts_with(base),

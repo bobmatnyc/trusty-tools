@@ -87,6 +87,15 @@ pub const CACHE_MAX_AGE_ENV: &str = "TRUSTY_SECRETS_CACHE_MAX_AGE_SECS";
 /// resolve reads the backend again (#7520 S2; provisional, plan §6 point 1).
 pub const DEFAULT_CACHE_MAX_AGE: Duration = Duration::from_secs(600);
 
+/// How long an unlock grant lives at most (#10524, owner ruling Dd5).
+pub const DEFAULT_UNLOCK_TTL: Duration = Duration::from_secs(8 * 3600);
+
+/// Shortens the unlock grant's TTL, in seconds, for a sandbox check (#10524).
+///
+/// What: a positive integer below [`DEFAULT_UNLOCK_TTL`] is that many
+/// seconds; anything else is the default. It never lengthens the grant.
+pub const UNLOCK_TTL_ENV: &str = "TRUSTY_SECRETS_UNLOCK_TTL_SECS";
+
 /// The subcommand that serves the socket.
 pub const SERVE_SUBCOMMAND: &str = "serve";
 
@@ -139,6 +148,8 @@ pub struct ServerSettings {
     pub idle_timeout: Duration,
     /// How long a cached CLI-backed value may answer (#7520 S2).
     pub cache_max_age: Duration,
+    /// How long an unlock grant lives at most (#10524).
+    pub unlock_ttl: Duration,
     /// The append-only credential access audit log (#4567).
     pub audit_log: PathBuf,
     /// Size at which [`Self::audit_log`] is rotated when next opened.
@@ -174,6 +185,7 @@ impl ServerSettings {
             machine_config,
             idle_timeout,
             cache_max_age: DEFAULT_CACHE_MAX_AGE,
+            unlock_ttl: DEFAULT_UNLOCK_TTL,
             mint_enabled: false,
         }
     }
@@ -296,6 +308,7 @@ impl ServerSettings {
             idle_timeout: idle.unwrap_or_else(|| idle_from_env(env(IDLE_TIMEOUT_ENV).as_deref())),
             cache_max_age: cache_max_age
                 .unwrap_or_else(|| cache_max_age_from_env(env(CACHE_MAX_AGE_ENV).as_deref())),
+            unlock_ttl: unlock_ttl_from_env(env(UNLOCK_TTL_ENV).as_deref()),
             audit_log,
             audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,
             template_root,
@@ -438,6 +451,16 @@ fn cache_max_age_from_env(raw: Option<&str>) -> Duration {
     match raw.map(str::trim).map(str::parse::<u64>) {
         Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs).min(DEFAULT_CACHE_MAX_AGE),
         _ => DEFAULT_CACHE_MAX_AGE,
+    }
+}
+
+/// The unlock TTL from [`UNLOCK_TTL_ENV`]'s raw value (#10524).
+///
+/// Test: `settings_unlock_ttl_env_only_shortens`.
+fn unlock_ttl_from_env(raw: Option<&str>) -> Duration {
+    match raw.map(str::trim).map(str::parse::<u64>) {
+        Some(Ok(secs)) if secs > 0 => Duration::from_secs(secs).min(DEFAULT_UNLOCK_TTL),
+        _ => DEFAULT_UNLOCK_TTL,
     }
 }
 

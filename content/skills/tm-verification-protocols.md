@@ -3,7 +3,7 @@ name: tm-verification-protocols
 description: QA verification gate and evidence requirements for the trusty-mpm PM
 user-invocable: false
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: pm-workflow
 tags: [qa, verification, evidence, pm-required]
 effort: high
@@ -30,6 +30,12 @@ can be reused; a handoff alone does not require rerunning the same suite. Run
 missing coverage, changed-input checks and required independent high-risk
 gates. Keep live deployment evidence separate from source-test evidence.
 
+Declared demo/POC work owes a smoke run plus the core happy path. QA lists its
+open `intent(demo):` intentions
+(`git grep -n 'intent(demo):' -- <demo paths>`) and never counts them as
+coverage. Rule: `tm-workflow`, "Demo and POC Work" in
+`references/completion-standard.md`.
+
 ## Verification Requirements by Work Type
 
 | Work Type | Agent / Tool | Required Evidence | Forbidden Claim |
@@ -40,6 +46,22 @@ gates. Keep live deployment evidence separate from source-test evidence.
 | Local backend / daemon | `local-ops`, or `mcp__trusty-search__search_health` / `mcp__trusty-memory__memory_recall` for trusty-* services | Process status, health-check response | "running on localhost" |
 | Code diff quality | `mcp__trusty-review__review_diff` / `review_pr` | Review verdict (APPROVE/WARN/BLOCK) with findings | "the diff looks fine" |
 | CLI tools | Engineer / Local Ops | Command output + exit code | "tool installed" |
+
+## Revising a Document the Owner Edits
+
+A document the owner may edit out of band (a registered artifact under
+`[stale_copy]` in `.trusty-mpm.toml`, #10574) is revised in three steps:
+
+1. **Three-way compare.** When the owner returns an edited copy, keep the copy
+   you sent. Merge with `git merge-file <current> <sent-copy> <your-version>`
+   so every owner change survives, marked or not. Never rebuild the file from
+   your own copy.
+2. **Pre-publish recheck.** Re-read the file right before you publish or send
+   it. If it changed since your last read, merge again. The pm-guard refuses
+   a replacing write to a stale registered file with `STALE_INPUT_HASH`, and
+   any write to a `locked` file with `LOCKED`.
+3. **Diff before sending.** `diff -u <sent-copy> <new-version>` shows no hunk
+   the owner did not ask for.
 
 ## Forbidden Phrases (Circuit Breaker Violation)
 

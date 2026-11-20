@@ -5763,9 +5763,9 @@ dependencies = [
 
 [[package]]
 name = "libz-sys"
-version = "1.1.31"
+version = "1.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff20308ecabd635a2dc1dd5834a86c462cca20efba1d5d3ddab1f8aea3455cb2"
+checksum = "fee3f59f4321dab0c78d828942e7aa09d0bd8ad6e78a501977e6bf3d02938045"
 dependencies = [
  "cc",
  "libc",
@@ -6717,7 +6717,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.0",
+ "proc-macro-crate 1.3.1",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -11306,6 +11306,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
 name = "tree-sitter-c"
 version = "0.23.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11483,7 +11493,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents"
-version = "0.39.5"
+version = "0.40.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -11578,7 +11588,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.9.6"
+version = "0.10.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11681,7 +11691,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.2.3"
+version = "0.3.0"
 dependencies = [
  "libc",
  "serde",
@@ -11693,8 +11703,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-browser"
+version = "0.8.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "hmac 0.12.1",
+ "keyring",
+ "libc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "trusty-browser",
+ "trusty-common",
+ "trusty-mcp",
+ "unicode-normalization",
+]
+
+[[package]]
 name = "trusty-channels"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -11723,7 +11758,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-code"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11793,7 +11828,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.2"
+version = "0.70.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12092,7 +12127,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-memory"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12142,7 +12177,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.8"
+version = "1.14.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12199,6 +12234,8 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "trusty-agents-common",
  "trusty-architect",
  "trusty-channels",
@@ -12263,7 +12300,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-review"
-version = "0.42.0"
+version = "0.42.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12299,7 +12336,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-search"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -12394,7 +12431,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

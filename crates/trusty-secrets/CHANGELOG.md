@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.8.0] — 2026-11-19
+
+### Added
+
+- `secrets.gate`, the one server method `remote-gate` uses, with two inner verbs, `resolve` and `doctor`. It answers only a `trusty-secrets` peer below a root `sshd` or `sshd-session` with no Claude Code ancestor; any other peer gets the new `gate_refused` error kind and one deny record. Its `resolve` is `secrets.resolve` with `agent_parent` forced true, so the grant token is still required and a key denied to agents is refused. Its records carry `host`, `remote_agent` (marked unverified) and `remote_project` (#11464).
+- `ProcessTable::comm`, a process's kernel short name and owner uid, readable across uids (#11464).
+- `trusty-secrets remote-gate --host <name>`, an ssh forced-command front: it reads one JSON frame on stdin (one line, at most 64 KiB, within 5 s), allows only `resolve` and `doctor`, and checks the host's entry in the account machine config (`secrets.remote_hosts`: a `projects` map of `<owner>/<repo>` to a checkout on this machine, and a required `keys` list). A `resolve` takes a one-shot grant for the gate's own pid, then resolves through `secrets.gate`. It never starts a server: no socket to dial exits 69 (`studio_server_absent`); every refusal and every timeout exits 13 (#11464).
+
+### Fixed
+
+- The granted client no longer fails a resolve with `EINVAL` on macOS when the server closes the socket while answer bytes are still buffered (#10396).
+
 ## [0.7.0] — 2026-11-14
 
 ### Fixed

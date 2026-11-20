@@ -32,6 +32,7 @@ Moved from the crate README (#8454). `slack-mcp` builds only with the
 | `slack_canvas_create`        | Create a canvas seeded with markdown; with `channel_id` it becomes the channel's canvas and members inherit edit access | **`canvases:write`** (+ `channels:read`*) |
 | `slack_canvas_lookup_sections` | Look up section ids within a canvas, filtered by heading type and/or contained text; returns ids only, never content | **`canvases:read`** |
 | `slack_canvas_push`          | Translate CommonMark to canvas markdown and append it, or replace the canvas's header-delimited sections (non-atomic) | **`canvases:write`** (+ **`canvases:read`** for `replace_all`) |
+| `slack_canvas_access_set`    | Grant users (or regular channels) `read`/`write` access on a bot-owned canvas, so a shared link becomes editable; never grants `owner` | **`canvases:write`** |
 
 **Bold** scopes (`canvases:read`, `canvases:write`) are new as of epic #3611 —
 a Slack app that only had the original nine tools' scopes will need these

@@ -25,7 +25,9 @@
 //! `pm_guard_secret_read`'s `tests` submodule.
 
 use crate::commands::hook_rewrite::strip_wrapper_prefix;
-use crate::commands::pm_guard_bash::{git_argv_at_subcommand, matches_only_name_substring_family};
+use crate::commands::pm_guard_bash::{
+    git_argv_at_subcommand, has_live_nested_marker, matches_only_name_substring_family,
+};
 use crate::commands::pm_guard_secret_read::{
     NESTED_COMMAND_MARKERS, command_basename, has_a_named_extension,
 };
@@ -444,7 +446,8 @@ pub(crate) const TEXT_PAYLOAD_FLAGS: &[&str] = &["--body", "--title", "--message
 /// `denies_a_file_flag_beside_a_text_payload`,
 /// `a_gh_search_string_names_no_file_9001`.
 pub(crate) fn text_payload_indices(segment: &str, argv: &[String]) -> Vec<usize> {
-    if NESTED_COMMAND_MARKERS.iter().any(|m| segment.contains(m)) {
+    // #10974: a marker inside single quotes is data, not substitution.
+    if has_live_nested_marker(segment) {
         return Vec::new();
     }
     // #9001: `gh issue|pr list --search` takes a GitHub query, never a path.

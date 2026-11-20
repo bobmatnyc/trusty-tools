@@ -382,7 +382,7 @@ async fn drain_reviews_each_repo_against_its_own_index() {
     let base = startup_config(None);
     for (owner, repo, want) in [
         (
-            "duettoresearch",
+            "acme-labs",
             "code-intelligence",
             "code-intelligence-9f1c2e3a",
         ),

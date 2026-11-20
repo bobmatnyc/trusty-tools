@@ -662,7 +662,7 @@ fn an_unknown_named_remote_refuses_rather_than_answering_for_origin() {
 }
 
 /// A checkout whose `origin` is the org repository and whose branch pushes to
-/// the operator's fork remote — the #8403 `duettoresearch/jev-matching` shape.
+/// the operator's fork remote — the #8403 `acme-labs/jev-matching` shape.
 fn fork_push_checkout(root: &Path, origin: &str) -> PathBuf {
     let repo = checkout_with_origin(root, "jev-matching", origin);
     git_ok(
@@ -670,12 +670,12 @@ fn fork_push_checkout(root: &Path, origin: &str) -> PathBuf {
         &[
             "remote",
             "add",
-            "bob-duetto",
-            "https://github.com/bob-duetto/jev-matching.git",
+            "acme-admin",
+            "https://github.com/acme-admin/jev-matching.git",
         ],
     );
     git_ok(&repo, &["checkout", "-b", "fix/x"]);
-    git_ok(&repo, &["config", "remote.pushDefault", "bob-duetto"]);
+    git_ok(&repo, &["config", "remote.pushDefault", "acme-admin"]);
     repo
 }
 
@@ -685,15 +685,12 @@ fn fork_push_checkout(root: &Path, origin: &str) -> PathBuf {
 #[test]
 fn a_fork_branch_searches_origin_first_then_its_push_remote() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let repo = fork_push_checkout(
-        tmp.path(),
-        "https://github.com/duettoresearch/jev-matching.git",
-    );
+    let repo = fork_push_checkout(tmp.path(), "https://github.com/acme-labs/jev-matching.git");
     assert_eq!(
         merged_pr_search_repos_with(&repo, "fix/x", &no_aliases()).expect("both resolve"),
         vec![
-            "duettoresearch/jev-matching".to_string(),
-            "bob-duetto/jev-matching".to_string()
+            "acme-labs/jev-matching".to_string(),
+            "acme-admin/jev-matching".to_string()
         ]
     );
 }

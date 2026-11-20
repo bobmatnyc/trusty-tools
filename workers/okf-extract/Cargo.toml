@@ -7,7 +7,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/bobmatnyc/trusty-tools"
-authors = ["Bob Matsuoka <bob@matsuoka.com>"]
+authors = ["bobmatnyc"]
 description = "The trusty-okf extraction worker: xberg behind the SPEC-OKF-01 Appendix B process protocol."
 # #10746 S10b: ships only beside the trusty-okf CLI, never on crates.io
 # (SPEC-OKF-01 §3 (h) A covers trusty-okf; the worker follows it).

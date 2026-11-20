@@ -149,6 +149,8 @@ pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
+pub(crate) mod il_auto_apply; // See G0b IL auto-apply
+pub(crate) mod il_auto_apply_ilio; // See G0b IL auto-apply
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
@@ -164,6 +166,8 @@ pub(crate) mod hook_rewrite_isolated;
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// See G0b auto-setup: install and register the browser and computer MCP servers.
+pub(crate) mod auto_setup;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
 // split out of `install` for the 500-SLOC production cap.
 pub(crate) mod install_skills;
@@ -374,8 +378,14 @@ pub(crate) mod spawn_disclaimed;
 pub(crate) mod standalone;
 // #10960: `tm hook --standing-rules`, the Architect's per-turn rules block.
 pub(crate) mod standing_rules_hook;
+// #10575: `tm hook --completion-evidence`, the warn-only Stop check.
+pub(crate) mod completion_evidence_hook;
+// #10574: the stale-copy guard for registered artifacts.
+pub(crate) mod pm_guard_stale_copy;
 // #11398: `tm hook --turn-task`, the PM's per-turn task stamp.
 pub(crate) mod turn_task_hook;
+// #11431: `tm hook --pm-guard-shadow`, the minimal fact-based guard, log-only.
+pub(crate) mod pm_guard_min;
 // #8025: `tm status`'s daemon line, derived from the SAME `/health` probe
 // `tm doctor` uses — see its module doc for why the two disagreed.
 pub(crate) mod status_daemon;

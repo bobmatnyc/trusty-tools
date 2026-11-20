@@ -48,7 +48,7 @@ tracked as GitHub issue **#2611**.
 > keep track of both, and index any differences.
 
 Background: trusty-mpm (`tm`) provisions managed workspaces. For a live user
-checkout (e.g. `~/Duetto/repos/duetto`), tm creates a protected managed clone
+checkout (e.g. `~/Acme/repos/acme`), tm creates a protected managed clone
 at `~/trusty-mpm-projects/<org>/<repo>/` (a `.base` clone); sessions then get
 git worktrees under `.base/.worktrees/<session-id>/` (a `.trusty-mpm-worktree`
 marker file exists at worktree roots). So the SAME repo content can exist in
@@ -107,10 +107,10 @@ as its own facet, because sessions launch from worktrees, never from `.base`
 directly.
 
 The same pattern repeats across the daemon's ~75 registered indexes: e.g.
-`duetto-backend` and `duetto-frontend` are two *different* index ids pointing
-at the exact same `root_path` (`/Users/masa/Duetto/repos/duetto`) — a straight
+`acme-backend` and `acme-frontend` are two *different* index ids pointing
+at the exact same `root_path` (`/Users/masa/Acme/repos/acme`) — a straight
 duplicate full index of one directory — and there are separate
-`tm-*`/session-UUID indexes for `apex`, `apex-companion`, `duetto`,
+`tm-*`/session-UUID indexes for `apex`, `apex-companion`, `acme`,
 `mcp-services`, `code-intelligence`, `cto`, `xflux`, `demo-agentic-ux`, each a
 fully independent full index with zero relationship to its siblings.
 

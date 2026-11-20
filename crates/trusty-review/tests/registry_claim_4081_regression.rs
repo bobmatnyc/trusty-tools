@@ -1,7 +1,7 @@
 //! Regression tests for #4081: a hallucinated dependency-version finding wore
 //! `code_provable: true` + `verified: "confirmed"` and drove `BLOCK` / `F`.
 //!
-//! The fixture is the reported case verbatim — `duettoresearch/APEX` PR 1717's
+//! The fixture is the reported case verbatim — `acme/LEDGER` PR 1717's
 //! one-line CI change (`ruff>=0.6.0` → `ruff==0.16.0`) and the finding text
 //! #4081 quotes in full. `ruff==0.16.0` was in fact the CURRENT latest release,
 //! and all ten checks on that PR were green on that exact dependency; the claim
@@ -55,7 +55,7 @@ fn ruff_version_finding() -> Finding {
 /// A genuine, diff-provable correctness finding on the same PR — the control.
 fn genuine_finding() -> Finding {
     let mut f = Finding::new(
-        "src/apex/loader.py",
+        "src/ledger/loader.py",
         "logic-error",
         "`load_config` indexes `argv[1]` before checking `len(argv)`, so running \
          the loader with no arguments raises IndexError instead of printing usage.",

@@ -31,23 +31,59 @@ fn scratch_data_dir(dir: &std::path::Path) -> PathBuf {
     data
 }
 
+/// #10101 (owner ruling 2026-11-18): with `TM_WORKSPACE_TMUX` unset, the
+/// daemon and the CLI both launch on the default server. Red on d4ab972f18,
+/// where an unset variable picked the `tm-ws-*` server.
 #[serial_test::serial]
 #[test]
-fn the_opt_out_keeps_the_default_server() {
+fn with_no_env_a_launch_stays_on_the_default_server() {
     let (dir, _log, tmux) = real_driver();
-    assert!(opted_out(Some("0")));
-    assert!(opted_out(Some(" 0 ")));
-    assert!(!opted_out(Some("1")));
-    assert!(!opted_out(None));
+    assert!(launch_target_with(&tmux, dir.path(), None).is_none());
+    assert!(cli_launch_server_with(dir.path(), None, dir.path()).is_none());
+}
+
+/// #10101: only `TM_WORKSPACE_TMUX=1` reaches the workspace server.
+#[serial_test::serial]
+#[test]
+fn only_the_opt_in_reaches_the_workspace_server() {
+    let (dir, _log, tmux) = real_driver();
+    assert!(opted_in(Some("1")));
+    assert!(opted_in(Some(" 1 ")));
+    assert!(!opted_in(Some("0")));
+    assert!(!opted_in(None));
     assert!(launch_target_with(&tmux, dir.path(), Some("0")).is_none());
-    let (_, socket) = launch_target_with(&tmux, dir.path(), None).expect("workspace server");
+    let (_, socket) = launch_target_with(&tmux, dir.path(), Some("1")).expect("workspace server");
     assert_eq!(
         socket,
         dir.path()
             .join(crate::core::tmux_server::workspace_server_name(dir.path()))
     );
     // A driver that reaches no named server launches on the default server.
-    assert!(launch_target_with(&FakeNoopTmuxDriver, dir.path(), None).is_none());
+    assert!(launch_target_with(&FakeNoopTmuxDriver, dir.path(), Some("1")).is_none());
+}
+
+/// #10101 (ruling 2026-11-18): with `TM_WORKSPACE_TMUX` unset, a create
+/// stores no socket and creates its session on the default server.
+#[serial_test::serial]
+#[tokio::test]
+async fn with_no_env_a_create_stores_no_socket() {
+    let _env = crate::secret_source::test_env::EnvVarGuard::unset(WORKSPACE_TMUX_ENV);
+    let (dir, log, tmux) = real_driver();
+    let workspace = dir.path().join("repo");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    let mgr = SessionManager::new(&scratch_data_dir(dir.path()), Arc::new(tmux))
+        .await
+        .expect("manager");
+    let record = mgr
+        .create("task".into(), Some(workspace), None, None, None, None)
+        .await
+        .expect("create");
+    assert_eq!(record.tmux_socket, None);
+    let calls = std::fs::read_to_string(&log).expect("log");
+    assert!(
+        calls.lines().all(|l| !l.starts_with("-L ")),
+        "a call reached a named server: {calls}"
+    );
 }
 
 /// The create path starts the workspace server, creates the session there and
@@ -57,6 +93,8 @@ fn the_opt_out_keeps_the_default_server() {
 #[serial_test::serial]
 #[tokio::test]
 async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
+    // #10101: the workspace server is opt-in since the 2026-11-18 ruling.
+    let _opt_in = crate::secret_source::test_env::EnvVarGuard::set(WORKSPACE_TMUX_ENV, "1");
     let (dir, log, tmux) = real_driver();
     let workspace = dir.path().join("repo");
     std::fs::create_dir_all(&workspace).expect("workspace");
@@ -114,6 +152,8 @@ async fn a_fresh_launch_creates_its_session_on_the_workspace_server() {
 #[serial_test::serial]
 #[tokio::test]
 async fn resuming_on_a_crashed_workspace_server_restarts_it_and_recreates_the_pane() {
+    // #10101: only an opted-in record stays on its workspace server.
+    let _opt_in = crate::secret_source::test_env::EnvVarGuard::set(WORKSPACE_TMUX_ENV, "1");
     let dir = crate::test_support::hermetic_temp_dir();
     let workdir = std::fs::canonicalize(dir.path()).expect("canonical");
     let log = dir.path().join("calls.log");
@@ -175,7 +215,8 @@ fn two_worktrees_of_one_project_share_one_server() {
     let second = one.add_worktree("pm-b-10101");
     let elsewhere = other.add_worktree("pm-c-10101");
 
-    let socket = |cwd: &std::path::Path| launch_target_with(&tmux, cwd, None).expect("server").1;
+    let socket =
+        |cwd: &std::path::Path| launch_target_with(&tmux, cwd, Some("1")).expect("server").1;
 
     let expected = dir
         .path()
@@ -193,8 +234,9 @@ fn a_cli_launch_names_the_daemons_workspace_server() {
     let (dir, _log, tmux) = real_driver();
     let fixture = crate::session_manager::worktree_git_fixture::GitWorktreeFixture::new();
     let worktree = fixture.add_worktree("pm-cli-10101");
-    let (_, daemon) = launch_target_with(&tmux, &worktree, None).expect("daemon server");
-    let (name, socket) = cli_launch_server_with(&worktree, None, dir.path()).expect("cli server");
+    let (_, daemon) = launch_target_with(&tmux, &worktree, Some("1")).expect("daemon server");
+    let (name, socket) =
+        cli_launch_server_with(&worktree, Some("1"), dir.path()).expect("cli server");
     assert_eq!(socket, daemon, "one rule for both launch paths");
     assert_eq!(
         name,
@@ -202,9 +244,10 @@ fn a_cli_launch_names_the_daemons_workspace_server() {
     );
 }
 
-/// #10101: `TM_WORKSPACE_TMUX=0` keeps a CLI launch on the default server.
+/// #10101: a CLI launch reaches the workspace server only under
+/// `TM_WORKSPACE_TMUX=1`.
 #[test]
-fn the_cli_opt_out_keeps_the_default_server() {
+fn the_cli_needs_the_opt_in_for_the_workspace_server() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(cli_launch_server_with(dir.path(), Some("0"), dir.path()).is_none());
     assert!(cli_launch_server_with(dir.path(), Some("1"), dir.path()).is_some());

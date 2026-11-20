@@ -87,8 +87,8 @@ fn equivalent_remote_spellings_match() {
 }
 
 /// The #9089 repro's alias table, parsed from a literal — never `~/.ssh/config`.
-fn duetto_aliases() -> SshHostAliases {
-    SshHostAliases::parse("Host github-duetto\n  HostName github.com\n")
+fn acme_labs_aliases() -> SshHostAliases {
+    SshHostAliases::parse("Host github-acme\n  HostName github.com\n")
 }
 
 /// A checkout at `<tmp>/base` whose `origin` is the #9089 alias remote.
@@ -100,7 +100,7 @@ fn alias_origin_checkout(tmp: &Path) -> std::path::PathBuf {
             "remote",
             "add",
             "origin",
-            "git@github-duetto:duettoresearch/APEX.git",
+            "git@github-acme:acme-labs/LEDGER.git",
         ],
     );
     base
@@ -111,13 +111,13 @@ fn alias_origin_checkout(tmp: &Path) -> std::path::PathBuf {
 /// Test: itself.
 #[test]
 fn an_ssh_alias_origin_matches_its_github_remote() {
-    let aliases = duetto_aliases();
-    let want = canonical_remote("https://github.com/duettoresearch/apex.git");
+    let aliases = acme_labs_aliases();
+    let want = canonical_remote("https://github.com/acme-labs/ledger.git");
     for url in [
-        "git@github-duetto:duettoresearch/APEX.git",
-        "github-duetto:duettoresearch/apex",
-        "ssh://git@github-duetto/duettoresearch/APEX.git",
-        "git+ssh://git@github-duetto/duettoresearch/apex",
+        "git@github-acme:acme-labs/LEDGER.git",
+        "github-acme:acme-labs/ledger",
+        "ssh://git@github-acme/acme-labs/LEDGER.git",
+        "git+ssh://git@github-acme/acme-labs/ledger",
     ] {
         assert_eq!(
             canonical_remote_with(url, &aliases),
@@ -132,14 +132,14 @@ fn an_ssh_alias_origin_matches_its_github_remote() {
 /// Test: itself.
 #[test]
 fn a_host_with_no_alias_entry_canonicalizes_as_before() {
-    let aliases = duetto_aliases();
+    let aliases = acme_labs_aliases();
     for url in [
         "git@github.com:acme/widget.git",
         "git@gitlab.com:acme/widget.git",
         "git@gh-other:acme/widget.git",
         "ssh://git@gh-other:2222/acme/widget.git",
-        "https://github-duetto/acme/widget",
-        "/tmp/github-duetto:x/widget",
+        "https://github-acme/acme/widget",
+        "/tmp/github-acme:x/widget",
     ] {
         assert_eq!(
             canonical_remote_with(url, &aliases),
@@ -159,8 +159,8 @@ fn an_ssh_alias_origin_checkout_matches_its_github_remote() {
 
     verify_remote_matches(
         &base,
-        "https://github.com/duettoresearch/apex.git",
-        &duetto_aliases(),
+        "https://github.com/acme-labs/ledger.git",
+        &acme_labs_aliases(),
     )
     .expect("an alias origin is the repository its real host serves");
 }
@@ -183,12 +183,8 @@ fn an_unreadable_ssh_config_never_turns_an_alias_into_a_match() {
         garbage,
     ] {
         let aliases = SshHostAliases::load(&config);
-        let err = verify_remote_matches(
-            &base,
-            "https://github.com/duettoresearch/apex.git",
-            &aliases,
-        )
-        .expect_err("an unread alias must not match");
+        let err = verify_remote_matches(&base, "https://github.com/acme-labs/ledger.git", &aliases)
+            .expect_err("an unread alias must not match");
         assert!(
             matches!(err, ColdStartError::RemoteMismatch { .. }),
             "config {config:?}: expected RemoteMismatch, got {err:?}"

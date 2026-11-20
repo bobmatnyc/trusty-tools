@@ -290,6 +290,14 @@ jobs:
       # #8716: the rustdoc-links job's scope decision and the gate's own
       # fail-closed arms. Neither needs a doc build; the gate's selftest scores
       # captured cargo streams. It ran in no workflow before this step.
+      # #11470: the release gates for a trusty-mpm publish — published content
+      # coverage and the clean-HOME command walk — driven with fixtures and a
+      # stub binary; no network, no toolchain.
+      - name: Release content-gate selftests (#11470)
+        run: |
+          bash scripts/check-content-release-coverage-selftest.sh
+          bash scripts/release-gate-selftest.sh
+
       - name: Rustdoc scope + link-gate selftests (#8716)
         run: |
           bash scripts/rustdoc-links-scope-selftest.sh
@@ -3049,6 +3057,13 @@ jobs:
       - name: Content gates selftest (#8388)
         if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
         run: bash scripts/check_content_selftest.sh
+
+      # #10576: the owner-scenario lint must still fail a UI-script scenario, a
+      # missing field, an unknown trace ID and a prose-only block. Valid on
+      # merge_group like the other steps in this job.
+      - name: Owner-scenario lint selftest (#10576)
+        if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) }}
+        run: bash scripts/check_owner_scenarios_selftest.sh
 
       # #4688: diff against the base branch AS IT IS NOW, not the frozen
       # `base.sha` snapshot, so the merge base cannot lag behind the merge

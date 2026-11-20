@@ -252,7 +252,7 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 
 ### 6.1 GitHub client (`integrations/github/`)
 
-**Auth** (`auth.rs`): GitHub App preferred (JWT minted via `jsonwebtoken`, exchanged for short-lived installation token), PAT fallback. Multi-org: `resolve_token(owner)` selects installation token by case-insensitive owner match (`duettoresearch` vs `hotstats`), falling back to `GITHUB_TOKEN`.
+**Auth** (`auth.rs`): GitHub App preferred (JWT minted via `jsonwebtoken`, exchanged for short-lived installation token), PAT fallback. Multi-org: `resolve_token(owner)` selects installation token by case-insensitive owner match (`acme` vs `hotstats`), falling back to `GITHUB_TOKEN`.
 
 **Push firewall** (`firewall.rs`): Hard-coded `GH_ALLOW_PUSH = false`. `assert_no_push_operation()` panics/errors on any git-write attempt. Not configurable by env or per-repo config.
 
@@ -267,7 +267,8 @@ JSON schema is additively versioned via `review_version`. Existing field names a
 | `GITHUB_APP_ID` | App numeric ID |
 | `GITHUB_APP_CLIENT_ID` | App OAuth client ID |
 | `GITHUB_APP_PRIVATE_KEY` | RSA PEM (`\n`-escaped newlines) |
-| `GITHUB_INSTALLATION_ID_DUETTORESEARCH` | duettoresearch org installation |
+| `GITHUB_INSTALLATION_ID_DEFAULT_ORG` | default org installation id |
+| `GITHUB_INSTALLATION_DEFAULT_ORG` | org (repo owner) the default installation id belongs to |
 | `GITHUB_INSTALLATION_ID_HOTSTATS` | hotstats org installation |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for `X-Hub-Signature-256` |
 | `GITHUB_TOKEN` | PAT fallback |
@@ -594,7 +595,7 @@ contains the full design. Status per phase:
 
 ---
 
-## 13. Best-practice & Duetto-alignment component requirements (epic #1413)
+## 13. Best-practice & Acme-alignment component requirements (epic #1413)
 
 This section maps the normative requirements from PRD.md §9 to the specific
 components they affect. See PRD.md §9 for the full rationale and MUST/SHOULD

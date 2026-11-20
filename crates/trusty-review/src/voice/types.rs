@@ -42,7 +42,7 @@ pub struct VoiceProvenance {
 /// Test: covered by serde round-trip in voice/tests.rs.
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub struct VoiceMeta {
-    /// Package name (e.g. `"duetto"`).
+    /// Package name (e.g. `"house"`).
     pub name: String,
     /// SemVer-ish version string (e.g. `"0.1.0"`).
     #[serde(default)]

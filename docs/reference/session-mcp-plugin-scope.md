@@ -80,7 +80,7 @@ the first path segment under the repos root, else the owner the `origin`
 remote names.
 
 ```toml
-extends = "bob-duetto"          # optional, one parent, at most 4 files
+extends = "acme-admin"          # optional, one parent, at most 4 files
 [mcp]
 allow = ["apex"]                # user-scope servers that load; absent = all
 deny  = ["heygen"]              # applied after allow

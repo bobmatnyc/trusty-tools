@@ -1,0 +1,5 @@
+crate   trusty-mpm
+version 1.14.8
+reason  #10574: `.trusty-mpm.toml` gains a `[stale_copy]` table; ProjectLevelConfig is deny_unknown_fields, so the table needs a field. Internal numbering policy (owner ruling 2026-09-26): a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field ProjectLevelConfig.stale_copy
+accept  enum_variant_added variant PrepError:ArchitectHooks

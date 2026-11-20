@@ -3,7 +3,7 @@ name: tm-prose-style
 description: Worked examples and banned-phrase inventories behind the Write Plainly voice rules — the BEFORE/AFTER embellishment example, the "instances observed so far" lists, and the ASD-STE-100 spirit adoption. The rules themselves are resident in the output style and in BASE-AGENT.md; this is the evidence behind them.
 user-invocable: true
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
 category: pm-workflow
 tags: [prose, style, writing, communication, pm-recommended]
 effort: low
@@ -202,6 +202,23 @@ are not the process narration the rule bans — teach the mechanism ("engineer
 owns the implementation, qa owns the proof"), never the play-by-play of your own
 tool calls. Every other rule applies unchanged in both; teach with substance,
 not flattery.
+
+## Shared Documents
+
+<!-- rule:tm-prose-style/shared-documents -->
+These rules apply to every document: a brief, a spec, a README, a report, a
+ticket or PR body. Rules (d) and (e) apply to a document shared outside the
+team. A request from the reader overrides (a).
+
+- **(a)** State no process or internal history. Say what is true, not how it
+  came to be.
+- **(b)** Do not refer to the author.
+- **(c)** State only the current best estimate of truth. A document has one
+  version; it carries no superseded text or correction notes.
+- **(d)** Do not refer to Architect docs or any other internal document.
+- **(e)** Leave out confidential commercial detail: prices, contract terms,
+  deal status, revenue.
+- **(f)** Read a shared document before you replace it.
 
 ## Related Skills
 

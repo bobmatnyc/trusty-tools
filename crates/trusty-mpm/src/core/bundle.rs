@@ -73,10 +73,11 @@ impl BundledStyle {
 /// up a configured/selected id against this table; a single ordered slice keeps
 /// both behaviours consistent.
 /// What: the professional (`trusty-mpm`), teaching (`trusty-mpm-teacher`), and
-/// research (`trusty-mpm-research`) PM styles, then the fleet-supervisor style
-/// (`trusty-mpm-supervisor`, #8453). Deploying and `tm doctor` cover all four;
+/// research (`trusty-mpm-research`) PM styles, the non-technical-owner PM style
+/// (`owner-plain`, #10576), then the fleet-supervisor style
+/// (`trusty-mpm-supervisor`, #8453). Deploying and `tm doctor` cover all five;
 /// only a supervisor session may select the last.
-/// Test: `bundle_tests::output_style_registry_has_four_distinct_ids`.
+/// Test: `bundle_tests::output_style_registry_has_five_distinct_ids`.
 pub const OUTPUT_STYLES: &[BundledStyle] = &[
     BundledStyle {
         id: DEFAULT_OUTPUT_STYLE_ID,
@@ -92,6 +93,12 @@ pub const OUTPUT_STYLES: &[BundledStyle] = &[
         id: "trusty-mpm-research",
         file_name: "trusty-mpm-research.md",
         content_path: "output-styles/trusty-mpm-research.md",
+    },
+    // #10576: the default PM with plain, regular reporting to a non-technical owner.
+    BundledStyle {
+        id: "owner-plain",
+        file_name: "owner-plain.md",
+        content_path: "output-styles/owner-plain.md",
     },
     BundledStyle {
         id: crate::core::session_profile::ARCHITECT_WRITTEN_OUTPUT_STYLE_ID,

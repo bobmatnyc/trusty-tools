@@ -225,7 +225,7 @@ domain. The equivalent pipeline lives at `tga profile`
 | [#558](https://github.com/bobmatnyc/trusty-tools/issues/558) | Epic: longitudinal per-contributor code review profiles | ✅ Core shipped |
 | [#569](https://github.com/bobmatnyc/trusty-tools/issues/569) | Per-PR review personalization from contributor profile | Planned (post-#552) |
 | [#1242](https://github.com/bobmatnyc/trusty-tools/issues/1242) | OpenRouter Zero Data Retention (ZDR) opt-in | Planned |
-| [#1413](https://github.com/bobmatnyc/trusty-tools/issues/1413) | Epic: best-practice & Duetto-alignment review improvements | Planned (see §9) |
+| [#1413](https://github.com/bobmatnyc/trusty-tools/issues/1413) | Epic: best-practice & Acme-alignment review improvements | Planned (see §9) |
 | [#1414](https://github.com/bobmatnyc/trusty-tools/issues/1414) | Inline per-line GitHub review comments | P1 |
 | [#1415](https://github.com/bobmatnyc/trusty-tools/issues/1415) | One-click `suggestion` blocks in review comments | P1 |
 | [#1416](https://github.com/bobmatnyc/trusty-tools/issues/1416) | Consequence/failure-mechanism + uncertainty signaling | P1 |
@@ -243,7 +243,7 @@ The critical path is: **#552** (full 16-stage pipeline) → **#549** (persistenc
 
 ## 7. Acceptance checklist (spec conformance gate)
 
-> _Section 9 (Best-practice & Duetto-alignment requirements) was added 2026-06-18 and adds additional acceptance items at the bottom of §7._
+> _Section 9 (Best-practice & Acme-alignment requirements) was added 2026-06-18 and adds additional acceptance items at the bottom of §7._
 
 An implementation is spec-conformant only when ALL of the following hold:
 
@@ -286,9 +286,9 @@ An implementation is spec-conformant only when ALL of the following hold:
 
 ---
 
-## 9. Best-practice & Duetto-alignment requirements (epic #1413)
+## 9. Best-practice & Acme-alignment requirements (epic #1413)
 
-> **Added 2026-06-18.** Requirements derived from analysis of Duetto human PR reviews
+> **Added 2026-06-18.** Requirements derived from analysis of Acme human PR reviews
 > that earned positive author feedback, combined with general best practices from
 > Google eng-practices, Conventional Comments, Cloudflare/Greptile/Qodo, and SmartBear.
 >
@@ -307,7 +307,7 @@ using the GitHub `POST /repos/{owner}/{repo}/pulls/{pull_number}/reviews` API wi
 SHOULD be aggregated into the review summary body.
 
 **Rationale:** Authors navigate findings most efficiently when comments appear inline
-in the diff view. Duetto human reviews that earned the most positive feedback
+in the diff view. Acme human reviews that earned the most positive feedback
 universally used inline comments; a wall-of-text review body in isolation consistently
 drew requests to "please annotate the specific lines." The GitHub PR review API
 supports batching all inline comments into one API call alongside the overall verdict.
@@ -337,7 +337,7 @@ from the `suggestion` block to avoid invalid diff application.
 
 **Rationale:** One-click suggestions are the highest-signal feature in GitHub's
 review UX and are explicitly recommended in Conventional Comments as the fastest
-path to acceptance. Duetto reviews that included them had the shortest time-to-merge
+path to acceptance. Acme reviews that included them had the shortest time-to-merge
 for the flagged fixes.
 
 **Forward reference:** #1415. Requires inline comment posting (#1414).
@@ -358,7 +358,7 @@ for the flagged fixes.
    *"I may be missing context about…"* or *"This could be intentional if…"* The
    reviewer system prompt MUST reinforce this contract.
 
-**Rationale:** The most common negative feedback on AI reviews in Duetto audits was
+**Rationale:** The most common negative feedback on AI reviews in Acme audits was
 "it flags things but doesn't tell me what actually breaks." Consequence-first framing
 converts a vague concern into an actionable decision. Explicit uncertainty signaling
 avoids the false authority problem: authors distrust confident-sounding findings that
@@ -391,7 +391,7 @@ field addition.
 
 **Rationale:** Conventional Comments is the industry standard (adopted by GitLab,
 Shopify, Cloudflare internal tools) and eliminates ambiguity about whether a comment
-is blocking. Praise-first framing mirrors how Duetto's highest-rated human reviews are
+is blocking. Praise-first framing mirrors how Acme's highest-rated human reviews are
 structured and reduces author defensiveness. Bias-to-merge is the formal statement of
 the existing fail-safe posture (§6) at the prompt level.
 
@@ -419,7 +419,7 @@ Cross-references §6 (fail-safe), §4.1 verdict taxonomy.
    blocking — enforcement is a team process decision.
 
 **Rationale:** The gap between "code looks right" and "code satisfies requirements"
-is the most common source of post-merge rework in Duetto's retrospectives.
+is the most common source of post-merge rework in Acme's retrospectives.
 Test-plan conformance was the single requirement most often cited in positive
 review feedback: "caught that we missed the edge case in AC-3."
 
@@ -447,7 +447,7 @@ metadata fetch (already ✅). JIRA AC extraction requires AC-structured ticket p
    (no spec context, no review block).
 
 **Rationale:** Grounded findings are 3× more actionable than assertion-only findings
-in Duetto review audits. Authors can verify or contest a spec citation; they cannot
+in Acme review audits. Authors can verify or contest a spec citation; they cannot
 engage with an ungrounded assertion. Confluence spec fetch (already implemented as a
 context source) unlocks automatic spec grounding without manual copy-paste.
 
@@ -482,7 +482,7 @@ JIRA context source (already ✅). Cross-references #584 (per-repo spec config).
 **Rationale:** Over-flagging is the #1 reason authors disable or ignore AI review
 tools (SmartBear developer survey, Qodo eng-practices whitepaper). Nit rollup and
 re-review suppression directly address the two most common "reviewer fatigue"
-complaints in Duetto's internal tooling retrospectives.
+complaints in Acme's internal tooling retrospectives.
 
 **Forward reference:** #1420. Requires reviewer prompt update, `MAX_NITS` constant
 in `config/constants.rs`, and re-review suppression (depends on dedup store,
@@ -524,7 +524,7 @@ fully-automated feedback loop.
 **Requirement:**
 
 A calibration test harness SHOULD be implemented (`regression-testing/`) that:
-1. Replays a corpus of PRs from GitHub org Project #19 (Duetto's
+1. Replays a corpus of PRs from GitHub org Project #19 (Acme's
    positive-signal PR set — PRs that earned explicit positive author feedback)
    through the review pipeline in dry-run mode.
 2. Computes **recall** (fraction of positive-signal findings that the bot also
@@ -566,7 +566,7 @@ snapshot fetched just-in-time from the GitHub API, with no tga dependency.
 
 **Rationale:** A reviewer who knows "this author's last 3 PRs all had the same
 missing-error-check pattern" can weigh findings more appropriately and tailor
-the tone. This is standard practice in Duetto's highest-rated human reviews.
+the tone. This is standard practice in Acme's highest-rated human reviews.
 The MAY priority reflects that the longitudinal profile in `tga profile`
 partially satisfies this need; this source adds recency and is cheaper to
 compute, without pulling trusty-review back into a tga dependency.

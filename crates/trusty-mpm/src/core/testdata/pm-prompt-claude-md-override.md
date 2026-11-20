@@ -31,18 +31,19 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt, so every line there is a standing
-  per-turn cost. Needed on every prompt → `CLAUDE.md`. Needed only sometimes →
-  a skill, `docs/`, or memory. The test is frequency of need, not format.
+- `CLAUDE.md` costs every turn. Needed on every prompt → `CLAUDE.md`.
+  Needed only sometimes → a skill, `docs/`, or memory.
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Criteria: `Skill(skill="tm-ticketing")`.
+  Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
   data loss or corruption, a crash, hang or leaked process, a resource pileup,
@@ -53,7 +54,7 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 

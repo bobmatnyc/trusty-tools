@@ -329,6 +329,60 @@ pub(super) fn session_end_pane_still_live(
     crate::daemon::runtime_reap::session_has_live_pane(tmux_name, panes, probe)
 }
 
+/// Whether the `SessionEnd` gate defers the Stopped transition (#2454, #11175).
+///
+/// Why: a session on a `tm-ws-*` workspace server has no pane on the default
+/// server, so a default-server listing found nothing and stopped a record
+/// whose pane still ran its runtime (#11175).
+/// What: [`session_end_defers_in`] over this process's tmux socket directory.
+/// Test: `the_session_end_gate_reads_the_workspace_server_11175`.
+pub(super) fn session_end_defers(
+    tmux_name: &str,
+    socket: Option<&std::path::Path>,
+    probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
+) -> bool {
+    let socket_dir = crate::core::tmux_server::ambient_socket_dir();
+    session_end_defers_in(tmux_name, socket, &socket_dir, probe)
+}
+
+/// [`session_end_defers`] with the workspace servers in `socket_dir`.
+///
+/// What: lists the panes on the server `socket` names
+/// ([`crate::core::tmux_server::server_of_socket`]) and applies
+/// [`session_end_pane_still_live`]. A workspace server is listed through
+/// [`crate::daemon::orphan_gc_servers::list_server_panes`], bounded by the
+/// probe budget, so a hung server cannot hold the caller. A socket outside
+/// `socket_dir` defers and runs no tmux: the record stays `Active`, and the
+/// managed reaper stops it only once its server is gone. tmux absent, a
+/// failed listing, or one that outlives the budget proceeds, as before.
+/// Test: `the_session_end_gate_reads_the_workspace_server_11175`,
+/// `an_unroutable_socket_defers_without_running_tmux_11175`,
+/// `a_hung_workspace_server_lets_the_stop_proceed_in_time_11175`.
+pub(super) fn session_end_defers_in(
+    tmux_name: &str,
+    socket: Option<&std::path::Path>,
+    socket_dir: &std::path::Path,
+    probe: &dyn crate::daemon::orphan_gc::ChildLivenessProbe,
+) -> bool {
+    let server = match crate::core::tmux_server::server_of_socket(socket, socket_dir) {
+        Ok(server) => server,
+        Err(e) => {
+            tracing::warn!("#11175: SessionEnd gate for {tmux_name} deferred — {e}");
+            return true;
+        }
+    };
+    let Ok(driver) = crate::daemon::tmux::TmuxDriver::discover() else {
+        return false;
+    };
+    let panes = match server.as_deref() {
+        Some(server) => {
+            crate::daemon::orphan_gc_servers::list_server_panes(&driver, socket_dir, server)
+        }
+        None => driver.list_managed_panes().ok(),
+    };
+    panes.is_some_and(|panes| session_end_pane_still_live(tmux_name, &panes, probe))
+}
+
 /// Immediately mark a managed session Stopped on `SessionEnd`, WITHOUT killing
 /// its tmux pane (#2454).
 ///
@@ -417,6 +471,7 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
     if let Some(r) = matched {
         let id = r.id;
         let tmux_name = r.tmux_name.clone();
+        let tmux_socket = r.tmux_socket.clone();
 
         // #4337: this Claude session has genuinely ended — un-correlate it so
         // a later, unrelated SessionStart is never compared against a dead
@@ -433,14 +488,18 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
         // runtime. Fails open (proceeds) when tmux is unavailable or pane
         // enumeration fails, matching the transition's own non-destructive
         // nature (nothing here ever touches the pane regardless).
-        if let Ok(driver) = crate::daemon::tmux::TmuxDriver::discover()
-            && let Ok(panes) = driver.list_managed_panes()
-            && session_end_pane_still_live(
-                &tmux_name,
-                &panes,
+        // #11175: tmux subprocesses; off the async worker.
+        let gate_name = tmux_name.clone();
+        let defers = tokio::task::spawn_blocking(move || {
+            session_end_defers(
+                &gate_name,
+                tmux_socket.as_deref(),
                 &crate::daemon::orphan_gc::ProcessTreeProbe,
             )
-        {
+        })
+        .await
+        .unwrap_or(false);
+        if defers {
             tracing::info!(
                 managed_id = %id,
                 claude_session_id = %claude_session_id,
@@ -467,3 +526,7 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
 #[cfg(test)]
 #[path = "session_start_taint_tests.rs"]
 mod taint_tests;
+
+#[cfg(test)]
+#[path = "session_end_server_tests.rs"]
+mod session_end_server_tests;

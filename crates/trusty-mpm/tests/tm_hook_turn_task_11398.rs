@@ -42,6 +42,7 @@ fn run(project: &Path, payload: &serde_json::Value, profile: Option<&str>) -> (S
         .current_dir(project)
         .env("CLAUDE_PROJECT_DIR", project)
         .env("DATG_SESSION", "pm-a")
+        .env("DBATG_SESSION", "pm-a")
         .env_remove("TMUX_PANE")
         .env_remove("TRUSTY_MPM_SESSION_PROFILE")
         .env_remove("TRUSTY_MPM_DISABLE_HOOKS")
@@ -125,4 +126,66 @@ fn every_fail_open_path_is_silent_and_exits_zero() {
     let bare = tempfile::tempdir().expect("tempdir");
     let (stdout, _) = run(bare.path(), &prompt(), None);
     assert!(stdout.is_empty(), "no state file: {stdout:?}");
+}
+
+/// Write the dbatg store for session `pm-a` under `project`, shaped like the
+/// dbatg MCP's own write: `trusty-architect`'s `State` (tasks carry no
+/// `created`; the PM's task is the free-text `session.task` line).
+fn dbatg(project: &Path, session_task: &str) {
+    let dir = project.join(".trusty-mpm/dbatg/pm-a");
+    std::fs::create_dir_all(&dir).expect("mkdir dbatg");
+    let state = serde_json::json!({
+        "code": "tt",
+        "v": 9,
+        "config": { "mode": "warn" },
+        "goals": [],
+        "items": [],
+        "tasks": [
+            { "id": "tt-T0b", "goal": "tt-G01", "title": "t", "status": "open", "to": "", "outcome": "" },
+            { "id": "tt-T0c", "goal": "tt-G01", "title": "t", "status": "done", "to": "", "outcome": "" },
+        ],
+        "next": { "G": "02", "D": "01", "A": "01", "T": "0d" },
+        "session": {
+            "written_at": "2026-11-19T01:40Z",
+            "written_epoch": 1_795_052_400,
+            "task": session_task,
+            "next": "dolor sit",
+        },
+    });
+    std::fs::write(dir.join("state.json"), state.to_string()).expect("write state");
+}
+
+#[test]
+fn a_dbatg_session_task_stamps_the_turn() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    dbatg(dir.path(), "tt-T0b: wiring the stamp");
+    let (stdout, stderr) = run(dir.path(), &prompt(), None);
+    let out: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout:?}"));
+    assert_eq!(
+        out["hookSpecificOutput"]["additionalContext"],
+        "Task: tt-T0b"
+    );
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn dbatg_takes_precedence_over_datg_and_never_shows_a_stale_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    datg(dir.path(), Some("tt-T0b"));
+    dbatg(dir.path(), "tt-T0b: both stores");
+    let (stdout, _) = run(dir.path(), &prompt(), None);
+    // dbatg's answer (no `@MMDD`: its tasks have no `created`), not datg's.
+    assert!(stdout.contains("\"Task: tt-T0b\""), "{stdout:?}");
+    // A dbatg store with no task id is final: datg's older `current` is stale.
+    dbatg(dir.path(), "waiting on the owner");
+    let (stdout, stderr) = run(dir.path(), &prompt(), None);
+    assert!(
+        stdout.is_empty() && stderr.is_empty(),
+        "{stdout:?} {stderr:?}"
+    );
+    // A done dbatg task shows nothing either.
+    dbatg(dir.path(), "tt-T0c");
+    let (stdout, _) = run(dir.path(), &prompt(), None);
+    assert!(stdout.is_empty(), "{stdout:?}");
 }

@@ -234,7 +234,7 @@ pub(super) fn select_relevant_triples(
 /// Drop recalled drawers that were written while working on a different
 /// project.
 ///
-/// Why: a drawer tagged `creator:cwd=/Users/bob/Duetto/cto` — a note about
+/// Why: a drawer tagged `creator:cwd=/Users/bob/Acme/cto` — a note about
 /// another repository entirely — was recalled into `trusty-tools` sessions turn
 /// after turn. The drawer really does live in the `trusty-tools` palace, so
 /// palace resolution cannot exclude it; the write put it in the wrong place and

@@ -63,7 +63,8 @@ fn resolve_model_env_var_beats_toml() {
     unsafe {
         std::env::set_var("TAGENT_MODEL_PYTHON_ENGINEER", "env/winner");
     }
-    let (m, src) = resolve_model("python-engineer", "toml/model", Some("toml/override"));
+    let (m, src) =
+        resolve_model("python-engineer", "toml/model", Some("toml/override")).expect("resolves");
     assert_eq!(m, "env/winner");
     assert_eq!(src, ModelSource::AgentEnv);
     clear_model_env("python-engineer");
@@ -73,7 +74,7 @@ fn resolve_model_env_var_beats_toml() {
 fn resolve_model_llm_override_beats_agent_model() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("x-agent");
-    let (m, src) = resolve_model("x-agent", "toml/agent", Some("toml/override"));
+    let (m, src) = resolve_model("x-agent", "toml/agent", Some("toml/override")).expect("resolves");
     assert_eq!(m, "toml/override");
     assert_eq!(src, ModelSource::LlmOverride);
 }
@@ -82,7 +83,7 @@ fn resolve_model_llm_override_beats_agent_model() {
 fn resolve_model_uses_agent_model_when_no_override() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("y-agent");
-    let (m, src) = resolve_model("y-agent", "toml/agent", None);
+    let (m, src) = resolve_model("y-agent", "toml/agent", None).expect("resolves");
     assert_eq!(m, "toml/agent");
     assert_eq!(src, ModelSource::AgentToml);
 }
@@ -95,7 +96,7 @@ fn resolve_model_uses_default_env_when_nothing_else() {
     unsafe {
         std::env::set_var("TAGENT_DEFAULT_MODEL", "default/model");
     }
-    let (m, src) = resolve_model("z-agent", "", None);
+    let (m, src) = resolve_model("z-agent", "", None).expect("resolves");
     assert_eq!(m, "default/model");
     assert_eq!(src, ModelSource::DefaultEnv);
     // SAFETY: guarded by ENV_LOCK
@@ -108,16 +109,32 @@ fn resolve_model_uses_default_env_when_nothing_else() {
 fn resolve_model_fallback_when_nothing_set() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("q-agent");
-    let (m, src) = resolve_model("q-agent", "", None);
+    let (m, src) = resolve_model("q-agent", "", None).expect("resolves");
     assert_eq!(m, FALLBACK_MODEL);
     assert_eq!(src, ModelSource::Fallback);
+}
+
+/// Why: #10978 — under a provider lock the Anthropic `FALLBACK_MODEL` is a
+/// route off Bedrock, so an agent with no model is an error naming it.
+/// Test: itself.
+#[test]
+fn resolve_model_refuses_the_fallback_under_the_lock() {
+    use crate::llm::provider_lock::{ProviderLock, override_on_this_thread};
+    let _guard = ENV_LOCK.blocking_lock();
+    clear_model_env("lock-agent");
+    let _locked = override_on_this_thread(Ok(Some(ProviderLock::Bedrock)));
+    let err = resolve_model("lock-agent", "", None).expect_err("no fallback under the lock");
+    assert!(err.to_string().contains("lock-agent"), "{err}");
+    // A configured model is still returned as-is; the loader checks its slug.
+    let (m, _) = resolve_model("lock-agent", "bedrock/x", None).expect("configured model");
+    assert_eq!(m, "bedrock/x");
 }
 
 #[test]
 fn resolve_model_empty_llm_override_is_ignored() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("r-agent");
-    let (m, src) = resolve_model("r-agent", "toml/agent", Some(""));
+    let (m, src) = resolve_model("r-agent", "toml/agent", Some("")).expect("resolves");
     assert_eq!(m, "toml/agent");
     assert_eq!(src, ModelSource::AgentToml);
 }
@@ -480,49 +497,6 @@ fn bundled_agents_dir() -> PathBuf {
     )
 }
 
-/// #3738 (MEDIUM): `cto-assistant` ships as TWO hand-maintained files — the
-/// flat `cto-assistant.toml` (what `GET /api/agents` scans, so it drives the
-/// GUI label) and the directory package `cto-assistant/agent.toml` (what the
-/// runtime loads, so it drives the actual persona identity). Both hand-carry
-/// `[agent].display_name`/`model`; nothing keeps them in sync. This guard
-/// fails CI if a future single-file edit desyncs the GUI label from the
-/// runtime identity ("CTO Assistant" in one, stale in the other).
-/// Test: This function IS the test.
-#[test]
-fn cto_assistant_flat_and_package_display_name_stay_in_sync() {
-    let dir = bundled_agents_dir();
-    let read_agent_field = |path: PathBuf, field: &str| -> Option<String> {
-        let raw = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
-        let parsed: toml::Value =
-            toml::from_str(&raw).unwrap_or_else(|e| panic!("{} must parse: {e}", path.display()));
-        parsed
-            .get("agent")
-            .and_then(|a| a.get(field))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    let flat = dir.join("cto-assistant.toml");
-    let package = dir.join("cto-assistant").join("agent.toml");
-
-    let flat_display = read_agent_field(flat.clone(), "display_name");
-    let package_display = read_agent_field(package.clone(), "display_name");
-    assert_eq!(
-        flat_display.as_deref(),
-        Some("CTO Assistant"),
-        "flat cto-assistant.toml must declare display_name 'CTO Assistant'"
-    );
-    assert_eq!(
-        flat_display, package_display,
-        "cto-assistant flat + package display_name must match (GUI label vs runtime identity)"
-    );
-    assert_eq!(
-        read_agent_field(flat, "model"),
-        read_agent_field(package, "model"),
-        "cto-assistant flat + package model must match"
-    );
-}
-
 #[test]
 fn base_assistant_package_is_generic_default_and_curated() {
     // #3054: The base `assistant` agent must load from its directory-package
@@ -705,8 +679,7 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
 }
 
 /// #3738 (owner decision 2026-07-23): pins the canonical display names the
-/// chat surface serves — generic "Assistant" (the default), "Izzie", and
-/// "CTO Assistant" (#3819: renamed from "CTO Bot") — resolved through
+/// chat surface serves — generic "Assistant" (the default) and "Izzie" — resolved through
 /// `AgentInfo::display_label` from each bundled persona's `display_name`.
 /// This is the single-source-of-truth guard that keeps the GUI's
 /// per-message speaker attribution and the REPL `/switch` label from
@@ -715,11 +688,7 @@ fn izzie_overlay_package_parses_with_personal_deltas() {
 #[test]
 fn bundled_personas_expose_expected_display_names() {
     let _guard = ENV_LOCK.blocking_lock();
-    for (agent_name, expected) in [
-        ("assistant", "Assistant"),
-        ("izzie", "Izzie"),
-        ("cto-assistant", "CTO Assistant"),
-    ] {
+    for (agent_name, expected) in [("assistant", "Assistant"), ("izzie", "Izzie")] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
         unsafe {
@@ -778,11 +747,11 @@ fn display_label_falls_back_to_name_when_unset() {
 /// `project_list`, `console_metrics`, `system_status`, `mcp_list`,
 /// `mcp_enable`, `mcp_disable` (all of which either proxy trusty-mpm by name
 /// or enumerate internal daemon/MCP-service names to the user). Both `izzie`
-/// and `cto-assistant` declare `extends = "assistant"`, and `merge_extends`
+/// and `writing-assistant` declare `extends = "assistant"`, and `merge_extends`
 /// UNIONS `[tools].allow` base-first — so this test also confirms the grant
 /// propagates through inheritance and the strip isn't reintroduced by either
 /// overlay's own (now-deltas-only) allowlist.
-/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// What: Loads `assistant`, `izzie`, and `writing-assistant` via the real
 /// `AgentConfig::by_name` dispatch loader (bundled agents dir) and asserts
 /// each resolved `[tools].allow` contains `delegate_to_agent` and excludes
 /// every black-boxed tool name.
@@ -806,7 +775,7 @@ fn assistant_tier_grants_delegation_and_blackboxes_internal_tools() {
 
     // #8186: `writing-assistant` is the third first-class assistant and
     // extends the same base, so both halves of this claim must hold for it.
-    for agent_name in ["assistant", "izzie", "cto-assistant", "writing-assistant"] {
+    for agent_name in ["assistant", "izzie", "writing-assistant"] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
         unsafe {
@@ -882,7 +851,7 @@ fn assistant_tier_persona_carries_curated_worker_routing_list() {
 
     // #8186: the routing prose reaches `writing-assistant` by the same
     // concatenation, so the dead-instruction absence claim covers it too.
-    for agent_name in ["assistant", "izzie", "cto-assistant", "writing-assistant"] {
+    for agent_name in ["assistant", "izzie", "writing-assistant"] {
         clear_model_env(agent_name);
         // SAFETY: guarded by ENV_LOCK.
         unsafe {
@@ -932,12 +901,10 @@ fn assistant_tier_persona_carries_curated_worker_routing_list() {
 
 /// PR A follow-up (#3052): pins the resolved `[llm]` `temperature`/
 /// `max_tokens` for every bundled assistant-tier agent, proving the per-key
-/// `extends` inheritance fix (a) restores `cto-assistant`'s tuned sampling
-/// (the #469 regression) and (b) leaves `assistant`/`izzie` — which don't
-/// override either field — resolving to EXACTLY the base's values, unchanged
-/// from before this fix (no unintended drift for agents that inherit
-/// wholesale).
-/// What: Loads `assistant`, `izzie`, and `cto-assistant` via the real
+/// `extends` inheritance fix leaves `assistant`/`izzie` — which don't
+/// override either field — resolving to EXACTLY the base's values (no
+/// unintended drift for agents that inherit wholesale).
+/// What: Loads `assistant` and `izzie` via the real
 /// `AgentConfig::by_name` dispatch loader and asserts each resolved
 /// `(temperature, max_tokens)` pair.
 /// Test: This function IS the test.
@@ -946,7 +913,7 @@ fn assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance() {
     let _guard = ENV_LOCK.blocking_lock();
 
     // (agent name, expected temperature, expected max_tokens)
-    let cases: [(&str, f32, u32); 3] = [
+    let cases: [(&str, f32, u32); 2] = [
         // Base: declares its own values directly (not an extends child) —
         // must be completely unaffected by the per-key merge change.
         ("assistant", 0.7, 1024),
@@ -955,10 +922,6 @@ fn assistant_tier_llm_sampling_params_pin_per_key_extends_inheritance() {
         // must resolve identically to the base, whether via its own
         // declaration or via inheritance.
         ("izzie", 0.7, 1024),
-        // cto-assistant: extends "assistant" and declares ONLY temperature/
-        // max_tokens as deltas — must resolve to ITS tuned values (#469),
-        // not the base's, restoring the pre-`extends`-conversion behavior.
-        ("cto-assistant", 0.3, 4096),
     ];
 
     for (agent_name, expected_temperature, expected_max_tokens) in cases {
@@ -1575,8 +1538,8 @@ fn extends_shadow_fallback_searches_home_tier_when_package_resolved_there() {
 // in-scope agent by name (resolving through `AgentConfig::by_name`, which
 // prefers a directory package over a same-named flat file — #482) and
 // asserts `runner != ClaudeCode` and the expected model. A second test
-// loads the two flat files that are shadowed by a directory package
-// (`cto-assistant.toml`, `izzie.toml`) directly by path, since `by_name`
+// loads the flat file that is shadowed by a directory package
+// (`izzie.toml`) directly by path, since `by_name`
 // would never reach them while the package is present — the flat `izzie`
 // file additionally serves as the `extends` shadow-fallback safety net
 // (see `AgentConfig::extends_shadow_fallback_in`), so it must stay
@@ -1601,9 +1564,6 @@ fn bundled_persona_agents_do_not_use_claude_code_runner() {
         ("assistant", "claude-sonnet-4-6"),
         ("pm", "claude-opus-4-6"),
         ("personal-assistant", "claude-sonnet-4-6"),
-        // #7878: pinned to Duetto Bedrock, so the slug carries the
-        // `bedrock/` routing marker and the inference-profile id.
-        ("cto-assistant", "bedrock/us.anthropic.claude-sonnet-4-6"),
         ("izzie", "claude-sonnet-4-6"),
     ];
     for (name, expected_model) in cases {
@@ -1635,32 +1595,28 @@ fn bundled_persona_agents_do_not_use_claude_code_runner() {
 fn bundled_persona_shadowed_flat_duplicates_do_not_use_claude_code_runner() {
     use crate::agents::RunnerKind;
 
-    // `cto-assistant.toml` and `izzie.toml` are shadowed by their same-named
-    // directory package (`cto-assistant/agent.toml`, `izzie/agent.toml`) and
-    // are never reached via `by_name` while the package is present — load
-    // them directly by path so this hygiene guard actually exercises them.
-    // #7878: each flat shadow must still name the SAME model as its package,
+    // `izzie.toml` is shadowed by its same-named directory package
+    // (`izzie/agent.toml`) and is never reached via `by_name` while the
+    // package is present — load it directly by path so this hygiene guard
+    // actually exercises it.
+    // #7878: the flat shadow must still name the SAME model as its package,
     // because the shadow is the fallback the loader reaches when the package's
     // `extends` chain fails — a fallback on a different provider would be a
     // silent routing change, not a degraded one.
-    for (name, expected_model) in [
-        ("cto-assistant", "bedrock/us.anthropic.claude-sonnet-4-6"),
-        ("izzie", "claude-sonnet-4-6"),
-    ] {
-        let path = bundled_agents_dir().join(format!("{name}.toml"));
-        let cfg = AgentConfig::load(&path)
-            .unwrap_or_else(|e| panic!("shadowed flat agent '{name}.toml' must still parse: {e}"));
+    let (name, expected_model) = ("izzie", "claude-sonnet-4-6");
+    let path = bundled_agents_dir().join(format!("{name}.toml"));
+    let cfg = AgentConfig::load(&path)
+        .unwrap_or_else(|e| panic!("shadowed flat agent '{name}.toml' must still parse: {e}"));
 
-        assert_ne!(
-            cfg.agent.runner,
-            RunnerKind::ClaudeCode,
-            "shadowed flat agent '{name}.toml' must not declare runner = \"claude-code\" (#3358)"
-        );
-        assert_eq!(
-            cfg.agent.model, expected_model,
-            "shadowed flat agent '{name}.toml' model mismatch"
-        );
-    }
+    assert_ne!(
+        cfg.agent.runner,
+        RunnerKind::ClaudeCode,
+        "shadowed flat agent '{name}.toml' must not declare runner = \"claude-code\" (#3358)"
+    );
+    assert_eq!(
+        cfg.agent.model, expected_model,
+        "shadowed flat agent '{name}.toml' model mismatch"
+    );
 }
 
 /// #3358 code-critic MEDIUM: the two tests above assert over a hardcoded
@@ -2010,8 +1966,8 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
     let _guard = ENV_LOCK.blocking_lock();
 
     // Every resolvable bundled agent name: flat `<name>.toml` plus directory
-    // packages `<name>/agent.toml`. Deduped, because `izzie`, `cto-assistant`
-    // and `ctrl` ship BOTH forms — the duplication that makes a per-file
+    // packages `<name>/agent.toml`. Deduped, because `izzie` and `ctrl`
+    // ship BOTH forms — the duplication that makes a per-file
     // `tier = "l0"` literal the wrong mechanism (see `AgentTier::for_kind`).
     let mut names: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(bundled_agents_dir()).expect("bundled agents dir") {
@@ -2132,7 +2088,6 @@ fn bundled_assistant_personas_resolve_l0_and_gain_nothing() {
         assistants,
         vec![
             "assistant".to_string(),
-            "cto-assistant".to_string(),
             "ctrl".to_string(),
             "izzie".to_string(),
             "personal-assistant".to_string(),
@@ -2330,7 +2285,6 @@ const TIER_TABLE: &[&str] = &[
     "bedrock-engineer\tengineer\tl1",
     "claude-code-engineer\tengineer\tl1",
     "code-agent\tengineer\tl1",
-    "cto-assistant\tassistant\tl0",
     "ctrl\tassistant\tl0",
     "docs-agent\tdocumentation\tl1",
     "engineer\tengineer\tl1",
@@ -2374,14 +2328,7 @@ const TIER_TABLE: &[&str] = &[
 /// Any future test of this property that reads files rather than resolving
 /// them would go green while the hole stayed open.
 ///
-/// The `cto-assistant` half is not symmetry, it is the deliberate CARVE-OUT:
-/// the owner chose to keep all four git tools there because it is a coding
-/// assistant, not a mail-ingesting one, so it re-declares them itself now that
-/// the base no longer supplies them. Pinned so a later "cleanup" of that
-/// apparently-redundant re-declaration fails loudly instead of silently
-/// regressing a capability that was explicitly retained.
-///
-/// What: resolves all four personas through `AgentConfig::by_name` (the same
+/// What: resolves every persona through `AgentConfig::by_name` (the same
 /// dispatch loader production uses, directory package shadowing flat file) and
 /// asserts reachability per tool via `match_any_glob` — the real matching
 /// semantics, so a persona that re-grants reach by widening a pattern to
@@ -2396,20 +2343,11 @@ fn bundled_personas_pin_git_reach() {
     // untrusted prose from mail, Drive and the web, which is the izzie shape
     // the base's git strip exists for — its own manifest says so, and this is
     // what makes that claim executable.
-    let expected: [(&str, &[&str]); 5] = [
+    let expected: [(&str, &[&str]); 4] = [
         ("izzie", &[]),
         ("personal-assistant", &[]),
         ("assistant", &[]),
         ("writing-assistant", &[]),
-        (
-            "cto-assistant",
-            &[
-                "git_log",
-                "git_status",
-                "git_branches",
-                "git_search_commits",
-            ],
-        ),
     ];
     // Every git tool named anywhere in the roster, so "reaches nothing" is
     // asserted against the full set rather than only the two that moved.
@@ -2464,106 +2402,6 @@ fn bundled_personas_pin_git_reach() {
     }
 }
 
-/// The `cto-assistant` OKG DOCSTORE grant is a shipped, deliberate one, and
-/// this overlay is what owns it.
-///
-/// Why: the grant lived as a hand edit in the DEPLOYED copy only (there is no
-/// API to grant a tool, #3890) until a bundled-agent reprovision overwrote
-/// that file and destroyed it with no `.stale.bak` (#4461). The owner decision
-/// (2026-07-31) was to move it into the bundle so the next reprovision
-/// CONVERGES on it instead of destroying it. Like the git carve-out above it
-/// is a non-obvious re-declaration that reads as redundancy, so a later
-/// tidy-up removes it unless something fails.
-///
-/// The redundancy is real but load-bearing, and that shapes the test: the base
-/// `assistant` has granted all four OKG tools since #3883 and `extends` unions
-/// `[tools].allow` base-first, so the RESOLVED surface keeps both tools even
-/// with this overlay stripped. A resolution-only assertion would therefore stay
-/// green through a full revert of the bundled grant. Both halves are asserted —
-/// resolved reachability (the capability the persona depends on) and the
-/// overlay's own declaration (independence from a base that may narrow later,
-/// exactly as the base narrowing git reach in #4420 already forced once).
-///
-/// Narrowness is pinned on the OVERLAY only, deliberately: this persona does
-/// resolve `okg_ingest_gmail`/`okg_ingest_drive` today, inherited from the
-/// base, so asserting non-reachability would assert a falsehood. What is true
-/// and worth pinning is that this overlay never adds them itself — widening it
-/// has to be a decision taken here, not a side effect of matching the base.
-/// What: resolves the persona through `AgentConfig::by_name` for reachability,
-/// then parses the package TOML directly for what the overlay itself declares.
-/// Test: This function IS the test.
-#[test]
-fn bundled_cto_assistant_pins_okg_docstore_reach() {
-    const GRANTED: [&str; 2] = ["okg_ingest_docstore", "okg_sources"];
-    const NOT_GRANTED_HERE: [&str; 2] = ["okg_ingest_gmail", "okg_ingest_drive"];
-
-    let _guard = ENV_LOCK.blocking_lock();
-    clear_model_env("cto-assistant");
-    // SAFETY: guarded by ENV_LOCK.
-    unsafe {
-        std::env::set_var("TAGENT_CONFIG_DIR", bundled_agents_dir());
-    }
-    let cfg = AgentConfig::by_name("cto-assistant");
-    // SAFETY: guarded by ENV_LOCK.
-    unsafe {
-        std::env::remove_var("TAGENT_CONFIG_DIR");
-    }
-    let cfg = cfg.unwrap_or_else(|e| panic!("'cto-assistant' must resolve: {e}"));
-    let resolved = cfg.tools.allow.as_deref().unwrap_or_else(|| {
-        panic!("'cto-assistant' must ship a restricted [tools].allow, not an absent one")
-    });
-
-    for tool in GRANTED {
-        assert!(
-            crate::ctrl::pm_task::match_any_glob(tool, resolved),
-            "'cto-assistant' must reach '{tool}' — the OKG docstore grant is a \
-             shipped owner decision (2026-07-31), bundled after #4461 destroyed \
-             the deployed hand edit. Resolved allow-list: {resolved:?}"
-        );
-    }
-
-    // The overlay's OWN declaration, pre-union. This is the half that fails if
-    // the bundled grant is reverted; the resolved half above would not, because
-    // the base re-supplies both tools through `extends`. Read as a raw
-    // `toml::Value` rather than an `AgentConfig` because this is an MD package:
-    // `[system_prompt].content` lives in `persona.md`, so a whole-config
-    // deserialize of the TOML alone fails on the missing field.
-    let raw = std::fs::read_to_string(
-        bundled_agents_dir()
-            .join("cto-assistant")
-            .join("agent.toml"),
-    )
-    .expect("the bundled cto-assistant package must exist");
-    let doc: toml::Value = toml::from_str(&raw).expect("the package must parse");
-    let declared: Vec<&str> = doc
-        .get("tools")
-        .and_then(|t| t.get("allow"))
-        .and_then(|a| a.as_array())
-        .expect("the cto-assistant package must declare its own [tools].allow")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-
-    for tool in GRANTED {
-        assert!(
-            declared.contains(&tool),
-            "the cto-assistant package must DECLARE '{tool}' itself rather than \
-             lean on the base's union — that independence is the whole point of \
-             bundling the grant (#3890: no API can re-add it, #4461: a \
-             reprovision eats any out-of-bundle edit). Declared: {declared:?}"
-        );
-    }
-    for tool in NOT_GRANTED_HERE {
-        assert!(
-            !declared.contains(&tool),
-            "the cto-assistant package must NOT declare '{tool}': this grant is \
-             narrow on purpose — docstore ingest only. Widening it is a decision \
-             about what this persona may ingest, not a cleanup to match the base \
-             (which does grant it, and whose union this overlay cannot filter)."
-        );
-    }
-}
-
 /// ADR-0024 decision 4 sub-answer (a), the MIGRATION half: every bundled
 /// assistant persona ships a seeded `[subagents].delegate_allowed`.
 ///
@@ -2574,7 +2412,7 @@ fn bundled_cto_assistant_pins_okg_docstore_reach() {
 /// edit that a later persona addition silently forgets, and the symptom (an
 /// assistant that quietly cannot delegate) is exactly the kind that surfaces
 /// only in production. Both the directory PACKAGE and the flat `extends`-shadow
-/// fallback are checked for the three personas that ship both, because the
+/// fallback are checked for the two personas that ship both, because the
 /// shadow is what loads when the `extends` chain fails to resolve — a seed on
 /// only one of the pair is a half-migration.
 /// What: the resolved config for each shipped assistant declares a whitelist,
@@ -2593,7 +2431,6 @@ fn bundled_assistant_personas_seed_the_reachable_subagent_whitelist() {
     for agent_name in [
         "assistant",
         "izzie",
-        "cto-assistant",
         "ctrl",
         "personal-assistant",
         // #8186: the seed is exactly the thing "a later persona addition
@@ -2622,7 +2459,7 @@ fn bundled_assistant_personas_seed_the_reachable_subagent_whitelist() {
     // The flat `extends`-shadow fallbacks carry the same seed. These are the
     // files that load when the `extends` chain does not resolve, so a seed on
     // the package alone leaves the fallback path silently un-migrated.
-    for shadow in ["izzie.toml", "cto-assistant.toml", "ctrl.toml"] {
+    for shadow in ["izzie.toml", "ctrl.toml"] {
         let raw = std::fs::read_to_string(bundled_agents_dir().join(shadow))
             .unwrap_or_else(|e| panic!("{shadow} must exist: {e}"));
         let parsed: AgentConfig =
@@ -2693,7 +2530,7 @@ fn bundled_packages() -> Vec<(String, PathBuf)> {
     out.sort();
     assert!(
         out.len() >= 4,
-        "sanity: the package roster should hold assistant/ctrl/izzie/cto-assistant \
+        "sanity: the package roster should hold assistant/ctrl/izzie/writing-assistant \
          at minimum, got {out:?}"
     );
     out
