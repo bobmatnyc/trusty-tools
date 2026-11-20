@@ -32,7 +32,9 @@ use zeroize::Zeroizing;
 
 use super::blob_keychain::BlobKeychain;
 use super::time_limit::TimeLimited;
-use super::vault_blob::{BlobStore, ItemId, ItemStore, item_error};
+#[cfg(target_os = "macos")]
+use super::vault_blob::item_error;
+use super::vault_blob::{BlobStore, ItemId, ItemStore};
 use super::{Capabilities, ControlItem, SecretBackend};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 

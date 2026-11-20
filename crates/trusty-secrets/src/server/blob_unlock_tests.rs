@@ -45,6 +45,8 @@ fn blob_state(fx: &Fixture) -> (Arc<MemItems>, State, String) {
         DEFAULT_MAX_TTL,
     ));
     state.power = Arc::new(NoPower);
+    // #11538: act as a Keychain build, so `hold_blob` runs on Linux CI too.
+    state.keychain_compiled = true;
     let token = grant_in(&state, &fx.project(), &KEYS);
     (items, state, token)
 }
