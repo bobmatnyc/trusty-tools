@@ -895,10 +895,13 @@ async fn source_root_diff_only_keeps_explicit_require_search_and_skips() {
 
 // ── #11545: a parked index is woken, not reported missing ─────────────────────
 
-/// A daemon whose index answers `503 index_not_resident`; `wake_ok` decides
-/// whether the one search that reloads it succeeds.
+/// A daemon whose index answers `503 index_not_resident` until one search
+/// wakes it; `wake_ok` decides whether that search succeeds, and `woken` is
+/// the status it reports afterwards (`None`: ready).
+#[derive(Default)]
 struct ParkedSearch {
     wake_ok: bool,
+    woken: Option<crate::integrations::search_client::IndexStatusResponse>,
     searches: std::sync::atomic::AtomicUsize,
 }
 
@@ -918,6 +921,10 @@ impl SearchClient for ParkedSearch {
         &self,
         index_id: &str,
     ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        if self.searches.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            let ready = crate::integrations::search_client::IndexStatusResponse::ready(index_id);
+            return Ok(self.woken.clone().unwrap_or(ready));
+        }
         Err(SearchClientError::Api {
             status: 503,
             body: format!(r#"{{"error":"index_not_resident","index_id":"{index_id}"}}"#),
@@ -956,7 +963,7 @@ fn parked_deps(search: Arc<ParkedSearch>) -> ReviewDeps {
 async fn parked_index_is_woken_by_one_search_and_proceeds() {
     let search = Arc::new(ParkedSearch {
         wake_ok: true,
-        searches: Default::default(),
+        ..Default::default()
     });
     let d = parked_deps(search.clone());
     let outcome = preflight_context(&config(), &d, InvocationSurface::Hosted).await;
@@ -969,10 +976,7 @@ async fn parked_index_is_woken_by_one_search_and_proceeds() {
 /// Test: this test.
 #[tokio::test]
 async fn parked_index_wake_failure_is_degraded_and_names_the_wake() {
-    let search = Arc::new(ParkedSearch {
-        wake_ok: false,
-        searches: Default::default(),
-    });
+    let search = Arc::new(ParkedSearch::default());
     let d = parked_deps(search.clone());
     match preflight_context(&config(), &d, InvocationSurface::Hosted).await {
         GateOutcome::Degraded(msg) => {
@@ -981,6 +985,36 @@ async fn parked_index_wake_failure_is_degraded_and_names_the_wake() {
             assert!(!msg.contains("no trusty-search index"), "{msg}");
         }
         other => panic!("expected Degraded, got {other:?}"),
+    }
+    assert_eq!(search.searches.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Why: #11545 — a woken index is re-probed once; a degraded post-wake status
+/// labels the review instead of passing as authoritative.
+/// Test: this test.
+#[tokio::test]
+async fn woken_index_is_reprobed_and_a_degraded_status_labels_the_review() {
+    let failed: crate::integrations::search_client::IndexStatusResponse = serde_json::from_str(
+        r#"{
+            "index_id": "main",
+            "search_capabilities": [],
+            "stages": {
+                "lexical": {"status": "failed", "failure": "corpus reload failed"},
+                "semantic": {"status": "failed"},
+                "graph": {"status": "failed"}
+            }
+        }"#,
+    )
+    .expect("fixture must parse");
+    let search = Arc::new(ParkedSearch {
+        wake_ok: true,
+        woken: Some(failed),
+        ..Default::default()
+    });
+    let d = parked_deps(search.clone());
+    match preflight_context(&config(), &d, InvocationSurface::Hosted).await {
+        GateOutcome::Degraded(msg) => assert!(msg.contains("lexical"), "{msg}"),
+        other => panic!("a degraded woken index must label the review, got {other:?}"),
     }
     assert_eq!(search.searches.load(std::sync::atomic::Ordering::SeqCst), 1);
 }

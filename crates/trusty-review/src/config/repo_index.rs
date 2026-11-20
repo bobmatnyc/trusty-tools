@@ -277,7 +277,8 @@ pub(crate) fn check_pin(
 /// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
 /// `owner_named_unknown_owner_sentinel_is_invalid`,
 /// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`,
-/// `review_pr_resolves_an_index_listed_only_as_parked`.
+/// `review_pr_resolves_an_index_listed_only_as_parked`,
+/// `review_pr_refuses_a_parked_index_of_another_owner`.
 pub(crate) async fn resolve_repo_index(
     client: &dyn SearchClient,
     owner: &str,
@@ -305,9 +306,12 @@ pub(crate) async fn resolve_repo_index(
         Err(detail) => detail,
     };
     // #11545: a parked id is registered, only not resident — it is present.
-    // The context gate wakes it with one search before reviewing.
+    // The context gate wakes it with one search before reviewing. Only a row
+    // the daemon files under this repo's identity counts, the parked analogue
+    // of the ForeignPin refusal: a bare id match would take acme/widget's
+    // parked `widget` index for bobmatnyc/widget.
     let parked = client
-        .list_parked_index_ids()
+        .list_parked_index_ids(Some(&repo_key))
         .await
         .inspect_err(|e| warn!(repo = %repo_key, "review_pr: parked indexes unreadable: {e}"))
         .unwrap_or_default();

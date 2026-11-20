@@ -17,17 +17,29 @@ use crate::integrations::search_transport::fixture::{EnvGuard, FakeSearchSocket,
 /// The root the parked row records; the checkout test rewrites it per run.
 const PARKED_ROOT_ENV: &str = "R11545_PARKED_ROOT";
 
-/// A daemon whose only registration for the repo is a parked row.
-fn parked_only(method: &str, _: &Value) -> Reply {
+/// A daemon whose only registration for the repo is a parked row. Like
+/// trusty-search's `parked_registrations`, it filters parked rows by the
+/// `repo_identity` param; the rows themselves carry no identity.
+fn parked_only(method: &str, params: &Value) -> Reply {
     let root = std::env::var(PARKED_ROOT_ENV).unwrap_or_else(|_| "/src/tga".to_string());
+    let rows = [
+        (
+            "trusty-git-analytics",
+            root.as_str(),
+            "bobmatnyc/trusty-git-analytics",
+        ),
+        ("widget", "/src/globex-widget", "globex/widget"),
+    ];
+    let filter = params.get("repo_identity").and_then(Value::as_str);
+    let parked: Vec<Value> = rows
+        .iter()
+        .filter(|(_, _, owner)| filter.is_none_or(|f| f == *owner))
+        .map(|(id, root, _)| json!({ "id": id, "root_path": root, "root_state": "present" }))
+        .collect();
     match method {
         "search.indexes.list" => Ok(json!({
             "indexes": [{ "id": "other", "root_path": "/src/other", "repo_identity": "acme/other" }],
-            "parked": [{
-                "id": "trusty-git-analytics",
-                "root_path": root,
-                "root_state": "present",
-            }],
+            "parked": parked,
         })),
         _ => Err((-32601, "method not found".to_string(), None)),
     }
@@ -61,6 +73,23 @@ async fn review_pr_resolves_an_index_listed_only_as_parked() {
     assert_eq!(
         got.expect("a parked index is present"),
         "trusty-git-analytics"
+    );
+}
+
+/// Why: #11545 — a parked `widget` owned by globex/widget must not resolve for
+/// bobmatnyc/widget; a bare id match would, unlike a foreign live pin.
+/// Test: this test.
+#[serial_test::serial]
+#[tokio::test]
+async fn review_pr_refuses_a_parked_index_of_another_owner() {
+    let (_dir, _fake, _env) = parked_client("r11545o");
+    let client = HttpSearchClient::from_config(&ReviewConfig::load(None)).expect("client builds");
+
+    let got = resolve_repo_index(&client, "bobmatnyc", "widget", None).await;
+    let err = got.expect_err("a parked index of another owner is not this repo's");
+    assert!(
+        err.to_string().contains("trusty-search index <path>"),
+        "{err}"
     );
 }
 

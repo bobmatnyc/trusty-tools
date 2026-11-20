@@ -299,11 +299,18 @@ pub trait SearchClient: Send + Sync {
     ///
     /// Why: a parked index is absent from the live list; #11545: `review_pr`
     /// counts it as present instead of reporting "no index".
-    /// What: the `parked` array of the unfiltered index list. The default body
-    /// answers none, so a client without a parked list behaves as before.
+    /// What: the `parked` array of the index list, filtered by the daemon to
+    /// `repo_identity` when one is given (#11545: a parked row of another
+    /// owner with the same id must not match). The default body answers none,
+    /// so a client without a parked list behaves as before.
     /// `HttpSearchClient` overrides it.
-    /// Test: `review_pr_resolves_an_index_listed_only_as_parked`.
-    async fn list_parked_index_ids(&self) -> Result<Vec<String>, SearchClientError> {
+    /// Test: `review_pr_resolves_an_index_listed_only_as_parked`,
+    /// `review_pr_refuses_a_parked_index_of_another_owner`.
+    async fn list_parked_index_ids(
+        &self,
+        repo_identity: Option<&str>,
+    ) -> Result<Vec<String>, SearchClientError> {
+        let _ = repo_identity;
         Ok(Vec::new())
     }
 
@@ -568,9 +575,12 @@ impl SearchClient for HttpSearchClient {
         Ok(self.get_index_list(repo_identity).await?.indexes)
     }
 
-    // #11417: the unfiltered list's `parked` rows.
-    async fn list_parked_index_ids(&self) -> Result<Vec<String>, SearchClientError> {
-        let envelope = self.get_index_list::<IndexIdentity>(None).await?;
+    // #11417: the list's `parked` rows; #11545: identity-filtered when asked.
+    async fn list_parked_index_ids(
+        &self,
+        repo_identity: Option<&str>,
+    ) -> Result<Vec<String>, SearchClientError> {
+        let envelope = self.get_index_list::<IndexIdentity>(repo_identity).await?;
         Ok(envelope.parked.into_iter().map(|row| row.id).collect())
     }
 
