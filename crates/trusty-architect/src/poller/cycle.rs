@@ -14,8 +14,9 @@
 //! df-T7i P1b adds the completion alerts (each pane, and the Architect's
 //! own outside a dry run), the queued ctx-cycle failures, the `run_*`
 //! scripts and the zone watch (outside a dry run) and the selftest alert.
+//! #11540 adds the ledger shim (live and shadow; its failures are `failing`).
 //! Steps owned elsewhere are left out: effort, token, pm_intake,
-//! dashboard, owner_*, auto_sleep, user_state, exited_step and triage rules
+//! dashboard, owner_*, auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
 //! `cycle_falls_back_to_transcript_when_status_ctx_is_none`,
@@ -34,6 +35,7 @@ use super::listing::{Pane, capture, list_panes};
 use super::routines::{push_due, routine_alerts};
 use super::self_ctx_alerts::self_ctx_alerts;
 use super::state::PollState;
+use super::steps::ledger_shim::run_ledger_shim;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::watchdog::Relauncher;
@@ -249,6 +251,16 @@ pub fn collect<T: Tmux + ?Sized>(
     if let Some(steps) = s.steps.filter(|_| !s.dry_run) {
         log.extend(steps.run(now));
     }
+    // #11540: the ledger-bound steps run in Python, live or shadow (never in
+    // a dry run); a shim failure joins `failing` below.
+    let mut shim_failing = Vec::new();
+    if let Some(steps) = s.steps.filter(|_| !s.dry_run || s.config.shadow) {
+        let shim = run_ledger_shim(steps, s.config, now);
+        candidates.extend(shim.alerts);
+        state.other.extend(shim.state);
+        log.extend(shim.log);
+        shim_failing = shim.failing;
+    }
     candidates.extend(selftest_alerts(&s.config.selftest_state, now));
     let failed = |e, log| Stopped::Failed(e, log);
     match read_events(&s.config.events(), &mut state.events_offset, now) {
@@ -272,6 +284,7 @@ pub fn collect<T: Tmux + ?Sized>(
     }
     // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
     let mut failing = watch_found.clone();
+    failing.extend(shim_failing);
     match routine_alerts(&s.config.routines, &s.config.supervisor, now) {
         Ok(found) => failing.extend(found),
         Err(e) => {
