@@ -6,8 +6,8 @@
 //! What: a map of item id to text, a read counter (a Keychain read is a
 //! prompt), and faults: a failing read, write or delete for one item, a
 //! write that stores other text than it was given (a read-back mismatch),
-//! a delete budget after which every delete fails, and a delay inside each
-//! write to widen races.
+//! a delete budget after which every delete fails, a delay inside each
+//! write to widen races, and a log of every call.
 //! Test: used by `vault_blob_tests.rs`, `blob_migrate_tests.rs` and the
 //! server's unlock tests.
 
@@ -32,6 +32,8 @@ pub(crate) struct MemItems {
     /// Deletes allowed before every later one fails; `None` is unlimited.
     pub(crate) delete_budget: Mutex<Option<usize>>,
     pub(crate) write_delay: Mutex<Option<Duration>>,
+    /// Every call in order: `("read" | "write" | "delete", item)`.
+    pub(crate) calls: Mutex<Vec<(&'static str, ItemId)>>,
 }
 
 impl MemItems {
@@ -55,6 +57,11 @@ impl MemItems {
     /// The raw text at `id`, uncounted.
     pub(crate) fn raw(&self, id: &ItemId) -> Option<String> {
         self.items.lock().unwrap().get(id).cloned()
+    }
+
+    /// Record one call on `id`.
+    fn log(&self, op: &'static str, id: &ItemId) {
+        self.calls.lock().unwrap().push((op, id.clone()));
     }
 
     /// How many reads ran.
@@ -81,6 +88,7 @@ fn garbled(id: &ItemId, text: &str) -> String {
 impl ItemStore for MemItems {
     fn read(&self, id: &ItemId) -> Result<Option<Zeroizing<String>>, SecretsError> {
         self.reads.fetch_add(1, Ordering::SeqCst);
+        self.log("read", id);
         if self.fail_read.lock().unwrap().contains(id) {
             return Err(item_error(id, "injected read failure"));
         }
@@ -88,6 +96,7 @@ impl ItemStore for MemItems {
     }
 
     fn write(&self, id: &ItemId, text: &str) -> Result<(), SecretsError> {
+        self.log("write", id);
         if self.fail_write.lock().unwrap().contains(id) {
             return Err(item_error(id, "injected write failure"));
         }
@@ -105,6 +114,7 @@ impl ItemStore for MemItems {
     }
 
     fn delete(&self, id: &ItemId) -> Result<bool, SecretsError> {
+        self.log("delete", id);
         let mut budget = self.delete_budget.lock().unwrap();
         if let Some(left) = budget.as_mut() {
             if *left == 0 {

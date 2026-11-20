@@ -137,3 +137,7 @@ impl SecretBackend for BlobKeychain {
         Some(Arc::clone(&self.store))
     }
 }
+
+#[cfg(test)]
+#[path = "blob_keychain_tests.rs"]
+mod tests;
