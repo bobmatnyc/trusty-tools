@@ -55,6 +55,9 @@ mod paste;
 mod resolve;
 #[cfg(unix)]
 mod session;
+// #10524: `tm secrets unlock` and `lock`.
+#[cfg(unix)]
+mod unlock;
 #[cfg(unix)]
 mod value;
 #[cfg(unix)]
@@ -126,6 +129,11 @@ pub(crate) async fn run(action: SecretsAction) -> anyhow::Result<()> {
         stdin: &StdinSource,
         ci: doctor::is_ci(std::env::var("CI").ok().as_deref()),
     };
+    // #10524: the presence prompt is the real one only here; tests pass a fake.
+    if let SecretsAction::Unlock = action {
+        let auth = trusty_mpm::core::presence_local::LocalAuthenticator;
+        return unlock::unlock(&ctx, &auth, &mut std::io::stdout()).await;
+    }
     dispatch(&ctx, action, &mut std::io::stdout()).await
 }
 
@@ -234,6 +242,16 @@ pub(crate) async fn dispatch_with(
         }
         SecretsAction::Doctor => doctor::doctor(ctx, out).await,
         SecretsAction::Resolve { key } => resolve::run(key.text(), out).await,
+        SecretsAction::Lock => unlock::lock(ctx, out).await,
+        SecretsAction::Migrate {
+            dry_run,
+            finish,
+            rollback,
+        } => unlock::migrate(ctx, unlock::step_of(finish, rollback), dry_run, out).await,
+        // #10524: the presence prompt runs only from the command line.
+        SecretsAction::Unlock => {
+            anyhow::bail!("tm secrets unlock: runs only from the command line")
+        }
         // #9621: both end the process, so only [`run`] dispatches them.
         SecretsAction::Exec { .. } | SecretsAction::ExecStub { .. } => {
             anyhow::bail!("tm secrets exec: runs only from the command line")
