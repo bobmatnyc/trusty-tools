@@ -987,13 +987,15 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # #11507: zsh for trusty-mpm hook_rewrite_chain real-shell tests (sh/bash/zsh).
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            zsh
 
       # #1008: trusty-analyze's `RoslynTool` (crates/trusty-analyze/src/core/
       # tool_impls/csharp/mod.rs) shells out to `dotnet build` to produce SARIF
@@ -1747,12 +1749,14 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # #11507: zsh for trusty-mpm hook_rewrite_chain real-shell tests (sh/bash/zsh).
       - name: Install system dependencies
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            zsh
 
       - name: Install .NET SDK (for trusty-analyze's C# Roslyn adapter tests)
         uses: actions/setup-dotnet@v4
