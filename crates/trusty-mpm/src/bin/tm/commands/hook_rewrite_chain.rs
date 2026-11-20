@@ -231,7 +231,7 @@ fn is_safe_program(words: &[String]) -> bool {
 }
 
 /// `git` verbs that only read the repository.
-const GIT_READ_VERBS: &[&str] = &[
+pub(crate) const GIT_READ_VERBS: &[&str] = &[
     "diff",
     "log",
     "show",
@@ -245,7 +245,7 @@ const GIT_READ_VERBS: &[&str] = &[
 ];
 
 /// `cargo` verbs that build, lint or test without installing or publishing.
-const CARGO_VERBS: &[&str] = &[
+pub(crate) const CARGO_VERBS: &[&str] = &[
     "build", "check", "test", "clippy", "nextest", "doc", "bench", "tree", "metadata", "fmt",
 ];
 

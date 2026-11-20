@@ -51,8 +51,55 @@ pub(crate) fn parse_chain_spec(spec: &str) -> Vec<Option<String>> {
 }
 
 /// The spec as the savings row's `chain_shape`: separators and names only.
+///
+/// Why (#11507 security scan): a step's tool name is program plus second
+/// token, so `ls /Users/<name>/proj` put a home path into the ledger.
+/// What: each step becomes its program basename, plus the verb only for
+/// `git` in `GIT_READ_VERBS` or `cargo` in `CARGO_VERBS`; a name that is not
+/// `[A-Za-z0-9._-]{1,32}` becomes `?`. Separators (`&&`, `;`, `|`) as written.
+/// Never a `/`, an argument or a pattern.
+/// Test: `the_spec_parses_into_steps`, `a_chain_savings_row_shape_carries_no_path`.
 pub(crate) fn chain_shape(spec: &str) -> String {
-    spec.replace('=', "")
+    use super::hook_rewrite_chain::{CARGO_VERBS, GIT_READ_VERBS};
+    let clean = |name: &str| {
+        let ok = !name.is_empty()
+            && name.len() <= 32
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+        if ok {
+            name.to_string()
+        } else {
+            "?".to_string()
+        }
+    };
+    let step = |text: &str| {
+        let mut words = text.split_whitespace();
+        let program = words.next().unwrap_or("").trim_start_matches('=');
+        let program = program.rsplit('/').next().unwrap_or("");
+        let verb = words.next().filter(|v| match program {
+            "git" => GIT_READ_VERBS.contains(v),
+            "cargo" => CARGO_VERBS.contains(v),
+            _ => false,
+        });
+        match verb {
+            Some(v) => format!("{} {v}", clean(program)),
+            None => clean(program),
+        }
+    };
+    let mut shape = String::new();
+    let mut rest = spec;
+    while let Some(at) = rest.find(['&', ';', '|']) {
+        let sep = if rest[at..].starts_with("&&") {
+            "&&"
+        } else {
+            &rest[at..=at]
+        };
+        shape.push_str(&format!("{} {sep} ", step(&rest[..at])));
+        rest = &rest[at + sep.len()..];
+    }
+    shape.push_str(&step(rest));
+    shape
 }
 
 /// Cut `text` at the markers for steps `1..steps`, in order.
@@ -218,6 +265,47 @@ mod tests {
         assert_eq!(split_chain(&text, "n", 3), ["a out\n", "", "c out\n"]);
         let text = format!("a\n{}{}d\n", cut("n", 1), cut("n", 3));
         assert_eq!(split_chain(&text, "n", 4), ["a\n", "", "", "d\n"]);
+    }
+
+    /// #11507 security scan: on d2c6960 the row's `chain_shape` was the raw
+    /// spec, `ls /Users/x/p && cargo test`.
+    #[test]
+    fn a_chain_savings_row_shape_carries_no_path() {
+        use trusty_mpm::core::savings::SavingsRow;
+        use trusty_mpm::core::savings_opportunity::{TOOL_TYPE_BASH, TaggedSavingsRow};
+        let rewrite = super::super::hook_rewrite::rewrite_bash_command_for_compression(
+            "cd x; ls /Users/x/p && cargo test -p y; git diff /Users/x/hosts | grep -n secret",
+        )
+        .expect("the chain is rewritten");
+        let spec = rewrite
+            .split_once("--tool \"")
+            .and_then(|(_, t)| t.split_once('"'))
+            .map(|(s, _)| s)
+            .expect("a spec");
+        let shape = chain_shape(spec);
+        let row = SavingsRow {
+            ts: "2026-11-20T00:00:00Z".to_string(),
+            session_id: "s1".to_string(),
+            technique: trusty_mpm::core::savings::TECHNIQUE_COMPRESS.to_string(),
+            tokens_saved: 900,
+            tokens_before: 1_000,
+            cost_saved_usd: 0.01,
+            basis: "b".to_string(),
+            model_source: String::new(),
+        };
+        let tagged = TaggedSavingsRow {
+            row: &row,
+            tool_type: TOOL_TYPE_BASH,
+            tool_name: "cargo test",
+            chain_shape: Some(&shape),
+            steps: Some(parse_chain_spec(spec).len()),
+        };
+        let json: serde_json::Value = serde_json::to_value(&tagged).expect("the row serialises");
+        let written = json["chain_shape"].as_str().expect("a chain_shape");
+        assert_eq!(written, "ls && cargo test ; git diff | grep");
+        for leak in ["/", "x/p", "hosts", "secret", "-n"] {
+            assert!(!written.contains(leak), "{leak:?} in {written:?}");
+        }
     }
 
     #[test]
