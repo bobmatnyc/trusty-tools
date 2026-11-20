@@ -167,14 +167,15 @@ pub(crate) fn decide(
     };
     match classification {
         Classification::Unrelated => Verdict::Allow,
+        // #11521: the text names the main-thread rule, never a launch record.
         Classification::Family(family) => deny(
             "egress-family",
             format!(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and a \
-                 subagent may not use an outbound message channel directly (#8454). A PM's or \
-                 the Architect's main session may use the family's read and list tools \
-                 (#11273); a send or write needs the Architect's tm launch record (#10447), \
-                 bar a PM's send to the owner's Slack DM (#11194). The claude.ai connectors \
+                 subagent may not use an outbound message channel directly (#8454). A \
+                 tm-launched PM's or Architect's main session may read, send and write \
+                 (#11521); a PM's subagent may read Gmail and Google Workspace (GP-043). \
+                 The claude.ai connectors \
                  are not this deny's subject (#10735), and a Slack read the host config \
                  grants this project is allowed (#10387). Ask the operator instead."
             ),

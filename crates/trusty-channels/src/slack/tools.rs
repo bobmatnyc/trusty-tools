@@ -28,7 +28,7 @@ use super::tool_schemas_canvas;
 ///
 /// Why: Both `tool_list_response` (indirectly) and `is_known_tool` must agree
 /// on the exact surface; a single constant array prevents drift.
-/// What: The 22 chat-as-tools operations implemented by the native Slack MCP —
+/// What: The 23 chat-as-tools operations implemented by the native Slack MCP —
 /// the original nine (#2639/#2640), ten added for claude.ai Slack-connector
 /// parity (epic #3611), two more from epic #3744 slice 1's `slack_canvas_*`
 /// tools, and `slack_canvas_push` from epic #3744 slice 2 (CommonMark →
@@ -61,6 +61,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "slack_canvas_create",
     "slack_canvas_lookup_sections",
     "slack_canvas_push",
+    "slack_canvas_access_set",
 ];
 
 /// Report whether `name` is a planned Slack tool.
@@ -414,6 +415,7 @@ mod canvas_split_tests {
             "slack_canvas_create",
             "slack_canvas_lookup_sections",
             "slack_canvas_push",
+            "slack_canvas_access_set",
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }

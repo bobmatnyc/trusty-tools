@@ -31,7 +31,7 @@ use crate::project::record::Project;
 use crate::session_manager::worktree_reclaim_gh::resolve_daemon_gh_env_in;
 
 /// A repository only the pinned account can see.
-const ORIGIN: &str = "https://github.com/duettoresearch/jev-matching";
+const ORIGIN: &str = "https://github.com/acme-labs/jev-matching";
 
 /// Build a minimal `Project` fixture, mirroring the register-route shape.
 fn project(name: &str, repo_url: &str, gh_account: Option<&str>) -> Project {
@@ -93,7 +93,7 @@ fn value_of(env: &crate::core::gh_identity::GhEnv, key: &str) -> String {
 async fn registry_pin_resolves_the_projects_scoped_config_dir() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
 
     let registry = ProjectRegistry::load(registry_dir.path())
         .await
@@ -104,7 +104,7 @@ async fn registry_pin_resolves_the_projects_scoped_config_dir() {
                 config_dir: Some(config_dir.path().to_path_buf()),
                 ..GithubConfig::default()
             }),
-            ..project("jev-matching", ORIGIN, Some("bob-duetto"))
+            ..project("jev-matching", ORIGIN, Some("acme-admin"))
         })
         .await
         .expect("register");
@@ -231,13 +231,13 @@ fn a_malformed_matching_record_fails_closed() {
 fn a_malformed_unrelated_record_does_not_block_a_match() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
                 "broken":{{"repo_url":"https://github.com/acme/widget","gh_account":42}},
-                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -266,14 +266,14 @@ fn a_pinned_config_dir_without_a_credential_fails_closed() {
     write_registry(
         registry_dir.path(),
         &format!(
-            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}}}}}"#,
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}}}}}"#,
             config_dir.path().display()
         ),
     );
     let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
         .expect_err("an empty config dir must refuse, never fall back");
     assert!(
-        err.contains("bob-duetto") && err.contains("refusing to fall back"),
+        err.contains("acme-admin") && err.contains("refusing to fall back"),
         "the refusal must name the pinned account; got: {err}"
     );
 }
@@ -291,14 +291,14 @@ async fn an_account_only_pin_fails_closed_naming_the_account() {
         .await
         .expect("load");
     registry
-        .register(project("jev-matching", ORIGIN, Some("bob-duetto")))
+        .register(project("jev-matching", ORIGIN, Some("acme-admin")))
         .await
         .expect("register");
 
     let err = pinned_gh_env_in(registry_dir.path(), ORIGIN)
         .expect_err("an account-only pin must refuse, never fall back");
     assert!(
-        err.contains("bob-duetto") && err.contains("refusing to probe"),
+        err.contains("acme-admin") && err.contains("refusing to probe"),
         "the refusal must name the pinned account; got: {err}"
     );
 }
@@ -359,13 +359,13 @@ fn a_record_pinning_nothing_is_not_a_pin() {
 fn an_unpinned_record_does_not_shadow_a_pinned_one() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
                 "Jev-Matching":{{"name":"Jev-Matching","repo_url":"{ORIGIN}.git","default_branch":"main"}},
-                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -393,7 +393,7 @@ fn two_disagreeing_pins_for_one_repository_fail_closed() {
         &format!(
             r#"{{"projects":{{
                 "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bobmatnyc"}},
-                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto"}}
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin"}}
             }}}}"#
         ),
     );
@@ -415,12 +415,12 @@ fn two_disagreeing_pins_for_one_repository_fail_closed() {
 fn a_malformed_second_matching_record_fails_closed() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
-                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}},
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}},
                 "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":42}}
             }}}}"#,
             config_dir.path().display()
@@ -438,7 +438,7 @@ fn a_malformed_second_matching_record_fails_closed() {
 /// carrying a `config_dir` wins.
 ///
 /// Why this shape: `seed_from_config` writes `jev` with only `gh_account`, and
-/// `tm <url> --user bob-duetto` later writes `jev-matching` with the same login
+/// `tm <url> --user acme-admin` later writes `jev-matching` with the same login
 /// plus a scoped `config_dir`. Comparing whole records called that a conflict
 /// and refused a repository that has one unambiguous identity.
 /// Test: itself.
@@ -446,13 +446,13 @@ fn a_malformed_second_matching_record_fails_closed() {
 fn same_login_pins_prefer_the_one_with_a_config_dir() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
-                "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto"}},
-                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+                "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin"}},
+                "jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -468,20 +468,20 @@ fn same_login_pins_prefer_the_one_with_a_config_dir() {
 
 /// 🔴 #5850 REGRESSION: logins that differ only in case name one account.
 ///
-/// Why: GitHub logins are case-insensitive, so `Bob-Duetto` and `bob-duetto`
+/// Why: GitHub logins are case-insensitive, so `Acme-Admin` and `acme-admin`
 /// are the same identity and must not block the repository.
 /// Test: itself.
 #[test]
 fn same_login_in_a_different_case_agrees() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
-                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"Bob-Duetto","github":{{"config_dir":"{0}"}}}},
-                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{0}"}}}}
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"Acme-Admin","github":{{"config_dir":"{0}"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{0}"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -507,8 +507,8 @@ fn same_login_with_conflicting_config_dirs_fails_closed() {
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
-                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-one"}}}},
-                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-two"}}}}
+                "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"/tmp/gh-one"}}}},
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"/tmp/gh-two"}}}}
             }}}}"#
         ),
     );
@@ -532,13 +532,13 @@ fn same_login_with_conflicting_config_dirs_fails_closed() {
 fn a_no_login_pin_agrees_with_a_login_pin_on_the_same_config_dir() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
                 "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"config_dir":"{0}"}}}},
-                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{0}","account":"bob-duetto"}}}}
+                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{0}","account":"acme-admin"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -548,7 +548,7 @@ fn a_no_login_pin_agrees_with_a_login_pin_on_the_same_config_dir() {
         .expect("the pins must resolve");
     assert_eq!(
         pin.account.as_deref(),
-        Some("bob-duetto"),
+        Some("acme-admin"),
         "the login must be inherited"
     );
     let env = pinned_gh_env_in(registry_dir.path(), ORIGIN)
@@ -571,7 +571,7 @@ fn a_no_login_pin_with_a_different_config_dir_fails_closed() {
         &format!(
             r#"{{"projects":{{
                 "jev":{{"name":"jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"config_dir":"/tmp/gh-one"}}}},
-                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"/tmp/gh-two"}}}}
+                "widget":{{"name":"widget","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"/tmp/gh-two"}}}}
             }}}}"#
         ),
     );
@@ -592,13 +592,13 @@ fn a_no_login_pin_with_a_different_config_dir_fails_closed() {
 fn a_host_only_duplicate_does_not_block_the_pinned_record() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
             r#"{{"projects":{{
                 "a-jev":{{"name":"a-jev","repo_url":"{ORIGIN}","default_branch":"main","github":{{"host":"github.com"}}}},
-                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}
+                "b-jev":{{"name":"b-jev","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}
             }}}}"#,
             config_dir.path().display()
         ),
@@ -678,20 +678,16 @@ fn daemon_gh_env_uses_the_registry_pin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let config_dir = tempfile::tempdir().expect("tempdir");
-    write_hosts_yml(config_dir.path(), "bob-duetto");
+    write_hosts_yml(config_dir.path(), "acme-admin");
     write_registry(
         registry_dir.path(),
         &format!(
-            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"bob-duetto","github":{{"config_dir":"{}"}}}}}}}}"#,
+            r#"{{"projects":{{"jev-matching":{{"name":"jev-matching","repo_url":"{ORIGIN}","default_branch":"main","gh_account":"acme-admin","github":{{"config_dir":"{}"}}}}}}}}"#,
             config_dir.path().display()
         ),
     );
-    let env = resolve_daemon_gh_env_in(
-        dir.path(),
-        "duettoresearch/jev-matching",
-        registry_dir.path(),
-    )
-    .expect("a usable pin must resolve");
+    let env = resolve_daemon_gh_env_in(dir.path(), "acme-labs/jev-matching", registry_dir.path())
+        .expect("a usable pin must resolve");
     assert_eq!(
         value_of(&env, "GH_CONFIG_DIR"),
         config_dir.path().to_string_lossy()
@@ -948,13 +944,13 @@ fn an_account_only_pin_never_runs_gh_in_an_unmigrated_dir() {
 }
 
 /// 🔴 The repository OWNER never selects the account: a tm dir for the owner
-/// `duettoresearch` does not answer a `octo-pinned` pin.
+/// `acme-labs` does not answer a `octo-pinned` pin.
 /// Test: itself.
 #[test]
 fn an_account_only_pin_never_resolves_from_the_repository_owner() {
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let state_root = tempfile::tempdir().expect("tempdir");
-    let owner_dir = migrated_dir(&state_root.path().join("gh-accounts").join("duettoresearch"));
+    let owner_dir = migrated_dir(&state_root.path().join("gh-accounts").join("acme-labs"));
     write_account_only_registry(registry_dir.path(), "octo-pinned");
     let sources = AccountDirSources {
         state_root: Some(state_root.path().to_path_buf()),
@@ -1068,7 +1064,7 @@ fn an_account_only_pin_refuses_a_dir_whose_login_has_no_token() {
 /// Test: itself.
 #[test]
 fn an_account_only_pin_on_an_enterprise_server_uses_gh_enterprise_token() {
-    let ghe_origin = "https://ghe.corp/duettoresearch/jev-matching";
+    let ghe_origin = "https://ghe.corp/acme-labs/jev-matching";
     let registry_dir = tempfile::tempdir().expect("tempdir");
     let static_dir = tempfile::tempdir().expect("tempdir");
     let static_dir = migrated_dir(static_dir.path());

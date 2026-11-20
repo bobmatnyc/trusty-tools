@@ -5,7 +5,7 @@
 //! inside the daemon. `tm launch` runs in-process and never asks the daemon;
 //! the guided fallback runs precisely BECAUSE the daemon is unreachable. Both
 //! provisioned a clone and a worktree for projects registered with `worktree:
-//! false` (live for `bobmatnyc/writing` and `bob-duetto/cto`). These tests
+//! false` (live for `bobmatnyc/writing` and `acme-admin/cto`). These tests
 //! pin both paths, and the `unwrap_or(true)` default they must not regress.
 //! What: per CLI path — one opted-out case asserting the SPECIFIC main-checkout
 //! path is returned and that the base-clone directory and the `.worktrees`
@@ -21,7 +21,7 @@
 //! `guided_resume_plan_*` tests, and it does not contain the string
 //! `.invalid` anywhere), and the line range is exactly the part that rotted.
 //! An earlier revision of the FIXTURES used the REAL `bobmatnyc/writing` and
-//! `bob-duetto/cto` remotes, and the guard-neutralised revert run proved why
+//! `acme-admin/cto` remotes, and the guard-neutralised revert run proved why
 //! that is wrong: `ensure_base_clone`
 //! genuinely cloned both private repos over the network (88.43s vs 0.28s
 //! baseline). The assertion under test is the opt-out DECISION, never that a
@@ -711,7 +711,7 @@ async fn provision_for_fallback_unset_creates_worktree_not_live_checkout() {
 /// entries carry `worktree: false`; a lookup that matched too eagerly would
 /// strip isolation from every other project when the daemon happens to be down.
 /// What: registers only `bobmatnyc/writing` as opted out, then provisions for
-/// `bob-duetto/cto` and asserts the worktree IS created.
+/// `acme-admin/cto` and asserts the worktree IS created.
 /// Test: itself.
 #[tokio::test]
 #[serial_test::serial]

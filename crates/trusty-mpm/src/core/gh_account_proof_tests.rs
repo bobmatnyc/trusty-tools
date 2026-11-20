@@ -24,7 +24,7 @@ use crate::core::gh_account_dir::gh_account_dir_tests::{
 };
 
 /// An Enterprise Server repository.
-const GHES_ORIGIN: &str = "https://ghe.corp/duettoresearch/jev-matching";
+const GHES_ORIGIN: &str = "https://ghe.corp/acme/jev-matching";
 
 /// A probe and check that prove `tok-bob` for `octo-pinned` under `dir` on
 /// github.com, and answer nothing else.

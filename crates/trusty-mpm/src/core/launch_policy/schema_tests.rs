@@ -47,12 +47,12 @@ fn an_empty_allow_list_is_a_valid_policy() {
 /// Q4: both keys may share the table.
 #[test]
 fn allow_and_deny_may_share_the_table() {
-    let (file, _) = parse("extends = \"bob\"\n[mcp]\nallow = [\"apex\"]\ndeny = [\"heygen\"]\nclaude_ai_connectors = false\n")
+    let (file, _) = parse("extends = \"bob\"\n[mcp]\nallow = [\"ledger\"]\ndeny = [\"heygen\"]\nclaude_ai_connectors = false\n")
         .unwrap()
         .unwrap();
     let mcp = file.mcp.unwrap();
     assert_eq!(file.extends.as_deref(), Some("bob"));
-    assert_eq!(mcp.allow, Some(vec!["apex".to_string()]));
+    assert_eq!(mcp.allow, Some(vec!["ledger".to_string()]));
     assert_eq!(mcp.deny, Some(vec!["heygen".to_string()]));
     assert_eq!(mcp.claude_ai_connectors, Some(false));
 }
@@ -89,7 +89,7 @@ fn a_parse_error_is_a_bad_file() {
 fn a_wildcard_is_a_bad_file() {
     for body in [
         "[mcp]\ndeny = [\"*\"]\n",
-        "[mcp]\nallow = [\"duetto-*\"]\n",
+        "[mcp]\nallow = [\"acme-*\"]\n",
         "[mcp]\ndeny = [\"mcp__?\"]\n",
     ] {
         let err = parse(body).unwrap_err();
