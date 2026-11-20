@@ -10,6 +10,8 @@
 //! [`EgressAnchors::locate`] adds `config.yaml` and the managed
 //! `claude-config/settings.json` and `settings.local.json` to the anchor set,
 //! under the parent's resolve, symlink, hard-link, case and fail-closed rules —
+//! and, for #11463, `~/.ssh/authorized_keys` and
+//! `~/.trusty-tools/trusty-common/config.yaml` under the same rules —
 //! so the directories above them are protected too, and `rm -rf` or `mv` of
 //! `~/.trusty-tools/trusty-mpm` is denied. [`Anchors::judge_delete`] judges an
 //! `rm`/`rmdir`/`unlink` operand, a glob or expansion by its literal parent.
@@ -26,7 +28,8 @@
 //! `xargs rm`, `find -delete`, a glob after a `cd`, an operand whose
 //! parent is an expansion (`rm $F`), and a `cp -r` of a `.claude` tree that
 //! sets `disableAllHooks` into a project with no entry (its source is unseen).
-//! Test: `pm_guard_trust_anchor_egress_tests.rs`; end to end in
+//! Test: `pm_guard_trust_anchor_egress_tests.rs`, #11463 in
+//! `pm_guard_trust_anchor_remote_gate_tests.rs`; end to end in
 //! `tests/tm_hook_egress_anchor_8454.rs`.
 
 use std::ffi::OsStr;
@@ -50,6 +53,12 @@ const PATTERN_CHARS: [char; 6] = ['$', '`', '*', '?', '[', '{'];
 
 /// The project settings file names the content rule guards.
 const SETTINGS_NAMES: [&str; 2] = ["settings.json", "settings.local.json"];
+
+/// #11463: the sshd key list, relative to the home directory.
+const AUTHORIZED_KEYS: &str = ".ssh/authorized_keys";
+
+/// #11463: the crate whose `config.yaml` holds the remote-host allowlist.
+const TRUSTY_COMMON: &str = "trusty-common";
 
 /// The directory a project settings file lives in.
 const CLAUDE_DIR: &str = ".claude";
@@ -77,6 +86,11 @@ impl EgressAnchors {
             trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
             managed.join(SETTINGS_NAMES[0]),
             managed.join(SETTINGS_NAMES[1]),
+            // #11463: a same-user agent must not add its own ssh key or edit
+            // the remote-host allowlist to pose as EVO to
+            // `trusty-secrets remote-gate`.
+            home.join(AUTHORIZED_KEYS),
+            trusty_common::crate_config::crate_config_path_at(home, TRUSTY_COMMON),
         ];
         let mut out = Self {
             guarded: Vec::new(),
