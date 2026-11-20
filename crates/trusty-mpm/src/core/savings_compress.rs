@@ -95,6 +95,59 @@ fn record_compress_with(
     compression_path: &str,
     price: impl FnOnce() -> Option<ParentModel>,
 ) {
+    record_tagged_with(
+        root,
+        session_id,
+        (tool_name, None),
+        (bytes_before, bytes_after),
+        compression_path,
+        price,
+    );
+}
+
+/// One step of a chained Bash call, for the row that step writes (#11507).
+#[derive(Debug, Clone, Copy)]
+pub struct ChainTag<'a> {
+    /// The chain's sanitised shape, e.g. `cd ; git diff && cargo test`.
+    pub shape: &'a str,
+    /// How many steps the chain has.
+    pub steps: usize,
+}
+
+/// [`record_compress`] for one compressed step of a chain (#11507).
+///
+/// What: the same decline rules and row, with `tool_name` the step's own tool
+/// and the additive `chain_shape`/`steps` fields set from `chain`.
+/// Test: `a_chain_step_row_carries_its_tool_and_the_chain_fields`.
+pub fn record_compress_step(
+    root: &Path,
+    session_id: &str,
+    tool_name: &str,
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+    chain: ChainTag<'_>,
+) {
+    record_tagged_with(
+        root,
+        session_id,
+        (tool_name, Some(chain)),
+        (bytes_before, bytes_after),
+        compression_path,
+        || resolve_session_price(root, session_id),
+    );
+}
+
+/// [`record_compress_with`] carrying the #11507 chain tag, when there is one.
+///
+/// Test: `a_chain_step_row_carries_its_tool_and_the_chain_fields`.
+pub(crate) fn record_tagged_with(
+    root: &Path,
+    session_id: &str,
+    (tool_name, chain): (&str, Option<ChainTag<'_>>),
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+    price: impl FnOnce() -> Option<ParentModel>,
+) {
     if session_id.trim().is_empty() {
         tracing::debug!("no session id: writing no compress savings row");
         return;
@@ -116,6 +169,8 @@ fn record_compress_with(
         row: &row,
         tool_type: TOOL_TYPE_BASH,
         tool_name,
+        chain_shape: chain.map(|c| c.shape),
+        steps: chain.map(|c| c.steps),
     };
     if let Err(source) = append_row(&ledger, &tagged) {
         tracing::warn!(

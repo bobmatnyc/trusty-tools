@@ -159,8 +159,9 @@ pub(crate) fn compression_rewrite_decision(command: &str) -> Result<String, Skip
     }
     let tool = match compressible_tool_decision(inner) {
         // #10973: a chain is judged segment by segment, never as a raw string.
+        // #11507: each step keeps its own filter and the chain its own status.
         Err(SkipReason::Chained) => {
-            super::hook_rewrite_chain::chain_tool_decision(inner, cd_prefix.is_empty())?
+            return super::hook_rewrite_chain::chain_rewrite(cd_prefix, inner);
         }
         other => other?,
     };
@@ -913,7 +914,10 @@ mod tests {
             rewrite_bash_command_for_compression("cargo build || cargo test"),
             None
         );
-        assert_eq!(rewrite_bash_command_for_compression("cd /tmp; ls"), None);
+        assert_eq!(
+            rewrite_bash_command_for_compression("cd /tmp; cd a; ls"),
+            None
+        );
     }
 
     #[test]

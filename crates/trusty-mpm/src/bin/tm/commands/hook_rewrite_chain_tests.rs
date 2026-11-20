@@ -1,61 +1,80 @@
-//! Tests for `hook_rewrite_chain` (#10973, #11037).
+//! Tests for `hook_rewrite_chain` (#10973, #11037, #11507).
 
-use super::super::hook_rewrite::rewrite_bash_command_for_compression;
+use super::super::compress::split_exit_sentinel;
+use super::super::compress_chain::{parse_chain_spec, split_chain};
+use super::super::hook_rewrite::{
+    compression_rewrite_decision, rewrite_bash_command_for_compression,
+};
 use super::super::hook_rewrite_isolated::cwd_rewrite_decision;
+use super::chain_rewrite_with_nonce;
 use std::path::Path;
+use trusty_mpm::core::savings_opportunity::SkipReason;
 
-/// What `hook_rewrite` emits for `<prefix><body>`, built from the producer.
-fn expected(prefix: &str, body: &str, tool: &str) -> String {
-    format!(
-        "{prefix}{} | tm compress --tool \"{tool}\"",
-        crate::commands::compress::wrap_command_reporting_exit(body)
-    )
+/// The rewrite of `command` with the marker nonce fixed to `n0`.
+fn with_nonce(command: &str) -> Option<String> {
+    let command = command.trim();
+    let (prefix, inner) =
+        super::super::hook_rewrite_cd::split_leading_cd(command).unwrap_or(("", command));
+    chain_rewrite_with_nonce(prefix, inner, "n0").ok()
 }
 
-/// #10973: on the pre-fix commit every one of these returned `None`.
+/// The `printf` the rewrite inserts before step `i`.
+fn m(i: usize) -> String {
+    format!("printf '\\n__tm_chain_n0_{i}__\\n'")
+}
+
+/// #11507: the chain text is kept byte for byte, with only marker steps added.
 #[test]
 fn a_safe_chain_is_compressed() {
-    for (command, prefix, body, tool) in [
+    let s = "printf '\\n__tm_compress_exit=%s__\\n' \"$?\"; }";
+    for (command, expected) in [
         (
             "cargo build && cargo test",
-            "",
-            "cargo build && cargo test",
-            "cargo test",
+            format!(
+                "{{ cargo build && {} && cargo test; {s} | tm compress --tool \"cargo build && cargo test\" --chain n0",
+                m(1)
+            ),
         ),
         (
             "cd crates/x && cargo build -p x && cargo test -p x",
-            "cd crates/x && ",
-            "cargo build -p x && cargo test -p x",
-            "cargo test",
+            format!(
+                "cd crates/x && {{ cargo build -p x && {} && cargo test -p x; {s} | tm compress --tool \"cargo build && cargo test\" --chain n0",
+                m(1)
+            ),
         ),
         (
-            "git diff; git diff --stat",
-            "",
-            "git diff; git diff --stat",
-            "git diff",
+            "cd x; git diff",
+            format!(
+                "{{ cd x; {}; git diff; {s} | tm compress --tool \"=cd ; git diff\" --chain n0",
+                m(1)
+            ),
+        ),
+        (
+            "git diff;git log -3",
+            format!(
+                "{{ git diff;{}; git log -3; {s} | tm compress --tool \"git diff ; git log\" --chain n0",
+                m(1)
+            ),
         ),
         (
             "cargo test -p x | tail -40",
-            "",
-            "cargo test -p x | tail -40",
-            "cargo test",
-        ),
-        (
-            "export RUST_LOG=debug && cargo test",
-            "",
-            "export RUST_LOG=debug && cargo test",
-            "cargo test",
-        ),
-        (
-            "true; grep -n 'a b' notes.txt",
-            "",
-            "true; grep -n 'a b' notes.txt",
-            "grep -n",
+            format!(
+                "{{ cargo test -p x | tail -40; {s} | tm compress --tool \"cargo test | tail\" --chain n0"
+            ),
         ),
     ] {
-        assert_eq!(
-            rewrite_bash_command_for_compression(command).as_deref(),
-            Some(expected(prefix, body, tool).as_str()),
+        assert_eq!(with_nonce(command), Some(expected), "{command}");
+    }
+    for command in [
+        "export RUST_LOG=debug && cargo test",
+        "true; grep -n 'a b' notes.txt",
+        "cd /repo && git diff HEAD~1 && ls -la | head -20",
+        "cargo test && git diff",
+        "echo start; date +%s; git diff",
+        "cd 'my dir'; git diff; git log -3",
+    ] {
+        assert!(
+            rewrite_bash_command_for_compression(command).is_some(),
             "{command}"
         );
     }
@@ -88,6 +107,7 @@ fn a_destructive_segment_refuses_the_chain() {
         "cargo fmt && cargo test",
         "cargo install x && cargo test",
         "git diff --output=x && ls",
+        "date -s 12:00; git diff",
     ] {
         assert_eq!(
             rewrite_bash_command_for_compression(command),
@@ -97,7 +117,7 @@ fn a_destructive_segment_refuses_the_chain() {
     }
 }
 
-/// #10973: an ambiguous shape fails closed, uncompressed.
+/// #11507: every refused shape keeps its skip reason and is not rewritten.
 #[test]
 fn an_ambiguous_shape_is_not_compressed() {
     for command in [
@@ -120,17 +140,32 @@ fn an_ambiguous_shape_is_not_compressed() {
         "git diff | head && ls",
         "git diff |& head",
         "git diff;",
-        "git diff && # note",
-        "true && true",
-        // #10973 critic: one filter cannot serve two output classes.
-        "git diff; git log -3",
-        "cd /repo && git diff HEAD~1 && ls -la | head -20",
-        "cargo test && git diff",
-        "grep -rn foo src; git diff",
+        "git diff\nls -la",
+        "for f in a b; do git diff; done",
+        "cd a; cd b; git diff",
+        "cd a; git diff; cd b",
+        "pushd a; git diff",
+        "cd -; git diff",
+        "cd $HOME; git diff",
+        "cd a && cd b; git diff",
+        "set -o pipefail; cargo test | tail",
+        "set -e; git diff",
+        "trap 'x' EXIT; git diff",
+        "exit 1; git diff",
+        "eval git diff; ls",
+        "git diff; ls 'open",
     ] {
         assert_eq!(
-            rewrite_bash_command_for_compression(command),
-            None,
+            compression_rewrite_decision(command),
+            Err(SkipReason::Chained),
+            "{command:?}"
+        );
+    }
+    // A chain with no covered step has nothing to filter.
+    for command in ["true && true", "cd a; echo hi", "echo a; date"] {
+        assert_eq!(
+            compression_rewrite_decision(command),
+            Err(SkipReason::NoFilter),
             "{command:?}"
         );
     }
@@ -146,6 +181,7 @@ fn an_isolation_worktree_refuses_every_chain() {
         "cargo build && cargo test",
         "git diff; git diff --stat",
         "cargo test | tail -40",
+        "cd x; git diff",
     ] {
         assert!(
             rewrite_bash_command_for_compression(command).is_some(),
@@ -170,12 +206,37 @@ fn run_in(shell: &str, cwd: &Path, script: &str) -> (Option<i32>, String, String
     )
 }
 
+/// Run `command`'s rewrite with `tm compress --chain` replaced by its own
+/// splitter and an identity filter: (exit code, stdout, stderr).
+fn run_rewrite(
+    shell: &str,
+    cwd: &Path,
+    setup: &str,
+    command: &str,
+) -> (Option<i32>, String, String) {
+    let rewritten = rewrite_bash_command_for_compression(command)
+        .unwrap_or_else(|| panic!("{command} must be rewritten"));
+    let (head, tail) = rewritten
+        .split_once("| tm compress --tool \"")
+        .expect("the rewrite ends in the compress stage");
+    let (spec, nonce) = tail.split_once("\" --chain ").expect("a chain rewrite");
+    // A failed `cd <dir> && ` prefix never starts the pipeline: the shell's
+    // own status stands, as it would in front of the real `tm compress`.
+    let (code, out, err) = run_in(shell, cwd, &format!("{setup}{head}"));
+    let (body, exit) = split_exit_sentinel(&out);
+    let merged = split_chain(body, nonce, parse_chain_spec(spec).len()).concat();
+    (exit.or(code), merged, err)
+}
+
 /// The original chain and its rewrite, run for real, must agree.
 ///
-/// What: as `a_cd_rewrite_runs_like_the_original_in_a_real_shell`, with the
-/// `tm compress` stage replaced by a filter that strips the #7384 sentinel and
-/// exits with the status it carries. Covers `&&` and `;` short-circuit and
-/// status, a trailing reader, and the leading `cd`'s cwd afterwards.
+/// Why (#11507): requirement 1 and 2 — stdout byte for byte, stderr and status.
+/// What: in a temp tree, each case runs bare and rewritten under sh, bash and
+/// zsh. The filter stage is the real splitter (`compress_chain::split_chain`)
+/// with an identity filter, since a real filter changes bytes by design.
+/// `grep -q nomatch` stands in for `false`, which no chain admits. The cwd
+/// after a `cd <dir> && ` chain matches too; a `cd <dir>;` runs inside the
+/// group by design (Architect spec, #11507).
 /// Test: itself.
 #[test]
 fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
@@ -183,30 +244,24 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
     let root = root.path().canonicalize().expect("canonical temp dir");
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "alpha\nhi there\nhi again\n").expect("write");
-    let filter = root.join("filter.sh");
-    std::fs::write(
-        &filter,
-        "all=$(cat)\nstatus=${all##*__tm_compress_exit=}\nstatus=${status%__}\n\
-         printf '%s\\n' \"${all%__tm_compress_exit=*}\"\nexit \"$status\"\n",
-    )
-    .expect("write filter");
     let cases = [
+        // `&&`, `;`, `| reader`, `cd X;`, `cd X &&`
+        "grep -n hi sub/marker.txt && grep -c hi sub/marker.txt",
+        "grep -n hi sub/marker.txt; grep -c alpha sub/marker.txt",
+        "grep -n hi sub/marker.txt | head -1",
+        "cd sub; grep -n hi marker.txt; grep -c hi marker.txt",
         "cd sub && grep -n hi marker.txt && grep -c hi marker.txt",
-        "cd sub && grep -n nomatch marker.txt && grep -c hi marker.txt",
-        "grep -n nomatch sub/marker.txt; grep -c hi sub/marker.txt",
+        // `false && echo b`: status 1, no `b`; `false; echo b`: `b`, status 0
+        "grep -q nomatch sub/marker.txt && echo b",
+        "grep -q nomatch sub/marker.txt; echo b",
+        // a non-zero last step's status and stderr pass through
+        "echo a; grep -n hi no-such-file",
         "grep -n hi no-such-file; grep -n hi sub/marker.txt",
-        "grep -n hi sub/marker.txt; grep -n hi no-such-file",
-        "cd sub && grep -n hi marker.txt | head -1",
-        "cd sub && grep -n nomatch marker.txt | wc -l",
+        "cd missing; grep -n hi marker.txt",
         "cd missing && grep -n hi marker.txt && grep -c hi marker.txt",
-        "grep -n hi sub/marker.txt; grep -n x no-such-file; grep -c hi sub/marker.txt",
+        "cd sub && grep -n nomatch marker.txt | wc -l",
+        "export X=1 && grep -c hi sub/marker.txt; date +%Y; true",
     ];
-    let lines = |s: &str| {
-        s.lines()
-            .filter(|l| !l.is_empty())
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
     for shell in ["sh", "bash", "zsh"] {
         if std::process::Command::new(shell)
             .args(["-c", "exit 0"])
@@ -217,25 +272,30 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
             continue;
         }
         for command in cases {
-            let rewritten = rewrite_bash_command_for_compression(command)
-                .unwrap_or_else(|| panic!("{command} must be rewritten"));
-            let (head, _tool) = rewritten
-                .split_once("| tm compress")
-                .expect("the rewrite ends in the compress stage");
-            let script = format!("{head}| sh '{}'", filter.display());
-            let (code, out, err) = run_in(shell, &root, command);
-            let (rcode, rout, rerr) = run_in(shell, &root, &script);
-            assert_eq!(code, rcode, "{shell}: status of `{command}` vs `{script}`");
-            assert_eq!(lines(&out), lines(&rout), "{shell}: stdout of `{command}`");
-            assert_eq!(err, rerr, "{shell}: stderr of `{command}`");
-            let (_, cwd, _) = run_in(shell, &root, &format!("{command}\npwd -P"));
-            let (_, rcwd, _) = run_in(shell, &root, &format!("{script}\npwd -P"));
-            assert_eq!(
-                cwd.lines().last(),
-                rcwd.lines().last(),
-                "{shell}: cwd after `{command}`"
-            );
+            let original = run_in(shell, &root, command);
+            let rewritten = run_rewrite(shell, &root, "", command);
+            assert_eq!(original, rewritten, "{shell}: `{command}`");
+            if command.starts_with("cd ") && !command.contains(';') {
+                let (_, cwd, _) = run_in(shell, &root, &format!("{command}\npwd -P"));
+                let rewrite = rewrite_bash_command_for_compression(command).unwrap_or_default();
+                let head = rewrite.split("| tm compress").next().unwrap_or_default();
+                let (_, rcwd, _) = run_in(shell, &root, &format!("{head}| cat >/dev/null\npwd -P"));
+                assert_eq!(
+                    cwd.lines().last(),
+                    rcwd.lines().last(),
+                    "{shell}: cwd after `{command}`"
+                );
+            }
         }
+        assert_eq!(
+            run_in(shell, &root, cases[5]).0,
+            Some(1),
+            "{shell}: false && echo b"
+        );
+        assert_eq!(
+            run_in(shell, &root, cases[6]),
+            (Some(0), "b\n".into(), String::new())
+        );
         // #10973 critic: under `set -o pipefail` a failing producer piped to a
         // reader keeps its status 1 through the rewrite too.
         if run_in(shell, &root, "set -o pipefail").0 != Some(0) {
@@ -247,26 +307,24 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
             "cd sub && grep -n nomatch marker.txt | tail -3",
             "grep -n hi sub/marker.txt; grep -n nomatch sub/marker.txt | wc -l",
         ] {
-            let rewritten = rewrite_bash_command_for_compression(command)
-                .unwrap_or_else(|| panic!("{command} must be rewritten"));
-            let (head, _tool) = rewritten
-                .split_once("| tm compress")
-                .expect("the rewrite ends in the compress stage");
-            let script = format!("set -o pipefail\n{head}| sh '{}'", filter.display());
-            let (code, out, _) = run_in(shell, &root, &format!("set -o pipefail\n{command}"));
-            let (rcode, rout, _) = run_in(shell, &root, &script);
-            assert_eq!(code, Some(1), "{shell}: pipefail status of `{command}`");
-            assert_eq!(code, rcode, "{shell}: pipefail status of `{script}`");
-            assert_eq!(lines(&out), lines(&rout), "{shell}: pipefail stdout");
+            let setup = "set -o pipefail\n";
+            let original = run_in(shell, &root, &format!("{setup}{command}"));
+            assert_eq!(
+                original.0,
+                Some(1),
+                "{shell}: pipefail status of `{command}`"
+            );
+            assert_eq!(
+                original,
+                run_rewrite(shell, &root, setup, command),
+                "{shell}: `{command}`"
+            );
         }
     }
 }
 
-/// #10973 critic: more than 30 diff lines followed by a log, run through the
-/// REAL `tm compress` filter, keep every diff line. On ffabca0644 the chain
-/// `git diff; git log -3` was compressed with the `git log` filter, which drops
-/// the diff past 30 lines; now a mixed-class chain is refused, and a same-class
-/// diff chain keeps every line.
+/// #10973 critic, #11507: more than 30 diff lines followed by a log keep every
+/// diff line, because each step now runs through its own filter.
 /// Test: itself.
 #[test]
 fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
@@ -274,23 +332,20 @@ fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
     let diff: String = (0..40)
         .map(|i| format!("+added line {i} of the patch\n"))
         .collect();
-    let output = format!(
-        "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,0 +1,40 @@\n{diff}\
-         commit 0123456789abcdef\nAuthor: a <a@b>\n\n    subject\n"
-    );
-    let command = "git diff; git log -3";
-    let tool = rewrite_bash_command_for_compression(command).and_then(|r| {
-        r.rsplit_once("--tool \"")
-            .map(|(_, t)| t.trim_end_matches('"').to_owned())
-    });
-    // Refused (the fix), or else the filter it would run must keep the diff.
-    if let Some(tool) = tool {
-        let filtered = compress_tool_output(&tool, &output);
-        for i in 0..40 {
-            assert!(
-                filtered.contains(&format!("+added line {i} of the patch")),
-                "`{command}` compressed with `{tool}` lost diff line {i}:\n{filtered}"
-            );
-        }
+    let diff = format!("diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,0 +1,40 @@\n{diff}");
+    let rewrite = with_nonce("git diff; git log -3").expect("a mixed chain is rewritten");
+    let spec = rewrite
+        .split_once("--tool \"")
+        .and_then(|(_, t)| t.split_once('"'))
+        .map(|(s, _)| s)
+        .expect("a spec");
+    let tools = parse_chain_spec(spec);
+    assert_eq!(tools, [Some("git diff".into()), Some("git log".into())]);
+    let filtered = compress_tool_output("git diff", &diff);
+    for i in 0..40 {
+        assert!(
+            filtered.contains(&format!("+added line {i} of the patch")),
+            "the diff step lost line {i}:\n{filtered}"
+        );
     }
 }
