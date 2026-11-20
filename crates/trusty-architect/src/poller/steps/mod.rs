@@ -10,7 +10,7 @@
 //! adds [`ledger_shim`].
 //! Test: see each module.
 
-// #11540: the ledger-bound steps, a Python shim run each cycle.
+// #11540: the ledger-bound steps, a Python shim run every 60 s.
 pub mod ledger_shim;
 pub mod notify_macos;
 // df-T7i P1b: the prototype's run_* scripts, started on its cadence.

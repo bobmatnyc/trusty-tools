@@ -20,6 +20,7 @@ fn opts(debounce_ms: u64, tick_ms: u64) -> ServeOptions {
     ServeOptions {
         debounce: Duration::from_millis(debounce_ms),
         tick: Duration::from_millis(tick_ms),
+        min_gap: Duration::ZERO,
         scan_every: Duration::from_millis(20),
         once: false,
     }
@@ -48,7 +49,7 @@ fn run_loop(
                 opts,
                 stop,
                 files,
-                control: None,
+                tmux: None,
                 events: Some(rx),
                 log: &log,
             };
@@ -268,4 +269,33 @@ fn panicking_cycle_is_alerted_and_the_loop_continues() {
     let carried: Vec<bool> = seen.iter().take(4).map(|c| c.1.is_some()).collect();
     assert_eq!(carried, [false, false, true, false], "{seen:?}");
     assert!(seen[2].1.as_deref().is_some_and(|d| d.contains("boom")));
+}
+
+/// #9779 review: continuous events for 1.2 s with a 300 ms least gap run at
+/// most ceil(1200 / 300) + 1 event cycles. Red with no gap (about one per
+/// debounce).
+#[test]
+fn busy_events_keep_the_least_gap() {
+    let gap = Duration::from_millis(300);
+    let window = Duration::from_millis(1200);
+    let (_, seen) = run_loop(
+        ServeOptions {
+            min_gap: gap,
+            ..opts(10, 30_000)
+        },
+        None,
+        "",
+        |_| {},
+        |tx, seen| {
+            wait_for(seen, |v| !v.is_empty());
+            let end = Instant::now() + window;
+            while Instant::now() < end {
+                let _ = tx.send(Event::Changed("tmux:s1".to_owned()));
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        },
+    );
+    let bound = window.as_millis().div_ceil(gap.as_millis()) + 1;
+    let n = events(&seen) as u128;
+    assert!((2..=bound).contains(&n), "{n} not in 2..={bound}: {seen:?}");
 }

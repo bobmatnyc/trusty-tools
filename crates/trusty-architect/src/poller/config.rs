@@ -32,6 +32,8 @@ use crate::self_ctx::{default_dir, projects_dir};
 
 /// Load alert line: the 15-minute load average over this many times the cores.
 pub const LOAD_FACTOR_DEFAULT: f64 = 1.5;
+/// `tm architect serve`'s least gap between event cycles, in seconds.
+pub const SERVE_MIN_EVENT_GAP_DEFAULT: f64 = 15.0;
 /// The context window a token count is divided by.
 pub const SELF_CTX_WINDOW_DEFAULT: i64 = 1_000_000;
 /// The Architect's own context percent that raises `self_ctx` with no
@@ -132,6 +134,10 @@ pub struct Config {
     /// Shadow run: outputs go to `<inbox>/shadow/`, no lock, no keys, no
     /// relaunch, no notification, no mutating step (#9779, plan section 3).
     pub shadow: bool,
+    /// `SERVE_MIN_EVENT_GAP` seconds, else [`SERVE_MIN_EVENT_GAP_DEFAULT`]:
+    /// the least time between two event cycles of `tm architect serve`
+    /// (#9779 review). The 60 s tick is unaffected.
+    pub serve_min_gap: f64,
 }
 
 impl Config {
@@ -261,6 +267,7 @@ impl Config {
             push_channel: get("ARCHITECT_PUSH_CHANNEL").filter(|v| !v.is_empty()),
             push_recipient: get("ARCHITECT_PUSH_SLACK_USER").filter(|v| !v.is_empty()),
             shadow: false,
+            serve_min_gap: lenient("SERVE_MIN_EVENT_GAP", SERVE_MIN_EVENT_GAP_DEFAULT).max(0.0),
         })
     }
 

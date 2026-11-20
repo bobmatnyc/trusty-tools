@@ -42,9 +42,10 @@ pub(crate) enum ArchitectAction {
     },
     /// The poll cycle as a service, run on local events (#9779).
     ///
-    /// Runs the same cycle as `poll` within 2 s of an inbox write, a tmux
-    /// pane or window change (`tmux -C`) or a transcript append, and at
-    /// least every 60 s. GitHub reads keep their own cadence; no port is
+    /// Runs the same cycle as `poll` soon after an inbox write, tmux pane
+    /// activity (polled; no tmux client is attached) or a transcript
+    /// append: 2 s debounce, at most one event cycle per 15 s
+    /// (`SERVE_MIN_EVENT_GAP`), and at least every 60 s. GitHub reads keep their own cadence; no port is
     /// opened. Takes `inbox/poll.lock` for its life, so `poll` cannot run
     /// beside it. A watcher that fails is logged and raised as a `serve`
     /// alert while the 60 s tick keeps cycling. SIGTERM or SIGINT exits

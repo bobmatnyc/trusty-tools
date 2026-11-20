@@ -24,7 +24,7 @@ fn sigterm_finishes_the_cycle_and_exits() -> Result<(), Box<dyn std::error::Erro
                 },
                 stop,
                 files: None,
-                control: None,
+                tmux: None,
                 events: None,
                 log: &log,
             };

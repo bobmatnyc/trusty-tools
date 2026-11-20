@@ -1,5 +1,5 @@
 //! #11540: the ledger shim (`scripts/fleet-poll-ledger.py`) run by the
-//! poller each cycle. A fake runner stands in for the child; every path is a
+//! poller every 60 s (#9779 review: not every `serve` cycle). A fake runner stands in for the child; every path is a
 //! tempdir. Each failure test is red against a shim runner that only logs.
 
 mod cycle_support;
@@ -220,5 +220,36 @@ fn ledger_shim_failure_reaches_the_cycle_failing_set() -> TestResult {
     );
     assert_eq!(state.other["dream"], json!({"last": "2026-11-16"}));
     assert_eq!(fake.shim_calls().len(), 1, "once per cycle");
+    Ok(())
+}
+
+/// #9779 review: ten cycles 15 s apart (a busy `serve`) run the shim once per
+/// 60 s, and a failing shim's alert stays in the `push` book across the
+/// cycles that skip it. Red against a cycle that runs the shim every time.
+#[test]
+fn ledger_shim_runs_once_per_cadence_across_fast_cycles() -> TestResult {
+    let env = Env::new(&[])?;
+    with_script(&env)?;
+    let fake = FakeShim::new(|| exits(Some(1), OK_OUT, "fleet-poll-ledger: x\n"));
+    let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(10));
+    let clock = FakeClock::new(1_763_294_400.0);
+    let steps = ScriptSteps::new(&fake, &env.config);
+    let runner = Runner {
+        steps: Some(&steps),
+        ..env.runner(&tmux, &clock, &QuietHost)
+    };
+    let (mut session, _) = PollSession::load(&env.config, false, clock.now_unix());
+    for _ in 0..10 {
+        runner.run_once(&mut session)?;
+        let (state, _) = load_state(&env.state_path());
+        assert!(
+            state.other["push"].get("ledger_shim:exit").is_some(),
+            "open across skipped cycles: {:?}",
+            state.other.get("push")
+        );
+        clock.sleep(Duration::from_secs(15));
+    }
+    // t = 0, 15, ..., 135 s: due at 0, 60 and 120 only.
+    assert_eq!(fake.shim_calls().len(), 3);
     Ok(())
 }

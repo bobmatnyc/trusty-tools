@@ -50,7 +50,7 @@ fn watcher_start_failure_is_a_serve_alert() -> TestResult {
         opts: once(),
         stop: &stop,
         files: Some(broken_watch(&env)?),
-        control: None,
+        tmux: None,
         events: None,
         log: &log,
     };
@@ -78,7 +78,7 @@ fn lock_contention_second_instance_does_not_cycle() -> TestResult {
         opts: once(),
         stop: &stop,
         files: None,
-        control: None,
+        tmux: None,
         events: None,
         log: &log,
     };
@@ -105,7 +105,7 @@ fn shadow_serve_writes_only_the_shadow_dir() -> TestResult {
         opts: once(),
         stop: &stop,
         files: Some(watch),
-        control: None,
+        tmux: None,
         events: None,
         log: &log,
     };
@@ -142,7 +142,7 @@ fn tick_runs_the_poll_cycle() -> TestResult {
         },
         stop: &stop,
         files: None,
-        control: None,
+        tmux: None,
         events: None,
         log: &log,
     };

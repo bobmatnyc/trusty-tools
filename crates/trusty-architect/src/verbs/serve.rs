@@ -1,15 +1,18 @@
 //! `tm architect serve`: the poll cycle, run on local events (#9779).
 //!
 //! Why: the same cycle as `tm architect poll`, started by an inbox write, a
-//! tmux notification or a transcript append within two seconds instead of
+//! tmux pane's activity or a transcript append within seconds instead of
 //! at the next 60 s interval (plan section 2).
 //! What: [`serve`] installs the SIGTERM/SIGINT stop flag, builds the
 //! production [`crate::poller::Runner`] through the helper `poll` uses, and
 //! runs [`ServeLoop::for_config`] through [`serve_runner`], which takes
 //! `poll.lock` (not in `--shadow`) for the service's life. `--once` runs the
-//! start cycle and exits, failing as a failed cycle.
+//! start cycle and exits, failing as a failed cycle. The least gap between
+//! event cycles is the config's `serve_min_gap` (`SERVE_MIN_EVENT_GAP`).
 //! Test: `tests/serve_runner.rs` (the runner path), trusty-mpm's
 //! `cli_parses_architect_verbs` (the verb).
+
+use std::time::Duration;
 
 use super::VerbError;
 use super::poll::{run_error, with_live_runner};
@@ -48,9 +51,12 @@ pub fn serve(
             tracing::warn!(error = %e, line, "serve log append failed");
         }
     };
+    let defaults = ServeOptions::default();
     let opts = ServeOptions {
         once: args.once,
-        ..ServeOptions::default()
+        // #9779 review: a busy fleet cycles at most once per this gap.
+        min_gap: Duration::try_from_secs_f64(config.serve_min_gap).unwrap_or(defaults.min_gap),
+        ..defaults
     };
     with_live_runner(&config, false, messages, &mut |runner| {
         let tmux = runner.tmux.clone();

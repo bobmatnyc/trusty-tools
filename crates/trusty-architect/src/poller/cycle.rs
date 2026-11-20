@@ -40,7 +40,7 @@ use super::self_ctx_alerts::self_ctx_alerts;
 use super::self_refresh::self_refresh_fault_alerts;
 use super::slack::PushSender;
 use super::state::PollState;
-use super::steps::ledger_shim::run_ledger_shim;
+use super::steps::ledger_shim::ledger_shim_step;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::watchdog::Relauncher;
@@ -263,10 +263,10 @@ pub fn collect<T: Tmux + ?Sized>(
         log.extend(steps.run(now));
     }
     // #11540: the ledger-bound steps run in Python, live or shadow (never in
-    // a dry run); a shim failure joins `failing` below.
+    // a dry run), every 60 s (#9779 review); a shim failure joins `failing`.
     let mut shim_failing = Vec::new();
     if let Some(steps) = s.steps.filter(|_| !s.dry_run || s.config.shadow) {
-        let shim = run_ledger_shim(steps, s.config, now);
+        let shim = ledger_shim_step(steps, s.config, now);
         candidates.extend(shim.alerts);
         state.other.extend(shim.state);
         log.extend(shim.log);

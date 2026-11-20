@@ -7,12 +7,14 @@
 //! (idle, host load, watchdog clocks, routines). GitHub stays on the cycle's
 //! own fixed-cadence steps: no webhook, no listener port.
 //! What: [`ServeLoop::run`] runs one cycle at start, then waits on three
-//! sources: [`FileWatch`] (mtime polling of the inbox and the hot Claude
-//! transcripts), [`ControlClients`] (one `tmux -C` read-only client per
-//! session, sending [`Event`]s) and the tick. The first event opens a
-//! debounce window ([`DEBOUNCE`]); every event inside it joins the same
-//! cycle. After a cycle the file watch re-reads its baseline, so the cycle's
-//! own writes start no cycle. A source that fails is a fault ([`Faults`]):
+//! sources, both read every [`SCAN_EVERY`]: [`FileWatch`] (mtime polling of
+//! the inbox and the hot Claude transcripts) and [`TmuxActivity`] (one
+//! `tmux list-panes -a` read of each pane's activity time; no tmux client is
+//! attached), and the tick. The first event opens a debounce window
+//! ([`DEBOUNCE`]); every event inside it joins the same cycle, and an event
+//! cycle starts no sooner than `min_gap` ([`MIN_EVENT_GAP`]) after the last
+//! cycle ([`Pacer`]). After a cycle both sources re-read their baseline, so
+//! the cycle's own writes start no cycle. A source that fails is a fault ([`Faults`]):
 //! logged, stored under [`SERVE_FAULT`] in the poll state and raised by the
 //! cycle as a `serve` alert in its failing set ([`serve_fault_alerts`]),
 //! while the tick keeps cycling. A panicking cycle is caught, logged and
@@ -22,22 +24,24 @@
 //! [`Runner::start`] (none in a shadow run) and holds it for the service's
 //! life, so a second `serve` or a `poll` cannot cycle beside it.
 //! Test: `tests/serve_loop.rs`, `tests/serve_runner.rs`,
-//! `tests/serve_control.rs`, `tests/serve_signal.rs`.
+//! `tests/serve_activity.rs`, `tests/serve_pace.rs`, `tests/serve_signal.rs`.
 
-mod control;
+mod activity;
 mod files;
+mod pace;
 mod signal;
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Map, Value};
 
-pub use control::{CONTROL_ALERT_AFTER, ControlClients};
+pub use activity::{ACTIVITY_FORMAT, TMUX_FAULT, TmuxActivity};
 pub use files::{FileWatch, WatchRoot};
+pub use pace::Pacer;
 pub use signal::install_stop_handlers;
 
 use crate::classify::Alert;
@@ -49,6 +53,8 @@ use crate::tmux::{SystemTmux, Tmux};
 
 /// Events closer together than this join one cycle.
 pub const DEBOUNCE: Duration = Duration::from_secs(2);
+/// An event cycle starts at least this long after the last cycle.
+pub const MIN_EVENT_GAP: Duration = Duration::from_secs(15);
 /// A cycle runs at least this often, events or not.
 pub const TICK: Duration = Duration::from_secs(60);
 /// How often the file watch re-reads its mtimes.
@@ -94,6 +100,8 @@ pub struct ServeOptions {
     pub debounce: Duration,
     /// [`TICK`] in production.
     pub tick: Duration,
+    /// [`MIN_EVENT_GAP`] by default; the config's `SERVE_MIN_EVENT_GAP`.
+    pub min_gap: Duration,
     /// [`SCAN_EVERY`] in production.
     pub scan_every: Duration,
     /// Run the start cycle only, then return.
@@ -105,6 +113,7 @@ impl Default for ServeOptions {
         Self {
             debounce: DEBOUNCE,
             tick: TICK,
+            min_gap: MIN_EVENT_GAP,
             scan_every: SCAN_EVERY,
             once: false,
         }
@@ -190,9 +199,9 @@ pub struct ServeLoop<'a> {
     pub stop: &'a AtomicBool,
     /// The inbox and transcript watch; `None` runs on the tick only.
     pub files: Option<FileWatch>,
-    /// The `tmux -C` clients, reconciled at start and on each tick.
-    pub control: Option<ControlClients>,
-    /// Where [`ControlClients`] (and tests) send [`Event`]s.
+    /// The pane activity read, run with each file scan.
+    pub tmux: Option<TmuxActivity>,
+    /// Where tests (and any future source) send [`Event`]s.
     pub events: Option<Receiver<Event>>,
     /// Appends one line to the service log (`poll.log` / `shadow.log`).
     pub log: &'a dyn Fn(&str),
@@ -200,8 +209,8 @@ pub struct ServeLoop<'a> {
 
 impl<'a> ServeLoop<'a> {
     /// The production sources for `config`: the inbox (its shadow dir,
-    /// `poll.log` and `poll.lock` excluded) and transcript watch, and a
-    /// control client per session on `tmux`'s server but the poll session.
+    /// `poll.log` and `poll.lock` excluded) and transcript watch, and the
+    /// pane activity of every session on `tmux`'s server but the poll session.
     pub fn for_config(
         config: &Config,
         tmux: SystemTmux,
@@ -218,14 +227,13 @@ impl<'a> ServeLoop<'a> {
             WatchRoot::inbox(&config.inbox, exclude),
             WatchRoot::transcripts(&config.transcript_base),
         ]);
-        let (tx, rx) = channel();
-        let control = ControlClients::new(tmux, vec![config.poll_session.clone()], tx);
+        let tmux = TmuxActivity::new(tmux, vec![config.poll_session.clone()]);
         Self {
             opts,
             stop,
             files: Some(files),
-            control: Some(control),
-            events: Some(rx),
+            tmux: Some(tmux),
+            events: None,
             log,
         }
     }
@@ -238,72 +246,56 @@ impl<'a> ServeLoop<'a> {
     pub fn run(&mut self, cycle: &mut CycleFn<'_>) -> Result<ServeStats, String> {
         let mut faults = Faults::default();
         let mut stats = ServeStats::default();
-        self.refresh(&mut faults, true);
+        self.scan(&mut faults, true);
         let first = self.run_cycle(Trigger::Start, &mut faults, &mut stats, cycle);
         if self.opts.once {
-            self.shutdown();
             return first.map(|()| stats);
         }
         self.scan(&mut faults, false);
-        let mut next_tick = Instant::now() + self.opts.tick;
-        // A busy fleet can keep events due forever; the refresh still runs.
-        let mut next_refresh = next_tick;
-        let mut next_scan = Instant::now() + self.opts.scan_every;
-        let mut pending: Option<Instant> = None;
+        let o = self.opts;
+        let mut pace = Pacer::new(o.debounce, o.tick, o.min_gap, Instant::now());
+        // A busy fleet can keep events due forever; the full scan still runs.
+        let mut next_refresh = Instant::now() + o.tick;
+        let mut next_scan = Instant::now() + o.scan_every;
         while !self.stop.load(Ordering::SeqCst) {
             let now = Instant::now();
             if now >= next_scan {
                 if self.scan(&mut faults, false) {
-                    pending.get_or_insert(now + self.opts.debounce);
+                    pace.event(now);
                 }
-                next_scan = now + self.opts.scan_every;
+                next_scan = now + o.scan_every;
             }
             if now >= next_refresh {
-                self.refresh(&mut faults, false);
-                next_refresh = now + self.opts.tick;
+                self.scan(&mut faults, true);
+                next_refresh = now + o.tick;
             }
-            let event_due = pending.is_some_and(|at| now >= at);
-            if event_due || now >= next_tick {
-                let trigger = if event_due {
-                    Trigger::Events
-                } else {
-                    Trigger::Tick
-                };
+            if let Some(trigger) = pace.due(now) {
                 let _ = self.run_cycle(trigger, &mut faults, &mut stats, cycle);
                 // The cycle's own writes are the new baseline, not an event.
                 self.scan(&mut faults, false);
-                pending = None;
-                next_tick = Instant::now() + self.opts.tick;
-                next_scan = Instant::now() + self.opts.scan_every;
+                pace.ran(Instant::now());
+                next_scan = Instant::now() + o.scan_every;
                 continue;
             }
-            let wake = [Some(next_tick), Some(next_scan), pending]
-                .into_iter()
-                .flatten()
-                .min()
-                .unwrap_or(now);
+            let wake = pace.wake().min(next_scan);
             let wait = wake.saturating_duration_since(now).min(STOP_POLL);
             match self.events.as_ref().map(|rx| rx.recv_timeout(wait)) {
-                Some(Ok(event)) => self.handle(event, &mut faults, &mut pending),
+                Some(Ok(event)) => self.handle(event, &mut faults, &mut pace),
                 Some(Err(RecvTimeoutError::Timeout)) => {}
                 Some(Err(RecvTimeoutError::Disconnected)) => self.events = None,
                 None => std::thread::sleep(wait),
             }
         }
         (self.log)("serve stop: signal received; last cycle finished");
-        self.shutdown();
         Ok(stats)
     }
 
-    fn handle(&self, event: Event, faults: &mut Faults, pending: &mut Option<Instant>) {
-        let due = Instant::now() + self.opts.debounce;
+    fn handle(&self, event: Event, faults: &mut Faults, pace: &mut Pacer) {
         match event {
-            Event::Changed(_) => {
-                pending.get_or_insert(due);
-            }
+            Event::Changed(_) => pace.event(Instant::now()),
             Event::Fault { kind, detail } => {
                 if self.fault(faults, &kind, &detail) {
-                    pending.get_or_insert(due);
+                    pace.event(Instant::now());
                 }
             }
             Event::Clear(kind) => self.recovered(faults, &kind),
@@ -329,45 +321,37 @@ impl<'a> ServeLoop<'a> {
         }
     }
 
-    /// Re-reads the file watch; true when a watched file changed.
+    /// Re-reads the file watch (every file when `full`) and the tmux pane
+    /// activity; true when either changed.
     fn scan(&mut self, faults: &mut Faults, full: bool) -> bool {
-        let Some(files) = self.files.as_mut() else {
-            return false;
-        };
         let mut changed = false;
-        for (kind, result) in files.scan(full, SystemTime::now()) {
-            match result {
-                Ok(c) => {
-                    changed |= c;
-                    self.recovered(faults, &kind);
-                }
-                Err(e) => {
-                    self.fault(faults, &kind, &e);
+        if let Some(files) = self.files.as_mut() {
+            for (kind, result) in files.scan(full, SystemTime::now()) {
+                match result {
+                    Ok(c) => {
+                        changed |= c;
+                        self.recovered(faults, &kind);
+                    }
+                    Err(e) => {
+                        self.fault(faults, &kind, &e);
+                    }
                 }
             }
+        }
+        // #9779 review: a failed tmux read fails closed as a `serve` fault.
+        match self.tmux.as_mut().map(TmuxActivity::poll) {
+            Some(Ok(c)) => {
+                changed |= c;
+                self.recovered(faults, TMUX_FAULT);
+            }
+            Some(Err(e)) => {
+                if self.fault(faults, TMUX_FAULT, &format!("list-panes: {e}")) {
+                    changed = true;
+                }
+            }
+            None => {}
         }
         changed
-    }
-
-    /// Start and tick: a full file scan and the tmux client reconcile.
-    fn refresh(&mut self, faults: &mut Faults, start: bool) {
-        self.scan(faults, true);
-        let Some(control) = self.control.as_mut() else {
-            return;
-        };
-        match control.reconcile() {
-            Ok(died) => {
-                self.recovered(faults, control::RECONCILE);
-                for name in died {
-                    let detail = "control client thread died; restarted";
-                    self.fault(faults, &control::kind(&name), detail);
-                }
-            }
-            Err(e) => {
-                let what = if start { "start" } else { "reconcile" };
-                self.fault(faults, control::RECONCILE, &format!("{what}: {e}"));
-            }
-        }
     }
 
     fn run_cycle(
@@ -402,12 +386,6 @@ impl<'a> ServeLoop<'a> {
                 self.fault(faults, CYCLE_PANIC, &format!("cycle panicked: {text}"));
                 Err(format!("cycle panicked: {text}"))
             }
-        }
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(control) = self.control.as_mut() {
-            control.shutdown();
         }
     }
 }
