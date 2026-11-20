@@ -20,7 +20,7 @@
 
 use std::cmp::Reverse;
 
-use tracing::warn;
+use tracing::{info, warn};
 use trusty_common::github_path::{UNKNOWN_OWNER, parse_owner_repo};
 use trusty_common::repo_identity::RepoIdentity;
 
@@ -59,8 +59,8 @@ pub enum RepoIndexError {
     },
     /// No live registered index belongs to the repo.
     ///
-    /// #11417: `detail` ends with the remedy — `ensure_project` for a parked
-    /// id, `trusty-search index <path>` otherwise (see `no_index_remedy`).
+    /// `detail` ends with the remedy, `trusty-search index <path>`; #11545: a
+    /// parked id resolves instead of landing here.
     #[error(
         "no trusty-search index for {repo}: looked up index {index_id:?} and repo_identity \
          {repo:?} across {registered} registered index(es); {detail}"
@@ -276,7 +276,9 @@ pub(crate) fn check_pin(
 /// `registry_failure_is_an_error_when_search_is_required`,
 /// `identity_filter_is_queried_first_and_the_full_list_only_on_a_miss`,
 /// `owner_named_unknown_owner_sentinel_is_invalid`,
-/// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`.
+/// `filter_ignoring_daemon_still_resolves_the_right_repo_and_refuses_the_wrong_one`,
+/// `review_pr_resolves_an_index_listed_only_as_parked`,
+/// `review_pr_refuses_a_parked_index_of_another_owner`.
 pub(crate) async fn resolve_repo_index(
     client: &dyn SearchClient,
     owner: &str,
@@ -303,41 +305,29 @@ pub(crate) async fn resolve_repo_index(
         Ok(id) => return Ok(id),
         Err(detail) => detail,
     };
-    // #11417: a parked id needs `ensure_project`, not a reindex.
-    let remedy = no_index_remedy(client, &repo_key, &index_id).await;
+    // #11545: a parked id is registered, only not resident — it is present.
+    // The context gate wakes it with one search before reviewing. Only a row
+    // the daemon files under this repo's identity counts, the parked analogue
+    // of the ForeignPin refusal: a bare id match would take acme/widget's
+    // parked `widget` index for bobmatnyc/widget.
+    let parked = client
+        .list_parked_index_ids(Some(&repo_key))
+        .await
+        .inspect_err(|e| warn!(repo = %repo_key, "review_pr: parked indexes unreadable: {e}"))
+        .unwrap_or_default();
+    if parked.contains(&index_id) {
+        info!(repo = %repo_key, index = %index_id, "review_pr: resolved a parked index");
+        return Ok(index_id);
+    }
     Err(RepoIndexError::NoIndex {
         repo: repo_key.clone(),
         index_id: index_id.clone(),
         registered: indexes.len(),
-        detail: format!("{detail}. {remedy}"),
+        detail: format!(
+            "{detail}. Index a checkout of {repo_key} with `trusty-search index <path>`, then \
+             retry"
+        ),
     })
-}
-
-/// The remedy a [`RepoIndexError::NoIndex`] ends with (#11417).
-///
-/// Why: a parked index is registered but not live, so it is missing from the
-/// list `review_pr` reads; telling the operator to index the checkout sends
-/// them to a reindex, which never clears a park.
-/// What: when the daemon lists `index_id` as parked, name the park and point
-/// at trusty-search `ensure_project`; otherwise, or when the parked list
-/// cannot be read (the miss is already an error), the index remedy.
-/// Test: `no_index_names_a_parked_id_and_points_at_ensure_project`,
-/// `no_index_for_an_unknown_id_keeps_the_index_remedy`.
-async fn no_index_remedy(client: &dyn SearchClient, repo_key: &str, index_id: &str) -> String {
-    let parked = client
-        .list_parked_index_ids()
-        .await
-        .inspect_err(|e| warn!(repo = %repo_key, "review_pr: parked indexes unreadable: {e}"))
-        .is_ok_and(|ids| ids.iter().any(|id| id == index_id));
-    if parked {
-        format!(
-            "Index {index_id:?} is registered but is parked, so it is not live. Re-activate \
-             it with trusty-search `ensure_project` (search.project.ensure) for its checkout \
-             of {repo_key}, then retry; a reindex does not clear a park"
-        )
-    } else {
-        format!("Index a checkout of {repo_key} with `trusty-search index <path>`, then retry")
-    }
 }
 
 /// The canonical identity an index records, or `None` when absent/unparseable.
