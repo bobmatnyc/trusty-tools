@@ -12,7 +12,8 @@ the extension's service worker through TrustyPages.commands, as the native
 port would drive them.
 Run: python3 -m pytest crates/trusty-browser/tests/extension/test_frames_uat.py
 Test: `test_granted_child_is_read_and_found_with_attribution`,
-`test_child_without_permission_is_denied`, `test_child_ref_is_refused_after_the_frame_navigates`.
+`test_child_without_permission_is_denied`, `test_child_ref_is_refused_after_the_frame_navigates`,
+`test_include_text_reads_top_and_child_text_on_a_link_heavy_page`.
 """
 
 import json
@@ -35,6 +36,9 @@ def pages(port):
     child = f"https://b.test:{port}/child"
     return {
         ("a.test", "/"): f'<title>Top</title><button>Top button</button><iframe src="{child}"></iframe>',
+        # #11284: a link-heavy page whose elements alone fill a read's budget.
+        ("a.test", "/links"): '<title>Links</title><p>TOP-TEXT body</p>' + "".join(
+            f'<a href="/l{i}">Link number {i}</a> ' for i in range(1500)) + f'<iframe src="{child}"></iframe>',
         ("b.test", "/child"): f'<title>Child</title><form><button>{LABEL}</button><a href="/next">Next</a></form>',
         ("b.test", "/next"): "<title>Next</title><button>After navigation</button>",
     }
@@ -86,8 +90,8 @@ READ = {"scope_ref": None, "max_chars": 50000, "viewport_only": False, "include_
 FIND = {"role": None, "name": LABEL, "text": None, "within_ref": None, "limit": 10}
 
 
-def browse(tmp_path, port, granted, body):
-    """Load the extension copy granting `granted` origins, open a.test, and run `body(ask, tab)`."""
+def browse(tmp_path, port, granted, body, path="/"):
+    """Load the extension copy granting `granted` origins, open a.test `path`, and run `body(ask, tab)`."""
     copy = tmp_path / "extension"
     shutil.copytree(EXTENSION, copy)
     manifest = json.loads((copy / "manifest.json").read_text())
@@ -101,7 +105,7 @@ def browse(tmp_path, port, granted, body):
         try:
             worker = context.service_workers[0] if context.service_workers else context.wait_for_event("serviceworker")
             tab = context.pages[0] if context.pages else context.new_page()
-            tab.goto(f"https://a.test:{port}/")
+            tab.goto(f"https://a.test:{port}{path}")
             tab.wait_for_function("document.querySelector('iframe') && document.readyState === 'complete'")
             child = next(f for f in tab.frames if f.url.startswith("https://b.test"))
             child.wait_for_selector("button")
@@ -149,3 +153,16 @@ def test_child_ref_is_refused_after_the_frame_navigates(site, tmp_path):
         assert ask("page_read", {**READ, "scope_ref": form["ref"]}) == {"error": "StaleElement"}
         assert ask("page_find", {**FIND, "within_ref": form["ref"]}) == {"error": "StaleElement"}
     browse(tmp_path, site, ["a.test", "b.test"], body)
+
+
+def test_include_text_reads_top_and_child_text_on_a_link_heavy_page(site, tmp_path):
+    # #11284: the links must not take the whole budget from the text, and the child's text is read too.
+    def body(ask, _child):
+        result = ask("page_read", {**READ, "include_text": True})["result"]
+        assert result["text"] != ""
+        assert "TOP-TEXT body" in result["text"]
+        child = next(f for f in result["frames"] if f["id"] != 0)
+        assert f'[frame {child["id"]}]' in result["text"] and LABEL in result["text"]
+        assert result["truncated"] is True
+        assert len(json.dumps(result, separators=(",", ":")).encode()) <= READ["max_chars"]
+    browse(tmp_path, site, ["a.test", "b.test"], body, "/links")

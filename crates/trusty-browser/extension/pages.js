@@ -662,7 +662,8 @@ TrustyPages.commands = deps => {
   //   granted child with its share of the budget, appends its entries with frame-scoped refs, records
   //   frameKey -> documentId for later scoped reads, then bounds the list to `limit` and the bytes to `budget`.
   // Test: tests/extension/test_frames.mjs `a granted child frame is read with attribution`,
-  //   `the frame count and byte share stay inside the result budget`.
+  //   `the frame count and byte share stay inside the result budget`,
+  //   `include_text reads each granted child frame's text within its share`.
   async function withFrames(req, base, plan, mode, options, limit, budget) {
     const list = mode === "read" ? "elements" : "matches";
     for (const key of [...frameDocs.keys()]) if (key.startsWith(req.tab + ":")) frameDocs.delete(key);
@@ -678,6 +679,8 @@ TrustyPages.commands = deps => {
       frames.push(frame);
       frameDocs.set(frameKey(req.tab, frame.id), {document:frame.document, origin:frame.origin, url:frame.url});
       out[list].push(...child[list].map(e => inFrame(frame.id, e)));
+      // #11284: a child's text joins the result's text under a frame marker; it was read within its share.
+      if (mode === "read" && child.text) out.text += "\n\n[frame " + frame.id + "]\n" + child.text;
       if (child.truncated) out.truncated = true;
     }
     if (out[list].length > limit) { out[list].length = limit; out.truncated = true; }
@@ -927,7 +930,7 @@ TrustyPages.commands = deps => {
         text:result.text, elements:result.elements, truncated:result.truncated};
       if (!many || hit.documentId !== plan.top.documentId) return base;
       return withFrames(req, base, plan, "read", {scope_ref:null, max_chars:Math.max(1, share),
-        viewport_only:req.viewport_only, include_text:false}, 500, budget);
+        viewport_only:req.viewport_only, include_text:req.include_text}, 500, budget);
     },
     // #11357: a read like page_read, of matches only.
     async page_find(req) {

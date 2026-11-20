@@ -19,7 +19,7 @@ use trusty_browser::launchd;
 #[cfg(target_os = "macos")]
 use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
-const PY_SIGNATURE: &str = "2531891ac604428de6b8200d86ea000275a8cbe587a74678bfeedf0a0f096bba";
+const PY_SIGNATURE: &str = "1170f60e8c2884ba170a64864164d2d5758f9df68bba69c6d47ee1520a36ff17";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
