@@ -244,6 +244,7 @@ impl<'a> ServeLoop<'a> {
             self.shutdown();
             return first.map(|()| stats);
         }
+        self.scan(&mut faults, false);
         let mut next_tick = Instant::now() + self.opts.tick;
         // A busy fleet can keep events due forever; the refresh still runs.
         let mut next_refresh = next_tick;
