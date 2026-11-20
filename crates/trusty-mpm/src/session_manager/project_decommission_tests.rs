@@ -585,6 +585,38 @@ async fn decommission_project_without_records_unloads_by_its_checkout() {
     assert!(report.stopped.is_empty() && report.left_as_is.is_empty());
 }
 
+/// #11551 (critic round): a GitHub project whose clone is gone still names its
+/// `owner/repo` palace, which may be loaded; it must be unloaded, never
+/// reported NotLoaded.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_with_a_deleted_github_clone_unloads_its_palace() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let project = registry.get("widget").await.expect("row");
+    assert!(
+        crate::project::local_checkout_for(&project).is_none_or(|p| !p.is_dir()),
+        "premise: no checkout on disk"
+    );
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("the palace unloads");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(
+        rig.params_of("memory.palace_unload").is_some(),
+        "the unload was asked"
+    );
+}
+
 /// #11551: a project whose checkout was deleted has no palace to unload and
 /// no live index, so the verb must not refuse with `IndexShutdown`.
 /// Test: this function IS the test.

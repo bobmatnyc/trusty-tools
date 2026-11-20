@@ -124,9 +124,9 @@ pub struct ShutdownTarget {
     /// The `search.project.resolve` queries, tried in order until one hits:
     /// the `owner/repo` identity, then the checkout paths.
     pub search_queries: Vec<String>,
-    /// The palace id; `Ok(None)` when no checkout is on disk, so no palace
-    /// can be loaded from it (#11551); `Err` when an existing checkout fails
-    /// to resolve.
+    /// The palace id; `Ok(None)` when no checkout is on disk and the remote
+    /// names no `owner/repo`, so no palace can be named (#11551); `Err` when
+    /// an existing checkout fails to resolve.
     pub palace: Result<Option<String>, String>,
 }
 
@@ -138,8 +138,10 @@ impl ShutdownTarget {
     /// then `root`, then `repo_url` when it is an absolute path, deduplicated.
     /// The palace resolves through `trusty_common::palace_resolve` from `root`
     /// and `repo_url`, the same call session launch exports
-    /// `TRUSTY_MEMORY_PALACE` from; no `root` gives `Ok(None)`.
+    /// `TRUSTY_MEMORY_PALACE` from. With no `root`, the remote's `owner/repo`
+    /// palace id, else `Ok(None)`.
     /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`,
+    /// `decommission_project_with_a_deleted_github_clone_unloads_its_palace`,
     /// `a_path_project_is_parked_by_its_path`.
     pub fn for_project(project_key: Option<&str>, repo_url: &str, root: Option<&Path>) -> Self {
         let path_url = Some(repo_url.trim()).filter(|u| u.starts_with('/'));
@@ -158,8 +160,13 @@ impl ShutdownTarget {
             Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
                 .map(|r| Some(r.id))
                 .map_err(|e| format!("could not resolve the palace: {e}")),
-            // #11551: a deleted checkout names no palace, so none is loaded.
-            None => Ok(None),
+            // #11551: with no checkout, the remote's `owner/repo` (resolution
+            // level 3) still names a palace that may be loaded; only a project
+            // with no such identity has no palace to unload.
+            // A path-form `repo_url` is a checkout, not a remote: no identity.
+            None => Ok(remote
+                .filter(|r| !matches!(r.trim().chars().next(), Some('/' | '~')))
+                .and_then(trusty_common::palace_id::owner_repo_from_git_remote)),
         };
         Self {
             search_queries,

@@ -365,7 +365,14 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
         vec!["/nonexistent/widget".to_string()]
     );
     // #11551: no checkout is "no palace loaded", not a resolve failure.
-    assert_eq!(by_key.palace, Ok(None), "no checkout, no palace");
+    // #11551: no checkout still names the remote's owner/repo palace; only a
+    // project with no such identity has none.
+    let expected =
+        trusty_common::palace_id::owner_repo_from_git_remote("https://github.com/other/name");
+    assert!(expected.is_some());
+    assert_eq!(by_key.palace, Ok(expected));
+    let gone = ShutdownTarget::for_project(Some("local:1234"), "/x/y/gone", None);
+    assert_eq!(gone.palace, Ok(None), "no checkout, no identity, no palace");
 }
 
 /// A trusty-search whose resolve answers only `path`, and misses all else.
