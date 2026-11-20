@@ -1,0 +1,8 @@
+["  TM 1.7.4 | org/proj | ✻me | Opus | /rc", true]
+["  TM 1.7.4 | org/proj | ✻me | Opus | /rc   ", true]
+["  TM 1.7.4 | org/proj | ✻me | Opus |/rc", true]
+["  TM 1.7.4 · /rc", true]
+["/rc", true]
+["  TM 1.7.4 | /rc failed", false]
+["  TM 1.7.4 | x/rc", false]
+["  TM 1.7.4 | /rc extra", false]

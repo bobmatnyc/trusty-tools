@@ -260,11 +260,8 @@ fn test_idle_prompt_alerts_after_ten_minutes_only() {
     assert_eq!(ps.idle_since, Some(1000.0));
     // Literal ten minutes (the prototype reads fp.IDLE_AFTER), so a mutated
     // IDLE_AFTER turns this test red.
-    assert_eq!(kinds(&run(&cap, &mut ps, 1000.0 + 599.0).1), ["ctx"]);
-    assert_eq!(
-        kinds(&run(&cap, &mut ps, 1000.0 + 600.0).1),
-        ["ctx", "idle"]
-    );
+    assert!(kinds(&run(&cap, &mut ps, 1000.0 + 599.0).1).is_empty());
+    assert_eq!(kinds(&run(&cap, &mut ps, 1000.0 + 600.0).1), ["idle"]);
 }
 
 // Python: test_suggestion_box_counts_as_idle

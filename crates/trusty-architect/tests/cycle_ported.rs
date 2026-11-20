@@ -116,3 +116,23 @@ fn test_exited_suppressed_for_a_vanished_fixture_session_but_not_a_real_one() ->
     );
     Ok(())
 }
+
+/// df-T7i P1b: `PM_RC_RESTORE` is False in the live script, so a PM's
+/// `/rc failed` is neither an alert nor a trigger. The port has no Remote
+/// Control step at all; this pins that it stays silent.
+// Python: test_pm_rc_failed_is_not_an_alert_and_types_nothing
+#[test]
+fn test_pm_rc_failed_is_not_an_alert_and_types_nothing() -> TestResult {
+    let env = Env::new(&[])?;
+    let tmux = fleet(
+        &[("tm-api", "%11", "claude")],
+        &screen(10).replace("/rc", "/rc failed"),
+    );
+    let clock = FakeClock::new(0.0);
+    let mut session = PollSession::new(PollState::default());
+    env.runner(&tmux, &clock, &QuietHost)
+        .run_once(&mut session)?;
+    assert!(env.written("tm-api")?.iter().all(|k| !k.starts_with("rc_")));
+    assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
+    Ok(())
+}

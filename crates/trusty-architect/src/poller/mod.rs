@@ -20,12 +20,15 @@
 //! #9779 adds [`watchdog`] (dead/frozen/silent/ok and the relaunch),
 //! [`routines`] (D5r: routines ran, push due; nothing sends) and the shadow
 //! run ([`prepare_shadow`], `Config::shadow`).
+//! df-T7i P1b ports the live script's drift since 988152c: [`ctx_bar`],
+//! [`digest`] (the wake digest), [`zone`], [`self_refresh`], the inbox and
+//! completion alerts, and [`steps::scripts`] (the `run_*` Python steps).
 //! Test: `tests/poller_ported.rs`, `tests/wake_ported.rs`,
 //! `tests/cycle_ported.rs` and `tests/architect_ported.rs` (the prototype's
 //! tests, by name), `tests/parity_a3.rs` and `tests/parity_wake.rs` (goldens
 //! from `regen_a3.py`), `tests/state_atomic.rs`, `tests/wake_send_path.rs`,
 //! `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/watchdog_ported.rs`,
-//! `tests/d5r_shadow.rs`.
+//! `tests/d5r_shadow.rs`, `tests/p1b_ported.rs`, `tests/parity_p1b.rs`.
 
 mod architect;
 mod band;
@@ -64,8 +67,8 @@ pub use architect::{DONE_SUMMARY, SHELLS, architect_busy, architect_busy_in, is_
 pub use crate::error::{CycleError, RunError};
 pub use band::{
     BAND_HOLD_FREE_GIB, BAND_HOLD_LOAD_FACTOR, BAND_OPEN_LOAD_FACTOR, BAND_REHOLD_LOAD_FACTOR,
-    BAND_STOP_FREE_GIB, BAND_STOP_LOAD_FACTOR, BAND_STOP_MEM_FREE_PCT, Band, BandConfig,
-    band_alerts, builder_band,
+    BAND_STOP_FREE_GIB, BAND_STOP_LOAD_FACTOR, BAND_STOP_MEM_FREE_PCT, BAND_SWAP_ACTIVE_PAGES,
+    Band, BandConfig, band_alerts, builder_band,
 };
 pub use completion::{COMPLETE_MIN_CTX_PCT, completion_alerts, il_task_complete_for};
 pub use config::{
@@ -75,7 +78,9 @@ pub use config::{
 pub use ctx::{TranscriptCtx, pane_session_id};
 pub use cycle::{Collected, Sensors, Stopped, collect};
 pub use events::{EVENT_TYPES, read_events};
-pub use host::{DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts};
+pub use host::{
+    DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts, parse_vm_stat_swaps,
+};
 pub use inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 pub use listing::{Listing, Pane, capture, list_panes, parse_list_panes};
 pub use lock::PollLock;

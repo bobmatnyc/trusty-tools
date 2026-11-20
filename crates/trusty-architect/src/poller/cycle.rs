@@ -11,6 +11,9 @@
 //! adds the fleet plan, events, host and self-ctx alerts, drops `idle` alerts
 //! of quiet sessions, and dedups. Test-fixture sessions never raise `exited`.
 //! It runs the usage step after the fleet plan (#9801 slice 1).
+//! df-T7i P1b adds the completion alerts (each pane, and the Architect's
+//! own outside a dry run), the queued ctx-cycle failures, the `run_*`
+//! scripts and the zone watch (outside a dry run) and the selftest alert.
 //! Steps owned elsewhere are left out: effort, token, pm_intake,
 //! dashboard, owner_*, auto_sleep, user_state, exited_step and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).

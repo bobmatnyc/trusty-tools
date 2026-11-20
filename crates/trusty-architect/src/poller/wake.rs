@@ -395,7 +395,7 @@ pub fn record_wake_result(path: &Path, result: &str, now: f64) -> io::Result<()>
 /// result drops `wake_alerts` and `wake_alerts_dropped` and, outside a dry
 /// run, stamps `digest_cursor`.
 /// Test: `dispatch_wake_matches_python_goldens`,
-/// `dispatch_wake_suppressed_while_self_clear_marker_fresh`,
+/// `test_dispatch_wake_suppressed_while_self_clear_marker_fresh`,
 /// `a_failed_wake_alert_record_never_changes_the_wake`.
 pub fn dispatch_wake_with<C: Clock + ?Sized>(
     state: &mut PollState,

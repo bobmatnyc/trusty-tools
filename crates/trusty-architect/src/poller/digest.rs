@@ -13,7 +13,7 @@
 //! line within [`WAKE_MAX_CHARS`]. The reads never fail: a missing or bad
 //! file is no messages.
 //! Test: `dispatch_wake_matches_python_goldens` (tests/parity_wake.rs),
-//! `digest_matches_python_goldens` (tests/parity_p1b.rs),
+//! `cap_wake_matches_python_goldens` (tests/parity_p1b.rs),
 //! `bound_wake_alerts_keeps_the_newest_fifty_and_counts_drops`.
 
 use std::fs;

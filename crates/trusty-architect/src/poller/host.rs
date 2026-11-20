@@ -280,7 +280,7 @@ fn swap_counters() -> io::Result<u64> {
 }
 
 /// `Swapins:` plus `Swapouts:` from `vm_stat` output.
-pub(crate) fn parse_vm_stat_swaps(out: &str) -> io::Result<u64> {
+pub fn parse_vm_stat_swaps(out: &str) -> io::Result<u64> {
     let field = |name: &str| {
         out.lines().find_map(|l| {
             let v = l.strip_prefix(name)?.trim().trim_end_matches('.');
