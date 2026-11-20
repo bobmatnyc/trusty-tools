@@ -106,6 +106,7 @@ fn live_cycle_renames_exactly_and_sends_nothing() -> TestResult {
         notifier: &RecordingNotifier::default(),
         relauncher: None,
         steps: None,
+        pusher: None,
         dry_run: false,
         messages: &trusty_architect::poller::NoMessages,
     };

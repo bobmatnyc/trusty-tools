@@ -46,6 +46,7 @@ mod listing;
 mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
 mod messages;
+pub mod push;
 mod pyfmt;
 pub mod routines;
 mod run;
@@ -54,6 +55,7 @@ pub mod self_refresh;
 mod session;
 mod shadow;
 mod sink;
+pub mod slack;
 mod state;
 pub mod steps;
 mod triage;
@@ -82,7 +84,7 @@ pub use host::{
     DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts, parse_vm_stat_swaps,
 };
 pub use inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
-pub use listing::{Listing, Pane, capture, list_panes, parse_list_panes};
+pub use listing::{LIST_FORMAT, Listing, Pane, capture, list_panes, parse_list_panes};
 pub use lock::PollLock;
 pub use messages::{MessageSink, NoMessages, PaneMessage, PaneMessageKind};
 pub use run::{CycleSummary, Phase, Runner, parse_interval};

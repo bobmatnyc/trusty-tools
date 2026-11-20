@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use super::VerbError;
 use crate::clock::SystemClock;
 use crate::error::RunError;
+use crate::poller::slack::{SEND_TIMEOUT, SLACK_POST_URL, SlackDm, SystemCurl, env_token};
 use crate::poller::steps::notify_macos::Osascript;
 use crate::poller::steps::scripts::{ScriptSteps, SystemSubprocess};
 use crate::poller::steps::usage::ScriptProbe;
@@ -92,7 +93,29 @@ pub fn poll_config(
 pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Result<(), VerbError> {
     let mut config = config.clone();
     config.shadow = args.shadow;
-    let config = &config;
+    let result = with_live_runner(&config, args.dry_run, messages, &mut |runner| {
+        if args.once || args.dry_run {
+            runner.run_single(&args.interval).map(drop)
+        } else {
+            runner.run_loop(&args.interval, None)
+        }
+    });
+    result.map_err(run_error)
+}
+
+/// What `poll` or `serve` does with the production runner.
+pub(crate) type LiveCycle<'f> =
+    dyn FnMut(&Runner<'_, SystemTmux, SystemClock>) -> Result<(), RunError> + 'f;
+
+/// The production [`Runner`] for `config` handed to `f`: the real tmux,
+/// clock, host, usage probe, notifier, relaunch script, script steps and
+/// Slack push. `poll` and `serve` (#9779) share it, so they run one cycle.
+pub(crate) fn with_live_runner(
+    config: &Config,
+    dry_run: bool,
+    messages: &dyn MessageSink,
+    f: &mut LiveCycle<'_>,
+) -> Result<(), RunError> {
     let tmux = config
         .tmux_socket
         .as_ref()
@@ -110,6 +133,13 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
     };
     // df-T7i P1b: the run_* scripts, zone watch and self-refresh start.
     let steps = ScriptSteps::new(&SystemSubprocess, config);
+    // #9779 D5t: the owner push; sends only with ARCHITECT_PUSH_CHANNEL=slack.
+    let slack = SlackDm {
+        curl: &SystemCurl,
+        token: &env_token,
+        url: SLACK_POST_URL.to_owned(),
+        timeout: SEND_TIMEOUT,
+    };
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
@@ -121,18 +151,14 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
         messages,
         relauncher: Some(&relauncher),
         steps: Some(&steps),
-        dry_run: args.dry_run,
+        pusher: Some(&slack),
+        dry_run,
     };
-    let result = if args.once || args.dry_run {
-        runner.run_single(&args.interval).map(drop)
-    } else {
-        runner.run_loop(&args.interval, None)
-    };
-    result.map_err(run_error)
+    f(&runner)
 }
 
 /// A bad interval is a usage error, as argparse's `type=int` makes it.
-fn run_error(e: RunError) -> VerbError {
+pub(crate) fn run_error(e: RunError) -> VerbError {
     match e {
         RunError::Config(c) => VerbError::Usage(c.to_string()),
         other => VerbError::Failed(other.to_string()),

@@ -39,6 +39,7 @@ use super::self_refresh::self_refresh_step;
 use super::session::PollSession;
 use super::shadow::prepare_shadow;
 use super::sink::{append_alerts, append_log};
+use super::slack::PushSender;
 use super::state::{PollState, save_state};
 use super::steps::notify_macos::{Notifier, notifies, notify_watchdog_alerts};
 use super::steps::scripts::ScriptSteps;
@@ -149,6 +150,8 @@ pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     /// The run_* scripts, the zone watch and the self-refresh start, through
     /// one subprocess seam; `None` turns them off (df-T7i P1b; tests).
     pub steps: Option<&'a ScriptSteps<'a>>,
+    /// Sends the owner push (#9779 D5t); never called in a dry or shadow run.
+    pub pusher: Option<&'a dyn PushSender>,
     /// One cycle that writes nothing and sends nothing.
     pub dry_run: bool,
 }
@@ -214,6 +217,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             dry_run: self.hands_off(),
             relauncher: self.relauncher,
             steps: self.steps,
+            pusher: self.pusher,
         };
         // #9171 A3b-2: work on a copy; nothing is committed before the append.
         let mut next = session.state.clone();
@@ -414,8 +418,13 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         Ok(summary)
     }
 
-    /// Takes the lock (not in a dry run), loads the state and logs the start.
-    fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
+    /// Takes the lock (not in a dry or shadow run), loads the state and logs
+    /// the start. `tm architect serve` holds the returned lock for its life.
+    ///
+    /// # Errors
+    /// [`RunError::AlreadyRunning`] when another poller holds the lock;
+    /// [`RunError::Io`] when the inbox, shadow dir or lock cannot be made.
+    pub fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
         let mut seeded = Vec::new();
         let lock = if self.dry_run {
             None

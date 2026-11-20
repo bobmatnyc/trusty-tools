@@ -26,9 +26,10 @@ use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::classify::Alert;
 use crate::poller::Config;
 use crate::process::{RunFailure, run_bounded};
 
@@ -171,6 +172,8 @@ pub struct ScriptSteps<'a> {
     /// The variables that were set to `off`.
     pub off: Vec<String>,
     last: Mutex<BTreeMap<&'static str, f64>>,
+    /// The ledger shim's last failures, carried over the cycles it skips.
+    shim_failing: Mutex<Vec<Alert>>,
 }
 
 /// The variables that turn a script step off when set to `off`.
@@ -193,7 +196,36 @@ impl<'a> ScriptSteps<'a> {
             python: cfg.python.clone(),
             off: cfg.scripts_off.clone(),
             last: Mutex::new(BTreeMap::new()),
+            shim_failing: Mutex::new(Vec::new()),
         }
+    }
+
+    /// True when step `name` never ran or last ran `every` seconds or more
+    /// before `now`; then records `now` as its last run. The same in-memory
+    /// clock as the detached scripts (#9779 review: the ledger shim).
+    pub fn due(&self, name: &'static str, every: f64, now: f64) -> bool {
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if now - last.get(name).copied().unwrap_or(f64::NEG_INFINITY) < every {
+            return false;
+        }
+        last.insert(name, now);
+        true
+    }
+
+    /// The ledger shim's failures from its last run.
+    pub(super) fn shim_failing(&self) -> Vec<Alert> {
+        self.shim_failing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Records the ledger shim's failures from this run.
+    pub(super) fn set_shim_failing(&self, failing: &[Alert]) {
+        *self
+            .shim_failing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = failing.to_vec();
     }
 
     fn is_off(&self, name: &str) -> bool {

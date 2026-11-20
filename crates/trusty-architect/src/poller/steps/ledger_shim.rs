@@ -1,4 +1,4 @@
-//! The ledger shim: `scripts/fleet-poll-ledger.py`, run once per cycle.
+//! The ledger shim: `scripts/fleet-poll-ledger.py`, run every [`SHIM_EVERY`].
 //!
 //! Why: ten prototype steps read and write the Intent Ledger and the
 //! dashboard store (il_cron, share_request, reminder, ctx_watch,
@@ -14,7 +14,12 @@
 //! cannot start, a timeout, a non-zero exit or unreadable output each yield
 //! one `ledger_shim` alert in [`ShimRun::failing`], fingerprinted by the
 //! failure kind, so dedup and `push_due` see it.
-//! Test: `ledger_shim_success_raises_no_alert`,
+//! [`ledger_shim_step`] is the cycle's call: it runs the shim at most once per
+//! [`SHIM_EVERY`] on [`ScriptSteps::due`]'s clock (a `serve` cycle can come
+//! every 15 s, #9779 review) and, on a skipped cycle, returns the last run's
+//! failures so an open failure stays in the `failing` set.
+//! Test: `ledger_shim_runs_once_per_cadence_across_fast_cycles`,
+//! `ledger_shim_success_raises_no_alert`,
 //! `ledger_shim_each_failure_kind_raises_an_alert`,
 //! `ledger_shim_shadow_passes_the_shadow_flag`,
 //! `ledger_shim_failure_reaches_the_cycle_failing_set`.
@@ -34,6 +39,10 @@ pub const SHIM_SCRIPT: &str = "fleet-poll-ledger.py";
 pub const SHIM_TIMEOUT: Duration = Duration::from_secs(240);
 /// The alert kind of a shim failure.
 pub const SHIM_ALERT: &str = "ledger_shim";
+/// The shim's cadence, in seconds: the prototype's per-cycle run at 60 s.
+pub const SHIM_EVERY: f64 = 60.0;
+/// The shim's name on the [`ScriptSteps::due`] clock.
+const SHIM_STEP: &str = "ledger shim";
 /// The `poll-state.json` keys the shim's steps own.
 pub const SHIM_STATE_KEYS: [&str; 3] = ["morning_brief", "dream", "exited"];
 
@@ -66,6 +75,19 @@ pub fn shim_argv(steps: &ScriptSteps<'_>, cfg: &Config, now: f64) -> Vec<String>
         v.push(path(cfg.shadow_dir()));
     }
     v
+}
+
+/// The cycle's shim step at `now`: a run when due, else the last failures.
+pub fn ledger_shim_step(steps: &ScriptSteps<'_>, cfg: &Config, now: f64) -> ShimRun {
+    if !steps.due(SHIM_STEP, SHIM_EVERY, now) {
+        return ShimRun {
+            failing: steps.shim_failing(),
+            ..ShimRun::default()
+        };
+    }
+    let run = run_ledger_shim(steps, cfg, now);
+    steps.set_shim_failing(&run.failing);
+    run
 }
 
 /// Runs the shim once; see the module docs.

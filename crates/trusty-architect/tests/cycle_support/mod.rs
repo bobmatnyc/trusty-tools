@@ -137,6 +137,7 @@ impl Env {
             notifier: &self.notifier,
             relauncher: None,
             steps: None,
+            pusher: None,
             dry_run: false,
             messages: &trusty_architect::poller::NoMessages,
         }

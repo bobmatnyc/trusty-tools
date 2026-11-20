@@ -62,6 +62,7 @@ fn dry_run_pane_lines_match_python() -> TestResult {
         dry_run: true,
         relauncher: None,
         steps: None,
+        pusher: None,
     };
     let found = collect(
         sensors,
@@ -267,6 +268,7 @@ fn a_configured_supervisor_is_skipped_and_the_only_pane_woken() -> TestResult {
         dry_run: true,
         relauncher: None,
         steps: None,
+        pusher: None,
     };
     let mut state = PollState {
         events_offset: Some(0),

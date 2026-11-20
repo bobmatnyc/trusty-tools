@@ -3,7 +3,8 @@
 //! Why: the prototype runs tmux with `timeout=10` and the host probes with 5 s
 //! and 10 s; A1's `Command::output()` had no bound, so one hung tmux server
 //! froze the poller (#9171 A3a).
-//! What: [`run_bounded`] spawns with stdin closed, drains stdout and stderr on
+//! What: [`run_bounded`] spawns with stdin closed ([`run_bounded_input`]
+//! writes the given bytes to stdin on a thread, then closes it), drains stdout and stderr on
 //! two threads (a full pipe never blocks the child), polls `try_wait` every
 //! 10 ms until the deadline, then kills and reaps the child.
 //! Test: `system_tmux_times_out_and_reaps_the_child`,
@@ -57,11 +58,33 @@ fn kill_and_reap(child: &mut Child) {
 ///
 /// Postcondition: when this returns, the child has been waited on (no zombie),
 /// whatever the result.
-pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration) -> Result<Finished, RunFailure> {
-    cmd.stdin(Stdio::null())
+pub(crate) fn run_bounded(cmd: Command, timeout: Duration) -> Result<Finished, RunFailure> {
+    run_bounded_input(cmd, None, timeout)
+}
+
+/// [`run_bounded`] with `input` written to the child's stdin (#9779: the
+/// Slack push hands its token to curl this way, never in argv).
+pub(crate) fn run_bounded_input(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    timeout: Duration,
+) -> Result<Finished, RunFailure> {
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    cmd.stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(RunFailure::Spawn)?;
+    if let (Some(bytes), Some(mut pipe)) = (input, child.stdin.take()) {
+        // A child that exits early closes the pipe; the exit status decides.
+        thread::spawn(move || {
+            use std::io::Write;
+            let _ = pipe.write_all(&bytes);
+        });
+    }
     let out = drain(child.stdout.take());
     let err = drain(child.stderr.take());
     let deadline = Instant::now() + timeout;

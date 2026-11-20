@@ -15,6 +15,8 @@
 //! own outside a dry run), the queued ctx-cycle failures, the `run_*`
 //! scripts and the zone watch (outside a dry run) and the selftest alert.
 //! #11540 adds the ledger shim (live and shadow; its failures are `failing`).
+//! #11541 review: the last self-refresh fault and the Architect pane's own
+//! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
 //! Steps owned elsewhere are left out: effort, token, pm_intake,
 //! dashboard, owner_*, auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
@@ -32,10 +34,13 @@ use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 use super::listing::{Pane, capture, list_panes};
-use super::routines::{push_due, routine_alerts};
+use super::push::{PushRoute, push_step};
+use super::routines::routine_alerts;
 use super::self_ctx_alerts::self_ctx_alerts;
+use super::self_refresh::self_refresh_fault_alerts;
+use super::slack::PushSender;
 use super::state::PollState;
-use super::steps::ledger_shim::run_ledger_shim;
+use super::steps::ledger_shim::ledger_shim_step;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
 use super::watchdog::Relauncher;
@@ -46,6 +51,7 @@ use crate::classify::{Alert, PaneInfo, alert, dedup, evaluate, fleet_plan_alerts
 use crate::error::{CycleError, TmuxError};
 use crate::quiet::{is_test_fixture_session, read_quiet_sessions};
 use crate::self_ctx::self_ctx_tokens;
+use crate::serve::serve_fault_alerts;
 use crate::tmux::Tmux;
 
 /// What one cycle found.
@@ -93,6 +99,9 @@ pub struct Sensors<'a, T: Tmux + ?Sized> {
     /// The script steps and the subprocess seam the zone watch reads
     /// through; `None` turns both off (df-T7i P1b; tests).
     pub steps: Option<&'a ScriptSteps<'a>>,
+    /// Sends the owner push (#9779 D5t); `None` makes a due push with a
+    /// channel set a `push_failed` alert.
+    pub pusher: Option<&'a dyn PushSender>,
 }
 
 /// `cycle()`'s dry-run line for one watched pane (988152c line 1527), with
@@ -159,9 +168,11 @@ pub fn collect<T: Tmux + ?Sized>(
     // df-T7i P1b: the Architect's own task-complete refresh (the prototype's
     // architect_rc tail; its Remote Control half is not ported).
     let mut candidates = Vec::new();
+    let mut sup_faults = Vec::new();
     if !s.dry_run {
-        let (found, lines) = supervisor_completion(&s, &listing.panes, state, now);
+        let (found, faults, lines) = supervisor_completion(&s, &listing.panes, state, now);
         candidates.extend(found);
+        sup_faults = faults;
         log.extend(lines);
     }
     let watched: Vec<&Pane> = listing
@@ -252,10 +263,10 @@ pub fn collect<T: Tmux + ?Sized>(
         log.extend(steps.run(now));
     }
     // #11540: the ledger-bound steps run in Python, live or shadow (never in
-    // a dry run); a shim failure joins `failing` below.
+    // a dry run), every 60 s (#9779 review); a shim failure joins `failing`.
     let mut shim_failing = Vec::new();
     if let Some(steps) = s.steps.filter(|_| !s.dry_run || s.config.shadow) {
-        let shim = run_ledger_shim(steps, s.config, now);
+        let shim = ledger_shim_step(steps, s.config, now);
         candidates.extend(shim.alerts);
         state.other.extend(shim.state);
         log.extend(shim.log);
@@ -285,6 +296,21 @@ pub fn collect<T: Tmux + ?Sized>(
     // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
     let mut failing = watch_found.clone();
     failing.extend(shim_failing);
+    // #11541: self-refresh faults (last run's record, this cycle's reads).
+    let sup = &s.config.supervisor;
+    for a in self_refresh_fault_alerts(&state.other, sup, now)
+        .into_iter()
+        .chain(sup_faults)
+        // #9779: `tm architect serve`'s source and panic faults.
+        .chain(serve_fault_alerts(&state.other, sup, now))
+    {
+        if !failing
+            .iter()
+            .any(|f| f.kind == a.kind && f.fingerprint == a.fingerprint)
+        {
+            failing.push(a);
+        }
+    }
     match routine_alerts(&s.config.routines, &s.config.supervisor, now) {
         Ok(found) => failing.extend(found),
         Err(e) => {
@@ -295,12 +321,17 @@ pub fn collect<T: Tmux + ?Sized>(
             failing.push(alert("routine_stale", "config", &detail, sup, "", now));
         }
     }
-    let keys: Vec<String> = failing
-        .iter()
-        .map(|a| format!("{}:{}", a.kind, a.fingerprint))
-        .collect();
-    let channel = s.config.push_channel.as_deref();
-    log.extend(push_due(&mut state.other, &keys, now, channel));
+    // #9779 D5t: an overdue failure is a Slack DM; a failed send alerts.
+    let route = PushRoute {
+        channel: s.config.push_channel.as_deref(),
+        recipient: s.config.push_recipient.as_deref(),
+        sender: s.pusher,
+        hands_off: s.dry_run,
+        supervisor: &s.config.supervisor,
+    };
+    let (push_failed, lines) = push_step(&mut state.other, &failing, now, &route);
+    log.extend(lines);
+    candidates.extend(push_failed);
     candidates.extend(failing);
     let quiet = read_quiet_sessions(&s.config.quiet_sessions);
     candidates.retain(|a| !(a.kind == "idle" && quiet.contains(&a.session)));
@@ -316,32 +347,48 @@ pub fn collect<T: Tmux + ?Sized>(
 }
 
 /// The Architect pane's completion alert: its status line has no `ctx N%`,
-/// so its own transcript gives the percent (`None` when unreadable).
+/// so its own transcript gives the percent (`None` when unreadable). A failed
+/// capture or self-ctx read is also a `self_refresh` fault alert (#11541).
 fn supervisor_completion<T: Tmux + ?Sized>(
     s: &Sensors<'_, T>,
     panes: &[Pane],
     state: &mut PollState,
     now: f64,
-) -> (Vec<Alert>, Vec<String>) {
+) -> (Vec<Alert>, Vec<Alert>, Vec<String>) {
     let mut sup: Vec<&Pane> = panes
         .iter()
         .filter(|p| p.session == s.config.supervisor && !is_shell(&p.cmd))
         .collect();
     sup.sort_by_key(|p| p.active != "11");
     let Some(p) = sup.first() else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
+    };
+    let sess = s.config.supervisor.clone();
+    let fault = |fp: &str, e: &dyn std::fmt::Display| {
+        let detail = format!("self-refresh {fp}: {e}");
+        alert("self_refresh", fp, &detail, &sess, "", now)
     };
     let mut info = match capture(s.tmux, &p.pane) {
         Ok(raw) => parse_pane(&raw),
-        Err(e) => return (Vec::new(), vec![format!("architect rc capture ERROR {e}")]),
+        Err(e) => {
+            let line = format!("architect rc capture ERROR {e}");
+            return (Vec::new(), vec![fault("architect-capture", &e)], vec![line]);
+        }
     };
-    let tokens = self_ctx_tokens(&s.config.self_ctx_dir).ok().flatten();
+    let (mut faults, mut lines) = (Vec::new(), Vec::new());
+    let tokens = match self_ctx_tokens(&s.config.self_ctx_dir) {
+        Ok(t) => t,
+        Err(e) => {
+            lines.push(format!("architect rc self_ctx ERROR {e}"));
+            faults.push(fault("tokens", &e));
+            None
+        }
+    };
     info.ctx = match (tokens, s.config.self_ctx_window) {
         (Some(t), Some(w)) if w > 0 => u64::try_from(100 * i128::from(t) / i128::from(w)).ok(),
         _ => None,
     };
     let il = |name: &str| il_task_complete_for(&s.config.il_schedule, name);
-    let sess = s.config.supervisor.clone();
     let found = completion_alerts(&mut state.other, &sess, p.pane.as_target(), &info, now, &il);
-    (found, Vec::new())
+    (found, faults, lines)
 }

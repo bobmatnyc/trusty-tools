@@ -28,6 +28,7 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
   - `quiet` — Print the quiet-session list, sorted, one name per line
   - `restart` — Restart the Architect behind the checkpoint gate (#11365)
   - `self-ctx` — Print the Architect's own context in tokens (`self-ctx.py`)
+  - `serve` — The poll cycle as a service, run on local events (#9779)
   - `up` — Bring the Architect up from any state, then attach (#11364)
 - `attach` — Attach to an existing session by ID, name prefix, or project path. Opens the multipane TUI focused on the matched session (#6483)
 - `auth` — Manage the tm-managed `CLAUDE_CODE_OAUTH_TOKEN` store (issue #2246)

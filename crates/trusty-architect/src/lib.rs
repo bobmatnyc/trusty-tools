@@ -45,6 +45,8 @@ pub mod quiet;
 mod scripted;
 mod secret;
 pub mod self_ctx;
+// #9779: `tm architect serve`, the event-driven cycle.
+pub mod serve;
 mod sha1;
 mod sha256;
 mod tmux;
