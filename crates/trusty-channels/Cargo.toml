@@ -1,6 +1,6 @@
 [package]
 name = "trusty-channels"
-version = "0.2.2"
+version = "0.3.0"
 # ADR-0029 lists this crate as an explicit opt-down to 2021.
 edition = "2021"
 rust-version.workspace = true
@@ -59,6 +59,10 @@ required-features = ["unrouted-slack-mcp"]
 
 [[test]]
 name = "canvas_push_http"
+required-features = ["unrouted-slack-mcp"]
+
+[[test]]
+name = "canvas_access_http"
 required-features = ["unrouted-slack-mcp"]
 
 [dependencies]
