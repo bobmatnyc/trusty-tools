@@ -12,6 +12,7 @@ fn write(path: &Path, lines: &[&str]) {
     std::fs::write(path, lines.join("\n")).expect("write");
 }
 
+#[allow(clippy::too_many_arguments)] // a row-literal builder
 fn opp(
     ts: &str,
     sid: &str,
