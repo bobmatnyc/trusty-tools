@@ -44,10 +44,7 @@ fn a_safe_chain_is_compressed() {
         ),
         (
             "cd x; git diff",
-            format!(
-                "{{ cd x; {}; git diff; {s} | tm compress --tool \"=cd ; git diff\" --chain n0",
-                m(1)
-            ),
+            format!("cd x; {{ git diff; {s} | tm compress --tool \"git diff\" --chain n0"),
         ),
         (
             "git diff;git log -3",
@@ -235,8 +232,8 @@ fn run_rewrite(
 /// zsh. The filter stage is the real splitter (`compress_chain::split_chain`)
 /// with an identity filter, since a real filter changes bytes by design.
 /// `grep -q nomatch` stands in for `false`, which no chain admits. The cwd
-/// after a `cd <dir> && ` chain matches too; a `cd <dir>;` runs inside the
-/// group by design (Architect spec, #11507).
+/// after the command is checked in
+/// `a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell`.
 /// Test: itself.
 #[test]
 fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
@@ -347,5 +344,54 @@ fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
             filtered.contains(&format!("+added line {i} of the patch")),
             "the diff step lost line {i}:\n{filtered}"
         );
+    }
+}
+
+/// #11507 (Architect, 07:45Z): a `cd <dir>;` or `cd <dir> && ` chain leaves the
+/// caller's shell in the same directory as the original, and a `cd` into a
+/// missing directory under `;` still runs the rest where the shell already was.
+/// On 2fb258b432 the `cd <dir>;` ran inside the piped group, a subshell, so
+/// the cwd after the rewrite was the start directory.
+/// What: each case runs bare and rewritten (filter stage `cat >/dev/null`)
+/// with `; pwd -P` appended, under sh, bash and zsh, and compares the last
+/// line; output and status go through `run_rewrite` as well.
+/// Test: itself.
+#[test]
+fn a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let root = root.path().canonicalize().expect("canonical temp dir");
+    std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+    std::fs::write(root.join("sub/marker.txt"), "hi there\n").expect("write");
+    std::fs::write(root.join("marker.txt"), "hi root\n").expect("write");
+    for shell in ["sh", "bash", "zsh"] {
+        if run_in(shell, &root, "exit 0").0.is_none() {
+            continue;
+        }
+        for command in [
+            "cd sub; grep -n hi marker.txt",
+            "cd sub && grep -n hi marker.txt",
+            "cd missing; grep -n hi marker.txt",
+            "cd sub; grep -n hi marker.txt; grep -c hi marker.txt",
+        ] {
+            let rewrite = rewrite_bash_command_for_compression(command)
+                .unwrap_or_else(|| panic!("{command} must be rewritten"));
+            let head = rewrite.split("| tm compress").next().unwrap_or_default();
+            let (_, cwd, _) = run_in(shell, &root, &format!("{command}; pwd -P"));
+            let (_, rcwd, _) = run_in(shell, &root, &format!("{head}| cat >/dev/null; pwd -P"));
+            assert_eq!(
+                cwd.lines().last(),
+                rcwd.lines().last(),
+                "{shell}: cwd after `{command}` vs `{head}`"
+            );
+            // `cd sub && <one command>` is D60's single-tool form, whose
+            // output parity `a_cd_rewrite_runs_like_the_original_in_a_real_shell` owns.
+            if rewrite.contains("--chain ") {
+                assert_eq!(
+                    run_in(shell, &root, command),
+                    run_rewrite(shell, &root, "", command),
+                    "{shell}: `{command}`"
+                );
+            }
+        }
     }
 }

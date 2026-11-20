@@ -52,8 +52,8 @@ pub(crate) fn split_leading_cd(command: &str) -> Option<(&str, &str)> {
 
 /// Whether `segment` is exactly `cd <dir>` in [`split_leading_cd`]'s DIR grammar.
 ///
-/// Why (#11507): the `cd X; a` form keeps its `cd` inside the group as an
-/// inert first step, under the same DIR rules (no `-`, `$`, glob or operator).
+/// Why (#11507): the `cd X; a` form keeps its `cd` in front of the group,
+/// under the same DIR rules (no `-`, `$`, glob or operator).
 /// Test: `a_safe_chain_is_compressed`, `an_ambiguous_shape_is_not_compressed`.
 pub(crate) fn is_plain_cd(segment: &str) -> bool {
     let Some(after_cd) = segment.trim().strip_prefix("cd").and_then(skip_blanks) else {

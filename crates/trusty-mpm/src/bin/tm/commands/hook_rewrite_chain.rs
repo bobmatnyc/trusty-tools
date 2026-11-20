@@ -12,7 +12,7 @@
 //! accepts only `&&` and `;` separators plus one optional trailing `|` into a
 //! reader in [`READERS`]. Each step is covered (`compressible_tool_decision`
 //! plus an allowlisted program and verb, `is_safe_program`) or inert (`true`,
-//! `export NAME=value`, `echo`, `date`, and one leading `cd <dir>;`); anything
+//! `export NAME=value`, `echo`, `date`); anything
 //! else refuses. The original text is kept byte for byte, and a `printf`
 //! marker step is inserted after each separator (`a && printf M && b`,
 //! `a; printf M; b`), so `&&` still short-circuits, `;` still continues and the
@@ -21,8 +21,8 @@
 //! Anything ambiguous fails closed as `Chained`: `||`, a background `&`,
 //! `$( )`, backticks, `( )`, braces, any `<` or `>` (heredocs included), a
 //! line break, unlexable quoting, a destructive segment, and any `cd` but the
-//! one leading `cd <dir>;` (kept inside the group) or `cd <dir> && ` (kept
-//! outside by `hook_rewrite_cd`). An isolation worktree still refuses every
+//! one leading `cd <dir>; ` or `cd <dir> && ` (`hook_rewrite_cd`), both kept
+//! in front of the group so the caller's cwd moves as in the original. An isolation worktree still refuses every
 //! chain: its no-shell `tm compress -- <cmd>` shape (#7477) cannot carry one.
 //! Test: `a_safe_chain_is_compressed`, `a_destructive_segment_refuses_the_chain`,
 //! `an_ambiguous_shape_is_not_compressed`,
@@ -79,6 +79,14 @@ pub(crate) fn chain_rewrite_with_nonce(
     if has_ambiguous_shape(inner) {
         return Err(SkipReason::Chained);
     }
+    // #11507 (Architect, 07:45Z): a leading `cd <dir>;` runs in front of the
+    // group, so the caller's cwd moves as in the original and a failed `cd`
+    // still lets the rest run, as `;` does.
+    let (cd_prefix, inner, after_semicolon_cd) = match split_leading_cd_semicolon(inner) {
+        Some((prefix, rest)) if cd_prefix.is_empty() => (prefix, rest, true),
+        _ => (cd_prefix, inner, false),
+    };
+    let allow_semicolon = cd_prefix.is_empty() || after_semicolon_cd;
     let segments = split_shell_segments_raw(inner);
     let (mut body, mut spec, mut pos, mut step, mut covered) =
         (String::new(), String::new(), 0, 0, false);
@@ -89,7 +97,7 @@ pub(crate) fn chain_rewrite_with_nonce(
             .map(|next| separator_after(inner, segment, next));
         match separator {
             Some("&&") | None => {}
-            Some(";") if cd_prefix.is_empty() => {}
+            Some(";") if allow_semicolon => {}
             Some("|") if i + 2 == segments.len() => {
                 if !is_reader(segments[i + 1].trim()) {
                     return Err(SkipReason::Chained);
@@ -117,8 +125,7 @@ pub(crate) fn chain_rewrite_with_nonce(
             pos = at;
             spec.push_str(if before == "&&" { " && " } else { " ; " });
         }
-        let leading_cd = i == 0 && separator == Some(";");
-        match step_tool(text, leading_cd)? {
+        match step_tool(text)? {
             Step::Covered(tool) => {
                 covered = true;
                 spec.push_str(&tool);
@@ -144,16 +151,29 @@ enum Step {
     Inert(String),
 }
 
-/// Classify one step; `leading_cd` admits a first `cd <dir>` before a `;`.
+/// `inner` split into its leading `cd <dir>; ` and the rest, when it has one.
+///
+/// What: the first segment is exactly `cd <dir>` in `hook_rewrite_cd`'s DIR
+/// grammar (no `-`, `$`, glob or operator) and the separator after it is `;`.
+/// Test: `a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell`.
+fn split_leading_cd_semicolon(inner: &str) -> Option<(&str, &str)> {
+    let segments = split_shell_segments_raw(inner);
+    let (first, next) = (segments.first()?, segments.get(1)?);
+    if separator_after(inner, first, next) != ";" || !super::hook_rewrite_cd::is_plain_cd(first) {
+        return None;
+    }
+    let at = next.trim_start().as_ptr() as usize - inner.as_ptr() as usize;
+    Some((&inner[..at], &inner[at..]))
+}
+
+/// Classify one step; any `cd` here refuses the chain.
 ///
 /// Test: `a_safe_chain_is_compressed`, `a_destructive_segment_refuses_the_chain`.
-fn step_tool(text: &str, leading_cd: bool) -> Result<Step, SkipReason> {
+fn step_tool(text: &str) -> Result<Step, SkipReason> {
     let words = shlex_words(text);
     let inert = |w: &[String]| Ok(Step::Inert(w[0].clone()));
     match words.first().map(String::as_str) {
         None => Err(SkipReason::Chained),
-        // #11507: `cd <dir>;` in `hook_rewrite_cd`'s DIR grammar (no `-`, no `$`).
-        Some("cd") if leading_cd && super::hook_rewrite_cd::is_plain_cd(text) => inert(&words),
         Some("true") if words.len() == 1 => inert(&words),
         Some("export") if words.len() > 1 && words[1..].iter().all(|w| is_env_assignment(w)) => {
             inert(&words)
