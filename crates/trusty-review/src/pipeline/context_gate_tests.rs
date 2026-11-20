@@ -892,3 +892,95 @@ async fn source_root_diff_only_keeps_explicit_require_search_and_skips() {
         }
     }
 }
+
+// ── #11545: a parked index is woken, not reported missing ─────────────────────
+
+/// A daemon whose index answers `503 index_not_resident`; `wake_ok` decides
+/// whether the one search that reloads it succeeds.
+struct ParkedSearch {
+    wake_ok: bool,
+    searches: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl SearchClient for ParkedSearch {
+    async fn health(&self) -> Result<HealthResponse, SearchClientError> {
+        Ok(HealthResponse {
+            status: "ok".to_string(),
+            embedder: EmbedderState::Bool(true),
+            warmboot_summary: None,
+        })
+    }
+    async fn list_indexes(&self) -> Result<Vec<IndexInfo>, SearchClientError> {
+        Ok(vec![])
+    }
+    async fn index_status(
+        &self,
+        index_id: &str,
+    ) -> Result<crate::integrations::search_client::IndexStatusResponse, SearchClientError> {
+        Err(SearchClientError::Api {
+            status: 503,
+            body: format!(r#"{{"error":"index_not_resident","index_id":"{index_id}"}}"#),
+        })
+    }
+    async fn search(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<u32>,
+    ) -> Result<Vec<SearchResult>, SearchClientError> {
+        self.searches
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.wake_ok {
+            Ok(vec![])
+        } else {
+            Err(SearchClientError::Transport("reload timed out".to_string()))
+        }
+    }
+}
+
+fn parked_deps(search: Arc<ParkedSearch>) -> ReviewDeps {
+    ReviewDeps {
+        llm: Arc::new(StubLlm),
+        verifier: None,
+        search,
+        analyze: Some(Arc::new(StubAnalyze { ready: true })),
+        dedup: None,
+    }
+}
+
+/// Why: #11545 — a parked index is present; one search wakes it and the
+/// review proceeds with full context.
+/// Test: this test.
+#[tokio::test]
+async fn parked_index_is_woken_by_one_search_and_proceeds() {
+    let search = Arc::new(ParkedSearch {
+        wake_ok: true,
+        searches: Default::default(),
+    });
+    let d = parked_deps(search.clone());
+    let outcome = preflight_context(&config(), &d, InvocationSurface::Hosted).await;
+    assert_eq!(outcome, GateOutcome::Proceed);
+    assert_eq!(search.searches.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Why: #11545 error arm — a failed wake degrades and names the wake, never
+/// "no index" and never a skip.
+/// Test: this test.
+#[tokio::test]
+async fn parked_index_wake_failure_is_degraded_and_names_the_wake() {
+    let search = Arc::new(ParkedSearch {
+        wake_ok: false,
+        searches: Default::default(),
+    });
+    let d = parked_deps(search.clone());
+    match preflight_context(&config(), &d, InvocationSurface::Hosted).await {
+        GateOutcome::Degraded(msg) => {
+            assert!(msg.contains("wake search"), "{msg}");
+            assert!(msg.contains("reload timed out"), "{msg}");
+            assert!(!msg.contains("no trusty-search index"), "{msg}");
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+    assert_eq!(search.searches.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

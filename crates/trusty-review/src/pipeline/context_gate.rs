@@ -30,6 +30,9 @@ use crate::{
     pipeline::runner::ReviewDeps,
 };
 
+/// #11545: the query of the one search that reloads a parked index.
+const WAKE_QUERY: &str = "wake";
+
 /// Decision produced by the required-context preflight gate.
 ///
 /// Why: the runner needs a single typed verdict to decide whether to abort the
@@ -129,7 +132,9 @@ pub(crate) struct GateFacts {
 /// healthy_target_index_proceeds_despite_an_unrelated_failed_index,
 /// degraded_target_index_reason_comes_from_the_per_index_probe,
 /// unknown_index_skips_and_names_the_index,
-/// unknown_index_skips_even_when_search_is_opted_out}`;
+/// unknown_index_skips_even_when_search_is_opted_out,
+/// parked_index_is_woken_by_one_search_and_proceeds,
+/// parked_index_wake_failure_is_degraded_and_names_the_wake}`;
 /// `fresh_worktree_tests::fresh_clone_without_any_index_degrades_loudly_instead_of_skipping`
 /// covers the #8411 empty-index branch.
 pub async fn preflight_context(
@@ -306,6 +311,20 @@ pub(crate) async fn preflight_context_detailed(
                  index."
             ));
             return (skip, facts);
+        }
+        // #11545: a parked index is present; one search reloads it (the
+        // daemon's documented `restore_via`). A failed wake degrades, naming it.
+        Err(e) if e.is_not_resident() => {
+            match deps.search.search(index, WAKE_QUERY, Some(1)).await {
+                Ok(_) => info!(index = %index, "woke parked trusty-search index (#11545)"),
+                Err(wake) => {
+                    warn!(index = %index, "parked index wake failed: {wake}");
+                    search_degraded_reason = Some(format!(
+                        "index `{index}` is parked (not resident) and the wake search against \
+                         it failed ({wake}) — the review ran without its code context"
+                    ));
+                }
+            }
         }
         Err(e) => {
             warn!(index = %index, "index status probe failed: {e}");
