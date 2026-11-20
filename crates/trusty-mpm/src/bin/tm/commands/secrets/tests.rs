@@ -1427,3 +1427,7 @@ async fn import_json_never_shows_a_value_in_any_output() {
         }
     }
 }
+
+// #10524: `unlock` and `lock`; they share this harness.
+#[path = "unlock_tests.rs"]
+mod unlock_tests;
