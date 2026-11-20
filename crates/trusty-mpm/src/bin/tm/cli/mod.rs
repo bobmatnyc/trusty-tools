@@ -734,6 +734,9 @@ pub(crate) enum Command {
         /// #10973: the program and arguments to run; empty reads stdin.
         #[arg(last = true)]
         command: Vec<String>,
+        /// #11507: the chain marker nonce; `--tool` is then the chain's step spec.
+        #[arg(long, conflicts_with = "command")]
+        chain: Option<String>,
     },
     /// Wait for a condition, in-turn, without blocking past the harness ceiling.
     ///

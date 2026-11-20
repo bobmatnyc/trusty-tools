@@ -191,7 +191,7 @@ fn cli_parses_hook_pm_guard() {
 fn cli_parses_compress() {
     let cli = Cli::try_parse_from(["trusty-mpm", "compress", "--tool", "bash"]).unwrap();
     match cli.command.unwrap() {
-        Command::Compress { tool, command } => {
+        Command::Compress { tool, command, .. } => {
             assert_eq!(tool, "bash");
             assert!(command.is_empty());
         }
@@ -215,7 +215,7 @@ fn cli_parses_compress_with_a_command() {
     ])
     .unwrap();
     match cli.command.unwrap() {
-        Command::Compress { tool, command } => {
+        Command::Compress { tool, command, .. } => {
             assert_eq!(tool, "git diff");
             assert_eq!(command, ["git", "diff", "--stat"]);
         }

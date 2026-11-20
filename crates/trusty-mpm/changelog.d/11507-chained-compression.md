@@ -1,0 +1,3 @@
+Added
+- `tm hook` now compresses chained Bash calls step by step: `cd X && a && b`, `cd X; a`, `a; b`, `a && b` and `a | reader` keep their original text, gain `printf` markers between steps, and pipe into the new `tm compress --chain`, which filters each step with its own tool, passes `cd`/`true`/`export`/`echo`/`date` steps through and exits with the chain's own status (#11507).
+- Each compressed chain step writes its own `savings.jsonl` row named after that step's program and verb, with additive `chain_shape` and `steps` fields; chained opportunity rows name the dominant step instead of `cd` and log a sanitised `command_shape` (separators and program names only) (#11507).

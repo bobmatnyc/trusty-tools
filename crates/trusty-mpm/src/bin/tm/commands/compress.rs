@@ -112,7 +112,7 @@ pub(crate) fn wrap_command_reporting_exit(command: &str) -> String {
 /// Test: `split_exit_sentinel_reads_and_strips_a_trailing_status`,
 /// `split_exit_sentinel_leaves_unwrapped_input_untouched`,
 /// `wrap_command_reporting_exit_round_trips_through_split`.
-fn split_exit_sentinel(stdin_text: &str) -> (&str, Option<i32>) {
+pub(crate) fn split_exit_sentinel(stdin_text: &str) -> (&str, Option<i32>) {
     let body = stdin_text.strip_suffix('\n').unwrap_or(stdin_text);
     let (head, last) = match body.rfind('\n') {
         Some(newline) => (&body[..newline], &body[newline + 1..]),
@@ -256,7 +256,7 @@ pub(crate) async fn compress_and_emit(
 /// reported [`CompressionPath`] stays the path that actually ran.
 /// Test: `rtk_returning_nothing_falls_back_to_the_raw_output_and_warns_once`,
 /// `a_real_compression_is_not_treated_as_an_empty_result`.
-async fn compress_with_raw_fallback(
+pub(crate) async fn compress_with_raw_fallback(
     resolve: RtkResolver,
     tool: &str,
     input: &str,
@@ -382,7 +382,7 @@ fn record_compress_savings_with(
 /// Test: Exercised indirectly by every `run_compress_*` test capturing
 /// `tracing_test`-free stderr is out of scope for this spike; the log
 /// *content* is verified directly via [`log_compression_stats`]'s own test.
-fn init_stats_log_subscriber() {
+pub(crate) fn init_stats_log_subscriber() {
     let _ = tracing_subscriber::fmt()
         // #8948: same AWS hold-down as the daemon subscriber.
         .with_env_filter(crate::tracing_setup::env_filter("info"))
@@ -431,7 +431,7 @@ fn init_stats_log_subscriber() {
 /// `a_passthrough_run_emits_no_stats_line`,
 /// exercised end-to-end via `run_compress_*` tests below and, for the exit
 /// field, by `tm_compress_reports_the_wrapped_commands_exit_status`.
-fn log_compression_stats(
+pub(crate) fn log_compression_stats(
     tool_name: &str,
     bytes_before: usize,
     bytes_after: usize,
@@ -557,7 +557,7 @@ fn estimate_tokens_from_bytes(bytes: usize) -> u32 {
 /// degrade-gracefully behavior.
 /// Test: Indirectly via `append_compression_record_*` tests, which pass an
 /// explicit path rather than calling this resolver.
-fn compression_log_path() -> PathBuf {
+pub(crate) fn compression_log_path() -> PathBuf {
     match dirs::home_dir() {
         Some(home) => home.join(".trusty-mpm").join("compression.jsonl"),
         None => PathBuf::from(".trusty-mpm").join("compression.jsonl"),
@@ -586,7 +586,7 @@ fn compression_log_path() -> PathBuf {
 /// `serde_json::to_string(&record)` line + `\n`, flush.
 /// Test: `append_compression_record_creates_file`,
 /// `append_compression_record_appends`.
-async fn append_compression_record(
+pub(crate) async fn append_compression_record(
     path: &Path,
     session_id: Option<&str>,
     tool_name: &str,

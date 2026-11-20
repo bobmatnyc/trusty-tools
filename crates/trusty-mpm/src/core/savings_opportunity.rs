@@ -82,12 +82,22 @@ pub struct OpportunityRow {
     /// before the field existed reads as [`SkipReason::Unknown`].
     #[serde(default)]
     pub skip_reason: SkipReason,
+    /// #11507: a chained Bash call's sanitised shape — separators and program
+    /// names only, no arguments or paths; additive, omitted when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_shape: Option<String>,
 }
 
 impl OpportunityRow {
     /// This row with its [`SkipReason`] set.
     pub fn with_skip_reason(mut self, skip_reason: SkipReason) -> Self {
         self.skip_reason = skip_reason;
+        self
+    }
+
+    /// This row with its #11507 command shape set.
+    pub fn with_command_shape(mut self, command_shape: Option<String>) -> Self {
+        self.command_shape = command_shape;
         self
     }
 
@@ -111,6 +121,7 @@ impl OpportunityRow {
             bytes_scanned,
             would_compress_bytes,
             skip_reason: SkipReason::Unknown,
+            command_shape: None,
         }
     }
 }
@@ -341,6 +352,13 @@ pub struct TaggedSavingsRow<'a> {
     pub tool_type: &'a str,
     /// The `tm compress --tool` value, e.g. `git diff`.
     pub tool_name: &'a str,
+    /// #11507: the chain's sanitised shape (`cd ; git diff && cargo test`),
+    /// for a row one step of a chained call wrote; additive, omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_shape: Option<&'a str>,
+    /// #11507: how many steps that chain has; omitted outside a chain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps: Option<usize>,
 }
 
 /// The category a Claude Code tool name belongs to.

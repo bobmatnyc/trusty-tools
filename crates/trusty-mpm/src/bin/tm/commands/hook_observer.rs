@@ -34,6 +34,7 @@ use trusty_mpm::core::savings_opportunity::{
 };
 
 use super::hook_bash_decision::bash_skip_reason;
+use super::hook_chain_shape::{command_shape, dominant_step};
 use super::hook_rewrite::{effective_tool_name, hook_cwd};
 
 /// The most result bytes one hook invocation hands the compressor's dry run.
@@ -104,11 +105,16 @@ pub(crate) fn opportunity_row(
     session_id: &str,
 ) -> Option<OpportunityRow> {
     // #10973: `bash` is `Some(reason)` for a Bash call — the hook's own decision.
+    let mut shape = None;
     let (tool_type, dispatch, result, bash) = match event {
         "PostToolUse" => {
             let tool = payload.get("tool_name")?.as_str()?;
             let dispatch = match payload["tool_input"]["command"].as_str() {
-                Some(cmd) if tool == "Bash" => effective_tool_name(cmd.trim()),
+                // #11507: a chain is named by its dominant step, never `cd`.
+                Some(cmd) if tool == "Bash" => {
+                    shape = command_shape(cmd.trim());
+                    dominant_step(cmd.trim()).unwrap_or_else(|| effective_tool_name(cmd.trim()))
+                }
                 _ => tool.to_string(),
             };
             let bash = (tool == "Bash").then(|| {
@@ -147,7 +153,8 @@ pub(crate) fn opportunity_row(
             scanned,
             would_compress,
         )
-        .with_skip_reason(skip_reason(bash, would_compress < returned)),
+        .with_skip_reason(skip_reason(bash, would_compress < returned))
+        .with_command_shape(shape),
     )
 }
 
@@ -223,6 +230,19 @@ mod tests {
         assert_eq!(row.session_id, "s1");
         assert_eq!(row.bytes_returned, out.len() as u64);
         assert!(row.would_compress_bytes < row.bytes_returned, "{row:?}");
+    }
+
+    /// #11507: on the pre-fix commit this row was named `cd` with no shape.
+    #[test]
+    fn a_chained_bash_row_names_the_dominant_step_and_its_shape() {
+        let payload = json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /private/dir && cargo build && cargo test -p x"},
+            "tool_response": {"stdout": cargo_output(), "stderr": ""},
+        });
+        let row = opportunity_row("PostToolUse", &payload, "s1").expect("a row");
+        assert_eq!(row.tool_name, "cargo test");
+        assert_eq!(row.command_shape.as_deref(), Some("cd && cargo && cargo"));
     }
 
     #[test]
