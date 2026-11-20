@@ -229,3 +229,24 @@ fn shadow_seed_copy_failure_is_an_error() -> TestResult {
     );
     Ok(())
 }
+
+#[test]
+fn routines_config_error_raises_an_alert_in_the_cycle() -> TestResult {
+    // A malformed routines list must not switch D5r off silently (#9779).
+    let env = Env::new(&[])?;
+    fs::create_dir_all(env.root().join("local"))?;
+    fs::write(&env.config.routines, "{not json")?;
+    let tmux = fleet(&[], "");
+    let clock = FakeClock::new(now());
+    env.runner(&tmux, &clock, &QuietHost).run_single("60")?;
+    let alerts = fs::read_to_string(env.config.alerts()).unwrap_or_default();
+    let rows: Vec<serde_json::Value> = alerts
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<_, _>>()?;
+    let hit = rows.iter().find(|a| a["kind"] == "routine_stale");
+    let hit = hit.ok_or_else(|| format!("no routine_stale alert in {alerts:?}"))?;
+    assert_eq!(hit["fingerprint"], "config", "{hit}");
+    assert!(hit["detail"].as_str().is_some_and(|d| d.contains("parse")), "{hit}");
+    Ok(())
+}

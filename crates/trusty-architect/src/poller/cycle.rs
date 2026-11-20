@@ -274,7 +274,13 @@ pub fn collect<T: Tmux + ?Sized>(
     let mut failing = watch_found.clone();
     match routine_alerts(&s.config.routines, &s.config.supervisor, now) {
         Ok(found) => failing.extend(found),
-        Err(e) => log.push(format!("routines ERROR {e}")),
+        Err(e) => {
+            // #9779: a bad routines config is a failure, not a silent off.
+            log.push(format!("routines ERROR {e}"));
+            let detail = format!("routines config: {e}");
+            let sup = &s.config.supervisor;
+            failing.push(alert("routine_stale", "config", &detail, sup, "", now));
+        }
     }
     let keys: Vec<String> = failing
         .iter()
