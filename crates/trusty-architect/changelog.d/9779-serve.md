@@ -1,0 +1,2 @@
+Added
+- `serve` and `verbs::serve`: the poll cycle as an event-driven service. An inbox write, a hot transcript append (mtime polling once a second) or a `tmux -C` notification starts the same `Runner` cycle after a 2 s debounce; a 60 s tick still runs a cycle when nothing changed. The service holds `poll.lock` (none with `--shadow`). A watcher that fails, a `tmux -C` client down 30 s, or a panicking cycle is logged and raised as a `serve` alert while the tick keeps cycling; SIGTERM/SIGINT exit after the running cycle (#9779).

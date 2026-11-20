@@ -3,7 +3,7 @@
 //! Why: `start-fleet-poll.sh` and the Architect's skills ran five Python
 //! scripts; each verb here takes the same arguments as the script it
 //! replaces, so a caller swaps one for the other.
-//! What: [`ArchitectAction`] — `poll`, `classify`, `input-state`, `quiet`,
+//! What: [`ArchitectAction`] — `poll`, `serve` (#9779), `classify`, `input-state`, `quiet`,
 //! `self-ctx`. The work is `trusty_architect::verbs`. #10063 adds
 //! `dashboard`, the dashboard store's verbs ([`DashboardArgs`]).
 //! Test: `cli_parses_architect_verbs`, `cli_parses_architect_dashboard_verbs`.
@@ -39,6 +39,25 @@ pub(crate) enum ArchitectAction {
         /// takes no lock, sends no keys, relaunches nothing (#9779).
         #[arg(long)]
         shadow: bool,
+    },
+    /// The poll cycle as a service, run on local events (#9779).
+    ///
+    /// Runs the same cycle as `poll` within 2 s of an inbox write, a tmux
+    /// pane or window change (`tmux -C`) or a transcript append, and at
+    /// least every 60 s. GitHub reads keep their own cadence; no port is
+    /// opened. Takes `inbox/poll.lock` for its life, so `poll` cannot run
+    /// beside it. A watcher that fails is logged and raised as a `serve`
+    /// alert while the 60 s tick keeps cycling. SIGTERM or SIGINT exits
+    /// after the running cycle.
+    Serve {
+        /// Shadow run beside the live poller: writes only `inbox/shadow/`,
+        /// takes no lock, sends no keys, relaunches, notifies and pushes
+        /// nothing.
+        #[arg(long)]
+        shadow: bool,
+        /// Run one cycle and exit (exit 1 when it fails).
+        #[arg(long)]
+        once: bool,
     },
     /// Print one pane capture's facts as JSON (`parse_pane`).
     ///

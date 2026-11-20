@@ -18,7 +18,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use trusty_architect::SystemTmux;
-use trusty_architect::verbs::{self, InputTarget, Output, PollArgs, VerbError};
+use trusty_architect::verbs::{self, InputTarget, Output, PollArgs, ServeArgs, VerbError};
 
 use crate::cli::ArchitectAction;
 
@@ -82,6 +82,12 @@ fn execute(
             // #9167: each submitted wake becomes a `poll_wake` message event.
             let messages = super::architect_messages::poll_sink(&config.poll_session);
             verbs::poll(&args, &config, messages.as_ref()).map(|()| String::new())
+        }),
+        // #9779: the same cycle and wake sink as `poll`, run on events.
+        ArchitectAction::Serve { shadow, once } => config(get).and_then(|config| {
+            let messages = super::architect_messages::poll_sink(&config.poll_session);
+            let args = ServeArgs { shadow, once };
+            verbs::serve(&args, &config, messages.as_ref()).map(|()| String::new())
         }),
         ArchitectAction::Classify { file } => {
             read_capture(file.as_deref(), stdin).and_then(|bytes| verbs::classify(&bytes))
@@ -235,6 +241,20 @@ mod tests {
         assert!(matches!(
             parse(&["poll", "--once", "--interval", "30", "--dry-run"]),
             ArchitectAction::Poll { once: true, ref interval, dry_run: true, .. } if interval == "30"
+        ));
+        assert!(matches!(
+            parse(&["serve"]),
+            ArchitectAction::Serve {
+                shadow: false,
+                once: false
+            }
+        ));
+        assert!(matches!(
+            parse(&["serve", "--shadow", "--once"]),
+            ArchitectAction::Serve {
+                shadow: true,
+                once: true
+            }
         ));
         assert!(matches!(
             parse(&["poll", "--interval=45"]),
