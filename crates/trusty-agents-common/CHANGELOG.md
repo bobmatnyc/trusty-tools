@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.0] — 2026-11-20
+
+### Added
+
+- Framework-deployed agents carry `omitClaudeMd: true`, so a dispatched subagent starts without the CLAUDE.md hierarchy; untracked files written before the stamp stay adoptable. Needs Claude Code v2.1.271+ (#7684).
+
 ## [0.10.0] — 2026-11-20
 
 ### Breaking
