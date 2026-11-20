@@ -395,3 +395,47 @@ fn a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell() {
         }
     }
 }
+
+/// #11507 critic (HIGH): a failing covered step, then `&& x; y`. The `&&`
+/// skips `x` and its marker, `y`'s marker still prints. On 2d7fded31a the
+/// splitter stopped at the first missing marker, so the literal marker line
+/// reached the caller with `y`'s output.
+/// What: under sh, bash and zsh, the original and the rewrite (real splitter,
+/// identity filter) agree on status, stdout, stderr and the cwd afterwards,
+/// and no `__tm_chain_` text survives.
+/// Test: itself.
+#[test]
+fn a_short_circuit_before_a_semicolon_runs_like_the_original() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let root = root.path().canonicalize().expect("canonical temp dir");
+    std::fs::create_dir_all(root.join("sub")).expect("mkdir");
+    std::fs::write(root.join("sub/marker.txt"), "hi there\nhi again\n").expect("write");
+    for shell in ["sh", "bash", "zsh"] {
+        if run_in(shell, &root, "exit 0").0.is_none() {
+            continue;
+        }
+        for command in [
+            "grep -q nomatch sub/marker.txt && grep -n hi sub/marker.txt; grep -c hi sub/marker.txt",
+            "cd sub; grep -q nomatch marker.txt && grep -n hi marker.txt; grep -c hi marker.txt",
+            "grep -n hi sub/marker.txt; grep -q nomatch sub/marker.txt && grep -n hi sub/marker.txt; grep -n there sub/marker.txt",
+            "grep -q nomatch sub/marker.txt && grep -n hi sub/marker.txt; grep -n hi no-such-file",
+        ] {
+            let original = run_in(shell, &root, command);
+            let rewritten = run_rewrite(shell, &root, "", command);
+            assert!(
+                !rewritten.1.contains("__tm_chain_"),
+                "{shell}: marker leaked: {rewritten:?}"
+            );
+            assert_eq!(original, rewritten, "{shell}: `{command}`");
+            let rewrite = rewrite_bash_command_for_compression(command).unwrap_or_default();
+            let head = rewrite.split("| tm compress").next().unwrap_or_default();
+            let (_, cwd, _) = run_in(shell, &root, &format!("{command}; pwd -P"));
+            let (_, rcwd, _) = run_in(shell, &root, &format!("{head}| cat >/dev/null; pwd -P"));
+            assert_eq!(
+                cwd.lines().last(),
+                rcwd.lines().last(),
+                "{shell}: cwd after `{command}`"
+            );
+        }
+    }
+}

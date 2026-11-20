@@ -57,21 +57,27 @@ pub(crate) fn chain_shape(spec: &str) -> String {
 
 /// Cut `text` at the markers for steps `1..steps`, in order.
 ///
-/// What: piece `i` is the bytes before the `\n<marker i+1>\n` the producer
-/// printed; the last piece is the rest. Exactly the marker's bytes are removed,
-/// so concatenating the pieces gives the chain's own output. A missing marker
-/// (an `&&` short-circuit) ends the cut, so there may be fewer pieces than steps.
+/// What: piece `i` is step `i`'s output: the bytes between its own marker (none
+/// for step 0) and the next marker that printed. Exactly the markers' bytes are
+/// removed, so concatenating the pieces gives the chain's own output. A missing
+/// marker (an `&&` short-circuit) is skipped, not an end: #11507 critic, in
+/// `a && b; c` with `a` failing, `c`'s marker still prints, so the steps the
+/// short-circuit skipped get empty pieces and the search goes on. Pieces stay
+/// aligned with steps; there are fewer only when the tail never ran.
 /// Test: `a_split_and_merge_round_trips_byte_for_byte`,
-/// `a_short_circuited_chain_yields_fewer_pieces`.
+/// `a_short_circuited_chain_yields_fewer_pieces`,
+/// `a_short_circuit_before_a_semicolon_keeps_later_markers`.
 pub(crate) fn split_chain<'a>(text: &'a str, nonce: &str, steps: usize) -> Vec<&'a str> {
     let mut pieces = Vec::new();
     let mut rest = text;
     for step in 1..steps {
         let cut = format!("\n{}\n", chain_marker(nonce, step));
         let Some(at) = rest.find(&cut) else {
-            break;
+            continue;
         };
         pieces.push(&rest[..at]);
+        // Steps between the last printed marker and this one never ran.
+        pieces.resize(step, "");
         rest = &rest[at + cut.len()..];
     }
     pieces.push(rest);
@@ -203,6 +209,15 @@ mod tests {
         let text = format!("one\n{}two\n", cut("n", 1));
         assert_eq!(split_chain(&text, "n", 4), ["one\n", "two\n"]);
         assert_eq!(split_chain("only\n", "n", 3), ["only\n"]);
+    }
+
+    /// #11507 critic: `a && b; c` with `a` failing prints only marker 2.
+    #[test]
+    fn a_short_circuit_before_a_semicolon_keeps_later_markers() {
+        let text = format!("a out\n{}c out\n", cut("n", 2));
+        assert_eq!(split_chain(&text, "n", 3), ["a out\n", "", "c out\n"]);
+        let text = format!("a\n{}{}d\n", cut("n", 1), cut("n", 3));
+        assert_eq!(split_chain(&text, "n", 4), ["a\n", "", "", "d\n"]);
     }
 
     #[test]
