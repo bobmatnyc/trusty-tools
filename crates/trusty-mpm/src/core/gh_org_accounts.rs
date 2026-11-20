@@ -1,6 +1,6 @@
 //! `[accounts]` in `~/.trusty-mpm/config.toml`: GitHub org → `gh` account (#9091).
 //!
-//! Why: owner ruling 33. `tm duettoresearch/<repo>` must run as `bob-duetto`
+//! Why: owner ruling 33. `tm acme/<repo>` must run as `acme-admin`
 //! without naming `--account` on every invocation, so the config maps an org to
 //! the account that clones and spawns for it.
 //! What: [`OrgAccounts`] is the validated table. [`OrgAccounts::inspect`] reads
@@ -22,8 +22,8 @@ use crate::session_manager::ssh_host_alias::SshHostAliases;
 
 /// The `[accounts]` table: org → `gh` login, matched case-insensitively.
 ///
-/// Why: GitHub org names are case-insensitive, so `DuettoResearch` and
-/// `duettoresearch` must find the same entry, and a table naming both is
+/// Why: GitHub org names are case-insensitive, so `Acme` and
+/// `acme` must find the same entry, and a table naming both is
 /// ambiguous rather than "last one wins".
 /// What: keys keep the case the operator wrote; [`Self::account_for`] folds case.
 /// Test: `org_lookup_ignores_case`, `orgs_differing_only_in_case_are_refused`.

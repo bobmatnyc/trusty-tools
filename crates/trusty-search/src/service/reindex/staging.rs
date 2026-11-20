@@ -4,7 +4,7 @@
 //! in `index.redb.tmp` and atomically swapped it in on success. The standard
 //! (non-force) reindex wrote chunks straight into the live `index.redb`, so a
 //! reindex that failed mid-way — or, post-#601, embedded zero vectors — destroyed
-//! the only searchable copy with no way to roll back. During the Duetto P0 this
+//! the only searchable copy with no way to roll back. During the Acme P0 this
 //! turned a transient embedder outage into a permanently dead index.
 //!
 //! What: the actual redb staging/swap plumbing (open-fresh tmp, swap onto the

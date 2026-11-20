@@ -49,7 +49,7 @@ spec_refs:
 
 **The tm checkout is the directory tm creates** at `repos_root().join(owner).join(repo)` — by default `~/trusty-mpm-projects/<owner>/<repo>` (`inproject.rs:134-136`, `DEFAULT_REPOS_DIR` at `:56`).
 
-It is **not the user's own clone** of the repo, wherever that lives. This spec says "the tm checkout" for the former and "the user's own clone" for the latter, and never says "main checkout" for either — that phrase was read both ways and cost a round of wrong analysis.
+It is **not the user's own clone** of the repo, wherever that lives. A linked git worktree of the tm checkout is part of it: a session launched there runs and composes its content there ([ADR-0037](../adr/0037-pm-placement-precedence-main-checkout-by-default.md), worktree amendment). This spec says "the tm checkout" for the former and "the user's own clone" for the latter, and never says "main checkout" for either — that phrase was read both ways and cost a round of wrong analysis.
 
 Since #4270 the tm checkout *is* the base checkout, with worktrees at `<base>/.worktrees/<name>` (`harness_root.rs:47-59`, `provisioner/workspace.rs:13-22`). The pre-#4270 layout put a bare clone at `<project>/.base` and added worktrees from there; existing `.base` stores were deliberately not migrated. Retiring `.base` finishes that convergence and leaves exactly one tm checkout per project, which is what makes this spec's single-home model coherent rather than aspirational.
 

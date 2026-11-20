@@ -26,7 +26,11 @@ use std::sync::Arc;
 use futures_util::stream::{self, StreamExt};
 use serde::Serialize;
 use trusty_review::llm::bedrock::estimate_bedrock_cost_usd;
-use trusty_review::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_VERIFIER_MODEL};
+use trusty_review::llm::models::COMPARE_CANDIDATE_MODELS;
+
+/// The eval's verifier stays Haiku 4.5 when the production default moved to a
+/// different family (#11527), so scores stay comparable across eval runs.
+const EVAL_VERIFIER_MODEL: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 use trusty_review::llm::{LlmProvider, strip_provider_prefix};
 
 use crate::eval::{Entry, Row, Totals, eval_config, load_dataset, markdown_table, review_diff};
@@ -122,7 +126,7 @@ pub fn live_settings(env: Env<'_>) -> Result<Option<LiveSettings>, String> {
         .map_or_else(|| target_dir(env).join("model_eval"), PathBuf::from);
     Ok(Some(LiveSettings {
         models,
-        verifier: DEFAULT_VERIFIER_MODEL.to_string(),
+        verifier: EVAL_VERIFIER_MODEL.to_string(),
         passes,
         max_usd,
         concurrency,

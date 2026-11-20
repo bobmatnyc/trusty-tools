@@ -23,7 +23,6 @@ verify = "vercel whoami"
 
 [accounts.neon]
 account = "robert.matsuoka"
-scope = "Duetto-CTO"
 verify = "neonctl me"
 
 [accounts.crates-io]

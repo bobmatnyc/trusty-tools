@@ -338,7 +338,7 @@ fn slug_as_url(origin: &str) -> String {
 ///
 /// Why: a session spawn reads the raw origin, while the daemon reads it through
 /// `repo_slug_for`, which resolves a `~/.ssh/config` alias. Proving the token
-/// for `git@github-duetto:org/repo` against host `github-duetto` refused a pin
+/// for `git@github-acme:org/repo` against host `github-acme` refused a pin
 /// the daemon proved.
 /// What: [`super::worktree_repo_slug::parse_repo_slug`] with `aliases`, then
 /// the same slug-to-URL step the daemon uses. An origin that parse refuses —

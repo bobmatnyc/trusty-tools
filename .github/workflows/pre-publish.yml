@@ -835,6 +835,54 @@ jobs:
           echo "  step must be made to fail instead."
 
   # ==========================================================================
+  # published-content — GATE 7 (#11470). trusty-mpm only.
+  #
+  # trusty-mpm 1.14.8 shipped needing `output-styles/owner-plain.md`, which no
+  # published content release carried. Every earlier gate read the repository's
+  # own content/ tree, or checked versions and tags. This gate runs
+  # scripts/check-content-release-coverage.sh: the newest PUBLISHED content-v*
+  # release must be at or above MIN_CONTENT_TAG and carry every file tm
+  # requires. The candidate binary's clean-HOME run
+  # (scripts/release-smoke-clean-home.sh) is preflight-publish.sh CHECK 11 on
+  # the Mac, which also reruns this coverage check. Any other crate's run passes this job with a SKIP line, so the summary's
+  # "every job is success" rule still holds.
+  # ==========================================================================
+  published-content:
+    name: "Gate 7 — candidate tm against published content"
+    needs: resolve-sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve-sha.outputs.sha }}
+
+      - name: Is this a trusty-mpm release?
+        id: target
+        env:
+          INPUT_CRATE: ${{ inputs.crate }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          crate="${INPUT_CRATE:-}"
+          if [ -z "${crate}" ] && [ "${REF_TYPE}" = tag ]; then
+            crate="$(sed -E 's/-v[0-9]+\.[0-9]+\.[0-9]+.*$//' <<<"${REF_NAME}")"
+          fi
+          if [ "${crate}" = trusty-mpm ]; then
+            echo "run=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "run=false" >> "${GITHUB_OUTPUT}"
+            echo "SKIP: Gate 7 checks trusty-mpm releases only; this run is for '${crate:-<none>}'."
+          fi
+
+      - name: Content release coverage
+        if: steps.target.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/check-content-release-coverage.sh
+
+  # ==========================================================================
   # summary — the aggregate verdict.
   #
   # Written as "every job must equal success" rather than "no job failed".
@@ -845,7 +893,7 @@ jobs:
   # ==========================================================================
   summary:
     name: Pre-publish gate
-    needs: [resolve-sha, ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts]
+    needs: [resolve-sha, ci-parity, rustdoc-links, audit, deny, ignored-tests, contracts, published-content]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -859,6 +907,7 @@ jobs:
           R_DENY: ${{ needs.deny.result }}
           R_IGNORED: ${{ needs.ignored-tests.result }}
           R_CONTRACTS: ${{ needs.contracts.result }}
+          R_CONTENT: ${{ needs.published-content.result }}
           RESOLVED_SHA: ${{ needs.resolve-sha.outputs.sha }}
         run: |
           set -euo pipefail
@@ -871,7 +920,8 @@ jobs:
             "audit:${R_AUDIT}" \
             "deny:${R_DENY}" \
             "ignored-tests:${R_IGNORED}" \
-            "contracts:${R_CONTRACTS}"; do
+            "contracts:${R_CONTRACTS}" \
+            "published-content:${R_CONTENT}"; do
             name="${pair%%:*}"; result="${pair##*:}"
             if [ "${result}" = "success" ]; then
               echo "  [PASS] ${name}"

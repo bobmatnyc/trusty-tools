@@ -1,6 +1,6 @@
 //! Severity-anchored, deterministic grade derivation.
 //!
-//! Why: the calibration run against the duetto code-review board (30 PRs)
+//! Why: the calibration run against a code-review board (30 PRs)
 //! revealed two systemic problems:
 //!   - BLOCK was never emitted (0% detection): the model soft-pedalled critical
 //!     issues to APPROVE* instead of escalating to BLOCK.
@@ -846,7 +846,7 @@ pub(crate) fn is_high_severity(f: &Finding) -> bool {
 /// Return `true` when a finding clears the citability gate and is therefore
 /// eligible to drive the deterministic BLOCK floor (RULE 1, #PR84 calibration).
 ///
-/// Why: PR #84 (`duetto-eve-agents` #84) was graded BLOCK/F on a SINGLE finding
+/// Why: PR #84 (an agents repo, #84) was graded BLOCK/F on a SINGLE finding
 /// the model self-tagged `effort: high` — a FALSE, non-citable claim about
 /// Vercel's routing (contradicted by Vercel's docs and disproven in prod).  The
 /// floor trusted the model's self-reported effort unconditionally and hard-clamped

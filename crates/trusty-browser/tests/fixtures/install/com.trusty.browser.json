@@ -1,0 +1,9 @@
+{
+  "name": "com.trusty.browser",
+  "description": "Trusty Browser native host",
+  "type": "stdio",
+  "path": "/private/tmp/p4-cap/home/.trusty/browser/chrome-native-host",
+  "allowed_origins": [
+    "chrome-extension://jabfhcolknbbdajilgpficniedhcfahc/"
+  ]
+}

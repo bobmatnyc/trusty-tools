@@ -396,14 +396,14 @@ mod tests {
         // the table would fail here rather than pass unnoticed.
         let fw = FrameworkPaths::under("/base");
         let manifest = HarnessManifest::from_toml(
-            "[mcp.custom.duetto-memory]\ntype = \"http\"\nurl = \"https://mcp.example/memory\"\n",
+            "[mcp.custom.acme-memory]\ntype = \"http\"\nurl = \"https://mcp.example/memory\"\n",
         )
         .expect("a manifest declaring [mcp.custom] must still parse");
 
         let plan = HarnessPlan::from_manifest(&manifest, &fw, std::path::Path::new("/c"));
 
         assert!(
-            !format!("{plan:?}").contains("duetto-memory"),
+            !format!("{plan:?}").contains("acme-memory"),
             "no part of the plan may carry a [mcp.custom] entry: {plan:?}"
         );
     }

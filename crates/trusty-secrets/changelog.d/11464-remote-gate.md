@@ -1,3 +1,0 @@
-Added
-- `trusty-secrets remote-gate --host <name>`, an ssh forced-command front: it reads one JSON frame on stdin, allows only `resolve` and `doctor`, checks the host's project allowlist (`secrets.remote_hosts` in the account machine config), and relays to the running GUI-session server with `agent_parent` fixed true. It never starts a server; no server, or a call past 10 s, exits 69, and a refusal exits 13 (#11464).
-- `secrets.remote.resolve` and `secrets.remote.doctor` server methods, served only to a verified `trusty-secrets` peer that runs below a root-owned `sshd` and has no Claude Code ancestor; their audit records carry `host`, `remote_agent` (marked unverified) and `remote_project`, and a new `remote_refused` error kind (#11464).

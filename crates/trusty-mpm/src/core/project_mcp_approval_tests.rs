@@ -62,11 +62,11 @@ fn project_mcp_state_reports_each_declared_server() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
     let cfg = tmp.path().join("cfg");
-    mcp_json(&cwd, &["apex", "duetto-memory", "smuggled"]);
+    mcp_json(&cwd, &["ledger", "mem-acme", "smuggled"]);
     settings(
         &cwd.join(".claude").join("settings.json"),
         json!({
-            "enabledMcpjsonServers": ["apex"],
+            "enabledMcpjsonServers": ["ledger"],
             "disabledMcpjsonServers": ["smuggled"],
         }),
     );
@@ -77,11 +77,11 @@ fn project_mcp_state_reports_each_declared_server() {
         state,
         vec![
             ProjectMcpServer {
-                name: "apex".to_owned(),
+                name: "ledger".to_owned(),
                 approval: Approval::Enabled
             },
             ProjectMcpServer {
-                name: "duetto-memory".to_owned(),
+                name: "mem-acme".to_owned(),
                 approval: Approval::Prompt
             },
             ProjectMcpServer {
@@ -97,7 +97,7 @@ fn project_mcp_state_honours_enable_all() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
     let cfg = tmp.path().join("cfg");
-    mcp_json(&cwd, &["apex"]);
+    mcp_json(&cwd, &["ledger"]);
     settings(
         &cfg.join("settings.json"),
         json!({"enableAllProjectMcpServers": true}),
@@ -117,10 +117,10 @@ fn approval_prefers_the_project_tier() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
     let cfg = tmp.path().join("cfg");
-    mcp_json(&cwd, &["apex"]);
+    mcp_json(&cwd, &["ledger"]);
     settings(
         &cwd.join(".claude").join("settings.local.json"),
-        json!({"disabledMcpjsonServers": ["apex"]}),
+        json!({"disabledMcpjsonServers": ["ledger"]}),
     );
     settings(
         &cfg.join("settings.json"),
@@ -140,11 +140,11 @@ fn approval_reads_the_recorded_prompt_answer() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
     let cfg = tmp.path().join("cfg");
-    mcp_json(&cwd, &["apex"]);
+    mcp_json(&cwd, &["ledger"]);
     std::fs::create_dir_all(&cfg).unwrap();
     std::fs::write(
         cfg.join(".claude.json"),
-        json!({"projects": {cwd.to_string_lossy(): {"enabledMcpjsonServers": ["apex"]}}})
+        json!({"projects": {cwd.to_string_lossy(): {"enabledMcpjsonServers": ["ledger"]}}})
             .to_string(),
     )
     .unwrap();
@@ -156,7 +156,7 @@ fn approval_reads_the_recorded_prompt_answer() {
 fn approval_defaults_to_prompt() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path().join("repo");
-    mcp_json(&cwd, &["apex"]);
+    mcp_json(&cwd, &["ledger"]);
 
     let state = project_mcp_state(&cwd, &tmp.path().join("cfg"));
 

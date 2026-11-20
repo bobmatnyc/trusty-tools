@@ -504,7 +504,7 @@ fn resolve_reads_owner_and_project_from_the_git_origin() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let repo = tmp.path().join("checkout");
     std::fs::create_dir_all(repo.join("logs")).expect("repo dirs");
-    if !init_repo(&repo, "git@github.com:duettoresearch/pricing.git") {
+    if !init_repo(&repo, "git@github.com:acme-labs/pricing.git") {
         return;
     }
 
@@ -527,7 +527,7 @@ log_drain:
     assert_eq!(
         plan.destinations[0].target,
         DrainTarget {
-            owner: "duettoresearch".to_string(),
+            owner: "acme-labs".to_string(),
             project: "pricing".to_string()
         }
     );
@@ -538,7 +538,7 @@ fn resolve_prefers_an_explicit_owner_and_project_over_the_origin() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let repo = tmp.path().join("checkout");
     std::fs::create_dir_all(&repo).expect("repo dir");
-    if !init_repo(&repo, "git@github.com:duettoresearch/pricing.git") {
+    if !init_repo(&repo, "git@github.com:acme-labs/pricing.git") {
         return;
     }
 
@@ -692,15 +692,15 @@ log_drain:
   sources:
     - crate_name: trusty-mpm
       root: "/var/log/a"
-      owner: "duettoresearch"
+      owner: "acme-labs"
       project: "pricing"
     - crate_name: trusty-mpm
       root: "/var/log/b"
-      owner: "duettoresearch"
+      owner: "acme-labs"
       project: "insights"
     - crate_name: trusty-code
       root: "/var/log/c"
-      owner: "duettoresearch"
+      owner: "acme-labs"
       project: "pricing"
 "#,
     );
@@ -711,12 +711,12 @@ log_drain:
     assert_eq!(plan.destinations.len(), 2, "two projects, two passes");
     assert_eq!(
         plan.destinations[0].target.key_prefix(),
-        "duettoresearch/pricing"
+        "acme-labs/pricing"
     );
     assert_eq!(plan.destinations[0].sources.len(), 2, "same pair, one pass");
     assert_eq!(
         plan.destinations[1].target.key_prefix(),
-        "duettoresearch/insights"
+        "acme-labs/insights"
     );
     assert_eq!(plan.destinations[1].sources.len(), 1);
 }

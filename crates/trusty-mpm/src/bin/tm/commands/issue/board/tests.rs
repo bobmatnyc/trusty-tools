@@ -304,21 +304,21 @@ fn a_spec_without_hold_is_refused_and_hold_enabled_is_accepted_10275() {
 fn the_project_block_parses_and_refuses_an_unknown_key_10275() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("issue-state.yaml");
-    let block = "\nproject:\n  owner: duettoresearch\n  number: 7\n  drop_options:\n    - \
+    let block = "\nproject:\n  owner: acme\n  number: 7\n  drop_options:\n    - \
                  Published\n    - On Preview\n  extra_fields:\n    - Area\n";
     std::fs::write(&path, format!("{STATUS_LIFECYCLE_YAML}{block}")).expect("write");
     let (model, _) = load_model_in(tmp.path(), Some(path.as_path()), None).expect("block loads");
     assert_eq!(
         model.project,
         Some(ProjectBlock {
-            owner: "duettoresearch".to_string(),
+            owner: "acme".to_string(),
             number: 7,
             drop_options: vec!["Published".to_string(), "On Preview".to_string()],
             extra_fields: vec!["Area".to_string()],
         })
     );
 
-    let bad = "\nproject:\n  owner: duettoresearch\n  number: 7\n  colour: red\n";
+    let bad = "\nproject:\n  owner: acme\n  number: 7\n  colour: red\n";
     std::fs::write(&path, format!("{STATUS_LIFECYCLE_YAML}{bad}")).expect("write");
     let err = load_model_in(tmp.path(), Some(path.as_path()), None)
         .expect_err("unknown key refused")
@@ -353,7 +353,7 @@ fn the_repo_block_names_project_45_with_crate_and_agents_10275() {
 fn the_project_block_is_checked_against_the_spec_10275() {
     let spec = spec();
     let base = ProjectBlock {
-        owner: "duettoresearch".to_string(),
+        owner: "acme".to_string(),
         number: 7,
         drop_options: vec!["Published".to_string(), "On Preview".to_string()],
         extra_fields: vec!["Crate".to_string()],

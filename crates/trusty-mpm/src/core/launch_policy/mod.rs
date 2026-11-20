@@ -1,7 +1,7 @@
 //! Per-owner launch config: discovery, schema, `extends`, last-good (#8988).
 //!
-//! Why: one operator works for several owners (bobmatnyc, bob-duetto,
-//! duettoresearch) whose sessions should load different MCP servers. Owner
+//! Why: one operator works for several owners (bobmatnyc, acme-admin,
+//! acme) whose sessions should load different MCP servers. Owner
 //! state lives outside every repository, so a clone cannot write it.
 //! What: [`resolve`] maps a cwd to its owner ([`owner::owner_for`]),
 //! reads `<repos_root>/<owner>/.trusty-mpm-owner.toml` and its `extends` chain

@@ -21,18 +21,18 @@ use super::*;
 /// a different account can never win over the explicit selection.
 #[test]
 fn account_clone_env_shadows_inherited_identity_and_sets_gh_token() {
-    const CLONE_URL: &str = "https://github.com/duettoresearch/poc-hotel-supply";
+    const CLONE_URL: &str = "https://github.com/acme/poc-hotel-supply";
 
     let env = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         None,
         |account| {
-            assert_eq!(account, "bob-duetto");
+            assert_eq!(account, "acme-admin");
             Ok("minted-token".to_string())
         },
         |token| {
             assert_eq!(token, "minted-token");
-            Ok("bob-duetto".to_string())
+            Ok("acme-admin".to_string())
         },
         |_, _| panic!("verify_scoped_login must not run when config_dir is None"),
     )
@@ -47,7 +47,7 @@ fn account_clone_env_shadows_inherited_identity_and_sets_gh_token() {
         env.set,
         vec![
             ("GH_TOKEN".to_string(), "minted-token".to_string()),
-            ("GH_USER".to_string(), "bob-duetto".to_string()),
+            ("GH_USER".to_string(), "acme-admin".to_string()),
         ]
     );
 
@@ -133,7 +133,7 @@ fn account_clone_env_propagates_a_resolver_failure_naming_the_account() {
 #[test]
 fn account_clone_env_refuses_a_token_minted_for_a_different_account() {
     let err = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         None,
         |_| Ok("token-for-the-wrong-account".to_string()),
         |token| {
@@ -143,7 +143,7 @@ fn account_clone_env_refuses_a_token_minted_for_a_different_account() {
         |_, _| panic!("verify_scoped_login must not run when config_dir is None"),
     )
     .expect_err("a login mismatch must refuse");
-    assert!(err.contains("bob-duetto"), "{err}");
+    assert!(err.contains("acme-admin"), "{err}");
     assert!(err.contains("bobmatnyc"), "{err}");
 }
 
@@ -152,14 +152,14 @@ fn account_clone_env_refuses_a_token_minted_for_a_different_account() {
 #[test]
 fn account_clone_env_propagates_a_verification_failure() {
     let err = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         None,
         |_| Ok("some-token".to_string()),
         |_| Err("gh api user failed: network error".to_string()),
         |_, _| panic!("verify_scoped_login must not run when config_dir is None"),
     )
     .expect_err("a verification failure must propagate, not be swallowed");
-    assert!(err.contains("bob-duetto"), "{err}");
+    assert!(err.contains("acme-admin"), "{err}");
 }
 
 /// A token that DOES belong to the requested account proceeds normally —
@@ -167,11 +167,11 @@ fn account_clone_env_propagates_a_verification_failure() {
 #[test]
 fn account_clone_env_accepts_a_token_that_matches() {
     let env = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         None,
         |_| Ok("minted-token".to_string()),
         // GitHub logins are case-insensitive — the comparison must be too.
-        |_| Ok("Bob-Duetto".to_string()),
+        |_| Ok("Acme-Admin".to_string()),
         |_, _| panic!("verify_scoped_login must not run when config_dir is None"),
     )
     .expect("a matching (case-insensitively) login must proceed");
@@ -179,7 +179,7 @@ fn account_clone_env_accepts_a_token_that_matches() {
         env.set,
         vec![
             ("GH_TOKEN".to_string(), "minted-token".to_string()),
-            ("GH_USER".to_string(), "bob-duetto".to_string()),
+            ("GH_USER".to_string(), "acme-admin".to_string()),
         ]
     );
 }
@@ -196,16 +196,16 @@ fn account_clone_env_accepts_a_token_that_matches() {
 /// receiving the SAME dir and the default github.com host.
 #[test]
 fn account_clone_env_uses_a_config_dir_and_verifies_it_scoped() {
-    let dir = std::path::PathBuf::from("/tmp/tm-state/gh-accounts/bob-duetto");
+    let dir = std::path::PathBuf::from("/tmp/tm-state/gh-accounts/acme-admin");
     let env = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         Some(&dir),
         |_| panic!("resolve_token (the -u fallback) must not run when config_dir is Some"),
         |_| panic!("verify_login (bare-token) must not run for the config_dir arm"),
         |scoped_dir, host| {
             assert_eq!(scoped_dir, dir.to_string_lossy());
             assert_eq!(host, crate::core::trusty_tools_config::DEFAULT_GITHUB_HOST);
-            Ok("bob-duetto".to_string())
+            Ok("acme-admin".to_string())
         },
     )
     .expect("a matching scoped identity must proceed");
@@ -229,16 +229,16 @@ fn account_clone_env_uses_a_config_dir_and_verifies_it_scoped() {
 /// auth switch`, and never a silent clone under the wrong identity.
 #[test]
 fn account_clone_env_refuses_a_config_dir_scoped_to_a_different_login() {
-    let dir = std::path::PathBuf::from("/tmp/tm-state/gh-accounts/bob-duetto");
+    let dir = std::path::PathBuf::from("/tmp/tm-state/gh-accounts/acme-admin");
     let err = account_clone_env_with(
-        "bob-duetto",
+        "acme-admin",
         Some(&dir),
         |_| panic!("resolve_token must not run for the config_dir arm"),
         |_| panic!("verify_login must not run for the config_dir arm"),
         |_, _| Ok("someone-else".to_string()),
     )
     .expect_err("a scoped-identity mismatch must refuse");
-    assert!(err.contains("bob-duetto"), "{err}");
+    assert!(err.contains("acme-admin"), "{err}");
     assert!(err.contains("someone-else"), "{err}");
     assert!(
         !err.contains("gh auth switch"),

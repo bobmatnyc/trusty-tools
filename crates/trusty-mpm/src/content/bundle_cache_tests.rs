@@ -17,6 +17,61 @@ use trusty_common::integrity::Sha256Digest;
 use super::*;
 use crate::content::status::content_status;
 
+/// The cache tests' `update`: the production one with no minimum, so the
+/// `content-v0.x` fixtures exercise everything else (#11470).
+fn update<S: ReleaseSource + ?Sized>(
+    cache: &Path,
+    source: &S,
+    content_ref: Option<&str>,
+) -> Result<UpdateOutcome, CacheError> {
+    update_with_minimum(cache, source, content_ref, "content-v0.0.0")
+}
+
+/// #11470 regression: with only `content-v2.4.0` published, the production
+/// `update` refuses and says none qualifies; pre-fix it answered "already
+/// pinned and verified" for the stale pin.
+#[test]
+fn update_refuses_when_no_release_meets_the_minimum() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut src = FakeSource::default();
+    src.publish("content-v2.4.0");
+    update(cache.path(), &src, Some("content-v2.4.0")).expect("seed the stale pin");
+    let err = super::update(cache.path(), &src, None).expect_err("below the minimum");
+    let msg = err.to_string();
+    assert!(msg.contains("none is published yet"), "{msg}");
+    assert!(
+        msg.contains("content-v2.4.0 is verified and stays in use"),
+        "{msg}"
+    );
+}
+
+/// #11470: `--content-ref` below the minimum is refused before any fetch.
+#[test]
+fn update_refuses_a_content_ref_below_the_minimum() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut src = FakeSource::default();
+    src.publish("content-v2.4.0");
+    let err = super::update(cache.path(), &src, Some("content-v2.4.0")).expect_err("below");
+    assert!(err.to_string().contains("older than"), "{err}");
+    assert!(
+        !cache.path().join(LOCK_FILE_NAME).exists(),
+        "nothing pinned"
+    );
+}
+
+/// #11470 criterion 2: a stale pin moves to the first qualifying release.
+#[test]
+fn update_moves_a_stale_pin_to_the_first_qualifying_release() {
+    let cache = tempfile::tempdir().expect("tempdir");
+    let mut src = FakeSource::default();
+    src.publish("content-v2.4.0");
+    update(cache.path(), &src, Some("content-v2.4.0")).expect("seed the stale pin");
+    src.publish(crate::content::min_content::MIN_CONTENT_TAG);
+    let out = super::update(cache.path(), &src, None).expect("update");
+    assert_eq!(out.tag, crate::content::min_content::MIN_CONTENT_TAG);
+    assert_eq!(out.action, UpdateAction::Installed);
+}
+
 const A: &str = "content-v0.1.0";
 const B: &str = "content-v0.2.0";
 

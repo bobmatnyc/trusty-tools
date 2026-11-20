@@ -174,7 +174,20 @@ fn pre_fix_labels_are_recorded_as_legacy() {
 /// the full binary name on purpose — renaming one invalidates the binary's
 /// designated requirement and re-triggers macOS TCC prompts (#2558). It must
 /// not be normalised onto the launchd convention.
-const SCAN_EXEMPT_PATHS: &[&str] = &["trusty-installer/src/commands/macos_signing"];
+///
+/// The three `trusty-browser` files name the same `com.trusty.browser` string in
+/// three non-launchd namespaces, each fixed by state a Python install already
+/// left on disk (#11440): `codesign.rs` the codesign identifier and designated
+/// requirement (#2558), `install_host.rs` the Chrome native-messaging host name
+/// (the manifest file Chrome reads), and `vault.rs` the Keychain service of the
+/// wrapping key (renaming it orphans every pairing). The browser's launchd label
+/// itself comes from [`BROWSER`](crate::launchd_labels::BROWSER).
+const SCAN_EXEMPT_PATHS: &[&str] = &[
+    "trusty-installer/src/commands/macos_signing",
+    "trusty-browser/src/codesign.rs",
+    "trusty-browser/src/install_host.rs",
+    "trusty-browser/src/vault.rs",
+];
 
 /// Why (#4919, and #2827 before it): every re-fix so far corrected one literal
 /// and left the mechanism that mints them intact, so a new divergent literal

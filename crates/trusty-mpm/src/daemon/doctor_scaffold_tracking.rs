@@ -10,8 +10,8 @@
 //! does not untrack anything already in the index. This probe detects that
 //! already-broken state and prints the exact `git rm -r --cached` remediation,
 //! mirroring what actually fixed the verified reproduction
-//! (`duettoresearch/duetto-eve-agents`, worktree `tm-duetto-eve-agents-01`,
-//! stranded 28 commits — duetto-eve-agents#111, commit 0e699e2).
+//! (`acme/acme-eve-agents`, worktree `tm-acme-eve-agents-01`,
+//! stranded 28 commits — acme-eve-agents#111, commit 0e699e2).
 //!
 //! The reproduction's error output (`git merge --ff-only` "would be
 //! overwritten") listed far more files than the true 7-file collision,

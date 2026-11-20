@@ -377,6 +377,9 @@ fn cli_parses_every_secrets_verb() {
         vec!["remove", "K", "grp"],
         vec!["import", ".env"],
         vec!["import", ".env", "grp"],
+        // See G0b secrets JSON import.
+        vec!["import", "c.json", "--format", "json"],
+        vec!["import", "--google-oauth", "client.json", "grp"],
         vec!["copy", "--from", "keychain", "--to", "spare"],
         vec!["copy", "--from", "keychain", "--to", "spare", "A", "grp.B"],
         // #10998: a named source.
@@ -1313,3 +1316,118 @@ async fn every_verb_fails_without_a_value_when_the_socket_is_unreachable() {
 // #11015: `tm secrets assign`, on this harness.
 #[path = "assign_tests.rs"]
 mod assign_tests;
+
+/// See G0b secrets JSON import: a nested `.json` file lands under
+/// upper-snake names through the dotenv import's storage loop.
+#[tokio::test]
+async fn import_json_nested_file_stores_upper_snake_names() {
+    let h = harness().await;
+    let text = format!(r#"{{"db": {{"password": "{VALUE}", "port": 5432}}}}"#);
+    let path = env_file(&h, "app.json", &text);
+    let outcome = run(&h, "", &["import", &path]).await;
+    assert_eq!(outcome.err, None);
+    assert_eq!(
+        outcome.out,
+        "imported DB_PASSWORD (new)\nimported DB_PORT (new)\n\
+         trusty/acme/web: 2 imported, 0 skipped, 0 failed\n"
+    );
+    assert_eq!(
+        stored(&h.keychain, PROJECT_VAULT, "DB_PASSWORD").as_deref(),
+        Some(VALUE)
+    );
+    // `--format json` reads a file of any extension as JSON.
+    let other = env_file(&h, "app.txt", &text);
+    let forced = run(&h, "", &["import", &other, "--format", "json"]).await;
+    assert!(
+        forced.out.contains("DB_PASSWORD (updated)"),
+        "{}",
+        forced.out
+    );
+}
+
+/// See G0b secrets JSON import: both Google client shapes store three keys
+/// under `google-oauth.<project_id>`; a missing field or an array stores
+/// nothing and names the key or field only.
+#[tokio::test]
+async fn import_google_oauth_stores_one_group_per_project() {
+    let h = harness().await;
+    for (shape, name, flag) in [
+        ("installed", "client.json", None),
+        ("web", "client.txt", Some("--google-oauth")),
+    ] {
+        let text = format!(
+            r#"{{"{shape}": {{"client_id": "1-{shape}.apps", "client_secret": "{VALUE}", "project_id": "proj-{shape}"}}}}"#
+        );
+        let path = env_file(&h, name, &text);
+        let mut args = vec!["import", path.as_str()];
+        args.extend(flag);
+        let outcome = run(&h, "", &args).await;
+        assert_eq!(outcome.err, None);
+        let p = format!("google-oauth.proj-{shape}");
+        assert_eq!(
+            outcome.out,
+            format!(
+                "imported {p}.CLIENT_ID (new)\nimported {p}.CLIENT_SECRET (new)\n\
+                 imported {p}.PROJECT_ID (new)\ntrusty/acme/web: 3 imported, 0 skipped, 0 failed\n"
+            )
+        );
+        let secret = format!("{p}.CLIENT_SECRET");
+        assert_eq!(
+            stored(&h.keychain, PROJECT_VAULT, &secret).as_deref(),
+            Some(VALUE)
+        );
+    }
+    let missing = r#"{"web": {"client_id": "1", "project_id": "p-1"}}"#;
+    let missing = env_file(&h, "m.json", missing);
+    let refused = run(&h, "", &["import", &missing]).await;
+    assert!(
+        refused.err().contains("lacks a string `client_secret`"),
+        "{}",
+        refused.err()
+    );
+    let array = env_file(&h, "a.json", &format!(r#"{{"keys": ["{SHORT}"]}}"#));
+    let refused = run(&h, "", &["import", &array]).await;
+    assert!(
+        refused.err().contains("KEYS is an array"),
+        "{}",
+        refused.err()
+    );
+    assert_eq!(h.keychain.len(), 6, "a refused file stores nothing");
+}
+
+/// See G0b secrets JSON import: a known value appears in no stdout, error
+/// text (the CLI's stderr, `Display` and `Debug`) or TRACE log of any JSON
+/// import run, stored or refused.
+#[tokio::test]
+async fn import_json_never_shows_a_value_in_any_output() {
+    let h = harness().await;
+    let files = [
+        format!(r#"{{"a": {{"b": "{VALUE}"}}, "c": "{SHORT}"}}"#),
+        format!(r#"{{"a": "{VALUE}", "bad": [1]}}"#),
+        format!(r#"{{"a": "{VALUE}""#),
+        format!(r#"{{"a": {VALUE}}}"#),
+        format!(r#"{{"installed": {{"client_secret": "{VALUE}"}}}}"#),
+    ];
+    for (i, text) in files.iter().enumerate() {
+        let path = env_file(&h, &format!("f{i}.json"), text);
+        let outcome = run(&h, "", &["import", &path]).await;
+        let err = outcome.err.clone().unwrap_or_default();
+        let streams = [
+            ("stdout", &outcome.out),
+            ("stderr", &err),
+            ("logs", &outcome.logs),
+        ];
+        for (what, shown) in streams {
+            for value in [VALUE, SHORT, HEAD, END] {
+                assert!(
+                    !shown.contains(value),
+                    "file {i}: {what} carries a value: {shown}"
+                );
+            }
+        }
+    }
+}
+
+// #10524: `unlock` and `lock`; they share this harness.
+#[path = "unlock_tests.rs"]
+mod unlock_tests;

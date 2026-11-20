@@ -1,0 +1,3 @@
+Added
+- Declared demo and POC work ships a smoke run plus the core happy path and records deferred coverage as named `intent(demo):` test intentions; promotion to production converts every intention into a real test. The rule lives in the `tm-workflow` completion standard, with pointers from the PM core, the test ladder, `tm-verification-protocols`, `prototype-then-port` and the output styles (#11489).
+- The demo/POC declaration is recorded on the issue or brief and cited in the PR body. `scripts/check_demo_intentions.sh` fails CI on an `intent(demo):` marker outside the paths in `scripts/demo-intention-paths.txt`, and `scripts/check_ignored_tests.sh` lists Rust intentions without counting them against the ignored-test baseline (#11489).

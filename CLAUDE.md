@@ -78,7 +78,10 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
-`cargo test --workspace` is a publish gate, not inner-loop proof.
+`cargo test --workspace` is a publish gate, not inner-loop proof. Only declared
+demo/POC work may defer tests, as `#[ignore = "intent(demo): …"]` intentions
+that never cover production code or replace a failing test:
+[test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 🔴 **Markdown under `crates/*/src/assets/**` is rung 3, not rung 1.** It is
 `include_str!`-embedded into the binary and asserted on by bundle tests, so a

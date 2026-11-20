@@ -147,15 +147,18 @@ pub enum ErrorKind {
     // #10459 PR1: the next unused value; ONE kind for every mint refusal,
     // so a refusal names no check (the audit record's `reason_arm` does).
     TicketRefused = 38,
-    /// A `secrets.remote.*` call was refused: the peer is not the verified
-    /// gate, or the host or project is not on the account's allowlist.
+    /// A remote-gate call was refused: the host, project or key is not on
+    /// the account's allowlist.
     // #11464: the next unused value; ONE kind, so a refusal names no check.
     RemoteRefused = 39,
+    /// A `secrets.gate` call came from a peer that is not the verified gate.
+    // #11464 D3a: the next unused value; like `BridgeRefused`, names no check.
+    GateRefused = 40,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 40] = [
+    pub(crate) const ALL: [Self; 41] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -196,6 +199,7 @@ impl ErrorKind {
         Self::AgentKeyDenied,
         Self::TicketRefused,
         Self::RemoteRefused,
+        Self::GateRefused,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -247,6 +251,7 @@ impl ErrorKind {
             Self::AgentKeyDenied => "agent_key_denied",
             Self::TicketRefused => "ticket_refused",
             Self::RemoteRefused => "remote_refused",
+            Self::GateRefused => "gate_refused",
             Self::Internal => "internal",
         }
     }
@@ -350,7 +355,11 @@ impl ErrorKind {
             }
             // #11464: names no check, as `TicketRefused` names none.
             Self::RemoteRefused => {
-                "a remote-gate call was refused: the caller is not the verified gate, or the host or project is not allowed"
+                "a remote-gate call was refused: the host, project or key is not allowed"
+            }
+            // #11464 D3a: names no check, as `BridgeRefused` names none.
+            Self::GateRefused => {
+                "a gate call is accepted only from the verified remote gate, running below sshd and outside any Claude Code process tree; this caller was not verified"
             }
             Self::Internal => "internal error",
         }
@@ -414,6 +423,8 @@ impl ErrorKind {
             Self::TicketRefused => -32086,
             // #11464: the next unused code.
             Self::RemoteRefused => -32087,
+            // #11464 D3a: the next unused code.
+            Self::GateRefused => -32088,
         }
     }
 

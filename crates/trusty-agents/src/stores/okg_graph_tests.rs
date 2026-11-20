@@ -26,7 +26,7 @@ fn fixture_tree() -> tempfile::TempDir {
         tmp.path(),
         "people",
         "bob",
-        "---\ntype: Person\ntitle: Bob\ndescription: The owner.\nworks_at: \"[[Duetto]]\"\nknows:\n  - \"[[Ada]]\"\n---\n\nBody line.\n",
+        "---\ntype: Person\ntitle: Bob\ndescription: The owner.\nworks_at: \"[[Globex]]\"\nknows:\n  - \"[[Ada]]\"\n---\n\nBody line.\n",
     );
     entity(
         tmp.path(),
@@ -37,8 +37,8 @@ fn fixture_tree() -> tempfile::TempDir {
     entity(
         tmp.path(),
         "organizations",
-        "duetto",
-        "---\ntype: Organization\ntitle: Duetto\ndescription: A company with a [[Bob]] mention.\n---\n",
+        "globex",
+        "---\ntype: Organization\ntitle: Globex\ndescription: A company with a [[Bob]] mention.\n---\n",
     );
     tmp
 }
@@ -61,7 +61,7 @@ fn reads_triples_and_definitions_from_a_tree() {
             .iter()
             .map(|t| (t.subject.as_str(), t.predicate.as_str(), t.object.as_str()))
             .collect::<Vec<_>>(),
-        vec![("Bob", "knows", "Ada"), ("Bob", "works_at", "Duetto"),],
+        vec![("Bob", "knows", "Ada"), ("Bob", "works_at", "Globex"),],
         "triples: {:?}",
         graph.triples
     );
@@ -76,7 +76,7 @@ fn reads_triples_and_definitions_from_a_tree() {
         defs,
         vec![
             (
-                "Duetto",
+                "Globex",
                 Some("Organization"),
                 Some("A company with a [[Bob]] mention.")
             ),
@@ -89,7 +89,7 @@ fn reads_triples_and_definitions_from_a_tree() {
 
 /// Why: OKF writes an edge as a snake_case key holding `[[wiki-links]]`, but a
 /// `description` is prose that may mention an entity. Treating every key with a
-/// link as an edge would mint `Duetto description Bob` out of that sentence.
+/// link as an edge would mint `Globex description Bob` out of that sentence.
 /// What: the fixture's organization carries a `[[Bob]]` inside `description`
 /// and must contribute no triple.
 /// Test: itself.
@@ -100,7 +100,7 @@ fn envelope_fields_are_not_edges() {
         !graph
             .triples
             .iter()
-            .any(|t| t.predicate == "description" || t.subject == "Duetto"),
+            .any(|t| t.predicate == "description" || t.subject == "Globex"),
         "an envelope field produced an edge: {:?}",
         graph.triples
     );
@@ -124,7 +124,7 @@ fn subject_counts_include_edgeless_entities() {
         vec![
             ("Ada".to_string(), 0),
             ("Bob".to_string(), 2),
-            ("Duetto".to_string(), 0),
+            ("Globex".to_string(), 0),
         ]
     );
 }

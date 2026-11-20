@@ -1,0 +1,410 @@
+[
+  {
+    "file": "00-enroll-host-refused.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-host-refused"
+  },
+  {
+    "file": "01-enroll-host-refused-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-host-refused-reply"
+  },
+  {
+    "file": "02-enroll-pair.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-pair"
+  },
+  {
+    "file": "03-enroll-pair-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-pair-reply"
+  },
+  {
+    "file": "04-enroll-pair-repeat.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-pair-repeat"
+  },
+  {
+    "file": "05-enroll-pair-repeat-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-pair-repeat-reply"
+  },
+  {
+    "file": "06-enroll-pair-beta.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-pair-beta"
+  },
+  {
+    "file": "07-enroll-pair-beta-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-pair-beta-reply"
+  },
+  {
+    "file": "08-enroll-conflict-key.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-conflict-key"
+  },
+  {
+    "file": "09-enroll-conflict-key-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-conflict-key-reply"
+  },
+  {
+    "file": "10-enroll-invalid.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-invalid"
+  },
+  {
+    "file": "11-enroll-invalid-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-invalid-reply"
+  },
+  {
+    "file": "12-enroll-removed-op.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-removed-op"
+  },
+  {
+    "file": "13-enroll-removed-op-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-removed-op-reply"
+  },
+  {
+    "file": "14-enroll-unpair-bad.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-unpair-bad"
+  },
+  {
+    "file": "15-enroll-unpair-bad-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-unpair-bad-reply"
+  },
+  {
+    "file": "16-hello-profile-mismatch.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "hello-profile-mismatch"
+  },
+  {
+    "file": "17-hello-profile-mismatch-reply.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "hello-profile-mismatch-reply"
+  },
+  {
+    "file": "18-hello-invalid-nonce.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "hello-invalid-nonce"
+  },
+  {
+    "file": "19-hello-invalid-nonce-reply.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "hello-invalid-nonce-reply"
+  },
+  {
+    "file": "20-hello-extra-field.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "hello-extra-field"
+  },
+  {
+    "file": "21-hello-extra-field-reply.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "hello-extra-field-reply"
+  },
+  {
+    "file": "22-hello-proof-mismatch.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "hello-proof-mismatch"
+  },
+  {
+    "file": "23-hello-proof-mismatch-challenge.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "hello-proof-mismatch-challenge"
+  },
+  {
+    "file": "24-proof-mismatch.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "proof-mismatch"
+  },
+  {
+    "file": "25-proof-mismatch-reply.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "proof-mismatch-reply"
+  },
+  {
+    "file": "26-agent-attach-not-connected.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-attach-not-connected"
+  },
+  {
+    "file": "27-agent-attach-not-connected-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-attach-not-connected-reply"
+  },
+  {
+    "file": "28-pair-hello.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "pair-hello"
+  },
+  {
+    "file": "29-pair-challenge.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "pair-challenge"
+  },
+  {
+    "file": "30-pair-proof.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "pair-proof"
+  },
+  {
+    "file": "31-pair-ack.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "pair-ack"
+  },
+  {
+    "file": "32-popup-connect.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "popup-connect"
+  },
+  {
+    "file": "33-popup-connect-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "popup-connect-reply"
+  },
+  {
+    "file": "34-popup-grants.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "popup-grants"
+  },
+  {
+    "file": "35-popup-grants-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "popup-grants-reply"
+  },
+  {
+    "file": "36-agent-profiles.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-profiles"
+  },
+  {
+    "file": "37-agent-profiles-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-profiles-reply"
+  },
+  {
+    "file": "38-agent-attach-extra.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-attach-extra"
+  },
+  {
+    "file": "39-agent-attach-extra-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-attach-extra-reply"
+  },
+  {
+    "file": "40-agent-attach.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-attach"
+  },
+  {
+    "file": "41-agent-attach-ack.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-attach-ack"
+  },
+  {
+    "file": "42-agent-tabs.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-tabs"
+  },
+  {
+    "file": "43-worker-command-0.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "worker-command-0"
+  },
+  {
+    "file": "44-worker-reply-0.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "worker-reply-0"
+  },
+  {
+    "file": "45-agent-tabs-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-tabs-reply"
+  },
+  {
+    "file": "46-agent-select-no-request-id.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-select-no-request-id"
+  },
+  {
+    "file": "47-worker-command-1.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "worker-command-1"
+  },
+  {
+    "file": "48-worker-reply-1.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "worker-reply-1"
+  },
+  {
+    "file": "49-agent-select-no-request-id-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-select-no-request-id-reply"
+  },
+  {
+    "file": "50-agent-unknown-op.bin",
+    "socket": "agent.sock",
+    "direction": "client_to_broker",
+    "message": "agent-unknown-op"
+  },
+  {
+    "file": "51-agent-unknown-op-reply.bin",
+    "socket": "agent.sock",
+    "direction": "broker_to_client",
+    "message": "agent-unknown-op-reply"
+  },
+  {
+    "file": "52-operator-grants.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-grants"
+  },
+  {
+    "file": "53-operator-grants-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-grants-reply"
+  },
+  {
+    "file": "54-operator-pairings.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-pairings"
+  },
+  {
+    "file": "55-operator-pairings-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-pairings-reply"
+  },
+  {
+    "file": "56-operator-revoke-unknown.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-revoke-unknown"
+  },
+  {
+    "file": "57-operator-revoke-unknown-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-revoke-unknown-reply"
+  },
+  {
+    "file": "58-operator-unpair-unknown.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-unpair-unknown"
+  },
+  {
+    "file": "59-operator-unpair-unknown-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-unpair-unknown-reply"
+  },
+  {
+    "file": "60-operator-bad-op.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-bad-op"
+  },
+  {
+    "file": "61-operator-bad-op-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-bad-op-reply"
+  },
+  {
+    "file": "62-operator-revoke-grants.bin",
+    "socket": "operator.sock",
+    "direction": "client_to_broker",
+    "message": "operator-revoke-grants"
+  },
+  {
+    "file": "63-operator-revoke-grants-reply.bin",
+    "socket": "operator.sock",
+    "direction": "broker_to_client",
+    "message": "operator-revoke-grants-reply"
+  },
+  {
+    "file": "64-worker-command-2.bin",
+    "socket": "service.sock",
+    "direction": "broker_to_client",
+    "message": "worker-command-2"
+  },
+  {
+    "file": "65-worker-reply-2.bin",
+    "socket": "service.sock",
+    "direction": "client_to_broker",
+    "message": "worker-reply-2"
+  },
+  {
+    "file": "66-enroll-pair-replace.bin",
+    "socket": "enrollment.sock",
+    "direction": "client_to_broker",
+    "message": "enroll-pair-replace"
+  },
+  {
+    "file": "67-enroll-pair-replace-reply.bin",
+    "socket": "enrollment.sock",
+    "direction": "broker_to_client",
+    "message": "enroll-pair-replace-reply"
+  }
+]

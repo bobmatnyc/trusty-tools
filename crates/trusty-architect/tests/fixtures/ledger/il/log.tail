@@ -1,0 +1,3 @@
+{"t":"2026-10-21T10:00Z","id":"xa-session","ev":"update","note":"lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempo"}
+{"t":"2026-10-21T10:00Z","id":"xa-A01","ev":"done","note":"lorem ipsum dolor sit amet elit sed tempor über magna lorem ipsum dolor sit amet elit sed tempor über magna lorem ips"}
+{"ts":"2026-10-21T10:00Z","kind":"act","session":"pm-small","who":"pm-small","what":"merged the parser","owner_words":"","evidence":"PR #1","goal":"xa-G01","refs":"crates/trusty-architect"}

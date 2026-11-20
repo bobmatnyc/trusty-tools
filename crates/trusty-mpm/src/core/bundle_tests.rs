@@ -2203,7 +2203,9 @@ const OVER_BUDGET_BODY_BASELINES: &[(&str, usize, &str)] = &[
     ("dotnet-engineer", 43_500, "#7825"),
     ("elixir-engineer", 44_000, "#7825"),
     // #8021: ticketing and version-control raised by their measured overage.
-    ("ticketing", 47_229, "#7727"),
+    // #11469: +160 for the acceptance-criteria bullet and close-note line, kept
+    // resident because the ticketing agent has no `Skill` tool.
+    ("ticketing", 47_389, "#7727"),
     ("version-control", 47_724, "#7727"),
 ];
 

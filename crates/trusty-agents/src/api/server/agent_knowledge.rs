@@ -147,7 +147,7 @@ pub(super) async fn knowledge_at(
     // bound as a curated store (`attached_indexes_deduped`, shared with
     // `/stores` so the two routes can never disagree about the id set).
     // Without this, an agent like cto-assistant (one curated `[[stores]]`
-    // binding plus `search_indexes = ["cto-duetto"]` — a 200,090-chunk corpus
+    // binding plus `search_indexes = ["cto-acme"]` — a 200,090-chunk corpus
     // its `vector_search` can genuinely query) would have the overwhelming
     // majority of its real retrievable knowledge silently missing from the
     // Knowledge pane, with no `issues` entry to say so.
