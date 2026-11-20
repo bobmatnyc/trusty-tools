@@ -6,6 +6,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.5] — 2026-11-20
+
+### Documentation
+
+- Test data in the search monitor TUI tests uses the neutral `dev-acme` project name instead of a real organisation's ([#11519](https://github.com/bobmatnyc/trusty-tools/issues/11519)).
+
 ## [0.70.4] — 2026-11-19
 
 ### Documentation
