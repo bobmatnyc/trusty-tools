@@ -28,13 +28,13 @@ fn token() -> String {
 #[test]
 fn accounts_table_parses_names_scope_and_verify() {
     let AccountMap::Ok(map) = map(
-        "[accounts.neon]\naccount = \"robert.matsuoka\"\nscope = \"Duetto-CTO\"\nverify = \"neonctl me\"\n",
+        "[accounts.neon]\naccount = \"robert.matsuoka\"\nscope = \"Acme-CTO\"\nverify = \"neonctl me\"\n",
     ) else {
         panic!("expected a valid map");
     };
     let entry = &map["neon"];
     assert_eq!(entry.account, "robert.matsuoka");
-    assert_eq!(entry.scope.as_deref(), Some("Duetto-CTO"));
+    assert_eq!(entry.scope.as_deref(), Some("Acme-CTO"));
     assert_eq!(entry.verify.as_deref(), Some("neonctl me"));
 }
 

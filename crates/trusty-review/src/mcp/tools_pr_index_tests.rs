@@ -112,7 +112,7 @@ async fn run_captured(state: &AppState, owner: &str, repo: &str) -> (Option<Seen
 #[tokio::test]
 async fn two_repos_resolve_to_their_own_indexes_in_one_server() {
     let state = state_with(Some(two_repo_registry()), true);
-    let ci = resolve_pr_index(&state, "DuettoResearch", "code-intelligence").await;
+    let ci = resolve_pr_index(&state, "Acme-Labs", "code-intelligence").await;
     assert_eq!(
         ci.ok(),
         Some(PrIndex::Resolved("code-intelligence-9f1c2e3a".into()))
@@ -138,7 +138,7 @@ async fn resolved_config_reaches_the_review_for_each_repo() {
     let mut state = state_with(Some(two_repo_registry()), true);
     state.config.github_token = "test-token-8649".into();
 
-    let (ci, _) = run_captured(&state, "duettoresearch", "code-intelligence").await;
+    let (ci, _) = run_captured(&state, "acme-labs", "code-intelligence").await;
     let (tt, _) = run_captured(&state, "bobmatnyc", "trusty-tools").await;
     // SAFETY: restore env before any assertion can unwind the test.
     unsafe { std::env::remove_var("TRUSTY_REVIEW_AUTH_MODE") };
@@ -410,7 +410,7 @@ async fn owner_named_unknown_owner_sentinel_is_invalid() {
 #[test]
 fn pinned_index_wins_only_when_it_belongs_to_the_repo() {
     let reg = two_repo_registry();
-    let key = "duettoresearch/code-intelligence";
+    let key = "acme-labs/code-intelligence";
     let pinned = select_repo_index(
         &reg,
         key,

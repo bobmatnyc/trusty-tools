@@ -719,7 +719,7 @@ fn an_unproven_tm_account_dir_pin_fails_closed() {
 fn operator_dir_pin() -> PinnedGhIdentity {
     PinnedGhIdentity {
         account: Some("octo-pinned".into()),
-        config_dir: Some(PathBuf::from("/home/me/.config/gh-duetto")),
+        config_dir: Some(PathBuf::from("/home/me/.config/gh-acme-labs")),
         ..Default::default()
     }
 }
@@ -735,7 +735,7 @@ fn an_operator_config_dir_pin_is_proven_and_injected() {
     assert_eq!(value_of(&env.vars, "GH_TOKEN").as_deref(), Some("tok-p"));
     assert_eq!(
         value_of(&env.vars, "GH_CONFIG_DIR").as_deref(),
-        Some("/home/me/.config/gh-duetto")
+        Some("/home/me/.config/gh-acme-labs")
     );
     assert_eq!(
         value_of(&env.vars, "GIT_CONFIG_VALUE_1").as_deref(),
@@ -831,7 +831,7 @@ fn a_shimmed_config_dir_pin_injects_no_token_and_pins_git_to_the_shim() {
     }
     assert_eq!(
         value_of(&env.vars, "GH_CONFIG_DIR").as_deref(),
-        Some("/home/me/.config/gh-duetto")
+        Some("/home/me/.config/gh-acme-labs")
     );
     assert_eq!(
         value_of(&env.vars, "GIT_CONFIG_VALUE_1").as_deref(),
