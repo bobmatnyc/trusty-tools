@@ -28,6 +28,7 @@ fn keychain_capabilities_are_read_write_only() {
     assert_eq!(KeychainBackend::new().id().as_str(), "keychain");
 }
 
+#[cfg(target_os = "macos")]
 fn item() -> ItemId {
     ItemId::new("trusty/acme/web", "API_KEY")
 }
