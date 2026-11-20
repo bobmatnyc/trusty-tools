@@ -132,7 +132,7 @@ pub(crate) fn busy_memory() -> Answer {
 fn target() -> ShutdownTarget {
     ShutdownTarget {
         search_queries: vec!["acme/widget".into()],
-        palace: Ok("acme-widget".into()),
+        palace: Ok(Some("acme-widget".into())),
     }
 }
 
@@ -308,7 +308,12 @@ async fn a_daemon_not_running_holds_nothing_and_an_unresolved_target_fails() {
         palace: Err("could not resolve the palace: bad pin".into()),
     };
     let report = rig.capability().shut_down(&unresolved).await;
-    assert_eq!(report.still_loaded().len(), 2, "{report:?}");
+    // #11551: no queries is NotLoaded; a resolve error on a checkout stays Failed.
+    assert!(
+        matches!(report.search, ShutdownState::NotLoaded { .. }),
+        "{report:?}"
+    );
+    assert_eq!(report.still_loaded().len(), 1, "{report:?}");
     assert!(
         rig.methods().is_empty(),
         "nothing is asked without a target"
@@ -359,7 +364,8 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
         by_path.search_queries,
         vec!["/nonexistent/widget".to_string()]
     );
-    assert!(by_key.palace.is_err(), "no checkout, no palace");
+    // #11551: no checkout is "no palace loaded", not a resolve failure.
+    assert_eq!(by_key.palace, Ok(None), "no checkout, no palace");
 }
 
 /// A trusty-search whose resolve answers only `path`, and misses all else.
