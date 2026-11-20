@@ -17,6 +17,7 @@ use trusty_architect::serve::{
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type Seen = Mutex<Vec<(Trigger, Option<String>)>>;
 
 /// A fake tmux: logs every argv to `argv.log`; `list-panes` prints the
 /// `panes` file, or fails with a `noserver` file; anything else exits 1.
@@ -67,10 +68,10 @@ fn tmux_activity_change_is_an_event() -> TestResult {
 fn run_with(
     files: Option<FileWatch>,
     tmux: Option<TmuxActivity>,
-    act: impl FnOnce(&Mutex<Vec<(Trigger, Option<String>)>>),
+    act: impl FnOnce(&Seen),
 ) -> Vec<(Trigger, Option<String>)> {
     let stop = AtomicBool::new(false);
-    let seen: Arc<Mutex<Vec<(Trigger, Option<String>)>>> = Arc::default();
+    let seen: Arc<Seen> = Arc::default();
     std::thread::scope(|s| {
         let seen2 = Arc::clone(&seen);
         let stop = &stop;
@@ -99,7 +100,7 @@ fn run_with(
     seen.lock().map(|v| v.clone()).unwrap_or_default()
 }
 
-fn wait_for(seen: &Mutex<Vec<(Trigger, Option<String>)>>, n: usize) {
+fn wait_for(seen: &Seen, n: usize) {
     let end = Instant::now() + Duration::from_secs(3);
     while Instant::now() < end && seen.lock().is_ok_and(|v| v.len() < n) {
         std::thread::sleep(Duration::from_millis(10));

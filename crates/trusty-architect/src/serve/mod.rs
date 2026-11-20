@@ -344,11 +344,8 @@ impl<'a> ServeLoop<'a> {
                 changed |= c;
                 self.recovered(faults, TMUX_FAULT);
             }
-            Some(Err(e)) => {
-                if self.fault(faults, TMUX_FAULT, &format!("list-panes: {e}")) {
-                    changed = true;
-                }
-            }
+            // A new fault is due a cycle, so its alert goes out promptly.
+            Some(Err(e)) => changed |= self.fault(faults, TMUX_FAULT, &format!("list-panes: {e}")),
             None => {}
         }
         changed
