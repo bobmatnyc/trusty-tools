@@ -19,9 +19,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Limit: a restart through `http_addr` of an HTTP-only console whose socket bind keeps failing stops that console; the new child then fails readiness after 60 s, the console stays down, and `restart` exits non-zero (`NotReady`).
 - Limit: a verb-started console runs with cwd `/`, so a daemon its bridges start loads only the user-level `~/.env.local`, not the project-level one a shell-started console finds from its cwd.
 
+### Fixed
+
+- The console's upstream error table lists `gate_refused` (a `secrets.gate` call from a peer that is not the remote gate) and `remote_refused` (a refused `secrets.gate` call), the trusty-secrets kinds it was missing, so the table stays closed over the server's kinds. The page's kind text lists `gate_refused` too (#11464).
+
 ### Changed
 
 - The Linux lifecycle stop and restart tests scan an injected process table of their own processes, so a host trusty-console no longer changes their result (#11085). `stop` and `restart` behaviour is unchanged.
+- Test fixtures use neutral placeholder org names.
 
 ### Security
 
