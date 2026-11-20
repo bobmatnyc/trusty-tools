@@ -84,7 +84,7 @@ pub use host::{
     DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts, parse_vm_stat_swaps,
 };
 pub use inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
-pub use listing::{Listing, Pane, capture, list_panes, parse_list_panes};
+pub use listing::{LIST_FORMAT, Listing, Pane, capture, list_panes, parse_list_panes};
 pub use lock::PollLock;
 pub use messages::{MessageSink, NoMessages, PaneMessage, PaneMessageKind};
 pub use run::{CycleSummary, Phase, Runner, parse_interval};

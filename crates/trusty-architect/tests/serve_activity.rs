@@ -19,12 +19,14 @@ use trusty_architect::serve::{
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type Seen = Mutex<Vec<(Trigger, Option<String>)>>;
 
-/// A fake tmux: logs every argv to `argv.log`; `list-panes` prints the
-/// `panes` file, or fails with a `noserver` file; anything else exits 1.
+/// A fake tmux: drops SystemTmux's leading `-u` (#11543), logs every argv to
+/// `argv.log`; `list-panes` prints the `panes` file, or fails with a
+/// `noserver` file; anything else exits 1.
 fn fake_tmux(dir: &Path) -> TestResult<SystemTmux> {
     let d = dir.display();
     let script = format!(
         "#!/bin/sh\n\
+         [ \"$1\" = -u ] && shift\n\
          echo \"$*\" >> {d}/argv.log\n\
          case \"$1\" in\n\
          list-panes) [ -f {d}/noserver ] && {{ echo 'no server running' >&2; exit 1; }}\n\
