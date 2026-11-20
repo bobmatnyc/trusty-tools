@@ -36,9 +36,12 @@ unsafe impl GlobalAlloc for MarkerAlloc {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if layout.align() == 1 && (MARKER.len()..=256).contains(&layout.size()) {
+        // #10524: a grant's `LockedBuf` is one page-aligned run of pages.
+        let page_run = layout.align() >= 4096 && layout.size() <= 1 << 16;
+        if page_run || (layout.align() == 1 && (MARKER.len()..=256).contains(&layout.size())) {
             // SAFETY: `ptr` is a live block of `layout.size()` bytes, zeroed
-            // at allocation, and align 1 means it holds no padding.
+            // at allocation; align 1 means it holds no padding, and a page
+            // run is a byte buffer.
             let bytes = unsafe { std::slice::from_raw_parts(ptr, layout.size()) };
             if bytes.windows(MARKER.len()).any(|w| w == MARKER) {
                 FREED_WITH_MARKER.fetch_add(1, Ordering::SeqCst);
@@ -139,4 +142,58 @@ fn cache_zeroizes_every_value_it_drops() {
 fn cached_value_type_zeroizes_on_drop() {
     fn assert_zeroize_on_drop<T: zeroize::ZeroizeOnDrop>() {}
     assert_zeroize_on_drop::<Held>();
+}
+
+/// Why: #10524 AC2 — a value the unlock grant holds is zeroed when it
+/// leaves: by eviction, by lock, by expiry, and with the whole cache.
+/// Red while `LockedBuf`'s drop skips the zeroing.
+/// Test: itself.
+#[test]
+fn grant_cache_zeroizes_on_drop() {
+    use super::super::grant_cache::DropReason;
+    let secs = Arc::new(AtomicU64::new(0));
+    let (a, b) = (Arc::clone(&secs), Arc::clone(&secs));
+    let (instant, wall) = (Instant::now(), SystemTime::now());
+    let cache = SecretCache::with_clocks(
+        Duration::from_secs(600),
+        Arc::new(move || instant + Duration::from_secs(a.load(Ordering::SeqCst))),
+        Arc::new(move || wall + Duration::from_secs(b.load(Ordering::SeqCst))),
+    );
+    let kc = BackendId::keychain();
+    let web = VaultName::new("trusty/acme/web").unwrap();
+    let key = |name: &str| SecretKey::new(name).unwrap();
+    let freed = || FREED_WITH_MARKER.load(Ordering::SeqCst);
+    let ttl = Duration::from_secs(60);
+    let alive = || Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fill = |cache: &SecretCache, name: &str| {
+        forget(cache.read_through(&kc, None, &web, &key(name), || marked(name)));
+    };
+
+    cache.grant().open(ttl, alive());
+    fill(&cache, "EVICTED");
+    assert_eq!(cache.grant().count(), 1, "the grant holds a value to drop");
+    cache.evict(&web, &key("EVICTED"));
+    fill(&cache, "LOCKED");
+    cache.grant().close(DropReason::Revoked, None);
+    assert_eq!(
+        freed(),
+        0,
+        "an evicted or locked grant value was freed unzeroed"
+    );
+
+    cache.grant().open(ttl, alive());
+    fill(&cache, "EXPIRED");
+    secs.store(60, Ordering::SeqCst);
+    cache.grant().check();
+    assert_eq!(freed(), 0, "an expired grant value was freed unzeroed");
+
+    cache.grant().open(ttl, alive());
+    fill(&cache, "HELD");
+    assert_eq!(cache.grant().count(), 1);
+    drop(cache);
+    assert_eq!(
+        freed(),
+        0,
+        "a grant value held at cache drop was freed unzeroed"
+    );
 }

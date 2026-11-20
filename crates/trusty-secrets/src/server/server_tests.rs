@@ -81,6 +81,7 @@ fn fixture_with_idle(idle_timeout: Duration) -> Fixture {
         machine_config: tmp.path().join("machine.yaml"),
         idle_timeout,
         cache_max_age: DEFAULT_CACHE_MAX_AGE,
+        unlock_ttl: crate::server::DEFAULT_UNLOCK_TTL,
         // #4567: the audit log stays in the temp dir too.
         audit_log: tmp.path().join("audit").join("audit.jsonl"),
         audit_max_bytes: DEFAULT_AUDIT_MAX_BYTES,

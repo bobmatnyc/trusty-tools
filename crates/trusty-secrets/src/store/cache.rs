@@ -19,7 +19,8 @@
 //! lock or unknown settings fail closed: every lookup misses and nothing is
 //! stored. `Debug` shows the entry count and the max age only. The
 //! cache is not a gate: [`super::SecretStore`] consults it only after the
-//! grant, ancestry, agents-flag and audit checks have passed.
+//! grant, ancestry, agents-flag and audit checks have passed. #10524: while
+//! an unlock grant is live, [`GrantCache`] answers first, Keychain included.
 //! Test: the tests at the end of this file, and `session_cache_tests.rs`
 //! beside `server_tests.rs`.
 
@@ -33,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime};
 use zeroize::Zeroizing;
 
 use super::config::{self, CliSettings};
+use super::grant_cache::{GrantCache, Lookup};
 use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 
 /// The CLI settings a backend was opened under: its section of the account
@@ -57,6 +59,18 @@ pub(crate) struct OpenedUnder {
 }
 
 impl OpenedUnder {
+    /// Settings naming 1Password account `account`, with no file; tests only.
+    #[cfg(test)]
+    pub(crate) fn for_account(account: &str) -> Self {
+        Self {
+            settings: Some(CliSettings {
+                account: Some(account.to_owned()),
+                ..CliSettings::default()
+            }),
+            file: None,
+        }
+    }
+
     /// `backend`'s section of the machine config at `path`, with the file's
     /// fingerprint.
     ///
@@ -223,6 +237,8 @@ pub(crate) struct SecretCache {
     max_age: Duration,
     now: CacheClock,
     wall: WallClock,
+    // #10524: the unlock grant's values; consulted before the session map.
+    grant: GrantCache,
 }
 
 impl fmt::Debug for SecretCache {
@@ -231,6 +247,7 @@ impl fmt::Debug for SecretCache {
         f.debug_struct("SecretCache")
             .field("entries", &self.count())
             .field("max_age", &self.max_age)
+            .field("grant", &self.grant)
             .finish()
     }
 }
@@ -246,9 +263,15 @@ impl SecretCache {
         Self {
             entries: Mutex::default(),
             max_age,
+            grant: GrantCache::new(Arc::clone(&now), Arc::clone(&wall)),
             now,
             wall,
         }
+    }
+
+    /// The unlock grant's window and values (#10524).
+    pub(crate) fn grant(&self) -> &GrantCache {
+        &self.grant
     }
 
     /// Whether values read from `backend` are cached: `onepassword` and
@@ -296,6 +319,18 @@ impl SecretCache {
         key: &SecretKey,
         read: impl FnOnce() -> Result<Option<SecretValue>, SecretsError>,
     ) -> Result<Option<SecretValue>, SecretsError> {
+        // #10524: under a live unlock grant the grant answers, Keychain too.
+        match self.grant.lookup(backend, under, vault, key) {
+            Lookup::Hit(value) => return Ok(Some(value)),
+            Lookup::Miss(epoch) => {
+                let value = read()?;
+                if let Some(value) = &value {
+                    self.grant.store(backend, under, vault, key, epoch, value);
+                }
+                return Ok(value);
+            }
+            Lookup::Off => {}
+        }
         // #7520 M1: settings that could not be read or compared bypass it.
         let Some(under) = under.filter(|_| Self::caches(backend)) else {
             return read();
@@ -345,6 +380,8 @@ impl SecretCache {
     /// Test: `set_delete_copy_evict_cached_value`,
     /// `cache_read_started_before_an_eviction_is_not_stored`.
     pub(crate) fn evict(&self, vault: &VaultName, key: &SecretKey) {
+        // #10524: a write must not leave the old value in the grant either.
+        self.grant.evict(vault, key);
         if let Some(mut entries) = self.lock() {
             entries.epoch = entries.epoch.wrapping_add(1);
             entries
@@ -480,7 +517,7 @@ mod tests {
         cache.evict(&web, &name);
         assert_eq!(
             format!("{cache:?}"),
-            "SecretCache { entries: 0, max_age: 600s }"
+            "SecretCache { entries: 0, max_age: 600s, grant: GrantCache { live: false, values: 0 } }"
         );
     }
 
