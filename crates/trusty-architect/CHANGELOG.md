@@ -6,6 +6,33 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.4.0] — 2026-11-20
+
+### Added
+
+- `poller::routines`: a `goals_dir` routine (goal_reconcile) raises `routine_stale` per active goal doc whose `reconciled_at` is missing, unreadable or older than the routine's stale threshold; an unreadable goal doc or folder is flagged too. A routine can set `stale_after_s` to override the default of twice `interval_s`; unknown keys are refused (#9779).
+- Poller sensors from the live `fleet-poll.py`: queued `ctx-cycle-alerts.jsonl` failures (`ctxcycle`), `selftest-state.json` failures (`selftest_fail`), the hourly `data.kalloc.1024` zone watch (`host_zone`), and the task-complete refresh (`ctx` fingerprint `complete`) for PMs and the Architect (#9779).
+- The wake line carries a one-line digest of the woken alerts and held PM messages (capped at 400 characters), the woken alerts are kept in `poll-state.json` until a wake is sent, a fresh `inbox/wake-suppress` marker holds the wake, and failed wakes are recorded in `pm-wake-alert.json` (#9779).
+- The poller starts `self-clear.sh` at 50% of its own context when idle, and runs the prototype's Python steps on its cadence: `board_feed.py`, `share_sync.py poll`, `questions_rc.py` each cycle; `task_ingest.py --sweep`, `task_progress.py`, `il_dashboard_sync.py` every 60 s; `track_gh.py` and `runtime_selftest.py` every 5 min. A dry or shadow run starts none of them (#9779).
+- `serve` and `verbs::serve`: the poll cycle as an event-driven service. An inbox write, a hot transcript append (mtime polling once a second) or a change in tmux pane activity (one `tmux list-panes -a` read per second; no tmux client is attached, in any mode including `--shadow`) starts the same `Runner` cycle after a 2 s debounce, at most once per 15 s (`SERVE_MIN_EVENT_GAP`); a 60 s tick still runs a cycle when nothing changed. The ledger shim runs at most once per 60 s in `poll` and `serve`. The service holds `poll.lock` (none with `--shadow`). A watcher that fails, a failed tmux read, or a panicking cycle is logged and raised as a `serve` alert while the tick keeps cycling; SIGTERM/SIGINT exit after the running cycle (#9779).
+- `poller::slack` and `poller::push`: a failure the Architect has not cleared in 30 min is sent to the owner as a Slack DM from the MPM app bot when `ARCHITECT_PUSH_CHANNEL=slack` and `ARCHITECT_PUSH_SLACK_USER` names the recipient. The token is read from `SLACK_MPM_BOT_OAUTH_TOKEN` at send time and handed to curl on stdin; it never appears in argv, logs or alerts. One push per incident; a failed send (missing token, timeout, HTTP error, Slack `ok: false`, unknown channel, no recipient) is a `push_failed` alert and is retried no sooner than 30 min. Shadow and dry runs log "would push" and send nothing. Off by default (#9779, D5t).
+- `poller::watchdog`: the Architect watchdog ported from `architect-watchdog.py` (dead, frozen, silent, ok; one relaunch per 30 min through `session-relaunch.sh --rc`, given up after two failures). It runs every cycle of `tm architect poll` (#9779).
+- `poller::routines`: the D5r check raises `routine_stale` when a routine listed in `local/routines.json` has not run within twice its interval, and logs a failure left uncleared for 30 min as due a push. Nothing is sent; `ARCHITECT_PUSH_CHANNEL` ships unset (#9779).
+- Shadow run (`Config::shadow`, `PollArgs::shadow`): writes only `inbox/shadow/` (alerts, state seeded from the live state, `shadow.log`), takes no lock, sends no keys, notifies nobody and relaunches nothing (#9779).
+- The poller runs `scripts/fleet-poll-ledger.py` once per cycle (live and shadow, never in a dry run) for the ten ledger-bound steps that stay Python until the ledger port; a missing script, a child that cannot start, a timeout (killed after 240 s), a non-zero exit or unreadable output raises a `ledger_shim` alert in the cycle's failing set.
+
+### Fixed
+
+- `tm architect poll`: a malformed or invalid `local/routines.json` now raises `routine_stale` with fingerprint `config` instead of only logging, so the D5r check cannot switch off silently; a reset non-object `push` state record is logged (#9779).
+- `poller::self_refresh`: a missing window or percent setting, a zero window, unreadable self-ctx tokens, a failed capture or a failed `self-clear.sh` start is now a `self_refresh` alert (one fingerprint per kind) in the cycle's failing set, due a push like any failure; the Architect pane's own capture and self-ctx read failures raise it too (#11541 review, #9779).
+- `tm architect serve`/`poll` find panes when the process has no UTF-8 locale: tmux runs with `-u`, so it no longer rewrites the TAB in `list-panes -F` output to `_`. A `list-panes` row the parser cannot read is kept in `Listing::unreadable` and logged at warn level instead of dropped silently (#11543).
+
+### Changed
+
+- Context bars follow `ctx_bar.py`: PM `ctx` alerts at 31/35% (were 22/25%); the Architect's `self_ctx` threshold is its bar from `thresholds.architect_bar_ctx` in `il-schedule.json`, 35% by default (#9779).
+- The builder band stops on swap activity of 256 pages or more per sample, not on swap left in use; the band detail reads `swap activity N pages` (#9779).
+- No 5-hour `plan-limit` alert; `tm-architect-questions` raises no `idle` alert; the ILIO trial sessions are not watched; `parse_pane` reports `rc_active` (#9779).
+
 ## [0.3.0] — 2026-11-20
 
 ### Added
