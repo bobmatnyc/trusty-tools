@@ -2,7 +2,7 @@
 
 Generated from `Cli::command()` (clap's command-tree introspection) — every `tm <command>` and its nested subcommands, verbatim. Source: `crates/trusty-mpm/src/bin/tm/cli/mod.rs` (top-level `Command` enum) plus one action enum per group under `cli/actions/*.rs`. Regenerate with `tm generate capabilities`.
 
-71 top-level commands.
+72 top-level commands.
 
 - `agent` — Inspect the deployed agent roster's declared skills (DOC-42, issue #2889)
   - `list` — List every deployed agent with its declared skills
@@ -194,6 +194,8 @@ Generated from `Cli::command()` (clap's command-tree introspection) — every `t
 - `restart` — Stop the running daemon and start a fresh one
 - `rm` — Remove a managed alias: deregister and delete its project dir (DOC-24)
 - `run` — Start a session for a GitHub repo (`<owner>/<repo>`) or a managed alias
+- `savings` — Tool-output savings read side (#11033)
+  - `status` — Per-day tool-output tokens seen, compressed and saved, and why the rest was skipped
 - `secrets` — Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`. No verb prints a value
   - `__exec-stub` — The helper `exec` runs as its child; never run by hand
   - `assign` — Copy one key of any trusty vault into a named project's scope

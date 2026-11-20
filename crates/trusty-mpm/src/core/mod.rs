@@ -385,6 +385,8 @@ pub mod savings_opportunity_reason;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
+// #11033: read side for `tm savings status` and the doctor rows/day check.
+pub mod savings_status;
 // #7245: the side files that carry an instruction-compression row from the
 // compiling process to the hook that learns the session id, and that keep the
 // "nothing folded" decline to one warning per project.

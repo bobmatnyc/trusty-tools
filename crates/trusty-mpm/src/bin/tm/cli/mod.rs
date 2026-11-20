@@ -672,6 +672,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DivertAction,
     },
+    /// Tool-output savings read side (#11033).
+    ///
+    /// Why: compress and opportunity rows were written but never shown.
+    /// What: `tm savings status [--by tool|subagent] [--days N] [--json]`.
+    /// Test: `cli_parses_savings_status`.
+    Savings {
+        /// Action to run.
+        #[command(subcommand)]
+        action: SavingsAction,
+    },
     /// Palace access and maintenance without MCP (#4837, #8352).
     ///
     /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the

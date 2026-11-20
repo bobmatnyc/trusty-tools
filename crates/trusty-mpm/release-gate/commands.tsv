@@ -171,6 +171,7 @@ repair deploy	SAFE	$H	repair deploy	-	0	-	~/.claude of temp HOME
 repair push-guard	SAFE	$H	repair push-guard --path $H/proj --dry-run	-	0	-	
 repair session-store	SAFE	$H	repair session-store --path $H/s.json --dry-run	-	1	No such file or directory	pinned 1: no session store at the --path's companion file in this HOME. 
 repair savings-ledger	SAFE	$H	repair savings-ledger --root $H --dry-run	-	0	-	
+savings status	SAFE	$H	savings status --days 2	-	0	UPPER BOUND	reads the usage ledgers only (#11033)
 repair delegation	SANDBOX	$H	repair delegation --list $H	-	0	-	D: lists through the daemon
 auth set-token	SKIP	-	-	-	-	-	stores a token; macOS Keychain, not HOME-scoped
 auth clear-token	SKIP	-	-	-	-	-	Keychain delete
