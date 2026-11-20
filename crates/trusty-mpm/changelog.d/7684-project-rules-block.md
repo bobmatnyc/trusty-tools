@@ -1,0 +1,4 @@
+Added
+- Every `Agent` dispatch now carries a `## Project rules (from CLAUDE.md)` block: the regions of the project CLAUDE.md marked `<!-- tm:agent-rules -->`, or the whole file when it marks none. Every `CLAUDE.md` from the working directory up to the git root contributes, root first, so a subdirectory `CLAUDE.md` adds to the root rules instead of replacing them. Subagents started with `omitClaudeMd: true` keep the project build and test rules (#7684).
+- The project rules block now reaches every tm-managed dispatch that runs hooks: with `[pm_guard] enabled = false` the always-installed `tm hook --egress-guard` appends it instead. `Task` dispatches get it too (#7684).
+- An unreadable `CLAUDE.md` puts a one-line `project rules unavailable: <reason>` notice in the block instead of dropping the rules silently (#7684).
