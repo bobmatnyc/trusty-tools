@@ -462,6 +462,59 @@ fn resolver_session_no_repo_returns_none() {
     );
 }
 
+/// A no-repo session running in `dir` (#11552).
+fn session_in(dir: &std::path::Path) -> SessionRecord {
+    let mut session = session_no_repo();
+    session.cwd = dir.to_path_buf();
+    session
+}
+
+/// #11552: a local-only spawn binds to the path-form project it runs in.
+#[test]
+fn resolver_session_without_repo_url_binds_by_checkout_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let checkout = root.path().join("proj");
+    std::fs::create_dir_all(&checkout).expect("mkdir");
+    let projects = vec![
+        proj("parent", &root.path().to_string_lossy()),
+        proj("proj", &checkout.to_string_lossy()),
+    ];
+    let bound = resolve_session_project(&session_in(&checkout), &projects).expect("bound");
+    assert_eq!(bound.name, "proj", "the parent project must not claim it");
+    let fleet = fleet_by_project(&[session_in(&checkout)], &projects);
+    let proj_group = fleet
+        .iter()
+        .find(|f| f.project.name == "proj")
+        .expect("group");
+    assert_eq!(proj_group.sessions.len(), 1);
+}
+
+/// #11552: a session in `<checkout>/.worktrees/<name>` binds to the checkout.
+#[test]
+fn resolver_session_without_repo_url_binds_from_a_worktree() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let tree = root.path().join(".worktrees").join("x");
+    std::fs::create_dir_all(&tree).expect("mkdir");
+    let projects = vec![proj("proj", &root.path().to_string_lossy())];
+    let mut session = session_no_repo();
+    session.workspace_path = Some(tree);
+    let bound = resolve_session_project(&session, &projects).expect("bound");
+    assert_eq!(bound.name, "proj");
+}
+
+/// #11552: a sibling directory sharing a name prefix never matches.
+#[test]
+fn resolver_session_without_repo_url_ignores_a_sibling_path() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let checkout = root.path().join("proj");
+    let sibling = root.path().join("proj-other");
+    std::fs::create_dir_all(&checkout).expect("mkdir");
+    std::fs::create_dir_all(&sibling).expect("mkdir");
+    let projects = vec![proj("proj", &checkout.to_string_lossy())];
+    assert!(resolve_session_project(&session_in(&sibling), &projects).is_none());
+    assert!(resolve_session_project(&session_in(&sibling.join("sub")), &projects).is_none());
+}
+
 #[test]
 fn resolver_session_unregistered_url_returns_none() {
     let projects = vec![proj("trusty-tools", "https://github.com/org/trusty-tools")];
