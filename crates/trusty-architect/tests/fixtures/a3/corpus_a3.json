@@ -257,6 +257,22 @@
    50,
    0,
    "open"
+  ],
+  [
+   0.0,
+   16,
+   300,
+   70,
+   255,
+   null
+  ],
+  [
+   0.0,
+   16,
+   300,
+   70,
+   256,
+   null
   ]
  ],
  "band_alerts": [
@@ -363,7 +379,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -381,7 +398,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -399,7 +417,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -417,7 +436,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -435,7 +455,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    },
    "load_factor": "2.0"
   },
@@ -454,7 +475,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    },
    "load_factor": "3"
   },
@@ -473,7 +495,8 @@
      95
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -491,7 +514,8 @@
      100
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -509,7 +533,8 @@
      536870912000
     ],
     "swap": 512.4,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -527,7 +552,8 @@
      536870912000
     ],
     "swap": "error",
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -545,7 +571,8 @@
      536870912000
     ],
     "swap": null,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    }
   },
   {
@@ -563,7 +590,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    },
    "state": {
     "band": "hold"
@@ -584,7 +612,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": 60.0
+    "mem": 60.0,
+    "activity": 0
    },
    "state": {
     "band": "hold"
@@ -605,7 +634,8 @@
      536870912000
     ],
     "swap": 0,
-    "mem": null
+    "mem": null,
+    "activity": 0
    },
    "state": {}
   },
@@ -624,7 +654,52 @@
      1073741824
     ],
     "swap": 2048.0,
-    "mem": 10.0
+    "mem": 10.0,
+    "activity": 0
+   },
+   "state": {
+    "band": "open"
+   }
+  },
+  {
+   "case": "idle_swap_keeps_open",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 6800.0,
+    "mem": 60.0,
+    "activity": 255
+   },
+   "state": {
+    "band": "open"
+   }
+  },
+  {
+   "case": "active_swap_stops",
+   "probe": {
+    "loads": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "cores": 16,
+    "disk": [
+     100,
+     1,
+     536870912000
+    ],
+    "swap": 0,
+    "mem": 60.0,
+    "activity": 256
    },
    "state": {
     "band": "open"
@@ -1770,6 +1845,173 @@
      {
       "raise": "refusing to send to %1 (session 'tm-api')"
      }
+    ]
+   ]
+  },
+  {
+   "case": "woken_alerts_ride_the_digest",
+   "steps": [
+    [
+     2,
+     null,
+     false,
+     "skipped: input typed",
+     [
+      {
+       "session": "tm-a",
+       "kind": "idle",
+       "detail": "idle 12 min, no agents running"
+      },
+      {
+       "session": "",
+       "kind": "load",
+       "detail": "load 30.0/31.0/31.0\n(15m)"
+      }
+     ]
+    ],
+    [
+     1,
+     null,
+     false,
+     "sent to %1",
+     [
+      {
+       "session": "tm-b",
+       "kind": "ctx",
+       "detail": "ctx 36%"
+      },
+      {
+       "session": "tm-a",
+       "kind": "idle",
+       "detail": "idle 12 min, no agents running"
+      }
+     ]
+    ],
+    [
+     1,
+     null,
+     false,
+     "skipped: input typed",
+     [
+      {
+       "session": "tm-c",
+       "kind": "exited",
+       "detail": "gone"
+      }
+     ]
+    ]
+   ]
+  },
+  {
+   "case": "held_pm_messages_join_the_digest",
+   "messages": [
+    {
+     "ts": "2025-10-09T08:50:00Z",
+     "session": "tm-a",
+     "kind": "progress",
+     "text": "halfway  through\tthe port"
+    },
+    {
+     "ts": "2025-10-09T08:50:01Z",
+     "session": "tm-a",
+     "kind": "progress",
+     "text": "which branch?"
+    },
+    {
+     "ts": "2025-10-09T08:50:02Z",
+     "session": "tm-b",
+     "kind": "fyi",
+     "text": "Task: ab-T12@1119 | pct: 5\nmerged"
+    },
+    {
+     "ts": "2025-10-09T08:50:03Z",
+     "session": "tm-b",
+     "kind": "ack",
+     "text": "Task: ab-T12@1119 ok?"
+    },
+    {
+     "ts": "2025-10-09T08:50:04Z",
+     "session": "tm-b",
+     "kind": "ack",
+     "text": "see .trusty-mpm/sessions/x/session-20251009-085000.md"
+    },
+    {
+     "ts": "2025-10-09T08:50:05Z",
+     "session": "tm-c",
+     "kind": "done",
+     "text": "finished"
+    },
+    {
+     "ts": "2025-10-09T08:50:06Z",
+     "kind": "fyi",
+     "text": "WHICHEVER works",
+     "urgent": false
+    },
+    {
+     "ts": "2025-10-09T08:50:07Z",
+     "session": "tm-d",
+     "kind": "ack",
+     "text": "Approve-ish not a word? no"
+    },
+    {
+     "ts": "2025-10-09T08:50:08Z",
+     "session": "tm-d",
+     "kind": "fyi",
+     "text": "x",
+     "urgent": true
+    },
+    {
+     "ts": "2025-10-09T08:00:00Z",
+     "session": "tm-old",
+     "kind": "fyi",
+     "text": "before the cutoff"
+    },
+    "not json",
+    {
+     "ts": "bad",
+     "session": "tm-e",
+     "kind": "fyi",
+     "text": "bad ts"
+    },
+    {
+     "ts": "2025-10-09T08:50:09Z",
+     "session": "tm-e",
+     "kind": "ack",
+     "text": "a",
+     "x": 1
+    },
+    {
+     "ts": "2025-10-09T08:50:10Z",
+     "session": "tm-e",
+     "kind": "ack",
+     "text": "b"
+    },
+    {
+     "ts": "2025-10-09T08:50:11Z",
+     "session": "tm-e",
+     "kind": "ack",
+     "text": "c"
+    },
+    {
+     "ts": "2025-10-09T08:50:12Z",
+     "session": "tm-e",
+     "kind": "progress",
+     "text": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+   ],
+   "steps": [
+    [
+     1,
+     null,
+     false,
+     "skipped: input typed",
+     [
+      {
+       "session": "tm-a",
+       "kind": "idle",
+       "detail": "idle"
+      }
+     ]
     ]
    ]
   }

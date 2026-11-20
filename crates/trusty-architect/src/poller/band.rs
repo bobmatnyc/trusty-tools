@@ -82,7 +82,13 @@ impl Band {
     }
 }
 
+/// Swap-in plus swap-out pages per sample that count as active swapping
+/// (i-20261104-07: smaller deltas flapped the band; df-T7i P1b).
+pub const BAND_SWAP_ACTIVE_PAGES: f64 = 256.0;
+
 /// The band for the host inputs. `mem_free` `None` skips the memory test.
+/// `swap_mb` is swap activity in pages (the prototype keeps the old name):
+/// idle swap left over from earlier never stops the band.
 ///
 /// `prev` is the stored band: from `open`, hold only above the rehold line;
 /// from anything else, open only below the open line; with no stored band the
@@ -102,7 +108,7 @@ pub fn builder_band(
     if load15 > cfg.stop_load_factor * cores
         || free_gib < cfg.stop_free_gib
         || low_mem
-        || swap_mb.unwrap_or(0.0) > 0.0
+        || swap_mb.unwrap_or(0.0) >= BAND_SWAP_ACTIVE_PAGES
     {
         return Band::Stop;
     }
@@ -140,7 +146,7 @@ pub fn band_alerts(
     let shown_old = old.as_deref().filter(|o| !o.is_empty()).unwrap_or("none");
     let detail = format!(
         "builder band {shown_old} -> {} (load15 {load15:.1}/{cores} cores, {free_gib:.0} GiB free, \
-         mem {mem} free, swap {:.0})",
+         mem {mem} free, swap activity {:.0} pages)",
         band.as_str(),
         swap.unwrap_or(0.0)
     );

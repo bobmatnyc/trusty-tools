@@ -11,7 +11,9 @@
 //! loop on the real tmux, clock and host: `--once` and `--dry-run` run one
 //! cycle through [`Runner::run_single`], which fails where the script logs
 //! and exits 0. #9167: each submitted wake is recorded through the caller's
-//! [`MessageSink`] (`tm` passes its trusty-events producer).
+//! [`MessageSink`] (`tm` passes its trusty-events producer). #9779: the
+//! watchdog runs every cycle (relaunch via `session-relaunch.sh`), and
+//! `--shadow` redirects every write to `<inbox>/shadow/` and acts on nothing.
 //! Test: `poll_config_reads_the_shipped_names`,
 //! `run_single_fails_closed_when_tmux_cannot_list_panes` (tests/verbs_poll.rs).
 
@@ -21,7 +23,9 @@ use super::VerbError;
 use crate::clock::SystemClock;
 use crate::error::RunError;
 use crate::poller::steps::notify_macos::Osascript;
+use crate::poller::steps::scripts::{ScriptSteps, SystemSubprocess};
 use crate::poller::steps::usage::ScriptProbe;
+use crate::poller::watchdog::relaunch::{RELAUNCH_TIMEOUT, ScriptRelauncher, SystemScriptRunner};
 use crate::poller::{Config, MessageSink, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
 use crate::tmux::SystemTmux;
 
@@ -34,6 +38,9 @@ pub struct PollArgs {
     pub interval: String,
     /// `--dry-run`: one cycle that prints, writes no file and sends no keys.
     pub dry_run: bool,
+    /// `--shadow`: writes only `<inbox>/shadow/`, takes no lock, sends no
+    /// keys and relaunches nothing (#9779).
+    pub shadow: bool,
 }
 
 /// The poller configuration for the Architect in `root`; see the module doc.
@@ -83,12 +90,26 @@ pub fn poll_config(
 /// [`VerbError::Failed`] when another poller holds the lock, the inbox cannot
 /// be written, or a single run's cycle fails or is incomplete.
 pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Result<(), VerbError> {
+    let mut config = config.clone();
+    config.shadow = args.shadow;
+    let config = &config;
     let tmux = config
         .tmux_socket
         .as_ref()
         .map_or_else(SystemTmux::new, SystemTmux::with_socket);
     // #9801: the real usage probe (usage-probe.sh) and macOS notifier.
     let usage_probe = ScriptProbe::new(&config.usage);
+    // #9779: the watchdog relaunches through the Python session-relaunch.sh.
+    let relauncher = ScriptRelauncher {
+        tmux: &tmux,
+        runner: &SystemScriptRunner,
+        script: config.relaunch_script.clone(),
+        session: config.supervisor.clone(),
+        root: config.root.clone(),
+        timeout: RELAUNCH_TIMEOUT,
+    };
+    // df-T7i P1b: the run_* scripts, zone watch and self-refresh start.
+    let steps = ScriptSteps::new(&SystemSubprocess, config);
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
@@ -98,6 +119,8 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
         usage_probe: &usage_probe,
         notifier: &Osascript::default(),
         messages,
+        relauncher: Some(&relauncher),
+        steps: Some(&steps),
         dry_run: args.dry_run,
     };
     let result = if args.once || args.dry_run {

@@ -15,6 +15,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
+use trusty_architect::SelfCtxError;
 use trusty_architect::classify::{Alert, alert};
 use trusty_architect::poller::{
     BandConfig, Config, DiskUsage, HostProbe, TranscriptCtx, append_alerts, band_alerts,
@@ -226,6 +227,9 @@ impl HostProbe for FakeProbe<'_> {
     fn mem_free_pct(&self) -> Option<f64> {
         self.0["mem"].as_f64()
     }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(self.0["activity"].as_u64().unwrap_or(0))
+    }
 }
 
 #[derive(Serialize)]
@@ -369,8 +373,16 @@ fn materialize(dir: &Path, files: &[Value]) -> io::Result<()> {
 #[derive(Serialize)]
 struct SelfCtxRow<'a> {
     case: &'a str,
-    alerts: Vec<Alert>,
+    alerts: SelfCtxResult,
     logged: bool,
+}
+
+/// The alerts, or the prototype's raise (df-T7i P1b ruling row).
+#[derive(Serialize)]
+#[serde(untagged)]
+enum SelfCtxResult {
+    Alerts(Vec<Alert>),
+    Raise { raises: &'static str },
 }
 
 #[test]
@@ -399,9 +411,17 @@ fn self_ctx_alerts_match_python_goldens() -> TestResult {
         // the config, switches the sensor off and lists the value in
         // `problems` for the caller to log.
         let cfg = config(dir.path(), &vars)?;
+        // df-T7i P1b ruling: a window of 0 is an error the cycle logs; the
+        // prototype raises ZeroDivisionError (the golden row records the raise).
         let (alerts, logged) = match self_ctx_alerts(&cfg, now) {
-            Ok(a) => (a, !cfg.problems.is_empty()),
-            Err(_) => (Vec::new(), true),
+            Ok(a) => (SelfCtxResult::Alerts(a), !cfg.problems.is_empty()),
+            Err(SelfCtxError::ZeroWindow(_)) => (
+                SelfCtxResult::Raise {
+                    raises: "ZeroDivisionError",
+                },
+                false,
+            ),
+            Err(_) => (SelfCtxResult::Alerts(Vec::new()), true),
         };
         rows.push(to_python_json(
             &SelfCtxRow {

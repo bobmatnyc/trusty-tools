@@ -35,6 +35,10 @@ pub(crate) enum ArchitectAction {
         /// writes no file, sends no keys.
         #[arg(long)]
         dry_run: bool,
+        /// Shadow run beside the live poller: writes only `inbox/shadow/`,
+        /// takes no lock, sends no keys, relaunches nothing (#9779).
+        #[arg(long)]
+        shadow: bool,
     },
     /// Print one pane capture's facts as JSON (`parse_pane`).
     ///

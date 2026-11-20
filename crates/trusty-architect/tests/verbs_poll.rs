@@ -60,6 +60,8 @@ fn dry_run_pane_lines_match_python() -> TestResult {
         config: &env.config,
         usage_probe: &RecordingProbe::default(),
         dry_run: true,
+        relauncher: None,
+        steps: None,
     };
     let found = collect(
         sensors,
@@ -263,6 +265,8 @@ fn a_configured_supervisor_is_skipped_and_the_only_pane_woken() -> TestResult {
         config: &config,
         usage_probe: &RecordingProbe::default(),
         dry_run: true,
+        relauncher: None,
+        steps: None,
     };
     let mut state = PollState {
         events_offset: Some(0),
@@ -310,6 +314,7 @@ fn a_configured_supervisor_is_skipped_and_the_only_pane_woken() -> TestResult {
         &found.panes,
         1,
         None,
+        &trusty_architect::poller::WakeContext::default(),
     );
     assert!(phrase.contains("would send to %5"), "{phrase}");
     let captured: Vec<_> = tmux
@@ -336,6 +341,7 @@ fn a_bad_interval_is_a_usage_error() -> TestResult {
             once: true,
             interval: interval.to_owned(),
             dry_run: false,
+            shadow: false,
         };
         let err = verbs::poll(&args, &env.config, &trusty_architect::poller::NoMessages)
             .expect_err(interval);

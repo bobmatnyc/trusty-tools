@@ -1,5 +1,5 @@
 //! #9171 A3: every prototype test A3a and A3b own is ported by name; #9801
-//! slice 1 adds `test_usage.py`'s.
+//! slice 1 adds `test_usage.py`'s; df-T7i P1b the live drift's.
 //!
 //! What: reads each golden list (`tests/fixtures/a3/python_tests_a3a.txt`,
 //! `python_tests_a3b.txt`, `tests/fixtures/9801/python_tests_9801.txt`) and
@@ -78,6 +78,8 @@ fn check(list: &str, size: usize) -> TestResult {
         golden("a3/python_tests_a3b.txt")?,
         // #9801 slice 1: test_usage.py.
         golden("9801/python_tests_9801.txt")?,
+        // df-T7i P1b: the live script's drift since 988152c.
+        golden("p1b/python_tests_p1b.txt")?,
     ]
     .concat();
     let found = found()?;
@@ -114,6 +116,12 @@ fn every_a3b_python_test_is_ported_by_name() -> TestResult {
 #[test]
 fn every_9801_slice1_python_test_is_ported_by_name() -> TestResult {
     check("9801/python_tests_9801.txt", 12)
+}
+
+/// df-T7i P1b: the tests added with the drift P1b ports.
+#[test]
+fn every_p1b_python_test_is_ported_by_name() -> TestResult {
+    check("p1b/python_tests_p1b.txt", 20)
 }
 
 #[test]

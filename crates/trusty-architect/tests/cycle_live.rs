@@ -104,6 +104,8 @@ fn live_cycle_renames_exactly_and_sends_nothing() -> TestResult {
         config: &env.config,
         usage_probe: &RecordingProbe::default(),
         notifier: &RecordingNotifier::default(),
+        relauncher: None,
+        steps: None,
         dry_run: false,
         messages: &trusty_architect::poller::NoMessages,
     };
