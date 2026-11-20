@@ -6,7 +6,7 @@
 //! exited_step). They stay Python until the ledger port (#11540, Architect
 //! ruling 2026-11-20 01:41Z); the poller runs them and must surface a failure
 //! as an alert, never only a log line.
-//! What: [`run_ledger_shim`] runs the script through the [`Subprocess`] seam,
+//! What: [`run_ledger_shim`] runs the script through the [`Subprocess`](super::scripts::Subprocess) seam,
 //! bounded by [`SHIM_TIMEOUT`] (killed on expiry), with `--state` (the run's
 //! own `poll-state.json`, read only), `--now`, and `--shadow <inbox>/shadow`
 //! in a shadow run. Its stdout object gives the step alerts and the changed
