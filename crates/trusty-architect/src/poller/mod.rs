@@ -17,11 +17,15 @@
 //! [`rename_windows`], [`architect_busy`] and the [`Triage`] seam. #9801
 //! slice 1 adds [`steps`]: the usage step and `notify_macos`. #9167 adds
 //! [`MessageSink`], through which a submitted wake is recorded.
+//! #9779 adds [`watchdog`] (dead/frozen/silent/ok and the relaunch),
+//! [`routines`] (D5r: routines ran, push due; nothing sends) and the shadow
+//! run ([`prepare_shadow`], `Config::shadow`).
 //! Test: `tests/poller_ported.rs`, `tests/wake_ported.rs`,
 //! `tests/cycle_ported.rs` and `tests/architect_ported.rs` (the prototype's
 //! tests, by name), `tests/parity_a3.rs` and `tests/parity_wake.rs` (goldens
 //! from `regen_a3.py`), `tests/state_atomic.rs`, `tests/wake_send_path.rs`,
-//! `tests/cycle_loop.rs`, `tests/state_session.rs`.
+//! `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/watchdog_ported.rs`,
+//! `tests/d5r_shadow.rs`.
 
 mod architect;
 mod band;
@@ -36,17 +40,20 @@ mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
 mod messages;
 mod pyfmt;
+pub mod routines;
 mod run;
 mod self_ctx_alerts;
 mod session;
+mod shadow;
 mod sink;
 mod state;
 pub mod steps;
 mod triage;
 mod wake;
+pub mod watchdog;
 mod windows;
 
-pub use architect::{DONE_SUMMARY, SHELLS, architect_busy, is_shell};
+pub use architect::{DONE_SUMMARY, SHELLS, architect_busy, architect_busy_in, is_shell};
 
 pub use crate::error::{CycleError, RunError};
 pub use band::{
@@ -67,6 +74,7 @@ pub use messages::{MessageSink, NoMessages, PaneMessage, PaneMessageKind};
 pub use run::{CycleSummary, Phase, Runner, parse_interval};
 pub use self_ctx_alerts::self_ctx_alerts;
 pub use session::PollSession;
+pub use shadow::prepare_shadow;
 pub use sink::{append_alerts, append_log};
 pub use state::{PollState, SaveStep, StoredCount, load_state, save_state, save_state_with};
 pub use triage::{Triage, WakeAll};

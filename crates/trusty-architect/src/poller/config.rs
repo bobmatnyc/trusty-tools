@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use super::band::BandConfig;
 use super::pyfmt::{py_float, py_int};
 use super::steps::usage::UsagePaths;
+use super::watchdog::{FROZEN_MIN_DEFAULT, SILENT_MINUTES_DEFAULT};
 use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
 use crate::self_ctx::{default_dir, projects_dir};
@@ -73,6 +74,23 @@ pub struct Config {
     pub poll_session: String,
     /// The usage step's ledger, cache, account file and probe (#9801).
     pub usage: UsagePaths,
+    /// The Architect project directory: a relaunched session starts there.
+    pub root: PathBuf,
+    /// `<root>/scripts/session-relaunch.sh`: the watchdog's relaunch (#9779).
+    pub relaunch_script: PathBuf,
+    /// `SILENT_MINUTES` (default 45; a bad value falls back, as in Python).
+    pub silent_minutes: f64,
+    /// `FROZEN_MIN` (default 15; a bad value falls back, as in Python).
+    pub frozen_minutes: f64,
+    /// `ARCHITECT_ROUTINES_FILE`, else `<root>/local/routines.json`: the D5r
+    /// routine list. A missing file turns the check off.
+    pub routines: PathBuf,
+    /// `ARCHITECT_PUSH_CHANNEL`: where an overdue failure is pushed. Ships
+    /// unset; this build sends nothing either way (D5r).
+    pub push_channel: Option<String>,
+    /// Shadow run: outputs go to `<inbox>/shadow/`, no lock, no keys, no
+    /// relaunch, no notification, no mutating step (#9779, plan section 3).
+    pub shadow: bool,
 }
 
 impl Config {
@@ -169,6 +187,13 @@ impl Config {
             supervisor: SUPERVISOR.to_owned(),
             poll_session: format!("{SUPERVISOR}-poll"),
             usage,
+            root: root.to_owned(),
+            relaunch_script: root.join("scripts/session-relaunch.sh"),
+            silent_minutes: lenient("SILENT_MINUTES", SILENT_MINUTES_DEFAULT),
+            frozen_minutes: lenient("FROZEN_MIN", FROZEN_MIN_DEFAULT),
+            routines: path("ARCHITECT_ROUTINES_FILE", root.join("local/routines.json")),
+            push_channel: get("ARCHITECT_PUSH_CHANNEL").filter(|v| !v.is_empty()),
+            shadow: false,
         })
     }
 
@@ -187,19 +212,37 @@ impl Config {
         self.inbox.join("events.jsonl")
     }
 
+    /// `<inbox>/shadow`: every file a shadow run writes.
+    pub fn shadow_dir(&self) -> PathBuf {
+        self.inbox.join("shadow")
+    }
+
+    /// Where this run writes: the inbox, or [`Config::shadow_dir`].
+    fn out_dir(&self) -> PathBuf {
+        if self.shadow {
+            self.shadow_dir()
+        } else {
+            self.inbox.clone()
+        }
+    }
+
     /// `<inbox>/alerts.jsonl`: the alert log the Architect reads.
     pub fn alerts(&self) -> PathBuf {
-        self.inbox.join("alerts.jsonl")
+        self.out_dir().join("alerts.jsonl")
     }
 
     /// `<inbox>/poll-state.json`: dedup and sensor state across cycles.
     pub fn state(&self) -> PathBuf {
-        self.inbox.join("poll-state.json")
+        self.out_dir().join("poll-state.json")
     }
 
-    /// `<inbox>/poll.log`: one line per cycle and per error.
+    /// `<inbox>/poll.log` (`shadow/shadow.log` in a shadow run).
     pub fn log(&self) -> PathBuf {
-        self.inbox.join("poll.log")
+        if self.shadow {
+            self.shadow_dir().join("shadow.log")
+        } else {
+            self.inbox.join("poll.log")
+        }
     }
 
     /// `<inbox>/poll.lock`: held by the one running poller (#9171 A3b-2).

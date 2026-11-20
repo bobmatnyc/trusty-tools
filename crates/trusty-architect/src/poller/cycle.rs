@@ -26,9 +26,12 @@ use super::ctx::TranscriptCtx;
 use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::listing::{Pane, capture, list_panes};
+use super::routines::{push_due, routine_alerts};
 use super::self_ctx_alerts::self_ctx_alerts;
 use super::state::PollState;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
+use super::watchdog::Relauncher;
+use super::watchdog::wiring::watchdog_alerts;
 use super::windows::rename_windows;
 use crate::classify::{Alert, PaneInfo, alert, dedup, evaluate, fleet_plan_alerts, parse_pane};
 use crate::error::{CycleError, TmuxError};
@@ -48,6 +51,8 @@ pub struct Collected {
     pub suppressed: usize,
     /// `poll.log` lines; a dry run prints them instead.
     pub log: Vec<String>,
+    /// The watchdog's `architect=...` phrase; empty when it is off (#9779).
+    pub watch_phrase: String,
 }
 
 /// Why [`collect`] did not finish, with the log lines written so far.
@@ -70,8 +75,11 @@ pub struct Sensors<'a, T: Tmux + ?Sized> {
     pub config: &'a Config,
     /// Starts the usage step's `/usage` probe (#9801).
     pub usage_probe: &'a dyn ProbeLauncher,
-    /// When true, rename nothing.
+    /// When true, rename nothing, relaunch nothing and start no probe (a dry
+    /// run or a shadow run).
     pub dry_run: bool,
+    /// The watchdog's relaunch path; `None` turns the watchdog off (#9779).
+    pub relauncher: Option<&'a dyn Relauncher>,
 }
 
 /// `cycle()`'s dry-run line for one watched pane (988152c line 1527), with
@@ -126,6 +134,15 @@ pub fn collect<T: Tmux + ?Sized>(
         .map(|row| format!("list-panes row without a %N pane id skipped: {row:?}"))
         .collect();
     log.extend(rename_windows(s.tmux, s.dry_run).1);
+    // #9779: the prototype runs the watchdog before the pane loop.
+    let mut watch_found = Vec::new();
+    let mut watch_phrase = String::new();
+    if let Some(r) = s.relauncher {
+        let (found, phrase, lines) =
+            watchdog_alerts(s.tmux, &listing.panes, state, s.config, now, r, s.dry_run);
+        (watch_found, watch_phrase) = (found, phrase);
+        log.extend(lines);
+    }
     let watched: Vec<&Pane> = listing
         .panes
         .iter()
@@ -212,6 +229,19 @@ pub fn collect<T: Tmux + ?Sized>(
         Ok(found) => candidates.extend(found),
         Err(e) => log.push(format!("self_ctx ERROR {e}")),
     }
+    // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
+    let mut failing = watch_found.clone();
+    match routine_alerts(&s.config.routines, &s.config.supervisor, now) {
+        Ok(found) => failing.extend(found),
+        Err(e) => log.push(format!("routines ERROR {e}")),
+    }
+    let keys: Vec<String> = failing
+        .iter()
+        .map(|a| format!("{}:{}", a.kind, a.fingerprint))
+        .collect();
+    let channel = s.config.push_channel.as_deref();
+    log.extend(push_due(&mut state.other, &keys, now, channel));
+    candidates.extend(failing);
     let quiet = read_quiet_sessions(&s.config.quiet_sessions);
     candidates.retain(|a| !(a.kind == "idle" && quiet.contains(&a.session)));
     let (new, suppressed) = dedup(&mut state.alerts, &candidates, now);
@@ -221,5 +251,6 @@ pub fn collect<T: Tmux + ?Sized>(
         new,
         suppressed,
         log,
+        watch_phrase,
     })
 }

@@ -35,12 +35,14 @@ use super::lock::PollLock;
 use super::messages::MessageSink;
 use super::pyfmt::py_int;
 use super::session::PollSession;
+use super::shadow::prepare_shadow;
 use super::sink::{append_alerts, append_log};
 use super::state::{PollState, save_state};
 use super::steps::notify_macos::{Notifier, notifies, notify_watchdog_alerts};
 use super::steps::usage::ProbeLauncher;
 use super::triage::Triage;
 use super::wake::Waker;
+use super::watchdog::Relauncher;
 use crate::classify::Alert;
 use crate::classify::alerts::iso;
 use crate::clock::Clock;
@@ -139,11 +141,19 @@ pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     pub notifier: &'a dyn Notifier,
     /// Records each submitted wake (#9167).
     pub messages: &'a dyn MessageSink,
+    /// The watchdog's relaunch path; `None` turns the watchdog off (#9779).
+    pub relauncher: Option<&'a dyn Relauncher>,
     /// One cycle that writes nothing and sends nothing.
     pub dry_run: bool,
 }
 
 impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
+    /// True when the run must act on nothing: a dry run, or a shadow run
+    /// (#9779: no keys, no relaunch, no notification, no probe).
+    fn hands_off(&self) -> bool {
+        self.dry_run || self.config.shadow
+    }
+
     /// One cycle; see the module docs.
     ///
     /// # Errors
@@ -195,7 +205,8 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             probe: self.probe,
             config: self.config,
             usage_probe: self.usage_probe,
-            dry_run: self.dry_run,
+            dry_run: self.hands_off(),
+            relauncher: self.relauncher,
         };
         // #9171 A3b-2: work on a copy; nothing is committed before the append.
         let mut next = session.state.clone();
@@ -236,20 +247,28 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
                     source,
                 });
             }
-            // #9801: notify_macos after the append; a failure is a log line.
-            log.extend(notify_watchdog_alerts(self.notifier, &found.new));
+            if self.config.shadow {
+                // #9779: a shadow run notifies nobody; it logs what it would.
+                let would = found.new.iter().filter(|a| notifies(a));
+                log.extend(would.map(|a| format!("  would notify: {}", a.display)));
+            } else {
+                // #9801: notify_macos after the append; a failure is a log line.
+                log.extend(notify_watchdog_alerts(self.notifier, &found.new));
+            }
         }
         if let Err(source) = hook(Phase::AlertsAppended) {
             carry_usage(session, &next);
             return Err(phase(Phase::AlertsAppended)(source));
         }
-        let (woken, logged) = self.triage.triage(&found.new, now, &mut next, self.dry_run);
+        let (woken, logged) = self
+            .triage
+            .triage(&found.new, now, &mut next, self.hands_off());
         let alerts = self.config.alerts();
         let waker = Waker {
             tmux: self.tmux,
             clock: self.clock,
             alerts: &alerts,
-            dry_run: self.dry_run,
+            dry_run: self.hands_off(),
             messages: self.messages,
         };
         let wake = waker.dispatch_as(
@@ -259,13 +278,15 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             woken.len() as u64,
             Some(logged),
         );
-        log.push(format!(
-            "panes={} new={} woken={} logged={logged} suppressed={} wake={wake}",
+        let line = format!(
+            "panes={} new={} woken={} logged={logged} suppressed={} wake={wake} {}",
             found.watched,
             found.new.len(),
             woken.len(),
-            found.suppressed
-        ));
+            found.suppressed,
+            found.watch_phrase
+        );
+        log.push(line.trim_end().to_owned());
         session.state = next;
         if !self.dry_run && !session.save_blocked() {
             save_state(&self.config.state(), &session.state)?;
@@ -363,7 +384,15 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
 
     /// Takes the lock (not in a dry run), loads the state and logs the start.
     fn start(&self, every: Duration) -> Result<(Option<PollLock>, PollSession), RunError> {
+        let mut seeded = Vec::new();
         let lock = if self.dry_run {
+            None
+        } else if self.config.shadow {
+            // #9779: a shadow run takes no lock; it writes only the shadow dir.
+            seeded = prepare_shadow(self.config).map_err(|source| RunError::Io {
+                what: format!("prepare {}", self.config.shadow_dir().display()),
+                source,
+            })?;
             None
         } else {
             fs::create_dir_all(&self.config.inbox).map_err(|source| RunError::Io {
@@ -374,6 +403,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         };
         let (session, mut lines) =
             PollSession::load(self.config, self.dry_run, self.clock.now_unix());
+        lines.splice(0..0, seeded);
         if !self.dry_run {
             lines.push(format!("poll start interval={}s", every.as_secs()));
         }

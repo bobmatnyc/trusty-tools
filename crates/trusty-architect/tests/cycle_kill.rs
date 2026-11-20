@@ -36,6 +36,7 @@ fn child(root: &Path) -> TestResult {
         config: &config,
         usage_probe: &RecordingProbe::default(),
         notifier: &RecordingNotifier::default(),
+        relauncher: None,
         dry_run: false,
         messages: &trusty_architect::poller::NoMessages,
     };

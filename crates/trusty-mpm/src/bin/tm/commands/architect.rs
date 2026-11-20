@@ -71,11 +71,13 @@ fn execute(
             once,
             interval,
             dry_run,
+            shadow,
         } => config(get).and_then(|config| {
             let args = PollArgs {
                 once,
                 interval,
                 dry_run,
+                shadow,
             };
             // #9167: each submitted wake becomes a `poll_wake` message event.
             let messages = super::architect_messages::poll_sink(&config.poll_session);
@@ -220,11 +222,19 @@ mod tests {
     fn cli_parses_architect_verbs() {
         assert!(matches!(
             parse(&["poll"]),
-            ArchitectAction::Poll { once: false, ref interval, dry_run: false } if interval == "60"
+            ArchitectAction::Poll { once: false, ref interval, dry_run: false, shadow: false } if interval == "60"
+        ));
+        assert!(matches!(
+            parse(&["poll", "--shadow"]),
+            ArchitectAction::Poll {
+                shadow: true,
+                dry_run: false,
+                ..
+            }
         ));
         assert!(matches!(
             parse(&["poll", "--once", "--interval", "30", "--dry-run"]),
-            ArchitectAction::Poll { once: true, ref interval, dry_run: true } if interval == "30"
+            ArchitectAction::Poll { once: true, ref interval, dry_run: true, .. } if interval == "30"
         ));
         assert!(matches!(
             parse(&["poll", "--interval=45"]),
