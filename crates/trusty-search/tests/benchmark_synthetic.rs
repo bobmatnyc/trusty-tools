@@ -31,17 +31,19 @@
 //! This harness intentionally does NOT spin up its own daemon. It uses the
 //! dedicated fixture daemon the operator started for this benchmark run.
 
-// Live benchmarks require an isolated daemon and disposable source copy.
-// See support/isolated_benchmark.rs for the three required environment variables.
+// Live benchmarks require a sandbox daemon socket and a disposable source copy.
+// #10677: socket-only since #9214 — see support/socket_benchmark.rs.
 #[path = "support/isolated_benchmark.rs"]
 mod isolated_benchmark;
-use isolated_benchmark::daemon_url;
+#[path = "support/socket_benchmark.rs"]
+mod socket_benchmark;
+use socket_benchmark::call;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
 use serde_json::{json, Value};
+use trusty_search::service::daemon_client::DaemonClient as Client;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -122,19 +124,9 @@ struct QueryResult {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Build a reqwest client with the timeouts already tuned by
-/// `baseline_trusty_tools.rs`.
-///
-/// Why: generous but finite timeouts prevent the test hanging on a hung
-/// fixture daemon.
-/// What: returns a Client with 2 s connect and 30 s request timeouts.
-/// Test: any transport error will panic via .expect() in callers.
-fn make_client() -> Client {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("reqwest client construction is infallible")
+/// Dial the sandbox daemon named by `TRUSTY_SEARCH_BENCH_SOCKET` (#10677).
+async fn make_client() -> Client {
+    socket_benchmark::sandbox_client().await
 }
 
 /// Absolute path of the synthetic corpus root.
@@ -184,19 +176,9 @@ fn load_ground_truth() -> Vec<GroundTruthQuery> {
         .collect()
 }
 
-/// Sanity-check that the daemon is up.
-///
-/// Why: a clear early error is better than confusing transport failures later.
-/// What: GETs /health and asserts 200.
-/// Test: panics with a human-readable message if the daemon is unreachable.
+/// Sanity-check that the daemon is up: `search.health` must answer.
 async fn assert_daemon_healthy(client: &Client) {
-    let daemon_url = daemon_url();
-    let resp = client
-        .get(format!("{daemon_url}/health"))
-        .send()
-        .await
-        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
-    assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
+    call(client, "search.health", json!({})).await;
 }
 
 /// Create (or re-create) the `synthetic-benchmark` index. Returns immediately
@@ -207,14 +189,13 @@ async fn assert_daemon_healthy(client: &Client) {
 /// What: DELETEs any existing index with this name, then POSTs to /indexes.
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
     // Delete first if it exists, to start from a clean slate.
     let _ = client
-        .delete(format!(
-            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
-        ))
-        .send()
+        .call(
+            "search.index.delete",
+            json!({ "index_id": INDEX_NAME, "delete_data": true }),
+        )
         .await;
 
     let root = corpus_root();
@@ -222,18 +203,7 @@ async fn register_index(client: &Client) {
         "id": INDEX_NAME,
         "root_path": root.to_string_lossy(),
     });
-    let resp = client
-        .post(format!("{daemon_url}/indexes"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /indexes transport failure");
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "POST /indexes returned non-200: body = {:?}",
-        resp.text().await.ok()
-    );
+    call(client, "search.index.create", body).await;
 }
 
 /// Trigger a full force-reindex and wait for every stage to reach `Ready`.
@@ -243,20 +213,18 @@ async fn register_index(client: &Client) {
 ///   semantic + graph stages all report status="ready".
 /// Test: panics with last-known status on REINDEX_TIMEOUT.
 async fn reindex_and_wait(client: &Client) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
     let root = corpus_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
-    let resp = client
-        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /reindex transport failure");
-    assert_eq!(resp.status().as_u16(), 200, "POST /reindex non-200");
+    call(
+        client,
+        "search.index.reindex",
+        json!({ "index_id": INDEX_NAME, "body": body }),
+    )
+    .await;
 
     // Poll status until every stage is Ready.
     let start = Instant::now();
@@ -296,13 +264,12 @@ async fn reindex_and_wait(client: &Client) {
 /// What: GET /indexes/:id/status, returns parsed JSON Value.
 /// Test: transport or parse failures panic.
 async fn fetch_status(client: &Client) -> Value {
-    let daemon_url = daemon_url();
-    let resp = client
-        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
-        .send()
-        .await
-        .expect("GET /status transport failure");
-    resp.json().await.expect("status JSON parse failure")
+    call(
+        client,
+        "search.index.status",
+        json!({ "index_id": INDEX_NAME }),
+    )
+    .await
 }
 
 /// Delete the synthetic-benchmark index. Best-effort.
@@ -312,22 +279,16 @@ async fn fetch_status(client: &Client) -> Value {
 /// What: DELETE /indexes/:id; prints the response status regardless.
 /// Test: failures are printed, not panicked (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &corpus_root()).await;
     let resp = client
-        .delete(format!(
-            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
-        ))
-        .send()
+        .call(
+            "search.index.delete",
+            json!({ "index_id": INDEX_NAME, "delete_data": true }),
+        )
         .await;
     match resp {
-        Ok(r) => {
-            println!(
-                "  cleanup DELETE /indexes/{INDEX_NAME} → {}",
-                r.status().as_u16()
-            );
-        }
-        Err(e) => println!("  cleanup DELETE failed: {e}"),
+        Ok(_) => println!("  cleanup search.index.delete {INDEX_NAME} → ok"),
+        Err(e) => println!("  cleanup search.index.delete failed: {e}"),
     }
 }
 
@@ -369,28 +330,21 @@ fn search_request(query: &GroundTruthQuery, mode: Mode) -> Value {
 ///
 /// Why: all three modes must run the same search path so results are
 /// comparable; only the JSON body fields differ.
-/// What: POSTs to /indexes/:id/search with mode-appropriate parameters
+/// What: calls `search.query` with mode-appropriate parameters
 ///   plus the query's `mode_hint` forwarded as `mode`. Records Hit@1 and
 ///   Hit@5 against the ground_truth_files list.
 /// Test: transport failures panic; JSON parse failures panic with status code.
 async fn run_query(client: &Client, query: &GroundTruthQuery, mode: Mode) -> QueryResult {
-    let daemon_url = daemon_url();
     let body = search_request(query, mode);
 
     let t0 = Instant::now();
-    let resp = client
-        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /search transport failure");
+    let json_body = call(
+        client,
+        "search.query",
+        json!({ "index_id": INDEX_NAME, "body": body }),
+    )
+    .await;
     let client_latency_ms = t0.elapsed().as_millis();
-
-    let status = resp.status().as_u16();
-    let json_body: Value = resp
-        .json()
-        .await
-        .unwrap_or_else(|e| panic!("search response JSON parse failure ({status}): {e}"));
 
     let results = json_body["results"].as_array().cloned().unwrap_or_default();
     let top_files: Vec<String> = results
@@ -665,7 +619,7 @@ fn percentile(sorted: &[u128], p: usize) -> u128 {
 #[tokio::test]
 #[ignore = "benchmark: needs the isolated fixture daemon and corpus (support/isolated_benchmark.rs)"]
 async fn benchmark_synthetic_corpus_all_modes() {
-    let client = make_client();
+    let client = make_client().await;
     assert_daemon_healthy(&client).await;
     println!("\n=== synthetic-benchmark corpus, three-mode evaluation (v0.2.0) ===");
     println!("corpus root: {}", corpus_root().display());
