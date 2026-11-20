@@ -30,11 +30,15 @@
 mod architect;
 mod band;
 pub(crate) mod box_text;
+mod completion;
 mod config;
 mod ctx;
+pub mod ctx_bar;
 mod cycle;
+pub mod digest;
 mod events;
 mod host;
+mod inbox_alerts;
 mod listing;
 mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
@@ -43,6 +47,7 @@ mod pyfmt;
 pub mod routines;
 mod run;
 mod self_ctx_alerts;
+pub mod self_refresh;
 mod session;
 mod shadow;
 mod sink;
@@ -52,6 +57,7 @@ mod triage;
 mod wake;
 pub mod watchdog;
 mod windows;
+pub mod zone;
 
 pub use architect::{DONE_SUMMARY, SHELLS, architect_busy, architect_busy_in, is_shell};
 
@@ -61,13 +67,16 @@ pub use band::{
     BAND_STOP_FREE_GIB, BAND_STOP_LOAD_FACTOR, BAND_STOP_MEM_FREE_PCT, Band, BandConfig,
     band_alerts, builder_band,
 };
+pub use completion::{COMPLETE_MIN_CTX_PCT, completion_alerts, il_task_complete_for};
 pub use config::{
     Config, LOAD_FACTOR_DEFAULT, SELF_CTX_THRESHOLD_DEFAULT, SELF_CTX_WINDOW_DEFAULT,
+    SelfCtxThreshold,
 };
 pub use ctx::{TranscriptCtx, pane_session_id};
 pub use cycle::{Collected, Sensors, Stopped, collect};
 pub use events::{EVENT_TYPES, read_events};
 pub use host::{DISK_HIGH, DiskUsage, HostProbe, SystemHostProbe, host_alerts};
+pub use inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 pub use listing::{Listing, Pane, capture, list_panes, parse_list_panes};
 pub use lock::PollLock;
 pub use messages::{MessageSink, NoMessages, PaneMessage, PaneMessageKind};
@@ -78,15 +87,21 @@ pub use shadow::prepare_shadow;
 pub use sink::{append_alerts, append_log};
 pub use state::{PollState, SaveStep, StoredCount, load_state, save_state, save_state_with};
 pub use triage::{Triage, WakeAll};
-pub use wake::{BOX_CHANGED, Waker, dispatch_wake};
+pub use wake::{
+    BOX_CHANGED, WAKE_SUPPRESS_MAX_S, WakeContext, Waker, dispatch_wake, dispatch_wake_with,
+    record_wake_result,
+};
 pub use windows::{plan_window_renames, rename_windows};
 
 /// The Architect's own tmux session: the only pane the poller may wake.
 pub const SUPERVISOR: &str = "tm-architect";
 
 /// Sessions the poller never watches, and whose events it drops.
-pub const SKIP_SESSIONS: [&str; 3] = [
+/// df-T7i P1b adds the ILIO trial Architect's two sessions (ar-T2f).
+pub const SKIP_SESSIONS: [&str; 5] = [
     "tm-architect",
     "tm-supervisor-collector",
     "tm-architect-poll",
+    "tm-architect-ilio",
+    "tm-architect-ilio-poll",
 ];

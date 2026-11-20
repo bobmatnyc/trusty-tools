@@ -154,7 +154,7 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
     }];
 
     // 1. Empty box: the pointer is typed, confirmed and submitted.
-    let sent = waker.wake_as(SESSION, &panes, 1, None)?;
+    let sent = waker.wake_as(SESSION, &panes, 1, None, "")?;
     println!("wake 1 -> {sent}");
     let after = scratch.until(&pane, |s| s.contains('\u{276f}') && !s.contains("[poll"))?;
     println!("--- capture after wake 1 ---\n{after}");
@@ -176,7 +176,7 @@ fn live_wake_types_then_enters_and_refuses_a_draft() -> Result<(), Box<dyn std::
         "half-typed draft",
     ])?;
     let drafted = scratch.until(&pane, |s| s.contains("half-typed draft"))?;
-    let refused = waker.wake_as(SESSION, &panes, 1, None)?;
+    let refused = waker.wake_as(SESSION, &panes, 1, None, "")?;
     println!("wake 2 -> {refused}");
     let still = capture(&tmux, &pane)?;
     println!("--- capture after wake 2 ---\n{}", scratch.screen(&pane)?);
@@ -298,7 +298,7 @@ fn live_wake_keys_reach_only_the_target_pane() -> Result<(), Box<dyn std::error:
         messages: &crate::poller::NoMessages,
     };
     let panes = [listed(NAME, &first, "01"), listed(NAME, &second, "01")];
-    let sent = waker.wake_as(NAME, &panes, 1, None)?;
+    let sent = waker.wake_as(NAME, &panes, 1, None, "")?;
     println!("wake -> {sent}");
     scratch.until(&first, |s| !s.contains("[poll"))?;
     let submitted = fs::read_to_string(&log_a).unwrap_or_default();
@@ -382,7 +382,7 @@ fn live_wake_reads_a_wide_dim_suggestion_row() -> Result<(), Box<dyn std::error:
         dry_run: true,
         messages: &crate::poller::NoMessages,
     };
-    let verdict = waker.wake_as(NAME, &[listed(NAME, &pane, "11")], 1, None)?;
+    let verdict = waker.wake_as(NAME, &[listed(NAME, &pane, "11")], 1, None, "")?;
     println!("wake -> {verdict}");
     assert!(
         verdict.starts_with(&format!("dry-run: would send to {id}: [poll")),

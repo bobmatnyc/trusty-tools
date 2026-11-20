@@ -23,6 +23,7 @@ use super::VerbError;
 use crate::clock::SystemClock;
 use crate::error::RunError;
 use crate::poller::steps::notify_macos::Osascript;
+use crate::poller::steps::scripts::{ScriptSteps, SystemSubprocess};
 use crate::poller::steps::usage::ScriptProbe;
 use crate::poller::watchdog::relaunch::{RELAUNCH_TIMEOUT, ScriptRelauncher, SystemScriptRunner};
 use crate::poller::{Config, MessageSink, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
@@ -107,6 +108,8 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
         root: config.root.clone(),
         timeout: RELAUNCH_TIMEOUT,
     };
+    // df-T7i P1b: the run_* scripts, zone watch and self-refresh start.
+    let steps = ScriptSteps::new(&SystemSubprocess, config);
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
@@ -117,6 +120,7 @@ pub fn poll(args: &PollArgs, config: &Config, messages: &dyn MessageSink) -> Res
         notifier: &Osascript::default(),
         messages,
         relauncher: Some(&relauncher),
+        steps: Some(&steps),
         dry_run: args.dry_run,
     };
     let result = if args.once || args.dry_run {

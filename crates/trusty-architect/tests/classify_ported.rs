@@ -255,7 +255,8 @@ fn test_idle_prompt_alerts_after_ten_minutes_only() {
     let mut ps = PaneState::default();
     let (info, alerts) = run(&cap, &mut ps, 1000.0);
     assert!(!info.busy && !info.turn_active);
-    assert_eq!(kinds(&alerts), ["ctx"]);
+    // df-T7i P1b: the default screen's ctx 30% is under the live 31% bar.
+    assert!(kinds(&alerts).is_empty());
     assert_eq!(ps.idle_since, Some(1000.0));
     // Literal ten minutes (the prototype reads fp.IDLE_AFTER), so a mutated
     // IDLE_AFTER turns this test red.
@@ -279,7 +280,7 @@ fn test_suggestion_box_counts_as_idle() {
     );
     let mut ps = PaneState::default();
     run(&cap, &mut ps, 0.0);
-    assert_eq!(kinds(&run(&cap, &mut ps, 600.0).1), ["ctx", "idle"]);
+    assert_eq!(kinds(&run(&cap, &mut ps, 600.0).1), ["idle"]);
 }
 
 // Python: test_busy_pane_is_neither_idle_nor_question
@@ -305,7 +306,7 @@ fn test_busy_pane_is_neither_idle_nor_question() {
         let mut ps = PaneState::default();
         let (info, alerts) = run(&cap, &mut ps, 0.0);
         assert!(info.busy && info.turn_active, "{status}");
-        assert_eq!(kinds(&alerts), ["ctx"], "{status}");
+        assert!(kinds(&alerts).is_empty(), "{status}");
         assert_eq!(ps.idle_since, None, "{status}");
     }
 }
@@ -336,7 +337,7 @@ fn test_question_is_last_pm_line_ending_in_question_mark() {
         &mut PaneState::default(),
         0.0,
     );
-    assert_eq!(kinds(&alerts), ["ctx", "question"]);
+    assert_eq!(kinds(&alerts), ["question"]);
     let question = alerts.iter().find(|a| a.kind == "question");
     assert_eq!(
         question.map(|a| a.detail.as_str()),
@@ -365,26 +366,27 @@ fn ctx_fingerprints(ctx: u32) -> Vec<String> {
     alerts.into_iter().map(|a| a.fingerprint).collect()
 }
 
-/// At fleet-poll.py's 22/25 bar. Literal percentages, so a mutated
-/// `CTX_WARN` or `CTX_HIGH` turns it red.
+/// At fleet-poll.py's live 31/35 bar (df-T7i P1b; was 22/25). Literal
+/// percentages, so a mutated `CTX_WARN` or `CTX_HIGH` turns it red.
 // Python: test_ctx_47_alerts_and_crossing_50_changes_fingerprint
 #[test]
 fn test_ctx_47_alerts_and_crossing_50_changes_fingerprint() {
-    assert!(ctx_fingerprints(21).is_empty());
-    assert_eq!(ctx_fingerprints(22), ["22"]);
-    assert_eq!(ctx_fingerprints(24), ["22"]);
-    assert_eq!(ctx_fingerprints(25), ["25"]);
+    assert!(ctx_fingerprints(30).is_empty());
+    assert_eq!(ctx_fingerprints(31), ["31"]);
+    assert_eq!(ctx_fingerprints(34), ["31"]);
+    assert_eq!(ctx_fingerprints(35), ["35"]);
     // The prototype test's own values: 47 and 52 both read as the high bar.
-    assert_eq!(ctx_fingerprints(47), ["25"]);
-    assert_eq!(ctx_fingerprints(52), ["25"]);
-    assert_eq!(ctx_fingerprints(44), ["25"]);
+    assert_eq!(ctx_fingerprints(47), ["35"]);
+    assert_eq!(ctx_fingerprints(52), ["35"]);
+    assert_eq!(ctx_fingerprints(44), ["35"]);
 }
 
 /// `scripts/test_fleet_poll_ctx.py`, both halves since #9171 A3a.
 #[test]
 fn test_ctx_thresholds_follow_ruling_b7() {
-    assert_eq!((CTX_WARN, CTX_HIGH), (22, 25));
-    assert_eq!(trusty_architect::poller::SELF_CTX_THRESHOLD_DEFAULT, 25);
+    // df-T7i P1b: Bob 2026-11-05, 350k of a 1M window (was ruling b7's 22/25).
+    assert_eq!((CTX_WARN, CTX_HIGH), (31, 35));
+    assert_eq!(trusty_architect::poller::SELF_CTX_THRESHOLD_DEFAULT, 35);
 }
 
 // Python: test_plan_limit_text_and_status_line
@@ -396,17 +398,17 @@ fn test_plan_limit_text_and_status_line() {
     ]
     .concat();
     let (_, alerts) = run(&screen(&body, agents_x()), &mut PaneState::default(), 0.0);
-    assert_eq!(kinds(&alerts), ["ctx", "plan-limit"]);
+    assert_eq!(kinds(&alerts), ["plan-limit"]);
     let prose = ["⏺ Both agents died at the account's usage limit."];
     let (_, alerts) = run(&screen(&prose, agents_x()), &mut PaneState::default(), 0.0);
-    assert_eq!(kinds(&alerts), ["ctx"]);
+    assert!(kinds(&alerts).is_empty());
     let infos = [
         (
             "tm-a".to_owned(),
             parse_pane(&screen(
                 &PM_TURN,
                 Screen {
-                    plan: Some((91, 50)),
+                    plan: Some((50, 91)),
                     ..Screen::default()
                 },
             )),
@@ -416,14 +418,19 @@ fn test_plan_limit_text_and_status_line() {
             parse_pane(&screen(
                 &PM_TURN,
                 Screen {
-                    plan: Some((88, 50)),
+                    plan: Some((95, 88)),
                     ..Screen::default()
                 },
             )),
         ),
     ];
+    // df-T7i P1b: weekly only; the 5-hour 95% raises nothing (Bob 2026-10-31).
     let plan = fleet_plan_alerts(&infos, 0.0);
-    assert!(plan.len() == 1 && plan[0].session.is_empty() && plan[0].detail.contains("91%"));
+    assert!(
+        plan.len() == 1
+            && plan[0].session.is_empty()
+            && plan[0].detail.contains("weekly plan usage 91%")
+    );
     assert!(!plan[0].display.starts_with('['));
 }
 
@@ -432,20 +439,14 @@ fn test_plan_limit_text_and_status_line() {
 fn test_error_alerts_only_for_lines_new_since_last_cycle() {
     let old = [&PM_TURN[..], &["  ⎿  Error: Exit code 1"]].concat();
     let mut ps = PaneState::default();
-    // First sight seeds the error set: only the ctx alert.
-    assert_eq!(
-        kinds(&run(&screen(&old, agents_x()), &mut ps, 0.0).1),
-        ["ctx"]
-    );
+    // First sight seeds the error set: no alert (ctx 30% is under the 31% bar).
+    assert!(kinds(&run(&screen(&old, agents_x()), &mut ps, 0.0).1).is_empty());
     let new = [&old[..], &["⏺ API Error: 529 overloaded"]].concat();
     let alerts = run(&screen(&new, agents_x()), &mut ps, 0.0).1;
-    assert_eq!(kinds(&alerts), ["ctx", "error"]);
+    assert_eq!(kinds(&alerts), ["error"]);
     let error = alerts.iter().find(|a| a.kind == "error");
     assert!(error.is_some_and(|a| a.detail.contains("API Error")));
-    assert_eq!(
-        kinds(&run(&screen(&new, agents_x()), &mut ps, 0.0).1),
-        ["ctx"]
-    );
+    assert!(kinds(&run(&screen(&new, agents_x()), &mut ps, 0.0).1).is_empty());
 }
 
 // --- scripts/test_fleet_poll_idle.py: agents anywhere, current_waiting -------

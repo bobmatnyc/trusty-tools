@@ -6,8 +6,10 @@
 //! `cycle.rs` to one call per step.
 //! What: slice 1 ports [`usage`] (sampling and `usage` alerts, run by the
 //! cycle) and [`notify_macos`] (the notification for `architect_*` alerts,
-//! run after the alerts are written).
+//! run after the alerts are written). df-T7i P1b adds [`scripts`].
 //! Test: see each module.
 
 pub mod notify_macos;
+// df-T7i P1b: the prototype's run_* scripts, started on its cadence.
+pub mod scripts;
 pub mod usage;

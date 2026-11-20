@@ -237,6 +237,18 @@ pub(crate) fn is_rc_failed(line: &str) -> bool {
     line.contains("/rc failed")
 }
 
+/// `RC_ACTIVE`: `(?:^|[\s|·])/rc\s*$`, the status line while Remote Control
+/// is connected (df-T7i P1b; the prototype's ar-T75 field).
+pub(crate) fn is_rc_active(line: &str) -> bool {
+    let Some(before) = line.trim_end_matches(is_space).strip_suffix("/rc") else {
+        return false;
+    };
+    before
+        .chars()
+        .next_back()
+        .is_none_or(|c| is_space(c) || c == '|' || c == '·')
+}
+
 /// Any of `DIALOG_MARKERS` in `line`.
 pub(crate) fn has_dialog_marker(line: &str) -> bool {
     [

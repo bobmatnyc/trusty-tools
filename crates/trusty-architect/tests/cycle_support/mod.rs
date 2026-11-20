@@ -136,6 +136,7 @@ impl Env {
             usage_probe: &self.probe,
             notifier: &self.notifier,
             relauncher: None,
+            steps: None,
             dry_run: false,
             messages: &trusty_architect::poller::NoMessages,
         }
@@ -169,6 +170,9 @@ impl HostProbe for QuietHost {
     fn mem_free_pct(&self) -> Option<f64> {
         Some(60.0)
     }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
+    }
 }
 
 /// A host whose load average cannot be read: the host check fails.
@@ -192,6 +196,9 @@ impl HostProbe for BrokenHost {
     }
     fn mem_free_pct(&self) -> Option<f64> {
         None
+    }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
     }
 }
 

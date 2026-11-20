@@ -1,16 +1,20 @@
 //! The Architect's own context alert.
 //!
 //! Why: the Architect's pane has no `ctx N%` field, and an Architect past its
-//! refresh bar loses the fleet's thread (ruling b7: 25% of a 1M window).
+//! refresh bar loses the fleet's thread (its bar: `ctx_bar.py`, 35% of a 1M
+//! window unless the schedule raises it; df-T7i P1b).
 //! What: [`self_ctx_alerts`] is the prototype's `self_ctx_alerts`: one
 //! `self_ctx` alert for the configured supervisor
 //! ([`crate::poller::SUPERVISOR`] by default, #9822), fingerprinted by the threshold, when
 //! the newest interactive transcript's tokens reach `SELF_CTX_THRESHOLD`% of
-//! `SELF_CTX_WINDOW` (#9171 A3a).
+//! `SELF_CTX_WINDOW` (#9171 A3a); unset, the threshold is the Architect's
+//! bar percent. A window of 0 is an error the cycle logs (the prototype
+//! raises `ZeroDivisionError` and loses the cycle; df-T7i P1b ruling).
 //! Test: `test_self_ctx_alerts_only_when_over_threshold`,
 //! `self_ctx_alerts_match_python_goldens`.
 
-use super::config::Config;
+use super::config::{Config, SelfCtxThreshold};
+use super::ctx_bar::bar_pct;
 use crate::classify::{Alert, alert};
 use crate::error::SelfCtxError;
 use crate::self_ctx::self_ctx_tokens;
@@ -26,6 +30,10 @@ use crate::self_ctx::self_ctx_tokens;
 pub fn self_ctx_alerts(cfg: &Config, now: f64) -> Result<Vec<Alert>, SelfCtxError> {
     let (Some(window), Some(threshold)) = (cfg.self_ctx_window, cfg.self_ctx_threshold) else {
         return Ok(Vec::new());
+    };
+    let threshold = match threshold {
+        SelfCtxThreshold::Env(n) => n,
+        SelfCtxThreshold::Bar => bar_pct(&cfg.supervisor, window, &cfg.il_schedule)?,
     };
     let Some(tokens) = self_ctx_tokens(&cfg.self_ctx_dir)? else {
         return Ok(Vec::new());

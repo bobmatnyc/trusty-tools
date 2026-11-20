@@ -57,16 +57,15 @@ fn test_quiet_session_suppresses_idle_but_not_ctx() -> TestResult {
 #[test]
 fn test_quiet_sessions_file_missing_means_nothing_is_quiet() -> TestResult {
     let env = Env::new(&[])?;
-    // The prototype's default `screen(PM_TURN)` carries `ctx 30%`, over the
-    // live 22% bar, so the live script writes `ctx` too: the frozen test's
-    // `["idle"]` is stale. Same input; the live kinds.
+    // The prototype's default `screen(PM_TURN)` carries `ctx 30%`, under the
+    // live 31% bar (df-T7i P1b), so the frozen test's `["idle"]` holds again.
     let tmux = fleet(&[("tm-active", "%11", "2.1.283")], &screen(30));
     let clock = FakeClock::new(IDLE_AFTER + 1.0);
     let mut session = PollSession::new(idle_since_zero(&["tm-active|%11"]));
     env.runner(&tmux, &clock, &QuietHost)
         .run_once(&mut session)?;
     assert!(!env.config.quiet_sessions.exists());
-    assert_eq!(env.written("tm-active")?, ["idle", "ctx"]);
+    assert_eq!(env.written("tm-active")?, ["idle"]);
     Ok(())
 }
 

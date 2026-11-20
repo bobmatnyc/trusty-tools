@@ -20,19 +20,26 @@
 //! `tests/wake_send_path.rs` (AC5-7), `tests/parity_wake.rs` (goldens),
 //! `tests/wake_messages.rs` (#9167).
 
+use std::fs;
+use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
+
+use serde_json::Map;
 
 use super::SUPERVISOR;
 use super::box_text::{box_full_text, own_pointer};
+use super::digest::{WakeItem, bound_wake_alerts, cap_wake, held_since, read_items, wake_digest};
 use super::listing::{Pane, capture};
 use super::messages::{MessageSink, PaneMessage, PaneMessageKind};
 use super::state::{PollState, StoredCount};
+use crate::classify::alerts::iso;
 use crate::classify::{input_state_for_send, parse_pane};
 use crate::clock::Clock;
 use crate::error::WakeError;
 use crate::input::classify_input;
 use crate::pointer::{Confirmation, Erased, type_pointer, verify_owner};
+use crate::pyjson::to_python_json;
 use crate::tmux::{PaneId, Tmux};
 
 /// The phrase for a pointer that did not land and was not ours to erase
@@ -84,7 +91,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
     /// `tm-architect`; [`WakeError::Tmux`] when a tmux call fails. The
     /// prototype raises for both; [`dispatch_wake`] reports them as `failed`.
     pub fn wake(&self, panes: &[Pane], n: u64, logged: Option<u64>) -> Result<String, WakeError> {
-        self.wake_as(SUPERVISOR, panes, n, logged)
+        self.wake_as(SUPERVISOR, panes, n, logged, "")
     }
 
     /// [`Waker::wake`] for the session `owner`. Production passes the
@@ -96,6 +103,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         panes: &[Pane],
         n: u64,
         logged: Option<u64>,
+        digest: &str,
     ) -> Result<String, WakeError> {
         let Some(target) = owner_pane(panes, owner) else {
             return Ok(format!("skipped: no {owner} pane"));
@@ -116,7 +124,11 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
             }
             return Ok(format!("skipped: input {reading}"));
         }
-        let msg = pointer_text(self.clock.now_unix(), n, logged, self.alerts);
+        // df-T7i P1b: the digest rides the same line, capped (cap_wake).
+        let msg = cap_wake(
+            &pointer_text(self.clock.now_unix(), n, logged, self.alerts),
+            digest,
+        );
         if self.dry_run {
             return Ok(format!("dry-run: would send to {target}: {msg}"));
         }
@@ -195,7 +207,8 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         new_count: u64,
         logged: Option<u64>,
     ) -> String {
-        self.dispatch_as(SUPERVISOR, state, panes, new_count, logged)
+        let ctx = WakeContext::default();
+        self.dispatch_as(SUPERVISOR, state, panes, new_count, logged, &ctx)
     }
 
     /// [`Waker::dispatch`] waking the session `owner` (the config's
@@ -209,14 +222,16 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Waker<'_, T, C> {
         panes: &[Pane],
         new_count: u64,
         logged: Option<u64>,
+        ctx: &WakeContext<'_>,
     ) -> String {
-        dispatch_wake(
+        dispatch_wake_with(
             state,
             new_count,
             logged,
             self.dry_run,
             self.clock,
-            |n, l| self.wake_as(owner, panes, n, l),
+            ctx,
+            |n, l, digest| self.wake_as(owner, panes, n, l, digest),
         )
     }
 }
@@ -277,6 +292,120 @@ pub fn dispatch_wake<C: Clock + ?Sized>(
     clock: &C,
     wake: impl FnOnce(u64, Option<u64>) -> Result<String, WakeError>,
 ) -> String {
+    let ctx = WakeContext::default();
+    dispatch_wake_with(state, new_count, logged, dry_run, clock, &ctx, |n, l, _| {
+        wake(n, l)
+    })
+}
+
+/// What a wake reads and writes besides the pane (df-T7i P1b). A `None`
+/// path turns its step off.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WakeContext<'a> {
+    /// The alerts woken this cycle, carried until a wake is sent.
+    pub woken: &'a [WakeItem],
+    /// `pm-messages.jsonl`: held PM messages join the digest.
+    pub messages: Option<&'a Path>,
+    /// `alerts.jsonl`, named by the digest's `+N more -> path`.
+    pub alerts: Option<&'a Path>,
+    /// The self-clear marker: while it is fresh, no wake is typed (ar-T0c).
+    pub suppress: Option<&'a Path>,
+    /// `pm-wake-alert.json`: failed wakes counted, a sent one clears it (D39).
+    pub wake_alert: Option<&'a Path>,
+}
+
+/// Seconds after which a self-clear marker is stale (self-clear was killed
+/// without its trap) and ignored.
+pub const WAKE_SUPPRESS_MAX_S: f64 = 3.0 * 3600.0;
+
+/// True while `marker` exists and is younger than [`WAKE_SUPPRESS_MAX_S`].
+fn wake_suppressed(marker: &Path, now: f64) -> bool {
+    let Ok(modified) = fs::metadata(marker).and_then(|m| m.modified()) else {
+        return false;
+    };
+    let mtime = modified
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64());
+    now - mtime < WAKE_SUPPRESS_MAX_S
+}
+
+/// `build_wake_digest`: carries `woken` into `wake_alerts`, bounds the list,
+/// and builds the digest of it plus the held PM messages since the last
+/// confirmed wake.
+fn build_wake_digest(state: &mut PollState, ctx: &WakeContext<'_>, now: f64) -> String {
+    let mut pend = read_items(&state.other);
+    pend.extend(ctx.woken.iter().cloned());
+    let pend = bound_wake_alerts(&mut state.other, pend);
+    let cutoff = state
+        .other
+        .get("digest_cursor")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|c| *c != 0.0)
+        .or(state.wake_sent_at.filter(|c| *c != 0.0))
+        .unwrap_or(now - 1800.0);
+    let msgs = ctx
+        .messages
+        .map(|p| held_since(p, cutoff))
+        .unwrap_or_default();
+    wake_digest(&pend, &msgs, ctx.alerts.unwrap_or(Path::new("")))
+}
+
+/// `pm_cursor.record_wake_result`: a `failed` phrase counts an attempt in
+/// `path`; a `sent` one removes the file; anything else changes nothing.
+///
+/// # Errors
+/// The file cannot be written or removed (a missing file is not an error).
+pub fn record_wake_result(path: &Path, result: &str, now: f64) -> io::Result<()> {
+    if result.starts_with("failed") {
+        let mut st: Map<String, serde_json::Value> = fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        st.entry("first_ts").or_insert_with(|| iso(now).into());
+        let attempts = st
+            .get("attempts")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        st.insert("attempts".to_owned(), (attempts + 1).into());
+        st.insert("last_ts".to_owned(), iso(now).into());
+        let text = to_python_json(&st, true).map_err(io::Error::other)?;
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, text)?;
+        fs::rename(&tmp, path)?;
+    } else if result.starts_with("sent") {
+        match fs::remove_file(path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// [`dispatch_wake`] with the digest, the self-clear marker and the
+/// wake-alert record (df-T7i P1b): `wake` gets the digest as its third
+/// argument.
+///
+/// Why: the prototype's live `dispatch_wake`; a wake that cannot be typed
+/// must keep its alerts and reach the Architect's hook (D39).
+/// What: as [`dispatch_wake`], plus: a fresh `ctx.suppress` marker returns
+/// `suppressed: self-clear waiting for idle` with everything still pending;
+/// the woken alerts are carried in `wake_alerts` and the digest is built
+/// from them and the held messages; outside a dry run the result is
+/// recorded in `ctx.wake_alert` (an error is logged, never fatal); a `sent`
+/// result drops `wake_alerts` and `wake_alerts_dropped` and, outside a dry
+/// run, stamps `digest_cursor`.
+/// Test: `dispatch_wake_matches_python_goldens`,
+/// `dispatch_wake_suppressed_while_self_clear_marker_fresh`,
+/// `a_failed_wake_alert_record_never_changes_the_wake`.
+pub fn dispatch_wake_with<C: Clock + ?Sized>(
+    state: &mut PollState,
+    new_count: u64,
+    logged: Option<u64>,
+    dry_run: bool,
+    clock: &C,
+    ctx: &WakeContext<'_>,
+    wake: impl FnOnce(u64, Option<u64>, &str) -> Result<String, WakeError>,
+) -> String {
     // #9171 AC7: an unreadable stored count is a wake still owed, never 0.
     let pending =
         counter_or(state.wake_pending.as_ref(), "wake_pending", 1).saturating_add(new_count);
@@ -291,12 +420,27 @@ pub fn dispatch_wake<C: Clock + ?Sized>(
         state.wake_logged = None;
         return "none".to_owned();
     }
-    let result = wake(pending, logged_total).unwrap_or_else(|e| format!("failed: {e}"));
+    let now = clock.now_unix();
+    // ar-T0c: alerts stay pending; the first wake after the marker carries them.
+    if ctx.suppress.is_some_and(|m| wake_suppressed(m, now)) {
+        return "suppressed: self-clear waiting for idle".to_owned();
+    }
+    let digest = build_wake_digest(state, ctx, now);
+    let result = wake(pending, logged_total, &digest).unwrap_or_else(|e| format!("failed: {e}"));
+    if let Some(path) = ctx.wake_alert.filter(|_| !dry_run) {
+        // D39: a failing wake must reach the Architect's hook, not only poll.log.
+        if let Err(e) = record_wake_result(path, &result, now) {
+            tracing::warn!(error = %e, path = %path.display(), "wake-alert record failed");
+        }
+    }
     // #9171 AC7: only a confirmed send clears the count.
     if result.starts_with("sent") {
         state.wake_pending = Some(StoredCount::Count(0));
         state.wake_logged = None;
+        state.other.remove("wake_alerts");
+        state.other.remove("wake_alerts_dropped");
         if !dry_run {
+            state.other.insert("digest_cursor".to_owned(), now.into());
             state.wake_sent_at = Some(clock.now_unix());
         }
     }

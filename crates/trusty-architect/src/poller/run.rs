@@ -30,18 +30,21 @@ use std::time::Duration;
 
 use super::config::Config;
 use super::cycle::{Sensors, Stopped, collect};
+use super::digest::WakeItem;
 use super::host::HostProbe;
 use super::lock::PollLock;
 use super::messages::MessageSink;
 use super::pyfmt::py_int;
+use super::self_refresh::self_refresh_step;
 use super::session::PollSession;
 use super::shadow::prepare_shadow;
 use super::sink::{append_alerts, append_log};
 use super::state::{PollState, save_state};
 use super::steps::notify_macos::{Notifier, notifies, notify_watchdog_alerts};
+use super::steps::scripts::ScriptSteps;
 use super::steps::usage::ProbeLauncher;
 use super::triage::Triage;
-use super::wake::Waker;
+use super::wake::{WakeContext, Waker};
 use super::watchdog::Relauncher;
 use crate::classify::Alert;
 use crate::classify::alerts::iso;
@@ -143,6 +146,9 @@ pub struct Runner<'a, T: Tmux + ?Sized, C: Clock + ?Sized> {
     pub messages: &'a dyn MessageSink,
     /// The watchdog's relaunch path; `None` turns the watchdog off (#9779).
     pub relauncher: Option<&'a dyn Relauncher>,
+    /// The run_* scripts, the zone watch and the self-refresh start, through
+    /// one subprocess seam; `None` turns them off (df-T7i P1b; tests).
+    pub steps: Option<&'a ScriptSteps<'a>>,
     /// One cycle that writes nothing and sends nothing.
     pub dry_run: bool,
 }
@@ -207,6 +213,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             usage_probe: self.usage_probe,
             dry_run: self.hands_off(),
             relauncher: self.relauncher,
+            steps: self.steps,
         };
         // #9171 A3b-2: work on a copy; nothing is committed before the append.
         let mut next = session.state.clone();
@@ -271,20 +278,45 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             dry_run: self.hands_off(),
             messages: self.messages,
         };
+        // df-T7i P1b: the digest, the self-clear marker and the D39 record.
+        let items: Vec<WakeItem> = woken.iter().map(WakeItem::from).collect();
+        let ctx = WakeContext {
+            woken: &items,
+            messages: Some(&self.config.pm_messages),
+            alerts: Some(&alerts),
+            suppress: Some(&self.config.wake_suppress),
+            wake_alert: Some(&self.config.wake_alert),
+        };
         let wake = waker.dispatch_as(
             &self.config.supervisor,
             &mut next,
             &found.panes,
             woken.len() as u64,
             Some(logged),
+            &ctx,
         );
+        // df-T7i P1b (D22): never type into the box twice in a cycle.
+        let mut watch_phrase = found.watch_phrase;
+        if let Some(steps) = self.steps.filter(|_| !wake.starts_with("sent")) {
+            let phrase = self_refresh_step(
+                &mut next.other,
+                self.config,
+                self.tmux,
+                steps.runner,
+                &found.panes,
+                now,
+                self.hands_off(),
+                log,
+            );
+            watch_phrase = format!("{watch_phrase} {phrase}").trim_end().to_owned();
+        }
         let line = format!(
             "panes={} new={} woken={} logged={logged} suppressed={} wake={wake} {}",
             found.watched,
             found.new.len(),
             woken.len(),
             found.suppressed,
-            found.watch_phrase
+            watch_phrase
         );
         log.push(line.trim_end().to_owned());
         session.state = next;

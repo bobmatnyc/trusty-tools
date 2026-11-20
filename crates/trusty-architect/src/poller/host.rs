@@ -53,6 +53,9 @@ pub trait HostProbe {
     fn swap_used_mb(&self) -> io::Result<Option<f64>>;
     /// System-wide memory free percent, when the host reports one.
     fn mem_free_pct(&self) -> Option<f64>;
+    /// Swap-ins plus swap-outs over a short sample, in pages (df-T7i P1b:
+    /// the band's swap input; idle swap left in use is not activity).
+    fn swap_activity_pages(&self) -> io::Result<u64>;
 }
 
 /// Alerts on host load, disk and swap; with `band` set, the band alert too.
@@ -103,8 +106,20 @@ pub fn host_alerts(
     if let Some(stored) = band {
         let free_gib = du.free as f64 / f64::from(1u32 << 30);
         let mem = probe.mem_free_pct();
+        // df-T7i P1b: the band reads swap activity; a failed read is none.
+        let activity = probe.swap_activity_pages().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "swap activity read failed; counted as none");
+            0
+        });
         out.extend(band_alerts(
-            &cfg.band, stored, now, load15, cores, free_gib, mem, swap,
+            &cfg.band,
+            stored,
+            now,
+            load15,
+            cores,
+            free_gib,
+            mem,
+            Some(activity as f64),
         ));
     }
     Ok(out)
@@ -236,11 +251,60 @@ impl HostProbe for SystemHostProbe {
             .ok()
             .and_then(|out| parse_memory_pressure(&out))
     }
+
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        let first = swap_counters()?;
+        std::thread::sleep(BAND_SWAP_SAMPLE);
+        Ok(swap_counters()?.saturating_sub(first))
+    }
+}
+
+/// Seconds between the two swap-counter reads (`BAND_SWAP_SAMPLE_S`).
+const BAND_SWAP_SAMPLE: Duration = Duration::from_secs(3);
+
+/// Swap-ins plus swap-outs so far: `vm_stat` on macOS, `/proc/vmstat` else.
+fn swap_counters() -> io::Result<u64> {
+    if cfg!(target_os = "macos") {
+        let out = run_text("vm_stat", &[], Duration::from_secs(5))?;
+        return parse_vm_stat_swaps(&out);
+    }
+    let text = std::fs::read_to_string("/proc/vmstat")?;
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name)?.trim().parse::<u64>().ok())
+    };
+    match (field("pswpin "), field("pswpout ")) {
+        (Some(i), Some(o)) => Ok(i + o),
+        _ => Err(io::Error::other("no pswpin/pswpout in /proc/vmstat")),
+    }
+}
+
+/// `Swapins:` plus `Swapouts:` from `vm_stat` output.
+pub(crate) fn parse_vm_stat_swaps(out: &str) -> io::Result<u64> {
+    let field = |name: &str| {
+        out.lines().find_map(|l| {
+            let v = l.strip_prefix(name)?.trim().trim_end_matches('.');
+            v.parse::<u64>().ok()
+        })
+    };
+    match (field("Swapins:"), field("Swapouts:")) {
+        (Some(i), Some(o)) => Ok(i + o),
+        _ => Err(io::Error::other("no Swapins/Swapouts in vm_stat output")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_stat_swap_counters_parse_and_a_missing_field_is_an_error() -> io::Result<()> {
+        let out = "Pages free: 1.\nSwapins:  120.\nSwapouts:  7.\n";
+        assert_eq!(parse_vm_stat_swaps(out)?, 127);
+        assert!(parse_vm_stat_swaps("Swapins: 3.\n").is_err());
+        assert!(parse_vm_stat_swaps("Swapins: x.\nSwapouts: 1.\n").is_err());
+        Ok(())
+    }
 
     #[test]
     fn host_text_parsers_match_the_prototype_patterns() -> io::Result<()> {
