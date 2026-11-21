@@ -17,13 +17,16 @@ use std::path::Path;
 use std::process::Command;
 
 /// The fixed code-signing identifier.
-pub const IDENTIFIER: &str = "com.trusty.computer";
+pub const IDENTIFIER: &str = trusty_common::launchd_labels::COMPUTER;
 /// The Developer ID team the identity must belong to.
 pub const TEAM: &str = "4JH68XUHC5";
 /// Env var naming the signing identity when `--sign-identity` is absent.
 pub const IDENTITY_ENV: &str = "TRUSTY_COMPUTER_SIGN_IDENTITY";
+
 /// The designated requirement a registered binary must satisfy.
-pub const REQUIREMENT: &str = "identifier \"com.trusty.computer\" and anchor apple generic and certificate leaf[subject.OU] = \"4JH68XUHC5\"";
+pub fn requirement() -> String {
+    format!("identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\"", IDENTIFIER, TEAM)
+}
 /// The stderr warning `--no-sign` prints.
 pub const NO_SIGN_WARNING: &str = "warning: --no-sign: the binary is not Developer ID signed; its code identity changes on every rebuild";
 
@@ -45,7 +48,7 @@ impl Codesign for SystemCodesign {
     fn verify(&self, path: &Path) -> io::Result<bool> {
         let out = Command::new("/usr/bin/codesign")
             .arg("-v")
-            .arg(format!("-R={REQUIREMENT}"))
+            .arg(format!("-R={}", requirement()))
             .arg(path)
             .output()?;
         Ok(out.status.success())

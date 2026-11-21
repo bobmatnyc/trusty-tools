@@ -27,7 +27,7 @@ commands (issue #11460):
                            persists across restarts until `unlock`
   unlock                   clear a lockout: confirm in the dialog, type its code
   install-service [--state DIR] [--sign-identity ID | --no-sign]
-                           sign both bins, write the com.trusty.computer plist, bootstrap
+                           sign both bins, write the launchd plist, bootstrap
   uninstall-service [--state DIR]
                            bootout the job and remove its plist
 every operator verb takes --state DIR (default ~/.trusty/computer)";

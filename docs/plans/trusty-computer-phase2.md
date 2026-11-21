@@ -181,7 +181,7 @@ Bob mints; an agent cannot mint for itself (brief lines 71, 109). Pattern: trust
   browser cutover (port plan line 142). Still schedule a desk slot with a 20 min limit.
 - Launchd label `com.trusty.computer`, `KeepAlive` (`launchd.rs:91-325`); the daemon starts on the first lease.
 - `install-service` checks `/Applications/CuaDriver.app` is 0.23.2 and both grants are present via
-  `check_permissions {"prompt": false}`; it never prompts (README.md:93-101 for Bob's grant steps).
+  `check_permissions {"prompt": false}`; it never prompts (README.md:93-101 for the operator's grant steps).
 - Isolated live runs use a new `scripts/sandbox_computer_daemon.sh` (temp state, no `.env.local`, no Keychain),
   per the CLAUDE.md hand-built-daemon rule (#9121). Built in Phase 6.
 

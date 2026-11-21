@@ -145,6 +145,9 @@ pub const BROWSER: &str = agent!("browser");
 /// The trusty-agents Slack gateway (`tagent --slack`).
 pub const AGENTS_SLACK: &str = agent!("agents", "slack");
 
+/// The trusty-computer desktop control service.
+pub const COMPUTER: &str = agent!("computer");
+
 /// A launchd-managed service: its member name, canonical label, and the labels
 /// earlier installs used for the same service.
 ///
@@ -184,6 +187,12 @@ pub const SERVICES: &[Service] = &[
         member: "trusty-browser",
         sub_unit: None,
         label: BROWSER,
+        legacy: &[],
+    },
+    Service {
+        member: "trusty-computer",
+        sub_unit: None,
+        label: COMPUTER,
         legacy: &[],
     },
     Service {

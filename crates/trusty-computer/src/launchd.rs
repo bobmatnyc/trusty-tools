@@ -1,4 +1,4 @@
-//! The `com.trusty.computer` launchd job: `install-service` and `uninstall-service`.
+//! The launchd job for trusty-computer: `install-service` and `uninstall-service`.
 //!
 //! Why: the broker must start at login and stay up, and the job must run the
 //! exact signed binary the operator installed (plan section 7, issue #11460;
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::codesign::{Signer, ensure_install_signed};
 
 /// The launchd label.
-pub const LABEL: &str = "com.trusty.computer";
+pub const LABEL: &str = trusty_common::launchd_labels::COMPUTER;
 
 /// Why a launchd action failed.
 #[derive(Debug, thiserror::Error)]
