@@ -213,6 +213,31 @@ class ViewsAgree(unittest.TestCase):
             store.list_docs("items")
         self.assertEqual(ds.LOCK_WAIT, 10.0)   # the Rust store's LOCK_WAIT
 
+    def serve_behind_held_lock(self, lock_wait):
+        """A DashboardServer over a seeded dir store whose .lock a writer holds; returns its port."""
+        serve = _load_serve()
+        root, _ = self.seed("dir")
+        store = ds.Store(root, fmt="dir", schema_mode="off")
+        store.lock_wait = lock_wait
+        page = os.path.join(os.path.dirname(root), "index.html")
+        with open(page, "w") as f:
+            f.write("<html><head></head><body>x</body></html>")
+        srv = serve.DashboardServer(0, store, page)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        held = open(os.path.join(root, ".lock"), "a")
+        fcntl.flock(held, fcntl.LOCK_EX)
+        self.addCleanup(held.close)
+        self.addCleanup(fcntl.flock, held, fcntl.LOCK_UN)
+        return srv.server_address[1]
+
+    def test_api_viz_behind_a_held_writer_lock_is_503_not_empty_data(self):
+        # #10699: _bodies swallowed Unavailable, so /api/viz answered 200 with no sessions and no goals.
+        port = self.serve_behind_held_lock(0.2)
+        status, body = _get(port, "/api/viz")
+        self.assertEqual((status, body.get("code")), (503, "unavailable"), body)
+
     def test_id_resolution_behind_a_held_writer_lock_stays_unavailable(self):
         # #10679: store_sid / alias_rules caught StoreError, so a hung writer read as "no session, no aliases".
         import dashboard_qual as qual
@@ -232,6 +257,17 @@ class ViewsAgree(unittest.TestCase):
         fcntl.flock(held, fcntl.LOCK_UN)
         store.delete("meta", "id-aliases", actor="test")
         self.assertEqual(qual.alias_rules(store), [])   # an absent doc still reads as no rules
+
+
+def _get(port, path):
+    """(status, JSON body) of one GET."""
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        c.request("GET", path)
+        r = c.getresponse()
+        return r.status, json.loads(r.read())
+    finally:
+        c.close()
 
 
 def _load_serve():

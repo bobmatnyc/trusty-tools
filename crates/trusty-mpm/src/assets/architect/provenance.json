@@ -50,7 +50,7 @@
     "scripts/dashboard_schema.py": "7f468c01a14e7db69ce3f3202c18484caa56fb6f2d0ca74e06e0ae2459b9ce11",
     "scripts/dashboard_store.py": "69e685dfe53d57ee05f2a60f539bffbe38add30a491e1adf96222b509769e445",
     "scripts/dashboard_toml.py": "69007b041109ca108dca44fcf1065864a10e58245497dc726878404d938f0bfc",
-    "scripts/dashboard_viz.py": "1489a1ba6c87170ea94320d45db46fd1830439a6caa12b1d6c54ec6e24b5802b",
+    "scripts/dashboard_viz.py": "ddce567aee4518a6a285551d8648caaf0ff28d24e296c256f737e569d6d3a4f2",
     "scripts/dashboard_watch.py": "c02ab333e6c8550a3632e7d658a24aedc024f98d519dd900cd0841dbb6cba0c6",
     "scripts/datg-hook.sh": "b74b3f6d17084e3e52b67700f05d550a39c0abc9312d6af63ff7cc46a2f9da6f",
     "scripts/datg.py": "b12a9df1706bda2aa8a46952886c3e0de796d75b4d87792a11a08e34da04adc3",
