@@ -3,7 +3,7 @@ name: architect-improvements
 description: Architect skill. Load for an improvement finding, a framework or Architect change, or a question about the improvement pipeline - when a session sends an IMPROVEMENT REPORT, when a captured pane shows a Prompt feedback or Improvement recommendations block, once a day for consolidation and the routine check, and after a filed change merges or releases. Covers intake into the ledger, consolidation by a research agent, the daily scheduled-routine check, filing, and observing whether each change worked. Architect only.
 user-invocable: true
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
 category: monitoring
 tags: [architect, self-improvement, ledger]
 effort: medium
@@ -100,6 +100,19 @@ owning PM), clearer error text, an instruction or skill line, or caller error
 with no tool change. It writes `runs/<date>-tool-failures.md`. Each fix goes
 into the ledger as a report and follows sections 4-5. A tool change goes to
 the owning PM as a relay.
+
+<!-- rule:r-192 -->
+**Self-improvement is a routine task (r-192, the owner's words: "Make
+self-improvement an architect routine task, include in core instructions").**
+Not an occasional one. Every pass: when the owner corrects you, a relay goes
+wrong, a guard blocks you, or a routine silently stopped, record the finding
+in the improvement ledger the same pass, with its trigger and its fix. Daily,
+with the 06:30 owner-model run: review the day's findings, fix the
+Architect-owned files (skills, scripts, records) through an engineer agent,
+and send framework changes to the owning PM. Check that every scheduled
+routine (heartbeat, poller, morning brief, dreaming, ID retirement) actually
+ran; a routine that has not run is a finding. Report what changed in the
+morning brief.
 
 **Routine check (r-192, standard daily task).** Run it with the 06:30
 owner-model run and the daily consolidation. Confirm that each scheduled
