@@ -1,0 +1,11 @@
+# cua-driver 0.23.2, bounded daemon on a private socket, 2026-11-18 (issue #11460, Phase 2).
+# start_session {"session":"s1"}; end_session {"session":"s1"}; then list_windows {"pid":P,"session":"s1"}:
+{"ok":false,"error":"session 's1' has ended; tool call 'list_windows' was rejected. Call start_session with this id to revive it before issuing further actions, or use a new session id.","exit_code":1}
+# start_session {"session":"s1"} again answers "revived":true and the next call succeeds.
+# Manifest idle_timeout elapsed (5s manifest): every call, start_session included, until a restart:
+{"ok":false,"error":"Policy loading error: capability manifest idle timeout exceeded","exit_code":1}
+# Unknown method and bad JSON:
+{"ok":false,"error":"Unknown method: bogus","exit_code":65}
+{"ok":false,"error":"JSON parse error: expected ident at line 1 column 2","exit_code":65}
+# Bounded refusal (an isError tool result, ok:true at the transport):
+{"ok":true,"result":{"content":[{"text":"protected resource is outside the capability manifest: desktop application pid 1 is outside the capability manifest","type":"text"}],"isError":true,"structuredContent":{"refusal":{"code":"bounded_resource_outside_manifest","message":"protected resource is outside the capability manifest: desktop application pid 1 is outside the capability manifest"},"status":"refused"}}}

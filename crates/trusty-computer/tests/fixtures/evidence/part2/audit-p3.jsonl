@@ -1,0 +1,17 @@
+{"args": {"keys": ["prompt"]}, "op": "call", "phase": "forward", "request_id": "p3-full-relaunch-1", "tool": "check_permissions", "ts": 1794991775.273, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["prompt"]}, "ms": 44, "ok": true, "op": "call", "phase": "done", "request_id": "p3-full-relaunch-1", "tool": "check_permissions", "ts": 1794991775.317, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["include_screenshot", "pid", "window_id"]}, "op": "call", "phase": "forward", "request_id": "p3-full-relaunch-2", "tool": "get_window_state", "ts": 1794991776.649, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["include_screenshot", "pid", "window_id"]}, "ms": 1007, "ok": true, "op": "call", "phase": "done", "redacted": 65, "request_id": "p3-full-relaunch-2", "tool": "get_window_state", "ts": 1794991777.657, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["element_token", "pid", "window_id"]}, "op": "call", "phase": "forward", "request_id": "p3-full-relaunch-3", "tool": "click", "ts": 1794991777.657, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["element_token", "pid", "window_id"]}, "confirmed": true, "ms": 3173, "ok": true, "op": "call", "phase": "done", "request_id": "p3-full-relaunch-3", "tool": "click", "ts": 1794991780.83, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["include_screenshot", "pid", "window_id"]}, "op": "call", "phase": "forward", "request_id": "p3-full-relaunch-4", "tool": "get_window_state", "ts": 1794991780.831, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["include_screenshot", "pid", "window_id"]}, "ms": 1022, "ok": true, "op": "call", "phase": "done", "redacted": 65, "request_id": "p3-full-relaunch-4", "tool": "get_window_state", "ts": 1794991781.852, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["element_token", "pid", "window_id"]}, "op": "call", "phase": "forward", "request_id": "p3-full-relaunch-5", "tool": "click", "ts": 1794991781.853, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["element_token", "pid", "window_id"]}, "confirmed": false, "ms": 4459, "ok": true, "op": "call", "phase": "done", "request_id": "p3-full-relaunch-5", "tool": "click", "ts": 1794991786.312, "uid": 502, "verdict": "filter"}
+{"args": {"keys": ["pid"]}, "op": "call", "refused": "denied_tool", "request_id": "p3-full-relaunch-6", "tool": "kill_app", "ts": 1794991786.312, "uid": 502}
+{"args": {"keys": []}, "op": "call", "refused": "denied_tool", "request_id": "p3-full-relaunch-7", "tool": "clipboard_read", "ts": 1794991786.312, "uid": 502}
+{"args": {"keys": ["pid"]}, "op": "call", "refused": "denied_tool", "request_id": "p3-full-relaunch-8", "tool": "bring_to_front", "ts": 1794991786.313, "uid": 502}
+{"args": {"keys": []}, "op": "call", "refused": "denied_tool", "request_id": "p3-full-relaunch-9", "tool": "get_desktop_state", "ts": 1794991786.313, "uid": 502}
+{"args": {"keys": ["include_screenshot", "pid", "window_id"]}, "op": "call", "refused": "screenshot", "request_id": "p3-full-relaunch-10", "tool": "get_window_state", "ts": 1794991786.313, "uid": 502}
+{"args": {"keys": ["pid"]}, "op": "call", "refused": "pid_out_of_scope", "request_id": "p3-full-relaunch-11", "tool": "list_windows", "ts": 1794991786.313, "uid": 502}
+{"args": {"keys": ["element_token", "pid", "window_id"]}, "op": "call", "refused": "token_not_exposed", "request_id": "p3-full-relaunch-12", "tool": "click", "ts": 1794991786.313, "uid": 502, "verdict": "filter"}

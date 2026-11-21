@@ -11909,6 +11909,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusty-computer"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libc",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "trusty-connectors"
 version = "0.1.0"
 dependencies = [
