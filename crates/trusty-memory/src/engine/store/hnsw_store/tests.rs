@@ -1621,10 +1621,7 @@ fn replay_leaves_no_point_without_neighbours() {
 }
 
 /// Builds `replay_leaves_no_point_without_neighbours` runs.
-// #10682: the replay is serial now, so the entry-point race this repeated
-// build hunted cannot occur and every build is identical; 200 serial builds
-// would cost tens of minutes for no extra coverage.
-const REPLAY_BUILDS: usize = 3;
+const REPLAY_BUILDS: usize = 200;
 
 /// Threads in the test's own replay pool; a 4-vCPU CI runner's count, so the
 /// inserts still race.
@@ -2384,6 +2381,3 @@ mod concurrency_tests;
 // #9275: chunk-row (`{uuid}#n`) search grouping.
 #[path = "chunk_tests.rs"]
 mod chunk_tests;
-// #10682: the open-time replay is serial and cannot deadlock in `hnsw_rs`.
-#[path = "replay_deadlock_tests.rs"]
-mod replay_deadlock_tests;

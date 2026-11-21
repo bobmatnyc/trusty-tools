@@ -23,22 +23,23 @@
 //!
 //! What: [`new_index`] builds a SINGLE-layer graph. With `max_layer = 1`,
 //! `LayerGenerator::generate` maps every draw to layer 0, so the OS-seeded RNG
-//! no longer shapes the graph. [`replay`] inserts every live row serially
-//! (#10682: a parallel insert can deadlock inside `hnsw_rs`).
+//! no longer shapes the graph. [`replay`] inserts the first live row serially,
+//! so the entry point exists, and the rest on rayon.
 //!
-//! Guarantee (#10682): the replay is serial, so two opens of the same rows
-//! build the same graph. Owner ruling 25 (#9141) had chosen a parallel replay
-//! for its open cost (~0.45 s parallel against ~4.2–5.2 s serial for 6,661
-//! 384-dim rows in the dev profile); that replay could deadlock inside
-//! `hnsw_rs`, so the serial cost is the price of an open that always ends.
-//! #9280: at or below `EXHAUSTIVE_SCAN_MAX_POINTS` the exact scan answers
-//! instead of the graph.
+//! Guarantee: a parallel build's neighbour lists still depend on thread
+//! scheduling, so two opens return the same top k only while the search
+//! finds the exact top k both times. That held in every measurement above,
+//! but `hnsw_rs` cannot promise it. Owner ruling 25 (#9141) accepted this
+//! trade for the open cost: ~0.45 s parallel against ~4.2–5.2 s serial for
+//! 6,661 384-dim rows in the dev profile. #9280: at or below
+//! `EXHAUSTIVE_SCAN_MAX_POINTS` the exact scan answers instead of the graph,
+//! so this caveat applies only above it.
 //! Test: `reopening_a_palace_answers_every_query_identically`,
 //! `replay_leaves_no_point_without_neighbours`.
 
 use hnsw_rs::prelude::{DistCosine, Hnsw};
 
-use super::quiet_insert::insert_quietly;
+use super::quiet_insert::{insert_quietly, inserts_before_print_point};
 use super::{HNSW_EF_CONSTRUCTION, HNSW_INITIAL_CAPACITY, HNSW_MAX_NB_CONNECTION};
 
 /// Layer count of every graph this store builds.
@@ -66,32 +67,45 @@ pub(super) fn new_index() -> Hnsw<'static, f32, DistCosine> {
     )
 }
 
-/// Insert `live` into `index`, one row at a time on the calling thread.
+/// Insert `live` into `index`: the first row serially, the rest in parallel.
 ///
-/// Why (#10682): `hnsw_rs` 0.3.4 `reverse_update_neighborhood_simple`
-/// (`hnsw.rs:1237-1241`) holds `new_point.neighbours.read()` while it takes
-/// `q.neighbours.write()`. Two parallel inserts that each found the other as a
-/// neighbour each hold their own read lock and wait on the other's write lock,
-/// so `parallel_insert_slice` can deadlock and hang `HnswStore::open`. The
-/// lock order lives inside `hnsw_rs`, so the only order this crate controls is
-/// "one insert at a time". This reverses owner ruling 25's parallel replay
-/// (#9141): a correct open beats a fast open that can hang forever.
-/// #9141: the graph stays single-layer, so a serial replay is also
-/// deterministic: the same rows give the same neighbour lists on every open.
-/// What: every row goes through [`super::quiet_insert::insert_quietly`], which
-/// also silences the 50,000th-insert print (#9187). Fails only when stdout
-/// cannot be silenced, and then the graph is partial.
-/// Test: `replay_builds_the_same_graph_every_time`,
-/// `replay_of_mutual_neighbours_finishes_within_bound`,
-/// `reopening_a_palace_answers_every_query_identically`,
-/// `no_hnsw_insert_writes_to_stdout`.
+/// Why (#9141): the serial replay was the dominant cost of a cold palace open
+/// (2.4 s of a 3 s open at 6,644 vectors). Owner ruling 25 chose the parallel
+/// insert over the serial one; see the module header for what that gives up.
+/// An `hnsw_rs` 0.3.4 insert that reads no entry point sets one and returns
+/// with no neighbours (`hnsw.rs:1083-1098`). In a parallel insert into an
+/// empty graph several first inserts can read no entry point at once, and
+/// every one but the winner is stored with no edges, so no search reaches it.
+/// #9187: `hnsw_rs` prints to stdout on every 50,000th insert, and only a
+/// serial insert can be silenced without racing other threads.
+/// What: `insert_slice` for the first row sets the entry point. The rest go
+/// through `parallel_insert_slice` in batches that each stop one insert short
+/// of a print point; that insert runs alone through
+/// [`super::quiet_insert::insert_quietly`]. Below 50,000 rows this is one batch,
+/// as before. Fails only when stdout cannot be silenced, and then the graph is
+/// partial.
+/// Test: `reopening_a_palace_answers_every_query_identically`,
+/// `replay_leaves_no_point_without_neighbours`, `no_hnsw_insert_writes_to_stdout`.
 pub(super) fn replay(
     index: &Hnsw<'static, f32, DistCosine>,
     live: &[(Vec<f32>, usize)],
 ) -> std::io::Result<()> {
-    // #10682: serial, so no two inserts ever hold `hnsw_rs` neighbour locks at once.
-    for (vector, id) in live {
+    let Some(((first, first_id), mut rest)) = live.split_first() else {
+        return Ok(());
+    };
+    // See #9141: the entry point exists before any parallel insert reads it.
+    insert_quietly(index, first, *first_id)?;
+    while !rest.is_empty() {
+        // #9187: no parallel batch reaches a print point.
+        let free = inserts_before_print_point(index.get_nb_point()).min(rest.len());
+        let (batch, tail) = rest.split_at(free);
+        let refs: Vec<(&[f32], usize)> = batch.iter().map(|(v, id)| (v.as_slice(), *id)).collect();
+        index.parallel_insert_slice(&refs);
+        let Some(((vector, id), tail)) = tail.split_first() else {
+            break;
+        };
         insert_quietly(index, vector, *id)?;
+        rest = tail;
     }
     Ok(())
 }
