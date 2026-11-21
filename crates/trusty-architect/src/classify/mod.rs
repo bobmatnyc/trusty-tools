@@ -32,6 +32,7 @@ use matchers::{
     is_rc_failed, is_rule, is_spinner, strip_ansi, strip_timers,
 };
 
+pub(crate) use alerts::clean;
 pub use alerts::{
     Alert, CTX_HIGH, CTX_WARN, DETAIL_MAX, IDLE_AFTER, IDLE_EXEMPT_SESSIONS, PLAN_HIGH, PaneState,
     alert, evaluate, fleet_plan_alerts,

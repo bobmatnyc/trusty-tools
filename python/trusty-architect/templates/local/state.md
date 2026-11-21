@@ -3,6 +3,11 @@
 The Architect's running state, rewritten in place at the end of every pass.
 History goes in `local/actions.md`.
 
+Write an active hold as a line that starts with its format, or setup cannot
+read it: `- HOLD: <what is held>` (usage hold), `- usage state: HOLD
+<details>`, or `- On hold (<who>): no merge <details>` (merge hold). A line
+that only uses the word "hold" elsewhere is a note, not a hold.
+
 - poll_count: 0
 - last_consumed_ts: none
 - last_alert_ts: none
