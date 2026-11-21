@@ -232,6 +232,15 @@ pub enum RpcServerError {
         source: serde_json::Error,
     },
 
+    /// Writing the response frame failed.
+    #[error("write response frame: {source}")]
+    Write {
+        /// Underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    // #11256: appended last so no existing variant's discriminant shifts.
     /// The client hung up while a method marked with
     /// [`RpcRouter::mark_read_only`] was running, so the handler was cancelled
     /// and nothing was answered (#11256).
@@ -239,14 +248,6 @@ pub enum RpcServerError {
     ClientGone {
         /// The cancelled method.
         method: String,
-    },
-
-    /// Writing the response frame failed.
-    #[error("write response frame: {source}")]
-    Write {
-        /// Underlying OS error.
-        #[source]
-        source: std::io::Error,
     },
 }
 
