@@ -238,6 +238,20 @@ class ViewsAgree(unittest.TestCase):
         status, body = _get(port, "/api/viz")
         self.assertEqual((status, body.get("code")), (503, "unavailable"), body)
 
+    def test_concurrent_fleet_gets_behind_a_held_writer_lock_share_one_wait(self):
+        # #10698: the fleet cache re-ran a failed build per queued request, so the Nth request waited N lock waits.
+        port = self.serve_behind_held_lock(0.5)
+        out = []
+        threads = [threading.Thread(target=lambda: out.append(_get(port, "/api/fleet"))) for _ in range(4)]
+        start = time.monotonic()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        elapsed = time.monotonic() - start
+        self.assertEqual(sorted(s for s, _ in out), [503] * 4, out)
+        self.assertLess(elapsed, 0.9, f"4 requests took {elapsed:.2f}s: each re-ran the failed build")
+
     def test_id_resolution_behind_a_held_writer_lock_stays_unavailable(self):
         # #10679: store_sid / alias_rules caught StoreError, so a hung writer read as "no session, no aliases".
         import dashboard_qual as qual
