@@ -179,6 +179,7 @@ trusty-mpm	test:integration	tm_hook_pm_guard_build_lease	reads common::stage_rep
 trusty-mpm	test:integration	tm_sessions_instructions_diagnostics::instructions_reports_section_status_and_project_style	reads FrameworkContent::load over the checkout (#9012)
 trusty-mpm	lib	daemon::doctor_content::tests::content_row_fails_when_the_pm_package_does_not_parse	reads the checkout's content: fake_checkout_with_package stages a PM package the doctor row parses (#9012)
 trusty-mpm	lib	daemon::doctor_content_requires::tests	reads the checkout's content: copies content/ and reads it through checkout_content, AgentRoster::load and FrameworkContent::load (#8390)
+trusty-mpm	lib	core::architect_lockdown::tests::the_unused_agent_list_names_bundled_agents_and_both_spellings	reads literal '../../content/agents' to check each name in ARCHITECT_UNUSED_AGENTS is a bundled agent file (MB159a)
 trusty-review	lib	pipeline::mapreduce::map::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::mapreduce::synthesis::tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
 trusty-review	lib	pipeline::prompt::sections_tests	reads prompt_templates::test_support::prompts (content/instructions/trusty-review/prompts, #9015)
