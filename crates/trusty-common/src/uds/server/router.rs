@@ -196,6 +196,8 @@ pub struct RpcRouter {
     /// separately from `methods` so marking a name is independent of how its
     /// handler was registered — including through a [`RpcFallback`].
     liveness: BTreeSet<String>,
+    /// #11256: names whose handler is cancelled when the client hangs up.
+    read_only: BTreeSet<String>,
 }
 
 impl std::fmt::Debug for RpcRouter {
@@ -206,6 +208,7 @@ impl std::fmt::Debug for RpcRouter {
             .field("methods", &self.method_names().collect::<Vec<_>>())
             .field("streams", &self.stream_names().collect::<Vec<_>>())
             .field("liveness", &self.liveness_names().collect::<Vec<_>>())
+            .field("read_only", &self.read_only.iter().collect::<Vec<_>>())
             .field("fallback", &self.fallback.is_some())
             .finish()
     }
@@ -314,6 +317,43 @@ impl RpcRouter {
         }
         serde_json::from_slice::<MethodName>(frame)
             .is_ok_and(|named| self.liveness.contains(&named.method))
+    }
+
+    /// Mark `name` as READ-ONLY: its handler is cancelled when the client hangs
+    /// up before the answer is written (#11256).
+    ///
+    /// Why: an abandoned read keeps the daemon busy for its whole duration — a
+    /// bridge that times out at 60 s leaves a `scope=all` walk running long
+    /// after nobody can read its answer (#11255 F4).
+    /// What: records the NAME, like [`mark_liveness`].
+    /// [`super::handle_connection`] races a marked method's handler against a
+    /// peer hang-up and drops the handler future when the peer goes. An
+    /// unmarked method — every write — runs to completion, because dropping a
+    /// write part-way can leave state half applied.
+    ///
+    /// 🔴 Mark only methods with no side effect a partial run could leave behind.
+    ///
+    /// [`mark_liveness`]: RpcRouter::mark_liveness
+    ///
+    /// Test: `a_read_only_handler_is_cancelled_when_its_client_hangs_up_11256`,
+    /// `a_write_handler_runs_to_completion_after_its_client_hangs_up_11256`.
+    pub fn mark_read_only(mut self, name: impl Into<String>) -> Self {
+        self.read_only.insert(name.into());
+        self
+    }
+
+    /// The method `frame` names when it is marked with [`mark_read_only`]
+    /// (#11256); `None` for an unmarked or unparseable frame.
+    ///
+    /// [`mark_read_only`]: RpcRouter::mark_read_only
+    pub(super) fn read_only_method(&self, frame: &[u8]) -> Option<String> {
+        if self.read_only.is_empty() {
+            return None;
+        }
+        serde_json::from_slice::<MethodName>(frame)
+            .ok()
+            .map(|named| named.method)
+            .filter(|method| self.read_only.contains(method))
     }
 
     /// Register a streaming `handler` under `name`, replacing any previous

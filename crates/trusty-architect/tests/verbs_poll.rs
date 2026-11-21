@@ -351,3 +351,38 @@ fn a_bad_interval_is_a_usage_error() -> TestResult {
     }
     Ok(())
 }
+
+/// #11369: the cadence is `poll_interval_s` in `local/architect.json`, the
+/// file `architect_config.py` reads; a bad value or a missing named file is a
+/// usage error, never the default.
+#[test]
+fn configured_interval_reads_architect_json() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let none = |_: &str| None;
+    assert_eq!(verbs::configured_interval(dir.path(), &none)?, "60");
+    fs::create_dir_all(dir.path().join("local"))?;
+    let file = dir.path().join("local/architect.json");
+    fs::write(&file, "  \n")?;
+    assert_eq!(verbs::configured_interval(dir.path(), &none)?, "60");
+    fs::write(&file, r#"{"dashboard_port": 7890}"#)?;
+    assert_eq!(verbs::configured_interval(dir.path(), &none)?, "60");
+    fs::write(&file, r#"{"poll_interval_s": 600}"#)?;
+    assert_eq!(verbs::configured_interval(dir.path(), &none)?, "600");
+    for bad in ["0", "-5", "1.5", "\"600\"", "true", "null"] {
+        fs::write(&file, format!(r#"{{"poll_interval_s": {bad}}}"#))?;
+        let err = verbs::configured_interval(dir.path(), &none).expect_err(bad);
+        assert_eq!(err.exit_code(), 2, "{bad}: {err}");
+        assert!(err.to_string().contains("poll_interval_s"), "{err}");
+    }
+    for bad in ["{", "[]"] {
+        fs::write(&file, bad)?;
+        let err = verbs::configured_interval(dir.path(), &none).expect_err(bad);
+        assert_eq!(err.exit_code(), 2, "{bad}: {err}");
+    }
+    let other = dir.path().join("other.json");
+    let named = |k: &str| (k == "ARCHITECT_CONFIG").then(|| other.display().to_string());
+    assert!(verbs::configured_interval(dir.path(), &named).is_err());
+    fs::write(&other, r#"{"poll_interval_s": 45}"#)?;
+    assert_eq!(verbs::configured_interval(dir.path(), &named)?, "45");
+    Ok(())
+}

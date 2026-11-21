@@ -9,6 +9,8 @@ directory holding <owner>/<repo> checkouts (default ~/trusty-mpm-projects;
 `ARCHITECT_PROJECTS_ROOT` overrides) and `claude_config_dir` the Claude Code config
 directory whose projects/ holds the transcripts (`CLAUDE_CONFIG_DIR` overrides; default
 ~/.trusty-tools/trusty-mpm/claude-config). Both are returned absolute (#10571).
+`poll_interval_s` is the poller's cycle length in whole seconds (default 60): the one
+cadence every start path reads (#11369).
 What: `load()` reads `<root>/local/architect.json`, where `root` is the parent
 of this `scripts/` directory, and returns a frozen `Config`. `ARCHITECT_CONFIG`
 names another file, which must exist. Precedence is environment, then file,
@@ -31,9 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
 
 DEFAULT_PORT = 7890
+# #11369: the poller cadence; `tm architect poll` reads the same key and default.
+DEFAULT_POLL_INTERVAL_S = 60
 _SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 _KNOWN = ("owner_name", "memory_palace", "dashboard_port", "tailnet_url", "repos", "caps",
-          "projects_root", "claude_config_dir")
+          "projects_root", "claude_config_dir", "poll_interval_s")
 DEFAULT_PROJECTS_ROOT = "~/trusty-mpm-projects"
 DEFAULT_CLAUDE_CONFIG_DIR = "~/.trusty-tools/trusty-mpm/claude-config"
 _REPO_FIELDS = ("slug", "gh_config_dir", "checkout")
@@ -74,6 +78,7 @@ class Config:
     unknown: Tuple[str, ...] = ()
     projects_root: str = ""
     claude_config_dir: str = ""
+    poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
 
 
 def default_claude_config_dir(environ: Optional[Mapping[str, str]] = None) -> str:
@@ -104,6 +109,7 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
     tailnet = _url(path, "tailnet_url", _string(path, data, "tailnet_url"))
     repos = _repos(path, data.get("repos", {}), unknown)
     caps = _caps(path, data.get("caps", {}))
+    interval = _interval(path, data.get("poll_interval_s", DEFAULT_POLL_INTERVAL_S))
     projects_root = _string(path, data, "projects_root") or DEFAULT_PROJECTS_ROOT
     claude_dir = _string(path, data, "claude_config_dir") or DEFAULT_CLAUDE_CONFIG_DIR
     # See #10161: the environment wins over the file, one variable per key.
@@ -121,7 +127,7 @@ def load(root: Optional[str] = None, environ: Optional[Mapping[str, str]] = None
     return Config(path=path, owner_name=owner, memory_palace=palace, dashboard_port=port,
                   tailnet_url=tailnet, repos=types.MappingProxyType(repos), caps=types.MappingProxyType(caps),
                   unknown=tuple(sorted(unknown)), projects_root=_abs(projects_root),
-                  claude_config_dir=_abs(claude_dir))
+                  claude_config_dir=_abs(claude_dir), poll_interval_s=interval)
 
 
 def _abs(value: str) -> str:
@@ -186,6 +192,13 @@ def _is_number(value: Any) -> bool:
 def _port(path: str, key: str, value: Any) -> int:
     if not _is_int(value) or not 1 <= value <= 65535:
         raise _fail(path, key, "an integer in 1..65535")
+    return value
+
+
+def _interval(path: str, value: Any) -> int:
+    # #11369: whole seconds, at least 1, as `--interval` and `tm architect poll` accept.
+    if not _is_int(value) or value < 1:
+        raise _fail(path, "poll_interval_s", "a whole number of seconds, at least 1")
     return value
 
 

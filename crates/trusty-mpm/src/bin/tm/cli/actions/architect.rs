@@ -28,9 +28,11 @@ pub(crate) enum ArchitectAction {
         /// Run one cycle and exit.
         #[arg(long)]
         once: bool,
-        /// Seconds between cycles (a positive whole number).
-        #[arg(long, default_value = "60", allow_hyphen_values = true)]
-        interval: String,
+        /// Seconds between cycles (a positive whole number). Default:
+        /// `poll_interval_s` in `local/architect.json`, else 60.
+        // #11369: no clap default, so every start path reads one cadence.
+        #[arg(long, allow_hyphen_values = true)]
+        interval: Option<String>,
         /// One cycle that captures and classifies only: prints to stdout,
         /// writes no file, sends no keys.
         #[arg(long)]
