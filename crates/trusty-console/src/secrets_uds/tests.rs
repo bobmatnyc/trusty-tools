@@ -944,7 +944,7 @@ fn console_kind_table_matches_the_server_error_kinds() {
         .filter_map(|rest| rest.split('"').next())
         .collect();
     let console: HashSet<&str> = UPSTREAM_KINDS.iter().map(|(k, _, _)| *k).collect();
-    assert_eq!(server.len(), 41);
+    assert_eq!(server.len(), 42);
     assert_eq!(console, server);
 
     let deadline = secrets_source("server/deadline.rs");

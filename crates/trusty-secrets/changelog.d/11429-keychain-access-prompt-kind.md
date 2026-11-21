@@ -1,0 +1,3 @@
+Fixed
+- A Keychain call that outlasts its time limit, as when a macOS access prompt is open or the item's access list names an older `trusty-secrets` binary, now fails with the distinct kind `keychain_access_prompt` (-32089) instead of the generic `backend_timeout`. The reply says the outcome is unknown, names the remedy (answer the prompt, then verify with `tm secrets list`), and never reads as "not stored", since the abandoned write may still land. A time-out of any other backend stays `backend_timeout` ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+- `KEYCHAIN_CALL_TIMEOUT` drops from 60 s to 20 s, so the reply arrives before a 30 s client gives up ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
