@@ -28,7 +28,7 @@ pub const SIZE_WARN: u64 = 8 * 1024;
 /// `state.json` size a growing write may not exceed.
 pub const SIZE_REFUSE: u64 = 16 * 1024;
 /// Session record limit, in bytes of compact JSON.
-pub const SESSION_MAX: usize = 2048;
+pub const SESSION_MAX: usize = 8192; // #11498: long holds fit
 
 /// What the size bar says about a write from `before` to `after` bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

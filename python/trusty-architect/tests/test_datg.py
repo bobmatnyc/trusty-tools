@@ -440,17 +440,35 @@ class SessionRecordCase(Base):
         with self.assertRaisesRegex(datg.DatgError, "cap of 8"):
             datg.write_ops(self.p, ops)
 
-    def test_session_record_over_2kb_refused(self):
+    def test_session_record_over_cap_refused(self):
+        self.assertEqual(datg.SESSION_MAX, 8192)   # #11498: raised from 2048
         ops = [{"op": "session", "waiting_on": [{"who": "ci", "what": "w" * 120}] * 5,
-                "owed": [{"check": "c" * 80, "expect": "e" * 80, "ref": "r" * 80}] * 8}]
+                "owed": [{"check": "c" * 80, "expect": "e" * 80, "ref": "r" * 80}] * 8,
+                "hold": "é" * 1000, "merge_hold": "é" * 1000,
+                "refs": [{"key": f"k{i:02}", "value": "v" * 200} for i in range(12)]}]
         with self.assertRaises(datg.DatgError):
             datg.write_ops(self.p, ops)
 
+    def test_long_holds_over_the_old_cap_are_recorded_in_full(self):
+        # #11498: an owner-shaped record (~1.9 KB of refs) plus both holds at full length is ~5 KB, over the old 2048 B.
+        refs = [{"key": f"ref{i}", "value": "v" * 160} for i in range(8)]
+        hold, merge = "é" * 1000, "m" * 1000
+        datg.write_ops(self.p, [{"op": "session", "task": "t" * 120, "next": "n" * 150, "refs": refs}])
+        datg.write_ops(self.p, [{"op": "session", "hold": hold, "merge_hold": merge}])
+        ses = self.state()["session"]
+        self.assertEqual((ses["hold"], ses["merge_hold"]), (hold, merge))
+        self.assertGreater(len(json.dumps(ses, separators=(",", ":"), ensure_ascii=False).encode()), 2048)
+        datg.write_ops(self.p, [{"op": "session", "boundary": True}])   # a later write is not refused for size
+        self.assertIn("boundary_at", self.state()["session"])
+
     def test_session_size_refusal_names_the_largest_fields(self):
-        # #11498: a refusal names the fields to shrink, largest first.
-        ops = [{"op": "session", "hold": "é" * 1000, "merge_hold": "m" * 900}]
-        with self.assertRaisesRegex(datg.DatgError, r"largest fields: hold 2002 B, merge_hold 902 B"):
+        # #11498: a record over the 8 KB cap is refused whole, never cut; the refusal names the largest fields.
+        refs = [{"key": f"k{i:02}", "value": "v" * 200} for i in range(12)]
+        ops = [{"op": "session", "hold": chr(0x1F600) * 1000, "merge_hold": "é" * 1000, "refs": refs}]
+        before = self.state().get("session")
+        with self.assertRaisesRegex(datg.DatgError, r"largest fields: hold 4002 B, refs \d+ B, merge_hold 2002 B"):
             datg.write_ops(self.p, ops)
+        self.assertEqual(self.state().get("session"), before)
 
     def test_session_plus_item_op_is_one_commit_and_none_states_empty(self):
         v = self.state()["v"]

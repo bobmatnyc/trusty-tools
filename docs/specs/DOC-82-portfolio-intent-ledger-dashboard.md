@@ -77,7 +77,7 @@ Source of truth: the dashboard JSON Schema set (JSON Schema 2020-12, 14 files), 
 
 ### 2.4 Session record
 
-- **LDG-2.4.1** Each PM ledger MUST hold one `session` object, rewritten whole, at most 2 KB, with `task`, `next`, `waiting_on`, `owed` (exact values, never "latest"), `agents`, `crons`, `boundary_at`, `ctx_use`, `written_at`, and the optional `hold` and `merge_hold` (each at most 1000 characters, counted in the 2 KB record limit; #11498). Check: an over-limit field is refused (exit 2) and a record over 2 KB is refused naming its largest fields; `owed.expect` equal to a vague word is refused.
+- **LDG-2.4.1** Each PM ledger MUST hold one `session` object, rewritten whole, at most 8 KB (8192 B; #11498), with `task`, `next`, `waiting_on`, `owed` (exact values, never "latest"), `agents`, `crons`, `boundary_at`, `ctx_use`, `written_at`, and the optional `hold` and `merge_hold` (each at most 1000 characters, counted in the 8 KB record limit; #11498). Check: an over-limit field is refused (exit 2) and a record over 8 KB is refused naming its largest fields; `owed.expect` equal to a vague word is refused.
 - **LDG-2.4.2** The Architect keeps the same record for itself (code `ar`), in its Architect store, not in a separate file (gap G11). Check: `digest` of the Architect store contains the session record.
 
 ### 2.5 Sessions (dashboard rows)
