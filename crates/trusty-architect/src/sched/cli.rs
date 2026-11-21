@@ -11,6 +11,7 @@
 //! nothing. The config is `--config`, else `local/meta/registry.json` under
 //! `--root`, else `ARCHITECT_PROJECT_DIR`, else the current directory. An
 //! empty, unreadable or invalid config is an error and a non-zero exit.
+//! `run` takes the daemon's lock first (`run_once_refuses_while_another_scheduler_holds_the_lock`).
 //! Test: `tests/sched_cli.rs` (one test per verb), `tests/sched_daemon.rs`.
 
 use std::path::{Path, PathBuf};
@@ -193,6 +194,9 @@ fn engine_for<'a>(
 }
 
 fn run_once(layout: &Layout, config: &Path, d: &Deps<'_>) -> Result<Outcome, SchedError> {
+    // The same lock as the daemon: `run` beside `daemon` would double-fire a
+    // slot and race the state file's temp file.
+    let _instance = Instance::acquire(layout)?;
     let (mut engine, _) = engine_for(layout, config, d)?;
     let mut rep = engine.tick()?;
     let longest = engine

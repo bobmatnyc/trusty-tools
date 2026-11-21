@@ -11,12 +11,16 @@
 //! The agent kind never runs in tests: they inject a fake [`JobRunner`].
 //! Test: `system_runner_runs_argv_without_a_shell`,
 //! `system_runner_kills_the_group_at_the_timeout`,
-//! `system_runner_reports_exit_codes_and_a_missing_program`.
+//! `system_runner_reports_exit_codes_and_a_missing_program`. [`JobRunner::terminate_all`]
+//! kills the groups still alive when the scheduler stops:
+//! `stopping_kills_children_still_running_after_the_wait` (tests/sched_stop.rs).
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// What to run.
@@ -57,6 +61,38 @@ pub struct RunResult {
 pub trait JobRunner: Send + Sync {
     /// Runs `spec`.
     fn run(&self, spec: &RunSpec) -> RunResult;
+
+    /// Kills every child still running: SIGTERM to each process group, then
+    /// SIGKILL after `grace`. The stop path calls it when the wait is over.
+    /// A runner that starts no processes has nothing to do.
+    fn terminate_all(&self, _grace: Duration) {}
+}
+
+/// Process groups of the children the real runner has alive, so a stop can
+/// kill them: a child in its own group outlives the scheduler otherwise, and
+/// the restarted scheduler would launch a second copy.
+static LIVE_GROUPS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+fn live() -> std::sync::MutexGuard<'static, BTreeSet<u32>> {
+    // The set is only inserted into and removed from, so it is whole even
+    // after a panic elsewhere.
+    LIVE_GROUPS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Records a child's group for its lifetime.
+struct GroupGuard(u32);
+
+impl GroupGuard {
+    fn new(pgid: u32) -> Self {
+        live().insert(pgid);
+        Self(pgid)
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        live().remove(&self.0);
+    }
 }
 
 /// The real runner.
@@ -86,6 +122,23 @@ fn failed(msg: String, started: Instant) -> RunResult {
 }
 
 impl JobRunner for SystemRunner {
+    fn terminate_all(&self, grace: Duration) {
+        let groups: Vec<u32> = live().iter().copied().collect();
+        for g in &groups {
+            kill_group(*g, libc::SIGTERM);
+        }
+        let until = Instant::now() + grace;
+        while Instant::now() < until && !live().is_empty() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // A group still registered after the grace is killed outright; one
+        // whose run already finished is no longer in the set.
+        let remaining: Vec<u32> = live().iter().copied().collect();
+        for g in remaining {
+            kill_group(g, libc::SIGKILL);
+        }
+    }
+
     fn run(&self, spec: &RunSpec) -> RunResult {
         let started = Instant::now();
         let Some((program, args)) = spec.argv.split_first() else {
@@ -116,6 +169,7 @@ impl JobRunner for SystemRunner {
             Ok(c) => c,
             Err(e) => return failed(format!("spawn {program}: {e}"), started),
         };
+        let _group = GroupGuard::new(child.id());
         let deadline = started + spec.timeout;
         loop {
             match child.try_wait() {

@@ -207,6 +207,21 @@ pub fn run_loop(
     stop: &AtomicBool,
     max_ticks: Option<u64>,
 ) -> Result<(), SchedError> {
+    run_loop_with(engine, reload, clock, stop, max_ticks, STOP_WAIT)
+}
+
+/// [`run_loop`] with the stop wait given (tests use a short one).
+///
+/// # Errors
+/// As [`run_loop`].
+pub fn run_loop_with(
+    engine: &mut Engine<'_>,
+    reload: &mut Reload,
+    clock: &dyn Clock,
+    stop: &AtomicBool,
+    max_ticks: Option<u64>,
+    stop_wait: Duration,
+) -> Result<(), SchedError> {
     let mut ticks = 0;
     while !stop.load(Ordering::SeqCst) && max_ticks.is_none_or(|m| ticks < m) {
         reload.poll(engine, clock);
@@ -227,6 +242,6 @@ pub fn run_loop(
             clock.sleep(TICK);
         }
     }
-    engine.wait_idle(STOP_WAIT);
+    engine.shutdown(stop_wait);
     Ok(())
 }
