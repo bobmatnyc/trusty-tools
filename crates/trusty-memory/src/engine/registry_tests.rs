@@ -1979,6 +1979,7 @@ fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
     let _stall = open_lock.lock();
     let err = reg
         .open_palace(dir.path(), &id)
+        .map(|_| ())
         .expect_err("a stalled re-open must be an error");
     assert!(err.downcast_ref::<OpenQueueTimeout>().is_some(), "{err:#}");
     assert!(
