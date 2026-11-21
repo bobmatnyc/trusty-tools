@@ -225,12 +225,13 @@ jobs:
   #
   # IT FAILS CLOSED IN BOTH DIRECTIONS. No CI run found for the SHA is a
   # FAILURE, not a pass — "never ran" and "ran and passed" are different facts,
-  # and conflating them is the #5620 shape. A missing, skipped or cancelled
-  # "Rust tests (pre-publish gate)" job, any red job, or an API read that
-  # fails is a failure. There is no override.
+  # and conflating them is the #5620 shape. A pending, missing, skipped or
+  # cancelled required job ("Rust tests (pre-publish gate)", "Clippy",
+  # "MSRV check", "Format check"), any red job, or an API read that fails is a
+  # failure. There is no override.
   #
-  # #11486: it reads that required job, not the whole run's status, so a
-  # dispatch made once the shards settle passes while slower CI jobs finish;
+  # #11486: it reads those required jobs, not the whole run's status, so a
+  # dispatch made once they settle passes while slower CI jobs finish;
   # and it never counts this workflow's own run. Logic and fixtures:
   # scripts/check-ci-parity.sh, scripts/check-ci-parity-selftest.sh.
   # ==========================================================================

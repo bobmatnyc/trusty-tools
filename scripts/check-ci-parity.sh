@@ -8,11 +8,13 @@
 #   the `CI gate` roll-up, the red-main notifier), so a dispatch made once the
 #   shards settled still failed "dispatched too early" (run 44365083664).
 # What: lists the ci.yml runs for SHA, excluding this workflow's own run
-#   (SELF_RUN_ID), and reads their jobs. A run counts green when the required
-#   job "Rust tests (pre-publish gate)" concluded `success` and no other job
-#   concluded red. Fails closed: an API read that fails, no run, a missing,
-#   skipped or cancelled required job, or any red job is a failure. Jobs still
-#   running that are not required are listed as a warning, not waited on.
+#   (SELF_RUN_ID), and reads their jobs. A run counts green when every job in
+#   REQUIRED_JOBS concluded `success` and no other job concluded red. The list
+#   holds the CI jobs pre-publish does not re-run itself (tests, clippy, MSRV,
+#   fmt); never "CI gate", which would bring the #11486 wait back. Fails
+#   closed: an API read that fails, no run, a pending, missing, skipped or
+#   cancelled required job, or any red job is a failure. Jobs still running
+#   that are not required are listed as a warning, not waited on.
 # Test: scripts/check-ci-parity-selftest.sh
 #
 # Usage: SHA=<sha> GITHUB_REPOSITORY=<owner/repo> [SELF_RUN_ID=<id>] \
@@ -21,7 +23,10 @@
 
 set -uo pipefail
 
-REQUIRED_JOB="Rust tests (pre-publish gate)"
+# Exact ci.yml job `name:` values; the selftest fails if one drifts.
+REQUIRED_JOBS=("Rust tests (pre-publish gate)" "Clippy" "MSRV check" "Format check")
+REQUIRED_JSON="$(printf '%s\n' "${REQUIRED_JOBS[@]}" | jq -R . | jq -s -c .)"
+REQUIRED_LABEL="$(printf '%s\n' "${REQUIRED_JOBS[@]}" | paste -sd ',' -)"
 : "${SHA:?SHA is required}"
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 SELF_RUN_ID="${SELF_RUN_ID:-${GITHUB_RUN_ID:-0}}"
@@ -68,29 +73,40 @@ for id in $(printf '%s' "${runs}" | jq -r '.[].id'); do
   bad="$(printf '%s' "${jobs}" | jq -r '[.[] | select(.status == "completed"
       and (.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure", "action_required")))
       | "\(.name)=\(.conclusion)"] | join(", ")')"
-  req="$(printf '%s' "${jobs}" | jq -r --arg n "${REQUIRED_JOB}" \
-    '[.[] | select(.name == $n)] | if length == 0 then "absent"
-     elif any(.[]; .status == "completed" and .conclusion == "success") then "success"
-     elif any(.[]; .status != "completed") then "pending"
-     else (map(.conclusion // "none") | join(",")) end')"
-  running="$(printf '%s' "${jobs}" | jq -r --arg n "${REQUIRED_JOB}" \
-    '[.[] | select(.status != "completed" and .name != $n) | .name] | join(", ")')"
+  # Per required job: success | pending | absent | <conclusions>.
+  states="$(printf '%s' "${jobs}" | jq -r --argjson req "${REQUIRED_JSON}" '
+    . as $jobs | $req[] | . as $n | [$jobs[] | select(.name == $n)]
+    | if length == 0 then "absent"
+      elif any(.[]; .status == "completed" and .conclusion == "success") then "success"
+      elif any(.[]; .status != "completed") then "pending"
+      else (map(.conclusion // "none") | join(",")) end
+    | "\($n)=\(.)"')"
+  waiting="$(printf '%s\n' "${states}" | grep -E '=(pending)$' || true)"
+  if [ "${run_status}" != "completed" ]; then
+    waiting="${waiting}$(printf '%s\n' "${states}" | grep -E '=absent$' || true)"
+  fi
+  failed="$(printf '%s\n' "${states}" | grep -vE '=(success|pending)$' || true)"
+  if [ "${run_status}" != "completed" ]; then
+    failed="$(printf '%s\n' "${failed}" | grep -vE '=absent$' || true)"
+  fi
+  running="$(printf '%s' "${jobs}" | jq -r --argjson req "${REQUIRED_JSON}" \
+    '[.[] | select(.status != "completed" and (.name | IN($req[]) | not)) | .name] | join(", ")')"
 
   if [ -n "${bad}" ]; then
     echo "::error::CI run ${id}: red job(s): ${bad}"
     red=$((red + 1))
-  elif [ "${req}" = "success" ]; then
-    echo "CI run ${id}: '${REQUIRED_JOB}' succeeded"
+  elif [ -n "${failed}" ]; then
+    echo "::error::CI run ${id} (run ${run_status}): required job(s) not green: $(printf '%s' "${failed}" | paste -sd ';' -). A missing, skipped or cancelled required job proves nothing."
+    red=$((red + 1))
+  elif [ -n "${waiting}" ]; then
+    echo "CI run ${id}: required job(s) not finished: $(printf '%s' "${waiting}" | paste -sd ';' -)"
+    pending=$((pending + 1))
+  else
+    echo "CI run ${id}: every required job succeeded (${REQUIRED_LABEL})"
     if [ -n "${running}" ]; then
       echo "::warning::CI run ${id}: not waited on, still running: ${running}"
     fi
     green=$((green + 1))
-  elif [ "${req}" = "pending" ] || { [ "${req}" = "absent" ] && [ "${run_status}" != "completed" ]; }; then
-    echo "CI run ${id}: '${REQUIRED_JOB}' has not finished"
-    pending=$((pending + 1))
-  else
-    echo "::error::CI run ${id}: '${REQUIRED_JOB}' is ${req} (run ${run_status}); a missing, skipped or cancelled required job proves nothing."
-    red=$((red + 1))
   fi
 done
 
@@ -99,6 +115,6 @@ if [ "${green}" -gt 0 ]; then
   exit 0
 fi
 if [ "${pending}" -gt 0 ]; then
-  die "CI for ${SHA} has not finished '${REQUIRED_JOB}' — ${pending} run(s) still pending. This gate is dispatched too early; wait for the test shards to settle, then re-run. Nothing here is red, but nothing has been proved either."
+  die "CI for ${SHA} has not finished its required jobs (${REQUIRED_LABEL}) — ${pending} run(s) still pending. This gate is dispatched too early; wait for them to settle, then re-run. Nothing here is red, but nothing has been proved either."
 fi
-die "No CI run for ${SHA} has a green '${REQUIRED_JOB}' (${red} red). A release gate cannot pass over a red CI."
+die "No CI run for ${SHA} has every required job green (${REQUIRED_LABEL}) (${red} red). A release gate cannot pass over a red CI."
