@@ -19,8 +19,9 @@
 //! directory naming another server, and the fail-closed rows of `walk` (a kill
 //! word in an interpreter, `ssh`, an alias, a written script, text the guard
 //! cannot read). Every caller is bound, the Architect included.
-//! Residual, out of #10665's scope (#10706, #10702): `pkill tmux`, `killall
-//! tmux`, `kill -TERM <server pid>`, script bodies, a symlink to the default
+//! #10702: a `pkill`/`killall`/`kill` of the tmux server process is refused
+//! too (`signal`). Residual, out of #10665's scope (#10706): a `kill` of a
+//! literal server pid, script bodies, a symlink to the default
 //! socket created in the same command, and `tmux source-file`.
 //! Test: `tmux_kill_server_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_tmux_kill_server_10665.rs`.
@@ -40,6 +41,9 @@ mod walk;
 // #10706 H1: the reader options that write or run.
 #[path = "tmux_kill_server_readers.rs"]
 mod readers;
+// #10702: `pkill`/`killall`/`kill` of the tmux server process.
+#[path = "tmux_kill_server_signal.rs"]
+mod signal;
 
 /// The rule name recorded with a whole-server kill deny.
 pub(crate) const TMUX_KILL_SERVER_RULE: &str = "tmux-kill-server";
@@ -146,8 +150,13 @@ impl ServerEnv {
 /// `the_ruling_dac_rows_refuse_or_allow`,
 /// `every_other_finding_is_log_only`,
 /// `a_case_variant_of_a_fleet_label_is_refused`,
-/// `an_untargeted_fleet_kill_session_is_refused`.
+/// `an_untargeted_fleet_kill_session_is_refused`,
+/// `a_tmux_process_kill_is_refused`.
 pub(crate) fn evaluate_tmux_kill_server(command: &str, env: &ServerEnv) -> Option<KillVerdict> {
+    // #10702: a signal to the tmux server process kills it with no tmux verb.
+    if let Some(why) = signal::signal_kill(command, env) {
+        return Some(KillVerdict::Refuse(refusal(&why)));
+    }
     let mentions_kill = names_whole_server_kill(command);
     // #10665 (ruling Dac): a command the guard cannot classify is log-only.
     let mut soft = (mentions_kill && unclassifiable_command(command).is_some())

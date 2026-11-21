@@ -927,3 +927,49 @@ fn grouped_exec_output_to_shell_is_logged() {
         assert_logged_inline_and_as_body(command);
     }
 }
+
+/// #10702: a signal to the tmux server process is refused in every spelling.
+#[test]
+fn a_tmux_process_kill_is_refused() {
+    for command in [
+        "pkill tmux",
+        "pkill -x tmux",
+        "pkill -9 -x tmux",
+        "/usr/bin/pkill -x tmux",
+        "sudo pkill -KILL TMUX",
+        "killall tmux",
+        "killall -9 tmux",
+        "kill $(tmux display -p '#{pid}')",
+        "kill -9 `tmux display-message -p '#{pid}'`",
+        "kill -TERM $(pgrep -x tmux)",
+        "pgrep tmux | xargs kill",
+        "cd /tmp && pkill -x tmux",
+        "sh -c 'killall tmux'",
+        "pkill -f 'tmux -L default'",
+    ] {
+        assert!(refused(command), "{command} should be refused");
+    }
+}
+
+/// #10702: unrelated kills, tmux readers, text and scratch servers run.
+#[test]
+fn a_scratch_or_unrelated_process_kill_is_allowed() {
+    for command in [
+        "pkill -f trusty-search",
+        "kill %1",
+        "kill -9 12345",
+        "pgrep tmux",
+        "ps aux | grep tmux",
+        "echo 'pkill -x tmux'",
+        "gh issue comment 1 --body 'killall tmux is refused'",
+        "kill $(tmux -L scratch1 display -p '#{pid}')",
+        "pkill -f 'tmux -L scratch1'",
+        "killall trusty-search",
+    ] {
+        assert_eq!(
+            evaluate_tmux_kill_server(command, &fleet_env()),
+            None,
+            "{command} should be allowed"
+        );
+    }
+}
