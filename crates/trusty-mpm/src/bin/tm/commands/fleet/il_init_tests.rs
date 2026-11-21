@@ -516,7 +516,10 @@ fn notes_that_only_mention_hold_or_merge_are_not_holds() {
     assert!(!report.failed(), "{}", report.render());
     if state_path(&dir).exists() {
         let ses = session(&dir);
-        assert!(ses["merge_hold"].as_str().is_none_or(str::is_empty), "{ses}");
+        assert!(
+            ses["merge_hold"].as_str().is_none_or(str::is_empty),
+            "{ses}"
+        );
         assert!(ses["hold"].as_str().is_none_or(str::is_empty), "{ses}");
     }
 }
