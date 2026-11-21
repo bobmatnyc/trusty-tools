@@ -12,7 +12,7 @@
 //! `stop`, `restart`, `grant_request`, `grant_confirm`, `grants`, `lease`,
 //! `revoke` and `lockout` on the operator socket (`broker_operator.rs`). Every refusal is audited, and
 //! an audit failure refuses. Whenever the lease moves, the broker rescopes
-//! the supervisor to the new holder's grant ([`Inner::moved`]). The call
+//! the supervisor to the new holder's grant. The call
 //! pipeline is in `broker_call.rs`.
 //! Test: `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`.
 

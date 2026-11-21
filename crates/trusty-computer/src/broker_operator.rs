@@ -7,7 +7,7 @@
 //! bundle through the [`AppResolver`](crate::app_identity::AppResolver) and
 //! refuses a mismatch (the sensitive check then reads the resolved bundle),
 //! draws a six-digit code,
-//! shows it in the [`ConsentDialog`] (no broker lock held) and on a confirm
+//! shows it in the consent dialog (no broker lock held) and on a confirm
 //! stores a challenge for [`DIALOG_CODE_TTL`]. `grant_confirm` checks the
 //! code, mints and answers a one-use `tc-` grant code valid
 //! [`GRANT_CODE_TTL`]. Five bad codes in 60 s lock minting out; five bad

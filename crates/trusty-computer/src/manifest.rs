@@ -6,7 +6,7 @@
 //! lease scope, and a scope change means a daemon restart (plan section 3).
 //! What: [`LeaseScope`] is one pid plus one window id; [`render`] emits the
 //! version-3 YAML with the tool ceiling of `tests/fixtures/capabilities.live.yaml`
-//! and no `resources.apps` entry; [`write`] stores it 0600 without following a
+//! and no `resources.apps` entry; the `write()` function stores it 0600 without following a
 //! symlink.
 //! Test: `manifest_pins_exact_pid_and_window_only`, `manifest_file_is_private`.
 
