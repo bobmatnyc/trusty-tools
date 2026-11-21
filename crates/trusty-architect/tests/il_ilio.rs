@@ -30,7 +30,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let ilio = tmp.path().join("ilio");
     fs::create_dir_all(&ilio).unwrap();
     fs::copy(fixture("ilio/r-library.json"), ilio.join("r-library.json")).unwrap();

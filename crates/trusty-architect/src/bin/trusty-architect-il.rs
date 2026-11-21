@@ -17,7 +17,13 @@ fn main() -> ExitCode {
     let env = Env::from_process();
     let frozen = env.get("TRUSTY_IL_NOW").and_then(|v| v.parse::<f64>().ok());
     let clock: Box<dyn Clock> = match frozen {
-        Some(t) => Box::new(FakeClock::new(t)),
+        Some(t) => {
+            // A leftover variable would freeze every timestamp this binary writes: say so each run.
+            eprintln!(
+                "trusty-architect-il: warning: TRUSTY_IL_NOW is set; the clock is frozen at {t} (test hook)"
+            );
+            Box::new(FakeClock::new(t))
+        }
         None => Box::new(SystemClock),
     };
     let stdin = || {

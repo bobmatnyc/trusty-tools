@@ -15,7 +15,7 @@ FROZEN = ROOT + "support/frozen_py.py"
 S = sys.argv[1]
 work = tempfile.mkdtemp(prefix="il-x-")
 proj = work + "/p"
-shutil.copytree(HERE + "/base", proj)
+shutil.copytree(HERE + "/base_datg", proj + "/.trusty-mpm/datg")
 os.makedirs(work + "/ilio")
 shutil.copy(HERE + "/ilio/r-library.json", work + "/ilio/")
 env = dict(os.environ, FROZEN_EPOCH="1795200000", ILIO_PROJECT=proj, ILIO_DIR=work + "/ilio",
@@ -43,7 +43,7 @@ cases = {
     "secret_password": blk("task: fx-T01\ndone: x\npct: 5\nnext: password = abcdefgh1"),
     "secret_pem": blk("task: fx-T01\ndone: x\npct: 5\nnext: -----BEGIN RSA PRIVATE KEY-----"),
     "bare_id": blk("task: T01\n" + base),
-    "other_code_suffix": blk("task: ar-T01\n" + base),
+    "other_code_suffix": blk("task: pm-T01\n" + base),
     "stamp_ok": blk("task: fx-T01@1118\n" + base),
     "new_long_ok": blk("task: fx-T01\ndone: x\npct: 1\nnew: T \"" + "t" * 100 + "\" done_when=\"" + "d" * 200 + "\"\nnext: y"),
     "new_too_long": blk("task: fx-T01\ndone: x\npct: 1\nnew: T \"t\" done_when=\"" + "d" * 1200 + "\"\nnext: y"),

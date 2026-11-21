@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn log_rec_reads_both_shapes() {
         let a =
-            log_rec(r#"{"t":"2026-11-20T10:00Z","id":"ar-T01","ev":"done","note":"n"}"#).unwrap();
+            log_rec(r#"{"t":"2026-11-20T10:00Z","id":"pm-T01","ev":"done","note":"n"}"#).unwrap();
         assert_eq!((a.kind.as_str(), a.t.is_some()), ("done", true));
         let b = log_rec(r#"{"ts":"2026-11-20T10:00Z","session":"","kind":"digest"}"#).unwrap();
         assert_eq!(b.kind, "digest");

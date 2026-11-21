@@ -10,7 +10,7 @@
 //! (state, log, archive, stdout, exit code); a verb sweep; Python-writes-Rust-reads and
 //! the reverse; mixed Python and Rust writers on one lock.
 //! Run: `cargo test -p trusty-architect --test il_parity -- --include-ignored`.
-//! Config (all have defaults on the Architect's machine): `ARCHITECT_SCRIPTS`,
+//! Config (no defaults; a missing one skips the test): `ARCHITECT_SCRIPTS`,
 //! `ARCHITECT_IL_LIVE` (the Architect's `.trusty-mpm/datg`), `DOGFOOD_DATG`.
 //! Test: `digest_is_byte_equal_to_python`, `apply_blocks_write_the_same_ledger_as_python`,
 //! `verb_sweep_writes_the_same_ledger_as_python`, `python_and_rust_read_each_others_writes`,
@@ -26,19 +26,12 @@ use il_support::*;
 use trusty_architect::il::{Json, Out};
 
 fn scripts() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ARCHITECT_SCRIPTS")
-            .unwrap_or_else(|_| "/Users/masa/trusty-mpm-projects/architect/scripts".into()),
-    )
+    PathBuf::from(std::env::var("ARCHITECT_SCRIPTS").unwrap_or_default())
 }
 
 fn ledgers() -> Vec<(&'static str, PathBuf)> {
-    let arch = std::env::var("ARCHITECT_IL_LIVE").unwrap_or_else(|_| {
-        "/Users/masa/trusty-mpm-projects/architect/local/il/.trusty-mpm/datg".into()
-    });
-    let dog = std::env::var("DOGFOOD_DATG").unwrap_or_else(|_| {
-        "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.trusty-mpm/datg".into()
-    });
+    let arch = std::env::var("ARCHITECT_IL_LIVE").unwrap_or_default();
+    let dog = std::env::var("DOGFOOD_DATG").unwrap_or_default();
     vec![("architect", arch.into()), ("dogfood", dog.into())]
 }
 
@@ -152,7 +145,11 @@ fn exec(mut cmd: Command, stdin: &str) -> Out {
 
 fn clean(s: &str) -> String {
     s.lines()
-        .filter(|l| !l.starts_with("task_steer:") && !l.starts_with("ilio: steering"))
+        .filter(|l| {
+            !l.starts_with("task_steer:")
+                && !l.starts_with("ilio: steering")
+                && !l.starts_with("trusty-architect-il: warning: TRUSTY_IL_NOW")
+        })
         .map(|l| format!("{l}\n"))
         .collect()
 }

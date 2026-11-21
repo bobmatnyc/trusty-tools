@@ -7,7 +7,7 @@
 //! What: one test per behaviour, all on a copy of the fixture ledger.
 //! Test: `session_flag_and_state_dir_pick_the_directory`, `closed_ids_are_reused`,
 //! `act_records_without_bumping_the_version`, `notify_failure_is_logged_and_not_fatal`,
-//! `notify_is_skipped_loudly_without_a_command`, `usage_errors_exit_two_and_write_nothing`,
+//! `notify_is_skipped_loudly_without_a_command`, `frozen_clock_variable_warns_on_stderr`, `usage_errors_exit_two_and_write_nothing`,
 //! `unported_verbs_are_refused`, `binary_round_trip`, `batch_input_must_be_a_list`.
 
 mod il_support;
@@ -118,7 +118,7 @@ fn session_flag_and_state_dir_pick_the_directory() {
 #[test]
 fn closed_ids_are_reused() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let p = project.to_str().unwrap();
     let env = Env::bare(tmp.path());
     let add = |title: &str| {
@@ -193,7 +193,7 @@ fn closed_ids_are_reused() {
 #[test]
 fn act_records_without_bumping_the_version() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let dir = datg_dir(&project);
     let (v, state) = (v_of(&dir), fs::read(dir.join("state.json")).unwrap());
     let out = run_at(
@@ -230,7 +230,7 @@ fn act_records_without_bumping_the_version() {
 #[test]
 fn notify_failure_is_logged_and_not_fatal() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let dir = datg_dir(&project);
     let env = Env::bare(tmp.path()).with("DATG_NOTIFY_CMD", "/usr/bin/false");
     let out = run_at(
@@ -280,7 +280,7 @@ fn notify_failure_is_logged_and_not_fatal() {
 #[test]
 fn notify_is_skipped_loudly_without_a_command() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let out = run_at(
         &[
             "datg",
@@ -298,16 +298,46 @@ fn notify_is_skipped_loudly_without_a_command() {
     assert_eq!(out.code, 0);
     assert!(
         out.stderr
-            .contains("pm-notify skipped for fx-D01 (DATG_NOTIFY_CMD is not set"),
+            .contains("pm-notify failed for fx-D01 (DATG_NOTIFY_CMD is not set"),
         "{}",
         out.stderr
     );
+    // The skip is recorded in the log like any failed notify, not only printed.
+    let dir = datg_dir(&project);
+    let last = read(&dir, "log.jsonl").lines().last().unwrap().to_owned();
+    assert!(
+        last.contains("\"kind\":\"notify_failure\"")
+            && last.contains("fx-D01 pm-notify skipped: DATG_NOTIFY_CMD unset"),
+        "{last}"
+    );
+}
+
+#[test]
+fn frozen_clock_variable_warns_on_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = project_with(tmp.path(), &fixture("base_datg"));
+    let p = project.to_str().unwrap();
+    let out = run_bin(
+        &["datg", "--project", p, "show", "--brief"],
+        "",
+        &[],
+        Some(NOW),
+    );
+    assert_eq!(out.code, 0);
+    assert!(
+        out.stderr
+            .contains("warning: TRUSTY_IL_NOW is set; the clock is frozen at"),
+        "{}",
+        out.stderr
+    );
+    let live = run_bin(&["datg", "--project", p, "show", "--brief"], "", &[], None);
+    assert!(!live.stderr.contains("TRUSTY_IL_NOW"), "{}", live.stderr);
 }
 
 #[test]
 fn usage_errors_exit_two_and_write_nothing() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let dir = datg_dir(&project);
     let before = (read(&dir, "state.json"), read(&dir, "log.jsonl"));
     let p = project.to_str().unwrap();
@@ -344,7 +374,7 @@ fn usage_errors_exit_two_and_write_nothing() {
 #[test]
 fn unported_verbs_are_refused() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let p = project.to_str().unwrap();
     for verb in ["hook", "check-dispatch", "stamp"] {
         let out = run_at(
@@ -365,7 +395,7 @@ fn unported_verbs_are_refused() {
 #[test]
 fn batch_input_must_be_a_list() {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let p = project.to_str().unwrap();
     let env = Env::bare(tmp.path());
     let obj = run_at(&["datg", "--project", p, "batch"], "{}", &env, NOW);

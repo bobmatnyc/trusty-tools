@@ -4,7 +4,7 @@
 Why: the Rust port must write the same bytes as `datg.py` and `ilio.py`. The goldens are
 what the Python produced for a fixed ledger, a fixed list of steps and a frozen clock, so
 `tests/il_golden.rs` can prove parity without python3 or the live ledgers.
-What: builds `base/` (a small synthetic ledger) with `datg.py`, replays `steps.jsonl`
+What: builds `base_datg/` (a small synthetic ledger) with `datg.py`, replays `steps.jsonl`
 on a copy of it with `datg.py`/`ilio.py`, and records each step's stdout, stderr and exit
 code (`golden/steps.jsonl`) plus the final files (`golden/datg/`). Paths are written as
 `@P@` (project) and `@I@` (ILIO_DIR).
@@ -216,8 +216,9 @@ def main():
     os.makedirs(work)
     base(scripts, work)
     datg = os.path.join(work, "p", ".trusty-mpm", "datg")
-    dest = os.path.join(HERE, "base", ".trusty-mpm", "datg")
-    shutil.rmtree(os.path.join(HERE, "base"), ignore_errors=True)
+    # Not under a `.trusty-mpm/` directory: the repo ignore rules skip those.
+    dest = os.path.join(HERE, "base_datg")
+    shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest)
     for f in os.listdir(datg):
         if f != ".lock":

@@ -186,13 +186,6 @@ fn act_op(rest: &[String]) -> IlResult<Json> {
 fn notify_escalations(cx: &mut Cx, w: &Where, evs: &[Ev], st: &Json) -> IlResult<()> {
     let cmd = cx.env.get("DATG_NOTIFY_CMD").map(str::to_owned);
     for e in evs.iter().filter(|e| e.ev == "escalated") {
-        let Some(cmd) = &cmd else {
-            cx.out.eprintln(&format!(
-                "datg: pm-notify skipped for {} (DATG_NOTIFY_CMD is not set; datg.py queues it from its own scripts dir)",
-                e.id
-            ));
-            continue;
-        };
         let item = st
             .arr("items")
             .iter()
@@ -221,7 +214,17 @@ fn notify_escalations(cx: &mut Cx, w: &Where, evs: &[Ev], st: &Json) -> IlResult
         };
         let text = format!("{} {}{tail}", e.id, item.s("title"));
         let sess = super::cli::session_name(cx, w, st.s("code"))?;
-        if let Err(err) = super::notify::run(cmd, &sess, &text) {
+        // An unset command is a failure to notify like any other: logged as `notify_failure`.
+        let outcome = match &cmd {
+            Some(c) => {
+                super::notify::run(c, &sess, &text).map_err(|err| (format!("failed: {err}"), err))
+            }
+            None => Err((
+                "skipped: DATG_NOTIFY_CMD unset".to_owned(),
+                "DATG_NOTIFY_CMD is not set; datg.py queues it from its own scripts dir".to_owned(),
+            )),
+        };
+        if let Err((logged, err)) = outcome {
             cx.out
                 .eprintln(&format!("datg: pm-notify failed for {} ({err})", e.id));
             let ledger = cx.ledger(w)?;
@@ -230,7 +233,7 @@ fn notify_escalations(cx: &mut Cx, w: &Where, evs: &[Ev], st: &Json) -> IlResult
                 ("ts", ctx.now_iso().into()),
                 ("session", sess.as_str().into()),
                 ("kind", "notify_failure".into()),
-                ("text", format!("{} pm-notify failed: {err}", e.id).into()),
+                ("text", format!("{} pm-notify {logged}", e.id).into()),
             ]);
             // The escalation is already in the state; a log line that cannot be written is an error
             // (exit 2), not a note, so a silent gap in the record cannot go unseen.

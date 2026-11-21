@@ -232,7 +232,7 @@ mod tests {
 
     #[test]
     fn remind_line_grammar() {
-        let m = parse_remind(r#"ar-T0f at=2026-11-20 every=14d "ping Bob""#).unwrap();
+        let m = parse_remind(r#"pm-T0f at=2026-11-20 every=14d "ping Bob""#).unwrap();
         assert_eq!(
             (
                 m.task.as_str(),
@@ -240,14 +240,14 @@ mod tests {
                 m.every.as_deref(),
                 m.note.as_str()
             ),
-            ("ar-T0f", "2026-11-20", Some("14d"), "ping Bob")
+            ("pm-T0f", "2026-11-20", Some("14d"), "ping Bob")
         );
-        assert!(parse_remind(r#"ar-T0f at=2026-11-20 "n""#).is_some());
+        assert!(parse_remind(r#"pm-T0f at=2026-11-20 "n""#).is_some());
         for bad in [
-            r#"ar-T0f at=x"#,
-            r#"ar-T0f at=x """#,
-            r#"ar-T0f at=x "a"b""#,
-            r#"ar-T0f x=1 "n""#,
+            r#"pm-T0f at=x"#,
+            r#"pm-T0f at=x """#,
+            r#"pm-T0f at=x "a"b""#,
+            r#"pm-T0f x=1 "n""#,
             "",
         ] {
             assert!(parse_remind(bad).is_none(), "{bad}");

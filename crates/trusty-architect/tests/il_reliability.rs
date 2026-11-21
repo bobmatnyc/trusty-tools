@@ -32,7 +32,7 @@ use trusty_architect::il::{Ctx, Env, Fault, Json, Ledger};
 const NOW: i64 = 1_800_000_000;
 
 fn fresh_project(tmp: &Path) -> std::path::PathBuf {
-    project_with(tmp, &fixture("base/.trusty-mpm/datg"))
+    project_with(tmp, &fixture("base_datg"))
 }
 
 fn env(tmp: &Path) -> Env {

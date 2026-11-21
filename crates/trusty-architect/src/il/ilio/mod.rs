@@ -432,12 +432,15 @@ pub fn task_id(st: &Json, tok: &str) -> Option<String> {
     task_match(st, tok).map(|t| t.s("id").to_owned())
 }
 
-/// The id of the ledger's active ad-hoc goal, else `ar-G01`.
+/// The code `ilio.py` falls back to when the ledger has no ad-hoc goal (its default goal is `<code>-G01`).
+const FALLBACK_CODE: &str = "ar";
+
+/// The id of the ledger's active ad-hoc goal, else `<FALLBACK_CODE>-G01`.
 fn adhoc_or_default(st: &Json) -> String {
     st.arr("goals")
         .iter()
         .find(|g| g.s("status") == "active" && g.s("title").starts_with("Handle ad-hoc tasks"))
-        .map_or_else(|| "ar-G01".to_owned(), |g| g.s("id").to_owned())
+        .map_or_else(|| format!("{FALLBACK_CODE}-G01"), |g| g.s("id").to_owned())
 }
 
 /// `parent_goal`: the goal of the block's task; the ad-hoc default goal when it cannot be resolved.
@@ -467,12 +470,12 @@ mod tests {
 
     #[test]
     fn parse_block_takes_the_last_fence() {
-        let text = "x\n```il\ntask: a\n```\nmid\n```il  \nTask: ar-T01\n\nnote without colon\ndone: x: y\n```\n";
+        let text = "x\n```il\ntask: a\n```\nmid\n```il  \nTask: pm-T01\n\nnote without colon\ndone: x: y\n```\n";
         let rows = parse_block(text).unwrap();
         assert_eq!(
             rows,
             [
-                ("Task".into(), "ar-T01".into()),
+                ("Task".into(), "pm-T01".into()),
                 ("?".into(), "note without colon".into()),
                 ("done".into(), "x: y".into())
             ]
@@ -521,11 +524,11 @@ mod tests {
 
     #[test]
     fn task_and_goal_resolution() {
-        let st = Json::parse(r#"{"goals":[{"id":"ar-G01","status":"active","title":"Handle ad-hoc tasks (standing)"}],"tasks":[{"id":"ar-T0f","goal":"ar-G02, ar-G03","status":"open"}]}"#).unwrap();
-        assert_eq!(task_id(&st, "ar-T0f@1120").as_deref(), Some("ar-T0f"));
-        assert_eq!(task_id(&st, "T0f").as_deref(), Some("ar-T0f"));
+        let st = Json::parse(r#"{"goals":[{"id":"pm-G01","status":"active","title":"Handle ad-hoc tasks (standing)"}],"tasks":[{"id":"pm-T0f","goal":"pm-G02, pm-G03","status":"open"}]}"#).unwrap();
+        assert_eq!(task_id(&st, "pm-T0f@1120").as_deref(), Some("pm-T0f"));
+        assert_eq!(task_id(&st, "T0f").as_deref(), Some("pm-T0f"));
         assert_eq!(task_id(&st, "xx-T0f"), None);
-        assert_eq!(parent_goal(&st, "ar-T0f"), "ar-G02");
-        assert_eq!(parent_goal(&st, "free: nothing"), "ar-G01");
+        assert_eq!(parent_goal(&st, "pm-T0f"), "pm-G02");
+        assert_eq!(parent_goal(&st, "free: nothing"), "pm-G01");
     }
 }

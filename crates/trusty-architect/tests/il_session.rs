@@ -22,7 +22,7 @@ struct Rig {
 
 fn rig() -> Rig {
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let env = Env::bare(tmp.path());
     Rig {
         project: project.to_str().unwrap().to_owned(),

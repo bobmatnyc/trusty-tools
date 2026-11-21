@@ -28,10 +28,7 @@ const RUNS_DIGEST: usize = 40;
 const RUNS_APPLY: usize = 25;
 
 fn scripts() -> PathBuf {
-    PathBuf::from(
-        std::env::var("ARCHITECT_SCRIPTS")
-            .unwrap_or_else(|_| "/Users/masa/trusty-mpm-projects/architect/scripts".into()),
-    )
+    PathBuf::from(std::env::var("ARCHITECT_SCRIPTS").unwrap_or_default())
 }
 
 fn bin() -> String {
@@ -149,15 +146,11 @@ fn latency_report() {
     let ledgers = [
         (
             "Architect",
-            std::env::var("ARCHITECT_IL_LIVE").unwrap_or_else(|_| {
-                "/Users/masa/trusty-mpm-projects/architect/local/il/.trusty-mpm/datg".into()
-            }),
+            std::env::var("ARCHITECT_IL_LIVE").unwrap_or_default(),
         ),
         (
             "tm-dogfood",
-            std::env::var("DOGFOOD_DATG").unwrap_or_else(|_| {
-                "/Users/masa/trusty-mpm-projects/bobmatnyc/trusty-tools/.trusty-mpm/datg".into()
-            }),
+            std::env::var("DOGFOOD_DATG").unwrap_or_default(),
         ),
     ];
     println!("binary: {}", bin());

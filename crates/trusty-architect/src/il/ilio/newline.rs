@@ -283,10 +283,10 @@ mod tests {
 
     #[test]
     fn parses_a_full_new_line() {
-        let n = parse_new(r#"T "Ship it" goal ar-G01 session=s1 multistep done_when="a; b" detail="why" opts x|y"#).unwrap();
+        let n = parse_new(r#"T "Ship it" goal pm-G01 session=s1 multistep done_when="a; b" detail="why" opts x|y"#).unwrap();
         assert_eq!(
             (n.kind, n.title.as_str(), n.goal.as_deref()),
-            ('T', "Ship it", Some("ar-G01"))
+            ('T', "Ship it", Some("pm-G01"))
         );
         assert_eq!(n.toks, ["session=s1", "multistep"]);
         assert_eq!(

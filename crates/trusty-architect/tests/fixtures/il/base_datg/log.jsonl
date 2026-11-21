@@ -1,0 +1,29 @@
+{"t":"2026-11-18T11:06Z","id":"fx-init","ev":"open","note":"init"}
+{"t":"2026-11-18T11:07Z","id":"fx-G01","ev":"open","note":"Ship the thing"}
+{"t":"2026-11-18T11:08Z","id":"fx-G02","ev":"open","note":"Handle ad-hoc tasks (standing)"}
+{"t":"2026-11-18T11:09Z","id":"fx-G03","ev":"open","note":"Later: tidy the docs"}
+{"t":"2026-11-18T11:10Z","id":"fx-D01","ev":"open","note":"Which path? café ✓"}
+{"t":"2026-11-18T11:11Z","id":"fx-A01","ev":"open","note":"Bob: sign the form"}
+{"t":"2026-11-18T11:12Z","id":"fx-D02","ev":"drift","note":"drift: scope creeping"}
+{"t":"2026-11-18T11:13Z","id":"fx-T01","ev":"open","note":"Write the spec"}
+{"t":"2026-11-18T11:14Z","id":"fx-T02","ev":"open","note":"Port the parser"}
+{"t":"2026-11-18T11:15Z","id":"fx-T03","ev":"open","note":"日本語 task with ünicode"}
+{"t":"2026-11-18T11:12Z","id":"fx-D03","ev":"open","note":"Extra decision one"}
+{"t":"2026-11-18T11:12Z","id":"fx-D04","ev":"open","note":"Extra decision two"}
+{"t":"2026-11-18T11:12Z","id":"fx-D05","ev":"open","note":"Extra decision three"}
+{"t":"2026-11-18T11:12Z","id":"fx-D06","ev":"open","note":"Extra decision four"}
+{"t":"2026-11-18T11:12Z","id":"fx-D07","ev":"open","note":"Extra decision five"}
+{"t":"2026-11-18T11:15Z","id":"fx-T04","ev":"open","note":"Review the parser output against the spec examples"}
+{"t":"2026-11-18T11:16Z","id":"fx-T05","ev":"open","note":"Draft the migration plan for the old ledger"}
+{"t":"2026-11-18T11:16Z","id":"fx-T06","ev":"open","note":"Benchmark the digest on the large ledger"}
+{"t":"2026-11-18T11:16Z","id":"fx-T07","ev":"open","note":"Write the runbook for lock timeouts"}
+{"t":"2026-11-18T11:16Z","id":"fx-T08","ev":"open","note":"Audit the log rotation edge cases"}
+{"t":"2026-11-18T11:16Z","id":"fx-D01","ev":"answered","note":"Which path? café ✓"}
+{"t":"2026-11-18T11:17Z","id":"fx-D02","ev":"escalated","note":"drift: scope creeping"}
+{"t":"2026-11-18T11:18Z","id":"fx-T01","ev":"update","note":"pulse"}
+{"t":"2026-11-18T11:18Z","id":"fx-T01","ev":"update","note":"reminder #1 2026-11-19T12:00Z"}
+{"t":"2026-11-18T11:18Z","id":"fx-T02","ev":"update","note":"reminder #1 2026-11-18T12:00Z"}
+{"ts":"2026-11-18T11:18Z","kind":"act","session":"","who":"tm-architect","what":"recorded the spec decision","owner_words":"go ahead","evidence":"PR #1","goal":"fx-G01","refs":"PR #1"}
+{"ts":"2026-11-18T11:18Z","kind":"act","session":"","who":"tm-architect","what":"second action","owner_words":"","evidence":"","goal":"","refs":""}
+{"t":"2026-11-18T11:19Z","id":"fx-session","ev":"update","note":"Ship the thing"}
+{"t":"2026-11-18T11:20Z","id":"fx-T03","ev":"done","note":"日本語 task with ünicode"}

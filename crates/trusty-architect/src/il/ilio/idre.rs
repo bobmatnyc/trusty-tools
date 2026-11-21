@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn finds_ids_with_code_pre_and_stamp() {
-        let m = ids_in(&chars("close ar-T0f@1120, ar-D01 and T0g; R01"));
+        let m = ids_in(&chars("close pm-T0f@1120, pm-D01 and T0g; R01"));
         let got: Vec<_> = m
             .iter()
             .map(|m| (m.code.clone(), m.pre, m.n.clone(), m.stamp.clone()))
@@ -187,8 +187,8 @@ mod tests {
         assert_eq!(
             got,
             [
-                (Some("ar".into()), 'T', "0f".into(), Some("1120".into())),
-                (Some("ar".into()), 'D', "01".into(), None),
+                (Some("pm".into()), 'T', "0f".into(), Some("1120".into())),
+                (Some("pm".into()), 'D', "01".into(), None),
                 (None, 'T', "0g".into(), None),
                 (None, 'R', "01".into(), None),
             ]
@@ -207,20 +207,20 @@ mod tests {
 
     #[test]
     fn fullmatch_needs_the_whole_token() {
-        assert!(id_full("ar-T0f").is_some());
-        assert!(id_full("ar-T0f@1120").is_some_and(|m| m.stamp.as_deref() == Some("1120")));
-        assert!(id_full("ar-T0f,").is_none());
+        assert!(id_full("pm-T0f").is_some());
+        assert!(id_full("pm-T0f@1120").is_some_and(|m| m.stamp.as_deref() == Some("1120")));
+        assert!(id_full("pm-T0f,").is_none());
         assert!(id_full("T0f").is_some_and(|m| m.code.is_none()));
-        assert!(id_full("ar-T0o").is_none());
+        assert!(id_full("pm-T0o").is_none());
         assert!(id_full("").is_none());
     }
 
     #[test]
     fn lookalike_flags_o_and_l() {
-        for yes in ["ar-T0o", "ar-T1l", "T0l", "ar-Tol"] {
+        for yes in ["pm-T0o", "pm-T1l", "T0l", "pm-Tol"] {
             assert!(lookalike_full(yes), "{yes}");
         }
-        for no in ["ar-T0f", "ar-T", "free", "ar-X0o", ""] {
+        for no in ["pm-T0f", "pm-T", "free", "pm-X0o", ""] {
             assert!(!lookalike_full(no), "{no}");
         }
     }

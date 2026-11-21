@@ -44,7 +44,7 @@ fn golden_steps_match_python_byte_for_byte() {
     // golden was generated with (`generate.py` PROJECT_LEN).
     let pad = PROJECT_LEN - tmp.path().to_str().unwrap().len() - "/x/p".len();
     let root = tmp.path().join("x".repeat(pad + 1));
-    let project = project_with(&root, &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(&root, &fixture("base_datg"));
     assert_eq!(project.to_str().unwrap().len(), PROJECT_LEN);
     let ilio_dir = tmp.path().join("ilio");
     fs::create_dir_all(&ilio_dir).unwrap();
@@ -113,7 +113,7 @@ fn golden_steps_match_python_byte_for_byte() {
 fn no_unexpected_files_in_the_ledger_dir() {
     // Same file set as the Python leaves: nothing like an outbox or a journal, no temp file.
     let tmp = tempfile::tempdir().unwrap();
-    let project = project_with(tmp.path(), &fixture("base/.trusty-mpm/datg"));
+    let project = project_with(tmp.path(), &fixture("base_datg"));
     let env = Env::bare(tmp.path());
     let p = project.to_str().unwrap();
     for args in [
@@ -143,7 +143,7 @@ fn no_unexpected_files_in_the_ledger_dir() {
     ] {
         assert_eq!(run_at(&args, "", &env, 1_800_000_000).code, 0, "{args:?}");
     }
-    let mut want = names(&fixture("base/.trusty-mpm/datg"));
+    let mut want = names(&fixture("base_datg"));
     want.sort();
     assert_eq!(names(&datg_dir(&project)), want);
 }
