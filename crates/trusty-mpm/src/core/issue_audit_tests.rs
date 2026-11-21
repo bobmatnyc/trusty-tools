@@ -641,6 +641,19 @@ fn an_unfilled_template_warns() {
 }
 
 #[test]
+fn a_bare_list_marker_warns() {
+    // #11478: an empty template bullet is a marker with nothing after it.
+    assert_acceptance(
+        &[
+            "## Acceptance criteria\n-\n",
+            "## Acceptance criteria\n+\n",
+            "## Acceptance criteria\n1.\n",
+        ],
+        Verdict::Warn,
+    );
+}
+
+#[test]
 fn a_tbd_label_warns() {
     assert_acceptance(
         &[
