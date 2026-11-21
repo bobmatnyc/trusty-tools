@@ -1204,6 +1204,9 @@ impl AppState {
         self.registry = Arc::new(
             PalaceRegistry::from_env()
                 .with_writer_intent()
+                // #11613: never idle-evict a palace that re-opens past the
+                // client's exchange budget.
+                .with_reopen_pin()
                 .with_maintenance_lease(Arc::new(lease))
                 .with_data_root(&self.data_root),
         );

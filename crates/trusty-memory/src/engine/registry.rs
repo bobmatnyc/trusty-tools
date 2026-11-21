@@ -440,6 +440,20 @@ impl PalaceRegistry {
         Ok(handle)
     }
 
+    /// Keep a palace whose last open took at least
+    /// [`crate::engine::reopen_cost::SLOW_REOPEN`] through `evict_idle`.
+    ///
+    /// Why (#11613): only the daemon answers a client with a fixed exchange
+    /// budget; armed elsewhere, a load-slowed test open would pin its palace.
+    /// What: consuming builder; replaces the cost table with a pinning one.
+    /// Test: `registry_tests::first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen`.
+    pub(crate) fn with_reopen_pin(mut self) -> Self {
+        self.reopen_costs = Arc::new(ReopenCosts::pinning_at(
+            crate::engine::reopen_cost::SLOW_REOPEN,
+        ));
+        self
+    }
+
     /// #11613 test seam: pretend `id`'s last open took `took`.
     #[cfg(test)]
     pub(crate) fn record_open_cost_for_test(&self, id: &PalaceId, took: Duration) {

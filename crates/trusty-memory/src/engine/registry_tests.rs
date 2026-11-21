@@ -1939,8 +1939,11 @@ const EXCHANGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 fn first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen() {
     let dir = tempdir().unwrap();
     let root = dir.path().to_path_buf();
-    let reg =
-        std::sync::Arc::new(PalaceRegistry::new().with_open_queue_timeout(EXCHANGE_BUDGET * 3));
+    let reg = std::sync::Arc::new(
+        PalaceRegistry::new()
+            .with_reopen_pin()
+            .with_open_queue_timeout(EXCHANGE_BUDGET * 3),
+    );
     let id = idle_disk_palace(&reg, &root, "slow-reopen");
     reg.record_open_cost_for_test(&id, std::time::Duration::from_secs(6));
 
@@ -1970,7 +1973,9 @@ fn first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen() {
 #[test]
 fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
     let dir = tempdir().unwrap();
-    let reg = PalaceRegistry::new().with_open_queue_timeout(std::time::Duration::from_millis(200));
+    let reg = PalaceRegistry::new()
+        .with_reopen_pin()
+        .with_open_queue_timeout(std::time::Duration::from_millis(200));
     let id = idle_disk_palace(&reg, dir.path(), "fast-reopen");
 
     assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 1);
