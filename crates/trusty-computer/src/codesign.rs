@@ -5,7 +5,7 @@
 //! they carry the team-`4JH68XUHC5` Developer ID and the fixed identifier
 //! `com.trusty.computer` (port of trusty-browser `codesign.rs`; plan section 7,
 //! issue #11460). TCC attribution stays with `CuaDriver.app`.
-//! What: [`ensure_signed`] checks a binary against [`REQUIREMENT`], signs it
+//! What: [`ensure_signed`] checks a binary against [`requirement()`], signs it
 //! in place when it fails, and verifies again; any failure is an error the
 //! caller returns before it writes the plist. `codesign` and `security` sit
 //! behind [`Codesign`] so tests never sign or read the Keychain.
@@ -25,14 +25,17 @@ pub const IDENTITY_ENV: &str = "TRUSTY_COMPUTER_SIGN_IDENTITY";
 
 /// The designated requirement a registered binary must satisfy.
 pub fn requirement() -> String {
-    format!("identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\"", IDENTIFIER, TEAM)
+    format!(
+        "identifier \"{}\" and anchor apple generic and certificate leaf[subject.OU] = \"{}\"",
+        IDENTIFIER, TEAM
+    )
 }
 /// The stderr warning `--no-sign` prints.
 pub const NO_SIGN_WARNING: &str = "warning: --no-sign: the binary is not Developer ID signed; its code identity changes on every rebuild";
 
 /// Runs `codesign` / `security`; a seam so tests never sign or read the Keychain.
 pub trait Codesign {
-    /// True when `path` satisfies [`REQUIREMENT`].
+    /// True when `path` satisfies [`requirement()`].
     fn verify(&self, path: &Path) -> io::Result<bool>;
     /// Sign `path` in place with `identity`; `Err` carries codesign's stderr.
     fn sign(&self, path: &Path, identity: &str) -> io::Result<Result<(), String>>;
@@ -123,7 +126,7 @@ pub fn detect_identity(listing: &str) -> Result<String, String> {
     }
 }
 
-/// Make `exe` satisfy [`REQUIREMENT`] before it is registered; fail closed.
+/// Make `exe` satisfy [`requirement()`] before it is registered; fail closed.
 ///
 /// Why: the plist must never name a binary whose signing failed.
 /// What: `Skip` warns and returns. Otherwise an already-satisfying binary is

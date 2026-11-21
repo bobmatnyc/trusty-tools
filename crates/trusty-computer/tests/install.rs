@@ -243,7 +243,7 @@ fn signing_constants_name_the_computer_identity() {
     assert_eq!(codesign::IDENTIFIER, "com.trusty.computer");
     assert_eq!(codesign::TEAM, "4JH68XUHC5");
     assert_eq!(
-        codesign::REQUIREMENT,
+        codesign::requirement(),
         "identifier \"com.trusty.computer\" and anchor apple generic and certificate leaf[subject.OU] = \"4JH68XUHC5\""
     );
     assert_eq!(codesign::IDENTITY_ENV, "TRUSTY_COMPUTER_SIGN_IDENTITY");
