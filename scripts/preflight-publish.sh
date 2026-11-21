@@ -69,9 +69,9 @@
 #     <pkg>`, which compares this crate's public API against its PREVIOUS
 #     crates.io release — the greatest non-yanked version below the one about to
 #     be published (#5296). This workspace follows an internal numbering
-#     scheme, not Cargo SemVer's break-forces-major rule (owner ruling
-#     2026-09-26): a feature bumps the minor version, a fix bumps the patch, and
-#     a public-API break never forces a major bump on its own — see
+#     scheme, not Cargo SemVer's break-forces-major rule: a feature bumps the
+#     minor version, a fix bumps the patch, and a public-API break never
+#     forces a major bump on its own — see
 #     docs/reference/semver-gate.md. So CHECK 5 REPORTS a computed break: it
 #     still runs the comparison, prints every break it finds, and records them
 #     (`semver_record_break` below), but a computed break never fails this check
@@ -824,7 +824,7 @@ semver_types_decide() {
 #            named a reason to accept that. Permits; never prints PASS. This is
 #            an INFRASTRUCTURE fault arm — the comparison itself could not run —
 #            and is the only 0-compared arm that still stops without the reason.
-#     [WARN] RECORDED BREAK (owner ruling 2026-09-26): a computed break — exit
+#     [WARN] RECORDED BREAK (internal numbering policy): a computed break — exit
 #            1, `VERDICT: BREAK`, and a break list that parses. Permits once
 #            semver_record_break has printed the record and written it outside
 #            the working tree. Never prints PASS.
@@ -852,7 +852,7 @@ semver_types_decide() {
 #   scrolls past every publish. An override that is always set is not an
 #   override.
 #
-# A COMPUTED BREAK NEVER NEEDS THIS VARIABLE (owner ruling 2026-09-26). It
+# A COMPUTED BREAK NEVER NEEDS THIS VARIABLE (internal numbering policy). It
 #   answers "the gate could not run"; a computed break is the gate running and
 #   having an answer, which `semver_record_break` records and permits —
 #   setting the override alongside a break changes nothing, see the
@@ -968,7 +968,7 @@ semver_record_declaration_note() {
 # row. Returns 0 once the record is printed and written, 1 when it could not be
 # written.
 #
-# Why: the internal numbering policy (owner ruling 2026-09-26; see
+# Why: the internal numbering policy (see
 #   docs/reference/semver-gate.md) makes a public-API break something this gate
 #   REPORTS. A report only printed to a terminal is lost, so it also leaves a
 #   file. That file must not land in the working tree: a stranded changelog.d/
@@ -998,8 +998,8 @@ semver_record_break() {
   n="$(printf '%s\n' "$entries" | grep -c .)"
   lints="$(printf '%s\n' "$entries" | cut -f1 | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//; s/ /, /g')"
 
-  reason="Auto-recorded by preflight-publish.sh CHECK 5 (owner ruling 2026-09-26):"
-  reason="${reason} trusty-tools' internal numbering policy — a public-API break"
+  reason="Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy:"
+  reason="${reason} a public-API break"
   reason="${reason} never forces a major version. See docs/reference/semver-gate.md."
   rel="$(semver_accept_rel "$pkg" "$version")"
   record="$(
@@ -1021,7 +1021,7 @@ semver_record_break() {
       echo "Breaking"
       echo
       echo "- ${pkg} ${version} ships a public-API break under the internal numbering"
-      echo "  policy (owner ruling 2026-09-26); recorded in \`${rel}\` (Refs #8699)."
+      echo "  policy (docs/reference/semver-gate.md); recorded in \`${rel}\` (Refs #8699)."
     )"
   fi
 
@@ -1055,7 +1055,7 @@ semver_record_break() {
   SEMVER_RECORDED_BREAKS="${n} break entry(ies) in ${lints}; record at ${dir}"
   SEMVER_RECORDED_LIST="$(printf '%s\n' "$entries" | sed "s/${tab}/: /")"
   echo "[WARN] semver: RECORDED BREAK — ${pkg} ${version} ships a public-API break." >&2
-  echo "       Owner ruling 2026-09-26: a break is reported, never a reason to fail" >&2
+  echo "       Internal numbering policy: a break is reported, never a reason to fail" >&2
   echo "       this gate or to force a version bump. Never prints [PASS]." >&2
   echo "       Record written OUTSIDE the working tree: ${dir}" >&2
   echo "       Land it in the post-release PR; its files mirror their repo paths:" >&2
@@ -1071,7 +1071,7 @@ semver_decide() {
   local rc="$1" log="$2" pkg="$3" version="$4"
   local summary checked skipped inventoried blind compared blind_why entries err_line
 
-  # --- EXIT 1. Owner ruling 2026-09-26: a computed public-API break never forces
+  # --- EXIT 1. Internal numbering policy: a computed public-API break never forces
   #     a major version and never blocks a publish — it is recorded instead.
   #     But exit 1 is only a break when the gate printed that verdict AND its
   #     break list reads completely (#8699); anything else is the gate
@@ -1884,7 +1884,7 @@ check11_published_content() {
 # ---------------------------------------------------------------------------
 # preflight_ok_summary — the final OK lines, printed only when no check failed.
 # A recorded break lists every entry and never reads "Safe to publish"
-# (ruling 2026-09-22, kept by #8699).
+# (kept by #8699).
 # Test: preflight-check5-selftest.sh, case (r5) "check 5 + check 9".
 # ---------------------------------------------------------------------------
 preflight_ok_summary() {
