@@ -432,16 +432,51 @@ fn name_order(p: &Project) -> (String, &str) {
 /// Why: `SessionRecord` carries `repo_url` but not a project name reference;
 /// this function performs the lookup so fleet grouping and focused-session
 /// routing do not need to replicate the matching logic.
-/// What: delegates to [`resolve_project_by_repo_url`] once the session's
-/// `repo_url` is confirmed present.
-/// Test: `resolver_session_project_binding`, `resolver_session_no_repo`,
-/// `resolver_session_url_tie_break`.
+/// What: delegates to [`resolve_project_by_repo_url`] when the session has a
+/// `repo_url`; otherwise binds by checkout path ([`resolve_by_checkout_path`]).
+/// Test: `resolver_session_project_binding`, `resolver_session_no_repo_returns_none`,
+/// `resolver_session_url_tie_break`,
+/// `resolver_session_without_repo_url_binds_by_checkout_path`.
 pub fn resolve_session_project<'a>(
     session: &SessionRecord,
     projects: &'a [Project],
 ) -> Option<&'a Project> {
-    let session_url = session.repo_url.as_ref()?;
-    resolve_project_by_repo_url(session_url, projects)
+    match session.repo_url.as_ref() {
+        Some(session_url) => resolve_project_by_repo_url(session_url, projects),
+        // #11552: local-only spawns (#8934) carry no repo_url.
+        None => resolve_by_checkout_path(session, projects),
+    }
+}
+
+/// Bind a session with no `repo_url` to the path-form project whose checkout
+/// is the session's directory (#11552).
+///
+/// What: the session directory (`workspace_path`, else `cwd`) loses a trailing
+/// `.worktrees/<name>`; it and each project's path-form `repo_url` are
+/// canonicalised and compared whole-path (component equality, never a prefix,
+/// so a parent project never claims a child). Ties break by [`name_order`].
+/// Test: `resolver_session_without_repo_url_binds_by_checkout_path`,
+/// `resolver_session_without_repo_url_binds_from_a_worktree`,
+/// `resolver_session_without_repo_url_ignores_a_sibling_path`.
+fn resolve_by_checkout_path<'a>(
+    session: &SessionRecord,
+    projects: &'a [Project],
+) -> Option<&'a Project> {
+    let dir = session.workspace_path.as_deref().unwrap_or(&session.cwd);
+    let dir = match dir.parent() {
+        Some(parent) if parent.file_name().is_some_and(|n| n == ".worktrees") => parent.parent()?,
+        _ => dir,
+    };
+    let canon = |p: &std::path::Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let dir = canon(dir);
+    let home = dirs::home_dir();
+    projects
+        .iter()
+        .filter(|p| {
+            crate::project::project_key::local_repo_path(&p.repo_url, home.as_deref())
+                .is_some_and(|checkout| canon(&checkout) == dir)
+        })
+        .min_by(|a, b| name_order(a).cmp(&name_order(b)))
 }
 
 /// Group a slice of session records by their bound project.
@@ -452,8 +487,8 @@ pub fn resolve_session_project<'a>(
 /// What: one entry per repo ([`one_project_per_repo`], #10476), holding every
 /// session whose `repo_url` matches it, each once; projects with no sessions
 /// are included with an empty `sessions` vec so callers can still display the
-/// full registry. Session records with no `repo_url` (or whose URL matches no
-/// project) are silently omitted from the fleet view.
+/// full registry. A session with no `repo_url` binds by checkout path
+/// (#11552); one that matches no project is omitted from the fleet view.
 /// Test: `resolver_fleet_by_project_basic`, `resolver_fleet_empty_sessions`,
 /// `resolver_fleet_no_repo_sessions_omitted`,
 /// `resolver_fleet_shared_repo_url_one_group_all_sessions`.

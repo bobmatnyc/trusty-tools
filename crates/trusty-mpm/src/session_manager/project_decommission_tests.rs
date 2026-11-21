@@ -584,3 +584,74 @@ async fn decommission_project_without_records_unloads_by_its_checkout() {
     );
     assert!(report.stopped.is_empty() && report.left_as_is.is_empty());
 }
+
+/// #11551 (critic round): a GitHub project whose clone is gone still names its
+/// `owner/repo` palace, which may be loaded; it must be unloaded, never
+/// reported NotLoaded.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_with_a_deleted_github_clone_unloads_its_palace() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{healthy_memory, healthy_search, rig};
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let project = registry.get("widget").await.expect("row");
+    assert!(
+        crate::project::local_checkout_for(&project).is_none_or(|p| !p.is_dir()),
+        "premise: no checkout on disk"
+    );
+    let rig = rig(healthy_search(), healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "widget", Ok(rig.capability()))
+        .await
+        .expect("the palace unloads");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::Unloaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(
+        rig.params_of("memory.palace_unload").is_some(),
+        "the unload was asked"
+    );
+}
+
+/// #11551: a project whose checkout was deleted has no palace to unload and
+/// no live index, so the verb must not refuse with `IndexShutdown`.
+/// Test: this function IS the test.
+#[tokio::test]
+async fn decommission_project_with_a_missing_checkout_is_not_refused() {
+    use crate::session_manager::index_shutdown::ShutdownState;
+    use crate::session_manager::index_shutdown::tests::{Answer, healthy_memory, rig};
+    use crate::uds_mock::RpcError;
+    let (_dir, _reg, _fake, mgr, registry) = fixture().await;
+    let gone = crate::test_support::hermetic_temp_dir();
+    let deleted = gone.path().join("deleted-checkout");
+    let mut project = registry.get("widget").await.expect("row");
+    project.name = "gone-proj".into();
+    project.repo_url = deleted.to_string_lossy().into_owned();
+    project.project_key = Some("local:5678".into());
+    registry.register(project).await.expect("register");
+    // trusty-search's "not found" code: no index is registered for the path.
+    let not_found: Answer = Arc::new(|_, _| Err(RpcError::new(-32004, "no such project")));
+    let rig = rig(not_found, healthy_memory()).await;
+
+    let report = mgr
+        .decommission_project_with(&registry, "gone-proj", Ok(rig.capability()))
+        .await
+        .expect("a missing checkout must not refuse the decommission");
+
+    let shutdown = report.index_shutdown.expect("the shutdown is reported");
+    assert!(
+        matches!(shutdown.palace, ShutdownState::NotLoaded { .. }),
+        "{shutdown:?}"
+    );
+    assert!(
+        registry
+            .get("gone-proj")
+            .await
+            .expect("row")
+            .is_decommissioned()
+    );
+}

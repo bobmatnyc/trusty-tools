@@ -124,8 +124,10 @@ pub struct ShutdownTarget {
     /// The `search.project.resolve` queries, tried in order until one hits:
     /// the `owner/repo` identity, then the checkout paths.
     pub search_queries: Vec<String>,
-    /// The palace id, or why it could not be resolved.
-    pub palace: Result<String, String>,
+    /// The palace id; `Ok(None)` when no checkout is on disk and the remote
+    /// names no `owner/repo`, so no palace can be named (#11551); `Err` when
+    /// an existing checkout fails to resolve.
+    pub palace: Result<Option<String>, String>,
 }
 
 impl ShutdownTarget {
@@ -136,8 +138,10 @@ impl ShutdownTarget {
     /// then `root`, then `repo_url` when it is an absolute path, deduplicated.
     /// The palace resolves through `trusty_common::palace_resolve` from `root`
     /// and `repo_url`, the same call session launch exports
-    /// `TRUSTY_MEMORY_PALACE` from.
+    /// `TRUSTY_MEMORY_PALACE` from. With no `root`, the remote's `owner/repo`
+    /// palace id, else `Ok(None)`.
     /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`,
+    /// `decommission_project_with_a_deleted_github_clone_unloads_its_palace`,
     /// `a_path_project_is_parked_by_its_path`.
     pub fn for_project(project_key: Option<&str>, repo_url: &str, root: Option<&Path>) -> Self {
         let path_url = Some(repo_url.trim()).filter(|u| u.starts_with('/'));
@@ -154,9 +158,15 @@ impl ShutdownTarget {
         let remote = Some(repo_url).filter(|u| !u.trim().is_empty());
         let palace = match root {
             Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
-                .map(|r| r.id)
+                .map(|r| Some(r.id))
                 .map_err(|e| format!("could not resolve the palace: {e}")),
-            None => Err("no checkout on disk to resolve the palace from".to_string()),
+            // #11551: with no checkout, the remote's `owner/repo` (resolution
+            // level 3) still names a palace that may be loaded; only a project
+            // with no such identity has no palace to unload.
+            // A path-form `repo_url` is a checkout, not a remote: no identity.
+            None => Ok(remote
+                .filter(|r| !matches!(r.trim().chars().next(), Some('/' | '~')))
+                .and_then(trusty_common::palace_id::owner_repo_from_git_remote)),
         };
         Self {
             search_queries,
@@ -324,10 +334,10 @@ async fn park_search(socket: Option<&Path>, queries: &[String]) -> ShutdownState
         }
         Err(error) => return ShutdownState::Failed { id: None, error },
     };
+    // #11551: nothing to resolve means no index can be loaded for it.
     if queries.is_empty() {
-        return ShutdownState::Failed {
-            id: None,
-            error: "the project has no repo identity or checkout path to resolve".to_string(),
+        return ShutdownState::NotLoaded {
+            reason: "the project has no repo identity or checkout path to resolve".to_string(),
         };
     }
     // The identity, when present, is the first query and is never a path.
@@ -369,7 +379,10 @@ async fn park_search(socket: Option<&Path>, queries: &[String]) -> ShutdownState
 }
 
 /// Unload the project's palace.
-async fn unload_palace(socket: Option<&Path>, palace: &Result<String, String>) -> ShutdownState {
+async fn unload_palace(
+    socket: Option<&Path>,
+    palace: &Result<Option<String>, String>,
+) -> ShutdownState {
     let socket = match listening(socket).await {
         Ok(Some(socket)) => socket,
         Ok(None) => {
@@ -380,7 +393,13 @@ async fn unload_palace(socket: Option<&Path>, palace: &Result<String, String>) -
         Err(error) => return ShutdownState::Failed { id: None, error },
     };
     let palace = match palace {
-        Ok(p) => p,
+        Ok(Some(p)) => p,
+        // #11551: no checkout on disk, so no palace was resolved or loaded.
+        Ok(None) => {
+            return ShutdownState::NotLoaded {
+                reason: "no checkout on disk, so no palace to unload".to_string(),
+            };
+        }
         Err(why) => {
             return ShutdownState::Failed {
                 id: None,
