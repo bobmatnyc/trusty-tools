@@ -333,6 +333,11 @@ fn kill_word(word: &str) -> Option<&'static str> {
         return None;
     }
     let tail = word.rsplit('=').next().unwrap_or(word);
+    // #10702: a `case` arm `a)pkill` reaches shlex as one word; drop the `<pattern>)`.
+    let tail = match tail.split_once(')') {
+        Some((_, rest)) if !rest.is_empty() => rest,
+        _ => tail,
+    };
     let program = base(tail.trim_start_matches(|c| "({`$!".contains(c)));
     match program.trim_end_matches(|c| ";)`}".contains(c)) {
         "pkill" => Some("pkill"),

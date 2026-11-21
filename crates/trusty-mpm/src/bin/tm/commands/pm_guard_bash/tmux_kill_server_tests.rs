@@ -1065,6 +1065,9 @@ fn a_kill_in_a_loop_or_if_head_is_refused() {
         "if pkill tmux; then :; fi",
         "while pkill tmux; do :; done",
         "until pkill tmux; do :; done",
+        "case x in a)pkill tmux;; esac",
+        "case x in a) pkill tmux;; esac",
+        "case $x in *)kill -9 $(pgrep tmux);; esac",
     ] {
         assert!(refused(command), "{command:?} should be refused");
     }
