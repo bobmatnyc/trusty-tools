@@ -22,7 +22,10 @@ Drop this copy, the `[patch.crates-io]` entry, the `exclude` entry and the
 three `vendor/hnsw_rs` rows in `.line-cap-allowlist.tsv` once upstream releases
 the fix.
 
-Upstream report: <URL>
+Upstream fix: https://github.com/jean-pierreBoth/hnswlib-rs/commit/95f9023838a6d6a9af0b4e05f4a9a4e73bc0dcc6
+("fix deadlock in reverse update by cloning", 2026-10-28, on upstream main as
+0.3.6, unreleased). It applies the same clone-then-write change. Drop this copy
+when hnsw_rs 0.3.6 or later is on crates.io.
 
 ```diff
 --- a/src/hnsw.rs
