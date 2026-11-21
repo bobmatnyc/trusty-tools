@@ -107,6 +107,20 @@ pub(crate) fn steps(dir: &Path, session: &str) -> Vec<Step> {
                 .to_owned(),
         ));
     }
+    // #11498: a hold that cannot be recorded stops here, before the ledger and hooks.
+    let ses = std::fs::read_to_string(state_path(dir))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .map(|st| st["session"].clone())
+        .unwrap_or_default();
+    if let Err(e) = holds::hold_room(&ses, &holds, &work) {
+        return vec![Step::Failed(format!(
+            "{e}, so tm fleet init stopped before it created the Intent Ledger or its hooks; the \
+             hold in local/state.md was not shortened. Free room in the session record (for \
+             example remove unused refs with `python3 scripts/datg.py --project {IL_DIR} session \
+             set --ref KEY=none`), then run tm fleet init again"
+        ))];
+    }
     let mut out = vec![ledger_step(dir)];
     out.push(hooks_step(dir, session));
     out.extend(holds.any().then(|| hold_step(dir, &holds, &work)).flatten());

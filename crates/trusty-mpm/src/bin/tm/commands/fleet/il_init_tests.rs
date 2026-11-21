@@ -450,6 +450,53 @@ fn holds_with_an_unreadable_ledger_fail_visibly() {
     );
 }
 
+/// Fresh install with `state` already in `local/state.md`: the report, and
+/// whether the ledger or any ledger hook exists afterwards.
+fn fresh_init_with_state(state: &str) -> (super::super::InitReport, bool, bool) {
+    let fx = Fixture::new();
+    let dir = fx.dir();
+    std::fs::create_dir_all(dir.join("local")).unwrap();
+    std::fs::write(dir.join("local/state.md"), state).unwrap();
+    let report = fx.init().unwrap();
+    let hooks = std::fs::read_to_string(dir.join(".claude/settings.json"))
+        .is_ok_and(|t| t.contains("datg-hook.sh"));
+    (report, state_path(&dir).exists(), hooks)
+}
+
+/// #11498: a hold longer than its field stops init before the ledger and
+/// hooks exist; it is never cut to fit.
+#[test]
+fn a_hold_that_cannot_be_recorded_stops_init_before_the_ledger() {
+    let (report, ledger, hooks) =
+        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "x".repeat(1200)));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("hold from local/state.md is 1200 characters")
+                && t.contains("at most 1000"))),
+        "{}",
+        report.render()
+    );
+    assert!(!ledger, "no ledger without its hold");
+    assert!(!hooks, "no ledger hook without its hold");
+}
+
+/// #11498: 1000 multi-byte characters fit the field but not the 2048 B
+/// record; init names the field, its size and the limit, and creates nothing.
+#[test]
+fn a_1000_character_multibyte_hold_is_never_shortened() {
+    let (report, ledger, hooks) =
+        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "é".repeat(1000)));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("hold is 2000 B") && t.contains("limit is 2048 B"))),
+        "{}",
+        report.render()
+    );
+    assert!(!ledger && !hooks, "{}", report.render());
+}
+
 /// #11480: the two notes from the owner's state.md that stopped init or became
 /// a fake merge hold; neither starts with a hold format.
 #[test]

@@ -446,6 +446,12 @@ class SessionRecordCase(Base):
         with self.assertRaises(datg.DatgError):
             datg.write_ops(self.p, ops)
 
+    def test_session_size_refusal_names_the_largest_fields(self):
+        # #11498: a refusal names the fields to shrink, largest first.
+        ops = [{"op": "session", "hold": "é" * 1000, "merge_hold": "m" * 900}]
+        with self.assertRaisesRegex(datg.DatgError, r"largest fields: hold 2002 B, merge_hold 902 B"):
+            datg.write_ops(self.p, ops)
+
     def test_session_plus_item_op_is_one_commit_and_none_states_empty(self):
         v = self.state()["v"]
         datg.write_ops(self.p, [{"op": "add", "kind": "T", "title": "t", "goal": "th-G01"},

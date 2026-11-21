@@ -92,7 +92,73 @@ fn historical(first: &str, all: &str) -> bool {
 fn value(first_value: &str, rest: &[&str]) -> String {
     let mut parts = vec![first_value.trim().to_owned()];
     parts.extend(rest.iter().map(|l| head(l).trim().to_owned()));
-    parts.join(" | ").chars().take(HOLD_MAX).collect()
+    parts.join(" | ") // #11498: never shortened
+}
+
+/// The session record's byte limit (`SESSION_MAX` in `datg_store.py`).
+pub(crate) const SESSION_MAX: usize = 2048;
+
+/// Whether the holds (and the task/next written beside them) fit the ledger
+/// session record `ses` (`Null` for a ledger not created yet). `Err` names the
+/// field, its size and the limit (#11498).
+/// Why: `hold_step` runs after the ledger and hooks exist, so a refused write
+/// there leaves a live ledger without its hold; this check runs first.
+/// What: each hold over [`HOLD_MAX`] characters is refused; then the record
+/// as `datg.py session set` would write it (compact JSON plus `written_at` and
+/// `written_epoch`) must stay within [`SESSION_MAX`] bytes. A field the ledger
+/// already holds is not written, so it is not counted twice.
+/// Test: `a_hold_that_cannot_be_recorded_stops_init_before_the_ledger`,
+/// `a_1000_character_multibyte_hold_is_never_shortened`.
+pub(crate) fn hold_room(
+    ses: &serde_json::Value,
+    holds: &Holds,
+    work: &(Option<String>, Option<String>),
+) -> Result<(), String> {
+    let empty = |key: &str| ses[key].as_str().is_none_or(str::is_empty);
+    let open = |key: &str| {
+        ses[key]
+            .as_str()
+            .is_none_or(|v| v.trim().is_empty() || v.starts_with("needs owner input:"))
+    };
+    let mut probe = ses.as_object().cloned().unwrap_or_default();
+    let mut written = Vec::new();
+    for (field, v) in [("hold", &holds.usage), ("merge_hold", &holds.merge)] {
+        let Some(v) = v.as_deref().filter(|_| empty(field)) else {
+            continue;
+        };
+        let chars = v.chars().count();
+        if chars > HOLD_MAX {
+            return Err(format!(
+                "the {field} from local/state.md is {chars} characters and the Intent Ledger \
+                 `{field}` field holds at most {HOLD_MAX}"
+            ));
+        }
+        written.push((field, v.len()));
+        probe.insert(field.to_owned(), v.into());
+    }
+    if written.is_empty() {
+        return Ok(());
+    }
+    for (field, v) in [("task", &work.0), ("next", &work.1)] {
+        if let Some(v) = v.as_deref().filter(|_| open(field)) {
+            probe.insert(field.to_owned(), v.into());
+        }
+    }
+    probe.insert("written_at".to_owned(), "2026-01-01T00:00Z".into());
+    probe.insert("written_epoch".to_owned(), 1_700_000_000_u64.into());
+    let n = serde_json::to_string(&probe).map_or(usize::MAX, |s| s.len());
+    if n <= SESSION_MAX {
+        return Ok(());
+    }
+    let fields: Vec<String> = written
+        .iter()
+        .map(|(f, b)| format!("{f} is {b} B"))
+        .collect();
+    Err(format!(
+        "the Intent Ledger session record would be {n} B with the holds and its limit is \
+         {SESSION_MAX} B ({})",
+        fields.join(", ")
+    ))
 }
 
 /// The active holds in `local/state.md`; see the module doc.
@@ -126,10 +192,8 @@ pub(crate) fn holds_in_state_md(text: &str) -> Result<Holds, (usize, String)> {
         if all.to_ascii_lowercase().contains("merge") {
             let entry = value(h, &lines[1..]);
             found.merge = Some(match found.merge.take() {
-                Some(prev) => format!("{prev} || {entry}")
-                    .chars()
-                    .take(HOLD_MAX)
-                    .collect(),
+                // #11498: never shortened; `hold_room` refuses an over-long hold.
+                Some(prev) => format!("{prev} || {entry}"),
                 None => entry,
             });
             continue;

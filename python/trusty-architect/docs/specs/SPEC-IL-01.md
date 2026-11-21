@@ -52,7 +52,11 @@ One object, rewritten whole. Target size 1 KB, hard limit 2 KB.
 | `boundary_at` | ISO minute UTC | | last task boundary time |
 | `ctx_use` | {at, active, stale, ctx, keep} | `keep` <= 160 | last CTX-USE: `active` and `stale` ints 0-100, `ctx` int tokens, `at` ISO minute |
 | `refs` | list of {key, value} | 12 entries; key `^[a-z0-9][a-z0-9_.-]{0,31}$`; value one line <= 200 | pointers the owner refers to (doc URL, source md, relay marker); printed first under POINTERS in the digest |
+| `hold` | str | 1000 chars | the usage HOLD the owner set; `""` clears it (#10579) |
+| `merge_hold` | str | 1000 chars | a no-merge hold, kept apart from `hold`; `""` clears it (#10579) |
 | `written_at` | ISO minute UTC | | time of the last write that changed state |
+
+Size rule (#11498): `hold` and `merge_hold` count toward the 2 KB record limit like every other field, measured in UTF-8 bytes of the compact JSON record. A write over the limit is refused, and the refusal names the largest fields. `tm fleet init` never shortens a hold: one that cannot be recorded stops init before it creates the ledger or its hooks.
 
 Rules: no field holds secrets; a value that would be a secret holds its location. `owed.expect` holds the exact value, never "latest" or "main". The Architect checks `owed` entries by command, not by the PM's word (ARCHITECT.md r-071).
 
