@@ -100,6 +100,43 @@ def add_page_tools(
         )
 
     @server.tool()
+    def page_styles(
+        lease: str,
+        properties: list[str],
+        ref: str | None = None,
+        selector: str | None = None,
+    ) -> dict[str, Any]:
+        """Read computed CSS values of one element, named by ``ref`` or ``selector``.
+
+        Why: a visual check needs real colours and sizes, not the markup
+        (#11373). What: ``getComputedStyle`` of the ref's element, or of the
+        first match of the CSS ``selector`` in the lease's top document; give
+        exactly one. ``properties`` lists 1-50 names (``background-color``,
+        ``--brand``); ``styles`` maps each to its value. A selector that
+        matches nothing answers ``NoMatch``.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call(
+            "page_styles", lease=lease, properties=properties, ref=ref, selector=selector
+        )
+
+    @server.tool()
+    def page_evaluate(lease: str, expression: str, request_id: str) -> dict[str, Any]:
+        """Evaluate a JavaScript ``expression`` in the leased tab's page and return its value.
+
+        Why: an agent sometimes needs page state no other tool reads (#11373).
+        What: runs in the page's own context through ``chrome.debugger``,
+        awaits a promise, and returns ``value`` as JSON text (``truncated``
+        past 65536 characters), its ``type``, and ``exception`` when it threw.
+        It can change the page; every call is audit-logged. Reuse the request
+        ID to retry.
+        Test: `test_end_to_end_page_session_through_the_mcp_server`.
+        """
+        return call(
+            "page_evaluate", lease=lease, expression=expression, request_id=request_id
+        )
+
+    @server.tool()
     def page_hover(lease: str, ref: str, request_id: str) -> dict[str, Any]:
         """Move the pointer onto the element a page_read returned as ``ref``.
 

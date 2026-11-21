@@ -233,6 +233,14 @@ class FakeBrowser:
                 "changed": changed,
                 "value": req["value"],
             }
+        if op == "page_styles":  # #11373: every requested property reads one value
+            self.done.append((op, req["ref"], req["selector"]))
+            styles = {name: "rgb(1, 2, 3)" for name in req["properties"]}
+            return {"document": item["document"], "styles": styles}
+        if op == "page_evaluate":  # #11373
+            self.done.append((op, None, req["expression"]))
+            return {"document": item["document"], "type": "number", "value": "2",
+                    "exception": None, "truncated": False}  # fmt: skip
         self.done.append((op, req.get("ref"), req.get("text")))
         if op == "page_drag":
             return {"document": item["document"], "dropped": req["target"] != "1.9"}
