@@ -125,3 +125,4 @@ SKIP	trusty-common	embedder-cuda	cudarc/candle-kernels build.rs panics with "`nv
 # panics on `nvcc --version` — which no CI runner here has. Matching row in
 # scripts/semver-checks-feature-exclusions.tsv.
 SKIP	trusty-embedderd	cuda	pass-through to trusty-common/embedder-cuda; cudarc/candle-kernels build.rs panics with "`nvcc --version` failed" without the CUDA toolkit, which no CI runner here has. Matching row in scripts/semver-checks-feature-exclusions.tsv.
+LANE	features	trusty-computer/test-seams

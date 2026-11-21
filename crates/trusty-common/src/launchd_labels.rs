@@ -150,6 +150,9 @@ pub const AGENTS_SLACK: &str = agent!("agents", "slack");
 /// copy of this label (#9171 A1), so it is not in [`SERVICES`].
 pub const ARCHITECT_SCHED: &str = agent!("architect-sched");
 
+/// The trusty-computer desktop control service.
+pub const COMPUTER: &str = agent!("computer");
+
 /// A launchd-managed service: its member name, canonical label, and the labels
 /// earlier installs used for the same service.
 ///
@@ -189,6 +192,12 @@ pub const SERVICES: &[Service] = &[
         member: "trusty-browser",
         sub_unit: None,
         label: BROWSER,
+        legacy: &[],
+    },
+    Service {
+        member: "trusty-computer",
+        sub_unit: None,
+        label: COMPUTER,
         legacy: &[],
     },
     Service {

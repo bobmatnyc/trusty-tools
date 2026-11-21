@@ -1,0 +1,10 @@
+Security
+- A `call` answers a journaled `request_id` only after the grant is bound to the session, live, and its lease is held by that session; another session replaying an id from the audit log gets `grant_not_bound` (#11460).
+- `grant_request` resolves the pid's real bundle through LaunchServices (`lsappinfo`) before the dialog and refuses a mismatch (`bundle_mismatch`, `app_unresolved`); the sensitive-app check reads the resolved bundle in any letter case, and the dialog shows the pid and the resolved app name and bundle (#11460).
+- A call naming both `element_token` and `snapshot_id`/`element_index` is refused (`dual_address`), and `trusty-computer-mcp` refuses any argument its tool schema does not declare (`bad_args`) (#11460).
+- A failed supervisor start clears its pid and scope on every error path, so a later rescope cannot treat an unverified daemon as running (#11460).
+- Every text part of a snapshot loses its menu bar even with no structured part; a `get_window_state` reply with no structured part is refused (`redaction_failed`); a `driver_refused` result and message are redacted (#11460).
+- Hotkey and key-chord checks fold aliases (`command`, `meta`, `⌘` -> `cmd`; `alt`, `opt` -> `option`; `control` -> `ctrl`; `escape` -> `esc`), ignore order and refuse any superset of a denied chord (#11460).
+- A lockout writes `<state>/lockout` before anything else; a restarted broker reads it and refuses every op but `status` until the operator runs `trusty-computer unlock`, which needs the dialog and its code typed on `/dev/tty` (#11460).
+- `scripts/sandbox_computer_daemon.sh` runs `cua-driver stop --socket <dir>/state/driver/cua-driver.sock` after a KILL teardown (#11460).
+- A grant records the process start time (`proc_pidinfo` `PROC_PIDTBSDINFO`) with the resolved bundle; `grant_confirm` and every forwarded `call` re-resolve the pid, and a changed bundle, a changed start time or a vanished process is refused `app_changed`, revokes the grant and is audited, so a reused pid cannot inherit a grant (#11460).

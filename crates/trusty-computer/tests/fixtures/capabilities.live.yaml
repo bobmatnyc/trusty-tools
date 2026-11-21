@@ -1,0 +1,38 @@
+# Bounded capability manifest for the part 2 daemon (cua docs:
+# docs/content/docs/how-to-guides/driver/write-a-bounded-manifest.mdx).
+# Daemon-side ceiling under the broker's own filter. The app entry is a
+# scoped to the JXA fixture by bundle id; macOS entries need bundle_id
+# (`grantcheck/make_app.sh` wraps fixture.js in GrantCheck.app).
+version: 3
+expires_after: 2h
+idle_timeout: 15m
+
+allow:
+  tools:
+    - start_session
+    - end_session
+    - list_apps
+    - list_windows
+    - get_window_state
+    - verify_state
+    - click
+    - type_text
+    - set_value
+    - press_key
+    - check_permissions
+
+resources:
+  apps:
+    - bundle_id: com.trusty.spike.grantcheck
+      launch: false
+      windows: all
+      terminate: driver_launched
+  desktop:
+    # The bundle_id entry above did not admit the window (no attested bundle
+    # id for an exec'd osascript); exact pid/window entries do. The broker
+    # fills these per run (grantcheck/live_manifest.sh).
+    applications: [FIXTURE_PID]
+    windows:
+      - pid: FIXTURE_PID
+        window_id: FIXTURE_WINDOW
+    display: false

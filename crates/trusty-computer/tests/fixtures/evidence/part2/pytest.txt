@@ -1,0 +1,14 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0
+rootdir: <repo>/spikes/trusty-computer
+plugins: asyncio-1.4.0, anyio-4.13.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 51 items
+
+tests/test_broker.py ..............                                      [ 27%]
+tests/test_fixture.py .                                                  [ 29%]
+tests/test_policy.py ............................                        [ 84%]
+tests/test_redact.py ...                                                 [ 90%]
+tests/test_supervisor.py .....                                           [100%]
+
+============================= 51 passed in 15.58s ==============================
