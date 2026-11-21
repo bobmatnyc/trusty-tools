@@ -879,7 +879,7 @@ crates/trusty-mpm/src/core/session_launch/mod.rs	RULING_DATED	3
 crates/trusty-mpm/src/core/session_launch/palace_alias.rs	EMAIL	1
 crates/trusty-mpm/src/core/session_launch/skills.rs	RULING_DATED	1
 crates/trusty-mpm/src/core/session_launch/tests.rs	BRIEF_PATH	2
-crates/trusty-mpm/src/core/session_launch/tests.rs	EMAIL	5
+crates/trusty-mpm/src/core/session_launch/tests.rs	EMAIL	3
 crates/trusty-mpm/src/core/session_launch/tests.rs	RULING_DATED	2
 crates/trusty-mpm/src/core/session_launch/tests_catchup_root_8311.rs	EMAIL	1
 crates/trusty-mpm/src/core/session_launch/tests_scaffold_gitignore.rs	EMAIL	1
