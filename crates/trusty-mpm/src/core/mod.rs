@@ -275,10 +275,6 @@ pub mod memory_forget;
 pub mod memory_rename;
 // #9538: the protocol-checked door to the memory socket.
 pub mod memory_checked;
-// #10648: a verb's first call survives a cold palace open in the daemon.
-pub mod memory_first_call;
-#[cfg(test)]
-mod memory_first_call_tests;
 #[cfg(test)]
 mod memory_protocol_gate_tests;
 pub mod model_inject;

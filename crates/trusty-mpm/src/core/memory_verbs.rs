@@ -487,21 +487,7 @@ pub async fn run_verb(
         args.insert("palace".to_string(), Value::String(palace));
     }
 
-    // #10648: a read retries a cold-open stall once; a write warms its palace first.
-    let method = verb.method();
-    let result = super::memory_first_call::call_verb(
-        &socket,
-        method,
-        Value::Object(args),
-        verb.is_write(),
-        trusty_common::memory_rpc::DEFAULT_TIMEOUT,
-    )
-    .await
-    .map_err(|e| MemoryVerbError::Call {
-        method,
-        socket: socket.display().to_string(),
-        detail: format!("{e:#}"),
-    })?;
+    let result = call_method(&socket, verb.method(), Value::Object(args)).await?;
 
     let count = if verb.is_write() {
         None

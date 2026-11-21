@@ -33,14 +33,9 @@ async fn recording_daemon(body: Value) -> (crate::uds_mock::MockUdsDaemon, Calls
     (daemon, calls)
 }
 
-/// The one verb call the stub recorded, past any #10648 palace warm-up.
+/// The one call the stub recorded.
 fn only_call(calls: &Calls) -> (String, Value) {
-    let all = calls.lock().expect("recorded calls");
-    let seen: Vec<_> = all
-        .iter()
-        .filter(|(m, _)| m != super::super::memory_first_call::WARM_METHOD)
-        .cloned()
-        .collect();
+    let seen = calls.lock().expect("recorded calls");
     assert_eq!(seen.len(), 1, "expected exactly one RPC: {seen:?}");
     seen[0].clone()
 }
