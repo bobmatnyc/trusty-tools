@@ -58,10 +58,11 @@ class PrivateNames:
       escapes a whole-word match, and the names cannot be committed (#11513).
     What: duck-types a compiled regex for leak_findings. Each name is lowercased
       to [a-z0-9]; each [A-Za-z0-9]+ run of the line is lowercased and every
-      name found inside it is a hit. A substring search over the whole run
+      run holding any name is one hit, however many names it holds. A substring search over the whole run
       covers every case-change and letter/digit split of it.
     Test: selftest cases private-camel, private-glued, private-digits,
-      private-plural, private-hyphen, private-underscore, private-url, private-at.
+      private-plural, private-hyphen, private-underscore, private-url, private-at,
+      private-allow-nested-names.
     """
 
     def __init__(self, names):
@@ -72,9 +73,9 @@ class PrivateNames:
         if not any(n in low for n in self.names):
             return
         for run in RUN_RE.finditer(low):
-            for name in self.names:
-                if name in run.group(0):
-                    yield _Hit(run.group(0))
+            # #11535: one hit per run, even when one name contains another.
+            if any(name in run.group(0) for name in self.names):
+                yield _Hit(run.group(0))
 
     def search(self, line):
         return next(self.finditer(line), None)

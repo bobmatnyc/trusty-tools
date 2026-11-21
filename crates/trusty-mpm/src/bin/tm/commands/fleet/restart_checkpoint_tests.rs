@@ -58,7 +58,7 @@ fn put_ledger(dir: &Path, session: serde_json::Value) {
         .extend(session.as_object().expect("object").clone());
     let state = serde_json::json!({
         "code": "ar", "v": 3, "next": {}, "items": [], "tasks": [],
-        "goals": [{"id": "ar-G01", "status": "active"}], "session": ses
+        "goals": [{"id": "ar-g01", "status": "active"}], "session": ses
     });
     std::fs::write(d.join("state.json"), state.to_string()).expect("state");
 }

@@ -24,6 +24,7 @@
 #   private-allow-other-token  same path, a different name    FAIL PRIVATE_NAME
 #   private-allow-other-path   same token, another file       FAIL PRIVATE_NAME
 #   private-allow-count-grew   one more hit than the row's count  FAIL
+#   private-allow-nested-names a run holding two nested names counts once  OK
 #   private-allow-count-shrank fewer hits than the count     OK, with a shrink note
 #   private-allow-duplicate    a repeated (path, token) row   FAIL
 #   private-allow-stale   an allowlist row with no hit        FAIL STALE_ALLOWLIST
@@ -187,6 +188,11 @@ git -C "$REPO" rm -q -f other.md
 # #11535: a row's count caps its hits, shrink-only like the baseline.
 w notes.md 'built for ZorpCorp clients' 'ZorpCorp again'
 expect private-allow-count-grew 1 "FAIL PRIVATE_NAME: notes.md: 2 allowlisted hit(s)" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
+# #11535: a run holding two nested names (zorp inside zorpcorp) is one hit.
+printf 'zorp\nzorpcorp\n' >"$TMP_ROOT/nested.txt"
+w notes.md 'built for ZorpCorp clients'
+expect private-allow-nested-names 0 "OK" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$TMP_ROOT/nested.txt"
+w notes.md 'built for ZorpCorp clients' 'ZorpCorp again'
 printf 'notes.md\t%s\t3\tdeprecated alias (#1)\n' "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
 expect private-allow-count-shrank 0 "1 baseline count(s) can shrink" PUBLIC_LEAK_PRIVATE_NAMES_FILE="$NAMES"
 printf 'notes.md\t%s\t2\tdeprecated alias (#1)\n' "$TOK" "$TOK" >"$REPO/scripts/public_leak_private_allowlist.tsv"
