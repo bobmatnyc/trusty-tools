@@ -232,10 +232,10 @@ fn an_unreadable_mode_marker_is_an_error_not_shadow() {
 #[test]
 fn plist_has_keepalive_label_and_program_arguments() {
     let spec = PlistSpec {
-        exe: PathBuf::from("/Users/u/.cargo/bin/trusty-architect-sched"),
+        exe: PathBuf::from("/home/user/.cargo/bin/trusty-architect-sched"),
         root: PathBuf::from("/arch"),
         log_dir: PathBuf::from("/arch/local/logs/sched"),
-        path_env: PlistSpec::default_path(std::path::Path::new("/Users/u")),
+        path_env: PlistSpec::default_path(std::path::Path::new("/home/user")),
     };
     let x = spec.render();
     assert_eq!(LABEL, "com.trusty.architect-sched");
@@ -245,10 +245,10 @@ fn plist_has_keepalive_label_and_program_arguments() {
         "<key>RunAtLoad</key>\n  <true/>",
         "<key>ThrottleInterval</key>\n  <integer>10</integer>",
         "<key>ExitTimeOut</key>\n  <integer>60</integer>",
-        "<string>/Users/u/.cargo/bin/trusty-architect-sched</string>\n    <string>daemon</string>\n    <string>--root</string>\n    <string>/arch</string>",
+        "<string>/home/user/.cargo/bin/trusty-architect-sched</string>\n    <string>daemon</string>\n    <string>--root</string>\n    <string>/arch</string>",
         "<key>StandardOutPath</key>\n  <string>/arch/local/logs/sched/stdout.log</string>",
         "<key>NumberOfFiles</key>\n    <integer>8192</integer>",
-        "/Users/u/.cargo/bin:/Users/u/.local/bin:/opt/homebrew/bin",
+        "/home/user/.cargo/bin:/home/user/.local/bin:/opt/homebrew/bin",
     ] {
         assert!(x.contains(want), "plist lacks {want:?}:\n{x}");
     }
