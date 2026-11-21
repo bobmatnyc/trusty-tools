@@ -240,6 +240,39 @@ fn loop_refuses_to_start_while_locked() -> TestResult {
     Ok(())
 }
 
+/// A dry run naming ARCHITECT_DRY_RUN_STATE reads and saves that file only,
+/// so a second dry run dedupes what the first saw; the inbox stays untouched
+/// and no key is sent. Red against a dry run that never saves its state.
+#[test]
+fn dry_run_with_its_own_state_dedupes_across_runs() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let own_str = own.display().to_string();
+    let env = Env::new(&[("ARCHITECT_DRY_RUN_STATE", own_str.as_str())])?;
+    let tmux = fleet(
+        &[("tm-architect", "%1", "claude"), ("tm-a", "%2", "claude")],
+        &screen(50),
+    )
+    .fallback("display-message", "tm-architect\n")
+    .fallback("send-keys", "");
+    let clock = FakeClock::new(1_000.0);
+    let mut runner = env.runner(&tmux, &clock, &QuietHost);
+    runner.dry_run = true;
+    let first = runner.run_single("60")?;
+    assert!(!first.new.is_empty(), "the first dry run alerts");
+    assert!(own.exists(), "the dry run saved its own state");
+    let second = runner.run_single("60")?;
+    assert!(second.new.is_empty(), "deduped: {:?}", second.new);
+    assert!(second.suppressed >= first.new.len());
+    let files: Vec<String> = fs::read_dir(&env.config.inbox)?
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, ["events.jsonl"], "the inbox is untouched");
+    assert!(tmux.sends().is_empty());
+    Ok(())
+}
+
 /// A dry run takes no lock, writes no file, sends no keys, sleeps no
 /// interval and runs one cycle.
 #[test]
