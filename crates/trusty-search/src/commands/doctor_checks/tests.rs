@@ -306,6 +306,56 @@ fn fastembed_cache_dir_respects_env_override() {
     }
 }
 
+/// #10590: with no override doctor reads the live default, `~/.cache/fastembed`.
+#[serial_test::serial]
+#[test]
+fn fastembed_cache_dir_defaults_to_the_live_embedder_path() {
+    let keys = ["FASTEMBED_CACHE_DIR", "FASTEMBED_CACHE_PATH"];
+    let prev: Vec<_> = keys.iter().map(|k| std::env::var(k).ok()).collect();
+    for k in keys {
+        std::env::remove_var(k);
+    }
+    let got = fastembed_cache_dir();
+    for (k, v) in keys.iter().zip(prev) {
+        if let Some(v) = v {
+            std::env::set_var(k, v);
+        }
+    }
+    let home = dirs::home_dir().expect("home");
+    assert_eq!(got, home.join(".cache").join("fastembed"));
+}
+
+/// #10590: the layout the live embedder writes (`~/.cache/fastembed`) passes.
+#[test]
+fn model_cache_ok_when_the_live_layout_holds_the_model() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("models--Qdrant--all-MiniLM-L6-v2-onnx")).unwrap();
+    let got = check_model_cache_in(tmp.path(), None);
+    assert!(matches!(got, CheckResult::Ok(_)), "{got:?}");
+}
+
+/// #10590 fail-open check: a cache without the selected model still warns.
+#[test]
+fn model_cache_warns_when_the_model_is_missing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // The int8 model's directory does not serve the fp32 default.
+    std::fs::create_dir_all(tmp.path().join("models--Xenova--all-MiniLM-L6-v2")).unwrap();
+    assert!(check_model_cache_in(tmp.path(), None).is_warn());
+    assert!(check_model_cache_in(&tmp.path().join("absent"), None).is_warn());
+}
+
+#[test]
+fn model_cache_dir_name_follows_the_model_selection() {
+    assert_eq!(
+        model_cache_dir_name(None).0,
+        "models--Qdrant--all-MiniLM-L6-v2-onnx"
+    );
+    assert_eq!(
+        model_cache_dir_name(Some(" INT8 ")).0,
+        "models--Xenova--all-MiniLM-L6-v2"
+    );
+}
+
 // ── Python/MPS embedder checks (epic #3524 slice 5) ─────────────────────────
 
 /// Save/restore a single env var across a test body — same accepted

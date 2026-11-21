@@ -134,6 +134,10 @@ pub struct Config {
     /// Shadow run: outputs go to `<inbox>/shadow/`, no lock, no keys, no
     /// relaunch, no notification, no mutating step (#9779, plan section 3).
     pub shadow: bool,
+    /// `ARCHITECT_DRY_RUN_STATE`: a dry run's own state file, read and saved
+    /// every cycle so a repeated dry run dedupes; unset, a dry run saves
+    /// nothing. The scheduler's shadow poll sets it (#11602 follow-up).
+    pub dry_run_state: Option<PathBuf>,
     /// `SERVE_MIN_EVENT_GAP` seconds, else [`SERVE_MIN_EVENT_GAP_DEFAULT`]:
     /// the least time between two event cycles of `tm architect serve`
     /// (#9779 review). The 60 s tick is unaffected.
@@ -267,6 +271,9 @@ impl Config {
             push_channel: get("ARCHITECT_PUSH_CHANNEL").filter(|v| !v.is_empty()),
             push_recipient: get("ARCHITECT_PUSH_SLACK_USER").filter(|v| !v.is_empty()),
             shadow: false,
+            dry_run_state: get("ARCHITECT_DRY_RUN_STATE")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
             serve_min_gap: lenient("SERVE_MIN_EVENT_GAP", SERVE_MIN_EVENT_GAP_DEFAULT).max(0.0),
         })
     }
@@ -308,6 +315,15 @@ impl Config {
     /// `<inbox>/poll-state.json`: dedup and sensor state across cycles.
     pub fn state(&self) -> PathBuf {
         self.out_dir().join("poll-state.json")
+    }
+
+    /// The state file a run reads: [`Config::dry_run_state`] in a dry run
+    /// that names one, else [`Config::state`].
+    pub fn state_read(&self, dry_run: bool) -> PathBuf {
+        match &self.dry_run_state {
+            Some(p) if dry_run => p.clone(),
+            _ => self.state(),
+        }
     }
 
     /// `<inbox>/poll.log` (`shadow/shadow.log` in a shadow run).

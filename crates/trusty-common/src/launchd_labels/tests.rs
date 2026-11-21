@@ -187,6 +187,8 @@ const SCAN_EXEMPT_PATHS: &[&str] = &[
     "trusty-browser/src/codesign.rs",
     "trusty-browser/src/install_host.rs",
     "trusty-browser/src/vault.rs",
+    // #9171 A1: trusty-architect is a leaf; cannot depend on trusty-common
+    "trusty-architect/src/sched/plist.rs",
 ];
 
 /// Why (#4919, and #2827 before it): every re-fix so far corrected one literal

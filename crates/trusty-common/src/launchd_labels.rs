@@ -145,6 +145,11 @@ pub const BROWSER: &str = agent!("browser");
 /// The trusty-agents Slack gateway (`tagent --slack`).
 pub const AGENTS_SLACK: &str = agent!("agents", "slack");
 
+/// The Architect's job scheduler (`trusty-architect-sched`). Canonical name
+/// only: `trusty-architect` is a leaf crate and renders its own plist with a
+/// copy of this label (#9171 A1), so it is not in [`SERVICES`].
+pub const ARCHITECT_SCHED: &str = agent!("architect-sched");
+
 /// The trusty-computer desktop control service.
 pub const COMPUTER: &str = agent!("computer");
 

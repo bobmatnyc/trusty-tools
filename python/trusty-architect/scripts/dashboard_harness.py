@@ -54,12 +54,11 @@ from dashboard_fleet import (  # noqa: F401  (#10571: split out, re-exported for
     FACTORY_DONE, FACTORY_TASK, GONE_KEEP_S, PAUSED_DOC, POLLER, STATUSES, _iso_epoch, architect_state, collect_messages, dir_mtime, factory_sessions, fleet_status, map_state, resolve_target, session_status, session_tasks, tmux_sessions)
 from dashboard_harness_base import (  # noqa: F401  (#10571: split out, re-exported)
     ACTIVITY_S, IDLE_PARK_MIN, SLOW_TOKENS_1H, TAIL_BYTES, TEXT_MAX, WINDOW_S, _SECRET, _iso, one_line, read_json, tail_json,
-    tail_lines)
+    tail_lines, CACHE_TTL_S, HarnessCache)
 
 AGENT_OK_S, AGENT_SLOW_S, AGENT_MAX_S = 90, 300, 15 * 60
 READ_CAP = 2 * 1024 * 1024        # per-file bytes read in one call; a bigger backlog is skipped to the tail
 SESSION_DIRS = 4                  # newest session directories scanned per transcript project
-CACHE_TTL_S = 4.0
 DOC_WINDOW_S = 24 * 3600
 DOC_FILES = 10                    # newest main transcripts per dir, and newest subagent transcripts per dir
 DOC_KEEP = 800                    # change records kept in memory
@@ -511,39 +510,3 @@ def build(inbox, projects_dir, session_docs, item_docs, now=None, project_cwds=N
     arch["state"] = architect_state(dir_mtime(projects_dir, arch_dir) if arch_dir else 0, max(m["epoch"] for m in msgs) if msgs else 0, user_state, now)
     return {"generated": datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "epoch": int(now),
             "window_s": WINDOW_S, "architect": arch, "sessions": sessions, "messages": msgs[-200:], "docs": doc_rows, "sources": sources}
-
-
-class HarnessCache:
-    """Serve one build() result for CACHE_TTL_S so concurrent pages and polls share one scan.
-
-    swr=True (stale-while-revalidate): once a value exists, an expired get() returns it at once and rebuilds on one background
-    thread, so a slow build under host load never holds a request (Live "timed out", the owner 2026-10-30). The first get() still builds inline."""
-
-    def __init__(self, ttl=CACHE_TTL_S, clock=time.time, swr=False):
-        self.ttl, self.clock, self.swr, self._at, self._val = ttl, clock, swr, 0.0, None
-        self._lock = threading.Lock()   # #10161: concurrent requests share one build() instead of racing two
-        self._refreshing = False
-
-    def _refresh(self, fn):
-        try:
-            val = fn()
-            with self._lock:
-                self._val, self._at = val, self.clock()
-        except Exception as e:  # noqa: BLE001 - keep serving the stale value; the next expired get() retries
-            import sys
-            sys.stderr.write(f"harness refresh failed: {e!r}\n")
-        finally:
-            with self._lock:
-                self._refreshing = False
-
-    def get(self, fn):
-        with self._lock:
-            t = self.clock()
-            if self.swr and self._val is not None:
-                if t - self._at >= self.ttl and not self._refreshing:
-                    self._refreshing = True
-                    threading.Thread(target=self._refresh, args=(fn,), daemon=True).start()
-                return self._val
-            if self._val is None or t - self._at >= self.ttl:
-                self._val, self._at = fn(), t
-            return self._val
