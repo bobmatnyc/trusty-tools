@@ -11822,7 +11822,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.5"
+version = "0.70.6"
 dependencies = [
  "anyhow",
  "async-trait",
