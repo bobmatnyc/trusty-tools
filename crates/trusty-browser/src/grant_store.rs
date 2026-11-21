@@ -21,17 +21,23 @@
 //! (`GrantStoreStale`) until a later persist succeeds. That persist is retried
 //! at each `retire`, at start, and at the head of each new-grant `connect`.
 //! The flag lives under the broker mutex with the grants, so it cannot race
-//! them. Remaining gap: the flag is in memory. If the broker restarts while a
-//! stale store is still on disk, the store is well-formed, so `restore_grants`
-//! loads it and the revoked grant returns inside its reconnect grace (the
-//! incarnation rule still decides its fate). Closing that needs a durable
-//! marker on a disk that just refused a write and a delete; not attempted.
+//! them. The flag is in memory, so a restart with a stale store on disk would
+//! load the revoked grant again. `restore_grants` therefore skips every grant
+//! that has a `grant_end` row in the audit log (live file and rotated
+//! generations); an audit log that cannot be read restores nothing (#11582).
+//! Limit: the tombstone is the audit row. If the audit write also failed (for
+//! example a fully read-only disk), there is no `grant_end` row, and the
+//! revoked grant returns inside its reconnect grace; the incarnation rule
+//! still decides its fate.
 //! Test: `store_round_trips_and_is_owner_only`, `a_rejected_store_restores_nothing`,
 //! `a_failed_rewrite_deletes_the_store`, `a_failed_rewrite_and_delete_reports_a_stale_store`
 //! here; `a_restart_keeps_a_grant_until_its_grace_ends`,
 //! `a_revoked_grant_does_not_return_after_a_restart`,
-//! `a_stale_store_refuses_new_grants_until_a_persist_succeeds` in `tests/broker_grants.rs`.
+//! `a_stale_store_refuses_new_grants_until_a_persist_succeeds`,
+//! `a_stale_store_does_not_restore_a_revoked_grant`,
+//! `an_unreadable_audit_log_restores_no_grant` in `tests/broker_grants.rs`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -41,6 +47,7 @@ use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
+use crate::audit::{self, Audit};
 use crate::broker::{Core, Inner};
 use crate::grants::{Grant, RECONNECT_GRACE};
 use crate::pairing;
@@ -222,6 +229,38 @@ impl GrantStore {
     }
 }
 
+/// Grant ids with a `grant_end` row in the audit log, live file and rotated generations.
+///
+/// Why: the `grant_end` row survives a store rewrite and delete that both failed (#11582).
+/// What: an absent file is skipped; any other read error is returned so the caller
+/// fails closed. A line that is not JSON (a torn last write) is skipped.
+/// Test: `a_stale_store_does_not_restore_a_revoked_grant`,
+/// `an_unreadable_audit_log_restores_no_grant` in `tests/broker_grants.rs`.
+fn ended_grants(audit: &Audit) -> io::Result<HashSet<String>> {
+    let mut ended = HashSet::new();
+    let paths = (1..=audit::KEEP)
+        .map(|i| audit.generation(i))
+        .chain([audit.path().to_path_buf()]);
+    for path in paths {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for line in text.lines() {
+            let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if row.get("event").and_then(|v| v.as_str()) == Some("grant_end")
+                && let Some(grant) = row.get("grant").and_then(|v| v.as_str())
+            {
+                ended.insert(grant.to_owned());
+            }
+        }
+    }
+    Ok(ended)
+}
+
 impl Core {
     /// Load the store at broker start and re-create each grant in its reconnect grace.
     ///
@@ -240,8 +279,16 @@ impl Core {
                 return;
             }
         };
+        // #11582: a stale store may name a revoked grant; its `grant_end` row is the tombstone.
+        let ended = match ended_grants(&self.audit) {
+            Ok(ended) => ended,
+            Err(e) => {
+                eprintln!("trusty-browser: grants not restored, audit log unreadable: {e}");
+                return;
+            }
+        };
         let until = self.clock.now() + RECONNECT_GRACE;
-        for s in stored {
+        for s in stored.into_iter().filter(|s| !ended.contains(&s.grant)) {
             let route = match pairing::profile_row(&inner.db, &s.profile) {
                 Ok(Some(route)) => route,
                 _ => continue,
