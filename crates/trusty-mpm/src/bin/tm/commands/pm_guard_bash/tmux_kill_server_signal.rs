@@ -5,11 +5,12 @@
 //! verb to read.
 //! What: [`signal_kill`] reads the command, every `$(…)` and backtick body in
 //! it, and every `eval` / `-c` string, as units. Each unit is split on `;`,
-//! `&&`, `||` and newline outside quotes and substitutions, and each segment
+//! `&&`, `||`, `|`, `&` and newline outside quotes and substitutions, and each segment
 //! is judged alone. A kill word counts only in command position: first in its
-//! segment, after a compound head (`(`, `{`, `do`, `then`, `!`, `|`,
+//! segment, after a compound head (`(`, `{`, `do`, `then`, `if`, `while`, `!`,
 //! `find -exec`), or after a wrapper (`timeout 5`, `sudo -u root`,
-//! `env -u X`, `nice -n 10`, `xargs`), so `grep kill tmux.log` is data.
+//! `env -u X`, `nice -n 10`, `xargs`). Elsewhere it counts unless the segment
+//! opens with a data program ([`DATA`]), so `grep kill tmux.log` is data.
 //! A `pkill`, `killall` or `kill` word is judged on its operands, one
 //! group per word or substitution: a group naming `tmux` is refused unless it
 //! carries its own scratch server (`-L <label>` / `-S <path>` that
@@ -25,15 +26,25 @@
 //! Test: `a_tmux_process_kill_is_refused`,
 //! `a_scratch_or_unrelated_process_kill_is_allowed`,
 //! `a_kill_word_outside_command_position_is_allowed`,
-//! `each_compound_segment_is_judged_alone`.
+//! `each_compound_segment_is_judged_alone`,
+//! `pipe_and_background_segments_are_judged_alone`,
+//! `a_kill_in_a_loop_or_if_head_is_refused`,
+//! `an_unlisted_wrapper_or_leading_redirect_fails_closed`.
 
 use super::super::super::split_shell_segments;
 use super::{ServerEnv, scratch_server};
 
 /// Words after which the next word runs as a command.
 const HEADS: &[&str] = &[
-    "(", "{", "do", "then", "else", "elif", "!", "|", "&", "&&", "||", ";", "-exec", "-execdir",
-    "-ok",
+    "(", "{", "do", "then", "else", "elif", "if", "while", "until", "!", "|", "&", "&&", "||", ";",
+    "-exec", "-execdir", "-ok",
+];
+
+/// #10702 r4: programs whose operands are data, so a kill word after one in
+/// a segment naming `tmux` is text; any other opener fails closed.
+const DATA: &[&str] = &[
+    "grep", "egrep", "fgrep", "rg", "ag", "git", "gh", "echo", "printf", "cat", "less", "more",
+    "head", "tail", "sed", "awk", "jq", "wc", "sort", "uniq", "diff", "man", "which", "type", "ls",
 ];
 
 /// Programs that run their operand as a command (`sudo pkill`).
@@ -126,7 +137,10 @@ fn substitutions(text: &str) -> Vec<String> {
 fn judge_text(text: &str, env: &ServerEnv, substitutions_name_tmux: bool) -> Option<String> {
     let words = shell_words(text);
     (0..words.len()).find_map(|i| {
-        let program = runs_kill(&words, i)?;
+        let positioned = runs_kill(&words, i);
+        // #10702 r4: an unlisted wrapper or leading redirect fails closed.
+        let program =
+            positioned.or_else(|| kill_word(&words[i]).filter(|_| !data_opener(&words)))?;
         let groups = operand_groups(&words[i + 1..]);
         let named = groups.iter().any(|g| unscratched_tmux(g, env));
         let variable = program == "kill" && groups.iter().any(|g| is_variable(g));
@@ -195,6 +209,12 @@ fn compound_segments(text: &str) -> Vec<String> {
             _ if double || tick || depth > 0 => 0,
             b';' | b'\n' => 1,
             b'&' | b'|' if bytes.get(i + 1) == Some(&b) => 2,
+            // #10702 r4: a single `|` or bare `&` ends a command too; `>&`,
+            // `&>` and `2>&1` are redirects.
+            b'|' => 1,
+            b'&' if i > 0 && matches!(bytes[i - 1], b'>' | b'<') => 0,
+            b'&' if bytes.get(i + 1) == Some(&b'>') => 0,
+            b'&' => 1,
             _ => 0,
         };
         if width > 0 {
@@ -208,6 +228,14 @@ fn compound_segments(text: &str) -> Vec<String> {
     out.push(text[start..].to_string());
     out.retain(|s| !s.trim().is_empty());
     out
+}
+
+/// Whether the segment's first program, past compound heads, is in [`DATA`].
+fn data_opener(words: &[String]) -> bool {
+    words
+        .iter()
+        .find(|w| !HEADS.contains(&w.as_str()))
+        .is_some_and(|w| DATA.contains(&base(w).as_str()))
 }
 
 /// The kill program `words[i]` runs, when it sits in command position.

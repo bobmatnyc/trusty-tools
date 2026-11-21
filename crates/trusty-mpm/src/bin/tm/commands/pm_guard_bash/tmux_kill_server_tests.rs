@@ -1041,3 +1041,55 @@ fn each_compound_segment_is_judged_alone() {
         assert!(refused(command), "{command:?} should be refused");
     }
 }
+
+/// #10702 r4: a single `|` and a bare `&` end a command; redirects do not.
+#[test]
+fn pipe_and_background_segments_are_judged_alone() {
+    for command in [
+        "echo x|pkill tmux",
+        "echo x | pkill tmux",
+        "sleep 1 &pkill tmux",
+        "sleep 1 & pkill tmux",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+    for command in ["grep kill tmux.log 2>&1", "grep kill f &> o; ls tmux"] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+}
+
+/// #10702 r4: `if`, `while` and `until` heads put a kill in command position.
+#[test]
+fn a_kill_in_a_loop_or_if_head_is_refused() {
+    for command in [
+        "if pkill tmux; then :; fi",
+        "while pkill tmux; do :; done",
+        "until pkill tmux; do :; done",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+}
+
+/// #10702 r4: a kill word after an unlisted opener fails closed when the
+/// segment names `tmux`; a data program opener stays allowed.
+#[test]
+fn an_unlisted_wrapper_or_leading_redirect_fails_closed() {
+    for command in [
+        "watch pkill tmux",
+        "caffeinate pkill tmux",
+        "flock /tmp/l pkill tmux",
+        "chrt -f 1 pkill tmux",
+        "arch -arm64 pkill tmux",
+        ">/dev/null pkill tmux",
+        "2>/dev/null kill -9 $(pgrep tmux)",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+    for command in [
+        "grep kill tmux.log",
+        "cat x | rg pkill tmux",
+        "watch pkill foo",
+    ] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+}
