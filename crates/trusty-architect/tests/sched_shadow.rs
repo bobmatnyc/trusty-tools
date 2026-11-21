@@ -90,19 +90,44 @@ fn shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one() {
         .collect();
     assert_eq!(inbox.len(), 1);
     assert_eq!(inbox[0].1, scratch.display().to_string());
-    assert_eq!(
-        std::fs::read_to_string(scratch.join("poll-state.json")).unwrap(),
-        r#"{"panes":{}}"#
-    );
+    let state = scratch.join(shadow::DRY_RUN_STATE);
+    let named: Vec<_> = spec
+        .env
+        .iter()
+        .filter(|(k, _)| k == "ARCHITECT_DRY_RUN_STATE")
+        .collect();
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0].1, state.display().to_string());
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), r#"{"panes":{}}"#);
     assert_eq!(
         std::fs::read(dir.path().join("inbox/poll-state.json")).unwrap(),
         before
     );
     assert_eq!(ctx.interval_s, 60);
-    // Without live state the stale scratch copy is removed.
-    std::fs::remove_file(dir.path().join("inbox/poll-state.json")).unwrap();
+}
+
+/// The shadow's own state survives the next plan: re-seeding it from the live
+/// state every run made each dry run re-alert everything (new=347 per cycle).
+/// Red against a `plan` that copies the live state every run.
+#[test]
+fn shadow_plan_keeps_the_dry_runs_own_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let l = layout(dir.path());
+    std::fs::create_dir_all(dir.path().join("inbox")).unwrap();
+    std::fs::write(dir.path().join("inbox/poll-state.json"), r#"{"panes":{}}"#).unwrap();
     shadow::plan(&l, &PollJob::default(), vec![], T0).unwrap();
-    assert!(!scratch.join("poll-state.json").exists());
+    let state = l.shadow_dir().join(shadow::DRY_RUN_STATE);
+    std::fs::write(&state, r#"{"alerts":{"seen":{}}}"#).unwrap();
+    shadow::plan(&l, &PollJob::default(), vec![], T0 + 60).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        r#"{"alerts":{"seen":{}}}"#
+    );
+    // No live state: the dry run starts empty, and nothing is created.
+    let fresh = tempfile::tempdir().unwrap();
+    let l = layout(fresh.path());
+    shadow::plan(&l, &PollJob::default(), vec![], T0).unwrap();
+    assert!(!l.shadow_dir().join(shadow::DRY_RUN_STATE).exists());
 }
 
 #[test]
