@@ -47,6 +47,7 @@ const linkify = (p, t) => { p.appendChild(el("span", null, t)); return p; };
 const docOf = (r) => { const m = /^([^/]+)\/(docs\/briefs\/.+\.md)$/.exec(txt(r)); return m ? { project: m[1], path: m[2] } : null; };
 const fillList = (box, nodes) => { box.children = nodes; };
 let readOnly = false, written = [];
+const notReady = () => "";   /* #11588: the questions count as loaded here (test_dashboard_loading.py covers the gate) */
 const paneQ = {}, paneFilter = () => () => true;   /* the pane filter, unset here (test_dashboard_pane_filter.py covers it) */
 const window = { DocReader: { open: () => {} } };
 const document = { createElementNS: (ns, t) => new N(t), querySelectorAll: () => [] }; const fetch = () => new Promise(() => {});
