@@ -121,7 +121,7 @@ fn test_wake_detects_its_own_stale_pointer_and_does_not_send() -> TestResult {
     let clock = FakeClock::new(NOW);
     assert_eq!(
         parse_pane(&cap).box_reading,
-        BoxReading::Input(InputState::Typed)
+        BoxReading::Input(InputState::Poll) // See MB1595: the deployed input-state.py
     );
     assert_eq!(
         waker(&tmux, &clock, ALERTS).wake(&sup_pane()?, 1, None)?,

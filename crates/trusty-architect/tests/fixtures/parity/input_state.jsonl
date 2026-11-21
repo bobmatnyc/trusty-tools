@@ -28,7 +28,7 @@
 ["errors_new", ["empty", ""]]
 ["stale_prompt_busy", ["empty", ""]]
 ["wrapped_draft", ["typed", "a long typed reply that wr"]]
-["wrapped_pointer", ["typed", "[poll 11:15Z] 4 new alerts -"]]
+["wrapped_pointer", ["poll", "[poll 11:15Z] 4 new alerts -"]]
 ["draft_starting_with_poll", ["typed", "poll the team about the release date"]]
 ["empty_capture", ["no-prompt", ""]]
 ["no_prompt", ["no-prompt", ""]]

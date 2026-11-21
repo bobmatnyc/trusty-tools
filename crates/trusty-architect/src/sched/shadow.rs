@@ -8,7 +8,8 @@
 //! (`local/meta/shadow/dry-run-state.json`), seeded once from the live
 //! `poll-state.json` and then kept, so the dry run dedupes across cycles. It
 //! builds the dry-run [`RunSpec`] with `ARCHITECT_INBOX_DIR` pointing at the
-//! scratch inbox and `ARCHITECT_DRY_RUN_STATE` at that file. [`parse_decision`]
+//! scratch inbox, `ARCHITECT_READ_INBOX_DIR` at the live one (read-only
+//! queues, MB1595) and `ARCHITECT_DRY_RUN_STATE` at that file. [`parse_decision`]
 //! reads the dry-run's stdout: the cycle line (`panes= new= woken= logged=
 //! suppressed= wake=`) and one `would alert:` line per new alert. [`record`]
 //! appends one [`ShadowRecord`] to `inbox/shadow-wakes.jsonl`; the alert detail
@@ -185,10 +186,18 @@ pub fn plan(
     env.retain(|(k, _)| {
         !matches!(
             k.as_str(),
-            "ARCHITECT_INBOX_DIR" | "ARCHITECT_PROJECT_DIR" | "ARCHITECT_DRY_RUN_STATE"
+            "ARCHITECT_INBOX_DIR"
+                | "ARCHITECT_PROJECT_DIR"
+                | "ARCHITECT_DRY_RUN_STATE"
+                | "ARCHITECT_READ_INBOX_DIR"
         )
     });
     env.push(("ARCHITECT_INBOX_DIR".to_owned(), dir.display().to_string()));
+    // See MB1595: selftest, ctx-cycle and PM-message queues are read live.
+    env.push((
+        "ARCHITECT_READ_INBOX_DIR".to_owned(),
+        layout.root.join("inbox").display().to_string(),
+    ));
     env.push((
         "ARCHITECT_DRY_RUN_STATE".to_owned(),
         state.display().to_string(),

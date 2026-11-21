@@ -33,7 +33,8 @@ fn record(slot: i64, ok: bool, wake: Option<&str>, alerts: Vec<ShadowAlert>) -> 
         ok,
         panes: Some(3),
         new: Some(alerts.len() as u64),
-        woken: Some(0),
+        // MB1595: parity reads the cycle's `woken`, so a waking record says so.
+        woken: Some(u64::from(wake.is_some())),
         logged: Some(0),
         suppressed: Some(0),
         wake_phrase: wake.map(str::to_owned),

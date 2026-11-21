@@ -209,13 +209,15 @@ pub fn cutover(
     }
     if !th.force {
         let rep = parity::load(layout, now - th.since_s)?;
-        if rep.cycles < th.min_cycles || rep.match_pct() < th.min_match_pct {
+        // See MB1595: the same verdict `parity` prints.
+        if !rep.passes(th) {
             return Err(SchedError::Cutover(format!(
-                "parity below the threshold ({} cycles of {} needed, {:.1}% matched of {:.1}% needed); \
-                 pass --force to override",
+                "parity below the threshold ({} cycles of {} needed, alerts {:.1}% and wakes {:.1}% \
+                 matched of {:.1}% needed); pass --force to override",
                 rep.cycles,
                 th.min_cycles,
-                rep.match_pct(),
+                rep.alert_pct(),
+                rep.wake_pct(),
                 th.min_match_pct
             )));
         }

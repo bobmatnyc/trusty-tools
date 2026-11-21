@@ -5,7 +5,7 @@
 //! `status`, `run` (needs `--once`), `daemon`, `cutover`, `rollback`,
 //! `parity`, `plist`. Flags: `--root DIR`, `--config PATH`, `--once`,
 //! `--json`, `--since <N>[smhd]`, `--force`, `--min-cycles N`,
-//! `--min-match-pct P`, `--exe PATH`. An unknown verb or flag, a flag
+//! `--min-match-pct P` (`parity` and `cutover`; defaults 120 and 95), `--exe PATH`. An unknown verb or flag, a flag
 //! without its value or a value that does not parse is a usage error.
 //! Test: `args_parse_every_verb_and_flag`, `args_reject_unknown_and_malformed`.
 

@@ -17,6 +17,7 @@ pub mod alerts;
 pub mod dedup;
 mod guard;
 pub(crate) mod matchers;
+pub mod screen;
 #[cfg(test)]
 mod tests;
 
@@ -78,6 +79,8 @@ pub struct PaneInfo {
     pub box_reading: BoxReading,
     /// The input line's text with escapes removed (`input-state.py`).
     pub box_text: String,
+    /// [`screen::screen_hash`] of the rows above the box (MB1595, Bob D9t).
+    pub screen: String,
     /// True when a rule-bounded input box was found.
     pub has_box: bool,
     /// `(fingerprint text, detail)` of an open dialog below the box.
@@ -281,6 +284,7 @@ pub fn parse_pane(capture: &str) -> PaneInfo {
     PaneInfo {
         box_reading,
         box_text,
+        screen: screen::screen_hash(&lines, top),
         has_box: found.is_some(),
         dialog,
         status,

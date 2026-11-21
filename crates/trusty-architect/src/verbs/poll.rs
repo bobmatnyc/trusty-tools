@@ -27,7 +27,7 @@ use crate::poller::steps::notify_macos::Osascript;
 use crate::poller::steps::scripts::{ScriptSteps, SystemSubprocess};
 use crate::poller::steps::usage::ScriptProbe;
 use crate::poller::watchdog::relaunch::{RELAUNCH_TIMEOUT, ScriptRelauncher, SystemScriptRunner};
-use crate::poller::{Config, MessageSink, Runner, SUPERVISOR, SystemHostProbe, WakeAll};
+use crate::poller::{Config, MessageSink, RuleTriage, Runner, SUPERVISOR, SystemHostProbe};
 use crate::tmux::SystemTmux;
 
 /// `fleet-poll.py`'s arguments.
@@ -141,11 +141,16 @@ pub(crate) fn with_live_runner(
         url: SLACK_POST_URL.to_owned(),
         timeout: SEND_TIMEOUT,
     };
+    // See MB1595: alert_triage.py's rules, not wake-for-all.
+    let triage = RuleTriage {
+        rules: config.triage_rules.clone(),
+        schedule: config.il_schedule.clone(),
+    };
     let runner = Runner {
         tmux: &tmux,
         clock: &SystemClock,
         probe: &SystemHostProbe,
-        triage: &WakeAll,
+        triage: &triage,
         config,
         usage_probe: &usage_probe,
         notifier: &Osascript::default(),

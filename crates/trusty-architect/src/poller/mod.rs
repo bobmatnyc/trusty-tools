@@ -47,6 +47,7 @@ mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
 mod messages;
 pub mod owner_answers;
+pub mod pm_intake;
 pub mod push;
 mod pyfmt;
 pub mod routines;
@@ -60,6 +61,7 @@ pub mod slack;
 mod state;
 pub mod steps;
 mod triage;
+pub mod triage_rules;
 mod wake;
 pub mod watchdog;
 mod windows;
@@ -95,6 +97,7 @@ pub use shadow::prepare_shadow;
 pub use sink::{append_alerts, append_log};
 pub use state::{PollState, SaveStep, StoredCount, load_state, save_state, save_state_with};
 pub use triage::{Triage, WakeAll};
+pub use triage_rules::RuleTriage;
 pub use wake::{
     BOX_CHANGED, WAKE_SUPPRESS_MAX_S, WakeContext, Waker, dispatch_wake, dispatch_wake_with,
     record_wake_result,
