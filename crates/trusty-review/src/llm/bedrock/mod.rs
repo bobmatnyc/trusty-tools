@@ -40,7 +40,9 @@
 //! `bedrock_request_includes_tool_config_when_schema_set` (all unit-level,
 //! no real AWS calls).
 
-pub(crate) mod arn;
+// #10892: the ARN parser moved to trusty-common; re-exported so every
+// `arn::` path in this crate resolves to the one shared copy.
+pub(crate) use trusty_common::inference::bedrock::arn;
 // #9310: opt-in raw capture of reviewer replies.
 mod capture;
 pub mod pricing;
@@ -656,3 +658,7 @@ fn extract_token_usage(
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "arn_tests.rs"]
+mod arn_tests;

@@ -93,7 +93,7 @@ pub use config::{ConfigCommand, ConfigKeysCommand};
 #[cfg(feature = "inference-client")]
 pub use configurator::{AdapterFactory, Configurator, ResolvedProvider, provider_for};
 #[cfg(feature = "inference-client")]
-pub use error::InferenceError;
+pub use error::{BedrockError, InferenceError};
 #[cfg(feature = "inference-client")]
 pub use providers::{OpenAiCompatAdapter, OpenAiCompatConfig, register_default_factories};
 #[cfg(feature = "inference-client")]
