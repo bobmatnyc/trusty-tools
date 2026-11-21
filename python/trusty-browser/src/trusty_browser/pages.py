@@ -16,6 +16,7 @@ from trusty_browser import codes
 from trusty_browser.codes import Grant
 from trusty_browser.grants import Grants, gone
 from trusty_browser.leases import TTL
+from trusty_browser.page_eval import check, evaluated, styled
 from trusty_browser.page_fields import MODIFIERS, key_allowed, valid_files
 from trusty_browser.page_query import KEEP_LEASE, clicked, controls, optional
 from trusty_browser.protocol import (
@@ -40,6 +41,9 @@ OPS = {
     "page_press": {"op", "lease", "request_id", "ref", "key", "modifiers"},
     "page_select": {"op", "lease", "request_id", "ref", "value"},
     "page_drag": {"op", "lease", "request_id", "ref", "target"},
+    # #11373: page_styles names a ref or a selector (optional fields).
+    "page_styles": {"op", "lease", "properties"},
+    "page_evaluate": {"op", "lease", "request_id", "expression"},
     "page_navigate": {"op", "lease", "request_id", "url"},
     "page_upload": {"op", "lease", "request_id", "ref", "files"},
     "page_downloads": {"op", "lease"},
@@ -165,10 +169,11 @@ def validate(request: Frame) -> str:
     if not OPS[op] <= set(request) <= OPS[op] | optional(op):
         raise Refusal("InvalidRequest")
     controls(request)  # #11356
+    check(request)  # #11373
     for name in ("lease", "request_id", "ref", "target"):
         # #11291: page_scroll names no ref unless it scrolls to an element.
         # #11286: page_press takes a null ref for the focused element.
-        nullable = op == "page_scroll" or (op == "page_press" and request.get(name) is None)
+        nullable = op in ("page_scroll", "page_styles") or (op == "page_press" and request.get(name) is None)
         if name in request and not (name == "ref" and nullable):
             string(request, name)
     if op == "page_press":
@@ -407,6 +412,13 @@ class Pages(Grants):
             claim.deadline = time.monotonic() + TTL
             reply = {"ok": True, "tab": tab, **result, "document_changed": changed}
             return reply, tab, host(result["origin"])
+        if op == "page_styles":  # #11373: a read inside the lease's document
+            names = request["properties"]
+            raw = await self.send(grant, claim, claim.peer, op, tab=tab,
+                                  document=claim.document, properties=names, **controls(request))  # fmt: skip
+            claim.deadline = time.monotonic() + TTL
+            reply = {"ok": True, "tab": tab, **styled(raw, names)}  # type: ignore[arg-type]
+            return reply, tab, host(claim.origin)
         if op == "page_downloads":
             raw = await self.send(grant, claim, claim.peer, op, tab=tab)
             listed = shaped(raw, LISTED)
@@ -422,6 +434,8 @@ class Pages(Grants):
             args: Frame = {"url": request["url"]}
         elif op in HISTORY:
             args = {}
+        elif op == "page_evaluate":  # #11373
+            args = {"document": claim.document, "expression": request["expression"]}
         else:
             args = {"document": claim.document, "ref": request["ref"]}
             if op == "page_click":  # #11294: the dialog policy
@@ -455,7 +469,10 @@ class Pages(Grants):
             shape = shape.get(op, DONE)
             if op in ("page_type", "page_press") and isinstance(raw, dict) and "truncated" in raw:
                 shape = CUT
-            result = clicked(raw) if op == "page_click" else shaped(raw, shape)
+            if op == "page_evaluate":  # #11373
+                result = evaluated(raw)
+            else:
+                result = clicked(raw) if op == "page_click" else shaped(raw, shape)
             where = host(claim.origin)
         claim.deadline = time.monotonic() + TTL
         reply = {"ok": True, "tab": tab, **result}

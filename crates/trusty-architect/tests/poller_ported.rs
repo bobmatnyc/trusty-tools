@@ -351,13 +351,14 @@ fn test_status_line_ctx_wins_over_the_transcript() -> TestResult {
     transcript_env(dir.path(), "%40", "sid-p", Some(700_000))?;
     let cfg = config(dir.path(), &[])?;
     let mut ctx = TranscriptCtx::new();
-    let alerts = ctx_cycle(&cfg, &mut ctx, &busy_screen(30), "%40")?;
-    // The live bar (22) alerts on the status line's 30%, never the transcript's 70%.
+    let alerts = ctx_cycle(&cfg, &mut ctx, &busy_screen(40), "%40")?;
+    // The live bar (31, df-T7i P1b) alerts on the status line's 40%, never
+    // the transcript's 70%.
     let shown: Vec<_> = alerts
         .iter()
         .map(|a| (a.kind.as_str(), a.detail.as_str()))
         .collect();
-    assert_eq!(shown, [("ctx", "ctx 30%")]);
+    assert_eq!(shown, [("ctx", "ctx 40%")]);
     assert_eq!(
         ctx.reads(),
         0,
@@ -380,7 +381,7 @@ fn test_status_line_without_a_plain_ctx_percent_uses_the_transcript() -> TestRes
             .iter()
             .map(|a| (a.kind.as_str(), a.fingerprint.as_str(), a.detail.as_str()))
             .collect();
-        assert_eq!(shown, [("ctx", "25", "ctx 69%")], "{replacement}");
+        assert_eq!(shown, [("ctx", "35", "ctx 69%")], "{replacement}");
     }
     Ok(())
 }
@@ -523,6 +524,9 @@ impl HostProbe for Probe {
     fn mem_free_pct(&self) -> Option<f64> {
         Some(60.0)
     }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
+    }
 }
 
 fn load_alerts(probe: &Probe, factor: Option<&str>) -> TestResult<Vec<Alert>> {
@@ -591,7 +595,7 @@ fn test_load_reemit_interval_is_unchanged_at_1800s() -> TestResult {
 // Python: test_builder_band_boundaries
 #[test]
 fn test_builder_band_boundaries() {
-    let cases: [(f64, f64, Option<f64>, f64, &str); 11] = [
+    let cases: [(f64, f64, Option<f64>, f64, &str); 13] = [
         (0.0, 300.0, Some(70.0), 0.0, "open"),
         (17.9, 200.0, Some(20.0), 0.0, "open"),
         (18.0, 300.0, Some(70.0), 0.0, "hold"),
@@ -602,7 +606,11 @@ fn test_builder_band_boundaries() {
         (0.0, 100.0, Some(70.0), 0.0, "hold"),
         (0.0, 300.0, Some(19.0), 0.0, "stop"),
         (0.0, 300.0, None, 0.0, "open"),
-        (0.0, 300.0, Some(70.0), 1.0, "stop"),
+        // df-T7i P1b: the swap input is activity in pages; 1 page is not
+        // active swapping, 256 is.
+        (0.0, 300.0, Some(70.0), 1.0, "open"),
+        (0.0, 300.0, Some(70.0), 255.0, "open"),
+        (0.0, 300.0, Some(70.0), 256.0, "stop"),
     ];
     let cfg = BandConfig::default();
     for (load, free, mem, swap, want) in cases {
@@ -629,7 +637,7 @@ fn test_band_alert_fires_only_on_change_and_first_run() {
     // The live detail names load15 (the prototype test predates the switch).
     assert_eq!(
         chg[0].detail,
-        "builder band open -> hold (load15 13.2/16 cores, 180 GiB free, mem 70% free, swap 0)"
+        "builder band open -> hold (load15 13.2/16 cores, 180 GiB free, mem 70% free, swap activity 0 pages)"
     );
 }
 

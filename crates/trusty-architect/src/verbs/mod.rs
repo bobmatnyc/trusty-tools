@@ -19,11 +19,15 @@
 
 mod input_state;
 mod poll;
+mod serve;
 
 use std::path::{Path, PathBuf};
 
 pub use input_state::{InputTarget, input_state};
-pub use poll::{PollArgs, poll, poll_config};
+pub use poll::{
+    DEFAULT_POLL_INTERVAL_S, POLL_INTERVAL_KEY, PollArgs, configured_interval, poll, poll_config,
+};
+pub use serve::{ServeArgs, serve};
 
 use crate::classify::parse_pane;
 use crate::pyjson::to_python_json;

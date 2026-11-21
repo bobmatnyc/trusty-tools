@@ -34,6 +34,9 @@ trusty-browser extension-path
   profile, open `chrome://extensions`, enable Developer mode, choose
   **Load unpacked** and select that directory. After an upgrade, run
   `extension-path` again and click **Reload**.
+- To upgrade, install the new crate and run `trusty-browser install-service`
+  again. It restarts the loaded broker so it serves the new binary and
+  extension assets, and exits 1 if the restart fails.
 
 Both verbs sign the installed binaries with your Developer ID so the Keychain
 trusts them across upgrades; `--no-sign` skips that step. See

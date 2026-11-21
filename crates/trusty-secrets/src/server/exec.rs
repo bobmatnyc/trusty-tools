@@ -246,6 +246,10 @@ pub(crate) fn resolve_with(
             }
             let project = ProjectContext::resolve(state, &scope.project)?;
             gate.project(&project);
+            // #10524: a read under a live unlock grant says so on its record.
+            if super::unlock::live_for_read(state) {
+                gate.served_from_grant();
+            }
             // #9621: the allow record before the backend is opened or read,
             // so an audit log that cannot be written refuses with no read;
             // it also precedes the spend, so an audit failure spends nothing.

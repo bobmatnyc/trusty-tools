@@ -185,6 +185,36 @@ pub(crate) enum SecretsAction {
     },
     /// Report socket and backend reachability, never a value.
     Doctor,
+    // #10524: the 8 h unlock grant (owner ruling Dd5).
+    /// Approve once, with Touch ID or the login password, so Keychain and
+    /// 1Password reads raise no prompt for 8 h.
+    ///
+    /// The grant lives only in the running trusty-secrets server. It ends
+    /// after 8 h, on system sleep, at logout, on `tm secrets lock`, or when
+    /// the server exits; it never survives a restart. Refused under an agent.
+    Unlock,
+    /// End the unlock grant now; the next read prompts again.
+    Lock,
+    // #10524: the vault blob (owner ruling 2026-11-19).
+    /// Move every trusty Keychain item into one Keychain item, so
+    /// `tm secrets unlock` prompts once.
+    ///
+    /// Plain `migrate` writes a verified backup item, then the blob, and
+    /// keeps the old items. `--finish` deletes the old items once the blob and
+    /// backup exist. `--rollback` writes every item back to its own Keychain
+    /// item, then deletes the blob. `--dry-run` reports counts and key names
+    /// and writes nothing. Never prints a value. Refused under an agent.
+    Migrate {
+        /// Report what the step would do; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Delete the old per-item Keychain items after a migration.
+        #[arg(long, conflicts_with = "rollback")]
+        finish: bool,
+        /// Restore the per-item layout and delete the blob.
+        #[arg(long)]
+        rollback: bool,
+    },
     // #9072: tier 3 of DOC-74 §15.8 for any language, on the command line.
     /// Print one key's value inside a `tm secrets exec` grant.
     ///

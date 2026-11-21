@@ -178,3 +178,43 @@ fn a_ledger_write_failure_does_not_fail_the_compression() {
         "the blocking file must be left exactly as it was"
     );
 }
+
+/// #11507: a chain step writes its own tool name plus the additive chain fields,
+/// and a plain run writes neither field.
+/// Test: itself.
+#[test]
+fn a_chain_step_row_carries_its_tool_and_the_chain_fields() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let chain = ChainTag {
+        shape: "cd ; git diff && cargo test",
+        steps: 3,
+    };
+    record_tagged_with(
+        dir.path(),
+        "sess-c",
+        ("cargo test", Some(chain)),
+        (400_000, 40_000),
+        "native_fallback",
+        sonnet_price,
+    );
+    record_compress_with(
+        dir.path(),
+        "sess-c",
+        "git diff",
+        400_000,
+        40_000,
+        "native_fallback",
+        sonnet_price,
+    );
+    let text = std::fs::read_to_string(savings_log_in(dir.path())).expect("ledger");
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    assert_eq!(rows.len(), 2, "{text}");
+    assert_eq!(rows[0]["tool_name"], "cargo test");
+    assert_eq!(rows[0]["chain_shape"], "cd ; git diff && cargo test");
+    assert_eq!(rows[0]["steps"], 3);
+    assert!(rows[1].get("chain_shape").is_none(), "{text}");
+    assert!(rows[1].get("steps").is_none(), "{text}");
+}

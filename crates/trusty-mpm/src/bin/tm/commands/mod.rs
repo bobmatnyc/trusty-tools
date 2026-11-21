@@ -33,6 +33,7 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 // #10973: `tm compress -- <cmd>`, the run mode an isolation worktree accepts.
+pub(crate) mod compress_chain;
 pub(crate) mod compress_run;
 pub(crate) mod daemon;
 // #9034: three-state daemon pid identity, read from argv.
@@ -159,6 +160,7 @@ pub(crate) mod hook_rewrite;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
 // #10973: chained commands judged per segment.
+pub(crate) mod hook_chain_shape;
 pub(crate) mod hook_rewrite_chain;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
@@ -342,6 +344,8 @@ pub(crate) mod repair;
 // #7569: `tm repair savings-ledger` — quarantine the ledger rows #7514 let
 // unit tests append to the operator's own savings ledger.
 pub(crate) mod repair_savings_ledger;
+// #11033: `tm savings status`.
+pub(crate) mod savings_status;
 // #5007: `tm repair session-store` — back up and truncate a corrupt
 // `sessions.json` so a wedged store no longer needs a human editing JSON.
 pub(crate) mod repair_session_store;

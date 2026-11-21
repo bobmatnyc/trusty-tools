@@ -57,16 +57,15 @@ fn test_quiet_session_suppresses_idle_but_not_ctx() -> TestResult {
 #[test]
 fn test_quiet_sessions_file_missing_means_nothing_is_quiet() -> TestResult {
     let env = Env::new(&[])?;
-    // The prototype's default `screen(PM_TURN)` carries `ctx 30%`, over the
-    // live 22% bar, so the live script writes `ctx` too: the frozen test's
-    // `["idle"]` is stale. Same input; the live kinds.
+    // The prototype's default `screen(PM_TURN)` carries `ctx 30%`, under the
+    // live 31% bar (df-T7i P1b), so the frozen test's `["idle"]` holds again.
     let tmux = fleet(&[("tm-active", "%11", "2.1.283")], &screen(30));
     let clock = FakeClock::new(IDLE_AFTER + 1.0);
     let mut session = PollSession::new(idle_since_zero(&["tm-active|%11"]));
     env.runner(&tmux, &clock, &QuietHost)
         .run_once(&mut session)?;
     assert!(!env.config.quiet_sessions.exists());
-    assert_eq!(env.written("tm-active")?, ["idle", "ctx"]);
+    assert_eq!(env.written("tm-active")?, ["idle"]);
     Ok(())
 }
 
@@ -115,5 +114,25 @@ fn test_exited_suppressed_for_a_vanished_fixture_session_but_not_a_real_one() ->
         session.state.sessions.is_empty(),
         "the gone sessions are dropped"
     );
+    Ok(())
+}
+
+/// df-T7i P1b: `PM_RC_RESTORE` is False in the live script, so a PM's
+/// `/rc failed` is neither an alert nor a trigger. The port has no Remote
+/// Control step at all; this pins that it stays silent.
+// Python: test_pm_rc_failed_is_not_an_alert_and_types_nothing
+#[test]
+fn test_pm_rc_failed_is_not_an_alert_and_types_nothing() -> TestResult {
+    let env = Env::new(&[])?;
+    let tmux = fleet(
+        &[("tm-api", "%11", "claude")],
+        &screen(10).replace("/rc", "/rc failed"),
+    );
+    let clock = FakeClock::new(0.0);
+    let mut session = PollSession::new(PollState::default());
+    env.runner(&tmux, &clock, &QuietHost)
+        .run_once(&mut session)?;
+    assert!(env.written("tm-api")?.iter().all(|k| !k.starts_with("rc_")));
+    assert!(tmux.sends().is_empty(), "{:?}", tmux.sends());
     Ok(())
 }

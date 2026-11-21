@@ -297,6 +297,11 @@ impl SecretBackend for TimeLimited {
             move |b| b.set_control_item(item, &v, k.as_ref(), present),
         )
     }
+
+    // #10524: the store is a handle, not a call; its users bound their reads.
+    fn blob_store(&self) -> Option<Arc<super::vault_blob::BlobStore>> {
+        self.inner.blob_store()
+    }
 }
 
 #[cfg(test)]

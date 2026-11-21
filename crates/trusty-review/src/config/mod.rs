@@ -566,8 +566,10 @@ impl ReviewConfig {
     /// uses its main checkout's index; with no match at all, and no registered
     /// index named by the current value, `search_index` becomes empty ("no
     /// index"), which the context gate reviews diff-only rather than skipping.
-    /// A daemon error leaves `search_index` unchanged.
+    /// A daemon error leaves `search_index` unchanged. #11545: with no live
+    /// match, a parked index covering the checkout is picked; the gate wakes it.
     /// Test: `resolve_index_noop_when_explicit`, `resolve_index_updates_when_unset`,
+    /// `checkout_resolver_counts_a_parked_index_as_present`,
     /// `fresh_worktree_reuses_the_main_checkout_index_instead_of_skipping`.
     pub async fn resolve_index(
         &mut self,
@@ -579,20 +581,21 @@ impl ReviewConfig {
         }
         let repo_root = index_resolver::repo_root_from_cwd();
         match client.list_indexes().await {
-            Ok(indexes) => {
-                // #8411: a fresh worktree has no index; its main checkout's does.
-                let matched = index_resolver::resolve_index_from_list(&indexes, &repo_root)
-                    .or_else(|| {
-                        let main = index_resolver::main_checkout_root(&repo_root)?;
-                        let id = index_resolver::best_matching_index(&indexes, &main)?;
-                        warn!(
-                            index = %id,
-                            main_checkout = %main.display(),
-                            "trusty-review: worktree has no search index; using its main \
-                             checkout's index (#8411)"
-                        );
-                        Some(id)
+            Ok(mut indexes) => {
+                let mut matched = Self::match_checkout(&indexes, &repo_root);
+                if matched.is_none() {
+                    // #11545: a parked index is registered, only not resident;
+                    // count it as present. The context gate wakes it.
+                    let parked = client.list_parked_indexes().await.unwrap_or_else(|e| {
+                        warn!("trusty-review: parked index list unreadable: {e}");
+                        Vec::new()
                     });
+                    matched = Self::match_checkout(&parked, &repo_root);
+                    if let Some(id) = &matched {
+                        tracing::info!(index = %id, "trusty-review: matched a parked index");
+                    }
+                    indexes.extend(parked);
+                }
                 if let Some(id) = matched {
                     tracing::info!(
                         index = %id,
@@ -617,6 +620,27 @@ impl ReviewConfig {
                 );
             }
         }
+    }
+
+    /// The index covering `repo_root` in `indexes`, else its main checkout's.
+    ///
+    /// #8411: a fresh worktree has no index; its main checkout's does.
+    /// #11545: run on the live list, then on the parked list.
+    fn match_checkout(
+        indexes: &[crate::integrations::search_client::IndexInfo],
+        repo_root: &std::path::Path,
+    ) -> Option<String> {
+        index_resolver::resolve_index_from_list(indexes, repo_root).or_else(|| {
+            let main = index_resolver::main_checkout_root(repo_root)?;
+            let id = index_resolver::best_matching_index(indexes, &main)?;
+            warn!(
+                index = %id,
+                main_checkout = %main.display(),
+                "trusty-review: worktree has no search index; using its main \
+                 checkout's index (#8411)"
+            );
+            Some(id)
+        })
     }
 
     /// Relax the required-context flags for a `--source-root` diff-only run.

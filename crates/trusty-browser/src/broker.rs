@@ -19,6 +19,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use rusqlite::Connection;
@@ -28,6 +29,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use crate::audit::{Audit, Clock, SystemClock};
 use crate::entropy::{Entropy, Monotonic, OsEntropy, SystemMonotonic};
+use crate::grant_store::StoreIo;
 use crate::grants::Grant;
 use crate::peer_conn::Peer;
 use crate::peer_darwin::HostRefused;
@@ -222,6 +224,12 @@ pub struct Core {
     pub wall_clock: Arc<dyn Clock>,
     /// Enrollment peer check.
     pub(crate) host_check: Arc<dyn HostCheck>,
+    /// File operations of the grant store (injectable in test builds).
+    pub(crate) store_io: StoreIo,
+    /// #11528: the grant store rewrite and its delete both failed, so the file on disk may
+    /// name a revoked grant; `connect` refuses new grants until a persist succeeds. Lives on
+    /// `Core`, not `Inner`, so the public `Inner` struct gains no field (SemVer, 0.8.x).
+    pub(crate) store_stale: AtomicBool,
     /// Self, for spawned tasks.
     pub this: Weak<Core>,
     inner: Mutex<Inner>,
@@ -258,6 +266,21 @@ impl Broker {
     /// (a held lock is an error), then each socket. Must run inside a tokio runtime.
     /// Test: `broker_sockets_have_python_paths_and_modes`, `a_second_broker_is_refused_by_the_lock`.
     pub fn start(options: BrokerOptions) -> Result<Broker, BrokerError> {
+        Broker::start_with_io(options, StoreIo::default())
+    }
+
+    /// `start` with injected grant store file operations (test builds only).
+    ///
+    /// Why: tests must fail a grant store rewrite or delete; a `BrokerOptions` field for it
+    /// would be a public-API break on a 0.8.x patch.
+    /// What: identical to `start`, with `io` as the store's file operations.
+    /// Test: `a_stale_store_refuses_new_grants_until_a_persist_succeeds`.
+    #[cfg(feature = "test-seams")]
+    pub fn start_with_store_io(options: BrokerOptions, io: StoreIo) -> Result<Broker, BrokerError> {
+        Broker::start_with_io(options, io)
+    }
+
+    fn start_with_io(options: BrokerOptions, store_io: StoreIo) -> Result<Broker, BrokerError> {
         let state = absolute(&options.state)?;
         let registry = Registry::open(&state)?;
         let lock = fs::OpenOptions::new()
@@ -295,9 +318,13 @@ impl Broker {
             // See review af942b9e95 #4: without the seam the real check is fixed.
             #[cfg(not(feature = "test-seams"))]
             host_check: Arc::new(ChromeHostCheck),
+            store_io,
+            store_stale: AtomicBool::new(false),
             this: this.clone(),
             inner: Mutex::new(inner),
         });
+        // #11528: bring back persisted grants, still subject to the reconnect grace.
+        core.restore_grants(&mut core.lock());
         let mut broker = Broker {
             core,
             tasks: JoinSet::new(),

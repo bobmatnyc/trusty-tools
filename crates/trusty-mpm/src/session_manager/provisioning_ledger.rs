@@ -428,8 +428,11 @@ impl ProvisioningLedger {
     /// What: ` M` or `??` on a [`LEDGERED_FILES`] entry whose current bytes
     /// hash to the ledgered value; ` M .gitignore` whose unstaged diff adds
     /// only ledgered lines and removes none; `?? .gitignore` whose every line
-    /// is ledgered. Anything else, including a staged change, is `false`.
+    /// is ledgered; `??` on a settings snapshot [`Self::vouches_for`] accepts
+    /// (#11221). Anything else, including a staged change, is `false`.
     /// Test: `ledger_excuses_only_provisioning_dirt_on_a_clone`,
+    /// `a_spawn_provisioned_clone_passes_the_dirt_check_11221`,
+    /// `foreign_bak_files_still_keep_the_clone_11221`,
     /// `ledger_keeps_a_clone_with_an_edited_claude_md`,
     /// `ledger_keeps_a_clone_whose_gitignore_gained_a_user_line`.
     pub(crate) fn excuses(&self, ws: &Path, line: &str) -> bool {
@@ -448,6 +451,9 @@ impl ProvisioningLedger {
                 .files
                 .get(rel)
                 .is_some_and(|want| file_sha256(&ws.join(rel)).as_ref() == Some(want)),
+            // #11221: tm's own `.claude/settings.json.<stamp>.bak`, by the
+            // writer's exact name shape and the ledgered bytes.
+            ("?? ", rel) if is_settings_snapshot(rel) => self.vouches_for(ws, rel),
             _ => false,
         }
     }

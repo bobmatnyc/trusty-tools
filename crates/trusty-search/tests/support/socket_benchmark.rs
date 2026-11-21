@@ -261,6 +261,71 @@ impl Fixture {
     }
 }
 
+/// Dial the sandbox daemon for a benchmark that manages its own index.
+///
+/// Why: the index-owning benchmarks (`benchmark_harness`, `benchmark_synthetic`,
+/// `benchmark_open_mpm`, `benchmark_open_mpm_kg`) dialled an HTTP daemon that
+/// no longer exists since #9214 (#10677).
+/// What: the same socket refusal and corpus check as [`fixture`], without
+/// `TRUSTY_SEARCH_BENCH_INDEX` — each benchmark names its own index.
+/// Test: `socket_env_is_required_absolute_and_not_the_live_default`,
+/// `a_missing_daemon_fails_closed_naming_the_socket`.
+pub async fn sandbox_client() -> DaemonClient {
+    let socket = resolve_suite_socket(std::env::var_os(SOCKET_ENV).as_deref(), None)
+        .unwrap_or_else(|e| panic!("{e}"));
+    // Validate the corpus before even a health call, as the HTTP fixture did.
+    isolated_benchmark::corpus_root("");
+    connect(&socket).await.unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `method` with `params`, panicking with the method name on any refusal.
+pub async fn call(client: &DaemonClient, method: &str, params: Value) -> Value {
+    client
+        .call(method, params)
+        .await
+        .unwrap_or_else(|e| panic!("{method}: {e}"))
+}
+
+/// `search.index.status` for `index`, or `None` when the daemon has no such index.
+pub async fn index_status(client: &DaemonClient, index: &str) -> Option<Value> {
+    match client
+        .call("search.index.status", json!({ "index_id": index }))
+        .await
+    {
+        Ok(status) => Some(status),
+        Err(DaemonCallError::Refused { code, .. })
+            if code == trusty_search::service::rpc::error::CODE_NOT_FOUND =>
+        {
+            None
+        }
+        Err(e) => panic!("search.index.status for {index}: {e}"),
+    }
+}
+
+/// Read back ownership before deleting or reindexing an existing benchmark index.
+///
+/// What: a missing index passes; an index registered to another root panics.
+pub async fn assert_index_root(client: &DaemonClient, index: &str, expected: &Path) {
+    let Some(status) = index_status(client, index).await else {
+        return;
+    };
+    let actual = status["root_path"]
+        .as_str()
+        .expect("benchmark status must identify root_path");
+    isolated_benchmark::validate_registered_root(Path::new(actual), expected)
+        .unwrap_or_else(|error| panic!("{error}"));
+}
+
+/// Keep fixture indexing outside timed quality/performance measurements.
+pub async fn assert_index_ready(client: &DaemonClient, index: &str) {
+    let status = index_status(client, index).await.unwrap_or_else(|| {
+        panic!("benchmark prerequisite failed: index {index} is not registered")
+    });
+    isolated_benchmark::validate_ready(&status).unwrap_or_else(|error| {
+        panic!("benchmark prerequisite failed: {error}; wait for indexing before rerunning")
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

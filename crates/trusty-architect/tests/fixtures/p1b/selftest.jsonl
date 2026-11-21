@@ -1,0 +1,5 @@
+{"case": "missing", "alerts": []}
+{"case": "clean", "alerts": []}
+{"case": "failing_with_lines", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "", "pane": "", "kind": "selftest_fail", "fingerprint": "ledger_spec,routines", "detail": "ledger_spec: 2 rules; routines: il-cron stale", "display": "[runtime selftest]: failing: ledger_spec: 2 rules; routines: il-cron stale"}]}
+{"case": "failing_without_lines", "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "", "pane": "", "kind": "selftest_fail", "fingerprint": "factory", "detail": "factory", "display": "[runtime selftest]: failing: factory"}]}
+{"case": "not_json", "alerts": []}

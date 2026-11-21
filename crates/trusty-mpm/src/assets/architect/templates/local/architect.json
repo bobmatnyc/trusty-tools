@@ -2,6 +2,7 @@
   "owner_name": "",
   "memory_palace": "",
   "dashboard_port": 7890,
+  "poll_interval_s": 60,
   "tailnet_url": "",
   "projects_root": "",
   "claude_config_dir": "",

@@ -142,6 +142,9 @@ fn a_failing_usage_probe_never_stops_the_cycle() -> TestResult {
         config: &env.config,
         usage_probe: &probe,
         notifier: &notifier,
+        relauncher: None,
+        steps: None,
+        pusher: None,
         dry_run: false,
         messages: &trusty_architect::poller::NoMessages,
     };

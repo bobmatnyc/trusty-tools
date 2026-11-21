@@ -26,12 +26,44 @@ fn project() -> (tempfile::TempDir, PathBuf) {
     (dir, root)
 }
 
-fn args(argv: &[&str]) -> DbatgArgs {
-    let full: Vec<&str> = ["tm", "dbatg"].iter().chain(argv).copied().collect();
-    match Cli::try_parse_from(full).expect("parse").command {
+/// `tm dbatg <argv>` through the whole `tm` CLI: proves the wiring.
+///
+/// Parses on an 8 MiB thread, the stack the real `tm` main thread parses on;
+/// the whole clap tree overflows a 2 MiB test thread in a debug build (see
+/// run 44709752864).
+fn tm_args(argv: &[&str]) -> DbatgArgs {
+    let full: Vec<String> = ["tm", "dbatg"]
+        .iter()
+        .chain(argv)
+        .map(|s| (*s).to_owned())
+        .collect();
+    let parsed = std::thread::Builder::new()
+        .stack_size(8 << 20)
+        .spawn(move || Cli::try_parse_from(full).expect("parse").command)
+        .expect("spawn")
+        .join()
+        .expect("join");
+    match parsed {
         Some(Command::Dbatg(a)) => a,
         other => panic!("not dbatg: {other:?}"),
     }
+}
+
+/// `tm dbatg` alone, for the parser the fallback tests use.
+#[derive(Parser)]
+struct DbatgOnly {
+    #[command(flatten)]
+    args: DbatgArgs,
+}
+
+/// `argv` parsed as `tm dbatg` arguments.
+///
+/// See run 44709752864: building the whole `tm` clap tree takes ~2 MiB of
+/// stack in a debug build, which overflowed the 2 MiB test thread; this
+/// parses only the `dbatg` subtree.
+fn args(argv: &[&str]) -> DbatgArgs {
+    let full: Vec<&str> = ["dbatg"].iter().chain(argv).copied().collect();
+    DbatgOnly::try_parse_from(full).expect("parse").args
 }
 
 /// Runs `argv` with no daemon at the socket, as session `own`, with the
@@ -77,7 +109,7 @@ fn cli_parses_every_dbatg_verb() {
         &["show", "--brief"],
     ];
     for argv in cases {
-        let a = args(argv);
+        let a = tm_args(argv);
         let ok = matches!(
             a.verb,
             DbatgVerb::Init { .. }
@@ -331,4 +363,29 @@ async fn dbatg_cli_reports_a_daemon_predating_dbatg_as_exit_3() {
     assert!(msg.contains("tm restart"), "{msg}");
     assert!(msg.contains("r-old"), "{msg}");
     assert!(!msg.contains("mpm.ping") && !msg.contains('\n'), "{msg}");
+}
+
+/// See run 44709752864: the fallback tests' parse and the in-process write
+/// fit a 512 KiB stack, a quarter of the CI test thread.
+#[test]
+fn dbatg_cli_fallback_fits_a_small_test_stack() {
+    let (_dir, root) = project();
+    let out = std::thread::Builder::new()
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(offline(
+                &root,
+                Some("pm-a"),
+                &["add", "G", "--title", "x"],
+                "",
+            ))
+        })
+        .expect("spawn")
+        .join()
+        .expect("join");
+    assert_eq!((out.stdout.as_str(), out.error), ("th-G01\n", None));
 }

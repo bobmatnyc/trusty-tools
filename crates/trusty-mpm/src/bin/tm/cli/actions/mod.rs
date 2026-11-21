@@ -30,6 +30,8 @@ mod dbatg;
 mod deliverables;
 // #6887: `tm divert` — the bulk-read worker.
 mod divert;
+// #11033: `tm savings status`.
+mod savings;
 // #8939: `tm env set|keys` — dotenv edits that print no value.
 mod env;
 // #8436: `tm fleet` — the Architect's setup and status.
@@ -91,6 +93,7 @@ pub(crate) use projects::{
     ClearableConfigField, ConfigAction, ProjectsAction, SettableConfigField,
 };
 pub(crate) use repair::RepairAction;
+pub(crate) use savings::{SavingsAction, SavingsGroupArg};
 pub(crate) use secrets::{ArgText, ImportFormat, SecretsAction};
 pub(crate) use services::ServicesAction;
 pub(crate) use sessctl::SessctlAction;

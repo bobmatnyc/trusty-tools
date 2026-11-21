@@ -42,9 +42,22 @@ pub fn architect_busy<T: Tmux + ?Sized>(
     tmux: &T,
     panes: &[Pane],
 ) -> Result<(bool, String), TmuxError> {
+    architect_busy_in(tmux, panes, SUPERVISOR)
+}
+
+/// [`architect_busy`] for a configured Architect `session` (#9779: the
+/// watchdog follows `ARCHITECT_SESSION`).
+///
+/// # Errors
+/// As [`architect_busy`].
+pub fn architect_busy_in<T: Tmux + ?Sized>(
+    tmux: &T,
+    panes: &[Pane],
+    session: &str,
+) -> Result<(bool, String), TmuxError> {
     let Some(p) = panes
         .iter()
-        .find(|p| p.session == SUPERVISOR && !is_shell(&p.cmd))
+        .find(|p| p.session == session && !is_shell(&p.cmd))
     else {
         return Ok((false, String::new()));
     };

@@ -1,0 +1,484 @@
+{
+ "now": 1760000000.5,
+ "ctx_bar": [
+  {
+   "case": "no_schedule_pm",
+   "session": "tm-a",
+   "window": 1000000,
+   "schedule": null
+  },
+  {
+   "case": "no_schedule_architect",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": null
+  },
+  {
+   "case": "architect_bar_450k",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": 450000
+    }
+   }
+  },
+  {
+   "case": "architect_bar_pm_unchanged",
+   "session": "tm-a",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": 450000
+    }
+   }
+  },
+  {
+   "case": "bar_bool_ignored",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": true
+    }
+   }
+  },
+  {
+   "case": "bar_zero_ignored",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": 0
+    }
+   }
+  },
+  {
+   "case": "bar_float_ignored",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": 400000.0
+    }
+   }
+  },
+  {
+   "case": "thresholds_not_a_dict",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": {
+    "thresholds": null
+   }
+  },
+  {
+   "case": "small_window",
+   "session": "tm-architect",
+   "window": 700000,
+   "schedule": {
+    "thresholds": {
+     "architect_bar_ctx": 450000
+    }
+   }
+  },
+  {
+   "case": "bad_json",
+   "session": "tm-architect",
+   "window": 1000000,
+   "schedule": "not json"
+  }
+ ],
+ "cap_wake": [
+  [
+   "empty_digest",
+   "[poll 07:00Z] 3 alerts need you (1 logged) -> /x/inbox/alerts.jsonl",
+   ""
+  ],
+  [
+   "fits",
+   "[poll 07:00Z] 3 alerts need you (1 logged) -> /x/inbox/alerts.jsonl",
+   "tm-a idle: idle 12 min"
+  ],
+  [
+   "cut_with_ellipsis",
+   "[poll 07:00Z] 3 alerts need you (1 logged) -> /x/inbox/alerts.jsonl",
+   "item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item item "
+  ],
+  [
+   "whitespace_collapsed",
+   "[poll 07:00Z] 3 alerts need you (1 logged) -> /x/inbox/alerts.jsonl",
+   "a\n b\t\tc   d"
+  ],
+  [
+   "no_room",
+   "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+   "digest text here"
+  ],
+  [
+   "room_exactly_20",
+   "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ],
+  [
+   "room_19",
+   "hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",
+   "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  ],
+  [
+   "unicode_digest",
+   "[poll 07:00Z] 3 alerts need you (1 logged) -> /x/inbox/alerts.jsonl",
+   "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9"
+  ]
+ ],
+ "ctx_cycle": [
+  {
+   "case": "missing_file",
+   "steps": [
+    {
+     "content": null,
+     "dry_run": false
+    }
+   ]
+  },
+  {
+   "case": "two_lines_then_one_more",
+   "steps": [
+    {
+     "content": "{\"session\": \"tm-a\", \"fingerprint\": \"f1\", \"detail\": \"cycle failed\"}\nnot json\n{\"fingerprint\": \"f2\"}\n",
+     "dry_run": false
+    },
+    {
+     "append": "{\"session\": \"tm-b\", \"fingerprint\": \"f3\", \"detail\": \"x\"}\n",
+     "dry_run": false
+    },
+    {
+     "append": "",
+     "dry_run": false
+    }
+   ]
+  },
+  {
+   "case": "dry_run_keeps_offset",
+   "steps": [
+    {
+     "content": "{\"session\": \"tm-a\", \"fingerprint\": \"f1\", \"detail\": \"d\"}\n",
+     "dry_run": true
+    },
+    {
+     "append": "",
+     "dry_run": true
+    }
+   ]
+  },
+  {
+   "case": "partial_last_line",
+   "steps": [
+    {
+     "content": "{\"session\": \"tm-a\", \"fingerprint\": \"f1\", \"detail\": \"d\"}\n{\"session\": \"tm-b\"",
+     "dry_run": false
+    },
+    {
+     "append": ", \"fingerprint\": \"f2\"}\n",
+     "dry_run": false
+    }
+   ]
+  }
+ ],
+ "selftest": [
+  [
+   "missing",
+   null
+  ],
+  [
+   "clean",
+   {
+    "failures": [],
+    "lines": []
+   }
+  ],
+  [
+   "failing_with_lines",
+   {
+    "failures": [
+     "ledger_spec",
+     "routines"
+    ],
+    "lines": [
+     "ledger_spec: 2 rules",
+     "routines: il-cron stale"
+    ]
+   }
+  ],
+  [
+   "failing_without_lines",
+   {
+    "failures": [
+     "factory"
+    ]
+   }
+  ],
+  [
+   "not_json",
+   "{"
+  ]
+ ],
+ "zone": [
+  {
+   "case": "hourly_and_dedup_per_boot",
+   "steps": [
+    [
+     1760000000.5,
+     7999999,
+     1759000000
+    ],
+    [
+     1760000060.5,
+     9000000,
+     1759000000
+    ],
+    [
+     1760003600.5,
+     9000000,
+     1759000000
+    ],
+    [
+     1760007200.5,
+     12500000,
+     1759000000
+    ],
+    [
+     1760010800.5,
+     12500000,
+     1759000005
+    ]
+   ]
+  },
+  {
+   "case": "uptime_over_14_days",
+   "steps": [
+    [
+     1760000000.5,
+     1000,
+     1757704000
+    ],
+    [
+     1760003600.5,
+     1000,
+     1757704000
+    ]
+   ]
+  },
+  {
+   "case": "no_readings",
+   "steps": [
+    [
+     1760000000.5,
+     null,
+     null
+    ]
+   ]
+  },
+  {
+   "case": "no_boot_time",
+   "steps": [
+    [
+     1760000000.5,
+     8500000,
+     null
+    ],
+    [
+     1760003600.5,
+     8500000,
+     null
+    ]
+   ]
+  }
+ ],
+ "completion": [
+  {
+   "case": "fires_once_then_holds",
+   "steps": [
+    [
+     "box_empty",
+     20,
+     true
+    ],
+    [
+     "box_empty",
+     20,
+     true
+    ],
+    [
+     "box_typed",
+     20,
+     true
+    ],
+    [
+     "box_empty",
+     20,
+     true
+    ]
+   ]
+  },
+  {
+   "case": "below_floor_then_over",
+   "steps": [
+    [
+     "idle_suggestion",
+     14,
+     true
+    ],
+    [
+     "idle_suggestion",
+     15,
+     true
+    ]
+   ]
+  },
+  {
+   "case": "il_open",
+   "steps": [
+    [
+     "box_empty",
+     40,
+     false
+    ]
+   ]
+  },
+  {
+   "case": "busy_and_dialog",
+   "steps": [
+    [
+     "busy_agents_waiting",
+     40,
+     true
+    ],
+    [
+     "permission",
+     40,
+     true
+    ]
+   ]
+  },
+  {
+   "case": "limit_notice",
+   "steps": [
+    [
+     "plan_limit_text",
+     40,
+     true
+    ]
+   ]
+  },
+  {
+   "case": "no_ctx",
+   "steps": [
+    [
+     "box_empty",
+     null,
+     true
+    ]
+   ]
+  }
+ ],
+ "il": [
+  {
+   "case": "clean",
+   "state": {
+    "session": {},
+    "tasks": [
+     {
+      "status": "done"
+     }
+    ]
+   }
+  },
+  {
+   "case": "open_task",
+   "state": {
+    "session": {},
+    "tasks": [
+     {
+      "status": "open"
+     }
+    ]
+   }
+  },
+  {
+   "case": "session_task",
+   "state": {
+    "session": {
+     "task": "ab-T12"
+    },
+    "tasks": []
+   }
+  },
+  {
+   "case": "owed",
+   "state": {
+    "session": {
+     "owed": [
+      "x"
+     ]
+    }
+   }
+  },
+  {
+   "case": "agents",
+   "state": {
+    "session": {
+     "agents": 1
+    }
+   }
+  },
+  {
+   "case": "no_tasks_key",
+   "state": {
+    "session": {}
+   }
+  },
+  {
+   "case": "task_not_dict",
+   "state": {
+    "tasks": [
+     "done"
+    ]
+   }
+  },
+  {
+   "case": "state_not_dict",
+   "state": [
+    "x"
+   ]
+  },
+  {
+   "case": "no_state_file",
+   "state": null
+  },
+  {
+   "case": "not_scheduled",
+   "state": {
+    "session": {}
+   },
+   "name": "tm-other"
+  },
+  {
+   "case": "per_session_dir",
+   "state": {
+    "session": {},
+    "tasks": []
+   },
+   "per_session": true
+  }
+ ],
+ "rc_lines": [
+  "  TM 1.7.4 | org/proj | \u273bme | Opus | /rc",
+  "  TM 1.7.4 | org/proj | \u273bme | Opus | /rc   ",
+  "  TM 1.7.4 | org/proj | \u273bme | Opus |/rc",
+  "  TM 1.7.4 \u00b7 /rc",
+  "/rc",
+  "  TM 1.7.4 | /rc failed",
+  "  TM 1.7.4 | x/rc",
+  "  TM 1.7.4 | /rc extra"
+ ]
+}

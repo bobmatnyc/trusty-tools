@@ -29,6 +29,7 @@ pub mod cli_operator;
 pub mod codesign;
 pub mod entropy;
 pub mod frame;
+pub mod grant_store;
 pub mod grants;
 pub mod install_host;
 pub mod keychain_migrate;

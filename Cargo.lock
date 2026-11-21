@@ -11582,7 +11582,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-agents-common"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11685,7 +11685,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-architect"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "libc",
  "serde",
@@ -11822,7 +11822,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-common"
-version = "0.70.5"
+version = "0.70.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11929,7 +11929,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -12171,7 +12171,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.10"
+version = "1.14.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12424,7 +12424,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.8.0"
+version = "0.9.1"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

@@ -195,6 +195,19 @@ repos:
         pass_filenames: false
         always_run: true
 
+  # Public-content leak guard. The staged text files against
+  # scripts/public_leak_patterns.txt and the shrink-only baseline. Set
+  # PUBLIC_LEAK_PRIVATE_NAMES_FILE to an out-of-tree file of private names to
+  # check those too; unset or absent, they are skipped. CI runs the whole tree.
+  - repo: local
+    hooks:
+      - id: public-leaks
+        name: "Public-content leak guard"
+        entry: python3 scripts/check_content.py public-leaks
+        language: system
+        pass_filenames: true
+        types: [text]
+
   # Empirical commit-effort scoring — appends Effort/Effort-Score/
   # Effort-Breakdown trailers to commit messages. Non-destructive: never
   # blocks a commit; computation failures log a warning and exit 0.

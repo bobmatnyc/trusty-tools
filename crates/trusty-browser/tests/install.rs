@@ -19,7 +19,8 @@ use trusty_browser::launchd;
 #[cfg(target_os = "macos")]
 use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
-const PY_SIGNATURE: &str = "1170f60e8c2884ba170a64864164d2d5758f9df68bba69c6d47ee1520a36ff17";
+// #11529, #11284: re-pinned for the changed worker.js and pages*.js (and the manifest stamp they feed).
+const PY_SIGNATURE: &str = "07b6580f7a5440ed7a79856ccbefeafa1bf1373be5ca4550313e661d7737e92f";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";
@@ -267,6 +268,8 @@ fn install_host_is_idempotent_and_refuses_a_foreign_file() {
 /// Records every call; `print` answers with the configured outcome.
 struct FakeCtl {
     print: Outcome,
+    /// A verb whose call fails with this outcome (default: every verb but `print` succeeds).
+    failing: Option<(String, Outcome)>,
     calls: RefCell<Vec<Vec<String>>>,
 }
 
@@ -279,8 +282,19 @@ impl FakeCtl {
                 stdout: stdout.to_owned(),
                 stderr: String::new(),
             },
+            failing: None,
             calls: RefCell::new(Vec::new()),
         }
+    }
+    /// Make `verb` exit non-zero with `stderr`.
+    fn failing(mut self, verb: &str, stderr: &str) -> FakeCtl {
+        let out = Outcome {
+            code: 1,
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+        };
+        self.failing = Some((verb.to_owned(), out));
+        self
     }
     fn verbs(&self) -> Vec<String> {
         self.calls.borrow().iter().map(|c| c[0].clone()).collect()
@@ -295,6 +309,8 @@ impl Launchctl for FakeCtl {
             .push(args.iter().map(|s| s.to_string()).collect());
         Ok(if args[0] == "print" {
             self.print.clone()
+        } else if let Some((_, out)) = self.failing.as_ref().filter(|(v, _)| v == args[0]) {
+            out.clone()
         } else {
             Outcome::default()
         })
@@ -367,10 +383,10 @@ fn install_service_writes_files_and_bootstraps() {
     );
     let hosts = install_host::default_directory(dir.path()).expect("dir");
     assert!(hosts.join("com.trusty.browser.enroll.json").is_file());
-    // Loaded with our plist: a second install is a no-op that does not bootstrap.
+    // Loaded with our plist: a second install does not bootstrap; it restarts (#11522).
     let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
     launchd::manage(&l, true, &ctl, &signed()).expect("reinstall");
-    assert_eq!(ctl.verbs(), vec!["print"]);
+    assert_eq!(ctl.verbs(), vec!["print", "kickstart"]);
 }
 
 #[cfg(target_os = "macos")]
@@ -462,6 +478,38 @@ fn uninstall_service_replaces_a_python_registration() {
         fs::read_to_string(&plist).expect("plist"),
         launchd::launch_configuration(&l.exe, &l.state).expect("render")
     );
+}
+
+/// #11522: an already-loaded broker of ours is restarted, not left on its old binary.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_over_a_loaded_broker_restarts_it() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let plist = plist_path(dir.path());
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signed()).expect("first install");
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()));
+    launchd::manage(&l, true, &ctl, &signed()).expect("reinstall");
+    assert_eq!(ctl.verbs(), vec!["print", "kickstart"]);
+    assert_eq!(
+        ctl.calls.borrow()[1],
+        vec!["kickstart", "-k", "gui/501/com.trusty.browser"]
+    );
+}
+
+/// #11522: a failed restart is an error carrying the launchctl message.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_over_a_loaded_broker_reports_a_failed_restart() {
+    let dir = common::state_dir();
+    let l = layout(dir.path());
+    let plist = plist_path(dir.path());
+    launchd::manage(&l, true, &FakeCtl::new(113, ""), &signed()).expect("first install");
+    let ctl = FakeCtl::new(0, &format!("\tpath = {}\n", plist.display()))
+        .failing("kickstart", "Could not find service");
+    let err = launchd::manage(&l, true, &ctl, &signed()).expect_err("restart fails");
+    assert_eq!(err.to_string(), "launchctl failed: Could not find service");
+    assert_eq!(ctl.verbs(), vec!["print", "kickstart"]);
 }
 
 /// A loaded Python broker is restarted on our plist, not left running.

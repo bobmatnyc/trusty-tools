@@ -25,16 +25,30 @@ use std::path::{Path, PathBuf};
 use super::band::BandConfig;
 use super::pyfmt::{py_float, py_int};
 use super::steps::usage::UsagePaths;
+use super::watchdog::{FROZEN_MIN_DEFAULT, SILENT_MINUTES_DEFAULT};
 use super::{SKIP_SESSIONS, SUPERVISOR};
 use crate::error::ConfigError;
 use crate::self_ctx::{default_dir, projects_dir};
 
 /// Load alert line: the 15-minute load average over this many times the cores.
 pub const LOAD_FACTOR_DEFAULT: f64 = 1.5;
+/// `tm architect serve`'s least gap between event cycles, in seconds.
+pub const SERVE_MIN_EVENT_GAP_DEFAULT: f64 = 15.0;
 /// The context window a token count is divided by.
 pub const SELF_CTX_WINDOW_DEFAULT: i64 = 1_000_000;
-/// The Architect's own context percent that raises `self_ctx` (ruling b7).
-pub const SELF_CTX_THRESHOLD_DEFAULT: i64 = 25;
+/// The Architect's own context percent that raises `self_ctx` with no
+/// schedule bar and a 1M window (Bob 2026-11-05; was 25, ruling b7).
+pub const SELF_CTX_THRESHOLD_DEFAULT: i64 = 35;
+
+/// Where the `self_ctx` threshold comes from (df-T7i P1b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfCtxThreshold {
+    /// `SELF_CTX_THRESHOLD` names the percent.
+    Env(i64),
+    /// Unset: the Architect's bar as a percent of the window
+    /// ([`super::ctx_bar::bar_pct`], read from `il_schedule` each cycle).
+    Bar,
+}
 
 /// Everything the A3a sensors read from the environment.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,8 +70,36 @@ pub struct Config {
     pub pane_ctx_window: Option<i64>,
     /// `SELF_CTX_WINDOW`. `None` when bad: `self_ctx` is then off.
     pub self_ctx_window: Option<i64>,
-    /// `SELF_CTX_THRESHOLD`. `None` when bad: `self_ctx` is then off.
-    pub self_ctx_threshold: Option<i64>,
+    /// `SELF_CTX_THRESHOLD`, or the bar when unset. `None` when bad:
+    /// `self_ctx` is then off.
+    pub self_ctx_threshold: Option<SelfCtxThreshold>,
+    /// `IL_SCHEDULE`, else `<root>/local/il-schedule.json`: the Architect's
+    /// context bar and the sessions the completion check reads (df-T7i P1b).
+    pub il_schedule: PathBuf,
+    /// `SELF_CLEAR_SUPPRESS`, else `<inbox>/wake-suppress`: while this marker
+    /// is fresh, self-clear waits for idle and no wake is typed (ar-T0c).
+    pub wake_suppress: PathBuf,
+    /// `PM_WAKE_ALERT`, else `<inbox>/pm-wake-alert.json`: the failed-wake
+    /// record the Architect's hook reads (D39).
+    pub wake_alert: PathBuf,
+    /// `pm-messages.jsonl` in `ARCHITECT_INBOX_DIR`, else the inbox: held PM
+    /// messages join the wake digest.
+    pub pm_messages: PathBuf,
+    /// `SELF_REFRESH_PCT` (default 50): own context percent at which the
+    /// poller starts `self-clear.sh`. `None` when bad: the step reports an
+    /// error, as the prototype does.
+    pub self_refresh_pct: Option<f64>,
+    /// `USAGE_ZONE_FILE`, else `<root>/local/usage/zone-kalloc1024.jsonl`:
+    /// the hourly kernel-zone log (D73).
+    pub zone_log: PathBuf,
+    /// `<inbox>/ctx-cycle-alerts.jsonl`: failures `ctx-cycle.py` queues.
+    pub ctx_cycle_alerts: PathBuf,
+    /// `<inbox>/selftest-state.json`: `runtime_selftest.py`'s result.
+    pub selftest_state: PathBuf,
+    /// `ARCHITECT_PYTHON`, else `python3`: runs the prototype's scripts.
+    pub python: String,
+    /// The script-step switches set to `off` (`steps::scripts::OFF_SWITCHES`).
+    pub scripts_off: Vec<String>,
     /// Each bad `PANE_CTX_WINDOW` / `SELF_CTX_*` value, for the caller to log
     /// (the prototype logs `self_ctx ERROR ...` and `transcript ctx ERROR ...`).
     pub problems: Vec<ConfigError>,
@@ -73,6 +115,29 @@ pub struct Config {
     pub poll_session: String,
     /// The usage step's ledger, cache, account file and probe (#9801).
     pub usage: UsagePaths,
+    /// The Architect project directory: a relaunched session starts there.
+    pub root: PathBuf,
+    /// `<root>/scripts/session-relaunch.sh`: the watchdog's relaunch (#9779).
+    pub relaunch_script: PathBuf,
+    /// `SILENT_MINUTES` (default 45; a bad value falls back, as in Python).
+    pub silent_minutes: f64,
+    /// `FROZEN_MIN` (default 15; a bad value falls back, as in Python).
+    pub frozen_minutes: f64,
+    /// `ARCHITECT_ROUTINES_FILE`, else `<root>/local/routines.json`: the D5r
+    /// routine list. A missing file turns the check off.
+    pub routines: PathBuf,
+    /// `ARCHITECT_PUSH_CHANNEL`: where an overdue failure is pushed. Ships
+    /// unset (nothing sent); `slack` sends a DM (D5r, D5t).
+    pub push_channel: Option<String>,
+    /// `ARCHITECT_PUSH_SLACK_USER`: the Slack user id the DM goes to (D5t).
+    pub push_recipient: Option<String>,
+    /// Shadow run: outputs go to `<inbox>/shadow/`, no lock, no keys, no
+    /// relaunch, no notification, no mutating step (#9779, plan section 3).
+    pub shadow: bool,
+    /// `SERVE_MIN_EVENT_GAP` seconds, else [`SERVE_MIN_EVENT_GAP_DEFAULT`]:
+    /// the least time between two event cycles of `tm architect serve`
+    /// (#9779 review). The 60 s tick is unaffected.
+    pub serve_min_gap: f64,
 }
 
 impl Config {
@@ -123,7 +188,10 @@ impl Config {
         let root_text = root.to_string_lossy();
         let pane_ctx_window = int("PANE_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
         let self_ctx_window = int("SELF_CTX_WINDOW", SELF_CTX_WINDOW_DEFAULT);
-        let self_ctx_threshold = int("SELF_CTX_THRESHOLD", SELF_CTX_THRESHOLD_DEFAULT);
+        let self_ctx_threshold = match get("SELF_CTX_THRESHOLD") {
+            None => Some(SelfCtxThreshold::Bar),
+            Some(_) => int("SELF_CTX_THRESHOLD", 0).map(SelfCtxThreshold::Env),
+        };
         let inbox = path("SUPERVISOR_INBOX_DIR", root.join("inbox"));
         // #9801: usage.py's paths, read as usage.py reads them.
         let claude_dir = path("CLAUDE_CONFIG_DIR", config.clone());
@@ -138,7 +206,7 @@ impl Config {
             probe_log: inbox.join("usage-probe.log"),
         };
         Ok(Self {
-            inbox,
+            inbox: inbox.clone(),
             sessions_dir: path("SESSIONS_DIR", config.join("sessions")),
             transcript_base: path("TRANSCRIPT_BASE", projects_dir(home)),
             self_ctx_dir: path("SELF_CTX_DIR", default_dir(home, &root_text)),
@@ -149,6 +217,28 @@ impl Config {
             pane_ctx_window,
             self_ctx_window,
             self_ctx_threshold,
+            il_schedule: path("IL_SCHEDULE", root.join("local/il-schedule.json")),
+            wake_suppress: path("SELF_CLEAR_SUPPRESS", inbox.join("wake-suppress")),
+            wake_alert: path("PM_WAKE_ALERT", inbox.join("pm-wake-alert.json")),
+            pm_messages: path("ARCHITECT_INBOX_DIR", inbox.clone()).join("pm-messages.jsonl"),
+            self_refresh_pct: match get("SELF_REFRESH_PCT") {
+                None => Some(super::self_refresh::SELF_REFRESH_PCT_DEFAULT),
+                Some(v) => py_float(&v),
+            },
+            zone_log: path(
+                "USAGE_ZONE_FILE",
+                root.join("local/usage/zone-kalloc1024.jsonl"),
+            ),
+            ctx_cycle_alerts: inbox.join("ctx-cycle-alerts.jsonl"),
+            selftest_state: inbox.join("selftest-state.json"),
+            python: get("ARCHITECT_PYTHON")
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "python3".to_owned()),
+            scripts_off: super::steps::scripts::OFF_SWITCHES
+                .iter()
+                .filter(|n| get(n).as_deref() == Some("off"))
+                .map(|n| (*n).to_owned())
+                .collect(),
             problems,
             band: BandConfig {
                 stop_load_factor: lenient("BAND_STOP_LOAD_FACTOR", band_default.stop_load_factor),
@@ -169,6 +259,15 @@ impl Config {
             supervisor: SUPERVISOR.to_owned(),
             poll_session: format!("{SUPERVISOR}-poll"),
             usage,
+            root: root.to_owned(),
+            relaunch_script: root.join("scripts/session-relaunch.sh"),
+            silent_minutes: lenient("SILENT_MINUTES", SILENT_MINUTES_DEFAULT),
+            frozen_minutes: lenient("FROZEN_MIN", FROZEN_MIN_DEFAULT),
+            routines: path("ARCHITECT_ROUTINES_FILE", root.join("local/routines.json")),
+            push_channel: get("ARCHITECT_PUSH_CHANNEL").filter(|v| !v.is_empty()),
+            push_recipient: get("ARCHITECT_PUSH_SLACK_USER").filter(|v| !v.is_empty()),
+            shadow: false,
+            serve_min_gap: lenient("SERVE_MIN_EVENT_GAP", SERVE_MIN_EVENT_GAP_DEFAULT).max(0.0),
         })
     }
 
@@ -187,19 +286,37 @@ impl Config {
         self.inbox.join("events.jsonl")
     }
 
+    /// `<inbox>/shadow`: every file a shadow run writes.
+    pub fn shadow_dir(&self) -> PathBuf {
+        self.inbox.join("shadow")
+    }
+
+    /// Where this run writes: the inbox, or [`Config::shadow_dir`].
+    fn out_dir(&self) -> PathBuf {
+        if self.shadow {
+            self.shadow_dir()
+        } else {
+            self.inbox.clone()
+        }
+    }
+
     /// `<inbox>/alerts.jsonl`: the alert log the Architect reads.
     pub fn alerts(&self) -> PathBuf {
-        self.inbox.join("alerts.jsonl")
+        self.out_dir().join("alerts.jsonl")
     }
 
     /// `<inbox>/poll-state.json`: dedup and sensor state across cycles.
     pub fn state(&self) -> PathBuf {
-        self.inbox.join("poll-state.json")
+        self.out_dir().join("poll-state.json")
     }
 
-    /// `<inbox>/poll.log`: one line per cycle and per error.
+    /// `<inbox>/poll.log` (`shadow/shadow.log` in a shadow run).
     pub fn log(&self) -> PathBuf {
-        self.inbox.join("poll.log")
+        if self.shadow {
+            self.shadow_dir().join("shadow.log")
+        } else {
+            self.inbox.join("poll.log")
+        }
     }
 
     /// `<inbox>/poll.lock`: held by the one running poller (#9171 A3b-2).
@@ -226,7 +343,10 @@ mod tests {
             c.self_ctx_dir,
             Path::new("/home/u/.trusty-tools/trusty-mpm/claude-config/projects/-arch")
         );
-        assert_eq!((c.load_factor, c.self_ctx_threshold), (Some(1.5), Some(25)));
+        assert_eq!(
+            (c.load_factor, c.self_ctx_threshold),
+            (Some(1.5), Some(SelfCtxThreshold::Bar))
+        );
         assert_eq!(
             c.quiet_sessions,
             Path::new("/arch/local/quiet-sessions.txt")

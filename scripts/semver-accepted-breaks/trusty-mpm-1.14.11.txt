@@ -1,0 +1,6 @@
+crate   trusty-mpm
+version 1.14.11
+reason  Auto-recorded by preflight-publish.sh CHECK 5: trusty-tools' internal numbering policy — a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field OpportunityRow.command_shape
+accept  constructible_struct_adds_field field TaggedSavingsRow.chain_shape
+accept  constructible_struct_adds_field field TaggedSavingsRow.steps

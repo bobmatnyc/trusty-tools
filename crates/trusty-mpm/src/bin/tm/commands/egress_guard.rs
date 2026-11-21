@@ -419,7 +419,12 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
         if let Some(allowed) = slack_read {
             eprintln!("{}", allowed.audit_line());
         }
-        return None;
+        // #7684: with `[pm_guard] enabled = false` this always-installed hook
+        // carries the project rules onto an `Agent`/`Task` dispatch.
+        return crate::commands::pm_guard_accounts::egress_rules_carrier(
+            read.as_ref().ok(),
+            || MpmConfig::load_default().pm_guard.enabled,
+        );
     };
     // An unreadable payload names nothing: audit it with every field empty.
     let null = serde_json::Value::Null;
@@ -439,7 +444,9 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
 /// What: [`guard_once`] under [`deny_on_panic`]. A deny is printed as the one
 /// stdout object and the process exits 0 at once, so a stdin that never
 /// closed cannot hold the runtime's shutdown past Claude Code's hook timeout.
-/// An allow returns `Ok(())` with nothing printed. `url` is the daemon the
+/// An allow returns `Ok(())` with nothing printed, except the #7684 rules
+/// carrier: with `[pm_guard] enabled = false`, an `Agent`/`Task` dispatch
+/// prints one `updatedInput` object carrying the project rules. `url` is the daemon the
 /// taint arm asks for its policy verdict (#8454 VC) and the audit POST goes to.
 /// Test: `tests/tm_hook_egress_guard_8454.rs`.
 pub(crate) async fn egress_guard(url: &str) -> anyhow::Result<()> {

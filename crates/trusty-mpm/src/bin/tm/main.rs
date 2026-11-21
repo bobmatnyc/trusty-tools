@@ -542,9 +542,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::PromptFeedback(args)) => commands::prompt_feedback_cli::run(args).await,
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
+        // #11033: the read side of the compress and opportunity ledgers.
+        Some(Command::Savings { action }) => commands::savings_status::run(action),
         Some(Command::Memory { action }) => memory(action).await,
         // #10973: a command after `--` selects the run mode (`compress_run`).
-        Some(Command::Compress { tool, command }) => compress_run::run(&tool, &command).await,
+        Some(compress @ Command::Compress { .. }) => compress_run::dispatch(compress).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),
