@@ -53,6 +53,14 @@
 #     them. These 5 tests are uncounted, and the baseline excludes them.
 #     Architect ruling 2026-10-10 (Gate 4 ratchet).
 #
+#   DEMO TEST INTENTIONS (#11489). A test whose source reads
+#     `#[ignore = "intent(demo): ..."]` is a named intention in declared
+#     demo/POC work, not a deferred test. scripts/check_demo_intentions.sh
+#     confines intentions to declared demo paths, so this gate lists them as
+#     INTENTION rows and leaves them out of the unselected count; adding one
+#     never moves the baseline. A manifest row may not select one
+#     (INTENTION-SELECTED): its empty body would pass and read as coverage.
+#
 # WHAT THIS GATE DOES NOT CLAIM. It does not claim the unselected ignored tests
 #   pass, and it never prints a line that could be read that way. Its summary
 #   states both numbers — ran N, did not run M — because "0 failed" and
@@ -80,7 +88,8 @@
 #
 # Test: scripts/check_ignored_tests_selftest.sh drives the live path through a
 #   stub cargo: the feature-only count, the RATCHET, every fail-closed arm of
-#   both enumerations, ROW-NEEDS-FEATURES, and the default-feature run phase.
+#   both enumerations, ROW-NEEDS-FEATURES, the intent(demo): exclusion and
+#   INTENTION-SELECTED, and the default-feature run phase.
 #   The STALE-ROW branch has no self-test case yet.
 
 set -euo pipefail
@@ -266,13 +275,59 @@ for pkg, pattern, _why in rows:
     needs_features.extend(h for h in hits if h in feature_only)
     selected.update(hits)
 
-unselected = [t for t in all_tests if t not in selected]
+# #11489: `intent(demo):` test intentions. scripts/check_demo_intentions.sh
+# governs where they may appear, so the ratchet neither counts nor runs them.
+# Source scan: an `#[ignore = "intent(demo): ..."]` line, then the next
+# `fn <name>`; a test matches on package and its last path segment.
+def demo_intentions():
+    import subprocess
+    names = set()
+    files = subprocess.run(["git", "ls-files", "--", "crates/*.rs"],
+                           capture_output=True, text=True, check=True).stdout.split()
+    pkg_of = {}
+    for f in files:
+        parts = f.split("/")
+        if len(parts) < 3:
+            continue
+        crate_dir = "/".join(parts[:2])
+        if crate_dir not in pkg_of:
+            pkg_of[crate_dir] = None
+            try:
+                m = re.search(r'^name\s*=\s*"([^"]+)"', open(f"{crate_dir}/Cargo.toml").read(), re.M)
+                pkg_of[crate_dir] = m.group(1) if m else None
+            except OSError:
+                pass
+        pkg = pkg_of[crate_dir]
+        try:
+            text = open(f, encoding="utf-8", errors="replace").read()
+        except OSError:
+            continue
+        if "intent(demo):" not in text or pkg is None:
+            continue
+        pending = False
+        for line in text.splitlines():
+            if re.search(r'#\[ignore\s*=\s*"intent\(demo\):', line):
+                pending = True
+                continue
+            m = re.search(r'\bfn\s+([A-Za-z_][A-Za-z0-9_]*)', line)
+            if pending and m:
+                names.add((pkg, m.group(1)))
+                pending = False
+    return names
+
+intent_names = demo_intentions()
+intentions = {(p, t) for (p, t) in all_tests if (p, t.rsplit("::", 1)[-1]) in intent_names}
+
+unselected = [t for t in all_tests if t not in selected and t not in intentions]
 by_crate = collections.Counter(p for p, _ in unselected)
 
 print(f"SUMMARY\t{len(all_tests)} ignored test(s) in the workspace; "
       f"{len(selected)} selected to RUN; {len(unselected)} NOT run "
-      f"(baseline {baseline}); {len(feature_only)} compiled only under "
+      f"(baseline {baseline}); {len(intentions)} intent(demo): intention(s) "
+      f"not counted; {len(feature_only)} compiled only under "
       f"--features {features}")
+for pkg, tname in sorted(intentions):
+    print(f"INTENTION\t{pkg}\t{tname}")
 for crate, n in sorted(by_crate.items(), key=lambda kv: -kv[1]):
     print(f"UNSELECTED\t{crate}\t{n}")
 for pkg, tname in sorted(feature_only):
@@ -286,6 +341,13 @@ for pkg, tname in sorted(set(needs_features)):
     print(f"FAIL\tROW-NEEDS-FEATURES\t{pkg}\t{tname} is compiled only under "
           f"--features {features}; the run phase keeps default features and "
           "would not run it. Remove the row; the test counts as unselected.")
+    failed = True
+
+# #11489: an intention has no body; running it would report coverage that
+# does not exist.
+for pkg, tname in sorted(selected & intentions):
+    print(f"FAIL\tINTENTION-SELECTED\t{pkg}\t{tname} is an intent(demo): intention; "
+          "it is never run as coverage. Remove the row.")
     failed = True
 
 # FAIL CLOSED: a row that selects nothing is a manifest that has drifted from

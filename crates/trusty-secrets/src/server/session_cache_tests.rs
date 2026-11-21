@@ -16,6 +16,14 @@ use crate::server::exec;
 use crate::server::methods::{self, Caller};
 use crate::store::SecretCache;
 
+// #10524: the unlock grant; it shares this module's counting double.
+#[path = "unlock_tests.rs"]
+mod unlock_tests;
+
+// #10524: the vault blob's migration and the one-prompt unlock.
+#[path = "blob_unlock_tests.rs"]
+mod blob_unlock_tests;
+
 /// The project vault of the second fixture repo, `Acme/Api`.
 const API_VAULT: &str = "trusty/acme/api";
 

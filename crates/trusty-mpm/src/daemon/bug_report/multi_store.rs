@@ -110,7 +110,8 @@ pub fn aggregate_errors_from_paths(paths: &[PathBuf], limit: usize) -> Vec<Aggre
     let mut map: HashMap<String, AggregatedError> = HashMap::new();
 
     for path in paths {
-        let records = ErrorStore::read_records(path, PER_STORE_LIMIT);
+        // G0b: an il-auto-apply pending with a later resolution is cleared.
+        let records = super::drop_resolved_pending(ErrorStore::read_records(path, PER_STORE_LIMIT));
         for record in records {
             let fp = record.fingerprint.clone();
             map.entry(fp)

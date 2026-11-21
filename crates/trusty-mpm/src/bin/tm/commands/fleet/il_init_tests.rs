@@ -354,10 +354,8 @@ fn lowercase_holds_are_never_dropped() {
             .unwrap()
             .contains("hold all merges")
     );
-    assert!(
-        il_init::holds_in_state_md("- we hold the release\n").is_err(),
-        "unclassifiable"
-    );
+    // #11480: the word alone, not at the head, is neither a hold nor an error.
+    assert_eq!(read("- we hold the release\n"), il_init::Holds::default());
     assert_eq!(read("- holding pattern\n"), il_init::Holds::default());
 }
 
@@ -378,8 +376,9 @@ fn an_unreadable_state_md_stops_before_the_ledger() {
 #[test]
 fn ambiguous_hold_text_fails_before_the_ledger_is_created() {
     for (text, line) in [
-        ("# State\n- usage: we are on hold until Monday\n", 2),
-        ("# State\n\nThe HOLD is in place\n", 3),
+        // #11480: only text that starts with a hold format and cannot be read fails.
+        ("# State\n- HOLD until Monday\n", 2),
+        ("# State\n\nOn hold: the release\n", 3),
     ] {
         assert_eq!(
             il_init::hold_in_state_md(text).unwrap_err().0,
@@ -449,4 +448,78 @@ fn holds_with_an_unreadable_ledger_fail_visibly() {
         "{}",
         report.render()
     );
+}
+
+/// Fresh install with `state` already in `local/state.md`: the report, and
+/// whether the ledger or any ledger hook exists afterwards.
+fn fresh_init_with_state(state: &str) -> (super::super::InitReport, bool, bool) {
+    let fx = Fixture::new();
+    let dir = fx.dir();
+    std::fs::create_dir_all(dir.join("local")).unwrap();
+    std::fs::write(dir.join("local/state.md"), state).unwrap();
+    let report = fx.init().unwrap();
+    let hooks = std::fs::read_to_string(dir.join(".claude/settings.json"))
+        .is_ok_and(|t| t.contains("datg-hook.sh"));
+    (report, state_path(&dir).exists(), hooks)
+}
+
+/// #11498: a hold longer than its field stops init before the ledger and
+/// hooks exist; it is never cut to fit.
+#[test]
+fn a_hold_that_cannot_be_recorded_stops_init_before_the_ledger() {
+    let (report, ledger, hooks) =
+        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "x".repeat(1200)));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("hold from local/state.md is 1200 characters")
+                && t.contains("at most 1000"))),
+        "{}",
+        report.render()
+    );
+    assert!(!ledger, "no ledger without its hold");
+    assert!(!hooks, "no ledger hook without its hold");
+}
+
+/// #11498: 1000 multi-byte characters fit the field but not the 2048 B
+/// record; init names the field, its size and the limit, and creates nothing.
+#[test]
+fn a_1000_character_multibyte_hold_is_never_shortened() {
+    let (report, ledger, hooks) =
+        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "é".repeat(1000)));
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report.steps.iter().any(|s| matches!(s, Step::Failed(t)
+            if t.contains("hold is 2000 B") && t.contains("limit is 2048 B"))),
+        "{}",
+        report.render()
+    );
+    assert!(!ledger && !hooks, "{}", report.render());
+}
+
+/// #11480: the two notes from the owner's state.md that stopped init or became
+/// a fake merge hold; neither starts with a hold format.
+#[test]
+fn notes_that_only_mention_hold_or_merge_are_not_holds() {
+    let relay = "## Improvement candidates\n\n- relay.sh into a pane in tmux copy-mode \
+        (2026-11-18 15:53Z): send-keys -l failed with repeated \"not in a mode\" and nothing \
+        landed; a fix would log a hold instead of a failure.\n";
+    let owed = "- relay owed: none. D19 stays a hold until D18 is answered; PR 10610 MERGED.\n";
+    for text in [relay, owed] {
+        assert_eq!(
+            il_init::holds_in_state_md(text),
+            Ok(il_init::Holds::default()),
+            "{text}"
+        );
+    }
+    let (_fx, dir, report) = reinit_with_state(format!("# State\n{relay}{owed}").as_bytes());
+    assert!(!report.failed(), "{}", report.render());
+    if state_path(&dir).exists() {
+        let ses = session(&dir);
+        assert!(
+            ses["merge_hold"].as_str().is_none_or(str::is_empty),
+            "{ses}"
+        );
+        assert!(ses["hold"].as_str().is_none_or(str::is_empty), "{ses}");
+    }
 }

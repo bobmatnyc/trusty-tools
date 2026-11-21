@@ -713,6 +713,7 @@ def mutating_frame(op, lease, rid="r"):
         "page_press": {**base, "ref": None, "key": "Enter", "modifiers": ["Shift"]},
         "page_select": {**base, "ref": "1.0", "value": "x"},
         "page_drag": {**base, "ref": "1.0", "target": "1.1"},
+        "page_evaluate": {**base, "expression": "1 + 1"},
         "page_navigate": {**base, "url": ORIGIN},
         "page_upload": {**base, "ref": "1.0", "files": [FILE]},
         "page_back": base,
@@ -838,6 +839,7 @@ def test_history_ops_refuse_outside_the_grant_and_send_nothing(short, clock, op)
         "page_back",
         "page_reload",
         "page_drag",
+        "page_evaluate",
     ],
 )
 def test_worker_outcome_unknown_is_journaled_and_a_retry_sends_nothing(
@@ -1084,5 +1086,101 @@ def test_dialog_policy_is_forwarded_and_the_dialog_relayed(short, clock):
         typed = {"op": "page_type", "lease": lease, "ref": "1.0", "text": "x"}
         refused = await call({**typed, "request_id": "f", "dialog": "accept"})
         assert refused == {"ok": False, "error": "InvalidRequest"}
+
+    run(short, body)
+
+
+def styles_frame(lease, **fields):
+    frame = {"op": "page_styles", "lease": lease, "properties": ["background-color"]}
+    return {**frame, "selector": "body", **fields}
+
+
+def test_page_styles_relays_computed_values_for_a_ref_or_a_selector(short, clock):
+    # #11373: a read in the lease's document; nothing is journaled.
+    async def body(rig):
+        ack, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        assert await call(styles_frame(lease)) == {
+            "ok": True,
+            "tab": 7,
+            "document": "d7-1",
+            "styles": {"background-color": "rgb(1, 2, 3)"},
+        }
+        by_ref = styles_frame(lease, selector=None, ref="1.0", properties=["color", "--x"])
+        assert (await call(by_ref))["styles"] == {"color": "rgb(1, 2, 3)", "--x": "rgb(1, 2, 3)"}
+        sent = rig.a.sent("page_styles")
+        assert [(f["ref"], f["selector"], f["document"]) for f in sent] == [
+            (None, "body", "d7-1"),
+            ("1.0", None, "d7-1"),
+        ]
+        assert not rig.broker.grants[ack["grant"]].sessions[0].journal
+        rig.a.refuse["page_styles"] = {"error": "NoMatch", "tab": 7}
+        assert await call(styles_frame(lease)) == {"ok": False, "error": "NoMatch", "tab": 7}
+        assert len(rig.broker.claims) == 1  # NoMatch keeps the lease
+        rig.a.refuse["page_styles"] = {"document": "d7-1", "styles": {"color": "red"}}
+        assert (await call(styles_frame(lease)))["error"] == "BrowserRefused"
+
+    run(short, body)
+
+
+def test_page_styles_refuses_bad_frames_and_sends_nothing(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        bad = [
+            {"selector": None},
+            {"ref": "1.0"},
+            {"selector": ""},
+            {"selector": "x" * 1025},
+            {"selector": None, "ref": ""},
+            {"properties": []},
+            {"properties": "color"},
+            {"properties": ["color", "color"]},
+            {"properties": ["color;x"]},
+            {"properties": ["a" * 101]},
+            {"properties": [f"p{i}" for i in range(51)]},
+            {"extra": 1},
+        ]
+        for change in bad:
+            reply = await call(styles_frame(lease, **change))
+            assert reply == {"ok": False, "error": "InvalidRequest"}, change
+        assert rig.a.sent("page_styles") == []
+
+    run(short, body)
+
+
+def test_page_evaluate_refuses_bad_expressions_and_sends_nothing(short, clock):
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = mutating_frame("page_evaluate", lease)
+        for expression in ("", "x" * 8193, 5, None):
+            reply = await call({**frame, "expression": expression})
+            assert reply == {"ok": False, "error": "InvalidRequest"}, expression
+        assert rig.a.sent("page_evaluate") == []
+
+    run(short, body)
+
+
+def test_page_evaluate_relays_the_value_journals_and_audits(short, clock):
+    # #11373: every evaluate call writes an admitted line and a result line; the expression is not logged.
+    async def body(rig):
+        _, call = await session(rig)
+        lease = (await call({"op": "select", "tab": 7}))["lease"]
+        frame = mutating_frame("page_evaluate", lease, "e")
+        done = {"ok": True, "tab": 7, "document": "d7-1", "type": "number",
+                "value": "2", "exception": None, "truncated": False}  # fmt: skip
+        assert await call(frame) == done
+        assert await call(frame) == done  # the retry answers from the journal
+        sent = rig.a.sent("page_evaluate")
+        assert len(sent) == 1 and sent[0]["expression"] == "1 + 1"
+        assert sent[0]["document"] == "d7-1"
+        lines = [x for x in rig.audit() if x.get("op") == "page_evaluate"]
+        assert [x["outcome"] for x in lines] == ["admitted", "ok"] * 2  # the retry too
+        assert lines[1]["tab"] == 7
+        assert "1 + 1" not in (rig.state / "audit.jsonl").read_text()
+        rig.a.refuse["page_evaluate"] = {"document": "d7-1", "type": "number"}
+        bad = await call({**frame, "request_id": "f"})
+        assert bad == {"ok": False, "error": "BrowserRefused"}
 
     run(short, body)

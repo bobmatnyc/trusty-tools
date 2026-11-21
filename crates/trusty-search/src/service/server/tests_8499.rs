@@ -5,7 +5,7 @@
 //! tracked `.gitignore` and left the edit uncommitted. A repo sync that ran
 //! `git reset --hard` reverted it, the following `git clean -fd` deleted the
 //! colocated index directory, and a daemon with those files mmapped died with
-//! SIGBUS (duettoresearch/code-intelligence#5217).
+//! SIGBUS (acme/code-intelligence#5217).
 //! What: every test drives the real `create_index_report` and a real reindex
 //! against a committed temp git repo, with `TRUSTY_DATA_DIR` pinned to a
 //! private tempdir (`IsolatedDataDir`) and the root on the test allowlist.

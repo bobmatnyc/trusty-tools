@@ -1,0 +1,2 @@
+Fixed
+- The Architect dashboard's Secrets form no longer says "Not stored" when a save times out or gets no answer, as when a macOS Keychain access prompt blocks `tm secrets set` and the write lands after approval. On `keychain_access_prompt`, `backend_timeout`, a gateway time-out or no response it says the outcome is unknown and to verify with `tm secrets list`; a real refusal keeps "Not stored" ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).

@@ -33,6 +33,7 @@ pub(crate) mod banner;
 pub(crate) mod commit_trailers;
 pub(crate) mod compress;
 // #10973: `tm compress -- <cmd>`, the run mode an isolation worktree accepts.
+pub(crate) mod compress_chain;
 pub(crate) mod compress_run;
 pub(crate) mod daemon;
 // #9034: three-state daemon pid identity, read from argv.
@@ -149,6 +150,8 @@ pub(crate) mod hook_bash_decision;
 // #10973: the per-tool-result compression-opportunity observer.
 pub(crate) mod hook_observer;
 pub(crate) mod hook_payload;
+pub(crate) mod il_auto_apply; // See G0b IL auto-apply
+pub(crate) mod il_auto_apply_ilio; // See G0b IL auto-apply
 // #8433 P0 (D09): SessionStart delivery and the hook-side taint re-apply.
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
@@ -157,6 +160,7 @@ pub(crate) mod hook_rewrite;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
 // #10973: chained commands judged per segment.
+pub(crate) mod hook_chain_shape;
 pub(crate) mod hook_rewrite_chain;
 // #10973: the compression rewrite an isolation worktree's classifier accepts.
 pub(crate) mod hook_rewrite_isolated;
@@ -164,6 +168,8 @@ pub(crate) mod hook_rewrite_isolated;
 pub(crate) mod hook_stdin;
 pub(crate) mod hooks;
 pub(crate) mod install;
+// See G0b auto-setup: install and register the browser and computer MCP servers.
+pub(crate) mod auto_setup;
 // #4605: the unmanaged-bundled-skill reporter and `--reconcile-skills` path,
 // split out of `install` for the 500-SLOC production cap.
 pub(crate) mod install_skills;
@@ -338,6 +344,8 @@ pub(crate) mod repair;
 // #7569: `tm repair savings-ledger` — quarantine the ledger rows #7514 let
 // unit tests append to the operator's own savings ledger.
 pub(crate) mod repair_savings_ledger;
+// #11033: `tm savings status`.
+pub(crate) mod savings_status;
 // #5007: `tm repair session-store` — back up and truncate a corrupt
 // `sessions.json` so a wedged store no longer needs a human editing JSON.
 pub(crate) mod repair_session_store;

@@ -99,6 +99,7 @@ an empty variable counts as unset.
 | `tailnet_url` | `""` or an `http://` / `https://` origin | `""`: the dashboard footer links localhost only | `DASHBOARD_TAILNET_URL` |
 | `projects_root` | string, a directory | `""`: `~/trusty-mpm-projects` | `ARCHITECT_PROJECTS_ROOT` |
 | `claude_config_dir` | string, a directory | `""`: `~/.trusty-tools/trusty-mpm/claude-config` | `CLAUDE_CONFIG_DIR` |
+| `poll_interval_s` | integer, at least 1 | `60`: seconds between poll cycles; `fleet-poll.py` and `tm architect poll` both read it, and `--interval N` overrides it for one run | none |
 | `repos` | `{name: {slug, gh_config_dir, checkout}}`, `slug` required | `{}` | none |
 | `caps` | `{name: number}`; `builder_slots` an integer of 1 or more, `load_factor` above 0 | `{}`: each script's own constant | `LOAD_FACTOR` sets `caps.load_factor` |
 
@@ -323,7 +324,8 @@ the PM profile, return to step 5.
 
 The poller runs in tmux session `<ARCHITECT_SESSION>-poll`. With a custom
 name, run `ARCHITECT_SESSION=<name> "$dir/scripts/start-fleet-poll.sh"`.
-The script is idempotent. Pass `--interval N` to change the cycle length.
+The script is idempotent. The cycle length is `poll_interval_s` in
+`local/architect.json` (default 60 s); `--interval N` overrides it for one run.
 
 ### 9. Verify after launch
 

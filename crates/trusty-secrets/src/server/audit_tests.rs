@@ -819,8 +819,8 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
         assert!(response.result.is_none(), "{response:?}");
         let error = response.error.as_ref().expect("an error reply");
         let data = error.data.as_ref().expect("error data");
-        assert_eq!(data["kind"], json!("backend_timeout"), "{error:?}");
-        assert_eq!(error.code, ErrorKind::BackendTimeout.code());
+        assert_eq!(data["kind"], json!("keychain_access_prompt"), "{error:?}");
+        assert_eq!(error.code, ErrorKind::KeychainAccessPrompt.code());
         assert!(!wire(response).contains(FAKE_VALUE), "{error:?}");
         assert!(
             error.message.contains("pkill -x trusty-secrets"),
@@ -851,7 +851,7 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
 
     let waits: Vec<BackendWait> = records(&fx)
         .into_iter()
-        .filter(|r| r.reason.as_ref().map(AuditReason::as_str) == Some("backend_timeout"))
+        .filter(|r| r.reason.as_ref().map(AuditReason::as_str) == Some("keychain_access_prompt"))
         .map(|r| r.backend_wait.expect("a timeout row records its wait"))
         .collect();
     assert_eq!(waits.len(), 2, "{waits:?}");
@@ -901,4 +901,65 @@ fn timeout_reply_text_names_wait_or_refusal_and_the_recovery() {
         bare.message,
         format!("{}: {}", method::SET, ErrorKind::BackendTimeout.text())
     );
+}
+
+/// Why: #11429 — a `set` blocked on a Keychain access prompt came back as a
+/// generic `backend_timeout`, and a client that gave up first reported "Not
+/// stored" although the write could still land once the prompt was approved.
+/// What: behind the real [`TimeLimited`] wrapper, a `set` that hangs on the
+/// Keychain answers the distinct kind `keychain_access_prompt` (code -32089)
+/// within its limit, says the outcome is unknown and points at
+/// `tm secrets list`, never claims the value was not stored, and carries no
+/// value. A time-out of a non-Keychain backend stays `backend_timeout`.
+/// Test: itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keychain_prompt_timeout_on_set_answers_its_own_kind_with_outcome_unknown() {
+    use crate::store::time_limit::TimeLimited;
+    let fx = fixture();
+    let (hung, release) = HungValues::new();
+    let limited: Arc<dyn SecretBackend> = Arc::new(TimeLimited::new(
+        Arc::clone(&hung) as Arc<dyn SecretBackend>,
+        HUNG_LIMIT,
+    ));
+    let base = fx.backends();
+    let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
+        "keychain" => Ok(Arc::clone(&limited)),
+        _ => base(id),
+    });
+    let server = fx.start_with(factory).await;
+    let params = json!({"project": fx.project(), "vault": "trusty/acme/web",
+        "key": "PROMPT_KEY", "value": FAKE_VALUE});
+    let started = std::time::Instant::now();
+    let reply = call(&fx.settings.socket, method::SET, params).await;
+    let took = started.elapsed();
+    drop(release);
+
+    assert!(reply.result.is_none(), "{reply:?}");
+    let error = reply.error.as_ref().expect("an error reply");
+    let data = error.data.as_ref().expect("error data");
+    assert_eq!(data["kind"], json!("keychain_access_prompt"), "{error:?}");
+    assert_eq!(error.code, -32089, "{error:?}");
+    assert!(error.message.contains("outcome unknown"), "{error:?}");
+    assert!(error.message.contains("tm secrets list"), "{error:?}");
+    assert!(
+        !error.message.to_lowercase().contains("not stored"),
+        "{error:?}"
+    );
+    assert!(!wire(&reply).contains(FAKE_VALUE), "{error:?}");
+    assert!(took < HUNG_LIMIT * 10, "the reply waited {took:?}");
+    server.stop().await;
+
+    // The error arm: only a Keychain time-out is a prompt.
+    let timeout = |backend: &str| crate::api::SecretsError::Timeout {
+        backend: backend.to_owned(),
+        operation: "set",
+        vault: "v".to_owned(),
+        key: "k".to_owned(),
+        waited: Duration::from_secs(1),
+    };
+    assert_eq!(
+        ErrorKind::from(timeout("keychain")).as_str(),
+        "keychain_access_prompt"
+    );
+    assert_eq!(ErrorKind::from(timeout("file")).as_str(), "backend_timeout");
 }

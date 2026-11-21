@@ -167,14 +167,15 @@ pub(crate) fn decide(
     };
     match classification {
         Classification::Unrelated => Verdict::Allow,
+        // #11521: the text names the main-thread rule, never a launch record.
         Classification::Family(family) => deny(
             "egress-family",
             format!(
                 "tm hook --egress-guard denies `{tool_name}`: it is a {family} tool, and a \
-                 subagent may not use an outbound message channel directly (#8454). A PM's or \
-                 the Architect's main session may use the family's read and list tools \
-                 (#11273); a send or write needs the Architect's tm launch record (#10447), \
-                 bar a PM's send to the owner's Slack DM (#11194). The claude.ai connectors \
+                 subagent may not use an outbound message channel directly (#8454). A \
+                 tm-launched PM's or Architect's main session may read, send and write \
+                 (#11521); a PM's subagent may read Gmail and Google Workspace (GP-043). \
+                 The claude.ai connectors \
                  are not this deny's subject (#10735), and a Slack read the host config \
                  grants this project is allowed (#10387). Ask the operator instead."
             ),
@@ -418,7 +419,12 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
         if let Some(allowed) = slack_read {
             eprintln!("{}", allowed.audit_line());
         }
-        return None;
+        // #7684: with `[pm_guard] enabled = false` this always-installed hook
+        // carries the project rules onto an `Agent`/`Task` dispatch.
+        return crate::commands::pm_guard_accounts::egress_rules_carrier(
+            read.as_ref().ok(),
+            || MpmConfig::load_default().pm_guard.enabled,
+        );
     };
     // An unreadable payload names nothing: audit it with every field empty.
     let null = serde_json::Value::Null;
@@ -438,7 +444,9 @@ async fn guard_once(url: &str) -> Option<serde_json::Value> {
 /// What: [`guard_once`] under [`deny_on_panic`]. A deny is printed as the one
 /// stdout object and the process exits 0 at once, so a stdin that never
 /// closed cannot hold the runtime's shutdown past Claude Code's hook timeout.
-/// An allow returns `Ok(())` with nothing printed. `url` is the daemon the
+/// An allow returns `Ok(())` with nothing printed, except the #7684 rules
+/// carrier: with `[pm_guard] enabled = false`, an `Agent`/`Task` dispatch
+/// prints one `updatedInput` object carrying the project rules. `url` is the daemon the
 /// taint arm asks for its policy verdict (#8454 VC) and the audit POST goes to.
 /// Test: `tests/tm_hook_egress_guard_8454.rs`.
 pub(crate) async fn egress_guard(url: &str) -> anyhow::Result<()> {

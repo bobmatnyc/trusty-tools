@@ -271,7 +271,7 @@ fn agent_bash_payload(cwd: &Path, agent: &str, command: &str) -> Value {
     payload
 }
 
-/// 2026-09-25 report (duettoresearch/cto-reports): a read-only `local-ops`
+/// 2026-09-25 report (acme-labs/cto-reports): a read-only `local-ops`
 /// dispatch — process and service checks, no compiler — was refused by the
 /// builder cap at a measured load of 71.9. Admission now follows the build
 /// command, so the dispatch is admitted on the same loaded host.
@@ -312,7 +312,7 @@ fn a_rust_engineer_dispatch_never_consults_the_builder_cap() {
     );
 }
 
-/// 2026-09-24 trigger (mac-duetto): a light `typescript-engineer` dispatch was
+/// 2026-09-24 trigger (mac-acme): a light `typescript-engineer` dispatch was
 /// refused as "builder 2 of 1" on free memory 5059 MB. It is admitted now.
 #[test]
 fn a_light_typescript_engineer_dispatch_is_admitted_under_memory_pressure() {

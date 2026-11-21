@@ -199,8 +199,7 @@ fn clear_extends(mut cfg: AgentConfig) -> AgentConfig {
 /// `extends_tier_child_can_downgrade_l0_base_to_l1`,
 /// `extends_tier_omitted_everywhere_resolves_l1`,
 /// `extends_unions_the_subagent_whitelist`,
-/// `extends_child_provider_id_wins_and_omitted_inherits`,
-/// `bundled_cto_assistant_keeps_its_bedrock_pin_through_extends`.
+/// `extends_child_provider_id_wins_and_omitted_inherits`.
 pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
     // #3936: the base's own contribution to the `permissions.scopes`
     // accumulator, captured BEFORE `base` moves into `merged` below.

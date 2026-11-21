@@ -16,6 +16,7 @@ control-plane tools, desktop clients. Derive the live package count from
 - Crate purposes: [crate-map.md](docs/reference/crate-map.md). Replaced
   repos: [former-repos.md](docs/reference/former-repos.md).
 
+<!-- tm:agent-rules -->
 ## Build and Test Commands
 
 🔴 **Use exactly these commands, scoped to the crate you changed** — a bare
@@ -78,7 +79,10 @@ in the PR body.** Risk maps to rung (1–2 Low, 3–4 Normal, 5–6 High).
 
 🔴 **Scope down, never scope away** — never green a red gate by deleting,
 `#[ignore]`-ing, `cfg`-gating, `--exclude`-ing, or `--lib`-narrowing; a bare
-`cargo test --workspace` is a publish gate, not inner-loop proof.
+`cargo test --workspace` is a publish gate, not inner-loop proof. Only declared
+demo/POC work may defer tests, as `#[ignore = "intent(demo): …"]` intentions
+that never cover production code or replace a failing test:
+[test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
 
 🔴 **Markdown under `crates/*/src/assets/**` is rung 3, not rung 1.** It is
 `include_str!`-embedded into the binary and asserted on by bundle tests, so a
@@ -92,6 +96,7 @@ Per-rung commands, CI gates, baseline-red triage:
 [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md),
 [ci-gates.md](docs/reference/ci-gates.md).
 
+<!-- /tm:agent-rules -->
 ## Key Conventions
 
 🔴 **Search before filing.** `tm-ticketing` owns the disposition on a hit
@@ -120,6 +125,7 @@ one comment on the PR or existing issue, dropped, or logged in the rollup
 fix round of its own. HIGH+ or independently schedulable work may still be
 filed (search first).
 
+<!-- tm:agent-rules -->
 🔴 **Why/What/Test doc pattern, proportional depth:** `/// Why: <motivation>`,
 `/// What: <mechanics>`, `/// Test: <where coverage lives>`. Full pattern for
 entry points and design-heavy/cross-crate code; one line for trivial items.
@@ -149,6 +155,7 @@ category per fragment — the first line IS the category. Validate before
 committing: `bash scripts/check_changelog_fragment.sh --staged`. Format and
 category list: [changelog-fragments.md](docs/reference/changelog-fragments.md).
 
+<!-- /tm:agent-rules -->
 ## Git Tag / Release
 
 🔴 **Version bumps, tags, and `cargo publish` are delegated to `local-ops`** —
@@ -173,8 +180,10 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
   never `--path` from a worktree, which loses provenance once that worktree
   is reclaimed ([ADR-0043](docs/adr/0043-cargo-bin-policy.md)); run from
   outside the workspace directory so no local `[patch]` resolution applies.
+<!-- tm:agent-rules -->
 - **Stage by name, never `-A`:** `git add <file>` or `git add -p` — `-A`
   stages untracked build directories like `target-worktree/`.
+<!-- /tm:agent-rules -->
 - Docs/config stay writable in the main checkout; commits never land on
   local `main` — docs/session notes reach origin only via the fast-path PR
   ([ADR-0061](docs/adr/0061-commits-never-land-on-local-main.md)).
@@ -190,6 +199,7 @@ Dispatch mechanics: `Skill(skill="tm-workflow")`.
   a worktree — bare `git diff`, `bash scripts/…`, a heredoc. Substitute for
   every shape: [worktree-discipline.md](docs/reference/worktree-discipline.md).
 
+<!-- tm:agent-rules -->
 ## Abbreviations & Aliases
 
 🔴 **Resolve any crate abbreviation before acting on it** — tickets, build
@@ -210,6 +220,7 @@ commands, conversation. Directory is always `crates/<crate>/`.
 | `taudit` | trusty-audit — moved to bobmatnyc/trusty-git-analytics |
 
 What each crate is for: [crate-map.md](docs/reference/crate-map.md).
+<!-- /tm:agent-rules -->
 
 ## Other Pointers
 

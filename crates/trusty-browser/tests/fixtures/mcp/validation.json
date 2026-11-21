@@ -1,0 +1,1351 @@
+[
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 3
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3"
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": " 3 "
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3.0"
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3.00"
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "+3"
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "-3"
+  },
+  "ok": {
+   "tab": -3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "-0"
+  },
+  "ok": {
+   "tab": 0
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "1_000"
+  },
+  "ok": {
+   "tab": 1000
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "  -3_0 "
+  },
+  "ok": {
+   "tab": -30
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "\t5\n"
+  },
+  "ok": {
+   "tab": 5
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "00012"
+  },
+  "ok": {
+   "tab": 12
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3.5"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3.5', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3."
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3.', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "+-3"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='+-3', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "_3"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='_3', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3__0"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3__0', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3_"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3_', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": " "
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value=' ', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": ""
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "x"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='x', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "0x10"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='0x10', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "3e2"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='3e2', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "٣"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='٣', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 3.0
+  },
+  "ok": {
+   "tab": 3
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 3.5
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=3.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_from_float"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 1e+18
+  },
+  "ok": {
+   "tab": 1000000000000000000
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": -1e+18
+  },
+  "ok": {
+   "tab": -1000000000000000000
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 9.3e+18
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Unable to parse input string as an integer, exceeded maximum size [type=int_parsing_size, input_value=9.3e+18, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing_size"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 1e+20
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Unable to parse input string as an integer, exceeded maximum size [type=int_parsing_size, input_value=1e+20, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing_size"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": true
+  },
+  "ok": {
+   "tab": 1
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": false
+  },
+  "ok": {
+   "tab": 0
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": null
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": [
+    1
+   ]
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value=[1], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": {
+    "a": 1
+   }
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "[1]"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value=[1], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "{\"a\":1}"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "null"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "true"
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='true', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 9223372036854775807
+  },
+  "ok": {
+   "tab": 9223372036854775807
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": 9999999999999999999
+  },
+  "ok": {
+   "tab": 9999999999999999999
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": true
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": false
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 1
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 0
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 2
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": -1
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=-1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 1.0
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 0.0
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": -0.0
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 2.0
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=2.0, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": 0.5
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value=0.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "yes"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "YES"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "On"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "off"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "f"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "T"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "n"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "No"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "1"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": true,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "0"
+  },
+  "ok": {
+   "lease": "l",
+   "scope_ref": null,
+   "max_chars": 50000,
+   "viewport_only": false,
+   "include_text": false
+  }
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "2"
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='2', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": ""
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": " true"
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=' true', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": null
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": []
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": {}
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "null"
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "viewport_only": "[]"
+  },
+  "error": "1 validation error for page_readArguments\nviewport_only\n  Input should be a valid boolean [type=bool_type, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": null
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": null
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "null"
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": null
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "5"
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "5"
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": 5
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": 5.5
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=5.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": true
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "[\"a\"]"
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=['a'], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "{\"a\":1}"
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "true"
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "true"
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "NaN"
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": "NaN"
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": ""
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": ""
+  }
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": []
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_hover",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "request_id": {}
+  },
+  "error": "1 validation error for page_hoverArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": null
+  },
+  "ok": {
+   "lease": "l",
+   "key": "k",
+   "request_id": null,
+   "ref": null,
+   "modifiers": null
+  }
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": []
+  },
+  "ok": {
+   "lease": "l",
+   "key": "k",
+   "request_id": null,
+   "ref": null,
+   "modifiers": []
+  }
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": [
+    "a"
+   ]
+  },
+  "ok": {
+   "lease": "l",
+   "key": "k",
+   "request_id": null,
+   "ref": null,
+   "modifiers": [
+    "a"
+   ]
+  }
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": "a"
+  },
+  "error": "1 validation error for page_pressArguments\nmodifiers\n  Input should be a valid list [type=list_type, input_value='a', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/list_type"
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": "[\"a\"]"
+  },
+  "ok": {
+   "lease": "l",
+   "key": "k",
+   "request_id": null,
+   "ref": null,
+   "modifiers": [
+    "a"
+   ]
+  }
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": [
+    "a",
+    1
+   ]
+  },
+  "error": "1 validation error for page_pressArguments\nmodifiers.1\n  Input should be a valid string [type=string_type, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": [
+    null,
+    "b",
+    2
+   ]
+  },
+  "error": "2 validation errors for page_pressArguments\nmodifiers.0\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\nmodifiers.2\n  Input should be a valid string [type=string_type, input_value=2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": {
+    "a": 1
+   }
+  },
+  "error": "1 validation error for page_pressArguments\nmodifiers\n  Input should be a valid list [type=list_type, input_value={'a': 1}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/list_type"
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": "null"
+  },
+  "ok": {
+   "lease": "l",
+   "key": "k",
+   "request_id": null,
+   "ref": null,
+   "modifiers": null
+  }
+ },
+ {
+  "tool": "page_press",
+  "arguments": {
+   "lease": "l",
+   "key": "k",
+   "modifiers": 5
+  },
+  "error": "1 validation error for page_pressArguments\nmodifiers\n  Input should be a valid list [type=list_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/list_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": null
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": 5
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": true
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": 1.5
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value=1.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": []
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value=[], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": {}
+  },
+  "error": "1 validation error for browser_switchArguments\nlease\n  Input should be a valid string [type=string_type, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": ""
+  },
+  "ok": {
+   "lease": ""
+  }
+ },
+ {
+  "tool": "browser_switch",
+  "arguments": {
+   "lease": "é\n\t\u0000 ​😀 '\"\\"
+  },
+  "ok": {
+   "lease": "é\n\t\u0000 ​😀 '\"\\"
+  }
+ },
+ {
+  "tool": "page_click",
+  "arguments": {},
+  "error": "2 validation errors for page_clickArguments\nlease\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\nref\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_click",
+  "arguments": {
+   "lease": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "q": [
+    1,
+    2.5,
+    null,
+    true,
+    "it's",
+    "a\"b",
+    "é",
+    {
+     "k": "v"
+    }
+   ]
+  },
+  "error": "1 validation error for page_clickArguments\nref\n  Field required [type=missing, input_value={'lease': 'xxxxxxxxxxxxxx...a\"b', 'é', {'k': 'v'}]}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_click",
+  "arguments": {
+   "x": "a'b\"c",
+   "lease": "q"
+  },
+  "error": "1 validation error for page_clickArguments\nref\n  Field required [type=missing, input_value={'x': 'a\\'b\"c', 'lease': 'q'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_click",
+  "arguments": {
+   "x": "a'b",
+   "lease": "q",
+   "y": 1.5e-07,
+   "z": -0.0,
+   "w": 1e+16
+  },
+  "error": "1 validation error for page_clickArguments\nref\n  Field required [type=missing, input_value={'x': \"a'b\", 'lease': 'q'..., 'z': -0.0, 'w': 1e+16}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_click",
+  "arguments": {
+   "lease": "q",
+   "ref": "r",
+   "dialog": null
+  },
+  "error": "1 validation error for page_clickArguments\ndialog\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_click",
+  "arguments": {
+   "lease": "q",
+   "ref": "r",
+   "extra": 1
+  },
+  "ok": {
+   "lease": "q",
+   "ref": "r",
+   "request_id": null,
+   "dialog": "dismiss"
+  }
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": [
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a",
+    "a"
+   ]
+  },
+  "error": "1 validation error for browser_selectArguments\ntab\n  Input should be a valid integer [type=int_type, input_value=['a', 'a', 'a', 'a', 'a',...'a', 'a', 'a', 'a', 'a'], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_type"
+ },
+ {
+  "tool": "browser_select",
+  "arguments": {
+   "tab": "111111111111111111111111111111"
+  },
+  "ok": {
+   "tab": 111111111111111111111111111111
+  }
+ },
+ {
+  "tool": "page_upload",
+  "arguments": {
+   "lease": "l",
+   "ref": "r"
+  },
+  "error": "1 validation error for page_uploadArguments\npaths\n  Field required [type=missing, input_value={'lease': 'l', 'ref': 'r'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_upload",
+  "arguments": {
+   "lease": 1,
+   "ref": 2,
+   "paths": 3
+  },
+  "error": "3 validation errors for page_uploadArguments\nlease\n  Input should be a valid string [type=string_type, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\nref\n  Input should be a valid string [type=string_type, input_value=2, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\npaths\n  Input should be a valid list [type=list_type, input_value=3, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/list_type"
+ },
+ {
+  "tool": "page_upload",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "paths": "[\"a\", \"b\"]"
+  },
+  "ok": {
+   "lease": "l",
+   "ref": "r",
+   "paths": [
+    "a",
+    "b"
+   ],
+   "request_id": null
+  }
+ },
+ {
+  "tool": "page_upload",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "paths": [
+    "a",
+    3
+   ]
+  },
+  "error": "1 validation error for page_uploadArguments\npaths.1\n  Input should be a valid string [type=string_type, input_value=3, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_read",
+  "arguments": {
+   "lease": "l",
+   "scope_ref": 5,
+   "max_chars": "x",
+   "viewport_only": 3,
+   "include_text": null
+  },
+  "error": "4 validation errors for page_readArguments\nscope_ref\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\nmax_chars\n  Input should be a valid integer, unable to parse string as an integer [type=int_parsing, input_value='x', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_parsing\nviewport_only\n  Input should be a valid boolean, unable to interpret input [type=bool_parsing, input_value=3, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_parsing\ninclude_text\n  Input should be a valid boolean [type=bool_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/bool_type"
+ },
+ {
+  "tool": "page_find",
+  "arguments": {
+   "lease": "l",
+   "role": "button",
+   "limit": "7"
+  },
+  "ok": {
+   "lease": "l",
+   "role": "button",
+   "name": null,
+   "text": null,
+   "within_ref": null,
+   "limit": 7
+  }
+ },
+ {
+  "tool": "page_scroll",
+  "arguments": {
+   "lease": "l",
+   "to": 5,
+   "wait_ms": 1.5
+  },
+  "error": "2 validation errors for page_scrollArguments\nto\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\nwait_ms\n  Input should be a valid integer, got a number with a fractional part [type=int_from_float, input_value=1.5, input_type=float]\n    For further information visit https://errors.pydantic.dev/2.14/v/int_from_float"
+ },
+ {
+  "tool": "page_navigate",
+  "arguments": {
+   "lease": "l"
+  },
+  "error": "1 validation error for page_navigateArguments\nurl\n  Field required [type=missing, input_value={'lease': 'l'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_type",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "text": 5
+  },
+  "error": "1 validation error for page_typeArguments\ntext\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_drag",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "target": null
+  },
+  "error": "1 validation error for page_dragArguments\ntarget\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_select",
+  "arguments": {
+   "lease": "l",
+   "ref": "r",
+   "value": [
+    "v"
+   ]
+  },
+  "error": "1 validation error for page_selectArguments\nvalue\n  Input should be a valid string [type=string_type, input_value=['v'], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_back",
+  "arguments": {
+   "lease": "l",
+   "request_id": 1
+  },
+  "error": "1 validation error for page_backArguments\nrequest_id\n  Input should be a valid string [type=string_type, input_value=1, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "page_forward",
+  "arguments": {
+   "lease": "l"
+  },
+  "ok": {
+   "lease": "l",
+   "request_id": null
+  }
+ },
+ {
+  "tool": "page_reload",
+  "arguments": {},
+  "error": "1 validation error for page_reloadArguments\nlease\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "page_downloads",
+  "arguments": {
+   "lease": null
+  },
+  "error": "1 validation error for page_downloadsArguments\nlease\n  Input should be a valid string [type=string_type, input_value=None, input_type=NoneType]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_release",
+  "arguments": {},
+  "error": "1 validation error for browser_releaseArguments\nlease\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "browser_tabs",
+  "arguments": {
+   "x": 1
+  },
+  "ok": {}
+ },
+ {
+  "tool": "browser_connect",
+  "arguments": {
+   "profile": 5
+  },
+  "error": "1 validation error for browser_connectArguments\nprofile\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ },
+ {
+  "tool": "browser_connect",
+  "arguments": {
+   "profile": "null"
+  },
+  "ok": {
+   "profile": null
+  }
+ },
+ {
+  "tool": "browser_profiles",
+  "arguments": {},
+  "ok": {}
+ },
+ {
+  "tool": "browser_disconnect",
+  "arguments": {},
+  "ok": {}
+ },
+ {
+  "tool": "browser_claim",
+  "arguments": {},
+  "ok": {}
+ },
+ {
+  "tool": "browser_snapshot",
+  "arguments": {
+   "lease": "w"
+  },
+  "ok": {
+   "lease": "w",
+   "request_id": null
+  }
+ },
+ {
+  "tool": "browser_snapshot",
+  "arguments": {},
+  "error": "1 validation error for browser_snapshotArguments\nlease\n  Field required [type=missing, input_value={}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.14/v/missing"
+ },
+ {
+  "tool": "browser_click",
+  "arguments": {
+   "lease": "w",
+   "marker": 5,
+   "request_id": [
+    1
+   ]
+  },
+  "error": "2 validation errors for browser_clickArguments\nmarker\n  Input should be a valid string [type=string_type, input_value=5, input_type=int]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type\nrequest_id\n  Input should be a valid string [type=string_type, input_value=[1], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.14/v/string_type"
+ }
+]

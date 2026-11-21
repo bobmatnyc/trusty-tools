@@ -1,0 +1,11 @@
+{"case": "fires_once_then_holds", "step": 0, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-x", "pane": "%1", "kind": "ctx", "fingerprint": "complete", "detail": "task complete (IL clean, prompt empty, no agents), ctx 20%: refresh from checkpoint", "display": "[tm-x]: ctx: task complete (IL clean, prompt empty, no agents), ctx 20%: refresh from checkpoint"}], "state": {"complete": {"tm-x": true}}}
+{"case": "fires_once_then_holds", "step": 1, "alerts": [], "state": {"complete": {"tm-x": true}}}
+{"case": "fires_once_then_holds", "step": 2, "alerts": [], "state": {"complete": {}}}
+{"case": "fires_once_then_holds", "step": 3, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-x", "pane": "%1", "kind": "ctx", "fingerprint": "complete", "detail": "task complete (IL clean, prompt empty, no agents), ctx 20%: refresh from checkpoint", "display": "[tm-x]: ctx: task complete (IL clean, prompt empty, no agents), ctx 20%: refresh from checkpoint"}], "state": {"complete": {"tm-x": true}}}
+{"case": "below_floor_then_over", "step": 0, "alerts": [], "state": {"complete": {}}}
+{"case": "below_floor_then_over", "step": 1, "alerts": [{"ts": "2025-10-09T08:53:20Z", "session": "tm-x", "pane": "%1", "kind": "ctx", "fingerprint": "complete", "detail": "task complete (IL clean, prompt empty, no agents), ctx 15%: refresh from checkpoint", "display": "[tm-x]: ctx: task complete (IL clean, prompt empty, no agents), ctx 15%: refresh from checkpoint"}], "state": {"complete": {"tm-x": true}}}
+{"case": "il_open", "step": 0, "alerts": [], "state": {"complete": {}}}
+{"case": "busy_and_dialog", "step": 0, "alerts": [], "state": {"complete": {}}}
+{"case": "busy_and_dialog", "step": 1, "alerts": [], "state": {"complete": {}}}
+{"case": "limit_notice", "step": 0, "alerts": [], "state": {"complete": {}}}
+{"case": "no_ctx", "step": 0, "alerts": [], "state": {"complete": {}}}

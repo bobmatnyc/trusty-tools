@@ -1,12 +1,16 @@
-{"calls": [[3, null]], "case": "skip_then_send_carries_total", "result": "skipped: no input box found", "state": {"wake_pending": 3}, "step": 0}
-{"calls": [[5, null]], "case": "skip_then_send_carries_total", "result": "sent to %1", "state": {"wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 1}
-{"calls": [[4, null]], "case": "failed_confirm_keeps_pending", "result": "failed: text not confirmed in the input box; box changed, nothing erased", "state": {"wake_pending": 4}, "step": 0}
-{"calls": [[4, null]], "case": "failed_confirm_keeps_pending", "result": "failed: text not confirmed in the input box; box changed, nothing erased", "state": {"wake_pending": 4}, "step": 1}
+{"calls": [[3, null, ""]], "case": "skip_then_send_carries_total", "result": "skipped: no input box found", "state": {"wake_alerts": [], "wake_pending": 3}, "step": 0}
+{"calls": [[5, null, ""]], "case": "skip_then_send_carries_total", "result": "sent to %1", "state": {"digest_cursor": 1760000000.5, "wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 1}
+{"calls": [[4, null, ""]], "case": "failed_confirm_keeps_pending", "result": "failed: text not confirmed in the input box; box changed, nothing erased", "state": {"wake_alerts": [], "wake_pending": 4}, "step": 0}
+{"calls": [[4, null, ""]], "case": "failed_confirm_keeps_pending", "result": "failed: text not confirmed in the input box; box changed, nothing erased", "state": {"wake_alerts": [], "wake_pending": 4}, "step": 1}
 {"calls": [], "case": "nothing_pending", "result": "none", "state": {"wake_pending": 0}, "step": 0}
 {"calls": [], "case": "nothing_pending", "result": "none", "state": {"wake_pending": 0}, "step": 1}
-{"calls": [[2, 3]], "case": "logged_carried_then_cleared", "result": "skipped: input typed", "state": {"wake_logged": 3, "wake_pending": 2}, "step": 0}
-{"calls": [[2, 4]], "case": "logged_carried_then_cleared", "result": "sent to %1 (still in box after Enter)", "state": {"wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 1}
-{"calls": [], "case": "logged_carried_then_cleared", "result": "none", "state": {"wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 2}
-{"calls": [[5, null]], "case": "dry_run_sets_no_sent_at", "result": "dry-run: would send to %1: x", "state": {"wake_pending": 5}, "step": 0}
-{"calls": [[5, null]], "case": "dry_run_sets_no_sent_at", "result": "sent to %1", "state": {"wake_pending": 0}, "step": 1}
-{"calls": [[1, null]], "case": "raise_is_failed", "result": "failed: refusing to send to %1 (session 'tm-api')", "state": {"wake_pending": 1}, "step": 0}
+{"calls": [[2, 3, ""]], "case": "logged_carried_then_cleared", "result": "skipped: input typed", "state": {"wake_alerts": [], "wake_logged": 3, "wake_pending": 2}, "step": 0}
+{"calls": [[2, 4, ""]], "case": "logged_carried_then_cleared", "result": "sent to %1 (still in box after Enter)", "state": {"digest_cursor": 1760000000.5, "wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 1}
+{"calls": [], "case": "logged_carried_then_cleared", "result": "none", "state": {"digest_cursor": 1760000000.5, "wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 2}
+{"calls": [[5, null, ""]], "case": "dry_run_sets_no_sent_at", "result": "dry-run: would send to %1: x", "state": {"wake_alerts": [], "wake_pending": 5}, "step": 0}
+{"calls": [[5, null, ""]], "case": "dry_run_sets_no_sent_at", "result": "sent to %1", "state": {"wake_pending": 0}, "step": 1}
+{"calls": [[1, null, ""]], "case": "raise_is_failed", "result": "failed: refusing to send to %1 (session 'tm-api')", "state": {"wake_alerts": [], "wake_pending": 1}, "step": 0}
+{"calls": [[2, null, "tm-a idle: idle 12 min, no agents running | owner load: load 30.0/31.0/31.0 (15m)"]], "case": "woken_alerts_ride_the_digest", "result": "skipped: input typed", "state": {"wake_alerts": [{"detail": "idle 12 min, no agents running", "kind": "idle", "session": "tm-a"}, {"detail": "load 30.0/31.0/31.0\n(15m)", "kind": "load", "session": ""}], "wake_pending": 2}, "step": 0}
+{"calls": [[3, null, "owner load: load 30.0/31.0/31.0 (15m) | tm-b ctx: ctx 36% | tm-a idle: idle 12 min, no agents running"]], "case": "woken_alerts_ride_the_digest", "result": "sent to %1", "state": {"digest_cursor": 1760000000.5, "wake_pending": 0, "wake_sent_at": 1760000000.5}, "step": 1}
+{"calls": [[1, null, "tm-c exited: gone"]], "case": "woken_alerts_ride_the_digest", "result": "skipped: input typed", "state": {"digest_cursor": 1760000000.5, "wake_alerts": [{"detail": "gone", "kind": "exited", "session": "tm-c"}], "wake_pending": 1, "wake_sent_at": 1760000000.5}, "step": 2}
+{"calls": [[1, null, "tm-a idle: idle | tm-a progress: halfway through the port | tm-b fyi: Task: ab-T12@1119 | pct: 5 merged | ? fyi: WHICHEVER works | tm-e ack: a | tm-e ack: b | tm-e ack: c | tm-e progress: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"]], "case": "held_pm_messages_join_the_digest", "result": "skipped: input typed", "state": {"wake_alerts": [{"detail": "idle", "kind": "idle", "session": "tm-a"}], "wake_pending": 1}, "step": 0}

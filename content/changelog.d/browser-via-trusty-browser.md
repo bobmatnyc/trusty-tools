@@ -1,0 +1,4 @@
+Changed
+
+- Browser work routes through the trusty-browser MCP tools (`browser_*`, `page_*` from `trusty-browser-mcp`), not the Claude in Chrome extension. The PM routing row, both `web-qa` agents and the delegation, tool-usage and circuit-breaker skills say so; `web-qa` drops `mcp__claude-in-chrome` from its tools and points at the trusty-browser README for registration (`tm mcp add trusty-browser ~/.cargo/bin/trusty-browser-mcp`) and the extension Connect grant. Ships in the first content release after merge, alongside trusty-browser 0.7.0.
+- Both `web-qa` agents state that trusty-browser 0.7.0 gives `page_read` state and visible text but no console, network or screenshot evidence: report that as a named gap, never "console clean", and use Playwright for that evidence only. The registration text notes that the shell expands `~` so the absolute path is written, and the `claude mcp add` fallback uses `-s user`.

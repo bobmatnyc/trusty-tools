@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::ancestry::{ProcessError, ProcessTable, StartTime};
+use crate::ancestry::{ProcComm, ProcessError, ProcessTable, StartTime};
 
 #[derive(Default)]
 struct ProcState {
@@ -30,6 +30,8 @@ struct ProcState {
     cwds: HashMap<u32, PathBuf>,
     // #10459 PR1: the argv per pid; a pid with none is unreadable.
     argvs: HashMap<u32, Vec<String>>,
+    // #11464: the short name and owner uid per pid; none is unreadable.
+    comms: HashMap<u32, ProcComm>,
     parent_delay: Option<Duration>,
 }
 
@@ -97,6 +99,15 @@ impl FakeProcs {
             s.unix_starts.insert(pid, secs);
             s.cwds.insert(pid, cwd.to_path_buf());
         });
+    }
+
+    /// Give `pid` the short name `name`, owned by `uid` (#11464).
+    pub(crate) fn set_comm(&self, pid: u32, name: &str, uid: u32) {
+        let comm = ProcComm {
+            name: name.to_owned(),
+            uid,
+        };
+        self.with(|s| s.comms.insert(pid, comm));
     }
 
     /// Give `pid` the argv `args` (#10459 PR1).
@@ -170,6 +181,17 @@ impl ProcessTable for FakeProcs {
                 .get(&pid)
                 .cloned()
                 .ok_or(ProcessError::Unreadable { pid })
+        })
+    }
+
+    fn comm(&self, pid: u32) -> Result<ProcComm, ProcessError> {
+        self.with(|s| match s.unreadable {
+            true => Err(ProcessError::Unreadable { pid }),
+            false => s
+                .comms
+                .get(&pid)
+                .cloned()
+                .ok_or(ProcessError::Unreadable { pid }),
         })
     }
 

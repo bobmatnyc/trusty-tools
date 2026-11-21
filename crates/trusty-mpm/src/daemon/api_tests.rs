@@ -1395,6 +1395,8 @@ async fn doctor_endpoint_returns_report() {
         "instruction_fold",
         // #7867: the `compress`/`divert` rows the 💸 segment folds.
         "tool_output_compression",
+        // #11033: compress rows per day.
+        "compress_rows_per_day",
         // #7617: whether the 💸 segment can render at all.
         "statusline",
         "agent_skills",

@@ -1570,9 +1570,14 @@ impl Drop for EnvGuard {
 async fn a_failed_start_is_reported_rather_than_swallowed() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket = tmp.path().join("nothing-here.sock");
-    // Port 1 is privileged and unbound: the child's trusty-search probe always
-    // refuses, so it exits before it binds.
-    let _search = EnvGuard::set("TRUSTY_SEARCH_URL", "http://127.0.0.1:1");
+    // #11559: #9214 retired `TRUSTY_SEARCH_URL`; the child reads
+    // `TRUSTY_SEARCH_SOCKET`. A path nothing serves makes its startup
+    // `search.health` probe fail, so it exits before it binds — without this a
+    // live trusty-search on the host answered and the gap read `NotIndexed`.
+    let _search = EnvGuard::set(
+        "TRUSTY_SEARCH_SOCKET",
+        &tmp.path().join("no-search.sock").to_string_lossy(),
+    );
     // Off the real data directory: a developer machine with a live analyze
     // server holds an exclusive redb lock on it, which would fail the child for
     // a reason that has nothing to do with the property under test.

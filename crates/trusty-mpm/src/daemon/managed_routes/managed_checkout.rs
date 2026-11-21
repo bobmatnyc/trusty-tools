@@ -1,4 +1,5 @@
-//! Which tree a directory launch runs in: the managed checkout, always.
+//! Which tree a directory launch runs in: the managed checkout, or a linked
+//! worktree of it (ADR-0037 amendment).
 //!
 //! Why: ADR-0037 decided that a PM session with no explicit worktree request
 //! runs on "the project's main checkout". That phrase names the MANAGED
@@ -47,7 +48,8 @@ pub(super) fn managed_checkout_for(gh: &GithubPath) -> PathBuf {
 /// any future caller from resolving the same phrase two different ways.
 ///
 /// What: compares `launch_dir` to the managed checkout built from `gh`. Equal —
-/// the launch is already managed, so it runs there unchanged. Not equal — the
+/// the launch is already managed, so it runs there unchanged. A live linked
+/// worktree of the managed checkout is managed too and runs in place. Else the
 /// session runs in the managed checkout instead, cloned first via
 /// `inproject::ensure_base_clone` when it does not yet exist. The comparison is
 /// a plain path equality because tm constructs the managed path itself from
@@ -59,7 +61,8 @@ pub(super) fn managed_checkout_for(gh: &GithubPath) -> PathBuf {
 /// control plane never established control over.
 /// Test: `managed_launch_dir_is_left_alone`,
 /// `unmanaged_launch_dir_redirects_to_managed`,
-/// `provisioning_failure_is_an_error_not_a_fallback`.
+/// `provisioning_failure_is_an_error_not_a_fallback`,
+/// `a_worktree_of_the_managed_checkout_composes_from_its_own_content`.
 pub(super) fn resolve_placement(
     launch_dir: &Path,
     gh: &GithubPath,
@@ -89,6 +92,10 @@ pub fn resolve_placement_at(
     if launch_dir == managed {
         return Ok(managed);
     }
+    // ADR-0037 amendment: a linked worktree of the managed checkout is managed.
+    if is_worktree_of(launch_dir, &managed) {
+        return Ok(launch_dir.to_path_buf());
+    }
 
     // ADR-0037: the launch directory is not the managed checkout, so it is not
     // where the session runs. The unmanaged tree is left exactly as it is.
@@ -115,6 +122,58 @@ pub fn resolve_placement_at(
     })?;
 
     Ok(managed)
+}
+
+/// Whether `launch_dir` is a live linked git worktree of `managed`.
+///
+/// Why: ADR-0037 (amended) counts a linked worktree of the managed checkout as
+/// managed, so the session runs, and composes its prompt, in that worktree.
+/// What: reads the `gitdir:` line of `<launch_dir>/.git` and the `commondir`
+/// of that admin directory, and compares the common dir to `<managed>/.git`.
+/// A `.git` directory (a plain checkout) or no `.git` is `false` silently. A
+/// `.git` file whose admin directory is gone (a removed or pruned worktree),
+/// or a missing `launch_dir`, is `false` with a warning, so the launch falls
+/// back to the managed checkout.
+/// Test: `a_worktree_of_the_managed_checkout_composes_from_its_own_content`,
+/// `a_pruned_worktree_falls_back_to_the_managed_checkout`,
+/// `a_removed_worktree_falls_back_to_the_managed_checkout`,
+/// `a_foreign_worktree_redirects_to_the_managed_checkout`.
+fn is_worktree_of(launch_dir: &Path, managed: &Path) -> bool {
+    let marker = launch_dir.join(".git");
+    if !launch_dir.exists() {
+        warn!(
+            launch_dir = %launch_dir.display(),
+            "spawn_managed: launch directory does not exist; using the managed checkout"
+        );
+        return false;
+    }
+    if !marker.is_file() {
+        return false;
+    }
+    let common = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|text| {
+            let gitdir = text
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("gitdir:"))?;
+            Some(launch_dir.join(gitdir.trim()))
+        })
+        .and_then(|admin| {
+            let rel = std::fs::read_to_string(admin.join("commondir")).ok()?;
+            admin.join(rel.trim()).canonicalize().ok()
+        });
+    let Some(common) = common else {
+        warn!(
+            launch_dir = %launch_dir.display(),
+            "spawn_managed: worktree's git admin directory is missing (detached or \
+             removed worktree); using the managed checkout"
+        );
+        return false;
+    };
+    managed
+        .join(".git")
+        .canonicalize()
+        .is_ok_and(|m| m == common)
 }
 
 /// Turn a failed in-project spawn into an error when a worktree was REQUESTED,

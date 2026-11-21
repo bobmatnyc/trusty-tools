@@ -15,7 +15,8 @@
 //! the sources of `ln`, `mv`, `cp -l`/`-s` and `install -l`
 //! ([`AnchorWrite::Source`]), each `sed -i` file operand, `install -d`
 //! directories, each `rm`/`rmdir`/`unlink` operand ([`AnchorWrite::Delete`],
-//! #8454), each `truncate` operand ([`AnchorWrite::File`], #8433), and a
+//! #8454), each `truncate` operand ([`AnchorWrite::File`], #8433), each
+//! `chmod`/`chown`/`chgrp` operand ([`AnchorWrite::Delete`], #11463), and a
 //! `cd`/`pushd`/`popd` ([`AnchorWrite::DirChange`]), after
 //! which the caller cannot place a relative path. A verb segment that will not
 //! tokenize, and a Q2 write run by `xargs` (which appends operands the guard
@@ -91,6 +92,8 @@ pub(super) enum Verb {
     Rm,
     /// #8433: `truncate` empties each operand in place.
     Truncate,
+    /// #11463: `chmod`/`chown`/`chgrp` change each operand's access.
+    Chmod,
 }
 
 /// Every write `command` makes that the trust-anchor rule judges.
@@ -125,6 +128,10 @@ fn segment_anchor_writes(segment: &str) -> Result<Vec<AnchorWrite>, UnplaceableW
         Verb::Rm => out.extend(delete_operands(&args).map(AnchorWrite::Delete)),
         // #8433: each operand is written; `-s`'s value is read as one too.
         Verb::Truncate => out.extend(delete_operands(&args).map(AnchorWrite::File)),
+        // #11463: judged like a delete, so a glob is judged by its literal
+        // parent (`chmod +x scripts/*.sh` stays allowed). The mode word is
+        // judged too; it names no anchor.
+        Verb::Chmod => out.extend(delete_operands(&args).map(AnchorWrite::Delete)),
         Verb::Sed => out.extend(
             sed_edits(&args)
                 .unwrap_or_default()
@@ -179,6 +186,7 @@ fn verb_of(word: &str) -> Option<Verb> {
         "cd" | "pushd" | "popd" => Some(Verb::Cd),
         "rm" | "grm" | "rmdir" | "grmdir" | "unlink" | "gunlink" => Some(Verb::Rm),
         "truncate" | "gtruncate" => Some(Verb::Truncate),
+        "chmod" | "gchmod" | "chown" | "gchown" | "chgrp" | "gchgrp" => Some(Verb::Chmod),
         _ => None,
     }
 }
@@ -237,7 +245,8 @@ fn xargs_writes(tail: &[String]) -> Result<Vec<AnchorWrite>, UnplaceableWrite> {
         Verb::Sed if sed_edits(&args).is_none() => Ok(Vec::new()),
         // #8454 residual: `xargs rm` deletes what stdin names; refusing it
         // would refuse routine cleanup, so it is left to the root-delete floor.
-        Verb::Rm => Ok(Vec::new()),
+        // #11463: `xargs chmod` likewise, for routine `find | xargs chmod`.
+        Verb::Rm | Verb::Chmod => Ok(Vec::new()),
         Verb::Cp | Verb::Install => {
             let parsed = CopyArgs::parse(verb, &args);
             match parsed.target_dir {

@@ -181,7 +181,7 @@ The memory and search protocol is in the Architect core. In addition:
 - A tool missing from your loaded list is not unavailable — load its schema with `ToolSearch`.
 
 ## Files and end of pass
-- **Files (r-082).** Each file in `local/` has one role; `local/state.md` is rewritten in place; `local/actions.md` is append-only. (details: architect-workflow)
+- **Files (r-082).** Each file in `local/` has one role; `local/state.md` is rewritten in place; `local/actions.md` is append-only. An active hold in `local/state.md` is a line that starts with `- HOLD: <what is held>`, `- usage state: HOLD <details>` or `- On hold (<who>): no merge <details>`; `tm fleet init` reads only those. (details: architect-workflow)
 - **End of pass (r-083).** Update projects, state and actions, then commit the local records; never push. (details: architect-workflow)
 - **Dashboard (r-181).** Keep one served dashboard page per installation: the owner's actions, a line per goal, a collapsible row per managed session. Every decision or action that is not truly simple links a readable brief in the owning project's briefs directory, the owner can ask for one on any item, and no dashboard field holds more than one paragraph (no standalone Briefs section). Update it at the end of every pass that changed something, and answer "dashboard" from Remote Control with a fresh pass and the link. (details: architect-dashboard)
 
@@ -310,6 +310,10 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - An option that adds a component, service, config surface, state or
   abstraction states the surface it adds and why nothing simpler works, and
   needs the owner's informed OK. Add complexity by plan, never by accident.
+- Every brief and document you write follows `tm-prose-style` "Shared
+  Documents" (a)–(f): no process history, no author, current truth only, no
+  internal-doc links or confidential commercial detail; read a shared doc
+  before replacing it.
 
 ### Completion Standard
 
@@ -324,3 +328,6 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - **Limits:** after the first review, a PR gets at most one fix round and one
   delta review (a criterion-fail fix uses that one round). A blocker left after
   that comes to you.
+
+**Acceptance criteria:** 1–4 testable per issue; the close cites each, plus
+`stretch` follow-ups or "none". `Skill(skill="tm-ticketing")`.

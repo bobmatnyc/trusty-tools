@@ -814,8 +814,8 @@ mod tests {
     /// The two-account answer a real `gh auth status` gives on this machine.
     fn two_accounts() -> GhAuthProbe {
         GhAuthProbe::Answered(GhAccountStatus {
-            active: Some("bob-duetto".to_string()),
-            logged_in: vec!["bob-duetto".to_string(), "bobmatnyc".to_string()],
+            active: Some("acme-admin".to_string()),
+            logged_in: vec!["acme-admin".to_string(), "bobmatnyc".to_string()],
         })
     }
 
@@ -830,8 +830,8 @@ mod tests {
         );
         // A logged-in but non-active account is a legitimate choice.
         assert_eq!(
-            validate_gh_user_login(" bob-duetto ", Some(&two_accounts())).unwrap(),
-            "bob-duetto"
+            validate_gh_user_login(" acme-admin ", Some(&two_accounts())).unwrap(),
+            "acme-admin"
         );
     }
 
@@ -922,7 +922,7 @@ mod tests {
                 stack_hint: None,
                 tags: vec![],
                 description: None,
-                gh_user: Some("bob-duetto".into()),
+                gh_user: Some("acme-admin".into()),
                 gh_account: None,
                 github: None,
                 commit_name: None,

@@ -268,16 +268,34 @@ pub(crate) async fn install(
         );
     }
 
-    // Wire the MPM lifecycle hooks into every Claude settings file on the
-    // machine. Per-file failures are non-fatal so one bad file does not sink
-    // the whole install. Uses absolute-path hook commands resolved from the
-    // currently-running binary so hooks fire even in stripped-PATH environments.
-    if let Err(e) = install_claude_hooks() {
-        eprintln!("warning: failed to install Claude Code hooks: {e:#}");
-    }
+    // Wire the MPM lifecycle hooks into the managed Claude settings file. Uses
+    // absolute-path hook commands resolved from the currently-running binary so
+    // hooks fire even in stripped-PATH environments.
+    let hooks = install_claude_hooks();
 
-    println!("Framework installed. Run `trusty-mpm daemon` to start.");
+    // See G0b auto-setup: failures print and never abort the install.
+    crate::commands::auto_setup::run_and_print();
+
+    println!("{}", install_outcome(hooks)?);
     Ok(())
+}
+
+/// The closing line of `tm install`, or the error that makes it exit non-zero.
+///
+/// Why (#11508): a failed hook wiring leaves no settings.json, yet the command
+/// printed "Framework installed" and exited 0 (fail-open).
+/// What: `Ok` hook wiring yields the success line; `Err` yields an error that
+/// says the install is incomplete and why, and no success line.
+/// Test: `install_outcome_fails_when_hook_wiring_fails`.
+fn install_outcome(hooks: anyhow::Result<usize>) -> anyhow::Result<&'static str> {
+    match hooks {
+        Ok(_) => Ok("Framework installed. Run `trusty-mpm daemon` to start."),
+        Err(e) => Err(e.context(
+            "install incomplete: the Claude Code hooks were not wired, so settings.json was not \
+             written; install tm with `cargo install trusty-mpm` (so it is on PATH) and run \
+             `tm install` again",
+        )),
+    }
 }
 
 /// Idempotently install the MPM `PreToolUse` / `PostToolUse` / `Stop` hook

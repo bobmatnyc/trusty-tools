@@ -4,11 +4,14 @@
 //! watched pane; both must name panes by their exact `%N` id (#9171 A3a).
 //! What: [`list_panes`] runs the prototype's `list-panes` format and
 //! [`parse_list_panes`] splits each row like `line.split("\t", 5)`: rows with
-//! fewer than 4 fields are dropped, rows with 4 or 5 are padded with `""`. A
-//! row whose pane field is not a `%N` id is kept out of [`Listing::panes`] and
-//! reported in [`Listing::skipped`] for the caller to log. [`capture`] runs
+//! fewer than 4 fields are dropped from [`Listing::panes`] and kept in
+//! [`Listing::unreadable`], rows with 4 or 5 are padded with `""`. A row whose
+//! pane field is not a `%N` id is kept out of [`Listing::panes`] and reported
+//! in [`Listing::skipped`]. [`list_panes`] logs both at warn level. [`capture`] runs
 //! `capture-pane -e -p -S -80 -t <pane>`.
-//! Test: `list_panes_matches_python_goldens`, `capture_and_list_build_exact_argv`.
+//! Test: `list_panes_matches_python_goldens`, `capture_and_list_build_exact_argv`,
+//! `underscore_separated_rows_are_unreadable_not_silent`,
+//! `list_panes_reads_rows_without_a_utf8_locale`.
 
 use serde::Serialize;
 
@@ -45,6 +48,8 @@ pub struct Listing {
     pub panes: Vec<Pane>,
     /// Rows the prototype would keep whose pane field is not `%N`.
     pub skipped: Vec<String>,
+    /// Non-blank rows with fewer than 4 tab-separated fields (#11543).
+    pub unreadable: Vec<String>,
 }
 
 /// Parses `list-panes` output in the prototype's `list_panes` shape.
@@ -53,6 +58,10 @@ pub fn parse_list_panes(out: &str) -> Listing {
     for line in splitlines(out) {
         let mut parts: Vec<&str> = line.splitn(6, '\t').collect();
         if parts.len() < 4 {
+            // #11543: a separator tmux rewrote must not vanish silently.
+            if !line.trim().is_empty() {
+                listing.unreadable.push(line.to_owned());
+            }
             continue;
         }
         parts.resize(6, "");
@@ -78,7 +87,14 @@ pub fn parse_list_panes(out: &str) -> Listing {
 /// The `list-panes` call failed; the prototype skips the cycle.
 pub fn list_panes<T: Tmux + ?Sized>(tmux: &T) -> Result<Listing, TmuxError> {
     let out = tmux.run(&["list-panes", "-a", "-F", LIST_FORMAT])?;
-    Ok(parse_list_panes(&out))
+    let listing = parse_list_panes(&out);
+    for row in &listing.unreadable {
+        tracing::warn!(row, "list-panes row has fewer than 4 tab-separated fields");
+    }
+    for row in &listing.skipped {
+        tracing::warn!(row, "list-panes row has no %N pane id");
+    }
+    Ok(listing)
 }
 
 /// The pane's screen plus 80 rows of scrollback, with escape codes.
@@ -101,6 +117,17 @@ pub fn capture<T: Tmux + ?Sized>(tmux: &T, pane: &PaneId) -> Result<String, Tmux
 mod tests {
     use super::*;
     use crate::FakeTmux;
+
+    #[test]
+    fn underscore_separated_rows_are_unreadable_not_silent() {
+        // tmux's output for LIST_FORMAT with no UTF-8 locale (#11543).
+        let listing = parse_list_panes("fleet_%0_claude_11_/tmp_0\n\nfleet_%1_zsh_10_/_0\n");
+        assert!(listing.panes.is_empty());
+        assert_eq!(
+            listing.unreadable,
+            ["fleet_%0_claude_11_/tmp_0", "fleet_%1_zsh_10_/_0"]
+        );
+    }
 
     #[test]
     fn capture_and_list_build_exact_argv() -> Result<(), TmuxError> {

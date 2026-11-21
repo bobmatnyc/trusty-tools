@@ -29,7 +29,7 @@ use trusty_common::integrity::Sha256Digest;
 pub const CONTENT_DIR: &str = "instructions/trusty-review";
 
 /// The bundle path of the shipped voice package.
-pub const VOICE_PATH: &str = "instructions/trusty-review/voices/duetto/voice.toml";
+pub const VOICE_PATH: &str = "instructions/trusty-review/voices/house/voice.toml";
 
 /// The bundle path of the stock prompt. Spelled out, not taken from the
 /// library, so a renamed path fails here and the file needs nothing from

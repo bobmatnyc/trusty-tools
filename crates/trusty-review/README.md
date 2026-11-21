@@ -646,8 +646,26 @@ already enables). See the [Cargo features](#cargo-features) note below.
 ## Reviewer model
 
 The default reviewer model is `us.anthropic.claude-sonnet-5-5` (Claude Sonnet 5.5) on AWS Bedrock.
-The verifier and summarizer default to Haiku 4.5
-(`us.anthropic.claude-haiku-4-5-20251001-v1:0`).
+The summarizer defaults to Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`). The verifier defaults to a
+different model family than the reviewer (#11527): Amazon Nova Pro
+(`us.amazon.nova-pro-v1:0`) on Bedrock, Gemini 2.5 Flash
+(`google/gemini-2.5-flash`) on OpenRouter. When the reviewer and verifier
+resolve to the same model id, trusty-review logs a warning; the override
+still applies.
+
+The Bedrock verifier default needs `bedrock:InvokeModel` access to
+`amazon.nova-pro-v1:0` (through the `us.` cross-region inference profile) in
+the AWS account and region trusty-review runs in. When the startup liveness
+probe gets `AccessDenied` or `ModelNotFound` for this built-in default,
+trusty-review falls back to Haiku 4.5
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) and logs a warning naming
+both models. The fallback is probed too; if it also fails, live mode refuses
+to start. A verifier model you set explicitly never falls back: if it is
+denied, live mode refuses to start. Pick another verifier with
+`TRUSTY_REVIEW_VERIFIER_MODEL` (for example
+`TRUSTY_REVIEW_VERIFIER_MODEL=bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0`),
+`--verifier-model`, or `[models.verifier]` in the config file.
 
 Override via:
 
@@ -710,7 +728,7 @@ global config schema is trivially addable following the same pattern in
 ```toml
 # .trusty-review.toml — committed at the repo root
 [voice]
-package = "duetto"
+package = "house"
 
 [review]
 template = "strict-security"

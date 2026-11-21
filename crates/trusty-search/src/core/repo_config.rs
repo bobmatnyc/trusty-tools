@@ -1,6 +1,6 @@
 //! Repo-level configuration parsed from `<repo_root>/trusty-search.yaml`.
 //!
-//! Why: large polyrepos (Duetto's monolith, mono-style ML repos) need to expose
+//! Why: large polyrepos (Acme's monolith, mono-style ML repos) need to expose
 //! several logically-separate indexes — backend Java APIs vs. frontend
 //! TypeScript dashboards — without dumping every file into one giant index.
 //! A repo-level YAML lets project owners declare these slices once and have

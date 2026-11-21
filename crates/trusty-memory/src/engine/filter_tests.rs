@@ -490,8 +490,8 @@ fn structural_tokens_are_not_flagged() {
     // slash-path tokens (issue #1667 primary cases)
     let slash_tokens = [
         "verdict/grade/prose-summary", // 27 chars — the exact reported FP
-        "duettoresearch/duetto",       // org/repo slug
-        "duettoresearch/projects/19",  // org/repo/id path
+        "acme-labs/acme-labs",         // org/repo slug
+        "acme-labs/projects/19",       // org/repo/id path
         "crates/trusty-review/src/pipeline/mapreduce/synthesis.rs", // file path
     ];
     for tok in slash_tokens {
@@ -535,7 +535,7 @@ fn gate_accepts_fp_content() {
         // The exact token from the rejection report:
         "Use verdict/grade/prose-summary as the synthesized output key",
         // Org/repo slug references:
-        "See duettoresearch/duetto for the upstream fork and duettoresearch/projects/19 for tracking",
+        "See acme-labs/acme-labs for the upstream fork and acme-labs/projects/19 for tracking",
         // Semver / review-decision token:
         "Review verdict: >=2-medium->REQUEST_CHANGES must block merge",
         // File path reference:
@@ -2077,8 +2077,8 @@ fn aws_key_ids_with_adjacent_text_are_blocked() {
 const RECURRENCE_FALSE_POSITIVES: &[(&str, &str)] = &[
     // #1667 — slash paths, slugs, semver-operator tokens.
     ("#1667", "verdict/grade/prose-summary"),
-    ("#1667", "duettoresearch/duetto"),
-    ("#1667", "duettoresearch/projects/19"),
+    ("#1667", "acme-labs/acme-labs"),
+    ("#1667", "acme-labs/projects/19"),
     ("#1667", ">=2-medium->REQUEST_CHANGES"),
     // #1676 — key=value whose value is itself a slash path.
     (

@@ -1789,7 +1789,7 @@ fn preseed_trust_preserves_other_keys() {
     let workspace = tmp.path().join("ws");
     std::fs::write(
         &claude_json,
-        r#"{"oauthAccount":{"emailAddress":"r@1mc.io"},"projects":{"/other":{"hasTrustDialogAccepted":true}}}"#,
+        r#"{"oauthAccount":{"emailAddress":"owner@example.com"},"projects":{"/other":{"hasTrustDialogAccepted":true}}}"#,
     )
     .unwrap();
 
@@ -1800,7 +1800,7 @@ fn preseed_trust_preserves_other_keys() {
     // OAuth survives untouched (issue #1269: OAuth must be preserved).
     assert_eq!(
         value["oauthAccount"]["emailAddress"],
-        serde_json::json!("r@1mc.io")
+        serde_json::json!("owner@example.com")
     );
     // Pre-existing project survives.
     assert_eq!(

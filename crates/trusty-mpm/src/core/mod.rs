@@ -319,9 +319,13 @@ pub mod project_accounts;
 #[cfg(test)]
 mod project_accounts_tests;
 pub mod project_aliases;
+// #7684: the project CLAUDE.md rules appended to every `Agent` dispatch.
 /// The committed, project-level `.trusty-mpm.toml` config surface (#5207).
 pub mod project_config;
 pub mod project_discovery;
+pub mod project_rules;
+#[cfg(test)]
+mod project_rules_tests;
 // #7892: `.mcp.json` follows Claude Code's own approval flow, so tm reports
 // that state rather than deciding it.
 pub mod project_mcp_approval;
@@ -381,6 +385,8 @@ pub mod savings_opportunity_reason;
 // #7569: the one-shot repair that quarantines the ledger rows #7514's resolver
 // bug let unit tests write into the operator's own ledger.
 pub mod savings_repair;
+// #11033: read side for `tm savings status` and the doctor rows/day check.
+pub mod savings_status;
 // #7245: the side files that carry an instruction-compression row from the
 // compiling process to the hook that learns the session id, and that keep the
 // "nothing folded" decline to one warning per project.

@@ -27,7 +27,8 @@ use crate::models::ReviewResult;
 /// What: creates `<log_dir>/<owner>-<repo>-pr<number>-<timestamp>.json` and
 /// a `.md` companion.  Both are written atomically (write-then-rename idiom)
 /// so partial writes don't corrupt the log.  Errors are logged as warnings;
-/// they do not fail the overall pipeline.
+/// they do not fail the overall pipeline.  It also appends the review's
+/// finding-yield row to `finding_yield.jsonl` (#11525).
 /// Test: `write_review_log_creates_json_file`.
 pub fn write_review_log(result: &ReviewResult, log_dir: &Path) {
     if let Err(e) = std::fs::create_dir_all(log_dir) {
@@ -59,6 +60,9 @@ pub fn write_review_log(result: &ReviewResult, log_dir: &Path) {
     if let Err(e) = atomic_write(&md_path, md.as_bytes()) {
         warn!(path = %md_path.display(), "failed to write review log Markdown: {e}");
     }
+
+    // #11525: one finding-yield row per review, aggregated by `review_health`.
+    crate::pipeline::finding_yield::append_yield_row(result, log_dir);
 }
 
 /// Build the log file stem for this review.

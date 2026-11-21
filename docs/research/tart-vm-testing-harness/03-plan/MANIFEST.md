@@ -4433,7 +4433,7 @@ detected before. See Phase 7 Deviations items 1 and 2.
 
   9. **POST-PHASE, 2026-08-04 — the `on_exit` wrapper is a DEVIATION from DOC-2
      §Shell discipline, cleanup property 1, and it is now corrected
-     ([issue #16](https://github.com/mac-duetto/trusty-tools/issues/16)).**
+     ([issue #16](https://github.com/acme-mac/trusty-tools/issues/16)).**
 
      Property 1 requires cleanup to *"capture `$?` on the very first line, before
      anything else can clobber it"*, and the spec's own trap skeleton

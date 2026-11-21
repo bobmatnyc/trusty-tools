@@ -19,11 +19,15 @@ use crate::sha1::sha1_hex;
 
 /// Seconds an idle pane waits before it alerts.
 pub const IDLE_AFTER: f64 = 600.0;
-// #9171: fleet-poll.py's live bar (ruling b7, 2026-10-07), not fleet-classify.py's 45/50.
+// df-T7i P1b: the PM bar of ctx_bar.py (Bob 2026-11-05: 350k of a 1M window,
+// "approaching" at 90% of it); was 22/25 (ruling b7). The Architect's own bar
+// differs, but its pane is never evaluated (SKIP_SESSIONS).
 /// Context percent that raises a `ctx` alert.
-pub const CTX_WARN: u64 = 22;
+pub const CTX_WARN: u64 = 31;
 /// Context percent whose `ctx` alert carries the higher fingerprint.
-pub const CTX_HIGH: u64 = 25;
+pub const CTX_HIGH: u64 = 35;
+/// Sessions idle by design: never an `idle` alert (ar-T63, df-T7i P1b).
+pub const IDLE_EXEMPT_SESSIONS: [&str; 1] = ["tm-architect-questions"];
 /// Plan usage percent that raises the fleet-wide `plan-limit` alert.
 pub const PLAN_HIGH: u64 = 90;
 /// Characters an alert detail keeps.
@@ -199,8 +203,8 @@ pub fn alert(
 ///
 /// Why: one place decides which facts need the Architect.
 /// What: `dialog`, `question`, `idle` (after [`IDLE_AFTER`] s with an empty or
-/// suggestion box, no dialog, not busy), `ctx` (at [`CTX_WARN`]%, fingerprint
-/// `22`/`25`), `plan-limit`, and `error` for error lines new since last cycle
+/// suggestion box, no dialog, not busy; never for [`IDLE_EXEMPT_SESSIONS`]),
+/// `ctx` (at [`CTX_WARN`]%, fingerprint `31`/`35`), `plan-limit`, and `error` for error lines new since last cycle
 /// (the first sight only seeds the baseline).
 /// Test: `test_idle_prompt_alerts_after_ten_minutes_only`,
 /// `test_error_alerts_only_for_lines_new_since_last_cycle`,
@@ -227,7 +231,7 @@ pub fn evaluate(
     );
     if info.has_box && idle_box && info.dialog.is_none() && !info.busy {
         let since = *ps.idle_since.get_or_insert(now);
-        if now - since >= IDLE_AFTER {
+        if now - since >= IDLE_AFTER && !IDLE_EXEMPT_SESSIONS.contains(&session) {
             // Python's int() truncates toward zero; `//` floors.
             let mins = ((now - since) / 60.0).floor() as i64;
             add(
@@ -267,14 +271,12 @@ pub fn evaluate(
 }
 
 /// Plan usage is account-wide: one alert for the fleet, not one per pane.
+/// Weekly only: no 5-hour alert (Bob 2026-10-31, df-T7i P1b).
 ///
 /// Test: `test_plan_limit_text_and_status_line`, `plan_alerts_match_python_goldens`.
 pub fn fleet_plan_alerts(infos: &[(String, PaneInfo)], now: f64) -> Vec<Alert> {
     type PlanField = (&'static str, &'static str, fn(&PaneInfo) -> Option<u64>);
-    let keys: [PlanField; 2] = [
-        ("plan5h", "5-hour", |i| i.plan5h),
-        ("planwk", "weekly", |i| i.planwk),
-    ];
+    let keys: [PlanField; 1] = [("planwk", "weekly", |i| i.planwk)];
     keys.into_iter()
         .filter_map(|(key, label, get)| {
             let (v, s) = infos

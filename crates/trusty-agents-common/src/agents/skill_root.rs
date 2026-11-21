@@ -83,5 +83,40 @@ pub fn compose_agent_for_deploy(
     skills_root: &Path,
 ) -> Result<String, AgentBuildError> {
     let composed = compose_agent_with_provenance(name, source_dir, Provenance::FrameworkOwned)?;
-    resolve_skills_root(&composed, skills_root)
+    // #7684: every framework deploy starts its subagent without CLAUDE.md.
+    resolve_skills_root(&stamp_omit_claude_md(&composed), skills_root)
+}
+
+/// The frontmatter line that starts a subagent without CLAUDE.md (#7684).
+///
+/// Why: a dispatched subagent takes its rules from its own prompt and the
+/// delegation brief; reloading the project CLAUDE.md hierarchy into every
+/// subagent turn is resident cost the PM already pays once.
+/// What: Claude Code's `omitClaudeMd` subagent field. Claude Code older than
+/// v2.1.271 ignores the key, and Claude Code ignores it for a main-session
+/// `--agent`, so the PM keeps its CLAUDE.md. The project rules reach the
+/// subagent through tm's `PreToolUse` hooks instead (pm-guard, or the egress
+/// guard when pm-guard is off); a Claude Code session without tm's hooks has
+/// no carrier, so its subagents get neither CLAUDE.md nor the rules
+/// (docs/reference/agent-cost-controls.md section 4).
+pub const OMIT_CLAUDE_MD_LINE: &str = "omitClaudeMd: true";
+
+/// Add [`OMIT_CLAUDE_MD_LINE`] as the first frontmatter key of `composed`.
+///
+/// What: inserts after the opening `---` fence; a text with no frontmatter
+/// fence, or one already carrying an `omitClaudeMd:` key, is returned as is.
+/// Test: `compose_for_deploy_stamps_omit_claude_md`,
+/// `stamp_omit_claude_md_is_idempotent_and_skips_unfenced_text`.
+pub fn stamp_omit_claude_md(composed: &str) -> String {
+    let Some(rest) = composed.strip_prefix("---\n") else {
+        return composed.to_string();
+    };
+    let fm_end = rest.find("\n---").unwrap_or(rest.len());
+    if rest[..fm_end]
+        .lines()
+        .any(|l| l.starts_with("omitClaudeMd:"))
+    {
+        return composed.to_string();
+    }
+    format!("---\n{OMIT_CLAUDE_MD_LINE}\n{rest}")
 }

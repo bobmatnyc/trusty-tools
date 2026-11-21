@@ -146,3 +146,99 @@ fn block_composes_with_the_in_place_note() {
         updated
     );
 }
+
+/// #7684: a deployed agent starts with `omitClaudeMd: true`, so the project's
+/// build and test rules must ride on the dispatch prompt instead — for a
+/// non-ops agent too, and alongside the account block for an ops one.
+#[test]
+fn any_agent_dispatch_gets_the_project_rules() {
+    use trusty_mpm::core::project_rules::{PROJECT_RULES_HEADING, RULES_CLOSE, RULES_OPEN};
+    let dir = project(ACCOUNTS_TOML);
+    let md =
+        format!("private\n{RULES_OPEN}\nrun `cargo test -p x --no-fail-fast`\n{RULES_CLOSE}\n");
+    std::fs::write(dir.path().join("CLAUDE.md"), md).expect("write CLAUDE.md");
+
+    let out = account_rewrite(
+        Some(r()),
+        "Agent",
+        Some(&dispatch("rust-engineer")),
+        dir.path(),
+    )
+    .expect("a non-ops dispatch carries the rules");
+    let p = prompt(&out);
+    assert!(p.starts_with("deploy it"), "{p}");
+    assert!(p.contains(PROJECT_RULES_HEADING), "{p}");
+    assert!(p.ends_with("run `cargo test -p x --no-fail-fast`"), "{p}");
+    assert!(!p.contains("private"), "{p}");
+    assert!(!p.contains(ACCOUNT_BLOCK_HEADING), "{p}");
+
+    let ops = account_rewrite(Some(r()), "Agent", Some(&dispatch("local-ops")), dir.path())
+        .expect("an ops dispatch carries both");
+    assert!(prompt(&ops).contains(ACCOUNT_BLOCK_HEADING));
+    assert!(prompt(&ops).contains(PROJECT_RULES_HEADING));
+    // No roster still carries the rules; so does `Task`, without accounts.
+    assert!(account_rewrite(None, "Agent", Some(&dispatch("qa")), dir.path()).is_some());
+    let task = account_rewrite(Some(r()), "Task", Some(&dispatch("local-ops")), dir.path())
+        .expect("a Task dispatch carries the rules");
+    assert!(prompt(&task).contains(PROJECT_RULES_HEADING));
+    assert!(!prompt(&task).contains(ACCOUNT_BLOCK_HEADING));
+}
+
+/// #7684: a project with no `CLAUDE.md` leaves a non-ops dispatch untouched.
+#[test]
+fn no_claude_md_leaves_a_dispatch_unchanged() {
+    let dir = project("");
+    for tool in ["Agent", "Task"] {
+        assert_eq!(
+            account_rewrite(Some(r()), tool, Some(&dispatch("research")), dir.path()),
+            None,
+            "{tool}"
+        );
+    }
+    let payload = serde_json::json!({
+        "tool_name": "Agent", "cwd": dir.path(), "tool_input": dispatch("research"),
+    });
+    assert_eq!(rules_carrier_response(&payload, dir.path()), None);
+}
+
+/// #7684: the carrier object holds the rewritten input and no decision.
+#[test]
+fn carrier_response_holds_only_the_updated_input() {
+    use trusty_mpm::core::project_rules::PROJECT_RULES_HEADING;
+    let dir = project("");
+    std::fs::write(dir.path().join("CLAUDE.md"), "rule").expect("write CLAUDE.md");
+    let payload = serde_json::json!({
+        "tool_name": "Agent", "cwd": dir.path(), "tool_input": dispatch("research"),
+    });
+    let out = rules_carrier_response(&payload, Path::new("/")).expect("carried");
+    let hso = &out["hookSpecificOutput"];
+    assert!(hso.get("permissionDecision").is_none(), "{out}");
+    assert!(
+        prompt(&hso["updatedInput"]).contains(PROJECT_RULES_HEADING),
+        "{out}"
+    );
+    // The egress share: silent while pm-guard is on, the carrier when off.
+    assert_eq!(egress_rules_carrier(Some(&payload), || true), None);
+    assert_eq!(egress_rules_carrier(Some(&payload), || false), Some(out));
+    let read = serde_json::json!({"tool_name": "Read", "cwd": dir.path()});
+    assert_eq!(
+        egress_rules_carrier(Some(&read), || panic!("config read for a non-dispatch")),
+        None
+    );
+}
+
+#[test]
+fn project_rules_are_appended_once() {
+    use trusty_mpm::core::project_rules::PROJECT_RULES_HEADING;
+    let dir = project("");
+    std::fs::write(dir.path().join("CLAUDE.md"), "rule").expect("write CLAUDE.md");
+    let once = account_rewrite(Some(r()), "Agent", Some(&dispatch("local-ops")), dir.path())
+        .expect("first pass rewrites");
+    assert_eq!(
+        account_rewrite(Some(r()), "Agent", Some(&once), dir.path()),
+        None
+    );
+    let composed = compose(Some(r()), "Agent", once, dir.path());
+    assert_eq!(prompt(&composed).matches(PROJECT_RULES_HEADING).count(), 1);
+    assert_eq!(prompt(&composed).matches(ACCOUNT_BLOCK_HEADING).count(), 1);
+}

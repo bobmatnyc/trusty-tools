@@ -39,17 +39,19 @@
 //! Like `benchmark_synthetic.rs`, this harness does NOT spin up its own
 //! daemon — the operator starts an isolated fixture instance for this run.
 
-// Live benchmarks require an isolated daemon and disposable source copy.
-// See support/isolated_benchmark.rs for the three required environment variables.
+// Live benchmarks require a sandbox daemon socket and a disposable source copy.
+// #10677: socket-only since #9214 — see support/socket_benchmark.rs.
 #[path = "support/isolated_benchmark.rs"]
 mod isolated_benchmark;
-use isolated_benchmark::daemon_url;
+#[path = "support/socket_benchmark.rs"]
+mod socket_benchmark;
+use socket_benchmark::call;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use reqwest::Client;
 use serde_json::{json, Value};
+use trusty_search::service::daemon_client::DaemonClient as Client;
 
 // ── Constants ───────────────────────────────────────────────────────────────
 
@@ -229,18 +231,16 @@ fn load_ground_truth() -> Vec<GroundTruthQuery> {
 
 // ── HTTP helpers ────────────────────────────────────────────────────────────
 
-/// Build a reqwest client with timeouts tuned for a long-running benchmark.
+/// Dial the sandbox daemon with a timeout tuned for a long-running benchmark.
 ///
 /// Why: KG expansion can be slow on the first call; the synthetic harness
 /// uses a 30 s ceiling, but indexing an organic corpus may need more.
-/// What: 5 s connect, 60 s request.
+/// What: 60 s per socket call.
 /// Test: any transport error panics via `.expect()` in callers.
-fn make_client() -> Client {
-    Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(60))
-        .build()
-        .expect("reqwest client construction is infallible")
+async fn make_client() -> Client {
+    socket_benchmark::sandbox_client()
+        .await
+        .with_timeout(Duration::from_secs(60))
 }
 
 /// Sanity-check that the daemon is up and report its version.
@@ -250,14 +250,7 @@ fn make_client() -> Client {
 /// What: GETs /health, asserts 200, prints `version` + `rss_mb`.
 /// Test: panics with a human-readable message if the daemon is unreachable.
 async fn assert_daemon_healthy(client: &Client) -> Value {
-    let daemon_url = daemon_url();
-    let resp = client
-        .get(format!("{daemon_url}/health"))
-        .send()
-        .await
-        .expect("isolated benchmark daemon must be reachable at TRUSTY_SEARCH_TEST_URL");
-    assert_eq!(resp.status().as_u16(), 200, "GET /health returned non-200");
-    let body: Value = resp.json().await.expect("health JSON parse failure");
+    let body = call(client, "search.health", json!({})).await;
     println!(
         "    daemon healthy: version={}, indexes={}, rss_mb={}",
         body["version"].as_str().unwrap_or("?"),
@@ -274,12 +267,8 @@ async fn assert_daemon_healthy(client: &Client) -> Value {
 /// What: GET /health, returns `rss_mb` (0 on parse failure).
 /// Test: transport errors panic; callers consume the u64.
 async fn fetch_rss_mb(client: &Client) -> u64 {
-    let daemon_url = daemon_url();
-    match client.get(format!("{daemon_url}/health")).send().await {
-        Ok(r) => match r.json::<Value>().await {
-            Ok(v) => v["rss_mb"].as_u64().unwrap_or(0),
-            Err(_) => 0,
-        },
+    match client.health().await {
+        Ok(v) => v["rss_mb"].as_u64().unwrap_or(0),
         Err(_) => 0,
     }
 }
@@ -291,13 +280,12 @@ async fn fetch_rss_mb(client: &Client) -> u64 {
 /// What: DELETEs any existing index with this name, then POSTs to /indexes.
 /// Test: asserts 200 on POST; transport errors panic.
 async fn register_index(client: &Client) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
     let _ = client
-        .delete(format!(
-            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
-        ))
-        .send()
+        .call(
+            "search.index.delete",
+            json!({ "index_id": INDEX_NAME, "delete_data": true }),
+        )
         .await;
 
     let root = open_mpm_root();
@@ -309,18 +297,7 @@ async fn register_index(client: &Client) {
         "id": INDEX_NAME,
         "root_path": root.to_string_lossy(),
     });
-    let resp = client
-        .post(format!("{daemon_url}/indexes"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /indexes transport failure");
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "POST /indexes returned non-200: body = {:?}",
-        resp.text().await.ok()
-    );
+    call(client, "search.index.create", body).await;
 }
 
 /// Trigger a full force-reindex and wait for every stage to reach `ready`,
@@ -336,20 +313,18 @@ async fn register_index(client: &Client) {
 ///
 /// Test: panics with last-known status on `REINDEX_TIMEOUT` or memory bail.
 async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
     let root = open_mpm_root();
     let body = json!({
         "root_path": root.to_string_lossy(),
         "force": true,
     });
-    let resp = client
-        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/reindex"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /reindex transport failure");
-    assert_eq!(resp.status().as_u16(), 200, "POST /reindex non-200");
+    call(
+        client,
+        "search.index.reindex",
+        json!({ "index_id": INDEX_NAME, "body": body }),
+    )
+    .await;
 
     let start = Instant::now();
     let mut last_rss_sample = Instant::now() - RSS_SAMPLE_INTERVAL;
@@ -421,13 +396,12 @@ async fn reindex_and_wait(client: &Client) -> (u64, Duration, u64) {
 /// What: GET /indexes/:id/status, returns parsed JSON Value.
 /// Test: transport or parse failures panic.
 async fn fetch_status(client: &Client) -> Value {
-    let daemon_url = daemon_url();
-    let resp = client
-        .get(format!("{daemon_url}/indexes/{INDEX_NAME}/status"))
-        .send()
-        .await
-        .expect("GET /status transport failure");
-    resp.json().await.expect("status JSON parse failure")
+    call(
+        client,
+        "search.index.status",
+        json!({ "index_id": INDEX_NAME }),
+    )
+    .await
 }
 
 /// Delete the benchmark index. Best-effort.
@@ -436,20 +410,16 @@ async fn fetch_status(client: &Client) -> Value {
 /// What: DELETE /indexes/:id; prints the response status regardless.
 /// Test: failures print, not panic (cleanup is best-effort).
 async fn cleanup_index(client: &Client) {
-    isolated_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
-    let daemon_url = daemon_url();
+    socket_benchmark::assert_index_root(client, INDEX_NAME, &open_mpm_root()).await;
     let resp = client
-        .delete(format!(
-            "{daemon_url}/indexes/{INDEX_NAME}?delete_data=true"
-        ))
-        .send()
+        .call(
+            "search.index.delete",
+            json!({ "index_id": INDEX_NAME, "delete_data": true }),
+        )
         .await;
     match resp {
-        Ok(r) => println!(
-            "  cleanup DELETE /indexes/{INDEX_NAME} → {}",
-            r.status().as_u16()
-        ),
-        Err(e) => println!("  cleanup DELETE failed: {e}"),
+        Ok(_) => println!("  cleanup search.index.delete {INDEX_NAME} → ok"),
+        Err(e) => println!("  cleanup search.index.delete failed: {e}"),
     }
 }
 
@@ -497,7 +467,6 @@ fn search_request(query: &GroundTruthQuery, tool: Tool, resolved_seed: Option<&s
 /// Test: transport failures panic; per-tool routing covered by per-query
 /// asserts in the main body.
 async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> QueryResult {
-    let daemon_url = daemon_url();
     // KG seed handling: only Tool::Kg on a kg_seed query exercises the two-
     // stage pattern. Other tool/query combinations fall through to the
     // standard single-stage path so we can compare each tool on the same
@@ -512,19 +481,13 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
     let body = search_request(query, tool, kg_seed_chunk_id.as_deref());
 
     let t0 = Instant::now();
-    let resp = client
-        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
-        .json(&body)
-        .send()
-        .await
-        .expect("POST /search transport failure");
+    let json_body = call(
+        client,
+        "search.query",
+        json!({ "index_id": INDEX_NAME, "body": body }),
+    )
+    .await;
     let client_latency_ms = t0.elapsed().as_millis();
-
-    let status = resp.status().as_u16();
-    let json_body: Value = resp
-        .json()
-        .await
-        .unwrap_or_else(|e| panic!("search response JSON parse failure ({status}): {e}"));
 
     let results = json_body["results"].as_array().cloned().unwrap_or_default();
     let top_files: Vec<String> = results
@@ -576,20 +539,19 @@ async fn run_query(client: &Client, query: &GroundTruthQuery, tool: Tool) -> Que
 /// Test: implicit — kg_seed queries' KG runs succeed iff the seed
 ///   resolves.
 async fn resolve_kg_seed(client: &Client, seed_text: &str) -> Option<String> {
-    let daemon_url = daemon_url();
     let body = json!({
         "text": seed_text,
         "top_k": 1,
         "stage": "lexical",
         "compact": false,
     });
-    let resp = client
-        .post(format!("{daemon_url}/indexes/{INDEX_NAME}/search"))
-        .json(&body)
-        .send()
+    let json_body = client
+        .call(
+            "search.query",
+            json!({ "index_id": INDEX_NAME, "body": body }),
+        )
         .await
         .ok()?;
-    let json_body: Value = resp.json().await.ok()?;
     let id = json_body["results"]
         .as_array()?
         .first()?
@@ -815,7 +777,7 @@ fn print_negative_footer(results: &[QueryResult]) {
 #[tokio::test]
 #[ignore = "benchmark: needs the isolated fixture daemon and corpus (support/isolated_benchmark.rs)"]
 async fn benchmark_open_mpm_per_lane_tools() {
-    let client = make_client();
+    let client = make_client().await;
     let health = assert_daemon_healthy(&client).await;
     let daemon_version = health["version"].as_str().unwrap_or("?").to_string();
 

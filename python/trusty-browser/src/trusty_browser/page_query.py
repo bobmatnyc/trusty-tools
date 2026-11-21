@@ -5,6 +5,7 @@ Split from pages.py for the SLOC cap. Tests live in tests/test_page_ops.py.
 
 from __future__ import annotations
 
+from trusty_browser.page_eval import STYLES_DEFAULTS
 from trusty_browser.protocol import Frame, Refusal
 
 # #11356: page_read's controls; each absent one takes its default.
@@ -28,6 +29,7 @@ DEFAULTS: dict[str, Frame] = {
     "page_read": READ_DEFAULTS,
     "page_find": FIND_DEFAULTS,
     "page_click": CLICK_DEFAULTS,
+    "page_styles": STYLES_DEFAULTS,  # #11373
 }
 DIALOG_TYPES = {"alert", "confirm", "prompt", "beforeunload"}
 TERMS = ("role", "name", "text")
@@ -112,4 +114,5 @@ KEEP_LEASE = {
     "InvalidRequest",
     "InvalidOperation",
     "NoHistory",
+    "NoMatch",  # #11373: page_styles selector matched nothing
 }

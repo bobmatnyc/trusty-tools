@@ -109,6 +109,8 @@ fn a_tagged_compress_row_still_folds_as_a_saving() {
         row: &row,
         tool_type: TOOL_TYPE_BASH,
         tool_name: "git diff",
+        chain_shape: None,
+        steps: None,
     };
     append_row(&ledger, &tagged).expect("append");
     assert_eq!(fold_session_per_call(&ledger, "s1").tokens_saved, 900);

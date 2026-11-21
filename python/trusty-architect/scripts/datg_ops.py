@@ -356,8 +356,11 @@ def apply_session(st, a):
                           "keep": _lim(c.get("keep"), "ctx_use.keep", 160)}
     probe = dict(ses, written_at=now_iso(), written_epoch=int(time.time()))
     n = len(json.dumps(probe, separators=(",", ":"), ensure_ascii=False).encode())
-    if n > SESSION_MAX:
-        raise DatgError(f"session record would be {n} B (> {SESSION_MAX} B limit)")
+    if n > SESSION_MAX:   # #11498: name the largest fields so the refusal says what to shrink
+        sizes = sorted(((len(json.dumps(v, separators=(",", ":"), ensure_ascii=False).encode()), k)
+                        for k, v in probe.items()), reverse=True)[:3]
+        top = ", ".join(f"{k} {b} B" for b, k in sizes)
+        raise DatgError(f"session record would be {n} B (> {SESSION_MAX} B limit); largest fields: {top}")
     st["session"] = ses
     return {"id": f"{st['code']}-session", "ev": "update", "note": ses.get("task", "")[:120]}
 

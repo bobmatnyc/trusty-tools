@@ -1,6 +1,6 @@
 //! `# Context:` diff-preamble consumption (#8654).
 //!
-//! Why: the canary sentence in duettoresearch/code-intelligence#5906 reached
+//! Why: the canary sentence in acme/code-intelligence#5906 reached
 //! the diff as a `# Context:` preamble and was discarded as an unparsed
 //! section. These tests pin where the preamble ends and where its text goes.
 //! What: pure calls to `split_context_preamble` / `consume_context_preamble`.

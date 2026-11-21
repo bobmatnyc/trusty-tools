@@ -95,6 +95,13 @@ pub(crate) async fn doctor(
     };
     overall = overall.worst(wiring.status);
     print_check(&wiring);
+    // See G0b auto-setup: read-only; spawns nothing.
+    if let Some(env) = super::auto_setup::Env::live() {
+        for check in super::auto_setup::doctor_rows(&env) {
+            overall = overall.worst(check.status);
+            print_check(&check);
+        }
+    }
     // #8371: opt-in; without `--network` this spawns nothing.
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);

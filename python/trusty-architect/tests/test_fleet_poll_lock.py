@@ -73,3 +73,37 @@ def test_dashboard_poller_name_follows_the_architect_session(monkeypatch):
     monkeypatch.delenv("ARCHITECT_SESSION")
     monkeypatch.delenv("ARCHITECT_POLL_SESSION")
     assert _load("dashboard_fleet_c", "dashboard_fleet.py").POLLER == "tm-architect-poll"
+
+
+def _poll_once(tmp_path, monkeypatch, config_text, argv):
+    """`main(argv)` with the inbox in tmp_path and ARCHITECT_CONFIG naming config_text."""
+    monkeypatch.setattr(fp, "INBOX", str(tmp_path))
+    monkeypatch.setattr(fp, "LOG", str(tmp_path / "poll.log"))
+    monkeypatch.setattr(fp, "STATE", str(tmp_path / "poll-state.json"))
+    monkeypatch.setattr(fp, "LOCK", str(tmp_path / "poll.lock"))
+    monkeypatch.setattr(fp, "_HELD_LOCK", [])
+    cfg = tmp_path / "architect.json"
+    cfg.write_text(config_text, encoding="utf-8")
+    monkeypatch.setenv("ARCHITECT_CONFIG", str(cfg))
+    ran = []
+    monkeypatch.setattr(fp, "cycle", lambda state, dry_run: ran.append(dry_run))
+    rc = fp.main(argv)
+    for fd in fp._HELD_LOCK:
+        os.close(fd)
+    log = tmp_path / "poll.log"
+    return rc, ran, log.read_text() if log.exists() else ""
+
+
+def test_the_interval_comes_from_architect_json(tmp_path, monkeypatch):
+    # #11369: no --interval reads poll_interval_s; --interval still overrides it.
+    rc, ran, log = _poll_once(tmp_path, monkeypatch, '{"poll_interval_s": 600}', ["--once"])
+    assert (rc, ran) == (0, [False]) and "poll start interval=600s" in log
+    rc, _, log = _poll_once(tmp_path, monkeypatch, '{"poll_interval_s": 600}',
+                            ["--once", "--interval", "30"])
+    assert rc == 0 and "poll start interval=30s" in log
+
+
+def test_a_bad_poll_interval_stops_the_poller_before_any_cycle(tmp_path, monkeypatch, capsys):
+    rc, ran, _ = _poll_once(tmp_path, monkeypatch, '{"poll_interval_s": 0}', ["--once"])
+    assert (rc, ran) == (2, [])
+    assert "poll_interval_s" in capsys.readouterr().err

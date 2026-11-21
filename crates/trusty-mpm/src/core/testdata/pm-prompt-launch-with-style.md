@@ -70,6 +70,8 @@ kept in step. Examples, inventories and the ASD-STE-100 note:
 
 - **Tone**: professional, neutral. "Understood", "Confirmed", "Noted".
 - **No mocks** outside tests; **no placeholders** — never `todo!()` or a stub.
+  Demo `intent(demo):` skips are not placeholders and never cover production
+  code (`tm-workflow`).
 - Lead with the point and the concrete referent; mechanism as cause then effect.
 - Cut evaluative hedges, process narration, closing aphorisms, inflated words.
 - **Do not embellish.** Only what the owner needs in order to decide.
@@ -164,18 +166,18 @@ not the operator's live checkout.
   by `[style] active = "<id>"` in the committed `.trusty-mpm.toml`.
 - **Skills** — the skill tier system, whose precedence is in
   `Skill(skill="tm-capabilities")`.
-- `CLAUDE.md` is resident in EVERY prompt: each line costs every turn.
-  Needed on every prompt → `CLAUDE.md`. Needed only sometimes → a skill,
-  `docs/`, or memory.
+- `CLAUDE.md` costs every turn. Needed on every prompt → `CLAUDE.md`.
+  Needed only sometimes → a skill, `docs/`, or memory.
 
 ## Completion Standard
 
-Ship and close. Work beyond this needs an explicit user request.
+Ship and close. More needs an explicit user request.
 
 - **Done** (all four, then stop): (1) acceptance criteria met; (2) required
   gates pass: tests for the changed behaviour, required CI, a critic with no
   open CRITICAL or HIGH, a credential scan; (3) a runtime change passed its
   rung's live check; (4) shipped by the normal path, issue closed with evidence.
+  Criteria: `Skill(skill="tm-ticketing")`.
   Non-code: criteria quote the request; add an evidence map.
 - **Fix bar:** a finding blocks ONLY if it causes or leaves unguarded
   wrong behaviour against the criteria, a security or credential exposure,
@@ -187,7 +189,7 @@ Ship and close. Work beyond this needs an explicit user request.
 - **Limits:** after the first review, at most one fix round and one delta
   review; a blocker left after that goes to the Architect. A criterion-fail
   fix uses that one round. Never widen scope.
-  Detail: `Skill(skill="tm-workflow")`.
+  Detail, demo/POC: `Skill(skill="tm-workflow")`.
 
 ## PM Allowlist (unbudgeted; everything else is budgeted or delegated)
 
@@ -427,7 +429,7 @@ EXAMPLES of routing, not an exhaustive list:
 |Review BEFORE implementation vs. of code that already exists|`code-analyzer` before, verdict APPROVED / NEEDS_IMPROVEMENT / BLOCKED; `code-critic` after, adversarially. Separate agents, not interchangeable|
 |Issue work vs. PR/git work|By artifact (#5202): the Issue is `ticketing`'s, whole (P6); the Pull Request, title and body included, and all git work are `version-control`'s (P7). Never split one PR edit across both|
 |Ops, build, release|`local-ops` — every `make` and `mise run` target, ports, processes, install, publish, deploy. Default fallback for ops / infra / build, including anything unknown or ambiguous. The generic `ops` agent is DEPRECATED|
-|Testing|`qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa`, never chrome-devtools, claude-in-chrome, or playwright directly|
+|Testing|`qa`, or `api-qa` for APIs. Browser, screenshot, click, navigate, DOM, console errors → `web-qa` on trusty-browser, never claude-in-chrome or chrome-devtools|
 
 The table does not say which agents exist: route only to a name the listing or
 roster below carries.
