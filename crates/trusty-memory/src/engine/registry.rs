@@ -16,6 +16,7 @@ use crate::engine::community::KnowledgeGap;
 use crate::engine::maintenance_lease::MaintenanceLease;
 use crate::engine::palace::{Palace, PalaceId};
 use crate::engine::palace_not_found::PalaceNotFound;
+use crate::engine::reopen_cost::ReopenCosts;
 use crate::engine::retrieval::PalaceHandle;
 use crate::engine::store::concurrent_open::OpenIntent;
 use crate::engine::store::hnsw_store::{HnswOp, OpWatch};
@@ -230,6 +231,9 @@ pub struct PalaceRegistry {
     /// registered, kept past eviction; see [`Self::oldest_hnsw_op`]. A dead
     /// `Weak` (its store dropped) is pruned on every insert and read.
     hnsw_ops: Arc<Mutex<HnswWatches>>,
+    /// #11613: each palace's last measured open; `evict_idle` keeps a palace
+    /// whose re-open would outlast the client's exchange budget.
+    reopen_costs: Arc<ReopenCosts>,
 }
 
 /// #9487: each registered vector store's in-flight HNSW registry, by palace.
@@ -275,6 +279,7 @@ impl PalaceRegistry {
             maintenance: None,
             data_root: None,
             hnsw_ops: Arc::default(),
+            reopen_costs: Arc::default(),
         }
     }
 
@@ -424,7 +429,21 @@ impl PalaceRegistry {
     /// on [`Self::may_run_maintenance`].
     /// Test: `registry_tests::a_non_maintainer_open_deletes_no_expired_row`.
     pub(crate) fn open_handle(&self, palace: &Palace) -> Result<Arc<PalaceHandle>> {
-        PalaceHandle::open_with_intent_purging(palace, self.open_intent, self.may_run_maintenance())
+        let started = std::time::Instant::now();
+        let handle = PalaceHandle::open_with_intent_purging(
+            palace,
+            self.open_intent,
+            self.may_run_maintenance(),
+        )?;
+        // #11613: measure only a successful open; `evict_idle` reads it.
+        self.reopen_costs.record(&palace.id, started.elapsed());
+        Ok(handle)
+    }
+
+    /// #11613 test seam: pretend `id`'s last open took `took`.
+    #[cfg(test)]
+    pub(crate) fn record_open_cost_for_test(&self, id: &PalaceId, took: Duration) {
+        self.reopen_costs.record(id, took);
     }
 
     /// Insert a new palace handle, replacing any prior entry with the same id.
@@ -628,6 +647,7 @@ impl PalaceRegistry {
             cache.pop(palace_id)
         };
         self.gaps_cache.remove(palace_id);
+        self.reopen_costs.forget(palace_id);
         // `_evicted` drops here, closing fds outside the lock.
     }
 
@@ -1150,7 +1170,11 @@ impl PalaceRegistry {
     /// double-opens the files. Victims are `pop`ed and dropped OUTSIDE the lock
     /// (fd close / RAM free must not run under it, mirroring `remove`). A zero
     /// `threshold` disables the sweep. Returns the number of handles evicted.
+    /// #11613: a palace whose last measured open took at least
+    /// [`crate::engine::reopen_cost::SLOW_REOPEN`] is never evicted, so its
+    /// next call is never a re-open past the client's exchange budget.
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
+    /// `registry_tests::first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen`,
     /// `registry_tests::evict_idle_skips_referenced_handle`,
     /// `registry_tests::evict_idle_skips_recently_accessed_handle`.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]
@@ -1166,7 +1190,12 @@ impl PalaceRegistry {
             // `iter()` borrows the cache immutably and `pop()` needs it mutably.
             let victims: Vec<PalaceId> = cache
                 .iter()
-                .filter(|(_, h)| Arc::strong_count(h) == 1 && h.idle_secs() >= threshold_secs)
+                .filter(|(id, h)| {
+                    Arc::strong_count(h) == 1
+                        && h.idle_secs() >= threshold_secs
+                        // #11613: a slow re-open would outlast the client.
+                        && !self.reopen_costs.too_slow_to_evict(id)
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             victims

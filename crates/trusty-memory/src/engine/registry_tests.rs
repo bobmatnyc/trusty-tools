@@ -1903,3 +1903,86 @@ fn a_writer_registry_never_hydrates_read_only() {
         "a palace a writer registry could not open must be recorded unopenable"
     );
 }
+
+/// #11613: a disk palace, created through the registry and left idle and
+/// unreferenced, so `evict_idle` may consider it.
+fn idle_disk_palace(reg: &PalaceRegistry, root: &std::path::Path, name: &str) -> PalaceId {
+    use crate::engine::palace::Palace;
+    let id = PalaceId::new(name);
+    let palace = Palace {
+        id: id.clone(),
+        name: name.to_string(),
+        description: None,
+        created_at: chrono::Utc::now(),
+        data_dir: root.join(name),
+    };
+    let handle = reg.create_palace(root, palace).expect("create palace");
+    handle
+        .last_accessed
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    id
+}
+
+/// The client's exchange budget, scaled down for a test (#11613).
+const EXCHANGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Why (#11613): the first call after an idle sweep re-opened its palace
+/// inside the request, and a palace whose open outlasts the client's 5 s
+/// exchange broke the client's pipe.
+/// What: a palace whose measured open (6 s) exceeds the budget survives the
+/// sweep. With the open lock held, so any re-open stalls (the slow-open
+/// fake), the next `open_palace` still answers inside [`EXCHANGE_BUDGET`].
+/// Before the fix the sweep evicted it and the call waited on the stalled
+/// re-open past the budget.
+/// Test: this test.
+#[test]
+fn first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let reg =
+        std::sync::Arc::new(PalaceRegistry::new().with_open_queue_timeout(EXCHANGE_BUDGET * 3));
+    let id = idle_disk_palace(&reg, &root, "slow-reopen");
+    reg.record_open_cost_for_test(&id, std::time::Duration::from_secs(6));
+
+    let evicted = reg.evict_idle(std::time::Duration::from_secs(1));
+
+    let open_lock = reg.open_lock_for_test(&id);
+    let stall = open_lock.lock();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (caller, call_id) = (std::sync::Arc::clone(&reg), id.clone());
+    std::thread::spawn(move || {
+        let _ = tx.send(caller.open_palace(&root, &call_id).map(|_| ()));
+    });
+    let answered = rx.recv_timeout(EXCHANGE_BUDGET);
+    drop(stall);
+    answered
+        .expect("the first call after the sweep must answer within the exchange budget")
+        .expect("the resident palace must serve the call");
+    assert_eq!(evicted, 0, "a slow-to-reopen palace must stay resident");
+}
+
+/// Why (#11613, Fail-Open Check): the exemption must not stop eviction of a
+/// palace that re-opens fast, and a re-open that stalls must surface as an
+/// error, never as a successful or empty answer.
+/// What: a palace with its real (fast) measured open is evicted; with its open
+/// lock held, `open_palace` fails with `OpenQueueTimeout` and registers nothing.
+/// Test: this test.
+#[test]
+fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
+    let dir = tempdir().unwrap();
+    let reg = PalaceRegistry::new().with_open_queue_timeout(std::time::Duration::from_millis(200));
+    let id = idle_disk_palace(&reg, dir.path(), "fast-reopen");
+
+    assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 1);
+
+    let open_lock = reg.open_lock_for_test(&id);
+    let _stall = open_lock.lock();
+    let err = reg
+        .open_palace(dir.path(), &id)
+        .expect_err("a stalled re-open must be an error");
+    assert!(err.downcast_ref::<OpenQueueTimeout>().is_some(), "{err:#}");
+    assert!(
+        reg.peek(&id).is_none(),
+        "a failed re-open registers nothing"
+    );
+}
