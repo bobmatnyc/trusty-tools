@@ -60,7 +60,7 @@ inbox/hold.json (source "ledger"), the hold fleet-poll.py reads before it wakes 
 A warn-mode hook warning is appended to log.jsonl as kind hook_warning (ts, session, text).
 Dispatch policy: warn until config.block_after (default 2026-10-12T13:30Z), then deny a
 dispatch whose prompt lacks "Goal: <code>-G<hex2>" naming an active goal; config.mode
-("warn"|"block") overrides the date. No network, no secrets (locations only in items).
+("warn"|"block") overrides the date. No network, no secrets (locations only in items; owner-declared throwaway credentials excepted, see tm-secrets).
 #11101 (datg_task.py): a dispatch carries 'Task: <id>@MMDD' for an open task; a missing or unusable one warns
 and is logged to inbox/task-compliance.jsonl (config.task_mode refuse follows the dispatch mode). 'add T'
 stamps 'created' and warns past config.wip_cap active tasks (default 8, and refuse mode raises), and a

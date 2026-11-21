@@ -92,6 +92,8 @@ line that could carry one.
     (#9158).
 11. A review agent (`code-critic`, `code-analyzer`, `security`) never runs `tm secrets` (any verb), the `trusty-secrets` CLI, or any call to the live trusty-secrets socket or server on the operator's machine. If a review needs secrets behaviour exercised, report it as a gap for a sandboxed live check (temp HOME, file backend); never run that check against the live store. (#7524, D05)
 
+Exception: a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. All other secrets keep this rule. The exception does not allow printing or logging any value, and it does not cover a credential the owner did not declare.
+
 A value that reaches a transcript, log or commit is a security defect. Stop
 and report its location to the PM; it is already exposed.
 

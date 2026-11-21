@@ -26,7 +26,7 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 - Never start a second recurring monitor, and never restart a paused one unless
   asked.
 - Record where a secret lives, never its value. Never print it either; the
-  checks use length only.
+  checks use length only. Exception: a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. All other secrets keep this rule.
 - Never treat a PM's claim as verified. It stays reported until your own
   command or capture confirms it.
 - Address a pane by its exact target only, `-t '=<session>:'`, quoted in zsh,

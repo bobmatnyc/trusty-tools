@@ -42,7 +42,7 @@ root. `.trusty-mpm/sessions/` is inside the WATCHED project's root.
    text first (`tmux send-keys -t '=<session>:' -l '/tm-session-pause'`),
    confirm the box holds only that text, then Enter as a separate call. Never
    combine it with `/clear`. You may add a line asking it to keep the current
-   tasks, agent ids, authorizations, blockers and next steps. Never a secret.
+   tasks, agent ids, authorizations, blockers and next steps. Never a secret. Owner-declared throwaway or demo credentials are excepted (tm-secrets).
 3. **Verify the checkpoint itself**, not an acknowledgement or a spinner:
    - The pause appends an entry for this session to
      `.trusty-mpm/sessions/sessions-log.jsonl` in the watched project. Its
