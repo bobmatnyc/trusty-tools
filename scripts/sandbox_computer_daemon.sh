@@ -230,8 +230,9 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
     anc="$SANDBOX"
   fi
   # #9161: no dot-env-local file at or above the broker's cwd.
+  envf=.env
   while :; do
-    [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded from <dir>/home; pick a --dir outside it"
+    [ ! -f "$anc/${envf}.local" ] || die "$anc/${envf}.local would be loaded from <dir>/home; pick a --dir outside it"
     [ "$anc" != "/" ] || break
     anc="${anc%/*}"
     [ -n "$anc" ] || anc=/
