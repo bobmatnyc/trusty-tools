@@ -188,19 +188,22 @@ impl GhTokenResolver for SystemGhResolver {
 /// then `GH_TOKEN`, then `gh auth token` via `gh`, else `GithubError::MissingToken`
 /// with a developer-actionable message.
 /// Test: `cli_token_prefers_github_token`, `cli_token_uses_gh_token_env`,
-/// `cli_token_falls_back_to_gh`, `cli_token_missing_errors`.
+/// `cli_token_falls_back_to_gh`, `cli_token_missing_errors`,
+/// `cli_token_skips_tm_placeholder_gh_token_11414`,
+/// `cli_token_placeholder_only_errors_11414`.
 fn resolve_cli_token(
     config: &ReviewConfig,
     gh: &impl GhTokenResolver,
 ) -> Result<String, GithubError> {
     // 1. GITHUB_TOKEN (already captured into config.github_token at load time).
-    if !config.github_token.is_empty() {
+    if !config.github_token.is_empty() && !is_tm_placeholder(&config.github_token) {
         tracing::debug!("using GITHUB_TOKEN for CLI GitHub auth");
         return Ok(config.github_token.clone());
     }
     // 2. GH_TOKEN (the `gh` CLI's own env var).
     if let Ok(gh_token) = std::env::var("GH_TOKEN")
         && !gh_token.trim().is_empty()
+        && !is_tm_placeholder(&gh_token)
     {
         tracing::debug!("using GH_TOKEN for CLI GitHub auth");
         return Ok(gh_token.trim().to_string());
@@ -211,6 +214,17 @@ fn resolve_cli_token(
         return Ok(token);
     }
     Err(GithubError::MissingToken)
+}
+
+/// Whether `token` is a trusty-mpm launcher placeholder, never a credential.
+// #11414: tm pinned `GH_TOKEN=tm-local-only-repo-no-gh` into local-only
+// sessions; sending it to GitHub fails with 401, so skip it and fall through.
+fn is_tm_placeholder(token: &str) -> bool {
+    let placeholder = token.trim().starts_with("tm-");
+    if placeholder {
+        tracing::warn!("ignoring a trusty-mpm placeholder GitHub token var");
+    }
+    placeholder
 }
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
@@ -358,6 +372,33 @@ mod tests {
         match resolve_cli_token(&config, &gh) {
             Err(GithubError::MissingToken) => {}
             other => panic!("expected MissingToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn cli_token_skips_tm_placeholder_gh_token_11414() {
+        // #11414: a tm placeholder in GH_TOKEN falls through to `gh auth token`.
+        unsafe { std::env::set_var("GH_TOKEN", "tm-local-only-repo-no-gh") };
+        let config = config_with_token("");
+        let gh = FakeGh(Some("fake_gh_cli_value".to_string())); // pragma: allowlist secret
+        let token = resolve_cli_token(&config, &gh).expect("should resolve via gh");
+        unsafe { std::env::remove_var("GH_TOKEN") };
+        assert_eq!(token, "fake_gh_cli_value");
+    }
+
+    #[test]
+    #[serial]
+    fn cli_token_placeholder_only_errors_11414() {
+        // #11414 fail-closed: placeholders everywhere and no gh → MissingToken.
+        unsafe { std::env::set_var("GH_TOKEN", "tm-local-only-repo-no-gh") };
+        let config = config_with_token("tm-local-only-repo-no-gh");
+        let result = resolve_cli_token(&config, &FakeGh(None));
+        unsafe { std::env::remove_var("GH_TOKEN") };
+        match result {
+            Err(GithubError::MissingToken) => {}
+            Err(other) => panic!("expected MissingToken, got {other:?}"),
+            Ok(_) => panic!("expected MissingToken, got a token"),
         }
     }
 

@@ -541,7 +541,9 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         &[
             "cli_token_falls_back_to_gh",
             "cli_token_missing_errors",
+            "cli_token_placeholder_only_errors_11414",
             "cli_token_prefers_github_token",
+            "cli_token_skips_tm_placeholder_gh_token_11414",
             "cli_token_uses_gh_token_env",
         ],
     ),
