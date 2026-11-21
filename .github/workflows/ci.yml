@@ -275,6 +275,11 @@ jobs:
       - name: CI helper selftests (#4179, #4468, #4421)
         run: bash scripts/check-ci-helpers-selftest.sh
 
+      # #11486: pre-publish.yml is dispatch-only, so its CI-parity verdicts are
+      # fixture-tested here, on every PR.
+      - name: Pre-publish CI-parity selftest (#11486)
+        run: ./scripts/check-ci-parity-selftest.sh
+
       # #5657: this job's notifier below cannot see a sibling workflow, so every
       # push-to-main workflow must be watched by red-main-notify.yml instead. A
       # PR that adds one fails HERE, naming the file, rather than going unwatched
