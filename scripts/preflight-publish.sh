@@ -69,8 +69,9 @@
 #     <pkg>`, which compares this crate's public API against its PREVIOUS
 #     crates.io release — the greatest non-yanked version below the one about to
 #     be published (#5296). This workspace follows an internal numbering
-#     scheme, not Cargo SemVer's break-forces-major rule: a feature bumps the minor version, a fix bumps
-#     the patch, and#     a public-API break never forces a major bump on its own — see
+#     scheme, not Cargo SemVer's break-forces-major rule: a feature bumps the
+#     minor version, a fix bumps the patch, and a public-API break never
+#     forces a major bump on its own — see
 #     docs/reference/semver-gate.md. So CHECK 5 REPORTS a computed break: it
 #     still runs the comparison, prints every break it finds, and records them
 #     (`semver_record_break` below), but a computed break never fails this check
