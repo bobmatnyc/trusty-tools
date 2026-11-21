@@ -24,6 +24,7 @@ trusty-agents	lib	agents::bundled	reads repo_tree / repo_tree_files (content/age
 trusty-agents	lib	agents::claude_code_runner::tests::dispatcher_errors_when_claude_code_requested_but_unwired	runtime: TAGENT_CONFIG_DIR points at content/agents/trusty-agents/agents (#9014)
 trusty-agents	lib	agents::registry::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents	lib	agents::skill_floor::skill_floor_tests	reads literal 'content/instructions/architect/skills' (#8436, #9132)
+trusty-agents	lib	agents::tests::beta_pack	runtime: loads the overlays/beta pack and the bundled assistant persona.md under content/agents/trusty-agents via repo_tree_dir (#10979)
 trusty-agents	lib	agents::tests::loading	runtime: resolves bundled agents and persona.md from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents	lib	agents::tests::provider_policy	reads repo_tree and the bundled templates under content/agents/trusty-agents/agents (#9014)
 trusty-agents	lib	api::server::agent_stores::unit_tests::agent_name_allowlist_accepts_every_bundled_agent	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
