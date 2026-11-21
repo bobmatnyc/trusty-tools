@@ -103,6 +103,22 @@ fn local_only_gh_env_strips_every_inherited_token() {
     assert_eq!(value("GH_ENTERPRISE_TOKEN"), Some(LOCAL_ONLY_GH_TOKEN));
 }
 
+/// #11414: the pin exports no placeholder token — an empty value, which gh and
+/// MCP children read as unset, still overrides an inherited real token.
+/// Test: itself.
+#[test]
+fn local_only_pin_exports_no_placeholder_token_11414() {
+    let vars = local_only_gh_vars();
+    for key in ["GH_TOKEN", "GH_ENTERPRISE_TOKEN"] {
+        let value = vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+        assert_eq!(
+            value,
+            Some(""),
+            "{key} must be set empty, not a placeholder"
+        );
+    }
+}
+
 /// 🔴 #8934 MEDIUM 4: the pin clamps git's credential helpers too, as #8914's
 /// `git_credential_pin` does, so HTTPS git cannot reach a stored credential.
 /// Test: itself.

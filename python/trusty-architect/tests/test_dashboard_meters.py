@@ -18,6 +18,7 @@ def render(page, docs):
     fns = [re.search(r"  function %s\(.*?\n  }\n" % f, src, re.S).group(0) for f in ("meter", "renderAccounts")]
     js = FAKE + """
 const ACCT_BEEP_PCT = 95;
+const notReady = () => "";   /* #11588: the accounts count as loaded here (test_dashboard_loading.py covers the gate) */
 N.prototype.replaceChildren = function () { this.children = []; };
 const nodes = {}; const $ = (id) => (nodes[id] = nodes[id] || el("div")); const accounts = %s;
 """ % json.dumps(docs) + lt + acc + "\n".join(fns) + """

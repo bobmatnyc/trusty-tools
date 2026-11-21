@@ -225,8 +225,15 @@ jobs:
   #
   # IT FAILS CLOSED IN BOTH DIRECTIONS. No CI run found for the SHA is a
   # FAILURE, not a pass — "never ran" and "ran and passed" are different facts,
-  # and conflating them is the #5620 shape. A run that exists but concluded
-  # anything other than `success` is a failure. There is no override.
+  # and conflating them is the #5620 shape. A pending, missing, skipped or
+  # cancelled required job ("Rust tests (pre-publish gate)", "Clippy",
+  # "MSRV check", "Format check"), any red job, or an API read that fails is a
+  # failure. There is no override.
+  #
+  # #11486: it reads those required jobs, not the whole run's status, so a
+  # dispatch made once they settle passes while slower CI jobs finish;
+  # and it never counts this workflow's own run. Logic and fixtures:
+  # scripts/check-ci-parity.sh, scripts/check-ci-parity-selftest.sh.
   # ==========================================================================
   ci-parity:
     name: CI shards already green for this commit
@@ -242,49 +249,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.resolve-sha.outputs.sha }}
-        run: |
-          set -euo pipefail
-          echo "Looking for a CI workflow run against ${SHA}"
-
-          # The CI workflow's own runs for this head SHA, every page. The
-          # shard aggregate row is "Rust tests (pre-publish gate)" inside that
-          # run, so the run's own conclusion is what we read (it is `failure`
-          # if any shard failed).
-          # #9626: scoped to ci.yml, not the repo-wide runs list. A release
-          # commit carries 100+ tag-triggered runs, and the repo-wide first
-          # page missed the CI run. A failed read exits nonzero under `set -e`.
-          runs="$(gh api --paginate \
-            "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
-            --jq '.workflow_runs[] | select(.name == "CI") | {id, status, conclusion, event}' \
-            | jq -s '.')"
-
-          echo "CI runs for this SHA: ${runs}"
-
-          count="$(printf '%s' "${runs}" | jq 'length')"
-          if [ "${count}" -eq 0 ]; then
-            echo "::error::No CI workflow run exists for ${SHA}. The four nextest shards have never executed against this tree, so nothing here can claim they passed. Push this commit to main (or dispatch CI against it) and re-run."
-            exit 1
-          fi
-
-          # Any completed run that succeeded is enough; a re-run after a flake
-          # is a legitimate green.
-          green="$(printf '%s' "${runs}" | jq '[.[] | select(.status == "completed" and .conclusion == "success")] | length')"
-          if [ "${green}" -eq 0 ]; then
-            # STILL RUNNING and CONCLUDED RED are different facts and get
-            # different messages. On the gate's first real run the only CI run
-            # for the SHA was `queued` — the gate was dispatched ~20 s after the
-            # merge landed — and a message about a "red CI" would have sent
-            # someone hunting a failure that did not exist. Both still FAIL:
-            # an unfinished CI has not proved anything yet.
-            pending="$(printf '%s' "${runs}" | jq '[.[] | select(.status != "completed")] | length')"
-            if [ "${pending}" -gt 0 ]; then
-              echo "::error::CI for ${SHA} has not finished — ${pending} run(s) still queued or in progress. This gate is dispatched too early; wait for CI to settle, then re-run. Nothing here is red, but nothing has been proved either."
-            else
-              echo "::error::CI has run to completion for ${SHA} and no run concluded 'success'. A release gate cannot pass over a red CI. Conclusions above."
-            fi
-            exit 1
-          fi
-          echo "OK — ${green} green CI run(s) for ${SHA}"
+          SELF_RUN_ID: ${{ github.run_id }}
+        run: ./scripts/check-ci-parity.sh
 
   # ==========================================================================
   # rustdoc-links — GATE 1. Broken intra-doc links.

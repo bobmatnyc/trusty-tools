@@ -34,9 +34,12 @@ pub const LOCAL_ONLY_GH_CONFIG_DIR: &str = "/dev/null/tm-local-only-repo-no-gh";
 /// The value a local-only session gets in `GH_TOKEN` and `GH_ENTERPRISE_TOKEN`.
 ///
 /// Why: an env token outranks every other gh credential source, so filling
-/// both keeps an inherited real token from reaching gh; it authenticates as
-/// nobody and is not a secret.
-pub const LOCAL_ONLY_GH_TOKEN: &str = "tm-local-only-repo-no-gh";
+/// both keeps an inherited real token from reaching gh. Empty, because gh and
+/// trusty-review read an empty token var as unset and fall through to the
+/// unreadable [`LOCAL_ONLY_GH_CONFIG_DIR`], which fails closed.
+// #11414: a non-empty placeholder was sent to GitHub by MCP children as a real
+// token (401 Bad credentials); an empty value blocks the inherited token too.
+pub const LOCAL_ONLY_GH_TOKEN: &str = "";
 
 /// Whether a directory's repository has an `origin` remote.
 ///
