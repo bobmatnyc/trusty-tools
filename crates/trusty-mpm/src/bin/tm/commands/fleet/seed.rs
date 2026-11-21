@@ -20,7 +20,8 @@
 //! Architect only. [`deploy`] writes each file when it is absent, and since
 //! #10571 replaces one whose bytes are an earlier shipped version
 //! (`seed_history.tsv`, see [`refresh`]). A file with any other bytes is
-//! someone's edit and is reported skipped, never overwritten. The skills' bytes are the ones every Architect launch also
+//! someone's edit and is reported skipped, never overwritten; since #11245 the
+//! shipped copy is written beside it as `<file>.shipped`. The skills' bytes are the ones every Architect launch also
 //! deploys (#9540).
 //! Test: `a_first_run_seeds_the_architect_project`,
 //! `every_template_asset_is_seeded`, `every_script_asset_is_seeded`,
@@ -207,7 +208,7 @@ fn records_era_steps(dir: &Path) -> Vec<Step> {
 /// A kept core script lacking this release's wiring adds a `WARNING` step
 /// ([`wiring::kept_copy_warnings`], #11058).
 /// Test: `a_refresh_updates_an_unedited_earlier_copy`,
-/// `a_refresh_keeps_an_edited_copy_and_reports_it`,
+/// `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`,
 /// `an_edited_seed_or_script_is_never_overwritten`,
 /// `an_edited_poller_without_owner_answer_wiring_is_warned_11058`,
 /// `an_upgrade_keeps_instance_files_and_refreshes_framework_files_10608`.
@@ -234,9 +235,11 @@ fn deploy_file(
             ))])
         }
         Ok(bytes) => {
+            // #11245: keep the edit, and write the new shipped copy beside it.
+            let sibling = write_shipped_sibling(dir, file)?;
             let mut steps = vec![Step::Skipped(format!(
                 "{}: differs from the shipped copy (edited), so it is left as is; \
-                 custom copy kept, not refreshed",
+                 custom copy kept, not refreshed; the shipped copy is at {sibling}",
                 file.dest
             ))];
             // #11058: a kept core script can silently disable a refreshed sibling.
@@ -255,6 +258,25 @@ fn deploy_file(
         }
         Err(err) => Err(err).with_context(|| format!("cannot read {}", path.display())),
     }
+}
+
+/// Suffix of the sibling that holds the shipped copy of a kept, edited file.
+pub(crate) const SHIPPED_SUFFIX: &str = ".shipped";
+
+/// Why: an edited Architect file is kept, so a release change to it would be
+/// lost silently (#11245, owner ruling 2026-11-21).
+/// What: writes the current shipped bytes to `<dest>.shipped` beside the kept
+/// file (never executable, so it cannot run in place of the script) and
+/// returns that relative path. Rewrites it only when its bytes differ.
+/// Test: `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`.
+fn write_shipped_sibling(dir: &Path, file: &Seeded<'_>) -> anyhow::Result<String> {
+    let rel = format!("{}{SHIPPED_SUFFIX}", file.dest);
+    let path = dir.join(&rel);
+    if std::fs::read(&path).ok().as_deref() != Some(file.contents.as_bytes()) {
+        trusty_common::atomic_file::write_atomic(&path, file.contents.as_bytes())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(rel)
 }
 
 /// Write `file`'s shipped bytes to `path` atomically; mode `0755` for a script.
