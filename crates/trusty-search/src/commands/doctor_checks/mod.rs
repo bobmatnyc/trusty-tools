@@ -51,30 +51,30 @@ pub struct EmptyIndex {
 
 /// Return the directory where fastembed caches ONNX models.
 ///
-/// Why: fastembed uses `FASTEMBED_CACHE_DIR` env var when set, otherwise
-/// `.fastembed_cache` relative to the process CWD. For the daemon the CWD
-/// is wherever the user launched it — so we check the env var first, then
-/// fall back to the cache path next to the trusty-search data dir.
+/// Why (#10590): doctor guessed its own path (a data-dir sibling, the exe dir,
+/// then `./.fastembed_cache`), while the daemon, the sidecar and the service
+/// unit all use `~/.cache/fastembed`. A healthy cache read as missing.
+/// What: delegates to the resolver the live embedder uses.
+/// Test: `fastembed_cache_dir_respects_env_override`.
 pub fn fastembed_cache_dir() -> std::path::PathBuf {
-    if let Ok(s) = std::env::var("FASTEMBED_CACHE_DIR") {
-        return std::path::PathBuf::from(s);
+    // #10590: one resolver for doctor and the live embedder.
+    trusty_common::embedder::resolve_fastembed_cache_dir()
+}
+
+/// fastembed's cache subdirectory and label for the model the embedder loads.
+///
+/// Why (#10590): the fp32 default and the `TRUSTY_EMBEDDER_MODEL=int8` opt-in
+/// download different repositories, so doctor must look for the one in use.
+/// What: mirrors `resolve_default_embedding_model`'s match on that variable.
+/// Test: `model_cache_dir_name_follows_the_model_selection`.
+pub fn model_cache_dir_name(selector: Option<&str>) -> (&'static str, &'static str) {
+    match selector.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("int8") | Some("quantized") | Some("q") => (
+            "models--Xenova--all-MiniLM-L6-v2",
+            "all-MiniLM-L6-v2 (int8)",
+        ),
+        _ => ("models--Qdrant--all-MiniLM-L6-v2-onnx", "all-MiniLM-L6-v2"),
     }
-    if let Some(d) = dirs::data_local_dir() {
-        let candidate = d.join("trusty-search").join(".fastembed_cache");
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let candidate = exe
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join(".fastembed_cache");
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    std::path::PathBuf::from(".fastembed_cache")
 }
 
 /// The daemon's `search.health` body, or `None` when the socket does not answer.
@@ -113,13 +113,23 @@ pub fn check_daemon_running(running: bool, location: &str, version: &str) -> Che
     }
 }
 
-/// Inspect the fastembed model cache.
+/// Inspect the fastembed model cache the live embedder reads.
 pub fn check_model_cache() -> CheckResult {
-    let model_cache = fastembed_cache_dir();
-    let model_name = "all-MiniLM-L6-v2";
-    let model_subdir = model_cache.join("models--Qdrant--all-MiniLM-L6-v2-onnx");
-    if model_subdir.exists() {
-        let size = dir_size_bytes(&model_cache);
+    let selector = std::env::var("TRUSTY_EMBEDDER_MODEL").ok();
+    check_model_cache_in(&fastembed_cache_dir(), selector.as_deref())
+}
+
+/// Verdict for the model cache at `model_cache`.
+///
+/// Why (#10590): separated so a test can point it at a temp layout.
+/// What: `Ok` when the selected model's directory exists under `model_cache`;
+/// `Warn` otherwise, naming the path that was checked.
+/// Test: `model_cache_ok_when_the_live_layout_holds_the_model`,
+/// `model_cache_warns_when_the_model_is_missing`.
+pub fn check_model_cache_in(model_cache: &std::path::Path, selector: Option<&str>) -> CheckResult {
+    let (subdir, model_name) = model_cache_dir_name(selector);
+    if model_cache.join(subdir).is_dir() {
+        let size = dir_size_bytes(model_cache);
         CheckResult::Ok(format!(
             "Model cache: {} ({}, {})",
             model_cache.display(),
@@ -133,9 +143,10 @@ pub fn check_model_cache() -> CheckResult {
             model_name
         ))
     } else {
-        CheckResult::Warn(
-            "Model not cached — will download on first `trusty-search start`".to_string(),
-        )
+        CheckResult::Warn(format!(
+            "Model not cached at {} — will download on first `trusty-search start`",
+            model_cache.display()
+        ))
     }
 }
 
