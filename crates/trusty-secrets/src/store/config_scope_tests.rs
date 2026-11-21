@@ -505,6 +505,45 @@ fn scope_derive_without_a_remote_fails_closed() {
     }
 }
 
+/// Why: #11346 — a checkout with no `origin` resolves from its own explicit
+/// `trusty.secrets.repo`, never a guess; a bad value or no value fails
+/// closed with a reason naming the key; an `origin` still wins.
+/// Test: itself.
+#[test]
+fn scope_derive_without_a_remote_reads_the_local_repo_key() {
+    let tmp = TempDir::new().unwrap();
+    git(tmp.path(), &["init", "-q"]);
+    let err = ScopeSet::derive(tmp.path(), None, None).unwrap_err();
+    assert!(
+        err.to_string().contains("trusty.secrets.repo"),
+        "the error names the key: {err}"
+    );
+    for bad in ["acme", "acme/web/x", "/web", "acme/"] {
+        git(
+            tmp.path(),
+            &["config", "--local", "trusty.secrets.repo", bad],
+        );
+        let err = ScopeSet::derive(tmp.path(), None, None).unwrap_err();
+        assert!(
+            matches!(err, SecretsError::ScopeUndetermined { .. }),
+            "{bad}: {err:?}"
+        );
+    }
+    git(
+        tmp.path(),
+        &["config", "--local", "trusty.secrets.repo", "Acme/Architect"],
+    );
+    let scopes = ScopeSet::derive(tmp.path(), None, None).unwrap();
+    assert_eq!(scopes.project().as_str(), "trusty/acme/architect");
+    assert_eq!(scopes.owner().unwrap().as_str(), "trusty/acme");
+    git(
+        tmp.path(),
+        &["remote", "add", "origin", "git@github.com:Acme/Web.git"],
+    );
+    let scopes = ScopeSet::derive(tmp.path(), None, None).unwrap();
+    assert_eq!(scopes.project().as_str(), "trusty/acme/web");
+}
+
 /// Why: DOC-74 §13 Q5 — `secrets.vault` replaces the project vault only; the
 /// owner vault still follows the remote, and lookup stays project-first.
 /// Test: itself.

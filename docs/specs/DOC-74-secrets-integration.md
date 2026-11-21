@@ -290,9 +290,11 @@ secrets:
 ```
 
 A machine `project_vaults` entry for the checkout's `<owner>/<repo>` wins over
-the project file's `secrets.vault`. A checkout with no `origin` remote has no
-owner to check an override against, so its scope is undetermined whatever
-either file says.
+the project file's `secrets.vault`. A checkout with no `origin` remote takes
+its `<owner>/<repo>` from `git config --local trusty.secrets.repo` (#11346);
+only `.git/config` is read, the same file as the remote. With neither there
+is no owner to check an override against, so its scope is undetermined
+whatever either file says, and the error names the key.
 
 ### 6.2 Backend-specific settings
 
