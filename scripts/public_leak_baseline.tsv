@@ -1768,6 +1768,12 @@ scripts/tests/test_architect_export.py	EMAIL	3
 scripts/tests/test_architect_export.py	GH_CONFIG_DIR	1
 scripts/tests/test_architect_export.py	HOSTNAME	3
 scripts/tests/test_architect_export.py	TAILNET_IP	1
+# vendor/hnsw_rs: public upstream author's published crate metadata and example paths, kept verbatim per owner ruling Dbg (#10682); remove when the vendored copy is dropped.
+vendor/hnsw_rs/Cargo.toml	EMAIL	1
+vendor/hnsw_rs/Cargo.toml.orig	EMAIL	1
+vendor/hnsw_rs/examples/ann-glove25-angular.rs	OPERATOR_PATH	1
+vendor/hnsw_rs/examples/ann-mnist-784-euclidean.rs	OPERATOR_PATH	1
+vendor/hnsw_rs/examples/ann-sift1m-128-euclidean.rs	OPERATOR_PATH	1
 vmtest-harness/lib/verify.sh	RULING_DATED	1
 website/src/lib/flagship/content.ts	RULING_DATED	1
 website/src/lib/install/audiences.ts	HOSTNAME	1
