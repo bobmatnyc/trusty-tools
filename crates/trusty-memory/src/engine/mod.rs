@@ -49,6 +49,8 @@ pub(crate) mod palace_not_found;
 #[cfg(test)]
 pub(crate) mod palace_not_found_tests;
 pub mod registry;
+// #11613: measured open cost that keeps a slow-to-reopen palace resident.
+pub(crate) mod reopen_cost;
 // #10609 (ADR-0074): the durable marker a Tier C retiree carries.
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) mod retired_marker;

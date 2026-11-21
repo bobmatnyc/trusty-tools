@@ -91,6 +91,24 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// `trusty-memory/tests/uds_consumer_contract.rs`.
 pub const CODE_NOT_FOUND: i64 = -32004;
 
+/// The JSON-RPC code trusty-memory answers while a palace is still opening
+/// (#11255, #11613): retryable, and the call did no work.
+///
+/// Why duplicated: as [`CODE_NOT_FOUND`]; the daemon's own constant is
+/// `trusty_memory::tools::recall_open::CODE_PALACE_OPENING`.
+pub const CODE_PALACE_OPENING: i64 = -32007;
+
+/// The total time a checked call waits out `CODE_PALACE_OPENING` answers.
+///
+/// Why (#11613): a large palace re-opens in tens of seconds under load; the
+/// daemon answers within one exchange and the client asks again until this
+/// bound, then surfaces the last `-32007` as the error.
+pub const PALACE_OPENING_WAIT: Duration = Duration::from_secs(30);
+
+/// The first pause before re-asking after `-32007`; doubles up to 2 s.
+const OPENING_BACKOFF_START: Duration = Duration::from_millis(250);
+const OPENING_BACKOFF_MAX: Duration = Duration::from_secs(2);
+
 /// The daemon answered, and what it answered was an error.
 ///
 /// Why a typed error rather than a formatted string: a caller sometimes has to
@@ -130,6 +148,11 @@ impl MemoryRpcError {
     /// Did the daemon say the thing asked for does not exist?
     pub fn is_not_found(&self) -> bool {
         self.code == CODE_NOT_FOUND
+    }
+
+    /// Did the daemon say the palace is still opening, so a re-ask may succeed?
+    pub fn is_palace_opening(&self) -> bool {
+        self.code == CODE_PALACE_OPENING
     }
 }
 
@@ -297,7 +320,43 @@ pub async fn call_memory_tool_at_with_timeout(
                 ))
             })?;
     }
-    call_memory_tool_at_raw_with_timeout(socket, method, params, timeout).await
+    call_waiting_out_opening(socket, method, params, timeout, PALACE_OPENING_WAIT).await
+}
+
+/// One raw call, re-asked while the daemon answers `-32007` (#11613).
+///
+/// Why: the daemon answers [`CODE_PALACE_OPENING`] inside one exchange
+/// instead of holding the call past the client's budget. The daemon refuses
+/// such a call before its handler runs, so re-sending a write cannot apply it
+/// twice. A daemon that never sends `-32007` sees one call, as before.
+/// What: each `-32007` pauses (250 ms, doubling to 2 s, never past `budget`)
+/// and asks again. Past `budget` the last `-32007` is the error. Every other
+/// answer returns at once.
+/// Test: `a_call_waits_out_palace_opening_and_returns_the_answer`,
+/// `a_palace_that_never_opens_is_the_opening_error_after_the_budget`.
+async fn call_waiting_out_opening(
+    socket: &Path,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+    budget: Duration,
+) -> Result<Value> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut pause = OPENING_BACKOFF_START;
+    loop {
+        let outcome =
+            call_memory_tool_at_raw_with_timeout(socket, method, params.clone(), timeout).await;
+        let opening = matches!(
+            &outcome,
+            Err(e) if e.downcast_ref::<MemoryRpcError>().is_some_and(MemoryRpcError::is_palace_opening)
+        );
+        let now = tokio::time::Instant::now();
+        if !opening || now >= deadline {
+            return outcome;
+        }
+        tokio::time::sleep(pause.min(deadline - now)).await;
+        pause = (pause * 2).min(OPENING_BACKOFF_MAX);
+    }
 }
 
 /// One call with NO protocol check — the explicit escape hatch (#9538).
