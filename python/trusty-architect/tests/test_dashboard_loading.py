@@ -71,12 +71,36 @@ class TestLoading(unittest.TestCase):
             self.assertIn("Could not load", v, c)
             self.assertNotIn("0", v.replace("(denied)", ""), c)
 
+    def test_a_loaded_empty_list_shows_zero_and_its_empty_text(self):
+        """Once the items have loaded, an empty list is a real 0 and says so."""
+        stubs = r"""
+loaded.items = true;
+let items = [], decisionSort = "rank", undone = 0;
+const comp = { qx: {}, ax: {}, tx: {}, qa: {}, aa: {}, ta: {} }, bucketItems = () => ({ open: [], answered: [], done: [], briefing: [] });
+const partitionItems = () => ({ q: [], qa: [], qx: [], a: [], aa: [], ax: [], t: [], ta: [], tx: [] });
+const renderParked = () => {}, decisionList = (l) => l, sortKey = () => 0, decisionNodes = () => [];
+const fillList = (box, nodes, emptyText) => { box.replaceChildren(); if (!nodes.length) box.appendChild(el("p", "empty", emptyText)); };
+const nl = () => ({}), paneFilter = () => () => true, qhit = () => true, renderCompleted = () => {};
+const undoneCount = () => 0, autoCollapse = () => {}, askKind = () => "T";
+const renderQuestion = () => null, renderAction = () => null, renderTask = () => null;
+renderAsks();
+console.log(JSON.stringify([$("n-tasks").textContent, $("list-t").textContent]));"""
+        out = run(PAGES[0], stubs)
+        self.assertEqual(out[0], "0")
+        self.assertIn("no open tasks", out[1])
+
     def test_nav_sum_keeps_the_mark(self):
         out = run(PAGES[0], 'console.log(JSON.stringify([addN(0, "\\u00b7"), addN(2, 3), addN(1, "!"), srcMark("items"), (loaded.items = true, srcMark("items"))]));')
         self.assertEqual(out, ["·", 5, "!", "·", None])
 
 
 class TestWiring(unittest.TestCase):
+    def test_static_markup_has_no_empty_state_text(self):
+        """Before the first render every list placeholder reads "Loading…", never a list's empty text (#11588)."""
+        src = open(PAGES[0], encoding="utf-8").read()
+        stale = [t for t in re.findall(r'<p class="empty"[^>]*>([^<]*)</p>', src) if t and t != "Loading\u2026"]   # the hidden, blank #main-empty is no list
+        self.assertEqual(stale, [])
+
     def test_start_marks_each_collection_loaded_or_failed(self):
         src = open(PAGES[0], encoding="utf-8").read()
         for name in ("items", "questions", "goals", "sessions", "accounts"):
