@@ -2255,7 +2255,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
   const optimisticRm = new Map();     /* goal id -> removal doc id written by this viewer, until the store echoes it */
   let accounts = [], items = [], meta = null, settings = null, optimisticState = null, goals = [], sessions = [], fleet = null, priorities = [], reorders = [];
   /* BEGIN loadState */
-  /* #11588: a list shows no count and no empty text until its collection's first snapshot lands (the owner, ar-T9n); a failed first load shows "!" and an error, never 0. */
+  /* #11588: a list shows no count and no empty text until its collection's first snapshot lands (the owner); a failed first load shows "!" and an error, never 0. */
   const loaded = {}, loadFailed = {};
   const srcMark = (name) => (!name || loaded[name] ? null : loadFailed[name] ? "!" : "·");
   const isN = (n) => typeof n === "number";

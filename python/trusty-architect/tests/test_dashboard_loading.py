@@ -1,4 +1,4 @@
-"""Lists and counts before their data loads (#11588, the owner ar-T9n: "Don't say how many tasks until they've loaded").
+"""Lists and counts before their data loads (#11588, the owner: "Don't say how many tasks until they've loaded").
 
 Why: render() runs on any collection's snapshot, so a list whose own collection had not answered yet showed 0 and its
 empty-state text ("The Architect has no open tasks.") under a spinning "Loading…".
