@@ -446,7 +446,7 @@ impl PalaceRegistry {
     /// Why (#11613): only the daemon answers a client with a fixed exchange
     /// budget; armed elsewhere, a load-slowed test open would pin its palace.
     /// What: consuming builder; replaces the cost table with a pinning one.
-    /// Test: `registry_tests::first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen`.
+    /// Test: `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`.
     pub(crate) fn with_reopen_pin(mut self) -> Self {
         self.reopen_costs = Arc::new(ReopenCosts::pinning_at(
             crate::engine::reopen_cost::SLOW_REOPEN,
@@ -1188,7 +1188,7 @@ impl PalaceRegistry {
     /// [`crate::engine::reopen_cost::SLOW_REOPEN`] is never evicted, so its
     /// next call is never a re-open past the client's exchange budget.
     /// Test: `registry_tests::evict_idle_drops_idle_unreferenced_handle`,
-    /// `registry_tests::first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen`,
+    /// `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`,
     /// `registry_tests::evict_idle_skips_referenced_handle`,
     /// `registry_tests::evict_idle_skips_recently_accessed_handle`.
     #[cfg_attr(not(feature = "server"), allow(dead_code))]

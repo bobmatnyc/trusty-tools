@@ -1923,51 +1923,29 @@ fn idle_disk_palace(reg: &PalaceRegistry, root: &std::path::Path, name: &str) ->
     id
 }
 
-/// The client's exchange budget, scaled down for a test (#11613).
-const EXCHANGE_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// Why (#11613): the first call after an idle sweep re-opened its palace
-/// inside the request, and a palace whose open outlasts the client's 5 s
-/// exchange broke the client's pipe.
-/// What: a palace whose measured open (6 s) exceeds the budget survives the
-/// sweep. With the open lock held, so any re-open stalls (the slow-open
-/// fake), the next `open_palace` still answers inside [`EXCHANGE_BUDGET`].
-/// Before the fix the sweep evicted it and the call waited on the stalled
-/// re-open past the budget.
+/// Why (#11613): the pin keeps a palace whose re-open would outlast the
+/// client's exchange resident, so it rarely needs the `-32007` gate.
+/// What: a palace whose recorded open took 6 s survives the idle sweep. The
+/// first call after a real eviction is `tools::tests::palace_gate_tests`.
 /// Test: this test.
 #[test]
-fn first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen() {
+fn a_slow_to_reopen_palace_survives_the_idle_sweep() {
     let dir = tempdir().unwrap();
-    let root = dir.path().to_path_buf();
-    let reg = std::sync::Arc::new(
-        PalaceRegistry::new()
-            .with_reopen_pin()
-            .with_open_queue_timeout(EXCHANGE_BUDGET * 3),
-    );
-    let id = idle_disk_palace(&reg, &root, "slow-reopen");
+    let reg = PalaceRegistry::new().with_reopen_pin();
+    let id = idle_disk_palace(&reg, dir.path(), "slow-reopen");
     reg.record_open_cost_for_test(&id, std::time::Duration::from_secs(6));
 
-    let evicted = reg.evict_idle(std::time::Duration::from_secs(1));
-
-    let open_lock = reg.open_lock_for_test(&id);
-    let stall = open_lock.lock();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (caller, call_id) = (std::sync::Arc::clone(&reg), id.clone());
-    std::thread::spawn(move || {
-        let _ = tx.send(caller.open_palace(&root, &call_id).map(|_| ()));
-    });
-    let answered = rx.recv_timeout(EXCHANGE_BUDGET);
-    drop(stall);
-    answered
-        .expect("the first call after the sweep must answer within the exchange budget")
-        .expect("the resident palace must serve the call");
-    assert_eq!(evicted, 0, "a slow-to-reopen palace must stay resident");
+    assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 0);
+    assert!(
+        reg.peek(&id).is_some(),
+        "a slow-to-reopen palace stays resident"
+    );
 }
 
 /// Why (#11613, Fail-Open Check): the exemption must not stop eviction of a
 /// palace that re-opens fast, and a re-open that stalls must surface as an
 /// error, never as a successful or empty answer.
-/// What: a palace with its real (fast) measured open is evicted; with its open
+/// What: a palace with a recorded 0 s open is evicted; with its open
 /// lock held, `open_palace` fails with `OpenQueueTimeout` and registers nothing.
 /// Test: this test.
 #[test]
@@ -1977,6 +1955,8 @@ fn a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors() {
         .with_reopen_pin()
         .with_open_queue_timeout(std::time::Duration::from_millis(200));
     let id = idle_disk_palace(&reg, dir.path(), "fast-reopen");
+    // #11613 review: a real open measured under load could reach the pin.
+    reg.record_open_cost_for_test(&id, std::time::Duration::ZERO);
 
     assert_eq!(reg.evict_idle(std::time::Duration::from_secs(1)), 1);
 

@@ -3,15 +3,15 @@
 //! Why: after an idle eviction the next call re-opens its palace inside the
 //! request. A large palace (8.1k vectors in the report) re-opens slower than
 //! the client's 5 s UDS exchange, so the client gave up with a broken pipe
-//! while the daemon finished the call. The client has no "opening" signal it
-//! honours, so the daemon must answer inside the budget; the only way to do
-//! that for a palace whose open alone exceeds it is not to evict it.
+//! while the daemon finished the call. A non-resident palace now answers
+//! `-32007` through `tools::palace_gate` and the client waits; the pin keeps
+//! a palace known to re-open slowly resident, so its callers rarely wait.
 //! What: [`ReopenCosts`] keeps the last measured open duration of each palace
 //! the registry opened. On a registry armed with
 //! `PalaceRegistry::with_reopen_pin` (the daemon's), `evict_idle` skips a
 //! palace whose last open took at least [`SLOW_REOPEN`]. An unarmed registry
 //! (CLI, stdio, tests) and a palace never measured stay evictable, as before.
-//! Test: `registry_tests::first_call_after_idle_sweep_does_not_wait_on_a_slow_reopen`,
+//! Test: `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`,
 //! `registry_tests::a_fast_open_palace_is_still_evicted_and_a_stalled_reopen_errors`.
 
 use std::time::Duration;
