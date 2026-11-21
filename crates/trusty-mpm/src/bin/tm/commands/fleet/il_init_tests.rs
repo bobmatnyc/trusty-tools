@@ -481,20 +481,109 @@ fn a_hold_that_cannot_be_recorded_stops_init_before_the_ledger() {
     assert!(!hooks, "no ledger hook without its hold");
 }
 
-/// #11498: 1000 multi-byte characters fit the field but not the 2048 B
-/// record; init names the field, its size and the limit, and creates nothing.
+/// #11498: 1000 multi-byte characters (2000 B, over the old 2048 B record
+/// cap with the rest of the record) are recorded in full on a fresh install.
 #[test]
 fn a_1000_character_multibyte_hold_is_never_shortened() {
-    let (report, ledger, hooks) =
-        fresh_init_with_state(&format!("# State\n- HOLD: {}\n", "é".repeat(1000)));
+    let hold = "é".repeat(1000);
+    let (_fx, dir, report) = reinit_with_state(format!("# State\n- HOLD: {hold}\n").as_bytes());
+    assert!(!report.failed(), "{}", report.render());
+    assert_eq!(session(&dir)["hold"].as_str(), Some(hold.as_str()));
+}
+
+/// An installed ledger whose session record already carries `refs` of
+/// `value_len` characters each, `n` of them; then `state` is written and init
+/// runs again.
+fn init_over_refs(
+    n: usize,
+    value_len: usize,
+    state: &str,
+) -> (Fixture, std::path::PathBuf, super::super::InitReport) {
+    let fx = Fixture::new();
+    fx.init().unwrap();
+    let dir = fx.dir();
+    for i in 0..n {
+        let r = format!("ref{i}={}", "v".repeat(value_len));
+        let out = datg(&dir, &["session", "set", "--ref", &r]);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    std::fs::write(dir.join("local/state.md"), state).unwrap();
+    let report = fx.init().unwrap();
+    (fx, dir, report)
+}
+
+/// #11498: the owner's shape — about 1.9 KB of refs — plus a usage hold and a
+/// merge hold at full length (about 4 KB, twice the old cap) is recorded in
+/// full, and a later `session set --boundary` is not refused for size.
+#[test]
+fn full_length_holds_over_an_owner_sized_record_fit() {
+    let usage = format!("HOLD: {}", "u".repeat(1000));
+    let merge = format!("On hold (owner): no merge {}", "m".repeat(974));
+    let (_fx, dir, report) = init_over_refs(8, 160, &format!("# State\n- {usage}\n- {merge}\n"));
+    assert!(!report.failed(), "{}", report.render());
+    let ses = session(&dir);
+    assert_eq!(
+        ses["hold"].as_str().map(str::chars).map(Iterator::count),
+        Some(1000)
+    );
+    assert_eq!(ses["merge_hold"].as_str(), Some(merge.as_str()));
+    assert!(ses.to_string().len() > 2048, "{ses}");
+    let out = datg(&dir, &["session", "set", "--boundary"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// #11498: holds that push the record over the 8192 B cap are refused with
+/// the sizes named; the ledger is left without them, never with a cut hold.
+#[test]
+fn holds_over_the_raised_cap_are_refused_never_cut() {
+    let usage = format!("HOLD: {}", "\u{1F600}".repeat(1000));
+    let merge = format!("On hold (owner): no merge {}", "é".repeat(974));
+    let (_fx, dir, report) = init_over_refs(12, 200, &format!("# State\n- {usage}\n- {merge}\n"));
     assert!(report.failed(), "{}", report.render());
     assert!(
         report.steps.iter().any(|s| matches!(s, Step::Failed(t)
-            if t.contains("hold is 2000 B") && t.contains("limit is 2048 B"))),
+            if t.contains("limit is 8192 B") && t.contains("hold is 4000 B"))),
         "{}",
         report.render()
     );
-    assert!(!ledger && !hooks, "{}", report.render());
+    let ses = session(&dir);
+    assert!(ses["hold"].as_str().is_none_or(str::is_empty), "{ses}");
+    assert!(
+        ses["merge_hold"].as_str().is_none_or(str::is_empty),
+        "{ses}"
+    );
+}
+
+/// #11498: the three code copies of the session record cap agree: this
+/// crate's, the shipped `datg_store.py` (byte-identical to its source) and
+/// the Rust ledger port's.
+#[test]
+fn the_session_record_cap_copies_agree() {
+    let cap = super::super::il_init::SESSION_MAX;
+    let py = include_str!("../../../../assets/architect/scripts/datg_store.py");
+    assert!(
+        py.lines().any(|l| l
+            .strip_prefix("SESSION_MAX = ")
+            .and_then(|v| v.split_whitespace().next())
+            == Some(cap.to_string().as_str())),
+        "datg_store.py SESSION_MAX differs from {cap}"
+    );
+    let port = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../trusty-architect/src/ledger/limits.rs");
+    let rs = std::fs::read_to_string(&port).unwrap();
+    assert!(
+        rs.contains(&format!("pub const SESSION_MAX: usize = {cap};")),
+        "{} SESSION_MAX differs from {cap}",
+        port.display()
+    );
 }
 
 /// #11480: the two notes from the owner's state.md that stopped init or became

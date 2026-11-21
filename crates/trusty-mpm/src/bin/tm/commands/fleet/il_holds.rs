@@ -96,7 +96,7 @@ fn value(first_value: &str, rest: &[&str]) -> String {
 }
 
 /// The session record's byte limit (`SESSION_MAX` in `datg_store.py`).
-pub(crate) const SESSION_MAX: usize = 2048;
+pub(crate) const SESSION_MAX: usize = 8192; // #11498: long holds fit
 
 /// Whether the holds (and the task/next written beside them) fit the ledger
 /// session record `ses` (`Null` for a ledger not created yet). `Err` names the

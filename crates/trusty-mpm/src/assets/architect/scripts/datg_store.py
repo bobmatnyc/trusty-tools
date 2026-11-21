@@ -54,7 +54,7 @@ def _size_cap(name, default):
 
 SIZE_REFUSE = _size_cap("datg_size_refuse", 64 * 1024)   # owner ruling D74
 SIZE_WARN = _size_cap("datg_size_warn", SIZE_REFUSE // 2)  # 32 KB by default
-SESSION_MAX = 2048
+SESSION_MAX = 8192   # #11498: owner record (~1.9 KB) plus both holds at full length is ~4 KB
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 WHO = ("owner", "architect", "ci", "agent", "other")
 VAGUE = {"latest", "main", "master", "head", "current", "tbd", "unknown", "?", "n/a", "none", "-"}

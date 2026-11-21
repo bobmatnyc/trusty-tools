@@ -39,7 +39,7 @@ The title limit drops from 200 to 120. Today's open task titles run to about 250
 
 ### 2.2 New: session record `state.json["session"]`
 
-One object, rewritten whole. Target size 1 KB, hard limit 2 KB.
+One object, rewritten whole. Target size 1 KB, hard limit 8 KB (8192 B; raised from 2 KB by #11498 so a record with both holds at full length fits).
 
 | Field | Type | Limit | Meaning |
 | --- | --- | --- | --- |
@@ -56,7 +56,7 @@ One object, rewritten whole. Target size 1 KB, hard limit 2 KB.
 | `merge_hold` | str | 1000 chars | a no-merge hold, kept apart from `hold`; `""` clears it (#10579) |
 | `written_at` | ISO minute UTC | | time of the last write that changed state |
 
-Size rule (#11498): `hold` and `merge_hold` count toward the 2 KB record limit like every other field, measured in UTF-8 bytes of the compact JSON record. A write over the limit is refused, and the refusal names the largest fields. `tm fleet init` never shortens a hold: one that cannot be recorded stops init before it creates the ledger or its hooks.
+Size rule (#11498): `hold` and `merge_hold` count toward the 8 KB record limit like every other field, measured in UTF-8 bytes of the compact JSON record. A write over the limit is refused, and the refusal names the largest fields. `tm fleet init` never shortens a hold: one that cannot be recorded stops init before it creates the ledger or its hooks.
 
 Rules: no field holds secrets; a value that would be a secret holds its location. `owed.expect` holds the exact value, never "latest" or "main". The Architect checks `owed` entries by command, not by the PM's word (ARCHITECT.md r-071).
 
