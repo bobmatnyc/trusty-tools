@@ -4,7 +4,7 @@
 # for a live check (issues #11460, #9121).
 #
 # Why: a hand-built broker inherits every exported credential (#9121), loads
-#   the `.env.local` at or above its cwd (#9161), and, with the real $HOME,
+#   any dot-env-local file at or above its cwd (#9161), and, with the real $HOME,
 #   resolves `~/.cua-driver` and `~/.trusty/computer` to the user's live cua-driver
 #   config, socket and grants. The trusty-computer plan (section 7) requires
 #   every live run to use this script instead.
@@ -28,8 +28,8 @@
 #   socket is <dir>/state/driver/cua-driver.sock (plan section 3); a path over
 #   103 bytes (sun_path) refuses. The script never opens, lists or removes any
 #   socket itself.
-#   Working directory: <dir>/home; a `.env.local` at or above it refuses, and
-#   TRUSTY_SANDBOX=1 tells trusty loaders to read none.
+#   Working directory: <dir>/home; any dot-env-local file at or above it refuses,
+#   and TRUSTY_SANDBOX=1 tells trusty loaders to read none.
 #   Teardown is kill-by-pid only: the child pid goes to <dir>/sandbox.pid; on
 #   EXIT, INT, TERM and under `--stop DIR` the script signals it only while its
 #   argv ends `serve --state <dir>/state`. TERM, 10 s, then KILL, 5 s. A
@@ -229,7 +229,7 @@ if [ "${SANDBOX#<}" = "$SANDBOX" ]; then
   else
     anc="$SANDBOX"
   fi
-  # #9161: no `.env.local` at or above the broker's cwd.
+  # #9161: no dot-env-local file at or above the broker's cwd.
   while :; do
     [ ! -f "$anc/.env.local" ] || die "$anc/.env.local would be loaded from <dir>/home; pick a --dir outside it"
     [ "$anc" != "/" ] || break
