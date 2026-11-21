@@ -3,7 +3,7 @@ name: architect-workflow
 description: Architect skill. Load at the start of a pass, when setting up or moving this project, when writing a record in local/ or a brief, when changing the polling cadence, and at the end of a pass. Covers scaffolding, portability, repository and data rules, the push workflow, the one-live-session rule, the file roles, the cadence and the end-of-pass checklist. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, records, workflow, cadence]
 effort: high
@@ -165,6 +165,20 @@ wake: read the new alert lines, capture only the panes they name, act, and
 update the state. Session crons and Monitors die with the session: re-create
 them after every relaunch and record them in `local/state.md`. After a
 restart, check that the poller session runs.
+
+## Monitoring and heartbeat
+
+- Read bounded pane captures. Capture only the panes a wake names, and run a
+  full poll on the cadence `CLAUDE.md` sets. Verify the session, pane, project
+  path and foreground state before any send.
+- Run exactly one heartbeat. A heartbeat (a cron job or a Monitor) is bound to
+  the session that created it and does not survive a restart: after a
+  restart, re-create it only if it should be active and no other session runs
+  one.
+- An open AskUserQuestion dialog blocks the heartbeat until it is answered, so
+  do not hold a dialog open while the fleet needs watching.
+- End every pass by updating your ledgers: what changed, exactly what you sent
+  and where, the time from `date -u`, and what is still pending.
 
 ## Related skills
 

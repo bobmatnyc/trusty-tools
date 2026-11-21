@@ -68,12 +68,12 @@ fn the_architect_composes_architect_md_then_agents_md_then_the_core() {
     assert!(!prompt.contains("# Trusty Fleet Supervisor"), "{prompt}");
 }
 
-/// The manual's question-id sentences (`architect.md`, "Question ids").
+/// The question-id sentences (`architect-operating-rules`, "Question ids").
 const HEX_ID_RULE: [&str; 2] = ["exactly two lowercase hex digits", "Never use `00`."];
 
 /// The offset of each [`HEX_ID_RULE`] sentence in `flat`, or `None` when one
 /// is missing or occurs more than once.
-/// Test: `the_composed_architect_prompt_carries_the_hex_id_rule_before_the_agents_md_and_the_core`.
+/// Test: `the_hex_id_rule_lives_once_in_the_operating_rules_skill_and_the_manual_names_it`.
 fn hex_id_rule_offsets(flat: &str) -> Option<Vec<usize>> {
     HEX_ID_RULE
         .iter()
@@ -88,24 +88,29 @@ fn hex_id_rule_offsets(flat: &str) -> Option<Vec<usize>> {
 
 /// Why: #9291 — only the byte-for-byte goldens pinned the hex-id rule, and a
 /// golden refresh would drop it silently.
-/// What: the rule reaches the composed prompt once, from the manual, ahead of
-/// the owner's `AGENTS.md` section and the core.
+/// What: MB159a moved the rule out of `architect.md`. The shipped
+/// `architect-operating-rules` skill carries it once, and the composed prompt
+/// (manual, `AGENTS.md` section, core) names that skill so the rule stays
+/// reachable without riding every turn.
 #[test]
-fn the_composed_architect_prompt_carries_the_hex_id_rule_before_the_agents_md_and_the_core() {
+fn the_hex_id_rule_lives_once_in_the_operating_rules_skill_and_the_manual_names_it() {
+    let skill = collapse_whitespace(
+        rc().instruction("architect/skills/architect-operating-rules.md")
+            .unwrap_or_default(),
+    );
+    assert!(
+        hex_id_rule_offsets(&skill).is_some(),
+        "the hex-id rule, once each, in architect-operating-rules"
+    );
     let body = format!("# Owner rules\n\n{SENTINEL}\n");
     let tmp = architect_dir(Some(body.as_bytes()));
-    let flat = collapse_whitespace(&compose_in(rc(), tmp.path()).0);
-    let heading = flat
-        .find("## Owner overrides (AGENTS.md)")
-        .expect("the AGENTS.md heading");
-    let core_start = flat.len() - collapse_whitespace(&folded(rc(), "architect/core.md")).len();
-    let offsets = hex_id_rule_offsets(&flat).expect("the manual's hex-id rule, once each");
+    let prompt = collapse_whitespace(&compose_in(rc(), tmp.path()).0);
     assert!(
-        offsets.iter().all(|&at| at < heading) && heading < core_start,
-        "the hex-id rule is not ahead of AGENTS.md and the core: {offsets:?}"
+        hex_id_rule_offsets(&prompt).is_none() && prompt.contains("architect-operating-rules"),
+        "the prompt carries the rule itself, or never names its skill"
     );
-    // Shown able to fail: the same check rejects a prompt without the rule.
-    assert!(hex_id_rule_offsets(&flat.replace(HEX_ID_RULE[0], "")).is_none());
+    // Shown able to fail: the same check rejects a skill without the rule.
+    assert!(hex_id_rule_offsets(&skill.replace(HEX_ID_RULE[0], "")).is_none());
 }
 
 #[test]
