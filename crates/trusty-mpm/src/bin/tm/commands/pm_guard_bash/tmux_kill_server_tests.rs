@@ -931,7 +931,7 @@ fn grouped_exec_output_to_shell_is_logged() {
 /// #10702: a signal to the tmux server process is refused in every spelling.
 #[test]
 fn a_tmux_process_kill_is_refused() {
-    for command in [
+    let allowed: Vec<&str> = [
         "pkill tmux",
         "pkill -x tmux",
         "pkill -9 -x tmux",
@@ -946,9 +946,36 @@ fn a_tmux_process_kill_is_refused() {
         "cd /tmp && pkill -x tmux",
         "sh -c 'killall tmux'",
         "pkill -f 'tmux -L default'",
-    ] {
-        assert!(refused(command), "{command} should be refused");
-    }
+        // #10702 r2: a scratch server excuses only its own operand.
+        "kill $(pgrep -x tmux) $(tmux -L scratch1 display -p '#{pid}')",
+        "pkill -f 'tmux|tmux -L scratch1'",
+        // #10702 r2: wrappers with options or counts.
+        "timeout 5 pkill -x tmux",
+        "nice -n 10 pkill tmux",
+        "time pkill tmux",
+        "setsid pkill tmux",
+        "! pkill tmux",
+        "sudo -u root pkill tmux",
+        "env -u X pkill tmux",
+        // #10702 r2: compound heads and nested commands.
+        "(pkill tmux)",
+        "{ pkill tmux; }",
+        "`pkill tmux`",
+        "for p in $(pgrep -x tmux); do kill $p; done",
+        "if true; then pkill tmux; fi",
+        "echo $(pkill tmux)",
+        "x=$(killall tmux)",
+        "eval 'pkill tmux'",
+        "find . -maxdepth 0 -exec pkill tmux \\;",
+        "pgrep tmux | xargs sh -c 'kill $0'",
+        // #10702 r2: a pid list built by ps.
+        "ps ax | grep tmux | awk '{print $1}' | xargs kill",
+        "kill $(ps ax | awk '/tmux/{print $2}')",
+    ]
+    .into_iter()
+    .filter(|command| !refused(command))
+    .collect();
+    assert!(allowed.is_empty(), "should be refused: {allowed:#?}");
 }
 
 /// #10702: unrelated kills, tmux readers, text and scratch servers run.

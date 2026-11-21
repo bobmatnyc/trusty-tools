@@ -20,8 +20,9 @@
 //! word in an interpreter, `ssh`, an alias, a written script, text the guard
 //! cannot read). Every caller is bound, the Architect included.
 //! #10702: a `pkill`/`killall`/`kill` of the tmux server process is refused
-//! too (`signal`). Residual, out of #10665's scope (#10706): a `kill` of a
-//! literal server pid, script bodies, a symlink to the default
+//! too (`signal`; its own residuals, // See #10702: pid indirection through a
+//! file or earlier command, an obfuscated name, a literal pid or process
+//! group). Residual, out of #10665's scope (#10706): script bodies, a symlink to the default
 //! socket created in the same command, and `tmux source-file`.
 //! Test: `tmux_kill_server_tests.rs`; end to end in
 //! `tests/tm_hook_pm_guard_tmux_kill_server_10665.rs`.
