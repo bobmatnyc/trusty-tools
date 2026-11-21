@@ -538,7 +538,7 @@ fn scope_derive_without_a_remote_reads_the_local_repo_key() {
     assert_eq!(scopes.owner().unwrap().as_str(), "trusty/acme");
     git(
         tmp.path(),
-        &["remote", "add", "origin", "git@github.com:Acme/Web.git"],
+        &["remote", "add", "origin", "https://github.com/Acme/Web.git"],
     );
     let scopes = ScopeSet::derive(tmp.path(), None, None).unwrap();
     assert_eq!(scopes.project().as_str(), "trusty/acme/web");
