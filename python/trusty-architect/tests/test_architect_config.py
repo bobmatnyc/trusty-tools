@@ -274,3 +274,17 @@ def test_projects_root_and_claude_config_dir_resolve_absolute_with_env_winning(t
     assert default.projects_root == os.path.expanduser("~/trusty-mpm-projects")
     assert default.claude_config_dir == ac.default_claude_config_dir({})
     assert "projects_root" not in default.unknown and "claude_config_dir" not in default.unknown
+
+
+def test_poll_interval_defaults_to_60_and_is_read_from_the_file(tmp_path):
+    # #11369: one cadence for every poller start path.
+    assert ac.load(root=str(tmp_path), environ={}).poll_interval_s == 60
+    _write(tmp_path, json.dumps({"poll_interval_s": 600}))
+    cfg = ac.load(root=str(tmp_path), environ={})
+    assert cfg.poll_interval_s == 600 and "poll_interval_s" not in cfg.unknown
+
+
+@pytest.mark.parametrize("value", [0, -5, 1.5, "600", True])
+def test_a_bad_poll_interval_fails_and_names_the_key(tmp_path, value):
+    text = _error(tmp_path, json.dumps({"poll_interval_s": value}))
+    assert "poll_interval_s" in text

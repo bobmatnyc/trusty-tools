@@ -35,7 +35,8 @@ use crate::tmux::SystemTmux;
 pub struct PollArgs {
     /// `--once`: one cycle, then exit.
     pub once: bool,
-    /// `--interval N`, as typed: seconds between cycles (default `60`).
+    /// `--interval N`, as typed: seconds between cycles; callers default it
+    /// to [`configured_interval`] (#11369).
     pub interval: String,
     /// `--dry-run`: one cycle that prints, writes no file and sends no keys.
     pub dry_run: bool,
@@ -155,6 +156,65 @@ pub(crate) fn with_live_runner(
         dry_run,
     };
     f(&runner)
+}
+
+/// The `local/architect.json` key holding the poll cadence in whole seconds.
+pub const POLL_INTERVAL_KEY: &str = "poll_interval_s";
+
+/// The cadence when `local/architect.json` names none; `architect_config.py`'s
+/// `DEFAULT_POLL_INTERVAL_S`.
+pub const DEFAULT_POLL_INTERVAL_S: u64 = 60;
+
+/// The poll interval, as `--interval` text, every start path shares.
+///
+/// Why: #11369 — the shell start scripts, `fleet-poll.py` and `tm architect
+/// poll` each carried their own default, so the running cadence depended on
+/// who started the poller.
+/// What: reads [`POLL_INTERVAL_KEY`] from the file `ARCHITECT_CONFIG` names
+/// (which must exist), else `<root>/local/architect.json`, the same lookup as
+/// `architect_config.py`. A missing or blank default file, or an absent key,
+/// gives [`DEFAULT_POLL_INTERVAL_S`].
+/// Test: `configured_interval_reads_architect_json` (tests/verbs_poll.rs);
+/// the cross-path parity test lives in `tm`'s `commands/architect.rs`.
+///
+/// # Errors
+/// [`VerbError::Usage`] for an unreadable file, malformed JSON, a top level
+/// that is not an object, or a key that is not a whole number of at least 1;
+/// the message names the path and key, never the value.
+pub fn configured_interval(
+    root: &Path,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, VerbError> {
+    let named = get("ARCHITECT_CONFIG").filter(|v| !v.is_empty());
+    let path = named
+        .as_ref()
+        .map_or_else(|| root.join("local/architect.json"), PathBuf::from);
+    let shown = path.display();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && named.is_none() => {
+            return Ok(DEFAULT_POLL_INTERVAL_S.to_string());
+        }
+        // #11369: a named or unreadable file never falls back to the default.
+        Err(e) => return Err(VerbError::Usage(format!("{shown}: cannot read: {e}"))),
+    };
+    if text.trim().is_empty() {
+        return Ok(DEFAULT_POLL_INTERVAL_S.to_string());
+    }
+    let data: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| VerbError::Usage(format!("{shown}: not valid JSON ({e})")))?;
+    let object = data
+        .as_object()
+        .ok_or_else(|| VerbError::Usage(format!("{shown}: the top level must be a JSON object")))?;
+    match object.get(POLL_INTERVAL_KEY) {
+        None => Ok(DEFAULT_POLL_INTERVAL_S.to_string()),
+        Some(value) => match value.as_u64() {
+            Some(secs) if secs >= 1 => Ok(secs.to_string()),
+            _ => Err(VerbError::Usage(format!(
+                "{shown}: {POLL_INTERVAL_KEY}: must be a whole number of seconds, at least 1"
+            ))),
+        },
+    }
 }
 
 /// A bad interval is a usage error, as argparse's `type=int` makes it.

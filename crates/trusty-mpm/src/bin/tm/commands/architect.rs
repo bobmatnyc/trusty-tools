@@ -81,6 +81,7 @@ fn execute(
             dry_run,
             shadow,
         } => config(get).and_then(|config| {
+            let interval = poll_interval(interval, &config.root, get)?;
             let args = PollArgs {
                 once,
                 interval,
@@ -172,6 +173,18 @@ fn architect_config(
     verbs::poll_config(&root, &home, get)
 }
 
+/// `--interval` as typed, else the cadence in `local/architect.json`.
+///
+/// Why: #11369 — a clap default of 60 disagreed with the seeded scripts.
+/// Test: `the_poll_start_paths_agree_on_the_interval`.
+fn poll_interval(
+    explicit: Option<String>,
+    root: &Path,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, VerbError> {
+    explicit.map_or_else(|| verbs::configured_interval(root, get), Ok)
+}
+
 /// The home directory, or the verb error a caller reports.
 fn home_dir() -> Result<PathBuf, VerbError> {
     dirs::home_dir().ok_or_else(|| VerbError::Failed("cannot find the home directory".to_owned()))
@@ -236,7 +249,12 @@ mod tests {
     fn cli_parses_architect_verbs() {
         assert!(matches!(
             parse(&["poll"]),
-            ArchitectAction::Poll { once: false, ref interval, dry_run: false, shadow: false } if interval == "60"
+            ArchitectAction::Poll {
+                once: false,
+                interval: None,
+                dry_run: false,
+                shadow: false
+            }
         ));
         assert!(matches!(
             parse(&["poll", "--shadow"]),
@@ -248,7 +266,7 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["poll", "--once", "--interval", "30", "--dry-run"]),
-            ArchitectAction::Poll { once: true, ref interval, dry_run: true, .. } if interval == "30"
+            ArchitectAction::Poll { once: true, ref interval, dry_run: true, .. } if interval.as_deref() == Some("30")
         ));
         assert!(matches!(
             parse(&["serve"]),
@@ -266,7 +284,7 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["poll", "--interval=45"]),
-            ArchitectAction::Poll { ref interval, .. } if interval == "45"
+            ArchitectAction::Poll { ref interval, .. } if interval.as_deref() == Some("45")
         ));
         assert!(matches!(
             parse(&["input-state", "%1", "=tm-a:"]),
@@ -375,5 +393,52 @@ mod tests {
             &mut &b""[..],
         );
         assert_eq!(out.error.map(|e| e.exit_code()), Some(1));
+    }
+
+    /// The interval `fleet-poll.py` resolves for an Architect `root`, read
+    /// through the shipped `architect_config.py` with no environment.
+    fn python_interval(root: &Path) -> String {
+        let scripts = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets/architect/scripts");
+        let code = "import importlib.util, sys\n\
+            spec = importlib.util.spec_from_file_location('ac', sys.argv[1])\n\
+            m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n\
+            print(m.load(root=sys.argv[2], environ={}).poll_interval_s)";
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(code)
+            .arg(scripts.join("architect_config.py"))
+            .arg(root)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// #11369: `start-fleet-poll.sh` (via `fleet-poll.py`) and `tm architect
+    /// poll` read one cadence; this fails when the two start paths disagree.
+    #[test]
+    fn the_poll_start_paths_agree_on_the_interval() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let none = |_: &str| None;
+        let rust = || poll_interval(None, root, &none).expect("interval");
+        assert_eq!((rust(), python_interval(root)), ("60".into(), "60".into()));
+        std::fs::create_dir_all(root.join("local")).expect("local dir");
+        for value in ["600", "45"] {
+            std::fs::write(
+                root.join("local/architect.json"),
+                format!(r#"{{"poll_interval_s": {value}}}"#),
+            )
+            .expect("write config");
+            assert_eq!(rust(), value, "tm architect poll");
+            assert_eq!(python_interval(root), value, "fleet-poll.py");
+        }
+        // `--interval` still overrides the file for one run.
+        let explicit = poll_interval(Some("30".into()), root, &none).expect("explicit");
+        assert_eq!(explicit, "30");
     }
 }
