@@ -347,3 +347,16 @@ fn install_without_the_bundled_docs_fails_naming_the_doc() {
         "a failed install must leave the framework tree unwritten"
     );
 }
+
+/// #11508: a failed hook wiring fails the install (non-zero exit) and never
+/// yields the "Framework installed" line; a wired install still does.
+#[test]
+fn install_outcome_fails_when_hook_wiring_fails() {
+    let err = install_outcome(Err(anyhow::anyhow!("refusing to bake the ephemeral build path")))
+        .expect_err("failed hook wiring must fail the install");
+    let text = format!("{err:#}");
+    assert!(text.contains("install incomplete"), "{text}");
+    assert!(text.contains("refusing to bake"), "{text}");
+    assert!(!text.contains("Framework installed"), "{text}");
+    assert!(install_outcome(Ok(3)).is_ok_and(|l| l.starts_with("Framework installed")));
+}
