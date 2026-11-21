@@ -10,7 +10,7 @@
 //! pattern `architect_skills` uses for skills). [`provenance_line`] renders
 //! the seeded `docs/architect/bundle-provenance.json` as one report line.
 //! Test: `a_refresh_updates_an_unedited_earlier_copy`,
-//! `a_refresh_keeps_an_edited_copy_and_reports_it`,
+//! `a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245`,
 //! `every_embedded_seed_is_in_the_shipped_history`,
 //! `init_and_status_report_the_bundle_provenance`.
 
