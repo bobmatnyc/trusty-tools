@@ -227,12 +227,58 @@ pub fn read_codex_registration(home: &Path, server_key: &str) -> Option<McpRegis
     })
 }
 
-/// The two Claude Code settings files that exist independently of any project.
-fn claude_global_settings_paths(home: &Path) -> Vec<PathBuf> {
-    ["settings.json", "settings.local.json"]
-        .iter()
-        .map(|n| home.join(".claude").join(n))
-        .collect()
+/// The managed Claude Code tier under trusty-mpm's config dir.
+///
+/// Mirrors trusty-mpm's `MANAGED_CLAUDE_CONFIG_SUBDIR`; trusty-search cannot
+/// depend on trusty-mpm.
+const MANAGED_CLAUDE_CONFIG_SUBDIR: &str = "claude-config";
+
+/// The files a config dir `dir` (a `CLAUDE_CONFIG_DIR`) keeps MCP servers in.
+fn claude_config_dir_files(dir: &Path) -> [PathBuf; 3] {
+    [
+        dir.join("settings.json"),
+        dir.join("settings.local.json"),
+        dir.join(".claude.json"),
+    ]
+}
+
+/// Every global Claude Code file that can hold a trusty-search registration.
+///
+/// Why (#10590): a supervisor install launches Claude Code with
+/// `CLAUDE_CONFIG_DIR` set to trusty-mpm's managed tier, and Claude Code keeps
+/// user-scope MCP servers in `.claude.json`. Doctor read only
+/// `~/.claude/settings*.json`, so a connected managed-profile registration
+/// read as absent.
+/// What: the default tier (`~/.claude/settings.json`,
+/// `~/.claude/settings.local.json`, `~/.claude.json`), then the same three
+/// files under `config_dir` (the shell's `CLAUDE_CONFIG_DIR`) and under
+/// `managed_dir` (trusty-mpm's tier), deduplicated, in that order.
+/// Test: `claude_settings_paths_include_the_managed_tier`.
+pub fn claude_settings_paths(
+    home: &Path,
+    config_dir: Option<&Path>,
+    managed_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut paths = vec![
+        home.join(".claude").join("settings.json"),
+        home.join(".claude").join("settings.local.json"),
+        home.join(".claude.json"),
+    ];
+    // #10590: the tiers a managed or relocated Claude Code actually reads.
+    for dir in [config_dir, managed_dir].into_iter().flatten() {
+        for path in claude_config_dir_files(dir) {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    paths
+}
+
+/// trusty-mpm's managed `CLAUDE_CONFIG_DIR`, `~/.trusty-tools/trusty-mpm/claude-config`.
+pub fn managed_claude_config_dir() -> Option<PathBuf> {
+    trusty_common::crate_config::crate_config_dir("trusty-mpm")
+        .map(|d| d.join(MANAGED_CLAUDE_CONFIG_SUBDIR))
 }
 
 /// Every Claude Code verdict for this machine — never an empty list.
@@ -244,23 +290,28 @@ fn claude_global_settings_paths(home: &Path) -> Vec<PathBuf> {
 /// `$HOME` walk, so zero global files is a normal state. A broken project-local
 /// registration would then be reported by nothing on the machine, which is the
 /// failure #5264 was filed about, reproduced for the client this check added.
-/// What: one verdict per existing global file; when neither exists, a single
-/// `Warn` that names the scope limit, so the operator reads "doctor did not
-/// check project-local files" rather than silence.
+/// What: `paths` comes from [`claude_settings_paths`]. One verdict per
+/// registration found in an existing file (`Ok`, or `Error` for the #5264
+/// shape). #10590: a file without a registration is not a verdict of its own,
+/// because one tier holding it is enough; when no file holds one, a single
+/// `Warn` names every file checked. When no file exists at all, a single
+/// `Warn` names the scope limit, so the operator reads "doctor did not check
+/// project-local files" rather than silence.
 /// Test: `absent_global_claude_files_still_emit_a_scope_warning`,
-/// `existing_global_claude_file_is_checked`.
+/// `existing_global_claude_file_is_checked`,
+/// `managed_tier_registration_is_ok_without_a_default_tier_one`,
+/// `files_without_a_registration_in_any_tier_warn`.
 pub fn check_claude_registrations(
-    home: &Path,
+    paths: &[PathBuf],
     server_key: &str,
     probed_base: &str,
     version_of: &dyn Fn(Option<&McpRegistration>) -> String,
 ) -> Vec<CheckResult> {
-    let paths = claude_global_settings_paths(home);
     let existing: Vec<&PathBuf> = paths.iter().filter(|p| p.is_file()).collect();
 
     if existing.is_empty() {
         return vec![CheckResult::Warn(format!(
-            "Claude Code MCP registration: neither global settings file exists ({}) \
+            "Claude Code MCP registration: no global settings file exists ({}) \
              — nothing was checked for this client. `trusty-search setup` also \
              patches PROJECT-LOCAL .claude/settings.json files, which doctor does \
              not scan; check those by hand, or run `trusty-search setup` to \
@@ -273,15 +324,30 @@ pub fn check_claude_registrations(
         ))];
     }
 
-    existing
-        .into_iter()
-        .map(|path| {
-            let reg = read_claude_registration(path, server_key);
+    // #10590: judge the registrations that exist; one tier holding it suffices.
+    let found: Vec<McpRegistration> = existing
+        .iter()
+        .filter_map(|path| read_claude_registration(path, server_key))
+        .collect();
+    if found.is_empty() {
+        return vec![CheckResult::Warn(format!(
+            "Claude Code MCP registration: absent from every global settings file \
+             ({}) — run `trusty-search setup` to register it",
+            existing
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))];
+    }
+    found
+        .iter()
+        .map(|reg| {
             check_registration(
-                reg.as_ref(),
+                Some(reg),
                 "Claude Code",
-                path,
-                &version_of(reg.as_ref()),
+                &reg.path,
+                &version_of(Some(reg)),
                 probed_base,
             )
         })
@@ -471,7 +537,7 @@ mod tests {
         let version = |_: Option<&McpRegistration>| "v".to_string();
 
         let results = check_claude_registrations(
-            tmp.path(),
+            &claude_settings_paths(tmp.path(), None, None),
             "trusty-search",
             "http://127.0.0.1:7878",
             &version,
@@ -511,18 +577,90 @@ mod tests {
         let version = |_: Option<&McpRegistration>| "v".to_string();
 
         let results = check_claude_registrations(
-            tmp.path(),
+            &claude_settings_paths(tmp.path(), None, None),
             "trusty-search",
             "http://127.0.0.1:7878",
             &version,
         );
 
-        assert_eq!(results.len(), 1, "one verdict per existing file");
+        assert_eq!(results.len(), 1, "one verdict per registration");
         assert!(
             results[0].is_error(),
             "an empty args vector is the #5264 defect: {:?}",
             results[0]
         );
+    }
+
+    /// A supervisor install: `~/.claude/settings.json` exists without the
+    /// server, and the managed tier's `.claude.json` holds a working one.
+    fn managed_layout(managed_json: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let default = tmp.path().join(".claude");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("settings.json"), r#"{"model":"opus"}"#).unwrap();
+        let managed = tmp
+            .path()
+            .join(".trusty-tools/trusty-mpm")
+            .join(MANAGED_CLAUDE_CONFIG_SUBDIR);
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(managed.join(".claude.json"), managed_json).unwrap();
+        (tmp, managed)
+    }
+
+    #[test]
+    fn claude_settings_paths_include_the_managed_tier() {
+        let paths = claude_settings_paths(
+            Path::new("/h"),
+            Some(Path::new("/h/.claude")),
+            Some(Path::new("/m")),
+        );
+        assert!(paths.contains(&PathBuf::from("/h/.claude.json")));
+        assert!(paths.contains(&PathBuf::from("/m/.claude.json")));
+        assert!(paths.contains(&PathBuf::from("/m/settings.json")));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.ends_with("settings.json"))
+                .count(),
+            2,
+            "a CLAUDE_CONFIG_DIR equal to ~/.claude is listed once: {paths:?}"
+        );
+    }
+
+    /// #10590: the healthy managed-profile layout gives no warning.
+    #[test]
+    fn managed_tier_registration_is_ok_without_a_default_tier_one() {
+        let (tmp, managed) = managed_layout(
+            r#"{"mcpServers":{"trusty-search":{"type":"stdio","command":"trusty-search","args":["serve"]}}}"#,
+        );
+        let version = |_: Option<&McpRegistration>| "v".to_string();
+        let results = check_claude_registrations(
+            &claude_settings_paths(tmp.path(), None, Some(&managed)),
+            "trusty-search",
+            "http://127.0.0.1:7878",
+            &version,
+        );
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert!(
+            matches!(&results[0], CheckResult::Ok(m) if m.contains(".claude.json")),
+            "expected Ok naming the managed file, got {results:?}"
+        );
+    }
+
+    /// #10590 fail-open check: the managed tier exists but holds no server, so
+    /// the registration is really missing and must still warn.
+    #[test]
+    fn files_without_a_registration_in_any_tier_warn() {
+        let (tmp, managed) = managed_layout(r#"{"mcpServers":{"other":{"command":"x"}}}"#);
+        let version = |_: Option<&McpRegistration>| "v".to_string();
+        let results = check_claude_registrations(
+            &claude_settings_paths(tmp.path(), None, Some(&managed)),
+            "trusty-search",
+            "http://127.0.0.1:7878",
+            &version,
+        );
+        assert_eq!(results.len(), 1, "{results:?}");
+        assert!(results[0].is_warn(), "expected Warn, got {results:?}");
     }
 
     #[test]
