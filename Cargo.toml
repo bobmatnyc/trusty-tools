@@ -28,7 +28,8 @@ resolver = "2"
 # `workers/okf-extract` (#10745) holds the trusty-okf extraction worker. It
 # needs Rust 1.98 (xberg) and builds on its own rust-toolchain.toml, outside the
 # 1.94 workspace MSRV (ADR-0029). Guard: scripts/check_worker_dir_excluded.sh.
-exclude = ["workers/okf-extract"]
+# #10682: vendor/hnsw_rs is a patched dependency, not a member.
+exclude = ["workers/okf-extract", "vendor/hnsw_rs"]
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
 # except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
@@ -576,6 +577,9 @@ quick-xml = "0.41"
 trusty-common = { path = "crates/trusty-common" }
 trusty-embedderd = { path = "crates/trusty-embedderd" }
 trusty-console = { path = "crates/trusty-console" }
+# #10682: hnsw_rs 0.3.4 with the reverse-update lock-order fix; see
+# vendor/hnsw_rs/README.trusty-tools.md. Drop once upstream ships the fix.
+hnsw_rs = { path = "vendor/hnsw_rs" }
 
 # Owner ruling 2026-09-27: workspace crates keep file:line tables so panic and
 # test-failure backtraces still resolve; dependencies carry no debuginfo. The

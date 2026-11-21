@@ -2381,3 +2381,6 @@ mod concurrency_tests;
 // #9275: chunk-row (`{uuid}#n`) search grouping.
 #[path = "chunk_tests.rs"]
 mod chunk_tests;
+// #10682: the parallel open-time replay cannot deadlock in `hnsw_rs`.
+#[path = "replay_deadlock_tests.rs"]
+mod replay_deadlock_tests;

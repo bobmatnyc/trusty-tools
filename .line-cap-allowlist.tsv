@@ -15,3 +15,6 @@ crates/trusty-mpm/src/daemon/api.rs	1176
 crates/trusty-mpm/src/daemon/managed_routes/lifecycle.rs	559
 crates/trusty-search/src/main.rs	570
 scripts/check_asset_test_filter.py	677
+vendor/hnsw_rs/src/hnsw.rs	1277
+vendor/hnsw_rs/src/hnswio.rs	997
+vendor/hnsw_rs/src/libext.rs	1014
