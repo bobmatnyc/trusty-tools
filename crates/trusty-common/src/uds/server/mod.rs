@@ -84,6 +84,7 @@
 //!
 //! Test: `tests.rs` — `dispatch_*` for the decision, `serve_*` for the socket.
 
+mod hangup;
 mod idle;
 mod router;
 mod stream;
@@ -92,6 +93,10 @@ mod wire;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hangup_tests.rs"]
+mod hangup_tests;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -225,6 +230,15 @@ pub enum RpcServerError {
         /// Underlying serde error.
         #[source]
         source: serde_json::Error,
+    },
+
+    /// The client hung up while a method marked with
+    /// [`RpcRouter::mark_read_only`] was running, so the handler was cancelled
+    /// and nothing was answered (#11256).
+    #[error("client hung up; cancelled read-only method {method}")]
+    ClientGone {
+        /// The cancelled method.
+        method: String,
     },
 
     /// Writing the response frame failed.
@@ -450,9 +464,22 @@ pub async fn handle_connection(
 
     // #8531: the connection's peer, so a handler can bind a privilege to the
     // kernel's word rather than to a caller-written param.
-    let outcome = REQUEST_PEER
-        .scope(peer, router.dispatch_streaming(&frame))
-        .await;
+    let dispatch = REQUEST_PEER.scope(peer, router.dispatch_streaming(&frame));
+    let outcome = match router.read_only_method(&frame) {
+        // #11256: a read-only handler is dropped when its client hangs up; a
+        // write (unmarked) runs to completion. Both cancel arms are errors.
+        Some(method) => tokio::select! {
+            biased;
+            outcome = dispatch => outcome,
+            gone = hangup::peer_hung_up(&stream) => {
+                return Err(match gone {
+                    Ok(()) => RpcServerError::ClientGone { method },
+                    Err(source) => RpcServerError::Read { source },
+                });
+            }
+        },
+        None => dispatch.await,
+    };
     let errored = match outcome {
         RpcOutcome::Single(response) => {
             let errored = response.is_error();
@@ -867,6 +894,10 @@ pub async fn serve_until_idle(
                 }
                 Ok(Ok(Served::LivenessProbe)) => {
                     tracing::debug!("liveness probe connected and closed without a frame");
+                }
+                // #11256: a client hang-up is not a server fault.
+                Ok(Err(e @ RpcServerError::ClientGone { .. })) => {
+                    tracing::info!(error = %e, "uds rpc read-only request cancelled");
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "uds rpc connection failed; nothing was answered");
