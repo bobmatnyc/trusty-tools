@@ -4,10 +4,13 @@
 //! and `kill $(tmux display -p '#{pid}')` killed the fleet's server with no
 //! verb to read.
 //! What: [`signal_kill`] reads the command, every `$(…)` and backtick body in
-//! it, and every `eval` / `-c` string, as units. In each unit it scans every
-//! word, so a wrapper (`timeout 5`, `sudo -u root`, `env -u X`, `nice -n 10`),
-//! a compound head (`(`, `{`, `do`, `then`, `!`) or `find -exec` needs no
-//! list. A `pkill`, `killall` or `kill` word is judged on its operands, one
+//! it, and every `eval` / `-c` string, as units. Each unit is split on `;`,
+//! `&&`, `||` and newline outside quotes and substitutions, and each segment
+//! is judged alone. A kill word counts only in command position: first in its
+//! segment, after a compound head (`(`, `{`, `do`, `then`, `!`, `|`,
+//! `find -exec`), or after a wrapper (`timeout 5`, `sudo -u root`,
+//! `env -u X`, `nice -n 10`, `xargs`), so `grep kill tmux.log` is data.
+//! A `pkill`, `killall` or `kill` word is judged on its operands, one
 //! group per word or substitution: a group naming `tmux` is refused unless it
 //! carries its own scratch server (`-L <label>` / `-S <path>` that
 //! [`scratch_server`] accepts); a `pkill -f 'a|b'` pattern is judged per
@@ -20,10 +23,27 @@
 //! command (`tmux display … > f; kill $(cat f)`), an obfuscated name
 //! (`tm[u]x`, `$T`, `printf`), and a literal pid or process group.
 //! Test: `a_tmux_process_kill_is_refused`,
-//! `a_scratch_or_unrelated_process_kill_is_allowed`.
+//! `a_scratch_or_unrelated_process_kill_is_allowed`,
+//! `a_kill_word_outside_command_position_is_allowed`,
+//! `each_compound_segment_is_judged_alone`.
 
 use super::super::super::split_shell_segments;
 use super::{ServerEnv, scratch_server};
+
+/// Words after which the next word runs as a command.
+const HEADS: &[&str] = &[
+    "(", "{", "do", "then", "else", "elif", "!", "|", "&", "&&", "||", ";", "-exec", "-execdir",
+    "-ok",
+];
+
+/// Programs that run their operand as a command (`sudo pkill`).
+const WRAPPERS: &[&str] = &[
+    "sudo", "doas", "env", "timeout", "nice", "nohup", "setsid", "stdbuf", "ionice", "exec",
+    "command", "builtin", "time", "xargs",
+];
+
+/// Shells whose `-c` operand is a command string.
+const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh"];
 
 /// How deep nested `$(…)` / `eval` / `-c` bodies are read.
 const MAX_DEPTH: usize = 4;
@@ -39,10 +59,8 @@ pub(super) fn signal_kill(command: &str, env: &ServerEnv) -> Option<String> {
     collect_units(command, 0, &mut units);
     let substitutions_name_tmux = units[1..].iter().any(|u| unscratched_tmux(u, env));
     units.iter().find_map(|unit| {
-        // The whole unit keeps `$(a | b)` together; segments split `a;pkill`.
-        let mut texts = vec![unit.clone()];
-        texts.extend(split_shell_segments(unit));
-        texts.iter().find_map(|text| {
+        // #10702 r3: each `;`/`&&`/`||`/newline segment is judged alone.
+        compound_segments(unit).iter().find_map(|text| {
             judge_text(text, env, substitutions_name_tmux)
                 .or_else(|| xargs_kill(text, command, env))
         })
@@ -107,8 +125,8 @@ fn substitutions(text: &str) -> Vec<String> {
 /// Why a `pkill`/`killall`/`kill` word in `text` signals the fleet's server.
 fn judge_text(text: &str, env: &ServerEnv, substitutions_name_tmux: bool) -> Option<String> {
     let words = shell_words(text);
-    words.iter().enumerate().find_map(|(i, word)| {
-        let program = kill_word(word)?;
+    (0..words.len()).find_map(|i| {
+        let program = runs_kill(&words, i)?;
         let groups = operand_groups(&words[i + 1..]);
         let named = groups.iter().any(|g| unscratched_tmux(g, env));
         let variable = program == "kill" && groups.iter().any(|g| is_variable(g));
@@ -123,7 +141,8 @@ fn xargs_kill(segment: &str, command: &str, env: &ServerEnv) -> Option<String> {
     let kills = words
         .iter()
         .flat_map(|w| w.split_whitespace().map(str::to_string).collect::<Vec<_>>())
-        .any(|w| kill_word(&w).is_some());
+        .collect::<Vec<_>>();
+    let kills = (0..kills.len()).any(|i| runs_kill(&kills, i).is_some());
     if !(has_xargs && kills) {
         return None;
     }
@@ -132,6 +151,97 @@ fn xargs_kill(segment: &str, command: &str, env: &ServerEnv) -> Option<String> {
         .filter(|s| s.trim() != segment.trim())
         .any(|s| shell_words(s).iter().any(|w| unscratched_tmux(w, env)))
         .then(|| refusal("xargs kill"))
+}
+
+/// `text` split on `;`, `&&`, `||` and newline outside quotes, `$(…)` and
+/// backticks (#10702 r3), so `kill 1\necho tmux` is two commands.
+fn compound_segments(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let (mut out, mut start, mut i) = (Vec::new(), 0, 0);
+    let (mut single, mut double, mut tick, mut depth) = (false, false, false, 0usize);
+    while i < bytes.len() {
+        let b = bytes[i];
+        let width = match b {
+            b'\\' if !single => {
+                i += 2;
+                continue;
+            }
+            b'\'' if !double && !tick && depth == 0 => {
+                single = !single;
+                0
+            }
+            _ if single => 0,
+            b'"' if depth == 0 && !tick => {
+                double = !double;
+                0
+            }
+            b'`' => {
+                tick = !tick;
+                0
+            }
+            b'$' if bytes.get(i + 1) == Some(&b'(') => {
+                depth += 1;
+                i += 2;
+                continue;
+            }
+            b'(' if depth > 0 => {
+                depth += 1;
+                0
+            }
+            b')' if depth > 0 => {
+                depth -= 1;
+                0
+            }
+            _ if double || tick || depth > 0 => 0,
+            b';' | b'\n' => 1,
+            b'&' | b'|' if bytes.get(i + 1) == Some(&b) => 2,
+            _ => 0,
+        };
+        if width > 0 {
+            out.push(text[start..i].to_string());
+            start = i + width;
+            i += width;
+        } else {
+            i += 1;
+        }
+    }
+    out.push(text[start..].to_string());
+    out.retain(|s| !s.trim().is_empty());
+    out
+}
+
+/// The kill program `words[i]` runs, when it sits in command position.
+fn runs_kill(words: &[String], i: usize) -> Option<&'static str> {
+    let program = kill_word(&words[i])?;
+    let opener = words[i]
+        .rsplit('=')
+        .next()
+        .is_some_and(|t| t.starts_with(|c| "({`$!".contains(c)));
+    (opener || command_position(words, i)).then_some(program)
+}
+
+/// Whether `words[i]` runs as a command rather than being an operand.
+fn command_position(words: &[String], i: usize) -> bool {
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        let word = words[j].as_str();
+        if HEADS.contains(&word) || word.ends_with([';', '&', '|', '(', '{']) {
+            return true;
+        }
+        if word == "-c" || word == "-lc" {
+            return j > 0 && SHELLS.contains(&base(&words[j - 1]).as_str());
+        }
+        let skip = WRAPPERS.contains(&base(word).as_str())
+            || word.starts_with('-')
+            || word.parse::<f64>().is_ok()
+            || (word.contains('=') && !word.starts_with('='))
+            || (j > 0 && words[j - 1].starts_with('-'));
+        if !skip {
+            return false;
+        }
+    }
+    true
 }
 
 /// The operands after a kill word, one group per word or substitution.

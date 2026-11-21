@@ -1000,3 +1000,44 @@ fn a_scratch_or_unrelated_process_kill_is_allowed() {
         );
     }
 }
+
+/// #10702 r3: a kill word that is an operand, not a command, is data.
+#[test]
+fn a_kill_word_outside_command_position_is_allowed() {
+    for command in [
+        "grep kill tmux.log",
+        "grep -e kill tmux.log",
+        "rg -n pkill crates/tmux",
+        "git log --grep killall -- tmux",
+        "grep -c kill tmux.log",
+    ] {
+        assert!(!refused(command), "{command} should be allowed");
+    }
+    // The same words in command position are still refused.
+    for command in ["grep x f; pkill tmux", "grep x f | xargs kill; echo tmux"] {
+        assert!(refused(command), "{command} should be refused");
+    }
+}
+
+/// #10702 r3: `;`, `&&`, `||` and newline separate independent commands.
+#[test]
+fn each_compound_segment_is_judged_alone() {
+    for command in [
+        "kill -9 12345\nls tmux",
+        "kill %1\necho tmux",
+        "kill 12345; echo tmux",
+        "kill 12345 && ls tmux",
+        "kill 12345 || ls tmux",
+        "grep kill f\nls tmux",
+    ] {
+        assert!(!refused(command), "{command:?} should be allowed");
+    }
+    for command in [
+        "echo hi\npkill tmux",
+        "true && pkill tmux",
+        "false || killall tmux",
+        "ls; kill $(pgrep -x tmux)",
+    ] {
+        assert!(refused(command), "{command:?} should be refused");
+    }
+}
