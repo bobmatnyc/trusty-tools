@@ -2091,7 +2091,14 @@ fn architect_restart_with_a_stale_checkpoint_exits_4_and_stops_nothing() {
         panic!("one record: {:?}", env.recorded_pids());
     };
     write_il(&dir, 1_792_576_800, Some(1_792_576_900));
-    let out = env.tm(&["architect", "restart", "--dir", dir_arg(&dir)]);
+    // See G0b architect restart: the no-request path keeps the #11365 gate.
+    let out = env.tm(&[
+        "architect",
+        "restart",
+        "--no-checkpoint",
+        "--dir",
+        dir_arg(&dir),
+    ]);
     assert_eq!(out.status.code(), Some(4), "{}", text(&out));
     assert!(
         trusty_mpm::core::process::is_process_alive(pid),

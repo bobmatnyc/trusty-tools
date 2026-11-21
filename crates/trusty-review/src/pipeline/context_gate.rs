@@ -26,9 +26,32 @@ use tracing::{info, warn};
 
 use crate::{
     config::{InvocationSurface, ReviewConfig},
-    integrations::health::ServingState,
+    integrations::{health::ServingState, search_client::IndexStatusResponse},
     pipeline::runner::ReviewDeps,
 };
+
+/// #11545: the query of the one search that reloads a parked index.
+const WAKE_QUERY: &str = "wake";
+
+/// The labelled reason an index status gives, or `None` when it is serving.
+///
+/// `IndexStatusResponse::serving_state` produces only `Serving` and
+/// `Degraded`; a `NotServing` from a future revision is at least as serious,
+/// so it takes the same labelled path. #11545: shared with the post-wake probe.
+fn index_degraded_reason(index: &str, status: &IndexStatusResponse) -> Option<String> {
+    match status.serving_state() {
+        ServingState::Serving => None,
+        ServingState::Degraded(reason) | ServingState::NotServing(reason) => {
+            warn!(
+                index = %index,
+                reason = %reason,
+                "the index under review is degraded — proceeding, review will be labelled \
+                 DEGRADED (#6686)"
+            );
+            Some(reason)
+        }
+    }
+}
 
 /// Decision produced by the required-context preflight gate.
 ///
@@ -129,7 +152,10 @@ pub(crate) struct GateFacts {
 /// healthy_target_index_proceeds_despite_an_unrelated_failed_index,
 /// degraded_target_index_reason_comes_from_the_per_index_probe,
 /// unknown_index_skips_and_names_the_index,
-/// unknown_index_skips_even_when_search_is_opted_out}`;
+/// unknown_index_skips_even_when_search_is_opted_out,
+/// parked_index_is_woken_by_one_search_and_proceeds,
+/// parked_index_wake_failure_is_degraded_and_names_the_wake,
+/// woken_index_is_reprobed_and_a_degraded_status_labels_the_review}`;
 /// `fresh_worktree_tests::fresh_clone_without_any_index_degrades_loudly_instead_of_skipping`
 /// covers the #8411 empty-index branch.
 pub async fn preflight_context(
@@ -269,24 +295,8 @@ pub(crate) async fn preflight_context_detailed(
     //   * the index does not exist        → Skip, naming it (#6687)
     //   * the index exists and is broken  → record a reason, review is labelled
     //   * the status probe itself failed  → record a reason, review is labelled
-    let mut search_degraded_reason: Option<String> = None;
-    match index_status {
-        Ok(status) => match status.serving_state() {
-            ServingState::Serving => {}
-            // `IndexStatusResponse::serving_state` produces only `Serving` and
-            // `Degraded`; a `NotServing` from a future revision is at least as
-            // serious, so it takes the same labelled path rather than being
-            // dropped.
-            ServingState::Degraded(reason) | ServingState::NotServing(reason) => {
-                warn!(
-                    index = %index,
-                    reason = %reason,
-                    "the index under review is degraded — proceeding, review will be labelled \
-                     DEGRADED (#6686)"
-                );
-                search_degraded_reason = Some(reason);
-            }
-        },
+    let search_degraded_reason: Option<String> = match index_status {
+        Ok(status) => index_degraded_reason(index, &status),
         // #6687: an unknown index is a configuration fault, not an outage the
         // operator can opt out of. Every search this review would issue returns
         // `404 unknown index`, `runner_context` used to turn that into an empty
@@ -307,14 +317,40 @@ pub(crate) async fn preflight_context_detailed(
             ));
             return (skip, facts);
         }
+        // #11545: a parked index is present; one search reloads it (the
+        // daemon's documented `restore_via`). A failed wake degrades, naming it.
+        Err(e) if e.is_not_resident() => {
+            match deps.search.search(index, WAKE_QUERY, Some(1)).await {
+                Ok(_) => {
+                    info!(index = %index, "woke parked trusty-search index (#11545)");
+                    // #11545: a woken index is only as good as its stages;
+                    // re-probe once and apply the normal serving_state check.
+                    match deps.search.index_status(index).await {
+                        Ok(status) => index_degraded_reason(index, &status),
+                        Err(e) => Some(format!(
+                            "index `{index}` was parked and woken, but its status could not \
+                             be read after the wake ({e}) — the review ran without a per-index \
+                             health verdict"
+                        )),
+                    }
+                }
+                Err(wake) => {
+                    warn!(index = %index, "parked index wake failed: {wake}");
+                    Some(format!(
+                        "index `{index}` is parked (not resident) and the wake search against \
+                         it failed ({wake}) — the review ran without its code context"
+                    ))
+                }
+            }
+        }
         Err(e) => {
             warn!(index = %index, "index status probe failed: {e}");
-            search_degraded_reason = Some(format!(
+            Some(format!(
                 "the status of index `{index}` could not be read ({e}) — the review ran without \
                  a per-index health verdict, so missing context would not have been detected"
-            ));
+            ))
         }
-    }
+    };
     // #9194: the index reason, in the words the review would be labelled with.
     facts.search = search_degraded_reason
         .as_ref()

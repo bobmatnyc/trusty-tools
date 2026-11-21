@@ -6,6 +6,36 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.11] — 2026-11-20
+
+### Added
+
+- Every `Agent` dispatch now carries a `## Project rules (from CLAUDE.md)` block: the regions of the project CLAUDE.md marked `<!-- tm:agent-rules -->`, or the whole file when it marks none. Every `CLAUDE.md` from the working directory up to the git root contributes, root first, so a subdirectory `CLAUDE.md` adds to the root rules instead of replacing them. Subagents started with `omitClaudeMd: true` keep the project build and test rules (#7684).
+- The project rules block now reaches every tm-managed dispatch that runs hooks: with `[pm_guard] enabled = false` the always-installed `tm hook --egress-guard` appends it instead. `Task` dispatches get it too (#7684).
+- An unreadable `CLAUDE.md` puts a one-line `project rules unavailable: <reason>` notice in the block instead of dropping the rules silently (#7684).
+- `tm architect poll --shadow`: a shadow poller beside the live one that writes only `inbox/shadow/` and acts on nothing (#9779).
+- `tm architect serve [--shadow] [--once]`: runs the Architect poll cycle on local events (inbox, polled tmux pane activity, transcripts), at most one event cycle per 15 s, with a 60 s tick fallback; it attaches no tmux client, so `tm ls -a` and session switching are unaffected; `--shadow` writes only `inbox/shadow/` (#9779).
+- `tm secrets unlock` asks for Touch ID (or the login password) once, then opens the trusty-secrets 8 h unlock grant so secret reads raise no Keychain or 1Password prompt; `tm secrets lock` ends it (#10524).
+- `tm secrets migrate [--dry-run] [--finish | --rollback]` moves every trusty Keychain item into one Keychain item, so `tm secrets unlock` raises one prompt in total; `--rollback` restores the per-item layout (#10524).
+- `tm savings status [--by tool|subagent] [--days N] [--json]` prints, per day and group, the tool-output tokens seen, compressed and saved, the share compressed, an upper-bound would-save figure and the skip-reason split; days with dropped rows are marked undercounted (#11033).
+- `tm doctor` gains a `compress_rows_per_day` row that lists compress rows per day and warns when the latest complete day is more than 80% below the 14-day median (#11033).
+- `tm hook` now compresses chained Bash calls step by step: `cd X && a && b`, `cd X; a`, `a; b`, `a && b` and `a | reader` keep their original text, gain `printf` markers between steps, and pipe into the new `tm compress --chain`, which filters each step with its own tool, passes `cd`/`true`/`export`/`echo`/`date` steps through and exits with the chain's own status (#11507).
+- Each compressed chain step writes its own `savings.jsonl` row named after that step's program and verb, with additive `chain_shape` and `steps` fields; chained opportunity rows name the dominant step instead of `cd` and log a sanitised `command_shape` (separators and program names only) (#11507).
+
+### Fixed
+
+- A freshly spawned clone no longer fails the decommission dirt check over tm's own `.claude/settings.json.<stamp>.bak` snapshot; only a snapshot of tm's exact name shape whose bytes the provisioning ledger recorded is excused (#11221).
+- The `tm dbatg` fallback tests no longer overflow the 2 MiB test-thread stack: they parse only the `dbatg` arguments, and the one test that checks the whole `tm` CLI parses on an 8 MiB thread (CI run 44709752864).
+
+### Changed
+
+- Agents tm deploys and `tm install --reset-agents` writes now carry `omitClaudeMd: true`, so dispatched subagents start without CLAUDE.md while the PM keeps it. Needs Claude Code v2.1.271+; older versions ignore the key (#7684).
+
+### Security
+
+- `tm hook --pm-guard` now refuses any PM or agent write to `~/.ssh/authorized_keys` or `~/.trusty-tools/trusty-common/config.yaml`, through the edit tools or Bash (redirects, `tee`, `cp`, `mv`, `sed -i`, `ln`, `rm`, `truncate`, `chmod`/`chown`/`chgrp`), in `~`, `$HOME` and absolute spellings. Reads, `~/.ssh/known_hosts` and other trusty config files stay writable.
+- `chmod`, `chown` and `chgrp` operands are now judged against every trust anchor.
+
 ## [1.14.10] — 2026-11-20
 
 ### Added
