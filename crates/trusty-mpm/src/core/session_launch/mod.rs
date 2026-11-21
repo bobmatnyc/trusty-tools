@@ -410,7 +410,9 @@ pub struct PrepReport {
 /// a single typed error surface that names which stage failed.
 /// What: variants for the agent-deploy stage and the instruction stage.
 /// Test: not exercised by the happy-path tests; surfaced on invalid paths.
+// #11443: new variants must not break downstream exhaustive matches.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PrepError {
     /// Deploying composed agents to `~/.claude/agents/` failed.
     #[error("agent deploy failed: {0}")]
