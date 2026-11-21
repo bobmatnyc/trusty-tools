@@ -345,7 +345,8 @@ trusty-memory first, before records. Procedure: `architect-search-memory`.
   Monitoring authority is not permission for new production cutovers,
   destructive operations or external messages.
 - Save concise state and decisions, never raw terminal dumps or secret
-  values. Record a secret's location only. When sending input, record the
+  values. Record a secret's location only (an owner-declared throwaway
+  credential is excepted, see tm-secrets). When sending input, record the
   exact text, target, reason, timestamp (from `date -u`, never estimated)
   and the observed acknowledgement.
 

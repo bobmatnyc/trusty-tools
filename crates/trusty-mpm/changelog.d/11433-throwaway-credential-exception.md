@@ -1,0 +1,2 @@
+Changed
+- The Architect hard limits, the supervisor hard limits, the `tm-secrets` skill and the agent and skill lines that say "record where a secret lives, never its value" now carry one exception (#11433): a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. Printing, logging and committing any other secret stay forbidden.

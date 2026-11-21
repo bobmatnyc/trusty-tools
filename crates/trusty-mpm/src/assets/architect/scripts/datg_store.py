@@ -75,7 +75,7 @@ RULES = (
     "5) Unsettled D/A: set esc=architect and SendMessage tm-architect. "
     "6) Relayed answer: write it in, act, close with a verified outcome. Close a card with its evidence "
     "(PR, SHA, URL, path or run id). "
-    "Never change goal ranks. No secret values."
+    "Never change goal ranks. No secret values (owner-declared throwaway credentials excepted, see tm-secrets)."
 )
 
 

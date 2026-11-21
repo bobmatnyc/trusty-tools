@@ -168,7 +168,7 @@ Use `bobmatnyc` for personal repos; use `<org>-account` for organisation repos.
 - Never commit `.env` files containing real secrets
 - Keep `.env.local` in `.gitignore`; provide `.env.example` with dummy values
 - Coordinate with `security` agent for environment variable audits
-- Use the password manager or secrets vault — never hardcode credentials
+- Use the password manager or secrets vault — never hardcode credentials. An owner-declared throwaway or demo credential is excepted (tm-secrets).
 - 🔴 Check that a Keychain item exists by exit status alone:
   `security find-generic-password -s <service> >/dev/null 2>&1 && echo present`.
   Never add `-w` or `-g` to a check — `-w` prints the value on stdout, `-g` on

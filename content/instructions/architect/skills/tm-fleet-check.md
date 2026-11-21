@@ -168,7 +168,7 @@ its `CLAUDE.md`.
     - Commit them to this project's local repository:
       `git add local && git commit -q -m "local: pass HH:MMZ"`. The
       repository has no remote; never add one.
-    - Never write a secret or a raw terminal dump into a record.
+    - Never write a secret or a raw terminal dump into a record. Owner-declared throwaway or demo credentials are excepted (tm-secrets).
 11. **Notify only on signal.** A quiet, unchanged pass needs no message to
     the user. Report meaningful change, completion, failure, or a decision
     the user owes, and never re-ask a pending question.
