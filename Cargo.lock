@@ -11929,7 +11929,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-console"
-version = "0.14.0"
+version = "0.14.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -12424,7 +12424,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-secrets"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "dirs 5.0.1",
  "fd-lock",

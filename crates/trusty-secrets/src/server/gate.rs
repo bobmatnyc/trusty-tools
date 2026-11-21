@@ -422,7 +422,11 @@ impl Gate<'_> {
         }
         // #11215: a time-out row says how long the call waited, or that it
         // was refused at once for a still-hung item.
-        if denied == Some(ErrorKind::BackendTimeout) {
+        // #11429: a Keychain time-out has its own kind, with the same note.
+        if matches!(
+            denied,
+            Some(ErrorKind::BackendTimeout | ErrorKind::KeychainAccessPrompt)
+        ) {
             record.backend_wait = crate::store::timeout_note::last().map(Into::into);
         }
         // #9066: a bridge call names the console's assertion on every record.

@@ -52,6 +52,7 @@ export const KIND_TEXT = {
   ticket_refused: 'The secrets server refused a main-thread ticket.',
   remote_refused: 'The secrets server refused a remote-gate call.',
   gate_refused: 'The secrets server refused a caller that is not the remote gate.',
+  keychain_access_prompt: 'The Keychain did not answer (a prompt may be open); outcome unknown, verify with tm secrets list.',
   internal: 'The secrets server failed.',
 };
 
