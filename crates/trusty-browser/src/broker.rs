@@ -28,6 +28,7 @@ use tokio::task::{AbortHandle, JoinSet};
 
 use crate::audit::{Audit, Clock, SystemClock};
 use crate::entropy::{Entropy, Monotonic, OsEntropy, SystemMonotonic};
+use crate::grant_store::StoreIo;
 use crate::grants::Grant;
 use crate::peer_conn::Peer;
 use crate::peer_darwin::HostRefused;
@@ -111,6 +112,9 @@ pub struct BrokerOptions {
     /// Enrollment peer check (test builds only; see review af942b9e95 #4).
     #[cfg(feature = "test-seams")]
     pub host_check: Arc<dyn HostCheck>,
+    /// Grant store file operations (test builds only), to fail a rewrite or a delete.
+    #[cfg(feature = "test-seams")]
+    pub store_io: StoreIo,
 }
 
 impl BrokerOptions {
@@ -127,6 +131,8 @@ impl BrokerOptions {
             wall_clock: Arc::new(SystemClock),
             #[cfg(feature = "test-seams")]
             host_check: Arc::new(ChromeHostCheck),
+            #[cfg(feature = "test-seams")]
+            store_io: StoreIo::default(),
         }
     }
 }
@@ -187,6 +193,9 @@ pub struct Inner {
     pub sweeper: Option<AbortHandle>,
     /// Last session id handed out.
     pub next_session: u64,
+    /// #11528: the grant store rewrite and its delete both failed, so the file on
+    /// disk may name a revoked grant; `connect` refuses new grants until a persist succeeds.
+    pub store_stale: bool,
 }
 
 impl Inner {
@@ -222,6 +231,8 @@ pub struct Core {
     pub wall_clock: Arc<dyn Clock>,
     /// Enrollment peer check.
     pub(crate) host_check: Arc<dyn HostCheck>,
+    /// File operations of the grant store (injectable in test builds).
+    pub(crate) store_io: StoreIo,
     /// Self, for spawned tasks.
     pub this: Weak<Core>,
     inner: Mutex<Inner>,
@@ -281,6 +292,7 @@ impl Broker {
             halted: false,
             sweeper: None,
             next_session: 0,
+            store_stale: false,
         };
         let core = Arc::new_cyclic(|this| Core {
             audit: Audit::with_clock(&state, options.audit_clock),
@@ -295,6 +307,10 @@ impl Broker {
             // See review af942b9e95 #4: without the seam the real check is fixed.
             #[cfg(not(feature = "test-seams"))]
             host_check: Arc::new(ChromeHostCheck),
+            #[cfg(feature = "test-seams")]
+            store_io: options.store_io,
+            #[cfg(not(feature = "test-seams"))]
+            store_io: StoreIo::default(),
             this: this.clone(),
             inner: Mutex::new(inner),
         });

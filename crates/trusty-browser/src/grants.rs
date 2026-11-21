@@ -181,6 +181,14 @@ impl Core {
         let ident = match Core::profile_grant(inner, &profile) {
             Some(g) => g.ident.clone(),
             None => {
+                // #11528: a stale grant store (rewrite and delete both failed) refuses new
+                // grants. Retry the persist first, so a recovered disk clears the condition.
+                if inner.store_stale {
+                    self.persist_grants(inner);
+                    if inner.store_stale {
+                        return Err(Refusal::new("GrantStoreStale"));
+                    }
+                }
                 let grant = Grant {
                     ident: format!("g-{}", token_hex(&*self.entropy, 6)),
                     scope: "profile".into(),

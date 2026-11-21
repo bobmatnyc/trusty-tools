@@ -12,14 +12,31 @@
 //! incarnation rule in `peer_back` decides whether it survives.
 //! [`Core::persist_grants`] rewrites the store at every grant change; when the
 //! rewrite fails the store is deleted, so a revoked grant can never return.
+//!
+//! No grant outlives its revocation (#11528 criterion c). Three cases cover it.
+//! A rewrite that succeeds leaves a store without the revoked grant. A rewrite
+//! that fails but whose delete succeeds leaves no store, so a restart restores
+//! nothing. A rewrite AND delete that both fail leave a stale store on disk;
+//! `Inner::store_stale` then makes `Core::connect` refuse every new grant
+//! (`GrantStoreStale`) until a later persist succeeds. That persist is retried
+//! at each `retire`, at start, and at the head of each new-grant `connect`.
+//! The flag lives under the broker mutex with the grants, so it cannot race
+//! them. Remaining gap: the flag is in memory. If the broker restarts while a
+//! stale store is still on disk, the store is well-formed, so `restore_grants`
+//! loads it and the revoked grant returns inside its reconnect grace (the
+//! incarnation rule still decides its fate). Closing that needs a durable
+//! marker on a disk that just refused a write and a delete; not attempted.
 //! Test: `store_round_trips_and_is_owner_only`, `a_rejected_store_restores_nothing`,
-//! `a_failed_rewrite_deletes_the_store` here; `a_restart_keeps_a_grant_until_its_grace_ends`,
-//! `a_revoked_grant_does_not_return_after_a_restart` in `tests/broker_grants.rs`.
+//! `a_failed_rewrite_deletes_the_store`, `a_failed_rewrite_and_delete_reports_a_stale_store`
+//! here; `a_restart_keeps_a_grant_until_its_grace_ends`,
+//! `a_revoked_grant_does_not_return_after_a_restart`,
+//! `a_stale_store_refuses_new_grants_until_a_persist_succeeds` in `tests/broker_grants.rs`.
 
 use std::fs;
 use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +59,47 @@ pub enum StoreError {
     /// Bad JSON, or an entry that fails validation.
     #[error("grant store is malformed: {0}")]
     Malformed(String),
+}
+
+/// Why a store rewrite did not leave a trustworthy store.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveError {
+    /// The rewrite failed and the old store was deleted (or never existed).
+    #[error("grant store rewrite failed, store deleted: {0}")]
+    Deleted(io::Error),
+    /// The rewrite failed AND the old store could not be deleted: it is stale.
+    #[error(
+        "grant store rewrite failed ({write}) and the stale store could not be deleted ({delete})"
+    )]
+    Stale {
+        /// The rewrite error.
+        write: io::Error,
+        /// The delete error.
+        delete: io::Error,
+    },
+}
+
+/// Atomic write of the store text to a path.
+pub type WriteFn = Arc<dyn Fn(&Path, &str) -> io::Result<()> + Send + Sync>;
+/// Delete of the store at a path.
+pub type RemoveFn = Arc<dyn Fn(&Path) -> io::Result<()> + Send + Sync>;
+
+/// The two file operations of a rewrite, injectable so a test can fail them.
+#[derive(Clone)]
+pub struct StoreIo {
+    /// Atomically write `text` to the path.
+    pub write: WriteFn,
+    /// Delete the file at the path.
+    pub remove: RemoveFn,
+}
+
+impl Default for StoreIo {
+    fn default() -> StoreIo {
+        StoreIo {
+            write: Arc::new(atomic_write),
+            remove: Arc::new(|p| fs::remove_file(p)),
+        }
+    }
 }
 
 /// One persisted grant: no key, ticket or route secret.
@@ -134,35 +192,32 @@ impl GrantStore {
     }
 
     /// Replace the store with `grants` atomically.
-    pub fn save(&self, grants: &[StoredGrant]) -> io::Result<()> {
-        self.replace(grants, &atomic_write)
+    pub fn save(&self, grants: &[StoredGrant]) -> Result<(), SaveError> {
+        self.replace(grants, &StoreIo::default())
     }
 
-    /// [`GrantStore::save`] with the writer injectable; a failed write deletes the store.
+    /// [`GrantStore::save`] with the file operations injectable; a failed write deletes the store.
     ///
     /// Why: a stale store could bring back a revoked grant.
-    /// What: on a write error the file is removed and the error returned.
-    pub fn replace(
-        &self,
-        grants: &[StoredGrant],
-        write: &dyn Fn(&Path, &str) -> io::Result<()>,
-    ) -> io::Result<()> {
+    /// What: on a write error the file is removed. A removal that fails with
+    /// anything but `NotFound` returns [`SaveError::Stale`], so the caller can fail closed.
+    /// Test: `a_failed_rewrite_deletes_the_store`, `a_failed_rewrite_and_delete_reports_a_stale_store`.
+    pub fn replace(&self, grants: &[StoredGrant], io: &StoreIo) -> Result<(), SaveError> {
         let doc = Document {
             version: 1,
             grants: grants.to_vec(),
         };
-        let text = serde_json::to_string(&doc).map_err(io::Error::other)?;
-        write(&self.path, &text).inspect_err(|_| {
-            // #11528: never leave an older store that still names a now-ended grant.
-            match fs::remove_file(&self.path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => eprintln!(
-                    "trusty-browser: cannot delete grant store {}: {e}",
-                    self.path.display()
-                ),
-            }
-        })
+        let text =
+            serde_json::to_string(&doc).map_err(|e| SaveError::Deleted(io::Error::other(e)))?;
+        let Err(write) = (io.write)(&self.path, &text) else {
+            return Ok(());
+        };
+        // #11528: never leave an older store that still names a now-ended grant.
+        match (io.remove)(&self.path) {
+            Ok(()) => Err(SaveError::Deleted(write)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Err(SaveError::Deleted(write)),
+            Err(delete) => Err(SaveError::Stale { write, delete }),
+        }
     }
 }
 
@@ -210,7 +265,12 @@ impl Core {
     }
 
     /// Rewrite the store from the active grants; on failure delete it.
-    pub fn persist_grants(&self, inner: &Inner) {
+    ///
+    /// Why: a stale store would bring a revoked grant back after a restart.
+    /// What: sets `inner.store_stale` when the rewrite and the delete both fail,
+    /// clears it on any other outcome (the store is then current or gone).
+    /// Test: `a_stale_store_refuses_new_grants_until_a_persist_succeeds`.
+    pub fn persist_grants(&self, inner: &mut Inner) {
         let grants: Vec<StoredGrant> = inner
             .grants
             .iter()
@@ -224,9 +284,12 @@ impl Core {
                 })
             })
             .collect();
-        if let Err(e) = GrantStore::new(&self.state).save(&grants) {
-            eprintln!("trusty-browser: grant store rewrite failed, store deleted: {e}");
+        // #11528: a stale store (rewrite and delete both failed) makes `connect` fail closed.
+        let saved = GrantStore::new(&self.state).replace(&grants, &self.store_io);
+        if let Err(e) = &saved {
+            eprintln!("trusty-browser: {e}");
         }
+        inner.store_stale = matches!(saved, Err(SaveError::Stale { .. }));
     }
 }
 
@@ -309,11 +372,26 @@ mod tests {
     fn a_failed_rewrite_deletes_the_store() {
         let (_d, s) = store();
         s.save(&[one()]).expect("save");
-        let fail = |_: &Path, _: &str| Err(io::Error::other("disk full"));
-        assert!(s.replace(&[], &fail).is_err());
+        let io = StoreIo {
+            write: Arc::new(|_, _| Err(io::Error::other("disk full"))),
+            ..StoreIo::default()
+        };
+        assert!(matches!(s.replace(&[], &io), Err(SaveError::Deleted(_))));
         assert!(
             !s.path.exists(),
             "a stale store must not survive a failed rewrite"
         );
+    }
+
+    #[test]
+    fn a_failed_rewrite_and_delete_reports_a_stale_store() {
+        let (_d, s) = store();
+        s.save(&[one()]).expect("save");
+        let io = StoreIo {
+            write: Arc::new(|_, _| Err(io::Error::other("disk full"))),
+            remove: Arc::new(|_| Err(io::Error::other("read-only"))),
+        };
+        assert!(matches!(s.replace(&[], &io), Err(SaveError::Stale { .. })));
+        assert!(s.path.exists(), "the old store is still on disk");
     }
 }

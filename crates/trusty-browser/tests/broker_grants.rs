@@ -312,3 +312,81 @@ async fn a_refused_handshake_carries_the_published_asset_stamp() {
     );
     broker.close().await;
 }
+
+/// #11528 criterion (c): when a rewrite AND the delete both fail, the store is stale, so the
+/// broker refuses new grants until a later persist succeeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_store_refuses_new_grants_until_a_persist_succeeds() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use trusty_browser::grant_store::StoreIo;
+
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    let failing = Arc::new(AtomicBool::new(false));
+    let (w, r) = (failing.clone(), failing.clone());
+    let real = StoreIo::default();
+    let (real_write, real_remove) = (real.write.clone(), real.remove.clone());
+    let io = StoreIo {
+        write: Arc::new(move |p, t| {
+            if w.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected write failure"));
+            }
+            real_write(p, t)
+        }),
+        remove: Arc::new(move |p| {
+            if r.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("injected delete failure"));
+            }
+            real_remove(p)
+        }),
+    };
+    let store = MemoryKeyStore::new();
+    let account = fs::canonicalize(state)
+        .expect("canon")
+        .to_string_lossy()
+        .into_owned();
+    store
+        .set(&fixture_service(), &account, &fixture_key())
+        .expect("key");
+    let mut options = BrokerOptions::new(state, Box::new(store));
+    options.service = fixture_service();
+    options.clock = Arc::new(clock.clone());
+    options.host_check = Arc::new(Open);
+    options.store_io = io;
+    let broker = Broker::start(options).expect("start");
+
+    let c = cred();
+    let connect = format!(r#"{{"op":"connect",{c}}}"#);
+    let paired = once(state, "enrollment.sock", &format!(r#"{{"op":"pair",{c}}}"#)).await;
+    assert_eq!(paired.get("ok"), Some(&Json::Bool(true)));
+    let worker = handshake(state, "inc-1").await;
+    let first = once(state, "enrollment.sock", &connect).await;
+    let grant = first.get("grant").and_then(Json::as_str).expect("grant");
+
+    // Revoke while the disk refuses both the rewrite and the delete.
+    failing.store(true, Ordering::SeqCst);
+    let revoked = once(
+        state,
+        "operator.sock",
+        &format!(r#"{{"op":"revoke_grant","grant":"{grant}"}}"#),
+    )
+    .await;
+    assert_eq!(revoked.get("ok"), Some(&Json::Bool(true)), "{revoked:?}");
+    let refused = once(state, "enrollment.sock", &connect).await;
+    assert_eq!(refused.get("ok"), Some(&Json::Bool(false)), "{refused:?}");
+    assert_eq!(
+        refused.get("error").and_then(Json::as_str),
+        Some("GrantStoreStale"),
+        "{refused:?}"
+    );
+
+    // The disk recovers: the next connect persists, clears the condition and connects.
+    failing.store(false, Ordering::SeqCst);
+    let again = once(state, "enrollment.sock", &connect).await;
+    assert_eq!(again.get("ok"), Some(&Json::Bool(true)), "{again:?}");
+    let stored = fs::read_to_string(state.join("grants.json")).expect("store");
+    assert!(!stored.contains(grant), "revoked grant left in {stored}");
+    drop(worker);
+    broker.close().await;
+}
