@@ -407,7 +407,8 @@ mod tool {
         assert!(outcome.is_error, "{}", outcome.text);
         assert_eq!(
             outcome.text,
-            "secrets_get_ref: secrets.scopes: cannot determine the project's scopes from its git remote or config"
+            "secrets_get_ref: secrets.scopes: cannot determine the project's scopes from its git remote or config; \
+             add an `origin` remote or run `git config --local trusty.secrets.repo <owner>/<repo>`"
         );
     }
 

@@ -495,6 +495,8 @@ pub mod architect_launch;
 pub mod guard_policy; // #10641: the policy table every pm-guard refusal names.
 // #10127: the Architect's own `--settings` deny and chat-token env scrub.
 pub mod architect_lockdown;
+// MB159a: the bundled agents an Architect launch hides from its roster.
+pub mod architect_agent_scope;
 pub mod architect_prompt;
 // #8878 R1: the Architect's tmux session name, recorded at launch.
 pub mod architect_session;

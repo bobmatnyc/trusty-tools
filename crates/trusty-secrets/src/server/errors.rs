@@ -268,8 +268,10 @@ impl ErrorKind {
         match self {
             Self::InvalidParams => "the params do not match this method's request shape",
             Self::ProjectInvalid => "`project` must be an absolute path to a directory",
+            // #11346: name the remedy — an `origin` remote or the local key.
             Self::ProjectUnresolved => {
-                "cannot determine the project's scopes from its git remote or config"
+                "cannot determine the project's scopes from its git remote or config; \
+                 add an `origin` remote or run `git config --local trusty.secrets.repo <owner>/<repo>`"
             }
             Self::VaultOutOfScope => "the vault is not one of this project's scopes",
             Self::InvalidValue => "the secret value was refused",

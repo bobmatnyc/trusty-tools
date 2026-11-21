@@ -15,8 +15,8 @@
 //! pre-refactor implementation.
 
 use super::doctor_checks::mcp_registration::{
-    check_claude_registrations, check_registration, read_codex_registration,
-    registered_exe_version, McpRegistration,
+    check_claude_registrations, check_registration, claude_settings_paths,
+    managed_claude_config_dir, read_codex_registration, registered_exe_version, McpRegistration,
 };
 use super::doctor_checks::{
     check_daemon_running, check_data_dir, check_http_listener, check_lock_file, check_log_rotation,
@@ -350,8 +350,11 @@ impl DoctorCheck for McpRegistrationCheck {
             &state.location,
         )];
 
+        // #10590: also read the CLAUDE_CONFIG_DIR and trusty-mpm managed tiers.
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        let managed = managed_claude_config_dir();
         results.extend(check_claude_registrations(
-            &home,
+            &claude_settings_paths(&home, config_dir.as_deref(), managed.as_deref()),
             MCP_SERVER_KEY,
             &state.location,
             &version_of,

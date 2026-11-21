@@ -264,11 +264,11 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-completion-standard.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-dashboard.md"
-version = "0.3.1"
+version = "0.3.2"
 
 [[member]]
 path = "instructions/architect/skills/architect-drift-check.md"
@@ -280,11 +280,11 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-host-admin.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-improvements.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-macos.md"
@@ -292,7 +292,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-operating-rules.md"
-version = "0.2.0"
+version = "0.3.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-owner-model.md"
@@ -300,7 +300,7 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-project-provision.md"
-version = "0.1.1"
+version = "0.1.2"
 
 [[member]]
 path = "instructions/architect/skills/architect-review.md"
@@ -312,15 +312,15 @@ version = "0.1.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-strategy.md"
-version = "0.3.0"
+version = "0.4.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-tmux-ops.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/architect-workflow.md"
-version = "0.1.0"
+version = "0.2.0"
 
 [[member]]
 path = "instructions/architect/skills/tm-context-refresh.md"
