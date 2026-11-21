@@ -276,3 +276,39 @@ async fn a_revoked_grant_does_not_return_after_a_restart() {
     assert_eq!(listed(state).await, 0);
     second.close().await;
 }
+
+/// #11529: a refused hello carries the published asset stamp, so a stale worker that never
+/// reaches the acknowledgement can still reload itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_handshake_carries_the_published_asset_stamp() {
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    let broker = start(state, &clock);
+    let c = cred();
+    let paired = once(state, "enrollment.sock", &format!(r#"{{"op":"pair",{c}}}"#)).await;
+    assert_eq!(paired.get("ok"), Some(&Json::Bool(true)));
+    trusty_browser::assets::extension_path(state).expect("publish");
+    let stamp = trusty_browser::assets::published(state).expect("stamp");
+
+    let mut s = UnixStream::connect(state.join("service.sock"))
+        .await
+        .expect("connect");
+    let hello = format!(
+        r#"{{"type":"hello","profile":"{PROFILE}","email":"{EMAIL}","incarnation":"inc-1","nonce":"{NONCE}"}}"#
+    );
+    let challenge = call(&mut s, &hello).await;
+    assert_eq!(
+        challenge.get("type").and_then(Json::as_str),
+        Some("challenge")
+    );
+    let bad = "0".repeat(64);
+    let refusal = call(&mut s, &format!(r#"{{"type":"proof","proof":"{bad}"}}"#)).await;
+    assert_eq!(refusal.get("ok"), Some(&Json::Bool(false)), "{refusal:?}");
+    assert_eq!(
+        refusal.get("assets").and_then(Json::as_str),
+        Some(stamp.as_str()),
+        "{refusal:?}"
+    );
+    broker.close().await;
+}

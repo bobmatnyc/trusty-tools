@@ -189,14 +189,14 @@ pub async fn browser(core: Arc<Core>, stream: UnixStream) {
     .await;
     let (row, incarnation) = match paired {
         Ok(Ok(found)) => found,
-        Ok(Err(stop)) => return answer(stop, &mut writer).await,
+        Ok(Err(stop)) => return answer(&core, stop, &mut writer).await,
         Err(_) => return,
     };
     let peer = match register(&core, writer, row, incarnation).await {
         Ok(peer) => peer,
         Err((stop, writer)) => {
             if let Some(mut w) = writer {
-                answer(stop, &mut w).await;
+                answer(&core, stop, &mut w).await;
             }
             return;
         }
@@ -209,9 +209,15 @@ pub async fn browser(core: Arc<Core>, stream: UnixStream) {
     core.forget(&mut inner, &peer);
 }
 
-async fn answer(stop: Stop, writer: &mut OwnedWriteHalf) {
+/// Write a handshake refusal. #11529: it carries the published asset stamp, so a worker
+/// that never gets an acknowledgement (`checkAssets` in `worker.js`) still learns it is stale.
+async fn answer(core: &Core, stop: Stop, writer: &mut OwnedWriteHalf) {
     if let Stop::Refused(r) = stop {
-        let _ = write_frame(writer, &relayed(&r)).await;
+        let mut frame = relayed(&r);
+        if let Some(stamp) = published(&core.state) {
+            frame.insert("assets", Json::from(stamp));
+        }
+        let _ = write_frame(writer, &frame).await;
     }
 }
 
