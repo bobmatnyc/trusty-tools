@@ -982,6 +982,9 @@ pub(crate) enum Command {
     },
     /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
+    ///
+    /// The scope comes from the checkout's `origin` remote. A checkout with
+    /// no `origin` sets `git config --local trusty.secrets.repo <owner>/<repo>`.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
         /// Secrets action to perform.
