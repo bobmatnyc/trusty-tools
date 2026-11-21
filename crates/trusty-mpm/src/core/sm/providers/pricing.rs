@@ -38,6 +38,16 @@
 /// routed through OpenRouter.
 /// Test: `pricing::tests::cost_per_million_*`.
 pub fn cost_per_million(model: &str) -> (f64, f64) {
+    // Exact Anthropic / OpenAI / Gemini ids (Bedrock `us.anthropic.` and
+    // OpenRouter `openai/` forms and dated snapshots included) are priced from
+    // `llm-prices`, whose rows cite the vendor pricing page and the date they
+    // were read. The family arms below stay the fallback for other ids.
+    if let Some(p) = llm_prices::lookup(model)
+        .filter(|p| matches!(p.provider, "anthropic" | "openai" | "google"))
+        && let (Some(input), Some(output)) = (p.input, p.output)
+    {
+        return (input, output);
+    }
     // NOTE: the family arms below are SUBSTRING matches and are ORDER-SENSITIVE
     // — the first `contains(...)` that hits wins. We check `sonnet` before
     // `haiku`/`opus`, which is safe only because we assume Anthropic model ids

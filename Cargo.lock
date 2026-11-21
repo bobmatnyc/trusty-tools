@@ -5876,6 +5876,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
+name = "llm-prices"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ff0c594d59bd22fd8796786cbbc56dbc541a4fe3130b9de917c51f399a438f1"
+
+[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12196,6 +12202,7 @@ dependencies = [
  "jsonwebtoken",
  "keyring",
  "libc",
+ "llm-prices",
  "lru 0.16.4",
  "nix 0.29.0",
  "notify 6.1.1",

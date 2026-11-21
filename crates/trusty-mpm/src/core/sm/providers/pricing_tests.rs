@@ -25,13 +25,32 @@ fn cost_per_million_matches_anthropic_families() {
     }
     for haiku in ["claude-haiku-4-5", "us.anthropic.claude-haiku-4-5"] {
         let (i, o) = cost_per_million(haiku);
-        assert!((i - 0.80).abs() < EPS, "{haiku} input");
-        assert!((o - 4.00).abs() < EPS, "{haiku} output");
+        assert!((i - 1.00).abs() < EPS, "{haiku} input");
+        assert!((o - 5.00).abs() < EPS, "{haiku} output");
     }
     for opus in ["claude-opus-4-1", "global.anthropic.claude-opus"] {
         let (i, o) = cost_per_million(opus);
         assert!((i - 15.00).abs() < EPS, "{opus} input");
         assert!((o - 75.00).abs() < EPS, "{opus} output");
+    }
+}
+
+#[test]
+fn cost_per_million_prices_current_models_at_list_price() {
+    // Opus 4.5 onward is $5/$25 (Opus 5.5 is $4/$20) and the 5.x Sonnet and
+    // Haiku are cheaper than their families; the substring arms priced them
+    // at $15/$75, $3/$15 and $0.80/$4.
+    for (model, input, output) in [
+        ("claude-opus-4-6", 5.00, 25.00),
+        ("us.anthropic.claude-opus-4-6-v1:0", 5.00, 25.00),
+        ("claude-opus-5-5", 4.00, 20.00),
+        ("claude-sonnet-5-5", 2.00, 10.00),
+        ("claude-haiku-5-5", 0.10, 0.50),
+        ("openai/gpt-5.5", 5.00, 30.00),
+    ] {
+        let (i, o) = cost_per_million(model);
+        assert!((i - input).abs() < EPS, "{model} input {i}");
+        assert!((o - output).abs() < EPS, "{model} output {o}");
     }
 }
 
@@ -61,9 +80,9 @@ fn estimate_cost_usd_known_sonnet() {
 
 #[test]
 fn estimate_cost_usd_known_haiku() {
-    // 1e6 input @ 0.80 + 1e6 output @ 4.00 = 4.80
+    // 1e6 input @ 1.00 + 1e6 output @ 5.00 = 6.00
     let cost = estimate_cost_usd("claude-haiku-4-5", 1_000_000, 1_000_000);
-    assert!((cost - 4.80).abs() < EPS, "expected $4.80, got {cost}");
+    assert!((cost - 6.00).abs() < EPS, "expected $6.00, got {cost}");
 }
 
 #[test]
