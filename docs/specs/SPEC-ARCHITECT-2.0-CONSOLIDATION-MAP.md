@@ -95,7 +95,7 @@ New jobs the scheduler needs (not in the registry): `board-feed`, `share-sync`, 
 4. Factory runs. M40-M4a are disabled and `factory_tasks.py` is retired in this map. Enable them, or drop the concept?
 5. Morning brief. After `morning_brief.py` retires, does the Architect still want a poller `morning_brief` wake, or only the M0d trigger?
 6. Shared state during overlap. Which process owns `inbox/poll-state.json` and `inbox/il-cron-state.json` while Python and Rust both run?
-7. `model_*.py` (ar-Te4). Keep, or retire when the Fable 5.2 versus Opus 5.5 comparison ends? Nothing in `scripts/` schedules `model_autoscore.py daily`.
+7. `model_*.py`. Keep, or retire when the Fable 5.2 versus Opus 5.5 comparison ends? Nothing in `scripts/` schedules `model_autoscore.py daily`.
 8. launchd jobs. `log-drain` stays outside the scheduler here. Should the scheduler adopt it after 2.0? The spike forbids touching existing launchd jobs now.
 9. Registry count. The brief says 46 jobs; the file has 47. Which is right?
 10. Retire confirmations: `chat-serve.py`, `chat-channel.py`, `il-settings.py`, `morning_brief.py`, `factory_tasks.py`. Nothing else in `scripts/` imports `chat-serve.py` or `chat-channel.py`, but callers were not checked outside `scripts/`.
@@ -110,9 +110,9 @@ One row per file. 240 rows. Test, fixture and test-data files follow in the next
 | `README.md` | job (stays a script) | doc (no job) | Trimmed to the scripts that remain. |
 | `alert_triage.py` | Rust module | architect::poller::triage (exists) | Haiku triage already ported to the poller. |
 | `aliases.py` | Rust module | architect::aliases | Name resolver. |
-| `architect-chat-serve.py` | Rust module | architect::mcp | Owner ruling 2026-11-11: architect-mcp moves to Rust; the Muse HTTP chat joins it. |
+| `architect-chat-serve.py` | Rust module | architect::mcp | Decided: architect-mcp moves to Rust; the Muse HTTP chat joins it. |
 | `architect-idle.py` | Rust module | architect::input / verbs::{turn_active,idle} (input exists) | Pane-state checks used before every send. |
-| `architect-mcp.py` | Rust module | architect::mcp | Owner ruling 2026-11-11: architect-mcp moves to Rust; the Muse HTTP chat joins it. |
+| `architect-mcp.py` | Rust module | architect::mcp | Decided: architect-mcp moves to Rust; the Muse HTTP chat joins it. |
 | `architect-start.sh` | Rust module | tm architect init/doctor/start | Port spec N4. |
 | `architect-watchdog.py` | Rust module | architect::poller::architect (exists) | Watchdog step already in the poller. |
 | `architect_config.py` | Rust module | architect::config | Instance settings. |
@@ -234,7 +234,7 @@ One row per file. 240 rows. Test, fixture and test-data files follow in the next
 | `il_agent.py` | Rust module | architect::ledger::{agent,timeline,remind} | IL readers and reminders. |
 | `il_dashboard_sync.py` | Rust module | architect::ledger::aggregate / dashboard::il_sync | IL aggregate and sync into dashboard items. |
 | `il_remind.py` | Rust module | architect::ledger::{agent,timeline,remind} | IL readers and reminders. |
-| `il_remind_migrate.py` | retire | none | One-shot migration of Remind tasks (ar-T6w). |
+| `il_remind_migrate.py` | retire | none | One-shot migration of Remind tasks. |
 | `il_timeline.py` | Rust module | architect::ledger::{agent,timeline,remind} | IL readers and reminders. |
 | `ilio-start.py` | Rust module | architect::hooks::ilio | IL response model hooks; not in the port spec. |
 | `ilio-start.sh` | Rust module | architect::hooks::ilio | IL response model hooks; not in the port spec. |
@@ -258,11 +258,11 @@ One row per file. 240 rows. Test, fixture and test-data files follow in the next
 | `meta_due.py` | job (stays a script) | registry job meta-due (every 10m) | Stays the first scheduled script; the scheduler runs it. Port after 2.0 if its logic should move into the scheduler. |
 | `meta_il.py` | job (stays a script) | registry job meta-due (library) | Writes the System-maintenance IL fields for meta_due.py. |
 | `meta_registry.py` | Rust module | architect::scheduler::{config,schedule,freshness} | Registry lint, cadence math and freshness tests are scheduler core; Python copy stays while meta_due.py runs. |
-| `model_autoscore.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison (ar-Te4); not in the port spec. |
-| `model_cases.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison (ar-Te4); not in the port spec. |
-| `model_cases_report.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison (ar-Te4); not in the port spec. |
-| `model_compare.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison (ar-Te4); not in the port spec. |
-| `model_replay.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison (ar-Te4); not in the port spec. |
+| `model_autoscore.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison; not in the port spec. |
+| `model_cases.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison; not in the port spec. |
+| `model_cases_report.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison; not in the port spec. |
+| `model_compare.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison; not in the port spec. |
+| `model_replay.py` | job (stays a script) | on demand; model_autoscore.py daily is a job candidate | Model comparison; not in the port spec. |
 | `morning_brief.py` | retire | registry job M0d (weekdays 12:30Z) | Its schedule now lives in the registry; the alert step goes away when M0d runs. |
 | `notify-supervisor.sh` | Rust module | architect::notify (hook body); tm project init | Port spec N4. |
 | `notion-mcp.sh` | job (stays a script) | on demand (no job) | Host-local or prototype tool; port spec keeps it Python. |
