@@ -9,15 +9,16 @@
 #   config, socket and grants. The trusty-computer plan (section 7) requires
 #   every live run to use this script instead.
 # What: validates, then runs in the foreground:
-#     env -i HOME=<dir>/home PATH=/usr/bin:/bin TRUSTY_SANDBOX=1 \
+#     env -i TRUSTY_SANDBOX=1 PATH=/usr/bin:/bin \
+#            HOME=<dir>/home \
 #            CUA_DRIVER_RS_TELEMETRY_ENABLED=false CUA_DRIVER_RS_UPDATE_CHECK=false \
 #            [<FORWARDED names the caller exported>] \
 #            <bin> serve --state <dir>/state
 #   No other variable reaches the broker: no token, no CUA_* name besides the
 #   two pinned off, no SSH_AUTH_SOCK. FORWARDED: RUST_LOG, LANG, LC_ALL.
-#   Live cua-driver isolation: HOME=<dir>/home, so `~/.cua-driver` resolves to
-#   <dir>/home/.cua-driver, never the real one. The daemon gets that HOME
-#   too: the broker starts it with `/usr/bin/open -n -g -a CuaDriver`, and
+#   Live cua-driver isolation: the home dir is set to <dir>/home, so
+#   `~/.cua-driver` resolves to <dir>/home/.cua-driver, never the real one.
+#   The daemon inherits that too: the broker starts it with `/usr/bin/open -n -g -a CuaDriver`, and
 #   `open` hands the launched app the caller's environment ("Opened
 #   applications inherit environment variables", open(1)); a probe app opened
 #   from `env -i HOME=<x>` saw HOME=<x> with and without `--env HOME`

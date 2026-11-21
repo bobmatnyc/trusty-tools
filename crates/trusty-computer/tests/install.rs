@@ -3,6 +3,10 @@
 //! Every path is under a temp HOME; `launchctl` and `codesign` are recording
 //! fakes and the CuaDriver version is a closure, so no test reaches launchd,
 //! the Keychain or cua-driver. Ported from trusty-browser `tests/install.rs`.
+//!
+//! These tests require macOS launchd and codesign tools.
+
+#![cfg(target_os = "macos")]
 
 use std::cell::RefCell;
 use std::fs;
