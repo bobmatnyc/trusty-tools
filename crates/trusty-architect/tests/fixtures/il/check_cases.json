@@ -1,0 +1,112 @@
+{
+ "free_task": [
+  "```il\ntask: free: nothing\ndone: x\npct: 0\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "goal_ignored": [
+  "```il\ngoal: whatever\ntask: fx-T01\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "two_tasks_and_open": [
+  "```il\ntask: fx-T01 fx-T02\ndone: x\npct: 1\nopen: fx-D02\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "stale_open": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nopen: fx-D77\nnext: y\n```\n",
+  "IL-REJECT STALE-ID open: fx-D77 is not in the ledger\n",
+  1
+ ],
+ "lookalike_l": [
+  "```il\ntask: fx-T0l\ndone: x\npct: 1\nnext: y\n```\n",
+  "IL-REJECT BADID task: fx-T0l is not base 34 (no o, no l; did you mean 0 or 1)\n",
+  1
+ ],
+ "lookalike_o_comma": [
+  "```il\ntask: fx-T01, fx-D0o\ndone: x\npct: 1\nnext: y\n```\n",
+  "IL-REJECT BADID task: fx-D0o is not base 34 (no o, no l; did you mean 0 or 1)\n",
+  1
+ ],
+ "remind_form": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nremind: oops\nnext: y\n```\n",
+  "IL-REJECT REMIND remind: form <task> at=<ts> [every=14d] \"note\"\n",
+  1
+ ],
+ "remind_every": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nremind: fx-T01 at=2026-12-01 every=0d \"n\"\nnext: y\n```\n",
+  "IL-REJECT REMIND remind: every '0d' must look like 14d, 36h or 2w\n",
+  1
+ ],
+ "remind_ok": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nremind: fx-T01 at=2026-12-01 every=2w \"n\"\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "remind_long_note": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nremind: fx-T01 at=2026-12-01 \"nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn\"\nnext: y\n```\n",
+  "IL-REJECT REMIND remind: note must be one line, 1-160 chars\n",
+  1
+ ],
+ "arabic_pct": [
+  "```il\ntask: fx-T01\ndone: x\npct: ٣\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "r_ref_ok": [
+  "```il\ntask: fx-T01\ndone: R01-a\npct: 5\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "secret_password": [
+  "```il\ntask: fx-T01\ndone: x\npct: 5\nnext: password = abcdefgh1\n```\n",
+  "IL-REJECT SECRET next: a secret-shaped value; record its location only\n",
+  1
+ ],
+ "secret_pem": [
+  "```il\ntask: fx-T01\ndone: x\npct: 5\nnext: -----BEGIN RSA PRIVATE KEY-----\n```\n",
+  "IL-REJECT SECRET next: a secret-shaped value; record its location only\n",
+  1
+ ],
+ "bare_id": [
+  "```il\ntask: T01\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "other_code_suffix": [
+  "```il\ntask: ar-T01\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "stamp_ok": [
+  "```il\ntask: fx-T01@1118\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "new_long_ok": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nnew: T \"tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt\" done_when=\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "new_too_long": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nnew: T \"t\" done_when=\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\nnext: y\n```\n",
+  "IL-REJECT LONG new: line over 1200 characters\n",
+  1
+ ],
+ "tabbed_fence": [
+  "```il \t\ntask: fx-T01\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "two_blocks_last_wins": [
+  "```il\ntask: fx-T77\ndone: x\npct: 1\nnext: y\n```\n\n```il\ntask: fx-T01\ndone: x\npct: 1\nnext: y\n```\n",
+  "OK\n",
+  0
+ ],
+ "colonless_line": [
+  "```il\ntask: fx-T01\ndone: x\npct: 1\nnext: y\nstray words\n```\n",
+  "IL-REJECT FIELD ?: unknown field; allowed goal,task,done,pct,est,remaining,open,new,remind,close,next,delta,need,decided,act,evidence,refs,error,feedback,merge\n",
+  1
+ ]
+}

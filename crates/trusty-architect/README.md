@@ -75,6 +75,27 @@ assert!(matches!(refused, Err(SendError::Refused { .. })));
 assert!(tmux.calls().is_empty());
 ```
 
+## Intent Ledger (`il`, `trusty-architect-il`)
+
+The Intent Ledger reads and writes of `datg.py` and `ilio.py`, on the same
+files (`.trusty-mpm/datg/[<session>/]state.json`, `log.jsonl`, `archive.jsonl`,
+`.lock`), so going back to the Python is running it. This is the live `datg`
+format, not the DOC-82 `dbatg` format of `ledger`.
+
+```text
+trusty-architect-il datg --project P digest --no-log
+trusty-architect-il datg --project P add T --title X --goal G --done-when Y
+echo "$BLOCK" | ILIO_PROJECT=P trusty-architect-il ilio apply
+```
+
+One writer at a time (the Python's `.lock`, 10 s wait), atomic writes,
+schema validation before every write, one `write` per log append. A refused or
+failed write exits 2 with the ledger unchanged. `apply` writes the ledger only;
+the dashboard store and steering log stay in Python. `hook`, `check-dispatch`
+and `stamp` are not ported. `tests/il_golden.rs` replays a scripted session
+against the Python's output; `tests/il_parity.rs` (ignored) does the same on
+copies of the live ledgers.
+
 ## Dependency rule
 
 The crate depends only on std, `serde`, `serde_json`, `thiserror`,

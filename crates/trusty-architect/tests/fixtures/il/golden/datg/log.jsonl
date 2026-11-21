@@ -1,0 +1,14 @@
+{"t":"2026-11-24T11:07Z","id":"fx-prune","ev":"update","note":"archived 2"}
+{"t":"2026-11-30T11:09Z","id":"fx-session","ev":"update","note":"Ship the thing"}
+{"t":"2026-11-30T11:09Z","id":"fx-T01","ev":"update","note":"pulse"}
+{"t":"2026-11-30T11:09Z","id":"fx-session","ev":"update","note":"Ship the thing"}
+{"t":"2026-11-30T11:09Z","id":"fx-T01","ev":"update","note":"pulse"}
+{"t":"2026-11-30T11:09Z","id":"fx-T01","ev":"update","note":"pulse"}
+{"t":"2026-11-30T11:09Z","id":"fx-T01","ev":"update","note":"reminder #3 2026-12-01T09:30Z"}
+{"t":"2026-11-30T11:09Z","id":"fx-T0b","ev":"open","note":"Review the PR"}
+{"t":"2026-11-30T11:09Z","id":"fx-T0c","ev":"open","note":"Relay the notes"}
+{"ts":"2026-11-30T11:09Z","kind":"act","session":"","who":"tm-architect","what":"pushed the branch","owner_words":"go","evidence":"PR #3","goal":"fx-G01","refs":"PR #3"}
+{"t":"2026-11-30T11:09Z","id":"fx-session","ev":"update","note":"Ship the thing"}
+{"t":"2026-11-30T11:09Z","id":"fx-T01","ev":"update","note":"pulse"}
+{"t":"2026-11-30T11:09Z","id":"fx-T05","ev":"done","note":"Draft the migration plan for the old ledger"}
+{"t":"2026-11-30T11:09Z","id":"fx-T04","ev":"done","note":"Review the parser output against the spec examples"}
