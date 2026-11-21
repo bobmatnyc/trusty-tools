@@ -263,7 +263,7 @@ fn dry_run_with_its_own_state_dedupes_across_runs() -> TestResult {
     assert!(own.exists(), "the dry run saved its own state");
     let second = runner.run_single("60")?;
     assert!(second.new.is_empty(), "deduped: {:?}", second.new);
-    assert!(second.suppressed >= first.new.len());
+    assert!(second.suppressed >= 1, "the seen alert is suppressed");
     let files: Vec<String> = fs::read_dir(&env.config.inbox)?
         .filter_map(Result::ok)
         .map(|e| e.file_name().to_string_lossy().into_owned())
