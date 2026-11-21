@@ -62,7 +62,7 @@ fn starts_with_hold_format(h: &str) -> bool {
         || low
             .strip_prefix("usage state:")
             .is_some_and(|r| first(r.trim_start()))
-        || low.strip_prefix("on ").is_some_and(|r| first(r))
+        || low.strip_prefix("on ").is_some_and(first)
 }
 
 /// The entry's head with its bullet and emphasis stripped.
