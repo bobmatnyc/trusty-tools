@@ -14,7 +14,9 @@
 //! first sight of a job sets `next_due` to its next slot: nothing runs for a
 //! slot that predates the scheduler. Failures back off 30 s, 60 s, ... capped
 //! at one hour, with one `meta_miss` per streak (at the third failure, or at
-//! once for a spawn error).
+//! once for a spawn error). Delivery is at-least-once: the state is saved at
+//! the end of a tick, so a crash between a run's spawn and that save reruns
+//! the slot after restart.
 //! Test: `tests/sched_engine.rs`.
 
 use std::collections::HashSet;
@@ -174,6 +176,22 @@ impl<'a> Engine<'a> {
             && let Err(e) = self.state.save(&self.layout.state())
         {
             tracing::error!(error = %e, "scheduler state not saved");
+        }
+        rep
+    }
+
+    /// The stop path: waits `wait` for running children, then terminates the
+    /// ones still alive through the runner and collects their records.
+    pub fn shutdown(&mut self, wait: Duration) -> TickReport {
+        let mut rep = self.wait_idle(wait);
+        if !self.running.is_empty() {
+            tracing::warn!(
+                running = self.running.len(),
+                "stop: killing children still running"
+            );
+            self.runner.terminate_all(Duration::from_secs(2));
+            let more = self.wait_idle(Duration::from_secs(10));
+            rep.records.extend(more.records);
         }
         rep
     }

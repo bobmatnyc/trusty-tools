@@ -10,7 +10,7 @@
 //! silent reset) and [`SchedState::save`] writes a temp file then renames it,
 //! as the poller's state does.
 //! Test: `state_round_trips_through_an_atomic_save`,
-//! `corrupt_state_is_an_error_not_a_reset`, `layout_paths_follow_the_contract`.
+//! `corrupt_state_is_an_error_not_a_reset`, `empty_state_file_is_an_error_not_a_reset`, `layout_paths_follow_the_contract`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -78,7 +78,12 @@ impl SchedState {
     /// [`SchedError::Parse`] when it is not a state document.
     pub fn load(path: &Path) -> Result<Self, SchedError> {
         match std::fs::read_to_string(path) {
-            Ok(text) if text.trim().is_empty() => Ok(Self::default()),
+            // An empty file is a torn write, not a fresh start: defaulting
+            // would reset runs_today, backoff, fail_streak, misses and poll_next.
+            Ok(text) if text.trim().is_empty() => Err(SchedError::Parse {
+                what: path.display().to_string(),
+                detail: "the state file is empty".to_owned(),
+            }),
             Ok(text) => serde_json::from_str(&text).map_err(|e| SchedError::Parse {
                 what: path.display().to_string(),
                 detail: e.to_string(),
@@ -101,14 +106,24 @@ impl SchedState {
     }
 }
 
-/// Writes `bytes` to `path` through `<path>.tmp` and a rename.
+/// Writes `bytes` to `path` durably: temp file, `fsync`, rename, then `fsync`
+/// of the parent directory, so a crash leaves the old or the new file whole.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), SchedError> {
+    use std::io::Write;
     let io = |what: &str, e| SchedError::io(format!("{what} {}", path.display()), e);
-    if let Some(dir) = path.parent() {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    if let Some(dir) = dir {
         std::fs::create_dir_all(dir).map_err(|e| io("create dir for", e))?;
     }
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| io("write", e))?;
-    std::fs::rename(&tmp, path).map_err(|e| io("rename onto", e))
+    let mut file = std::fs::File::create(&tmp).map_err(|e| io("create", e))?;
+    file.write_all(bytes).map_err(|e| io("write", e))?;
+    file.sync_all().map_err(|e| io("sync", e))?;
+    drop(file);
+    std::fs::rename(&tmp, path).map_err(|e| io("rename onto", e))?;
+    let parent = dir.unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| io("sync dir of", e))
 }
