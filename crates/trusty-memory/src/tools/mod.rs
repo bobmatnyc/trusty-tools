@@ -76,6 +76,9 @@ pub(crate) mod recall_access;
 // #11255: the single-palace recall's bounded, off-worker palace open.
 #[cfg(feature = "server")]
 pub mod recall_open;
+// #11613: every per-palace tool's bounded open, ahead of its handler.
+#[cfg(feature = "server")]
+pub(crate) mod palace_gate;
 #[cfg(feature = "server")]
 pub mod recall_ops;
 #[cfg(feature = "server")]
@@ -182,6 +185,9 @@ pub async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> Result<
     // #7493: the fold reads `max_bytes`/`full` off the caller's arguments,
     // which the dispatch below also consumes.
     let cap_args = byte_cap::is_capped(name).then(|| args.clone());
+    // #11613: a palace that cannot open in time answers -32007 before the
+    // handler runs, so a refused write was never applied.
+    palace_gate::gate(state, name, &args).await?;
     let result = dispatch_tool_inner(state, name, args).await;
     if let (Ok(_), Some(args)) = (&result, &stamp_args) {
         stamp_palace_use(state, args, name);

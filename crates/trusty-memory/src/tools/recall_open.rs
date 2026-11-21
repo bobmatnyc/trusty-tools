@@ -197,10 +197,18 @@ fn shared_failure(palace: &str, e: &Arc<anyhow::Error>) -> anyhow::Error {
 /// `a_joiner_of_a_failed_open_gets_the_open_failure`,
 /// `a_joiner_of_a_missing_palace_open_answers_not_found`.
 pub(crate) async fn open_for_recall(state: &AppState, palace: &str) -> Result<Arc<PalaceHandle>> {
+    open_bounded(state, palace, state.recall_limits.open_wait).await
+}
+
+/// [`open_for_recall`] with an explicit `wait` (#11613: the dispatch gate).
+pub(crate) async fn open_bounded(
+    state: &AppState,
+    palace: &str,
+    wait: Duration,
+) -> Result<Arc<PalaceHandle>> {
     if let Some(handle) = state.registry.get(&PalaceId::new(palace)) {
         return Ok(handle);
     }
-    let wait = state.recall_limits.open_wait;
     let deadline = tokio::time::Instant::now() + wait;
     let opening = || -> anyhow::Error {
         PalaceOpening {
