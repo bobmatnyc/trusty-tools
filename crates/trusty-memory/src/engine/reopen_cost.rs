@@ -26,6 +26,7 @@ use crate::engine::palace::PalaceId;
 /// whatever load the host had then. The reporter's host ran at load averages
 /// of 8 to 20, which stretches an open several-fold, so the margin is wide.
 /// What: 1 s. Compared with `>=` against the last measured open.
+#[cfg(any(test, feature = "server"))]
 pub(crate) const SLOW_REOPEN: Duration = Duration::from_secs(1);
 
 /// The last measured open duration of each palace, by id, and the pin
@@ -35,6 +36,7 @@ pub(crate) struct ReopenCosts(DashMap<PalaceId, Duration>, Option<Duration>);
 
 impl ReopenCosts {
     /// A table that pins a palace whose last open took at least `pin`.
+    #[cfg(any(test, feature = "server"))]
     pub(crate) fn pinning_at(pin: Duration) -> Self {
         Self(DashMap::new(), Some(pin))
     }

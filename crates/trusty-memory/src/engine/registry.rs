@@ -447,6 +447,7 @@ impl PalaceRegistry {
     /// budget; armed elsewhere, a load-slowed test open would pin its palace.
     /// What: consuming builder; replaces the cost table with a pinning one.
     /// Test: `registry_tests::a_slow_to_reopen_palace_survives_the_idle_sweep`.
+    #[cfg(any(test, feature = "server"))]
     pub(crate) fn with_reopen_pin(mut self) -> Self {
         self.reopen_costs = Arc::new(ReopenCosts::pinning_at(
             crate::engine::reopen_cost::SLOW_REOPEN,
