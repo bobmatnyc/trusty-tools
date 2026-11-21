@@ -389,3 +389,49 @@ async fn a_stale_store_refuses_new_grants_until_a_persist_succeeds() {
     drop(worker);
     broker.close().await;
 }
+
+/// Revoke a grant, then put back the store that still names it, as a rewrite and delete
+/// that both failed would leave it.
+async fn stale_store_after_revoke(state: &std::path::Path, clock: &Manual) {
+    let first = start(state, clock);
+    let grant = connected(state).await;
+    let stale = fs::read(state.join("grants.json")).expect("store");
+    let revoked = once(
+        state,
+        "operator.sock",
+        &format!(r#"{{"op":"revoke_grant","grant":"{grant}"}}"#),
+    )
+    .await;
+    assert_eq!(revoked.get("ok"), Some(&Json::Bool(true)), "{revoked:?}");
+    first.close().await;
+    fs::write(state.join("grants.json"), stale).expect("stale store");
+}
+
+/// #11582: a stale store naming a revoked grant does not restore it; `grant_end` is the tombstone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stale_store_does_not_restore_a_revoked_grant() {
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    stale_store_after_revoke(state, &clock).await;
+    let second = start(state, &clock);
+    assert_eq!(listed(state).await, 0, "a revoked grant must not return");
+    second.close().await;
+}
+
+/// #11582: an audit log that cannot be read restores nothing (fail closed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unreadable_audit_log_restores_no_grant() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    stale_store_after_revoke(state, &clock).await;
+    let log = state.join("audit.jsonl");
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).expect("chmod");
+    let second = start(state, &clock);
+    let count = listed(state).await;
+    second.close().await;
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).expect("chmod back");
+    assert_eq!(count, 0, "an unreadable audit log must not restore grants");
+}
