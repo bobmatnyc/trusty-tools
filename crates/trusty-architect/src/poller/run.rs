@@ -324,11 +324,15 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         );
         log.push(line.trim_end().to_owned());
         session.state = next;
-        // A dry run saves only to its own ARCHITECT_DRY_RUN_STATE file.
-        let save_to = if self.dry_run {
+        // A dry run saves only to its own ARCHITECT_DRY_RUN_STATE file, and
+        // never over one it could not read.
+        // See #11616
+        let save_to = if session.save_blocked() {
+            None
+        } else if self.dry_run {
             self.config.dry_run_state.clone()
         } else {
-            (!session.save_blocked()).then(|| self.config.state())
+            Some(self.config.state())
         };
         if let Some(path) = save_to {
             save_state(&path, &session.state)?;

@@ -273,6 +273,68 @@ fn dry_run_with_its_own_state_dedupes_across_runs() -> TestResult {
     Ok(())
 }
 
+/// Runs one dry run whose ARCHITECT_DRY_RUN_STATE is `own`, prepared by
+/// `prepare`, beside a live poll-state.json; returns the live bytes before
+/// and after. See #11616.
+fn dry_run_beside_live(
+    own: &std::path::Path,
+    prepare: impl FnOnce(&std::path::Path) -> io::Result<()>,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    let own_str = own.display().to_string();
+    let env = Env::new(&[("ARCHITECT_DRY_RUN_STATE", own_str.as_str())])?;
+    let live = env.config.state();
+    if let Some(dir) = live.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&live, br#"{"live": true}"#)?;
+    let before = fs::read(&live)?;
+    prepare(own)?;
+    let tmux = fleet(
+        &[("tm-architect", "%1", "claude"), ("tm-a", "%2", "claude")],
+        &screen(50),
+    )
+    .fallback("display-message", "tm-architect\n")
+    .fallback("send-keys", "");
+    let clock = FakeClock::new(1_000.0);
+    let mut runner = env.runner(&tmux, &clock, &QuietHost);
+    runner.dry_run = true;
+    runner.run_single("60")?;
+    Ok((before, fs::read(&live)?))
+}
+
+/// A corrupt dry-run state is kept as a copy before it is saved over, as the
+/// live path does; the live state is untouched. Red against 9817f2db99.
+#[test]
+fn dry_run_keeps_a_copy_of_its_corrupt_state() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let (before, after) = dry_run_beside_live(&own, |p| fs::write(p, "{not json"))?;
+    assert_eq!(before, after, "live poll-state.json is byte-identical");
+    let copies: Vec<_> = fs::read_dir(scratch.path())?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".corrupt."))
+        .collect();
+    assert_eq!(copies.len(), 1, "one copy of the corrupt state");
+    assert_eq!(fs::read(copies[0].path())?, b"{not json");
+    Ok(())
+}
+
+/// An unreadable dry-run state (a directory) blocks the save: the cycle
+/// succeeds and nothing is written over it. Red against 9817f2db99.
+#[test]
+fn dry_run_never_saves_over_an_unreadable_state() -> TestResult {
+    let scratch = tempfile::tempdir()?;
+    let own = scratch.path().join("dry-run-state.json");
+    let (before, after) = dry_run_beside_live(&own, |p| {
+        fs::create_dir(p)?;
+        fs::write(p.join("keep"), "x")
+    })?;
+    assert_eq!(before, after, "live poll-state.json is byte-identical");
+    assert!(own.is_dir(), "the unreadable path is not replaced");
+    assert_eq!(fs::read(own.join("keep"))?, b"x");
+    Ok(())
+}
+
 /// A dry run takes no lock, writes no file, sends no keys, sleeps no
 /// interval and runs one cycle.
 #[test]

@@ -79,7 +79,9 @@ fn read_state(config: &Config, dry_run: bool, now: f64, log: &mut Vec<String>) -
     match load_state(&path) {
         (state, None) => Some(Box::new(state)),
         (_, Some(e @ StateError::Corrupt { .. })) => {
-            if dry_run {
+            // See #11616: a dry run with its own state file saves it, so it
+            // keeps a copy first exactly as the live path does.
+            if dry_run && config.dry_run_state.is_none() {
                 log.push(format!("state CORRUPT {e}; dry run: starting empty"));
                 return Some(Box::default());
             }
