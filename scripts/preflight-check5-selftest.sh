@@ -48,7 +48,7 @@
 #     5.  no verdict (exit 3) real registry-unreachable run. An infrastructure
 #                             fault, same as case 3 — must [FAIL].
 #     6.  break (exit 1)      a computed verdict (real trusty-mpm break-lints.out).
-#                             Owner ruling 2026-09-26: this is a REPORT, not a
+#                             Internal numbering policy: this is a REPORT, not a
 #                             stop — must permit (status 0), print [WARN] …
 #                             RECORDED BREAK, and must NOT print [PASS]. See the
 #                             "record break" cases below for what gets written.
@@ -65,8 +65,8 @@
 #     10. empty reason        set with nothing in it is REFUSED, not honoured.
 #     11. break + override    a computed break needs no override and the
 #                             override changes nothing about it — the run still
-#                             takes the RECORDED BREAK arm (owner ruling
-#                             2026-09-26), never the UNVERIFIED one.
+#                             takes the RECORDED BREAK arm (internal numbering
+#                             policy), never the UNVERIFIED one.
 #     12. skip is unforced    the recorded-skip arm permits with NO override set,
 #                             so trusty-mpm does not need one on every publish.
 #                             An override that is always set is not an override.
@@ -88,7 +88,7 @@
 #                             is required for the clean arm, so a malfunctioning
 #                             differ lands in NO VERDICT rather than in [PASS].
 #
-#   "record break" cases (owner ruling 2026-09-26; #8699), driving
+#   "record break" cases (internal numbering policy; #8699), driving
 #   semver_record_break() over the real trusty-mpm 1.6.3 -> 1.6.4 break
 #   (break-lints.out, 25 distinct entries across 7 lints). Records go to
 #   PREFLIGHT_SEMVER_RECORD_DIR, a temp dir OUTSIDE the scratch REPO_ROOT:
@@ -335,7 +335,7 @@ assert_case "no verdict (gate exit 3)" \
   no-verdict.out 3 1 "[FAIL]" "0 crate(s) were compared" "[PASS] semver:"
 
 SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 \
-  assert_case "computed break (gate exit 1) — owner ruling 2026-09-26: reports, never blocks" \
+  assert_case "computed break (gate exit 1) — internal numbering policy: reports, never blocks" \
   break-lints.out 1 0 "[WARN] semver: RECORDED BREAK" "break entry" "[PASS] semver:"
 
 assert_case "summary line unparsable" \
@@ -378,7 +378,7 @@ else
 fi
 
 # --- 11. A computed break needs no override, and the override changes
-#         nothing about it (owner ruling 2026-09-26): the run still takes the
+#         nothing about it (internal numbering policy): the run still takes the
 #         RECORDED BREAK arm, never the UNVERIFIED one — the override answers
 #         "the gate could not run", and this is the gate running and answering.
 raw="$(PREFLIGHT_SEMVER_UNVERIFIED="$REASON" SELFTEST_PKG=trusty-mpm SELFTEST_VERSION=1.6.4 \
@@ -516,7 +516,7 @@ else
 fi
 
 # ===========================================================================
-# (r1)-(r4). "record break" — semver_record_break, owner ruling 2026-09-26.
+# (r1)-(r4). "record break" — semver_record_break, internal numbering policy.
 #            break-lints.out is the real trusty-mpm 1.6.3 -> 1.6.4 break: 7
 #            failed lints, 25 distinct entries.
 # ===========================================================================
@@ -557,6 +557,10 @@ in_tree_files() {
 
 # --- (r1) A structured break list prints the record, writes it OUTSIDE the
 #          working tree, and permits.
+# RULING_DATED regex, copied from rule RULING_DATED (field 3, case-insensitive) in
+# scripts/public_leak_patterns.txt on origin/ci/public-content-guard — the guard
+# is not on main yet. The generator must write nothing this matches (#11535).
+RULING_DATED_RE='(owner|the owner)[ ,:(]*(ruling|decision|said)?[ ,:(]*20[0-9]{2}-[0-9]{2}-[0-9]{2}|ruling 20[0-9]{2}-[0-9]{2}-[0-9]{2}'
 DECL_REL="scripts/semver-accepted-breaks/trusty-mpm-1.6.4.txt"
 FRAG_REL="crates/trusty-mpm/changelog.d/8699-semver-break-1.6.4.md"
 REC_DIR="${RECORDS}/trusty-mpm-1.6.4"
@@ -573,12 +577,15 @@ elif [[ ! -f "${REC_DIR}/${DECL_REL}" ]]; then
   fail_case "record/(r1) ${REC_DIR}/${DECL_REL} was not written" "$(find "$RECORDS" -type f 2>&1)"
 elif ! grep -q '^crate   trusty-mpm$' "${REC_DIR}/${DECL_REL}" \
     || ! grep -q '^version 1.6.4$' "${REC_DIR}/${DECL_REL}" \
-    || ! grep -q 'owner ruling 2026-09-26' "${REC_DIR}/${DECL_REL}" \
+    || ! grep -q 'Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy:' "${REC_DIR}/${DECL_REL}" \
     || ! grep -q '^accept  constructible_struct_adds_field field BuilderSlotResponse.slot_refused$' "${REC_DIR}/${DECL_REL}"; then
   fail_case "record/(r1) the record does not follow the README row format" "$(cat "${REC_DIR}/${DECL_REL}")"
 elif [[ "$(sed -n 1p "${REC_DIR}/${FRAG_REL}" 2>/dev/null)" != "Breaking" ]] \
     || ! grep -q '^- ' "${REC_DIR}/${FRAG_REL}"; then
   fail_case "record/(r1) ${REC_DIR}/${FRAG_REL} is not a Breaking fragment" "$(cat "${REC_DIR}/${FRAG_REL}" 2>&1)"
+elif ! grep -qE "^- .*internal numbering" "${REC_DIR}/${FRAG_REL}" \
+    || grep -qiE "$RULING_DATED_RE" "${REC_DIR}/${DECL_REL}" "${REC_DIR}/${FRAG_REL}"; then
+  fail_case "record/(r1) generated record or fragment carries dated owner-ruling text (#11535)" "$(cat "${REC_DIR}/${DECL_REL}" "${REC_DIR}/${FRAG_REL}" 2>&1)"
 else
   pass_case "record/(r1) record and fragment written outside the working tree, none inside"
 fi
