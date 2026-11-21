@@ -194,20 +194,31 @@ pub enum LockdownError {
 pub struct Lockdown<'a> {
     deny_globs: &'a [&'a str],
     env_unset: &'a [&'a str],
+    /// Agent names hidden from the roster (MB159a); no capitalised variants.
+    deny_agents: &'a [&'a str],
 }
 
 impl Lockdown<'static> {
-    /// The shipped lists: [`ARCHITECT_DENY_GLOBS`] and [`ARCHITECT_ENV_UNSET`].
-    pub const PRODUCTION: Self = Self::new(ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET);
+    /// The shipped lists: [`ARCHITECT_DENY_GLOBS`], [`ARCHITECT_ENV_UNSET`] and
+    /// the MB159a [`ARCHITECT_UNUSED_AGENTS`](super::architect_agent_scope::ARCHITECT_UNUSED_AGENTS).
+    pub const PRODUCTION: Self = Self::new(ARCHITECT_DENY_GLOBS, ARCHITECT_ENV_UNSET)
+        .with_deny_agents(&super::architect_agent_scope::ARCHITECT_UNUSED_AGENTS);
 }
 
 impl<'a> Lockdown<'a> {
-    /// A lockdown over `deny_globs` and `env_unset`.
+    /// A lockdown over `deny_globs` and `env_unset`, hiding no agent.
     pub const fn new(deny_globs: &'a [&'a str], env_unset: &'a [&'a str]) -> Self {
         Self {
             deny_globs,
             env_unset,
+            deny_agents: &[],
         }
+    }
+
+    /// This lockdown, also hiding `agents` from the roster (MB159a).
+    pub const fn with_deny_agents(mut self, agents: &'a [&'a str]) -> Self {
+        self.deny_agents = agents;
+        self
     }
 
     /// Every deny glob plus its [`capitalised`] variant, sorted, deduplicated.
@@ -270,10 +281,12 @@ impl<'a> Lockdown<'a> {
         profile: SessionProfile,
         carrier: Option<&Path>,
     ) -> Result<Option<String>, LockdownError> {
-        if !profile.is_architect() || self.deny_globs.is_empty() {
+        if !profile.is_architect() || (self.deny_globs.is_empty() && self.deny_agents.is_empty()) {
             return Ok(None);
         }
-        let rules = self.deny_rules()?;
+        let mut rules = self.deny_rules()?;
+        // MB159a: the roster cut rides the same payload, so every seam has it.
+        rules.extend(super::architect_agent_scope::deny_rules(self.deny_agents));
         let mut body = match carrier {
             Some(path) => read_object(path)?,
             None => Map::new(),

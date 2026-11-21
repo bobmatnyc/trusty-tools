@@ -332,6 +332,10 @@ fn assert_architect_payload(args: &[String]) {
         .collect();
     want.sort();
     want.dedup();
+    // MB159a: the roster cut follows the sorted tool globs, in list order.
+    want.extend(trusty_mpm::core::architect_agent_scope::deny_rules(
+        &trusty_mpm::core::architect_agent_scope::ARCHITECT_UNUSED_AGENTS,
+    ));
     assert_eq!(
         body["permissions"]["deny"],
         serde_json::json!(want),

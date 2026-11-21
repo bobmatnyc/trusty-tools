@@ -20,6 +20,8 @@
 //! [`verbs`], the `tm architect` commands that replace the scripts (#9822).
 //! #9756 P0 adds [`ledger`], the PM Intent Ledger contract (types, ids,
 //! limits, store layout, `mpm.dbatg.*` request types), not yet wired into `tm`.
+//! MB1595 adds [`sched`], the Architect's one job scheduler, and its
+//! `trusty-architect-sched` binary (shadow mode, parity, cutover, rollback).
 //! #10063 adds [`dashboard`], the Architect dashboard store (formats, locking,
 //! versions, batches, tally), not yet wired into `tm`.
 //! Test: `manifest_has_no_trusty_mpm_dependency` (the leaf rule);
@@ -35,6 +37,8 @@ mod decimal_table;
 mod error;
 mod fake;
 mod input;
+// #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
+pub mod il;
 pub mod ledger;
 mod pointer;
 pub mod poller;
@@ -43,6 +47,8 @@ mod pyjson;
 mod pystr;
 pub mod quiet;
 mod scripted;
+// MB1595: the Architect's one job scheduler and its binary.
+pub mod sched;
 mod secret;
 pub mod self_ctx;
 // #9779: `tm architect serve`, the event-driven cycle.

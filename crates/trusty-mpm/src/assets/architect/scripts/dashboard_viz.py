@@ -48,10 +48,8 @@ def enc(path):
 
 
 def _bodies(store, coll):
-    try:
-        return [dict(d["data"], id=d["id"]) for d in store.list_docs(coll)]
-    except Exception:  # noqa: BLE001 - a missing or unreadable collection gives an empty view, not a 500
-        return []
+    """A collection's docs with their ids; an absent collection is []. #10699: a store error (Unavailable: 503) propagates."""
+    return [dict(d["data"], id=d["id"]) for d in store.list_docs(coll)]
 
 
 def _stem(name):

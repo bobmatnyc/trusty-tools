@@ -64,6 +64,12 @@ The owner and repository come from the `origin` git remote, which must be a
 the project vault first, then the owner vault. If the scope cannot be
 determined, the call fails. It never guesses.
 
+A checkout with no `origin` remote names its identity in its own
+`.git/config`: `git config --local trusty.secrets.repo <owner>/<repo>`. Only
+the local value counts, never a global or system one, and an `origin`
+remote always wins. With neither, the call fails and the error names this
+command.
+
 A `secrets.vault` override in the tracked `.trusty-tools/trusty-secrets.yaml`
 may name only `trusty/<owner>/<name>` under the remote's owner. To point a
 checkout at any other vault, add it to the machine config instead

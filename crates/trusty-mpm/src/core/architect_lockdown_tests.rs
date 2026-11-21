@@ -355,3 +355,77 @@ fn architect_isolated_spec_carries_the_production_lockdown() {
         assert_chat_tokens_unset(&spec.env_unset);
     }
 }
+
+/// MB159a: an Architect launch carries a deny rule for each of the 22
+/// never-dispatched agents, and none for an agent it needs.
+/// Before the fix the payload held only the gworkspace globs.
+#[test]
+fn an_architect_launch_hides_the_unused_agents_and_keeps_the_needed_ones() {
+    use crate::core::architect_agent_scope::ARCHITECT_UNUSED_AGENTS;
+    let spec = spec(SessionProfile::Architect, None, &[], &Lockdown::PRODUCTION).expect("spec");
+    let values = settings_values(&spec);
+    assert_eq!(values.len(), 1, "one --settings: {:?}", spec.args);
+    let deny = deny_of(&values[0]);
+    assert_eq!(ARCHITECT_UNUSED_AGENTS.len(), 22);
+    for name in ARCHITECT_UNUSED_AGENTS {
+        assert!(deny.contains(&format!("Agent({name})")), "{name}: {deny:?}");
+        assert!(deny.contains(&format!("Task({name})")), "{name}: {deny:?}");
+    }
+    for needed in [
+        "research",
+        "python-engineer",
+        "web-ui-engineer",
+        "engineer",
+        "code-critic",
+        "web-qa",
+        "local-ops",
+        "documentation",
+        "code-analyzer",
+        "qa",
+        "rust-engineer",
+        "version-control",
+        "ticketing",
+    ] {
+        assert!(
+            !deny.iter().any(|r| r.contains(&format!("({needed})"))),
+            "{needed} stays available: {deny:?}"
+        );
+    }
+    // The tool-glob rules are still there.
+    assert!(
+        deny.contains(&"mcp__*gworkspace*__*mail*".to_owned()),
+        "{deny:?}"
+    );
+}
+
+/// MB159a: a PM launch is unchanged: no `--settings` payload, no agent rule.
+#[test]
+fn a_pm_launch_hides_no_agent() {
+    let spec = spec(SessionProfile::Pm, None, &[], &Lockdown::PRODUCTION).expect("spec");
+    assert!(settings_values(&spec).is_empty(), "{:?}", spec.args);
+    assert!(
+        !spec.args.iter().any(|a| a.contains("Agent(")),
+        "{:?}",
+        spec.args
+    );
+}
+
+/// MB159a: the rules cover both Claude Code spellings, and the shipped list
+/// names real bundled agents (the legacy `ops` file is the one exception).
+#[test]
+fn the_unused_agent_list_names_bundled_agents_and_both_spellings() {
+    use crate::core::architect_agent_scope::{ARCHITECT_UNUSED_AGENTS, deny_rules};
+    assert_eq!(
+        deny_rules(&["x-engineer"]),
+        ["Agent(x-engineer)", "Task(x-engineer)"]
+    );
+    let agents = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content/agents");
+    let mut seen = std::collections::BTreeSet::new();
+    for name in ARCHITECT_UNUSED_AGENTS {
+        assert!(seen.insert(name), "{name} listed twice");
+        assert!(
+            name == "ops" || agents.join(format!("{name}.md")).is_file(),
+            "{name} is not a bundled agent"
+        );
+    }
+}

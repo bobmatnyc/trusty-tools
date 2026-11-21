@@ -3,7 +3,7 @@ name: architect-completion-standard
 description: Architect skill. Load before clearing, closing or merging a PR or work item, before deciding whether a review finding blocks, and before setting a fix round or a delta review. Covers Done, the fix bar, the round limits and the Architect's clearance rules. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, completion, review, clearance]
 effort: medium
@@ -64,6 +64,11 @@ branch blocks (the Fail-Open check): a fail-open arm is the hang, leak or
 data-loss class the fix bar protects. Other below-BLOCK findings go in one PR
 comment. A release or scope ruling names what it excludes as well as what it
 includes.
+
+## Reports
+
+Report progress by user impact against the user's goals, not by issue counts
+or close ratios.
 
 ## Related skills
 
