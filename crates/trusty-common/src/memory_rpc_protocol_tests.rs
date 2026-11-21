@@ -436,3 +436,55 @@ async fn a_supported_daemon_is_called_and_the_handshake_method_is_not_checked() 
         .expect("the handshake method itself is never checked");
     assert_eq!(body["protocol_version"], 99);
 }
+
+/// A router that answers `-32007` to `memory_list` `opening` times, then `{ok}`.
+fn opening_then_ok(opening: u64, calls: Arc<AtomicU64>) -> RpcRouter {
+    answering(json!({"protocol_version": *SUPPORTED_MEMORY_PROTOCOLS.end()}))
+        .typed::<Value, Value, _, _>("memory_list", move |_| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < opening {
+                    Err(
+                        RpcError::new(CODE_PALACE_OPENING, "palace 'p' is still opening")
+                            .with_data(json!({"kind": "palace_opening", "retryable": true})),
+                    )
+                } else {
+                    Ok(json!({"ok": true}))
+                }
+            }
+        })
+}
+
+/// Why (#11613): the daemon answers `-32007` instead of stalling past the
+/// exchange; the shared client must wait and ask again, not fail.
+/// Test: itself.
+#[tokio::test]
+async fn a_call_waits_out_palace_opening_and_returns_the_answer() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let fake = serve(opening_then_ok(2, Arc::clone(&calls)));
+    let got = call_memory_tool_at_with_timeout(&fake.socket, "memory_list", json!({}), BUDGET)
+        .await
+        .expect("the third ask is answered");
+    assert_eq!(got, json!({"ok": true}));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+/// Why (#11613): the wait is bounded; a palace that never opens is an
+/// error that still reads as `-32007`, never a success.
+/// Test: itself.
+#[tokio::test]
+async fn a_palace_that_never_opens_is_the_opening_error_after_the_budget() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let fake = serve(opening_then_ok(u64::MAX, Arc::clone(&calls)));
+    let budget = Duration::from_millis(600);
+    let started = std::time::Instant::now();
+    let err = call_waiting_out_opening(&fake.socket, "memory_list", json!({}), BUDGET, budget)
+        .await
+        .expect_err("a palace that never opens is an error");
+    assert!(started.elapsed() < budget + Duration::from_secs(2));
+    let rpc = err
+        .downcast_ref::<MemoryRpcError>()
+        .unwrap_or_else(|| panic!("not a daemon answer: {err:#}"));
+    assert!(rpc.is_palace_opening(), "{err:#}");
+    assert!(calls.load(Ordering::SeqCst) >= 2, "it re-asked");
+}
