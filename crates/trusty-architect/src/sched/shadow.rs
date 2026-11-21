@@ -4,9 +4,11 @@
 //! would fire the same wakes as the Python poller. A dry run writes nothing,
 //! so each run needs its own record that a parity join can read, and the run
 //! must never touch the live inbox, take `poll.lock` or send keys (R4).
-//! What: [`plan`] seeds a scratch inbox (`local/meta/shadow/`) with a fresh
-//! copy of the live `poll-state.json`, then builds the dry-run [`RunSpec`]
-//! with `ARCHITECT_INBOX_DIR` pointing at the scratch inbox. [`parse_decision`]
+//! What: [`plan`] gives the dry run its own state file in the scratch inbox
+//! (`local/meta/shadow/dry-run-state.json`), seeded once from the live
+//! `poll-state.json` and then kept, so the dry run dedupes across cycles. It
+//! builds the dry-run [`RunSpec`] with `ARCHITECT_INBOX_DIR` pointing at the
+//! scratch inbox and `ARCHITECT_DRY_RUN_STATE` at that file. [`parse_decision`]
 //! reads the dry-run's stdout: the cycle line (`panes= new= woken= logged=
 //! suppressed= wake=`) and one `would alert:` line per new alert. [`record`]
 //! appends one [`ShadowRecord`] to `inbox/shadow-wakes.jsonl`; the alert detail
@@ -14,6 +16,7 @@
 //! fingerprint, so the join key is session and kind).
 //! Test: `parse_decision_reads_the_cycle_and_alerts`,
 //! `shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one`,
+//! `shadow_plan_keeps_the_dry_runs_own_state`,
 //! `shadow_record_carries_the_contract_fields`, `failed_shadow_run_is_recorded_as_failed`.
 
 use std::path::PathBuf;
@@ -148,12 +151,15 @@ fn wake_target(phrase: &str) -> Option<String> {
     (!target.is_empty()).then(|| target.to_owned())
 }
 
+/// The dry run's own state file, in the scratch inbox.
+pub const DRY_RUN_STATE: &str = "dry-run-state.json";
+
 /// Builds the shadow dry-run for `now`; see the module doc.
 ///
 /// # Errors
 /// [`SchedError::Io`] when the scratch inbox cannot be made or the live state
-/// cannot be copied (an absent live state is not an error: the scratch copy
-/// is removed so the dry run starts empty).
+/// cannot be copied (an absent live state is not an error: the dry run then
+/// starts empty).
 pub fn plan(
     layout: &Layout,
     poll: &PollJob,
@@ -163,20 +169,30 @@ pub fn plan(
     let dir = layout.shadow_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| SchedError::io(format!("create {}", dir.display()), e))?;
-    let scratch = dir.join("poll-state.json");
-    match std::fs::copy(layout.root.join("inbox/poll-state.json"), &scratch) {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // A stale copy would hide the empty live state.
-            let _ = std::fs::remove_file(&scratch);
+    // A copy made every run threw away what the dry run had seen, so every
+    // cycle re-alerted everything the live state lacked: seed once, then keep.
+    let state = dir.join(DRY_RUN_STATE);
+    if !state.exists() {
+        match std::fs::copy(layout.root.join("inbox/poll-state.json"), &state) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(SchedError::io(format!("seed {}", state.display()), e)),
         }
-        Err(e) => return Err(SchedError::io(format!("seed {}", scratch.display()), e)),
     }
     let stdout = dir.join("last-stdout.txt");
     std::fs::write(&stdout, b"")
         .map_err(|e| SchedError::io(format!("write {}", stdout.display()), e))?;
-    env.retain(|(k, _)| k != "ARCHITECT_INBOX_DIR" && k != "ARCHITECT_PROJECT_DIR");
+    env.retain(|(k, _)| {
+        !matches!(
+            k.as_str(),
+            "ARCHITECT_INBOX_DIR" | "ARCHITECT_PROJECT_DIR" | "ARCHITECT_DRY_RUN_STATE"
+        )
+    });
     env.push(("ARCHITECT_INBOX_DIR".to_owned(), dir.display().to_string()));
+    env.push((
+        "ARCHITECT_DRY_RUN_STATE".to_owned(),
+        state.display().to_string(),
+    ));
     env.push((
         "ARCHITECT_PROJECT_DIR".to_owned(),
         layout.root.display().to_string(),

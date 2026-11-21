@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 
+// See trusty_common::launchd_labels::ARCHITECT_SCHED (canonical; leaf crate, #9171 A1)
 /// The agent label (the `com.trusty.<name>` convention).
 pub const LABEL: &str = "com.trusty.architect-sched";
 
