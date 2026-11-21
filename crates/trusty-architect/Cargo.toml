@@ -17,6 +17,11 @@ readme = "README.md"
 # Ship the library, README and changelog; `tests/` and `changelog.d/` stay out.
 include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
 
+# #11600: the Intent Ledger command (datg.py and ilio.py port).
+[[bin]]
+name = "trusty-architect-il"
+path = "src/bin/trusty-architect-il.rs"
+
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and
 # libc. A2 adds serde/serde_json for the parity JSON; regex and hashing are
