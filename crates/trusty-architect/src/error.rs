@@ -138,6 +138,10 @@ pub enum SelfCtxError {
     /// A usage field (or `usage` itself) is not what the sum needs.
     #[error("transcript usage field {0:?} is not an integer")]
     BadUsage(String),
+    /// The bar threshold divides by a window of 0 (df-T7i P1b; the
+    /// prototype raises `ZeroDivisionError` and loses the cycle).
+    #[error(transparent)]
+    ZeroWindow(#[from] crate::poller::ctx_bar::ZeroWindow),
 }
 
 /// An environment value the poller cannot use (#9171 A3a).

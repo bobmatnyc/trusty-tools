@@ -23,13 +23,32 @@ const EXIT_OUTPUT_LOST: i32 = 1;
 /// Exit status a shell reports for a program it found but could not run.
 const EXIT_NOT_EXECUTABLE: i32 = 126;
 
+/// [`run`] for a parsed `tm compress`; any other command is a no-op.
+///
+/// #11507: keeps `main.rs` under the SLOC cap as `Compress` grew a field.
+pub(crate) async fn dispatch(command: crate::cli::Command) -> anyhow::Result<()> {
+    match command {
+        crate::cli::Command::Compress {
+            tool,
+            command,
+            chain,
+        } => run(&tool, &command, chain.as_deref()).await,
+        _ => Ok(()),
+    }
+}
+
 /// `tm compress` dispatch: the stdin filter, or the run mode for a command.
 ///
-/// What: an empty `argv` → [`super::compress::run_compress`]; otherwise
+/// What: a `--chain` nonce → `compress_chain::run_chain` (#11507), exiting
+/// with the chain's status; an empty `argv` → [`super::compress::run_compress`]; otherwise
 /// [`run_compress_command`], then exits with the program's status.
 /// Test: `cli_parses_compress_with_a_command`, and end to end
 /// `tm_compress_run_mode_compresses_and_keeps_the_exit_status`.
-pub(crate) async fn run(tool: &str, argv: &[String]) -> anyhow::Result<()> {
+pub(crate) async fn run(tool: &str, argv: &[String], chain: Option<&str>) -> anyhow::Result<()> {
+    // #11507: a chain exits with the chain's own status.
+    if let Some(nonce) = chain {
+        std::process::exit(super::compress_chain::run_chain(tool, nonce).await?);
+    }
     if argv.is_empty() {
         return super::compress::run_compress(tool).await;
     }

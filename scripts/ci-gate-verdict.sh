@@ -62,6 +62,7 @@ check8-decision|CHECK 8 decision self-test (a run's head_sha is not what it gate
 fastembed-cache-selftest|Fastembed cache check self-test|-
 website-corpus|Website content corpus|-
 changelog-fragment|Per-PR changelog fragment|-
+public-leaks|Public-content leak guard|-
 test|Rust tests (pre-publish gate)|pr_skip
 "
 

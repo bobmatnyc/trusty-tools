@@ -246,8 +246,13 @@ impl SystemTmux {
     }
 
     /// The `Command` [`Tmux::run`] spawns for `args`; building it spawns nothing.
+    ///
+    /// `-u` makes tmux treat the client as UTF-8 whatever the locale: without a
+    /// UTF-8 locale (`env -i`, launchd) tmux rewrites the TAB in `-F` output to
+    /// `_`, and every `list-panes` row fails to parse (#11543).
     pub fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(&self.program);
+        cmd.arg("-u");
         if let Some(socket) = &self.socket {
             cmd.arg("-S").arg(socket);
         }
@@ -323,13 +328,15 @@ mod tests {
 
         let (program, plain) = argv(&SystemTmux::new().command(&args));
         assert_eq!(program, "tmux");
-        assert_eq!(plain, args);
+        assert_eq!(plain[0], "-u", "#11543: locale-proof tab separators");
+        assert_eq!(plain[1..], args);
 
         let (program, socketed) = argv(&SystemTmux::with_socket("/tmp/fleet.sock").command(&args));
         assert_eq!(program, "tmux");
         assert_eq!(
             socketed,
             [
+                "-u",
                 "-S",
                 "/tmp/fleet.sock",
                 "send-keys",

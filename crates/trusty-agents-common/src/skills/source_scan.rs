@@ -12,7 +12,7 @@
 //! companion directory was reached afterwards, keyed off the stem. There was no
 //! working directory-skill path to route the user tier through; both tiers read
 //! the same blind scan. Two real user skills sat hidden behind it for weeks:
-//! `duetto-design-system` and `cto-kb-ingest`.
+//! a design-system skill and a knowledge-base ingest skill.
 //!
 //! What: [`scan_skill_sources`] returns one [`SourceSkill`] per skill in
 //! `source`, accepting BOTH layouts, plus the names it had to reject so the

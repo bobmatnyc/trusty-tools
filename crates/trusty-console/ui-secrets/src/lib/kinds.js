@@ -50,6 +50,9 @@ export const KIND_TEXT = {
   bridge_refused: 'The secrets server refused the console bridge.',
   agent_key_denied: 'The operator denied this key to agents (per-key deny).',
   ticket_refused: 'The secrets server refused a main-thread ticket.',
+  remote_refused: 'The secrets server refused a remote-gate call.',
+  gate_refused: 'The secrets server refused a caller that is not the remote gate.',
+  keychain_access_prompt: 'The Keychain did not answer (a prompt may be open); outcome unknown, verify with tm secrets list.',
   internal: 'The secrets server failed.',
 };
 

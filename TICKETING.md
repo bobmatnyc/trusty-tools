@@ -200,6 +200,8 @@ table. `publish = false` today: `tc-services`, `trusty-code-gui`, `trusty-crate-
 - Rung 1-3, docs, CI: close at Merged, `--note "PR #M squash <sha>"`. Docs-only closes on merged-text
   evidence: the squash SHA plus confirmation the text is present on `origin/main` at the cited file/symbol.
 - Rung 4-6: close at Deployed, with the live evidence in the note.
+- At every rung the note lists each acceptance criterion with its evidence and
+  the follow-up issue numbers, or "none" ("Title and body", below).
 - Published is set later, on the already-closed issue, by release tooling. It never reopens an issue.
 - A merged fix that fails live verification stays open, at Merged, until a follow-up PR is open.
 
@@ -208,6 +210,10 @@ single-crate work stays a plain issue. Children are native sub-issues. The epic'
 child Status, at least Groomed once selected, never set by hand. It closes when every child is closed.
 The ticketing agent recomputes it on each child transition. The tracker/phase pattern below applies on top
 of this when the work has a gate between stages.
+
+**Intake.** A factory session takes its next issue with `tm issue next`: an open issue with a ready board Status or a ready
+`status:*` label, acceptance criteria, and no other assignee. Rule, ranking and label mapping:
+[docs/reference/issue-next.md](docs/reference/issue-next.md).
 
 **Labels.** `status:*` labels are retired after the hand-maintained period. `ws/<session>`, type,
 component and priority labels stay. Target commands: `tm issue transition N <Status>` writes the field;
@@ -419,7 +425,8 @@ may still be filed — search first.
   `fix(trusty-search): watcher misses renames on external volumes`, not "Bug in
   system".
 - **Body:** the defect or outcome, the decisive evidence, and one to four
-  observable closure conditions. Nothing else. No structured headings. Point at
+  acceptance criteria as a labelled `Acceptance criteria:` list (rule below).
+  Nothing else. No structured headings. Point at
   a linked issue, spec, ADR, or PR rather than restating it. Cite file and
   symbol — `agent_source.rs::autodeploy_agents` — never line numbers. Past a
   short screen it is over-written.
@@ -430,6 +437,18 @@ may still be filed — search first.
   (impact, affected versions, disclosure state), and a research or audit issue
   (its evidence inventory).
 - Every reference renders as a clickable markdown link, never a bare number.
+
+**Acceptance criteria.** Every bug, feature, task and epic issue states one to
+four testable acceptance criteria, each a check that can fail for a named
+reason; an epic states them on its phase issues. They set the good-enough bar:
+the issue closes when each criterion has evidence. Anything beyond the bar
+becomes a follow-up issue filed at close, with its own criteria and the
+`stretch` label; it never widens this issue's scope. The closing note lists
+every criterion with its evidence, plus the follow-up issue numbers or "none".
+
+The issue templates carry it as an `## Acceptance criteria` heading. `tm issue
+audit` warns when a body has neither form; it becomes a failure one release
+later (#11469).
 
 ## Symptom Titles and Area Labels (owner decision, 2026-09-27)
 

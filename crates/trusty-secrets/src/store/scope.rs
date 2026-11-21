@@ -39,6 +39,29 @@ const PINNED_OUT_OF_SCOPE: &str =
 const TRACKED_OVERRIDE_OUT_OF_SCOPE: &str = "a `secrets.vault` override in the tracked repo file \
      must be `trusty/<owner>/<name>` under the origin remote's owner";
 
+/// The fixed reason for a checkout with neither an `origin` remote nor a
+/// `trusty.secrets.repo` git config value; it names both remedies.
+// #11346: the error names the key to set.
+const NO_REMOTE: &str = "no `origin` git remote; add one, or run \
+     `git config --local trusty.secrets.repo <owner>/<repo>` in the checkout";
+
+/// The fixed reason for a `trusty.secrets.repo` value that does not parse.
+const BAD_DECLARED_REPO: &str =
+    "`trusty.secrets.repo` must be exactly `<owner>/<repo>` with valid names";
+
+/// Parse a `trusty.secrets.repo` value: exactly `<owner>/<repo>`.
+///
+/// Why: #11346 — the explicit identity of a checkout with no `origin`.
+/// What: two `/`-separated segments, each a valid owner or repository name;
+/// anything else is a fixed reason, never the value.
+/// Test: `scope_derive_without_a_remote_reads_the_local_repo_key`.
+fn parse_declared_identity(value: &str) -> Result<(OwnerName, RepoName), &'static str> {
+    let (owner, repo) = value.split_once('/').ok_or(BAD_DECLARED_REPO)?;
+    let owner = OwnerName::new(owner).map_err(|_| BAD_DECLARED_REPO)?;
+    let repo = RepoName::new(repo).map_err(|_| BAD_DECLARED_REPO)?;
+    Ok((owner, repo))
+}
+
 /// Why [`parse_remote_identity`] refused a remote URL.
 ///
 /// What: a fixed reason, never the URL.
@@ -233,11 +256,14 @@ impl ScopeSet {
     /// ([`SecretsError::UnsupportedRemoteHost`]). The override is the
     /// machine config's `project_vaults` entry for this `<owner>/<repo>`
     /// when present, else `tracked` (the repo file's `secrets.vault`),
-    /// checked by [`Self::from_identity`]. With no remote there is no owner
-    /// to check an override against, so the result is
+    /// checked by [`Self::from_identity`]. With no remote, the identity is
+    /// the checkout's own `git config --local trusty.secrets.repo
+    /// <owner>/<repo>` (#11346); with neither there is no owner to check an
+    /// override against, so the result is
     /// [`SecretsError::ScopeUndetermined`] whatever the config says.
     /// Test: `scope_derive_reads_the_origin_remote`,
     /// `scope_derive_without_a_remote_fails_closed`,
+    /// `scope_derive_without_a_remote_reads_the_local_repo_key`,
     /// `scope_non_github_remote_is_refused_with_fixed_text`,
     /// `scope_tracked_override_outside_the_owner_is_refused`.
     pub fn derive(
@@ -259,12 +285,24 @@ impl ScopeSet {
         tracked: Option<VaultName>,
         machine: Option<&MachineSecretsConfig>,
     ) -> Result<(Self, RemoteIdentity), SecretsError> {
-        // #9328: no remote, no owner — a tracked override cannot be checked.
-        let url = platform::origin_remote_url(dir).ok_or(SecretsError::ScopeUndetermined {
-            dir: dir.to_path_buf(),
-            reason: "no `origin` git remote",
-        })?;
-        let (owner, repo) = parse_remote_identity(&url).map_err(|r| r.into_error(dir))?;
+        let (owner, repo) = match platform::origin_remote_url(dir) {
+            Some(url) => parse_remote_identity(&url).map_err(|r| r.into_error(dir))?,
+            // #11346: no origin — use the checkout's own explicit
+            // `trusty.secrets.repo`; never guess one (#9328: no owner, no scope).
+            None => {
+                let declared =
+                    platform::local_secrets_repo(dir).ok_or(SecretsError::ScopeUndetermined {
+                        dir: dir.to_path_buf(),
+                        reason: NO_REMOTE,
+                    })?;
+                parse_declared_identity(&declared).map_err(|reason| {
+                    SecretsError::ScopeUndetermined {
+                        dir: dir.to_path_buf(),
+                        reason,
+                    }
+                })?
+            }
+        };
         let vault_override = match machine.and_then(|m| m.project_vault(&owner, &repo)) {
             Some(vault) => Some(VaultOverride::Machine(vault.clone())),
             None => tracked.map(VaultOverride::Tracked),

@@ -188,6 +188,8 @@ MUTATING = {
     "page_navigate",
     "page_upload",
     "page_drag",
+    # #11373: an evaluated expression can change the page, so it is journaled.
+    "page_evaluate",
 }
 # #11352: TextDropped also carries typed, accepted and entered.
 REFUSAL_FIELDS = ("tab", "origin", "access", "document")
@@ -214,6 +216,7 @@ PAGE_ERRORS = UNFINISHED | {
     "NoHistory",
     "NotDraggable",
     "InvalidUrl",
+    "NoMatch",  # #11373
 }
 
 

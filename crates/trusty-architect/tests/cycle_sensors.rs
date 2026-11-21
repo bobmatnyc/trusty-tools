@@ -50,7 +50,7 @@ fn ctx_rows(env: &Env) -> TestResult<Vec<(String, String, String)>> {
 #[test]
 fn cycle_falls_back_to_transcript_when_status_ctx_is_none() -> TestResult {
     let env = Env::new(&[])?;
-    transcript(env.root(), "%2", "sid-a", 300_000)?;
+    transcript(env.root(), "%2", "sid-a", 360_000)?;
     let cap = screen(10).replace("ctx 10% |", "⤵ 500k→77k (92%) |");
     let tmux = fleet(&[("tm-a", "%2", "claude")], &cap);
     let clock = FakeClock::new(0.0);
@@ -59,7 +59,7 @@ fn cycle_falls_back_to_transcript_when_status_ctx_is_none() -> TestResult {
         .run_once(&mut session)?;
     assert_eq!(
         ctx_rows(&env)?,
-        [("ctx".to_owned(), "25".to_owned(), "ctx 30%".to_owned())]
+        [("ctx".to_owned(), "35".to_owned(), "ctx 36%".to_owned())]
     );
     Ok(())
 }
@@ -69,7 +69,7 @@ fn cycle_falls_back_to_transcript_when_status_ctx_is_none() -> TestResult {
 #[test]
 fn cycle_prefers_status_line_ctx() -> TestResult {
     let env = Env::new(&[])?;
-    transcript(env.root(), "%2", "sid-a", 300_000)?;
+    transcript(env.root(), "%2", "sid-a", 360_000)?;
     let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(10));
     let clock = FakeClock::new(0.0);
     let mut session = PollSession::new(PollState::default());
@@ -101,11 +101,13 @@ fn wake_message_uses_need_you_form_from_cycle() -> TestResult {
         (2, 2, 0)
     );
     let typed = &tmux.sends()[0];
+    // df-T7i P1b: the woken alerts ride the same line as a digest.
     let want = format!(
-        "[poll 00:00Z] 2 alerts need you (0 logged) -> {}",
+        "[poll 00:00Z] 2 alerts need you (0 logged) -> {} | tm-a ctx: ctx 50% | owner band: builder band none -> open",
         env.config.alerts().display()
     );
-    assert_eq!(typed.last(), Some(&want), "{typed:?}");
+    let line = typed.last().cloned().unwrap_or_default();
+    assert!(line.starts_with(&want), "{typed:?}");
     assert!(
         tmux.sends().iter().all(|c| c[2] == "%1"),
         "keys only to the Architect"
@@ -138,6 +140,9 @@ impl HostProbe for Overloaded {
     }
     fn mem_free_pct(&self) -> Option<f64> {
         Some(1.0)
+    }
+    fn swap_activity_pages(&self) -> io::Result<u64> {
+        Ok(0)
     }
 }
 

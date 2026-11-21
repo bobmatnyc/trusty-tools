@@ -1,0 +1,3 @@
+Changed
+- The shipped review voice is now the neutral `house` voice at `voices/house/voice.toml`, replacing the previous org-derived voice; select it with `[voice] package = "house"`. A config that still names `duetto` loads `house` with a deprecation warning.
+- For one release the content bundle also ships the old `voices/duetto/voice.toml` path as a neutral placeholder, a byte-for-byte copy of `house`, so both older and newer trusty-review binaries pass `content check` and the two can ship in either order. A later bundle deletes the placeholder once the minimum supported trusty-review requires only `house`.

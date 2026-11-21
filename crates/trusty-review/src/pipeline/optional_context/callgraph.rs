@@ -122,7 +122,8 @@ pub(crate) fn parse_report(report: &str) -> Result<SymbolEdges, ParseError> {
             list = None;
         }
     }
-    if !cut && !(seen_calls && seen_callers) {
+    // #11559: `nonminimal_bool` — De Morgan of `!cut && !(calls && callers)`.
+    if !cut && (!seen_calls || !seen_callers) {
         return Err(ParseError::Unparseable);
     }
     Ok(edges)

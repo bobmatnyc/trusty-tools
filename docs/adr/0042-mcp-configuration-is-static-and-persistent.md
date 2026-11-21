@@ -46,7 +46,7 @@ The live config dir on this machine confirms the split is exactly along file bou
 
 ```
 $ python3 -c "import json; print(sorted(json.load(open(D+'/.claude.json'))['mcpServers']))"
-['apex', 'claude_design', 'duetto-code-intelligence', 'duetto-memory', 'duetto-product-intelligence']
+['apex', 'claude_design', 'acme-code-intelligence', 'acme-memory', 'acme-product-intelligence']
 
 $ python3 -c "import json; print(sorted(json.load(open(D+'/.mcp.json'))['mcpServers']))"
 ['trusty-memory', 'trusty-mpm', 'trusty-review', 'trusty-search']

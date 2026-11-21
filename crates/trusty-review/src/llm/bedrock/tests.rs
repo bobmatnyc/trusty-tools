@@ -137,13 +137,14 @@ fn priced(model: &str) -> (f64, f64) {
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_matches_price_list_per_profile() {
-    let cases: [(&str, (f64, f64)); 8] = [
+    let cases: [(&str, (f64, f64)); 9] = [
         ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
         ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
         ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
         ("global.anthropic.claude-opus-5-5", (4.00, 20.00)),
         ("us.anthropic.claude-sonnet-4-6", (3.30, 16.50)),
         ("global.anthropic.claude-sonnet-4-6", (3.00, 15.00)),
+        ("us.amazon.nova-pro-v1:0", (0.80, 3.20)),
         ("us.anthropic.claude-haiku-4-5-20251001-v1:0", (1.10, 5.50)),
         (
             "global.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -592,6 +593,10 @@ fn forced_tool_choice_capability_per_model_id_shape() {
             true,
         ),
         ("us.anthropic.claude-opus-4-8", true),
+        // #11527: the default verifier; a live Converse call with a forced
+        // `toolChoice` returned a `tool_use` answer.
+        ("us.amazon.nova-pro-v1:0", true),
+        ("bedrock/us.amazon.nova-pro-v1:0", true),
         ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", true),
         // #9292: region prefixes absent from the shared prefix list.
         (

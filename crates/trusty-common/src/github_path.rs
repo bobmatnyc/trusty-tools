@@ -305,7 +305,7 @@ fn origin_remote_url(dir: &Path) -> Option<String> {
 pub struct RemoteRepo {
     /// Remote host, with a port when the URL carried one, e.g. `github.com`.
     pub host: String,
-    /// Repository owner exactly as the remote spells it, e.g. `duettoresearch`.
+    /// Repository owner exactly as the remote spells it, e.g. `acme`.
     pub owner: String,
     /// Repository name exactly as the remote spells it, minus a trailing `.git`.
     pub repo: String,
@@ -660,9 +660,9 @@ mod tests {
                 "widget",
             ),
             (
-                "git@github.com:duettoresearch/pricing.git",
+                "git@github.com:acme/pricing.git",
                 "github.com",
-                "duettoresearch",
+                "acme",
                 "pricing",
             ),
             (
@@ -742,14 +742,9 @@ mod tests {
         if !git(&["init"]) {
             return;
         }
-        let _ = git(&[
-            "remote",
-            "add",
-            "origin",
-            "git@github.com:duettoresearch/Pricing.git",
-        ]);
+        let _ = git(&["remote", "add", "origin", "git@github.com:acme/Pricing.git"]);
         let parsed = derive_remote_repo(dir).expect("derived from origin");
-        assert_eq!(parsed.owner, "duettoresearch");
+        assert_eq!(parsed.owner, "acme");
         assert_eq!(parsed.repo, "Pricing", "the case the remote spells");
 
         let nested = dir.join("logs");

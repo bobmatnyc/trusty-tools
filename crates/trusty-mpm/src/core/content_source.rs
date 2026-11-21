@@ -53,7 +53,8 @@ pub fn resolve_for(dir: Option<&Path>, fetch: Fetch) -> Result<ResolvedContent, 
 /// else the installed bundle in `cache`. A checkout that is found is the
 /// source; a failure reading it is returned, never answered by another
 /// source. With no checkout, [`Fetch::OnFirstUse`] fetches the release when
-/// no lock is installed; [`Fetch::Never`] answers `NotInstalled`.
+/// no lock is installed, and refuses a pin below the minimum content release
+/// (#11470); [`Fetch::Never`] answers `NotInstalled`.
 /// [`AgentContentError::NoCacheDir`] when no checkout serves and `cache` is
 /// `None`.
 /// Test: `a_managed_workspace_resolves_the_cache_once_a_bundle_lands`,
@@ -73,7 +74,12 @@ pub fn resolve_for_in(
     }
     let cache = cache.ok_or(AgentContentError::NoCacheDir)?;
     match fetch {
-        Fetch::OnFirstUse => resolve_or_fetch_at(cache, DevOverride::Off),
+        Fetch::OnFirstUse => {
+            let resolved = resolve_or_fetch_at(cache, DevOverride::Off)?;
+            // #11470: a pin below the minimum is refused before a file is read.
+            crate::content::min_content::check_pin(resolved.source())?;
+            Ok(resolved)
+        }
         Fetch::Never => resolve_content_in(cache, DevOverride::Off),
     }
 }
@@ -107,6 +113,58 @@ impl LaunchContent {
 /// [`LaunchContent::load`].
 pub fn launch_content_for(dir: &Path) -> Result<LaunchContent, AgentContentError> {
     LaunchContent::load(&resolve_for(Some(dir), Fetch::OnFirstUse)?)
+}
+
+/// The content for a session whose own directory is `session_dir`.
+///
+/// Why: a daemon-hosted launch runs in the managed checkout, which can sit on
+/// another branch behind `origin/main`; composing from it, or from the
+/// daemon's cwd ahead of the installed release, served a stale tree the
+/// session never asked for.
+/// What: [`resolve_session_content_in`] with this process's cwd, the default
+/// cache and [`Fetch::OnFirstUse`], then [`LaunchContent::load`].
+pub fn launch_content_for_session(session_dir: &Path) -> Result<LaunchContent, AgentContentError> {
+    let cwd = std::env::current_dir().ok();
+    let cache = trusty_common::content::default_cache_dir();
+    LaunchContent::load(&resolve_session_content_in(
+        session_dir,
+        cwd.as_deref(),
+        cache.as_deref(),
+        Fetch::OnFirstUse,
+    )?)
+}
+
+/// The content for a session in `session_dir`, in this order: the trusted
+/// checkout enclosing `session_dir`; the installed release in `cache`; the
+/// checkout enclosing `cwd`; then `fetch`'s answer for an empty `cache`.
+///
+/// Why: the installed release must outrank the daemon's cwd checkout, yet a
+/// cwd checkout that [`resolve_for_in`] used before still answers when
+/// nothing is installed, so a launch never fetches where it did not before.
+/// What: an installed release, or any cache failure other than
+/// not-installed, is [`resolve_for_in`] over the cache alone (so the minimum
+/// content check, #11470, still applies).
+/// Test: `a_session_outside_any_checkout_uses_the_installed_content`,
+/// `a_session_with_nothing_installed_uses_the_cwd_checkout_before_a_fetch`.
+pub fn resolve_session_content_in(
+    session_dir: &Path,
+    cwd: Option<&Path>,
+    cache: Option<&Path>,
+    fetch: Fetch,
+) -> Result<ResolvedContent, AgentContentError> {
+    if let Some(root) = find_dev_checkout(session_dir) {
+        return checkout_content(&root);
+    }
+    let installed = cache.map(|c| resolve_content_in(c, DevOverride::Off));
+    let nothing_installed = match &installed {
+        None => true,
+        Some(Err(e)) => e.is_not_installed(),
+        Some(Ok(_)) => false,
+    };
+    if nothing_installed && let Some(root) = cwd.and_then(find_dev_checkout) {
+        return checkout_content(&root);
+    }
+    resolve_for_in(None, None, cache, fetch)
 }
 
 /// [`framework_content_for`], or [`framework_content`] for `None`, that never

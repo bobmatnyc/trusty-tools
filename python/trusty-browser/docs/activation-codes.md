@@ -77,7 +77,9 @@ fields are refused.
   registered under the removed site enrollment.
 - Page code runs only through `chrome.scripting.executeScript` in the default
   `ISOLATED` world, on the top frame, of a tab the worker names by explicit id.
-  No operation looks up "the active tab".
+  `page_read` and `page_find` also inject into every frame (`allFrames`) and
+  into permitted cross-origin child documents by `documentIds` (#11301); no
+  `webNavigation` permission is used. No operation looks up "the active tab".
 - `page_click` input is trusted (`isTrusted: true`, #11294):
   the worker attaches `chrome.debugger` to the named tab for the one command,
   sends DevTools Protocol `Input.*` events, and detaches. Chrome shows its
@@ -290,7 +292,7 @@ answers `InvalidRequest`.
 |---|---|---|
 | `tabs` | `op` | `tabs`: list of tab entries |
 | `select` | `op`, `tab` | `lease` str, `tab` int, `access` bool, `document` str or null, `origin` str or null, `title` str or null |
-| `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool |
+| `page_read` | `op`, `lease`; optional `scope_ref` str or null, `max_chars` int 1000-250000 (default 50000), `viewport_only` bool, `include_text` bool (both default false) | `tab` int, `document` str, `document_changed` bool, `origin` str, `url` str, `title` str, `text` str, `elements` list, `truncated` bool; with cross-origin child frames also `frames` list and `denied_frames` list (#11301) |
 | `page_click` | `op`, `lease`, `request_id`, `ref`, optional `dialog` (`accept` or `dismiss`, default `dismiss`) | `tab` int, `document` str, `dialog` when one opened |
 | `page_hover` | `op`, `lease`, `request_id`, `ref` | `tab` int, `document` str |
 | `page_type` | `op`, `lease`, `request_id`, `ref`, `text` | `tab` int, `document` str; when a `maxlength` cut the text also `truncated` true, `typed` int, `accepted` int (#11352) |
@@ -298,10 +300,12 @@ answers `InvalidRequest`.
 | `page_press` | `op`, `lease`, `request_id`, `ref` (str or null), `key`, `modifiers` | `tab` int, `document` str; `truncated`, `typed`, `accepted` as for `page_type` |
 | `page_select` | `op`, `lease`, `request_id`, `ref`, `value` | `tab` int, `document` str, `changed` bool, `value` str |
 | `page_drag` | `op`, `lease`, `request_id`, `ref`, `target` | `tab` int, `document` str, `dropped` bool |
+| `page_styles` | `op`, `lease`, `properties` (1-50 distinct CSS property names of at most 100 characters, custom properties allowed); exactly one of optional `ref` str and `selector` (str of 1-1024 characters) | `tab` int, `document` str, `styles`: object mapping each requested property to its computed value (#11373) |
+| `page_evaluate` | `op`, `lease`, `request_id`, `expression` (str of 1-8192 characters) | `tab` int, `document` str, `type` str, `value` JSON text or null, `exception` str or null, `truncated` bool (#11373) |
 | `page_navigate` | `op`, `lease`, `request_id`, `url` | `tab` int, `access` bool, `document` str or null, `origin` str or null, `settled` bool |
 | `page_upload` | `op`, `lease`, `request_id`, `ref`, `files` | `tab` int, `document` str |
 | `page_downloads` | `op`, `lease` | `tab` int, `origin` str, `downloads`: list of download entries |
-| `page_find` | `op`, `lease`; optional `role`, `name`, `text` (str of 1-200 characters or null; at least one set), `within_ref` str or null, `limit` int 1-50 (default 10) | `tab` int, `document` str, `document_changed` bool, `origin` str, `matches` list, `truncated` bool |
+| `page_find` | `op`, `lease`; optional `role`, `name`, `text` (str of 1-200 characters or null; at least one set), `within_ref` str or null, `limit` int 1-50 (default 10) | `tab` int, `document` str, `document_changed` bool, `origin` str, `matches` list, `truncated` bool; `frames` and `denied_frames` as `page_read` (#11301) |
 | `page_back`, `page_forward`, `page_reload` | `op`, `lease`, `request_id` | As `page_navigate` |
 | `release` | `op`, `lease` | none beyond `ok` (existing) |
 | `switch` | `op`, `lease` | `tab` int, `window` int, `focused` bool |
@@ -369,8 +373,9 @@ Refusals on these ops (`{"ok": false, "error": <name>, ...}`):
 | `NotSelectable` | `tab` | `page_select`: the element is not an enabled single-choice `select` |
 | `NoSuchOption` | `tab` | `page_select`: no enabled option has that value or label |
 | `Obscured` | `tab` | `page_click`: another element covers the element's centre; nothing was clicked |
-| `DebuggerBusy` | `tab` | `page_click`: another debugger (such as open DevTools) holds the tab; nothing ran |
+| `DebuggerBusy` | `tab` | `page_click`, `page_evaluate`: another debugger (such as open DevTools) holds the tab; nothing ran |
 | `NotDraggable` | `tab` | `page_drag`: `target` is `ref` itself or lies inside it |
+| `NoMatch` | `tab` | `page_styles`: `selector` matches no element of the lease's top document; the lease stays (#11373) |
 | `InvalidUrl` | none | `page_navigate`: the URL fails the URL floor |
 | `NoHistory` | `tab` | `page_back`, `page_forward`: the tab has no history entry in that direction; nothing changed and the lease stays |
 | `ProfileMismatch` | none | The browser's signed-in account changed (existing) |
@@ -465,7 +470,7 @@ Envelope:
 |---|---|---|
 | `page_tabs` | none | `{"tabs": [tab entry, ...]}` |
 | `page_tab` | `tab` | `{"access": bool, "document": str \| null, "origin": str \| null, "title": str \| null}` |
-| `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}` |
+| `page_read` | `tab`, `document` (str or null: the lease's last document), `scope_ref`, `max_chars`, `viewport_only`, `include_text` (the broker fills defaults) | `{"document", "origin", "url", "title", "text", "elements", "truncated"}`, plus both of `frames` and `denied_frames` or neither (#11301) |
 | `page_click` | `tab`, `document` (str or null), `ref`, `dialog` | `{"document": str}`, plus `"dialog"` when one opened |
 | `page_hover` | `tab`, `document` (str or null), `ref` | `{"document": str}` |
 | `page_type` | `tab`, `document` (str or null), `ref`, `text` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
@@ -473,10 +478,12 @@ Envelope:
 | `page_press` | `tab`, `document` (str or null), `ref` (str or null), `key`, `modifiers` | `{"document": str}`, plus `truncated`, `typed`, `accepted` when a `maxlength` cut the text |
 | `page_select` | `tab`, `document` (str or null), `ref`, `value` | `{"document": str, "changed": bool, "value": str}` |
 | `page_drag` | `tab`, `document` (str or null), `ref`, `target` | `{"document": str, "dropped": bool}` |
+| `page_styles` | `tab`, `document` (str or null), `ref` (str or null), `selector` (str or null), `properties` | `{"document": str, "styles": {property: str}}` |
+| `page_evaluate` | `tab`, `document` (str or null), `expression` | `{"document", "type", "value", "exception", "truncated"}` |
 | `page_navigate` | `tab`, `url` | `{"access": bool, "document": str \| null, "origin": str \| null, "settled": bool}` |
 | `page_upload` | `tab`, `document` (str or null), `ref`, `files` | `{"document": str}` |
 | `page_downloads` | `tab` | `{"origin": str, "downloads": [download entry, ...]}` |
-| `page_find` | `tab`, `document`, `role`, `name`, `text`, `within_ref`, `limit` (the broker fills defaults) | `{"document", "origin", "matches", "truncated"}` |
+| `page_find` | `tab`, `document`, `role`, `name`, `text`, `within_ref`, `limit` (the broker fills defaults) | `{"document", "origin", "matches", "truncated"}`, plus both of `frames` and `denied_frames` or neither (#11301) |
 | `page_back`, `page_forward`, `page_reload` | `tab` | As `page_navigate` |
 | `page_switch` | `tab` | `{"window": int, "focused": bool}` |
 | `grant_end` | `reason` (a `GrantEnded` reason, or `closed`), `last` bool | `"ended"` |
@@ -640,6 +647,55 @@ in order of distance from the viewport (0 for an element on screen, nearest
 first, document order on ties) and the list returns in document order; `text`
 takes what is left. A cut field, element or list sets `truncated: true`.
 
+### Cross-origin child frames (#11301)
+
+`page_read` and `page_find` without `scope_ref` / `within_ref` also read
+cross-origin child frames, read-only, when both hold:
+
+- the extension holds Chrome host permission for the child's own origin:
+  `chrome.permissions.contains({origins: ["<scheme>://<host>/*"]})`. The
+  optional `https://*/*` grant covers every child. `activeTab` gives no child
+  access;
+- the tab is within the grant's scope (the `OutOfScope` rule above refuses
+  first, before any frame is touched).
+
+Each frame is judged on its own origin. A grandchild does not inherit its
+parent's grant. The worker finds frames with one
+`executeScript({target: {tabId, allFrames: true}, func: pageFrames})`: a
+frame is a root when it is the top frame or its parent is cross-origin (a
+root's walk already covers its same-origin descendants), and each root lists
+the declared `src` origins of the cross-origin frames it embeds. It then reads
+each permitted root child with `documentIds: [documentId]`. Click, type and
+the other actions do not reach child frames (#11318).
+
+With any child frame read or denied, the result adds:
+
+| Field | Type | Content |
+|---|---|---|
+| `frames` | list | `{"id": int, "origin": str, "url": str, "document": str}` per frame read; the top document is first with `id` 0; `id` is Chrome's `frameId`. At most 9 (the top and 8 children) |
+| `denied_frames` | list | `{"origin": str, "reason": str}` per withheld origin, at most 20, with no child content. `reason` is `no_permission`, `opaque` (no http(s) origin), `frame_limit` (more than 8 permitted children) or `navigated` (the child changed document between discovery and read) |
+
+Every element (or match) then carries `"frame": int`, the `id` of its
+`frames` entry. The top-level `document`, `origin`, `url`, `title` and `text`
+stay the top document's. A child's ref is frame-scoped:
+`"<frameKey>:<epoch>.<n>"` (`^[0-9]{1,9}:[0-9]{1,9}\.[0-9]{1,6}$`), where
+`frameKey` is the frame's `id`; a match's `in.ref` is scoped the same way.
+The worker records frameKey to `documentId` at read time. A frame-scoped
+`scope_ref` or `within_ref` reads that child document only, after the
+permission check again; once the frame navigated (its `documentId` changed),
+or for a frame key no read recorded, it answers `StaleElement`. A
+frame-scoped ref is not an action `ref`: `page_click` and the other actions
+refuse it as `InvalidRequest`.
+
+Child entries carry no viewport distance: they keep document order and
+`viewport_only` does not filter them. `include_text` reads the top
+document's text only. Bounds: the top document reads with half of the
+budget, each permitted child with an equal share of the other half; the
+merged result keeps at most 500 elements (`limit` matches) and its JSON
+encoding stays within `max_chars` (262144 - 512 bytes for `page_find`),
+cutting text first and then entries from the end, children first. Any cut
+sets `truncated`.
+
 `page_find` (#11357): the same injected function in find mode, run like
 `page_read`. It matches the reported elements (see above) under `within_ref`
 (its descendants only; a ref that does not resolve answers `StaleElement`):
@@ -698,6 +754,28 @@ centre. Hovering the same element again sends only the two moves. It clicks
 nothing and changes no focus. The events are untrusted, so CSS `:hover` does
 not match; a page that reveals content only through `:hover` needs trusted
 input (#11294). It is journaled like `page_click`.
+
+`page_styles` (#11373): injects into `documentIds: [document]` only and reads
+`getComputedStyle` of the element `ref` names, or of the first match of
+`selector` in the top document, then `getPropertyValue` of each requested
+property (each value cut at 4096 characters). A selector the browser cannot
+parse answers `InvalidRequest`, one that matches nothing `NoMatch`. It is a
+read: not journaled, and a lost reply answers `BrowserDisconnected`.
+
+`page_evaluate` (#11373): runs `expression` in the page's main world over
+`chrome.debugger` (`Runtime.evaluate` with `returnByValue`, `awaitPromise` and
+`userGesture`), so Chrome shows its debugging bar for the length of the call.
+Like `page_click`, it attaches only to an accessible tab still on the lease's
+document, re-probes after the attach and answers `DocumentChanged` (nothing
+ran) when the document or origin moved, answers `DebuggerBusy` when another
+debugger holds the tab, dismisses any dialog the expression opens, answers
+`OutcomeUnknown` after 5 s, and always detaches. `value` is the result as JSON
+text (an unserializable number such as `NaN` as a JSON string; `undefined` or
+a non-serializable value as null), cut at 65536 characters with `truncated`
+true. A thrown error answers success with `type` `exception` and its
+description in `exception` (at most 1024 characters). The expression can
+change the page, so it is journaled like `page_click`. Its audit lines record
+the op, tab and host; never the expression or the value.
 
 `page_type`: supported targets are `input` of type `text`, `search`, `email`,
 `url`, `tel`, `password` or `number`, `textarea`, and a contenteditable
@@ -833,7 +911,7 @@ steps do not run.
 |---|---|---|
 | `tabs` | Grant generation is the peer's; tab grant: the reply list is filtered to the grant's tab | Grant known; tab grant: list only the grant's tab. Probes each listed tab for `access`, `origin`, `title` |
 | `select` | Generation; tab grant: `tab` equals the grant's tab; `TabClaimed` check | Check order, then the read-only probe |
-| `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame; failure is `PermissionNeeded` |
+| `page_read` | Lease valid and owned; lease generation is the grant's; tab grant: lease tab equals the grant's tab | Check order; inject into the top frame, plus permitted cross-origin child frames (#11301); failure is `PermissionNeeded` |
 | `page_find` | As `page_read` | As `page_read` |
 | `page_click`, `page_type`, `page_press` | As `page_read` | Check order; inject only into `documentIds: [document]` |
 | `page_navigate` | As `page_read`, plus the URL floor | Check order, URL floor, `tabs.update` on the explicit tab id |
@@ -857,8 +935,8 @@ only. A refusal's result line is best effort.
 |---|---|---|---|
 | `tabs` | `tabs` | absent | tab titles, origins |
 | `select` | `select` | host of the probed page when `access` | title |
-| `page_read` | `page_read` | host of the read page | text, elements, URL path or query, title |
-| `page_find` | `page_find` | host of the read page | matches and their names |
+| `page_read` | `page_read` | host of the read page; `frames` lists the hosts of the child frames read (#11301) | text, elements, URL path or query, title |
+| `page_find` | `page_find` | host of the read page; `frames` as `page_read` | matches and their names |
 | `page_click` | `page_click` | host of the page | ref, element name |
 | `page_hover` | `page_hover` | host of the page | ref, element name |
 | `page_type` | `page_type` | host of the page | typed text, ref, element name |
@@ -866,6 +944,8 @@ only. A refusal's result line is best effort.
 | `page_press` | `page_press` | host of the page | key, modifiers, ref, element name |
 | `page_select` | `page_select` | host of the page | chosen value, ref, element name |
 | `page_drag` | `page_drag` | host of the page | refs, element names |
+| `page_styles` | `page_styles` | host of the page | ref, selector, properties, values |
+| `page_evaluate` | `page_evaluate` | host of the page | expression, value, exception text |
 | `page_navigate` | `page_navigate` | host of the landed page when `access`; the admitted line carries the target host | URL path, query, fragment |
 | `page_upload` | `page_upload` | host of the page | file names, types and bytes |
 | `page_downloads` | `page_downloads` | host of the page | download paths and URLs |
@@ -971,6 +1051,8 @@ Connect mode (`src/trusty_browser/agent_mcp.py`, tests in
 | `page_press` | `lease: str`, `key: str`, `request_id: str`, optional `ref: str` (default: the focused element), optional `modifiers: list[str]` (default `[]`) | The `page_press` reply |
 | `page_select` | `lease: str`, `ref: str`, `value: str`, `request_id: str` | The `page_select` reply |
 | `page_drag` | `lease: str`, `ref: str`, `target: str`, `request_id: str` | The `page_drag` reply |
+| `page_styles` | `lease: str`, `properties: list[str]`, optional `ref: str`, optional `selector: str` (exactly one) | The `page_styles` reply |
+| `page_evaluate` | `lease: str`, `expression: str`, `request_id: str` | The `page_evaluate` reply |
 | `page_navigate` | `lease: str`, `url: str`, `request_id: str` | The `page_navigate` reply |
 | `page_upload` | `lease: str`, `ref: str`, `paths: list[str]`, `request_id: str` | The `page_upload` reply; see "Upload root" |
 | `page_downloads` | `lease: str` | The `page_downloads` reply |
@@ -1034,7 +1116,7 @@ directory as the root.
 5 MiB to `audit.jsonl.1` and `audit.jsonl.2` (two kept). One JSON object per
 line with only these keys: `ts`, `event`, `grant`, `scope`, `profile`, `op`,
 `tab`, `outcome`, `origin` (URL host only), `site`, `reason`,
-`email_domain`, `replaced`. It never carries a ticket, a lease token, a key, page content, typed text, a title, or a
+`email_domain`, `replaced`, `frames` (child-frame URL hosts only, #11301). It never carries a ticket, a lease token, a key, page content, typed text, a title, or a
 URL path, query or fragment.
 
 Events: `connect` (fail-closed), `attach` (fail-closed), `detach`
@@ -1087,8 +1169,10 @@ proof or nonce. A failed write goes to stderr and the request is still refused.
   synthetic events (`isTrusted: false`); only `page_click` is trusted.
 - Screenshots or any capture of pixels.
 - A page border on code-session tabs; the badge is the indicator.
-- Closed shadow roots and cross-origin iframes in `page_read`, `page_click`,
-  `page_type`.
+- Closed shadow roots in `page_read`, `page_click`, `page_type`.
+- Actions inside cross-origin iframes: `page_click`, `page_type` and the
+  other actions reach the top document and its same-origin frames only
+  (#11318). `page_read` and `page_find` read them (#11301).
 - Drag events the page sees as trusted.
 - File inputs inside iframes or shadow DOM, and uploads over 512 KiB.
 - Browser-level shortcuts (`Meta`+`t`, `Control`+`w` and the like): a

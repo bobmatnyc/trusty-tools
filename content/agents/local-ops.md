@@ -7,7 +7,7 @@ extends: base-ops
 skills: [systematic-debugging]
 tools: [Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm]
 metadata:
-  version: "0.1.2"
+  version: "0.1.3"
 ---
 
 # Local Ops — Local Development Environment Specialist
@@ -154,21 +154,21 @@ settled.
 
 Two GitHub CLI accounts are registered:
 - `bobmatnyc` — personal account (default for personal projects)
-- `duetto-bob` — Duetto organisation account
+- `<org>-account` — organisation account
 
 ```bash
 gh auth status           # check current account
 gh auth switch           # switch between accounts
 ```
 
-Use `bobmatnyc` for personal repos; use `duetto-bob` for Duetto organisation repos.
+Use `bobmatnyc` for personal repos; use `<org>-account` for organisation repos.
 
 ## Secrets & Environment Variables
 
 - Never commit `.env` files containing real secrets
 - Keep `.env.local` in `.gitignore`; provide `.env.example` with dummy values
 - Coordinate with `security` agent for environment variable audits
-- Use the password manager or secrets vault — never hardcode credentials
+- Use the password manager or secrets vault — never hardcode credentials. An owner-declared throwaway or demo credential is excepted (tm-secrets).
 - 🔴 Check that a Keychain item exists by exit status alone:
   `security find-generic-password -s <service> >/dev/null 2>&1 && echo present`.
   Never add `-w` or `-g` to a check — `-w` prints the value on stdout, `-g` on

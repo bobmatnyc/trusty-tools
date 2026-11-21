@@ -3,7 +3,7 @@
 # `tests/dependency_boundary.rs` fails the build if one appears here.
 [package]
 name = "trusty-architect"
-version = "0.2.3"
+version = "0.4.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -16,6 +16,11 @@ homepage = "https://trustytools.dev"
 readme = "README.md"
 # Ship the library, README and changelog; `tests/` and `changelog.d/` stay out.
 include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
+
+# #11600: the Intent Ledger command (datg.py and ilio.py port).
+[[bin]]
+name = "trusty-architect-il"
+path = "src/bin/trusty-architect-il.rs"
 
 [dependencies]
 # #9171 A1: dependencies are limited to std, serde, thiserror, tracing and

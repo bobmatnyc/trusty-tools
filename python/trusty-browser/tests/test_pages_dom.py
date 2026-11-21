@@ -1003,3 +1003,25 @@ def test_drag_reaches_a_draggable_inside_an_open_shadow_root(page):
     assert by_name["Shadow zone"]["within"] == "shadow"
     assert drag(page, by_name["Shadow item"]["ref"], by_name["Shadow zone"]["ref"]) == {"ok": True, "dropped": True}
     assert page.evaluate("drops") == ["deep"]
+
+
+def test_styles_read_computed_values_for_a_ref_and_a_selector(page):
+    # #11373: the injected pageStyles reads getComputedStyle by ref or selector.
+    page.evaluate("""() => { document.body.style.backgroundColor = "rgb(10, 20, 30)";
+      document.getElementById("go").style.color = "rgb(200, 0, 0)";
+      document.documentElement.style.setProperty("--brand", " teal"); }""")
+    styles = lambda ref, selector, names: page.evaluate(
+        "([r, s, n]) => TrustyPages.pageStyles(r, s, n)", [ref, selector, names]
+    )
+    go = ref_of(read(page), "Go now")
+    assert styles(None, "body", ["background-color"]) == {
+        "ok": True,
+        "styles": {"background-color": "rgb(10, 20, 30)"},
+    }
+    assert styles(go, None, ["color", "--brand"]) == {
+        "ok": True,
+        "styles": {"color": "rgb(200, 0, 0)", "--brand": "teal"},
+    }
+    assert styles(None, "#missing", ["color"]) == {"error": "NoMatch"}
+    assert styles(None, "a[", ["color"]) == {"error": "InvalidRequest"}
+    assert styles("9.0", None, ["color"]) == {"error": "StaleElement"}

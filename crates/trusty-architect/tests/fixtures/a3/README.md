@@ -2,8 +2,12 @@
 
 Goldens for `tests/parity_a3.rs`, `tests/parity_wake.rs` and the Unicode `\d` table (#9171 A3a, A3b-1).
 Every file here except this README and `regen_a3.py`, and
-`src/decimal_table.rs`, is written by `regen_a3.py`, which runs the frozen
-prototype `fleet-poll.py` (Architect commit 988152c). Do not edit them by hand,
+`src/decimal_table.rs`, is written by `regen_a3.py`, which runs the
+prototype `fleet-poll.py`. df-T7i P1b regenerated them from the live
+script (its last change, Architect commit f2741d4), with its siblings `usage.py` and
+`input-state.py` pinned at 988152c: their own drift is outside P1b. Build that
+prototype directory by copying the live `scripts/` and checking out those two
+files at 988152c. Do not edit them by hand,
 and never regenerate them from the Rust.
 
 `regen_a3.py` imports the prototype read-only (`-B`, `-I`,

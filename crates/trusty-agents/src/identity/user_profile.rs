@@ -242,12 +242,12 @@ mod tests {
         clear_profile_env();
         unsafe {
             std::env::set_var("TAGENT_USER_NAME", "Masa");
-            std::env::set_var("TAGENT_USER_EMAIL", "masa@matsuoka.com");
+            std::env::set_var("TAGENT_USER_EMAIL", "alice@example.com");
             std::env::set_var("TAGENT_USER_TIMEZONE", "America/New_York");
         }
         let p = UserProfile::from_env().expect("expected a profile from env");
         assert_eq!(p.name, "Masa");
-        assert_eq!(p.email.as_deref(), Some("masa@matsuoka.com"));
+        assert_eq!(p.email.as_deref(), Some("alice@example.com"));
         assert_eq!(p.timezone.as_deref(), Some("America/New_York"));
         assert!(p.is_complete());
         clear_profile_env();

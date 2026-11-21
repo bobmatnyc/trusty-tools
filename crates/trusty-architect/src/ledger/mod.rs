@@ -21,6 +21,8 @@
 
 pub mod fresh;
 pub mod ids;
+// See G0b IL auto-apply: the IL packet parser, checker and apply.
+pub mod il;
 pub mod limits;
 pub mod model;
 mod ops;

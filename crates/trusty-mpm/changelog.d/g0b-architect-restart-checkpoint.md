@@ -1,0 +1,2 @@
+Changed
+- `tm architect restart` now asks the Architect for an Intent Ledger checkpoint and waits up to 90 s for the write before it restarts only the Architect's `claude`; a timeout always refuses (exit 4) and no flag bypasses it (ruling Dpg: use `tm fleet relaunch`). `--no-checkpoint` skips the request and keeps the #11365 fresh-ledger gate. It finds the Architect by its fleet role and refuses when none is recorded. A failed stop or relaunch types nothing and reports "NOT restarted".

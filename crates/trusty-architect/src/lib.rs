@@ -35,6 +35,8 @@ mod decimal_table;
 mod error;
 mod fake;
 mod input;
+// #11600: Intent Ledger reads and writes (datg.py and ilio.py port), see il/mod.rs.
+pub mod il;
 pub mod ledger;
 mod pointer;
 pub mod poller;
@@ -45,6 +47,8 @@ pub mod quiet;
 mod scripted;
 mod secret;
 pub mod self_ctx;
+// #9779: `tm architect serve`, the event-driven cycle.
+pub mod serve;
 mod sha1;
 mod sha256;
 mod tmux;

@@ -269,7 +269,17 @@ async fn reopen_racing_a_delete(
             crate::service::server::delete_index_report(&state, &id, params).await
         })
     };
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // #10938: release the holder once the DELETE is queued on the teardown
+    // lock's write side, not after a fixed sleep. A queued writer takes the
+    // free permits, so `try_read` fails from then on. Releasing at once keeps
+    // the re-open's retry well inside the DELETE's quiesce timeout.
+    while lock.try_read().is_ok() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "#10938: the DELETE never queued on the teardown lock"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     drop(holder);
     let outcome = reopen.await.expect("re-open task");
     let body = delete

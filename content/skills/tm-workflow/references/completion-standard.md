@@ -68,6 +68,56 @@ and no fix round for it, unless the user asks.
 A project ruling that sets a stricter bar for a named project (for example
 cto-reports, "MEDIUMs fixed") stays in force for that project only.
 
+**Acceptance criteria** set an issue's good-enough bar; the rule lives in
+`tm-ticketing`, `references/ticket-content.md`.
+
+## Demo and POC Work — Minimal Tests, Named Intentions
+
+<!-- rule:tm-workflow/demo-test-intentions -->
+Owner ruling 2026-11-18. A demo, POC, prototype or spike is work whose issue
+or dispatch brief records the declaration in writing ("demo/POC work"). The PR
+body cites that declaration by link or quote. Without a recorded declaration
+the work is production work, whatever its size.
+
+**Demo paths.** Every directory that holds demo code is listed in
+`scripts/demo-intention-paths.txt`, added in the PR that cites the
+declaration. `scripts/check_demo_intentions.sh` runs in CI and fails on any
+`intent(demo):` marker outside a listed path, naming the file and line.
+
+**Minimal tests.** A demo ships with a smoke run plus a test of the core happy
+path. Those two pass like any other test.
+
+**Named intentions.** Each piece of coverage the demo defers is one skipped
+case whose reason starts with `intent(demo):` and states what is owed:
+
+- Rust: `#[ignore = "intent(demo): <what is owed>"]`
+- JS/TS: `it.todo("intent(demo): <what is owed>")`
+- Python: `@pytest.mark.skip(reason="intent(demo): <what is owed>")`
+
+An intention has no body and no assertion. It is not a placeholder assertion
+and nothing counts it as coverage. A Rust intention run with
+`--include-ignored` reports `ok` because its body is empty; that `ok` is not a
+passing test.
+
+**The ignored-test ratchet.** `scripts/check_ignored_tests.sh` lists each Rust
+intention as an `INTENTION` row and leaves it out of the
+`UNSELECTED-BASELINE` count, because the demo-path lint governs it. Adding an
+intention never moves the baseline, and the baseline is never raised for one.
+The gate refuses a manifest row that selects an intention.
+
+**Promotion to production.** Intentions tell the harness that the full suite is
+owed once scope is accepted for production. Promotion requires turning every
+intention into a real test. A reviewer or tool finds the open ones with
+`git grep -n 'intent(demo):' -- <promoted paths>`; promotion is done when that
+grep returns nothing and the paths are removed from
+`scripts/demo-intention-paths.txt`.
+
+**Limits.** This does not relax "scope down, never scope away" or "no
+placeholders, never `todo!()`". Intentions apply only to declared demo or POC
+work. They never stand in for coverage of production code, and they never
+replace or hide a failing test: a red test is fixed, not turned into an
+intention.
+
 ## Non-Code Deliverables — Quoted Criteria, Evidence Map, No Proxy Targets
 
 A document reported "goals only" was closed after one table row was deleted,

@@ -38,7 +38,7 @@ Example fixture (real `git log --format='%H%n%an%n%ae%n%ad%n%s%n---' --numstat`)
 ```
 8bedae8f2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f
 Bob Matsuoka
-bob@matsuoka.com
+alice@example.com
 2026-04-22 10:15:32 -0700
 feat: docs-agent + WriteFileTool + skip phase support (#82)
 ---
@@ -47,7 +47,7 @@ feat: docs-agent + WriteFileTool + skip phase support (#82)
 
 fe394d2a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e
 Bob Matsuoka
-bob@matsuoka.com
+alice@example.com
 2026-04-22 09:02:11 -0700
 feat: dynamic skill loading — all agents discover and load skills at runtime (#81)
 ---

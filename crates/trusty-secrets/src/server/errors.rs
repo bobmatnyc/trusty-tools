@@ -147,11 +147,23 @@ pub enum ErrorKind {
     // #10459 PR1: the next unused value; ONE kind for every mint refusal,
     // so a refusal names no check (the audit record's `reason_arm` does).
     TicketRefused = 38,
+    /// A remote-gate call was refused: the host, project or key is not on
+    /// the account's allowlist.
+    // #11464: the next unused value; ONE kind, so a refusal names no check.
+    RemoteRefused = 39,
+    /// A `secrets.gate` call came from a peer that is not the verified gate.
+    // #11464 D3a: the next unused value; like `BridgeRefused`, names no check.
+    GateRefused = 40,
+    /// A Keychain call did not answer in time, most often because a macOS
+    /// access prompt is open or the item's ACL pins an older code signature.
+    // #11429: the next unused value; a Keychain time-out told apart from
+    // `BackendTimeout`, with the outcome-unknown wording and the remedy.
+    KeychainAccessPrompt = 41,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 39] = [
+    pub(crate) const ALL: [Self; 42] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -191,6 +203,9 @@ impl ErrorKind {
         Self::BridgeRefused,
         Self::AgentKeyDenied,
         Self::TicketRefused,
+        Self::RemoteRefused,
+        Self::GateRefused,
+        Self::KeychainAccessPrompt,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -241,6 +256,9 @@ impl ErrorKind {
             Self::BridgeRefused => "bridge_refused",
             Self::AgentKeyDenied => "agent_key_denied",
             Self::TicketRefused => "ticket_refused",
+            Self::RemoteRefused => "remote_refused",
+            Self::GateRefused => "gate_refused",
+            Self::KeychainAccessPrompt => "keychain_access_prompt",
             Self::Internal => "internal",
         }
     }
@@ -250,8 +268,10 @@ impl ErrorKind {
         match self {
             Self::InvalidParams => "the params do not match this method's request shape",
             Self::ProjectInvalid => "`project` must be an absolute path to a directory",
+            // #11346: name the remedy — an `origin` remote or the local key.
             Self::ProjectUnresolved => {
-                "cannot determine the project's scopes from its git remote or config"
+                "cannot determine the project's scopes from its git remote or config; \
+                 add an `origin` remote or run `git config --local trusty.secrets.repo <owner>/<repo>`"
             }
             Self::VaultOutOfScope => "the vault is not one of this project's scopes",
             Self::InvalidValue => "the secret value was refused",
@@ -342,6 +362,18 @@ impl ErrorKind {
             Self::TicketRefused => {
                 "no main-thread ticket was minted: minting is off, or the caller is not the Architect's registered hook"
             }
+            // #11464: names no check, as `TicketRefused` names none.
+            Self::RemoteRefused => {
+                "a remote-gate call was refused: the host, project or key is not allowed"
+            }
+            // #11464 D3a: names no check, as `BridgeRefused` names none.
+            Self::GateRefused => {
+                "a gate call is accepted only from the verified remote gate, running below sshd and outside any Claude Code process tree; this caller was not verified"
+            }
+            // #11429: outcome unknown, never "not stored"; names no key.
+            Self::KeychainAccessPrompt => {
+                "the Keychain did not answer in time, usually because a macOS access prompt is open or the item's access list names an older trusty-secrets binary; outcome unknown: the call was abandoned, not stopped, so a write may still land once the prompt is approved; answer the prompt (Always Allow), then verify with `tm secrets list` before writing again"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -402,6 +434,12 @@ impl ErrorKind {
             Self::AgentKeyDenied => -32085,
             // #10459 PR1: the next unused code.
             Self::TicketRefused => -32086,
+            // #11464: the next unused code.
+            Self::RemoteRefused => -32087,
+            // #11464 D3a: the next unused code.
+            Self::GateRefused => -32088,
+            // #11429: the next unused code.
+            Self::KeychainAccessPrompt => -32089,
         }
     }
 
@@ -431,7 +469,9 @@ impl ErrorKind {
     /// Test: `server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal`,
     /// `timeout_reply_text_names_wait_or_refusal_and_the_recovery`.
     pub(crate) fn to_rpc_noted(self, method: &'static str, note: Option<&TimeoutNote>) -> RpcError {
-        let Some(note) = note.filter(|_| self == Self::BackendTimeout) else {
+        let Some(note) =
+            note.filter(|_| matches!(self, Self::BackendTimeout | Self::KeychainAccessPrompt))
+        else {
             return self.to_rpc(method);
         };
         RpcError::new(self.code(), format!("{method}: {}", timeout_text(note))).with_data(
@@ -447,8 +487,9 @@ impl ErrorKind {
 /// The step that clears a hung item: the abandoned set lives in the server
 /// process, so a new process starts with none (#11215).
 const TIMEOUT_RECOVERY: &str = "answer or dismiss any open macOS Keychain access prompt, or end \
-     the server with `pkill -x trusty-secrets` (the next call starts a fresh one), then retry; a \
-     write the abandoned call carried may still land, so check the value before writing it again";
+     the server with `pkill -x trusty-secrets` (the next call starts a fresh one), then retry; \
+     outcome unknown: a write the abandoned call carried may still land, so verify with `tm \
+     secrets list` before writing it again";
 
 /// The sentence for one noted time-out; see [`ErrorKind::to_rpc_noted`].
 pub(crate) fn timeout_text(note: &TimeoutNote) -> String {
@@ -509,6 +550,11 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::BackendNotEnabled { .. } => Self::BackendNotEnabled,
             SecretsError::DeadlineExceeded { .. } => Self::DeadlineExceeded,
             SecretsError::VaultNotVisible { .. } => Self::VaultNotVisible,
+            // #11429: a Keychain time-out is an access prompt or an ACL
+            // mismatch; any other backend keeps the generic kind.
+            SecretsError::Timeout { backend, .. } if backend == crate::api::BackendId::KEYCHAIN => {
+                Self::KeychainAccessPrompt
+            }
             SecretsError::Timeout { .. } => Self::BackendTimeout,
             // #10459: the store raises it only for a per-key deny.
             SecretsError::AgentUseRefused { .. } => Self::AgentKeyDenied,

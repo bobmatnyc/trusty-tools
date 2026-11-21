@@ -129,7 +129,8 @@ fn quotes_code(span: &str) -> bool {
         return false;
     }
     let bare = span.strip_suffix("()").unwrap_or(span);
-    !IDENT_RE.find(bare).is_some_and(|m| m.len() == bare.len())
+    // #11559: `nonminimal_bool` — same predicate, negation folded in.
+    IDENT_RE.find(bare).is_none_or(|m| m.len() != bare.len())
 }
 
 /// #8905 row 3: a snippet anchors a citation only when it is long enough to be

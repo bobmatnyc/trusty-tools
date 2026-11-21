@@ -1,0 +1,20 @@
+# PRIVATE_NAME hits the public-content leak guard accepts, one row per (path, token).
+# Format: path<TAB>sha256:<hex of token><TAB>count<TAB>reason naming an issue (#N).
+# token is the lowercased alphanumeric run the hit matched; compute its digest
+# with: printf %s <token> | shasum -a 256. count caps the hits, shrink-only like
+# the baseline: more fails, fewer is reported so the count can drop.
+# A path that itself spells a private name is given as sha256:<hex of the path>.
+# A row no hit uses fails as stale; a duplicate (path, token) row fails.
+#
+# See #11535: these rows cover the deprecated settings and env-var aliases, kept
+# with their deprecation warning; they and these rows go in the next major release.
+sha256:dd2de5356df7ef821f9d0fc308fb448f6dae3eac61382a2924fff45bc58f096d	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	1	deprecated voice placeholder path (#11515, #11535)
+crates/trusty-review/src/voice/loader.rs	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	6	deprecated voice-package alias, warns on use (#11515, #11535)
+crates/trusty-review/src/voice/tests.rs	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	4	tests the deprecated voice-package alias (#11515, #11535)
+crates/trusty-review/src/pipeline/voice_config.rs	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	4	tests the deprecated voice-package alias (#11515, #11535)
+crates/trusty-review/src/runtime_content_tests.rs	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	3	tests the deprecated voice placeholder path (#11515, #11535)
+crates/trusty-review/src/config/mod.rs	sha256:6584b4791a70726ba58f3d129fcc806302616c4248b32607feeba25988bcb38a	2	deprecated installation-id env var alias, warns on use (#11524, #11535)
+crates/trusty-review/src/config/config_tests.rs	sha256:6584b4791a70726ba58f3d129fcc806302616c4248b32607feeba25988bcb38a	3	tests the deprecated installation-id env var alias (#11524, #11535)
+content/CONTENT-CHANGELOG.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	1	release history documents the deprecated voice alias (#11515, #11535)
+crates/trusty-review/CHANGELOG.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	2	release history documents the deprecated voice alias (#11515, #11535)
+crates/trusty-review/changelog.d/11513-remove-org-specific-content.md	sha256:341928048c6a9eae6125efce59e680baa56d71e6c2cfa3e79871aaff427ff6ab	2	fragment documents the deprecated voice alias (#11513, #11535)

@@ -93,7 +93,30 @@ impl Serialize for DedupState {
 }
 
 fn reemit_interval(kind: &str) -> Option<f64> {
+    // #11474: fleet-classify.py re-emits `owner_answer` every 1800 s while
+    // it stays pending; kept out of `REEMIT` so its public type is unchanged.
+    if kind == "owner_answer" {
+        return Some(1800.0);
+    }
     REEMIT.iter().find(|(k, _)| *k == kind).map(|(_, v)| *v)
+}
+
+impl DedupState {
+    /// The `(key, seen)` pairs whose key starts with `prefix` (#11474: a
+    /// failed answer read keeps its keys, as `fleet-poll.py` does).
+    pub fn prefixed(&self, prefix: &str) -> Vec<(String, Seen)> {
+        let keep = |(k, _): &&(String, Seen)| k.starts_with(prefix);
+        self.alerts.iter().filter(keep).cloned().collect()
+    }
+
+    /// Puts back each of `kept` whose key this cycle did not set.
+    pub fn restore(&mut self, kept: Vec<(String, Seen)>) {
+        for (k, s) in kept {
+            if self.get(&k).is_none() {
+                self.alerts.push((k, s));
+            }
+        }
+    }
 }
 
 /// Splits `candidates` into `(new, suppressed_count)` and replaces the state.

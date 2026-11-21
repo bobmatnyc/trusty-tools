@@ -37,6 +37,8 @@ CODE_TOOLS = {
     "page_press",
     "page_select",
     "page_drag",
+    "page_styles",
+    "page_evaluate",
     "page_navigate",
     "page_upload",
     "page_downloads",
@@ -259,6 +261,8 @@ def test_tools_before_connect_answer_not_connected(short, clock):
             ("page_read", {"lease": "l"}),
             ("page_click", {"lease": "l", "ref": "1.0", "request_id": "r"}),
             ("page_hover", {"lease": "l", "ref": "1.0", "request_id": "r"}),
+            ("page_styles", {"lease": "l", "properties": ["color"], "selector": "body"}),
+            ("page_evaluate", {"lease": "l", "expression": "1", "request_id": "r"}),
             ("page_type", {"lease": "l", "ref": "1.0", "text": "", "request_id": "r"}),
             ("page_press", {"lease": "l", "key": "Enter", "request_id": "r"}),
             (
@@ -544,6 +548,15 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 "page_hover", lease=lease, ref="1.0", request_id="h"
             )
             assert hovered == {"ok": True, "tab": 7, "document": "d7-1"}
+            # #11373: computed styles by selector, then an evaluated expression.
+            styled = await agent.ok(
+                "page_styles", lease=lease, properties=["background-color"], selector="body"
+            )
+            assert styled["styles"] == {"background-color": "rgb(1, 2, 3)"}
+            value = await agent.ok(
+                "page_evaluate", lease=lease, expression="1 + 1", request_id="e"
+            )
+            assert (value["type"], value["value"], value["exception"]) == ("number", "2", None)
             landed = await agent.ok(
                 "page_navigate",
                 lease=lease,
@@ -565,6 +578,8 @@ def test_end_to_end_page_session_through_the_mcp_server(short, clock):
                 ("page_select", "1.0", "ca"),
                 ("page_select", "1.0", "ca"),
                 ("page_hover", "1.0", None),
+                ("page_styles", None, "body"),
+                ("page_evaluate", None, "1 + 1"),
             ]
             assert await agent.ok("browser_release", lease=lease) == {"ok": True}
             assert not broker.claims

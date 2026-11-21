@@ -325,6 +325,7 @@ pub fn eval_config(verifier_model: &str) -> ReviewConfig {
             reviewer: role(DEFAULT_REVIEWER_MODEL, 0.3, 4096),
             verifier: role(verifier_model, 1.0, 128),
             summarizer: role(DEFAULT_SUMMARIZER_MODEL, 0.0, 4096),
+            verifier_from_builtin_default: false,
         },
         github_app_id: None,
         github_app_private_key: None,

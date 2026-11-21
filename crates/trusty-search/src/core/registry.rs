@@ -374,7 +374,7 @@ pub struct IndexHandle {
     /// Why: large polyrepo roots (e.g. a directory of cloned Git repos) need
     /// a quick way to scope an index to a subset of sibling repositories
     /// without enumerating every absolute subtree. Glob patterns (`*` only,
-    /// no `**`) match repo-name shapes like `common-*` or `duetto-common*`.
+    /// no `**`) match repo-name shapes like `common-*` or `acme-common*`.
     /// What: A `Vec<String>` of glob patterns; empty = scan the whole
     /// `root_path` (current behaviour, no regression).
     /// Test: `path_filter_matches_immediate_subdir` covers the glob logic;
@@ -731,9 +731,9 @@ mod tests {
         ));
 
         // Exact match on immediate subdir.
-        let patterns = vec!["duetto-common".to_string()];
+        let patterns = vec!["acme-common".to_string()];
         assert!(path_matches_filter(
-            &PathBuf::from("/data/repos/duetto-common/src/lib.rs"),
+            &PathBuf::from("/data/repos/acme-common/src/lib.rs"),
             &root,
             &patterns,
         ));
@@ -744,14 +744,14 @@ mod tests {
         ));
 
         // Glob wildcard with `*`.
-        let patterns = vec!["common-*".to_string(), "duetto-common*".to_string()];
+        let patterns = vec!["common-*".to_string(), "acme-common*".to_string()];
         assert!(path_matches_filter(
             &PathBuf::from("/data/repos/common-utils/foo.rs"),
             &root,
             &patterns,
         ));
         assert!(path_matches_filter(
-            &PathBuf::from("/data/repos/duetto-common-events/lib.rs"),
+            &PathBuf::from("/data/repos/acme-common-events/lib.rs"),
             &root,
             &patterns,
         ));
@@ -763,7 +763,7 @@ mod tests {
 
         // Path outside root → not matched.
         assert!(!path_matches_filter(
-            &PathBuf::from("/elsewhere/duetto-common/lib.rs"),
+            &PathBuf::from("/elsewhere/acme-common/lib.rs"),
             &root,
             &patterns,
         ));

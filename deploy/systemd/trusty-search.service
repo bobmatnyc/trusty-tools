@@ -3,7 +3,7 @@
 # ISSUE CONTEXT
 # -------------
 # Issue #694: an abrupt SIGKILL during shutdown while redb was mid-flush
-# truncated index.redb, leaving the index unrecoverable on Duetto EC2/EBS.
+# truncated index.redb, leaving the index unrecoverable on Acme EC2/EBS.
 # Root mitigations already shipped:
 #   - redb 4.x (trusty-common 0.12+) defaults to Durability::Immediate (fsync
 #     after every commit), so partial writes are far less likely to corrupt.

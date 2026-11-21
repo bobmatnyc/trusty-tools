@@ -103,9 +103,9 @@ pub(crate) struct Cli {
     /// global `!gh auth git-credential` helper, a fixed SSH key) — the
     /// account with visibility into the repo is simply never tried. This flag
     /// names it explicitly. It is a clap `global = true` flag, so it parses
-    /// anywhere in the invocation: `tm --account bob-duetto <url>`, `tm run
-    /// --account bob-duetto <owner>/<repo>`, and `tm register --account
-    /// bob-duetto <owner>/<repo>` all bind the same field. The
+    /// anywhere in the invocation: `tm --account acme-admin <url>`, `tm run
+    /// --account acme-admin <owner>/<repo>`, and `tm register --account
+    /// acme-admin <owner>/<repo>` all bind the same field. The
     /// `<account>@<owner>/<repo>` shorthand
     /// (`commands::register_args::classify`) is the terser
     /// equivalent for the bare/`run` managed-repo forms; passing both is only
@@ -126,7 +126,7 @@ pub(crate) struct Cli {
     /// concurrently-running session under a different account is unaffected.
     /// #5850: `--user <login>` is a VISIBLE ALIAS of this same arg, not a
     /// second one — the owner reached for that spelling (`tm <url> --user
-    /// bob-duetto`) and got a clap parse error. One arg means one field, so
+    /// acme-admin`) and got a clap parse error. One arg means one field, so
     /// every parse position and the `is_name_segment` validation in
     /// [`crate::commands::register_args::resolve_account`] carry over
     /// unchanged; no validation against `gh auth status` exists for either
@@ -173,7 +173,7 @@ pub(crate) struct Cli {
 /// Test: `cli_rejects_a_blank_account_flag_before_the_repository`.
 fn non_blank_login(value: &str) -> Result<String, String> {
     if value.trim().is_empty() {
-        return Err("needs a gh login — e.g. `--user bob-duetto`.".to_string());
+        return Err("needs a gh login — e.g. `--user acme-admin`.".to_string());
     }
     Ok(value.to_string())
 }
@@ -672,6 +672,16 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: DivertAction,
     },
+    /// Tool-output savings read side (#11033).
+    ///
+    /// Why: compress and opportunity rows were written but never shown.
+    /// What: `tm savings status [--by tool|subagent] [--days N] [--json]`.
+    /// Test: `cli_parses_savings_status`.
+    Savings {
+        /// Action to run.
+        #[command(subcommand)]
+        action: SavingsAction,
+    },
     /// Palace access and maintenance without MCP (#4837, #8352).
     ///
     /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the
@@ -724,6 +734,9 @@ pub(crate) enum Command {
         /// #10973: the program and arguments to run; empty reads stdin.
         #[arg(last = true)]
         command: Vec<String>,
+        /// #11507: the chain marker nonce; `--tool` is then the chain's step spec.
+        #[arg(long, conflicts_with = "command")]
+        chain: Option<String>,
     },
     /// Wait for a condition, in-turn, without blocking past the harness ceiling.
     ///
@@ -969,6 +982,9 @@ pub(crate) enum Command {
     },
     /// Store project secrets and list key names: `set`, `list`, `remove`, `import`, `copy`, `assign`, `doctor`.
     /// No verb prints a value.
+    ///
+    /// The scope comes from the checkout's `origin` remote. A checkout with
+    /// no `origin` sets `git config --local trusty.secrets.repo <owner>/<repo>`.
     // #7521. Test: `cli_parses_every_secrets_verb`.
     Secrets {
         /// Secrets action to perform.

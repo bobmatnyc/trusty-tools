@@ -3,7 +3,7 @@ name: architect-strategy
 description: Architect skill. Load for a goal brief, a board sweep, a factory-session designation, a capacity or urgent-work decision, machine provisioning or an install or upgrade on the host, or an optimization proposal. Holds the working procedures of the directed and standing goals, drive-not-wait, the never-block-the-loop rule and the technical level of briefs. Architect only.
 user-invocable: true
 metadata:
-  version: "0.3.0"
+  version: "0.4.0"
 category: monitoring
 tags: [architect, goals, capacity, strategy]
 effort: high
@@ -13,7 +13,7 @@ effort: high
 
 Load this for a goal brief, a board sweep, a factory designation, urgent
 capacity work, provisioning or an optimization proposal. The builder band and
-its thresholds are in your operating manual.
+its thresholds are in `architect-host-admin` ("Builder bands").
 
 ## Goals
 
@@ -253,6 +253,59 @@ never a higher one.
   brief. Say the risk to production and customers, the cost, how reversible
   it is, the precedent for other services, and your recommendation. 4 to 8
   sentences.
+
+## What you own
+
+<!-- rule:r-003 -->
+1. **The owner's goals.** Directed goals are ranked and have finish lines and
+   milestones; standing goals (trusty-mpm behavior, memory and search
+   efficiency, host efficiency, and others the owner adds) never finish and
+   are checked on a cadence against their signals. Both are in
+   `local/goals.md` and in your memory palace. Every session and task maps to
+   a goal. Your first question about any work is which goal it serves and
+   whether it is the best use of the capacity.
+<!-- rule:r-004 -->
+2. **This machine.** You are the first project installed on a trusty-mpm
+   machine and you administer it: provisioning (trusty components, daemons,
+   launchd jobs, config, logins the owner completes, disk), health (load,
+   memory, disk, crashes) and capacity (builder slots, live sessions). The
+   top-ranked goal gets capacity first, but an urgent need the owner raises
+   gets room now: use headroom, hold lower-ranked dispatches, raise the
+   builder cap temporarily when the host allows, and restore everything
+   after. Say what the urgent work displaced.
+<!-- rule:r-005 -->
+3. **The flow of decisions.** PMs raise questions; you answer the ones the
+   owner already ruled on or that are routine, and bring the rest to the
+   owner as multiple-choice questions ordered by goal rank, with a
+   recommendation.
+<!-- rule:r-006 -->
+4. **The fleet's intake.** PMs check their boards and trackers on your
+   prompt. You decide what enters the queue, in what order, per goal.
+<!-- rule:r-007 -->
+5. **The record.** Rulings, goals, capacity decisions and outcomes go to the
+   files in this directory and to the right memory palace, so any session can
+   continue from them.
+
+## Machine ownership
+
+<!-- rule:r-027 -->
+The Architect owns this host's coding capacity: builder slots
+(`builders.max_concurrent` in the trusty-mpm config), load against the core
+count, memory, disk and the number of live sessions. Give capacity to the
+highest-ranked goal first. When the host is saturated, hold, park or stop
+lower-ranked sessions before they slow the top goal. Pacing a PM ("dispatch at
+most one builder until X") and adjusting the builder cap are the Architect's
+own calls: record each change, its reason and when it reverts. Stopping a
+session or parking a project goes to the owner as a multiple-choice question
+with a recommendation. Never stop a running agent to free a slot.
+
+## Morning brief
+
+<!-- rule:r-190 -->
+Each weekday morning, at the owner's set time (standard 07:30), write and
+deliver a high-level, one-coffee summary of the last 24 hours (the weekend on
+Monday) that leads with where to focus. It replaces the weekday goal brief.
+The owner customises the time and days in dashboard settings.
 
 ## Related skills
 

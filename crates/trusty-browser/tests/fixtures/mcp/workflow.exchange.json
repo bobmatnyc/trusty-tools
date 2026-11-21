@@ -1,0 +1,102 @@
+[
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"fixture-capture\", \"version\": \"0\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"experimental\":{},\"prompts\":{\"listChanged\":false},\"resources\":{\"subscribe\":false,\"listChanged\":false},\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"trusty-browser\",\"version\":\"1.30.0\"}}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"open\", \"workflow\": \"fixture\", \"ticket\": \"plain-ticket\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}",
+  "recv": null,
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_claim\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true,\\n  \\\"lease\\\": \\\"W1\\\",\\n  \\\"tab\\\": 4\\n}\"}],\"structuredContent\":{\"ok\":true,\"lease\":\"W1\",\"tab\":4},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"claim\"}",
+    "reply": "{\"ok\":true,\"lease\":\"W1\",\"tab\":4}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 3, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_snapshot\", \"arguments\": {\"lease\": \"W1\", \"request_id\": \"s1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"snapshot\", \"lease\": \"W1\", \"request_id\": \"s1\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 4, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_snapshot\", \"arguments\": {\"lease\": \"W1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"snapshot\", \"lease\": \"W1\", \"request_id\": \"<uuid4>\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 5, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_click\", \"arguments\": {\"lease\": \"W1\", \"marker\": \"m\\u00e9\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":5,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"ok\\\": true\\n}\"}],\"structuredContent\":{\"ok\":true},\"isError\":false}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"click\", \"lease\": \"W1\", \"request_id\": \"<uuid4>\", \"marker\": \"m\\u00e9\"}",
+    "reply": "{\"ok\":true}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 6, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_click\", \"arguments\": {\"lease\": \"W1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":6,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_click: 1 validation error for browser_clickArguments\\nmarker\\n  Field required [type=missing, input_value={'lease': 'W1'}, input_type=dict]\\n    For further information visit https://errors.pydantic.dev/2.14/v/missing\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_claim\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_claim: StaleLease\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"claim\"}",
+    "reply": "{\"ok\":false,\"error\":\"StaleLease\"}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 8, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_release\", \"arguments\": {\"lease\": \"W1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_release: Request refused\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"release\", \"lease\": \"W1\"}",
+    "reply": "{\"ok\":false}"
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 9, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_tabs\", \"arguments\": {}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Unknown tool: browser_tabs\"}],\"isError\":true}}",
+  "frames": []
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 10, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_release\", \"arguments\": {\"lease\": \"W1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_release: Trusty Browser closed the connection\"}],\"isError\":true}}",
+  "frames": [
+   {
+    "request": "{\"op\": \"release\", \"lease\": \"W1\"}",
+    "reply": null
+   }
+  ]
+ },
+ {
+  "send": "{\"jsonrpc\": \"2.0\", \"id\": 11, \"method\": \"tools/call\", \"params\": {\"name\": \"browser_release\", \"arguments\": {\"lease\": \"W1\"}}}",
+  "recv": "{\"jsonrpc\":\"2.0\",\"id\":11,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Error executing tool browser_release: [Errno 9] Bad file descriptor\"}],\"isError\":true}}",
+  "frames": []
+ }
+]

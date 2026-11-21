@@ -39,6 +39,7 @@
 #               fixtures, unconditional
 #   fastembed-cache-selftest – the model-cache check and key sites, unconditional
 #   website-corpus – the website content gate, step-gated on its own relevance
+#   public-leaks – the public-content leak guard over every tracked file
 #   ci-gate  – "CI gate": one context that fails when any context it stands in
 #              for fails, or a job skipped without the classifier's say-so
 #              (#8378; scripts/ci-gate-verdict.sh holds the covered list)
@@ -274,6 +275,11 @@ jobs:
       - name: CI helper selftests (#4179, #4468, #4421)
         run: bash scripts/check-ci-helpers-selftest.sh
 
+      # #11486: pre-publish.yml is dispatch-only, so its CI-parity verdicts are
+      # fixture-tested here, on every PR.
+      - name: Pre-publish CI-parity selftest (#11486)
+        run: ./scripts/check-ci-parity-selftest.sh
+
       # #5657: this job's notifier below cannot see a sibling workflow, so every
       # push-to-main workflow must be watched by red-main-notify.yml instead. A
       # PR that adds one fails HERE, naming the file, rather than going unwatched
@@ -290,6 +296,14 @@ jobs:
       # #8716: the rustdoc-links job's scope decision and the gate's own
       # fail-closed arms. Neither needs a doc build; the gate's selftest scores
       # captured cargo streams. It ran in no workflow before this step.
+      # #11470: the release gates for a trusty-mpm publish — published content
+      # coverage and the clean-HOME command walk — driven with fixtures and a
+      # stub binary; no network, no toolchain.
+      - name: Release content-gate selftests (#11470)
+        run: |
+          bash scripts/check-content-release-coverage-selftest.sh
+          bash scripts/release-gate-selftest.sh
+
       - name: Rustdoc scope + link-gate selftests (#8716)
         run: |
           bash scripts/rustdoc-links-scope-selftest.sh
@@ -979,13 +993,15 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
 
+      # #11507: zsh for trusty-mpm hook_rewrite_chain real-shell tests (sh/bash/zsh).
       - name: Install system dependencies
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            zsh
 
       # #1008: trusty-analyze's `RoslynTool` (crates/trusty-analyze/src/core/
       # tool_impls/csharp/mod.rs) shells out to `dotnet build` to produce SARIF
@@ -1739,12 +1755,14 @@ jobs:
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # #11507: zsh for trusty-mpm hook_rewrite_chain real-shell tests (sh/bash/zsh).
       - name: Install system dependencies
         run: |
           bash scripts/ci-apt-install.sh \
             build-essential \
             pkg-config \
-            libssl-dev
+            libssl-dev \
+            zsh
 
       - name: Install .NET SDK (for trusty-analyze's C# Roslyn adapter tests)
         uses: actions/setup-dotnet@v4
@@ -3122,6 +3140,37 @@ jobs:
   # context whose job is missing from `needs:`. Its table of covered contexts
   # is the single list; ci-gate-selftest.sh holds it equal to `needs:` below.
   # --------------------------------------------------------------------------
+  # public-leaks: the public-content leak guard, beside the Architect leak
+  # gate above. Every tracked text file against scripts/public_leak_patterns.txt
+  # with the shrink-only scripts/public_leak_baseline.tsv. No path filter: a
+  # leak can enter any path. The private names (class PRIVATE_NAME) come only
+  # from the PUBLIC_LEAK_PRIVATE_NAMES Actions secret: one name per line,
+  # written to a runner-temp file; set it with
+  #   gh secret set PUBLIC_LEAK_PRIVATE_NAMES < names.txt
+  # The guard fails when the secret is absent or empty (a fork PR has no secrets).
+  # Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
+  # --------------------------------------------------------------------------
+  public-leaks:
+    name: Public-content leak guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Public-leak selftest (new hit fails, stale baseline fails)
+        run: bash scripts/check_public_leaks_selftest.sh
+
+      - name: Enforce public-content leak guard
+        if: ${{ !cancelled() }}
+        env:
+          PUBLIC_LEAK_PRIVATE_NAMES: ${{ secrets.PUBLIC_LEAK_PRIVATE_NAMES }}
+        run: |
+          umask 077
+          names="$RUNNER_TEMP/public-leak-private-names.txt"
+          printf '%s\n' "$PUBLIC_LEAK_PRIVATE_NAMES" >"$names"
+          PUBLIC_LEAK_PRIVATE_NAMES_FILE="$names" python3 scripts/check_content.py public-leaks
+
+  # --------------------------------------------------------------------------
   ci-gate:
     name: CI gate
     needs:
@@ -3145,6 +3194,7 @@ jobs:
         fastembed-cache-selftest,
         website-corpus,
         changelog-fragment,
+        public-leaks,
         test,
       ]
     if: ${{ always() }}

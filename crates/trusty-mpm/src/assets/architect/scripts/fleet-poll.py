@@ -252,11 +252,20 @@ def save_state(state):
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Deterministic fleet poller.")
     ap.add_argument("--once", action="store_true", help="run one cycle and exit")
-    ap.add_argument("--interval", type=int, default=60, help="seconds between cycles")
+    ap.add_argument("--interval", type=int, default=None,
+                    help="seconds between cycles (default: poll_interval_s in local/architect.json)")
     ap.add_argument("--dry-run", action="store_true",
                     help="one cycle that captures and classifies only: prints to "
                          "stdout, writes no file, sends no keys")
     args = ap.parse_args(argv)
+    if args.interval is None:
+        # #11369: one cadence for every start path, read from local/architect.json.
+        config = _load_by_path("architect_config", "architect_config.py")
+        try:
+            args.interval = config.load().poll_interval_s
+        except config.ConfigError as err:
+            print(f"fleet-poll: {err}", file=sys.stderr)
+            return 2
     if not args.dry_run:
         os.makedirs(INBOX, exist_ok=True)
         # #10571: a second live poller stops here, before its first log line or state write.

@@ -8,7 +8,7 @@ Why: ADR-0064 versions instructional content apart from every crate. A content
   member lands under a bundle version no content-v* release has used yet.
   Nothing checked any of that before this script.
 
-What: four subcommands, each failing closed with a named reason.
+What: five subcommands, each failing closed with a named reason.
 
   tree [--expect-version X.Y.Z]
       Validates content/ against content/manifest.toml:
@@ -46,6 +46,9 @@ What: four subcommands, each failing closed with a named reason.
       read by scripts/check_architect_subproject.sh) to
       content/instructions/architect/** (#9996). Fails on a missing pattern file,
       an empty or engine-rejected pattern, or a missing scan root.
+  public-leaks [--update-baseline] [PATH ...]
+      Every tracked text file (or PATH ...) against scripts/public_leak_patterns.txt,
+      with a shrink-only baseline; see scripts/public_leaks.py.
 
 Exit: 0 pass; 1 a check failed; 2 bad usage or no Python 3.11+.
 Test: scripts/check_content_selftest.sh
@@ -530,6 +533,9 @@ def main():
     bump.add_argument("--base", default=os.environ.get("CONTENT_GATE_BASE") or "origin/main")
     sub.add_parser("sync")
     sub.add_parser("leaks")
+    pub = sub.add_parser("public-leaks")
+    pub.add_argument("--update-baseline", action="store_true")
+    pub.add_argument("paths", nargs="*")
     args = parser.parse_args()
     try:
         if args.cmd == "tree":
@@ -538,6 +544,11 @@ def main():
             cmd_bump(REPO_ROOT, args.base)
         elif args.cmd == "leaks":
             cmd_leaks(REPO_ROOT)
+        elif args.cmd == "public-leaks":
+            import public_leaks  # same directory; lazy so the other modes need only this file
+
+            root = Path(os.environ.get("PUBLIC_LEAK_ROOT") or REPO_ROOT)
+            public_leaks.run(root, load_leak_rules, leak_findings, Fail, args.paths, args.update_baseline)
         else:
             cmd_sync(REPO_ROOT)
     except Fail as err:

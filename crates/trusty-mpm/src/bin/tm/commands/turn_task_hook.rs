@@ -44,9 +44,9 @@ pub(crate) fn turn_task_hook() {
 /// testable without a binary.
 /// What: `None` for a sub-agent (`CLAUDE_MPM_SUB_AGENT` or a payload
 /// `agent_id`), an unreadable payload, an event other than
-/// `UserPromptSubmit`, no `CLAUDE_PROJECT_DIR`, an Architect session, an
-/// unresolved datg session ([`turn_task_stamp::state_path`] over
-/// `DATG_SESSION` and `tmux`) or no stamp ([`turn_task_stamp::read_stamp`]).
+/// `UserPromptSubmit`, no `CLAUDE_PROJECT_DIR`, an Architect session
+/// or no stamp ([`turn_task_stamp::resolve_stamp`]: the dbatg store over
+/// `DBATG_SESSION` and `tmux`, else the datg store over `DATG_SESSION`).
 /// Otherwise the JSON of [`turn_task_stamp::hook_output`].
 /// Test: `each_fail_open_arm_prints_nothing`, `a_pm_payload_is_stamped`.
 pub(crate) fn respond(
@@ -74,9 +74,15 @@ pub(crate) fn respond(
     if profile.is_architect() {
         return None;
     }
+    // #11398: dbatg (the installed writer) first, datg.py's store as fallback.
+    let dbatg_session = env("DBATG_SESSION");
     let datg_session = env("DATG_SESSION");
-    let path = turn_task_stamp::state_path(&project, datg_session.as_deref(), tmux)?;
-    let stamp = turn_task_stamp::read_stamp(&path)?;
+    let stamp = turn_task_stamp::resolve_stamp(
+        &project,
+        dbatg_session.as_deref(),
+        datg_session.as_deref(),
+        tmux,
+    )?;
     Some(turn_task_stamp::hook_output(&stamp).to_string())
 }
 

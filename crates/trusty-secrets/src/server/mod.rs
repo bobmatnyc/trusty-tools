@@ -63,12 +63,19 @@ pub mod errors;
 mod exec;
 mod gate;
 pub mod grant;
+// #10524: `secrets.migrate`, the vault blob migration.
+mod migrate;
 // #11215: the timestamp on the server's start and exit lines.
 #[cfg(test)]
 mod grant_fakes;
 mod log_stamp;
 mod methods;
 pub mod project;
+// #10524: the unlock grant's power watcher and its two methods.
+mod power;
+// #11464: the remote gate's server methods and its forced-command front.
+mod remote;
+mod remote_gate;
 mod router;
 // #9793: the sandbox consent override and backend refusal.
 mod sandbox;
@@ -83,16 +90,19 @@ mod ticket;
 mod ticket_checks;
 mod ticket_methods;
 mod tools;
+mod unlock;
 
 pub use ancestry::{
-    OsProcessTable, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
+    OsProcessTable, ProcComm, ProcessError, ProcessTable, StartTime, has_agent_ancestor,
     is_self_or_descendant,
 };
 pub use architect::ArchitectRefusal;
 pub use audit::{
     AUDIT_STREAM, AuditDecision, AuditMethod, AuditReason, AuditRecord, AuditSource, AuditStream,
-    BackendWait,
+    BackendWait, MigrationAudit, RemoteAgent, ServedFrom,
 };
+// #10524: why an unlock grant ended, as its audit records name it.
+pub use crate::store::grant_cache::DropReason as GrantDropReason;
 pub use client::{ClientError, OnDemandSecrets, RpcFailure, SECRETS_EXTERNAL_ENV, SECRETS_SERVICE};
 pub use copy_source::CopySourceAudit;
 pub use core_dump::disable_core_dumps;
@@ -107,6 +117,11 @@ pub use grant::{
 pub use log_stamp::log_stamp;
 pub use methods::PROJECT_FIELD;
 pub use project::{PROJECT_CONFIG_SUBPATH, ProjectContext};
+pub use remote_gate::{
+    EXIT_REFUSED, EXIT_UNAVAILABLE, EXIT_USAGE, FRAME_READ_TIMEOUT, GATE_DEADLINE, GATE_SUBCOMMAND,
+    GateConfig, GateReply, MAX_FRAME_BYTES, SERVER_ABSENT, gate_reply,
+    run_from_args as run_remote_gate_from_args, run_remote_gate,
+};
 pub use router::{
     BackendFactory, EXIT_GRACE, ServeError, ServeExit, StartEnv, State, backends_for,
     default_backends, run_to_exit, serve, serve_with,
@@ -115,8 +130,8 @@ pub use router::{
 pub use sandbox::SandboxEnv;
 pub use settings::{
     AUDIT_LOG_SUBPATH, CACHE_MAX_AGE_ENV, DEFAULT_AUDIT_MAX_BYTES, DEFAULT_CACHE_MAX_AGE,
-    DEFAULT_IDLE_TIMEOUT, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV, SOCKET_SUBPATH,
-    ServerSettings, SettingsError, template_root_beside,
+    DEFAULT_IDLE_TIMEOUT, DEFAULT_UNLOCK_TTL, IDLE_TIMEOUT_ENV, INDEX_DIR_ENV, SOCKET_ENV,
+    SOCKET_SUBPATH, ServerSettings, SettingsError, UNLOCK_TTL_ENV, template_root_beside,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use test_support::{serve_with_agent_callers, serve_without_agent_callers};

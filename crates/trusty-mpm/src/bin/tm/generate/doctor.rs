@@ -132,6 +132,10 @@ pub(crate) const DOCTOR_CHECKS: &[(&str, &str)] = &[
         "What tool-output compression has saved, folded from the same ledger rows the `💸` statusline segment renders — `compress` (a `tm compress` run, rtk or native) and `divert` (a bulk read answered by a cheap worker), both credited per tool call. `Ok` naming the row count, the tokens and estimated bytes saved and the last row's timestamp; `Warn` when no such row exists yet; `Warn` naming the IO error when the ledger exists and cannot be read, since an unreadable ledger is not an empty one. Never `Fail`. Read-only (issue #7867).",
     ),
     (
+        "compress_rows_per_day",
+        "`compress` savings rows per UTC day for the 14 complete days ending yesterday, listed as rows/day in the message (so `tm doctor --json` carries them). `Warn` when yesterday is more than 80% below the window's median — the first sign of a hook or `tm` version gap; `Warn` naming the IO error on an unreadable ledger; `Ok` otherwise. Never `Fail`. Read-only (issue #11033).",
+    ),
+    (
         "statusline",
         "Whether the `💸` savings segment can render at all: the `statusLine` command in each settings tier (present, and pointing at a binary that still exists), whether the savings ledger and the per-session statusline record store are readable, and whether the render rule produces a figure for a synthetic fold. `Fail` when no tier is wired, when an input cannot be read, or when the render rule declines; `Warn` when it can render but has no rows yet, or when a stale tier sits beside a wired one. Remediation: `tm doctor --fix --yes`, which seeds or repoints the entry in the project and user tiers (issue #7617).",
     ),

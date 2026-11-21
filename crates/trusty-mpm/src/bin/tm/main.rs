@@ -73,6 +73,11 @@ mod divert_cli_tests;
 #[path = "install_policy_tests.rs"]
 mod install_policy_tests;
 
+// #11470: every clap command has a row in the release-gate table.
+#[cfg(test)]
+#[path = "release_gate_drift_tests.rs"]
+mod release_gate_drift_tests;
+
 // #6441: parse-layer coverage for the bare `tm <github-url>` form. Its own
 // file rather than `tests.rs` because the `infer_subcommands` /
 // `external_subcommand` precedence it pins is one cohesive claim.
@@ -537,9 +542,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::PromptFeedback(args)) => commands::prompt_feedback_cli::run(args).await,
         // #6887: the cheap worker `--divert-check` steers the agent to.
         Some(Command::Divert { action }) => commands::divert::run(action).await,
+        // #11033: the read side of the compress and opportunity ledgers.
+        Some(Command::Savings { action }) => commands::savings_status::run(action),
         Some(Command::Memory { action }) => memory(action).await,
         // #10973: a command after `--` selects the run mode (`compress_run`).
-        Some(Command::Compress { tool, command }) => compress_run::run(&tool, &command).await,
+        Some(compress @ Command::Compress { .. }) => compress_run::dispatch(compress).await,
         // #5843: `tm wait` owns its own exit codes (0/75/1/2), so it never
         // returns here — the `!` it yields coerces into this match's type.
         Some(Command::Wait(args)) => commands::wait::run(args),

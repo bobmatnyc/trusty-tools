@@ -55,7 +55,7 @@ use crate::agents::manifest::{
 use crate::agents::metadata::agent_metadata_from_str;
 // #4698: every file this deployer writes is stamped framework-owned.
 use crate::agents::provenance::without_provenance_line;
-use crate::agents::skill_root::{check_skills_root, compose_agent_for_deploy};
+use crate::agents::skill_root::{OMIT_CLAUDE_MD_LINE, check_skills_root, compose_agent_for_deploy};
 
 /// Summary of one [`deploy_agents`] run.
 ///
@@ -241,13 +241,22 @@ pub fn deploy_agents_filtered(
 /// skipped — refused adoption, refused refresh. The pre-stamp spelling has to
 /// stay adoptable.
 /// What: `true` when `current` equals `composed`, or equals `composed` with its
-/// `provenance:` line removed. Nothing else is accepted — a file differing in
-/// any other byte is still treated as possibly the operator's.
+/// `provenance:` line removed, or either of those with the #7684
+/// `omitClaudeMd:` stamp removed. Nothing else is accepted — a file differing
+/// in any other byte is still treated as possibly the operator's.
 /// Test: `deploy_adopts_untracked_byte_identical_file`,
 /// `deploy_adopts_an_untracked_file_written_before_the_provenance_stamp`.
 fn is_adoptable(current: &str, composed: &str) -> bool {
-    checksum(current) == checksum(composed)
-        || checksum(current) == checksum(&without_provenance_line(composed))
+    let matches = |doc: &str| {
+        checksum(current) == checksum(doc)
+            || checksum(current) == checksum(&without_provenance_line(doc))
+    };
+    // #7684: a file written before the stamp existed stays adoptable.
+    let stamp = format!("---\n{OMIT_CLAUDE_MD_LINE}\n");
+    matches(composed)
+        || composed
+            .strip_prefix(&stamp)
+            .is_some_and(|rest| matches(&format!("---\n{rest}")))
 }
 
 fn deploy_agents_locked(

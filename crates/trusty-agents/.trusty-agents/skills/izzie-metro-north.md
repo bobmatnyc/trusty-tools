@@ -2,7 +2,7 @@
 name: izzie-metro-north
 description: MTA Metro North real-time schedules and alerts
 tags: [transit, metro-north, mta, train, schedule, izzie, cto]
-agents: [personal-assistant, cto-assistant]
+agents: [personal-assistant]
 ---
 
 # MTA Metro North — Real-time Schedules and Alerts

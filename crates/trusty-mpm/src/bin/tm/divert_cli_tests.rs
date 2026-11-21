@@ -75,3 +75,29 @@ fn cli_parses_divert_bulk_read() {
         "bulk-read must require at least one file"
     );
 }
+
+/// #11033: `tm savings status` parses with its three flags and defaults.
+#[test]
+fn cli_parses_savings_status() {
+    let cli = Cli::try_parse_from([
+        "trusty-mpm",
+        "savings",
+        "status",
+        "--by",
+        "subagent",
+        "--days",
+        "3",
+        "--json",
+    ])
+    .unwrap();
+    match cli.command.expect("command") {
+        Command::Savings {
+            action: crate::cli::SavingsAction::Status { by, days, json },
+        } => {
+            assert_eq!(by, crate::cli::SavingsGroupArg::Subagent);
+            assert_eq!(days, 3);
+            assert!(json);
+        }
+        other => panic!("expected Savings, got {other:?}"),
+    }
+}

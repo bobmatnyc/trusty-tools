@@ -14,7 +14,7 @@
 > review footer (#728), fail-closed on parse/truncation (#1241), MCP server
 > (`review_pr`/`review_diff`/`review_health`), full longitudinal contributor profile
 > pipeline, map-reduce Phases 1–2 (config + per-file splitter, #680). The new §9
-> in PRD.md (Best-practice & Duetto-alignment requirements, epic #1413) was also
+> in PRD.md (Best-practice & Acme-alignment requirements, epic #1413) was also
 > added in this reconciliation pass.
 >
 > **2026-08-12 update:** Contributor profiling was removed from trusty-review in
@@ -82,13 +82,13 @@ The critical path:
 - [#586](https://github.com/bobmatnyc/trusty-tools/issues/586) — configurable threshold TOML
 - [#680](https://github.com/bobmatnyc/trusty-tools/issues/680) — map-reduce Phases 3–6 (fan-out, reduce, wire-in, enable by default)
 - [#569](https://github.com/bobmatnyc/trusty-tools/issues/569) — per-PR review personalization from contributor profile (post-#552)
-- [#1413](https://github.com/bobmatnyc/trusty-tools/issues/1413) — epic: best-practice & Duetto-alignment improvements (#1414–#1423)
+- [#1413](https://github.com/bobmatnyc/trusty-tools/issues/1413) — epic: best-practice & Acme-alignment improvements (#1414–#1423)
 
 ## Related documentation
 
 This `spec/` set is the *what/why/gap* layer. Point-in-time docs live alongside it:
 
-- **[../research/](../research/)** — dated investigations and decision documents (source-analysis.md is the grounded analysis of the Python predecessor system that all spec requirements cite)
+- **[../research/](../research/)** — dated investigations and decision documents
 - **[crates/trusty-review/README.md](../../../crates/trusty-review/README.md)** — in-crate quick-start and usage
 
 ## Provenance and maintenance
