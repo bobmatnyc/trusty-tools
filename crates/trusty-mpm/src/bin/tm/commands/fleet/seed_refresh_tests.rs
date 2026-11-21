@@ -43,13 +43,16 @@ fn a_refresh_updates_an_unedited_earlier_copy() {
         "{steps:?}"
     );
     assert_eq!(mode(&dir.join(dest)), 0o755);
+    // #11245: an unedited copy updates in place and gets no `.shipped` sibling.
+    assert!(!dir.join(format!("{dest}.shipped")).exists());
     let again = super::super::seed::deploy_with(&dir, seed(), &history).unwrap();
     assert!(again.contains(&Step::Unchanged(dest.to_owned())));
 }
 
-/// Bytes the history does not list are an edit: kept, and reported as kept.
+/// Bytes the history does not list are an edit: kept, reported as kept, and
+/// (#11245) the new shipped copy is written beside it as `<dest>.shipped`.
 #[test]
-fn a_refresh_keeps_an_edited_copy_and_reports_it() {
+fn a_refresh_keeps_an_edited_copy_and_writes_the_shipped_sibling_11245() {
     let fx = Fixture::new();
     fx.init().unwrap();
     let dir = fx.dir();
@@ -63,8 +66,24 @@ fn a_refresh_keeps_an_edited_copy_and_reports_it() {
     assert_eq!(std::fs::read(dir.join(dest)).unwrap(), edited);
     assert!(
         steps.iter().any(|s| matches!(s, Step::Skipped(t)
-            if t.starts_with(dest) && t.contains("left as is") && t.contains("custom copy kept"))),
+            if t.starts_with(dest) && t.contains("left as is") && t.contains("custom copy kept")
+                && t.contains("scripts/datg.py.shipped"))),
         "{steps:?}"
+    );
+    let sibling = dir.join("scripts/datg.py.shipped");
+    assert_eq!(std::fs::read_to_string(&sibling).unwrap(), shipped(dest));
+    assert_eq!(
+        mode(&sibling) & 0o111,
+        0,
+        "the sibling must not be executable"
+    );
+    let again = super::super::seed::deploy_with(&dir, seed(), &history).unwrap();
+    assert_eq!(std::fs::read(dir.join(dest)).unwrap(), edited);
+    assert_eq!(std::fs::read_to_string(&sibling).unwrap(), shipped(dest));
+    assert!(
+        again
+            .iter()
+            .any(|s| matches!(s, Step::Skipped(t) if t.starts_with(dest)))
     );
 }
 
