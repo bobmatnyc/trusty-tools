@@ -116,3 +116,19 @@ def test_no_script_reads_store_files_directly():
         if n.endswith((".py", ".sh")) and not n.startswith("test_") and n not in allowed:
             bad += [f"{n}: {l.strip()}" for l in open(os.path.join(SCRIPTS, n), encoding="utf-8") if pat.search(l)]
     assert bad == []
+
+
+@pytest.mark.parametrize("extra,relayed", [
+    ({"relayed": True}, True),
+    ({"relayed": "2026-10-11T11:00Z"}, True),
+    ({"relayed_at": "2026-10-11T11:00Z"}, True),
+    ({"relayed": False}, False),
+    ({"relayed": "  "}, False),
+    ({"relayed_at": " "}, False),
+    ({"relayed": None, "relayed_at": None}, False),
+    ({}, False),
+])
+def test_relayed_accepts_bool_string_and_relayed_at(extra, relayed):
+    # Architect ruling: relayed is `relayed is True`, a non-blank `relayed` string, or a non-blank `relayed_at`.
+    items = [doc("q1", status="answered", answer="Yes", answered_at="2026-10-11T10:00Z", **extra)]
+    assert (dv.pending_items(items, NOW) == []) is relayed
