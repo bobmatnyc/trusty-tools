@@ -200,6 +200,8 @@ impl Core {
                 )?;
                 let ident = grant.ident.clone();
                 inner.grants.push(grant);
+                // #11528: the grant must outlive a broker restart.
+                self.persist_grants(inner);
                 ident
             }
         };
@@ -318,6 +320,8 @@ impl Core {
         inner
             .claims
             .retain(|c| !grant.sessions.contains(&c.owner_session));
+        // #11528: every grant end rewrites the store (deleted if the rewrite fails).
+        self.persist_grants(inner);
     }
 
     /// Keep one task at the earliest reconnect-grace deadline (`arm`).

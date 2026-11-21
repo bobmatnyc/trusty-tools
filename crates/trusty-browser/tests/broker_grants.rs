@@ -47,6 +47,10 @@ async fn call(s: &mut UnixStream, body: &str) -> Json {
         .await
         .expect("head");
     s.write_all(body.as_bytes()).await.expect("body");
+    recv(s).await
+}
+
+async fn recv(s: &mut UnixStream) -> Json {
     let mut head = [0u8; 4];
     tokio::time::timeout(Duration::from_secs(5), s.read_exact(&mut head))
         .await
@@ -84,7 +88,11 @@ async fn handshake(state: &std::path::Path, incarnation: &str) -> UnixStream {
         nonce: NONCE,
     };
     let proof = pairing_proof(KEY, Role::Extension, &fields, &server).expect("proof");
-    let ack = call(&mut s, &format!(r#"{{"type":"proof","proof":"{proof}"}}"#)).await;
+    let mut ack = call(&mut s, &format!(r#"{{"type":"proof","proof":"{proof}"}}"#)).await;
+    // A grant the new incarnation may not rebind is ended with a `grant_end` frame first.
+    if ack.get("op").and_then(Json::as_str) == Some("grant_end") {
+        ack = recv(&mut s).await;
+    }
     assert_eq!(ack.get("ok"), Some(&Json::Bool(true)), "{ack:?}");
     s
 }
@@ -163,4 +171,108 @@ async fn grace_expiry_ends_a_grant_whose_worker_never_returns() {
     let audit = fs::read_to_string(state.join("audit.jsonl")).expect("audit");
     assert!(audit.contains(r#""event":"grant_reuse""#), "{audit}");
     assert!(audit.contains(r#""outcome":"browser_gone""#), "{audit}");
+}
+
+fn start(state: &std::path::Path, clock: &Manual) -> Broker {
+    let store = MemoryKeyStore::new();
+    let account = fs::canonicalize(state)
+        .expect("canon")
+        .to_string_lossy()
+        .into_owned();
+    store
+        .set(&fixture_service(), &account, &fixture_key())
+        .expect("key");
+    let mut options = BrokerOptions::new(state, Box::new(store));
+    options.service = fixture_service();
+    options.clock = Arc::new(clock.clone());
+    options.host_check = Arc::new(Open);
+    Broker::start(options).expect("start")
+}
+
+fn cred() -> String {
+    format!(r#""profile":"{PROFILE}","email":"{EMAIL}","key":"{KEY}""#)
+}
+
+/// Pair, attach a worker and connect; returns the grant id. The worker is dropped.
+async fn connected(state: &std::path::Path) -> String {
+    let c = cred();
+    let paired = once(state, "enrollment.sock", &format!(r#"{{"op":"pair",{c}}}"#)).await;
+    assert_eq!(paired.get("ok"), Some(&Json::Bool(true)));
+    let worker = handshake(state, "inc-1").await;
+    let reply = once(
+        state,
+        "enrollment.sock",
+        &format!(r#"{{"op":"connect",{c}}}"#),
+    )
+    .await;
+    drop(worker);
+    reply
+        .get("grant")
+        .and_then(Json::as_str)
+        .expect("grant")
+        .to_owned()
+}
+
+async fn listed(state: &std::path::Path) -> usize {
+    grant_count(&once(state, "agent.sock", r#"{"op":"profiles"}"#).await)
+}
+
+/// #11528: a restart keeps the grant; the stored incarnation and the grace still decide its fate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restart_keeps_a_grant_until_its_grace_ends() {
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    let first = start(state, &clock);
+    let grant = connected(state).await;
+    first.close().await;
+
+    let stored = fs::read_to_string(state.join("grants.json")).expect("store");
+    assert!(stored.contains(&grant), "{stored}");
+    assert!(!stored.contains(KEY), "the store must not hold the key");
+
+    let second = start(state, &clock);
+    assert_eq!(listed(state).await, 1, "grant must survive the restart");
+    // The same incarnation rebinds it inside the grace.
+    *clock.0.lock().expect("clock") = 1030.0;
+    let worker = handshake(state, "inc-1").await;
+    assert_eq!(listed(state).await, 1);
+    drop(worker);
+    second.close().await;
+
+    // A new worker incarnation after a restart ends the grant.
+    let third = start(state, &clock);
+    let worker = handshake(state, "inc-2").await;
+    assert_eq!(
+        listed(state).await,
+        0,
+        "a different incarnation must not rebind"
+    );
+    drop(worker);
+    third.close().await;
+    // And the ended grant does not come back on the next start.
+    let fourth = start(state, &clock);
+    assert_eq!(listed(state).await, 0, "the ended grant must not come back");
+    fourth.close().await;
+}
+
+/// #11528: no grant outlives its revocation, even across a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_grant_does_not_return_after_a_restart() {
+    let dir = state_dir();
+    let state = dir.path();
+    let clock = Manual(Arc::new(Mutex::new(1000.0)));
+    let first = start(state, &clock);
+    let grant = connected(state).await;
+    let revoked = once(
+        state,
+        "operator.sock",
+        &format!(r#"{{"op":"revoke_grant","grant":"{grant}"}}"#),
+    )
+    .await;
+    assert_eq!(revoked.get("ok"), Some(&Json::Bool(true)), "{revoked:?}");
+    first.close().await;
+    let second = start(state, &clock);
+    assert_eq!(listed(state).await, 0);
+    second.close().await;
 }

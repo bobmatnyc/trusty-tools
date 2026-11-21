@@ -298,6 +298,8 @@ impl Broker {
             this: this.clone(),
             inner: Mutex::new(inner),
         });
+        // #11528: bring back persisted grants, still subject to the reconnect grace.
+        core.restore_grants(&mut core.lock());
         let mut broker = Broker {
             core,
             tasks: JoinSet::new(),
