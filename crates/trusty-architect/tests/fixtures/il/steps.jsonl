@@ -1,0 +1,86 @@
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "3000"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "1000"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "900"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "800"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "700"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "650"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "600"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "550"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "500"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "450"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "400"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "350"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "300"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "200"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["show", "--brief"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["show"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["fresh"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["fresh", "--max-age", "5"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["fresh", "--since", "2026-11-18T11:06Z"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["acts"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["acts", "--since", "48h", "--json"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["acts", "--goal", "fx-G01", "--limit", "1"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["reminders"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["reminders", "--all", "--json"], "stdin": null}
+{"epoch": 1795172800, "prog": "datg", "args": ["add", "T", "--title", "Fourth task", "--goal", "fx-G02", "--done-when", "x"], "stdin": null}
+{"epoch": 1795172860, "prog": "datg", "args": ["add", "T", "--title", "Fifth task", "--goal", "fx-G01", "--done-when", "y"], "stdin": null}
+{"epoch": 1795172920, "prog": "datg", "args": ["update", "fx-T01", "--priority", "1"], "stdin": null}
+{"epoch": 1795172980, "prog": "datg", "args": ["update", "fx-T02", "--status", "done", "--outcome", "merged PR #12"], "stdin": null}
+{"epoch": 1795173040, "prog": "datg", "args": ["update", "fx-D01", "--status", "done", "--outcome", "verified"], "stdin": null}
+{"epoch": 1795173100, "prog": "datg", "args": ["add", "A", "--title", "Check the build", "--goal", "fx-G01", "--opts", "yes*,no"], "stdin": null}
+{"epoch": 1795173160, "prog": "datg", "args": ["update", "fx-A02", "--answer", "yes"], "stdin": null}
+{"epoch": 1795173220, "prog": "datg", "args": ["update", "fx-D02", "--esc", ""], "stdin": null}
+{"epoch": 1795173280, "prog": "datg", "args": ["remind", "fx-T01", "--at", "2026-11-21", "--every", "7d", "--note", "ping the owner"], "stdin": null}
+{"epoch": 1795173281, "prog": "datg", "args": ["remind", "fx-T01", "--at", "2026-11-21", "--every", "7d", "--note", "ping the owner"], "stdin": null}
+{"epoch": 1795173340, "prog": "datg", "args": ["remind-done", "fx-T01", "1"], "stdin": null}
+{"epoch": 1795432000, "prog": "datg", "args": ["remind-fire", "--dry-run"], "stdin": null}
+{"epoch": 1795432000, "prog": "datg", "args": ["remind-fire"], "stdin": null}
+{"epoch": 1795432060, "prog": "datg", "args": ["remind-done", "fx-T01", "3", "--end"], "stdin": null}
+{"epoch": 1795173400, "prog": "datg", "args": ["act", "--who", "tm-architect", "--what", "reviewed the digest", "--refs", "local/briefs/x.md"], "stdin": null}
+{"epoch": 1795173460, "prog": "datg", "args": ["session", "set", "--next", "port the parser", "--owe", "none", "--wait", "none", "--ref", "spec=none", "--boundary"], "stdin": null}
+{"epoch": 1795173520, "prog": "datg", "args": ["batch"], "stdin": "[{\"op\": \"add\", \"kind\": \"D\", \"title\": \"Batch decision\", \"goal\": \"fx-G01\", \"opts\": [{\"l\": \"A\", \"rec\": true}, {\"l\": \"B\", \"rec\": false}]}, {\"op\": \"update\", \"id\": \"fx-T01\", \"title\": \"Write the spec (v2)\", \"note\": \"retitled\"}, {\"op\": \"act\", \"who\": \"w\", \"what\": \"batched act\"}]"}
+{"epoch": 1795173580, "prog": "datg", "args": ["rebalance"], "stdin": null}
+{"epoch": 1795173600, "prog": "datg", "args": ["update", "fx-T01", "--priority", "9"], "stdin": null}
+{"epoch": 1795173610, "prog": "datg", "args": ["update", "fx-T99", "--title", "x"], "stdin": null}
+{"epoch": 1795173620, "prog": "datg", "args": ["add", "T", "--title", "No done when", "--goal", "fx-G01"], "stdin": null}
+{"epoch": 1795173630, "prog": "datg", "args": ["add", "T", "--title", "Relay the answer", "--goal", "fx-G01", "--done-when", "z"], "stdin": null}
+{"epoch": 1795173640, "prog": "datg", "args": ["add", "D", "--title", "x", "--goal", "nope"], "stdin": null}
+{"epoch": 1795173650, "prog": "datg", "args": ["close", "fx-T04", "--outcome", ""], "stdin": null}
+{"epoch": 1795173660, "prog": "datg", "args": ["session", "set", "--wait", "bad:thing"], "stdin": null}
+{"epoch": 1795173670, "prog": "datg", "args": ["session", "set", "--owe", "x=latest@r"], "stdin": null}
+{"epoch": 1795173680, "prog": "datg", "args": ["archive-show", "fx-T03"], "stdin": null}
+{"epoch": 1795173681, "prog": "datg", "args": ["archive-show", "fx-T77"], "stdin": null}
+{"epoch": 1795518400, "prog": "datg", "args": ["prune", "--dry-run"], "stdin": null}
+{"epoch": 1795518460, "prog": "datg", "args": ["prune"], "stdin": null}
+{"epoch": 1796036800, "prog": "datg", "args": ["rotate"], "stdin": null}
+{"epoch": 1796036860, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "3000"], "stdin": null}
+{"epoch": 1796036870, "prog": "datg", "args": ["fresh", "--since", "later"], "stdin": null}
+{"epoch": 1796036880, "prog": "ilio", "args": ["table"], "stdin": null}
+{"epoch": 1796036881, "prog": "ilio", "args": ["table", "--max-tokens", "40"], "stdin": null}
+{"epoch": 1796036882, "prog": "ilio", "args": ["relay", "R01-a", "sha=abc123", "where=main"], "stdin": null}
+{"epoch": 1796036883, "prog": "ilio", "args": ["relay", "R09-z"], "stdin": null}
+{"epoch": 1796036890, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01@1118\ndone: outline written\npct: 60\nest: 2h\nremaining: 30m\nnext: finish the spec\n```\n"}
+{"epoch": 1796036900, "prog": "ilio", "args": ["check"], "stdin": "no block here"}
+{"epoch": 1796036901, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 5\n```"}
+{"epoch": 1796036902, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\nnext: y\npct: 5\n```"}
+{"epoch": 1796036903, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 5\nnext: y\nweird: 1\n```"}
+{"epoch": 1796036904, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww\npct: 5\nnext: y\n```"}
+{"epoch": 1796036905, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: key ghp_aaaaaaaaaaaaaaaaaaaaaaaa\npct: 5\nnext: y\n```"}
+{"epoch": 1796036906, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 105\nnext: y\n```"}
+{"epoch": 1796036907, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T0o\ndone: x\npct: 5\nnext: y\n```"}
+{"epoch": 1796036908, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T77\ndone: x\npct: 5\nnext: y\n```"}
+{"epoch": 1796036909, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01@0101\ndone: x\npct: 5\nnext: y\n```"}
+{"epoch": 1796036910, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: see R01-z\npct: 5\nnext: y\n```"}
+{"epoch": 1796036911, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 5\nremind: fx-T01 at=nope \"n\"\nnext: y\n```"}
+{"epoch": 1796036912, "prog": "ilio", "args": ["check"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 5\nremind: fx-T99 at=2026-12-01 \"n\"\nnext: y\n```"}
+{"epoch": 1796036930, "prog": "ilio", "args": ["parse"], "stdin": "```il\ntask: fx-T01@1118\ndone: outline written\npct: 60\nest: 2h\nremaining: 30m\nnext: finish the spec\n```\n"}
+{"epoch": 1796036931, "prog": "ilio", "args": ["expand"], "stdin": "```il\ntask: fx-T01@1118\ndone: R01-a sha=1 where=x for fx-T01\npct: 60\nest: 2h\nremaining: 30m\nnext: finish the spec\n```\n"}
+{"epoch": 1796036940, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01@1118\ndone: outline written\npct: 60\nest: 2h\nremaining: 30m\nnext: finish the spec\n```\n"}
+{"epoch": 1796036941, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01@1118\ndone: outline written\npct: 60\nest: 2h\nnext: finish the spec\n```\n"}
+{"epoch": 1796036950, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01\ndone: moved\npct: 70\nremaining: 20m\nnew: T \"Review the PR\" done_when=\"approved; merged\"\nnew: T \"Review the PR\" done_when=\"approved; merged\"\nnew: T \"Relay the notes\" multistep done_when=\"sent\"\nremind: fx-T01 at=2026-12-01T09:30Z every=7d \"check in\"\nnext: wait for review\ndelta: scope trimmed\ndecided: ship it\nact: pushed the branch | owner: go | ev: PR #3 | refs: PR #3\n```\n"}
+{"epoch": 1796036960, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01\ndone: closing\npct: 100\nclose: fx-T05 fx-T04\nnext: done\nevidence: verified by hand\n```\n"}
+{"epoch": 1796036970, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 80\nnew: T \"No done when here\"\nnext: y\n```\n"}
+{"epoch": 1796036971, "prog": "ilio", "args": ["apply"], "stdin": "```il\ntask: fx-T01\ndone: x\npct: 81\nnew: D \"A decision\" detail=\"short\"\nnext: y\n```\n"}
+{"epoch": 1796037000, "prog": "ilio", "args": ["collapse", "--dry-run"], "stdin": null}
+{"epoch": 1796037001, "prog": "ilio", "args": ["collapse"], "stdin": null}
+{"epoch": 1796037100, "prog": "datg", "args": ["digest", "--no-log", "--max-tokens", "800"], "stdin": null}
