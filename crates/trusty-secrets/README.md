@@ -146,10 +146,10 @@ write already under way may have landed. A `copy` lists in `failed` the keys
 it did not start and any key whose write the deadline cut short, which may
 have landed. `OnDemandSecrets` waits 15 s longer than the deadline, so for a
 CLI-backed call (1Password, Keeper) it always receives the server's answer.
-Each Keychain call has a time limit, `KEYCHAIN_CALL_TIMEOUT` (60 s), cut to
+Each Keychain call has a time limit, `KEYCHAIN_CALL_TIMEOUT` (20 s), cut to
 the request's deadline when that is sooner. A call blocked on an unanswered
-Keychain access prompt fails with `backend_timeout` (`SecretsError::Timeout`
-in the library), never as a miss or a success. The call is abandoned, not
+Keychain access prompt fails with `keychain_access_prompt` (`SecretsError::Timeout`
+in the library; -32089, outcome unknown, verify with `tm secrets list`), never as a miss or a success. The call is abandoned, not
 stopped: its thread stays blocked until the prompt ends, and a write it
 started may still land then. Until it ends, every later call on the same
 Keychain item fails at once with `backend_timeout`, so that late write cannot

@@ -42,13 +42,14 @@ use crate::api::{BackendId, SecretKey, SecretValue, SecretsError, VaultName};
 /// [`SecretsError::Timeout`] (#7524 P2-L7).
 ///
 /// Why: a Keychain call waits on an OS access prompt for as long as the
-/// prompt is open. 60 s matches one vendor CLI call's budget, which also
-/// leaves a person time to answer a prompt.
+/// prompt is open. #11429: 20 s, under the 30 s a dashboard bridge waits on
+/// `tm secrets set`, so the caller gets the `keychain_access_prompt` reply
+/// (outcome unknown, verify with `tm secrets list`) before it gives up itself.
 /// What: the default and only limit; a server request's earlier deadline
 /// cuts it further. Not configurable.
 /// Test: `keychain_backend_runs_every_call_under_the_time_limit`,
 /// `time_limited_call_that_never_returns_times_out_on_every_operation`.
-pub const KEYCHAIN_CALL_TIMEOUT: Duration = Duration::from_secs(60);
+pub const KEYCHAIN_CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The Keychain service holding the pre-#10386 "agents may use" flag items
 /// (#9070). Read only by the deny migration.
