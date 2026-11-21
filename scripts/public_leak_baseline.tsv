@@ -1707,8 +1707,6 @@ scripts/perf_weekly_memory.sh	EVO_HOST	34
 scripts/perf_weekly_memory.sh	OPERATOR_PATH	1
 scripts/perf_weekly_memory_selftest.sh	EVO_HOST	47
 scripts/preflight-check5-selftest.sh	EMAIL	1
-scripts/preflight-check5-selftest.sh	RULING_DATED	6
-scripts/preflight-publish.sh	RULING_DATED	8
 scripts/prepublish-ignored-tests.tsv	EVO_HOST	7
 scripts/prepublish-ignored-tests.tsv	RULING_DATED	1
 scripts/roadmap/generate.mjs	RULING_DATED	1
