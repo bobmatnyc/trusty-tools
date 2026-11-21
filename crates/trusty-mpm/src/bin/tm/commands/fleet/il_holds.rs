@@ -4,8 +4,10 @@
 //! historical one carried by mistake blocks work. The whole file is read, each
 //! entry classified, and anything unclear stops the migration.
 //! What: [`holds_in_state_md`] splits the file into entries (a line and the
-//! indented lines under it) and classifies every entry that names a hold (the
-//! word "hold" in any case): lifted or released, a recorded builder band, or an
+//! indented lines under it) and classifies every entry whose head starts with
+//! a hold format (`HOLD` as its first word, `usage state: HOLD`, `On hold`, any
+//! case; #11480: an entry that only uses the word "hold" or "merge" is neither
+//! a hold nor an error): lifted or released, a recorded builder band, or an
 //! answered or closed item (`D03 (answered ...)`, `QUESTION 17 CLOSED`) is
 //! history and not carried; `usage state: HOLD ...` and `hold: ...` (any case,
 //! `**HOLD**:` too) are the active usage hold; any other entry that names a
@@ -47,11 +49,20 @@ fn entries(text: &str) -> Vec<(usize, Vec<&str>)> {
     out
 }
 
-/// Whether `s` names a hold: the word "hold" in any case (#10579: lowercase
-/// "hold all merges" is a hold too).
-fn names_hold(s: &str) -> bool {
-    s.split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|w| w.eq_ignore_ascii_case("hold"))
+/// Whether the entry's head starts with a hold format: `HOLD` / `hold` as its
+/// first word, `usage state: HOLD`, or `On hold` (#11480).
+fn starts_with_hold_format(h: &str) -> bool {
+    let first = |s: &str| {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .is_some_and(|w| w.eq_ignore_ascii_case("hold"))
+    };
+    let low = h.to_ascii_lowercase();
+    first(h)
+        || low
+            .strip_prefix("usage state:")
+            .is_some_and(|r| first(r.trim_start()))
+        || low.strip_prefix("on ").is_some_and(|r| first(r))
 }
 
 /// The entry's head with its bullet and emphasis stripped.
@@ -89,10 +100,12 @@ pub(crate) fn holds_in_state_md(text: &str) -> Result<Holds, (usize, String)> {
     let mut found = Holds::default();
     for (line, lines) in entries(text) {
         let all = lines.join("\n");
-        if !names_hold(&all) || historical(lines[0], &all) {
+        let h = head(lines[0]);
+        // #11480: only an entry whose head starts with a hold format is a hold;
+        // a note that merely uses the word "hold" or "merge" is neither.
+        if !starts_with_hold_format(h) || historical(lines[0], &all) {
             continue;
         }
-        let h = head(lines[0]);
         let low = h.to_ascii_lowercase();
         let usage = low
             .strip_prefix("usage state:")
