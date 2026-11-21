@@ -11,6 +11,7 @@
 //! `grace_expiry_ends_a_grant_whose_worker_never_returns` in `tests/broker_grants.rs`.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::broker::{Core, Inner};
@@ -181,6 +182,14 @@ impl Core {
         let ident = match Core::profile_grant(inner, &profile) {
             Some(g) => g.ident.clone(),
             None => {
+                // #11528: a stale grant store (rewrite and delete both failed) refuses new
+                // grants. Retry the persist first, so a recovered disk clears the condition.
+                if self.store_stale.load(Ordering::SeqCst) {
+                    self.persist_grants(inner);
+                    if self.store_stale.load(Ordering::SeqCst) {
+                        return Err(Refusal::new("GrantStoreStale"));
+                    }
+                }
                 let grant = Grant {
                     ident: format!("g-{}", token_hex(&*self.entropy, 6)),
                     scope: "profile".into(),
@@ -200,6 +209,8 @@ impl Core {
                 )?;
                 let ident = grant.ident.clone();
                 inner.grants.push(grant);
+                // #11528: the grant must outlive a broker restart.
+                self.persist_grants(inner);
                 ident
             }
         };
@@ -318,6 +329,8 @@ impl Core {
         inner
             .claims
             .retain(|c| !grant.sessions.contains(&c.owner_session));
+        // #11528: every grant end rewrites the store (deleted if the rewrite fails).
+        self.persist_grants(inner);
     }
 
     /// Keep one task at the earliest reconnect-grace deadline (`arm`).

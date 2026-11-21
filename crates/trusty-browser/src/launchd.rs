@@ -241,10 +241,11 @@ fn legacy_for(r: &Registration, state: &Path) -> Box<dyn Fn(&str) -> bool> {
 /// What: refuses a plist or registration file it did not write (except
 /// Python's own, see [`Presence::Python`]) and a loaded job whose plist is
 /// elsewhere. Install: LaunchAgents 0700, state 0700, publish the extension,
-/// the host registrations, the plist (0600), then `bootstrap` unless already
-/// loaded. Uninstall: `bootout` when loaded, then remove every owned file.
+/// the host registrations, the plist (0600), then `bootstrap`, or
+/// `kickstart -k` when the job is already loaded (#11522). Uninstall: `bootout` when loaded, then remove every owned file.
 /// Test: `install_service_writes_files_and_bootstraps`, `uninstall_service_replaces_a_python_registration`,
-/// `install_service_refuses_a_job_owned_elsewhere`, `install_service_writes_nothing_when_signing_fails`.
+/// `install_service_refuses_a_job_owned_elsewhere`, `install_service_writes_nothing_when_signing_fails`,
+/// `install_over_a_loaded_broker_restarts_it`, `install_over_a_loaded_broker_reports_a_failed_restart`.
 pub fn manage(
     layout: &Layout,
     install: bool,
@@ -300,6 +301,11 @@ pub fn manage(
         }
         if loaded.code != 0 || present == Presence::Python {
             checked(ctl, &["bootstrap", &domain, &plist_path.to_string_lossy()])?;
+        } else {
+            // #11522: a loaded job keeps its old process; restart it so an upgrade
+            // serves the new binary and asset stamp. A failure is an error (exit 1),
+            // never a successful install.
+            checked(ctl, &["kickstart", "-k", &target])?;
         }
     } else {
         if loaded.code == 0 {

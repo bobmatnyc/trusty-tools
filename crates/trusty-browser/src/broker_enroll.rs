@@ -32,6 +32,8 @@ const SAFE: &[&str] = &[
     "CredentialConflict",
     "WorkflowCredentialOccupied",
     "Unauthorized",
+    // #11528: a stale grant store refuses a new grant; the popup shows the name.
+    "GrantStoreStale",
 ];
 
 fn failure_reply(fault: &Fault) -> Json {

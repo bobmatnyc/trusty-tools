@@ -99,7 +99,11 @@ async function connect() {
     connection = port;
     const valid = () => connection === port && epoch === generation;
     let phase = "challenge";
-    const timeout = setTimeout(() => drop(), 5000);
+    // #11529: a handshake that never completes is shown, not silently retried.
+    const timeout = setTimeout(() => {
+      if (connection === port) void report("Pairing timed out: the broker did not answer. After an upgrade, reload the extension at chrome://extensions.");
+      drop();
+    }, 5000);
     // Grants recorded after this hello survive the acknowledgement's prune.
     const fresh = codes.watchMints();
     const lost = () => { settleReady(false); codes.unwatch(fresh); void codes.offline.lost(); };
@@ -119,13 +123,21 @@ async function connect() {
         void TrustyControlIndicator.clearAll();
         lost();
         clearTimeout(timeout);
-        void report("Disconnected. Retrying…");
+        // #11529: before the acknowledgement the failure is the pairing's, not an idle port.
+        void report(phase === "active" ? "Disconnected. Retrying…"
+          : "Pairing failed: the broker closed the connection before acknowledging. After an upgrade, reload the extension at chrome://extensions.");
         schedule();
       }
     });
     port.onMessage.addListener(async msg => {
       try {
         if (!valid()) return;
+        // #11529: a refusal carries the published asset stamp; a worker that never gets an
+        // acknowledgement still reloads when it runs other assets.
+        if (msg?.ok === false && phase !== "active") {
+          await checkAssets(msg.assets);
+          throw new Error("Pairing refused");
+        }
         if (phase === "challenge") {
           phase = "checking";
           if (msg.type !== "challenge" || !isHex(msg.proof) || !isHex(msg.nonce)) throw new Error("Pairing refused");
