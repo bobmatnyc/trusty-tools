@@ -11,15 +11,16 @@ globalThis.TrustyPageRead = (() => {
   //   epoch keeps a ref from an earlier registry (an extension reload) from naming a new element.
   //   `options` (#11356): `scope_ref` reads one element's subtree (StaleElement when it changed),
   //   `viewport_only` keeps elements overlapping the viewport, `include_text` adds the scope's innerText, and
-  //   `max_chars` bounds the encoded result. Elements fill the bound in order of distance from the viewport,
-  //   then text takes what is left; any cut sets `truncated`. An entry outside the top light DOM carries
+  //   `max_chars` bounds the encoded result. With `include_text` the text keeps up to half the bound (#11284);
+  //   elements fill the rest in order of distance from the viewport; any cut sets `truncated`. An entry outside the top light DOM carries
   //   `within`, its hop path ("iframe/shadow"); viewport distance is measured in top-document coordinates.
   // Test: tests/test_pages_dom.py `test_read_reports_elements_and_bounds_size`,
   //   `test_refs_survive_reads_and_go_stale_when_the_element_changes`,
   //   `test_read_scopes_bounds_and_truncates_in_viewport_order`,
   //   `test_read_and_act_inside_iframes_and_shadow_roots`, `test_scope_ref_and_find_cross_shadow_roots`,
   //   `test_iframe_reads_measure_distance_in_top_coordinates`,
-  //   `test_drag_reaches_a_draggable_inside_an_open_shadow_root` (#11288). Mode "find" is page_find (see find below).
+  //   `test_drag_reaches_a_draggable_inside_an_open_shadow_root` (#11288); tests/extension/test_frames.mjs
+  //   `include_text keeps a text share on an element-heavy page` (#11284). Mode "find" is page_find (see find below).
   function pageInspect(mode, reserve, options) {
     const LIMIT = 262144 - reserve, KEY = "__trustyBrowserRefs";
     const epoch = () => 1 + crypto.getRandomValues(new Uint32Array(1))[0] % 999999999;
@@ -229,21 +230,25 @@ globalThis.TrustyPageRead = (() => {
       .sort((a, b) => a.far - b.far || a.index - b.index);
     const result = {origin:location.origin, url:cut(location.href, 2048), title:cut(document.title, 200),
       text:"", elements:[], truncated:false};
+    // #11284: with include_text, the text keeps up to half the budget before elements fill the rest.
+    let text = "";
+    if (options.include_text) {
+      const source = scope ?? document.body;
+      text = cut(source ? source.innerText : "", 65536);
+    }
+    const share = Math.min(Math.floor(budget / 2), bytes(text) - 2);
     // Elements fill the budget nearest the viewport first, then return in document order.
     let used = bytes(result);
     const kept = [];
     for (const {el, index} of ordered) {
       if (kept.length === 500) { truncated = true; break; }
       const entry = describe(el), cost = bytes(entry) + 1;
-      if (used + cost > budget) { truncated = true; break; }
+      if (used + cost > budget - share) { truncated = true; break; }
       used += cost;
       kept.push([index, entry]);
     }
     result.elements = kept.sort((a, b) => a[0] - b[0]).map(([, entry]) => entry);
-    if (options.include_text) {
-      const source = scope ?? document.body;
-      result.text = cut(source ? source.innerText : "", 65536);
-    }
+    result.text = text;
     for (let over = bytes(result) - budget; over > 0; over = bytes(result) - budget) {
       truncated = true;
       // #11356: text goes first, then elements, then the title and url, so the loop always ends.
