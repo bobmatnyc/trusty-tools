@@ -264,7 +264,7 @@ fn deploy_file(
 pub(crate) const SHIPPED_SUFFIX: &str = ".shipped";
 
 /// Why: an edited Architect file is kept, so a release change to it would be
-/// lost silently (#11245, owner ruling 2026-11-21).
+/// lost silently (#11245).
 /// What: writes the current shipped bytes to `<dest>.shipped` beside the kept
 /// file (never executable, so it cannot run in place of the script) and
 /// returns that relative path. Rewrites it only when its bytes differ.
