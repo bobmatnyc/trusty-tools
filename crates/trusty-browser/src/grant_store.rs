@@ -17,7 +17,7 @@
 //! A rewrite that succeeds leaves a store without the revoked grant. A rewrite
 //! that fails but whose delete succeeds leaves no store, so a restart restores
 //! nothing. A rewrite AND delete that both fail leave a stale store on disk;
-//! `Inner::store_stale` then makes `Core::connect` refuse every new grant
+//! `Core::store_stale` then makes `Core::connect` refuse every new grant
 //! (`GrantStoreStale`) until a later persist succeeds. That persist is retried
 //! at each `retire`, at start, and at the head of each new-grant `connect`.
 //! The flag lives under the broker mutex with the grants, so it cannot race
@@ -37,6 +37,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
 
@@ -267,7 +268,7 @@ impl Core {
     /// Rewrite the store from the active grants; on failure delete it.
     ///
     /// Why: a stale store would bring a revoked grant back after a restart.
-    /// What: sets `inner.store_stale` when the rewrite and the delete both fail,
+    /// What: sets `Core::store_stale` when the rewrite and the delete both fail,
     /// clears it on any other outcome (the store is then current or gone).
     /// Test: `a_stale_store_refuses_new_grants_until_a_persist_succeeds`.
     pub fn persist_grants(&self, inner: &mut Inner) {
@@ -289,7 +290,10 @@ impl Core {
         if let Err(e) = &saved {
             eprintln!("trusty-browser: {e}");
         }
-        inner.store_stale = matches!(saved, Err(SaveError::Stale { .. }));
+        self.store_stale.store(
+            matches!(saved, Err(SaveError::Stale { .. })),
+            Ordering::SeqCst,
+        );
     }
 }
 

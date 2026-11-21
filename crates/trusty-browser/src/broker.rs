@@ -19,6 +19,7 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use rusqlite::Connection;
@@ -112,9 +113,6 @@ pub struct BrokerOptions {
     /// Enrollment peer check (test builds only; see review af942b9e95 #4).
     #[cfg(feature = "test-seams")]
     pub host_check: Arc<dyn HostCheck>,
-    /// Grant store file operations (test builds only), to fail a rewrite or a delete.
-    #[cfg(feature = "test-seams")]
-    pub store_io: StoreIo,
 }
 
 impl BrokerOptions {
@@ -131,8 +129,6 @@ impl BrokerOptions {
             wall_clock: Arc::new(SystemClock),
             #[cfg(feature = "test-seams")]
             host_check: Arc::new(ChromeHostCheck),
-            #[cfg(feature = "test-seams")]
-            store_io: StoreIo::default(),
         }
     }
 }
@@ -193,9 +189,6 @@ pub struct Inner {
     pub sweeper: Option<AbortHandle>,
     /// Last session id handed out.
     pub next_session: u64,
-    /// #11528: the grant store rewrite and its delete both failed, so the file on
-    /// disk may name a revoked grant; `connect` refuses new grants until a persist succeeds.
-    pub store_stale: bool,
 }
 
 impl Inner {
@@ -233,6 +226,10 @@ pub struct Core {
     pub(crate) host_check: Arc<dyn HostCheck>,
     /// File operations of the grant store (injectable in test builds).
     pub(crate) store_io: StoreIo,
+    /// #11528: the grant store rewrite and its delete both failed, so the file on disk may
+    /// name a revoked grant; `connect` refuses new grants until a persist succeeds. Lives on
+    /// `Core`, not `Inner`, so the public `Inner` struct gains no field (SemVer, 0.8.x).
+    pub(crate) store_stale: AtomicBool,
     /// Self, for spawned tasks.
     pub this: Weak<Core>,
     inner: Mutex<Inner>,
@@ -269,6 +266,21 @@ impl Broker {
     /// (a held lock is an error), then each socket. Must run inside a tokio runtime.
     /// Test: `broker_sockets_have_python_paths_and_modes`, `a_second_broker_is_refused_by_the_lock`.
     pub fn start(options: BrokerOptions) -> Result<Broker, BrokerError> {
+        Broker::start_with_io(options, StoreIo::default())
+    }
+
+    /// `start` with injected grant store file operations (test builds only).
+    ///
+    /// Why: tests must fail a grant store rewrite or delete; a `BrokerOptions` field for it
+    /// would be a public-API break on a 0.8.x patch.
+    /// What: identical to `start`, with `io` as the store's file operations.
+    /// Test: `a_stale_store_refuses_new_grants_until_a_persist_succeeds`.
+    #[cfg(feature = "test-seams")]
+    pub fn start_with_store_io(options: BrokerOptions, io: StoreIo) -> Result<Broker, BrokerError> {
+        Broker::start_with_io(options, io)
+    }
+
+    fn start_with_io(options: BrokerOptions, store_io: StoreIo) -> Result<Broker, BrokerError> {
         let state = absolute(&options.state)?;
         let registry = Registry::open(&state)?;
         let lock = fs::OpenOptions::new()
@@ -292,7 +304,6 @@ impl Broker {
             halted: false,
             sweeper: None,
             next_session: 0,
-            store_stale: false,
         };
         let core = Arc::new_cyclic(|this| Core {
             audit: Audit::with_clock(&state, options.audit_clock),
@@ -307,10 +318,8 @@ impl Broker {
             // See review af942b9e95 #4: without the seam the real check is fixed.
             #[cfg(not(feature = "test-seams"))]
             host_check: Arc::new(ChromeHostCheck),
-            #[cfg(feature = "test-seams")]
-            store_io: options.store_io,
-            #[cfg(not(feature = "test-seams"))]
-            store_io: StoreIo::default(),
+            store_io,
+            store_stale: AtomicBool::new(false),
             this: this.clone(),
             inner: Mutex::new(inner),
         });

@@ -11,6 +11,7 @@
 //! `grace_expiry_ends_a_grant_whose_worker_never_returns` in `tests/broker_grants.rs`.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::broker::{Core, Inner};
@@ -183,9 +184,9 @@ impl Core {
             None => {
                 // #11528: a stale grant store (rewrite and delete both failed) refuses new
                 // grants. Retry the persist first, so a recovered disk clears the condition.
-                if inner.store_stale {
+                if self.store_stale.load(Ordering::SeqCst) {
                     self.persist_grants(inner);
-                    if inner.store_stale {
+                    if self.store_stale.load(Ordering::SeqCst) {
                         return Err(Refusal::new("GrantStoreStale"));
                     }
                 }

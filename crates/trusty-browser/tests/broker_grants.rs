@@ -353,8 +353,7 @@ async fn a_stale_store_refuses_new_grants_until_a_persist_succeeds() {
     options.service = fixture_service();
     options.clock = Arc::new(clock.clone());
     options.host_check = Arc::new(Open);
-    options.store_io = io;
-    let broker = Broker::start(options).expect("start");
+    let broker = Broker::start_with_store_io(options, io).expect("start");
 
     let c = cred();
     let connect = format!(r#"{{"op":"connect",{c}}}"#);
