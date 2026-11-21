@@ -207,8 +207,8 @@ def _due(until, now):
 
 
 def _relayed(data):
-    r = data.get("relayed")
-    return isinstance(r, str) and bool(r.strip())
+    r, at = data.get("relayed"), data.get("relayed_at")
+    return r is True or (isinstance(r, str) and bool(r.strip())) or (isinstance(at, str) and bool(at.strip()))
 
 
 def _with_note(head, note):

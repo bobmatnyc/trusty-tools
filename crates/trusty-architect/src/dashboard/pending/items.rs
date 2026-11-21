@@ -23,11 +23,16 @@ fn done(note: Option<&Value>, prefixes: &[&str]) -> bool {
         .is_some_and(|n| prefixes.iter().any(|p| lstrip(n).starts_with(p)))
 }
 
-/// `_relayed`: a non-blank `relayed` string.
+/// `_relayed`: `relayed` is `true` or a non-blank string, or `relayed_at`
+/// is a non-blank string (Architect ruling; the store holds all three forms).
+/// Test: `relayed_accepts_bool_string_and_relayed_at`.
 fn relayed(d: &Map<String, Value>) -> bool {
-    d.get("relayed")
-        .and_then(Value::as_str)
-        .is_some_and(|r| !strip(r).is_empty())
+    let non_blank = |k: &str| {
+        d.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|r| !strip(r).is_empty())
+    };
+    d.get("relayed") == Some(&Value::Bool(true)) || non_blank("relayed") || non_blank("relayed_at")
 }
 
 /// Appends the owner events of `items` (Python's `pending_items`).
@@ -180,4 +185,29 @@ fn status_event(d: &Map<String, Value>, id: &str, out: &mut Vec<PendingEvent>) {
         _ => return,
     };
     out.push(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relayed;
+    use serde_json::{Value, json};
+
+    fn is_relayed(v: Value) -> bool {
+        relayed(v.as_object().expect("object"))
+    }
+
+    /// Architect ruling: `relayed: true`, a non-blank `relayed` string or a
+    /// non-blank `relayed_at` count; nothing else does.
+    #[test]
+    fn relayed_accepts_bool_string_and_relayed_at() {
+        assert!(is_relayed(json!({"relayed": true})));
+        assert!(is_relayed(json!({"relayed": "2026-10-11T11:00Z"})));
+        assert!(is_relayed(json!({"relayed_at": "2026-10-11T11:00Z"})));
+        assert!(!is_relayed(json!({"relayed": false})));
+        assert!(!is_relayed(json!({"relayed": "  "})));
+        assert!(!is_relayed(json!({"relayed_at": " "})));
+        assert!(!is_relayed(json!({"relayed": null, "relayed_at": null})));
+        assert!(!is_relayed(json!({"relayed": 1, "relayed_at": 1})));
+        assert!(!is_relayed(json!({})));
+    }
 }

@@ -31,7 +31,7 @@
     "scripts/dashboard-serve.py": "13180f64314d065e66614bee732ecf39f0d14cf013f338e830fd72dc4e21fb63",
     "scripts/dashboard_archctx.py": "a0671fd9ffe327462d6da12836a7c2d30554c27a8ff081ee218afcb2fae6807e",
     "scripts/dashboard_attach.py": "6182265ac53cd527377f3fb726d211d998dabd51584b6f75926c63822afed477",
-    "scripts/dashboard_derive.py": "b1f52b0320e5789732d9297270eca403ad3a91f16d484491aea7e57a3d2c113d",
+    "scripts/dashboard_derive.py": "68a58aa3dd310911f8c2fe780ad15047257d8ddcbadf6a85b13fab5d040e6518",
     "scripts/dashboard_docs.py": "6c3cb637b9b6af903bfbd29585633c925b648a5ad8e006e55f35729a4680bd6a",
     "scripts/dashboard_fleet.py": "3713178accbb8bc6d19229f23388ee4c3afcb1132f4cdeb1c50cbf06b939d2f3",
     "scripts/dashboard_harness.py": "437a78b9c015a47c51a5351c03f23a40a1dc6f0a55126ad2c31a367739d5ce5d",
