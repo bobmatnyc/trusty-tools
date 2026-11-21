@@ -69,7 +69,7 @@ skill says which verbs ship in which release. The `secrets_get_ref` MCP tool
   marks it `(push-only for agents)`. You cannot read, grant, `exec` or
   locally copy it (`agent_key_denied`), but you can push it.
 - Push a key to a sync target (Vercel, GitHub Actions) with `tm secrets copy
-  --to <target>` from the project vault. A named copy cannot name a sync
+  --from <backend> --to <target> KEY` from the project vault. A named copy cannot name a sync
   target (`unsupported`), so copy the item into the project vault first,
   then push it. Copying an existing GitHub PAT into a project's Vercel
   environment is work you carry out, not a request you refuse. Never

@@ -161,7 +161,7 @@ to the destination and prints names only.
   person lifts the mark.
 - A named copy cannot name a sync target as source or destination
   (`unsupported`). Copy the item into the project vault, then push it with
-  `tm secrets copy --to <target>`. Residual risk: a writer of the
+  `tm secrets copy --from <backend> --to <target> KEY`. Residual risk: a writer of the
   destination repository can add a workflow or deployment that reads the
   pushed variable.
 - A key denied to agents stays blocked for an agent's copy and push
