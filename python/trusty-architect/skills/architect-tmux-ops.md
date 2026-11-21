@@ -3,7 +3,7 @@ name: architect-tmux-ops
 description: Architect skill. Load before any tmux capture or send, before classifying an input box, before any send-keys or dialog pick, and before any zsh command that takes a tmux or process target. Covers exact targets, the two-step send through scripts/relay.sh, input-box classes, Claude Code input-box traps, Monitor pipe flushing, PID waits and zsh `=` quoting. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.0"
+  version: "0.2.0"
 category: monitoring
 tags: [architect, tmux, send, input-box]
 effort: high
@@ -168,6 +168,12 @@ cmd $A` passes one argument. Write the flags out, or use an array
 `tmux kill-session -t =tm-x-poll` fails with "tm-x-poll not found": zsh
 treats `=name` as the path of command `name`. Quote exact-match targets:
 `tmux kill-session -t '=tm-x-poll'`.
+
+## Architect hang
+
+<!-- rule:r-079 -->
+Never kill a process to recover from a hang. Record the hung pid and bring
+the recovery to the owner.
 
 ## Related skills
 

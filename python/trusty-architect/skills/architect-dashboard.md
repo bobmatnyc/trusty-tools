@@ -3,7 +3,7 @@ name: architect-dashboard
 description: Architect skill. Load at the end of every pass that changed a session, goal or owner item, when the owner says "dashboard" (terminal or Remote Control), when an owner write from the dashboard page waits, or when the dashboard is set up on a new host. Covers the served page, the data model, the per-pass update, the answer flow, the owner controls and the technical level of item text. Architect only.
 user-invocable: true
 metadata:
-  version: "0.3.1"
+  version: "0.3.2"
 category: monitoring
 tags: [architect, dashboard, owner, store]
 effort: medium
@@ -395,3 +395,19 @@ config `projects/` directory. A missing source is listed on the page, never an
 error. The side panel's Docs tab lists Markdown files the fleet wrote in the
 last 24 h, with a Diff view (`GET /api/harness/diff?id=`); secret-named files
 are not listed and secret-looking values are redacted.
+
+## Classify every owner ask
+
+<!-- rule:r-193 -->
+**Classify every owner ask (r-193, the owner's words: "Anything I ask in this
+chat should be classified into Throwaway, Q&A, Task, Decision, Goal. The goal
+is I never have to find what we discussed in the transcript").** In the same
+pass, file each owner message as one of: Throwaway (an ack or chat; no
+record), Q&A (a question: answer it in the dashboard Q&A section,
+`questions/Q..`), Task (work: an IL T and a dashboard T), Decision (a choice
+for the owner: a D item), or Goal (a new outcome: a G). An answer that exists
+only in chat is a miss. File it in the same tool batch as the reply, not
+afterwards. Before creating a Q or a T, search the open ones: if the new ask
+is related, stack it on the existing item, newer first (the owner's
+words: "see if the one I asked is related to a new one, in which case stack it,
+newer first (amend the IL item)").

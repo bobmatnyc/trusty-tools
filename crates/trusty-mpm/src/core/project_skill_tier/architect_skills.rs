@@ -124,6 +124,9 @@ const OPERATING_RULES: ShippedSkill = ShippedSkill {
         "3e4c9ab8d8325d3a052c91e571533c7643508fda3f41a4449137d1eb3b86461e",
         // #11433: the text before the throwaway-credential exception.
         "14d0bae65aeda88741b2ea27e57afc82fa62a227dd8519a24fc3aacfda842342",
+        // MB159a: the text before the mandate, evidence labels, question ids
+        // and r-081's evidence clause moved in.
+        "630dd0dbd1927963fb7e1a54167a90c230930c967744c1b9678e808fc962ff1c",
     ],
 };
 
@@ -141,6 +144,8 @@ const WORKFLOW: ShippedSkill = ShippedSkill {
         "b0645b7e2ea415922472d45f2936dc844dcf2412420a7b535627ba9c1bcb81fc",
         // #11117: the text that limited AGENTS.md edits to an owner's order.
         "59137538d1832abdab2ed80b30c6f55596898c59fef013f5ecbfdf4672fdc3c6",
+        // MB159a: the text before the monitoring and heartbeat rules moved in.
+        "cd623d5af69e54c57ddc4272db7a3325626bc01ab7457ebd869b720d4bec0e5f",
     ],
 };
 
@@ -151,11 +156,14 @@ const STRATEGY: ShippedSkill = ShippedSkill {
     // The text before the daily factory status-update rule.
     // #10886: the text before the factory-discussions sweep.
     // #11064: the text before the technical level of briefs.
+    // MB159a: the text before "What you own", machine ownership and the
+    // morning brief moved in.
     previous: &[
         "2ca70fe0aedf2416933d68818ae440526a33ca590871d5f025c5e1415c55cf77",
         "5388a82b3a5bcab32b10486084d185da24770620aa825099b19327d7a8203dd9",
         "c09c629ca5e93fa6c540955caa7f399a28c905d9356e0366628d55feed62ecbf",
         "a6b725c4a34f673741028e6ab772c4b5154aff845fb1e9db846d3e2d1dcb4aae",
+        "0328f1ec2d0ee9856c7bcace4d117f9d5ead4f28e13d1415463d711b1742f674",
     ],
 };
 
@@ -163,7 +171,11 @@ const STRATEGY: ShippedSkill = ShippedSkill {
 const COMPLETION_STANDARD: ShippedSkill = ShippedSkill {
     stem: "architect-completion-standard",
     // #10803: the U1b text, before the fix bar's acceptance-criterion class.
-    previous: &["5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374"],
+    // MB159a: the text before the reports rule moved in.
+    previous: &[
+        "5e8aac79b0d9b187a46418d0e9443188e439474b40fed535b71379ceeeb34374",
+        "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
+    ],
 };
 
 /// `architect-project-provision`, edited since its first release.
@@ -176,14 +188,33 @@ const PROJECT_PROVISION: ShippedSkill = ShippedSkill {
         "102cb4baebb653664a28bb7d0934b2b4d0a20868bd03333ae253cad2ab5a7be8",
         "a1059ba1af14510618d08bd6f99bc46861052f3418ce3bb21fa2c627c908860b",
         "954f6c37e6c800af8819e2153e803ad62d6e29e963139410dab21ee8f473cd1f",
+        // MB159a: the text before the Architect-duties rule (r-066) moved in.
+        "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
     ],
+};
+
+/// `architect-tmux-ops`, edited since its first release (MB159a: r-079).
+const TMUX_OPS: ShippedSkill = ShippedSkill {
+    stem: "architect-tmux-ops",
+    previous: &["e38c80da0581139ce727e1650cf6404594b2172de0e32077a7cea17956b02382"],
+};
+
+/// `architect-host-admin`, edited since its first release (MB159a: builder
+/// bands, r-191).
+const HOST_ADMIN: ShippedSkill = ShippedSkill {
+    stem: "architect-host-admin",
+    previous: &["e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e"],
 };
 
 /// `architect-improvements`, edited since its first release.
 const IMPROVEMENTS: ShippedSkill = ShippedSkill {
     stem: "architect-improvements",
     // R-192/R-193: the D2 text, before the owner-asks rules.
-    previous: &["bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0"],
+    // MB159a: the text before the full r-192 rule moved in.
+    previous: &[
+        "bc1e63787be75c0c78df4d13ffbaea579134b2dd05387df57d74a81c3d8be4a0",
+        "b37627e2c31c3118884dd5a5e46cbbde5494d9b8206eb17a1c521a53883b5416",
+    ],
 };
 
 /// `architect-dashboard`, edited since its first release.
@@ -202,6 +233,8 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "1bd4e94597f1e17172f0a1ec8106f9ecc3983b2265a0eefe4cdf2eae020e5ffc",
         // #10680: the text before the read-back step in r-183.
         "d46d422b543fc97df9d7b05e3794713320a97302398a651729d8d70060a7d07d",
+        // MB159a: the text before the full r-193 rule moved in.
+        "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
     ],
 };
 
@@ -219,7 +252,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     FLEET_CHECK,
     CONTEXT_REFRESH,
     // #9997 U1b: the skills the operating manual indexes, first shipped here.
-    first_release("architect-tmux-ops"),
+    TMUX_OPS,
     OPERATING_RULES,
     WORKFLOW,
     first_release("architect-search-memory"),
@@ -234,7 +267,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     PROJECT_PROVISION,
     first_release("architect-macos"),
     IMPROVEMENTS,
-    first_release("architect-host-admin"),
+    HOST_ADMIN,
     // #10161 D3b: the dashboard skill, with the served page it describes.
     DASHBOARD,
 ];

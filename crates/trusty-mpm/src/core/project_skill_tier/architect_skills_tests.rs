@@ -268,15 +268,15 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-tmux-ops",
-            "e38c80da0581139ce727e1650cf6404594b2172de0e32077a7cea17956b02382",
+            "4be6fa1b350ef09a43d49dde96870f496a74caac95d493c78fe37a44fa2b159d",
         ),
         (
             "architect-operating-rules",
-            "630dd0dbd1927963fb7e1a54167a90c230930c967744c1b9678e808fc962ff1c",
+            "5bf15512eb4244c6ab7f3199b6a4829a35b26675faa8fb9a10a229ca97f52427",
         ),
         (
             "architect-workflow",
-            "cd623d5af69e54c57ddc4272db7a3325626bc01ab7457ebd869b720d4bec0e5f",
+            "dce96874a33465b9a362c53b17e22b54466eee1a4ea3ca0f03ac226e1edb503e",
         ),
         (
             "architect-search-memory",
@@ -288,11 +288,11 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-strategy",
-            "0328f1ec2d0ee9856c7bcace4d117f9d5ead4f28e13d1415463d711b1742f674",
+            "b21d4a4b479453cbec8ae3982db27e7364a4e094b014836eabb8acc483aa1e5a",
         ),
         (
             "architect-completion-standard",
-            "b00cc7544daacb4a48d6b8335666f737cd20aab4211286160974b547fdf71403",
+            "70343273c49dd1c517cebcb64bf7efe160dfbf09904febee2d0dd26ea904475e",
         ),
         (
             "architect-owner-model",
@@ -308,7 +308,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-project-provision",
-            "a4b3d792acb46789bf9d79a1ea7e3c2be455903af48a65bed0560fcca2a37edb",
+            "cbe193f6d533f586cfbed18f7e3c672101236a53783c92e437e2ce9e8a36d599",
         ),
         (
             "architect-macos",
@@ -316,28 +316,26 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-improvements",
-            "b37627e2c31c3118884dd5a5e46cbbde5494d9b8206eb17a1c521a53883b5416",
+            "5a0f6be29f925e8df9d3b40263f6ace8f0d72e269cee04b823b89a5dd7e7bf93",
         ),
         (
             "architect-host-admin",
-            "e9c576578a627e40d5d2b5259970397fab293289c4526d29716f2f1706b3090e",
+            "cf0becdbacdcdc405f9c0f7b93bd8643973aecfa29bc04fdecd638003a0107fb",
         ),
         (
             "architect-dashboard",
-            "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
+            "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 8] = [
-        "architect-tmux-ops",
+    const FIRST_RELEASE: [&str; 6] = [
         "architect-search-memory",
         "architect-github",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
         "architect-macos",
-        "architect-host-admin",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

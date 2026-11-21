@@ -3,7 +3,7 @@ name: architect-project-provision
 description: Architect skill. Load when the user sets up a new project for the fleet, when a new tm-* session appears whose project has no record in local/projects/, or when a mandate is checked. The provisioning checklist - confirm the stack, CLAUDE.md markers, the ADR folder, review and release gates, ticketing conventions, institutional mandates, tm registration and the push hook. Plans first; the user approves before anything is written into the project. Architect only.
 user-invocable: true
 metadata:
-  version: "0.1.1"
+  version: "0.1.2"
 category: monitoring
 tags: [architect, provisioning, mandates, trusty-mpm]
 effort: high
@@ -107,6 +107,12 @@ multiple-choice question per open decision, recommendation first:
 - `local/state.md` live sessions, `local/goals.md` session-to-goal map, and
   one `local/actions.md` entry.
 - Offer the first architectural review (`architect-review`) as a proposal.
+
+## Architect duties
+
+<!-- rule:r-066 -->
+The Architect does not code. Reviews go to a research or code-analyzer agent
+and changes go to the owning PM.
 
 ## Related skills
 
