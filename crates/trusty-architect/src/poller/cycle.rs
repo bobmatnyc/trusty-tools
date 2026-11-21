@@ -18,7 +18,7 @@
 //! #11541 review: the last self-refresh fault and the Architect pane's own
 //! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
 //! Steps owned elsewhere are left out: effort, token, pm_intake,
-//! dashboard, owner_*, auto_sleep, user_state and triage rules
+//! dashboard, owner_* other than owner_answer (#11474), auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
 //! `cycle_falls_back_to_transcript_when_status_ctx_is_none`,
@@ -34,6 +34,7 @@ use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 use super::listing::{Pane, capture, list_panes};
+use super::owner_answers::{ANSWER_KEY, owner_answer_step};
 use super::push::{PushRoute, push_step};
 use super::routines::routine_alerts;
 use super::self_ctx_alerts::self_ctx_alerts;
@@ -293,6 +294,8 @@ pub fn collect<T: Tmux + ?Sized>(
         Ok(found) => candidates.extend(found),
         Err(e) => log.push(format!("self_ctx ERROR {e}")),
     }
+    // #11474: dashboard answers not yet relayed (fleet-poll.py's owner_answer step).
+    let answers_ok = owner_answer_step(s.config, state, now, &mut candidates, &mut log);
     // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
     let mut failing = watch_found.clone();
     failing.extend(shim_failing);
@@ -335,7 +338,14 @@ pub fn collect<T: Tmux + ?Sized>(
     candidates.extend(failing);
     let quiet = read_quiet_sessions(&s.config.quiet_sessions);
     candidates.retain(|a| !(a.kind == "idle" && quiet.contains(&a.session)));
+    // #11474: a failed answer read says nothing about an answer; keep its keys.
+    let kept = if answers_ok {
+        Vec::new()
+    } else {
+        state.alerts.prefixed(ANSWER_KEY)
+    };
     let (new, suppressed) = dedup(&mut state.alerts, &candidates, now);
+    state.alerts.restore(kept);
     Ok(Collected {
         watched: watched.len(),
         panes: listing.panes,
