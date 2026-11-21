@@ -39,6 +39,11 @@ pub(crate) const EXCLUDED: &[(&str, &str)] = &[
         "client socket override; the daemon binds --socket",
     ),
     ("TRUSTY_SEARCH_DATA_DIR", "client launchd probe only"),
+    // #10590: `doctor` is an interactive CLI check; the daemon never reads it.
+    (
+        "CLAUDE_CONFIG_DIR",
+        "client-only: doctor reads the Claude config tier",
+    ),
     ("TRUSTY_SEARCH_NO_HTTP", "retired by #9536; not read"),
     ("TRUSTY_SEARCH_ISOLATED_CHILD", "test re-exec marker"),
     ("TRUSTY_SEARCH_TEST_ASSUME_LAUNCHD_SUPERVISED", "test seam"),
