@@ -7409,7 +7409,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
     if (res.status === 403 && !retried && verb !== "session" && j && /CSRF/.test(j.error || "")) { await session(); return post(verb, body, true); }   /* the server restarted: new token, one retry */
     if (!res.ok) {
       if (!(j && j.error)) console.warn("secrets " + verb + ": HTTP " + res.status);   /* detail for whoever debugs; never shown */
-      const e = new Error((j && j.error) || NOT_SET_UP); e.status = res.status; e.code = j && j.code; throw e;
+      const e = new Error((j && j.error) || NOT_SET_UP); e.status = res.status; e.code = (j && (j.code || j.kind)) || undefined; throw e;
     }
     return j;
   }
@@ -7492,6 +7492,14 @@ html.lib-strip.rd-open body { padding-right: 0; }
     };
     st.pollT = setTimeout(tick, 3000);
   }
+  /* BEGIN saveFailure */
+  /* #11429: only a real refusal is "Not stored". A Keychain prompt, a time-out or no answer at all may still have committed. */
+  function saveFailureText(e) {
+    const unknown = !e.status || e.status === 408 || e.status === 504 || /timed out/i.test(e.message || "") ||
+      ["keychain_access_prompt", "backend_timeout", "deadline_exceeded"].indexOf(e.code) >= 0;
+    return unknown ? "Outcome unknown: the save may still complete. Verify with `tm secrets list`. (" + e.message + ")" : "Not stored: " + e.message;
+  }
+  /* END saveFailure */
   async function save(ev) {
     ev.preventDefault();
     const vi = valueIn(), body = Object.assign(target(), { description: $("sx-desc").value.trim(), key: $("sx-label").value.trim(),
@@ -7507,7 +7515,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
       say("sx-status", (r.outcome === "updated" ? "Updated " : "Stored ") + r.key + " (" + r.length + " characters) in " + (body.scope === "owner" ? "the " + body.owner + " owner vault" : (r.entry && r.entry.backend || "the configured backend")) + ".", true);
       $("sx-desc").value = ""; $("sx-label").value = ""; $("sx-group").value = ""; st.edited = {}; st.pendingId = ""; clearTimeout(st.pollT);
       load();
-    } catch (e) { body.value = ""; say("sx-status", "Not stored: " + e.message); }
+    } catch (e) { body.value = ""; say("sx-status", saveFailureText(e)); }
     finally { $("sx-save").disabled = false; }
   }
   async function remove(row) {
