@@ -4,7 +4,7 @@ Plan only; no code, no build. Owner ruling: "Build Phase 2 with the bounded mode
 
 - **Spike**: local branch `spike/trusty-computer` (947c76ee7b), `spikes/trusty-computer/` (GO-STOP.md, README.md, `*.py`).
   Local only; Phase 0 copies its evidence in. **Grants check**: branch `spike/trusty-computer-grants`.
-- **Brief**: `architect/local/briefs/2026-11-17-trusty-computer-lift.md`.
+- **Brief**: implementation lift estimate document from 2026-11-17.
 - **Model crate**: `crates/trusty-browser/` 0.7.0 (~10.5k lines in `src/`), in worktree `agent-a2f985c7f624cb570`.
   Confirm it is on `main` before Phase 1 and re-cite that copy.
 - **Actuals**: `docs/plans/trusty-browser-rust-port.md:125-144`.
@@ -244,7 +244,7 @@ bash scripts/check_changelog_fragment.sh --staged   # crates/trusty-computer/cha
 
 Rungs: 0-1 rung 3. 2-4, 6, 7 rung 5 (lifecycle, security, release tooling): live and failure-path tests,
 `code-critic` at Phase 7. Phase 5 rung 6 plus a stdio smoke run. No other crate changes. Live checks and signing run
-on the Mac Studio; desktop-free builds may use EVO.
+on the development Mac; desktop-free builds may use a remote Linux build server.
 
 Owner questions: run the option (c) proof now? prefix `computer_*` or bare names (brief line 34)? add
 `sandbox_computer_daemon.sh` (CLAUDE.md names five)?

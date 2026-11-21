@@ -5,7 +5,7 @@
 #
 # Why: a hand-built broker inherits every exported credential (#9121), loads
 #   the `.env.local` at or above its cwd (#9161), and, with the real HOME,
-#   resolves `~/.cua-driver` and `~/.trusty/computer` to Bob's live cua-driver
+#   resolves `~/.cua-driver` and `~/.trusty/computer` to the user's live cua-driver
 #   config, socket and grants. The trusty-computer plan (section 7) requires
 #   every live run to use this script instead.
 # What: validates, then runs in the foreground:
