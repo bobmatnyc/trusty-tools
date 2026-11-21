@@ -640,12 +640,17 @@ fn visible_lines(body: &str) -> Vec<String> {
 /// `line` without a leading `-`/`*`/`+` bullet, `1.`/`1)` number or `[ ]` box.
 fn strip_list_marker(line: &str) -> &str {
     let mut s = line.trim_start();
-    if let Some(r) = s.strip_prefix(['-', '+', '*']) {
+    // #11478: a marker counts only when whitespace follows it, so `**bold**`,
+    // `-1` and `1.5x` are text, not list items.
+    let spaced = |r: &str| r.starts_with(char::is_whitespace);
+    if let Some(r) = s.strip_prefix(['-', '+', '*']).filter(|r| spaced(r)) {
         s = r.trim_start();
     } else {
         let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
         if digits > 0
-            && let Some(r) = s[digits..].strip_prefix(['.', ')'])
+            && let Some(r) = s[digits..]
+                .strip_prefix(['.', ')'])
+                .filter(|r| spaced(r))
         {
             s = r.trim_start();
         }

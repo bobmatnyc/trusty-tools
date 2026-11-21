@@ -687,3 +687,17 @@ fn a_bulleted_label_with_real_items_passes() {
         Verdict::Pass,
     );
 }
+
+/// #11478: a marker with no whitespace after it (`**bold**`, `-1`, `1.5x`) is
+/// text, so it ends a bare label's list instead of counting as an item.
+#[test]
+fn a_bold_or_signed_paragraph_after_a_tbd_label_warns() {
+    assert_acceptance(
+        &[
+            "Acceptance criteria:\n- TBD\n\n**See** #thread",
+            "Acceptance criteria:\n- TBD\n\n-1 on this for now",
+            "Acceptance criteria:\n- TBD\n\n1.5x slower than before",
+        ],
+        Verdict::Warn,
+    );
+}
