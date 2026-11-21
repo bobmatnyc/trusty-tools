@@ -11,7 +11,8 @@ PAGE = os.path.join(ROOT, "templates/dashboard/index.html")
 
 
 def texts(errors):
-    src = open(PAGE, encoding="utf-8").read()
+    with open(PAGE, encoding="utf-8") as f:
+        src = f.read()
     m = re.search(r"/\* BEGIN saveFailure \*/(.*?)/\* END saveFailure \*/", src, re.S)
     assert m, "the page has no saveFailure block"
     body = "const errs = %s;\nconsole.log(JSON.stringify(errs.map(saveFailureText)));" % json.dumps(errors)
