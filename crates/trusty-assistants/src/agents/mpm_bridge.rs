@@ -1,5 +1,5 @@
 //! Read a trusty-mpm-deployed `.claude/agents/*.md` artifact with the SHARED
-//! frontmatter reader and project it onto trusty-agents' `AgentConfig`.
+//! frontmatter reader and project it onto trusty-assistants' `AgentConfig`.
 //!
 //! Why: the owner's directive is "the same agents across the system — mpm,
 //! code, agents" with as little rewriting as feasible. trusty-mpm composes its
@@ -7,7 +7,7 @@
 //! `<project>/.claude/agents/*.md`. `AgentRegistry::load` already scans both
 //! of those directories as a first-class roster tier, but it parses them with
 //! `registry::md_agent::parse_md_agent` — a hand-rolled `serde_yaml` reader
-//! shaped for trusty-agents' OWN `.md` overlay schema, not for trusty-mpm's.
+//! shaped for trusty-assistants' OWN `.md` overlay schema, not for trusty-mpm's.
 //! The two schemas disagree (mpm's `tools:` is a flat name list; the overlay's
 //! is a nested `ToolsConfig` map — feeding the former to the latter is a hard
 //! `serde_yaml` error that silently drops the whole agent), so the tier that
@@ -85,7 +85,7 @@ const CONSUMED_KEYS: &[&str] = &[
 /// deployed artifacts?
 ///
 /// Why: `AgentRegistry::load` walks a mixed list of search paths
-/// (`agent_search_paths`): `.trusty-agents/agents` holds trusty-agents' OWN
+/// (`agent_search_paths`): `.trusty-agents/agents` holds trusty-assistants' OWN
 /// `.md` overlay schema and must keep using `parse_md_agent`, while
 /// `.claude/agents` holds trusty-mpm's deploy artifacts and must use this
 /// module. The loader needs one predicate to tell the two apart, and matching
@@ -152,7 +152,7 @@ pub(crate) fn load_mpm_agent(path: &Path) -> anyhow::Result<AgentConfig> {
 
 /// Warn ONCE, naming every frontmatter key this projection has no home for.
 ///
-/// Why: trusty-mpm's schema is richer than trusty-agents' `.md` surface
+/// Why: trusty-mpm's schema is richer than trusty-assistants' `.md` surface
 /// (`skills:`, `initialPrompt:`, `agent_type:`, `version:`, `effort:`, …).
 /// Silently discarding them is how a user ends up believing a declaration
 /// took effect when it did not, so every drop is reported — but as ONE
@@ -173,7 +173,7 @@ fn warn_dropped_fields(agent_name: &str, path: &Path, raw: &str) {
         agent = %agent_name,
         path = %path.display(),
         dropped = %dropped.join(", "),
-        "trusty-mpm agent declares frontmatter key(s) trusty-agents has no slot for — dropped; \
+        "trusty-mpm agent declares frontmatter key(s) trusty-assistants has no slot for — dropped; \
          note `skills:` in particular is a trusty-mpm CO-DEPLOYMENT DEPENDENCY list and is NOT \
          mapped onto trusty-agents' `[skills].allow`, which is a permission GATE"
     );
@@ -224,7 +224,7 @@ fn unmapped_keys(raw: &str) -> Vec<String> {
 /// frontmatter, which is the same guarantee trusty-code's
 /// `md_loader::extract_body` documents: trusty-mpm's compose step can enrich
 /// a role-derived `initialPrompt:` INTO the frontmatter, and that value must
-/// never leak into a trusty-agents system prompt. Never inspecting the block's
+/// never leak into a trusty-assistants system prompt. Never inspecting the block's
 /// contents makes the leak unrepresentable rather than merely unimplemented.
 /// What: skips the opening `---` line and everything through the next `---`
 /// line, returns the trimmed remainder. A document with no opening fence
@@ -254,7 +254,7 @@ fn extract_body(raw: &str) -> String {
     body.join("\n").trim().to_string()
 }
 
-/// Project parsed trusty-mpm metadata + body onto trusty-agents'
+/// Project parsed trusty-mpm metadata + body onto trusty-assistants'
 /// `AgentConfig`.
 ///
 /// Why: centralises the field-by-field mapping so [`load_mpm_agent`] stays a
@@ -301,11 +301,11 @@ fn extract_body(raw: &str) -> String {
 ///   wins, so: `allowed`, and `allow` stays `None`. This is also the exact
 ///   mapping trusty-code made for the same artifact class (`md_loader`'s
 ///   `ToolsConfig { allowed: meta.tools }`). Note trusty-mpm OVERRIDE-merges
-///   `tools:` across an `extends` chain while trusty-agents UNIONs it; the
+///   `tools:` across an `extends` chain while trusty-assistants UNIONs it; the
 ///   difference is unreachable here because this tier resolves no chain at all.
 /// - `skills` -> DROPPED, deliberately. trusty-mpm's `skills:` is a
 ///   co-deployment DEPENDENCY list ("ship these skill files alongside me");
-///   trusty-agents' `[skills].allow` is a PERMISSION GATE whose `None` means
+///   trusty-assistants' `[skills].allow` is a PERMISSION GATE whose `None` means
 ///   "this agent does not use skill grants" and whose `Some([])` means "grants
 ///   none". Mapping one to the other would silently convert a dependency
 ///   declaration into a grant, so `skills` is left at `SkillsConfig::default()`

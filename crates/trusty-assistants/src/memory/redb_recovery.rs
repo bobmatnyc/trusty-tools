@@ -1,11 +1,11 @@
 //! Graceful recovery from incompatible on-disk redb formats (issue #702).
 //!
 //! Why: redb 4.x cannot open a database written by redb 2.x — the open returns
-//! `DatabaseError::UpgradeRequired(_)`. trusty-agents's embedded memory stores
+//! `DatabaseError::UpgradeRequired(_)`. trusty-assistants's embedded memory stores
 //! (`store.redb`, the session registry `index.redb`) are re-derivable caches,
 //! so a stale v2 file left over from a pre-4.x binary must not crash the
 //! harness on warm boot. This helper centralises the format-mismatch detection
-//! and the back-up-then-recreate recovery for every trusty-agents redb open site.
+//! and the back-up-then-recreate recovery for every trusty-assistants redb open site.
 //!
 //! What: [`open_redb_or_recreate`] tries `Database::create`; on an
 //! incompatible-format error it renames the file aside to `*.v2-incompatible`,
@@ -41,7 +41,7 @@ fn is_incompatible(err: &DatabaseError) -> bool {
 /// Open the redb database at `path`, recreating it empty if the existing file
 /// is in an incompatible / old redb format (issue #702).
 ///
-/// Why: keeps every trusty-agents memory store's open path crash-safe across the
+/// Why: keeps every trusty-assistants memory store's open path crash-safe across the
 /// redb 2.x → 4.x upgrade without each store re-implementing the detection.
 /// What: tries `Database::create`. On `UpgradeRequired` / `RepairAborted` it
 /// renames `path` to `<path>.v2-incompatible`, logs an `ERROR`, and retries the

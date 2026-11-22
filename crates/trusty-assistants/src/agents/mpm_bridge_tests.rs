@@ -90,7 +90,7 @@ fn role_is_normalized_and_fails_closed() {
     );
 }
 
-/// `skills:` is a trusty-mpm CO-DEPLOYMENT DEPENDENCY list. trusty-agents'
+/// `skills:` is a trusty-mpm CO-DEPLOYMENT DEPENDENCY list. trusty-assistants'
 /// `[skills].allow` is a PERMISSION GATE where `None` means "does not use
 /// skill grants". Mapping one onto the other would silently turn a dependency
 /// declaration into a grant — the single most dangerous same-name/

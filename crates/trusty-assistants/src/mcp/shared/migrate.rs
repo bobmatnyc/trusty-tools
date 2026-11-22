@@ -7,7 +7,7 @@
 //! upgrading into this release would otherwise find every connector they had
 //! configured silently absent. This module reads those tables ONE more time,
 //! converts them to `trusty_mcp::McpServerConfig`, and writes them into the
-//! shared file `trusty-code` and `trusty-agents` now both read.
+//! shared file `trusty-code` and `trusty-assistants` now both read.
 //!
 //! What: [`migrate_if_absent`] writes the shared file only when it does not
 //! exist, so it is safe to call on every load and can never overwrite a file a

@@ -1,6 +1,6 @@
 //! `trusty-search` plugin wrapper.
 //!
-//! Why: trusty-agents wants pluggable code-search backends. `trusty-search`
+//! Why: trusty-assistants wants pluggable code-search backends. `trusty-search`
 //! distributes as a binary that speaks MCP (JSON-RPC 2.0 over stdio), so we
 //! reuse `StdioMcpClient` and expose a small typed surface for the
 //! operations the rest of the harness actually needs.
@@ -46,7 +46,7 @@ impl TrustySearchPlugin {
         if !binary_on_path("trusty-search") {
             return None;
         }
-        let mut client = StdioMcpClient::spawn("trusty-search", &["serve"], "trusty-agents")
+        let mut client = StdioMcpClient::spawn("trusty-search", &["serve"], env!("CARGO_PKG_NAME"))
             .await
             .ok()?;
         client.initialize().await.ok()?;

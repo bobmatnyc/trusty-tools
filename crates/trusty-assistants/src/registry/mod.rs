@@ -1,6 +1,6 @@
 //! Global project registry stored at `~/.trusty-agents/projects.json`.
 //!
-//! Why: When multiple projects use trusty-agents, tracking them centrally enables
+//! Why: When multiple projects use trusty-assistants, tracking them centrally enables
 //! cross-project features (bus routing, status summaries, stale-project cleanup)
 //! without requiring each project to declare itself. The registry is the single
 //! source of truth for "what projects does this user have?".
@@ -61,7 +61,7 @@ pub struct ProjectEntry {
     pub path: PathBuf,
     /// Human-readable project name (from CLAUDE.md first heading or dir name).
     pub name: String,
-    /// When trusty-agents last ran in this project.
+    /// When trusty-assistants last ran in this project.
     pub last_run: Option<DateTime<Utc>>,
     /// Lifecycle status.
     pub status: ProjectStatus,
@@ -79,10 +79,10 @@ pub struct ProjectEntry {
     /// What: Incremented on every `register_pm_start` call.
     #[serde(default)]
     pub pm_count: u64,
-    /// True when this entry represents trusty-agents's own source tree. (#182)
+    /// True when this entry represents trusty-assistants's own source tree. (#182)
     ///
     /// Why: CTRL has a self-awareness mode that lets the user dispatch
-    /// development tasks against trusty-agents itself; we mark the self-project
+    /// development tasks against trusty-assistants itself; we mark the self-project
     /// so UIs and tools can distinguish it without re-detecting.
     /// What: Set by `register_self_project`; defaults to false on existing
     /// entries to keep the registry file backwards compatible.
@@ -138,7 +138,7 @@ impl ProjectEntry {
     /// Why: macOS and Linux temp directories (e.g. those under
     /// `/var/folders/`, `/tmp/`, or paths whose basename starts with `.tmp`)
     /// occasionally get registered when tools like `mktemp` create a
-    /// temporary working directory and trusty-agents is invoked there. These
+    /// temporary working directory and trusty-assistants is invoked there. These
     /// entries pollute the `/projects` list and confuse navigation.
     /// What: Checks both the path prefix (known temp-dir roots) and the
     /// final path component (`.tmp`-prefixed names). Returns false for any

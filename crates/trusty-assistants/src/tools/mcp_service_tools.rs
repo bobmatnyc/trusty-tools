@@ -135,7 +135,8 @@ impl ServiceClient {
                 let mut client = StdioMcpClient::spawn_with_env(
                     &self.command,
                     &arg_refs,
-                    "trusty-agents",
+                    // #11632: the package name, renamed from trusty-agents.
+                    env!("CARGO_PKG_NAME"),
                     &self.env,
                 )
                 .await?;

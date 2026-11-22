@@ -403,7 +403,7 @@ pub enum Disposition {
 /// Test: `cross_product_result_is_always_a_proposal`, `envelope_json_shape`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProposalEnvelope {
-    /// The trusty-agents agent that initiated the dispatch.
+    /// The trusty-assistants agent that initiated the dispatch.
     pub origin_agent: String,
     /// The external non-coding specialist that produced `result`.
     pub target_agent: String,

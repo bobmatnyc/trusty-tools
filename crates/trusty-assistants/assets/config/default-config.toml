@@ -1,9 +1,9 @@
-# trusty-agents global configuration
-# ~/.trusty-agents/config.toml
+# trusty-assistants global configuration
+# ~/.trusty-assistants/config.toml (~/.trusty-agents/config.toml before #11632)
 
 # #7454 (ADR-0060) — READ THIS BEFORE EDITING THE MCP TABLES BELOW.
 #
-# MCP SERVERS NO LONGER LIVE IN THIS FILE. They live in the file trusty-agents
+# MCP SERVERS NO LONGER LIVE IN THIS FILE. They live in the file trusty-assistants
 # shares with trusty-code: ~/.trusty-tools/mcp/servers.toml, owned by the
 # `trusty-mcp` crate. Per-assistant overrides live in each assistant's own
 # `<assistant home>/config.toml` under `[mcp]`.
@@ -16,7 +16,7 @@
 # later edit here changes nothing.
 #
 # To add or change a server, edit ~/.trusty-tools/mcp/servers.toml, or run
-# `tagent mcp list` to see what is in effect. What DOES still apply from this
+# `ta mcp list` to see what is in effect. What DOES still apply from this
 # file is `[mcp] inject_for_roles` and `[mcp] trust_project_mcp_json`, plus
 # `[tool_registry] scope_enforcement`.
 
@@ -46,11 +46,11 @@ inject_for_roles = ["ctrl", "pm", "research", "observe"]
 # SECURITY (#3266): whether live MCP discovery is allowed to auto-spawn
 # servers declared in a project's `.mcp.json`. Defaults to false — a
 # project's `.mcp.json` is repo-controlled, untrusted content; cloning a
-# hostile repo must never cause trusty-agents to execute arbitrary binaries
+# hostile repo must never cause trusty-assistants to execute arbitrary binaries
 # on every persona turn. The supported opt-in path is a per-server
 # `[[mcp.services]]` entry with `discover = true` below, which is an
 # explicit, operator-curated allowlist and is unaffected by this flag. Only
-# set this to true if you trust every project you point trusty-agents at.
+# set this to true if you trust every project you point trusty-assistants at.
 trust_project_mcp_json = false
 
 # Service-tier MCPs agents can reference. Local native integrations
@@ -88,7 +88,7 @@ trust_project_mcp_json = false
 # to the daemon's loopback `POST /rpc` (crates/trusty-mpm/src/mcp/mod.rs,
 # crates/trusty-mpm/src/daemon/mcp_backend.rs). The repo-root `.mcp.json`
 # already wires this exact command for Claude Code itself (`.mcp.json:9-15`);
-# this block gives trusty-agents personas the identical MCP surface.
+# this block gives trusty-assistants personas the identical MCP surface.
 #
 # Issue #3203: curated, safe subset of the full 31-tool catalog
 # (crates/trusty-mpm/src/mcp/tools/{core,session,console,project,proxy}.rs —
@@ -167,7 +167,7 @@ description = "List recent Granola meetings"
 # trusty-memory — native memory/recall/knowledge-graph service (crate
 # `trusty-memory`, bin `trusty-memory`). `serve --stdio` is the same
 # self-contained stdio MCP entry point the repo-root `.mcp.json` already uses
-# for Claude Code itself (`.mcp.json`), so this block gives trusty-agents
+# for Claude Code itself (`.mcp.json`), so this block gives trusty-assistants
 # personas the identical MCP surface.
 #
 # Previously declared as a `[[tool_registry.endpoints]]` OpenRPC entry
@@ -255,7 +255,7 @@ max_tokens = 2048
 # tools via `rpc.discover`. The `direct` driver spawns a subprocess and
 # speaks JSON-RPC 2.0 over its stdin/stdout (NDJSON; one JSON object per
 # line, JSON array for batch). See
-# docs/trusty-agents/research/openrpc-trusty-contract.md for the wire format.
+# docs/trusty-assistants/research/openrpc-trusty-contract.md for the wire format.
 [tool_registry]
 scope_enforcement = "deny"
 
@@ -292,7 +292,7 @@ scope_enforcement = "deny"
 # (crates/trusty-gworkspace/src/api/client.rs) rather than a crash. Run
 # `trusty-gworkspace-mcp setup` on a machine with the (renamed) binary on
 # $PATH to authorize a Google account — see
-# docs/trusty-agents/research/openrpc-trusty-contract.md.
+# docs/trusty-assistants/research/openrpc-trusty-contract.md.
 [[tool_registry.endpoints]]
 name = "gworkspace"
 driver = "direct"

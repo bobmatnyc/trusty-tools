@@ -297,7 +297,7 @@ async fn reports_missing_palace_without_downgrading_index() {
     );
 }
 
-/// Why (#5592): `probe_palace` is one of three trusty-agents HTTP clients that
+/// Why (#5592): `probe_palace` is one of three trusty-assistants HTTP clients that
 /// consume `/api/v1/palaces/{id}/drawers`, and the only one whose OPERATOR-VISIBLE
 /// output changes when trusty-memory stops answering 404 for a palace it could
 /// not open. Telling an operator a palace "does not exist" sends them looking

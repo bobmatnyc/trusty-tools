@@ -41,7 +41,8 @@ use super::discovery::{EndpointCapabilities, EndpointManifest, parse_manifest};
 use super::driver::{BatchCall, BatchResult, RegistryDriver};
 
 const PROTOCOL_VERSION: &str = "openrpc/1";
-const CLIENT_NAME: &str = "trusty-agents";
+// #11632: the package name, so the rename reaches every MCP `clientInfo`.
+const CLIENT_NAME: &str = env!("CARGO_PKG_NAME");
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// Holds the child process and framed stdio. Wrapped in `Mutex` so the

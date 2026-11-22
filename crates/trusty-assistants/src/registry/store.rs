@@ -145,10 +145,10 @@ impl ProjectRegistry {
         Ok(())
     }
 
-    /// Register the trusty-agents self-project, flagging `is_self = true`. (#182)
+    /// Register the trusty-assistants self-project, flagging `is_self = true`. (#182)
     ///
     /// Why: CTRL detects its own source tree at startup so the user can
-    /// dispatch development tasks against trusty-agents itself. We persist the
+    /// dispatch development tasks against trusty-assistants itself. We persist the
     /// flag in the same `projects.json` so it survives restarts and is
     /// visible to other tools.
     /// What: Upserts the entry like `register`, but explicitly sets

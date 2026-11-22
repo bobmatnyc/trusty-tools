@@ -356,7 +356,7 @@ pub struct StartupMigrationReport {
 /// `GlobalConfig::load_or_create`, which only the REPL routing command calls.
 /// Every daemon entry point reads the config through `GlobalConfig::load`,
 /// which absorbed the legacy table in memory and never persisted — so a
-/// supervised `tagent --api` or `tagent --slack` left `config.toml` unchanged
+/// supervised `ta --api` or `ta --slack` left `config.toml` unchanged
 /// across every restart. This is the one entry point those starts call, and it
 /// keeps the hot `load` path read-only.
 /// What: drains `config_path` FIRST, so the assistant sweep's `route_to`
@@ -507,7 +507,7 @@ pub fn spawn_startup_migration(
 /// The global drain alone, for a start with no assistant roster to sweep.
 ///
 /// Why (#7609): `--api` returns early from `runtime::startup` and runs the full
-/// sweep from `api::server::routes`. Every OTHER `tagent` start goes through
+/// sweep from `api::server::routes`. Every OTHER `ta` start goes through
 /// the shared runtime startup hook, which owns no assistant roster but still
 /// has to drain the global config exactly once. Detached for the same reason as
 /// the full sweep.

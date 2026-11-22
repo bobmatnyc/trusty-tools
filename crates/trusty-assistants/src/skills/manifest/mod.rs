@@ -366,7 +366,7 @@ pub struct SkillCatalog {
 impl SkillCatalog {
     /// The compile-time catalog shipped with this crate.
     ///
-    /// Why/What: Every tool trusty-agents registers in-process, plus the
+    /// Why/What: Every tool trusty-assistants registers in-process, plus the
     /// first-party `trusty-gworkspace` MCP surface and the platform tools the
     /// checked-in agent roster grants, each with a human name.
     /// Test: `every_tool_declared_in_source_has_a_skill`.

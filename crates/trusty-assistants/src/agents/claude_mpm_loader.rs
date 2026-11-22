@@ -2,7 +2,7 @@
 //!
 //! Why: claude-mpm-style agents are authored as Markdown files with YAML
 //! frontmatter and deployed under `~/.claude/agents/` (user-level) and
-//! `.claude/agents/` (project-level). Supporting this format lets trusty-agents
+//! `.claude/agents/` (project-level). Supporting this format lets trusty-assistants
 //! reuse the growing claude-mpm agent ecosystem without forcing authors to
 //! hand-maintain parallel TOML copies.
 //! What: Scans both directories, parses each `.md` file's frontmatter + body,
@@ -85,7 +85,7 @@ pub struct ClaudeMpmAgent {
 impl ClaudeMpmAgent {
     /// Convert into an `AgentConfig` compatible with the existing engine.
     ///
-    /// Why: The rest of trusty-agents works against `AgentConfig`; building one
+    /// Why: The rest of trusty-assistants works against `AgentConfig`; building one
     /// here means the runner, prompt-builder, and tool-dispatch paths don't
     /// need to know claude-mpm exists.
     /// What: Fills every required field with sensible defaults (temperature

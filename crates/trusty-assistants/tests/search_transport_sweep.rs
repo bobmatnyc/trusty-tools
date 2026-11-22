@@ -1,4 +1,4 @@
-//! Keep trusty-agents off trusty-search's retired HTTP listener (#6285).
+//! Keep trusty-assistants off trusty-search's retired HTTP listener (#6285).
 //!
 //! Why: the trusty-search daemon is moving to a Unix socket only (ADR-0032).
 //! This crate's call sites were moved onto `trusty_common::search_rpc` in
@@ -74,7 +74,7 @@ fn no_http_call_to_trusty_search_in_src() {
     }
     assert!(
         found.is_empty(),
-        "trusty-agents must reach trusty-search over its Unix socket \
+        "trusty-assistants must reach trusty-search over its Unix socket \
          (`trusty_common::search_rpc`), never HTTP (#6285):\n{}",
         found.join("\n")
     );

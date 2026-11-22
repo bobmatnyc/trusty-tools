@@ -1,6 +1,6 @@
 //! Inter-project message bus over Unix domain sockets.
 //!
-//! Why: Multiple trusty-agents projects running concurrently need a lightweight
+//! Why: Multiple trusty-assistants projects running concurrently need a lightweight
 //! IPC channel to share signals (e.g., "agent A finished", "memory updated")
 //! without going through a central server. Unix domain sockets give us
 //! low-latency, in-process-group communication with no port conflicts.

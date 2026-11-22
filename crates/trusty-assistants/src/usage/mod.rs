@@ -1,6 +1,6 @@
 //! Per-dispatch usage logging (#281).
 //!
-//! Why: trusty-agents dispatches LLM calls through several paths (claude CLI,
+//! Why: trusty-assistants dispatches LLM calls through several paths (claude CLI,
 //! Anthropic direct, OpenRouter, Bedrock) and currently has no structured,
 //! easy-to-grep record of which model handled which call, how many tokens
 //! were spent, or how long the round-trip took. Inspired by Kilo.ai's

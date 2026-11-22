@@ -153,7 +153,7 @@ async fn search_returns_descriptive_unsupported_error() {
 // -----------------------------------------------------------------
 // Mock daemon mirroring trusty-memory's REAL method names.
 //
-// Why: `trusty-agents` cannot take a dev-dependency on `trusty-memory` without
+// Why: `trusty-assistants` cannot take a dev-dependency on `trusty-memory` without
 // an awkward cross-crate coupling for a single test module (pulling in the
 // whole daemon crate and its ONNX embedder just to prove five methods and their
 // DTO shapes are wired correctly is disproportionate). Before #6286 this served

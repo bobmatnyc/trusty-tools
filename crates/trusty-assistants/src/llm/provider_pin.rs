@@ -62,8 +62,10 @@ pub enum ProviderPinError {
     #[error(
         "agent '{agent}': [agent].provider_id = '{provider}' is pinned but no \
          credential for it resolves. Set {env_var} in the environment or \
-         .env.local, or run `tagent config keys set {provider}`. The pin is \
-         honoured strictly — no other provider's credential is substituted."
+         .env.local, or run `{bin} config keys set {provider}`. The pin is \
+         honoured strictly — no other provider's credential is substituted.",
+        // #11632: the binary name from the manifest, not a literal.
+        bin = crate::cli::BIN_NAME
     )]
     MissingCredential {
         agent: String,
@@ -350,7 +352,7 @@ mod tests {
             "must name the env var: {msg}"
         );
         assert!(
-            msg.contains("tagent config keys set"),
+            msg.contains("ta config keys set"),
             "must name the store tier: {msg}"
         );
     }

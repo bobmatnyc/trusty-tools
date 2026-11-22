@@ -1,6 +1,6 @@
 //! SPEC-OKF-01 criterion 37 (#10746 S6): a tombstone trusty-okf renders is
 //! detected by trusty-common's `is_tombstone`, the predicate trusty-search
-//! uses to withdraw it. It lives in trusty-agents because this crate
+//! uses to withdraw it. It lives in trusty-assistants because this crate
 //! depends on both; trusty-okf's core may not link trusty-common (B8).
 //! #10746 S11 moved it here from the deleted trusty-kb, unchanged.
 

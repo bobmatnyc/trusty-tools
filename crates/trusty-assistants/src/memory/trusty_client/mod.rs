@@ -2,7 +2,7 @@
 //! `MemoryBackend` enum that picks between Trusty and the local
 //! `RedbUsearchStore` at runtime.
 //!
-//! Why: trusty-agents ships an embedded memory store (redb + usearch) so it
+//! Why: trusty-assistants ships an embedded memory store (redb + usearch) so it
 //! works out of the box with no external services. When operators run the
 //! `trusty-memory` daemon locally, however, they get a richer Palace/Room/
 //! Drawer model that is worth using transparently. Auto-detection at startup
@@ -25,7 +25,7 @@
 //!     taken for trait-compatibility and not transmitted. `content` is the
 //!     JSON-serialized `payload` (not a text summary) so `get` can losslessly
 //!     round-trip it — `CreateDrawerBody` has no side-channel metadata field.
-//!   - `memory.drawers_list` with `tag` — trusty-agents' string ids are tagged
+//!   - `memory.drawers_list` with `tag` — trusty-assistants' string ids are tagged
 //!     onto the drawer at insert time (`ns_id(segment, id)`) because drawers are
 //!     keyed by server-generated UUID, not caller id; `get`/`delete` resolve the
 //!     UUID via an exact tag-match lookup first.
@@ -233,7 +233,7 @@ impl TrustyMemoryClient {
             "palace_create",
             json!({
                 "name": palace_id,
-                "description": "Auto-created by trusty-agents TrustyMemoryClient",
+                "description": "Auto-created by trusty-assistants TrustyMemoryClient",
                 "force": true,
             }),
             CALL_TIMEOUT,

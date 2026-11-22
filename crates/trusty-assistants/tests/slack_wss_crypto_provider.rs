@@ -1,4 +1,4 @@
-//! Regression coverage for the `tagent --slack` startup panic (#4825).
+//! Regression coverage for the `ta --slack` startup panic (#4825).
 //!
 //! Why: The Slack gateway died on its first WSS handshake because no
 //! process-level rustls `CryptoProvider` was ever installed. A green build

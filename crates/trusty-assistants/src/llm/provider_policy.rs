@@ -114,7 +114,7 @@ pub fn read_from_home(home: &Path) -> Option<String> {
 /// `agents::bundled::ensure_bundled_agents_deployed` uses — so all the
 /// behaviour is in the hermetically testable half.
 /// Test: [`read_from_home`]'s tests cover the body; this wrapper is exercised
-/// by real `tagent` invocations.
+/// by real `ta` invocations.
 pub fn configured_default() -> Option<String> {
     read_from_home(&dirs::home_dir()?)
 }

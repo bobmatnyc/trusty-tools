@@ -1,6 +1,6 @@
 //! Process-level rustls `CryptoProvider` installation (#4825).
 //!
-//! Why: `tagent --slack` reached its first WSS handshake and aborted the whole
+//! Why: `ta --slack` reached its first WSS handshake and aborted the whole
 //! process inside rustls 0.23 — "Could not automatically determine the
 //! process-level CryptoProvider from Rustls crate features". A single
 //! `rustls 0.23` instance in this workspace's graph has BOTH provider features

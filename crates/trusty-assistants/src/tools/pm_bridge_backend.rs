@@ -274,7 +274,7 @@ impl ProcessPmBridge {
         if !binary_on_path("tm") {
             bail!("tm backend unavailable: binary not found on PATH");
         }
-        let mut client = StdioMcpClient::spawn("tm", &["serve", "--stdio"], "trusty-agents")
+        let mut client = StdioMcpClient::spawn("tm", &["serve", "--stdio"], env!("CARGO_PKG_NAME"))
             .await
             .context("failed to spawn tm serve --stdio")?;
         client

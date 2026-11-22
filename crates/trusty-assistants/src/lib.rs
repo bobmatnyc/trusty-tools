@@ -1,9 +1,9 @@
-//! trusty-agents library surface: the assistant core.
+//! trusty-assistants library surface: the assistant core.
 //!
 //! Why: the assistant's homes, OKG stores, channels, listeners, memory and
 //! knowledge are library code that a host process drives. #11632 cut the
 //! agent harness that used to host them (PM orchestrator, CTRL, REPL,
-//! workflows, HTTP API, UI); the `tagent` binary now serves only stdio MCP and
+//! workflows, HTTP API, UI); the `ta` binary now serves only stdio MCP and
 //! the `config` verbs (`cli`, `mcp_serve`).
 //! What: declares every kept module as `pub mod`, and publishes a curated
 //! `agent_api` facade (`ToolExecutor`, `ToolResult`, `ToolExecutionTier`,
@@ -37,7 +37,7 @@ pub mod bus;
 // kept unchanged for the inbound rebuild rather than deleted.
 #[allow(dead_code)]
 pub mod channels;
-// #11632: the `tagent` argv dispatch left after the harness cut.
+// #11632: the `ta` argv dispatch left after the harness cut.
 pub mod cli;
 pub mod env_compat;
 pub mod events;
@@ -90,7 +90,7 @@ pub mod test_env;
 /// Re-export `install_plugins` so external launchers can register agent
 /// plugins before building a tool registry.
 ///
-/// Why: `trusty-agents` cannot depend on `publish = false` agent crates. A
+/// Why: `trusty-assistants` cannot depend on `publish = false` agent crates. A
 ///      downstream launcher wires the plugin registry at startup via this
 ///      re-export, keeping the published surface free of those crates.
 /// What: Forwards to `tools::agent_plugin::install_plugins`. The underlying
@@ -161,7 +161,7 @@ fn default_bundled_config_dir_checking(search_root: &std::path::Path) -> std::pa
         if search_root.join(&legacy).exists() {
             tracing::warn!(
                 ".open-mpm config dir detected; migrate to .trusty-agents \
-                 (trusty-agents will read from .open-mpm until you rename it)"
+                 (trusty-assistants will read from .open-mpm until you rename it)"
             );
             return legacy;
         }
@@ -172,7 +172,7 @@ fn default_bundled_config_dir_checking(search_root: &std::path::Path) -> std::pa
 /// Curated, stable surface for external agent crates.
 ///
 /// Why: An out-of-workspace launcher should depend on a tiny, well-defined
-///      slice of `trusty-agents` — not the whole internal module tree.
+///      slice of `trusty-assistants` — not the whole internal module tree.
 /// What: Re-exports `ToolExecutor`, `ToolResult`, `ToolExecutionTier`,
 ///       `AgentPlugin`, and `ServiceTier`.
 /// Test: Compile-tested by the workspace build; the re-exported plugin type

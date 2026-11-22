@@ -36,7 +36,7 @@ pub struct RunnerConfig {
 /// Optional `[plugins]` section (#446) — agent-scoped tool plugin declarations.
 ///
 /// Why: Lets agents extend their tool surface with domain-specific
-/// implementations (Python subprocess scripts today) without touching trusty-agents
+/// implementations (Python subprocess scripts today) without touching trusty-assistants
 /// core. Future transports (e.g. Rust dylib) plug in here as additional
 /// fields.
 /// What: A list of `[[plugins.python]]` entries parsed as `PythonPluginConfig`.

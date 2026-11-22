@@ -1,4 +1,4 @@
-//! `tagent mcp-serve` — a stdio MCP server exposing trusty-agents to external
+//! `ta mcp-serve` — a stdio MCP server exposing trusty-assistants to external
 //! MCP clients (Claude Code, etc.). Epic #3633 "core" slice.
 //!
 //! Why: external orchestrators already speak line-delimited JSON-RPC / MCP over
@@ -17,7 +17,7 @@
 //! RBAC: this surface applies NO tier restriction; gating external callers by
 //! tier is deferred to epic #3633.
 //! Test: `mcp_serve_tests` drives the `dispatch` fn in-memory; a live smoke
-//! pipes JSON-RPC lines into the built `tagent mcp-serve` binary.
+//! pipes JSON-RPC lines into the built `ta mcp-serve` binary.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +29,7 @@ use crate::tools::pm_bridge::PmBridgeTool;
 use crate::tools::pm_bridge_backend::ProcessPmBridge;
 use crate::tools::traits::ToolExecutor;
 
-/// Entry point for `tagent mcp-serve`: run the shared stdio MCP loop until the
+/// Entry point for `ta mcp-serve`: run the shared stdio MCP loop until the
 /// client closes the pipe (EOF), then return.
 ///
 /// Why: an MCP stdio server speaks JSON-RPC on stdout, so nothing else may

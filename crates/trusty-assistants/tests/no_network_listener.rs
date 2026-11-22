@@ -134,7 +134,7 @@ fn no_network_listener_outside_test_code() {
     }
     assert!(
         found.is_empty(),
-        "trusty-agents serves stdio MCP only; no TCP/UDP listener outside test \
+        "trusty-assistants serves stdio MCP only; no TCP/UDP listener outside test \
          code (#11632, ADR-0032):\n{}",
         found.join("\n")
     );

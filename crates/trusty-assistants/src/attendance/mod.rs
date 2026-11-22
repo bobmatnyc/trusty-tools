@@ -41,7 +41,7 @@
 //! DURABLE. State is one small JSON file per instance under
 //! `~/.trusty-agents/attendance/<instance>.json`, written through
 //! [`crate::state_writer::atomic_write`] (the same lock+tmp+rename path every
-//! other trusty-agents state file uses), so the answer survives a restart. That
+//! other trusty-assistants state file uses), so the answer survives a restart. That
 //! matters for correctness, not just tidiness: an in-memory tracker would
 //! report a fresh process as never-attended, and a never-attended instance is
 //! unattended (see [`Attendance::NeverAttended`]) — so restarting the API

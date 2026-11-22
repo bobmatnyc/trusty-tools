@@ -1,8 +1,8 @@
-//! The one door trusty-agents uses to call the trusty-memory daemon (#9538).
+//! The one door trusty-assistants uses to call the trusty-memory daemon (#9538).
 //!
 //! Why: #9288 made every first-party memory client verify the daemon's wire
 //! protocol before its first call, so a daemon from another release is refused
-//! by name instead of having its replies misparsed. trusty-agents has a dozen
+//! by name instead of having its replies misparsed. trusty-assistants has a dozen
 //! call sites; routing them all through this module means the check cannot be
 //! forgotten at a new one.
 //! What: [`call`] and [`call_with_timeout`] run

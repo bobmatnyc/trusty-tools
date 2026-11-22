@@ -646,7 +646,7 @@ fn globals_as_a_daemon_loads_them(raw: &str) -> Vec<Channel> {
 ///
 /// Why (#7609): `migrate_global_if_absent` was reachable only from
 /// `GlobalConfig::load_or_create`, and only the REPL routing command calls
-/// that. A supervised `tagent --api` / `tagent --slack` left `config.toml`
+/// that. A supervised `ta --api` / `ta --slack` left `config.toml`
 /// byte-identical across every restart, so the `route_to` backfill had no
 /// `[[channels]]` entry to append the bound assistant to.
 ///
@@ -776,7 +776,7 @@ fn a_daemon_start_survives_a_malformed_global_config() {
 /// to.
 ///
 /// Why (#7609 review): `spawn_global_migration` is the wiring every non-`--api`
-/// `tagent` start depends on. Proving only `run_startup_migration` leaves the
+/// `ta` start depends on. Proving only `run_startup_migration` leaves the
 /// spawn, the empty assistant roster and the `Some(config_path)` argument
 /// untested — and the empty roster is the one argument shape no other test
 /// passes through the spawn.

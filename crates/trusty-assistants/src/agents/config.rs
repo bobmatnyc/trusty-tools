@@ -68,7 +68,7 @@ pub struct AgentConfig {
     ///
     /// Why: Operators want to extend an agent with domain-specific tools
     /// (custom reports, lookups against internal APIs) without modifying
-    /// trusty-agents core. The `[plugins]` block declares one or more transports
+    /// trusty-assistants core. The `[plugins]` block declares one or more transports
     /// (currently only Python subprocess) that the agent loader resolves into
     /// runtime tool objects via `PythonToolPlugin::from_config`.
     /// What: `AgentPluginsConfig` with optional `python` list. Absent = no
@@ -79,7 +79,7 @@ pub struct AgentConfig {
 
     /// Optional `[rbac]` block (#445) — role-based access control.
     ///
-    /// Why: trusty-agents exposes the same agent across multiple transports
+    /// Why: trusty-assistants exposes the same agent across multiple transports
     /// (CLI, Slack, Telegram, HTTP). Each transport identifies users
     /// differently; the `[rbac]` block lets operators declare an env-var
     /// allowlist plus default tiers for authenticated vs unauthenticated
@@ -248,7 +248,7 @@ pub struct AgentConfig {
 /// `api::server::agent_subagents`'s module doc):
 /// - `allowed` — CROSS-PRODUCT (`dispatch_task` → trusty-code), intersected
 ///   with `tools::cross_product::NON_CODING_TARGETS`.
-/// - `delegate_allowed` — IN-PROCESS (`delegate_to_agent` → trusty-agents),
+/// - `delegate_allowed` — IN-PROCESS (`delegate_to_agent` → trusty-assistants),
 ///   ADR-0024 decision 4's editable whitelist, intersected with
 ///   `agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS`.
 ///
@@ -269,7 +269,7 @@ pub struct SubagentsConfig {
     /// Why: a separate key rather than a reinterpretation of `allowed` because
     /// the two mechanisms take different names for different things
     /// (`research` is a trusty-code specialist; `research-agent` is a
-    /// trusty-agents roster entry), and flattening them would make one config
+    /// trusty-assistants roster entry), and flattening them would make one config
     /// line mean two capabilities. The ADR anticipated the collision and
     /// recorded the alternative (rename the cross-product section, freeing
     /// `[subagents]` for the in-process list); that rename is a separate,
@@ -572,7 +572,7 @@ pub struct AgentInfo {
 
     /// Which `AgentRunner` implementation should execute this agent (#60).
     ///
-    /// Why: Most agents run as trusty-agents subprocess calls that route LLM
+    /// Why: Most agents run as trusty-assistants subprocess calls that route LLM
     /// requests through OpenRouter / Anthropic direct using an API key. Claude
     /// Max subscribers can instead spawn the locally-installed `claude` CLI,
     /// which authenticates via OAuth with no API key required. This field
@@ -666,7 +666,7 @@ pub struct AgentInfo {
     /// Name of a base agent this agent inherits from (`extends:`), DOC-41 §2.5
     /// / epic #3052, issue #3055.
     ///
-    /// Why: trusty-agents lets a user personalize a stock/bundled base agent
+    /// Why: trusty-assistants lets a user personalize a stock/bundled base agent
     /// (name it, add tools, override tone) without forking it — they author a
     /// child agent declaring `extends: <base>` and layer personal deltas on
     /// top. Resolution mirrors trusty-mpm's proven `compose_agent`: single
@@ -1007,7 +1007,7 @@ pub struct AgentCapabilities {
 /// Why: Surfacing the choice in config lets individual agents opt into
 /// Claude Max OAuth (via the `claude` CLI) without changing code or forcing
 /// that path globally.
-/// What: `Subprocess` (default) re-invokes the trusty-agents binary in
+/// What: `Subprocess` (default) re-invokes the trusty-assistants binary in
 /// `--agent <name>` mode; `Inline` is a placeholder for future in-process
 /// runners; `ClaudeCode` spawns the `claude` CLI with `-p ... --output-format
 /// stream-json` and parses the final `{"type":"result"}` event.

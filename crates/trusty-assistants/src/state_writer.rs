@@ -1,6 +1,6 @@
 //! Concurrency-safe state file writer (#198).
 //!
-//! Why: Multiple `trusty-agents` binary instances may run simultaneously — a durable
+//! Why: Multiple `trusty-assistants` binary instances may run simultaneously — a durable
 //! API server on `:7654`, a Tauri GUI, and a `cargo run` source build can all
 //! share `~/.trusty-agents/`. Direct `fs::write` / append-mode `OpenOptions` calls
 //! on the same path race: one process can truncate or partially-write a file

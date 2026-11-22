@@ -5,7 +5,7 @@
 //! consumer agreed on plus one escape hatch. The knobs this crate's three
 //! retired schemas carried — `McpService`'s `tools`/`discover`, and
 //! `EndpointConfig`'s `scopes`/`discovery_ttl_secs`/`eager_discovery`/`auth`/
-//! `driver`/transport limits — are trusty-agents' own semantics, so they live
+//! `driver`/transport limits — are trusty-assistants' own semantics, so they live
 //! in `extensions` rather than as fields `trusty-mcp` would have to model for
 //! one consumer. `trusty-mcp` never reads a key out of that map; this module
 //! is the only place that does, so an untyped `serde_json::Value` is decoded

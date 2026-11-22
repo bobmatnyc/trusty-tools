@@ -1,7 +1,7 @@
 //! Shared code-index store with advisory file locking.
 //!
 //! Why: The code index (`Segment::CodeIndex`) is logically shared across
-//! concurrent `trusty-agents` processes — a PM session, an agent subprocess, and a
+//! concurrent `trusty-assistants` processes — a PM session, an agent subprocess, and a
 //! `--watch` daemon may all want to read or update it at once. redb uses
 //! exclusive file-level locks per-process, and usearch has no cross-process
 //! coordination at all; without an additional advisory lock concurrent writes
@@ -78,7 +78,7 @@ impl CodeStore {
     /// `LockFileEx`) that PARK the calling thread for as long as another
     /// process holds the lock. Calling them straight from an async fn stalls a
     /// tokio worker thread for that whole time (audit 2026-08-19, finding 21):
-    /// with several trusty-agents processes contending on one code index, that
+    /// with several trusty-assistants processes contending on one code index, that
     /// starves every other task on the runtime. `File::open` is blocking I/O
     /// too, so it moves across with them.
     /// What: runs open + lock inside `spawn_blocking` and hands the locked

@@ -14,7 +14,7 @@
 //!   - [`ingest`]   — the `KbStore` entry points over the trusty-okf engine.
 //!   - [`index_state`] — this machine's index state for a bound SEARCH index,
 //!     read through `trusty_okf::state::index` from a directory in the
-//!     trusty-agents data area, never the synced tree (#3892; #10746 S12).
+//!     trusty-assistants data area, never the synced tree (#3892; #10746 S12).
 //!     `crate::stores::okg_feed` runs the `trusty_okf::feed` pass.
 //!   - [`legacy_journal`] — the one-time migration of the pre-S12 in-tree
 //!     `_sources/<id>.index.jsonl` journals into that state, as Pending.

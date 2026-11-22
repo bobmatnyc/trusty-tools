@@ -680,7 +680,7 @@ allowed = ["research", "ticketing"]
 /// kept SEPARATE from the cross-product `allowed` key.
 ///
 /// Why: the two mechanisms take different names for different things
-/// (`research` is a trusty-code specialist, `research-agent` a trusty-agents
+/// (`research` is a trusty-code specialist, `research-agent` a trusty-assistants
 /// roster entry). A single flattened key would make one config line mean two
 /// capabilities, which is exactly what the API payload keeps apart.
 /// What: both keys parse independently; declaring one leaves the other `None`.

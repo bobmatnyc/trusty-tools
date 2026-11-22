@@ -278,7 +278,7 @@ fn default_config_is_valid_toml() {
 /// `default-config.toml` fails CI.
 ///
 /// Why: the ideal guard would assert directly against
-/// `trusty_mpm::mcp::tools::TOOL_CATALOG`, but `trusty-agents` does not depend
+/// `trusty_mpm::mcp::tools::TOOL_CATALOG`, but `trusty-assistants` does not depend
 /// on `trusty-mpm`, and adding it as a dev-dependency purely for this one
 /// assertion would pull that crate's full daemon/tui/telegram/slack graph into
 /// every `cargo test -p trusty-assistants` run. This checked-in list is the

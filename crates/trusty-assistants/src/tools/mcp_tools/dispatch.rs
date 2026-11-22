@@ -126,7 +126,7 @@ fn shared_path() -> Result<std::path::PathBuf, String> {
 /// when nothing changed.
 ///
 /// Why: `~/.trusty-tools/mcp/servers.toml` is shared across processes — a
-/// durable API server, a GUI, `trusty-code`, and any `tagent` invocation can
+/// durable API server, a GUI, `trusty-code`, and any `ta` invocation can
 /// all reach it — so reading it OUTSIDE the write is a lost update, not a torn
 /// one. `McpConfigFile::save`'s tmp+rename already makes each individual write
 /// atomic; what it cannot do is stop two `mcp_add` calls from both reading the

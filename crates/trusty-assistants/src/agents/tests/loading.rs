@@ -2691,7 +2691,7 @@ fn writing_assistant_package_resolves_with_its_store_and_disabled_channels() {
 /// Why: this is the failure a wrong implementation of #8186 actually produces.
 /// A channel binding needs an account to be useful, and the shortest way to
 /// make one work on a developer's machine is to paste the bot token or app
-/// password into `agent.toml` — which then ships inside the `tagent` binary
+/// password into `agent.toml` — which then ships inside the `ta` binary
 /// (`agents::bundled` embeds this whole tree) and is written into every user's
 /// `~/.trusty-agents/agents/`. The model forbids it: `Channel::credential_ref`
 /// holds a `trusty_common::credentials::CredentialRef` NAME, `provider` or

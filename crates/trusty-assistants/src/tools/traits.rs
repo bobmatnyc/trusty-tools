@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 // Why: `ToolExecutor`, `ToolResult`, and `ToolExecutionTier` were extracted
 //      to `trusty-agents-common` so external agent crates (e.g. `cto-assistant`)
-//      can implement them without a cargo cycle through `trusty-agents`. Re-exports
+//      can implement them without a cargo cycle through `trusty-assistants`. Re-exports
 //      here preserve every existing `crate::tools::traits::ToolExecutor`
 //      import in the workspace — internal call sites are unchanged.
 // What: Re-exports the trait + result + tier from the shared crate.
@@ -32,9 +32,9 @@ pub use trusty_agents_common::{ToolExecutionTier, ToolExecutor, ToolResult};
 // Why: `AgentRunner`, `RunContext`, `AgentOutput`, and `HistoryMessage` were
 //      extracted to `trusty-agents-common::runner` in Wave 2 (issue #867,
 //      refs #830/#832) so external crates can implement or mock the runner
-//      seam without depending on the full `trusty-agents` binary crate.
+//      seam without depending on the full `trusty-assistants` binary crate.
 //      Re-exports here preserve every existing `crate::tools::traits::AgentRunner`,
-//      `RunContext`, `AgentOutput` reference inside `trusty-agents`.
+//      `RunContext`, `AgentOutput` reference inside `trusty-assistants`.
 // What: Explicit re-exports from the shared runner module.
 // Test: All existing AgentRunner tests and workflow tests still resolve and pass.
 pub use trusty_agents_common::runner::{AgentOutput, AgentRunner, RunContext};

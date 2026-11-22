@@ -121,7 +121,7 @@ impl AgentRegistry {
                     // through the SHARED reader that trusty-mpm itself emits
                     // with (`mpm_bridge`, leaf-only). Every other tier —
                     // `.trusty-agents/agents`, `<config_dir>/agents` — is
-                    // trusty-agents' OWN `.md` overlay schema (`capabilities:`,
+                    // trusty-assistants' OWN `.md` overlay schema (`capabilities:`,
                     // `runner:`, `display_name:`, live `extends:`) and keeps
                     // `parse_md_agent`. Neither reader is a superset of the
                     // other, which is why this is a selection and not a merge.
@@ -213,7 +213,7 @@ impl AgentRegistry {
     /// role/language/framework/tag signals and this method turns those into
     /// a concrete agent choice without a hard-coded switch statement.
     ///
-    /// Design: trusty-agents intentionally ships ONE language specialist
+    /// Design: trusty-assistants intentionally ships ONE language specialist
     /// (`python-engineer`) and a generic `engineer` agent that handles all
     /// other languages via runtime skill injection (see
     /// `.trusty-agents/skills/languages/`). For non-Python engineering tasks, the
@@ -347,7 +347,7 @@ impl AgentRegistry {
 
     /// List all discovered agents with their source and capability summary.
     ///
-    /// Why: Powers the `trusty-agents agents list` subcommand and startup log
+    /// Why: Powers the `trusty-assistants agents list` subcommand and startup log
     /// summary so operators can verify their overrides are picked up.
     /// What: Returns one `AgentSummary` per discovered agent, preserving
     /// discovery (priority) order.
@@ -384,7 +384,7 @@ impl AgentRegistry {
 /// issue #3055).
 ///
 /// Why: `extends` resolution runs once, at load time — the natural
-/// instantiation point trusty-agents already has (no separate build/deploy
+/// instantiation point trusty-assistants already has (no separate build/deploy
 /// pass like trusty-mpm). Doing it after the whole directory sweep means a
 /// child can inherit from ANY sibling in the map (a personal
 /// `~/.trusty-agents/agents/my-assistant.md` extending a bundled `assistant`),
@@ -484,7 +484,7 @@ pub fn config_search_paths(config_dir: &Path, leaf: &str) -> Vec<PathBuf> {
 ///
 /// Why: Centralizes the discovery policy — project-level overrides beat
 /// user-level overrides beat bundled defaults — so every call site
-/// (`main.rs`, `tagent agents list`, tests) sees the same order.
+/// (`main.rs`, `ta agents list`, tests) sees the same order.
 /// What: [`config_search_paths`] with the `agents` leaf — in order:
 /// `.trusty-agents/agents`, `.claude/agents`, `~/.trusty-agents/agents`,
 /// `~/.claude/agents`, `<config_dir>/agents`.

@@ -1,6 +1,6 @@
 //! Role-based access control for tool execution (#445).
 //!
-//! Why: trusty-agents exposes tools over multiple transports (CLI, REPL, Slack,
+//! Why: trusty-assistants exposes tools over multiple transports (CLI, REPL, Slack,
 //! Telegram, HTTP API). Some tools (memory writes, shell exec, ticketing
 //! mutations) are unsafe for arbitrary end-users while still being essential
 //! for the trusted operator at the controller. RBAC gates tool execution on
@@ -26,7 +26,7 @@ pub const MAX_IDENTITY_NAME_CHARS: usize = 128;
 ///      external agent crates can implement `ToolExecutor::restricted_tiers`
 ///      without depending on this crate). The original definition lived here;
 ///      consolidating into the agent-api crate broke the cargo cycle between
-///      `trusty-agents` and `cto-assistant`. Internal call sites still write
+///      `trusty-assistants` and `cto-assistant`. Internal call sites still write
 ///      `crate::rbac::ServiceTier` and get the same type.
 /// What: Re-export of `trusty_agents_common::ServiceTier`. Variants, serde
 ///       conventions (`snake_case`), and `Default = All` are unchanged.

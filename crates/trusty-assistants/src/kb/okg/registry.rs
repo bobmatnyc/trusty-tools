@@ -1,10 +1,10 @@
-//! The registry view trusty-agents still uses, over trusty-okf's registry.
+//! The registry view trusty-assistants still uses, over trusty-okf's registry.
 //!
 //! Why: #10746 S4 moved `_sources/registry.toml` into
 //! `trusty_okf::build::registry`, where boundary rule B6 bars connector
 //! variants: every kind but the doc store is `Locator::Connector`. The
-//! trusty-agents connector tools construct and match the typed mail and
-//! drive locators, and SPEC-OKF-01 §2.7.2 gives trusty-agents the `gmail`
+//! trusty-assistants connector tools construct and match the typed mail and
+//! drive locators, and SPEC-OKF-01 §2.7.2 gives trusty-assistants the `gmail`
 //! and `drive` kinds. #10746 S11 moved this typed view here from the deleted
 //! trusty-kb; every row is still stored through trusty-okf.
 //! What: [`Locator`] adds the typed `Gmail` and `Drive` variants to the
@@ -27,7 +27,7 @@ pub use trusty_okf::build::registry::{
 };
 
 /// One source's location: the doc store, the two typed connector kinds
-/// trusty-agents implements, or any other connector table.
+/// trusty-assistants implements, or any other connector table.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Locator {
     /// A directory of text files on the local filesystem.
@@ -327,7 +327,7 @@ impl SourceRegistry {
 mod tests {
     use super::*;
 
-    /// Why: the trusty-agents tools build and match typed rows; stored
+    /// Why: the trusty-assistants tools build and match typed rows; stored
     /// through trusty-okf, they must read back as the same typed rows.
     /// What: a mail row with a window and a drive row survive save and load.
     /// Test: self-contained.

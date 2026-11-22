@@ -1,14 +1,14 @@
 //! `extends`-based agent personalization (DOC-41 §2.5 / §2.5.1, epic #3052,
 //! issue #3055).
 //!
-//! Why: trusty-agents lets a user personalize a stock/bundled base agent
+//! Why: trusty-assistants lets a user personalize a stock/bundled base agent
 //! (name it, add tools, override tone) WITHOUT forking it — they author a
 //! child agent declaring `extends: <base>` and layer personal deltas on top.
 //! Rather than invent a bespoke algorithm, this mirrors trusty-mpm's proven
 //! `compose_agent` (`trusty-mpm/src/core/agent_builder.rs`, now
 //! `trusty-agents-common::agents::builder`): the SAME `MAX_DEPTH = 8` ceiling,
 //! the SAME case-insensitive name resolution, and the SAME base-first prose
-//! concatenation. trusty-agents does not depend on trusty-mpm as a library and
+//! concatenation. trusty-assistants does not depend on trusty-mpm as a library and
 //! that composer operates on Claude-Code deploy MARKDOWN with tools-OVERRIDE
 //! semantics, so this is an analogous — not shared — implementation working on
 //! the structured [`AgentConfig`] with the personalization merge table.
@@ -484,7 +484,7 @@ pub fn merge_extends(base: AgentConfig, child: AgentConfig) -> AgentConfig {
 ///
 /// Why: list fields accumulate through inheritance (a child ADDS tools to the
 /// base set rather than replacing it) — the personalization semantics of
-/// DOC-41 §2.5, and the key point that distinguishes trusty-agents' `tools`
+/// DOC-41 §2.5, and the key point that distinguishes trusty-assistants' `tools`
 /// union from trusty-mpm's `tools` override.
 /// What: `None + None => None`; otherwise `Some` of the base list followed by
 /// any child entries not already present (case-sensitive dedup — tool/scope

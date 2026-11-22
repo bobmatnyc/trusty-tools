@@ -19,7 +19,7 @@
 //!     view, the machine-local index state and the legacy-journal migration.
 //!
 //! Every ingest, ledger and registry write goes through trusty-okf; this
-//! module adds no second engine. The dependency edge is trusty-agents ->
+//! module adds no second engine. The dependency edge is trusty-assistants ->
 //! trusty-okf only (B1, B2).
 //!
 //! Test: the unit tests in each submodule, `tests/kb_okg_artifacts.rs`, and

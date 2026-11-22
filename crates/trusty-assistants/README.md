@@ -1,4 +1,7 @@
-# trusty-agents
+# trusty-assistants
+
+Formerly `trusty-agents`; #11632 renamed the crate and its binary (`tagent`
+is now `ta`, and `tagent` stays as a deprecated alias for one release).
 
 The assistant core of the trusty-* tools: per-assistant homes and OKG stores,
 channels and listeners, memory and knowledge, plus one serving surface — a
@@ -14,15 +17,27 @@ belongs to `trusty-code`; multi-project orchestration belongs to `trusty-mpm`.
 ## The binary
 
 ```
-tagent --version             Print the version and the commit that built it
-tagent --help                Print the usage text
-tagent config <verb> …       Manage inference provider credentials (API keys)
-tagent config profile <verb> Show or set the user profile
-tagent mcp-serve             Serve the dispatch_task tool as a stdio MCP server
+ta --version             Print the version and the commit that built it
+ta --help                Print the usage text
+ta config <verb> …       Manage inference provider credentials (API keys)
+ta config profile <verb> Show or set the user profile
+ta mcp-serve             Serve the dispatch_task tool as a stdio MCP server
 ```
 
-`tagent` opens no network listener. `tests/no_network_listener.rs` fails on any
+`ta` opens no network listener. `tests/no_network_listener.rs` fails on any
 non-test TCP or UDP bind in `src/`.
+
+## Where it keeps data
+
+| What | Path | Before #11632 |
+|---|---|---|
+| Assistant homes | `~/trusty-assistants/<id>/`, or `$TA_ASSISTANTS_DIR` | `~/trusty-agents/<id>/`, `$TAGENT_ASSISTANTS_DIR` |
+| Config and per-user state | `~/.trusty-assistants/` | `~/.trusty-agents/` |
+
+The old locations are still read for one release. `ta config profile` and
+`ta mcp-serve` move them once, never over an existing new directory, and leave
+a symlink at the old path; a failed move stops the command and changes
+nothing (`src/assistants/relocate.rs`).
 
 ## The library
 

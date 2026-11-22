@@ -1,6 +1,6 @@
 //! Plugin transports for external tool integrations.
 //!
-//! Why: trusty-agents wants to call external tools (MCP servers, future plugin
+//! Why: trusty-assistants wants to call external tools (MCP servers, future plugin
 //! hosts) without baking transport details into agent code. Centralising
 //! these clients here keeps the agent layer focused on tool dispatch and
 //! lets transport implementations evolve independently.

@@ -281,7 +281,7 @@ fn has_technical_context_word(words: &[&str]) -> bool {
 ///
 /// Why: Users write "Hello!" / "hi." / "hey," — comparing to plain "hello"
 /// requires normalization. We keep apostrophes (so "what's" stays whole)
-/// and internal hyphens (so "trusty-agents" stays whole).
+/// and internal hyphens (so "trusty-assistants" stays whole).
 /// What: Lowercases and replaces ASCII punctuation (except `'`, `-`, `_`)
 /// with spaces, then collapses runs of whitespace. Underscores are preserved
 /// so identifiers like `run_pm_task_with_session` remain a single token

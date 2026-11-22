@@ -206,7 +206,7 @@ pub enum Event {
     },
 
     // -- Checkpoint durability (#3062, SPEC-AGENTFW-02 §3.4) --
-    /// Emitted once at the start of `tagent resume <run-id>`, before any
+    /// Emitted once at the start of `ta resume <run-id>`, before any
     /// phase from the resume point re-executes.
     ///
     /// Why: Lets the UI / stderr stream distinguish "a fresh run started"
@@ -519,7 +519,7 @@ pub fn publish(event: Event) {
 /// Publish an event AND emit it on stderr with the `__OMPM_EVENT__` prefix
 /// so a parent process can re-broadcast on its own bus.
 ///
-/// Why: Workflow runs spawn as `trusty-agents --workflow ...` subprocesses of the
+/// Why: Workflow runs spawn as `trusty-assistants --workflow ...` subprocesses of the
 /// API server (`api/server.rs::run_task`). Events emitted inside that child
 /// reach the parent's bus only via the existing stderr stream. This helper
 /// does both in one call so emit sites don't have to know whether they're

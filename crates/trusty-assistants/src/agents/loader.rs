@@ -851,7 +851,7 @@ impl AgentConfig {
 /// `TAGENT_CONFIG_DIR` env var with a CWD-relative fallback (MIN-7 / #104).
 ///
 /// Why: Installed binaries rarely share a CWD with the repo; hardcoding a
-/// relative path made `trusty-agents` fragile when packaged. Honoring an env var
+/// relative path made `trusty-assistants` fragile when packaged. Honoring an env var
 /// lets operators point the loader at a vendored `config/` alongside the
 /// binary without code changes.
 /// What: Returns `${TAGENT_CONFIG_DIR}/<name>.toml` when the env var is

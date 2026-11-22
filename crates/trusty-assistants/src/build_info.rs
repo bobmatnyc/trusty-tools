@@ -187,7 +187,7 @@ impl BuildInfo {
     /// #4260: the counter is labelled `run #N`, never `build #N` — it names
     /// this invocation, and calling it a build made a stale binary look
     /// current.
-    /// What: `trusty-agents vX.Y.Z (<sha>, <date>) run #N`.
+    /// What: `trusty-assistants vX.Y.Z (<sha>, <date>) run #N`.
     /// Test: `display_string_format`.
     pub fn display_string(&self) -> String {
         format!("{} run #{}", version_string(), self.build)
@@ -217,7 +217,7 @@ async fn read_previous(file: &Path) -> u64 {
 /// Why: A crash during write must never leave `build.json` half-written —
 /// `rename(2)` on the same filesystem is atomic, so readers always see a
 /// complete file. The tmp filename must be unique PER CALL, not just per
-/// file: multiple `tagent` processes resolving the same project's
+/// file: multiple `ta` processes resolving the same project's
 /// `.trusty-agents/state` dir concurrently (e.g. several sub-agent
 /// invocations spawned back-to-back by the same PM/GUI session) used to all
 /// race on one shared `build.json.tmp` — one process's `rename` could win
@@ -285,7 +285,7 @@ mod tests {
     /// Regression test for a concurrent-writer crash exposed while fixing
     /// the packaged-app EROFS bug: once every caller resolves the SAME
     /// real project state dir (instead of each accidentally landing in its
-    /// own raw-cwd tempdir), several `tagent` processes/tasks incrementing
+    /// own raw-cwd tempdir), several `ta` processes/tasks incrementing
     /// the counter at once used to race on a single shared
     /// `build.json.tmp` — one writer's `rename` would fail with `ENOENT`
     /// because a second writer had already renamed the shared tmp path

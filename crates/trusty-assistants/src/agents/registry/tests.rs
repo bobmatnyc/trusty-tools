@@ -200,7 +200,7 @@ fn registry_list_returns_all_agents() {
 
 #[test]
 fn registry_best_match_uses_engineer_for_non_python() {
-    // Why: trusty-agents intentionally ships ONE language specialist
+    // Why: trusty-assistants intentionally ships ONE language specialist
     // (`python-engineer`) and routes all other languages to the generic
     // `engineer` agent, which receives the right language idiom skill
     // (rust-idiomatic.md, go-idiomatic.md, etc.) via runtime injection.
@@ -436,7 +436,7 @@ fn hand_authored_trusty_assistants_md_wins_over_a_claude_agents_agent() {
     let trusty = agents_tier(tmp.path(), ".trusty-agents");
     let claude = agents_tier(tmp.path(), ".claude");
 
-    // Hand-authored overlay, trusty-agents' own schema.
+    // Hand-authored overlay, trusty-assistants' own schema.
     fs::write(
         trusty.join("engineer.md"),
         "---\nname: engineer\nrole: engineer\ndescription: hand-authored\n\

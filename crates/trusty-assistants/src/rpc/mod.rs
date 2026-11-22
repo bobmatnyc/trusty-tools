@@ -1,6 +1,6 @@
 //! Unified `rpc.discover` for in-process MCP services (issue #460).
 //!
-//! Why: trusty-agents hosts multiple MCP services in the same binary. Each linked
+//! Why: trusty-assistants hosts multiple MCP services in the same binary. Each linked
 //! service implements `trusty_mcp_core::ServiceDescriptor` so the host can
 //! collect them and emit one merged OpenRPC document. #11632: the `POST /rpc`
 //! route that served it (`rpc_handler`) was cut with the HTTP API; the
@@ -26,7 +26,7 @@ use trusty_search::SearchMcpService;
 /// Build the unified OpenRPC discovery document.
 ///
 /// Why: Assembles the unified OpenRPC document covering every in-process MCP
-/// service so trusty-agents exposes one `rpc.discover` endpoint instead of forcing
+/// service so trusty-assistants exposes one `rpc.discover` endpoint instead of forcing
 /// clients to probe individual daemons.
 /// What: Collects `ServiceDescriptor` impls for memory and search, delegates
 /// to `OpenRpcBuilder::from_services`, returns the finalised OpenRPC `Value`.
@@ -37,7 +37,8 @@ pub fn build_unified_discovery() -> Value {
     let memory = MemoryMcpService;
     let search = SearchMcpService;
     let services: Vec<&dyn ServiceDescriptor> = vec![&memory, &search];
-    OpenRpcBuilder::from_services("trusty-agents", env!("CARGO_PKG_VERSION"), &services).build()
+    OpenRpcBuilder::from_services(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"), &services)
+        .build()
 }
 
 // TODO(#460): in-process `tools/call` dispatch. The merged manifest already
@@ -53,7 +54,7 @@ mod tests {
     #[test]
     fn search_service_tool_count() {
         let svc = SearchMcpService;
-        // Why: trusty-agents's service registry must advertise exactly the same
+        // Why: trusty-assistants's service registry must advertise exactly the same
         //      tools that trusty-search exposes.  A count mismatch means the
         //      descriptor in `trusty-search/src/service/mcp_descriptor.rs`
         //      changed without a corresponding update here, which would cause

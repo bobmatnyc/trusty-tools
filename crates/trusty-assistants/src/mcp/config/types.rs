@@ -153,7 +153,7 @@ pub struct McpSection {
     ///
     /// Why: A `.mcp.json` file is project-controlled, not operator-curated —
     /// cloning a hostile repo that ships a malicious `.mcp.json` would
-    /// otherwise cause trusty-agents to auto-spawn arbitrary binaries on
+    /// otherwise cause trusty-assistants to auto-spawn arbitrary binaries on
     /// every persona turn with zero gating. Defaulting this to `false`
     /// means the effective server set only ever comes from the shared,
     /// operator-curated file and this assistant's own `[mcp]` overrides

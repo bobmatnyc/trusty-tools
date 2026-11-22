@@ -4,7 +4,7 @@
 # targets are gone with the code they drove. Releases go through `local-ops`
 # (see the workspace CLAUDE.md), not through targets here.
 
-VERSION := $(shell cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print([p for p in json.load(sys.stdin)['packages'] if p['name']=='trusty-agents'][0]['version'])")
+VERSION := $(shell cargo metadata --no-deps --format-version 1 | python3 -c "import sys,json; print([p for p in json.load(sys.stdin)['packages'] if p['name']=='trusty-assistants'][0]['version'])")
 
 build:
 	cargo build -p trusty-assistants

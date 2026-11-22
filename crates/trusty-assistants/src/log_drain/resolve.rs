@@ -38,7 +38,8 @@ pub type LogDrainConfig = trusty_common::log_drain::SingleSourceSection;
 const DEFAULT_INCLUDE: &str = "daemon-*.log*";
 
 /// Producing crate name, as it appears in every drained object's key.
-const CRATE_NAME: &str = "trusty-agents";
+/// #11632: the package name, renamed from trusty-agents.
+const CRATE_NAME: &str = env!("CARGO_PKG_NAME");
 
 /// Resolve the config into a runnable plan, or refuse.
 ///

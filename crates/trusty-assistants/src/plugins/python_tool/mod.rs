@@ -1,7 +1,7 @@
 //! Python subprocess tool plugin (#446).
 //!
 //! Why: Agents need to expose domain-specific tooling (custom reports, data
-//! lookups, internal APIs) without baking that logic into the trusty-agents core
+//! lookups, internal APIs) without baking that logic into the trusty-assistants core
 //! binary. A subprocess plugin lets operators ship a Python script alongside
 //! their agent TOML — the harness spawns `python3 <script>`, hands it
 //! JSON-encoded parameters on stdin, and reads back a structured result on

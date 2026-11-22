@@ -1,6 +1,6 @@
 //! MCP (Model Context Protocol) connections: two tiers, one authority.
 //!
-//! Why: trusty-agents itself runs as an LLM-driven agent harness, and its
+//! Why: trusty-assistants itself runs as an LLM-driven agent harness, and its
 //! assistants reach external capability through MCP servers. Until #7454 this
 //! crate described those servers with THREE independent schemas of its own
 //! (`mcp::config::McpService`, `tools::registry::config::EndpointConfig`,

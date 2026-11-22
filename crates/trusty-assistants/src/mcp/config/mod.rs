@@ -296,7 +296,7 @@ impl GlobalConfig {
 
     /// Load the global config, creating it with defaults when absent.
     ///
-    /// Why: The first time a user runs trusty-agents there is no config. Rather
+    /// Why: The first time a user runs trusty-assistants there is no config. Rather
     /// than failing or silently using an empty registry, materialize the
     /// defaults to disk so the user can see/edit what's active.
     /// What: Reads `$HOME/.trusty-agents/config.toml`; if missing, writes the
@@ -315,7 +315,7 @@ impl GlobalConfig {
             tokio::fs::write(&path, DEFAULT_CONFIG_TOML)
                 .await
                 .with_context(|| format!("failed to write default config {}", path.display()))?;
-            tracing::info!(path = %path.display(), "created default trusty-agents config");
+            tracing::info!(path = %path.display(), "created default trusty-assistants config");
         }
         // #7609: the one-shot `[[listeners]]` -> `[[channels]]` drain. This is
         // already the write path, and it runs BEFORE the read so the parsed

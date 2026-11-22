@@ -48,7 +48,7 @@ use trusty_common::credentials::{CredentialRef, Principal, Scope, Secret, Servic
 /// changes nothing, which is exactly why it has to be right now — the signature
 /// will not change when the check arrives.
 fn principal() -> Principal {
-    ServiceId::parse("trusty-agents").map_or(Principal::Operator, Principal::Service)
+    ServiceId::parse(env!("CARGO_PKG_NAME")).map_or(Principal::Operator, Principal::Service)
 }
 
 /// Parse and confine a reference without resolving it.

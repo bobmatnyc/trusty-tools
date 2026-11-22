@@ -1,0 +1,5 @@
+Breaking
+- The crate is renamed from `trusty-agents` to `trusty-assistants` (version restarts at 0.1.0) and the library from `trusty_agents` to `trusty_assistants` (#11632).
+- The binary is now `ta`. `tagent` stays for one release as an alias that prints a deprecation line on stderr and then behaves exactly like `ta` (#11632).
+- `--version`, the MCP `serverInfo` name, every MCP `clientInfo` name, the OpenRPC title and the log-drain object prefix now say `trusty-assistants` (#11632).
+- Assistant homes live in `~/trusty-assistants/<id>/` (override: `TA_ASSISTANTS_DIR`) and config and per-user state in `~/.trusty-assistants/`. The old `~/trusty-agents/`, `~/.trusty-agents/` and `TAGENT_ASSISTANTS_DIR` are still read for one release; `ta config profile` and `ta mcp-serve` move the two directories once, never over an existing new directory, rewrite each home's recorded OKG root, and leave a symlink at the old path. A failed move stops the command and leaves the old directory as it was (#11632).

@@ -5,8 +5,8 @@
 //! unchanged through these re-exports.
 //!
 //! Why: The client was promoted to `trusty-common` so `trusty-console` and
-//! future local services can reuse it without a dependency on `trusty-agents`.
-//! Keeping the shim here preserves backward compatibility for trusty-agents'
+//! future local services can reuse it without a dependency on `trusty-assistants`.
+//! Keeping the shim here preserves backward compatibility for trusty-assistants'
 //! internal call sites without requiring a mechanical rename across the crate.
 //! What: Publicly re-exports `StdioMcpClient`, `ServerInfo`, `McpTool`,
 //! `MCP_PROTOCOL_VERSION`, and `plugin_stderr_stdio` from

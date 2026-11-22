@@ -35,6 +35,8 @@ use crate::kb::okg::registry::SourceSpec;
 use crate::kb::store::KbStore;
 
 /// The data-area application name the state directory lives under.
+// #11632: deliberately NOT renamed. This is machine-local, rebuildable index
+// state; renaming the directory would orphan it and force a full re-index.
 const DATA_APP: &str = "trusty-agents";
 
 /// The state directory under the trusty-agents data area.

@@ -2,10 +2,10 @@
 //!
 //! Why: The ctrl loop previously hard-coded per-persona tool registration
 //!      (`if persona_name == "<persona>" { register(<persona>_tools()) }`).
-//!      That coupled `trusty-agents` directly to every agent's tool surface and
+//!      That coupled `trusty-assistants` directly to every agent's tool surface and
 //!      forced sensitive agent logic (HR/budget queries) to live inside the
 //!      host binary. `AgentPlugin` decouples this: a plugin source constructs
-//!      a tool list and hands it to `trusty-agents`, and the ctrl loop matches
+//!      a tool list and hands it to `trusty-assistants`, and the ctrl loop matches
 //!      `plugin.persona_name` against the active persona at session start.
 //!      The live producer is now `crate::tools::python_skill`, which turns a
 //!      DECLARED Python skill directory into plugins — so no agent's tools
