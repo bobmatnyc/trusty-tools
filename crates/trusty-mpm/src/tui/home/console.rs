@@ -29,6 +29,8 @@ use crate::tui::theme::{Tone, badge, palette};
 pub const DESCRIPTOR: &str = "UNIT-05 · SERVICE CONSOLE";
 /// What a panel with no source shows.
 pub const NO_DATA: &str = "no data yet";
+/// The Version cell of an on-demand row with no daemon to report one (#11549).
+pub const ON_DEMAND_VERSION: &str = "on demand";
 /// Height of one machine card, borders included.
 const CARD_HEIGHT: u16 = 7;
 /// Below this width the two history columns drop.
@@ -67,7 +69,7 @@ pub struct Machine {
 pub struct ServiceRow {
     /// Display name.
     pub name: String,
-    /// Version, or `-`.
+    /// Version, `on demand` for an idle on-demand service (#11549), or `-`.
     pub version: String,
     /// Status word and tone.
     pub status: (String, Tone),
@@ -131,7 +133,8 @@ pub fn detail_of(health: &TileHealth) -> Option<String> {
 /// machine cards and the per-service history.
 ///
 /// Test: `console_home_shows_no_data_yet_for_machine_and_history`,
-/// `a_ready_feed_fills_every_card_with_live_values`.
+/// `a_ready_feed_fills_every_card_with_live_values`,
+/// `an_on_demand_row_says_on_demand_in_its_version_cell`.
 pub fn model_from_state(state: &HomeState) -> ConsoleModel {
     let history = &state.machine.history;
     let rows = state
@@ -144,6 +147,8 @@ pub fn model_from_state(state: &HomeState) -> ConsoleModel {
                 name: id.display_name().to_string(),
                 version: match health {
                     TileHealth::Up { version: Some(v) } => v.clone(),
+                    // #11549: an idle on-demand service says so, not "-"
+                    TileHealth::OnDemand => ON_DEMAND_VERSION.to_string(),
                     _ => "-".to_string(),
                 },
                 status: status_of(health),
