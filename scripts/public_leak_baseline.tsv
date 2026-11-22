@@ -92,7 +92,6 @@ crates/trusty-agents-common/src/agent_content_tests.rs	RULING_DATED	4
 crates/trusty-assistants/.gitignore	HOSTNAME	1
 crates/trusty-assistants/.trusty-agents/skills/frameworks/pytest.md	EMAIL	2
 crates/trusty-assistants/.trusty-agents/skills/workflow/docker.md	HOSTNAME	1
-crates/trusty-assistants/Cargo.toml	RULING_DATED	1
 crates/trusty-assistants/changelog.d/10120-slack-token-store.md	HOSTNAME	1
 crates/trusty-assistants/changelog.d/4054-4520-agent-tool-authz.md	RULING_DATED	1
 crates/trusty-assistants/changelog.d/4476-migrated-added.md	HOSTNAME	1
