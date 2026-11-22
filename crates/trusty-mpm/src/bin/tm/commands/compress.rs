@@ -357,6 +357,13 @@ fn record_compress_savings_with(
     let Some(root) = root else {
         return;
     };
+    // #11560: the observer reads this to write `compressed_no_gain`.
+    trusty_mpm::core::savings_compress_outcome::record_outcome(
+        root,
+        session_id,
+        tool,
+        trusty_mpm::core::savings_compress::compress_gains(bytes_before, bytes_after),
+    );
     trusty_mpm::core::savings_compress::record_compress(
         root,
         session_id,
@@ -848,6 +855,67 @@ mod tests {
         );
         // #10973: the compress row names the tool category it came from.
         assert!(written.contains("\"tool_type\":\"bash\""), "{written}");
+    }
+
+    /// The opportunity rows `observe_in` writes for one rewritten Bash call
+    /// after a filter run of `before -> after` bytes (#11560).
+    fn row_after_compress(before: usize, after: usize) -> (serde_json::Value, String) {
+        let root = tempfile::tempdir().expect("temp root");
+        record_compress_savings_with(
+            Some(root.path()),
+            Some("s-11560"),
+            "git diff",
+            before,
+            after,
+            "native",
+        );
+        let payload = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "{ git diff; printf '\\n[exit %s]\\n' \"$?\"; } | tm compress --tool \"git diff\""},
+            "tool_response": {"stdout": "x".repeat(after), "stderr": ""},
+        });
+        super::super::hook_observer::observe_in(
+            root.path(),
+            "PostToolUse",
+            Some(&payload),
+            "s-11560",
+        );
+        let dir = trusty_mpm::core::savings_opportunity::opportunity_dir_in(root.path());
+        let mut rows = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("opportunity dir").flatten() {
+            if entry.path().extension().is_some_and(|e| e == "jsonl") {
+                rows.extend(
+                    std::fs::read_to_string(entry.path())
+                        .expect("read")
+                        .lines()
+                        .map(str::to_string),
+                );
+            }
+        }
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row: serde_json::Value = serde_json::from_str(&rows[0]).expect("row");
+        let ledger =
+            std::fs::read_to_string(trusty_mpm::core::savings::savings_log_in(root.path()))
+                .unwrap_or_default();
+        (row, ledger)
+    }
+
+    /// Why (#11560): a rewritten call whose filter saved nothing read
+    /// `compressed`, so 173 zero-saving runs counted as compressions.
+    /// Test: itself.
+    #[test]
+    fn a_zero_saving_compress_row_reads_compressed_no_gain() {
+        let (row, ledger) = row_after_compress(668, 668);
+        assert_eq!(row["skip_reason"], "compressed_no_gain", "{row}");
+        assert!(ledger.is_empty(), "no savings row: {ledger}");
+    }
+
+    /// #11560: a saving run keeps `compressed` and writes exactly one savings row.
+    #[test]
+    fn a_saving_compress_row_reads_compressed_with_one_savings_row() {
+        let (row, ledger) = row_after_compress(10_000, 1_000);
+        assert_eq!(row["skip_reason"], "compressed", "{row}");
+        assert_eq!(ledger.lines().count(), 1, "{ledger}");
     }
 
     #[tokio::test]

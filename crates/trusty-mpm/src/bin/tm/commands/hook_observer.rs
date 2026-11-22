@@ -33,7 +33,9 @@ use trusty_mpm::core::savings_opportunity::{
     tool_type_of,
 };
 
-use super::hook_bash_decision::bash_skip_reason;
+use trusty_mpm::core::savings_compress_outcome::take_outcome;
+
+use super::hook_bash_decision::{bash_skip_reason, compress_tool_arg};
 use super::hook_chain_shape::{command_shape, dominant_step};
 use super::hook_rewrite::{effective_tool_name, hook_cwd};
 
@@ -71,9 +73,16 @@ pub(crate) fn observe(event: &str, payload: Option<&Value>, session_id: &str) {
 /// blocked `SubagentStop` delivery (#6556) while recovering nothing.
 /// Test: `an_unwritable_ledger_does_not_fail_the_hook`.
 pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, session_id: &str) {
-    let Some(row) = payload.and_then(|p| opportunity_row(event, p, session_id)) else {
+    let Some(mut row) = payload.and_then(|p| opportunity_row(event, p, session_id)) else {
         return;
     };
+    // #11560: the replayed decision says the call was rewritten; the filter's
+    // own outcome says whether it saved anything.
+    if row.skip_reason == SkipReason::Compressed
+        && let Some(p) = payload
+    {
+        row.skip_reason = compressed_outcome(root, p, session_id);
+    }
     // #10981 review: its own bounded ledger, never the statusline's file.
     match append_opportunity(root, &row) {
         Ok(OpportunityAppend::Written | OpportunityAppend::DayFull) => {}
@@ -87,6 +96,25 @@ pub(crate) fn observe_in(root: &Path, event: &str, payload: Option<&Value>, sess
             "trusty-mpm: #10973 opportunity row not written under {}: {e}",
             opportunity_dir_in(root).display()
         ),
+    }
+}
+
+/// `Compressed`, or `CompressedNoGain` when `tm compress` saved nothing (#11560).
+///
+/// Why: the opportunity row is written here, after the call, but the replayed
+/// `PreToolUse` decision only knows the call was rewritten. The filter leaves
+/// its outcome in `savings_compress_outcome`, keyed by session and `--tool`.
+/// What: joins and consumes that outcome; no outcome (no session id in the
+/// filter, an older `tm`, a lost race) keeps `Compressed`.
+/// Test: `a_zero_saving_compress_row_reads_compressed_no_gain`.
+fn compressed_outcome(root: &Path, payload: &Value, session_id: &str) -> SkipReason {
+    let cwd = hook_cwd(Some(payload));
+    let Some(tool) = compress_tool_arg(payload.get("tool_input"), cwd.as_deref()) else {
+        return SkipReason::Compressed;
+    };
+    match take_outcome(root, session_id, &tool) {
+        Some(false) => SkipReason::CompressedNoGain,
+        _ => SkipReason::Compressed,
     }
 }
 

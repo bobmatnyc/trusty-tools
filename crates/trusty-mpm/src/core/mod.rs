@@ -375,6 +375,8 @@ pub mod savings;
 // The `tm compress` tool-output producer, the ledger's third row source — what
 // makes the 💸 segment include bash and gate output, not just prompts and reads.
 pub mod savings_compress;
+// #11560: whether a `tm compress` run saved anything, for the opportunity row.
+pub mod savings_compress_outcome;
 // #6959: the bulk-read diversion producer, the ledger's second row source.
 pub mod savings_divert;
 pub mod savings_instructions;

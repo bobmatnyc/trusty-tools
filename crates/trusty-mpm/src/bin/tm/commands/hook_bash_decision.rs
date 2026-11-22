@@ -87,6 +87,33 @@ pub(crate) fn bash_skip_reason(tool_input: Option<&Value>, cwd: Option<&Path>) -
     }
 }
 
+/// The `--tool` argument `tm compress` ran under for this call, if any (#11560).
+///
+/// Why: the filter keys its outcome by exactly this string, so the observer
+/// must recover the same one to join it.
+/// What: read from the command when it already is a rewrite; otherwise from
+/// the command [`pretooluse_bash_decision`] would rewrite it to.
+/// Test: `the_compress_tool_arg_comes_from_the_rewrite`.
+pub(crate) fn compress_tool_arg(tool_input: Option<&Value>, cwd: Option<&Path>) -> Option<String> {
+    let command = tool_input.and_then(|t| t["command"].as_str())?;
+    if command.contains(COMPRESS_MARKER) {
+        return tool_arg_in(command);
+    }
+    let response = pretooluse_bash_decision(command, tool_input, cwd).ok()?;
+    let value: Value = serde_json::from_str(&response).ok()?;
+    let rewritten = value["hookSpecificOutput"]["updatedInput"]["command"].as_str()?;
+    tool_arg_in(rewritten)
+}
+
+/// The word after `tm compress --tool` in a rewritten command.
+fn tool_arg_in(command: &str) -> Option<String> {
+    let words = shlex_words(command);
+    words
+        .windows(3)
+        .find(|w| w[0].rsplit('/').next() == Some("compress") && w[1] == "--tool")
+        .map(|w| w[2].clone())
+}
+
 /// The reason for a command that is itself one of the hook's rewrites.
 fn already_rewritten(command: &str) -> Option<SkipReason> {
     if command.contains(COMPRESS_MARKER) {
@@ -124,6 +151,30 @@ mod tests {
             reason("/opt/bin/tm build-lease -- cargo build", "/repo"),
             SkipReason::HeavyBuild
         );
+    }
+
+    /// #11560: the observer's join key is the filter's own `--tool` value.
+    #[test]
+    fn the_compress_tool_arg_comes_from_the_rewrite() {
+        let arg = |command: &str, cwd: &str| {
+            compress_tool_arg(Some(&json!({"command": command})), Some(Path::new(cwd)))
+        };
+        assert_eq!(
+            arg(
+                "{ git diff; printf '\\n[exit %s]\\n' \"$?\"; } | tm compress --tool \"git diff\"",
+                "/repo"
+            )
+            .as_deref(),
+            Some("git diff")
+        );
+        assert_eq!(
+            arg("tm compress --tool \"a ; b\" --chain n1", "/repo").as_deref(),
+            Some("a ; b")
+        );
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let cwd = cwd.path().to_str().expect("utf8");
+        assert_eq!(arg("git diff", cwd).as_deref(), Some("git diff"));
+        assert_eq!(arg("git status", cwd), None, "no rewrite, no key");
     }
 
     #[test]
