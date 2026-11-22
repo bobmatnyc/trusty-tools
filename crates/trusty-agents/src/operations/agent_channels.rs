@@ -655,6 +655,33 @@ mod tests {
         let list = [b];
         assert!(authorized(&list, "other", true).is_err());
     }
+    /// Sending and the binding's on/off switch are separate gates: a binding
+    /// with `send_enabled` off refuses a send but not a read, and a disabled
+    /// binding refuses both.
+    ///
+    /// Why (#11632): the `channel` tool's `send` reaches `authorized(.., true)`
+    /// through `prepare_send`; the test that pinned this refusal branch left
+    /// with the cut inbound loop.
+    /// Test: itself.
+    #[test]
+    fn authorized_refuses_a_send_on_a_receive_only_or_disabled_binding() {
+        let receive_only = [Binding {
+            send_enabled: false,
+            ..binding()
+        }];
+        let refused = authorized(&receive_only, "team", true).unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        assert!(authorized(&receive_only, "team", false).is_ok());
+
+        let disabled = [Binding {
+            enabled: false,
+            ..binding()
+        }];
+        for send in [true, false] {
+            let refused = authorized(&disabled, "team", send).unwrap_err();
+            assert_eq!(refused.0, StatusCode::FORBIDDEN, "send={send}");
+        }
+    }
     /// A receiving Telegram binding saves, and its credential reference stays
     /// confined to Telegram's own family.
     ///
