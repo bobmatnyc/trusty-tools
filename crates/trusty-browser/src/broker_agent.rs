@@ -147,6 +147,8 @@ pub async fn agent(core: Arc<Core>, stream: UnixStream) {
     for (peer, claim) in held {
         clear(&core, peer.as_deref(), &claim).await;
     }
+    // #11371: the session's leases ended, so their emulated tabs reset now.
+    crate::emulation::reap(&core).await;
 }
 
 async fn refuse_wire(e: WireError, writer: &mut OwnedWriteHalf) {

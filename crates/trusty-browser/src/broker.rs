@@ -181,6 +181,8 @@ pub struct Inner {
     pub peers: Vec<Arc<Peer>>,
     /// Tab leases.
     pub claims: Vec<Claim>,
+    /// #11371: emulated tabs not yet reset.
+    pub emulated: Vec<crate::emulation::Emulated>,
     /// Attached agent sessions.
     pub sessions: Vec<SessionRef>,
     /// Set by `close`; no sweep runs after it.
@@ -300,6 +302,7 @@ impl Broker {
             ended: Vec::new(),
             peers: Vec::new(),
             claims: Vec::new(),
+            emulated: Vec::new(),
             sessions: Vec::new(),
             halted: false,
             sweeper: None,

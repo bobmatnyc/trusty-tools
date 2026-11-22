@@ -562,6 +562,11 @@ TrustyPages.commands = deps => {
     page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
     page_back:{tab}, page_forward:{tab}, page_reload:{tab},
     page_switch:{tab},
+    // #11371: leased-tab emulation; page_viewport checks the width and height pair in its handler.
+    page_javascript:{tab, enabled:bool},
+    page_color_scheme:{tab, scheme:v => ["light","dark","none"].includes(v)},
+    page_viewport:{tab, width:Number.isInteger, height:Number.isInteger},
+    page_emulation_reset:{tab},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -843,7 +848,9 @@ TrustyPages.commands = deps => {
       }
       return raw(method, params);
     };
-    try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
+    // #11371: an emulated tab is already attached; act reuses that attachment and leaves it attached.
+    const shared = emulation.has(req.tab);
+    if (!shared) try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
       const now = await probe(req.tab);
       if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
       throw changed(now);
@@ -865,7 +872,7 @@ TrustyPages.commands = deps => {
       aborted = true;
       clearTimeout(timer);
       chrome.debugger.onEvent.removeListener(answer);
-      await chrome.debugger.detach(debuggee).catch(() => {});
+      if (!shared) await chrome.debugger.detach(debuggee).catch(() => {});
     }
     return seen ? {document:req.document, dialog:seen} : {document:req.document};
 
@@ -893,7 +900,69 @@ TrustyPages.commands = deps => {
     }
   }
 
+  // Why: a visual check needs JS off, a forced color scheme and a fixed viewport, and none of it may outlive
+  //   the lease (#11371).
+  // What: the first override attaches chrome.debugger to the tab and keeps it attached; Chrome clears every
+  //   Emulation override when the debugger detaches, so a reset is a detach. A change back to every default
+  //   detaches too. The emulated tabs are kept in storage.session so a restarted worker, or one whose native
+  //   port closed, detaches them (resetAll). A command Chrome rejects detaches and answers DebuggerBusy, so no
+  //   override is left half-applied. act() reuses an emulation attachment instead of attaching again.
+  // Test: tests/extension/test_emulation.mjs.
+  const EMULATION = {javascript:true, color_scheme:"none", width:0, height:0};
+  const emulation = new Map();
+  const plain = s => s.javascript && s.color_scheme === "none" && s.width === 0 && s.height === 0;
+  if (chrome.debugger?.onDetach) chrome.debugger.onDetach.addListener(source => {
+    if (emulation.delete(source?.tabId)) void recordEmulation();
+  });
+  async function recordEmulation() {
+    try { await chrome.storage.session.set({emulated:[...emulation.keys()]}); } catch { /* Best effort; resetAll also walks the map. */ }
+  }
+  async function emulate(req, change, method, params) {
+    const debuggee = {tabId:req.tab}, before = emulation.get(req.tab);
+    const state = {...(before ?? EMULATION), ...change};
+    if (!before && plain(state)) return {...EMULATION};
+    if (!before) {
+      try { await chrome.debugger.attach(debuggee, "1.3"); } catch { throw refuse("DebuggerBusy", {tab:req.tab}); }
+      emulation.set(req.tab, {...EMULATION});
+      await recordEmulation();
+    }
+    try { await chrome.debugger.sendCommand(debuggee, method, params); } catch {
+      await resetTab(req.tab);
+      throw refuse("DebuggerBusy", {tab:req.tab});
+    }
+    if (plain(state)) return resetTab(req.tab);
+    emulation.set(req.tab, state);
+    return {...state};
+  }
+  async function resetTab(tabId) {
+    const held = emulation.delete(tabId);
+    // Detaching a tab with no attachment rejects; either way no override remains.
+    await chrome.debugger.detach({tabId}).catch(() => {});
+    if (held) await recordEmulation();
+    return {...EMULATION};
+  }
+  async function resetAll() {
+    let stored = [];
+    try { stored = (await chrome.storage.session.get("emulated")).emulated ?? []; } catch { /* Only the map. */ }
+    const tabs = new Set([...emulation.keys(), ...(Array.isArray(stored) ? stored.filter(tab) : [])]);
+    for (const t of tabs) await resetTab(t);
+    await recordEmulation();
+  }
+
   const run = {
+    page_javascript:req => emulate(req, {javascript:req.enabled}, "Emulation.setScriptExecutionDisabled",
+      {value:!req.enabled}),
+    page_color_scheme:req => emulate(req, {color_scheme:req.scheme}, "Emulation.setEmulatedMedia",
+      {features:[{name:"prefers-color-scheme", value:req.scheme === "none" ? "" : req.scheme}]}),
+    page_viewport(req) {
+      const {width, height} = req;
+      if (width === 0 && height === 0) {
+        return emulate(req, {width, height}, "Emulation.clearDeviceMetricsOverride", {});
+      }
+      if (!(width >= 200 && width <= 7680 && height >= 200 && height <= 4320)) throw refuse("InvalidRequest");
+      return emulate(req, {width, height}, "Emulation.setDeviceMetricsOverride",
+        {width, height, deviceScaleFactor:0, mobile:false});
+    },
     async page_tabs(req, row) {
       let tabs;
       if (row.scope === "tab") {
@@ -1022,6 +1091,10 @@ TrustyPages.commands = deps => {
       try { await deps.ended(req.grant, req.last); } catch { /* The next acknowledgement prunes the row. */ }
       return {id:req.id, ok:true, email:req.email, result:"ended"};
     }
+    // #11371: the broker resets a tab whose lease ended, after the grant row may be gone; a reset only detaches.
+    if (req.op === "page_emulation_reset") {
+      return {id:req.id, ok:true, email:req.email, result:await resetTab(req.tab), tab:req.tab};
+    }
     const row = await deps.grant(req.grant);
     if (!row) throw refuse("UnknownGrant");
     if ("tab" in spec) {
@@ -1043,6 +1116,6 @@ TrustyPages.commands = deps => {
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));
     return {id:req.id, ok:false, error:error.message, ...fields};
   }
-  return {command, failure, probe, handles:op => Object.hasOwn(SPECS, op)};
+  return {command, failure, probe, resetAll, handles:op => Object.hasOwn(SPECS, op)};
 };
 

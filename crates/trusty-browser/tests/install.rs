@@ -19,8 +19,8 @@ use trusty_browser::launchd;
 #[cfg(target_os = "macos")]
 use trusty_browser::launchd::{Launchctl, Layout, Outcome};
 
-// #11529, #11284: re-pinned for the changed worker.js and pages*.js (and the manifest stamp they feed).
-const PY_SIGNATURE: &str = "07b6580f7a5440ed7a79856ccbefeafa1bf1373be5ca4550313e661d7737e92f";
+// #11529, #11284, #11371: re-pinned for the changed worker.js and pages*.js (and the manifest stamp they feed).
+const PY_SIGNATURE: &str = "e6d4369878f966b7ffff88dab7347741e283972d8ddddb1be34b5401f012d60e";
 /// The state path of the Python capture (`tests/fixtures/install/*`).
 const PY_STATE: &str = "/private/tmp/p4-cap/home/.trusty/browser";
 const PY_EXE: &str = "/tmp/tb-venv-p1/bin/python3";

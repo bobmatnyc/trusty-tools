@@ -56,6 +56,10 @@ pub const OPS: &[(&str, &[&str])] = &[
     ("page_reload", &["op", "lease", "request_id"]),
     ("release", &["op", "lease"]),
     ("switch", &["op", "lease"]),
+    // #11371: leased-tab emulation; not journaled, each op sets an absolute state.
+    ("page_javascript", &["op", "lease", "enabled"]),
+    ("page_color_scheme", &["op", "lease", "scheme"]),
+    ("page_viewport", &["op", "lease", "width", "height"]),
 ];
 
 /// History ops: they act on the tab, not a document (`HISTORY`).
@@ -340,6 +344,9 @@ pub fn validate(request: &Json) -> Result<&'static str, Refusal> {
         {
             return Err(invalid());
         }
+    }
+    if !crate::emulation::valid(op, request) {
+        return Err(invalid());
     }
     if request.get("files").is_some_and(|f| !valid_files(f)) {
         return Err(invalid());

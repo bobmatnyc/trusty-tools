@@ -1,0 +1,2 @@
+Added
+- New MCP tools `page_javascript`, `page_color_scheme` and `page_viewport` turn JavaScript off, emulate `prefers-color-scheme` light or dark, and set the viewport (200-7680 by 200-4320 CSS pixels) on a leased tab over chrome.debugger. Every override resets when the lease ends, including by expiry, session end or grant end; a failed reset keeps `browser_release` from dropping the lease and refuses a new lease on that tab until a reset succeeds (#11371).

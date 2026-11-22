@@ -190,6 +190,29 @@ pub const CONNECT: &[Tool] = &[
         &["lease", "ref", "files", "request_id"],
     ),
     tool("page_downloads", &[LEASE], "page_downloads", &["lease"]),
+    // #11371: leased-tab emulation; the broker checks the values.
+    tool(
+        "page_javascript",
+        &[LEASE, field("enabled", K::Bool, D::Required)],
+        "page_javascript",
+        &["lease", "enabled"],
+    ),
+    tool(
+        "page_color_scheme",
+        &[LEASE, field("scheme", K::Str, D::Required)],
+        "page_color_scheme",
+        &["lease", "scheme"],
+    ),
+    tool(
+        "page_viewport",
+        &[
+            LEASE,
+            field("width", K::Int, D::Int(0)),
+            field("height", K::Int, D::Int(0)),
+        ],
+        "page_viewport",
+        &["lease", "width", "height"],
+    ),
     tool("browser_release", &[LEASE], "release", &["lease"]),
 ];
 

@@ -106,7 +106,9 @@ async function connect() {
     }, 5000);
     // Grants recorded after this hello survive the acknowledgement's prune.
     const fresh = codes.watchMints();
-    const lost = () => { settleReady(false); codes.unwatch(fresh); void codes.offline.lost(); };
+    const lost = () => { settleReady(false); codes.unwatch(fresh); void codes.offline.lost();
+      // #11371: no broker can reset an emulated tab once the port is gone, so the worker does.
+      void pageOps().resetAll().catch(() => {}); };
     function drop() {
       if (connection !== port) return;
       connection = null;
@@ -263,6 +265,8 @@ chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === "reconnect") { void connect(); void codes.tick().catch(() => {}); }
 });
 chrome.alarms.create("reconnect", {periodInMinutes:1});
+// #11371: a restarted worker has no lease, so any tab it left emulated is reset.
+void pageOps().resetAll().catch(() => {});
 // A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
 void codes.offline.lost();
 void connect();

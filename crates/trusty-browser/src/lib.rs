@@ -27,6 +27,7 @@ pub mod casefold;
 pub mod cli;
 pub mod cli_operator;
 pub mod codesign;
+pub mod emulation;
 pub mod entropy;
 pub mod frame;
 pub mod grant_store;

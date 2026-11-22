@@ -133,6 +133,8 @@ impl Core {
     pub fn forget(&self, inner: &mut Inner, peer: &Arc<Peer>) {
         inner.peers.retain(|p| !Arc::ptr_eq(p, peer));
         inner.claims.retain(|c| c.generation != peer.generation);
+        // #11371: the extension detaches its emulated tabs when this connection closes.
+        inner.emulated.retain(|e| e.generation != peer.generation);
         peer.kill();
         self.peer_gone(inner, peer);
     }

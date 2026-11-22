@@ -58,21 +58,21 @@ const KEEP_LEASE: &[&str] = &[
     "NoHistory",
 ];
 
-fn hosted(origin: Option<&str>) -> Result<Option<String>, Stop> {
+pub(crate) fn hosted(origin: Option<&str>) -> Result<Option<String>, Stop> {
     host(origin).map_err(|_| Stop::Close)
 }
 
 /// The leased tab a page op acts on, as `leased` found it.
-struct Leased {
-    token: String,
-    tab: i64,
+pub(crate) struct Leased {
+    pub(crate) token: String,
+    pub(crate) tab: i64,
     document: Option<String>,
-    origin: Option<String>,
-    peer: Arc<Peer>,
+    pub(crate) origin: Option<String>,
+    pub(crate) peer: Arc<Peer>,
 }
 
 impl Leased {
-    fn key(&self) -> Option<(String, i64)> {
+    pub(crate) fn key(&self) -> Option<(String, i64)> {
         Some((self.peer.generation.clone(), self.tab))
     }
 }
@@ -84,7 +84,7 @@ fn peer_of(core: &Core, grant: &Grant) -> Result<Arc<Peer>, Refusal> {
 }
 
 /// One page command with the contract's grant and lease fate on refusal (`Pages.send`).
-async fn send(
+pub(crate) async fn send(
     core: &Core,
     grant: &Grant,
     claim: Option<(String, i64)>,
@@ -185,7 +185,7 @@ fn opt_str(v: Option<&Json>) -> Option<String> {
     v.and_then(Json::as_str).map(str::to_owned)
 }
 
-fn reply_with(head: Vec<(&str, Json)>, result: Json) -> Json {
+pub(crate) fn reply_with(head: Vec<(&str, Json)>, result: Json) -> Json {
     let mut reply = Json::object(head);
     if let Json::Object(pairs) = result {
         for (k, v) in pairs {
@@ -195,7 +195,7 @@ fn reply_with(head: Vec<(&str, Json)>, result: Json) -> Json {
     reply
 }
 
-fn ok_tab(tab: i64) -> Vec<(&'static str, Json)> {
+pub(crate) fn ok_tab(tab: i64) -> Vec<(&'static str, Json)> {
     vec![("ok", Json::Bool(true)), ("tab", Json::Int(tab))]
 }
 
@@ -233,12 +233,17 @@ pub async fn run(
     let tab = claim.tab;
     match op {
         "release" => {
+            // #11371: a lease that emulated its tab ends only after the reset ran.
+            crate::emulation::reset_lease(core, &claim.token).await?;
             core.lock().drop_claim(&claim.token);
             return Ok((Json::object([("ok", Json::Bool(true))]), Some(tab), None));
         }
         "switch" => return switch(core, grant, &claim).await,
         "page_read" | "page_find" => return query(core, grant, &claim, op, request).await,
         "page_downloads" => return downloads(core, grant, &claim).await,
+        _ if crate::emulation::OPS.contains(&op) => {
+            return crate::emulation::apply(core, grant, &claim, op, request).await;
+        }
         _ => {}
     }
     let rid = request_string(request, "request_id")?.to_owned();
@@ -308,7 +313,7 @@ pub async fn run(
     Ok((reply, Some(tab), where_))
 }
 
-fn renew(core: &Core, token: &str) {
+pub(crate) fn renew(core: &Core, token: &str) {
     let deadline = core.lease_clock.now() + TTL;
     core.lock().with_claim(token, |c| c.deadline = deadline);
 }
@@ -423,6 +428,8 @@ async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) ->
         return Err(Refusal::new("OutOfScope").with("tab", tab).into());
     }
     let peer = peer_of(core, grant)?;
+    // #11371: no new lease on a tab whose last emulation is not yet reset.
+    crate::emulation::settle(core, &peer.generation, tab).await?;
     let now = core.lease_clock.now();
     let (token, created) = {
         let mut inner = core.lock();
