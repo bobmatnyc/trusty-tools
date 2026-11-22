@@ -234,3 +234,21 @@ async fn an_events_socket_that_does_not_answer_health_is_down_or_timeout() {
         "an RPC error is an answer, not health"
     );
 }
+
+/// #11547: an events bus that predates `events.health` answers
+/// method-not-found; the Degraded reason names the older binary.
+#[tokio::test]
+async fn a_method_not_found_answer_reads_as_an_older_binary() {
+    let (_dir, socket) = socket_dir();
+    serve(
+        &socket,
+        Peer::Reply(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32601,\"message\":\"unknown method\"}}\n"),
+    );
+    match events_tile(&socket, DEADLINE, DEADLINE).await {
+        TileHealth::Degraded { reason } => {
+            assert!(reason.contains("binary older than the TUI"), "{reason}");
+            assert!(reason.contains(events_method()), "{reason}");
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+}

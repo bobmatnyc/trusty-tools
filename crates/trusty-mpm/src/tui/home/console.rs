@@ -79,6 +79,8 @@ pub struct ServiceRow {
     pub cpu_history: Option<Vec<Option<u64>>>,
     /// MEM history (last 10 min), when a source exists.
     pub mem_history: Option<Vec<Option<u64>>>,
+    /// Why the row is not healthy, from the probe (#11547).
+    pub detail: Option<String>,
 }
 
 /// Everything the console home body draws.
@@ -114,6 +116,17 @@ pub fn status_of(health: &TileHealth) -> (String, Tone) {
     (word.to_string(), tone)
 }
 
+/// The probe's reason for a degraded or down row; `None` otherwise.
+///
+/// Test: `a_degraded_row_shows_its_probe_reason`.
+pub fn detail_of(health: &TileHealth) -> Option<String> {
+    match health {
+        // #11547: a Degraded (or Down) tile carries its reason to the screen
+        TileHealth::Degraded { reason } | TileHealth::Down { reason } => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 /// The live model: probe results for the rows, the console feeds for the
 /// machine cards and the per-service history.
 ///
@@ -138,6 +151,7 @@ pub fn model_from_state(state: &HomeState) -> ConsoleModel {
                 mem: figures.mem,
                 cpu_history: figures.cpu_history,
                 mem_history: figures.mem_history,
+                detail: detail_of(health),
             }
         })
         .collect();
@@ -191,7 +205,7 @@ fn section_title(frame: &mut Frame, area: Rect, title: &str, badge_of: Option<(S
 ///
 /// Test: `console_home_shows_no_data_yet_for_machine_and_history`.
 pub fn render_body(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
-    let [machine_title, cards, _gap, services_title, table] = Layout::default()
+    let [machine_title, cards, _gap, services_title, table, detail] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
@@ -199,6 +213,7 @@ pub fn render_body(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(2),
+            Constraint::Length(1),
         ])
         .areas(area);
     let section_badge = match &model.machine {
@@ -209,6 +224,21 @@ pub fn render_body(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
     render_cards(frame, cards, model.machine.as_ref());
     section_title(frame, services_title, "SERVICES", None);
     render_services(frame, table, model);
+    render_detail(frame, detail, model);
+}
+
+/// The selected row's probe reason, under the table (#11547).
+fn render_detail(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
+    let Some(row) = model.rows.get(model.selected) else {
+        return;
+    };
+    if let Some(detail) = &row.detail {
+        let p = palette();
+        frame.render_widget(
+            Paragraph::new(format!("{}: {detail}", row.name)).style(Style::default().fg(p.muted)),
+            area,
+        );
+    }
 }
 
 /// The four cards; with no source each says so.

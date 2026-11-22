@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
 use trusty_common::console_rpc::{CONSOLE_SERVICE, ConsoleFleetStatus, ServiceStatus};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
-use trusty_common::uds::server::RpcResponse;
+use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, RpcResponse};
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
 use super::services::{ProbeKind, ServiceId, binary_on_path};
@@ -174,10 +174,7 @@ pub(super) async fn uds_health(socket: &Path, method: &str, deadline: Duration) 
         Err(e) => return transport_failure(&e),
     };
     if let Some(error) = response.error {
-        return Observation::Unhealthy(format!(
-            "{method} answered an error (code {}): {}",
-            error.code, error.message
-        ));
+        return rpc_error(method, error.code, &error.message);
     }
     health_version(response.result.as_ref())
 }
@@ -205,10 +202,7 @@ pub(super) async fn uds_fleet_status(
         Err(e) => return transport_failure(&e),
     };
     if let Some(error) = response.error {
-        return Observation::Unhealthy(format!(
-            "{method} answered an error (code {}): {}",
-            error.code, error.message
-        ));
+        return rpc_error(method, error.code, &error.message);
     }
     match response
         .result
@@ -218,6 +212,23 @@ pub(super) async fn uds_fleet_status(
         Some(Err(e)) => Observation::Silent(format!("{method} answer did not decode: {e}")),
         None => Observation::Silent(format!("{method} answered no result")),
     }
+}
+
+/// The [`Observation::Unhealthy`] reason for an RPC error answer.
+///
+/// Why (#11547): a Degraded tile must say why. Method-not-found means the
+/// installed service predates the method this TUI calls, so it says that.
+/// Test: `a_method_not_found_answer_reads_as_an_older_binary`.
+pub(super) fn rpc_error(method: &str, code: i64, message: &str) -> Observation {
+    if code == CODE_METHOD_NOT_FOUND {
+        // #11547: name the version skew, not just the code
+        return Observation::Unhealthy(format!(
+            "binary older than the TUI: {method} not served (code {code})"
+        ));
+    }
+    Observation::Unhealthy(format!(
+        "{method} answered an error (code {code}): {message}"
+    ))
 }
 
 /// Read the console's own row out of its fleet view.

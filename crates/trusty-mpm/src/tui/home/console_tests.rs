@@ -83,6 +83,7 @@ fn filled() -> ConsoleModel {
             mem: Some(mem.into()),
             cpu_history: Some(wave(60, 0, 20, seed, |i| i < 3)),
             mem_history: Some(wave(60, 30, 40, seed + 1, none)),
+            detail: None,
         };
     ConsoleModel {
         machine: Some(machine),
@@ -171,6 +172,30 @@ fn a_filled_model_draws_cards_and_sparklines() {
         .find(|c| !c.symbol().trim().is_empty() && "▁▂▃▄▅▆▇█".contains(c.symbol()))
         .expect("a sparkline bar");
     assert_eq!(bar.fg, Color::Rgb(0xd9, 0x77, 0x42));
+}
+
+/// #11547: the selected Degraded row's probe reason shows under the table.
+#[test]
+fn a_degraded_row_shows_its_probe_reason() {
+    let mut state = HomeState::default();
+    let reason = "binary older than the TUI: events.health not served (code -32601)";
+    state.apply_health(HealthUpdate {
+        id: ServiceId::Events,
+        health: TileHealth::Degraded {
+            reason: reason.into(),
+        },
+    });
+    state.selected = ServiceId::ALL
+        .iter()
+        .position(|&id| id == ServiceId::Events)
+        .expect("events in the roster");
+    let model = model_from_state(&state);
+    let mut terminal = Terminal::new(TestBackend::new(160, 30)).expect("test backend");
+    terminal
+        .draw(|f| render_body(f, f.area(), &model))
+        .expect("draw");
+    let screen = text(terminal.backend().buffer());
+    assert!(screen.contains(&format!("Events: {reason}")), "{screen}");
 }
 
 // See #10899: Agents has no UDS endpoint; its row reads so in a neutral tone,
