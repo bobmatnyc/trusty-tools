@@ -53,12 +53,6 @@ intent_tests/
 weather_alerter/
 
 # UI test artifacts and debug scripts
-ui/.claude-mpm/
-ui/playwright-report/
-ui/test-results/
-ui/src-tauri/.trusty-agents/
-ui/debug-browser.mjs
-ui/ompm-debug.mjs
 
 # Local MCP server config (per-machine)
 .mcp.json
