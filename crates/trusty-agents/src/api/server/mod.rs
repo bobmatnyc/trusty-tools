@@ -82,6 +82,8 @@ mod ctrl_sessions;
 mod event_tickets;
 mod events_sse;
 mod handlers;
+// #11550: agents.health on the well-known socket `tm tui` probes.
+mod health_socket;
 mod listener_events;
 mod models;
 // #3765: the dispatch-reachability predicate is also the pin-eligibility

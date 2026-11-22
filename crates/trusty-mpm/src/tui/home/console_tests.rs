@@ -10,7 +10,6 @@ use super::console::{
     Card, ConsoleModel, Machine, NO_DATA, ON_DEMAND_VERSION, ServiceRow, model_from_state,
     render_body, status_of,
 };
-use super::probe::no_uds_endpoint;
 use super::services::ServiceId;
 use super::state::{HealthUpdate, HomeState, TileHealth};
 use crate::tui::theme::Tone;
@@ -216,13 +215,15 @@ fn a_degraded_row_shows_its_probe_reason() {
     assert!(screen.contains(&format!("Events: {reason}")), "{screen}");
 }
 
-// See #10899: Agents has no UDS endpoint; its row reads so in a neutral tone,
-// never the red of Down. #10966: Console now has one (#10902).
+// See #10899: a no-UDS-endpoint row reads in a neutral tone, never the red
+// of Down. #11550: no service has the gap now, so the health is synthetic.
 #[test]
 fn no_uds_endpoint_rows_are_muted_never_down() {
     let mut state = HomeState::default();
     let id = ServiceId::Agents;
-    let health = no_uds_endpoint(id).expect("no UDS endpoint");
+    let health = TileHealth::NoUdsEndpoint {
+        detail: "example gap",
+    };
     assert_eq!(
         status_of(&health),
         ("no UDS endpoint".to_string(), Tone::Muted)

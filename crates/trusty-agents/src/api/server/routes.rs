@@ -640,6 +640,8 @@ pub async fn serve_with_config(cfg: ApiConfig) -> Result<()> {
     if let Some(msg) = bind_refusal(cfg.bind) {
         anyhow::bail!(msg);
     }
+    // #11550: serve agents.health for `tm tui` while this server lives.
+    super::health_socket::spawn();
 
     // #364: Don't block server startup on docs indexing. For projects with
     // many docs files, `DocsIndex::build` can take 5–15s, which pushes us

@@ -1,36 +1,33 @@
-//! #10899: `tm tui` sends no HTTP probe. Agents has no UDS endpoint yet, so
-//! its tile reads "no UDS endpoint", never "down". #10966: Console left this
-//! set when its listener (#10902) landed; see `console_fleet_status_tests`.
+//! #10899: `tm tui` sends no HTTP probe. #11550: Agents left the
+//! "no UDS endpoint" set when tagent gained `agents.health`; no service is in
+//! it now, and the tile kind still renders as a neutral gap.
 
-use std::time::Duration;
-
-use super::console::status_of;
-use super::probe::{no_uds_endpoint, probe_service};
+use super::analyze_probe_tests::{DEADLINE, Peer, serve, socket_dir};
+use super::probe::{no_uds_endpoint, probe_service_at};
 use super::render::service_lines;
-use super::services::{ProbeKind, ServiceId};
+use super::services::{ProbeKind, ServiceId, binary_on_path};
 use super::state::{HealthUpdate, HomeState, TileHealth};
 
-const NO_UDS: [ServiceId; 1] = [ServiceId::Agents];
+/// An `agents.health` answer from tagent 0.9.1.
+const AGENTS_OK: &[u8] =
+    b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"ok\",\"version\":\"0.9.1\"}}\n";
 
-/// Uses only the API that exists on origin/main, so it is the regression
-/// proof: there the probe reads an HTTP discovery file and dials TCP.
-#[tokio::test]
-async fn agents_tile_reads_no_uds_endpoint() {
-    for id in NO_UDS {
-        let health = probe_service(id, Duration::from_millis(200)).await;
-        assert_eq!(health.label(), "no UDS endpoint", "{id:?}: {health:?}");
-        // #10966: the services row shows the gap in place of the tile.
-        let (word, _) = status_of(&health);
-        assert_eq!(word, "no UDS endpoint", "{id:?} row shows its gap");
-    }
-}
-
+/// Regression proof for #11550: on origin/main Agents is `NoUdsEndpoint`.
 #[test]
-fn agents_has_no_uds_endpoint_kind() {
+fn agents_probe_is_uds_health_on_its_well_known_socket() {
     assert_eq!(
         ServiceId::Agents.probe(),
-        ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
+        ProbeKind::UdsHealth(trusty_agents_common::health::METHOD_AGENTS_HEALTH)
     );
+    assert_eq!(
+        ServiceId::Agents.probe(),
+        ProbeKind::UdsHealth("agents.health")
+    );
+    assert_eq!(
+        ServiceId::Agents.socket(),
+        trusty_agents_common::health::agents_socket().map_err(|e| e.to_string())
+    );
+    assert!(ServiceId::Agents.not_listening_is_on_demand());
     // Every other tile keeps its UDS or on-demand probe.
     let others = [
         (ServiceId::Mpm, ProbeKind::UdsHealth("mpm.health")),
@@ -52,46 +49,53 @@ fn agents_has_no_uds_endpoint_kind() {
     }
 }
 
-/// `no_uds_endpoint` is synchronous and takes only the id: it cannot read a
-/// file, dial a socket or spawn. `probe_service` answers from it before the
-/// `PATH` lookup.
-#[tokio::test]
-async fn a_no_uds_endpoint_probe_does_no_io_and_is_not_down() {
+#[test]
+fn no_service_maps_to_no_uds_endpoint() {
     for id in ServiceId::ALL {
-        let pure = no_uds_endpoint(id);
-        assert_eq!(pure.is_some(), NO_UDS.contains(&id), "{id:?}");
+        assert!(no_uds_endpoint(id).is_none(), "{id:?}");
     }
-    for id in NO_UDS {
-        let pure = no_uds_endpoint(id).expect("no UDS endpoint");
-        assert!(matches!(pure, TileHealth::NoUdsEndpoint { .. }));
-        assert!(!pure.metrics_allowed(), "no console_metrics spawn");
-        assert_eq!(probe_service(id, Duration::ZERO).await, pure, "{id:?}");
+}
+
+#[tokio::test]
+async fn agents_tile_reads_up_with_version_or_on_demand() {
+    let (_dir, socket) = socket_dir();
+    let dialled = socket.clone();
+    let idle = probe_service_at(ServiceId::Agents, move || Ok(dialled), DEADLINE).await;
+    let want_idle = if binary_on_path(ServiceId::Agents.binary()) {
+        TileHealth::OnDemand
+    } else {
+        TileHealth::Absent
+    };
+    assert_eq!(idle, want_idle, "nothing listening");
+
+    serve(&socket, Peer::Reply(AGENTS_OK));
+    let dialled = socket.clone();
+    let up = probe_service_at(ServiceId::Agents, move || Ok(dialled), DEADLINE).await;
+    if binary_on_path(ServiceId::Agents.binary()) {
+        assert_eq!(
+            up,
+            TileHealth::Up {
+                version: Some("0.9.1".into())
+            }
+        );
     }
 }
 
 #[test]
 fn no_uds_endpoint_tiles_are_not_counted_as_down() {
     let mut state = HomeState::default();
-    for id in NO_UDS {
-        let health = no_uds_endpoint(id).expect("no UDS endpoint");
-        state.apply_health(HealthUpdate { id, health });
-    }
-    let failing = state
-        .tiles
-        .iter()
-        .filter(|(_, h)| {
-            matches!(
-                h,
-                TileHealth::Down { .. } | TileHealth::Degraded { .. } | TileHealth::Timeout
-            )
-        })
-        .count();
-    assert_eq!(failing, 0);
+    let health = TileHealth::NoUdsEndpoint {
+        detail: "example gap",
+    };
+    assert!(!health.metrics_allowed(), "no console_metrics spawn");
+    state.apply_health(HealthUpdate {
+        id: ServiceId::Agents,
+        health,
+    });
     let lines: Vec<String> = service_lines(ServiceId::Agents, &state)
         .iter()
         .map(|l| l.to_string())
         .collect();
     assert!(lines.contains(&"health    no UDS endpoint".to_string()));
-    assert!(lines.contains(&"detail    trusty-agents has no UDS socket yet (#6433)".to_string()));
-    assert!(!lines.iter().any(|l| l.starts_with("socket")), "{lines:?}");
+    assert!(lines.contains(&"detail    example gap".to_string()));
 }
