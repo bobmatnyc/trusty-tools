@@ -251,13 +251,13 @@ impl std::io::Write for SharedBuf {
     }
 }
 
-/// Why (#11560): a zero-saving decline was logged at debug, below the `info`
-/// filter `tm compress` installs, so no operator could see why a run wrote no row.
+/// Why (#11560): a zero-saving decline was invisible; it must be counted in a
+/// file, and #7607 forbids it on `tm compress` stderr (the agent's tool result).
 /// Test: itself.
 #[test]
-fn a_zero_saving_decline_logs_at_info_naming_the_reason() {
+fn a_zero_saving_decline_is_recorded_in_the_decline_file() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let logged = logs_at_info(|| {
+    let run = || {
         record_compress_with(
             dir.path(),
             "sess-a",
@@ -266,11 +266,30 @@ fn a_zero_saving_decline_logs_at_info_naming_the_reason() {
             668,
             "native_fallback",
             sonnet_price,
-        );
-    });
-    assert!(logged.contains(" INFO "), "{logged}");
-    assert!(logged.contains("no_gain"), "the reason is named: {logged}");
+        )
+    };
+    let logged = logs_at_info(run);
+    assert!(
+        logged.is_empty(),
+        "#7607: nothing on stderr at info: {logged}"
+    );
+    let text = std::fs::read_to_string(decline_log_in(dir.path())).expect("decline file");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let line: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+    assert_eq!(line["reason"], "no_gain");
+    assert_eq!(line["session_id"], "sess-a");
     assert!(!savings_log_in(dir.path()).exists(), "still no row");
+}
+
+/// #11560: a failed decline write is swallowed with nothing at info.
+#[test]
+fn a_failed_decline_write_is_silent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("usage"), "not a directory").expect("blocker");
+    let logged = logs_at_info(|| {
+        record_compress_with(dir.path(), "sess-a", "ls", 668, 668, "p", sonnet_price);
+    });
+    assert!(logged.is_empty(), "{logged}");
 }
 
 /// Why (#11560): a failed savings write is fail-open AND visible.

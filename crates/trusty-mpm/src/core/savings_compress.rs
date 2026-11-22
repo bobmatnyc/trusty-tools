@@ -152,6 +152,17 @@ pub(crate) fn record_tagged_with(
         tracing::debug!("no session id: writing no compress savings row");
         return;
     }
+    if !compress_gains(bytes_before, bytes_after) {
+        // #11560: a zero-gain decline goes to a file, never to stderr.
+        record_decline(
+            root,
+            session_id,
+            tool_name,
+            (bytes_before, bytes_after),
+            compression_path,
+        );
+        return;
+    }
     let Some(row) = compress_row(
         session_id,
         bytes_before,
@@ -195,6 +206,55 @@ pub(crate) fn record_tagged_with(
 /// Test: `a_hand_computed_byte_delta_matches_the_row`,
 /// `passthrough_output_writes_no_row`, `an_expanded_output_writes_no_row`,
 /// `no_row_when_the_session_model_cannot_be_priced`.
+/// The file a zero-gain compress decline is appended to (#11560).
+pub fn decline_log_in(root: &Path) -> std::path::PathBuf {
+    root.join("usage").join("compress-declines.jsonl")
+}
+
+/// Append one line naming why a run wrote no savings row (#11560).
+///
+/// Why: the decline was a `debug!` that the `info` filter hid, and stderr is
+/// the agent's tool result, so #7607 forbids printing it there. A file under
+/// the usage dir is where an operator can count it; `compression.jsonl`
+/// already counts the run itself.
+/// What: one JSON line `{ts, session_id, tool_name, reason: "no_gain",
+/// bytes_before, bytes_after, compression_path}` to [`decline_log_in`].
+/// FAIL-OPEN and silent: a failed write is a `debug!`, never stderr at `info`.
+/// Test: `a_zero_saving_decline_is_recorded_in_the_decline_file`,
+/// `a_failed_decline_write_is_silent`.
+fn record_decline(
+    root: &Path,
+    session_id: &str,
+    tool_name: &str,
+    (bytes_before, bytes_after): (usize, usize),
+    compression_path: &str,
+) {
+    use std::io::Write;
+    let path = decline_log_in(root);
+    let line = serde_json::json!({
+        "ts": now_ts(),
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "reason": "no_gain",
+        "bytes_before": bytes_before,
+        "bytes_after": bytes_after,
+        "compression_path": compression_path,
+    });
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+        })
+        .and_then(|mut f| writeln!(f, "{line}"));
+    if let Err(source) = written {
+        tracing::debug!(path = %path.display(), %source, "could not record the compress decline");
+    }
+}
+
 /// Whether a run from `bytes_before` to `bytes_after` saved any tokens.
 ///
 /// Why (#11560): the opportunity row's `compressed` / `compressed_no_gain`
@@ -217,10 +277,9 @@ fn compress_row(
     let after_tokens = (bytes_after as f64 / BYTES_PER_TOKEN).ceil() as i64;
     let tokens_saved = before_tokens - after_tokens;
     if tokens_saved <= 0 {
-        // #11560: info, not debug — `tm compress` filters at info, so a debug
-        // decline hid why 173 of 256 runs wrote no row. The run is still
-        // counted in `compression.jsonl` by the caller.
-        tracing::info!(
+        // #11560: debug only — `tm compress` stderr is the agent's tool result
+        // (#7607). The operator-visible record is `record_decline`'s file.
+        tracing::debug!(
             session_id,
             before_tokens,
             after_tokens,
