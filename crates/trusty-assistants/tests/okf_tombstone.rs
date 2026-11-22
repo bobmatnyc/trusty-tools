@@ -4,6 +4,9 @@
 //! depends on both; trusty-okf's core may not link trusty-common (B8).
 //! #10746 S11 moved it here from the deleted trusty-kb, unchanged.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use std::collections::BTreeSet;
 
 use chrono::DateTime;

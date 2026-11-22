@@ -11,10 +11,9 @@
 //! `$HOME`/cwd, asserting each exits 0 and writes the usage text to stdout.
 //! Test: this file IS the test.
 
-use std::path::Path;
-use std::process::Command;
+use tempfile::TempDir;
 
-const BIN: &str = env!("CARGO_BIN_EXE_ta");
+mod common;
 
 /// Run `ta <flag>` in `dir` with an isolated `$HOME` and no ambient
 /// project hint (#4826), returning `(exit_code, stdout, stderr)`.
@@ -23,16 +22,10 @@ const BIN: &str = env!("CARGO_BIN_EXE_ta");
 /// the normal startup path, which deploys the bundled agent roster under
 /// `$HOME/.trusty-agents/`, and a test must never write that into the
 /// developer's real home.
-fn help_output(dir: &Path, flag: &str) -> (Option<i32>, String, String) {
-    let mut cmd = Command::new(BIN);
-    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
-    trusty_common::parent_death::exit_with_parent(&mut cmd);
-    let out = cmd
+fn help_output(dir: &TempDir, flag: &str) -> (Option<i32>, String, String) {
+    // #11632: `common::ta` sets the isolated `$HOME` and clears the hints.
+    let out = common::ta(dir)
         .arg(flag)
-        .current_dir(dir)
-        .env("HOME", dir)
-        .env_remove("TAGENT_PROJECT_DIR")
-        .env_remove("OPEN_MPM_PROJECT_DIR")
         .output()
         .unwrap_or_else(|e| panic!("spawn `ta {flag}`: {e}"));
     (
@@ -48,7 +41,7 @@ fn help_output(dir: &Path, flag: &str) -> (Option<i32>, String, String) {
 fn help_flag_exits_zero_and_prints_usage_on_stdout() {
     for flag in ["--help", "-h"] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let (code, stdout, stderr) = help_output(tmp.path(), flag);
+        let (code, stdout, stderr) = help_output(&tmp, flag);
 
         assert_eq!(code, Some(0), "`ta {flag}` must exit 0; stderr:\n{stderr}");
         assert!(

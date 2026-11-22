@@ -16,10 +16,9 @@
 //! survives anywhere in it.
 //! Test: this file IS the test.
 
-use std::path::Path;
-use std::process::Command;
+use tempfile::TempDir;
 
-const BIN: &str = env!("CARGO_BIN_EXE_ta");
+mod common;
 
 /// Short git SHA baked in by `build.rs` for THIS compilation of the crate.
 ///
@@ -31,16 +30,10 @@ const GIT_HASH: &str = env!("GIT_COMMIT_HASH");
 
 /// Run `ta --version` in `dir` with an isolated `$HOME` and no ambient
 /// project hint (#4826), returning stdout.
-fn version_stdout(dir: &Path) -> String {
-    let mut cmd = Command::new(BIN);
-    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
-    trusty_common::parent_death::exit_with_parent(&mut cmd);
-    let out = cmd
+fn version_stdout(dir: &TempDir) -> String {
+    // #11632: `common::ta` sets the isolated `$HOME` and clears the hints.
+    let out = common::ta(dir)
         .arg("--version")
-        .current_dir(dir)
-        .env("HOME", dir)
-        .env_remove("TAGENT_PROJECT_DIR")
-        .env_remove("OPEN_MPM_PROJECT_DIR")
         .output()
         .expect("spawn `ta --version`");
     assert!(
@@ -57,9 +50,9 @@ fn version_stdout(dir: &Path) -> String {
 #[test]
 fn version_output_is_identical_across_invocations() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let first = version_stdout(tmp.path());
-    let second = version_stdout(tmp.path());
-    let third = version_stdout(tmp.path());
+    let first = version_stdout(&tmp);
+    let second = version_stdout(&tmp);
+    let third = version_stdout(&tmp);
 
     assert_eq!(
         first, second,
@@ -78,7 +71,7 @@ fn version_output_is_identical_across_invocations() {
 #[test]
 fn version_output_names_the_commit_that_built_it() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let out = version_stdout(tmp.path());
+    let out = version_stdout(&tmp);
 
     assert!(
         out.contains(env!("CARGO_PKG_VERSION")),
@@ -96,7 +89,7 @@ fn version_output_names_the_commit_that_built_it() {
 #[test]
 fn version_output_carries_no_per_invocation_counter() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let out = version_stdout(tmp.path());
+    let out = version_stdout(&tmp);
 
     assert!(
         !out.contains("build #"),
@@ -110,7 +103,7 @@ fn version_output_carries_no_per_invocation_counter() {
 #[test]
 fn version_output_writes_nothing_to_the_working_directory() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let _ = version_stdout(tmp.path());
+    let _ = version_stdout(&tmp);
 
     let entries: Vec<_> = std::fs::read_dir(tmp.path())
         .unwrap()

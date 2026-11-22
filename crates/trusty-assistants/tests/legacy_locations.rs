@@ -9,7 +9,7 @@
 //! names.
 //! Test: this file IS the test.
 
-use std::process::Command;
+mod common;
 
 /// Why: `config profile show` reads `user.toml` from the app directory, so
 /// it is the smallest real command that loads moved state.
@@ -27,14 +27,9 @@ fn ta_moves_the_old_directories_then_reads_them() {
     std::fs::create_dir_all(home.join("trusty-agents/izzie")).unwrap();
     std::fs::write(home.join("trusty-agents/izzie/instructions.md"), "izzie").unwrap();
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ta"));
-    trusty_common::parent_death::exit_with_parent(&mut cmd);
-    let out = cmd
+    // #11632: `common::ta` points `$HOME` at `tmp` and clears the root variables.
+    let out = common::ta(&tmp)
         .args(["config", "profile", "show"])
-        .current_dir(home)
-        .env("HOME", home)
-        .env_remove("TA_ASSISTANTS_DIR")
-        .env_remove("TAGENT_ASSISTANTS_DIR")
         .env_remove("TAGENT_USER_NAME")
         .output()
         .expect("spawn ta");

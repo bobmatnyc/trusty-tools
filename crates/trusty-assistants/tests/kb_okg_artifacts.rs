@@ -14,6 +14,9 @@
 //! Test: `cargo test -p trusty-assistants --test kb_okg_artifacts` (#10746 S11
 //! moved it here from the deleted trusty-kb).
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use trusty_assistants::kb::okg::registry::{Locator, SourceRegistry, SourceSpec};
 use trusty_assistants::kb::store::KbStore;
 use trusty_okf::build::ledger::Ledger;

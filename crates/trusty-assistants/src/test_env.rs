@@ -401,9 +401,37 @@ pub(crate) fn bundled_agents_dir() -> std::path::PathBuf {
         .join("content/agents/trusty-agents/agents")
 }
 
+// #11632: every lib test starts under a throwaway `$HOME`; see the file.
+include!("test_home_sandbox.rs");
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Why (#11632): a test that forgets its own `$HOME` override must still
+    /// land in a temp dir, never the operator's real home.
+    /// What: with `HOME_LOCK` held, the process-start hook has recorded its
+    /// sandbox under the temp dir, `HOME` is under the temp dir too (tests
+    /// that point it at their own temp dir may leave it there), and the
+    /// assistants-root variables are unset.
+    /// Test: itself.
+    #[test]
+    fn test_process_home_is_a_sandbox() {
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let marker = std::env::var_os(TEST_HOME_SANDBOX_MARKER).map(PathBuf::from);
+        let tmp = std::env::temp_dir();
+        assert!(
+            marker.as_ref().is_some_and(|m| m.starts_with(&tmp)),
+            "the process-start HOME sandbox did not run: {marker:?}"
+        );
+        assert!(
+            home.as_ref().is_some_and(|h| h.starts_with(&tmp)),
+            "HOME must be under the temp dir: {home:?}"
+        );
+        assert!(std::env::var_os("TA_ASSISTANTS_DIR").is_none());
+        assert!(std::env::var_os("TAGENT_ASSISTANTS_DIR").is_none());
+    }
 
     /// #3957: acquiring `lock_home()` inside a multi-threaded tokio runtime
     /// must panic, not quietly hand back a guard whose thread-local flag

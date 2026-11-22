@@ -20,6 +20,9 @@
 //! message from the owner's production log, and no bytes ever reach the
 //! listener.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;

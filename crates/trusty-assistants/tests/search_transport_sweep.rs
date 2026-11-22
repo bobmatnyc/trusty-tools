@@ -13,6 +13,9 @@
 //! Test: this file IS the test. `sweep_sees_the_source_tree` guards against
 //! the scan silently matching nothing; the red proof is a planted line.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// Spellings of an HTTP call to trusty-search.

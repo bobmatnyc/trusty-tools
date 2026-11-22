@@ -15,6 +15,9 @@
 //! (the crates.io tarball case).
 //! Test: this file.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 include!("../build_git_paths.rs");
 
 /// A plain repository's `.git` directory is used directly, even when the

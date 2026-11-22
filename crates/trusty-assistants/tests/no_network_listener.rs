@@ -13,8 +13,10 @@
 //! Test: this file IS the test. `scan_catches_a_planted_bind` shows the scan
 //! can fail.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Spellings of a network listener.
 const FORBIDDEN: &[&str] = &[
@@ -164,14 +166,8 @@ fn removed_api_flags_are_refused() {
         &["--serve", "--port", "8080"][..],
     ] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ta"));
-        trusty_common::parent_death::exit_with_parent(&mut cmd);
-        let out = cmd
-            .args(argv)
-            .current_dir(tmp.path())
-            .env("HOME", tmp.path())
-            .output()
-            .expect("spawn ta");
+        // #11632: `common::ta` sets the temporary `$HOME`.
+        let out = common::ta(&tmp).args(argv).output().expect("spawn ta");
         assert!(
             !out.status.success(),
             "`ta {argv:?}` must fail now that the HTTP API is gone"

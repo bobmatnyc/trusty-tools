@@ -7,27 +7,22 @@
 //! compares stdout, exit status and the stderr notice.
 //! Test: this file IS the test.
 
-use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
-fn run(bin: &str, dir: &Path) -> Output {
-    let mut cmd = Command::new(bin);
-    // #9617: stamp the child so a daemon it starts dies with this test.
-    trusty_common::parent_death::exit_with_parent(&mut cmd);
-    cmd.arg("--version")
-        .current_dir(dir)
-        .env("HOME", dir)
-        .output()
-        .unwrap_or_else(|e| panic!("spawn {bin}: {e}"))
+mod common;
+
+fn version(mut cmd: std::process::Command) -> Output {
+    cmd.arg("--version").output().expect("spawn --version")
 }
 
 /// Why: the alias is a pass-through with one added stderr line.
 /// Test: itself.
 #[test]
 fn tagent_warns_once_then_behaves_like_ta() {
+    // #11632: both spawns run under the test's temporary `$HOME`.
     let tmp = tempfile::TempDir::new().unwrap();
-    let ta = run(env!("CARGO_BIN_EXE_ta"), tmp.path());
-    let tagent = run(env!("CARGO_BIN_EXE_tagent"), tmp.path());
+    let ta = version(common::ta(&tmp));
+    let tagent = version(common::tagent(&tmp));
 
     assert!(ta.status.success() && tagent.status.success());
     assert_eq!(tagent.stdout, ta.stdout, "same output as `ta --version`");

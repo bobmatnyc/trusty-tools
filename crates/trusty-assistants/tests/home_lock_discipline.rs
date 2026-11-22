@@ -20,6 +20,9 @@
 //! actually been violated.
 //! Test: this file IS the test.
 
+// #11632: installs the process-start HOME sandbox in this test binary.
+mod common;
+
 use std::path::{Path, PathBuf};
 
 /// Text that mutates the process-global `$HOME`.
@@ -33,6 +36,12 @@ const HOME_MUTATIONS: &[&str] = &[
     "EnvVarGuard::set(\"HOME\"",
     "EnvVarGuard::clear(\"HOME\"",
 ];
+
+/// Files exempt from the lock, relative to `src/`, each with its reason.
+///
+/// #11632: `test_home_sandbox.rs` sets `$HOME` from the platform initializer,
+/// before `main`, when the process has one thread and no test is running.
+const PRE_MAIN_EXEMPT: &[&str] = &["test_home_sandbox.rs"];
 
 /// Text that acquires the crate's one `$HOME` lock.
 const HOME_LOCK_ACQUISITIONS: &[&str] = &["HOME_LOCK", "lock_home"];
@@ -77,6 +86,10 @@ fn every_home_mutating_source_file_takes_the_home_lock() {
         let Ok(text) = std::fs::read_to_string(file) else {
             continue;
         };
+        let rel = file.strip_prefix(&src).unwrap_or(file);
+        if PRE_MAIN_EXEMPT.iter().any(|e| rel == Path::new(e)) {
+            continue;
+        }
         let mutates = HOME_MUTATIONS.iter().any(|pat| text.contains(pat));
         let locks = HOME_LOCK_ACQUISITIONS.iter().any(|pat| text.contains(pat));
         if mutates && !locks {

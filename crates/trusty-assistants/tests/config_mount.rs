@@ -5,43 +5,22 @@
 //! on every primary binary; this asserts the mount actually wired up HERE by
 //! driving the real built binary — `config --help` parses and `config keys
 //! list` runs fully offline (no key required, no value is ever printed).
-//! What: spawns the binary via the Cargo-provided `CARGO_BIN_EXE_*` path and
-//! checks the two offline invocations exit success with the expected surface
+//! What: spawns the binary through `common::ta` (#11632: a temporary
+//! `$HOME` on every spawn) and checks the two offline invocations exit success with the expected surface
 //! text.
 //! Test: this file IS the test.
 
-use std::process::Command;
+mod common;
 
-/// Absolute path to the freshly built binary (Cargo sets this for integration
-/// tests). Using it guarantees we exercise the real mounted CLI, not a stub.
-const BIN: &str = env!("CARGO_BIN_EXE_ta");
-
-/// Spawn the built binary with the ambient project-dir hint cleared (#4826).
-///
-/// Why: `Command` inherits the parent's environment, so a `TAGENT_PROJECT_DIR`
-/// exported in the shell that ran `cargo test` reaches the child. Since that
-/// hint now outranks exe-path inference, it would steer the child's project
-/// root — and every write under it — out of this test's tempdir and into a real
-/// directory, silently, with the test still green. Constructing every spawn
-/// through here rather than clearing the vars at each call site means a future
-/// spawn added to this file cannot forget it.
-/// Test: `config_help_advertises_keys_feature`, `config_keys_list_runs_offline`,
-/// `profile_show_then_set_round_trips`.
-fn ta() -> Command {
-    let mut cmd = Command::new(BIN);
-    // #9617: stamp the child so a trusty-search daemon it starts dies with this test.
-    trusty_common::parent_death::exit_with_parent(&mut cmd);
-    cmd.env_remove("TAGENT_PROJECT_DIR")
-        .env_remove("OPEN_MPM_PROJECT_DIR");
-    cmd
-}
+// #4826, #11632: `common::ta` clears the project-dir hints and the assistants
+// root variables and points `$HOME` at the test's own temp dir, so no spawn
+// here can write into a real directory.
+use common::ta;
 
 #[test]
 fn config_help_advertises_keys_feature() {
-    // #11632: an isolated `$HOME`, so no spawn here can touch the real one.
     let home = tempfile::TempDir::new().expect("tempdir");
-    let out = ta()
-        .env("HOME", home.path())
+    let out = ta(&home)
         .args(["config", "--help"])
         .output()
         .expect("spawn `config --help`");
@@ -59,10 +38,8 @@ fn config_help_advertises_keys_feature() {
 
 #[test]
 fn config_keys_list_runs_offline() {
-    // #11632: an isolated `$HOME`, so no spawn here can touch the real one.
     let home = tempfile::TempDir::new().expect("tempdir");
-    let out = ta()
-        .env("HOME", home.path())
+    let out = ta(&home)
         .args(["config", "keys", "list"])
         .output()
         .expect("spawn `config keys list`");
@@ -90,9 +67,8 @@ fn config_keys_list_runs_offline() {
 fn profile_show_then_set_round_trips() {
     let home = tempfile::tempdir().expect("tempdir for isolated HOME");
 
-    let before = ta()
+    let before = ta(&home)
         .args(["config", "profile", "show"])
-        .env("HOME", home.path())
         .output()
         .expect("spawn `config profile show` (before)");
     assert!(before.status.success());
@@ -102,7 +78,7 @@ fn profile_show_then_set_round_trips() {
         "expected 'not set' before any profile exists; got:\n{before_stdout}"
     );
 
-    let set = ta()
+    let set = ta(&home)
         .args([
             "config",
             "profile",
@@ -116,7 +92,6 @@ fn profile_show_then_set_round_trips() {
             "--location",
             "New York, NY, USA",
         ])
-        .env("HOME", home.path())
         .output()
         .expect("spawn `config profile set`");
     assert!(
@@ -125,9 +100,8 @@ fn profile_show_then_set_round_trips() {
         String::from_utf8_lossy(&set.stderr)
     );
 
-    let after = ta()
+    let after = ta(&home)
         .args(["config", "profile", "show"])
-        .env("HOME", home.path())
         .output()
         .expect("spawn `config profile show` (after)");
     assert!(after.status.success());
