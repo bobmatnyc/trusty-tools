@@ -108,6 +108,7 @@ alert_triage = alert_dedupe.alert_triage            # #10857: is_urgent, the hol
 self_ctx = _load_by_path("self_ctx", "self-ctx.py")
 quiet_sessions = _load_by_path("quiet_sessions", "quiet-sessions.py")
 owner_answers = _load_by_path("owner_answers", "owner_answers.py")  # #10670: the answer store
+fleet_poll_deps = _load_by_path("fleet_poll_deps", "fleet_poll_deps.py")  # PR-B2: dep_degraded
 watchdog = _load_by_path("architect_watchdog", "architect-watchdog.py")
 il_cron = _load_by_path("il_cron", "il-cron.py")
 ctx_watch = il_cron.ctx_watch
@@ -196,6 +197,10 @@ def cycle(state, dry_run=False, now=None):
     if answers is not None:
         state["answers_read"] = True
     candidates += answers or []
+    dep_found, dep_lines = fleet_poll_deps.dep_health_alerts(state, now, alert)  # PR-B2
+    candidates += dep_found
+    for line in dep_lines:
+        log(line, dry_run)
     if failure:
         # #10670: a failed read must reach the Architect; owner_* always wakes (alert_triage).
         # The fingerprint is the error class, so one failure episode alerts once.
