@@ -9,9 +9,10 @@
 //! What: [`DependencyCache`] holds the last probe of both daemons and when it
 //! was taken. A request that finds it older than [`MAX_AGE`] starts ONE
 //! background refresh (single-flight) and waits at most [`REFRESH_WAIT`] for
-//! it; past that it answers from the previous result, which is at most
-//! [`MAX_AGE`] plus [`PROBE_BUDGET`] old because every probe runs under that
-//! budget (one that outlives it is `timeout`). With no result yet, each
+//! it; past that it answers from the previous result only while it is younger
+//! than [`STALE_LIMIT`]; an older one reads `timeout` for every dependency.
+//! Every probe runs under [`PROBE_BUDGET`] on its own task, so a hung probe is
+//! `timeout` and a panicking one is `down`. With no result yet, each
 //! dependency reads `pending`, never healthy.
 //! The probe itself is a [`DependencyProbe`] trait object, so tests inject a
 //! fake instead of dialling live daemons.
@@ -38,6 +39,12 @@ pub(crate) const REFRESH_WAIT: Duration = Duration::from_millis(150);
 
 /// Upper bound on one dependency probe; an unanswered probe is `timeout`.
 pub(crate) const PROBE_BUDGET: Duration = Duration::from_secs(2);
+
+/// Oldest report a request may serve while a refresh is still running.
+pub(crate) const STALE_LIMIT: Duration = MAX_AGE.saturating_add(PROBE_BUDGET);
+
+/// The `down` reason recorded for a probe whose task panicked.
+pub(crate) const PANICKED: &str = "probe panicked";
 
 /// A daemon `mpm.health` depends on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,20 +176,25 @@ impl DependencyCache {
             }
         }
         let inner = self.inner.lock();
-        inner
-            .report
-            .clone()
-            .unwrap_or_else(|| uniform(DependencyOutcome::Pending))
+        match (&inner.report, inner.computed_at) {
+            // Never serve a report past STALE_LIMIT, even if a refresh died.
+            (Some(report), Some(at)) if at.elapsed() < STALE_LIMIT => report.clone(),
+            (Some(_), _) => uniform(DependencyOutcome::Timeout),
+            (None, _) => uniform(DependencyOutcome::Pending),
+        }
     }
 
     /// Run both probes concurrently on a spawned task and store the result.
+    ///
+    /// Each probe runs on its own task, so a probe panic becomes a `Down`
+    /// outcome and the store below, which clears `refreshing`, always runs.
     fn start_refresh(self: &Arc<Self>) {
         let cache = Arc::clone(self);
         let probe = Arc::clone(&*self.probe.lock());
         tokio::spawn(async move {
             let (memory, search) = tokio::join!(
-                bounded(&*probe, Dependency::Memory),
-                bounded(&*probe, Dependency::Search)
+                isolated(Arc::clone(&probe), Dependency::Memory),
+                isolated(probe, Dependency::Search)
             );
             {
                 let mut inner = cache.inner.lock();
@@ -203,6 +215,13 @@ async fn bounded(probe: &dyn DependencyProbe, dep: Dependency) -> DependencyOutc
     tokio::time::timeout(PROBE_BUDGET, probe.probe(dep))
         .await
         .unwrap_or(DependencyOutcome::Timeout)
+}
+
+/// [`bounded`] on its own task; a panic or other `JoinError` is `Down`.
+async fn isolated(probe: Arc<dyn DependencyProbe>, dep: Dependency) -> DependencyOutcome {
+    tokio::spawn(async move { bounded(&*probe, dep).await })
+        .await
+        .unwrap_or_else(|_| DependencyOutcome::Down(PANICKED.to_owned()))
 }
 
 fn uniform(outcome: DependencyOutcome) -> DependencyReport {

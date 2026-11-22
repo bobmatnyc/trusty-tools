@@ -6,8 +6,8 @@ use std::time::Duration;
 use parking_lot::Mutex;
 
 use super::{
-    Dependency, DependencyCache, DependencyOutcome, DependencyProbe, MAX_AGE, ProbeFuture,
-    degraded_entries,
+    Dependency, DependencyCache, DependencyOutcome, DependencyProbe, MAX_AGE, PANICKED,
+    ProbeFuture, STALE_LIMIT, degraded_entries,
 };
 use crate::daemon::state::DaemonState;
 
@@ -17,6 +17,7 @@ enum Mode {
     Up,
     Down(&'static str),
     Hang,
+    Panic,
 }
 
 /// A probe whose per-dependency answer a test can change mid-test.
@@ -45,6 +46,7 @@ impl DependencyProbe for Fake {
                 Mode::Up => DependencyOutcome::Up,
                 Mode::Down(reason) => DependencyOutcome::Down(reason.to_owned()),
                 Mode::Hang => std::future::pending().await,
+                Mode::Panic => panic!("fake probe panic"),
             }
         })
     }
@@ -169,4 +171,55 @@ async fn health_does_not_block_on_a_hung_probe() {
         started.elapsed()
     );
     assert_eq!(body.status, "degraded");
+}
+
+/// A panicking probe reads `down — probe panicked`, never the last `Up`, and
+/// the next refresh still runs.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn panicking_probe_reads_down_and_next_refresh_runs() {
+    let fake = Fake::new(Mode::Up, Mode::Up);
+    let cache = Arc::new(DependencyCache::new(fake.clone()));
+    let wait = Duration::from_secs(1);
+    assert!(degraded_entries(&cache.get(wait).await).is_empty());
+
+    *fake.memory.lock() = Mode::Panic;
+    tokio::time::advance(MAX_AGE + Duration::from_secs(1)).await;
+    let report = cache.get(wait).await;
+    assert_eq!(
+        report[0],
+        (
+            Dependency::Memory,
+            DependencyOutcome::Down(PANICKED.to_owned())
+        ),
+        "{report:?}"
+    );
+
+    *fake.memory.lock() = Mode::Down("stopped");
+    tokio::time::advance(MAX_AGE + Duration::from_secs(1)).await;
+    let entries = degraded_entries(&cache.get(wait).await);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(
+        entries[0].contains("stopped"),
+        "a later refresh ran: {entries:?}"
+    );
+}
+
+/// A report older than `STALE_LIMIT` is never served while a refresh runs.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn report_past_stale_limit_reads_timeout_not_ok() {
+    let fake = Fake::new(Mode::Up, Mode::Up);
+    let cache = Arc::new(DependencyCache::new(fake.clone()));
+    assert!(degraded_entries(&cache.get(Duration::from_secs(1)).await).is_empty());
+
+    *fake.memory.lock() = Mode::Hang;
+    *fake.search.lock() = Mode::Hang;
+    tokio::time::advance(STALE_LIMIT).await;
+    let entries = degraded_entries(&cache.get(Duration::from_millis(10)).await);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(
+        entries.iter().all(|e| e.ends_with("timeout")),
+        "{entries:?}"
+    );
 }
