@@ -500,8 +500,7 @@ fn concurrent_writers_never_rewind_the_clock() {
 fn default_root_is_under_the_app_state_tree() {
     let root = default_attendance_root().expect("home dir");
     assert!(root.ends_with("attendance"));
-    // #11632: whichever of `.trusty-assistants` / `.trusty-agents` the app
-    // directory resolves to on this machine.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     let home = dirs::home_dir().expect("home dir");
     assert_eq!(
         root.parent().expect("parent"),

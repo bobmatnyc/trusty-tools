@@ -212,7 +212,7 @@ pub fn from_sources(env: Option<&str>, config: Option<(&str, &str)>) -> LockStat
 /// Test: `read_from_home_finds_the_config_lock`,
 /// `unreadable_config_file_fails_closed`.
 pub fn read_from_home(env: Option<&str>, home: Option<&Path>) -> LockState {
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     let Some(path) = home.map(|h| crate::assistants::app_dir(h).join("config.toml")) else {
         return from_sources(env, None);
     };

@@ -101,7 +101,7 @@ pub fn parse(config_toml: &str) -> Option<String> {
 /// Test: `read_from_home_finds_the_configured_provider`,
 /// `read_from_home_is_none_without_a_config_file`.
 pub fn read_from_home(home: &Path) -> Option<String> {
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     let path = crate::assistants::app_dir(home).join("config.toml");
     let text = std::fs::read_to_string(path).ok()?;
     parse(&text)

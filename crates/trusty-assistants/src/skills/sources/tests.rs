@@ -138,7 +138,7 @@ fn remote_git_cache_path_computed_correctly() {
     let paths = reg.resolved_paths();
     assert_eq!(paths.len(), 1);
 
-    // #11632: the app directory, under whichever name it resolves to.
+    // #11632: the app directory, `~/.trusty-agents` (owner ruling Dcm).
     let expected_base =
         crate::assistants::app_dir(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
             .join("skills")
@@ -172,7 +172,7 @@ fn remote_git_without_subdir_uses_cache_dir_directly() {
     let reg = SkillSourceRegistry::from_sources(project.path(), sources);
     let paths = reg.resolved_paths();
     assert_eq!(paths.len(), 1);
-    // #11632: the app directory, under whichever name it resolves to.
+    // #11632: the app directory, `~/.trusty-agents` (owner ruling Dcm).
     let expected =
         crate::assistants::app_dir(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
             .join("skills")

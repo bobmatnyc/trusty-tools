@@ -25,10 +25,10 @@ checkout and for any project that uses trusty-assistants as a dependency.
     └── project-index.md   # Auto-generated project summary
 ```
 
-User-global state lives under `~/.trusty-assistants/`:
+User-global state lives under `~/.trusty-agents/`:
 
 ```
-~/.trusty-assistants/
+~/.trusty-agents/
 ├── projects.json         # Global project registry
 ├── sockets/<name>.sock   # MessageBus UNIX sockets for cross-project relay
 ├── skills/                # Globally-shared skills (see discovery order below)
@@ -103,7 +103,7 @@ include = ["python-async-patterns", "pytest-best-practices"]
 
 ## Skill markdown
 
-`.trusty-agents/skills/<name>.md` (or `~/.trusty-assistants/skills/`):
+`.trusty-agents/skills/<name>.md` (or `~/.trusty-agents/skills/`):
 
 ```markdown
 ---
@@ -128,7 +128,7 @@ and by the `skill_loader` tool.
 By default, skills are discovered from two local sources:
 
 1. `<project>/.trusty-agents/skills/` (priority 10)
-2. `~/.trusty-assistants/skills/` (priority 5)
+2. `~/.trusty-agents/skills/` (priority 5)
 
 The first source to define a given skill name wins. Add project-local
 overrides — an extra local directory, or a remote git repository of shared
@@ -204,6 +204,6 @@ Running `ta` in a directory for the first time:
 1. Creates `.trusty-agents/` if missing
 2. Drops `.trusty-agents/state/initialized` marker
 3. Builds an initial code index of the working tree
-4. Registers the project in `~/.trusty-assistants/projects.json`
+4. Registers the project in `~/.trusty-agents/projects.json`
 
 Force re-initialization with `--reinit`.

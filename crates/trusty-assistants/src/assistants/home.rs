@@ -17,10 +17,9 @@
 //! defend against it or silently rewrite it.
 //!
 //! The path is the owner's, verbatim (2026-08-01): the store is
-//! `<root>/<agent>/okg/`, so a home is `~/trusty-assistants/<instance>/` with
+//! `trusty-agents/<agent>/okg/`, so a home is `~/trusty-agents/<instance>/` with
 //! no intervening `assistants/` segment, and that `okg/` tree is the store
-//! trusty-search indexes. #11632 renamed the root from `~/trusty-agents`;
-//! [`super::relocate`] reads and moves the old one.
+//! trusty-search indexes.
 //!
 //! What: [`assistants_root`] resolves the dotless root holding one home per
 //! instance. [`AssistantHome`] is one instance's home — the five entries
@@ -35,7 +34,7 @@
 //! new `root` field against the home, confined inside it.
 //!
 //! Scope: this module OWNS the layout and its creation. It deliberately does
-//! NOT migrate anything out of the dotted app directory into a home
+//! NOT migrate anything out of the existing dotted `~/.trusty-agents` tree
 //! (#4325: "The system is NOT required to auto-migrate or auto-relocate"), and
 //! nothing on the boot path calls [`AssistantHome::ensure`] yet — provisioning
 //! is the caller's deliberate act, exactly like OKG extraction (#4283).
@@ -54,27 +53,44 @@ use crate::stores::AgentStoreBinding;
 ///
 /// Why: tests, and any operator who keeps the tree somewhere other than their
 /// home directory. Named in the `NoUserHome` error so a user with no `$HOME`
-/// is told the way out rather than just the problem. #11632: was
-/// `TAGENT_ASSISTANTS_DIR`, which is still read for one release
-/// ([`super::relocate::LEGACY_ASSISTANTS_DIR_ENV`]).
-/// Test: `super::tests::home_tests::env_override_wins_over_the_user_home`,
-/// `super::tests::relocate_tests::new_variable_wins_and_the_old_one_is_still_read`.
+/// is told the way out rather than just the problem. #11632: the crate's new
+/// name; [`LEGACY_ASSISTANTS_DIR_ENV`] is still honoured after it.
+/// Test: `super::tests::home_tests::env_override_wins_over_the_user_home`.
 pub const ASSISTANTS_DIR_ENV: &str = "TA_ASSISTANTS_DIR";
+
+/// The pre-rename assistants-root override, honoured after
+/// [`ASSISTANTS_DIR_ENV`] and without a warning (#11632).
+/// Test: `assistants_root_env_order_and_default` (`tests/legacy_locations.rs`).
+pub const LEGACY_ASSISTANTS_DIR_ENV: &str = "TAGENT_ASSISTANTS_DIR";
 
 /// The DOTLESS product directory under the user's home (#4325).
 ///
 /// Why: the home is user-facing and browsable "just like trusty-mpm-projects"
 /// — a leading dot would hide it from Finder and from a plain `ls`, which is
-/// the opposite of the decision. The dotted app directory
-/// ([`super::relocate::APP_DIR_NAME`]) is app-private config and is untouched
-/// by this module.
+/// the opposite of the decision. The existing dotted `~/.trusty-agents` tree is
+/// app-private config and is untouched by this module.
 ///
 /// It holds one home per instance DIRECTLY — the owner specified the store path
-/// as `<root>/<agent>/okg/` (2026-08-01), so there is no intervening
-/// `assistants/` segment. #11632: was `trusty-agents`.
+/// as `trusty-agents/<agent>/okg/` (2026-08-01), so there is no intervening
+/// `assistants/` segment.
 /// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`,
 /// `super::tests::home_tests::okg_store_path_matches_the_owners_spelling`.
-pub const ASSISTANTS_DIR_NAME: &str = "trusty-assistants";
+// #11632: data paths keep the trusty-agents names (owner ruling Dcm)
+pub const ASSISTANTS_DIR_NAME: &str = "trusty-agents";
+
+/// The DOTTED, app-private directory under the user's home: config, provider
+/// policy, the user profile and per-user state.
+///
+/// Why: one name for every reader, so a rename cannot split them.
+/// Test: `ta_keeps_the_old_folders_and_creates_no_new_ones` (`tests/legacy_locations.rs`).
+// #11632: data paths keep the trusty-agents names (owner ruling Dcm)
+pub const APP_DIR_NAME: &str = ".trusty-agents";
+
+/// The app-private directory under `home`: `<home>/.trusty-agents`.
+/// Test: `ta_keeps_the_old_folders_and_creates_no_new_ones` (`tests/legacy_locations.rs`).
+pub fn app_dir(home: &Path) -> PathBuf {
+    home.join(APP_DIR_NAME)
+}
 
 /// The instance's own instructions (#4325). Test: `super::tests::home_tests::layout_matches_the_ticket`.
 pub const INSTRUCTIONS_FILE: &str = "instructions.md";
@@ -113,31 +129,22 @@ pub const STORES_DIR: &str = "stores";
 /// Why: one resolver, so a home created by provisioning and a home inspected by
 /// the concierge are the same directory. See [`ASSISTANTS_DIR_NAME`] for why it
 /// is dotless.
-/// What: `$TA_ASSISTANTS_DIR` verbatim when set and non-blank, else (#11632)
-/// the old `$TAGENT_ASSISTANTS_DIR` with a deprecation warning, else
-/// [`super::relocate::resolve_assistants_root`] under the user's home:
-/// `~/trusty-assistants`, or `~/trusty-agents` while only that one exists.
-/// `Err(NoUserHome)` when neither `$HOME` nor `$USERPROFILE` is set —
-/// resolving to the process CWD instead would scatter user-owned homes
-/// wherever the binary happened to start.
+/// What: `$TA_ASSISTANTS_DIR` verbatim when set and non-blank, else
+/// `$TAGENT_ASSISTANTS_DIR` the same way (#11632), else
+/// `<user home>/trusty-agents`. `Err(NoUserHome)` when neither `$HOME` nor
+/// `$USERPROFILE` is set — resolving to the process CWD instead would scatter
+/// user-owned homes wherever the binary happened to start.
 /// Test: `super::tests::home_tests::default_root_is_dotless_under_the_user_home`,
 /// `super::tests::home_tests::env_override_wins_over_the_user_home`,
-/// `super::tests::relocate_tests::new_variable_wins_and_the_old_one_is_still_read`.
+/// `assistants_root_env_order_and_default` (`tests/legacy_locations.rs`).
 pub fn assistants_root() -> Result<PathBuf, AssistantError> {
-    if let Some(dir) = std::env::var_os(ASSISTANTS_DIR_ENV)
-        && !dir.is_empty()
-    {
-        return Ok(PathBuf::from(dir));
-    }
-    // #11632: the pre-rename variable still names the root for one release.
-    if let Some(dir) = std::env::var_os(super::relocate::LEGACY_ASSISTANTS_DIR_ENV)
-        && !dir.is_empty()
-    {
-        tracing::warn!(
-            "{} is deprecated; rename it to {ASSISTANTS_DIR_ENV}",
-            super::relocate::LEGACY_ASSISTANTS_DIR_ENV
-        );
-        return Ok(PathBuf::from(dir));
+    // #11632: the new variable first, then the pre-rename one.
+    for key in [ASSISTANTS_DIR_ENV, LEGACY_ASSISTANTS_DIR_ENV] {
+        if let Some(dir) = std::env::var_os(key)
+            && !dir.is_empty()
+        {
+            return Ok(PathBuf::from(dir));
+        }
     }
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -145,7 +152,7 @@ pub fn assistants_root() -> Result<PathBuf, AssistantError> {
         .ok_or(AssistantError::NoUserHome {
             env: ASSISTANTS_DIR_ENV,
         })?;
-    Ok(super::relocate::resolve_assistants_root(Path::new(&home)))
+    Ok(PathBuf::from(home).join(ASSISTANTS_DIR_NAME))
 }
 
 /// One Assistant-type INSTANCE's home directory.

@@ -100,7 +100,7 @@ pub(crate) fn knowledge_dir() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     crate::assistants::app_dir(&home).join("knowledge")
 }
 

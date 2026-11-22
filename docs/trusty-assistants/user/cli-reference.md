@@ -29,7 +29,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize"}' | ta mcp-serve
 The shared credential verbs every trusty-* binary mounts
 (`ta config keys list`, `set`, `delete`, …), plus
 `ta config profile show|set --name … --email … --timezone … --location …`
-for `~/.trusty-assistants/user.toml`.
+for `~/.trusty-agents/user.toml`.
 
 ---
 

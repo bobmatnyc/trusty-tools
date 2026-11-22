@@ -472,7 +472,7 @@ pub fn config_search_paths(config_dir: &Path, leaf: &str) -> Vec<PathBuf> {
     paths.push(PathBuf::from(".trusty-agents").join(leaf));
     paths.push(PathBuf::from(".claude").join(leaf));
     if let Some(home) = std::env::var_os("HOME") {
-        // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+        // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
         paths.push(crate::assistants::app_dir(Path::new(&home)).join(leaf));
         paths.push(PathBuf::from(home).join(".claude").join(leaf));
     }

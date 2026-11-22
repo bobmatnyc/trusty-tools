@@ -58,7 +58,7 @@ impl UserProfile {
     /// the OS reports no home dir, which is unrecoverable for our use.
     /// Test: Tested indirectly via `profile_round_trip_through_toml`.
     pub fn profile_path() -> PathBuf {
-        // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+        // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
         crate::assistants::app_dir(&dirs::home_dir().expect("home dir required")).join("user.toml")
     }
 

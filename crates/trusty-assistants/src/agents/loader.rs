@@ -920,7 +920,7 @@ pub(crate) fn agents_dir_candidates() -> Vec<PathBuf> {
     let primary = agents_dir();
     let mut dirs = vec![primary.clone()];
     if let Some(home) = std::env::var_os("HOME") {
-        // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+        // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
         let home_dir = crate::assistants::app_dir(Path::new(&home)).join("agents");
         if home_dir != primary {
             dirs.push(home_dir);

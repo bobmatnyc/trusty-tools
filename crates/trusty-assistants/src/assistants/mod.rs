@@ -84,9 +84,6 @@ pub mod memory;
 pub mod memory_grants;
 pub mod memory_policy;
 pub mod provision;
-// #11632: read compatibility with, and the one-time move out of, the
-// pre-rename `trusty-agents` locations.
-pub mod relocate;
 pub mod roster;
 
 #[cfg(test)]
@@ -95,9 +92,9 @@ mod tests;
 pub use error::AssistantError;
 pub use health::{HomeHealth, HomeIssue, HomeIssueKind, inspect};
 pub use home::{
-    AGENTS_DIR, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR, AssistantHome,
-    AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE, OKG_DIR, STORES_DIR,
-    assistants_root,
+    AGENTS_DIR, APP_DIR_NAME, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR,
+    AssistantHome, AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE,
+    LEGACY_ASSISTANTS_DIR_ENV, OKG_DIR, STORES_DIR, app_dir, assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};
 pub use mcp::{McpOverrides, OverridesRead, read_overrides, write_overrides};
@@ -108,9 +105,5 @@ pub use memory::{
 pub use provision::{
     ProvisionedHome, StartupProvisioning, provision, provision_all, provision_startup_homes,
     provision_startup_homes_in,
-};
-pub use relocate::{
-    APP_DIR_NAME, LEGACY_APP_DIR_NAME, LEGACY_ASSISTANTS_DIR_ENV, LEGACY_ASSISTANTS_DIR_NAME,
-    RelocationReport, app_dir, migrate_legacy_locations, resolve_assistants_root,
 };
 pub use roster::{ASSISTANT_BASE, discover_instances};

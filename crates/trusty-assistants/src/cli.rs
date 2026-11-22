@@ -110,11 +110,7 @@ fn classify(args: &[String]) -> Command {
 /// Why: kept in the library so a downstream launcher can call
 /// `install_plugins(...)` first, as before the cut.
 /// What: installs the rustls crypto provider (#4825), then runs the verb
-/// [`classify`] picks. #11632: a verb that reads this crate's state
-/// (`config profile`, `mcp-serve`) first runs the
-/// one-time move out of the pre-rename locations
-/// ([`crate::assistants::migrate_legacy_locations`]); a failed move stops the
-/// verb rather than letting it run against the half-moved tree. An unknown argument — including the removed `--api`,
+/// [`classify`] picks. An unknown argument — including the removed `--api`,
 /// `--serve` and `--port` — prints the usage on stderr and fails.
 /// Test: `tests/no_network_listener.rs`, `tests/help_exit_code.rs`.
 pub async fn run() -> Result<()> {
@@ -129,17 +125,9 @@ pub async fn run() -> Result<()> {
             print!("{USAGE}");
             Ok(())
         }
-        // The credential verbs use trusty-common's shared store, not this
-        // crate's directories, so they do not run the move.
         Command::Config => run_config_subcommand(&args[1..]).await,
-        Command::ConfigProfile => {
-            migrate_before_state_access()?;
-            run_config_profile_subcommand(&args[3..])
-        }
-        Command::McpServe => {
-            migrate_before_state_access()?;
-            crate::mcp_serve::run_mcp_serve().await
-        }
+        Command::ConfigProfile => run_config_profile_subcommand(&args[3..]),
+        Command::McpServe => crate::mcp_serve::run_mcp_serve().await,
         Command::Unknown(arg) => {
             eprint!("{USAGE}");
             anyhow::bail!(
@@ -178,7 +166,7 @@ async fn run_config_subcommand(argv_tail: &[String]) -> Result<()> {
 
 /// Parse and run `ta config profile show|set` (#3406 follow-up).
 ///
-/// Why: gives `~/.trusty-assistants/user.toml` (name/email/timezone/location) a
+/// Why: gives `~/.trusty-agents/user.toml` (name/email/timezone/location) a
 /// CLI instead of hand-edited TOML.
 /// What: `argv_tail` starts after the literal `profile` token. `show` prints
 /// the profile (or "not set"); `set` overwrites only the flags passed and
@@ -266,26 +254,6 @@ fn run_config_profile_subcommand(argv_tail: &[String]) -> Result<()> {
                 UserProfile::profile_path().display()
             );
         }
-    }
-    Ok(())
-}
-
-/// Run the one-time move out of the pre-rename locations, loudly.
-///
-/// Why: #11632 — the move must finish before a verb reads a home or the app
-/// directory, and a failure must stop the verb, not be logged and skipped.
-/// What: [`crate::assistants::migrate_legacy_locations`] against `$HOME`;
-/// prints one stderr line per moved or skipped location and returns the
-/// error unchanged. No `$HOME` means nothing to move.
-/// Test: `assistants::tests::migrate_tests` covers the move itself.
-fn migrate_before_state_access() -> Result<()> {
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-        return Ok(());
-    };
-    let report = crate::assistants::migrate_legacy_locations(std::path::Path::new(&home))
-        .context("moving the pre-rename trusty-agents directories failed; nothing was changed for the failed entry")?;
-    for line in report.lines() {
-        eprintln!("{BIN_NAME}: {line}");
     }
     Ok(())
 }

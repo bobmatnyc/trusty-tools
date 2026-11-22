@@ -45,7 +45,8 @@ use trusty_mcp::config::McpServerConfig;
 use crate::mcp::extensions;
 
 /// The global config file inside the app directory
-/// (`~/.trusty-assistants/config.toml`; #11632: `~/.trusty-agents` until it moves).
+/// (`~/.trusty-agents/config.toml`; #11632: data paths keep the trusty-agents
+/// names, owner ruling Dcm).
 const CONFIG_FILE_NAME: &str = "config.toml";
 
 /// Top-level shape of `~/.trusty-agents/config.toml` — composes all subsystems.

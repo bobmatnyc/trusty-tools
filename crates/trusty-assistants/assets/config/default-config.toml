@@ -1,5 +1,5 @@
 # trusty-assistants global configuration
-# ~/.trusty-assistants/config.toml (~/.trusty-agents/config.toml before #11632)
+# ~/.trusty-agents/config.toml (the directory keeps its name after #11632)
 
 # #7454 (ADR-0060) — READ THIS BEFORE EDITING THE MCP TABLES BELOW.
 #

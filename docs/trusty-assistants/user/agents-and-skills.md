@@ -2,7 +2,7 @@
 
 ## Bundled agents
 
-trusty-assistants ships these agents as instructional content in the repository's `content/agents/trusty-agents/agents/` (#9014), deployed to `~/.trusty-assistants/agents/` on each run:
+trusty-assistants ships these agents as instructional content in the repository's `content/agents/trusty-agents/agents/` (#9014), deployed to `~/.trusty-agents/agents/` on each run:
 
 | Agent | Role | Purpose |
 |---|---|---|
@@ -76,7 +76,7 @@ Skills are Markdown files with optional YAML frontmatter. By default,
 discovery scans two local sources (in priority order):
 
 1. `<project>/.trusty-agents/skills/`
-2. `~/.trusty-assistants/skills/`
+2. `~/.trusty-agents/skills/`
 
 Add more sources — extra local directories or remote git repositories — via
 `.trusty-agents/skill-sources.toml`; see [configuration.md](./configuration.md#discovery-order-highest-priority-first).

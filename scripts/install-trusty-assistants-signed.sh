@@ -4,7 +4,7 @@
 # Why: Every `cargo install trusty-assistants` produces ad-hoc / linker-signed
 # `ta` and `tagent` binaries with new cdhashes. macOS TCC keys grants by
 # cdhash, so any TCC category the binary has triggered (it reads
-# `$HOME/.trusty-assistants/` and project `.trusty-agents/` config and state,
+# `$HOME/.trusty-agents/` and project `.trusty-agents/` config and state,
 # and — like `tm` (#2721) — project-local `.claude/` dirs that live under other
 # apps' data categories) is revoked on every rebuild, re-prompting the
 # operator. Signing with a stable Developer ID Application identity + a fixed
@@ -188,10 +188,10 @@ run_sign_ta() {
 
 print_next_steps() {
     section "Done — next steps"
-    # shellcheck disable=SC2016  # literal "$HOME"/".trusty-assistants/" is narration, not expansion
+    # shellcheck disable=SC2016  # literal "$HOME"/".trusty-agents/" is narration, not expansion
     printf '\nta reads only project-local ".trusty-agents/" and\n'
     # shellcheck disable=SC2016
-    printf '"$HOME/.trusty-assistants/" config/state (no external volumes) — analogous to\n'
+    printf '"$HOME/.trusty-agents/" config/state (no external volumes) — analogous to\n'
     printf "trusty-mpm's App-Data category, no Full Disk Access re-grant should be\n"
     printf 'needed. If macOS prompts for data access from other apps (e.g. reading a\n'
     printf 'project-local .claude/ config dir), approve it once — the stable\n'

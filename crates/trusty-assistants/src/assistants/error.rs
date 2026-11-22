@@ -42,15 +42,6 @@ pub enum AssistantError {
         reason: String,
     },
 
-    /// #11632: moving a pre-rename directory to its new name failed. The
-    /// entry is left where it was unless `reason` says the undo failed too.
-    #[error("could not move `{}` to `{}`: {reason}", from.display(), to.display())]
-    Relocate {
-        from: PathBuf,
-        to: PathBuf,
-        reason: String,
-    },
-
     /// #4325: creating or seeding one entry of the home failed.
     #[error("could not create `{}`: {source}", path.display())]
     Io {

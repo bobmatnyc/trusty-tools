@@ -143,11 +143,11 @@ impl MessageBus {
     ///
     /// Why: Centralizes path construction so `send_to` and `list_running`
     /// agree on the naming convention.
-    /// What: Returns `~/.trusty-assistants/sockets/<project_id>.sock`.
+    /// What: Returns `~/.trusty-agents/sockets/<project_id>.sock`.
     /// Test: Assert the returned path ends with `<id>.sock`.
     pub fn socket_path_for(project_id: &str) -> Result<PathBuf> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
-        // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+        // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
         Ok(crate::assistants::app_dir(&home)
             .join("sockets")
             .join(format!("{project_id}.sock")))

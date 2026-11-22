@@ -119,7 +119,7 @@ pub fn events_dir() -> Result<PathBuf> {
         );
     }
     let home = dirs::home_dir().context("could not determine $HOME directory")?;
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     Ok(crate::assistants::app_dir(&home).join("events"))
 }
 

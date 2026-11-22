@@ -29,15 +29,12 @@ non-test TCP or UDP bind in `src/`.
 
 ## Where it keeps data
 
-| What | Path | Before #11632 |
-|---|---|---|
-| Assistant homes | `~/trusty-assistants/<id>/`, or `$TA_ASSISTANTS_DIR` | `~/trusty-agents/<id>/`, `$TAGENT_ASSISTANTS_DIR` |
-| Config and per-user state | `~/.trusty-assistants/` | `~/.trusty-agents/` |
+The rename did not move any data (#11632, owner ruling Dcm):
 
-The old locations are still read for one release. `ta config profile` and
-`ta mcp-serve` move them once, never over an existing new directory, and leave
-a symlink at the old path; a failed move stops the command and changes
-nothing (`src/assistants/relocate.rs`).
+| What | Path |
+|---|---|
+| Assistant homes | `~/trusty-agents/<id>/`, or `$TA_ASSISTANTS_DIR`, then `$TAGENT_ASSISTANTS_DIR` |
+| Config and per-user state | `~/.trusty-agents/` |
 
 ## The library
 

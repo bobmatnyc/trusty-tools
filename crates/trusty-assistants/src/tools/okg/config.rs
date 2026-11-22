@@ -67,12 +67,12 @@ pub(super) fn expand_tilde(raw: &str, home: &std::path::Path) -> PathBuf {
 /// Why: an unreadable or `[okg]`-less config is the normal state for every
 /// existing install; it must yield the default policy, never an error that
 /// blocks ingestion outright.
-/// What: reads `~/.trusty-assistants/config.toml` and pulls out `[okg]`.
+/// What: reads `~/.trusty-agents/config.toml` and pulls out `[okg]`.
 pub fn load() -> OkgConfig {
     let Some(home) = home_dir() else {
         return OkgConfig::default();
     };
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     let path = crate::assistants::app_dir(&home).join("config.toml");
     let Ok(text) = std::fs::read_to_string(&path) else {
         return OkgConfig::default();

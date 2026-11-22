@@ -33,7 +33,7 @@ impl ProjectRegistry {
     pub fn new() -> Result<Self> {
         let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home dir"))?;
         Ok(Self {
-            // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+            // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
             registry_path: crate::assistants::app_dir(&home).join("projects.json"),
         })
     }

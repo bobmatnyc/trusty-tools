@@ -39,13 +39,13 @@ pub fn attendance_root(base: impl AsRef<Path>) -> PathBuf {
 ///
 /// Why: one definition, so a writer and a reader in different processes cannot
 /// disagree about where the signal lives.
-/// What: `~/.trusty-assistants/attendance`. The DOTTED, app-private tree — this is
-/// machine state, not the user-browsable `~/trusty-assistants/<instance>/` home
+/// What: `~/.trusty-agents/attendance`. The DOTTED, app-private tree — this is
+/// machine state, not the user-browsable `~/trusty-agents/<instance>/` home
 /// that `assistants::home` deliberately hands to the user.
 /// Test: `default_root_is_under_the_app_state_tree`.
 pub fn default_attendance_root() -> Result<PathBuf> {
     let home = dirs::home_dir().context("no home directory; cannot locate attendance state")?;
-    // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+    // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
     Ok(attendance_root(crate::assistants::app_dir(&home)))
 }
 

@@ -369,7 +369,7 @@ fn remote_cache_dir(source: &SkillSource) -> Option<PathBuf> {
     let name = source.name.as_deref()?;
     let base = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     Some(
-        // #11632: `~/.trusty-assistants`, or the pre-rename `~/.trusty-agents` until it moves.
+        // #11632: data paths keep the trusty-agents names (owner ruling Dcm).
         crate::assistants::app_dir(&base)
             .join("skills")
             .join("cache")
