@@ -105,7 +105,10 @@ fn parity_reports_identity_and_fallback_numbers() -> TestResult {
     )?;
     fs::write(dir.path().join("inbox/triage.jsonl"), wake_row(late5, &pm))?;
     let rep = parity::load(&l, t - 10)?;
-    assert_eq!((rep.alerts.matched, rep.alert_pairs), (2, (1, 1)));
+    // The idle pair has two keyed events with different fingerprints: the
+    // fallback no longer pairs them, so it is one scheduler-only and one
+    // poller-only mismatch (it used to count as a fallback match).
+    assert_eq!((rep.alerts.matched, rep.alert_pairs), (1, (1, 0)));
     assert_eq!(rep.alerts_identity.matched, 1);
     assert_eq!(rep.alerts_identity.scheduler_only, 1);
     assert_eq!((rep.wakes.matched, rep.wake_pairs), (1, (1, 0)));
@@ -115,7 +118,7 @@ fn parity_reports_identity_and_fallback_numbers() -> TestResult {
         "{text}"
     );
     assert!(
-        text.contains("pairs by identity / by +-2-cycle fallback: alerts 1 / 1, wakes 1 / 0\n"),
+        text.contains("pairs by identity / by +-2-cycle fallback: alerts 1 / 0, wakes 1 / 0\n"),
         "{text}"
     );
     assert!(

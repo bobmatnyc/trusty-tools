@@ -8,13 +8,14 @@
 //! identities (session, kind, fingerprint: the dedupe key; a PM message's id
 //! and an owner item's id are their fingerprints) within
 //! [`IDENTITY_CYCLES`] cycles of the record; pass 2, when asked, pairs what
-//! is left by session and kind (an event with no identity pairs with any)
-//! within [`FALLBACK_CYCLES`] cycles. Each pass takes the nearest unused live
+//! is left by session and kind, only when at least one side has no identity
+//! (two keyed events with different identities never pair) within [`FALLBACK_CYCLES`] cycles. Each pass takes the nearest unused live
 //! event. A shadow event left over is `scheduler_only`; a live event left
 //! over counts as `poller_only` only when it falls inside some joined
 //! record's own window. [`IL_CRON`] is left out of both sides.
 //! Test: `join_pairs_identity_across_phase_skew`,
 //! `join_falls_back_to_two_cycles_without_identity`,
+//! `fallback_never_pairs_two_keyed_events_with_different_fingerprints`,
 //! `parity_reports_identity_and_fallback_numbers`.
 
 use super::parity::Counts;
@@ -94,6 +95,38 @@ fn nearest(
         .map(|(i, _)| i)
 }
 
+/// An event's (session, kind): its `sk`, else the one its identity key carries.
+fn session_kind(e: &Event) -> Option<(&str, &str)> {
+    match (&e.sk, &e.key) {
+        (Some((s, k)), _) => Some((s, k)),
+        (None, Some(k)) => Some((&k.session, &k.kind)),
+        (None, None) => None,
+    }
+}
+
+/// Whether the fallback may pair `s` with `l`.
+///
+/// Why: a keyed shadow event whose identity pass failed paired with any keyed
+/// live event of the same session and kind, so `token` `ctx_main` matched
+/// `token` `hit_low` and inflated the match rate.
+/// What: two keyed events never pair here (their identities differ, or pass 1
+/// would have paired them); a legacy event without a key pairs when its
+/// (session, kind) equals the other's. A side with neither `sk` nor a key
+/// knows nothing and pairs with anything; once both sides know a (session,
+/// kind) they must be equal, so a known kind never pairs across kinds.
+/// Test: `fallback_never_pairs_two_keyed_events_with_different_fingerprints`,
+/// `fallback_pairs_keyed_with_legacy_unkeyed_event`,
+/// `fallback_never_pairs_different_known_kinds`.
+fn fallback_fits(s: &Event, l: &Event) -> bool {
+    if s.key.is_some() && l.key.is_some() {
+        return false;
+    }
+    match (session_kind(s), session_kind(l)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
 /// Pairs `shadow` with `live`; `in_scope(t)` says a live time falls inside a
 /// joined record's window. `fallback` false gives the identity-only numbers.
 pub fn join(
@@ -118,10 +151,7 @@ pub fn join(
             if paired[n] {
                 continue;
             }
-            let fits = |l: &Event| match (&s.sk, &l.sk) {
-                (Some(a), Some(b)) => a == b,
-                _ => true,
-            };
+            let fits = |l: &Event| fallback_fits(s, l);
             if let Some(i) = nearest(s, live, &used, FALLBACK_CYCLES, &fits) {
                 (used[i], paired[n]) = (true, true);
                 out.by_fallback += 1;
@@ -184,5 +214,63 @@ mod tests {
         let late = [anon(1000 + 3 * 60 + 61)];
         let j = join(&shadow, &late, &|t| t < 1100, true);
         assert_eq!((j.counts.matched, j.counts.poller_only), (0, 0));
+    }
+
+    #[test]
+    fn fallback_never_pairs_two_keyed_events_with_different_fingerprints() {
+        let shadow = [Event::keyed(
+            1000,
+            60,
+            key("tm-x", "token", "ctx_main:350k"),
+        )];
+        // One cycle later, same session and kind, different fingerprint.
+        let live = [Event::keyed(1060, 0, key("tm-x", "token", "hit_low:1"))];
+        let j = join(&shadow, &live, &|_| true, true);
+        assert_eq!((j.counts.matched, j.by_fallback), (0, 0));
+        assert_eq!((j.counts.scheduler_only, j.counts.poller_only), (1, 1));
+    }
+
+    #[test]
+    fn fallback_pairs_keyed_with_legacy_unkeyed_event() {
+        let sk = Some(("tm-x".to_owned(), "token".to_owned()));
+        let legacy = Event {
+            ts: 1060,
+            interval: 0,
+            key: None,
+            sk,
+        };
+        let shadow = [Event::keyed(
+            1000,
+            60,
+            key("tm-x", "token", "ctx_main:350k"),
+        )];
+        let j = join(&shadow, std::slice::from_ref(&legacy), &|_| true, true);
+        assert_eq!((j.counts.matched, j.by_fallback), (1, 1));
+        // Legacy shadow against a keyed live event pairs the same way.
+        let shadow = [Event {
+            ts: 1000,
+            interval: 60,
+            ..legacy
+        }];
+        let live = [Event::keyed(1060, 0, key("tm-x", "token", "hit_low:1"))];
+        assert_eq!(join(&shadow, &live, &|_| true, true).by_fallback, 1);
+    }
+
+    #[test]
+    fn fallback_never_pairs_different_known_kinds() {
+        let anon = |kind: &str, k: Option<EventKey>| Event {
+            ts: 1000,
+            interval: 60,
+            key: k,
+            sk: Some(("tm-x".to_owned(), kind.to_owned())),
+        };
+        let all = |_| true;
+        let j = join(&[anon("idle", None)], &[anon("token", None)], &all, true);
+        assert_eq!(j.counts.matched, 0);
+        // The kind known only through the key still blocks a cross-kind pair.
+        let mut keyed = anon("token", Some(key("tm-x", "token", "f")));
+        keyed.sk = None;
+        let j = join(&[keyed], &[anon("idle", None)], &all, true);
+        assert_eq!(j.counts.matched, 0);
     }
 }
