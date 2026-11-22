@@ -66,6 +66,8 @@ set -euo pipefail
 CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
 readonly TA_BIN="$CARGO_BIN_DIR/ta"
 readonly TA_IDENTIFIER="com.trusty.ta"
+# #11632: the one-release alias keeps its pre-rename identifier.
+readonly TAGENT_IDENTIFIER="com.trusty.tagent"
 
 # Sign identity: auto-detected by `tctl sign` if not overridden.
 TRUSTY_SIGN_IDENTITY="${TRUSTY_SIGN_IDENTITY:-}"
@@ -177,7 +179,7 @@ run_sign_ta() {
         warn "See docs/reference/release-workflow.md for one-time cert setup."
         return 0
     fi
-    info "ta signed successfully (identifier=$TA_IDENTIFIER); tagent as com.trusty.tagent."
+    info "ta signed successfully (identifier=$TA_IDENTIFIER); tagent as $TAGENT_IDENTIFIER."
 }
 
 # ---------------------------------------------------------------------------
