@@ -470,8 +470,7 @@ mod tests {
         let role = agent.to_agent_config().agent.role;
         assert_eq!(role, crate::agents::claude_mpm_role::UNMAPPED_ROLE);
         assert!(
-            !crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
-                .contains(&role.as_str()),
+            !crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES.contains(&role.as_str()),
             "an unmappable claude-mpm agent must stay role-ineligible, exactly \
              as it was before #4502"
         );

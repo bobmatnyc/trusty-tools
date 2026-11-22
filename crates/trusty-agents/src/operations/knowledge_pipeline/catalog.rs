@@ -1,5 +1,6 @@
 //! Trusted source catalogue for the Assistant knowledge API (#4531).
 //! Registry membership and effective bindings define scope; request bodies cannot supply sources.
+use super::super::StatusCode;
 use super::{Error, bad, failure};
 use crate::{
     agents::AgentConfig,
@@ -7,7 +8,6 @@ use crate::{
     listeners::config::ListenerConfig,
     registry::{ProjectEntry, ProjectStatus},
 };
-use axum::http::StatusCode;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},

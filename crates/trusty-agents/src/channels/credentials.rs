@@ -180,8 +180,8 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::operations::agent_channels::Binding;
     use crate::channels::ChannelAdapter;
+    use crate::operations::agent_channels::Binding;
     use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 
     const SLACK_PROVIDERS: &[&str] = &["slack", "slack-user", "slack-app"];

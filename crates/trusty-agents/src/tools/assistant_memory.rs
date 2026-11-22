@@ -66,8 +66,7 @@ pub(crate) fn operation_granted(config: &crate::agents::AgentConfig, name: &str)
         &catalog,
     );
     scope_granted(config, scope_for(name))
-        && patterns
-            .is_some_and(|p| allow_patterns_grant(name, &p))
+        && patterns.is_some_and(|p| allow_patterns_grant(name, &p))
 }
 
 /// Whether `[tools].allow` `patterns` grant the memory tool `name`.
@@ -471,7 +470,10 @@ mod tests {
         assert!(allow_patterns_grant("store_memory", &p(&["store_memory"])));
         assert!(allow_patterns_grant("store_memory", &p(&["store_*"])));
         assert!(allow_patterns_grant("store_memory", &p(&["*"])));
-        assert!(!allow_patterns_grant("store_memory", &p(&["search_*", "store"])));
+        assert!(!allow_patterns_grant(
+            "store_memory",
+            &p(&["search_*", "store"])
+        ));
         assert!(!allow_patterns_grant("store_memory", &[]));
     }
 

@@ -50,7 +50,7 @@ impl ToolExecutor for KnowledgeHistoryTool {
         .await
         {
             Ok(value) => ToolResult::ok(value.to_string()),
-            Err((status, axum::Json(value))) => {
+            Err((status, crate::operations::Json(value))) => {
                 ToolResult::err(format!("{status}: {}", value["error"]))
             }
         }

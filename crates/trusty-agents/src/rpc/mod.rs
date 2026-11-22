@@ -2,9 +2,9 @@
 //!
 //! Why: trusty-agents hosts multiple MCP services in the same binary. Each linked
 //! service implements `trusty_mcp_core::ServiceDescriptor` so the host can
-//! collect them and emit one merged OpenRPC document for the `POST /rpc`
-//! endpoint. Clients then hit a single discovery URL instead of probing
-//! per-service daemons.
+//! collect them and emit one merged OpenRPC document. #11632: the `POST /rpc`
+//! route that served it (`rpc_handler`) was cut with the HTTP API; the
+//! document builder stays.
 //!
 //! What:
 //!   - `build_unified_discovery()` collects the trusty-memory descriptor
@@ -12,17 +12,12 @@
 //!     descriptor (`SearchMcpService` from `trusty-search`) and feeds them to
 //!     `OpenRpcBuilder::from_services`. Each method ends up annotated with
 //!     an `x-service` extension naming its owning service.
-//!   - `rpc_handler` is an axum handler that dispatches `rpc.discover` via
-//!     `build_unified_discovery()` and returns `-32601 Method not found`
-//!     for anything else (in-process `tools/call` proxying is tracked
-//!     separately — see TODO at the bottom of this file).
 //!
 //! Test: `tests::merged_doc_has_all_tools`,
 //! `tests::every_method_has_x_service_annotation`,
 //! `tests::rpc_discover_not_in_methods_list`.
 
-use axum::Json;
-use serde_json::{Value, json};
+use serde_json::Value;
 use trusty_mcp::ServiceDescriptor;
 use trusty_mcp::openrpc::OpenRpcBuilder;
 use trusty_memory::MemoryMcpService;
@@ -43,35 +38,6 @@ pub fn build_unified_discovery() -> Value {
     let search = SearchMcpService;
     let services: Vec<&dyn ServiceDescriptor> = vec![&memory, &search];
     OpenRpcBuilder::from_services("trusty-agents", env!("CARGO_PKG_VERSION"), &services).build()
-}
-
-/// JSON-RPC handler for `POST /rpc`.
-///
-/// Why: Single entry point for OpenRPC clients. For now only `rpc.discover`
-/// is implemented; in-process `tools/call` dispatch is tracked as future
-/// work (the per-service tool execution paths already exist but aren't yet
-/// surfaced through this endpoint).
-/// What: Parses the JSON-RPC envelope, switches on `method`, returns either
-/// the discovery doc or `-32601 Method not found`.
-/// Test: `tests::handler_returns_discover_doc_with_jsonrpc_envelope`.
-pub async fn rpc_handler(Json(req): Json<Value>) -> Json<Value> {
-    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
-    let id = req.get("id").cloned().unwrap_or(Value::Null);
-    match method {
-        "rpc.discover" => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": build_unified_discovery(),
-        })),
-        _ => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": "Method not found"
-            }
-        })),
-    }
 }
 
 // TODO(#460): in-process `tools/call` dispatch. The merged manifest already
@@ -181,29 +147,5 @@ mod tests {
             let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("");
             assert_ne!(name, "rpc.discover");
         }
-    }
-
-    #[tokio::test]
-    async fn handler_returns_discover_doc_with_jsonrpc_envelope() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "rpc.discover"
-        });
-        let Json(resp) = rpc_handler(Json(req)).await;
-        assert_eq!(resp["jsonrpc"], "2.0");
-        assert_eq!(resp["id"], 1);
-        assert!(resp["result"]["methods"].is_array());
-    }
-
-    #[tokio::test]
-    async fn handler_returns_method_not_found_for_unknown_method() {
-        let req = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "totally.unknown"
-        });
-        let Json(resp) = rpc_handler(Json(req)).await;
-        assert_eq!(resp["error"]["code"], -32601);
     }
 }

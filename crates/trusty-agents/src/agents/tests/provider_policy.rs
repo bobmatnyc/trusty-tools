@@ -47,9 +47,7 @@ const CITED_UNPINNED_TEMPLATES: [&str; 6] = [
 
 /// This crate's bundled agent-template directory.
 fn templates_dir() -> PathBuf {
-    crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    )
+    crate::test_env::bundled_agents_dir()
 }
 
 /// Every bundled template as `(path relative to the agents dir, TOML body)`.
@@ -200,128 +198,6 @@ fn the_policy_covers_every_unpinned_bundled_template() {
              did not reach it; covered: {moved:?}"
         );
     }
-}
-
-/// Acceptance criterion 3 — with the policy set, the SAME template resolves
-/// the SAME provider under different ambient credentials.
-///
-/// Why: this is the defect. The `None` arm below is the pre-#3766 path and it
-/// FAILS the equality this test demands — an ambient `ANTHROPIC_API_KEY`
-/// flips `use_anthropic_direct`, an ambient OpenRouter key rewrites the slug,
-/// and the template silently runs somewhere else. The `Some` arm shows the
-/// configured policy making both credential environments resolve identically,
-/// via the same `provider_id` skip `ctrl::config::apply_credential_routing`
-/// already had from #3765.
-/// What: routes `ctrl.toml` — one of the seven templates #3766 cites —
-/// through `apply_credential_routing` under `AnthropicDirect` and under
-/// `OpenRouter`, and compares the resulting `(model, use_anthropic_direct)`.
-/// Test: itself.
-#[test]
-fn a_configured_policy_survives_differing_ambient_credentials() {
-    use crate::llm::credentials::LlmCredentials;
-
-    let body = std::fs::read_to_string(templates_dir().join("ctrl.toml")).expect("read ctrl.toml");
-
-    let resolve = |policy: Option<&str>, creds: &LlmCredentials| {
-        let mut cfg = parse_template("ctrl.toml", &body);
-        cfg.apply_provider_pin_with_policy(policy)
-            .expect("ctrl.toml loads");
-        crate::ctrl::config::apply_credential_routing(&mut cfg, creds);
-        (cfg.agent.model.clone(), cfg.llm.use_anthropic_direct)
-    };
-
-    // Control — the pre-#3766 behaviour, still reachable with no policy set:
-    // the ambient credential decides, so the two environments disagree.
-    let ambient_anthropic = resolve(None, &LlmCredentials::AnthropicDirect);
-    let ambient_openrouter = resolve(None, &LlmCredentials::OpenRouter);
-    assert_ne!(
-        ambient_anthropic, ambient_openrouter,
-        "without a policy the ambient credential is expected to decide — if this ever \
-         holds, the test below has stopped proving anything"
-    );
-
-    let pinned_anthropic = resolve(Some(TEST_POLICY), &LlmCredentials::AnthropicDirect);
-    let pinned_openrouter = resolve(Some(TEST_POLICY), &LlmCredentials::OpenRouter);
-    assert_eq!(
-        pinned_anthropic, pinned_openrouter,
-        "the configured policy must decide, not the ambient credential"
-    );
-    assert_eq!(
-        pinned_anthropic.0,
-        format!("{TEST_POLICY}/claude-sonnet-4-6")
-    );
-    assert!(
-        !pinned_anthropic.1,
-        "use_anthropic_direct must follow the policy"
-    );
-}
-
-/// Acceptance criterion 1 — a bundled-template refresh cannot regress a
-/// policy-resolved provider.
-///
-/// Why: `agents::bundled` rewrites a deployed template whenever its bytes
-/// differ from the bundled tree, and it never re-applies a live edit. Had
-/// #3766 been implemented by writing a provider into the template files, every
-/// reprovision would have silently reverted it. Keeping the policy in the
-/// operator config and applying it at LOAD is what makes this test pass, so
-/// this is the test that would fail an in-template implementation.
-/// What: deploys the bundle into a tempdir, records the policy-resolved
-/// provider for `ctrl.toml`, edits the deployed file and forces a genuine refresh
-/// over it, and re-resolves.
-///
-/// #3844: the force path (`tagent agents repair`) is what drives the refresh
-/// here. The automatic path now KEEPS a divergent file it cannot attribute to its
-/// own prior deploy, so a hand edit plus a stale stamp no longer refreshes
-/// anything — and this test's subject is the refresh, not which pass triggers it.
-/// Test: itself.
-#[test]
-fn a_reprovision_cannot_regress_the_policy_resolved_provider() {
-    let target = tempfile::tempdir().expect("tempdir");
-    let target = target.path();
-    crate::agents::bundled::ensure_bundled_agents_deployed_in(
-        crate::agents::bundled::content::test_support::repo_tree(
-            crate::agents::bundled::BundledTreeKind::Agents,
-        ),
-        target,
-    )
-    .expect("initial deploy");
-
-    let deployed = target.join("ctrl.toml");
-    let resolve = || {
-        let body = std::fs::read_to_string(&deployed).expect("read the deployed template");
-        let mut cfg = parse_template("ctrl.toml", &body);
-        cfg.apply_provider_pin_with_policy(Some(TEST_POLICY))
-            .expect("deployed ctrl.toml loads under the policy");
-        (cfg.agent.model.clone(), cfg.agent.provider_id.clone())
-    };
-
-    let before = resolve();
-    assert_eq!(before.1.as_deref(), Some(TEST_POLICY));
-
-    // An on-disk divergence for the refresh to act on.
-    let edited = format!(
-        "{}\n# local edit\n",
-        std::fs::read_to_string(&deployed).expect("read deployed")
-    );
-    std::fs::write(&deployed, edited).expect("write the edited template");
-
-    let report = crate::agents::bundled::force_reprovision_bundled_agents(
-        crate::agents::bundled::content::test_support::repo_tree(
-            crate::agents::bundled::BundledTreeKind::Agents,
-        ),
-        target,
-    )
-    .expect("refresh pass");
-    assert!(
-        report.refreshed >= 1,
-        "the force path must have driven a real refresh: {report:?}"
-    );
-
-    assert_eq!(
-        resolve(),
-        before,
-        "a template refresh must not change the policy-resolved provider"
-    );
 }
 
 /// Acceptance criterion 2 — no bundled template defaults to the

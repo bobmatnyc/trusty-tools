@@ -1,7 +1,7 @@
 //! Revision-aware listener bindings shared by the operator API and self-only tool.
-use super::{agent_paths::resolve_agent_paths, agent_names::is_valid_agent_name};
+use super::{Json, StatusCode};
+use super::{agent_names::is_valid_agent_name, agent_paths::resolve_agent_paths};
 use crate::listeners::config::{AgentListenerBinding, ListenerConfig};
-use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -253,76 +253,6 @@ pub(crate) async fn write_from_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn listener_and_model_updates_share_manifest_transaction_lock() {
-        use super::super::agent_patch::{PatchAgentRequest, patch_agent_at};
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.toml");
-        tokio::fs::write(&path,"[agent]\nname='fixture'\nrole='assistant'\nrunner='subprocess'\nmodel='openai/gpt-4o-mini'\ndescription='fixture'\n").await.unwrap();
-        let dirs = [dir.path().to_path_buf()];
-        let available =
-            [toml::from_str::<ListenerConfig>("name='mail'\nconnector='gmail'").unwrap()];
-        let initial = read_at(&dirs, "fixture", &available).await.unwrap();
-        let revision = initial["revision"].as_str().unwrap().to_owned();
-        let guard = super::super::AGENT_CONFIG_WRITE_LOCK.lock().await;
-        let patch = patch_agent_at(
-            &dirs,
-            "fixture",
-            PatchAgentRequest {
-                model_id: Some("openai/gpt-4o".into()),
-                ..Default::default()
-            },
-        );
-        tokio::pin!(patch);
-        tokio::select! { biased; _=&mut patch=>panic!("model patch bypassed manifest lock"), _=tokio::task::yield_now()=>{} }
-        let put = write_at(
-            &dirs,
-            "fixture",
-            &available,
-            ListenerUpdate {
-                revision,
-                listeners: vec![AgentListenerBinding {
-                    name: "mail".into(),
-                    instructions: "invoice".into(),
-                    ..Default::default()
-                }],
-            },
-        );
-        tokio::pin!(put);
-        tokio::select! { biased; _=&mut put=>panic!("listener update bypassed manifest lock"), _=tokio::task::yield_now()=>{} }
-        drop(guard);
-        assert_eq!(patch.await.status(), StatusCode::OK);
-        assert_eq!(put.await.unwrap_err().0, StatusCode::CONFLICT);
-        let fresh = read_at(&dirs, "fixture", &available).await.unwrap();
-        write_at(
-            &dirs,
-            "fixture",
-            &available,
-            ListenerUpdate {
-                revision: fresh["revision"].as_str().unwrap().into(),
-                listeners: vec![AgentListenerBinding {
-                    name: "mail".into(),
-                    instructions: "invoice".into(),
-                    ..Default::default()
-                }],
-            },
-        )
-        .await
-        .unwrap();
-        let result = patch_agent_at(
-            &dirs,
-            "fixture",
-            PatchAgentRequest {
-                model_id: Some("openai/gpt-4o-mini".into()),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(result.status(), StatusCode::OK);
-        let raw = tokio::fs::read_to_string(path).await.unwrap();
-        assert!(raw.contains("openai/gpt-4o-mini"));
-        assert_eq!(parse(&raw).unwrap()[0].instructions, "invoice");
-    }
     #[tokio::test]
     async fn listener_inheritance_is_effective_revisioned_and_removed_with_disabled_override() {
         let dir = tempfile::tempdir().unwrap();

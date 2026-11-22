@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::DelegateToAgentTool;
-use trusty_agents_common::perf::TokenUsage;
 use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor};
+use trusty_agents_common::perf::TokenUsage;
 
 /// Mock runner that records whether it was invoked and with what args.
 struct RecordingRunner {

@@ -38,14 +38,14 @@ pub(super) async fn replay(context: &Context) -> Result<(), super::Error> {
         };
         let state = match context.current(&state.revision).await {
             Ok(s) => s,
-            Err((axum::http::StatusCode::CONFLICT, _)) => continue,
+            Err((super::super::StatusCode::CONFLICT, _)) => continue,
             Err(e) => return Err(e),
         };
         let sources = context.sources(&state.project_selections())?;
         let store = context.store();
         match disk(move || store.replay_inbox(&state.revision, &sources, Utc::now())).await {
             Ok(_) => return Ok(()),
-            Err((axum::http::StatusCode::CONFLICT, _)) => continue,
+            Err((super::super::StatusCode::CONFLICT, _)) => continue,
             Err(e) => return Err(e),
         }
     }

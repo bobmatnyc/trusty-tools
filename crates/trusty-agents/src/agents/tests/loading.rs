@@ -151,9 +151,7 @@ async fn by_name_async_loads_plan_agent() {
     let _guard = ENV_LOCK.lock().await;
     clear_model_env("plan-agent");
     // #9014: the bundled roster lives under content/, not the cwd.
-    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    );
+    let bundled_dir = crate::test_env::bundled_agents_dir();
     let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
         "TAGENT_CONFIG_DIR",
         bundled_dir.to_str().expect("utf-8 path"),
@@ -161,8 +159,7 @@ async fn by_name_async_loads_plan_agent() {
     let cfg = AgentConfig::by_name_async("plan-agent")
         .await
         .expect("plan-agent loads async");
-    use crate::llm::adapter::Provider;
-    assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
+    assert_eq!(cfg.agent.name, "plan-agent");
 }
 
 #[test]
@@ -306,16 +303,13 @@ fn agent_config_load_populates_adapter() {
     let _guard = ENV_LOCK.blocking_lock();
     clear_model_env("plan-agent");
     // #9014: the bundled roster lives under content/, not the cwd.
-    let bundled_dir = crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    );
+    let bundled_dir = crate::test_env::bundled_agents_dir();
     let _config_dir = crate::channels::credentials::test_env::EnvVarGuard::set(
         "TAGENT_CONFIG_DIR",
         bundled_dir.to_str().expect("utf-8 path"),
     );
     let cfg = AgentConfig::by_name("plan-agent").expect("plan-agent loads");
-    use crate::llm::adapter::Provider;
-    assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
+    assert_eq!(cfg.agent.name, "plan-agent");
 }
 
 #[test]
@@ -330,8 +324,6 @@ fn agent_config_ctrl_default_loads_with_adapter() {
     assert!(cfg.system_prompt.content.contains("Standalone"));
     assert!(cfg.system_prompt.content.contains("delegate_to_agent"));
     // Adapter is populated by from_toml_str.
-    use crate::llm::adapter::Provider;
-    assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
 }
 
 #[test]
@@ -492,9 +484,7 @@ content = "test"
 
 /// Path to the bundled `.trusty-agents/agents` directory shipped with the crate.
 fn bundled_agents_dir() -> PathBuf {
-    crate::agents::bundled::content::test_support::repo_tree_dir(
-        crate::agents::bundled::BundledTreeKind::Agents,
-    )
+    crate::test_env::bundled_agents_dir()
 }
 
 #[test]
@@ -1092,8 +1082,6 @@ tools:\n  allowed: [my_tool]\n---\n\nMY OVERRIDES\n";
     assert_eq!(cfg.agent.name, "my-researcher");
     // Model inherited from the base and resolved; adapter matches it.
     assert_eq!(cfg.agent.model, "anthropic/claude-sonnet-4-6");
-    use crate::llm::adapter::Provider;
-    assert_eq!(cfg.adapter.provider(), Provider::Anthropic);
 }
 
 #[test]
@@ -1858,6 +1846,39 @@ mod agent_name_resolves_tests {
     }
 }
 
+// #11632: the L0-gated tool names the roster audits below check against. The
+// tools themselves (`tools::l0_exec`, `tools::gh_tools`, `tools::session_state`)
+// were cut with the coding-tool surface; the roster in `content/` still ships,
+// so the guard that no persona grants these names stays.
+const L0_SHELL_EXEC: &str = "l0_shell_exec";
+const GH_TOOL_NAMES: &[&str] = &[
+    "gh_pr_list",
+    "gh_pr_view",
+    "gh_pr_checks",
+    "gh_run_list",
+    "gh_run_view",
+];
+const L0_ONLY_SESSION_STATE_TOOLS: &[&str] = &[
+    "session_state_list",
+    "session_state_status",
+    "session_state_snapshot",
+    "session_list",
+    "session_status",
+    "session_proxy_summary",
+    "project_list",
+    "console_metrics",
+    "system_status",
+];
+
+/// Glob match with the `[tools].allow` semantics: exact, or `prefix*`.
+/// #11632: a copy of the cut `ctrl::pm_task::match_any_glob`.
+fn match_any_glob(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| match p.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == p,
+    })
+}
+
 /// The zero-delta capability check for ONE L0 persona, expressed as a
 /// `Result` so the identical rule can be run against both the real bundled
 /// roster and a fixture that deliberately violates it (#4519).
@@ -1889,7 +1910,7 @@ fn l0_persona_capability_delta(
         return Ok(());
     };
     for granted in allow {
-        if crate::tools::session_state::is_l0_only_session_state_tool(granted) {
+        if L0_ONLY_SESSION_STATE_TOOLS.contains(&granted.as_str()) {
             return Err(format!(
                 "'{name}' names the L0-gated tool '{granted}' in its effective allow set — \
                  becoming L0 would GRANT it, which is a capability change this \
@@ -1901,24 +1922,21 @@ fn l0_persona_capability_delta(
         // `[tools].allow` entries are glob patterns — a persona declaring
         // `l0_*` or `*` would reach the shell just as surely as one naming it
         // outright, and an equality check would miss both.
-        if crate::ctrl::pm_task::match_any_glob(
-            crate::tools::l0_exec::L0_SHELL_EXEC,
-            std::slice::from_ref(granted),
-        ) {
+        if match_any_glob(L0_SHELL_EXEC, std::slice::from_ref(granted)) {
             return Err(format!(
                 "'{name}' grants '{granted}' in its effective allow set (`[tools].allow` \
                  unioned with the tools `[skills].allow` expands to), which matches the \
                  L0-only execution grant '{}' — as an L0 persona it would hold a \
                  real shell. That is a capability change, not a side effect: \
                  review it deliberately.",
-                crate::tools::l0_exec::L0_SHELL_EXEC
+                L0_SHELL_EXEC
             ));
         }
         // #4170: and for the L0-only GitHub PR/CI surface. Same glob
         // reasoning; every name checked, so a tool added to `GH_TOOL_NAMES` is
         // covered without editing this test.
-        for gh in crate::tools::gh_tools::GH_TOOL_NAMES {
-            if crate::ctrl::pm_task::match_any_glob(gh, std::slice::from_ref(granted)) {
+        for gh in GH_TOOL_NAMES {
+            if match_any_glob(gh, std::slice::from_ref(granted)) {
                 return Err(format!(
                     "'{name}' grants '{granted}' in its effective allow set, which matches \
                      the L0-only GitHub tool '{gh}' — as an L0 persona it would \
@@ -2172,10 +2190,10 @@ allow = ["orchestration-shell-run"]
     assert!(
         effective_allow
             .as_deref()
-            .is_some_and(|p| p.iter().any(|t| t == crate::tools::l0_exec::L0_SHELL_EXEC)),
+            .is_some_and(|p| p.iter().any(|t| t == L0_SHELL_EXEC)),
         "sanity: the skill must expand to '{}', else this fixture is not the \
          case under test; got {effective_allow:?}",
-        crate::tools::l0_exec::L0_SHELL_EXEC
+        L0_SHELL_EXEC
     );
 
     // (1) The fix: the guard now CATCHES it.
@@ -2185,7 +2203,7 @@ allow = ["orchestration-shell-run"]
          [skills].allow — if this is Ok the blind spot #4519 closes is back",
     );
     assert!(
-        msg.contains(crate::tools::l0_exec::L0_SHELL_EXEC),
+        msg.contains(L0_SHELL_EXEC),
         "the rejection must name the tool it is protecting; got: {msg}"
     );
 
@@ -2378,7 +2396,7 @@ fn bundled_personas_pin_git_reach() {
         });
 
         for tool in ALL_GIT_TOOLS {
-            let reaches = crate::ctrl::pm_task::match_any_glob(tool, allow);
+            let reaches = match_any_glob(tool, allow);
             if intended.contains(&tool) {
                 assert!(
                     reaches,

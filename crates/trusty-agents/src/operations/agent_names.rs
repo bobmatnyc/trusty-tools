@@ -82,4 +82,46 @@ mod tests {
         );
         assert!(is_valid_agent_name(&"a".repeat(MAX_AGENT_NAME_LEN)));
     }
+
+    /// audit 2026-08-19 (finding 12): tightening to an allowlist must not lock
+    /// any shipped agent out of its own configuration.
+    ///
+    /// Why: a validator that rejects real names is a worse outage than the
+    /// traversal it prevents. Reading the roster off disk means a newly
+    /// bundled agent whose name the allowlist would reject fails this test.
+    /// Test: itself.
+    #[test]
+    fn agent_name_allowlist_accepts_every_bundled_agent() {
+        let dir = crate::test_env::bundled_agents_dir();
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("bundled agents dir") {
+            let path = entry.expect("dir entry").path();
+            let name = if path.is_dir() {
+                if !path.join("agent.toml").is_file() {
+                    continue;
+                }
+                path.file_name()
+                    .expect("dir name")
+                    .to_string_lossy()
+                    .into_owned()
+            } else if path.extension().is_some_and(|e| e == "toml") {
+                path.file_stem()
+                    .expect("file stem")
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                continue;
+            };
+            assert!(
+                is_valid_agent_name(&name),
+                "bundled agent {name:?} must remain reachable"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 20,
+            "expected the full bundled roster, only saw {checked} names in {}",
+            dir.display()
+        );
+    }
 }

@@ -10,12 +10,12 @@ pub(crate) mod intake;
 #[cfg(test)]
 mod tests;
 
+use super::{AxumPath, Json, StatusCode};
 use crate::{
     agents::AgentConfig,
     assistants::{AssistantHome, AssistantInstanceId},
     knowledge::{KnowledgeError, KnowledgeState, KnowledgeStore, ProtectedStore, SourceDescriptor},
 };
-use axum::{Json, extract::Path as AxumPath, http::StatusCode};
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -496,4 +496,3 @@ pub(crate) async fn assistant_history(
     };
     Ok(value)
 }
-

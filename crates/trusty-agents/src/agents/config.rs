@@ -9,7 +9,6 @@
 //! serde defaults and small helper impls.
 //! Test: Round-trip parsing is exercised by the unit tests in `tests.rs`.
 
-
 use serde::Deserialize;
 
 use super::params::{

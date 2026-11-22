@@ -1,7 +1,6 @@
-
-use super::{agent_listeners, agent_paths::resolve_agent_paths, agent_names::is_valid_agent_name};
+use super::{Json, StatusCode};
+use super::{agent_listeners, agent_names::is_valid_agent_name, agent_paths::resolve_agent_paths};
 use crate::listeners::config::{AgentBindingFilter, AgentListenerBinding};
-use axum::{Json, http::StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};

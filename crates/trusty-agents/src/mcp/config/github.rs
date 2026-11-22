@@ -49,7 +49,6 @@ impl GitHubIdentity {
     pub fn repo(&self) -> Option<String> {
         std::env::var(&self.repo_env).ok().filter(|s| !s.is_empty())
     }
-
 }
 
 /// `[github]` section of `~/.trusty-agents/config.toml` (#243).

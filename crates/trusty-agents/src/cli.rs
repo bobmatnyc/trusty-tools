@@ -9,7 +9,7 @@
 //! `config profile …` or `mcp-serve`; anything else is a usage error. No path
 //! here opens a network listener.
 //! Test: `tests/version_provenance.rs`, `tests/help_exit_code.rs`,
-//! `tests/config_mount.rs`, `tests/removed_modes.rs`.
+//! `tests/config_mount.rs`, `tests/no_network_listener.rs`.
 
 use std::time::{Duration, Instant};
 
@@ -101,7 +101,7 @@ fn classify(args: &[String]) -> Command {
 /// What: installs the rustls crypto provider (#4825), then runs the verb
 /// [`classify`] picks. An unknown argument — including the removed `--api`,
 /// `--serve` and `--port` — prints the usage on stderr and fails.
-/// Test: `tests/removed_modes.rs`, `tests/help_exit_code.rs`.
+/// Test: `tests/no_network_listener.rs`, `tests/help_exit_code.rs`.
 pub async fn run() -> Result<()> {
     crate::tls::install_crypto_provider()?;
     let args: Vec<String> = std::env::args().collect();
@@ -119,7 +119,9 @@ pub async fn run() -> Result<()> {
         Command::McpServe => crate::mcp_serve::run_mcp_serve().await,
         Command::Unknown(arg) => {
             eprint!("{USAGE}");
-            anyhow::bail!("unknown argument `{arg}`; the HTTP API and harness modes were removed (#11632)")
+            anyhow::bail!(
+                "unknown argument `{arg}`; the HTTP API and harness modes were removed (#11632)"
+            )
         }
     }
 }
@@ -258,7 +260,14 @@ mod tests {
     /// Test: itself.
     #[test]
     fn removed_modes_are_unknown() {
-        for flag in ["--api", "--serve", "--port", "--ctrl", "--workflow", "--agent"] {
+        for flag in [
+            "--api",
+            "--serve",
+            "--port",
+            "--ctrl",
+            "--workflow",
+            "--agent",
+        ] {
             assert_eq!(
                 classify(&argv(&[flag, "8080"])),
                 Command::Unknown(flag.to_string()),
@@ -274,7 +283,10 @@ mod tests {
         assert_eq!(classify(&argv(&[])), Command::Help);
         assert_eq!(classify(&argv(&["-h"])), Command::Help);
         assert_eq!(classify(&argv(&["mcp-serve"])), Command::McpServe);
-        assert_eq!(classify(&argv(&["config", "keys", "list"])), Command::Config);
+        assert_eq!(
+            classify(&argv(&["config", "keys", "list"])),
+            Command::Config
+        );
         assert_eq!(
             classify(&argv(&["config", "profile", "show"])),
             Command::ConfigProfile

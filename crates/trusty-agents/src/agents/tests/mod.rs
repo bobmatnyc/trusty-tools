@@ -1165,11 +1165,6 @@ fn agent_config_honours_a_provider_pin() {
         cfg.agent.model, "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
         "the pin must put the provider's routing marker on the slug"
     );
-    assert_eq!(
-        cfg.adapter.provider(),
-        crate::llm::adapter::Provider::Bedrock,
-        "and the adapter must be derived from the pinned slug"
-    );
     assert!(!cfg.llm.use_anthropic_direct);
 }
 
@@ -1180,18 +1175,10 @@ fn agent_config_honours_a_provider_pin() {
 #[test]
 fn agent_config_pin_beats_the_model_slug_prefix() {
     let unpinned = load_pinned("claude-sonnet-4-6", None).expect("loads");
-    assert_eq!(
-        unpinned.adapter.provider(),
-        crate::llm::adapter::Provider::Anthropic,
-        "precondition: the bare slug infers Anthropic"
-    );
+    assert_eq!(unpinned.agent.model, "claude-sonnet-4-6");
 
     let pinned = load_pinned("claude-sonnet-4-6", Some("bedrock")).expect("loads");
     assert_eq!(pinned.agent.model, "bedrock/claude-sonnet-4-6");
-    assert_eq!(
-        pinned.adapter.provider(),
-        crate::llm::adapter::Provider::Bedrock
-    );
 }
 
 /// Why: #3765 is explicit that an agent with NO pin keeps today's ambient
@@ -1206,10 +1193,6 @@ fn agent_config_without_a_pin_is_unchanged() {
     assert!(
         !cfg.llm.use_anthropic_direct,
         "an unpinned agent's use_anthropic_direct stays as declared"
-    );
-    assert_eq!(
-        cfg.adapter.provider(),
-        crate::llm::adapter::Provider::Anthropic
     );
 }
 
@@ -1290,11 +1273,6 @@ fn agent_config_pin_routes_atlascloud() {
 
     let cfg = cfg.expect("pinned agent loads");
     assert_eq!(cfg.agent.model, "atlascloud/openai/gpt-5.6-sol");
-    assert_eq!(
-        cfg.adapter.provider(),
-        crate::llm::adapter::Provider::AtlasCloud,
-        "before #3765 the `openai` substring routed this to OpenRouter"
-    );
 }
 
 /// Why: an anthropic pin must FORCE the direct path rather than depend on
@@ -1374,11 +1352,6 @@ fn override_model_repins_a_pinned_agent() {
         cfg.agent.model, "atlascloud/anthropic.claude-3-5-haiku-20241022-v1:0",
         "the override's bedrock/ marker must be replaced by the pin's"
     );
-    assert_eq!(
-        cfg.adapter.provider(),
-        crate::llm::adapter::Provider::AtlasCloud,
-        "and the rebuilt adapter must follow the pin, not the override's slug"
-    );
 }
 
 /// Why: the other half of the contract — an UNPINNED agent's override must
@@ -1393,10 +1366,6 @@ fn override_model_leaves_an_unpinned_agent_alone() {
     assert_eq!(
         cfg.agent.model, "bedrock/anthropic.claude-3-5-haiku-20241022-v1:0",
         "an unpinned override is taken verbatim"
-    );
-    assert_eq!(
-        cfg.adapter.provider(),
-        crate::llm::adapter::Provider::Bedrock
     );
 }
 

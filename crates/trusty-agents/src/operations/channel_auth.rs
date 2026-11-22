@@ -15,7 +15,6 @@
 //! Test: `writes_are_refused_until_a_credential_is_recorded`.
 use std::sync::RwLock;
 
-
 /// The copy every refusal answers with, HTTP and tool alike.
 const REFUSAL: &str = "Channel writes require an API token. Start the daemon with --api-token (or \
                        TAGENT_API_TOKEN); this process accepts channel reads only.";

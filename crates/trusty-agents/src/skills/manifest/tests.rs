@@ -328,11 +328,7 @@ fn agent_roster_grants_only_tools_that_have_a_skill() {
 fn roster_granted_tool_names() -> Vec<String> {
     let mut out = Vec::new();
     // #9014: the bundled roster lives under content/.
-    let mut stack = vec![
-        crate::agents::bundled::content::test_support::repo_tree_dir(
-            crate::agents::bundled::BundledTreeKind::Agents,
-        ),
-    ];
+    let mut stack = vec![crate::test_env::bundled_agents_dir()];
     while let Some(path) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&path) else {
             continue;

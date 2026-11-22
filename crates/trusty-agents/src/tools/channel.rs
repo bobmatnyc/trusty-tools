@@ -155,7 +155,7 @@ impl ToolExecutor for ChannelTool {
         };
         match result {
             Ok(v) => ToolResult::ok(v.to_string()),
-            Err((_, axum::Json(v))) => {
+            Err((_, crate::operations::Json(v))) => {
                 ToolResult::err(v["error"].as_str().unwrap_or("Channel request failed"))
             }
         }

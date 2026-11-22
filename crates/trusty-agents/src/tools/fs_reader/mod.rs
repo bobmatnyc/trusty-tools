@@ -98,25 +98,4 @@ mod tests {
             r.content()
         );
     }
-
-    // Tiny local replacement for the `pathdiff` crate so we don't add a new
-    // dependency for a two-function need.
-    mod pathdiff {
-        use std::path::{Path, PathBuf};
-
-        /// Produce a path expressing `target` relative to `base` if possible,
-        /// else return the absolute `target`.
-        pub fn diff_or_absolute(target: &Path, base: &Path) -> String {
-            match target.strip_prefix(base) {
-                Ok(rel) => rel.display().to_string(),
-                Err(_) => target.display().to_string(),
-            }
-        }
-
-        // Keep PathBuf unused import quiet for platforms that lint strictly.
-        #[allow(dead_code)]
-        fn _unused() -> PathBuf {
-            PathBuf::new()
-        }
-    }
 }
