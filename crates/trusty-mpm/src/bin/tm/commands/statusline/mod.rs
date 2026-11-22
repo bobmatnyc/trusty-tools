@@ -237,8 +237,9 @@ fn render_statusline_from(
 ///
 /// Why (#2011 follow-up, extended #2140, #6304 and #6958): separating ORDER +
 /// JOIN from the I/O-bound probes that produce each segment value is what makes
-/// the exact layout — `TM <ver> ● | <project> ⎇ <branch> | @<gh> | ✻<account> |
-/// <model> | ctx% | <cost> | <usage> | <savings>` — pinned by a deterministic
+/// the exact layout — `TM <ver> ● | <savings> | <project> ⎇ <branch> | @<gh> |
+/// ✻<account> | <model> | ctx% | <cost> | <usage>` (#11560: savings second, so
+/// an 80-column pane's cut cannot reach it) — pinned by a deterministic
 /// test using hand-supplied synthetic strings. Without this split, a future
 /// refactor could transpose or silently drop a middle segment and no test would
 /// catch it.
@@ -260,8 +261,11 @@ fn assemble_statusline(
     usage: Option<String>,
     savings: Option<String>,
 ) -> String {
+    // #11560: savings sits second. Claude Code cuts the line at the pane
+    // width, and an 80-column PM pane cut it before the last segment.
     [
         Some(version),
+        savings,
         project,
         gh,
         account,
@@ -269,7 +273,6 @@ fn assemble_statusline(
         ctx,
         cost,
         usage,
-        savings,
     ]
     .into_iter()
     .flatten()
@@ -533,7 +536,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "TM 1.2.3 \u{25cf} | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | \u{273b}someone@example.com | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41% | \u{1f4b8}~$0.42"
+            "TM 1.2.3 \u{25cf} | \u{1f4b8}~$0.42 | bobmatnyc/trusty-tools \u{2387} main | @bobmatnyc | \u{273b}someone@example.com | Claude Sonnet 4.6 | ctx 41% | $1.23 | \u{23f3}24% \u{1f4c5}41%"
         );
     }
 
@@ -560,15 +563,44 @@ mod tests {
         );
         assert_eq!(
             out,
-            "VERSION | PROJECT | GH | ACCOUNT | MODEL | CTX | COST | USAGE | SAVINGS"
+            "VERSION | SAVINGS | PROJECT | GH | ACCOUNT | MODEL | CTX | COST | USAGE"
         );
         assert_eq!(
             out.split(" | ").collect::<Vec<_>>(),
             vec![
-                "VERSION", "PROJECT", "GH", "ACCOUNT", "MODEL", "CTX", "COST", "USAGE", "SAVINGS"
+                "VERSION", "SAVINGS", "PROJECT", "GH", "ACCOUNT", "MODEL", "CTX", "COST", "USAGE"
             ],
-            "segment order must exactly match [version, project, gh, account, model, ctx, cost, usage, savings]"
+            "segment order must exactly match [version, savings, project, gh, account, model, ctx, cost, usage]"
         );
+    }
+
+    /// Why (#11560): Claude Code cuts the line at the pane width, and a PM pane
+    /// is 80 columns. With savings last, the cut fell before `💸`.
+    /// What: a realistic full line, cut to 80 display columns (an emoji or a
+    /// CJK-range char counts two), still carries the savings segment.
+    /// Test: itself.
+    #[test]
+    fn the_savings_segment_survives_an_80_column_cut() {
+        let out = assemble_statusline(
+            "TM 1.14.12 \u{25cf}".to_string(),
+            Some("bobmatnyc/trusty-tools \u{2387} fix/11560-savings-row".to_string()),
+            Some("@bobmatnyc".to_string()),
+            Some("\u{273b}someone@example.com".to_string()),
+            Some("Opus 4.5".to_string()),
+            Some("ctx 41%".to_string()),
+            Some("$12.34".to_string()),
+            Some("\u{23f3}24% \u{1f4c5}41%".to_string()),
+            Some("\u{1f4b8}62%/48%".to_string()),
+        );
+        let mut cols = 0;
+        let cut: String = out
+            .chars()
+            .take_while(|c| {
+                cols += if u32::from(*c) >= 0x1F000 { 2 } else { 1 };
+                cols <= 80
+            })
+            .collect();
+        assert!(cut.contains("\u{1f4b8}62%/48%"), "cut at 80: {cut}");
     }
 
     /// Why (#2011 follow-up): every segment except `version` must be omittable

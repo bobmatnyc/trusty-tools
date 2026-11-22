@@ -32,6 +32,8 @@ use crate::core::savings_opportunity::OpportunityRow;
 pub enum SkipReason {
     /// The rewrite applied: the result went through `tm compress`.
     Compressed,
+    /// #11560: the rewrite applied, but `tm compress` returned no fewer tokens.
+    CompressedNoGain,
     /// A non-Bash result the dry run would not shrink.
     NoGain,
     /// A non-Bash result (subagent, MCP, Read, …): no hook compresses these.

@@ -148,6 +148,7 @@ pub(crate) async fn run_chain(spec: &str, nonce: &str) -> anyhow::Result<i32> {
     };
     let session_id = trusty_mpm::core::savings::claude_code_session_id();
     let mut out = String::with_capacity(input.len());
+    let mut gained = false;
     for (piece, tool) in split_chain(input, nonce, tools.len())
         .into_iter()
         .zip(&tools)
@@ -179,8 +180,10 @@ pub(crate) async fn run_chain(spec: &str, nonce: &str) -> anyhow::Result<i32> {
             path.as_str(),
             tag,
         );
+        gained |= trusty_mpm::core::savings_compress::compress_gains(piece.len(), compressed.len());
         out.push_str(&compressed);
     }
+    record_chain_outcome(session_id.as_deref(), spec, gained);
     let mut stdout = tokio::io::stdout();
     stdout.write_all(out.as_bytes()).await?;
     stdout.flush().await?;
@@ -212,6 +215,25 @@ fn record_step_savings(
             tag,
         ),
         Err(source) => tracing::warn!(%source, "no framework root: writing no chain savings row"),
+    }
+}
+
+/// The chain's outcome for the observer, keyed by the `--tool` spec (#11560).
+///
+/// #7514: the ambient root read stays out of unit tests, like
+/// [`record_step_savings`].
+fn record_chain_outcome(session_id: Option<&str>, spec: &str, gained: bool) {
+    let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return;
+    };
+    if let Ok(paths) = super::managed_root::resolve_managed_paths(None) {
+        // #11560: a chain saved when any step saved.
+        trusty_mpm::core::savings_compress_outcome::record_outcome(
+            &paths.root,
+            session_id,
+            spec,
+            gained,
+        );
     }
 }
 

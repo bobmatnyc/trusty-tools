@@ -218,3 +218,145 @@ fn a_chain_step_row_carries_its_tool_and_the_chain_fields() {
     assert!(rows[1].get("chain_shape").is_none(), "{text}");
     assert!(rows[1].get("steps").is_none(), "{text}");
 }
+
+/// Run `f` under a subscriber that keeps INFO and above; return what it logged.
+///
+/// #11560: `tm compress` installs an `info` filter, so a line the test sees
+/// here is a line the operator sees there.
+pub(crate) fn logs_at_info(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = Arc::clone(&buf);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(move || SharedBuf(Arc::clone(&sink)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buf.lock().map(|b| b.clone()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut b) = self.0.lock() {
+            b.extend_from_slice(data);
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Why (#11560): a zero-saving decline was invisible; it must be counted in a
+/// file, and #7607 forbids it on `tm compress` stderr (the agent's tool result).
+/// Test: itself.
+#[test]
+fn a_zero_saving_decline_is_recorded_in_the_decline_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let run = || {
+        record_compress_with(
+            dir.path(),
+            "sess-a",
+            "ls",
+            668,
+            668,
+            "native_fallback",
+            sonnet_price,
+        )
+    };
+    let logged = logs_at_info(run);
+    assert!(
+        logged.is_empty(),
+        "#7607: nothing on stderr at info: {logged}"
+    );
+    let day = format!("{}.jsonl", &now_ts()[..10]);
+    let text = std::fs::read_to_string(decline_dir_in(dir.path()).join(day)).expect("day file");
+    assert_eq!(text.lines().count(), 1, "{text}");
+    let line: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
+    assert_eq!(line["reason"], "no_gain");
+    assert_eq!(line["session_id"], "sess-a");
+    assert!(!savings_log_in(dir.path()).exists(), "still no row");
+}
+
+/// #11560: a failed decline write is swallowed with nothing at info.
+#[test]
+fn a_failed_decline_write_is_silent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("usage"), "not a directory").expect("blocker");
+    let logged = logs_at_info(|| {
+        record_compress_with(dir.path(), "sess-a", "ls", 668, 668, "p", sonnet_price);
+    });
+    assert!(logged.is_empty(), "{logged}");
+}
+
+/// Why (#11560): a failed savings write is fail-open AND visible.
+/// Test: itself.
+#[test]
+fn a_failed_savings_write_is_logged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("usage"), "not a directory").expect("blocker");
+    let logged = logs_at_info(|| {
+        record_compress_with(
+            dir.path(),
+            "sess-a",
+            "cargo test",
+            400_000,
+            40_000,
+            "rtk_binary",
+            sonnet_price,
+        );
+    });
+    assert!(
+        logged.contains("could not append the compress savings row"),
+        "{logged}"
+    );
+}
+
+/// #11560: the observer's split and the row decline agree at the boundary.
+#[test]
+fn compress_gains_matches_the_row_decline() {
+    for (before, after) in [(668, 668), (400_000, 40_000), (8, 5), (9, 4), (0, 0)] {
+        assert_eq!(
+            compress_gains(before, after),
+            compress_row("s", before, after, "p", sonnet_price).is_some(),
+            "{before} -> {after}"
+        );
+    }
+}
+
+/// #11560 review: the decline sink is day-capped; a full day drops silently.
+#[test]
+fn a_full_decline_day_drops_silently() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let declines = decline_dir_in(dir.path());
+    let line = serde_json::json!({"ts": "2026-11-22T00:00:00Z", "reason": "no_gain"});
+    let first = append_day_line(&declines, "2026-11-22T00:00:00Z", &line, 10, 14).expect("write");
+    assert_eq!(
+        first,
+        crate::core::savings_opportunity::OpportunityAppend::Written
+    );
+    let day = declines.join("2026-11-22.jsonl");
+    let len = std::fs::metadata(&day).expect("day file").len();
+    let logged = logs_at_info(|| {
+        let again = append_day_line(&declines, "2026-11-22T00:00:01Z", &line, 10, 14);
+        assert!(matches!(
+            again,
+            Ok(crate::core::savings_opportunity::OpportunityAppend::DayFullMarked)
+        ));
+    });
+    assert!(logged.is_empty(), "{logged}");
+    let after = std::fs::read_to_string(&day).expect("day file");
+    assert!(
+        after.len() as u64 > len && after.contains("day_full"),
+        "{after}"
+    );
+    assert_eq!(
+        after.matches("no_gain").count(),
+        1,
+        "the dropped line is not stored"
+    );
+}

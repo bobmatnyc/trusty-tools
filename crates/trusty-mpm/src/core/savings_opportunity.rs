@@ -208,11 +208,37 @@ fn append_opportunity_bounded_with(
     keep_days: usize,
     remove: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> std::io::Result<OpportunityAppend> {
-    let day = row
-        .ts
-        .get(..10)
-        .filter(|d| is_day(d))
-        .unwrap_or("unknown-day");
+    append_day_line_with(dir, &row.ts, row, day_cap, keep_days, remove)
+}
+
+/// Append any serializable `row` to its day file under `dir`, day-capped.
+///
+/// Why (#11560): the compress-decline file needs the same bound as the
+/// opportunity ledger; one helper keeps the two from drifting.
+/// What: [`append_opportunity_bounded`]'s rules, with the day taken from `ts`.
+/// Test: `the_opportunity_ledger_is_bounded_by_day_cap_and_retention`,
+/// `a_full_decline_day_drops_silently`.
+pub fn append_day_line<T: Serialize>(
+    dir: &Path,
+    ts: &str,
+    row: &T,
+    day_cap: u64,
+    keep_days: usize,
+) -> std::io::Result<OpportunityAppend> {
+    append_day_line_with(dir, ts, row, day_cap, keep_days, &|p| {
+        std::fs::remove_file(p)
+    })
+}
+
+fn append_day_line_with<T: Serialize>(
+    dir: &Path,
+    ts: &str,
+    row: &T,
+    day_cap: u64,
+    keep_days: usize,
+    remove: &dyn Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<OpportunityAppend> {
+    let day = ts.get(..10).filter(|d| is_day(d)).unwrap_or("unknown-day");
     let path = dir.join(format!("{day}.jsonl"));
     crate::core::home_write_fence::check(&path); // #8545
     match std::fs::metadata(&path) {
