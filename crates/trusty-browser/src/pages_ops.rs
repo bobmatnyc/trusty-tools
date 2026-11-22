@@ -84,7 +84,7 @@ fn peer_of(core: &Core, grant: &Grant) -> Result<Arc<Peer>, Refusal> {
 }
 
 /// One page command with the contract's grant and lease fate on refusal (`Pages.send`).
-async fn send(
+pub(crate) async fn send(
     core: &Core,
     grant: &Grant,
     claim: Option<(String, i64)>,
@@ -234,11 +234,16 @@ pub async fn run(
     match op {
         "release" => {
             core.lock().drop_claim(&claim.token);
+            crate::emulation::reconcile(core).await; // #11371: reset on release.
             return Ok((Json::object([("ok", Json::Bool(true))]), Some(tab), None));
         }
         "switch" => return switch(core, grant, &claim).await,
         "page_read" | "page_find" => return query(core, grant, &claim, op, request).await,
         "page_downloads" => return downloads(core, grant, &claim).await,
+        "page_emulate" => {
+            let (token, peer, origin) = (&claim.token, &claim.peer, claim.origin.as_deref());
+            return crate::emulation::run(core, grant, token, tab, peer, origin, request).await;
+        }
         _ => {}
     }
     let rid = request_string(request, "request_id")?.to_owned();
@@ -453,6 +458,8 @@ async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) ->
             }
         }
     };
+    // #11371: a tab left emulated by an ended lease resets before the new holder sees it.
+    crate::emulation::reconcile(core).await;
     let key = Some((peer.generation.clone(), tab));
     let args = vec![("tab", Json::Int(tab))];
     let probed = send(core, grant, key, &peer, "page_tab", args)

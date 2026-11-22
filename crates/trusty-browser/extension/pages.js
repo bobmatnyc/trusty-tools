@@ -3,6 +3,8 @@
 // the read (#11355). Top-level code touches no `chrome` API. The `page*` function declarations are injected by chrome.scripting.executeScript, so each one
 // is self-contained: Chrome serializes the function source and runs it in the tab's isolated world.
 if (!globalThis.TrustyPageRead && typeof importScripts === "function") importScripts("pages_read.js");
+// #11371: tab emulation, which act() shares its debugger attachment with.
+if (!globalThis.TrustyEmulation && typeof importScripts === "function") importScripts("emulation.js");
 globalThis.TrustyPages = (() => {
   // Returns [origin, title, url] and changes nothing; the InjectionResult supplies the documentId.
   function pageProbe() { return [location.origin, document.title, location.href.slice(0, 2048)]; }
@@ -562,6 +564,7 @@ TrustyPages.commands = deps => {
     page_upload:{tab, document:doc, ref, files}, page_downloads:{tab},
     page_back:{tab}, page_forward:{tab}, page_reload:{tab},
     page_switch:{tab},
+    page_emulate:{tab, ...TrustyEmulation.spec},
     grant_end:{reason:v => REASONS.includes(v), last:v => typeof v === "boolean"},
   };
   const refuse = (error, fields = {}) => Object.assign(new Error(error), {fields});
@@ -843,7 +846,9 @@ TrustyPages.commands = deps => {
       }
       return raw(method, params);
     };
-    try { await chrome.debugger.attach(debuggee, "1.3"); } catch {
+    // #11371: an emulated tab keeps its attachment; act() shares it and leaves it attached.
+    let own = false;
+    try { own = await TrustyEmulation.attach(debuggee); } catch {
       const now = await probe(req.tab);
       if (now.access && now.document === req.document) throw refuse("DebuggerBusy", {tab:req.tab});
       throw changed(now);
@@ -865,7 +870,7 @@ TrustyPages.commands = deps => {
       aborted = true;
       clearTimeout(timer);
       chrome.debugger.onEvent.removeListener(answer);
-      await chrome.debugger.detach(debuggee).catch(() => {});
+      if (own) await chrome.debugger.detach(debuggee).catch(() => {});
     }
     return seen ? {document:req.document, dialog:seen} : {document:req.document};
 
@@ -998,6 +1003,7 @@ TrustyPages.commands = deps => {
     page_back:req => step(req.tab, "goBack"),
     page_forward:req => step(req.tab, "goForward"),
     page_reload:req => step(req.tab, "reload"),
+    page_emulate:req => TrustyEmulation.apply(req),
     // #11293: focus changes browser-wide state, so a tab grant may not switch even to its own tab.
     async page_switch(req, row) {
       if (row.scope === "tab") throw refuse("OutOfScope", {tab:req.tab});
@@ -1020,6 +1026,7 @@ TrustyPages.commands = deps => {
     if (req.op === "grant_end") {
       // grant_end refuses only a malformed frame or another account; an unknown grant is already ended.
       try { await deps.ended(req.grant, req.last); } catch { /* The next acknowledgement prunes the row. */ }
+      await TrustyEmulation.resetGrant(req.grant); // #11371
       return {id:req.id, ok:true, email:req.email, result:"ended"};
     }
     const row = await deps.grant(req.grant);
@@ -1027,6 +1034,7 @@ TrustyPages.commands = deps => {
     if ("tab" in spec) {
       if (row.scope === "tab" && req.tab !== row.tab) throw refuse("OutOfScope", {tab:req.tab});
       try { await chrome.tabs.get(req.tab); } catch { throw refuse("TabNotFound", {tab:req.tab}); }
+      await TrustyEmulation.guard(req); // #11371: another grant never sees this tab emulated.
     }
     const result = await run[req.op](req, row);
     return {id:req.id, ok:true, email:req.email, result, ...("tab" in spec ? {tab:req.tab} : {})};
@@ -1037,7 +1045,7 @@ TrustyPages.commands = deps => {
   function failure(req, error) {
     if (!error?.fields) {
       const acting = ["page_click","page_hover","page_type","page_press","page_select","page_scroll","page_navigate",
-        "page_upload","page_back","page_forward","page_reload","page_drag"].includes(req.op);
+        "page_upload","page_back","page_forward","page_reload","page_drag","page_emulate"].includes(req.op);
       return {id:req.id, ok:false, error:acting ? "OutcomeUnknown" : "BrowserDisconnected"};
     }
     const fields = Object.fromEntries(Object.entries(error.fields || {}).filter(([k]) => RELAYED.includes(k)));

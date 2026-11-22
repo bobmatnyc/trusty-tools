@@ -111,6 +111,7 @@ async function connect() {
       if (connection !== port) return;
       connection = null;
       void TrustyControlIndicator.clearAll();
+      void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
       lost();
       clearTimeout(timeout);
       port.disconnect();
@@ -121,6 +122,7 @@ async function connect() {
       if (connection === port) {
         connection = null;
         void TrustyControlIndicator.clearAll();
+        void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
         lost();
         clearTimeout(timeout);
         // #11529: before the acknowledgement the failure is the pairing's, not an idle port.
@@ -188,6 +190,7 @@ function reconnect() {
   epoch++;
   settleReady(false);
   void TrustyControlIndicator.clearAll();
+  void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
   void codes.offline.lost();
   const port = connection;
   connection = null;
@@ -265,4 +268,6 @@ chrome.alarms.onAlarm.addListener(alarm => {
 chrome.alarms.create("reconnect", {periodInMinutes:1});
 // A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
 void codes.offline.lost();
+// #11371: an attachment a previous worker run held (its emulation) is released at start.
+void TrustyEmulation.sweep();
 void connect();
