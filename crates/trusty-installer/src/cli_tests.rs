@@ -533,21 +533,12 @@ fn parse_sign() {
         let parsed = Cli::try_parse_from(["trusty-installer", "sign", value])
             .unwrap_or_else(|e| panic!("sign {value} parses: {e}"));
         match parsed.command {
-            Command::Sign { target, .. } => {
+            Commands::Sign { target, .. } => {
                 assert_eq!(target, SignTargetArg::Assistants);
                 assert_eq!(target.as_set_name(), "trusty-assistants");
             }
             other => panic!("expected Sign, got {other:?}"),
         }
-    }
-    let agents = Cli::try_parse_from(["trusty-installer", "sign", "trusty-assistants"])
-        .expect("sign trusty-assistants parses");
-    match agents.command {
-        Commands::Sign { target, .. } => {
-            assert_eq!(target, SignTargetArg::Assistants);
-            assert_eq!(target.as_set_name(), "trusty-assistants");
-        }
-        other => panic!("expected Sign, got {other:?}"),
     }
 
     // Owner ruling 2026-08-06: `trusty-memory` joins as a valid `tctl sign`
