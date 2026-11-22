@@ -26,11 +26,11 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 ///
 /// Why: HR-3 / DOC-17 requires the daemon to SURFACE catalog staleness so the
 /// TUI can show an indicator and the operator can decide to rebuild. The probe
-/// stays a liveness check (`status: "ok"`) and additionally carries the
+/// carries liveness in `alive`, overall health in `status`, and the
 /// cheap, offline catalog-staleness signal computed from the already-synced
 /// catalog checkout vs the deployed checksum manifests — it never blocks on a
 /// network pull.
-/// What: `status` is the liveness word; `catalog_stale` is true when deployed
+/// What: `status` is the overall health word; `catalog_stale` is true when deployed
 /// content drifts from the synced catalog; `catalog_unknown` is true when the
 /// catalog has never been synced (distinct from "fresh"); `catalog_changes` is a
 /// small human summary of WHAT changed (empty unless stale); `supervised`
@@ -39,8 +39,21 @@ use crate::daemon::tmux::{AdoptedSession, SessionSnapshot};
 /// `health_reports_ok_status`, `health_response_serializes_supervised_field`.
 #[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct HealthResponse {
-    /// Liveness word — `"ok"` while the daemon is up.
+    /// Overall health word: `"ok"`, or `"degraded"` when [`Self::degraded`]
+    /// is non-empty (a parked subsystem, or trusty-memory / trusty-search not
+    /// answering). Not a liveness signal — read [`Self::alive`] for that.
     pub status: String,
+    /// Whether the daemon process answered — the liveness signal.
+    ///
+    /// Why: `status` turns `"degraded"` when a dependency is down, and a
+    /// restart wait or supervisor that read `status == "ok"` as "the process is
+    /// up" would then bounce a live daemon for another daemon's outage.
+    /// What: always `true` in a response (an answer is liveness). The serde
+    /// default is `true` too, so a client reading an older daemon that omits
+    /// the field still sees it as alive.
+    /// Test: `both_up_reports_ok`, `health_snapshot_alive_defaults_true`.
+    #[serde(default = "default_alive")]
+    pub alive: bool,
     /// True when deployed agents/skills drift from the synced catalog (HR-3).
     pub catalog_stale: bool,
     /// True when the catalog has never been synced (nothing to compare).
@@ -196,6 +209,12 @@ pub struct HealthResponse {
 /// "safe" default so an older daemon response missing the field never reads
 /// as hazardous.
 fn default_supervised() -> bool {
+    true
+}
+
+/// Default for [`HealthResponse::alive`]: a response that parsed came from a
+/// live daemon.
+fn default_alive() -> bool {
     true
 }
 

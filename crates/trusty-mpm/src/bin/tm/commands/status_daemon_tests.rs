@@ -42,6 +42,7 @@ const LIVE_PID: u32 = 424_242;
 fn snapshot(pid: Option<u32>, version: &str) -> HealthSnapshot {
     HealthSnapshot {
         status: "ok".to_string(),
+        alive: true,
         catalog_stale: false,
         catalog_unknown: false,
         version: version.to_string(),

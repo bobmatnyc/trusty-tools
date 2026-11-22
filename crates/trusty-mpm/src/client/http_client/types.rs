@@ -1007,7 +1007,7 @@ pub struct FleetByProjectWireResponse {
 /// catalog-freshness flags (HR-3 / DOC-17) in one typed shape, rather than the
 /// bare boolean [`super::DaemonClient::is_healthy`] returns. Mirroring the
 /// daemon's `HealthResponse` field names keeps the wire contract type-checked.
-/// What: `status` is the liveness word (`"ok"` while up); `catalog_stale` is true
+/// What: `status` is the overall health word, `alive` the liveness bool; `catalog_stale` is true
 /// when deployed agents/skills drift from the synced catalog; `catalog_unknown`
 /// is true when the catalog has never been synced; `version` is the running
 /// daemon's build version (issue #2332). All non-`status` fields default so an
@@ -1015,8 +1015,19 @@ pub struct FleetByProjectWireResponse {
 /// Test: `health_snapshot_deserializes` in `tests.rs`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct HealthSnapshot {
-    /// Liveness word — `"ok"` while the daemon is up.
+    /// Overall health word: `"ok"`, or `"degraded"` when `degraded` is
+    /// non-empty. Not liveness — read [`Self::alive`].
     pub status: String,
+    /// Whether the daemon process answered; mirrors
+    /// `daemon::api::types::HealthResponse::alive`.
+    ///
+    /// Why: `status` is `"degraded"` while trusty-memory or trusty-search is
+    /// down, so it no longer answers "is the daemon up".
+    /// What: defaults to `true` when absent, because a response that parsed
+    /// came from a live daemon (an older daemon omits the field).
+    /// Test: `health_snapshot_alive_defaults_true`.
+    #[serde(default = "default_alive")]
+    pub alive: bool,
     /// True when deployed content drifts from the synced catalog (HR-3).
     #[serde(default)]
     pub catalog_stale: bool,
@@ -1132,4 +1143,9 @@ pub struct HealthSnapshot {
     /// Test: `health_snapshot_unbound_delegations_is_none_when_absent`.
     #[serde(default)]
     pub unbound_delegations_error: Option<String>,
+}
+
+/// Default for [`HealthSnapshot::alive`]: a parsed answer means a live daemon.
+fn default_alive() -> bool {
+    true
 }

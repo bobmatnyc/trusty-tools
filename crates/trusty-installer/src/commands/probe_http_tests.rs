@@ -256,6 +256,28 @@ fn warming_daemon_is_degraded_not_serving() {
     assert_eq!(effective_status(&already), "degraded");
 }
 
+/// Why: trusty-mpm reports `status: "degraded"` while trusty-memory or
+/// trusty-search is down, but `alive: true` says the member itself is up; `tctl
+/// up` must not restart it for another daemon's outage.
+/// Test: This is the test.
+#[test]
+fn alive_degraded_member_reads_ok() {
+    let mpm = serde_json::json!({ "status": "degraded", "alive": true });
+    assert_eq!(effective_status(&mpm), "ok");
+    assert_eq!(
+        classify_status(&effective_status(&mpm)),
+        MemberHealth::HealthyVersionOk
+    );
+    // Without `alive`, or with `alive: false`, degraded stays degraded.
+    let plain = serde_json::json!({ "status": "degraded" });
+    assert_eq!(effective_status(&plain), "degraded");
+    let dead = serde_json::json!({ "status": "degraded", "alive": false });
+    assert_eq!(effective_status(&dead), "degraded");
+    // A readiness gap still degrades an alive member.
+    let warming = serde_json::json!({ "status": "degraded", "alive": true, "embedder": "stalled" });
+    assert_eq!(effective_status(&warming), "degraded");
+}
+
 // ── The dual-resolution precedence rule ─────────────────────────────────────
 
 /// Why: THE rule that stops the fix re-shipping the bug. trusty-memory port-walks

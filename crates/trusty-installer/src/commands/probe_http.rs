@@ -688,10 +688,21 @@ fn sample(bytes: &[u8]) -> String {
 /// `embedder_status` is accepted too so a rename cannot silently defeat this).
 /// A daemon that carries none of them, or whose sub-field is not a string, is
 /// unaffected.
+///
+/// A body with `alive: true` and `status: "degraded"` (trusty-mpm, whose
+/// `status` turns degraded when trusty-memory or trusty-search is down) reads
+/// as `"ok"`: `alive` is the member's own liveness, and the dependency outage
+/// shows on those members' own rows. Otherwise `tctl up` reads the member
+/// `HealthyStale` and restarts a live daemon for another daemon's outage.
 /// Test: `tests::warming_daemon_is_degraded_not_serving`,
-/// `tests::real_daemon_payloads_are_never_down`.
+/// `tests::real_daemon_payloads_are_never_down`,
+/// `tests::alive_degraded_member_reads_ok`.
 pub fn effective_status(v: &serde_json::Value) -> String {
-    let raw = v.get("status").and_then(|s| s.as_str()).unwrap_or_default();
+    let mut raw = v.get("status").and_then(|s| s.as_str()).unwrap_or_default();
+    if raw.eq_ignore_ascii_case(DEGRADED) && v.get("alive").and_then(|a| a.as_bool()) == Some(true)
+    {
+        raw = "ok";
+    }
     if classify_status(raw) != MemberHealth::HealthyVersionOk {
         // Already degraded/down by its own account — never upgrade a verdict.
         return raw.to_owned();

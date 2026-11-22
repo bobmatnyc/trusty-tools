@@ -1240,6 +1240,24 @@ fn health_snapshot_degraded_defaults_to_empty() {
     assert!(suspended.degraded[0].contains("gh auth login"));
 }
 
+/// `alive` is the liveness signal: absent (an older daemon) reads `true`, and a
+/// degraded daemon still reports itself alive.
+/// Test: this test.
+#[test]
+fn health_snapshot_alive_defaults_true() {
+    let old: HealthSnapshot =
+        serde_json::from_value(serde_json::json!({ "status": "ok" })).expect("old body parses");
+    assert!(old.alive);
+    let degraded: HealthSnapshot = serde_json::from_value(serde_json::json!({
+        "status": "degraded",
+        "alive": true,
+        "degraded": ["trusty-search: timeout"],
+    }))
+    .expect("degraded body parses");
+    assert!(degraded.alive);
+    assert_eq!(degraded.status, "degraded");
+}
+
 /// #9007: the count is `None` for a daemon predating it, so a client cannot
 /// read an absent count as zero.
 #[test]

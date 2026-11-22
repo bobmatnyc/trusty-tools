@@ -351,12 +351,14 @@ pub struct DaemonState {
     /// what the client reads as "cannot tell".
     /// Test: `health_response_serializes_build_id_field`.
     pub(super) build_identity: std::sync::RwLock<String>,
-    /// The `/health` catalog-staleness report cache (#7968).
+    /// The `/health` caches: catalog staleness (#7968) and dependency probes.
     ///
-    /// Why: the walk behind the report must not run inline per request; see
-    /// [`crate::daemon::rpc::health_catalog`].
-    /// Test: `health_answers_while_the_catalog_read_is_stalled`.
-    pub(super) catalog_report: Arc<crate::daemon::rpc::health_catalog::CatalogReportCache>,
+    /// Why: neither the catalog walk nor the memory/search probes may run
+    /// inline per request; see [`crate::daemon::rpc::health_catalog`] and
+    /// [`crate::daemon::rpc::health_deps`].
+    /// Test: `health_answers_while_the_catalog_read_is_stalled`,
+    /// `stale_cached_ok_expires_after_max_age`.
+    pub(super) catalog_report: super::overseer::HealthCaches,
     /// Layer-3 portfolio manager state (`tm manager`, epic #2109, DOC-36 §3.1).
     ///
     /// Why: DOC-36 §3.1 makes `tm manager` a daemon-owned component whose
@@ -665,7 +667,7 @@ impl DaemonState {
     pub(crate) fn catalog_report_cache(
         &self,
     ) -> &Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
-        &self.catalog_report
+        &self.catalog_report.catalog
     }
 
     /// The framework root directory this daemon was configured with.
