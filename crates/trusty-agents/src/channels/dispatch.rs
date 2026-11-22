@@ -178,7 +178,8 @@ fn wakes(channel: &Channel, event: &StoredEvent) -> bool {
 /// computes for source (1) — set by ADDRESSING the event, before the
 /// `enabled`/`receive_enabled`/filter gates decide whether it also wakes. At
 /// most one of `routed`/`legacy` is ever `Some`.
-/// Test: its covering test left with the cut code (#11632).
+/// Test: `a_disabled_overlay_claims_the_event_and_wakes_nobody`,
+/// `a_send_only_global_wakes_nobody_it_routes_to`.
 #[derive(Debug, Default)]
 pub(crate) struct RouteSources {
     /// A global or overlay addresses this event, whether or not it wakes.
@@ -200,7 +201,8 @@ pub(crate) struct RouteSources {
 /// An empty `target` is account-wide and addresses everything the provider
 /// ingests; a non-empty one is put to the adapter, the same
 /// [`super::ChannelAdapter::addresses`] call source (1) makes.
-/// Test: its covering test left with the cut code (#11632).
+/// Test: `a_slack_global_routes_only_to_its_own_destination`,
+/// `agent_channels_gmail_binding_claims_only_its_own_correspondent`.
 fn addresses(channel: &Channel, provider: &str, destination: &str, event: &StoredEvent) -> bool {
     if channel.provider != provider {
         return false;
@@ -228,7 +230,10 @@ fn addresses(channel: &Channel, provider: &str, destination: &str, event: &Store
 /// `a_legacy_overlay_wakes_without_route_to`,
 /// `a_routed_global_excludes_the_legacy_binding_for_the_same_pair`,
 /// `an_overlay_filter_narrows_the_global_it_covers`,
-/// `an_unknown_provider_claims_nothing`.
+/// `an_unknown_provider_claims_nothing`,
+/// `a_disabled_overlay_claims_the_event_and_wakes_nobody`,
+/// `a_slack_global_routes_only_to_its_own_destination`,
+/// `a_send_only_global_wakes_nobody_it_routes_to`.
 pub(crate) fn route_sources(
     globals: &[Channel],
     own: &[Channel],

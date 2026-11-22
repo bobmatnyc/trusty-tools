@@ -44,7 +44,7 @@ use crate::rbac::ServiceTier;
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct PermissionsConfig {
     /// Settings list replacements supersede inherited grants; authored overlays default to union.
-    /// Test: its covering test left with the cut code (#11632).
+    /// Test: `agents::extends::tests::settings_grant_replacements_survive_extends`.
     #[serde(default)]
     pub replace_scopes: bool,
     #[serde(default)]
