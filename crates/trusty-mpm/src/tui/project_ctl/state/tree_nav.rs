@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 use ratatui::layout::Rect;
 
 use super::ProjectCtlState;
-use super::tree::{NodeId, TreeRow, build_tree, owner_key, owner_of_repo_url};
+use super::tree::{NodeId, TreeRow, build_tree, tree_owner_key};
 use crate::session_manager::ssh_host_alias::SshHostAliases;
 use crate::tui::coordinator::nav::ListNav;
 
@@ -202,10 +202,11 @@ impl ProjectCtlState {
     /// The owner key of a registered project, as [`NodeId`] carries it.
     pub(crate) fn owner_of_project(&self, project: &str) -> Option<String> {
         // #10476: D1c — case-only owner variants group as one owner
+        // #11554: the Architect's key is the top-level one, as its node's
         self.projects
             .iter()
             .find(|p| p.name == project)
-            .map(|p| owner_key(&owner_of_repo_url(&p.repo_url, aliases())))
+            .map(|p| tree_owner_key(p, aliases()))
     }
 
     /// Move the selection one visible row down (`down`) or up, saturating.
