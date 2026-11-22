@@ -205,7 +205,7 @@ fn run_config_profile_subcommand(argv_tail: &[String]) -> Result<()> {
             }
             None => println!(
                 "No profile set. Set TAGENT_USER_NAME/_EMAIL/_TIMEZONE/_LOCATION in \
-                 .env.local, or run `tagent config profile set --name <name>`."
+                 the environment, or run `tagent config profile set --name <name>`."
             ),
         },
         ProfileVerb::Set {

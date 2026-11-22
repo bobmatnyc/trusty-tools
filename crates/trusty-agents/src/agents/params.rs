@@ -301,10 +301,7 @@ pub struct LlmParams {
     /// through the same function for the ctrl/Slack/Telegram/API delegation
     /// turn, which carried its own hardcoded 4 until then.
     /// Test: `llm_params_persona_max_turns_defaults_to_none`,
-    /// `llm_params_persona_max_turns_parses_override` (`tests.rs`);
-    /// `persona_max_turns_with_tools_defaults_to_eight`,
-    /// `persona_max_turns_with_tools_honors_config_override`
-    /// (`ctrl::pm_task::dispatch::persona_tests`).
+    /// `llm_params_persona_max_turns_parses_override` (`tests.rs`).
     #[serde(default)]
     pub persona_max_turns: Option<u32>,
 
@@ -374,7 +371,7 @@ pub struct LlmParams {
     /// When `None`, falls back to the AWS SDK's default credential chain
     /// (env vars first, then `default` profile).
     /// Test: Field-level parsing covered by the standard serde
-    /// `#[serde(default)]` semantics; integration via `bedrock_smoke_test`.
+    /// `#[serde(default)]` semantics.
     #[serde(default)]
     pub aws_profile: Option<String>,
 
@@ -398,7 +395,7 @@ pub struct LlmParams {
     /// What: When `Some(n)`, the wave-loop retry helper, after exhausting its
     /// transient-error retries on the base model, makes ONE more attempt
     /// using `elevation_model`. When `None` (default), no elevation occurs.
-    /// Test: `elevation_triggers_after_n_failures`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default)]
     pub elevation_threshold: Option<u32>,
 
@@ -409,7 +406,7 @@ pub struct LlmParams {
     /// runner expects (`claude-opus-4-6`, `anthropic/claude-opus-4-6`, etc.).
     /// What: When `Some(name)` AND `elevation_threshold` is also set, the
     /// wave loop retries once on this model after exhausting normal retries.
-    /// Test: `elevation_triggers_after_n_failures`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default)]
     pub elevation_model: Option<String>,
 

@@ -246,13 +246,9 @@ pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 /// env-mutating test; async tests that cannot hold a `std::sync::Mutex`
 /// guard across `.await` may call this un-guarded and rely on `#[serial]`
 /// instead, matching the existing convention for those tests.
-/// Test: exercised indirectly via every test that now calls this before
-/// clearing credential env vars (`llm::credentials::tests::clear_all`,
-/// `llm::helpers::tests::create_client_*`, `llm::adapter::tests::*_when_env_absent`,
-/// `llm::http::tests::send_raw_completion_*`, `ctrl::ctrl_turn::dispatch::tests::clear_creds_env`,
-/// `runtime::cli_def::tests::credential_banner::clear_all`) — not
-/// independently unit tested since it depends on real process/filesystem
-/// state, exactly like `load_env_local_once` itself.
+/// Test: exercised indirectly by every test that calls it before clearing
+/// credential env vars — not independently unit tested since it depends on
+/// real process/filesystem state, exactly like `load_env_local_once` itself.
 pub fn force_env_local_loaded() {
     trusty_common::credentials::load_env_local_once();
 }
@@ -274,7 +270,7 @@ pub fn force_env_local_loaded() {
 /// each provider's `env_var_for` mapping when one exists, then removes
 /// `CLAUDE_CODE_OAUTH_TOKEN` explicitly (it has no registry entry — it's
 /// ctrl/PM's own OAuth routing credential, not an inference provider).
-/// Test: `llm::credentials::tests::other_configured_providers_empty_when_nothing_else_configured`.
+/// Test: its covering test left with the cut code (#11632).
 pub fn clear_all_credential_env_vars() {
     for caps in trusty_common::inference::registry::all() {
         if let Some(var) = trusty_common::credentials::env_var_for(caps.id.as_str()) {

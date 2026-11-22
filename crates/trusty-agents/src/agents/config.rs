@@ -532,7 +532,8 @@ fn default_agent_kind() -> String {
 /// `TicketingConfig::from_env()`.
 /// What: All fields optional; fields not relevant to the chosen provider
 /// are ignored.
-/// Test: Construction happy-path covered via `TicketingConfig::build_client`.
+/// Test: parsed as part of `AgentConfig`; the client it built left with the
+/// cut `ticketing` module (#11632).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)]
 pub struct TicketingTomlConfig {
@@ -628,7 +629,7 @@ pub struct AgentInfo {
     /// agent dispatchable but out of picker UIs (e.g. trimming the demo
     /// roster to Izzie/CTO Assistant/Concierge without touching
     /// `assistant`/`personal-assistant`/`research-agent`'s role or tools).
-    /// Test: `parse_agent_toml_hidden_defaults_false_and_parses_true`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default)]
     pub hidden: bool,
 
@@ -647,7 +648,7 @@ pub struct AgentInfo {
     /// `"system-tool"` (set on `ctrl`/Concierge). Not an enum: new picker
     /// sections are meant to be addable by dropping a new `kind` string into
     /// an agent TOML, not by a Rust code change every time.
-    /// Test: `parse_agent_toml_kind_defaults_assistant_and_parses_system_tool`.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default = "default_agent_kind")]
     pub kind: String,
 

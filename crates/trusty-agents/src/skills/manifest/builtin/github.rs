@@ -15,8 +15,7 @@
 //! What: A `const` table of one-tool [`SkillDef`] rows, all `Action` kind —
 //! these are things a user asks for by name ("check PR 4200's CI"), not
 //! internal plumbing to collapse away like the `System` rows in `ops.rs`.
-//! Test: `super::super::tests::every_tool_declared_in_source_has_a_skill`,
-//! `crate::tools::gh_tools::tests::every_gh_tool_has_a_skill_in_the_builtin_catalog`.
+//! Test: `super::super::tests::every_tool_declared_in_source_has_a_skill`.
 
 use super::super::{ProviderReq, SkillDef, SkillKind::Action, tool_skill};
 

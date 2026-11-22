@@ -41,8 +41,7 @@
 //! `gworkspace_send_threads_a_reply_and_opens_a_fresh_message`,
 //! `gworkspace_send_refuses_a_fresh_message_to_a_glob_sender`,
 //! `gworkspace_receive_builds_a_wake_prompt_naming_the_binding`,
-//! `channel_gworkspace_binding_cannot_name_an_okg_source_credential`,
-//! `agent_channels_gmail_binding_claims_only_its_own_correspondent`.
+//! `channel_gworkspace_binding_cannot_name_an_okg_source_credential`.
 
 // #7427: Gmail joins Slack and Telegram as a binding-addressed channel.
 use super::{Capabilities, ChannelAdapter, ChannelError, InboundEvent, WakePrompt};

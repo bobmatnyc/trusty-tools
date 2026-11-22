@@ -266,7 +266,7 @@ pub(crate) async fn load_at_with(
 /// [`crate::channels::dispatch::is_overlay`] matches on. A missing file is no
 /// overlays; an unreadable or unparseable one is an `Err` the caller must not
 /// read as "no references".
-/// Test: `super::tests::global_channels::a_referenced_global_channel_is_not_deleted_without_force`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) async fn overlaid_global_ids(
     dirs: &[PathBuf],
     name: &str,
@@ -338,8 +338,7 @@ fn revision(raw: &str) -> String {
 /// drop, so a record the operator cannot see in `bindings` is at least visible
 /// as damage they can repair — re-declaring the global brings the binding back.
 /// Test: `channel_providers_json_reports_registry_capabilities`,
-/// `channel_dispatch_failure_is_counted_per_binding`,
-/// `the_assistant_channel_view_names_its_inert_overlays`.
+/// `channel_dispatch_failure_is_counted_per_binding`.
 pub(crate) async fn read(name: &str) -> Result<Value, Error> {
     let dirs = crate::agents::agents_dir_candidates();
     let globals = crate::mcp::config::GlobalConfig::load().await.channels;
@@ -585,8 +584,7 @@ pub(crate) async fn send(
 /// the adapter's own reason and never reaches the network. Every other failure
 /// maps through [`channel_failure`], so an unresolvable credential is
 /// distinguishable from an upstream refusal.
-/// Test: `a_stub_channel_sends_and_reads_back_over_http`,
-/// `channel_adapter_read_defaults_to_unsupported`.
+/// Test: `channel_adapter_read_defaults_to_unsupported`.
 pub(crate) async fn messages(name: &str, id: &str) -> Result<Value, Error> {
     let binding = bound(name, id, false).await?;
     let adapter = crate::channels::require_adapter(&binding.provider)

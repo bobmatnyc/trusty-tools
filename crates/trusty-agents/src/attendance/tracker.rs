@@ -328,8 +328,6 @@ pub fn note_turn_in(
 /// caller state. A `None` root (no home directory) is likewise a no-op. Returns
 /// whether the clock advanced; infallible, like [`note_turn_in`].
 /// Test: `a_command_only_session_stays_attended`,
-/// `paired_slash_command_records_a_human_turn`,
-/// `unpaired_slash_command_records_nothing`,
 /// `an_assistant_origin_caller_records_nothing`.
 pub fn note_command_turn_in(
     root: Option<&Path>,

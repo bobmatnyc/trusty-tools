@@ -99,7 +99,7 @@ const PINNABLE: [ProviderId; 6] = [
 /// Why: the single predicate both the loader and the `PATCH /api/agents/:name`
 /// write gate consult, so the API cannot persist a pin the loader will reject.
 /// What: membership in [`PINNABLE`].
-/// Test: `pinnable_set_matches_reachable_today`.
+/// Test: its covering test left with the cut code (#11632).
 pub fn is_pinnable(id: ProviderId) -> bool {
     PINNABLE.contains(&id)
 }

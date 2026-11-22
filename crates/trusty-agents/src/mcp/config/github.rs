@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// What: `name` is the identity label (e.g. "personal", "work"); `token_env`
 /// is the env var holding the GitHub PAT; `repo_env` is the env var holding
 /// the default `owner/repo` for that identity.
-/// Test: `identity_resolves_token_from_env`, `identity_to_config_requires_both`.
+/// Test: `identity_resolves_token_from_env`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct GitHubIdentity {
     pub name: String,
@@ -32,7 +32,7 @@ pub struct GitHubIdentity {
     /// SSO-protected orgs where `gh` handles the auth dance automatically).
     /// What: Defaults to `false`. When `true`, `build_client()` skips the
     /// REST path and uses `GhCliClient` if `gh` is available.
-    /// Test: Covered indirectly by `build_client_force_gh_cli` in mod.rs.
+    /// Test: its covering test left with the cut code (#11632).
     #[serde(default)]
     pub use_gh_cli: bool,
 }
@@ -57,7 +57,7 @@ impl GitHubIdentity {
 /// so `GlobalConfig::github_identity(None)` can resolve to "the right one".
 /// What: `default_identity` is the name to use when none is requested;
 /// `identities` is the list of named entries.
-/// Test: `tests::default_identity_lookup`, `tests::named_identity_lookup`.
+/// Test: `tests::default_identity_lookup`.
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GitHubSection {
     #[serde(default)]

@@ -80,8 +80,7 @@ use super::super::{SkillDef, function_skill};
 /// member list, not the name, when reviewing what a `google-workspace` grant
 /// confers; the card's description states the same scope to the user.
 /// Test: `google_workspace_function_skill_bundles_the_mail_and_tasks_leaves`,
-/// `google_workspace_bundle_excludes_account_and_settings_administration`,
-/// `super::super::super::api::server::tests::agent_skills::skills_route_rolls_up_group_provider_requirements`.
+/// `google_workspace_bundle_excludes_account_and_settings_administration`.
 const GOOGLE_WORKSPACE_MEMBERS: &[&str] = &[
     // --- mail -------------------------------------------------------------
     "gmail-search",

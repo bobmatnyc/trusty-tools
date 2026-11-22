@@ -9,8 +9,7 @@
 //! What: `chat.postMessage` for outbound. For inbound, the knowledge-intake
 //! pass and the wake-prompt construction, returned as a [`WakePrompt`] the
 //! caller dispatches — the adapter never spawns.
-//! Test: `agent_channels_receive_never_falls_back_for_disabled_bound_destination`,
-//! `agent_channels_validates_provider_destination_and_permissions`,
+//! Test: `agent_channels_validates_provider_destination_and_permissions`,
 //! `slack_adapter_reports_send_and_receive`.
 
 // #7427: provider knowledge moved out of the HTTP layer into one adapter.

@@ -173,7 +173,6 @@ impl UntrustedFence {
     ///      indent, no line can occupy column 0 as markdown structure.
     /// Test: `neutralize_escapes_envelope_tag`, `neutralize_collapses_fences`,
     /// `neutralize_escapes_leading_header`,
-    /// `render_contains_injection_payload_inertly`,
     /// `each_fence_defends_its_own_tag`.
     pub fn neutralize_line(&self, line: &str) -> String {
         let mut s = line.trim_end().to_string();
@@ -210,8 +209,7 @@ impl UntrustedFence {
     /// prompt-structure position. Bare-CR content is not exotic: legacy line
     /// endings and PDF-extraction output both reach a store through OKG
     /// ingestion.
-    /// Test: `render_bare_cr_payload_is_contained`,
-    /// `render_contains_injection_payload_inertly`.
+    /// Test: `render_bare_cr_payload_is_contained`.
     pub fn render_entry(&self, entry: &str) -> String {
         let normalized = entry.replace("\r\n", "\n").replace('\r', "\n");
         let mut out = String::new();

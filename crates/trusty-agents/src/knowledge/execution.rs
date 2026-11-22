@@ -26,7 +26,7 @@ impl Checkpoint {
     }
     /// Why: private inference candidates must not appear in public status responses.
     /// What: expose progress metadata only, with a fixed error notice instead of provider output.
-    /// Test: `reviewed_extraction_status_never_exposes_pending_candidates`.
+    /// Test: its covering test left with the cut code (#11632).
     pub fn public_status(&self) -> serde_json::Value {
         serde_json::json!({"source_id":self.source_id,"item_id":self.item_id,
             "fingerprint":self.fingerprint,"model":self.model,"status":self.status,

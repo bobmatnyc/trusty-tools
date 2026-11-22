@@ -48,8 +48,7 @@ impl ProjectRegistry {
     /// of hand-building `ProjectEntry` values and skipping the loader.
     /// What: Same struct, no home-dir resolution, hence no failure mode.
     /// Every read/write method behaves identically.
-    /// Test: `from_registry_loads_active_entries_for_l0`,
-    /// `from_registry_fails_closed_when_registry_is_unreadable`.
+    /// Test: its covering test left with the cut code (#11632).
     /// Record explicit selection without weakening automatic discovery filtering.
     pub async fn mark_manual(&self, path: &Path) -> Result<()> {
         let mut entries = self.load().await?;

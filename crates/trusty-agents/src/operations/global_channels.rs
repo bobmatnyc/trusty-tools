@@ -89,7 +89,7 @@ pub(crate) struct ChannelWrite {
 /// What: SHA-256 over the canonical JSON encoding of the list, which is
 /// deterministic for a given list because `Channel`'s field order is its
 /// declaration order.
-/// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) fn revision(channels: &[Channel]) -> Result<String, Error> {
     // #7609 critic LOW: a serialization failure used to hash to a fixed
     // sentinel, which would have compared EQUAL to another failure and let a
@@ -113,7 +113,7 @@ pub(super) fn revision(channels: &[Channel]) -> Result<String, Error> {
 /// What: an absent file is an empty list; a file that will not parse is a 500
 /// naming the problem, NEVER an empty list — reading a broken file as "no
 /// channels declared" would let a write publish that emptiness.
-/// Test: `a_malformed_config_is_reported_not_read_as_empty`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) fn channels_in(raw: &str) -> Result<Vec<Channel>, Error> {
     crate::mcp::config::GlobalConfig::from_toml_str(raw)
         .map(|config| config.channels)
@@ -162,7 +162,7 @@ fn config_path() -> Result<PathBuf, Error> {
 /// actually wakes are one list.
 /// What: the stored channels, their revision, the provider capability table,
 /// and the routable roster in enumeration order.
-/// Test: `global_channels_serve_the_dispatchable_assistant_roster`.
+/// Test: its covering test left with the cut code (#11632).
 fn view(channels: &[Channel], routable: &[String]) -> Result<Value, Error> {
     Ok(json!({
         "scope": "global",
@@ -194,7 +194,7 @@ fn view(channels: &[Channel], routable: &[String]) -> Result<Value, Error> {
 /// What: identity limits, provider, destination, permissions, credential
 /// reference, the shared filter rules, and `route_to` naming assistants this
 /// host actually has.
-/// Test: `global_channel_validation_covers_provider_target_and_routes`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) fn validate(channel: &Channel, known_assistants: &[String]) -> Result<(), Error> {
     if !is_valid_agent_name(&channel.id)
         || channel.name.trim().is_empty()
@@ -285,7 +285,7 @@ fn validate_credential(
 
 /// [`validate`] over the whole list, plus the list-level rules.
 ///
-/// Test: `global_channel_validation_covers_provider_target_and_routes`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) fn validate_all(channels: &[Channel], known_assistants: &[String]) -> Result<(), Error> {
     if channels.len() > MAX_CHANNELS {
         return Err(bad(&format!(
@@ -325,9 +325,7 @@ pub(super) enum Persisted {
 /// does not preserve.
 ///
 /// Blocking: the caller runs this on a blocking thread.
-/// Test: `global_channels_round_trip_preserves_config_and_rejects_a_stale_revision`,
-/// `a_malformed_config_is_reported_not_read_as_empty`,
-/// `a_global_write_keeps_a_comment_block_unrelated_to_channels`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) fn persist(
     path: &Path,
     expected_revision: &str,
@@ -451,7 +449,7 @@ pub(crate) async fn write_from_turn(update: GlobalUpdate) -> Result<Value, Error
 /// Why (#8036): the injection route resolves a channel by id and needs its
 /// provider, target and `route_to` — the same records `get_route` serves, read
 /// through the same loader so the two cannot disagree about what is declared.
-/// Test: `an_injected_event_wakes_only_the_routed_assistant`.
+/// Test: its covering test left with the cut code (#11632).
 pub(super) async fn stored() -> Result<Vec<Channel>, Error> {
     load(&config_path()?).await
 }
@@ -468,7 +466,7 @@ pub(super) async fn stored() -> Result<Vec<Channel>, Error> {
 /// read closes that window; `persist` then re-verifies under the lock, so the
 /// guarantee does not rest on this unlocked read.
 /// What: `(stored view, count before, count after)`, exactly as [`apply`].
-/// Test: `a_global_channel_is_created_and_updated_one_at_a_time`.
+/// Test: its covering test left with the cut code (#11632).
 async fn amend(
     revision_read: String,
     edit: impl FnOnce(&mut Vec<Channel>) -> Result<(), Error>,

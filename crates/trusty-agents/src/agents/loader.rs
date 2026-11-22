@@ -145,8 +145,7 @@ impl AgentConfig {
     /// What: Same package → flat `.toml` → flat `.md` → `extends` resolution
     /// as `by_name`, but every dir lookup (including recursive `extends`
     /// ancestor lookups and the shadow-fallback) is scoped to `dirs`.
-    /// Test: `handle_agent_command_resolves_directory_package_fixture`,
-    /// `handle_agent_command_activates_bundled_assistant_package` (repl/tests.rs).
+    /// Test: its covering test left with the cut code (#11632).
     pub fn by_name_in(dirs: &[PathBuf], name: &str) -> Result<Self> {
         let (cfg, from_package) = Self::by_name_unresolved_src_in(dirs, name)?;
         // #3055: resolve an `extends` chain at load time (DOC-41 §2.5). An
