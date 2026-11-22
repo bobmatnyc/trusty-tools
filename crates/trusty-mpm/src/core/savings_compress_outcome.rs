@@ -57,6 +57,7 @@ pub fn record_outcome(root: &Path, session_id: &str, tool: &str, gained: bool) {
     if session_id.trim().is_empty() {
         return;
     }
+    sweep_stale(&outcome_dir_in(root), OUTCOME_MAX_AGE);
     let path = outcome_path(root, session_id, tool);
     let tmp = path.with_extension(format!("tmp{}", std::process::id()));
     let value = if gained { GAIN } else { NO_GAIN };
@@ -65,11 +66,35 @@ pub fn record_outcome(root: &Path, session_id: &str, tool: &str, gained: bool) {
         .and_then(|()| std::fs::rename(&tmp, &path));
     if let Err(source) = written {
         let _ = std::fs::remove_file(&tmp);
-        tracing::warn!(
+        // #11560 review: debug — `tm compress` stderr is the agent's tool result.
+        tracing::debug!(
             path = %path.display(),
             %source,
             "could not record the compress outcome; the opportunity row will read `compressed`"
         );
+    }
+}
+
+/// Remove every entry in `dir` older than `max_age`, temp files included.
+///
+/// Why (#11560 review): an outcome whose observer never ran (a cancelled
+/// call, no hook, a key the observer could not derive) and a `.tmp<pid>` left
+/// by a crash are never taken. Best effort: every error is ignored.
+/// Test: `a_write_sweeps_aged_outcome_and_tmp_files`.
+fn sweep_stale(dir: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let aged = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > max_age);
+        if aged {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -143,7 +168,32 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         // A file where the `usage` directory should be: create_dir_all fails.
         std::fs::write(dir.path().join("usage"), "not a dir").expect("write");
-        record_outcome(dir.path(), "s1", "git diff", false);
+        let logged = super::super::savings_compress::tests::logs_at_info(|| {
+            record_outcome(dir.path(), "s1", "git diff", false);
+        });
+        assert!(
+            logged.is_empty(),
+            "#11560 review: nothing at info: {logged}"
+        );
         assert_eq!(take_outcome(dir.path(), "s1", "git diff"), None);
+    }
+
+    #[test]
+    fn a_write_sweeps_aged_outcome_and_tmp_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outcomes = outcome_dir_in(dir.path());
+        std::fs::create_dir_all(&outcomes).expect("mkdir");
+        let aged = std::time::SystemTime::now() - Duration::from_secs(3_600);
+        for name in ["0123456789abcdef", "0123456789abcdef.tmp42"] {
+            let f = std::fs::File::create(outcomes.join(name)).expect("create");
+            f.set_modified(aged).expect("age");
+        }
+        record_outcome(dir.path(), "s1", "ls", true);
+        let left: Vec<_> = std::fs::read_dir(&outcomes)
+            .expect("dir")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "only the fresh outcome remains: {left:?}");
     }
 }

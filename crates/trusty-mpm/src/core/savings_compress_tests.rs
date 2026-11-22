@@ -223,7 +223,7 @@ fn a_chain_step_row_carries_its_tool_and_the_chain_fields() {
 ///
 /// #11560: `tm compress` installs an `info` filter, so a line the test sees
 /// here is a line the operator sees there.
-fn logs_at_info(f: impl FnOnce()) -> String {
+pub(crate) fn logs_at_info(f: impl FnOnce()) -> String {
     use std::sync::{Arc, Mutex};
     let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
     let sink = Arc::clone(&buf);
@@ -273,7 +273,8 @@ fn a_zero_saving_decline_is_recorded_in_the_decline_file() {
         logged.is_empty(),
         "#7607: nothing on stderr at info: {logged}"
     );
-    let text = std::fs::read_to_string(decline_log_in(dir.path())).expect("decline file");
+    let day = format!("{}.jsonl", &now_ts()[..10]);
+    let text = std::fs::read_to_string(decline_dir_in(dir.path()).join(day)).expect("day file");
     assert_eq!(text.lines().count(), 1, "{text}");
     let line: serde_json::Value = serde_json::from_str(text.trim()).expect("json");
     assert_eq!(line["reason"], "no_gain");
@@ -325,4 +326,37 @@ fn compress_gains_matches_the_row_decline() {
             "{before} -> {after}"
         );
     }
+}
+
+/// #11560 review: the decline sink is day-capped; a full day drops silently.
+#[test]
+fn a_full_decline_day_drops_silently() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let declines = decline_dir_in(dir.path());
+    let line = serde_json::json!({"ts": "2026-11-22T00:00:00Z", "reason": "no_gain"});
+    let first = append_day_line(&declines, "2026-11-22T00:00:00Z", &line, 10, 14).expect("write");
+    assert_eq!(
+        first,
+        crate::core::savings_opportunity::OpportunityAppend::Written
+    );
+    let day = declines.join("2026-11-22.jsonl");
+    let len = std::fs::metadata(&day).expect("day file").len();
+    let logged = logs_at_info(|| {
+        let again = append_day_line(&declines, "2026-11-22T00:00:01Z", &line, 10, 14);
+        assert!(matches!(
+            again,
+            Ok(crate::core::savings_opportunity::OpportunityAppend::DayFullMarked)
+        ));
+    });
+    assert!(logged.is_empty(), "{logged}");
+    let after = std::fs::read_to_string(&day).expect("day file");
+    assert!(
+        after.len() as u64 > len && after.contains("day_full"),
+        "{after}"
+    );
+    assert_eq!(
+        after.matches("no_gain").count(),
+        1,
+        "the dropped line is not stored"
+    );
 }

@@ -43,7 +43,10 @@ use std::path::Path;
 
 use crate::core::savings::{BYTES_PER_TOKEN, SavingsRow, TECHNIQUE_COMPRESS, append_row, now_ts};
 use crate::core::savings_divert::{MIN_COST_SAVED_USD, ParentModel, resolve_session_price};
-use crate::core::savings_opportunity::{TOOL_TYPE_BASH, TaggedSavingsRow};
+use crate::core::savings_opportunity::{
+    OPPORTUNITY_DAY_CAP_BYTES, OPPORTUNITY_KEEP_DAYS, TOOL_TYPE_BASH, TaggedSavingsRow,
+    append_day_line,
+};
 
 /// Append one `compress` row for a run that actually shrank its input.
 ///
@@ -206,9 +209,12 @@ pub(crate) fn record_tagged_with(
 /// Test: `a_hand_computed_byte_delta_matches_the_row`,
 /// `passthrough_output_writes_no_row`, `an_expanded_output_writes_no_row`,
 /// `no_row_when_the_session_model_cannot_be_priced`.
-/// The file a zero-gain compress decline is appended to (#11560).
-pub fn decline_log_in(root: &Path) -> std::path::PathBuf {
-    root.join("usage").join("compress-declines.jsonl")
+/// The directory of day files a zero-gain compress decline is appended to (#11560).
+///
+/// What: `<root>/usage/compress-declines/<YYYY-MM-DD>.jsonl`, bounded like the
+/// opportunity ledger.
+pub fn decline_dir_in(root: &Path) -> std::path::PathBuf {
+    root.join("usage").join("compress-declines")
 }
 
 /// Append one line naming why a run wrote no savings row (#11560).
@@ -218,7 +224,8 @@ pub fn decline_log_in(root: &Path) -> std::path::PathBuf {
 /// the usage dir is where an operator can count it; `compression.jsonl`
 /// already counts the run itself.
 /// What: one JSON line `{ts, session_id, tool_name, reason: "no_gain",
-/// bytes_before, bytes_after, compression_path}` to [`decline_log_in`].
+/// bytes_before, bytes_after, compression_path}` to today's file under
+/// [`decline_dir_in`].
 /// FAIL-OPEN and silent: a failed write is a `debug!`, never stderr at `info`.
 /// Test: `a_zero_saving_decline_is_recorded_in_the_decline_file`,
 /// `a_failed_decline_write_is_silent`.
@@ -229,10 +236,9 @@ fn record_decline(
     (bytes_before, bytes_after): (usize, usize),
     compression_path: &str,
 ) {
-    use std::io::Write;
-    let path = decline_log_in(root);
+    let ts = now_ts();
     let line = serde_json::json!({
-        "ts": now_ts(),
+        "ts": ts,
         "session_id": session_id,
         "tool_name": tool_name,
         "reason": "no_gain",
@@ -240,18 +246,17 @@ fn record_decline(
         "bytes_after": bytes_after,
         "compression_path": compression_path,
     });
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-        })
-        .and_then(|mut f| writeln!(f, "{line}"));
-    if let Err(source) = written {
-        tracing::debug!(path = %path.display(), %source, "could not record the compress decline");
+    // #11560 review: day files under the opportunity ledger's own cap; a full
+    // day drops (and counts) the line, with nothing on stderr.
+    let dir = decline_dir_in(root);
+    if let Err(source) = append_day_line(
+        &dir,
+        &ts,
+        &line,
+        OPPORTUNITY_DAY_CAP_BYTES,
+        OPPORTUNITY_KEEP_DAYS,
+    ) {
+        tracing::debug!(dir = %dir.display(), %source, "could not record the compress decline");
     }
 }
 
@@ -331,4 +336,4 @@ fn compress_row(
 
 #[cfg(test)]
 #[path = "savings_compress_tests.rs"]
-mod tests;
+pub(crate) mod tests;
