@@ -247,7 +247,7 @@ fn every_tool_declared_in_source_has_a_skill() {
     let catalog = SkillCatalog::builtin();
     let mut missing: Vec<String> = Vec::new();
     let mut scanned = 0usize;
-    for dir in ["src/tools", "src/ctrl/handlers"] {
+    for dir in ["src/tools"] {
         for tool in declared_tool_names(&crate_path(dir)) {
             if FIXTURE_TOOL_NAMES.contains(&tool.as_str())
                 || SUBAGENT_ONLY_TOOL_NAMES.contains(&tool.as_str())
@@ -261,9 +261,10 @@ fn every_tool_declared_in_source_has_a_skill() {
         }
     }
     // Guard against a silently vacuous scan: if the extraction regressed and
-    // found nothing, "no missing tools" would be a false pass.
+    // found nothing, "no missing tools" would be a false pass. #11632: the
+    // floor follows the tool surface, which the cut took from 80+ to 15.
     assert!(
-        scanned >= 80,
+        scanned >= 12,
         "source scan found only {scanned} tool declarations; extraction is broken"
     );
     missing.sort();

@@ -392,6 +392,19 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
 /// must keep working (no ambient runtime, and the default current-thread
 /// `#[tokio::test]` runtime every other test in this crate uses).
 /// Test: this IS the test module.
+/// The bundled agent roster in the checkout under test,
+/// `content/agents/trusty-agents/agents`.
+///
+/// Why (#11632): the manifest tests read the shipped roster as fixtures; the
+/// deploy module whose helper they used (`agents::bundled`) was cut.
+/// What: the runtime checkout (#9298), never the compile-time build path.
+/// Test: the `agents` and `skills::manifest` roster tests that call it.
+pub(crate) fn bundled_agents_dir() -> std::path::PathBuf {
+    trusty_common::test_harness::test_repo_root()
+        .expect("resolve the trusty-tools checkout (set TRUSTY_TEST_REPO_ROOT)")
+        .join("content/agents/trusty-agents/agents")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,17 +491,4 @@ mod tests {
             "ownership must survive an .await on a current-thread runtime"
         );
     }
-}
-
-/// The bundled agent roster in the checkout under test,
-/// `content/agents/trusty-agents/agents`.
-///
-/// Why (#11632): the manifest tests read the shipped roster as fixtures; the
-/// deploy module whose helper they used (`agents::bundled`) was cut.
-/// What: the runtime checkout (#9298), never the compile-time build path.
-/// Test: the `agents` and `skills::manifest` roster tests that call it.
-pub(crate) fn bundled_agents_dir() -> std::path::PathBuf {
-    trusty_common::test_harness::test_repo_root()
-        .expect("resolve the trusty-tools checkout (set TRUSTY_TEST_REPO_ROOT)")
-        .join("content/agents/trusty-agents/agents")
 }
