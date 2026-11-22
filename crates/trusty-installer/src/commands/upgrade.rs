@@ -901,9 +901,10 @@ fn restart_plan(binary: &str, daemon: bool, macos: bool) -> RestartPlan {
         ManageStrategy::None => {
             RestartPlan::NoRestart("no restart needed (not a daemon)".to_owned())
         }
-        ManageStrategy::Launchd if !macos => RestartPlan::NoRestart(format!(
-            "restart the {binary} daemon manually (launchd is macOS-only)"
-        )),
+        // #11086: the same text `tctl restart` now prints off macOS.
+        ManageStrategy::Launchd if !macos => {
+            RestartPlan::NoRestart(super::lifecycle::manual_lifecycle_note("restart", binary))
+        }
         strategy => RestartPlan::Restart(strategy),
     }
 }
