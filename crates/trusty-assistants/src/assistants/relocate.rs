@@ -51,8 +51,9 @@ const KNOWLEDGE_STATE: &str = "stores/knowledge-pipeline/state.json";
 ///
 /// Why: read compatibility for a process that has not run the move.
 /// What: `<home>/trusty-assistants` when it is a directory, else
-/// `<home>/trusty-agents` when that is a real directory, else the new path.
-/// Test: `super::tests::relocate_tests::legacy_homes_root_is_read_until_the_new_one_exists`.
+/// `<home>/trusty-agents` when that is a directory, else the new path.
+/// Test: `super::tests::relocate_tests::legacy_homes_root_is_read_until_the_new_one_exists`,
+/// `super::tests::relocate_tests::user_symlinked_legacy_root_is_read_and_not_moved`.
 pub fn resolve_assistants_root(home: &Path) -> PathBuf {
     prefer_new(
         home.join(super::ASSISTANTS_DIR_NAME),
@@ -65,14 +66,17 @@ pub fn resolve_assistants_root(home: &Path) -> PathBuf {
 /// Why: config, provider policy, the user profile and per-user state all
 /// lived under `~/.trusty-agents`; one resolver keeps them in one place.
 /// What: `<home>/.trusty-assistants` when it is a directory, else
-/// `<home>/.trusty-agents` when that is a real directory, else the new path.
+/// `<home>/.trusty-agents` when that is a directory, else the new path.
 /// Test: `super::tests::relocate_tests::legacy_app_dir_is_read_until_the_new_one_exists`.
 pub fn app_dir(home: &Path) -> PathBuf {
     prefer_new(home.join(APP_DIR_NAME), home.join(LEGACY_APP_DIR_NAME))
 }
 
 fn prefer_new(new: PathBuf, legacy: PathBuf) -> PathBuf {
-    if new.is_dir() || !is_real_dir(&legacy) {
+    // The pointer this module leaves at the old path resolves to `new`, so
+    // it never wins here; a symlink the user made to a tree elsewhere does,
+    // exactly as it did before the rename.
+    if new.is_dir() || !legacy.is_dir() {
         new
     } else {
         legacy

@@ -333,3 +333,27 @@ fn unreadable_knowledge_state_refuses_the_move() {
     assert_eq!(read(&state), "not json");
     assert!(!home.join(ASSISTANTS_DIR_NAME).join("assistant").exists());
 }
+
+/// Why: an operator who keeps `~/trusty-agents` as a symlink to a tree
+/// elsewhere was served from it before the rename; that must not stop. The
+/// move leaves a symlink alone, because moving the link would not move the
+/// data behind it.
+/// Test: itself.
+#[test]
+#[serial]
+fn user_symlinked_legacy_root_is_read_and_not_moved() {
+    let (_tmp, home) = canonical_tmp();
+    let _no_new = EnvVarGuard::clear(ASSISTANTS_DIR_ENV);
+    let _no_old = EnvVarGuard::clear(LEGACY_ASSISTANTS_DIR_ENV);
+    let elsewhere = home.join("synced-drive");
+    seed_home(&elsewhere, "izzie", "izzie on the synced drive");
+    let legacy_root = home.join(LEGACY_ASSISTANTS_DIR_NAME);
+    std::os::unix::fs::symlink(&elsewhere, &legacy_root).expect("symlink");
+
+    assert_eq!(resolve_assistants_root(&home), legacy_root);
+    let report = migrate_legacy_locations(&home).expect("nothing to move");
+
+    assert_eq!(report, Default::default());
+    assert!(is_symlink(&legacy_root));
+    assert!(!home.join(ASSISTANTS_DIR_NAME).exists());
+}
