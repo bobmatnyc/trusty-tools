@@ -890,6 +890,53 @@ fn compare_set_uses_config_authorized_model() {
     );
 }
 
+/// A malformed `[models] authorized` makes `compare` refuse (#10757).
+///
+/// Why: the loader fails open on a parse error, which let `compare` run the
+/// built-in set — models the operator never authorized.
+/// What: writes `authorized` as a string, env var unset, and asserts the
+/// compare default set is an error naming the key and the file; then asserts
+/// a non-blank env list still wins over the bad file.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn compare_refuses_malformed_authorized_key() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = \"bedrock/us.anthropic.claude-opus-4-8\"\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    let err = config
+        .role_models
+        .compare_default_models()
+        .expect_err("a malformed authorized key must not fall back to the built-in set");
+    let message = err.to_string();
+    assert!(message.contains("[models] authorized"), "{message}");
+    assert!(message.contains(&path.display().to_string()), "{message}");
+
+    unsafe {
+        std::env::set_var(
+            "TRUSTY_REVIEW_AUTHORIZED_MODELS",
+            "bedrock/us.anthropic.claude-haiku-5-5",
+        );
+    }
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    assert_eq!(
+        config.role_models.compare_default_models(),
+        Ok(vec!["bedrock/us.anthropic.claude-haiku-5-5".to_string()])
+    );
+}
+
 /// `TRUSTY_REVIEW_AUTHORIZED_MODELS` beats `[models] authorized` (#10757).
 #[test]
 fn authorized_models_env_beats_config_file() {

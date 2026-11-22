@@ -16,7 +16,6 @@ use trusty_review::{
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
     },
-    llm::models::compare_models,
     models::ReviewResult,
     pipeline::{CallerContext, DiffSource, ReviewInput, TriggerDecision, run_review},
 };
@@ -129,10 +128,11 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
     }
 
     // #10757: the default set is the operator's authorized list when declared.
-    let models: Vec<String> = args
-        .models
-        .clone()
-        .unwrap_or_else(|| compare_models(&config.role_models.authorized_models));
+    // #10757: a malformed `[models] authorized` is an error, never a fallback.
+    let models: Vec<String> = match args.models.clone() {
+        Some(models) => models,
+        None => config.role_models.compare_default_models()?,
+    };
 
     if models.is_empty() {
         anyhow::bail!("--models list is empty; provide at least one model slug");

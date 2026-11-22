@@ -78,6 +78,24 @@ pub struct RoleModels {
     /// Empty when neither `TRUSTY_REVIEW_AUTHORIZED_MODELS` nor
     /// `[models] authorized` names any; see [`resolve_authorized_models`].
     pub authorized_models: Vec<String>,
+    /// #10757: set when the config file declares `[models] authorized` but it
+    /// cannot be parsed and no env list overrides it; `compare` must refuse.
+    pub authorized_models_error: Option<AuthorizedModelsError>,
+}
+
+/// A `[models] authorized` key that is present but unparseable (#10757).
+///
+/// Why: falling back to the built-in compare set would invoke models the
+/// operator never authorized.
+/// What: carries the config file path and the parse error text.
+/// Test: `config_tests::compare_refuses_malformed_authorized_key`.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("cannot parse `[models] authorized` in {path}: {reason}")]
+pub struct AuthorizedModelsError {
+    /// The config file that declared the key.
+    pub path: String,
+    /// Why the value could not be read as a list of model slugs.
+    pub reason: String,
 }
 
 impl RoleModels {
@@ -200,6 +218,7 @@ impl RoleModels {
                 env.authorized_models.as_deref(),
                 file_models,
             ),
+            authorized_models_error: None,
         };
         // #11527: surface a reviewer/verifier pair that shares one model.
         if let Some(message) = roles.same_model_warning() {
@@ -363,6 +382,23 @@ pub fn resolve_authorized_models(env: Option<&str>, file: Option<&FileModels>) -
     }
     file.map(|f| clean(&mut f.authorized.iter().map(String::as_str)))
         .unwrap_or_default()
+}
+
+impl RoleModels {
+    /// The model set `compare` runs when `--models` is not given (#10757).
+    ///
+    /// Why: a malformed `[models] authorized` must not fail open to the
+    /// built-in set, which may name models the account cannot invoke.
+    /// What: returns `authorized_models_error` when set; otherwise
+    /// `compare_models(&authorized_models)`.
+    /// Test: `config_tests::compare_refuses_malformed_authorized_key`,
+    /// `config_tests::compare_set_uses_config_authorized_model`.
+    pub fn compare_default_models(&self) -> Result<Vec<String>, AuthorizedModelsError> {
+        match &self.authorized_models_error {
+            Some(err) => Err(err.clone()),
+            None => Ok(crate::llm::models::compare_models(&self.authorized_models)),
+        }
+    }
 }
 
 // ─── Resolution helper (private) ─────────────────────────────────────────────
