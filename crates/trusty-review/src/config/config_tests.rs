@@ -937,6 +937,37 @@ fn compare_refuses_malformed_authorized_key() {
     );
 }
 
+/// A valid `authorized` list in a file that fails the typed parse refuses (#10757).
+///
+/// Why: the typed parse fails on another key, so the list is never read and
+/// `compare` would run the built-in set.
+/// What: valid `[models] authorized` plus a wrong-typed `[verification]` key;
+/// asserts the compare default set is an error naming the key and the file.
+/// Test: this test.
+#[test]
+#[serial_test::serial]
+fn compare_refuses_valid_authorized_in_unparseable_file() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = [\"bedrock/us.anthropic.claude-haiku-5-5\"]\n\n[verification]\nenabled = \"not-a-bool\"\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+    let err = config
+        .role_models
+        .compare_default_models()
+        .expect_err("an unread authorized list must not fall back to the built-in set");
+    let message = err.to_string();
+    assert!(message.contains("[models] authorized"), "{message}");
+    assert!(message.contains(&path.display().to_string()), "{message}");
+}
+
 /// `TRUSTY_REVIEW_AUTHORIZED_MODELS` beats `[models] authorized` (#10757).
 #[test]
 fn authorized_models_env_beats_config_file() {

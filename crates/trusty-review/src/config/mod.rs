@@ -862,10 +862,12 @@ fn load_toml_file(path: Option<&std::path::Path>) -> Option<TomlFile> {
 /// Why: `load_toml_file` fails open on any parse error, which left
 /// `authorized_models` empty and let `compare` run the built-in set.
 /// What: re-reads `path`. When it parses as TOML, returns an error only if
-/// `models.authorized` exists and is not a list of strings. When the file is
+/// `models.authorized` exists and is not a list of strings, or is a valid list
+/// in a file the typed `TomlFile` parse rejects. When the file is
 /// not valid TOML at all, returns an error if any line declares `authorized`.
 /// Otherwise `None` (absent key, unreadable file).
-/// Test: `config_tests::compare_refuses_malformed_authorized_key`.
+/// Test: `config_tests::compare_refuses_malformed_authorized_key`,
+/// `config_tests::compare_refuses_valid_authorized_in_unparseable_file`.
 fn authorized_key_error(path: &std::path::Path) -> Option<role_models::AuthorizedModelsError> {
     let text = std::fs::read_to_string(path).ok()?;
     let error = |reason: String| role_models::AuthorizedModelsError {
@@ -875,10 +877,13 @@ fn authorized_key_error(path: &std::path::Path) -> Option<role_models::Authorize
     match toml::from_str::<toml::Table>(&text) {
         Ok(table) => {
             let value = table.get("models")?.get("authorized")?.clone();
-            value
-                .try_into::<Vec<String>>()
-                .err()
-                .map(|e| error(e.to_string()))
+            match value.try_into::<Vec<String>>() {
+                Err(e) => Some(error(e.to_string())),
+                // #10757: a valid list the typed whole-file parse rejected is unread.
+                Ok(_) => toml::from_str::<TomlFile>(&text)
+                    .err()
+                    .map(|e| error(e.to_string())),
+            }
         }
         Err(e) => text
             .lines()
