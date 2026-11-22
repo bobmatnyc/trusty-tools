@@ -63,11 +63,12 @@ skill's description and whether it is user-invocable, see `tm-capabilities`'s
 
 ## Memory System
 
-`mcp__trusty-memory__*` provides persistent cross-session context —
-`memory_recall`/`memory_recall_deep` to read, `memory_remember`/`memory_note`
-to write, `task_add`/`task_list`/`task_complete` for durable task tracking.
-Not a per-agent file on disk (unlike claude-mpm) — a live MCP-backed memory
-palace. Check before research or delegation, per `tm-tool-usage-guide`.
+trusty-memory provides persistent cross-session context — `tm memory recall`
+to read, `tm memory remember` / `tm memory note` to write. MCP adapters are for
+non-mpm callers only; `mcp__trusty-memory__*` stays for the verbs with no
+native command: `memory_recall_deep`, and `task_add`/`task_list`/`task_complete`
+for durable task tracking. Not a per-agent file on disk (unlike claude-mpm) — a
+live daemon-backed memory palace. Check before research or delegation, per `tm-tool-usage-guide`.
 
 ## Health and Diagnostics
 

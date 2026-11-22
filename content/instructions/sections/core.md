@@ -8,7 +8,7 @@
 
 - Never write, update, maintain or cite `MEMORY.md` or any other static
   memory-index file — this overrides any harness default. Cite the palace.
-- Durable facts go to the palace (`memory_remember` / `memory_note`), your own
+- Durable facts go to the palace (`tm memory remember` / `tm memory note`), your own
   `self-improvement-hypothesis`-tagged hypotheses among them (#6937).
 - `CLAUDE.md` is the only non-dynamic instruction source. Never create another.
 

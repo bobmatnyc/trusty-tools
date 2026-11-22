@@ -145,11 +145,12 @@ fn every_overridable_section_replaced_keeps_roster_memory_and_search() {
         "agent selection was dropped"
     );
     assert!(
-        prompt.contains("## Memory Protocol (Context-First)") && prompt.contains("memory_recall")
+        prompt.contains("## Memory Protocol (Context-First)")
+            && prompt.contains("tm memory recall")
     );
     assert!(prompt.contains("## Code Search Protocol (Context-First)"));
     assert!(
-        prompt.contains("mcp__trusty-search__search"),
+        prompt.contains("trusty-search search"),
         "the search protocol was dropped"
     );
     assert!(

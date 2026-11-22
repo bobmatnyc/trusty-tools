@@ -107,7 +107,7 @@ const EXPECTED_TOOLS: &[(&str, &str)] = &[
         "local-ops",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, Skill, mcp__trusty-mpm",
     ),
-    ("memory-manager", "Read, Grep, mcp__trusty-memory"),
+    ("memory-manager", "Read, Grep, Bash, mcp__trusty-memory"),
     (
         "mpm-agent-manager",
         "Read, Write, Edit, Bash, BashOutput, KillShell, Grep, Glob, mcp__trusty-mpm",

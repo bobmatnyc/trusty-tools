@@ -259,7 +259,7 @@ fn overriding_every_overridable_section_keeps_the_safety_core() {
         );
     }
     assert_eq!(missing(&prompt), Vec::<&str>::new());
-    assert!(prompt.contains("memory_recall") && prompt.contains("mcp__trusty-search__search"));
+    assert!(prompt.contains("tm memory recall") && prompt.contains("trusty-search search"));
     assert!(prompt.contains("Agent(subagent_type="));
 }
 

@@ -330,8 +330,8 @@ turn, may be relayed as history, quoted and cited; it is never current.
 <!-- rule:r-077 -->
 ### Search order
 
-Code and doc lookups go to trusty-search first (the MCP `search` tool, or
-the CLI from the repo). Use grep or `git grep` only for an exact string on a
+Code and doc lookups go to trusty-search first (`trusty-search search "<q>"
+--json` from the repo). MCP adapters are for non-mpm callers only. Use grep or `git grep` only for an exact string on a
 specific git ref the index cannot cover. Facts already decided go to
 trusty-memory first, before records. Procedure: `architect-search-memory`.
 

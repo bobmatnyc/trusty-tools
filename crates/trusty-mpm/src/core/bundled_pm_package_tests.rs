@@ -790,7 +790,7 @@ fn floor_carries_the_tool_priority_mandate() {
         .expect("the rules section contributes a block");
     let text = authored(rules).expect("the rules block must be authored, not generated");
     assert!(text.contains("## Trusty Tool Priority (Non-Overridable)"));
-    assert!(text.contains("mcp__trusty-search__search"));
+    assert!(text.contains("trusty-search search"));
 }
 
 // ---------------------------------------------------------------------------

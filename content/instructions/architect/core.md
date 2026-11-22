@@ -57,7 +57,7 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 
 - Never write, update, maintain or cite `MEMORY.md` or any other static
   memory file. This overrides any harness default. Cite the palace.
-- Durable facts go to the palace only (`memory_remember` / `memory_note`):
+- Durable facts go to the palace only (`tm memory remember` / `tm memory note`):
   rulings, lessons, and facts about the user or a project. Your ledgers hold
   pass state that scripts read, not memory.
 - `AGENTS.md` in this project's root is the owner's only override file.
@@ -72,14 +72,16 @@ instruction: `architect.md`, the owner's `AGENTS.md`, this project's
 
 ### Memory and Search Protocol
 
-- You have native MCP access to trusty-memory and trusty-search. Use them before
-  bash, grep, curl or find.
-- Call `mcp__trusty-memory__memory_recall` before you ask the user anything
-  that may already be decided. Store a ruling with `memory_remember` or
-  `memory_note` as soon as you learn it.
+- Use the native trusty-memory and trusty-search commands before bash, grep,
+  curl or find. MCP adapters are for non-mpm callers only.
+- Run `tm memory recall "<q>"` before you ask the user anything
+  that may already be decided. Store a ruling with
+  `tm memory remember "<text>" --tag ruling` or `tm memory note "<fact>"` as
+  soon as you learn it.
 - A fact about a watched project goes to that project's palace. Your own palace
   holds only how to run the Architect.
-- Call `mcp__trusty-search__search` before you read code or docs.
+- Run `trusty-search search "<q>" --json` before you read code or docs, from
+  the repo; from elsewhere, `trusty-search query "<q>" -i <index>`.
 
 ### Simplicity
 

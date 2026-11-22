@@ -95,13 +95,13 @@ pub const SAFETY_CORE: [SafetyCoreMember; 8] = [
         name: "Memory protocol",
         section: SectionId::Memory,
         kind: SafetyCoreKind::PinnedBlock,
-        marker: "Call `memory_recall` for targeted recall BEFORE any research or delegation",
+        marker: "Run `tm memory recall \"<q>\"` for targeted recall BEFORE any research or delegation",
     },
     SafetyCoreMember {
         name: "Code search protocol",
         section: SectionId::Search,
         kind: SafetyCoreKind::PinnedBlock,
-        marker: "Call `search` (`mcp__trusty-search__search`) BEFORE reading code files",
+        marker: "Run `trusty-search search \"<q>\" --json` from the repo BEFORE reading code files",
     },
     SafetyCoreMember {
         name: "Agent selection",

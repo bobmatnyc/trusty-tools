@@ -272,7 +272,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-operating-rules",
-            "5bf15512eb4244c6ab7f3199b6a4829a35b26675faa8fb9a10a229ca97f52427",
+            "cd4130f466da33d8b63baa6a5948d2474b2677862f4b1df4a89d62b5b91dd249",
         ),
         (
             "architect-workflow",
@@ -280,7 +280,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-search-memory",
-            "dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303",
+            "c2947716d1e2e238e41de5db982bfdda187adf0fb93d7274dda3631c8c40e733",
         ),
         (
             "architect-github",
@@ -312,7 +312,7 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-macos",
-            "442541a32d8c81f2cdcc4d9e74f0fc3e993ae535f5d94ca9f3223af48487077b",
+            "ecb65835f13999c7be19111fd93681ea23399b1aeba5c6f051ca8d7845d2a77c",
         ),
         (
             "architect-improvements",
@@ -324,18 +324,16 @@ fn the_shipped_history_is_pinned_so_an_asset_edit_trips() {
         ),
         (
             "architect-dashboard",
-            "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
+            "f9803f1f1cf7302dcffae7a7ad65fef4dd32f02514c8f9b625daaca69ff3a0de",
         ),
     ];
     // #9997: a skill on its first release has no earlier text; its first
     // edit moves it off this list and its old hash into `previous`.
-    const FIRST_RELEASE: [&str; 6] = [
-        "architect-search-memory",
+    const FIRST_RELEASE: [&str; 4] = [
         "architect-github",
         "architect-owner-model",
         "architect-drift-check",
         "architect-review",
-        "architect-macos",
     ];
     assert_eq!(PINNED.len(), SHIPPED.len());
     for (skill, (stem, pinned)) in shipped().iter().zip(PINNED) {

@@ -5,7 +5,7 @@
 //! 622k tokens for 120 files; this command group is the zero-inference path.
 //! What: [`MemoryAction`] — `import`, plus `import-auto-memory` (#7685), the
 //! one-way migration of Claude Code's own auto-memory store into the palace,
-//! plus `recall` / `remember` / `note` (#8352), the no-MCP palace verbs, and
+//! plus `recall` / `remember` / `note` (#8352), the native palace verbs, and
 //! `forget` (#9340), which deletes one drawer by id.
 //! Test: `cli_parses_memory_import*` in `memory_import_cli_tests.rs`;
 //! `cli_parses_memory_recall*`, `cli_parses_memory_forget` in `tests.rs`.
@@ -16,15 +16,16 @@ use clap::Subcommand;
 
 /// `tm memory` actions.
 ///
-/// #8352: `recall`, `remember` and `note` are the FALLBACK path for a session
-/// whose `mcp__trusty-memory__*` tools are unavailable. They call the same
-/// daemon methods the MCP tools do, over its Unix socket, so nothing in this
-/// process ever opens a palace store the daemon is serving (#1078).
+/// #8352: `recall`, `remember` and `note` are the native palace verbs every
+/// mpm session uses; MCP adapters are for non-mpm callers only (IN0055). They
+/// call the same daemon methods the MCP tools do, over its Unix socket, so
+/// nothing in this process ever opens a palace store the daemon is serving
+/// (#1078).
 #[derive(Debug, Subcommand)]
 pub(crate) enum MemoryAction {
-    /// Recall memories from the palace — the no-MCP `memory_recall` (#8352).
+    /// Recall memories from the palace — the native `memory_recall` (#8352).
     ///
-    /// Use this when the `mcp__trusty-memory__*` tools are unavailable. The
+    /// The mpm session's recall verb. The
     /// palace is the session's own — `TRUSTY_MEMORY_PALACE`, else the
     /// committed pin, else the repo slug — unless `--palace` names another.
     /// With no palace resolvable at all, trusty-memory answers with an index of
@@ -57,7 +58,7 @@ pub(crate) enum MemoryAction {
         memory_socket: Option<PathBuf>,
     },
 
-    /// Store a memory in the palace — the no-MCP `memory_remember` (#8352).
+    /// Store a memory in the palace — the native `memory_remember` (#8352).
     ///
     /// The daemon's content gates still apply: very short text with no context,
     /// auto-capture noise, and secret-shaped content are refused there, and the
@@ -96,7 +97,7 @@ pub(crate) enum MemoryAction {
         memory_socket: Option<PathBuf>,
     },
 
-    /// Store a short curated fact — the no-MCP `memory_note` (#8352).
+    /// Store a short curated fact — the native `memory_note` (#8352).
     ///
     /// The shortcut for high-signal one-liners ("deploy target is prod-east"):
     /// stored at importance 1.0 so it surfaces in the palace's essentials.
@@ -134,7 +135,7 @@ pub(crate) enum MemoryAction {
         memory_socket: Option<PathBuf>,
     },
 
-    /// Delete one drawer by id or by slot — the no-MCP `memory_forget` (#9340).
+    /// Delete one drawer by id or by slot — the native `memory_forget` (#9340).
     ///
     /// For cleaning up test or throwaway drawers. Exits non-zero when the
     /// daemon is unreachable, and when it reports no drawer with that id in the

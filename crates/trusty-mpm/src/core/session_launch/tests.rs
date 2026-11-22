@@ -98,8 +98,8 @@ fn build_system_prompt_includes_trusty_block() {
     // session knows to prefer `memory_recall` and `search`.
     let prompt = build_system_prompt(rc()).expect("trusty block is always present");
     assert!(prompt.contains("## Trusty Tool Priority (Non-Overridable)"));
-    assert!(prompt.contains("mcp__trusty-memory__memory_recall"));
-    assert!(prompt.contains("mcp__trusty-search__search"));
+    assert!(prompt.contains("tm memory recall"));
+    assert!(prompt.contains("trusty-search search"));
     // The bundled PM instructions are also part of the assembled prompt.
     assert!(prompt.contains("# PM Agent -- Trusty MPM"));
 }
