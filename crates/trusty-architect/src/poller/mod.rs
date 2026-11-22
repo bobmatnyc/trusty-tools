@@ -45,6 +45,7 @@ mod events;
 mod host;
 mod inbox_alerts;
 mod listing;
+pub mod live_idle;
 mod lock;
 // #9167: a delivered wake is reported through the caller's sink.
 mod messages;

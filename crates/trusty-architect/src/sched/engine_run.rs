@@ -156,8 +156,13 @@ impl Engine<'_> {
                     Origin::Plain,
                 ))
             }
-            Ok(Mode::Shadow) => shadow::plan(&self.layout, &poll, env, now)
-                .map(|(spec, ctx)| (spec, Origin::Shadow(ctx))),
+            // MB1595 window 3: the first shadow run of a daemon reseeds.
+            Ok(Mode::Shadow) => {
+                let fresh = !self.shadow_seeded;
+                let planned = shadow::plan_with_seed(&self.layout, &poll, env, now, fresh);
+                self.shadow_seeded |= planned.is_ok();
+                planned.map(|(spec, ctx)| (spec, Origin::Shadow(ctx)))
+            }
             Err(e) => Err(e),
         };
         let started = built.and_then(|(spec, origin)| self.spawn(POLL_JOB, now, now, spec, origin));

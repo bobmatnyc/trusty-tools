@@ -5,8 +5,9 @@
 //! so each run needs its own record that a parity join can read, and the run
 //! must never touch the live inbox, take `poll.lock` or send keys (R4).
 //! What: [`plan`] gives the dry run its own state file in the scratch inbox
-//! (`local/meta/shadow/dry-run-state.json`), seeded once from the live
-//! `poll-state.json` and then kept, so the dry run dedupes across cycles. It
+//! (`local/meta/shadow/dry-run-state.json`), seeded from the live
+//! `poll-state.json` at each daemon start ([`plan_with_seed`]) and then kept,
+//! so the dry run dedupes across cycles. It
 //! builds the dry-run [`RunSpec`] with `ARCHITECT_INBOX_DIR` pointing at the
 //! scratch inbox, `ARCHITECT_READ_INBOX_DIR` at the live one (read-only
 //! queues, MB1595) and `ARCHITECT_DRY_RUN_STATE` at that file. [`parse_decision`]
@@ -328,20 +329,53 @@ pub const DRY_RUN_STATE: &str = "dry-run-state.json";
 pub fn plan(
     layout: &Layout,
     poll: &PollJob,
+    env: Vec<(String, String)>,
+    now: i64,
+) -> Result<(RunSpec, ShadowCtx), SchedError> {
+    plan_with_seed(layout, poll, env, now, false)
+}
+
+/// [`plan`], reseeding the dry run's state from the live `poll-state.json`
+/// when `fresh` (the first shadow run of a daemon process).
+///
+/// Why: window 3 (MB1595) opened with 15 replayed alerts. The restarted
+/// shadow kept a state file written by an older binary that never raised
+/// those kinds, so cycle 1 found none of the live poller's dedup keys.
+/// What: `fresh` replaces the state file with a copy of the live one through
+/// a temp file and rename; the copy carries no offsets marker, so the live
+/// queue offsets are seeded again at the current end. Without a live state
+/// the dry run keeps its own. A copy that fails is an error, never a stale
+/// fallback: the engine retries the reseed on the next run.
+/// Test: `shadow_restart_reseeds_from_the_live_state`,
+/// `shadow_restart_reseed_failure_is_an_error`.
+///
+/// # Errors
+/// As [`plan`], and when the reseed copy fails.
+pub fn plan_with_seed(
+    layout: &Layout,
+    poll: &PollJob,
     mut env: Vec<(String, String)>,
     now: i64,
+    fresh: bool,
 ) -> Result<(RunSpec, ShadowCtx), SchedError> {
     let dir = layout.shadow_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| SchedError::io(format!("create {}", dir.display()), e))?;
     // A copy made every run threw away what the dry run had seen, so every
-    // cycle re-alerted everything the live state lacked: seed once, then keep.
+    // cycle re-alerted everything the live state lacked: seed at a daemon
+    // start (or when absent), then keep.
     let state = dir.join(DRY_RUN_STATE);
-    if !state.exists() {
-        match std::fs::copy(layout.root.join("inbox/poll-state.json"), &state) {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(SchedError::io(format!("seed {}", state.display()), e)),
+    if fresh || !state.exists() {
+        let tmp = state.with_extension("json.seed");
+        let copied = std::fs::copy(layout.root.join("inbox/poll-state.json"), &tmp)
+            .and_then(|_| std::fs::rename(&tmp, &state));
+        match copied {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !tmp.exists() => {}
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(SchedError::io(format!("seed {}", state.display()), e));
+            }
         }
     }
     seed_live_offsets(&state, &layout.root.join("inbox"))?;

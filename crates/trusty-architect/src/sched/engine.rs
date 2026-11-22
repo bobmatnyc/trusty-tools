@@ -70,6 +70,8 @@ pub struct Engine<'a> {
     pub(super) tx: Sender<Done>,
     rx: Receiver<Done>,
     dirty: bool,
+    /// The shadow state was reseeded from the live one in this process.
+    pub(super) shadow_seeded: bool,
 }
 
 fn backoff(streak: u32) -> i64 {
@@ -111,6 +113,7 @@ impl<'a> Engine<'a> {
             tx,
             rx,
             dirty: false,
+            shadow_seeded: false,
         }
     }
 
