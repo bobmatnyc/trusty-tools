@@ -1,8 +1,8 @@
 # Configuration
 
-`tagent` (trusty-agents) reads its configuration from `.trusty-agents/` in the
+`ta` (trusty-assistants) reads its configuration from `.trusty-agents/` in the
 current working directory. The same layout works for the harness's own
-checkout and for any project that uses trusty-agents as a dependency.
+checkout and for any project that uses trusty-assistants as a dependency.
 
 ## Directory layout
 
@@ -25,10 +25,10 @@ checkout and for any project that uses trusty-agents as a dependency.
     └── project-index.md   # Auto-generated project summary
 ```
 
-User-global state lives under `~/.trusty-agents/`:
+User-global state lives under `~/.trusty-assistants/`:
 
 ```
-~/.trusty-agents/
+~/.trusty-assistants/
 ├── projects.json         # Global project registry
 ├── sockets/<name>.sock   # MessageBus UNIX sockets for cross-project relay
 ├── skills/                # Globally-shared skills (see discovery order below)
@@ -103,7 +103,7 @@ include = ["python-async-patterns", "pytest-best-practices"]
 
 ## Skill markdown
 
-`.trusty-agents/skills/<name>.md` (or `~/.trusty-agents/skills/`):
+`.trusty-agents/skills/<name>.md` (or `~/.trusty-assistants/skills/`):
 
 ```markdown
 ---
@@ -120,7 +120,7 @@ Use `asyncio.TaskGroup` for structured concurrency:
 ```
 
 The YAML frontmatter is optional but recommended. Without it, the filename
-stem becomes the skill name. Tags are used by `tagent skills list --tag`
+stem becomes the skill name. Tags are used by `ta skills list --tag`
 and by the `skill_loader` tool.
 
 ### Discovery order (highest priority first)
@@ -128,12 +128,12 @@ and by the `skill_loader` tool.
 By default, skills are discovered from two local sources:
 
 1. `<project>/.trusty-agents/skills/` (priority 10)
-2. `~/.trusty-agents/skills/` (priority 5)
+2. `~/.trusty-assistants/skills/` (priority 5)
 
 The first source to define a given skill name wins. Add project-local
 overrides — an extra local directory, or a remote git repository of shared
 skills — via `.trusty-agents/skill-sources.toml`; each entry sets its own
-`priority`. Run `tagent skills sources` to see the resolved, ordered list of
+`priority`. Run `ta skills sources` to see the resolved, ordered list of
 directories actually scanned.
 
 ## Workflow JSON
@@ -199,11 +199,11 @@ verbs that remain are in [cli-reference.md](./cli-reference.md).
 
 ## Project initialization
 
-Running `tagent` in a directory for the first time:
+Running `ta` in a directory for the first time:
 
 1. Creates `.trusty-agents/` if missing
 2. Drops `.trusty-agents/state/initialized` marker
 3. Builds an initial code index of the working tree
-4. Registers the project in `~/.trusty-agents/projects.json`
+4. Registers the project in `~/.trusty-assistants/projects.json`
 
 Force re-initialization with `--reinit`.

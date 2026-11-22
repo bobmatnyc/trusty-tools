@@ -2,7 +2,7 @@
 
 ## Bundled agents
 
-trusty-agents ships these agents as instructional content in the repository's `content/agents/trusty-agents/agents/` (#9014), deployed to `~/.trusty-agents/agents/` on each run:
+trusty-assistants ships these agents as instructional content in the repository's `content/agents/trusty-agents/agents/` (#9014), deployed to `~/.trusty-assistants/agents/` on each run:
 
 | Agent | Role | Purpose |
 |---|---|---|
@@ -22,7 +22,7 @@ trusty-agents ships these agents as instructional content in the repository's `c
 | `local-ops-agent` | ops | Allowlisted shell access for local operations |
 | `postmortem-agent` | analyst | Analyzes session errors and suggests improvements (#186) |
 
-Run `tagent agents list` for the live list.
+Run `ta agents list` for the live list.
 
 ## Writing a custom agent
 
@@ -61,13 +61,13 @@ $EDITOR .trusty-agents/agents/rust-engineer.toml
 3. Verify it loads:
 
 ```bash
-tagent agents list | grep rust-engineer
+ta agents list | grep rust-engineer
 ```
 
 4. Invoke it:
 
 ```bash
-tagent --direct rust-engineer --task "Write a tokio TCP echo server"
+ta --direct rust-engineer --task "Write a tokio TCP echo server"
 ```
 
 ## Bundled skills
@@ -76,14 +76,14 @@ Skills are Markdown files with optional YAML frontmatter. By default,
 discovery scans two local sources (in priority order):
 
 1. `<project>/.trusty-agents/skills/`
-2. `~/.trusty-agents/skills/`
+2. `~/.trusty-assistants/skills/`
 
 Add more sources — extra local directories or remote git repositories — via
 `.trusty-agents/skill-sources.toml`; see [configuration.md](./configuration.md#discovery-order-highest-priority-first).
 
 ```bash
-tagent skills list
-tagent skills sources    # which directories were scanned
+ta skills list
+ta skills sources    # which directories were scanned
 ```
 
 ## Writing a custom skill
@@ -154,9 +154,9 @@ The default tool registry exposes these to most engineering agents (see the
 ## Discovering everything from the CLI
 
 ```bash
-tagent agents list
-tagent skills list
-tagent skills sources
+ta agents list
+ta skills list
+ta skills sources
 ```
 
 Or, from inside CTRL, just ask:

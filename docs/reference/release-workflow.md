@@ -751,38 +751,41 @@ identity makes that approval persist across every future reinstall.
 File-Provider* TCC category only; the FDA re-granting guidance above stays
 scoped to trusty-search and other external-volume daemons.
 
-### Signed Install: trusty-agents (#4277)
+### Signed Install: trusty-assistants (#4277)
 
-`trusty-agents` ships the `tagent` binary, which re-prompts for TCC access on
-every ad-hoc rebuild. (#11632 deleted the `Trusty Agents.app` desktop shell
-this section used to cover.)
+`trusty-assistants` (formerly `trusty-agents`, renamed in #11632) ships the
+`ta` binary and, for one release, the `tagent` alias. Both re-prompt for TCC
+access on every ad-hoc rebuild. (#11632 also deleted the `Trusty Agents.app`
+desktop shell this section used to cover.)
 
 On macOS the preferred local-source install path is
-`scripts/install-trusty-agents-signed.sh` (or `make install-agents-signed`):
+`scripts/install-trusty-assistants-signed.sh` (or
+`make install-assistants-signed`):
 
 ```bash
-# From the repo root (or any worktree) — installs tagent and signs it
-scripts/install-trusty-agents-signed.sh
+# From the repo root (or any worktree) — installs ta and tagent and signs them
+scripts/install-trusty-assistants-signed.sh
 # or
-make install-agents-signed
+make install-assistants-signed
 # dry-run (prints every cargo/tctl command without executing):
-scripts/install-trusty-agents-signed.sh --dry-run
+scripts/install-trusty-assistants-signed.sh --dry-run
 ```
 
-The script runs `cargo install --path crates/trusty-agents --locked`, then
-signs `tagent` by shelling out to `tctl sign trusty-agents` (`SIGNABLE_BINARIES`
-carries `("tagent", AGENTS_SET, "com.trusty.tagent")` — the same
+The script runs `cargo install --path crates/trusty-assistants --locked`, then
+signs `ta` and `tagent` by shelling out to `tctl sign trusty-assistants`
+(`SIGNABLE_BINARIES` carries `("ta", ASSISTANTS_SET, "com.trusty.ta")` and
+`("tagent", ASSISTANTS_SET, "com.trusty.tagent")` — the same
 single-source-of-truth table used by `trusty-search`/`trusty-mpm`, extended for
-#4277).
+#4277). `tctl sign trusty-agents` still parses for one release.
 
-**No Developer ID certificate present is never a hard failure** — `tagent`
-stays ad-hoc signed with a clear warning and remains fully functional; it
-simply re-prompts for TCC access on the next rebuild.
+**No Developer ID certificate present is never a hard failure** — `ta` stays
+ad-hoc signed with a clear warning and remains fully functional; it simply
+re-prompts for TCC access on the next rebuild.
 
-Already have `tagent` on PATH and just want to (re-)sign it? Skip straight to:
+Already have `ta` on PATH and just want to (re-)sign it? Skip straight to:
 
 ```bash
-tctl sign trusty-agents
+tctl sign trusty-assistants
 ```
 
 ### Signed Install: trusty-memory

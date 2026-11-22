@@ -156,7 +156,7 @@ sole path.
 
 ### 3. trusty-agents — the agentic harness
 
-**Crate:** `crates/trusty-agents/` — package `trusty-agents`, binary `tagent`
+**Crate:** `crates/trusty-assistants/` — package `trusty-agents`, binary `tagent`
 
 A general-purpose agentic harness for non-coding workflows: knowledge
 retrieval, memory management, scheduling, communications, and domain-specific
@@ -413,7 +413,7 @@ Source of truth for everything above, in the repository:
 - `crates/trusty-mpm/src/bin/tm/cli/mod.rs` — the `tm` subcommand surface
 - `crates/trusty-mpm/src/mcp/tools/mod.rs` — the MCP tool catalog
 - `crates/trusty-mpm/src/runtime/` — `RuntimeKind` and the two runtime adapters
-- `crates/trusty-agents/src/tools/pm_bridge.rs`, `src/tools/pm_bridge_backend.rs`,
+- `crates/trusty-assistants/src/tools/pm_bridge.rs`, `src/tools/pm_bridge_backend.rs`,
   `src/intent/route.rs` — the `dispatch_task` bridge and its router
 - `crates/trusty-agents-common/src/lib.rs` — the harness-layer shared surface
 - `crates/trusty-common/Cargo.toml` — the feature list behind the table above

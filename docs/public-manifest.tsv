@@ -106,7 +106,7 @@ PAGE	installation	docs/distribution/INSTALL-CONVENTION.md	/installation/conventi
 SECTION	tools	Tools
 PAGE	tools	docs/trusty-mpm/README.md	/tools/trusty-mpm	trusty-mpm
 PAGE	tools	docs/trusty-mpm/statusline-savings.md	/tools/trusty-mpm/statusline-savings	trusty-mpm Statusline Cost Savings
-PAGE	tools	docs/trusty-agents/README.md	/tools/trusty-agents	trusty-agents
+PAGE	tools	docs/trusty-assistants/README.md	/tools/trusty-assistants	trusty-assistants
 PAGE	tools	docs/trusty-search/README.md	/tools/trusty-search	trusty-search
 PAGE	tools	docs/trusty-memory/README.md	/tools/trusty-memory	trusty-memory
 PAGE	tools	docs/trusty-memory/backup-restore-upgrade.md	/tools/trusty-memory/backup-restore-upgrade	trusty-memory backup, restore and upgrade
@@ -123,10 +123,10 @@ PAGE	roadmap	docs/roadmap/trusty-tools.md	/roadmap	trusty-tools roadmap
 PAGE	roadmap	docs/roadmap/trusty-mpm.md	/roadmap/trusty-mpm	trusty-mpm roadmap (moved)
 
 SECTION	guides	User Guides
-PAGE	guides	docs/trusty-agents/user/quickstart.md	/guides/trusty-agents/quickstart	trusty-agents Quickstart
-PAGE	guides	docs/trusty-agents/user/cli-reference.md	/guides/trusty-agents/cli-reference	trusty-agents CLI Reference
-PAGE	guides	docs/trusty-agents/user/configuration.md	/guides/trusty-agents/configuration	trusty-agents Configuration
-PAGE	guides	docs/trusty-agents/user/agents-and-skills.md	/guides/trusty-agents/agents-and-skills	Agents and Skills
+PAGE	guides	docs/trusty-assistants/user/quickstart.md	/guides/trusty-assistants/quickstart	trusty-assistants Quickstart
+PAGE	guides	docs/trusty-assistants/user/cli-reference.md	/guides/trusty-assistants/cli-reference	trusty-assistants CLI Reference
+PAGE	guides	docs/trusty-assistants/user/configuration.md	/guides/trusty-assistants/configuration	trusty-assistants Configuration
+PAGE	guides	docs/trusty-assistants/user/agents-and-skills.md	/guides/trusty-assistants/agents-and-skills	Agents and Skills
 PAGE	guides	docs/guides/audit-instructions.md	/guides/audit-instructions	Engagement Instructions (instructions.md)
 PAGE	guides	docs/guides/secrets-from-code.md	/guides/secrets/from-code	Using Secrets from Code (planned)
 PAGE	guides	docs/guides/secrets-security-model.md	/guides/secrets/security-model	Secrets Security Model (planned)

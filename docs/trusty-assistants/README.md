@@ -1,22 +1,25 @@
-# trusty-agents — documentation
+# trusty-assistants — documentation
 
-`trusty-agents` (`crates/trusty-agents/`, binary `tagent`) is a Rust-native AI
+> Formerly `trusty-agents` (binary `tagent`); renamed in #11632. `tagent`
+> still runs, as a deprecated alias of `ta`, for one release.
+
+`trusty-assistants` (`crates/trusty-assistants/`, binary `ta`) is a Rust-native AI
 agent orchestration harness: a long-running **CTRL** controller coordinates
 per-project **PM** actors, each of which delegates work to specialized
 **sub-agents** that run either in-process (fast, read-only) or as isolated OS
 subprocesses communicating over NDJSON IPC. Its defining differentiator is
 **model-agnostic dispatch** — any agent role can be backed by OpenRouter, the
 direct Anthropic API, AWS Bedrock, or the `claude` CLI OAuth path, assignable
-per-agent via configuration. trusty-agents integrates with trusty-search and
+per-agent via configuration. trusty-assistants integrates with trusty-search and
 trusty-memory and reuses the workspace's common MCP and agent libraries.
 
 > **#11632 (2026-11-22):** the harness described above — CTRL, the PM actors,
 > sub-agent subprocesses, the REPL, workflows, the HTTP API and the desktop UI —
 > was cut. What remains is the assistant core as a library plus the
-> `tagent mcp-serve` stdio MCP surface ([CLI reference](user/cli-reference.md)).
+> `ta mcp-serve` stdio MCP surface ([CLI reference](user/cli-reference.md)).
 > Most documents below describe the pre-cut harness and are history.
 
-This directory is the extended index for trusty-agents design, research, and
+This directory is the extended index for trusty-assistants design, research, and
 user/developer documentation. Implemented behavior remains code-owned; start
 with the crate README and current workspace behavior contracts.
 
@@ -25,7 +28,7 @@ with the crate README and current workspace behavior contracts.
 | Subdir | What's here |
 |--------|-------------|
 | [`spec/`](spec/) | Historical pre-rename PRD, architecture, and component baseline. |
-| [`research/`](research/) | ~70 investigation, audit, and design docs that shaped trusty-agents — frameworks, IPC patterns, dispatch, token compression, UI surfaces, bug analyses. Indexed in [`research/README.md`](research/README.md). |
+| [`research/`](research/) | ~70 investigation, audit, and design docs that shaped trusty-assistants — frameworks, IPC patterns, dispatch, token compression, UI surfaces, bug analyses. Indexed in [`research/README.md`](research/README.md). |
 | [`design/`](design/) | Focused design notes: workflow engine, CTRL REPL, design goals. Visual assets (icon, treatment PDF) live in [`design/visual/`](design/visual/). |
 | [`developer/`](developer/) | Contributor docs: architecture overview, building, contributing, testing. |
 | [`user/`](user/) | End-user docs: quickstart, CLI reference, configuration, agents & skills. |
@@ -36,7 +39,7 @@ with the crate README and current workspace behavior contracts.
 
 ## Where to start
 
-- **New to trusty-agents?** Start with the [crate README](../../crates/trusty-agents/README.md) and [current product spec](../specs/trusty-agents-product-spec.md).
+- **New to trusty-assistants?** Start with the [crate README](../../crates/trusty-assistants/README.md) and [current product spec](../specs/trusty-agents-product-spec.md).
 - **Installing / using it?** [`user/quickstart.md`](user/quickstart.md).
 - **Contributing?** [`developer/contributing.md`](developer/contributing.md) and [`developer/building.md`](developer/building.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).

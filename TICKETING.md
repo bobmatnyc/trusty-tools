@@ -29,7 +29,9 @@ Cargo crate** (`crates/<name>/`), so a component label names a crate or one of
 the subsystem labels below. Resolve abbreviations against `CLAUDE.md`'s
 "Abbreviations & Aliases" table first.
 
-Crate labels: `trusty-agents`, `trusty-agents-common`, `trusty-agents-local`,
+Crate labels: `trusty-agents` (the trusty-assistants crate; #11632 renamed the
+crate, and the GitHub label keeps the old name until it is renamed),
+`trusty-agents-common`, `trusty-agents-local`,
 `trusty-analyze`,
 `trusty-bm25-daemon`, `trusty-channels`, `trusty-code`, `trusty-code-gui`,
 `trusty-code-tui`, `trusty-common`, `trusty-console`, `trusty-controller`,
@@ -473,7 +475,7 @@ later (#11469).
    | `area:memory-daemon` | trusty-memory internals: dream/consolidation, KG, palace locks, drawer loss |
    | `area:memory-import` | kuzu-memory import/export review workflow |
    | `area:search-index` | trusty-search indexing, embedding, reindex, vector integrity, and its own daemon |
-   | `area:agent-platform` | trusty-code / trusty-agents harness and roster |
+   | `area:agent-platform` | trusty-code / trusty-assistants harness and roster |
    | `area:agent-prompts` | Agent briefs, base-agent rules, skill, doc and PM-instruction wording, prompt-feedback rollups |
    | `area:channels` | Slack/Telegram front door and channel routing |
    | `area:other` | Fallback when no area above fits |

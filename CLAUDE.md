@@ -211,9 +211,9 @@ commands, conversation. Directory is always `crates/<crate>/`.
 | `tm` | trusty-memory |
 | `ts` | trusty-search |
 | `tc` | trusty-common |
-| `ta` | trusty-analyze |
+| `ta` | trusty-assistants (bin `ta`; `tagent` is a one-release alias) |
 | `mpm` | trusty-mpm |
-| `tagent`/`t-agents` | trusty-agents (bin `tagent`) |
+| `tagent`/`t-agents` | trusty-assistants — former name `trusty-agents` (#11632) |
 | `t-agents-common` | trusty-agents-common |
 | `tcode` | trusty-code |
 | `tctl` | trusty-installer |

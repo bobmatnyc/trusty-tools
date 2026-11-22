@@ -1,6 +1,6 @@
 # Quickstart
 
-`trusty-agents` (binary `tagent`) is not published to crates.io — build it
+`trusty-assistants` (binary `ta`) is not published to crates.io — build it
 from the `trusty-tools` monorepo source.
 
 ## 1. Install
@@ -9,7 +9,7 @@ from the `trusty-tools` monorepo source.
 git clone https://github.com/bobmatnyc/trusty-tools.git
 cd trusty-tools
 cargo install --path crates/trusty-agents --locked
-tagent --version
+ta --version
 ```
 
 On macOS, `make install-agents-signed` installs and signs it so TCC grants
@@ -17,8 +17,8 @@ survive a rebuild.
 
 ## 2. Connect an MCP client
 
-`tagent mcp-serve` is a stdio MCP server exposing `dispatch_task`. Register it
-with an MCP client as a stdio server whose command is `tagent mcp-serve`.
+`ta mcp-serve` is a stdio MCP server exposing `dispatch_task`. Register it
+with an MCP client as a stdio server whose command is `ta mcp-serve`.
 
 ## What changed
 

@@ -9,7 +9,7 @@
 > gate test below were cut with the trusty-agents HTTP API and UI. Rows 1–7 and
 > the gate are history; `stores::okg_graph`, the single reader, remains.
 
-Audited 2026-09-11 against `crates/trusty-agents` and
+Audited 2026-09-11 against `crates/trusty-assistants` and
 `crates/trusty-agents-common`. Every path by which graph data reaches the UI or
 an agent tool, with the store it reads.
 
@@ -24,9 +24,9 @@ an agent tool, with the store it reads.
 | 5 | Route wiring | `api::server::routes` (cut) | — | the four routes above, unchanged paths |
 | 6 | SPA client | the deleted `ui/src/lib/kg.ts` | the four routes | the four routes |
 | 7 | Browser component | the deleted `ui/src/components/KnowledgeGraphBrowser.svelte` | the SPA client | the SPA client |
-| 8 | Graph reader | `crates/trusty-agents/src/stores/okg_graph.rs` | did not exist | OKG tree — the single reader |
+| 8 | Graph reader | `crates/trusty-assistants/src/stores/okg_graph.rs` | did not exist | OKG tree — the single reader |
 
-No Tauri command and no MCP tool serves graph data: `crates/trusty-agents`
+No Tauri command and no MCP tool serves graph data: `crates/trusty-assistants`
 exposes the graph over HTTP only, and the desktop shell loads the same SPA.
 
 ## Other surfaces that read a memory palace, and why they are not the graph
@@ -34,13 +34,13 @@ exposes the graph over HTTP only, and the desktop shell loads the same SPA.
 | Surface | Reads | Verdict |
 |---|---|---|
 | `api::server::chat_history` (cut) | trusty-memory `chat_session_recall` | Chat transcripts, not graph data. Out of scope. |
-| `crates/trusty-agents/src/tools/memory/recall.rs` | memory drawers | The agent's recall tool. A drawer is a memory, never presented as a graph node. |
-| `crates/trusty-agents/src/tools/memory/vector_search.rs` | the bound search index | Search hits over the OKG corpus; `crates/trusty-agents/src/tools/memory/okg_fence.rs` fences untrusted ones. Not the graph surface. |
-| `crates/trusty-agents/src/stores/status.rs` | probes the bound palace | Reports whether a palace is reachable. Status, not content. |
+| `crates/trusty-assistants/src/tools/memory/recall.rs` | memory drawers | The agent's recall tool. A drawer is a memory, never presented as a graph node. |
+| `crates/trusty-assistants/src/tools/memory/vector_search.rs` | the bound search index | Search hits over the OKG corpus; `crates/trusty-assistants/src/tools/memory/okg_fence.rs` fences untrusted ones. Not the graph surface. |
+| `crates/trusty-assistants/src/stores/status.rs` | probes the bound palace | Reports whether a palace is reachable. Status, not content. |
 
 ## What the exposed graph carries
 
-Both halves, from `crates/trusty-agents/src/stores/okg_graph.rs`:
+Both halves, from `crates/trusty-assistants/src/stores/okg_graph.rs`:
 
 - **Triples** — one per `[[wiki-link]]` target held in an entity's relationship
   frontmatter keys. Envelope fields (`type`, `title`, `description`, `tags`, …)

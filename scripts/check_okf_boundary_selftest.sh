@@ -41,8 +41,8 @@ new_fixture() {
     > "$dir/crates/trusty-okf/src/lib.rs"
   printf '%s\nserde v1.0.0\n' "$TREE_HEAD" > "$dir/all.txt"
   printf '%s\n' "$TREE_HEAD" > "$dir/core.txt"
-  printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$dir/inv.txt"
-  printf 'trusty-agents v0.39.4 (/x/crates/trusty-agents)\n%s\n' "$TREE_HEAD" > "$dir/agents.txt"
+  printf '%s\ntrusty-assistants v0.1.0 (/x/crates/trusty-assistants)\n' "$TREE_HEAD" > "$dir/inv.txt"
+  printf 'trusty-assistants v0.1.0 (/x/crates/trusty-assistants)\n%s\n' "$TREE_HEAD" > "$dir/agents.txt"
   git -C "$dir" init -q
   printf '%s\n' "$dir"
 }
@@ -132,6 +132,10 @@ run_case "trusty-agents mid-literal fails" 1 "FAIL c12_no_agent_paths_or_index_n
 d="$(new_fixture agents-config-literal)"
 add_src "$d" 'pub const P: &str = ".config/trusty-agents";'
 run_case "trusty-agents config literal fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
+# #11632: the renamed crate's directory is banned too.
+d="$(new_fixture assistants-literal)"
+add_src "$d" 'pub const P: &str = "trusty-assistants/izzie/okg";'
+run_case "trusty-assistants literal fails" 1 "FAIL c12_no_agent_paths_or_index_names" "$d"
 
 # 8. B6: a connector Locator variant (criterion 13).
 d="$(new_fixture gmail)"
@@ -182,13 +186,14 @@ d="$(new_fixture ort)"
 printf 'ort v2.0.0\n' >> "$d/all.txt"
 run_case "extraction backend fails" 1 "FAIL b9_no_extraction_backend" "$d"
 
-# #10746 S11: B2 inverse half, trusty-agents must depend on trusty-okf.
+# #10746 S11: B2 inverse half, trusty-assistants (#11632; was trusty-agents)
+# must depend on trusty-okf.
 d="$(new_fixture no-agents-dependent)"
 printf '%s\n' "$TREE_HEAD" > "$d/inv.txt"
-run_case "no trusty-agents dependent fails" 1 "FAIL b2_trusty_agents_depends_on_okf" "$d"
+run_case "no trusty-agents dependent fails" 1 "FAIL b2_trusty_assistants_depends_on_okf" "$d"
 d="$(new_fixture agents-common-dependent)"
 printf '%s\ntrusty-agents-common v0.1.0 (/x/crates/trusty-agents-common)\n' "$TREE_HEAD" > "$d/inv.txt"
-run_case "a near-name dependent is not trusty-agents" 1 "FAIL b2_trusty_agents_depends_on_okf" "$d"
+run_case "a near-name dependent is not trusty-agents" 1 "FAIL b2_trusty_assistants_depends_on_okf" "$d"
 
 # #10746 S13: the connector crate stays out of trusty-okf (B1) and out of
 # trusty-agents.
@@ -202,16 +207,16 @@ run_case "connector crate in trusty-agents fails" 1 "FAIL b11_agents_do_not_link
 # edge near the top and over 64 KiB of tree after it, `awk | grep -q` under
 # pipefail exited 141 (SIGPIPE) and the check printed ok.
 d="$(new_fixture agents-connector-dep-large)"
-printf 'trusty-agents v0.39.4 (/x/crates/trusty-agents)\ntrusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' > "$d/agents.txt"
+printf 'trusty-assistants v0.1.0 (/x/crates/trusty-assistants)\ntrusty-connectors v0.1.0 (/x/crates/trusty-connectors)\n' > "$d/agents.txt"
 awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/agents.txt"
 run_case "connector crate in a large trusty-agents tree fails" 1 "FAIL b11_agents_do_not_link_connectors" "$d"
 d="$(new_fixture agents-dependent-large)"
-printf '%s\ntrusty-agents v0.39.4 (/x/crates/trusty-agents)\n' "$TREE_HEAD" > "$d/inv.txt"
+printf '%s\ntrusty-assistants v0.1.0 (/x/crates/trusty-assistants)\n' "$TREE_HEAD" > "$d/inv.txt"
 awk 'BEGIN { for (i = 0; i < 20000; i++) printf "padding-crate-%06d v1.0.0\n", i }' >> "$d/inv.txt"
-run_case "trusty-agents found in a large inverse tree" 0 "ok   b2_trusty_agents_depends_on_okf" "$d"
+run_case "trusty-agents found in a large inverse tree" 0 "ok   b2_trusty_assistants_depends_on_okf" "$d"
 d="$(new_fixture agents-tree-root)"
 printf 'serde v1.0.0\n' > "$d/agents.txt"
-run_case "agents tree not rooted at trusty-agents fails" 1 "does not start at trusty-agents" "$d"
+run_case "agents tree not rooted at trusty-agents fails" 1 "does not start at trusty-assistants" "$d"
 d="$(new_fixture agents-near-name)"
 printf 'trusty-connectors-extra v0.1.0\n' >> "$d/agents.txt"
 run_case "a near-name crate is not trusty-connectors" 0 "ok   b11_agents_do_not_link_connectors" "$d"
