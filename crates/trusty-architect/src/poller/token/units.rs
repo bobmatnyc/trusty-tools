@@ -11,7 +11,7 @@ use serde_json::Value;
 
 /// Priced families, in lookup order.
 const PRICE: [(&str, f64); 3] = [("opus", 5.0), ("sonnet", 3.0), ("haiku", 1.0)];
-/// Recognised families with no price (ar-Te4).
+/// Recognised families with no price.
 const UNPRICED: [&str; 1] = ["fable"];
 
 /// `family(model)`: the first known family named in the model, else `sonnet`.
