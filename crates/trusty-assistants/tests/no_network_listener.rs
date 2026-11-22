@@ -164,7 +164,7 @@ fn removed_api_flags_are_refused() {
         &["--serve", "--port", "8080"][..],
     ] {
         let tmp = tempfile::TempDir::new().expect("tempdir");
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tagent"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_ta"));
         trusty_common::parent_death::exit_with_parent(&mut cmd);
         let out = cmd
             .args(argv)

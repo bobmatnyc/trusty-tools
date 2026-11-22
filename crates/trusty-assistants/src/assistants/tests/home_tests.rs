@@ -66,9 +66,9 @@ impl Drop for EnvVarGuard {
 pub(super) fn temp_home() -> (tempfile::TempDir, AssistantHome) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let id = AssistantInstanceId::new("izzie").expect("valid id");
-    // A throwaway root standing in for `~/trusty-agents`; the real spelling is
+    // A throwaway root standing in for `~/trusty-assistants`; the real spelling is
     // pinned by `okg_store_path_matches_the_owners_spelling`.
-    let home = AssistantHome::under(tmp.path().join("trusty-agents"), id);
+    let home = AssistantHome::under(tmp.path().join("trusty-assistants"), id);
     (tmp, home)
 }
 
@@ -97,7 +97,7 @@ fn layout_matches_the_ticket() {
 /// the whole point of instance isolation.
 #[test]
 fn two_instances_get_separate_homes() {
-    let root = PathBuf::from("/trusty-agents");
+    let root = PathBuf::from("/trusty-assistants");
     let izzie = AssistantHome::under(&root, AssistantInstanceId::new("izzie").unwrap());
     let cto = AssistantHome::under(&root, AssistantInstanceId::new("cto-assistant").unwrap());
     assert_ne!(izzie.path(), cto.path());
@@ -141,7 +141,7 @@ fn default_root_is_dotless_under_the_user_home() {
 }
 
 /// Why: the owner specified the store path literally on 2026-08-01 —
-/// `trusty-agents/<agent>/okg/`. An intervening `assistants/` segment (the
+/// `trusty-assistants/<agent>/okg/` (`trusty-agents` before #11632). An intervening `assistants/` segment (the
 /// spelling this PR originally carried) would make every path the OKG Sources
 /// spec is written against wrong, so the full absolute path is pinned here
 /// rather than only the accessors.
@@ -160,17 +160,24 @@ fn okg_store_path_matches_the_owners_spelling() {
 
     let home = AssistantHome::for_instance("izzie").expect("valid id");
 
-    assert_eq!(home.path(), tmp.path().join("trusty-agents").join("izzie"));
+    // #11632: the root is `trusty-assistants`, renamed from `trusty-agents`.
+    assert_eq!(
+        home.path(),
+        tmp.path().join("trusty-assistants").join("izzie")
+    );
     assert_eq!(
         home.okg_dir(),
-        tmp.path().join("trusty-agents").join("izzie").join("okg")
+        tmp.path()
+            .join("trusty-assistants")
+            .join("izzie")
+            .join("okg")
     );
-    // `<trusty-agents home>/<agent>/stores/` — the parent of the per-remote-store
+    // `<root>/<agent>/stores/` — the parent of the per-remote-store
     // directories, same owner message.
     assert_eq!(
         home.stores_dir(),
         tmp.path()
-            .join("trusty-agents")
+            .join("trusty-assistants")
             .join("izzie")
             .join("stores")
     );

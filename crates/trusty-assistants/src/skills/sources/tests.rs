@@ -138,13 +138,13 @@ fn remote_git_cache_path_computed_correctly() {
     let paths = reg.resolved_paths();
     assert_eq!(paths.len(), 1);
 
-    let expected_base = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".trusty-agents")
-        .join("skills")
-        .join("cache")
-        .join("claude-mpm-agents")
-        .join("skills/");
+    // #11632: the app directory, under whichever name it resolves to.
+    let expected_base =
+        crate::assistants::app_dir(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+            .join("skills")
+            .join("cache")
+            .join("claude-mpm-agents")
+            .join("skills/");
     assert_eq!(paths[0], expected_base);
 }
 
@@ -172,12 +172,12 @@ fn remote_git_without_subdir_uses_cache_dir_directly() {
     let reg = SkillSourceRegistry::from_sources(project.path(), sources);
     let paths = reg.resolved_paths();
     assert_eq!(paths.len(), 1);
-    let expected = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".trusty-agents")
-        .join("skills")
-        .join("cache")
-        .join("foo");
+    // #11632: the app directory, under whichever name it resolves to.
+    let expected =
+        crate::assistants::app_dir(&dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+            .join("skills")
+            .join("cache")
+            .join("foo");
     assert_eq!(paths[0], expected);
 }
 

@@ -542,7 +542,8 @@ fn agent_search_paths_order() {
     assert_eq!(paths[1], PathBuf::from(".claude/agents"));
     assert_eq!(
         paths[2],
-        PathBuf::from("/tmp/home-test/.trusty-agents/agents")
+        // #11632: the app directory's new name when neither exists.
+        PathBuf::from("/tmp/home-test/.trusty-assistants/agents")
     );
     assert_eq!(paths[3], PathBuf::from("/tmp/home-test/.claude/agents"));
     assert_eq!(paths[4], PathBuf::from("/opt/trusty-agents/config/agents"));

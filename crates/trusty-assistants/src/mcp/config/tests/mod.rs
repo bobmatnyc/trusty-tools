@@ -97,7 +97,7 @@ async fn load_or_create_reads_existing_file() {
     unsafe {
         std::env::set_var("HOME", &home);
     }
-    let dir = home.join(".trusty-agents");
+    let dir = home.join(".trusty-assistants");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("config.toml"),
@@ -162,7 +162,7 @@ async fn providers_section_survives_an_unrelated_save() {
     }
 
     // An operator sets the policy by hand.
-    let dir = home.join(".trusty-agents");
+    let dir = home.join(".trusty-assistants");
     std::fs::create_dir_all(&dir).expect("create config dir");
     std::fs::write(
         dir.join("config.toml"),
@@ -243,10 +243,10 @@ async fn save_publishes_by_rename_leaving_the_old_file_intact() {
     cfg.mcp.inject_for_roles = vec!["ctrl".to_string()];
     cfg.save().await.expect("first save");
 
-    let path = home.join(".trusty-agents").join("config.toml");
+    let path = home.join(".trusty-assistants").join("config.toml");
     let published = std::fs::read_to_string(&path).expect("read first save");
 
-    let witness = home.join(".trusty-agents").join("witness.toml");
+    let witness = home.join(".trusty-assistants").join("witness.toml");
     std::fs::hard_link(&path, &witness).expect("hard link the published inode");
 
     cfg.mcp.inject_for_roles = vec!["pm".to_string()];
@@ -280,7 +280,7 @@ async fn save_leaves_no_scratch_file_behind() {
     cfg.mcp.inject_for_roles = vec!["ctrl".to_string()];
     cfg.save().await.expect("save should succeed");
 
-    let dir = home.join(".trusty-agents");
+    let dir = home.join(".trusty-assistants");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
         .expect("read config dir")
         .map(|e| {

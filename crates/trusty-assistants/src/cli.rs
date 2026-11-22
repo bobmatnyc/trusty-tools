@@ -110,7 +110,8 @@ fn classify(args: &[String]) -> Command {
 /// Why: kept in the library so a downstream launcher can call
 /// `install_plugins(...)` first, as before the cut.
 /// What: installs the rustls crypto provider (#4825), then runs the verb
-/// [`classify`] picks. #11632: a verb that reads state first runs the
+/// [`classify`] picks. #11632: a verb that reads this crate's state
+/// (`config profile`, `mcp-serve`) first runs the
 /// one-time move out of the pre-rename locations
 /// ([`crate::assistants::migrate_legacy_locations`]); a failed move stops the
 /// verb rather than letting it run against the half-moved tree. An unknown argument — including the removed `--api`,
@@ -128,10 +129,9 @@ pub async fn run() -> Result<()> {
             print!("{USAGE}");
             Ok(())
         }
-        Command::Config => {
-            migrate_before_state_access()?;
-            run_config_subcommand(&args[1..]).await
-        }
+        // The credential verbs use trusty-common's shared store, not this
+        // crate's directories, so they do not run the move.
+        Command::Config => run_config_subcommand(&args[1..]).await,
         Command::ConfigProfile => {
             migrate_before_state_access()?;
             run_config_profile_subcommand(&args[3..])

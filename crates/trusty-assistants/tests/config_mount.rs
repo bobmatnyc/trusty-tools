@@ -14,7 +14,7 @@ use std::process::Command;
 
 /// Absolute path to the freshly built binary (Cargo sets this for integration
 /// tests). Using it guarantees we exercise the real mounted CLI, not a stub.
-const BIN: &str = env!("CARGO_BIN_EXE_tagent");
+const BIN: &str = env!("CARGO_BIN_EXE_ta");
 
 /// Spawn the built binary with the ambient project-dir hint cleared (#4826).
 ///
@@ -38,7 +38,10 @@ fn ta() -> Command {
 
 #[test]
 fn config_help_advertises_keys_feature() {
+    // #11632: an isolated `$HOME`, so no spawn here can touch the real one.
+    let home = tempfile::TempDir::new().expect("tempdir");
     let out = ta()
+        .env("HOME", home.path())
         .args(["config", "--help"])
         .output()
         .expect("spawn `config --help`");
@@ -56,7 +59,10 @@ fn config_help_advertises_keys_feature() {
 
 #[test]
 fn config_keys_list_runs_offline() {
+    // #11632: an isolated `$HOME`, so no spawn here can touch the real one.
+    let home = tempfile::TempDir::new().expect("tempdir");
     let out = ta()
+        .env("HOME", home.path())
         .args(["config", "keys", "list"])
         .output()
         .expect("spawn `config keys list`");

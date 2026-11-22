@@ -11,14 +11,14 @@
 //!   it exists, else the old one when it exists, else the new one. A library
 //!   caller that never runs the move still finds existing data.
 //! - [`migrate_legacy_locations`] moves `~/.trusty-agents` to
-//!   `~/.trusty-assistants` and each `~/trusty-agents/<id>/` to
-//!   `~/trusty-assistants/<id>/`. It never overwrites a destination that
-//!   exists, and leaves a symlink at the old path so absolute paths recorded
+//!   `~/.trusty-assistants` and `~/trusty-agents` to `~/trusty-assistants`,
+//!   each as one directory. It never overwrites a destination that exists,
+//!   and leaves a symlink at the old path so absolute paths recorded
 //!   elsewhere (a trusty-search index root, a log path in another crate)
 //!   still resolve. A home's knowledge state records its OKG root as an
 //!   absolute path, so the move rewrites that one field.
-//! - Every step that fails undoes the steps before it and returns
-//!   [`AssistantError::Relocate`]; a failed entry is left exactly as found.
+//! - A step that fails undoes the steps before it and returns
+//!   [`AssistantError::Relocate`]; a failed move leaves the directory as found.
 //!
 //! The variable `TAGENT_ASSISTANTS_DIR` names a directory the operator chose,
 //! so it is read as-is and never moved; only its name is deprecated.
@@ -125,51 +125,35 @@ impl RelocationReport {
 /// Move the pre-rename directories under `home` to their new names, once.
 ///
 /// Why: #11632 — the second release drops the read compatibility above, so
-/// the data has to be under the new names by then. Running the move here,
-/// before a command reads state, means a user never edits a home that is
-/// about to move.
+/// the data has to be under the new names by then. Running the move before a
+/// command reads state means a user never edits a home that is about to move.
 /// What: moves `<home>/.trusty-agents` to `<home>/.trusty-assistants`, then,
-/// unless an assistants-root variable is set, each real directory in
-/// `<home>/trusty-agents` to `<home>/trusty-assistants/<name>`. A
-/// destination that exists is never overwritten: the pair goes in
-/// [`RelocationReport::kept_both`] and both stay as they are. Each move
-/// renames the directory, rewrites a home's recorded OKG root, and leaves a
-/// symlink at the old path; a step that fails undoes the earlier steps of
-/// that entry and returns the error. Entries moved before the failure stay
-/// moved. A second call finds only symlinks and does nothing.
+/// unless an assistants-root variable is set, `<home>/trusty-agents` to
+/// `<home>/trusty-assistants`. Each directory moves WHOLE, so files beside
+/// the homes (a `.git`, a README) travel with them. A destination that
+/// exists is never overwritten: the pair goes in
+/// [`RelocationReport::kept_both`] and both stay as they are. A move renames
+/// the directory, rewrites each home's recorded OKG root, and leaves a
+/// symlink at the old path; a step that fails undoes the steps before it and
+/// returns the error. A second call finds only symlinks and does nothing.
 /// Test: `super::tests::relocate_tests::moves_each_pilot_home_once`,
 /// `super::tests::relocate_tests::both_homes_present_keeps_both_untouched`,
 /// `super::tests::relocate_tests::failed_move_leaves_the_legacy_home_in_place`,
+/// `super::tests::relocate_tests::failed_state_rewrite_undoes_the_move`,
 /// `super::tests::relocate_tests::unreadable_knowledge_state_refuses_the_move`.
 pub fn migrate_legacy_locations(home: &Path) -> Result<RelocationReport, AssistantError> {
     let mut report = RelocationReport::default();
-    move_one(
+    move_tree(
         &home.join(LEGACY_APP_DIR_NAME),
         &home.join(APP_DIR_NAME),
         &mut report,
     )?;
-    if root_override_is_set() {
-        return Ok(report);
-    }
-    let legacy_root = home.join(LEGACY_ASSISTANTS_DIR_NAME);
-    if !is_real_dir(&legacy_root) {
-        return Ok(report);
-    }
-    let new_root = home.join(super::ASSISTANTS_DIR_NAME);
-    std::fs::create_dir_all(&new_root).map_err(|e| relocate_error(&legacy_root, &new_root, e))?;
-    let mut entries = std::fs::read_dir(&legacy_root)
-        .map_err(|e| relocate_error(&legacy_root, &new_root, e))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| is_real_dir(path))
-        .collect::<Vec<_>>();
-    entries.sort();
-    for from in entries {
-        let Some(name) = from.file_name() else {
-            continue;
-        };
-        let to = new_root.join(name);
-        move_one(&from, &to, &mut report)?;
+    if !root_override_is_set() {
+        move_tree(
+            &home.join(LEGACY_ASSISTANTS_DIR_NAME),
+            &home.join(super::ASSISTANTS_DIR_NAME),
+            &mut report,
+        )?;
     }
     Ok(report)
 }
@@ -182,83 +166,105 @@ fn root_override_is_set() -> bool {
         .any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty()))
 }
 
+/// One home's knowledge state, before and after its OKG root is rewritten.
+struct StateRewrite {
+    /// Relative to the moved directory: `<id>/stores/knowledge-pipeline/state.json`.
+    rel: PathBuf,
+    original: Vec<u8>,
+    rebased: Vec<u8>,
+}
+
 /// Move one directory, or record why it stayed. See [`migrate_legacy_locations`].
-fn move_one(from: &Path, to: &Path, report: &mut RelocationReport) -> Result<(), AssistantError> {
+fn move_tree(from: &Path, to: &Path, report: &mut RelocationReport) -> Result<(), AssistantError> {
     if !is_real_dir(from) {
         return Ok(());
     }
     if std::fs::symlink_metadata(to).is_ok() {
-        report.kept_both.push((from.to_path_buf(), to.to_path_buf()));
+        report
+            .kept_both
+            .push((from.to_path_buf(), to.to_path_buf()));
         return Ok(());
     }
-    // Read and rewrite the knowledge state BEFORE anything moves, so a state
-    // file this code cannot parse refuses the move with nothing changed.
-    let state = rebased_state(from, to)?;
+    // Read and rewrite every knowledge state BEFORE anything moves, so a
+    // state file this code cannot parse refuses the move with nothing changed.
+    let states = rebased_states(from, to)?;
     std::fs::rename(from, to).map_err(|e| relocate_error(from, to, e))?;
-    if let Some((_, rebased)) = &state
-        && let Err(e) = write_state(to, rebased)
-    {
-        return Err(undo(from, to, None, e));
+    for (written, state) in states.iter().enumerate() {
+        if let Err(e) = write_state(&to.join(&state.rel), &state.rebased) {
+            return Err(undo(from, to, &states[..written], e));
+        }
     }
     if let Err(e) = link_back(to, from) {
-        let original = state.as_ref().map(|(original, _)| original.as_slice());
-        return Err(undo(from, to, original, e));
+        return Err(undo(from, to, &states, e));
     }
     report.moved.push((from.to_path_buf(), to.to_path_buf()));
     Ok(())
 }
 
-/// The original and rewritten bytes of the home's knowledge state, or `None`
-/// when the home has none.
+/// The knowledge state of every home directly under `from`, with its OKG
+/// root moved from under `from` to under `to`.
 ///
-/// What: replaces the `from` prefix of `store.root` with `to`. Every other
-/// field is left byte-for-byte as parsed, including `revision`.
-fn rebased_state(from: &Path, to: &Path) -> Result<Option<(Vec<u8>, Vec<u8>)>, AssistantError> {
-    let path = from.join(KNOWLEDGE_STATE);
-    let original = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(relocate_error(from, to, e)),
-    };
-    let invalid = |reason: String| AssistantError::Relocate {
-        from: from.to_path_buf(),
-        to: to.to_path_buf(),
-        reason: format!("{}: {reason}", path.display()),
-    };
-    let mut state: serde_json::Value =
-        serde_json::from_slice(&original).map_err(|e| invalid(e.to_string()))?;
-    let root = state
-        .pointer_mut("/store/root")
-        .ok_or_else(|| invalid("has no `store.root`".to_string()))?;
-    let recorded = PathBuf::from(
-        root.as_str()
-            .ok_or_else(|| invalid("`store.root` is not a string".to_string()))?,
-    );
-    // The state may record the canonical spelling of the home (`/private/var`
-    // for `/var` on macOS), so try both.
+/// What: parses each `<id>/stores/knowledge-pipeline/state.json` as
+/// [`crate::knowledge::KnowledgeState`] and re-serialises it the way the
+/// knowledge store writes it, changing only `store.root`. A root outside
+/// `from` is left as recorded. Any read or parse failure is an error.
+fn rebased_states(from: &Path, to: &Path) -> Result<Vec<StateRewrite>, AssistantError> {
+    // The state may record the canonical spelling of the root (`/private/var`
+    // for `/var` on macOS), so both spellings are tried.
     let canonical = std::fs::canonicalize(from).map_err(|e| relocate_error(from, to, e))?;
-    let Some(rest) = recorded
-        .strip_prefix(from)
-        .or_else(|_| recorded.strip_prefix(&canonical))
-        .ok()
-        .map(Path::to_path_buf)
-    else {
-        // A root outside the home is refused by the knowledge store anyway;
-        // moving the home does not change what it records.
-        return Ok(None);
-    };
-    *root = serde_json::Value::String(to.join(&rest).to_string_lossy().into_owned());
-    let rebased = serde_json::to_vec_pretty(&state).map_err(|e| invalid(e.to_string()))?;
-    Ok(Some((original, rebased)))
+    let mut children = std::fs::read_dir(from)
+        .map_err(|e| relocate_error(from, to, e))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| is_real_dir(path))
+        .collect::<Vec<_>>();
+    children.sort();
+    let mut out = Vec::new();
+    for child in children {
+        let path = child.join(KNOWLEDGE_STATE);
+        let original = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(relocate_error(from, to, e)),
+        };
+        let invalid = |reason: String| AssistantError::Relocate {
+            from: from.to_path_buf(),
+            to: to.to_path_buf(),
+            reason: format!("{}: {reason}", path.display()),
+        };
+        let mut state: crate::knowledge::KnowledgeState =
+            serde_json::from_slice(&original).map_err(|e| invalid(e.to_string()))?;
+        let Some(rest) = state
+            .store
+            .root
+            .strip_prefix(from)
+            .or_else(|_| state.store.root.strip_prefix(&canonical))
+            .ok()
+            .map(Path::to_path_buf)
+        else {
+            continue;
+        };
+        state.store.root = to.join(rest);
+        let rebased = serde_json::to_vec_pretty(&state).map_err(|e| invalid(e.to_string()))?;
+        let rel = path
+            .strip_prefix(from)
+            .map_err(|e| invalid(e.to_string()))?
+            .to_path_buf();
+        out.push(StateRewrite {
+            rel,
+            original,
+            rebased,
+        });
+    }
+    Ok(out)
 }
 
-/// Atomically replace the knowledge state of the home now at `home`.
+/// Atomically replace the knowledge state file at `path`.
 ///
 /// What: a 0600 temp file in the same directory, synced, then renamed over
 /// the state file, so a failure leaves the previous bytes in place.
-fn write_state(home: &Path, bytes: &[u8]) -> std::io::Result<()> {
+fn write_state(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
-    let path = home.join(KNOWLEDGE_STATE);
     let parent = path
         .parent()
         .ok_or_else(|| std::io::Error::other("knowledge state has no parent directory"))?;
@@ -271,7 +277,7 @@ fn write_state(home: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
     tmp.write_all(bytes)?;
     tmp.as_file().sync_all()?;
-    tmp.persist(&path).map_err(|e| e.error)?;
+    tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
 
@@ -285,21 +291,19 @@ fn link_back(_target: &Path, _link: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Put a half-done move back: the original state bytes, then the directory.
+/// Put a half-done move back: the rewritten state files, then the directory.
 ///
-/// Why: the Fail-Open Check for #11632 — a failed move must leave the entry
+/// Why: the Fail-Open Check for #11632 — a failed move must leave the data
 /// where the read path above still finds it, not half-moved.
-/// What: returns [`AssistantError::Relocate`] naming the failure, and the
-/// undo failure too when the undo itself fails.
-fn undo(
-    from: &Path,
-    to: &Path,
-    original_state: Option<&[u8]>,
-    cause: std::io::Error,
-) -> AssistantError {
-    let restore_state = original_state.map_or(Ok(()), |bytes| write_state(to, bytes));
-    let restore_dir = restore_state.and_then(|()| std::fs::rename(to, from));
-    let reason = match restore_dir {
+/// What: writes back the original bytes of each state in `written`, renames
+/// `to` back to `from`, and returns [`AssistantError::Relocate`] naming the
+/// cause, plus the undo failure when the undo itself fails.
+fn undo(from: &Path, to: &Path, written: &[StateRewrite], cause: std::io::Error) -> AssistantError {
+    let restore = written
+        .iter()
+        .try_for_each(|state| write_state(&to.join(&state.rel), &state.original))
+        .and_then(|()| std::fs::rename(to, from));
+    let reason = match restore {
         Ok(()) => format!("{cause}; the move was undone"),
         Err(undo) => format!(
             "{cause}; undoing the move also failed ({undo}), so the data is at {}",

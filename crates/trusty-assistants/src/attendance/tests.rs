@@ -500,8 +500,12 @@ fn concurrent_writers_never_rewind_the_clock() {
 fn default_root_is_under_the_app_state_tree() {
     let root = default_attendance_root().expect("home dir");
     assert!(root.ends_with("attendance"));
-    assert!(
-        root.parent().expect("parent").ends_with(".trusty-agents"),
+    // #11632: whichever of `.trusty-assistants` / `.trusty-agents` the app
+    // directory resolves to on this machine.
+    let home = dirs::home_dir().expect("home dir");
+    assert_eq!(
+        root.parent().expect("parent"),
+        crate::assistants::app_dir(&home),
         "attendance is app-private machine state, not the user-browsable home"
     );
 }

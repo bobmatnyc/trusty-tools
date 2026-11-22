@@ -19,7 +19,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_tagent");
+const BIN: &str = env!("CARGO_BIN_EXE_ta");
 
 /// Short git SHA baked in by `build.rs` for THIS compilation of the crate.
 ///

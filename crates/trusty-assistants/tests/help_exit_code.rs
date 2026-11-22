@@ -14,7 +14,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_tagent");
+const BIN: &str = env!("CARGO_BIN_EXE_ta");
 
 /// Run `ta <flag>` in `dir` with an isolated `$HOME` and no ambient
 /// project hint (#4826), returning `(exit_code, stdout, stderr)`.
@@ -50,11 +50,7 @@ fn help_flag_exits_zero_and_prints_usage_on_stdout() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let (code, stdout, stderr) = help_output(tmp.path(), flag);
 
-        assert_eq!(
-            code,
-            Some(0),
-            "`ta {flag}` must exit 0; stderr:\n{stderr}"
-        );
+        assert_eq!(code, Some(0), "`ta {flag}` must exit 0; stderr:\n{stderr}");
         assert!(
             stdout.contains("Usage:"),
             "`ta {flag}` must print the usage text on stdout; got:\n{stdout}"
