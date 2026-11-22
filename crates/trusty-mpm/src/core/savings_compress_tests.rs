@@ -218,3 +218,92 @@ fn a_chain_step_row_carries_its_tool_and_the_chain_fields() {
     assert!(rows[1].get("chain_shape").is_none(), "{text}");
     assert!(rows[1].get("steps").is_none(), "{text}");
 }
+
+/// Run `f` under a subscriber that keeps INFO and above; return what it logged.
+///
+/// #11560: `tm compress` installs an `info` filter, so a line the test sees
+/// here is a line the operator sees there.
+fn logs_at_info(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink = Arc::clone(&buf);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_ansi(false)
+        .with_writer(move || SharedBuf(Arc::clone(&sink)))
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = buf.lock().map(|b| b.clone()).unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for SharedBuf {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if let Ok(mut b) = self.0.lock() {
+            b.extend_from_slice(data);
+        }
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Why (#11560): a zero-saving decline was logged at debug, below the `info`
+/// filter `tm compress` installs, so no operator could see why a run wrote no row.
+/// Test: itself.
+#[test]
+fn a_zero_saving_decline_logs_at_info_naming_the_reason() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let logged = logs_at_info(|| {
+        record_compress_with(
+            dir.path(),
+            "sess-a",
+            "ls",
+            668,
+            668,
+            "native_fallback",
+            sonnet_price,
+        );
+    });
+    assert!(logged.contains(" INFO "), "{logged}");
+    assert!(logged.contains("no_gain"), "the reason is named: {logged}");
+    assert!(!savings_log_in(dir.path()).exists(), "still no row");
+}
+
+/// Why (#11560): a failed savings write is fail-open AND visible.
+/// Test: itself.
+#[test]
+fn a_failed_savings_write_is_logged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("usage"), "not a directory").expect("blocker");
+    let logged = logs_at_info(|| {
+        record_compress_with(
+            dir.path(),
+            "sess-a",
+            "cargo test",
+            400_000,
+            40_000,
+            "rtk_binary",
+            sonnet_price,
+        );
+    });
+    assert!(
+        logged.contains("could not append the compress savings row"),
+        "{logged}"
+    );
+}
+
+/// #11560: the observer's split and the row decline agree at the boundary.
+#[test]
+fn compress_gains_matches_the_row_decline() {
+    for (before, after) in [(668, 668), (400_000, 40_000), (8, 5), (9, 4), (0, 0)] {
+        assert_eq!(
+            compress_gains(before, after),
+            compress_row("s", before, after, "p", sonnet_price).is_some(),
+            "{before} -> {after}"
+        );
+    }
+}

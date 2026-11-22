@@ -195,6 +195,17 @@ pub(crate) fn record_tagged_with(
 /// Test: `a_hand_computed_byte_delta_matches_the_row`,
 /// `passthrough_output_writes_no_row`, `an_expanded_output_writes_no_row`,
 /// `no_row_when_the_session_model_cannot_be_priced`.
+/// Whether a run from `bytes_before` to `bytes_after` saved any tokens.
+///
+/// Why (#11560): the opportunity row's `compressed` / `compressed_no_gain`
+/// split must use the same rounding [`compress_row`] declines on.
+/// Test: `compress_gains_matches_the_row_decline`.
+pub fn compress_gains(bytes_before: usize, bytes_after: usize) -> bool {
+    let before_tokens = (bytes_before as f64 / BYTES_PER_TOKEN).floor() as i64;
+    let after_tokens = (bytes_after as f64 / BYTES_PER_TOKEN).ceil() as i64;
+    before_tokens > after_tokens
+}
+
 fn compress_row(
     session_id: &str,
     bytes_before: usize,
@@ -206,12 +217,16 @@ fn compress_row(
     let after_tokens = (bytes_after as f64 / BYTES_PER_TOKEN).ceil() as i64;
     let tokens_saved = before_tokens - after_tokens;
     if tokens_saved <= 0 {
-        tracing::debug!(
+        // #11560: info, not debug — `tm compress` filters at info, so a debug
+        // decline hid why 173 of 256 runs wrote no row. The run is still
+        // counted in `compression.jsonl` by the caller.
+        tracing::info!(
             session_id,
             before_tokens,
             after_tokens,
             compression_path,
-            "the run returned no smaller than it read; writing no savings row"
+            reason = "no_gain",
+            "compress declined a savings row: the run returned no fewer tokens than it read"
         );
         return None;
     }
