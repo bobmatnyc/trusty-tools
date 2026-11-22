@@ -277,15 +277,18 @@ fn parity_joins_matched_scheduler_only_and_poller_only() {
         LiveAlert {
             ts: t + 10,
             key: alert("s1", "ctx"),
+            fingerprint: None,
         },
         LiveAlert {
             ts: t + 20,
             key: alert("s3", "error"),
+            fingerprint: None,
         },
         // Outside the window: not counted against this record.
         LiveAlert {
             ts: t + 60,
             key: alert("s9", "idle"),
+            fingerprint: None,
         },
     ];
     let rep = compute(&records, &live, &[]);
@@ -304,13 +307,15 @@ fn parity_joins_matched_scheduler_only_and_poller_only() {
 fn parity_counts_wakes_per_window() {
     let t = parse_iso("2026-11-21T14:00:00Z").unwrap();
     let wake = Some("dry-run: would send to tm-architect: x");
+    // MB1595 fix round: the records sit 10 cycles apart, beyond the
+    // fallback's two-cycle tolerance, so each wake stays its record's own.
     let records = [
-        record(t, true, wake, vec![]),       // both wake
-        record(t + 60, true, wake, vec![]),  // scheduler only
-        record(t + 120, true, None, vec![]), // poller only
-        record(t + 180, true, None, vec![]), // neither
+        record(t, true, wake, vec![]),        // both wake
+        record(t + 600, true, wake, vec![]),  // scheduler only
+        record(t + 1200, true, None, vec![]), // poller only
+        record(t + 1800, true, None, vec![]), // neither
     ];
-    let rep = compute(&records, &[], &[t + 5, t + 125]);
+    let rep = compute(&records, &[], &[t + 5, t + 1205]);
     assert_eq!(
         (
             rep.wakes.matched,
@@ -333,6 +338,7 @@ fn parity_ignores_failed_shadow_records() {
     let live = [LiveAlert {
         ts: t + 5,
         key: alert("s1", "ctx"),
+        fingerprint: None,
     }];
     let rep = compute(&records, &live, &[]);
     assert_eq!((rep.cycles, rep.failed_cycles), (1, 1));
