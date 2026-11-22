@@ -59,7 +59,7 @@ set -uo pipefail
 MAX_LEGS=8
 DOCS_ONLY=""
 EVENT_NAME=""
-UI_CRATES="trusty-agents-ui trusty-code-gui"
+UI_CRATES="trusty-code-gui"
 # Tested by ci.yml's `trusty-common-lanes` job, never by a leg.
 LANES_CRATE="trusty-common"
 TRUSTY_COMMON=false
