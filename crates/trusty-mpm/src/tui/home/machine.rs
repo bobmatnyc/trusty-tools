@@ -59,7 +59,8 @@ impl Fault {
     /// Test: `every_fault_draws_its_own_label_and_no_values`.
     pub fn label(&self) -> (&'static str, Tone) {
         match self {
-            Fault::Absent(_) => ("console absent", Tone::Muted),
+            // #11548: the process may run while its socket does not listen
+            Fault::Absent(_) => ("console socket not listening", Tone::Muted),
             Fault::Timeout => ("timeout", Tone::Warn),
             Fault::Error(_) => ("error", Tone::Err),
             Fault::Unknown(_) => ("unknown", Tone::Degraded),

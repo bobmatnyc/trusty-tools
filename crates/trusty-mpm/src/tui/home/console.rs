@@ -20,7 +20,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Sparkline, Table, TableState},
 };
 
-use super::machine_cards::{TITLES, history_note, machine_model, service_figures};
+use super::machine_cards::{NO_SOURCE, TITLES, history_note, machine_model, service_figures};
 use super::state::{HomeState, TileHealth};
 use crate::tui::VERSION_LABEL;
 use crate::tui::theme::{Tone, badge, palette};
@@ -339,16 +339,17 @@ fn render_services(frame: &mut Frame, area: Rect, model: &ConsoleModel) {
         Constraint::Length(10),
         // Fits the widest badge, ` NO UDS ENDPOINT `.
         Constraint::Length(17),
-        // #10943: fits `unknown`.
-        Constraint::Length(7),
-        Constraint::Length(9),
+        // #11548: fits `no samples` and `unmeasured`.
+        Constraint::Length(10),
+        Constraint::Length(10),
     ];
     let mut header = vec!["Service", "Version", "Status", "%CPU", "MEM"];
     if history {
         widths.extend([Constraint::Fill(1), Constraint::Fill(1)]);
         header.extend(["CPU · last 10 min", "MEM · last 10 min"]);
     }
-    let dash = || "—".to_string();
+    // #11548: a blank cell names why: no source (no ready history feed)
+    let dash = || NO_SOURCE.to_string();
     let rows = model.rows.iter().map(|r| {
         let mut cells = vec![
             Cell::from(r.name.clone()),

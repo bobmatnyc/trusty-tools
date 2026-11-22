@@ -187,9 +187,10 @@ pub fn history_note(history: &Feed<HistorySnapshot>) -> String {
 /// feed is ready.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ServiceFigures {
-    /// `%CPU` of the newest sample.
+    /// `%CPU` of the newest sample; [`NO_SAMPLES`] when the feed is ready but
+    /// holds none for this service, `None` when there is no source.
     pub cpu: Option<String>,
-    /// `MEM` of the newest sample.
+    /// `MEM` of the newest sample, same rule.
     pub mem: Option<String>,
     /// CPU over the window; an unmeasured or unknown-status sample is a gap.
     pub cpu_history: Option<Vec<Option<u64>>>,
@@ -197,13 +198,23 @@ pub struct ServiceFigures {
     pub mem_history: Option<Vec<Option<u64>>>,
 }
 
+/// What a `%CPU` / `MEM` cell says when the history is ready but holds no
+/// sample for the service (#11548).
+pub const NO_SAMPLES: &str = "no samples";
+/// What a `%CPU` / `MEM` cell says when there is no source to read (#11548).
+pub const NO_SOURCE: &str = "no source";
+/// What a cell says when the newest sample did not measure the value.
+pub const UNMEASURED: &str = "unmeasured";
+
 /// The figures of the service whose wire id is `id` (#10943).
 ///
 /// What: a sample whose status this build does not know is a gap, never a
 /// value (#10996 `ServiceStatus::Unknown`); when the newest one is unknown,
 /// `%CPU` and `MEM` read `unknown`. A service the history has no samples for
-/// gets empty series, which draw as "no samples yet".
+/// gets empty series, which draw as "no samples yet", and [`NO_SAMPLES`]
+/// cells; an unmeasured value reads [`UNMEASURED`] (#11548).
 /// Test: `service_rows_take_cpu_and_memory_from_service_samples`,
+/// `blank_cpu_and_mem_cells_say_why`,
 /// `an_unknown_service_status_is_a_gap_not_a_value`.
 pub fn service_figures(history: &Feed<HistorySnapshot>, id: &str) -> ServiceFigures {
     let Some(snapshot) = history.ready() else {
@@ -212,11 +223,15 @@ pub fn service_figures(history: &Feed<HistorySnapshot>, id: &str) -> ServiceFigu
     let samples: &[ServiceSample] = snapshot.service_samples.get(id).map_or(&[], Vec::as_slice);
     let known = |s: &ServiceSample| s.status != ServiceStatus::Unknown;
     let (cpu, mem) = match samples.last() {
-        None => (None, None),
+        // #11548: a ready feed with no sample says so, never a bare dash
+        None => (Some(NO_SAMPLES.to_string()), Some(NO_SAMPLES.to_string())),
         Some(s) if !known(s) => (Some("unknown".to_string()), Some("unknown".to_string())),
         Some(s) => (
-            s.cpu_pct.map(|c| format!("{c:.1}")),
-            s.rss_bytes.map(format_rss),
+            Some(
+                s.cpu_pct
+                    .map_or(UNMEASURED.to_string(), |c| format!("{c:.1}")),
+            ),
+            Some(s.rss_bytes.map_or(UNMEASURED.to_string(), format_rss)),
         ),
     };
     ServiceFigures {
