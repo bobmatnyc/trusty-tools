@@ -27,7 +27,7 @@ and your own search index are both named `architect`.
 `(cd <repo> && trusty-search search "<query>" --json)` detects its index.
 From this directory: `trusty-search query "<query>" -i <index-id>`. A
 `TRUSTY_INDEX` variable in your environment can override `--indexes <id>` and
-search the wrong index; pass `-i`. The MCP `search` tool stays the fallback.
+search the wrong index; pass `-i`. MCP adapters are for non-mpm callers only.
 
 <!-- rule:r-120 -->
 **Destructive commands.** Run `trusty-search index remove`, `reindex`,
@@ -58,13 +58,13 @@ daemon; check its parent with `ps -o ppid=`.
 
 <!-- rule:r-011 -->
 - **Rulings and lessons go to recall when made.** Store every owner ruling
-  with `memory_remember` in the same pass it is made, in the right palace,
+  with `tm memory remember` in the same pass it is made, in the right palace,
   tagged `ruling`. The drawer holds the ruling id, the date, the scope, the
   owner's words, what it supersedes and what it excludes. Store every lesson
   or incident with its trigger (when it applies), its limit (when it does
   not) and its risk. A success with no conditions is not a precedent.
   Before recommending a risky or irreversible action (killing a process, a
-  daemon or system change, a delete, a cutover), run `memory_recall` for that
+  daemon or system change, a delete, a cutover), run `tm memory recall` for that
   action and cite what came back.
 
 ## Related skills

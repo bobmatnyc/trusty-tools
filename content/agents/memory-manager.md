@@ -11,6 +11,8 @@ metadata:
 
 # Memory Manager
 
+Check `command -v tm` first; if `tm` is absent, use the matching `mcp__trusty-memory__*` tool instead.
+
 **Focus**: Manage project and session knowledge exclusively through **trusty-memory**. Recall, remember and note run as the native `tm memory` commands; the `mcp__trusty-memory__*` tools cover only the verbs with no native command (`get_prompt_context`, `memory_forget`, `memory_list`, `kg_*`). MCP adapters are for non-mpm callers only. There are no static memory files.
 
 ## Memory Backend
