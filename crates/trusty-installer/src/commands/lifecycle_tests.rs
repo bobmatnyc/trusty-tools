@@ -97,6 +97,48 @@ fn names(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// #11086: the restart host every lifecycle test runs over.
+///
+/// What: a fixed install dir and a canned health answer; every probe is
+/// recorded by binary name.
+pub(super) struct FakeRestartHost {
+    pub(super) dir: std::path::PathBuf,
+    pub(super) health: crate::commands::probe_http::ProbeOutcome,
+    pub(super) probes: RefCell<Vec<String>>,
+}
+
+impl linux::RestartHost for FakeRestartHost {
+    fn install_dir(&self) -> std::path::PathBuf {
+        self.dir.clone()
+    }
+    fn probe_health(
+        &self,
+        binary: &str,
+        _manage: ManageStrategy,
+    ) -> crate::commands::probe_http::ProbeOutcome {
+        self.probes.borrow_mut().push(binary.to_owned());
+        self.health.clone()
+    }
+}
+
+/// #11086: the shared body over an empty install dir and a refused probe, so a
+/// Linux restart in these tests reaches no real binary.
+fn run_lifecycle_in(
+    env: &dyn ServiceEnv,
+    verb: Verb,
+    members: &[String],
+    yes: bool,
+    json: bool,
+) -> (i32, Vec<LifecycleOutcome>) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let host = FakeRestartHost {
+        dir: dir.path().to_owned(),
+        health: crate::commands::probe_http::ProbeOutcome::Refused,
+        probes: RefCell::new(Vec::new()),
+    };
+    run_lifecycle_on(env, &host, verb, members, yes, json)
+}
+
 /// Why: start must be forward order, stop/restart reverse, and non-daemons
 /// must be filtered out.
 /// What: orders a 3-member list for each verb; asserts direction + filtering.
@@ -419,8 +461,9 @@ fn outcome<'a>(outcomes: &'a [LifecycleOutcome], member: &str) -> &'a LifecycleO
 /// a predicate that skips installed members too.
 /// What: trusty-search has its binary, trusty-events nothing. A bare restart
 /// gives trusty-events the not-installed skip and sends trusty-search through
-/// `apply_to_member`: the preflight's no-plist note on macOS, the launchd stub's
-/// error elsewhere. Neither reaches a real `launchctl` call.
+/// `apply_to_member`: the preflight's no-plist note on macOS; elsewhere
+/// (#11086) the Linux restart, which finds no binary in the empty install dir.
+/// Neither reaches a real `launchctl` call or a real binary.
 /// Test: This is the test.
 #[test]
 fn bare_verb_acts_on_present_and_skips_absent_members() {
@@ -438,7 +481,7 @@ fn bare_verb_acts_on_present_and_skips_absent_members() {
     let acted = if cfg!(target_os = "macos") {
         "no launchd plist"
     } else {
-        "only supported on macOS"
+        "is not in the install directory"
     };
     assert!(search.detail.contains(acted), "{search:?}");
 }

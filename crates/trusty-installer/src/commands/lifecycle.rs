@@ -20,16 +20,39 @@
 //! never issued back to back (#6618); `OwnVerb` members shell out to their own
 //! subcommand.
 //!
+//! #11086: on Linux, `restart` runs each member's own `<install dir>/<binary>
+//! restart` and then compares the running version with the installed one; see
+//! [`restart_on_linux`] and the `lifecycle_linux` child module.
+//!
 //! Test: `lifecycle_tests.rs` covers ordering, the report shaping/exit code, the
 //! `Action` verb-name mapping, and (#10975) the not-installed filter driven
 //! through a `ServiceEnv` fake; the actual launchctl/subprocess calls are
-//! side-effecting and never invoked in tests.
+//! side-effecting and never invoked in tests. `lifecycle_linux_tests.rs` drives
+//! the Linux restart (#11086) against stub binaries in a temp install dir.
+
+use std::path::Path;
 
 use serde::Serialize;
 
 use super::service_bootstrap::{RealServiceEnv, ServiceEnv};
 use super::stable_set::{select_members, ManageStrategy, StableMember};
 use crate::output::render_json;
+use linux::RestartHost;
+
+#[path = "lifecycle_linux.rs"]
+mod linux;
+
+/// The manual-lifecycle note for a launchd member on a host without launchd.
+///
+/// Why (#11086): `tctl start|stop|restart` printed "only supported on macOS"
+/// where `tctl upgrade` printed what the operator has to do; one text serves
+/// both.
+/// What: `"<verb> the <binary> daemon manually (launchd is macOS-only)"`.
+/// Test: `linux_lifecycle_output_never_says_macos_only`,
+/// `super::upgrade::tests::restart_plan_launchd_member_off_macos_is_manual`.
+pub(super) fn manual_lifecycle_note(verb: &str, binary: &str) -> String {
+    format!("{verb} the {binary} daemon manually (launchd is macOS-only)")
+}
 
 /// #10975: the outcome detail for a member a bare verb skips because it is not
 /// on this host. Info, not a failure: the outcome is `ok`.
@@ -189,11 +212,19 @@ pub fn run_restart(members: &[String], yes: bool, json: bool) -> i32 {
 ///
 /// Why: the three verbs share resolve → confirm → ordered-apply; one helper
 /// avoids triplication (DRY).
-/// What: [`run_lifecycle_in`] over [`RealServiceEnv`].
+/// What: [`run_lifecycle_on`] over [`RealServiceEnv`] and the real restart host.
 /// Test: `tests::bare_verbs_skip_members_that_are_not_installed` drives the
 /// shared body through a fake.
 fn run_lifecycle(verb: Verb, members: &[String], yes: bool, json: bool) -> i32 {
-    run_lifecycle_in(&RealServiceEnv, verb, members, yes, json).0
+    run_lifecycle_on(
+        &RealServiceEnv,
+        &linux::RealRestartHost,
+        verb,
+        members,
+        yes,
+        json,
+    )
+    .0
 }
 
 /// Is any trace of `binary` on this host — the binary, its plist, or its
@@ -228,26 +259,32 @@ fn probe_failed(verb: Verb, m: &StableMember, err: &str) -> LifecycleOutcome {
     }
 }
 
-/// Shared orchestration for all three lifecycle verbs, over a [`ServiceEnv`].
+/// Shared orchestration for all three lifecycle verbs, over a [`ServiceEnv`]
+/// and a [`RestartHost`].
 ///
 /// Why: the presence filter (#10975) reads the host, so a test needs to inject
-/// a fake host to drive the whole verb path without touching launchd.
+/// a fake host to drive the whole verb path without touching launchd. #11086:
+/// the Linux restart reads the install dir and the health probe, so those are
+/// injected too.
 /// What: resolves members (unknown → exit 3), orders them per verb, then splits
 /// off the members [`member_installed`] says are absent. A NAMED absent member
 /// exits 2 with `<name>: not installed` before any action; with no member named,
 /// each absent one gets an ok [`NOT_INSTALLED_NOTE`] outcome and is left out of
 /// the prompt. A member whose presence probe failed gets a failed outcome and
 /// no action. Confirms the blast radius unless `--yes`/non-interactive/`--json`,
-/// applies the verb to each present member via [`apply_to_member`], then renders
+/// applies the verb to each present member via [`apply_to_member`] (on Linux,
+/// `restart` goes through [`restart_on_linux`] instead, #11086), then renders
 /// the report. Returns the exit code and the outcomes (empty on an early exit).
 /// Test: `tests::bare_verbs_skip_members_that_are_not_installed`,
 /// `tests::bare_verb_acts_on_present_and_skips_absent_members`,
 /// `tests::named_member_not_installed_exits_2_with_no_action`,
 /// `tests::start_installs_a_member_whose_plist_is_absent`,
 /// `tests::loaded_label_without_plist_errors_before_bootout`,
-/// `tests::failed_presence_probe_is_an_error_not_a_skip`.
-fn run_lifecycle_in(
+/// `tests::failed_presence_probe_is_an_error_not_a_skip`,
+/// `rejected_restart_is_failed_and_later_members_still_restart`.
+fn run_lifecycle_on(
     env: &dyn ServiceEnv,
+    host: &dyn RestartHost,
     verb: Verb,
     members: &[String],
     yes: bool,
@@ -313,18 +350,28 @@ fn run_lifecycle_in(
         ok: true,
         detail: NOT_INSTALLED_NOTE.to_owned(),
     });
-    let applied = present.iter().map(|m| match apply_to_member(env, verb, m) {
-        Ok(detail) => LifecycleOutcome {
-            member: m.crate_name.clone(),
-            ok: true,
-            detail,
-        },
-        Err(e) => {
-            eprintln!("tctl {}: {}: {e:#}", verb.name(), m.crate_name);
-            LifecycleOutcome {
+    // #11086: on Linux, restart runs the install-dir binary and checks the
+    // running version; macOS and start/stop keep the strategy dispatch.
+    let linux_restart = verb == Verb::Restart && !cfg!(target_os = "macos");
+    let applied = present.iter().map(|m| {
+        let result = if linux_restart {
+            restart_on_linux(env, host, m)
+        } else {
+            apply_to_member(env, verb, m)
+        };
+        match result {
+            Ok(detail) => LifecycleOutcome {
                 member: m.crate_name.clone(),
-                ok: false,
-                detail: e.to_string(),
+                ok: true,
+                detail,
+            },
+            Err(e) => {
+                eprintln!("tctl {}: {}: {e:#}", verb.name(), m.crate_name);
+                LifecycleOutcome {
+                    member: m.crate_name.clone(),
+                    ok: false,
+                    detail: e.to_string(),
+                }
             }
         }
     });
@@ -382,21 +429,91 @@ pub fn restart_member(binary: &str, manage: ManageStrategy) -> anyhow::Result<St
     apply_to_member(&RealServiceEnv, Verb::Restart, &m)
 }
 
+/// Restart ONE member on Linux and check that it runs the installed version
+/// (#11086).
+///
+/// Why: a `restart` that exits 0 does not prove the daemon now runs the binary
+/// `tctl upgrade` placed, and a PATH lookup can restart a different copy.
+/// What: a launchd member without Linux verbs goes to [`apply_to_member_in`],
+/// which prints the manual note. Otherwise the member restarts through
+/// [`apply_to_member_in`] with the install dir: the `Launchd` arm runs
+/// `<install dir>/<binary> restart`, and trusty-mpm's `OwnVerb` arm is handed
+/// the absolute `<install dir>/tm`. A failed restart is `Err`, and no version
+/// is read. Then the installed version comes from `<install dir>/<binary>
+/// --version` (`tm` for trusty-mpm), and [`linux::verdict`] compares it with
+/// the health probe's running version.
+/// Test: `linux_restart_runs_the_install_dir_binary_not_the_path_decoy`,
+/// `installed_version_comes_from_the_binary_not_crates_toml`,
+/// `mpm_installed_version_comes_from_tm_not_the_shim`,
+/// `running_version_mismatch_is_failed_with_both_versions`,
+/// `refused_health_probe_after_restart_is_failed`,
+/// `rejected_restart_is_failed_and_later_members_still_restart`.
+fn restart_on_linux(
+    env: &dyn ServiceEnv,
+    host: &dyn RestartHost,
+    m: &StableMember,
+) -> anyhow::Result<String> {
+    let dir = host.install_dir();
+    if m.manage == ManageStrategy::Launchd && !linux::has_linux_verbs(&m.binary) {
+        return apply_to_member_in(env, &dir, Verb::Restart, m);
+    }
+    let exe = dir.join(linux::daemon_binary(&m.binary));
+    let mut target = m.clone();
+    if m.manage == ManageStrategy::OwnVerb {
+        // #11086: `own_verb_control` runs `binary` as given, so an absolute
+        // path keeps the PATH lookup out of trusty-mpm's restart.
+        target.binary = exe
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("install path {} is not UTF-8", exe.display()))?
+            .to_owned();
+    }
+    let restarted = apply_to_member_in(env, &dir, Verb::Restart, &target)?;
+    let installed = linux::installed_version(&exe)?;
+    let health = host.probe_health(&m.binary, m.manage);
+    linux::verdict(&restarted, &installed, &health).map_err(anyhow::Error::msg)
+}
+
+/// Apply a lifecycle verb to a single member, with the default install dir.
+///
+/// Why: `tctl upgrade`'s [`restart_member`] and the non-Linux-restart verbs
+/// need no injected install dir.
+/// What: [`apply_to_member_in`] with [`crate::download::install_dir_or_fallback`].
+/// Test: `tests::own_verb_path_for_absent_binary_errors`,
+/// `tests::loaded_label_without_plist_errors_before_bootout`.
+fn apply_to_member(env: &dyn ServiceEnv, verb: Verb, m: &StableMember) -> anyhow::Result<String> {
+    apply_to_member_in(env, &crate::download::install_dir_or_fallback(), verb, m)
+}
+
 /// Apply a lifecycle verb to a single member, dispatching on its strategy.
 ///
 /// Why: launchd and process-managed members need different mechanisms; this is
 /// the one place that branches on [`ManageStrategy`].
 /// What: `Launchd` → [`launchd_preflight`], then [`launchd_control`] (macOS
-/// `launchctl`) unless the preflight answered; `OwnVerb` → `<binary> <verb>`
-/// subprocess; `None` → a no-op note, worded per whether the member is a
-/// non-daemon or one whose service is retired (#6290, #6350). Returns a human
-/// detail string on success.
+/// `launchctl`) unless the preflight answered; off macOS, a `Restart` of a
+/// member with Linux verbs runs `<install_dir>/<binary> restart` instead
+/// (#11086); `OwnVerb` → `<binary> <verb>` subprocess; `None` → a no-op note,
+/// worded per whether the member is a non-daemon or one whose service is
+/// retired (#6290, #6350). Returns a human detail string on success.
 /// Test: `tests::own_verb_path_for_absent_binary_errors`,
-/// `tests::loaded_label_without_plist_errors_before_bootout`; the launchctl
-/// calls themselves are side-effecting.
-fn apply_to_member(env: &dyn ServiceEnv, verb: Verb, m: &StableMember) -> anyhow::Result<String> {
+/// `tests::loaded_label_without_plist_errors_before_bootout`,
+/// `linux_restart_runs_the_install_dir_binary_not_the_path_decoy`; the
+/// launchctl calls themselves are side-effecting.
+fn apply_to_member_in(
+    env: &dyn ServiceEnv,
+    install_dir: &Path,
+    verb: Verb,
+    m: &StableMember,
+) -> anyhow::Result<String> {
     match m.manage {
         ManageStrategy::Launchd => {
+            // #11086: a Linux restart runs the daemon's own verb by absolute
+            // path; macOS keeps the launchd path unchanged.
+            if !cfg!(target_os = "macos")
+                && verb == Verb::Restart
+                && linux::has_linux_verbs(&m.binary)
+            {
+                return linux::run_restart_verb(&install_dir.join(&m.binary));
+            }
             match launchd_preflight(env, verb, &m.binary, cfg!(target_os = "macos"))? {
                 Some(note) => Ok(note),
                 None => launchd_control(env, verb, &m.binary),
@@ -585,11 +702,13 @@ fn launchd_control(env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::Re
 /// Non-macOS stub: launchd is unavailable, so launchd control is unsupported.
 ///
 /// Why: the crate must compile on Linux/CI; launchd lifecycle is macOS-only.
-/// What: always returns an error explaining the platform limitation.
-/// Test: compile-only on non-macOS targets.
+/// What: always returns an error naming the manual step
+/// ([`manual_lifecycle_note`]).
+/// Test: `linux_lifecycle_output_never_says_macos_only`.
 #[cfg(not(target_os = "macos"))]
-fn launchd_control(_env: &dyn ServiceEnv, _verb: Verb, binary: &str) -> anyhow::Result<String> {
-    anyhow::bail!("launchd control of `{binary}` is only supported on macOS")
+fn launchd_control(_env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::Result<String> {
+    // #11086: say what the operator must do, not the platform limit.
+    anyhow::bail!("{}", manual_lifecycle_note(verb.name(), binary))
 }
 
 /// Drive a process-managed member via its own `<binary> <verb>` subcommand.
@@ -627,3 +746,8 @@ fn own_verb_control(env: &dyn ServiceEnv, verb: Verb, binary: &str) -> anyhow::R
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod tests;
+
+// #11086: the Linux restart path; stub binaries are `#!/bin/sh` scripts.
+#[cfg(all(test, unix, not(target_os = "macos")))]
+#[path = "lifecycle_linux_tests.rs"]
+mod linux_tests;
