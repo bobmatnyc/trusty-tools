@@ -8,8 +8,8 @@
 //! as an alert, never only a log line.
 //! What: [`run_ledger_shim`] runs the script through the [`Subprocess`](super::scripts::Subprocess) seam,
 //! bounded by [`SHIM_TIMEOUT`] (killed on expiry), with `--state` (the run's
-//! own `poll-state.json`, read only), `--now`, and `--shadow <inbox>/shadow`
-//! in a shadow run. Its stdout object gives the step alerts and the changed
+//! own `poll-state.json`, read only; a shadow run's `ARCHITECT_DRY_RUN_STATE`
+//! when set), `--now`, and `--shadow <inbox>/shadow` in a shadow run. Its stdout object gives the step alerts and the changed
 //! state keys ([`SHIM_STATE_KEYS`] only). A missing script, a child that
 //! cannot start, a timeout, a non-zero exit or unreadable output each yield
 //! one `ledger_shim` alert in [`ShimRun::failing`], fingerprinted by the
@@ -22,6 +22,7 @@
 //! `ledger_shim_success_raises_no_alert`,
 //! `ledger_shim_each_failure_kind_raises_an_alert`,
 //! `ledger_shim_shadow_passes_the_shadow_flag`,
+//! `dry_run_shadow_cycle_runs_the_ledger_shim`,
 //! `ledger_shim_failure_reaches_the_cycle_failing_set`.
 
 use std::io;
@@ -66,7 +67,13 @@ pub fn shim_argv(steps: &ScriptSteps<'_>, cfg: &Config, now: f64) -> Vec<String>
         steps.python.clone(),
         path(steps.scripts.join(SHIM_SCRIPT)),
         "--state".to_owned(),
-        path(cfg.state()),
+        // MB1595 fix round: a shadow dry run's own state, not the seed copy.
+        path(
+            cfg.dry_run_state
+                .clone()
+                .filter(|_| cfg.shadow)
+                .unwrap_or_else(|| cfg.state()),
+        ),
         "--now".to_owned(),
         now.to_string(),
     ];

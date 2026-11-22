@@ -84,7 +84,11 @@ fn shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one() {
         ("PATH".to_owned(), "/bin".to_owned()),
     ];
     let (spec, ctx) = shadow::plan(&l, &PollJob::default(), env, T0).unwrap();
-    assert_eq!(spec.argv, ["tm", "architect", "poll", "--dry-run"]);
+    // MB1595 fix round: `--shadow` lets the dry run's cycle run the ledger shim.
+    assert_eq!(
+        spec.argv,
+        ["tm", "architect", "poll", "--dry-run", "--shadow"]
+    );
     let scratch = l.shadow_dir();
     // The dry run points at the scratch inbox, never the live one.
     let inbox: Vec<_> = spec
@@ -215,7 +219,7 @@ fn poll_job_shadows_until_cutover() {
     assert_eq!(started, ["poll"]);
     assert_eq!(records[0].job, "poll");
     let spec = runner.last();
-    assert_eq!(spec.argv.last().map(String::as_str), Some("--dry-run"));
+    assert_eq!(spec.argv[3..], ["--dry-run", "--shadow"]);
     assert!(spec.env.iter().any(|(k, _)| k == "ARCHITECT_INBOX_DIR"));
     assert!(spec.env.iter().all(|(k, _)| k != "SECRET_TOKEN"));
     assert_eq!(lines(&layout(dir.path()).shadow_log()).len(), 1);

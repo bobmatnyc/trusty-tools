@@ -178,10 +178,7 @@ fn run_once_ticks_once_and_waits_for_what_it_started() {
         "{out}"
     );
     assert_eq!(runner.count(), 1);
-    assert_eq!(
-        runner.last().argv.last().map(String::as_str),
-        Some("--dry-run")
-    );
+    assert_eq!(runner.last().argv[3..], ["--dry-run", "--shadow"]);
     // Secrets in the process environment never reach a child.
     assert!(runner.last().env.iter().all(|(k, _)| k != "GH_TOKEN"));
     // State persisted: a minute later the job is due and runs.

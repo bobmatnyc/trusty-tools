@@ -253,3 +253,43 @@ fn ledger_shim_runs_once_per_cadence_across_fast_cycles() -> TestResult {
     assert_eq!(fake.shim_calls().len(), 3);
     Ok(())
 }
+
+/// MB1595 fix round (criterion 5): the scheduler's shadow argv
+/// `poll --dry-run --shadow` runs the ledger shim in its cycle, reading the
+/// dry run's own state; a plain `--dry-run` runs none. New test: the shim
+/// already ran under `--shadow` at base; the `--state` path is the change.
+#[test]
+fn dry_run_shadow_cycle_runs_the_ledger_shim() -> TestResult {
+    let env = Env::new(&[])?;
+    with_script(&env)?;
+    let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(10));
+    let clock = FakeClock::new(1_763_294_400.0);
+    let dry_state = env.config.inbox.join("shadow-own/dry-run-state.json");
+    let run = |shadow: bool| -> TestResult<Vec<(Vec<String>, Duration)>> {
+        let mut cfg: Config = env.config.clone();
+        cfg.shadow = shadow;
+        cfg.dry_run_state = Some(dry_state.clone());
+        let fake = FakeShim::new(|| exits(Some(0), OK_OUT, ""));
+        let steps = ScriptSteps::new(&fake, &cfg);
+        let runner = Runner {
+            steps: Some(&steps),
+            config: &cfg,
+            dry_run: true,
+            ..env.runner(&tmux, &clock, &QuietHost)
+        };
+        let (mut session, _) = PollSession::load(&cfg, true, clock.now_unix());
+        runner.run_once(&mut session)?;
+        Ok(fake.shim_calls())
+    };
+    let calls = run(true)?;
+    assert_eq!(calls.len(), 1, "a shadow dry run runs the shim");
+    let argv = &calls[0].0;
+    let at = argv
+        .iter()
+        .position(|a| a == "--state")
+        .map(|i| argv[i + 1].clone());
+    assert_eq!(at, Some(dry_state.to_string_lossy().into_owned()));
+    assert!(argv.iter().any(|a| a == "--shadow"));
+    assert!(run(false)?.is_empty(), "a plain dry run runs no shim");
+    Ok(())
+}

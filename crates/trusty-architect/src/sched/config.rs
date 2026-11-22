@@ -81,8 +81,10 @@ fn default_poll_timeout() -> u64 {
 fn yes() -> bool {
     true
 }
+// MB1595 fix round: `--shadow` makes the dry run's cycle run the ledger shim
+// (cycle.rs, `!dry_run || config.shadow`), as the live poller runs its steps.
 fn default_shadow_argv() -> Vec<String> {
-    ["tm", "architect", "poll", "--dry-run"]
+    ["tm", "architect", "poll", "--dry-run", "--shadow"]
         .map(str::to_owned)
         .to_vec()
 }
