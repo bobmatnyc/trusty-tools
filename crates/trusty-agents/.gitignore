@@ -52,7 +52,5 @@ doc_pipeline/
 intent_tests/
 weather_alerter/
 
-# UI test artifacts and debug scripts
-
 # Local MCP server config (per-machine)
 .mcp.json
