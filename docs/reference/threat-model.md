@@ -193,7 +193,7 @@ firing a cross-origin write.
   ([#6433](https://github.com/bobmatnyc/trusty-tools/issues/6433)), and with it
   [#3335](https://github.com/bobmatnyc/trusty-tools/issues/3335)'s open
   question.** The per-project search-as-a-service daemon
-  (`crates/trusty-agents/src/search/service/`) bound loopback TCP on an
+  (trusty-agents `search/service/`, cut in #11632) bound loopback TCP on an
   auto-assigned port and published `{pid, port}` to
   `.trusty-agents/state/search.pid`, appearing in no daemon inventory or port
   table. #3335 asked for formal declaration or retirement; ADR-0032 answers
