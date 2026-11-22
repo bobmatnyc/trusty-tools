@@ -10,7 +10,10 @@
 //! was taken. A request that finds it older than [`MAX_AGE`] starts ONE
 //! background refresh (single-flight) and waits at most [`REFRESH_WAIT`] for
 //! it; past that it answers from the previous result only while it is younger
-//! than [`STALE_LIMIT`]; an older one reads `timeout` for every dependency.
+//! than [`STALE_LIMIT`]. Past that, while the refresh is still in flight, a
+//! dependency last seen up reads `pending` and one last seen down keeps its
+//! outcome (PR-B2); with no refresh running, every dependency reads `timeout`.
+//! `pending` is listed in its own `pending[]` field, never in `degraded[]`.
 //! Every probe runs under [`PROBE_BUDGET`] on its own task, so a hung probe is
 //! `timeout` and a panicking one is `down`. With no result yet, each
 //! dependency reads `pending`, never healthy.
@@ -179,6 +182,9 @@ impl DependencyCache {
         match (&inner.report, inner.computed_at) {
             // Never serve a report past STALE_LIMIT, even if a refresh died.
             (Some(report), Some(at)) if at.elapsed() < STALE_LIMIT => report.clone(),
+            // PR-B2: a sparse reader lands here on every read; a refresh still
+            // in flight is not evidence of an outage.
+            (Some(report), _) if inner.refreshing => stale_in_flight(report),
             (Some(_), _) => uniform(DependencyOutcome::Timeout),
             (None, _) => uniform(DependencyOutcome::Pending),
         }
@@ -231,24 +237,58 @@ fn uniform(outcome: DependencyOutcome) -> DependencyReport {
         .collect()
 }
 
-/// The `degraded[]` entries for `report`: one per dependency that is not up.
+/// The answer for a report past [`STALE_LIMIT`] while a refresh is in flight.
 ///
-/// Why: `degraded[]` is the operator-facing list `tm status` already prints.
-/// What: `"<service>: timeout"`, `"<service>: pending (first probe still
-/// running)"`, or `"<service>: down — <reason>"`; nothing for an up dependency.
-/// Test: `timeout_reports_degraded_with_reason_timeout`.
+/// Why: a reader polling less often than every [`STALE_LIMIT`] (the fleet
+/// poller) always finds the report stale, so reading `timeout` there made a
+/// slow but healthy probe look like an outage (PR-B2).
+/// What: a dependency last seen `Up` reads `Pending`; one last seen down,
+/// timed out or pending keeps that outcome, so a hung probe still surfaces as
+/// `timeout` to a sparse reader once its refresh stored it.
+/// Test: `sparse_read_with_slow_healthy_probe_reads_pending_not_degraded`,
+/// `report_past_stale_limit_reads_pending_then_timeout`.
+fn stale_in_flight(report: &DependencyReport) -> DependencyReport {
+    report
+        .iter()
+        .map(|(dep, outcome)| match outcome {
+            DependencyOutcome::Up => (*dep, DependencyOutcome::Pending),
+            other => (*dep, other.clone()),
+        })
+        .collect()
+}
+
+/// The `degraded[]` entries for `report`: one per dependency down or timed out.
+///
+/// Why: `degraded[]` is the operator-facing list `tm status` already prints,
+/// and a non-empty list makes `status` read `"degraded"`.
+/// What: `"<service>: timeout"` or `"<service>: down — <reason>"`. An up or
+/// pending dependency adds nothing; pending goes to [`pending_entries`].
+/// Test: `timeout_reports_degraded_with_reason_timeout`,
+/// `no_finished_probe_reads_pending_not_ok`.
 pub fn degraded_entries(report: &DependencyReport) -> Vec<String> {
     report
         .iter()
         .filter_map(|(dep, outcome)| match outcome {
-            DependencyOutcome::Up => None,
+            DependencyOutcome::Up | DependencyOutcome::Pending => None,
             DependencyOutcome::Timeout => Some(format!("{}: timeout", dep.name())),
-            DependencyOutcome::Pending => Some(format!(
-                "{}: pending (first probe still running)",
-                dep.name()
-            )),
             DependencyOutcome::Down(reason) => Some(format!("{}: down — {reason}", dep.name())),
         })
+        .collect()
+}
+
+/// The `pending[]` entries for `report`: one per dependency with no current answer.
+///
+/// Why: pending is "no answer yet", not an outage. It sits in its own field so
+/// a reader (the fleet poller's `dep_degraded` rule) can tell it from down or
+/// timeout, and it never turns `status` to `"degraded"` on its own (PR-B2).
+/// What: `"<service>: pending"` for each `Pending` outcome.
+/// Test: `no_finished_probe_reads_pending_not_ok`,
+/// `sparse_read_with_slow_healthy_probe_reads_pending_not_degraded`.
+pub fn pending_entries(report: &DependencyReport) -> Vec<String> {
+    report
+        .iter()
+        .filter(|(_, outcome)| *outcome == DependencyOutcome::Pending)
+        .map(|(dep, _)| format!("{}: pending", dep.name()))
         .collect()
 }
 
