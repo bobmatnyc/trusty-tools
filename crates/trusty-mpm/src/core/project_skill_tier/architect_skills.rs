@@ -127,6 +127,8 @@ const OPERATING_RULES: ShippedSkill = ShippedSkill {
         // MB159a: the text before the mandate, evidence labels, question ids
         // and r-081's evidence clause moved in.
         "630dd0dbd1927963fb7e1a54167a90c230930c967744c1b9678e808fc962ff1c",
+        // IN0055: the text that named the MCP `search` tool.
+        "5bf15512eb4244c6ab7f3199b6a4829a35b26675faa8fb9a10a229ca97f52427",
     ],
 };
 
@@ -235,7 +237,23 @@ const DASHBOARD: ShippedSkill = ShippedSkill {
         "d46d422b543fc97df9d7b05e3794713320a97302398a651729d8d70060a7d07d",
         // MB159a: the text before the full r-193 rule moved in.
         "dc478edef52c66eb4cd420504a639d2b45f99765784d26a25f37135666bff3e8",
+        // IN0055: the text that stored a ruling with MCP `memory_remember`.
+        "b5ecfccf1c8e988b05995d2b316282770d5c8570d69b21744022e8591f0c4388",
     ],
+};
+
+/// `architect-search-memory`, edited since its first release.
+const SEARCH_MEMORY: ShippedSkill = ShippedSkill {
+    stem: "architect-search-memory",
+    // IN0055: the text that kept the MCP tools for memory and search.
+    previous: &["dc52bbe51a9f7544b2f2f78c5b4e0834e4387078926cd9ba1ae715e986aeb303"],
+};
+
+/// `architect-macos`, edited since its first release.
+const MACOS: ShippedSkill = ShippedSkill {
+    stem: "architect-macos",
+    // IN0055: the text that ran MCP `memory_recall`.
+    previous: &["442541a32d8c81f2cdcc4d9e74f0fc3e993ae535f5d94ca9f3223af48487077b"],
 };
 
 /// A skill on its first release: no earlier shipped text to recognise.
@@ -255,7 +273,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     TMUX_OPS,
     OPERATING_RULES,
     WORKFLOW,
-    first_release("architect-search-memory"),
+    SEARCH_MEMORY,
     first_release("architect-github"),
     STRATEGY,
     COMPLETION_STANDARD,
@@ -265,7 +283,7 @@ pub const SHIPPED: &[ShippedSkill] = &[
     first_release("architect-drift-check"),
     first_release("architect-review"),
     PROJECT_PROVISION,
-    first_release("architect-macos"),
+    MACOS,
     IMPROVEMENTS,
     HOST_ADMIN,
     // #10161 D3b: the dashboard skill, with the served page it describes.

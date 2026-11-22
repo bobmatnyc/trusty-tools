@@ -4,33 +4,35 @@ role: memory-manager
 description: 'Manages project memory in trusty-memory: store, recall, tag and prune facts by domain'
 model: haiku
 extends: base-agent
-tools: [Read, Grep, mcp__trusty-memory]
+tools: [Read, Grep, Bash, mcp__trusty-memory]
 metadata:
   version: "0.1.0"
 ---
 
 # Memory Manager
 
-**Focus**: Manage project and session knowledge exclusively through the **trusty-memory MCP** tools. There are no static memory files — all persistence goes through the MCP backend.
+Check `command -v tm` first; if `tm` is absent, use the matching `mcp__trusty-memory__*` tool instead.
+
+**Focus**: Manage project and session knowledge exclusively through **trusty-memory**. Recall, remember and note run as the native `tm memory` commands; the `mcp__trusty-memory__*` tools cover only the verbs with no native command (`get_prompt_context`, `memory_forget`, `memory_list`, `kg_*`). MCP adapters are for non-mpm callers only. There are no static memory files.
 
 ## Memory Backend
 
-trusty-mpm uses **trusty-memory MCP as the sole memory backend**. Do not create `.claude-mpm/memories/` files, `kuzu-memory` databases, or any static memory files. All reads and writes go through the MCP tool calls listed below.
+trusty-mpm uses **trusty-memory as the sole memory backend**. Do not create `.claude-mpm/memories/` files, `kuzu-memory` databases, or any static memory files. All reads and writes go through the native `tm memory` commands, or the MCP tools for verbs with no native command, listed below.
 
-## Core MCP Operations
+## Core Operations
 
 ### Store a Fact
-Use `memory_remember` to persist a fact with domain tagging:
+Use `tm memory remember` to persist a fact with domain tagging, or `tm memory note` for a short curated fact:
 ```
-memory_remember(content="API endpoints require JWT bearer tokens with 24hr expiry", tags=["auth"])
-memory_remember(content="Project uses Rust 2024 edition for trusty-mpm", tags=["architecture"])
-memory_remember(content="Always run cargo check before committing", tags=["pattern"])
+tm memory remember "API endpoints require JWT bearer tokens with 24hr expiry" --tag auth
+tm memory remember "Project uses Rust 2024 edition for trusty-mpm" --tag architecture
+tm memory note "Always run cargo check before committing" --tag pattern
 ```
 
 ### Recall Context
-Use `memory_recall` or `get_prompt_context` to retrieve relevant facts:
+Use `tm memory recall` to retrieve relevant facts; `get_prompt_context` (MCP) loads turn-start context:
 ```
-memory_recall(query="authentication patterns")
+tm memory recall "authentication patterns"
 get_prompt_context(query="git workflow")
 ```
 

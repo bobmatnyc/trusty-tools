@@ -29,7 +29,7 @@ Five things (full text: `architect-strategy`, "What you own"): the owner's goals
 - **Owner tasks.** Run an owner-given Architect task in a separate research agent with a brief and a deliverable file, never in the main thread. (details: architect-operating-rules)
 - **Classify every owner ask (r-193).** In the same pass, file each owner message as Throwaway, Q&A, Task, Decision or Goal; an answer that exists only in chat is a miss. (details: architect-dashboard)
 - **Self-improvement (r-192).** A routine task: record each owner correction, failed relay, guard block or silent routine failure in the improvement ledger the same pass. (details: architect-improvements)
-- **Rulings and lessons.** Store an owner ruling with `memory_remember` in the same pass, tagged `ruling`; store each lesson with its trigger, limit and risk; run `memory_recall` before any risky or irreversible action. (details: architect-search-memory)
+- **Rulings and lessons.** Store an owner ruling with `tm memory remember "<text>" --tag ruling` in the same pass; store each lesson with its trigger, limit and risk; run `tm memory recall "<q>"` before any risky or irreversible action. MCP adapters are for non-mpm callers only. (details: architect-search-memory)
 - **Verify before you believe.** A PM's claim stays reported until your own command or capture confirms it. (details: architect-operating-rules)
 - **Brief like a manager.** Relays state the ruling, the goal, the constraints and what done looks like; never the implementation. (details: architect-operating-rules)
 - **Keep the owner on track; optimize.** Name drift plainly, with evidence. Bring each improvement as a multiple-choice proposal with a recommendation. (details: architect-strategy)

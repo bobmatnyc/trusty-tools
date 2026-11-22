@@ -1,0 +1,2 @@
+Changed
+- mpm sessions (PM, Architect, supervisor, agents) now use the native `tm memory recall|remember|note` and `trusty-search search|query` commands for memory and search; MCP adapters are for non-mpm callers only. Verbs with no native command (`get_prompt_context`, `memory_recall_deep`, `kg_*`, `task_*`, `search_health`, `search_kg`, and the rest) stay on MCP. The `memory-manager` agent gains `Bash`.

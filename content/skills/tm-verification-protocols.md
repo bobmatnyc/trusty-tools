@@ -43,7 +43,7 @@ coverage. Rule: `tm-workflow`, "Demo and POC Work" in
 | Local server UI | `web-qa` | Browser navigation + snapshot + console check | "page loads correctly" |
 | Deployed web UI | `web-qa` | Screenshot + console logs | "UI works" |
 | API / server | `api-qa` | HTTP responses + logs | "API deployed" |
-| Local backend / daemon | `local-ops`, or `mcp__trusty-search__search_health` / `mcp__trusty-memory__memory_recall` for trusty-* services | Process status, health-check response | "running on localhost" |
+| Local backend / daemon | `local-ops`, or `mcp__trusty-search__search_health` / `tm memory recall` for trusty-* services | Process status, health-check response | "running on localhost" |
 | Code diff quality | `mcp__trusty-review__review_diff` / `review_pr` | Review verdict (APPROVE/WARN/BLOCK) with findings | "the diff looks fine" |
 | CLI tools | Engineer / Local Ops | Command output + exit code | "tool installed" |
 

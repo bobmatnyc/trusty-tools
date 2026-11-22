@@ -682,11 +682,10 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SavingsAction,
     },
-    /// Palace access and maintenance without MCP (#4837, #8352).
+    /// Native palace access and maintenance (#4837, #8352).
     ///
-    /// USE `recall`, `remember` and `note` AS THE FALLBACK whenever the
-    /// `mcp__trusty-memory__*` tools are unavailable — a dead MCP connection
-    /// does not cut this session off from memory. They call the same daemon
+    /// USE `recall`, `remember` and `note` in every mpm session; MCP adapters
+    /// are for non-mpm callers only. They call the same daemon
     /// methods the MCP tools do (`memory_recall`, `memory_remember`,
     /// `memory_note`) over its Unix socket, honour the session's own palace
     /// (`TRUSTY_MEMORY_PALACE`, then the committed pin, then the repo slug)

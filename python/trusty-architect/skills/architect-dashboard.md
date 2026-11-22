@@ -305,8 +305,8 @@ cancelled items with no `relayed` whose `answer_note` does not start with
 Relay the text it prints, never the hook line, `/api/meta` or a cached page
 view. Any non-zero exit (3: changed, gone or already relayed; 2: unreadable;
 or any other) means do not relay and do not act: list again and start over.
-Relay each one in the same turn, store the ruling (`memory_remember`, tag
-`ruling`), then set `relayed` "<ISO time> <session>" with `--if-version` set
+Relay each one in the same turn, store the ruling (`tm memory remember
+"<text>" --tag ruling`), then set `relayed` "<ISO time> <session>" with `--if-version` set
 to the integer in the read-back's fourth column; a version conflict means the
 owner saved again, so list again. Only after a successful `relayed` write, set
 it `done` with `done_at` and a one-line verified `outcome`. Never

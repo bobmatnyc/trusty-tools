@@ -15,8 +15,7 @@ How to drive the `tm` (trusty-mpm) binary itself: register and verify **MCP
 servers**, manage the **session lifecycle**, and run **health diagnostics**.
 
 This is distinct from `tm-tool-usage-guide`, which covers the PM's in-session
-`mcp__trusty-mpm__* / mcp__trusty-memory__* / mcp__trusty-search__*` **tool**
-families. This skill is about the `tm` **command-line binary** and the config it
+memory, search and `mcp__trusty-mpm__*` **tool** families. This skill is about the `tm` **command-line binary** and the config it
 owns.
 
 **PM-delegation framing.** A PM under circuit-breaker discipline does not shell

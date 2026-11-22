@@ -139,11 +139,11 @@ pub const ARCHITECT_CORE: [ArchitectCoreMember; 31] = [
     ),
     member(
         "memory protocol",
-        "Call `mcp__trusty-memory__memory_recall` before you ask the user",
+        "Run `tm memory recall \"<q>\"` before you ask the user",
     ),
     member(
         "search protocol",
-        "Call `mcp__trusty-search__search` before you read code or docs.",
+        "Run `trusty-search search \"<q>\" --json` before you read code or docs,",
     ),
     // #10929: the simplest option comes first; an added surface needs an informed OK.
     member(
