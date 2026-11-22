@@ -13,7 +13,7 @@
 use std::path::Path;
 
 // #5811: the walk and the marker list are shared — trusty-mpm, trusty-code,
-// trusty-agents and trusty-common's catch-up all need the same answer for
+// trusty-assistants and trusty-common's catch-up all need the same answer for
 // "where does this project begin?", so a second copy here would be a second
 // answer.
 pub use trusty_common::palace_resolve::{PROJECT_MARKERS, TRUSTY_TOOLS_DIR, find_project_root};

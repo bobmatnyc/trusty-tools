@@ -86,7 +86,7 @@ exclude = [".fastembed_cache/"]
 
 [lib]
 # Why: Explicit `rlib` keeps the crate linkable as a Rust library from
-#      host processes (trusty-agents) that want to register `MemoryMcpService`
+#      host processes (trusty-assistants) that want to register `MemoryMcpService`
 #      directly via the shared `ServiceDescriptor` trait, rather than
 #      spawning a separate MCP stdio child. Matches the rest of the
 #      trusty-* ecosystem (see trusty-mcp-core) for consistency.
@@ -105,7 +105,7 @@ path = "src/main.rs"
 # Why: `serve` / `start` bind the daemon's socket, so the binary needs the
 #      `server` feature compiled in. Listing it here keeps a
 #      `--no-default-features` library build (the engine-only build, and the
-#      trusty-agents `mcp-schema` linker) from trying to build this binary
+#      trusty-assistants `mcp-schema` linker) from trying to build this binary
 #      without the serving surface and failing to link `serve`.
 # #9269: `server` (default) replaces `daemon`, which stays as its alias.
 required-features = ["server"]
@@ -145,7 +145,7 @@ required-features = ["server"]
 [dependencies]
 # `bm25` (#5329) replaces the retired `bm25-client`: the lexical lane now links
 # the index itself rather than a UDS client for a subprocess that holds it.
-# `uds-supervisor` is NOT dropped — trusty-console and trusty-agents still
+# `uds-supervisor` is NOT dropped — trusty-console and trusty-assistants still
 # depend on the shared `UdsServiceSupervisor` for trusty-review / trusty-analyze.
 # JSON-RPC / MCP primitives (ADR-0040, #5803). #6316: `daemon-bridge-json-rpc`
 # compiles the shared stdio<->UDS forwarder `commands::serve_stdio_bridge` runs
@@ -306,7 +306,7 @@ chrono = { workspace = true }
 #      of `server` for all of 1.x (#6286 renamed `axum-server` to it).
 #      `mcp-schema` compiles only the MCP tool schema and `MemoryMcpService`,
 #      for a host that merges the schema into its own `rpc.discover` without
-#      linking the daemon — trusty-agents is that host.
+#      linking the daemon — trusty-assistants is that host.
 # Test: `tests/feature_gate.rs` (the manifest wiring) plus
 #      `cargo check -p trusty-memory --no-default-features` and
 #      `--no-default-features --features mcp-schema`.

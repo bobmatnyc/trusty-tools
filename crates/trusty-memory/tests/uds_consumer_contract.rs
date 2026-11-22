@@ -11,7 +11,7 @@
 //!   by literal.
 //! - `MAX_FRAME_BYTES`, which is symmetric: a client with a smaller budget
 //!   refuses frames the daemon considers legal.
-//! - `CODE_NOT_FOUND`, which trusty-agents reads to tell "no such palace" from a
+//! - `CODE_NOT_FOUND`, which trusty-assistants reads to tell "no such palace" from a
 //!   real failure.
 //! - #9288: the daemon's `PROTOCOL_VERSION`, which must sit inside the shared
 //!   client's `SUPPORTED_MEMORY_PROTOCOLS`.
@@ -202,7 +202,7 @@ async fn shared_client_reaches_a_dispatcher_method_through_the_fallback() {
 }
 
 /// Why: the folded methods are the half `trusty-common`'s monitor client and
-/// trusty-agents' backend call by name, and their params were flattened out of
+/// trusty-assistants' backend call by name, and their params were flattened out of
 /// path segments and query strings — a shape only this crate knows. A write
 /// followed by a tagged read is the narrowest thing that proves both ends agree
 /// on it.
@@ -260,7 +260,7 @@ async fn shared_client_round_trips_a_tagged_drawer_through_the_folded_methods() 
 /// client adds an envelope of its own reads that as a double-wrap that would
 /// lose every persona chat turn silently. It does not add one —
 /// `call_memory_tool_at_with_timeout` puts `method` and `params` straight into
-/// the JSON-RPC request — but the only proof that held was trusty-agents' own
+/// the JSON-RPC request — but the only proof that held was trusty-assistants' own
 /// mock, which is a copy of the assumption under test (#6286 review, finding 1).
 ///
 /// What: proves both halves of the asymmetry against a running daemon. Calling
@@ -358,7 +358,7 @@ async fn shared_client_reaches_a_chat_tool_through_the_tools_call_envelope() {
     );
 }
 
-/// Why: trusty-agents' `get` and `delete` against a palace it never created
+/// Why: trusty-assistants' `get` and `delete` against a palace it never created
 /// must be clean empty results, and they read that off
 /// `MemoryRpcError::is_not_found`. That reads a code `trusty-common` duplicates
 /// as a literal because it cannot import

@@ -561,7 +561,8 @@ const CRATE_BINARIES: &[(&str, &[&str])] = &[
         "trusty-search",
         &["trusty-search", "trusty-embedderd", "trusty-embedderd-py"],
     ),
-    ("trusty-agents", &["tagent"]),
+    // #11632: renamed from trusty-agents; `tagent` is a one-release alias.
+    ("trusty-assistants", &["ta", "tagent"]),
     ("trusty-audit", &["trusty-audit", "taudit"]),
     ("trusty-code", &["tcode"]),
 ];
@@ -1120,7 +1121,8 @@ mod tests {
             ("trusty-mpm", "tm"),
             ("trusty-search", "trusty-embedderd"),
             ("trusty-search", "trusty-embedderd-py"),
-            ("trusty-agents", "tagent"),
+            ("trusty-assistants", "ta"),
+            ("trusty-assistants", "tagent"),
         ] {
             assert!(
                 installed_binaries(krate).iter().any(|b| b == alias),
