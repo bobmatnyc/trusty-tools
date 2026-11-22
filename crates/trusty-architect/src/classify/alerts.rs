@@ -236,7 +236,8 @@ pub fn evaluate(
             let mins = ((now - since) / 60.0).floor() as i64;
             add(
                 "idle",
-                &format!("since-{}", since.trunc() as i64),
+                // See MB1595: the screen hash re-alerts a changed idle screen.
+                &format!("since-{}-{}", since.trunc() as i64, info.screen),
                 &format!("idle {mins} min, no agents running"),
             );
         }

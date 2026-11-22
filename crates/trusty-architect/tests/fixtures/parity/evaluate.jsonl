@@ -73,20 +73,20 @@
 {"case": "single:empty_dim_pair_then_typed", "step": 0, "alerts": [], "ps": {"idle_since": 10000.0, "errors": []}}
 {"case": "idle_after_ten_minutes", "step": 0, "alerts": [], "ps": {"idle_since": 1000.0, "errors": []}}
 {"case": "idle_after_ten_minutes", "step": 1, "alerts": [], "ps": {"idle_since": 1000.0, "errors": []}}
-{"case": "idle_after_ten_minutes", "step": 2, "alerts": [{"ts": "1970-01-01T00:26:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-1000", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 1000.0, "errors": []}}
+{"case": "idle_after_ten_minutes", "step": 2, "alerts": [{"ts": "1970-01-01T00:26:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-1000-5151ba4b612a", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 1000.0, "errors": []}}
 {"case": "suggestion_idle", "step": 0, "alerts": [], "ps": {"idle_since": 0.0, "errors": []}}
-{"case": "suggestion_idle", "step": 1, "alerts": [{"ts": "1970-01-01T00:10:00Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-0", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 0.0, "errors": []}}
+{"case": "suggestion_idle", "step": 1, "alerts": [{"ts": "1970-01-01T00:10:00Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-0-034925b4fb87", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 0.0, "errors": []}}
 {"case": "idle_resets_when_busy", "step": 0, "alerts": [], "ps": {"idle_since": 0.0, "errors": []}}
 {"case": "idle_resets_when_busy", "step": 1, "alerts": [], "ps": {"idle_since": null, "errors": []}}
 {"case": "idle_resets_when_busy", "step": 2, "alerts": [], "ps": {"idle_since": 700.0, "errors": []}}
-{"case": "idle_resets_when_busy", "step": 3, "alerts": [{"ts": "1970-01-01T00:21:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-700", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 700.0, "errors": []}}
+{"case": "idle_resets_when_busy", "step": 3, "alerts": [{"ts": "1970-01-01T00:21:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-700-034925b4fb87", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 700.0, "errors": []}}
 {"case": "errors_new_since_last_cycle", "step": 0, "alerts": [], "ps": {"idle_since": null, "errors": ["⎿  Error: Exit code 1"]}}
 {"case": "errors_new_since_last_cycle", "step": 1, "alerts": [{"ts": "1970-01-01T02:47:40Z", "session": "tm-x", "pane": "%1", "kind": "error", "fingerprint": "16dc4fc71510", "detail": "1 new: ⏺ API Error: 529 overloaded", "display": "[tm-x]: error: 1 new: ⏺ API Error: 529 overloaded"}], "ps": {"idle_since": null, "errors": ["⎿  Error: Exit code 1", "⏺ API Error: 529 overloaded"]}}
 {"case": "errors_new_since_last_cycle", "step": 2, "alerts": [], "ps": {"idle_since": null, "errors": ["⎿  Error: Exit code 1", "⏺ API Error: 529 overloaded"]}}
 {"case": "labeled_rule_idle", "step": 0, "alerts": [], "ps": {"idle_since": 1759000000.25, "errors": []}}
-{"case": "labeled_rule_idle", "step": 1, "alerts": [{"ts": "2025-09-27T20:06:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-1759000000", "detail": "idle 60 min, no agents running", "display": "[tm-x]: idle: idle 60 min, no agents running"}], "ps": {"idle_since": 1759000000.25, "errors": []}}
+{"case": "labeled_rule_idle", "step": 1, "alerts": [{"ts": "2025-09-27T20:06:40Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-1759000000-419bc9824e7c", "detail": "idle 60 min, no agents running", "display": "[tm-x]: idle: idle 60 min, no agents running"}], "ps": {"idle_since": 1759000000.25, "errors": []}}
 {"case": "stale_waiting_goes_idle", "step": 0, "alerts": [], "ps": {"idle_since": 0.0, "errors": []}}
-{"case": "stale_waiting_goes_idle", "step": 1, "alerts": [{"ts": "1970-01-01T00:10:00Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-0", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 0.0, "errors": []}}
+{"case": "stale_waiting_goes_idle", "step": 1, "alerts": [{"ts": "1970-01-01T00:10:00Z", "session": "tm-x", "pane": "%1", "kind": "idle", "fingerprint": "since-0-0e012d1062e1", "detail": "idle 10 min, no agents running", "display": "[tm-x]: idle: idle 10 min, no agents running"}], "ps": {"idle_since": 0.0, "errors": []}}
 {"case": "newest_waiting_never_idle", "step": 0, "alerts": [], "ps": {"idle_since": null, "errors": []}}
 {"case": "newest_waiting_never_idle", "step": 1, "alerts": [], "ps": {"idle_since": null, "errors": []}}
 {"case": "rows_without_bottom_rule_never_idle", "step": 0, "alerts": [], "ps": {"idle_since": null, "errors": []}}

@@ -7,7 +7,9 @@
 //! (exit 1 when stale); `run --once` ticks once and waits for the runs it
 //! started; `daemon` takes the lock, then loops until SIGTERM; `cutover` and
 //! `rollback` move the wake duty ([`super::cutover`]); `parity` prints the
-//! shadow-against-poller counts; `plist` prints the launchd plist and writes
+//! shadow-against-poller counts, match percentages and a PASS/FAIL verdict
+//! (exit 1 on FAIL) against `--min-cycles` (default 120) and `--min-match-pct`
+//! (default 95); `plist` prints the launchd plist and writes
 //! nothing. The config is `--config`, else `local/meta/registry.json` under
 //! `--root`, else `ARCHITECT_PROJECT_DIR`, else the current directory. An
 //! empty, unreadable or invalid config is an error and a non-zero exit.
@@ -132,8 +134,14 @@ pub fn execute(argv: &[String], d: &Deps<'_>) -> Result<Outcome, SchedError> {
             ok(format!("{msg}\n"))
         }
         "parity" => {
-            let rep = parity::load(&layout, now - args.since_s.unwrap_or(7200))?;
-            ok(parity::render(&rep))
+            // See MB1595: --min-cycles and --min-match-pct set the verdict;
+            // FAIL exits 1.
+            let th = thresholds(&args);
+            let rep = parity::load(&layout, now - th.since_s)?;
+            Ok(Outcome {
+                stdout: parity::render_with(&rep, &th),
+                code: if rep.passes(&th) { 0 } else { 1 },
+            })
         }
         _ => {
             let exe = args

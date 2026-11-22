@@ -17,7 +17,8 @@
 //! #11540 adds the ledger shim (live and shadow; its failures are `failing`).
 //! #11541 review: the last self-refresh fault and the Architect pane's own
 //! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
-//! Steps owned elsewhere are left out: effort, token, pm_intake,
+//! MB1595 adds the PM-message intake (`pm_message`).
+//! Steps owned elsewhere are left out: effort, token,
 //! dashboard, owner_* other than owner_answer (#11474), auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
@@ -35,6 +36,7 @@ use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
 use super::listing::{Pane, capture, list_panes};
 use super::owner_answers::{ANSWER_KEY, owner_answer_step};
+use super::pm_intake::pm_intake_alerts;
 use super::push::{PushRoute, push_step};
 use super::routines::routine_alerts;
 use super::self_ctx_alerts::self_ctx_alerts;
@@ -280,6 +282,15 @@ pub fn collect<T: Tmux + ?Sized>(
         Ok(found) => candidates.extend(found.into_iter().filter(|a| !s.config.skips(&a.session))),
         Err(e) => return Err(failed(CycleError::Events(e), log)),
     }
+    // See MB1595: fleet-poll.py's pm_intake_alerts, between events and host.
+    let pm = &s.config.pm_messages;
+    candidates.extend(pm_intake_alerts(
+        &mut state.other,
+        pm,
+        now,
+        s.dry_run,
+        &mut log,
+    ));
     match host_alerts(s.probe, s.config, now, Some(&mut state.band)) {
         Ok(found) => candidates.extend(found),
         Err(e) => return Err(failed(CycleError::Host(e), log)),

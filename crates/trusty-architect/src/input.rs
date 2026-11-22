@@ -5,7 +5,7 @@ use std::str::FromStr;
 
 use crate::classify::matchers::strip_sgr;
 use crate::error::SendError;
-use crate::pystr::{splitlines, strip};
+use crate::pystr::{is_digit, is_space, splitlines, strip};
 use crate::tmux::{Keys, PaneId, Tmux, send_keys};
 
 /// What a Claude Code pane's input box (the last `❯` line) holds.
@@ -13,8 +13,8 @@ use crate::tmux::{Keys, PaneId, Tmux, send_keys};
 /// Why: Claude Code draws an auto-generated next-prompt suggestion in dim text,
 /// which a plain capture shows exactly like a human's draft. The Architect must
 /// never submit or overwrite a draft.
-/// What: the four states `input-state.py` reports, under the same names
-/// (`no-prompt`, `empty`, `suggestion`, `typed`). [`classify_input`] is the
+/// What: the states `input-state.py` reports, under the same names
+/// (`no-prompt`, `empty`, `suggestion`, `typed`, `poll`). [`classify_input`] is the
 /// parity port of the script's classifier; [`crate::input_state_for_send`] is
 /// the fail-closed reading `send_guarded` takes (#9171 A2).
 /// Test: `input_state_names_round_trip`.
@@ -28,11 +28,20 @@ pub enum InputState {
     Suggestion,
     /// The box holds text someone typed.
     Typed,
+    /// The box holds only a poller wake line, left stale by an interrupted
+    /// wake (the deployed `input-state.py`, MB1595). Never sent over.
+    Poll,
 }
 
 impl InputState {
     /// Every state, in the order `input-state.py` documents them.
-    pub const ALL: [Self; 4] = [Self::NoPrompt, Self::Empty, Self::Suggestion, Self::Typed];
+    pub const ALL: [Self; 5] = [
+        Self::NoPrompt,
+        Self::Empty,
+        Self::Suggestion,
+        Self::Typed,
+        Self::Poll,
+    ];
 
     /// The name `input-state.py` prints for this state.
     pub fn as_str(self) -> &'static str {
@@ -41,6 +50,7 @@ impl InputState {
             Self::Empty => "empty",
             Self::Suggestion => "suggestion",
             Self::Typed => "typed",
+            Self::Poll => "poll",
         }
     }
 
@@ -58,7 +68,7 @@ impl fmt::Display for InputState {
     }
 }
 
-/// A name that is none of the four [`InputState`] names.
+/// A name that is none of the [`InputState`] names.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown input-box state {0:?}")]
 pub struct UnknownInputState(pub String);
@@ -99,10 +109,72 @@ pub fn classify_input(capture: &str) -> (InputState, String) {
         InputState::Empty
     } else if raw.contains("\u{1b}[2m") {
         InputState::Suggestion
+    } else if is_poll_line(capture) {
+        InputState::Poll
     } else {
         InputState::Typed
     };
     (state, text)
+}
+
+/// `box_text(capture)`: the last `❯` row's text after the glyph, plus the
+/// wrapped rows below it up to a blank or rule row, SGR removed, joined.
+fn box_text(capture: &str) -> String {
+    let lines = splitlines(capture);
+    let Some(last) = lines.iter().rposition(|l| l.contains('❯')) else {
+        return String::new();
+    };
+    let first = strip_sgr(lines[last]);
+    let mut out = first.split_once('❯').map_or("", |(_, r)| r).to_owned();
+    for l in &lines[last + 1..] {
+        let plain = strip_sgr(l);
+        if strip(&plain).is_empty() || plain.contains('─') {
+            break;
+        }
+        out.push_str(&plain);
+    }
+    out
+}
+
+/// `is_poll_line`: the whole box, whitespace removed, is the wake line
+/// `^\[poll\d\d:\d\dZ\]\d+(?:newalerts|alertsneedyou|alertneedsyou)(?:\(\d+logged\))?->\S`.
+fn is_poll_line(capture: &str) -> bool {
+    let c: Vec<char> = box_text(capture)
+        .chars()
+        .filter(|x| *x != '\u{a0}' && !is_space(*x))
+        .collect();
+    let lit = |i: usize, t: &str| -> Option<usize> {
+        let t: Vec<char> = t.chars().collect();
+        (c.get(i..i + t.len()) == Some(&t[..])).then_some(i + t.len())
+    };
+    let digit = |i: usize| c.get(i).is_some_and(|x| is_digit(*x)).then_some(i + 1);
+    let digits = |i: usize| {
+        let mut j = i;
+        while c.get(j).is_some_and(|x| is_digit(*x)) {
+            j += 1;
+        }
+        (j > i).then_some(j)
+    };
+    let head = lit(0, "[poll")
+        .and_then(digit)
+        .and_then(digit)
+        .and_then(|i| lit(i, ":"))
+        .and_then(digit)
+        .and_then(digit)
+        .and_then(|i| lit(i, "Z]"))
+        .and_then(digits);
+    let Some(i) = head else {
+        return false;
+    };
+    let Some(i) = ["newalerts", "alertsneedyou", "alertneedsyou"]
+        .iter()
+        .find_map(|w| lit(i, w))
+    else {
+        return false;
+    };
+    let logged = lit(i, "(").and_then(digits).and_then(|j| lit(j, "logged)"));
+    let arrow = |j: usize| lit(j, "->").is_some_and(|k| k < c.len());
+    logged.is_some_and(arrow) || arrow(i)
 }
 
 /// An input-box reading taken by [`crate::input_state_for_send`], the only

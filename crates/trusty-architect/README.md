@@ -104,6 +104,24 @@ by hand to stay inside that list. `trusty-mpm` calls
 it, so it must never depend on `trusty-mpm` or on any crate that does;
 `tests/dependency_boundary.rs` enforces this.
 
+## Scheduler parity
+
+`trusty-architect-sched parity [--since 2h] [--min-cycles N] [--min-match-pct P]`
+joins the shadow dry runs (`inbox/shadow-wakes.jsonl`) to the live poller's
+`alerts.jsonl` and `poll.log`. It prints the counts, the alert match percent,
+the wake match percent and a verdict: PASS needs at least `--min-cycles`
+joined cycles (default 120) and both percentages at or above
+`--min-match-pct` (default 95). FAIL exits 1; `cutover` applies the same
+verdict. A wake is a cycle whose triage woke (`woken` > 0), never the dry
+run's `would send` phrase, which repeats a backlog a dry run cannot clear.
+
+The poll cycle ports `pm_intake.py` (`pm_message`) and `alert_triage.py`'s
+rules; `runtime_selftest.py` stays a Python job the poller only reads
+(`selftest_fail`). A shadow reads those queues from the live inbox
+(`ARCHITECT_READ_INBOX_DIR`) and writes nothing there. Alerts the prototype
+sends to its Haiku gate wake in the port, as they do in a Python dry run, so
+those wakes can differ from live (MB1595).
+
 ## License
 
 MIT

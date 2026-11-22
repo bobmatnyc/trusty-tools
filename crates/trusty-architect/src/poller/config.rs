@@ -82,9 +82,17 @@ pub struct Config {
     /// `PM_WAKE_ALERT`, else `<inbox>/pm-wake-alert.json`: the failed-wake
     /// record the Architect's hook reads (D39).
     pub wake_alert: PathBuf,
-    /// `pm-messages.jsonl` in `ARCHITECT_INBOX_DIR`, else the inbox: held PM
-    /// messages join the wake digest.
+    /// `pm-messages.jsonl` in [`Config::read_inbox`]: the PM-message intake
+    /// reads it, and held messages join the wake digest.
     pub pm_messages: PathBuf,
+    /// `ARCHITECT_READ_INBOX_DIR`, else `ARCHITECT_INBOX_DIR`, else the inbox:
+    /// where the read-only queues and `events.jsonl` live. The shadow points the inbox at a
+    /// scratch directory and this at the live one, as a Python dry run reads
+    /// the live inbox (MB1595).
+    pub read_inbox: PathBuf,
+    /// `TRIAGE_RULES`, else `<root>/local/triage-rules.json`: the holds
+    /// [`super::RuleTriage`] reads.
+    pub triage_rules: PathBuf,
     /// `SELF_REFRESH_PCT` (default 50): own context percent at which the
     /// poller starts `self-clear.sh`. `None` when bad: the step reports an
     /// error, as the prototype does.
@@ -92,9 +100,9 @@ pub struct Config {
     /// `USAGE_ZONE_FILE`, else `<root>/local/usage/zone-kalloc1024.jsonl`:
     /// the hourly kernel-zone log (D73).
     pub zone_log: PathBuf,
-    /// `<inbox>/ctx-cycle-alerts.jsonl`: failures `ctx-cycle.py` queues.
+    /// `<read_inbox>/ctx-cycle-alerts.jsonl`: failures `ctx-cycle.py` queues.
     pub ctx_cycle_alerts: PathBuf,
-    /// `<inbox>/selftest-state.json`: `runtime_selftest.py`'s result.
+    /// `<read_inbox>/selftest-state.json`: `runtime_selftest.py`'s result.
     pub selftest_state: PathBuf,
     /// `ARCHITECT_PYTHON`, else `python3`: runs the prototype's scripts.
     pub python: String,
@@ -197,6 +205,11 @@ impl Config {
             Some(_) => int("SELF_CTX_THRESHOLD", 0).map(SelfCtxThreshold::Env),
         };
         let inbox = path("SUPERVISOR_INBOX_DIR", root.join("inbox"));
+        // See MB1595: the read-only queues follow the live inbox in a shadow.
+        let read_inbox = path(
+            "ARCHITECT_READ_INBOX_DIR",
+            path("ARCHITECT_INBOX_DIR", inbox.clone()),
+        );
         // #9801: usage.py's paths, read as usage.py reads them.
         let claude_dir = path("CLAUDE_CONFIG_DIR", config.clone());
         let usage = UsagePaths {
@@ -224,7 +237,7 @@ impl Config {
             il_schedule: path("IL_SCHEDULE", root.join("local/il-schedule.json")),
             wake_suppress: path("SELF_CLEAR_SUPPRESS", inbox.join("wake-suppress")),
             wake_alert: path("PM_WAKE_ALERT", inbox.join("pm-wake-alert.json")),
-            pm_messages: path("ARCHITECT_INBOX_DIR", inbox.clone()).join("pm-messages.jsonl"),
+            pm_messages: read_inbox.join("pm-messages.jsonl"),
             self_refresh_pct: match get("SELF_REFRESH_PCT") {
                 None => Some(super::self_refresh::SELF_REFRESH_PCT_DEFAULT),
                 Some(v) => py_float(&v),
@@ -233,8 +246,10 @@ impl Config {
                 "USAGE_ZONE_FILE",
                 root.join("local/usage/zone-kalloc1024.jsonl"),
             ),
-            ctx_cycle_alerts: inbox.join("ctx-cycle-alerts.jsonl"),
-            selftest_state: inbox.join("selftest-state.json"),
+            ctx_cycle_alerts: read_inbox.join("ctx-cycle-alerts.jsonl"),
+            selftest_state: read_inbox.join("selftest-state.json"),
+            read_inbox,
+            triage_rules: path("TRIAGE_RULES", root.join("local/triage-rules.json")),
             python: get("ARCHITECT_PYTHON")
                 .filter(|v| !v.is_empty())
                 .unwrap_or_else(|| "python3".to_owned()),
@@ -288,9 +303,10 @@ impl Config {
             || session == self.poll_session
     }
 
-    /// `<inbox>/events.jsonl`: hook events the poller turns into alerts.
+    /// `<read_inbox>/events.jsonl`: hook events the poller turns into
+    /// alerts; read-only, so a shadow reads the live file (MB1595).
     pub fn events(&self) -> PathBuf {
-        self.inbox.join("events.jsonl")
+        self.read_inbox.join("events.jsonl")
     }
 
     /// `<inbox>/shadow`: every file a shadow run writes.

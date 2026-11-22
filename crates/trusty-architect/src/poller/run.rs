@@ -274,6 +274,11 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
         let (woken, logged) = self
             .triage
             .triage(&found.new, now, &mut next, self.hands_off());
+        if self.dry_run {
+            // See MB1595: the shadow's parity leaves these wakes out.
+            let haiku = self.triage.haiku_woken();
+            log.push(format!("  triage haiku-path wakes: {haiku}"));
+        }
         let alerts = self.config.alerts();
         let waker = Waker {
             tmux: self.tmux,
