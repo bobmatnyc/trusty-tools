@@ -1,51 +1,29 @@
-//! Build script exposing git commit metadata to the binary and ensuring the
-//! embedded UI bundle directory always exists.
+//! Build script exposing git commit metadata to the binary.
 //!
 //! Why: Users of the binary benefit from knowing which exact commit produced
 //! the running artifact; pairing `CARGO_PKG_VERSION` with the short git SHA
-//! gives a deterministic identifier for bug reports and log correlation. The
-//! script also guarantees `ui/dist/` exists with at least a stub
-//! `index.html` so the `#[derive(RustEmbed)] #[folder = "ui/dist/"]` macro
-//! in `src/api/server.rs` always finds a directory to scan — without this,
-//! a missing `ui/dist/` (e.g. fresh clone with no pnpm installed) yields the
-//! 3 compile errors tracked in #112.
+//! gives a deterministic identifier for bug reports and log correlation.
 //! What: Queries git at build time and exposes the results to the compiled
 //! crate via `cargo:rustc-env` — `GIT_COMMIT_HASH` (short SHA),
 //! `GIT_COMMIT_HASH_FULL`, `GIT_COMMIT_DATE` (strict ISO 8601 committer
 //! date), and `GIT_DIRTY` (`"1"` when the working tree had uncommitted or
 //! untracked changes at build time). Falls back to `"unknown"` when git isn't
-//! available or the directory isn't a git repo. Then attempts a real `pnpm build` of the
-//! Svelte UI; if pnpm is unavailable or `SKIP_UI_BUILD=1`, falls back to
-//! writing a placeholder `ui/dist/index.html` so `rust-embed` still compiles.
-//! #8094: a pnpm step that RUNS and fails now aborts the cargo build instead
-//! of embedding that placeholder.
-//! Test: After `cargo build`, `build_info::GIT_HASH` should be non-empty and
-//! either a 7-char short hash or `"unknown"`. `cargo check -p trusty-agents` must
-//! succeed on a host without pnpm installed (regression coverage for #112).
-//! The UI-build policy itself is covered by
-//! `crates/trusty-agents/tests/build_ui_policy.rs`.
+//! available or the directory isn't a git repo. #11632: the embedded Svelte
+//! UI and its `pnpm build` step are gone with the HTTP API.
+//! Test: `crates/trusty-agents/tests/version_provenance.rs` asserts the
+//! binary's `--version` carries `GIT_COMMIT_HASH`.
 
-use std::path::Path;
 use std::process::Command;
 
-// #8094: the pure half of the UI-build decision, shared verbatim with the test
-// target that covers it. See `build_ui_policy.rs` for why it is `include!`d.
-include!("build_ui_policy.rs");
 // #8787: the pure git-dir resolution, shared verbatim with the test target
 // that covers it. See `build_git_paths.rs` for why it is `include!`d.
 include!("build_git_paths.rs");
 
 fn main() {
     // #8787: `.git/HEAD` and `.git/index` are repo-root-relative, not
-    // crate-relative, so a crate under `crates/trusty-agents/` never has them
-    // next to it — the two lines this replaced never existed on disk, which
-    // made cargo treat the build script as always-stale and rebuild the whole
-    // crate on every invocation. Resolve the real paths (following a
-    // worktree's `gitdir:` pointer where applicable) so cargo reruns this
-    // script only when a commit or `git add` actually changes them; a
-    // dirtied-but-unstaged file no longer refreshes `GIT_DIRTY` until the next
-    // rerun this crate's other watched inputs already trigger, which is the
-    // efficiency this fix trades for.
+    // crate-relative. Resolve the real paths (following a worktree's
+    // `gitdir:` pointer where applicable) so cargo reruns this script only
+    // when a commit or `git add` actually changes them.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -53,144 +31,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", head.display());
         println!("cargo:rerun-if-changed={}", index.display());
     }
-
-    // Re-run when the UI source that `pnpm build` reads changes; cargo scans a
-    // watched directory such as `ui/src` recursively. `ui/dist/` is NOT watched:
-    // it is this script's own output, and cargo's staleness reference is
-    // `invoked.timestamp`, stamped BEFORE the script runs, so every `pnpm build`
-    // made the next build re-run this script and rebuild the crate. rust-embed
-    // reads `ui/dist/` itself. Only paths that exist are declared: a missing one
-    // counts as changed, and the published tarball ships no `ui/public`.
-    for rel in [
-        "ui/src",
-        "ui/public",
-        "ui/index.html",
-        "ui/package.json",
-        "ui/pnpm-lock.yaml",
-        "ui/pnpm-workspace.yaml",
-        "ui/vite.config.ts",
-        "ui/svelte.config.js",
-        "ui/tailwind.config.js",
-        "ui/postcss.config.js",
-        "ui/tsconfig.json",
-    ] {
-        if Path::new(rel).exists() {
-            println!("cargo:rerun-if-changed={rel}");
-        }
-    }
-    println!("cargo:rerun-if-env-changed=SKIP_UI_BUILD");
-
-    // #8094: this script emits `rerun-if-changed`, which switches cargo off its
-    // whole-package default, so the `include!`d policy files must be named or
-    // an edit to either would not rebuild the script.
-    println!("cargo:rerun-if-changed=build_ui_policy.rs");
+    // This script emits `rerun-if-changed`, which switches cargo off its
+    // whole-package default, so the `include!`d file must be named.
     println!("cargo:rerun-if-changed=build_git_paths.rs");
 
-    ensure_ui_dist();
     emit_git_provenance();
-}
-
-/// Run the Svelte UI build (or fall back to a placeholder `ui/dist/index.html`).
-///
-/// Why: `src/api/server.rs` declares `#[derive(rust_embed::RustEmbed)]
-/// #[folder = "ui/dist/"]`, which requires the folder to exist at compile
-/// time. If pnpm is missing or `SKIP_UI_BUILD=1` is set, we still need
-/// *something* under `ui/dist/` or the derive macro fails the build with the
-/// 3 errors from #112. The placeholder lets `cargo check` and `cargo build`
-/// succeed without the JS toolchain installed — UI features simply return
-/// "UI not built" at runtime instead of breaking the entire workspace.
-/// What: [`placeholder_reason`] decides whether the stub is legitimate —
-/// `SKIP_UI_BUILD=1`, or a host with no pnpm — and a `cargo:warning=` names
-/// which of the two applied. Otherwise runs `pnpm install` (if `node_modules`
-/// is missing) followed by `pnpm build`, and #8094: a step that runs and fails
-/// aborts the cargo build through [`fail_build`] rather than quietly embedding
-/// the placeholder.
-/// Test: With pnpm uninstalled, `cargo check -p trusty-agents` must succeed.
-/// With pnpm installed, `ui/dist/index.html` must contain Vite's real output
-/// (look for a `<script type="module">` tag referencing `assets/`). The
-/// decision itself: `a_failing_pnpm_build_aborts_the_cargo_build`,
-/// `skip_ui_build_names_the_opt_out`.
-fn ensure_ui_dist() {
-    let ui_dist = Path::new("ui/dist");
-
-    let skip_ui_build = std::env::var("SKIP_UI_BUILD").as_deref() == Ok("1");
-    let pnpm_available = Command::new("pnpm").arg("--version").output().is_ok();
-    if let Some(reason) = placeholder_reason(skip_ui_build, pnpm_available) {
-        println!("cargo:warning={reason}");
-        ensure_placeholder(ui_dist);
-        return;
-    }
-
-    if !Path::new("ui/node_modules").exists() {
-        // Use --no-frozen-lockfile when pnpm-lock.yaml is absent (e.g.
-        // inside a cargo publish verification sandbox where only
-        // git-tracked files are present).
-        let lockfile_exists = Path::new("ui/pnpm-lock.yaml").exists();
-        let install_args: &[&str] = if lockfile_exists {
-            &["install", "--frozen-lockfile"]
-        } else {
-            &["install", "--no-frozen-lockfile"]
-        };
-        let installed = Command::new("pnpm")
-            .args(install_args)
-            .current_dir("ui")
-            .status();
-        if let Err(reason) = classify_pnpm_step("pnpm install", installed) {
-            fail_build(&reason);
-        }
-    }
-
-    let built = Command::new("pnpm").arg("build").current_dir("ui").status();
-    if let Err(reason) = classify_pnpm_step("pnpm build", built) {
-        fail_build(&reason);
-    }
-}
-
-/// Abort the cargo build, naming the pnpm failure that caused it (#8094).
-///
-/// Why: a build script that returns normally is a build that "succeeded", and
-/// that is how a failed `pnpm build` used to ship a placeholder page inside an
-/// installed binary. Panicking is what makes `cargo build`/`cargo install`
-/// fail.
-/// What: emits `reason` as a `cargo:warning=` — visible even in the summary
-/// cargo prints for a failed script — and then panics with it. pnpm's own
-/// stderr was inherited by this script, so cargo prints that too.
-/// Test: `a_failing_pnpm_build_aborts_the_cargo_build` covers the decision
-/// that reaches here.
-fn fail_build(reason: &str) -> ! {
-    println!("cargo:warning={reason}");
-    panic!("{reason}");
-}
-
-/// Write a stub `ui/dist/index.html` when the real UI build was skipped.
-///
-/// Why: `rust-embed` walks the folder at compile time and fails the derive
-/// macro if the directory is missing. A single-file stub is the smallest
-/// thing that satisfies the macro while making the "UI not built" state
-/// obvious to anyone who navigates to `/` in a browser.
-/// What: Creates `ui/dist/` if it doesn't exist and writes a minimal HTML
-/// document explaining how to enable the real UI. Idempotent — if a real
-/// `index.html` is already present (i.e. the Svelte build succeeded earlier
-/// in this `cargo build`), it is left untouched.
-/// Test: After running with `SKIP_UI_BUILD=1`, `ui/dist/index.html` must
-/// exist and contain the literal string "UI not built".
-fn ensure_placeholder(ui_dist: &Path) {
-    if ui_dist.join("index.html").exists() {
-        return;
-    }
-    if let Err(e) = std::fs::create_dir_all(ui_dist) {
-        println!("cargo:warning=failed to create {}: {e}", ui_dist.display());
-        return;
-    }
-    let stub = "<!doctype html><html><body><p>trusty-agents: UI not built. \
-                Install pnpm and rebuild (or unset SKIP_UI_BUILD) to embed \
-                the Svelte frontend.</p></body></html>";
-    if let Err(e) = std::fs::write(ui_dist.join("index.html"), stub) {
-        println!(
-            "cargo:warning=failed to write {}/index.html: {e}",
-            ui_dist.display()
-        );
-    }
 }
 
 /// Capture the git provenance of this build and expose it via `cargo:rustc-env`.
