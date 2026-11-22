@@ -25,7 +25,8 @@ use trusty_common::stdio_mcp_client::StdioMcpClient;
 use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, RpcResponse};
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
-use super::services::{ProbeKind, ServiceId, binary_on_path};
+use super::metrics_uds::fetch_uds_metrics;
+use super::services::{MetricsSource, ProbeKind, ServiceId, binary_on_path};
 use super::state::{HealthUpdate, MetricsUpdate, TileHealth};
 
 /// What one probe observed, before the binary-on-`PATH` check folds in.
@@ -328,7 +329,8 @@ pub fn spawn_health_poller<P, Fut>(
     }
 }
 
-/// Call `console_metrics` once over the service's stdio MCP command.
+/// Call `console_metrics` once: over the service's socket where it serves it
+/// (#10908), else over its stdio MCP command.
 ///
 /// Why (#10491): the first-level service view shows what trusty-console's
 /// metrics poller shows, through the same tool and the same report contract.
@@ -336,9 +338,17 @@ pub fn spawn_health_poller<P, Fut>(
 /// all under `deadline`. The child is killed when the client drops.
 /// Test: `a_service_without_console_metrics_is_refused_without_a_spawn`.
 pub async fn fetch_metrics(id: ServiceId, deadline: Duration) -> MetricsUpdate {
-    let result = match id.metrics_command() {
+    let result = match id.metrics_source() {
         None => Err(format!("{} offers no console_metrics tool", id.id())),
-        Some((binary, args)) => {
+        // #10908: Events and MPM answer over their own socket
+        Some(source @ (MetricsSource::Uds(_) | MetricsSource::UdsMcpDispatch)) => {
+            match id.socket() {
+                Ok(socket) => fetch_uds_metrics(source, &socket, deadline).await,
+                Err(reason) => Err(reason),
+            }
+        }
+        // Fallback: the stdio spawn, until the service serves UDS metrics.
+        Some(MetricsSource::Stdio(binary, args)) => {
             match tokio::time::timeout(deadline, call_metrics(binary, args, deadline)).await {
                 Ok(Ok(report)) => Ok(report),
                 Ok(Err(e)) => Err(format!("{e:#}")),

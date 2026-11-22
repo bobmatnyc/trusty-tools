@@ -222,7 +222,8 @@ impl HomeState {
     /// Test: `metrics_fetch_is_throttled_by_the_ttl`,
     /// `a_down_service_shows_unavailable_without_a_fetch`.
     pub fn request_metrics(&mut self, id: ServiceId, now: Instant) -> bool {
-        if id.metrics_command().is_none() {
+        // #10908: a UDS source counts, not just a stdio command
+        if id.metrics_source().is_none() {
             let reason = format!("{} offers no console_metrics tool", id.id());
             self.metrics
                 .insert(id, MetricsState::Unavailable { reason, at: now });
@@ -256,6 +257,14 @@ impl HomeState {
     }
 }
 
+/// Show `id`'s service view and ask for its metrics when they are stale.
+fn open_service(state: &mut HomeState, id: ServiceId, now: Instant) -> Option<HomeAction> {
+    state.view = View::Service(id);
+    state
+        .request_metrics(id, now)
+        .then_some(HomeAction::FetchMetrics(id))
+}
+
 /// Route one key press.
 ///
 /// Why (#10491): Enter on trusty-mpm opens today's projects view; Enter on any
@@ -264,7 +273,7 @@ impl HomeState {
 /// What: mutates `state` and returns the I/O the event loop must start.
 /// Test: `enter_on_mpm_opens_projects`, `enter_on_search_opens_its_view_and_esc_returns`,
 /// `arrows_move_the_selection_within_the_table`, `q_quits_from_any_view`,
-/// `a_opens_architect_and_v_opens_live`.
+/// `a_opens_architect_and_v_opens_live`, `i_opens_the_mpm_service_view`.
 pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<HomeAction> {
     if key.code == KeyCode::Char('q')
         || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
@@ -310,10 +319,13 @@ pub fn handle_key(state: &mut HomeState, key: KeyEvent, now: Instant) -> Option<
                 if id == ServiceId::Mpm {
                     return Some(HomeAction::OpenProjects);
                 }
-                state.view = View::Service(id);
-                state
-                    .request_metrics(id, now)
-                    .then_some(HomeAction::FetchMetrics(id))
+                open_service(state, id, now)
+            }
+            // #10908: `i` opens any row's service view, MPM's included,
+            // since Enter on MPM opens the projects view instead.
+            KeyCode::Char('i') => {
+                let id = state.selected_id();
+                open_service(state, id, now)
             }
             _ => None,
         },
