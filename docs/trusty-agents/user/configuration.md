@@ -194,7 +194,8 @@ directories actually scanned.
 
 ## Environment variables
 
-See [cli-reference.md](./cli-reference.md#environment-variables).
+The environment-variable table left with the harness modes #11632 cut; the
+verbs that remain are in [cli-reference.md](./cli-reference.md).
 
 ## Project initialization
 
