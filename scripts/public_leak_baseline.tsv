@@ -92,9 +92,7 @@ crates/trusty-agents-common/src/agent_content_tests.rs	RULING_DATED	4
 crates/trusty-agents/.gitignore	HOSTNAME	1
 crates/trusty-agents/.trusty-agents/skills/frameworks/pytest.md	EMAIL	2
 crates/trusty-agents/.trusty-agents/skills/workflow/docker.md	HOSTNAME	1
-crates/trusty-agents/CLAUDE.md	HOSTNAME	6
 crates/trusty-agents/Cargo.toml	RULING_DATED	1
-crates/trusty-agents/README.md	HOSTNAME	2
 crates/trusty-agents/changelog.d/10120-slack-token-store.md	HOSTNAME	1
 crates/trusty-agents/changelog.d/4054-4520-agent-tool-authz.md	RULING_DATED	1
 crates/trusty-agents/changelog.d/4476-migrated-added.md	HOSTNAME	1
@@ -1370,8 +1368,6 @@ docs/trusty-agents/research/test-infrastructure-survey-2026-04-26.md	OPERATOR_PA
 docs/trusty-agents/research/tm-tmux-manager-spec.md	OPERATOR_PATH	3
 docs/trusty-agents/research/token-tracking-infrastructure-2026-05.md	OPERATOR_PATH	4
 docs/trusty-agents/research/ui-surface-spec-2026-05.md	OPERATOR_PATH	3
-docs/trusty-agents/user/cli-reference.md	HOSTNAME	1
-docs/trusty-agents/user/quickstart.md	HOSTNAME	2
 docs/trusty-analyze/regression-testing/v0.5.1-2026-06-09.md	OPERATOR_PATH	1
 docs/trusty-analyze/regression-testing/v0.5.1-2026-06-09.md	RIG_SPEC	2
 docs/trusty-analyze/research/csharp-lint-plan-2026-06-08.md	OPERATOR_PATH	3
