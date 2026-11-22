@@ -119,22 +119,19 @@ install-search-signed:
 install-mpm-signed:
 	bash scripts/install-trusty-mpm-signed.sh
 
-# Install trusty-agents (tagent CLI + best-effort Trusty Agents.app) with
-# Developer ID signing for persistent macOS TCC grants.
+# Install trusty-agents (the tagent CLI) with Developer ID signing for
+# persistent macOS TCC grants.
 #
-# Why: fixes #4277 — `cargo install trusty-agents` (and every local `cargo
-# tauri build`) produces fresh ad-hoc/linker-signed identities for BOTH
-# `tagent` and the `Trusty Agents.app` desktop shell, so macOS re-prompts on
-# every rebuild. Signing with a Developer ID cert + fixed --identifier per
-# artifact makes the designated requirement (DR) stable, so the grant
-# persists across reinstalls.
+# Why: fixes #4277 — `cargo install trusty-agents` produces a fresh
+# ad-hoc/linker-signed identity for `tagent`, so macOS re-prompts on every
+# rebuild. Signing with a Developer ID cert + fixed --identifier makes the
+# designated requirement (DR) stable, so the grant persists across reinstalls.
+# #11632: the `Trusty Agents.app` desktop shell it also signed was deleted.
 #
 # What: delegates to scripts/install-trusty-agents-signed.sh, which runs
-# `cargo install --path crates/trusty-agents --locked`, signs `tagent` via
-# `tctl sign trusty-agents`, and best-effort (re-)signs an already-built
-# `Trusty Agents.app` (if present under target/{release,debug}/bundle/macos/)
-# via a direct `codesign --deep` pass. No certificate present degrades to an
-# unsigned install with a clear warning — never a hard failure.
+# `cargo install --path crates/trusty-agents --locked` and signs `tagent` via
+# `tctl sign trusty-agents`. No certificate present degrades to an unsigned
+# install with a clear warning — never a hard failure.
 #
 # Test: run `make install-agents-signed`; assert tagent is signed with a
 # Developer ID (not ad-hoc) and `codesign --verify --strict` passes. Run with

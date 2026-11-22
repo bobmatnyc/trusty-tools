@@ -531,8 +531,8 @@ grep "^name = " crates/<dir>/Cargo.toml
 
 Most match (`crates/trusty-search/` → `-p trusty-search`).
 
-**Exceptions** (always verify `Cargo.toml`):
-- `crates/trusty-agents/ui/src-tauri/` → `name = "trusty-agents-ui"` → `-p trusty-agents-ui`
+**Exceptions** (always verify `Cargo.toml`): none today. #11632 removed the
+last one, the nested `trusty-agents-ui` package.
 
 If `cargo -p <name>` returns "package not found":
 ```bash

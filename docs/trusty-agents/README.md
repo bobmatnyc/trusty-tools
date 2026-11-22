@@ -10,6 +10,12 @@ direct Anthropic API, AWS Bedrock, or the `claude` CLI OAuth path, assignable
 per-agent via configuration. trusty-agents integrates with trusty-search and
 trusty-memory and reuses the workspace's common MCP and agent libraries.
 
+> **#11632 (2026-11-22):** the harness described above — CTRL, the PM actors,
+> sub-agent subprocesses, the REPL, workflows, the HTTP API and the desktop UI —
+> was cut. What remains is the assistant core as a library plus the
+> `tagent mcp-serve` stdio MCP surface ([CLI reference](user/cli-reference.md)).
+> Most documents below describe the pre-cut harness and are history.
+
 This directory is the extended index for trusty-agents design, research, and
 user/developer documentation. Implemented behavior remains code-owned; start
 with the crate README and current workspace behavior contracts.
@@ -31,7 +37,6 @@ with the crate README and current workspace behavior contracts.
 ## Where to start
 
 - **New to trusty-agents?** Start with the [crate README](../../crates/trusty-agents/README.md) and [current product spec](../specs/trusty-agents-product-spec.md).
-- **Desktop projects, channels, and skills?** [`user/desktop-workspace.md`](user/desktop-workspace.md).
 - **Installing / using it?** [`user/quickstart.md`](user/quickstart.md).
 - **Contributing?** [`developer/contributing.md`](developer/contributing.md) and [`developer/building.md`](developer/building.md).
 - **Understanding a past decision?** [`decisions/`](decisions/) (crate-specific) or [`docs/adr/`](../adr/) (workspace-wide).

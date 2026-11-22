@@ -40,7 +40,7 @@ Always use `tracing::info!` / `tracing::debug!` etc. (which write to stderr).
 token and shares the live port and data — start one with
 `scripts/sandbox_search_daemon.sh` only (#9121; `sandbox_daemon.sh` is the
 `tm daemon` equivalent, `sandbox_secrets_console.sh` the trusty-secrets and
-console one, #9793, `sandbox_agents_daemon.sh` the `tagent --api` one, #10940).
+console one, #9793).
 
 🟡 **A live check on a stale binary** — the build lease writes to a pool slot,
 so `tm` on PATH or the ambient `$CARGO_TARGET_DIR/debug/tcode` can predate
@@ -174,11 +174,8 @@ work in edition 2024. Do not copy let-chain patterns into edition-2021 crates.
 
 🟢 **`trusty-code-gui` is excluded from bare `cargo build`/`test`/`check`**
 (#2951, #2983) — the root `Cargo.toml`'s `default-members` list omits it,
-matching CI's existing `--workspace --exclude trusty-code-gui
---exclude trusty-agents-ui` for the same commands (the second exclusion guards
-against a build-order race: `trusty-agents-ui`'s `tauri::generate_context!()`
-reads the same `ui/dist/` that `trusty-agents`' own build.rs populates, and
-panics if it runs first).
+matching CI's existing `--workspace --exclude trusty-code-gui` for the same
+commands.
 Use `cargo build -p trusty-code-gui` (or `--workspace`, which always builds
 everything regardless of `default-members`) when you actually need it. This
 also stops every agent worktree from silently producing a fresh ad-hoc-signed

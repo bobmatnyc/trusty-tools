@@ -1,22 +1,15 @@
-//! trusty-agents library surface.
+//! trusty-agents library surface: the assistant core.
 //!
-//! Why: trusty-agents was originally a binary-only crate. An out-of-workspace
-//!      launcher needs to implement `ToolExecutor` and return an `AgentPlugin`
-//!      so the ctrl loop can register its tools via dependency injection
-//!      rather than hard-coded `if persona ==` branches. Exposing the existing
-//!      module tree through a library target enables that without duplicating
-//!      code. No in-workspace crate uses this seam any more — the last one,
-//!      `cto-assistant`, was dissolved in #3732 in favour of a declared
-//!      Python skill.
-//! What: Declares every top-level module of the crate as `pub mod` so both
-//!       the `tagent` binary (which now consumes this lib via
-//!       `use trusty_agents::...`) and downstream launchers can reach the
-//!       internals. Also publishes a curated `agent_api` facade that pins
-//!       the minimal stable surface external agents should depend on
-//!       (`ToolExecutor`, `ToolResult`, `ToolExecutionTier`, `AgentPlugin`,
-//!       `ServiceTier`).
-//! Test: Compile-tested by the workspace build; the facade's plugin seam is
-//!       covered by `agent_plugin_lookup_returns_matching_plugin`.
+//! Why: the assistant's homes, OKG stores, channels, listeners, memory and
+//! knowledge are library code that a host process drives. #11632 cut the
+//! agent harness that used to host them (PM orchestrator, CTRL, REPL,
+//! workflows, HTTP API, UI); the `tagent` binary now serves only stdio MCP and
+//! the `config` verbs (`cli`, `mcp_serve`).
+//! What: declares every kept module as `pub mod`, and publishes a curated
+//! `agent_api` facade (`ToolExecutor`, `ToolResult`, `ToolExecutionTier`,
+//! `AgentPlugin`, `ServiceTier`) for out-of-workspace launchers.
+//! Test: compile-tested by the workspace build; the facade's plugin seam is
+//! covered by `agent_plugin_lookup_returns_matching_plugin`.
 
 // docs.rs builds a release's documentation once, from the uploaded tarball,
 // so a broken intra-doc link is baked into that version forever and only a new

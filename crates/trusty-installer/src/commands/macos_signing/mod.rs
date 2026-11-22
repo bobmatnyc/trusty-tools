@@ -47,21 +47,9 @@
 //!   by every `cargo install` and re-prompts a macOS TCC category on every
 //!   rebuild. `tagent` gets its own set (not folded into [`MPM_SET`]) because
 //!   it is an entirely separate crate/binary with no dependency on trusty-mpm's
-//!   install path. The desktop shell, `Trusty Agents.app`
-//!   (`crates/trusty-agents/ui/src-tauri`), is DELIBERATELY handled
-//!   differently from the sibling `trusty-code-gui` pattern:
-//!   rather than hardcoding `bundle.macOS.signingIdentity` in `tauri.conf.json`
-//!   (which hard-fails `cargo tauri build` on any machine without that exact
-//!   cert — see `docs/reference/common-pitfalls.md`), `tauri.conf.json` is left
-//!   with no `signingIdentity` set at all, and
-//!   `scripts/install-trusty-agents-signed.sh` exports `APPLE_SIGNING_IDENTITY`
-//!   (Tauri's own bundler env-var override) only around the build/sign step —
-//!   present → Developer-ID-signed bundle; absent → Tauri's ad-hoc default,
-//!   fail-soft for free. This module/table only covers the bare `tagent`
-//!   binary via this crate's flat-file `codesign` path, which does not apply
-//!   to a directory bundle; the `.app` bundle is signed by Tauri's own
-//!   bundler (or the install script's best-effort `codesign --deep` pass over
-//!   an already-built bundle) instead — see that script for both paths.
+//!   install path. #11632: the `Trusty Agents.app` desktop shell that the
+//!   install script also signed was deleted with the trusty-agents HTTP API;
+//!   this set covers the bare `tagent` binary only.
 //!
 //! - Owner ruling 2026-08-06: `trusty-memory` joins as its own signable set
 //!   ([`MEMORY_SET`]). Its absence was never a decision — no comment, doc, ADR,
@@ -134,12 +122,7 @@ pub const MPM_SET: &str = "trusty-mpm";
 /// `cargo install` mints a fresh ad-hoc identity for `tagent`, so macOS
 /// re-prompts a TCC category on every rebuild. Kept as its own set (rather
 /// than folded into [`MPM_SET`]) since `trusty-agents` is an independent
-/// crate with its own install path. The `Trusty Agents.app` desktop shell is
-/// NOT part of this table — it is a directory bundle signed via Tauri's own
-/// `APPLE_SIGNING_IDENTITY` build-time env var (set by
-/// `scripts/install-trusty-agents-signed.sh`), not this module's flat-file
-/// `codesign` path — see the module doc's #4277 note for why that's a
-/// deliberate deviation from the `trusty-code-gui` precedent.
+/// crate with its own install path.
 pub const AGENTS_SET: &str = "trusty-agents";
 
 /// The `trusty-memory` signable set: every binary `cargo install --path
