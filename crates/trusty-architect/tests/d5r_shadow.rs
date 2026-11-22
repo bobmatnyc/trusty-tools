@@ -224,7 +224,16 @@ fn shadow_seeds_state_once_and_never_writes_the_inbox() -> TestResult {
         "the live state is only read"
     );
     let shadow = listing(&env.config.shadow_dir())?;
-    assert_eq!(shadow, ["alerts.jsonl", "poll-state.json", "shadow.log"]);
+    // MB1595 fix round: the token watcher keeps its own state in the shadow dir.
+    assert_eq!(
+        shadow,
+        [
+            "alerts.jsonl",
+            "poll-state.json",
+            "shadow.log",
+            "token-watch-state.json"
+        ]
+    );
     assert!(env.log().contains("shadow: seeded"), "{}", env.log());
     assert!(tmux.sends().is_empty(), "a shadow run sends no keys");
     // A second start keeps the shadow's own state.

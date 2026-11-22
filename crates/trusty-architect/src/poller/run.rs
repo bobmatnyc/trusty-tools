@@ -22,7 +22,11 @@
 //! [`Runner::run_single`] is `--once`: the same start, one cycle, no sleep,
 //! and an error for a skipped or unsaved cycle, or for any `Config::problems`
 //! entry, which the loop only logs (#9822).
-//! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/verbs_poll.rs`.
+//! A dry run also prints the shadow keys marker, a `would alert key:` JSON line
+//! after each `would alert:` and a `would wake key:` line per woken alert,
+//! so the shadow record never rebuilds keys from display text (MB1595).
+//! Test: `tests/cycle_loop.rs`, `tests/state_session.rs`, `tests/verbs_poll.rs`,
+//! `dry_run_prints_structured_alert_and_wake_keys`.
 
 use std::fs;
 use std::io;
@@ -31,6 +35,7 @@ use std::time::Duration;
 use super::config::Config;
 use super::cycle::{Sensors, Stopped, collect};
 use super::digest::WakeItem;
+use super::dry_keys::{alert_key_line, wake_key_lines};
 use super::host::HostProbe;
 use super::lock::PollLock;
 use super::messages::MessageSink;
@@ -244,8 +249,11 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             }
         };
         if self.dry_run {
+            // MB1595 fix round: the structured keys the shadow record reads.
+            log.push(format!("  {}", crate::sched::shadow::KEYS_MARKER));
             for a in &found.new {
                 log.push(format!("  would alert: {}", a.display));
+                log.push(alert_key_line(a));
                 if notifies(a) {
                     log.push(format!("  would notify: {}", a.display)); // #9801
                 }
@@ -278,6 +286,7 @@ impl<T: Tmux + ?Sized, C: Clock + ?Sized> Runner<'_, T, C> {
             // See MB1595: the shadow's parity leaves these wakes out.
             let haiku = self.triage.haiku_woken();
             log.push(format!("  triage haiku-path wakes: {haiku}"));
+            log.extend(wake_key_lines(&woken, &self.triage.haiku_keys()));
         }
         let alerts = self.config.alerts();
         let waker = Waker {

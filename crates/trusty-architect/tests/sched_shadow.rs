@@ -43,6 +43,8 @@ fn record(slot: i64, ok: bool, wake: Option<&str>, alerts: Vec<ShadowAlert>) -> 
         digest_sha: "d".into(),
         error: None,
         haiku_woken: None,
+        alert_keys: None,
+        woken_keys: None,
     }
 }
 
@@ -82,7 +84,11 @@ fn shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one() {
         ("PATH".to_owned(), "/bin".to_owned()),
     ];
     let (spec, ctx) = shadow::plan(&l, &PollJob::default(), env, T0).unwrap();
-    assert_eq!(spec.argv, ["tm", "architect", "poll", "--dry-run"]);
+    // MB1595 fix round: `--shadow` lets the dry run's cycle run the ledger shim.
+    assert_eq!(
+        spec.argv,
+        ["tm", "architect", "poll", "--dry-run", "--shadow"]
+    );
     let scratch = l.shadow_dir();
     // The dry run points at the scratch inbox, never the live one.
     let inbox: Vec<_> = spec
@@ -213,7 +219,7 @@ fn poll_job_shadows_until_cutover() {
     assert_eq!(started, ["poll"]);
     assert_eq!(records[0].job, "poll");
     let spec = runner.last();
-    assert_eq!(spec.argv.last().map(String::as_str), Some("--dry-run"));
+    assert_eq!(spec.argv[3..], ["--dry-run", "--shadow"]);
     assert!(spec.env.iter().any(|(k, _)| k == "ARCHITECT_INBOX_DIR"));
     assert!(spec.env.iter().all(|(k, _)| k != "SECRET_TOKEN"));
     assert_eq!(lines(&layout(dir.path()).shadow_log()).len(), 1);
@@ -275,15 +281,18 @@ fn parity_joins_matched_scheduler_only_and_poller_only() {
         LiveAlert {
             ts: t + 10,
             key: alert("s1", "ctx"),
+            fingerprint: None,
         },
         LiveAlert {
             ts: t + 20,
             key: alert("s3", "error"),
+            fingerprint: None,
         },
         // Outside the window: not counted against this record.
         LiveAlert {
             ts: t + 60,
             key: alert("s9", "idle"),
+            fingerprint: None,
         },
     ];
     let rep = compute(&records, &live, &[]);
@@ -302,13 +311,15 @@ fn parity_joins_matched_scheduler_only_and_poller_only() {
 fn parity_counts_wakes_per_window() {
     let t = parse_iso("2026-11-21T14:00:00Z").unwrap();
     let wake = Some("dry-run: would send to tm-architect: x");
+    // MB1595 fix round: the records sit 10 cycles apart, beyond the
+    // fallback's two-cycle tolerance, so each wake stays its record's own.
     let records = [
-        record(t, true, wake, vec![]),       // both wake
-        record(t + 60, true, wake, vec![]),  // scheduler only
-        record(t + 120, true, None, vec![]), // poller only
-        record(t + 180, true, None, vec![]), // neither
+        record(t, true, wake, vec![]),        // both wake
+        record(t + 600, true, wake, vec![]),  // scheduler only
+        record(t + 1200, true, None, vec![]), // poller only
+        record(t + 1800, true, None, vec![]), // neither
     ];
-    let rep = compute(&records, &[], &[t + 5, t + 125]);
+    let rep = compute(&records, &[], &[t + 5, t + 1205]);
     assert_eq!(
         (
             rep.wakes.matched,
@@ -331,6 +342,7 @@ fn parity_ignores_failed_shadow_records() {
     let live = [LiveAlert {
         ts: t + 5,
         key: alert("s1", "ctx"),
+        fingerprint: None,
     }];
     let rep = compute(&records, &live, &[]);
     assert_eq!((rep.cycles, rep.failed_cycles), (1, 1));
@@ -384,4 +396,54 @@ fn parity_load_reads_the_three_files() {
     // No shadow file at all is an error, not an empty report.
     std::fs::remove_file(l.shadow_log()).unwrap();
     assert!(parity::load(&l, 0).is_err());
+}
+
+/// MB1595 fix round (class B): the displays the 2nd parity run mis-keyed,
+/// read through the old display path a record without structured keys takes.
+/// Red at base: `('runtime selftest', 'failing')`, an `[owner] ...` kind, and
+/// so on.
+#[test]
+fn parse_display_keys_the_mis_keyed_displays() {
+    let cases = [
+        (
+            "[runtime selftest]: failing: memory_mcp, search_mcp",
+            "",
+            "selftest_fail",
+        ),
+        ("[owner] Dbq answered 03:36Z", "", "owner_answer"),
+        ("[owner] Dbq answered 03:36Z: ship it", "", "owner_answer"),
+        ("[owner] Dbr won't do: out of scope", "", "owner_wont_do"),
+        (
+            "[dashboard]: stale tasks: 3 tasks idle over 7d",
+            "",
+            "stale_tasks",
+        ),
+        (
+            "[tm-a]: token ctx_main: ctx 360000 >= 350000 main opus",
+            "tm-a",
+            "token",
+        ),
+        ("[tm-a]: idle: idle 10 min", "tm-a", "idle"),
+    ];
+    for (display, session, kind) in cases {
+        let d = parse_decision(&format!("  would alert: {display}\n"));
+        assert_eq!(d.alerts, [alert(session, kind)], "{display}");
+        assert_eq!(d.keys, None, "no marker: the old path");
+    }
+}
+
+/// MB1595 fix round: with the keys marker the JSON keys win over a display
+/// that would parse wrong, and the record carries the fingerprints.
+#[test]
+fn parse_decision_prefers_structured_keys() {
+    let out = "  shadow keys: v1\n  would alert: [weird]: display: x\n  would alert key: {\"session\":\"tm-b\",\"kind\":\"pm_message\",\"fingerprint\":\"f1\"}\n";
+    let d = parse_decision(out);
+    assert_eq!(d.alerts, [alert("tm-b", "pm_message")]);
+    let keys = d.keys.unwrap_or_default();
+    assert_eq!(keys[0].fingerprint, "f1");
+    assert_eq!(
+        d.woken_keys,
+        Some(Vec::new()),
+        "marker: no wake keys is no wakes"
+    );
 }

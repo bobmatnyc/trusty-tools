@@ -17,13 +17,14 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value};
 
 use super::ctx_bar::{PM_BAR, architect_bar, bar_pct};
 use super::state::PollState;
-use super::triage::Triage;
+use super::triage::{Triage, alert_key};
 use crate::classify::Alert;
 use crate::pystr::{is_digit, parse_digits};
 use crate::sched::slot::parse_iso;
@@ -284,12 +285,16 @@ pub struct RuleTriage {
     pub schedule: PathBuf,
     /// Woken alerts of the last call that no rule decided.
     pub haiku: AtomicU64,
+    /// Their `session|kind|fingerprint` keys (MB1595 fix round).
+    pub haiku_keys: Mutex<Vec<String>>,
 }
 
 impl Triage for RuleTriage {
     fn triage(&self, new: &[Alert], now: f64, state: &mut PollState, _: bool) -> (Vec<Alert>, u64) {
         self.haiku.store(0, Ordering::Relaxed);
+        let mut keys = Vec::new();
         if new.is_empty() {
+            self.set_haiku_keys(keys);
             return (Vec::new(), 0);
         }
         let holds = load_holds(&self.rules);
@@ -311,11 +316,13 @@ impl Triage for RuleTriage {
                 Some(_) => woken.push(a.clone()),
                 None => {
                     haiku += 1;
+                    keys.push(alert_key(a));
                     woken.push(a.clone());
                 }
             }
         }
         self.haiku.store(haiku, Ordering::Relaxed);
+        self.set_haiku_keys(keys);
         state
             .other
             .insert("triage_rc".to_owned(), Value::Object(rc));
@@ -325,5 +332,21 @@ impl Triage for RuleTriage {
 
     fn haiku_woken(&self) -> u64 {
         self.haiku.load(Ordering::Relaxed)
+    }
+
+    fn haiku_keys(&self) -> Vec<String> {
+        self.haiku_keys
+            .lock()
+            .map(|k| k.clone())
+            .unwrap_or_else(|p| p.into_inner().clone())
+    }
+}
+
+impl RuleTriage {
+    fn set_haiku_keys(&self, keys: Vec<String>) {
+        match self.haiku_keys.lock() {
+            Ok(mut k) => *k = keys,
+            Err(p) => *p.into_inner() = keys,
+        }
     }
 }

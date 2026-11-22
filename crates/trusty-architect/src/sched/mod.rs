@@ -33,6 +33,7 @@ pub mod engine_run;
 pub mod fresh;
 pub mod logger;
 pub mod parity;
+pub mod parity_join;
 pub mod plist;
 pub mod runlog;
 pub mod shadow;

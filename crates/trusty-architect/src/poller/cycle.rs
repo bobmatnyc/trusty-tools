@@ -18,8 +18,8 @@
 //! #11541 review: the last self-refresh fault and the Architect pane's own
 //! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
 //! MB1595 adds the PM-message intake (`pm_message`); PR-B2 the tm health
-//! `dep_degraded` step.
-//! Steps owned elsewhere are left out: effort, token,
+//! `dep_degraded` step; the MB1595 fix round the `token` watcher.
+//! Steps owned elsewhere are left out: effort,
 //! dashboard, owner_* other than owner_answer (#11474), auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
 //! Test: `tests/cycle_ported.rs` (the prototype's cycle tests, by name),
@@ -48,6 +48,7 @@ use super::state::PollState;
 use super::steps::ledger_shim::ledger_shim_step;
 use super::steps::scripts::ScriptSteps;
 use super::steps::usage::{ProbeLauncher, probe_idle, usage_step};
+use super::token::token_alerts;
 use super::watchdog::Relauncher;
 use super::watchdog::wiring::watchdog_alerts;
 use super::windows::rename_windows;
@@ -259,6 +260,10 @@ pub fn collect<T: Tmux + ?Sized>(
         &idle_panes,
         s.dry_run,
     );
+    candidates.extend(found);
+    log.extend(lines);
+    // MB1595 fix round: fleet-poll.py's token_alerts, after usage and effort.
+    let (found, lines) = token_alerts(s.config, now, s.dry_run);
     candidates.extend(found);
     log.extend(lines);
     // df-T7i P1b: queued ctx-cycle failures; the run_* scripts; selftest.

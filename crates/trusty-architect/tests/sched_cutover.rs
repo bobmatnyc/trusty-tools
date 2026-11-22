@@ -74,6 +74,8 @@ fn seed_shadow(l: &Layout, n: i64) -> i64 {
             digest_sha: "d".into(),
             error: None,
             haiku_woken: None,
+            alert_keys: None,
+            woken_keys: None,
         };
         text += &format!("{}\n", serde_json::to_string(&rec).unwrap());
     }

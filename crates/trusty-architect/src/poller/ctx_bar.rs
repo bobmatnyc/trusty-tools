@@ -8,8 +8,9 @@
 //! What: [`architect_bar`] reads the key (a positive integer, else `None`);
 //! [`bar_pct`] is the bar as a whole percent of a window, used as the
 //! `self_ctx` threshold when `SELF_CTX_THRESHOLD` is unset.
+//! [`main_buckets`] is the token watcher's per-session `ctx_main` buckets.
 //! Test: `ctx_bar_matches_python_goldens` (tests/parity_p1b.rs),
-//! `bar_pct_of_a_zero_window_is_an_error`.
+//! `bar_pct_of_a_zero_window_is_an_error`, `main_buckets_swap_the_architect_levels`.
 
 use std::fs;
 use std::path::Path;
@@ -56,9 +57,51 @@ pub fn bar_pct(session: &str, window: i64, schedule: &Path) -> Result<i64, ZeroW
     Ok((100.0 * bar as f64 / window as f64).trunc() as i64)
 }
 
+/// The PMs' "approaching" level: 90% of [`PM_BAR`].
+pub const PM_APPROACH: i64 = 315_000;
+/// The PMs' compaction guard: 110% of [`PM_BAR`].
+pub const PM_GUARD: i64 = 400_000;
+
+/// `main_buckets(session, buckets)`: the token watcher's `ctx_main` buckets
+/// with the PM approach, bar and guard swapped for `session`'s own levels
+/// (90%, 100% and 110% of its bar), sorted and deduplicated.
+pub fn main_buckets(session: &str, buckets: &[i64], schedule: &Path) -> Vec<i64> {
+    let own = (session == ARCHITECT_SESSION)
+        .then(|| architect_bar(schedule))
+        .flatten();
+    let (approach, bar, guard) = own.map_or((PM_APPROACH, PM_BAR, PM_GUARD), |b| {
+        (b * 9 / 10, b, b * 11 / 10)
+    });
+    let mut out: Vec<i64> = buckets
+        .iter()
+        .map(|&b| match b {
+            PM_APPROACH => approach,
+            PM_BAR => bar,
+            PM_GUARD => guard,
+            other => other,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn main_buckets_swap_the_architect_levels() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sched = dir.path().join("s.json");
+        std::fs::write(&sched, r#"{"thresholds": {"architect_bar_ctx": 450000}}"#).expect("write");
+        let pm = [200_000, 315_000, 350_000, 400_000];
+        assert_eq!(main_buckets("tm-x", &pm, &sched), pm.to_vec());
+        assert_eq!(
+            main_buckets(ARCHITECT_SESSION, &pm, &sched),
+            vec![200_000, 405_000, 450_000, 495_000]
+        );
+    }
 
     #[test]
     fn bar_pct_of_a_zero_window_is_an_error() {
