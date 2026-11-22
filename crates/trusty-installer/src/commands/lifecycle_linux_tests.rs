@@ -430,3 +430,133 @@ fn installed_version_parses_each_daemons_real_version_line() {
         assert_eq!(got, want, "{name}");
     }
 }
+
+/// #11086 review: every probe answer other than a matching `Serving` version
+/// is FAILED, including the catch-all arm.
+///
+/// Why: an `Err` → `Ok` slip in the catch-all would report `ok` for a daemon
+/// whose version nobody read.
+/// What: a reply with no version, a probe that could not run, and a binary
+/// the probe could not find each give `Err` naming the installed version.
+/// Test: this is the test.
+#[test]
+fn verdict_fails_closed_on_every_other_probe_answer() {
+    let cases = [
+        ProbeOutcome::Serving {
+            status: "ok".to_owned(),
+            version: None,
+        },
+        ProbeOutcome::ProbeFailed {
+            detail: "no runtime".to_owned(),
+        },
+        ProbeOutcome::NotInstalled,
+    ];
+    for health in cases {
+        let err = linux::verdict("x restart ok", "0.36.7", &health)
+            .expect_err(&format!("{health:?} must be FAILED"));
+        assert!(err.contains("installed is 0.36.7"), "{err}");
+    }
+}
+
+/// Write a trusty-memory stub that accepts `restart` and answers `--version`
+/// with `version_arm` (shell text).
+fn stub_version_arm(f: &Fixture, version_arm: &str) {
+    let body = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  --version) {version_arm} ;;\n  \
+         restart) echo \"$0 restart\" >> '{log}' ;;\n  *) exit 2 ;;\nesac\n",
+        log = f.log.display()
+    );
+    write_exec_script(&f.bin.join("trusty-memory"), &body);
+}
+
+/// #11086 review: an installed version tctl cannot read is FAILED, before any
+/// health probe.
+///
+/// Why: swallowing the version-read error would compare the running version
+/// against nothing, or skip the check.
+/// What: `--version` exits 1, then prints `no version here`. Each time the
+/// restart runs, the member is FAILED naming `--version`, tctl exits 2, and the
+/// probe is never asked.
+/// Test: this is the test.
+#[test]
+fn unreadable_installed_version_is_failed_before_the_probe() {
+    for arm in ["exit 1", "echo 'no version here'"] {
+        let f = fixture();
+        stub_version_arm(&f, arm);
+        let env = LinuxEnv {
+            members: vec!["trusty-memory"],
+        };
+        let host = host(&f, serving("0.36.7"));
+        let (code, outcomes) = restart(&env, &host, &["trusty-memory"]);
+        let memory = outcome(&outcomes, "trusty-memory");
+        assert_eq!(code, 2, "{arm}: {outcomes:?}");
+        assert!(
+            !memory.ok && memory.detail.contains("--version"),
+            "{arm}: {memory:?}"
+        );
+        assert_eq!(log_lines(&f.log).len(), 1, "{arm}: the restart ran once");
+        assert!(host.probes.borrow().is_empty(), "{arm}: probe was asked");
+    }
+}
+
+/// #11086 review: trusty-mpm with no `tm` in the install dir is FAILED, and
+/// neither the shim nor a `PATH` copy is restarted.
+///
+/// Why: dropping the absolute-path hand-off would send the `OwnVerb` arm to a
+/// `PATH` lookup of `trusty-mpm`.
+/// What: the install dir holds only the shim; a decoy shim sits first on
+/// `PATH`. Both log to the restart log, which stays empty; exit 2, no probe.
+/// Test: this is the test.
+#[test]
+fn mpm_without_tm_in_the_install_dir_is_failed() {
+    let _lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let f = fixture();
+    stub(&f.bin, "trusty-mpm", "trusty-mpm 1.14.0", 0, &f.log);
+    let decoy = f.tmp.path().join("decoy");
+    std::fs::create_dir_all(&decoy).expect("create decoy dir");
+    stub(&decoy, "trusty-mpm", "trusty-mpm 1.14.0", 0, &f.log);
+    let env = LinuxEnv {
+        members: vec!["trusty-mpm"],
+    };
+    let host = host(&f, serving("1.14.0"));
+
+    let (code, outcomes) = {
+        let _path = DecoyPath::prepend(&decoy);
+        restart(&env, &host, &["trusty-mpm"])
+    };
+
+    let mpm = outcome(&outcomes, "trusty-mpm");
+    assert_eq!(code, 2, "{outcomes:?}");
+    assert!(!mpm.ok && mpm.detail.contains("/tm"), "{mpm:?}");
+    assert!(log_lines(&f.log).is_empty(), "something restarted");
+    assert!(host.probes.borrow().is_empty());
+}
+
+/// #11086 review: an install-dir binary the restart cannot spawn is FAILED,
+/// naming the spawn, before any probe.
+///
+/// Why: mapping the spawn error to ok would hand the verdict a restart that
+/// never happened.
+/// What: `trusty-search` in the install dir is mode 0644; exit 2, the detail
+/// names the failed spawn, no probe.
+/// Test: this is the test.
+#[test]
+fn unspawnable_install_binary_is_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let exe = f.bin.join("trusty-search");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").expect("write binary");
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o644)).expect("chmod 0644");
+    let env = LinuxEnv {
+        members: vec!["trusty-search"],
+    };
+    let host = host(&f, serving("0.63.1"));
+    let (code, outcomes) = restart(&env, &host, &["trusty-search"]);
+    let search = outcome(&outcomes, "trusty-search");
+    assert_eq!(code, 2, "{outcomes:?}");
+    // The `restart` spawn itself, not the later `--version` spawn, which also
+    // fails on this file.
+    let spawn = format!("failed to spawn `{} restart`", exe.display());
+    assert!(!search.ok && search.detail.contains(&spawn), "{search:?}");
+    assert!(host.probes.borrow().is_empty());
+}
