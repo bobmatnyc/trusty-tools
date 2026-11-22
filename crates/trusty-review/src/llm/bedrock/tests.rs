@@ -647,8 +647,6 @@ fn forced_tool_choice_capability_covers_every_compare_candidate() {
     use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
     let expected = [
         ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", true),
-        // #10757: forced tool choice probed working on 2026-11-22.
-        ("bedrock/us.anthropic.claude-haiku-5-5", true),
         ("bedrock/us.anthropic.claude-sonnet-4-6", true),
         ("bedrock/us.anthropic.claude-sonnet-5-5", false),
         ("bedrock/us.anthropic.claude-opus-5-5", false),
@@ -766,6 +764,25 @@ fn inference_config_omits_temperature_only_for_claude_5_5() {
     }
 }
 
+/// Haiku 5.5 has an id and a price, and its requests omit `temperature`.
+///
+/// Why: #10757 adds Haiku 5.5 to the model table; Bedrock rejects
+/// `temperature` for it ("deprecated for this model", probed 2026-11-22).
+/// What: prices [`HAIKU_5_5_MODEL`] at the `us.` rate and checks the Converse
+/// config drops `temperature` for it.
+/// Test: this test.
+#[test]
+fn haiku_5_5_id_has_a_price() {
+    use crate::llm::models::HAIKU_5_5_MODEL;
+    let cost = super::estimate_bedrock_cost_usd(HAIKU_5_5_MODEL, 1_000_000, 1_000_000);
+    assert!((cost - 0.66).abs() < 1e-9, "Haiku 5.5 us. rate: {cost}");
+    let req = structured_request("reviewer");
+    assert_eq!(
+        super::inference_config(&req, HAIKU_5_5_MODEL).temperature(),
+        None
+    );
+}
+
 /// Every compare-set candidate and the reviewer default has a stated
 /// temperature answer.
 ///
@@ -783,7 +800,6 @@ fn inference_config_temperature_covers_every_compare_candidate() {
             "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
             Some(0.3),
         ),
-        ("bedrock/us.anthropic.claude-haiku-5-5", None),
         ("bedrock/us.anthropic.claude-sonnet-4-6", Some(0.3)),
         ("bedrock/us.anthropic.claude-sonnet-5-5", None),
         ("bedrock/us.anthropic.claude-opus-5-5", None),
