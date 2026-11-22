@@ -241,7 +241,7 @@ pub fn degraded_entries(report: &DependencyReport) -> Vec<String> {
 /// Memory reports `Up` only for `status: "ok"`; search for any answer.
 /// Test: the binary smoke run (`scripts/sandbox_daemon.sh`); unit tests inject
 /// fakes instead.
-// The test build starts with `AlwaysUp` (see `default_probe`), so the socket
+// The test build starts with `StaticProbe` (see `default_probe`), so the socket
 // probe is only constructed by the daemon binary.
 #[cfg_attr(test, allow(dead_code))]
 pub struct SocketProbe;
@@ -309,7 +309,7 @@ async fn probe_search() -> DependencyOutcome {
 pub(crate) fn default_probe() -> Arc<dyn DependencyProbe> {
     #[cfg(test)]
     {
-        Arc::new(AlwaysUp)
+        Arc::new(StaticProbe(DependencyOutcome::Up))
     }
     #[cfg(not(test))]
     {
@@ -317,14 +317,16 @@ pub(crate) fn default_probe() -> Arc<dyn DependencyProbe> {
     }
 }
 
-/// Test-build default: every dependency answers.
+/// Test probe answering every dependency with one fixed outcome; the
+/// test-build default is `StaticProbe(DependencyOutcome::Up)`.
 #[cfg(test)]
-pub(crate) struct AlwaysUp;
+pub(crate) struct StaticProbe(pub(crate) DependencyOutcome);
 
 #[cfg(test)]
-impl DependencyProbe for AlwaysUp {
+impl DependencyProbe for StaticProbe {
     fn probe(&self, _dep: Dependency) -> ProbeFuture {
-        Box::pin(async { DependencyOutcome::Up })
+        let outcome = self.0.clone();
+        Box::pin(async move { outcome })
     }
 }
 
