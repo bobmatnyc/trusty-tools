@@ -62,6 +62,9 @@ pub fn config_at(root: &Path, vars: &[(&str, &str)]) -> TestResult<Config> {
             root.join(sub).to_string_lossy().into_owned(),
         )
     })
+    // An unreachable tm is a dep_health_error: keep a cycle off the machine's real tm socket
+    // unless a test turns the step on.
+    .chain([("TM_HEALTH".to_owned(), "off".to_owned())])
     .chain(vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())))
     .collect();
     let get = move |k: &str| {

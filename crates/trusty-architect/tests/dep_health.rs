@@ -132,19 +132,59 @@ fn garbage_reply_is_the_error_arm() {
 }
 
 #[test]
-fn unreachable_socket_is_deferred_not_healthy() -> TestResult {
+fn unreachable_socket_raises_dep_health_error() -> TestResult {
     let dir = tempfile::tempdir()?;
     let mut other = Map::new();
-    other.insert(
-        "dep_health".into(),
-        json!({"trusty-memory": {"streak": 1, "alerted": false}}),
-    );
+    let held = json!({"trusty-memory": {"streak": 1, "alerted": false}});
+    other.insert("dep_health".into(), held.clone());
     let sock = dir.path().join("absent.sock");
     let (found, lines) = dep_health_step(Some(&sock), &read_tm_health, &mut other, 1.0);
-    assert!(found.is_empty());
-    assert!(lines[0].contains("unreachable"), "{lines:?}");
-    assert_eq!(other["dep_health"]["trusty-memory"]["streak"], 1);
+    let key = |a: &trusty_architect::classify::Alert| {
+        (a.kind.clone(), a.fingerprint.clone(), a.session.clone())
+    };
+    let want = (
+        "dep_health_error".to_owned(),
+        "unreachable".to_owned(),
+        String::new(),
+    );
+    assert_eq!(
+        found.iter().map(key).collect::<Vec<_>>(),
+        std::slice::from_ref(&want)
+    );
+    assert!(
+        found[0].detail.contains("unreachable"),
+        "{}",
+        found[0].detail
+    );
+    assert!(lines.is_empty(), "{lines:?}");
+    assert_eq!(other["dep_health"], held, "streak held, never healthy");
+    // Dedupe key is per error class: a repeat read repeats it, garbage differs.
+    let (again, _) = dep_health_step(Some(&sock), &read_tm_health, &mut other, 2.0);
+    assert_eq!(key(&again[0]), want);
+    let junk = |_: &Path| Reading::Ok(json!("junk"));
+    let (garbage, _) = dep_health_step(Some(&sock), &junk, &mut other, 3.0);
+    assert_ne!(key(&garbage[0]), want);
+    assert_eq!(other["dep_health"], held);
     Ok(())
+}
+
+#[test]
+fn corrupt_state_book_recovers_and_still_alerts() {
+    let corrupt = [
+        json!("junk"),
+        json!([1]),
+        json!({"trusty-memory": "x"}),
+        json!({"trusty-memory": {}}),
+        json!({"trusty-memory": {"streak": "n", "alerted": "yes"}}),
+    ];
+    for bad in corrupt {
+        let mut other = Map::new();
+        other.insert("dep_health".into(), bad.clone());
+        assert!(run(&mut other, down()).is_empty(), "{bad}");
+        assert!(other["dep_health"].is_object(), "{bad}");
+        assert_eq!(run(&mut other, down()).len(), 1, "{bad}");
+        assert!(run(&mut other, down()).is_empty(), "{bad}");
+    }
 }
 
 fn serve_once(path: &Path, reply: &'static [u8]) -> TestResult {
@@ -236,7 +276,10 @@ fn cycle_writes_one_dep_degraded_after_two_degraded_reads() -> TestResult {
     let sock = sockdir.path().join("tm.sock");
     serve_n(&sock, 3, down())?;
     let sock_text = sock.to_string_lossy().into_owned();
-    let env = Env::new(&[("TM_HEALTH_SOCKET", sock_text.as_str())])?;
+    let env = Env::new(&[
+        ("TM_HEALTH", "on"),
+        ("TM_HEALTH_SOCKET", sock_text.as_str()),
+    ])?;
     let tmux = fleet(&[("tm-a", "%2", "claude")], &screen(10));
     let clock = FakeClock::new(0.0);
     let mut session = PollSession::new(PollState::default());

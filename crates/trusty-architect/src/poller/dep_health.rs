@@ -10,9 +10,10 @@
 //! outage; pending neither counts nor resets; up clears the service.
 //! [`dep_health_step`] runs it once per cycle with its book in
 //! `state["dep_health"]`, the Python module's key and shape. A bad answer is
-//! a `dep_health_error` alert keyed by error class; an unreachable tm is a log
-//! line only (tm being unreachable is its own alert). Neither reads healthy:
-//! the book is kept as it was.
+//! a `dep_health_error` alert keyed by error class, and so is an unreachable
+//! tm (class `unreachable`: connect refused, socket missing). Neither reads
+//! healthy: the book is kept as it was. A corrupt book (not an object, an
+//! entry missing `streak`/`alerted`) is coerced to defaults, never an error.
 //! Test: `tests/dep_health.rs`.
 
 use std::io::{Read, Write};
@@ -66,7 +67,7 @@ pub enum DepState {
 /// socket or a refused connect is [`Reading::Unreachable`]; a timeout, a
 /// non-JSON or over-long reply, or an RPC error is [`Reading::Error`].
 /// Test: `wire_read_parses_a_real_socket_and_garbage`,
-/// `unreachable_socket_is_deferred_not_healthy`.
+/// `unreachable_socket_raises_dep_health_error`.
 pub fn read_tm_health(path: &Path) -> Reading {
     if !path.exists() {
         return Reading::Unreachable(format!("{}: no socket", path.display()));
@@ -173,8 +174,9 @@ pub fn classify(result: &Value) -> Result<Vec<(&'static str, DepState)>, String>
 
 /// The rule for one classified read; updates `book` and returns new alerts.
 ///
-/// `book` is `{service: {"streak": n, "alerted": bool}}`.
-/// Test: `one_degraded_read_raises_nothing`, `two_consecutive_raise_exactly_one`,
+/// `book` is `{service: {"streak": n, "alerted": bool}}`; a missing or
+/// mistyped field reads as its default.
+/// Test: `corrupt_state_book_recovers_and_still_alerts`, `one_degraded_read_raises_nothing`, `two_consecutive_raise_exactly_one`,
 /// `third_read_does_not_duplicate`, `recovery_then_two_degraded_alerts_again`.
 pub fn step(
     book: &mut Map<String, Value>,
@@ -222,7 +224,8 @@ pub fn step(
 /// The cycle step: `(alerts, log lines)`, with the book in `other["dep_health"]`.
 ///
 /// Why: see the module doc. `socket` is `Config::tm_health_socket`; `None`
-/// (`TM_HEALTH=off`) turns the step off. `read` is the socket seam.
+/// (`TM_HEALTH=off`) turns the step off. `read` is the socket seam. An
+/// unreachable tm is a `dep_health_error` with fingerprint `unreachable`.
 /// Test: `tests/dep_health.rs`.
 pub fn dep_health_step(
     socket: Option<&Path>,
@@ -238,11 +241,7 @@ pub fn dep_health_step(
         vec![alert(ERROR_KIND, cls, &d, "", "", now)]
     };
     let result = match read(path) {
-        Reading::Unreachable(why) => {
-            let line =
-                format!("tm health unreachable ({why}); dep_degraded deferred, streaks held");
-            return (Vec::new(), vec![line]);
-        }
+        Reading::Unreachable(why) => return (error("unreachable", &why), Vec::new()),
         Reading::Error(cls, detail) => return (error(cls, &detail), Vec::new()),
         Reading::Ok(r) => r,
     };

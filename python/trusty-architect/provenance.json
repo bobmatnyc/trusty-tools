@@ -66,7 +66,7 @@
     "scripts/fleet_alert_dedupe.py": "ce6a9361fa46f993d8c27036ab6c68c4385fe963fdc025b6455899661467653b",
     "scripts/fleet_poll_alerts.py": "ab6f43afa913855d367d445f362088eda5ec9e4b90309a0fa0894ef236348914",
     "scripts/fleet_poll_cfg.py": "274a746903b1022e56ed623a8d5e4dff40d73e386a26c05224c265518c23935e",
-    "scripts/fleet_poll_deps.py": "11fb6319699c8018d85a3473120f5e49b6ea2156257b31b3702962056ebdad48",
+    "scripts/fleet_poll_deps.py": "3513e131139525cec86d1933d485f51b4ade90d492fa5bcd183817fa98bd6421",
     "scripts/fleet_poll_io.py": "2cdc2d0a8b9a889806bc1fa0d961891eedeeb4ffa5d64abdc295bb01861b3ddb",
     "scripts/fleet_poll_selfrefresh.py": "320163f2f0aa2b50eec2403d6697f88f3882afe686d34dbc0f13deee20d0bd48",
     "scripts/fleet_poll_wake.py": "ac1def97f4e12d3bf5876aea07507a631328343731378136175f6ca4a55d9476",

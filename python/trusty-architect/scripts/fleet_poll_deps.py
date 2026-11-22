@@ -9,8 +9,9 @@ a service degraded on 2 consecutive reads raises ONE `alert("dep_degraded", <ser
 neither counts nor resets the streak; an up read clears the service, so the next outage alerts again.
 `dep_health_alerts(state, now, alert)` is the entry point a poller calls once per cycle; its state lives under
 state["dep_health"]. A garbage answer is a `dep_health_error` alert whose fingerprint is the error class (the
-owner_answer_error precedent); an unreachable tm is only logged, because tm being unreachable is its own alert,
-not this one. Neither ever reads as healthy: the streaks are kept as they were.
+owner_answer_error precedent); an unreachable tm (socket missing, connect refused) is the same alert with the
+fingerprint "unreachable". Neither ever reads as healthy: the streaks are kept as they were. A corrupt state
+book (not a dict, an entry missing streak/alerted) is coerced to defaults, so the step never raises.
 Self-contained (stdlib only, no poller binding) so it can be dropped beside any fleet poller.
 Config (env): TM_HEALTH=off turns the step off; TM_HEALTH_SOCKET names the socket, else
 <data dir>/trusty-mpm/trusty-mpm.sock, where the data dir follows TRUSTY_DATA_DIR_OVERRIDE as tm does.
@@ -53,7 +54,7 @@ def read_tm_health(path=None, timeout=TIMEOUT_S):
     Why: the ruling reads tm health over its UDS method, not HTTP /health.
     What: connect, write one newline-terminated JSON-RPC frame, half-close, read one line. A missing socket or a
     refused connect is "unreachable"; a timeout, an over-long or non-JSON reply, or an RPC error is "error".
-    Test: test_unreachable_socket_is_deferred_not_healthy, test_garbage_reply_is_the_error_arm
+    Test: test_unreachable_socket_raises_dep_health_error, test_garbage_reply_is_the_error_arm
     """
     path = path or socket_path()
     if not os.path.exists(path):
@@ -117,8 +118,9 @@ def classify(result):
 def step(book, reading, result, now, alert):
     """The pure rule for one classified read; returns new alerts and updates `book` in place.
 
-    `book` is {service: {"streak": n, "alerted": bool}}; `reading` is classify()'s output; `result` the raw answer.
-    Test: test_one_degraded_read_raises_nothing, test_two_consecutive_raise_exactly_one,
+    `book` is {service: {"streak": n, "alerted": bool}}, a missing or mistyped field reading as its default;
+    `reading` is classify()'s output; `result` the raw answer.
+    Test: test_corrupt_state_book_never_raises_and_recovers, test_one_degraded_read_raises_nothing, test_two_consecutive_raise_exactly_one,
     test_third_read_does_not_duplicate, test_recovery_then_two_degraded_alerts_again, test_pending_read_does_not_count
     """
     found = []
@@ -129,8 +131,11 @@ def step(book, reading, result, now, alert):
             continue
         if state == "pending":
             continue  # neither counts nor resets
-        entry = book.setdefault(svc, {"streak": 0, "alerted": False})
-        entry["streak"] += 1
+        old = book.get(svc)
+        old = old if isinstance(old, dict) else {}
+        streak = old.get("streak")
+        streak = streak if isinstance(streak, int) and not isinstance(streak, bool) and streak >= 0 else 0
+        entry = book[svc] = {"streak": streak + 1, "alerted": old.get("alerted") is True}
         if entry["streak"] >= CONSECUTIVE and not entry["alerted"]:
             entry["alerted"] = True
             why = "; ".join(str(e) for e in result.get("degraded", []) if str(e).startswith(svc + ":"))
@@ -142,23 +147,28 @@ def dep_health_alerts(state, now, alert, read=None, env=None):
     """The poller step: (alerts, log lines) for this cycle; dedupe state in state["dep_health"].
 
     Why/What: see the module doc. `alert` is the poller's alert(kind, fingerprint, detail, session, pane, now);
-    `read` defaults to read_tm_health. Never raises: a bad answer is the error arm, an unreachable tm a log line.
+    `read` defaults to read_tm_health. Never raises: a bad answer or an unreachable tm is the error arm, and a
+    corrupt state book is replaced by an empty one.
     Test: tests/test_fleet_poll_deps.py
     """
     env = os.environ if env is None else env
     if env.get("TM_HEALTH") == "off":
         return [], []
-    book = state.setdefault(STATE_KEY, {})
     try:
+        book = state.get(STATE_KEY)
+        if not isinstance(book, dict):
+            book = state[STATE_KEY] = {}
         status, payload = (read or read_tm_health)()
         if status == "unreachable":
-            return [], [f"tm health unreachable ({payload}); dep_degraded deferred, streaks held"]
+            cls, detail = "unreachable", payload
+            return [alert(ERROR_KIND, cls, f"cannot read tm health ({cls}: {detail}); streaks held",
+                          now=now)], []
         if status != "ok":
             cls, detail = payload
             return [alert(ERROR_KIND, cls, f"cannot read tm health ({cls}: {detail}); streaks held",
                           now=now)], []
         reading = classify(payload)
+        return step(book, reading, payload, now, alert), []
     except Exception as e:  # noqa: BLE001 - a bad answer must not stop the poll loop
         cls = type(e).__name__
         return [alert(ERROR_KIND, cls, f"cannot read tm health ({cls}: {e}); streaks held", now=now)], []
-    return step(book, reading, payload, now, alert), []

@@ -130,13 +130,32 @@ def test_wire_read_parses_a_real_socket_and_garbage():
     assert (status, cls) == ("error", "unparseable")
 
 
-def test_unreachable_socket_is_deferred_not_healthy(tmp_path):
+def test_unreachable_socket_raises_dep_health_error(tmp_path):
     state = {"dep_health": {"trusty-memory": {"streak": 1, "alerted": False}}}
     env = {"TM_HEALTH_SOCKET": str(tmp_path / "absent.sock")}
     read = lambda: deps.read_tm_health(env["TM_HEALTH_SOCKET"])  # noqa: E731
     found, lines = deps.dep_health_alerts(state, 1.0, alert, read=read, env=env)
-    assert found == [] and "unreachable" in lines[0]
+    assert [(a["kind"], a["fingerprint"], a["session"]) for a in found] == [("dep_health_error", "unreachable", "")]
+    assert "unreachable" in found[0]["detail"] and lines == []
+    assert state["dep_health"]["trusty-memory"] == {"streak": 1, "alerted": False}, "streak held, never healthy"
+    # Dedupe key (kind, fingerprint, session) is per error class: a second unreachable read repeats the key,
+    # a garbage reply carries a different one.
+    again, _ = deps.dep_health_alerts(state, 2.0, alert, read=read, env=env)
+    garbage, _ = deps.dep_health_alerts(state, 3.0, alert, read=lambda: ("ok", "junk"), env=env)
+    key = lambda a: (a["kind"], a["session"], a["fingerprint"])  # noqa: E731
+    assert key(again[0]) == key(found[0]) != key(garbage[0])
     assert state["dep_health"]["trusty-memory"]["streak"] == 1
+
+
+def test_corrupt_state_book_never_raises_and_recovers():
+    corrupt = ("junk", [1], None, {"trusty-memory": "x"}, {"trusty-memory": {}},
+               {"trusty-memory": {"streak": "n", "alerted": "yes"}}, {"trusty-memory": [3]})
+    for bad in corrupt:
+        state = {"dep_health": bad}
+        assert run(state, DOWN) == [], bad
+        assert isinstance(state["dep_health"], dict)
+        assert [a["kind"] for a in run(state, DOWN)] == ["dep_degraded"], bad
+        assert run(state, DOWN) == [], bad
 
 
 def test_off_switch_and_socket_path():
