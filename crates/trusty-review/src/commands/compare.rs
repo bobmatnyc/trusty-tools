@@ -16,7 +16,7 @@ use trusty_review::{
         github::{AuthStrategy, GithubClient, RunMode},
         search_client::HttpSearchClient,
     },
-    llm::models::COMPARE_CANDIDATE_MODELS,
+    llm::models::compare_models,
     models::ReviewResult,
     pipeline::{CallerContext, DiffSource, ReviewInput, TriggerDecision, run_review},
 };
@@ -128,12 +128,11 @@ pub async fn cmd_compare(mut config: ReviewConfig, args: CompareArgs) -> Result<
         config.review_template = Some(name);
     }
 
-    let models: Vec<String> = args.models.clone().unwrap_or_else(|| {
-        COMPARE_CANDIDATE_MODELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    });
+    // #10757: the default set is the operator's authorized list when declared.
+    let models: Vec<String> = args
+        .models
+        .clone()
+        .unwrap_or_else(|| compare_models(&config.role_models.authorized_models));
 
     if models.is_empty() {
         anyhow::bail!("--models list is empty; provide at least one model slug");

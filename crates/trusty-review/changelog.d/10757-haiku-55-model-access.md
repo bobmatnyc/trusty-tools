@@ -1,0 +1,4 @@
+Added
+
+- Claude Haiku 5.5 (`us.anthropic.claude-haiku-5-5`) joins the model table and the default `compare` set, with Bedrock pricing ($0.11/$0.55 per MTok on a `us.` profile). Its requests omit `temperature`, which Bedrock rejects for this model.
+- `[models] authorized = [...]` and `TRUSTY_REVIEW_AUTHORIZED_MODELS` declare the models the account may invoke; when set, `compare` runs that list instead of the built-in set.

@@ -75,6 +75,7 @@ fn role_models_precedence_env_wins() {
         verifier_model: None,
         summarizer_model: None,
         provider: None,
+        ..Default::default()
     };
     let roles = RoleModels::from_env(&env);
     assert_eq!(roles.reviewer.model, "openai/gpt-5.4-mini-20260317");
@@ -855,4 +856,58 @@ fn same_model_warning_fires_when_reviewer_and_verifier_match() {
         warning.contains("us.anthropic.claude-sonnet-5-5"),
         "{warning}"
     );
+}
+
+/// A model the config file declares authorized is in the compare set (#10757).
+///
+/// Why: model access must come from config, not a compiled-in list; Opus 4.8
+/// was authorized on the account but absent from every built-in list.
+/// What: loads a `[models] authorized` file with the env var unset and asserts
+/// the resolved list, and the `compare` default set, name Opus 4.8.
+/// Test: this test; tempfile-based, `#[serial_test::serial]` for env isolation.
+#[test]
+#[serial_test::serial]
+fn compare_set_uses_config_authorized_model() {
+    unsafe {
+        std::env::remove_var("TRUSTY_REVIEW_AUTHORIZED_MODELS");
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[models]\nauthorized = [\"bedrock/us.anthropic.claude-opus-4-8\", \" \"]\n",
+    )
+    .expect("write config");
+
+    let config = ReviewConfig::from_env_and_file_inner(Some(&path), None, None, None);
+
+    let opus_4_8 = "bedrock/us.anthropic.claude-opus-4-8".to_string();
+    assert_eq!(config.role_models.authorized_models, vec![opus_4_8.clone()]);
+    assert_eq!(
+        crate::llm::models::compare_models(&config.role_models.authorized_models),
+        vec![opus_4_8],
+        "an authorized model must be selectable by compare"
+    );
+}
+
+/// `TRUSTY_REVIEW_AUTHORIZED_MODELS` beats `[models] authorized` (#10757).
+#[test]
+fn authorized_models_env_beats_config_file() {
+    let file = FileModels {
+        authorized: vec!["bedrock/us.anthropic.claude-opus-4-8".to_string()],
+        ..Default::default()
+    };
+    let env_ids = " bedrock/us.anthropic.claude-haiku-5-5, ,bedrock/us.anthropic.claude-opus-5-5";
+    assert_eq!(
+        role_models::resolve_authorized_models(Some(env_ids), Some(&file)),
+        vec![
+            "bedrock/us.anthropic.claude-haiku-5-5".to_string(),
+            "bedrock/us.anthropic.claude-opus-5-5".to_string(),
+        ]
+    );
+    assert_eq!(
+        role_models::resolve_authorized_models(Some("  "), Some(&file)),
+        file.authorized
+    );
+    assert!(role_models::resolve_authorized_models(None, None).is_empty());
 }

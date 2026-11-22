@@ -490,7 +490,10 @@ fn system_blocks(req: &LlmRequest, model: &str) -> Vec<SystemContentBlock> {
 
 /// Model families whose Bedrock Converse API rejects `temperature` with
 /// `ValidationException` (#9304).
-const NO_TEMPERATURE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
+// #10757: Haiku 5.5 also rejects it ("`temperature` is deprecated", probed
+// 2026-11-22, us-east-1).
+const NO_TEMPERATURE_FAMILIES: &[&str] =
+    &["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"];
 
 /// Whether `model` accepts a `temperature` on Bedrock Converse.
 ///

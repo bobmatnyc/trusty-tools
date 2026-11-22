@@ -137,7 +137,10 @@ fn priced(model: &str) -> (f64, f64) {
 /// Test: this test itself; no network calls.
 #[test]
 fn bedrock_cost_estimate_matches_price_list_per_profile() {
-    let cases: [(&str, (f64, f64)); 9] = [
+    let cases: [(&str, (f64, f64)); 11] = [
+        // #10757: Haiku 5.5, Price List retrieved 2026-11-22.
+        ("us.anthropic.claude-haiku-5-5", (0.11, 0.55)),
+        ("global.anthropic.claude-haiku-5-5", (0.10, 0.50)),
         ("us.anthropic.claude-sonnet-5-5", (2.20, 11.00)),
         ("global.anthropic.claude-sonnet-5-5", (2.00, 10.00)),
         ("us.anthropic.claude-opus-5-5", (4.40, 22.00)),
@@ -644,6 +647,8 @@ fn forced_tool_choice_capability_covers_every_compare_candidate() {
     use crate::llm::models::{COMPARE_CANDIDATE_MODELS, DEFAULT_REVIEWER_MODEL};
     let expected = [
         ("bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0", true),
+        // #10757: forced tool choice probed working on 2026-11-22.
+        ("bedrock/us.anthropic.claude-haiku-5-5", true),
         ("bedrock/us.anthropic.claude-sonnet-4-6", true),
         ("bedrock/us.anthropic.claude-sonnet-5-5", false),
         ("bedrock/us.anthropic.claude-opus-5-5", false),
@@ -712,6 +717,8 @@ fn system_blocks_add_the_tool_line_only_for_auto_models() {
 
 /// Sonnet 5.5 and Opus 5.5 ids, in each shape, beyond [`AUTO_MODEL_IDS`].
 const NO_TEMPERATURE_MODEL_IDS: &[&str] = &[
+    "us.anthropic.claude-haiku-5-5",
+    "global.anthropic.claude-haiku-5-5",
     "us.anthropic.claude-sonnet-5-5-20260901-v1:0",
     "eu.anthropic.claude-opus-5-5",
     "jp.anthropic.claude-sonnet-5-5-20260901-v1:0",
@@ -776,6 +783,7 @@ fn inference_config_temperature_covers_every_compare_candidate() {
             "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
             Some(0.3),
         ),
+        ("bedrock/us.anthropic.claude-haiku-5-5", None),
         ("bedrock/us.anthropic.claude-sonnet-4-6", Some(0.3)),
         ("bedrock/us.anthropic.claude-sonnet-5-5", None),
         ("bedrock/us.anthropic.claude-opus-5-5", None),
