@@ -188,16 +188,16 @@ fn write_ledger(root: &Path, reminders: &str) -> TestResult {
     fs::create_dir_all(&dir)?;
     let st = format!(
         r#"{{"code": "ar", "v": 1, "next": {{}}, "goals": [], "items": [], "session": {{}},
-        "tasks": [{{"id": "ar-T9u", "title": "parity windows", "reminders": [{reminders}]}}]}}"#
+        "tasks": [{{"id": "tk-T9u", "title": "parity windows", "reminders": [{reminders}]}}]}}"#
     );
     fs::write(dir.join("state.json"), st)?;
     Ok(())
 }
 
-/// Window 3: the live poller fired `ar-T9u #3` at 11:05:01Z; the shadow's dry
+/// Window 3: the live poller fired `tk-T9u #3` at 11:05:01Z; the shadow's dry
 /// shim at 11:05:40Z saw it `fired`, not pending, and raised nothing. Red
 /// before the fix. The alert matches `fleet-poll.py`'s (fingerprint
-/// `7ab8a61ab000`, the live row's), is new once, and a reminder fired before
+/// `e439233a4745`, the live row's), is new once, and a reminder fired before
 /// the shadow's first look is never replayed.
 #[test]
 fn shadow_reminder_fired_by_the_live_poller_is_raised_once() -> TestResult {
@@ -230,11 +230,11 @@ fn shadow_reminder_fired_by_the_live_poller_is_raised_once() -> TestResult {
         );
         clock.sleep(std::time::Duration::from_secs(60));
     }
-    let detail = "ar-T9u #3: verdict due (due 2026-11-22T11:05Z; task: parity windows)";
+    let detail = "tk-T9u #3: verdict due (due 2026-11-22T11:05Z; task: parity windows)";
     assert_eq!(
         reminders,
         [
-            vec![(String::new(), "7ab8a61ab000".to_owned(), detail.to_owned())],
+            vec![(String::new(), "e439233a4745".to_owned(), detail.to_owned())],
             vec![],
             vec![]
         ]
