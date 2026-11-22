@@ -22,6 +22,12 @@ pub trait Triage {
         state: &mut PollState,
         dry_run: bool,
     ) -> (Vec<Alert>, u64);
+
+    /// How many of the last call's woken alerts no rule decided (the
+    /// prototype's Haiku path, MB1595); parity leaves them out.
+    fn haiku_woken(&self) -> u64 {
+        0
+    }
 }
 
 /// Wakes for every new alert and logs none.

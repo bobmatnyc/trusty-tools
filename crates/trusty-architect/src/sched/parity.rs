@@ -7,9 +7,12 @@
 //! window `[slot, slot + interval)`. Alerts compare as the set of
 //! `(session, kind)`: in both is `matched`, only in the record is
 //! `scheduler_only`, only in `inbox/alerts.jsonl` is `poller_only`. Wakes
-//! compare per record: the shadow's triage woke (`woken > 0`) against a live
-//! `poll.log` cycle line in the window with `woken=N`, N > 0 (a line with no
-//! `woken=` field counts when it reads `wake=sent`). The wake phrase is not
+//! compare per record: the shadow's triage woke by a rule (`woken` above
+//! `haiku_woken`) against a live rule wake in the window, read from
+//! `inbox/triage.jsonl` (`decision` wake, `path` not `haiku`). Haiku-path
+//! wakes on either side only count in `haiku_excluded`: the port makes no
+//! Haiku call. With no triage record the live side is the `poll.log` cycle
+//! lines with `woken=N`, N > 0 (or `wake=sent` before that field). The wake phrase is not
 //! the decision: a dry run never sends, so its carried `wake_pending` makes
 //! every later cycle print `would send` (MB1595: 102 of 116 cycles).
 //! [`load`] reads the three files from a [`Layout`] since a time; [`render`]
@@ -58,6 +61,9 @@ pub struct Report {
     pub wakes: Counts,
     /// Live rows without a readable timestamp.
     pub unread: u64,
+    /// Wakes no triage rule decided (the Haiku path), on either side, left
+    /// out of the wake counts and the verdict (MB1595).
+    pub haiku_excluded: u64,
 }
 
 /// One live `alerts.jsonl` row.
@@ -69,9 +75,20 @@ pub struct LiveAlert {
     pub key: ShadowAlert,
 }
 
-/// Joins `records` to the live rows; `live_wakes` are the times of
-/// `poll.log` cycle lines that sent a wake.
+/// Joins `records` to the live rows; `live_wakes` are the times of live
+/// rule-decided wakes.
 pub fn compute(records: &[ShadowRecord], live: &[LiveAlert], live_wakes: &[i64]) -> Report {
+    compute_with(records, live, live_wakes, &[])
+}
+
+/// [`compute`], with `live_haiku` the times of live Haiku-path wakes: they and
+/// the shadow's `haiku_woken` count only in [`Report::haiku_excluded`].
+pub fn compute_with(
+    records: &[ShadowRecord],
+    live: &[LiveAlert],
+    live_wakes: &[i64],
+    live_haiku: &[i64],
+) -> Report {
     let mut rep = Report::default();
     for r in records {
         if !r.ok {
@@ -91,14 +108,18 @@ pub fn compute(records: &[ShadowRecord], live: &[LiveAlert], live_wakes: &[i64])
         rep.alerts.scheduler_only += ours.len() as u64 - both;
         rep.alerts.poller_only += theirs.len() as u64 - both;
         // See MB1595: the cycle's own triage decision, not the carried backlog.
+        // See MB1595: Haiku-path wakes are no evidence either way.
+        let haiku = r.haiku_woken.unwrap_or(0);
         let ours_wake = r.woken.map_or_else(
             || {
                 r.wake_phrase
                     .as_deref()
                     .is_some_and(|w| w.starts_with("dry-run: would send"))
             },
-            |w| w > 0,
+            |w| w > haiku,
         );
+        let inside = |t: &&i64| (from..to).contains(*t);
+        rep.haiku_excluded += haiku + live_haiku.iter().filter(inside).count() as u64;
         let theirs_wake = live_wakes.iter().any(|t| (from..to).contains(t));
         match (ours_wake, theirs_wake) {
             (true, true) => rep.wakes.matched += 1,
@@ -150,8 +171,36 @@ pub fn load(layout: &Layout, since: i64) -> Result<Report, SchedError> {
             None => unread += 1,
         }
     }
-    let mut wakes = Vec::new();
-    for line in read_lines(&layout.poll_log()) {
+    let (mut wakes, mut haiku) = (Vec::new(), Vec::new());
+    let triage = layout.root.join("inbox/triage.jsonl");
+    for line in read_lines(&triage) {
+        // A wake row: `"decision": "wake"`; its `path` says rule or Haiku.
+        if !line.contains("\"decision\": \"wake\"") {
+            continue;
+        }
+        let row: Option<Value> = serde_json::from_str(&line).ok();
+        let at = row
+            .as_ref()
+            .and_then(|v| Some((parse_iso(v["ts"].as_str()?)?, v)));
+        match at {
+            Some((t, v)) if t >= since => {
+                if v["path"].as_str() == Some("haiku") {
+                    haiku.push(t);
+                } else {
+                    wakes.push(t);
+                }
+            }
+            Some(_) => {}
+            None => unread += 1,
+        }
+    }
+    // No triage record: the poll.log cycle lines, with no Haiku split.
+    let lines = if wakes.is_empty() && haiku.is_empty() {
+        read_lines(&layout.poll_log())
+    } else {
+        Vec::new()
+    };
+    for line in lines {
         if !(line.contains(" panes=") && live_woke(&line)) {
             continue;
         }
@@ -161,7 +210,7 @@ pub fn load(layout: &Layout, since: i64) -> Result<Report, SchedError> {
             None => unread += 1,
         }
     }
-    let mut rep = compute(&records, &live, &wakes);
+    let mut rep = compute_with(&records, &live, &wakes, &haiku);
     rep.unread = unread;
     Ok(rep)
 }
@@ -206,8 +255,9 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         r.unread,
     );
     format!(
-        "{counts}alert match: {:.1}%\nwake match: {:.1}%\n\
+        "{counts}haiku-path wakes excluded: {}\nalert match: {:.1}%\nwake match: {:.1}%\n\
          verdict: {verdict} (needs at least {} cycles and {:.1}% for alerts and for wakes)\n",
+        r.haiku_excluded,
         r.alert_pct(),
         r.wake_pct(),
         th.min_cycles,

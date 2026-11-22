@@ -87,6 +87,10 @@ pub struct ShadowRecord {
     pub digest_sha: String,
     /// Why the run failed, when it did.
     pub error: Option<String>,
+    /// Woken alerts no triage rule decided (the Haiku path, MB1595); parity
+    /// leaves them out. Absent in records written before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haiku_woken: Option<u64>,
 }
 
 /// The parsed dry-run output.
@@ -106,6 +110,8 @@ pub struct Decision {
     pub wake: Option<String>,
     /// The alerts.
     pub alerts: Vec<ShadowAlert>,
+    /// `triage haiku-path wakes: N`.
+    pub haiku_woken: Option<u64>,
 }
 
 fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -120,6 +126,8 @@ pub fn parse_decision(stdout: &str) -> Decision {
     for line in stdout.lines() {
         if let Some(alert) = line.trim_start().strip_prefix("would alert: ") {
             d.alerts.push(parse_display(alert));
+        } else if let Some(n) = line.trim_start().strip_prefix("triage haiku-path wakes: ") {
+            d.haiku_woken = n.trim().parse().ok();
         } else if line.contains(" panes=") && line.contains(" woken=") {
             let num = |k| kv(line, k).and_then(|v| v.parse().ok());
             (d.panes, d.new, d.woken) = (num("panes"), num("new"), num("woken"));
@@ -152,6 +160,37 @@ fn wake_target(phrase: &str) -> Option<String> {
     (!target.is_empty()).then(|| target.to_owned())
 }
 
+/// The state key that says [`seed_live_offsets`] already ran.
+pub const LIVE_OFFSETS_SEEDED: &str = "shadow_live_offsets_seeded";
+
+/// Sets `pm_offset` and `events_offset` in the dry run's own `state` to the
+/// current end of the live `pm-messages.jsonl` and `events.jsonl`, once
+/// (marked by [`LIVE_OFFSETS_SEEDED`]), so the first read of the live queues
+/// is not a catch-up burst (MB1595). It only stats the live files; every
+/// write goes to `state`, in the scratch dir, through a temp file and rename.
+fn seed_live_offsets(state: &std::path::Path, live: &std::path::Path) -> Result<(), SchedError> {
+    use serde_json::{Map, Value};
+    let mut doc: Map<String, Value> = std::fs::read_to_string(state)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if doc.get(LIVE_OFFSETS_SEEDED) == Some(&Value::Bool(true)) {
+        return Ok(());
+    }
+    let end = |name: &str| std::fs::metadata(live.join(name)).map_or(0, |m| m.len());
+    doc.insert("pm_offset".to_owned(), end("pm-messages.jsonl").into());
+    doc.insert("events_offset".to_owned(), end("events.jsonl").into());
+    doc.insert(LIVE_OFFSETS_SEEDED.to_owned(), Value::Bool(true));
+    let tmp = state.with_extension("json.tmp");
+    let text = serde_json::to_string(&doc).map_err(|e| SchedError::Parse {
+        what: state.display().to_string(),
+        detail: e.to_string(),
+    })?;
+    std::fs::write(&tmp, text)
+        .and_then(|()| std::fs::rename(&tmp, state))
+        .map_err(|e| SchedError::io(format!("seed offsets {}", state.display()), e))
+}
+
 /// The dry run's own state file, in the scratch inbox.
 pub const DRY_RUN_STATE: &str = "dry-run-state.json";
 
@@ -180,6 +219,7 @@ pub fn plan(
             Err(e) => return Err(SchedError::io(format!("seed {}", state.display()), e)),
         }
     }
+    seed_live_offsets(&state, &layout.root.join("inbox"))?;
     let stdout = dir.join("last-stdout.txt");
     std::fs::write(&stdout, b"")
         .map_err(|e| SchedError::io(format!("write {}", stdout.display()), e))?;
@@ -271,6 +311,7 @@ pub fn record(
         alerts: d.alerts,
         digest_sha: sha256_hex(keys.join("\n").as_bytes())[..12].to_owned(),
         error,
+        haiku_woken: d.haiku_woken,
     };
     append_jsonl(&layout.shadow_log(), &rec)
 }

@@ -87,6 +87,10 @@ New jobs the scheduler needs (not in the registry): `board-feed`, `share-sync`, 
 3. The port spec tables do not list the chat, task, track, instructions, share, model, secondary-user, `ilio`, `brief_ids` and lifecycle modules. This map places them. Rows for the view modules were deferred to slice 8 in `local/rust-port.md`.
 4. `fleet-poll-ledger.py` is a temporary shim, deleted with issue #11540. The Rust poller already starts it each cycle for ten ledger-bound steps. The scheduler's shadow job must account for it.
 
+## Open items
+
+1. Rust triage for no-rule alerts (Haiku path). `alert_triage.py` sends an alert no rule decides to one batched Haiku call; the Rust poller makes no Haiku call and wakes for those alerts (Architect ruling, MB1595). `trusty-architect-sched parity` leaves those wakes out of its verdict and match percentages and prints their count.
+
 ## Open questions for the Architect
 
 1. Release scope. Is 2.0 steps 0-5 only, given 2026-11-27? The alternative puts steps 6 and 8 (pane senders, context clear) on the critical path.

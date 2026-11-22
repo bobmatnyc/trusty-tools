@@ -56,7 +56,16 @@ pub fn pm_intake_alerts(
     dry_run: bool,
     log: &mut Vec<String>,
 ) -> Vec<Alert> {
-    let bytes = fs::read(path).unwrap_or_default();
+    // Only a missing file reads as empty; any other error keeps the offset,
+    // as the prototype's step does (a reset to 0 would replay the queue).
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            log.push(format!("pm intake ERROR {e}"));
+            return Vec::new();
+        }
+    };
     let size = bytes.len() as u64;
     let mut off = state.get("pm_offset").and_then(Value::as_u64).unwrap_or(0);
     if size < off {

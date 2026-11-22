@@ -145,6 +145,7 @@ pub(crate) fn with_live_runner(
     let triage = RuleTriage {
         rules: config.triage_rules.clone(),
         schedule: config.il_schedule.clone(),
+        ..RuleTriage::default()
     };
     let runner = Runner {
         tmux: &tmux,

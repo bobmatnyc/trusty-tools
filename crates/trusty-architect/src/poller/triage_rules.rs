@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Map, Value};
 
@@ -273,16 +274,19 @@ fn load_holds(path: &std::path::Path) -> Vec<Value> {
 }
 
 /// The poller's triage: [`decide`], with the Haiku gate failing open.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default)]
 pub struct RuleTriage {
     /// `TRIAGE_RULES`, else `<root>/local/triage-rules.json`.
     pub rules: PathBuf,
     /// `IL_SCHEDULE`, else `<root>/local/il-schedule.json`.
     pub schedule: PathBuf,
+    /// Woken alerts of the last call that no rule decided.
+    pub haiku: AtomicU64,
 }
 
 impl Triage for RuleTriage {
     fn triage(&self, new: &[Alert], now: f64, state: &mut PollState, _: bool) -> (Vec<Alert>, u64) {
+        self.haiku.store(0, Ordering::Relaxed);
         if new.is_empty() {
             return (Vec::new(), 0);
         }
@@ -297,15 +301,27 @@ impl Triage for RuleTriage {
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        let woken: Vec<Alert> = new
-            .iter()
-            .filter(|a| decide(a, &rules, now, &mut rc).is_none_or(|d| d.wake))
-            .cloned()
-            .collect();
+        let mut haiku = 0;
+        let mut woken = Vec::new();
+        for a in new {
+            match decide(a, &rules, now, &mut rc) {
+                Some(d) if !d.wake => {}
+                Some(_) => woken.push(a.clone()),
+                None => {
+                    haiku += 1;
+                    woken.push(a.clone());
+                }
+            }
+        }
+        self.haiku.store(haiku, Ordering::Relaxed);
         state
             .other
             .insert("triage_rc".to_owned(), Value::Object(rc));
         let logged = (new.len() - woken.len()) as u64;
         (woken, logged)
+    }
+
+    fn haiku_woken(&self) -> u64 {
+        self.haiku.load(Ordering::Relaxed)
     }
 }

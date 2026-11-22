@@ -42,6 +42,7 @@ fn record(slot: i64, ok: bool, wake: Option<&str>, alerts: Vec<ShadowAlert>) -> 
         alerts,
         digest_sha: "d".into(),
         error: None,
+        haiku_woken: None,
     }
 }
 
@@ -99,7 +100,11 @@ fn shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one() {
         .collect();
     assert_eq!(named.len(), 1);
     assert_eq!(named[0].1, state.display().to_string());
-    assert_eq!(std::fs::read_to_string(&state).unwrap(), r#"{"panes":{}}"#);
+    // MB1595: the copy also gets the live queues' end offsets, once.
+    assert_eq!(
+        std::fs::read_to_string(&state).unwrap(),
+        r#"{"events_offset":0,"panes":{},"pm_offset":0,"shadow_live_offsets_seeded":true}"#
+    );
     assert_eq!(
         std::fs::read(dir.path().join("inbox/poll-state.json")).unwrap(),
         before
@@ -118,17 +123,19 @@ fn shadow_plan_keeps_the_dry_runs_own_state() {
     std::fs::write(dir.path().join("inbox/poll-state.json"), r#"{"panes":{}}"#).unwrap();
     shadow::plan(&l, &PollJob::default(), vec![], T0).unwrap();
     let state = l.shadow_dir().join(shadow::DRY_RUN_STATE);
-    std::fs::write(&state, r#"{"alerts":{"seen":{}}}"#).unwrap();
+    let own = r#"{"alerts":{"seen":{}},"shadow_live_offsets_seeded":true}"#;
+    std::fs::write(&state, own).unwrap();
     shadow::plan(&l, &PollJob::default(), vec![], T0 + 60).unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&state).unwrap(),
-        r#"{"alerts":{"seen":{}}}"#
-    );
-    // No live state: the dry run starts empty, and nothing is created.
+    assert_eq!(std::fs::read_to_string(&state).unwrap(), own);
+    // No live state: the dry run starts empty but for the live queues' end
+    // offsets (MB1595), so its first read is no catch-up burst.
     let fresh = tempfile::tempdir().unwrap();
     let l = layout(fresh.path());
     shadow::plan(&l, &PollJob::default(), vec![], T0).unwrap();
-    assert!(!l.shadow_dir().join(shadow::DRY_RUN_STATE).exists());
+    assert_eq!(
+        std::fs::read_to_string(l.shadow_dir().join(shadow::DRY_RUN_STATE)).unwrap(),
+        r#"{"events_offset":0,"pm_offset":0,"shadow_live_offsets_seeded":true}"#
+    );
 }
 
 #[test]

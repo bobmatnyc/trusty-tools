@@ -86,7 +86,7 @@ pub struct Config {
     /// reads it, and held messages join the wake digest.
     pub pm_messages: PathBuf,
     /// `ARCHITECT_READ_INBOX_DIR`, else `ARCHITECT_INBOX_DIR`, else the inbox:
-    /// where the read-only queues live. The shadow points the inbox at a
+    /// where the read-only queues and `events.jsonl` live. The shadow points the inbox at a
     /// scratch directory and this at the live one, as a Python dry run reads
     /// the live inbox (MB1595).
     pub read_inbox: PathBuf,
@@ -303,9 +303,10 @@ impl Config {
             || session == self.poll_session
     }
 
-    /// `<inbox>/events.jsonl`: hook events the poller turns into alerts.
+    /// `<read_inbox>/events.jsonl`: hook events the poller turns into
+    /// alerts; read-only, so a shadow reads the live file (MB1595).
     pub fn events(&self) -> PathBuf {
-        self.inbox.join("events.jsonl")
+        self.read_inbox.join("events.jsonl")
     }
 
     /// `<inbox>/shadow`: every file a shadow run writes.

@@ -15,6 +15,7 @@ fn triage(dir: &std::path::Path, holds: &str) -> std::io::Result<RuleTriage> {
     Ok(RuleTriage {
         rules,
         schedule: dir.join("il-schedule.json"),
+        ..RuleTriage::default()
     })
 }
 

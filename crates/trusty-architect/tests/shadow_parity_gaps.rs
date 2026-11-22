@@ -148,6 +148,7 @@ fn record(slot: i64, woken: u64, wake: Option<&str>) -> ShadowRecord {
         alerts: Vec::<ShadowAlert>::new(),
         digest_sha: "d".into(),
         error: None,
+        haiku_woken: None,
     }
 }
 
