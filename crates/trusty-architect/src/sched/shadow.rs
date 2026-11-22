@@ -170,16 +170,34 @@ pub const LIVE_OFFSETS_SEEDED: &str = "shadow_live_offsets_seeded";
 /// write goes to `state`, in the scratch dir, through a temp file and rename.
 fn seed_live_offsets(state: &std::path::Path, live: &std::path::Path) -> Result<(), SchedError> {
     use serde_json::{Map, Value};
-    let mut doc: Map<String, Value> = std::fs::read_to_string(state)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    use std::io::{Error, ErrorKind};
+    // D64: only a missing file is an empty state; a bad one is an error and stays as it is.
+    let mut doc: Map<String, Value> = match std::fs::read_to_string(state) {
+        Ok(t) => serde_json::from_str(&t).map_err(|e| SchedError::Parse {
+            what: state.display().to_string(),
+            detail: e.to_string(),
+        })?,
+        Err(e) if e.kind() == ErrorKind::NotFound => Map::new(),
+        Err(e) => return Err(SchedError::io(format!("read {}", state.display()), e)),
+    };
     if doc.get(LIVE_OFFSETS_SEEDED) == Some(&Value::Bool(true)) {
         return Ok(());
     }
-    let end = |name: &str| std::fs::metadata(live.join(name)).map_or(0, |m| m.len());
-    doc.insert("pm_offset".to_owned(), end("pm-messages.jsonl").into());
-    doc.insert("events_offset".to_owned(), end("events.jsonl").into());
+    // D64: only a missing live queue is offset 0; any other stat result that
+    // is not a file is an error, and nothing is written.
+    let end = |name: &str| -> Result<u64, SchedError> {
+        let path = live.join(name);
+        let what = || format!("stat {}", path.display());
+        match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => Ok(m.len()),
+            Ok(_) => Err(SchedError::io(what(), Error::other("not a regular file"))),
+            Err(e) if e.kind() == ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(SchedError::io(what(), e)),
+        }
+    };
+    let (pm, events) = (end("pm-messages.jsonl")?, end("events.jsonl")?);
+    doc.insert("pm_offset".to_owned(), pm.into());
+    doc.insert("events_offset".to_owned(), events.into());
     doc.insert(LIVE_OFFSETS_SEEDED.to_owned(), Value::Bool(true));
     let tmp = state.with_extension("json.tmp");
     let text = serde_json::to_string(&doc).map_err(|e| SchedError::Parse {

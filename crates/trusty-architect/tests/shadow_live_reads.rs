@@ -196,3 +196,33 @@ fn events_read_error_keeps_the_offset() {
     assert!(trusty_architect::poller::read_events(&path, &mut off, 1.0e9).is_err());
     assert_eq!(off, Some(42));
 }
+
+/// D64 HIGH arm 1: a live queue that is not a readable file (here, a
+/// directory) is an error: no marker and no state written.
+#[test]
+fn shadow_plan_refuses_an_unreadable_live_queue() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let l = layout(dir.path());
+    fs::create_dir_all(dir.path().join("inbox/pm-messages.jsonl"))?;
+    fs::create_dir_all(l.shadow_dir())?;
+    let state = l.shadow_dir().join(shadow::DRY_RUN_STATE);
+    fs::write(&state, r#"{"pm_offset": 7}"#)?;
+    assert!(shadow::plan(&l, &PollJob::default(), Vec::new(), T0).is_err());
+    assert_eq!(fs::read_to_string(&state)?, r#"{"pm_offset": 7}"#);
+    Ok(())
+}
+
+/// D64 HIGH arm 2: a corrupt dry-run state is an error and is left as it is,
+/// never read as empty and rewritten.
+#[test]
+fn shadow_plan_leaves_a_corrupt_dry_run_state_untouched() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let l = layout(dir.path());
+    fs::create_dir_all(dir.path().join("inbox"))?;
+    fs::create_dir_all(l.shadow_dir())?;
+    let state = l.shadow_dir().join(shadow::DRY_RUN_STATE);
+    fs::write(&state, b"{not json")?;
+    assert!(shadow::plan(&l, &PollJob::default(), Vec::new(), T0).is_err());
+    assert_eq!(fs::read(&state)?, b"{not json");
+    Ok(())
+}
