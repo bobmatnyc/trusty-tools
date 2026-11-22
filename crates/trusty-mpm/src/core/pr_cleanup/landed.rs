@@ -207,6 +207,32 @@ pub(super) fn unlanded<T: Git>(
     }
 }
 
+/// Why `name` (at commit `tip_oid`) must be kept, or `None` when the merge
+/// carried it — the one beyond-merged-head decision both modes share (#11407).
+///
+/// Why: the head branch was exempt from [`unlanded`] by NAME, so a head tree
+/// that moved past the merged head was refused or removed depending on what
+/// the dirt probe read, and the real run removed trees its dry run refused.
+/// What: a tip sitting ON the merged head is settled with no git call; any
+/// other tip — head branch included — must pass [`unlanded`]. Reads only, so
+/// `--dry-run` and the real run reach the same answer.
+/// Test: `cleanup_11407_a_head_tree_beyond_the_merged_head_is_refused_by_both_modes`,
+/// `cleanup_11407_a_head_branch_beyond_the_merged_head_is_kept_by_both_modes`,
+/// `cleanup_11407_a_head_tree_whose_extra_commits_landed_is_removed_by_both_modes`.
+pub(super) fn beyond_merged_head<T: Git>(
+    git: &T,
+    req: &CleanupRequest,
+    merge: &Merge,
+    name: &str,
+    tip_oid: &str,
+) -> Option<String> {
+    let (tip, head) = (tip_oid.trim(), merge.head.as_str());
+    if !head.is_empty() && tip.eq_ignore_ascii_case(head) {
+        return None;
+    }
+    unlanded(git, req, merge, name)
+}
+
 /// `"1 file"` / `"3 files"` for a newline-separated listing.
 pub(super) fn file_count(listing: &str) -> String {
     let n = listing.split_whitespace().count();
