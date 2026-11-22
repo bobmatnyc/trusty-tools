@@ -40,6 +40,7 @@ pub mod ctx_bar;
 mod cycle;
 pub mod dep_health;
 pub mod digest;
+mod dry_keys;
 mod events;
 mod host;
 mod inbox_alerts;

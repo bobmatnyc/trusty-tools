@@ -11,11 +11,15 @@
 //! scratch inbox, `ARCHITECT_READ_INBOX_DIR` at the live one (read-only
 //! queues, MB1595) and `ARCHITECT_DRY_RUN_STATE` at that file. [`parse_decision`]
 //! reads the dry-run's stdout: the cycle line (`panes= new= woken= logged=
-//! suppressed= wake=`) and one `would alert:` line per new alert. [`record`]
-//! appends one [`ShadowRecord`] to `inbox/shadow-wakes.jsonl`; the alert detail
-//! text is dropped, only session and kind are kept (dry-run prints no
-//! fingerprint, so the join key is session and kind).
+//! suppressed= wake=`), one `would alert:` line per new alert and, from the
+//! MB1595 fix round, the structured `would alert key:` and `would wake key:`
+//! JSON lines after the `shadow keys: v1` marker. With the marker the keys
+//! come only from the JSON (session, kind, fingerprint); older output falls
+//! back to [`parse_display`], which knows the displays that do not have the
+//! `[session]: kind:` shape. [`record`] appends one [`ShadowRecord`] to
+//! `inbox/shadow-wakes.jsonl`; the alert detail text is dropped.
 //! Test: `parse_decision_reads_the_cycle_and_alerts`,
+//! `parse_decision_prefers_structured_keys`, `parse_display_keys_the_mis_keyed_displays`,
 //! `shadow_plan_seeds_a_scratch_inbox_and_never_writes_the_live_one`,
 //! `shadow_plan_keeps_the_dry_runs_own_state`,
 //! `shadow_record_carries_the_contract_fields`, `failed_shadow_run_is_recorded_as_failed`.
@@ -50,6 +54,28 @@ pub struct ShadowAlert {
     pub session: String,
     /// Alert kind.
     pub kind: String,
+}
+
+/// An alert's identity: session, kind and fingerprint (MB1595 fix round).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventKey {
+    /// tmux session, or empty.
+    pub session: String,
+    /// Alert kind.
+    pub kind: String,
+    /// The alert's fingerprint (its dedupe key with session and kind).
+    pub fingerprint: String,
+}
+
+/// One alert the shadow cycle's triage woke for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WokenKey {
+    /// The alert.
+    #[serde(flatten)]
+    pub key: EventKey,
+    /// No rule decided it (the Haiku path); parity leaves it out.
+    #[serde(default)]
+    pub haiku: bool,
 }
 
 /// One `inbox/shadow-wakes.jsonl` line.
@@ -91,6 +117,13 @@ pub struct ShadowRecord {
     /// leaves them out. Absent in records written before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub haiku_woken: Option<u64>,
+    /// The alerts with fingerprints, from the structured dry-run lines;
+    /// absent in records written before the MB1595 fix round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alert_keys: Option<Vec<EventKey>>,
+    /// The alerts triage woke for; absent before the MB1595 fix round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub woken_keys: Option<Vec<WokenKey>>,
 }
 
 /// The parsed dry-run output.
@@ -112,6 +145,10 @@ pub struct Decision {
     pub alerts: Vec<ShadowAlert>,
     /// `triage haiku-path wakes: N`.
     pub haiku_woken: Option<u64>,
+    /// `would alert key:` lines; `Some` once the keys marker is seen.
+    pub keys: Option<Vec<EventKey>>,
+    /// `would wake key:` lines; `Some` once the keys marker is seen.
+    pub woken_keys: Option<Vec<WokenKey>>,
 }
 
 fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
@@ -124,7 +161,19 @@ fn kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 pub fn parse_decision(stdout: &str) -> Decision {
     let mut d = Decision::default();
     for line in stdout.lines() {
-        if let Some(alert) = line.trim_start().strip_prefix("would alert: ") {
+        let t = line.trim_start();
+        if t == KEYS_MARKER {
+            d.keys.get_or_insert_with(Vec::new);
+            d.woken_keys.get_or_insert_with(Vec::new);
+        } else if let Some(j) = t.strip_prefix("would alert key: ") {
+            if let Ok(k) = serde_json::from_str(j) {
+                d.keys.get_or_insert_with(Vec::new).push(k);
+            }
+        } else if let Some(j) = t.strip_prefix("would wake key: ") {
+            if let Ok(k) = serde_json::from_str(j) {
+                d.woken_keys.get_or_insert_with(Vec::new).push(k);
+            }
+        } else if let Some(alert) = t.strip_prefix("would alert: ") {
             d.alerts.push(parse_display(alert));
         } else if let Some(n) = line.trim_start().strip_prefix("triage haiku-path wakes: ") {
             d.haiku_woken = n.trim().parse().ok();
@@ -137,19 +186,77 @@ pub fn parse_decision(stdout: &str) -> Decision {
                 .map(|(_, w)| w.split(" architect=").next().unwrap_or(w).trim().to_owned());
         }
     }
+    // MB1595 fix round: structured keys win over the display text.
+    if let Some(keys) = &d.keys {
+        d.alerts = keys
+            .iter()
+            .map(|k| ShadowAlert {
+                session: k.session.clone(),
+                kind: k.kind.clone(),
+            })
+            .collect();
+    }
     d
 }
 
-/// `[session]: kind: detail` (or `kind: detail`) into session and kind.
-fn parse_display(display: &str) -> ShadowAlert {
+/// The marker the dry run prints before its structured key lines.
+pub const KEYS_MARKER: &str = "shadow keys: v1";
+
+/// Displays that do not have the `[session]: kind:` shape: (prefix, session,
+/// kind), from `fleet-poll.py`'s overrides (selftest, owner, dashboard).
+const DISPLAY_KINDS: [(&str, &str, &str); 16] = [
+    ("[runtime selftest]: failing: ", "", "selftest_fail"),
+    ("[owner] feedback on ", "", "owner_feedback"),
+    ("[owner] INTERACTIVE: ", "", "owner_interactive"),
+    ("[owner] status request ", "", "status_request"),
+    ("[owner] nudge ", "", "nudge"),
+    ("[dashboard]: user state -> ", "", "user_state"),
+    ("[dashboard]: morning brief due ", "", "morning_brief"),
+    ("[dashboard]: dream pass due ", "", "dream"),
+    ("[dashboard]: stale tasks: ", "", "stale_tasks"),
+    ("[dashboard]: factory overdue: ", "", "factory_overdue"),
+    (
+        "[dashboard]: status update requested: ",
+        "",
+        "status_request",
+    ),
+    ("[dashboard]: resume requested: ", "", "resume_request"),
+    ("[dashboard]: steer for ", "", "steer"),
+    ("[owner] ", "", "owner_answer"),
+    ("[dashboard]: ", "", "steer"),
+    ("[runtime selftest]: ", "", "selftest_fail"),
+];
+
+/// A display into session and kind: a known override shape from
+/// [`DISPLAY_KINDS`] (an owner line ending ` won't do: ...` is
+/// `owner_wont_do`), a token display `[s]: token <rule>: ...` as `token`,
+/// else `[session]: kind: detail` (or `kind: detail`).
+pub fn parse_display(display: &str) -> ShadowAlert {
+    let key = |s: &str, k: &str| ShadowAlert {
+        session: s.to_owned(),
+        kind: k.to_owned(),
+    };
+    if display.starts_with("[owner] ") && display.contains(" won't do: ") {
+        return key("", "owner_wont_do");
+    }
+    if let Some((_, s, k)) = DISPLAY_KINDS
+        .iter()
+        .find(|(p, _, _)| display.starts_with(p))
+    {
+        return key(s, k);
+    }
     let (session, rest) = match display.strip_prefix('[').and_then(|r| r.split_once("]: ")) {
         Some((s, r)) => (s, r),
         None => ("", display),
     };
-    ShadowAlert {
-        session: session.to_owned(),
-        kind: rest.split(':').next().unwrap_or(rest).trim().to_owned(),
-    }
+    let kind = rest.split(':').next().unwrap_or(rest).trim();
+    // `fleet-poll.py` token_alerts: `[s]: token <rule>: <detail>`.
+    let kind = if kind.starts_with("token ") {
+        "token"
+    } else {
+        kind
+    };
+    key(session, kind)
 }
 
 fn wake_target(phrase: &str) -> Option<String> {
@@ -330,6 +437,8 @@ pub fn record(
         digest_sha: sha256_hex(keys.join("\n").as_bytes())[..12].to_owned(),
         error,
         haiku_woken: d.haiku_woken,
+        alert_keys: d.keys,
+        woken_keys: d.woken_keys,
     };
     append_jsonl(&layout.shadow_log(), &rec)
 }

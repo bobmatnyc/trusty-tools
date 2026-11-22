@@ -149,6 +149,8 @@ fn record(slot: i64, woken: u64, wake: Option<&str>) -> ShadowRecord {
         digest_sha: "d".into(),
         error: None,
         haiku_woken: None,
+        alert_keys: None,
+        woken_keys: None,
     }
 }
 

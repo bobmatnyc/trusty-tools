@@ -43,6 +43,8 @@ fn record(slot: i64, ok: bool, wake: Option<&str>, alerts: Vec<ShadowAlert>) -> 
         digest_sha: "d".into(),
         error: None,
         haiku_woken: None,
+        alert_keys: None,
+        woken_keys: None,
     }
 }
 
@@ -384,4 +386,54 @@ fn parity_load_reads_the_three_files() {
     // No shadow file at all is an error, not an empty report.
     std::fs::remove_file(l.shadow_log()).unwrap();
     assert!(parity::load(&l, 0).is_err());
+}
+
+/// MB1595 fix round (class B): the displays the 2nd parity run mis-keyed,
+/// read through the old display path a record without structured keys takes.
+/// Red at base: `('runtime selftest', 'failing')`, an `[owner] ...` kind, and
+/// so on.
+#[test]
+fn parse_display_keys_the_mis_keyed_displays() {
+    let cases = [
+        (
+            "[runtime selftest]: failing: memory_mcp, search_mcp",
+            "",
+            "selftest_fail",
+        ),
+        ("[owner] Dbq answered 03:36Z", "", "owner_answer"),
+        ("[owner] Dbq answered 03:36Z: ship it", "", "owner_answer"),
+        ("[owner] Dbr won't do: out of scope", "", "owner_wont_do"),
+        (
+            "[dashboard]: stale tasks: 3 tasks idle over 7d",
+            "",
+            "stale_tasks",
+        ),
+        (
+            "[tm-a]: token ctx_main: ctx 360000 >= 350000 main opus",
+            "tm-a",
+            "token",
+        ),
+        ("[tm-a]: idle: idle 10 min", "tm-a", "idle"),
+    ];
+    for (display, session, kind) in cases {
+        let d = parse_decision(&format!("  would alert: {display}\n"));
+        assert_eq!(d.alerts, [alert(session, kind)], "{display}");
+        assert_eq!(d.keys, None, "no marker: the old path");
+    }
+}
+
+/// MB1595 fix round: with the keys marker the JSON keys win over a display
+/// that would parse wrong, and the record carries the fingerprints.
+#[test]
+fn parse_decision_prefers_structured_keys() {
+    let out = "  shadow keys: v1\n  would alert: [weird]: display: x\n  would alert key: {\"session\":\"tm-b\",\"kind\":\"pm_message\",\"fingerprint\":\"f1\"}\n";
+    let d = parse_decision(out);
+    assert_eq!(d.alerts, [alert("tm-b", "pm_message")]);
+    let keys = d.keys.unwrap_or_default();
+    assert_eq!(keys[0].fingerprint, "f1");
+    assert_eq!(
+        d.woken_keys,
+        Some(Vec::new()),
+        "marker: no wake keys is no wakes"
+    );
 }

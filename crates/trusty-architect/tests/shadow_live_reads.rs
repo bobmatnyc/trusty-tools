@@ -39,6 +39,8 @@ fn record(slot: i64, woken: u64, haiku: u64) -> ShadowRecord {
         digest_sha: "d".into(),
         error: None,
         haiku_woken: Some(haiku),
+        alert_keys: None,
+        woken_keys: None,
     }
 }
 
