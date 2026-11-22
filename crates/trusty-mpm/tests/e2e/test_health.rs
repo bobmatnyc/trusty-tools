@@ -17,7 +17,8 @@ async fn health_returns_ok() {
         .expect("health request");
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.expect("health json body");
-    assert_eq!(body["status"], "ok");
+    // `status` is "degraded" without trusty-memory/search; liveness is `alive`.
+    assert_eq!(body["alive"], true);
     // The staleness fields are present and well-typed.
     assert!(body["catalog_stale"].is_boolean(), "catalog_stale present");
     assert!(

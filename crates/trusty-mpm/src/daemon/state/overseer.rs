@@ -190,9 +190,33 @@ pub(super) fn build_session_registry(root: &std::path::Path) -> SessionRegistry 
     SessionRegistry::with_config(cfg.control_plane)
 }
 
-/// An empty `/health` catalog-report cache with the production max age (#7968).
-pub(super) fn new_catalog_report_cache()
--> Arc<crate::daemon::rpc::health_catalog::CatalogReportCache> {
+/// The `/health` caches a [`super::DaemonState`] owns.
+///
+/// Why: grouped in one field so the dependency cache rides in the slot the
+/// catalog cache already had (`state/core.rs` sits at the SLOC cap).
+#[derive(Debug)]
+pub(crate) struct HealthCaches {
+    /// The catalog-staleness report cache (#7968).
+    pub(crate) catalog: Arc<crate::daemon::rpc::health_catalog::CatalogReportCache>,
+    /// The trusty-memory / trusty-search reachability cache.
+    pub(crate) deps: Arc<crate::daemon::rpc::health_deps::DependencyCache>,
+}
+
+/// Empty `/health` caches with the production max ages and default probe.
+pub(super) fn new_catalog_report_cache() -> HealthCaches {
     use crate::daemon::rpc::health_catalog::{CatalogReportCache, MAX_AGE};
-    Arc::new(CatalogReportCache::new(MAX_AGE))
+    use crate::daemon::rpc::health_deps::{DependencyCache, default_probe};
+    HealthCaches {
+        catalog: Arc::new(CatalogReportCache::new(MAX_AGE)),
+        deps: Arc::new(DependencyCache::new(default_probe())),
+    }
+}
+
+impl super::DaemonState {
+    /// The `/health` dependency-probe cache; tests swap its probe.
+    pub(crate) fn dependency_cache(
+        &self,
+    ) -> &Arc<crate::daemon::rpc::health_deps::DependencyCache> {
+        &self.catalog_report.deps
+    }
 }
