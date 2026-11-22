@@ -7,8 +7,8 @@
 //! put a port on the host again.
 //! What: two guards. A source scan over `src/` fails, naming file and line, on
 //! any non-comment spelling of a network listener outside test code (a
-//! `tests.rs`/`*_tests.rs` file, a `tests/` directory, or the trailing
-//! `#[cfg(test)] mod` block of a file). And the built binary refuses the
+//! `tests.rs`/`*_tests.rs` file, a `tests/` directory, or the brace block of
+//! a `#[cfg(test)]` item). And the built binary refuses the
 //! removed `--api`/`--serve`/`--port` flags with a non-zero exit.
 //! Test: this file IS the test. `scan_catches_a_planted_bind` shows the scan
 //! can fail.
@@ -48,22 +48,53 @@ fn is_test_file(path: &Path) -> bool {
         || path.components().any(|c| c.as_os_str() == "tests")
 }
 
-/// The production part of `text`: everything before the first
-/// `#[cfg(test)]` that opens a `mod` block. This crate keeps its inline test
-/// module last in a file.
+/// The production part of `text`: every line except the brace block of a
+/// `#[cfg(test)]` item.
+///
+/// Why: a test module may sit anywhere in a file, and a `#[cfg(test)] mod x;`
+/// declaration has no body, so the code after it is production code and must
+/// still be scanned (#11632 fix round).
+/// What: on a `#[cfg(test)]` line, skips any further attribute lines, then the
+/// item they decorate. An item ending in `;` before any `{` skips only its own
+/// lines; otherwise lines are skipped until the braces opened by the item
+/// balance. Skipped lines become empty, so line numbers stay true.
+/// Test: `scan_catches_a_planted_bind`.
 fn production_part(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let cut = lines
-        .windows(2)
-        .position(|w| {
-            w[0].trim() == "#[cfg(test)]"
-                && (w[1].trim_start().starts_with("mod ")
-                    || w[1].trim_start().starts_with("pub mod ")
-                    || w[1].trim_start().starts_with("pub(crate) mod ")
-                    || w[1].trim_start().starts_with("#[path"))
-        })
-        .unwrap_or(lines.len());
-    lines[..cut].join("\n")
+    let mut out: Vec<&str> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() != "#[cfg(test)]" {
+            out.push(lines[i]);
+            i += 1;
+            continue;
+        }
+        let mut depth: i64 = 0;
+        let mut opened = false;
+        while i < lines.len() {
+            let line = lines[i];
+            out.push("");
+            i += 1;
+            let trimmed = line.trim();
+            if trimmed.starts_with("#[") && !opened {
+                continue;
+            }
+            for c in line.chars() {
+                match c {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if (!opened && trimmed.ends_with(';')) || (opened && depth <= 0) {
+                break;
+            }
+        }
+    }
+    out.join("\n")
 }
 
 /// Every `file:line` in the production part of `text` whose non-comment
@@ -121,6 +152,9 @@ fn scan_catches_a_planted_bind() {
     let in_tests = format!("fn a() {{}}\n#[cfg(test)]\nmod tests {{\n{planted}\n}}\n");
     assert!(violations("planted.rs", &in_tests).is_empty());
     assert!(is_test_file(Path::new("src/channels/migrate_tests.rs")));
+    // A `mod tests;` declaration skips nothing: the code after it is production.
+    let after_decl = "#[cfg(test)]\nmod tests;\nfn f() { UdpSocket::bind(..) }";
+    assert_eq!(violations("planted.rs", after_decl).len(), 1);
 }
 
 #[test]
