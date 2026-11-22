@@ -29,7 +29,7 @@ use crate::pystr::{is_digit, parse_digits};
 use crate::sched::slot::parse_iso;
 
 /// Kinds that always wake (`WAKE_KINDS`), besides `owner_*` and `architect_*`.
-pub const WAKE_KINDS: [&str; 18] = [
+pub const WAKE_KINDS: [&str; 19] = [
     "permission_prompt",
     "dialog",
     "question",
@@ -48,6 +48,8 @@ pub const WAKE_KINDS: [&str; 18] = [
     "host_zone",
     "morning_brief",
     "dream",
+    // PR-B2: memory or search down, urgent.
+    "dep_degraded",
 ];
 /// `token` sub-kinds that only feed the optimizer (`TOKEN_LOG`).
 const TOKEN_LOG: [&str; 4] = ["hit_low", "miss_idle", "miss_unexpected", "ctx_sub"];

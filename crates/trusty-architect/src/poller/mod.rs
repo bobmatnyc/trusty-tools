@@ -38,6 +38,7 @@ mod config;
 mod ctx;
 pub mod ctx_bar;
 mod cycle;
+pub mod dep_health;
 pub mod digest;
 mod events;
 mod host;

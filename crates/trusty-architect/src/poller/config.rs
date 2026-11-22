@@ -150,6 +150,9 @@ pub struct Config {
     /// the least time between two event cycles of `tm architect serve`
     /// (#9779 review). The 60 s tick is unaffected.
     pub serve_min_gap: f64,
+    /// tm's socket for the `dep_degraded` step (PR-B2): `TM_HEALTH_SOCKET`,
+    /// else tm's own derivation under `home`; `None` when `TM_HEALTH=off`.
+    pub tm_health_socket: Option<PathBuf>,
 }
 
 impl Config {
@@ -290,6 +293,12 @@ impl Config {
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             serve_min_gap: lenient("SERVE_MIN_EVENT_GAP", SERVE_MIN_EVENT_GAP_DEFAULT).max(0.0),
+            tm_health_socket: (get("TM_HEALTH").as_deref() != Some("off")).then(|| {
+                path(
+                    "TM_HEALTH_SOCKET",
+                    super::dep_health::tm_socket_path(home, get),
+                )
+            }),
         })
     }
 

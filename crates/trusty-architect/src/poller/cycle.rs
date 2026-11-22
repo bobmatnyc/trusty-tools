@@ -17,7 +17,8 @@
 //! #11540 adds the ledger shim (live and shadow; its failures are `failing`).
 //! #11541 review: the last self-refresh fault and the Architect pane's own
 //! capture or self-ctx read failures are `self_refresh` alerts in `failing`.
-//! MB1595 adds the PM-message intake (`pm_message`).
+//! MB1595 adds the PM-message intake (`pm_message`); PR-B2 the tm health
+//! `dep_degraded` step.
 //! Steps owned elsewhere are left out: effort, token,
 //! dashboard, owner_* other than owner_answer (#11474), auto_sleep, user_state and triage rules
 //! (#9801); the watchdog and Remote Control (#9779).
@@ -31,6 +32,7 @@ use super::architect::is_shell;
 use super::completion::{completion_alerts, il_task_complete_for};
 use super::config::Config;
 use super::ctx::TranscriptCtx;
+use super::dep_health::{dep_health_step, read_tm_health};
 use super::events::read_events;
 use super::host::{HostProbe, host_alerts};
 use super::inbox_alerts::{ctx_cycle_alerts, selftest_alerts};
@@ -307,6 +309,11 @@ pub fn collect<T: Tmux + ?Sized>(
     }
     // #11474: dashboard answers not yet relayed (fleet-poll.py's owner_answer step).
     let answers_ok = owner_answer_step(s.config, state, now, &mut candidates, &mut log);
+    // PR-B2: tm health degraded because memory or search is down.
+    let sock = s.config.tm_health_socket.as_deref();
+    let (found, lines) = dep_health_step(sock, &read_tm_health, &mut state.other, now);
+    candidates.extend(found);
+    log.extend(lines);
     // #9779 D5r: routines ran; an overdue failure is due a push (never sent).
     let mut failing = watch_found.clone();
     failing.extend(shim_failing);
