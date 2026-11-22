@@ -850,7 +850,7 @@ Already have the binaries on PATH and just want to (re-)sign them:
 tctl sign trusty-memory
 ```
 
-Like `install-trusty-agents-signed.sh`, the script delegates the signing step
+Like `install-trusty-assistants-signed.sh`, the script delegates the signing step
 to `tctl sign` rather than duplicating `codesign` flags, and a missing
 Developer ID certificate is a warning, not a hard failure.
 

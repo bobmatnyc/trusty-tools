@@ -108,7 +108,7 @@ async-trait = { workspace = true }
 
 # #2893 (epic #2892): shared `ServiceTier`/`RunContext`/`HistoryMessage` types,
 # deduped from tools/traits.rs against the canonical definitions trusty-agents
-# already re-exports from here (see crates/trusty-agents/src/tools/traits.rs).
+# already re-exports from here (see crates/trusty-assistants/src/tools/traits.rs).
 trusty-agents-common = { workspace = true }
 
 

@@ -12,7 +12,7 @@ cargo install --path crates/trusty-agents --locked
 ta --version
 ```
 
-On macOS, `make install-agents-signed` installs and signs it so TCC grants
+On macOS, `make install-assistants-signed` installs and signs it so TCC grants
 survive a rebuild.
 
 ## 2. Connect an MCP client

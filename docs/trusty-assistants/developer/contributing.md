@@ -29,7 +29,7 @@ API key are gated on the env var being set.
 ## Project layout
 
 ```
-crates/trusty-agents/
+crates/trusty-assistants/
 ├── Cargo.toml             Rust package manifest
 ├── build.rs               Captures GIT_COMMIT_HASH at compile time
 ├── .env.local             API keys (not committed)
@@ -113,7 +113,7 @@ cargo test --bins
 
 File issues on GitHub. Include:
 
-- Version: `tagent --version`
+- Version: `ta --version`
 - OS/arch: macOS-arm64, Linux-x64, etc.
 - Reproduction: minimal `cargo run --` invocation
 - Logs: re-run with `RUST_LOG=debug`
