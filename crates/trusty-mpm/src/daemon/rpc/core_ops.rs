@@ -56,7 +56,8 @@ use crate::daemon::state::DaemonState;
 /// What: `degraded[]` collects the parked-subsystem reasons plus one entry per
 /// dependency that is not up (from the bounded-age cache in
 /// [`super::health_deps`]); `status` is `"degraded"` when the list is
-/// non-empty, else `"ok"`. `alive` is always `true` — an answer is liveness.
+/// non-empty, else `"ok"`. `pending[]` lists dependencies with no current
+/// answer and never sets `status` (PR-B2). `alive` is always `true`.
 /// Test: `health_reports_ok_status`, `parity_health_agrees_across_transports`,
 /// `health_answers_while_the_catalog_read_is_stalled`,
 /// `memory_down_reports_degraded`, `search_down_reports_degraded`,
@@ -79,6 +80,8 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         .into_iter()
         .collect();
     degraded.extend(super::health_deps::degraded_entries(&deps));
+    // PR-B2: pending is listed apart and never makes `status` degraded.
+    let pending = super::health_deps::pending_entries(&deps);
     let status = if degraded.is_empty() {
         "ok"
     } else {
@@ -106,6 +109,7 @@ pub async fn health(state: &Arc<DaemonState>) -> HealthResponse {
         // reason it parked itself is readable here without threading state
         // through the supervisor. Empty is the healthy answer.
         degraded,
+        pending,
         // #9007: the records live in this process's memory only.
         unbound_delegations: unbound.as_ref().ok().copied(),
         unbound_delegations_error: unbound.err(),

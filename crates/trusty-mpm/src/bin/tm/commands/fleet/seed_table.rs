@@ -124,6 +124,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/fleet_poll_selfrefresh.py",
         false
     ),
+    // PR-B2: the dep_degraded step fleet-poll.py loads.
+    embedded!(
+        "scripts/fleet_poll_deps.py",
+        "scripts/fleet_poll_deps.py",
+        false
+    ),
     // #10857: fleet-classify.py loads this sibling by path (host-alert dedupe, hold gating).
     embedded!(
         "scripts/fleet_alert_dedupe.py",

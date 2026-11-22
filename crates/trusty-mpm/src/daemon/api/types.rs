@@ -184,6 +184,15 @@ pub struct HealthResponse {
     /// Test: `health_publishes_no_degraded_subsystem_when_idle`.
     #[serde(default)]
     pub degraded: Vec<String>,
+    /// trusty-memory / trusty-search with no current probe answer (PR-B2).
+    ///
+    /// Why: a refresh still in flight is not an outage; a reader must tell it
+    /// from down or timeout, so it is kept out of [`Self::degraded`].
+    /// What: `"<service>: pending"` entries; never changes `status`. Empty
+    /// for a daemon predating the field.
+    /// Test: `no_finished_probe_reads_pending_not_ok`.
+    #[serde(default)]
+    pub pending: Vec<String>,
     /// Live delegation records of unbound sessions still waiting for the 6 h
     /// stale (#9007).
     ///

@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 
 use super::{
     Dependency, DependencyCache, DependencyOutcome, DependencyProbe, MAX_AGE, PANICKED,
-    ProbeFuture, STALE_LIMIT, degraded_entries,
+    PROBE_BUDGET, ProbeFuture, STALE_LIMIT, degraded_entries, pending_entries,
 };
 use crate::daemon::state::DaemonState;
 
@@ -18,6 +18,8 @@ enum Mode {
     Down(&'static str),
     Hang,
     Panic,
+    /// Answers `Up` after this long: slow but healthy.
+    Slow(Duration),
 }
 
 /// A probe whose per-dependency answer a test can change mid-test.
@@ -47,6 +49,10 @@ impl DependencyProbe for Fake {
                 Mode::Down(reason) => DependencyOutcome::Down(reason.to_owned()),
                 Mode::Hang => std::future::pending().await,
                 Mode::Panic => panic!("fake probe panic"),
+                Mode::Slow(delay) => {
+                    tokio::time::sleep(delay).await;
+                    DependencyOutcome::Up
+                }
             }
         })
     }
@@ -144,14 +150,20 @@ async fn stale_cached_ok_expires_after_max_age() {
     assert!(entries[0].starts_with("trusty-search: down"), "{entries:?}");
 }
 
-/// Before any probe finishes, a request never reads healthy.
+/// Before any probe finishes, a request reads pending: listed in `pending[]`,
+/// never in `degraded[]`, and never as up.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
 async fn no_finished_probe_reads_pending_not_ok() {
     let cache = Arc::new(DependencyCache::new(Fake::new(Mode::Hang, Mode::Hang)));
-    let entries = degraded_entries(&cache.get(Duration::from_millis(10)).await);
-    assert_eq!(entries.len(), 2, "{entries:?}");
-    assert!(entries.iter().all(|e| e.contains("pending")), "{entries:?}");
+    let report = cache.get(Duration::from_millis(10)).await;
+    assert!(degraded_entries(&report).is_empty(), "{report:?}");
+    let pending = pending_entries(&report);
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    assert!(
+        pending.iter().all(|e| e.ends_with(": pending")),
+        "{pending:?}"
+    );
 }
 
 /// The health request does not wait out a hung probe: it answers within the
@@ -170,7 +182,9 @@ async fn health_does_not_block_on_a_hung_probe() {
         "{:?}",
         started.elapsed()
     );
-    assert_eq!(body.status, "degraded");
+    // PR-B2: no answer yet is pending, which alone does not degrade status.
+    assert_eq!(body.status, "ok", "{:?}", body.degraded);
+    assert_eq!(body.pending.len(), 2, "{:?}", body.pending);
 }
 
 /// A panicking probe reads `down — probe panicked`, never the last `Up`, and
@@ -205,10 +219,12 @@ async fn panicking_probe_reads_down_and_next_refresh_runs() {
     );
 }
 
-/// A report older than `STALE_LIMIT` is never served while a refresh runs.
+/// A report older than `STALE_LIMIT` is never served while a refresh runs:
+/// a dependency last up reads pending, and once the hung probe's budget
+/// elapses the stored outcome is a real `timeout` that a sparse read keeps.
 /// Test: this test.
 #[tokio::test(start_paused = true)]
-async fn report_past_stale_limit_reads_timeout_not_ok() {
+async fn report_past_stale_limit_reads_pending_then_timeout() {
     let fake = Fake::new(Mode::Up, Mode::Up);
     let cache = Arc::new(DependencyCache::new(fake.clone()));
     assert!(degraded_entries(&cache.get(Duration::from_secs(1)).await).is_empty());
@@ -216,10 +232,53 @@ async fn report_past_stale_limit_reads_timeout_not_ok() {
     *fake.memory.lock() = Mode::Hang;
     *fake.search.lock() = Mode::Hang;
     tokio::time::advance(STALE_LIMIT).await;
+    let report = cache.get(Duration::from_millis(10)).await;
+    assert!(degraded_entries(&report).is_empty(), "{report:?}");
+    assert_eq!(pending_entries(&report).len(), 2, "{report:?}");
+
+    // The in-flight refresh hits its budget and stores `timeout`.
+    tokio::time::sleep(PROBE_BUDGET + Duration::from_millis(10)).await;
     let entries = degraded_entries(&cache.get(Duration::from_millis(10)).await);
     assert_eq!(entries.len(), 2, "{entries:?}");
     assert!(
         entries.iter().all(|e| e.ends_with("timeout")),
         "{entries:?}"
+    );
+
+    // A sparse read past STALE_LIMIT starts another refresh and keeps the
+    // timed-out outcome instead of downgrading it to pending.
+    tokio::time::advance(STALE_LIMIT).await;
+    let entries = degraded_entries(&cache.get(Duration::from_millis(10)).await);
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(
+        entries.iter().all(|e| e.ends_with("timeout")),
+        "{entries:?}"
+    );
+}
+
+/// Sparse polling (PR-B2): a read more than 12 s after the last one, with a
+/// slow but healthy probe, reads pending and never degraded.
+/// Test: this test.
+#[tokio::test(start_paused = true)]
+async fn sparse_read_with_slow_healthy_probe_reads_pending_not_degraded() {
+    let slow = Mode::Slow(Duration::from_millis(500));
+    let state = state_with(Fake::new(slow.clone(), slow)).await;
+    let first = super::super::core_ops::health(&state).await;
+    assert_eq!(first.status, "ok", "{:?}", first.degraded);
+
+    tokio::time::advance(Duration::from_secs(13)).await;
+    let body = super::super::core_ops::health(&state).await;
+    assert_eq!(body.status, "ok", "{:?}", body.degraded);
+    assert!(
+        !body.degraded.iter().any(|d| d.starts_with("trusty-")),
+        "{:?}",
+        body.degraded
+    );
+    assert_eq!(
+        body.pending,
+        vec![
+            "trusty-memory: pending".to_owned(),
+            "trusty-search: pending".to_owned()
+        ]
     );
 }

@@ -66,3 +66,9 @@ def _owner_provenance_files_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setenv("ARCHITECT_OWNER_TURNS", str(tmp_path / "owner-turns.jsonl"))
     monkeypatch.setenv("ARCHITECT_RELAY_LOG", str(tmp_path / "relay-provenance.jsonl"))
     monkeypatch.setenv("ARCHITECT_IL", str(tmp_path / "no-architect-il"))   # #10960: the supersession ledgers
+
+
+@pytest.fixture(autouse=True)
+def _no_live_tm_health(monkeypatch):
+    """PR-B2: no cycle test dials the operator's tm socket; test_fleet_poll_deps.py injects its readings."""
+    monkeypatch.setenv("TM_HEALTH", "off")

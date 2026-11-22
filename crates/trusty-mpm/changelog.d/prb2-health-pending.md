@@ -1,0 +1,2 @@
+Changed
+- `mpm.health` lists a dependency whose probe has not answered yet in a new `pending[]` field instead of `degraded[]`, and `pending` alone no longer turns `status` to `"degraded"`. A read that lands more than 12 s after the last refresh, while a new probe is still running, reports `pending` for a dependency last seen up instead of `timeout`; one last seen down or timed out keeps that outcome.
