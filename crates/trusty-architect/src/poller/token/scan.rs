@@ -26,7 +26,7 @@ use serde_json::Value;
 
 use super::clock::{hour_fp, hour_of, parse_ts};
 use super::discover::LOOKBACK;
-use super::state::{FileState, OpenHour, Thresholds, TokenState};
+use super::state::{FileState, Thresholds, TokenState};
 use super::units::{effort_of, family, num, thinking_of, turn_units};
 use super::{TokenAlert, is_poll_command, project_label};
 use crate::poller::ctx_bar::main_buckets;
@@ -214,7 +214,7 @@ impl<'a> Scan<'a> {
             &effort_of(d),
         ]
         .join("|");
-        let o = self.st.open.entry(k).or_insert_with(OpenHour::default);
+        let o = self.st.open.entry(k).or_default();
         o.turns += 1;
         o.ctx.push(ctx);
         o.out += out_t;
