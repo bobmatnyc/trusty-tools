@@ -48,9 +48,9 @@ exclude = ["workers/okf-extract", "vendor/hnsw_rs"]
 # a new crate here is a mildly stale default, not a build break).
 default-members = [
     "crates/tc-services",
-    "crates/trusty-agents",
     "crates/trusty-agents-common",
     "crates/trusty-analyze",
+    "crates/trusty-assistants",
     "crates/trusty-channels",
     "crates/trusty-code",
     "crates/trusty-code-tui",
