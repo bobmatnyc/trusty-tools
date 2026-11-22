@@ -15,7 +15,7 @@
 
 // #7427: provider knowledge moved out of the HTTP layer into one adapter.
 use super::{Capabilities, ChannelAdapter, ChannelError, InboundEvent, WakePrompt};
-use crate::api::server::agent_channels::Binding;
+use crate::operations::agent_channels::Binding;
 use serde_json::{Value, json};
 use trusty_channels::slack::api::client::BaseClient;
 use trusty_channels::slack::api::constants::SLACK_API_BASE;
@@ -163,7 +163,7 @@ impl ChannelAdapter for SlackAdapter {
         binding: &Binding,
         event: InboundEvent<'_>,
     ) -> Result<Option<WakePrompt>, ChannelError> {
-        crate::api::server::knowledge_pipeline::intake::slack(event.agent, binding, event.event)
+        crate::operations::knowledge_pipeline::intake::slack(event.agent, binding, event.event)
             .await;
         let prompt = crate::listeners::wake::build_wake_prompt(
             event.event,

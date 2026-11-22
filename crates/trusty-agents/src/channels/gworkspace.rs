@@ -46,7 +46,7 @@
 
 // #7427: Gmail joins Slack and Telegram as a binding-addressed channel.
 use super::{Capabilities, ChannelAdapter, ChannelError, InboundEvent, WakePrompt};
-use crate::api::server::agent_channels::Binding;
+use crate::operations::agent_channels::Binding;
 use crate::listeners::store::StoredEvent;
 use serde_json::{Value, json};
 

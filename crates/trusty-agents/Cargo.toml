@@ -26,20 +26,10 @@ homepage = "https://trustytools.dev"
 include = [
     "src/**/*",
     "assets/**/*",
-    "ui/dist/**/*",
-    "ui/src/**/*",
-    "ui/index.html",
-    "ui/package.json",
-    "ui/pnpm-lock.yaml",
-    "ui/svelte.config.*",
-    "ui/tsconfig.*",
-    "ui/vite.config.*",
-    "ui/tailwind.config.*",
-    "ui/postcss.config.*",
     "build.rs",
-    # #8094: `build.rs` `include!`s this, so a published crate without it
+    # #8787: `build.rs` `include!`s this, so a published crate without it
     # would not build at all.
-    "build_ui_policy.rs",
+    "build_git_paths.rs",
     "Cargo.toml",
     "README.md",
     "LICENSE",

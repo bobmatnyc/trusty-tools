@@ -24,200 +24,89 @@
 // ratchet in `scripts/check_rustdoc_links.sh` absorb a new one.
 #![deny(rustdoc::broken_intra_doc_links)]
 
-/// Re-export the harness adapter framework from trusty-agents-common.
-///
-/// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832) so
-///      external crates can use `HarnessAdapter`, `AdapterRegistry`, etc. without
-///      depending on the full `trusty-agents` binary crate. This shim preserves
-///      every existing `crate::adapters::X` reference inside trusty-agents
-///      without touching any call site.
-/// What: Explicit re-export of all public items from `trusty_agents_common::adapters`,
-///       including submodule re-exports so path-qualified references remain valid.
-/// Test: `cargo build --workspace` verifies all internal call sites resolve.
-pub mod adapters {
-    // Submodules (re-exported so path references like `adapters::registry::Foo` resolve).
-    pub use trusty_agents_common::adapters::augment;
-    pub use trusty_agents_common::adapters::claude_code;
-    pub use trusty_agents_common::adapters::claude_mpm;
-    pub use trusty_agents_common::adapters::codex;
-    pub use trusty_agents_common::adapters::gemini;
-    pub use trusty_agents_common::adapters::patterns;
-    pub use trusty_agents_common::adapters::registry;
-    pub use trusty_agents_common::adapters::shell;
-    pub use trusty_agents_common::adapters::traits;
-    pub use trusty_agents_common::adapters::trusty_agents_adapter;
-    // Flat re-exports of every item promoted to the adapters facade.
-    pub use trusty_agents_common::adapters::{
-        // trait + value types
-        AdapterInfo,
-        // registry
-        AdapterRegistry,
-        // concrete adapters
-        AugmentAdapter,
-        ClaudeCodeAdapter,
-        ClaudeMpmAdapter,
-        CodexAdapter,
-        DetectionResult,
-        GeminiAdapter,
-        HarnessAdapter,
-        HarnessObservation,
-        HarnessState,
-        // patterns helpers
-        Pattern,
-        ShellAdapter,
-        TrustyAgentsAdapter,
-        any_match,
-        best_match,
-        last_n_lines,
-    };
-}
-
 pub mod agents;
-pub mod api;
 // #4325: per-assistant home directory + OKG store model — "Assistant" is a
 // TYPE, `izzie`/`cto-assistant` are INSTANCES of it, each with its own home.
 pub mod assistants;
-pub mod ast;
 // #7370: chat-thread attachments stored under `<assistant home>/attachments`,
 // a sibling of `okg` — files a turn references, never indexed knowledge.
 pub mod attachments;
-pub mod knowledge;
 // #4652: last-human-turn timeout — the only signal that can tell a human
 // attending an instance from the assistant's own activity (owner decision D3).
 pub mod attendance;
 pub mod build_info;
 pub mod bus;
-// #7427: one `ChannelAdapter` per channel provider, behind a registry. The
-// adapter half stays `pub(crate)` because the trait's methods take
-// `api::server::agent_channels::Binding`, which is `pub(crate)`.
+// #7427: one `ChannelAdapter` per channel provider, behind a registry.
 // #7609: the merged channel model (`channels::Channel`, its migrations and the
 // precedence rule) is public, like the `listeners` module it supersedes.
-pub mod channels;
-pub mod cli;
+// #11632: the inbound half (adapter `receive`, wake routing, dispatch status)
+// lost its only callers with the poll loop and the HTTP inbound route; it is
+// kept unchanged for the inbound rebuild rather than deleted.
 #[allow(dead_code)]
-pub mod compress;
-pub mod compression;
-pub mod context;
-pub mod ctrl;
-pub mod ctrl_session;
-pub mod debugger;
-pub mod docs_index;
+pub mod channels;
+// #11632: the `tagent` argv dispatch left after the harness cut.
+pub mod cli;
 pub mod env_compat;
-pub mod eval;
 pub mod events;
-pub mod git;
 pub mod identity;
-pub mod init;
-pub mod inspection;
 pub mod intent;
-pub mod interaction_log;
-pub mod ipc;
 // #10746 S11: the agent-side KB glue over trusty-okf, moved from the deleted
 // trusty-kb crate (SPEC-OKF-01 §2.7.2).
 pub mod kb;
+pub mod knowledge;
+// #11632: the stored-event lookup and wake prompt lost their callers with the
+// poll loop; kept unchanged for the inbound rebuild.
+#[allow(dead_code)]
 pub mod listeners;
+// #11632: only the assistant model-choice part of the cut `llm` module.
 pub mod llm;
-pub mod local_inference;
-/// `--api`/`--serve`'s adoption of `trusty_common::log_drain::run_once`
-/// (#6537) — mirrors trusty-mpm's own Phase 3 scheduler, scoped to the one
-/// project a `trusty-agents` daemon drains: its own rotating daemon log
-/// (`service::daemon_log_path`).
+/// The `[log_drain]` config section (#6537); its scheduler was cut with the
+/// daemon (#11632).
 pub mod log_drain;
 pub mod logging;
 pub mod mcp;
+// #11632: the stdio MCP server, the one serving surface left after the cut.
+pub mod mcp_serve;
+pub mod memory;
+// #11632: assistant operations that lived under the cut `api::server`. Their
+// HTTP-only write paths and the knowledge intake lost their callers with the
+// routes; they are kept unchanged rather than rewritten in this cut.
+#[allow(dead_code)]
+pub mod operations;
+pub mod plugins;
+pub mod rbac;
+// #11632: the project registry the knowledge pipeline reads its sources from.
+pub mod registry;
+pub mod rpc;
+// #11632: only the skill catalog the memory-tool grant check reads.
+pub mod skills;
+pub mod state_writer;
+pub mod stores;
+pub mod tls;
+pub mod tools;
+pub mod untrusted;
+pub mod usage;
+
 /// A stand-in trusty-memory daemon on a temp Unix socket, for tests (#6286).
 #[cfg(test)]
 pub(crate) mod uds_mock;
 
-pub mod memory;
-pub mod mistake_log;
-pub mod perf;
-pub mod plugins;
-pub mod process_tracker;
-pub mod progress;
-pub mod rbac;
-pub mod recap;
-pub mod registry;
-pub mod repl;
-pub mod rpc;
-pub mod search;
-pub mod service;
-pub mod session;
-pub mod session_record;
-/// Re-export the JSON-backed session ledger from trusty-agents-common.
-///
-/// Why: Moved to trusty-agents-common in Wave 1 (issue #862, refs #830/#832).
-///      This shim preserves every existing `crate::session_registry::X`
-///      reference inside trusty-agents without touching any call site.
-/// What: Explicit re-export of all public items from
-///       `trusty_agents_common::session_registry`.
-/// Test: `cargo build --workspace` verifies all internal call sites resolve.
-pub mod session_registry {
-    pub use trusty_agents_common::session_registry::{SessionEntry, SessionsRegistry};
-}
-
-pub mod skills;
-pub mod slack;
-pub mod state_writer;
-pub mod stores;
-pub mod subprocess;
-pub mod system_status;
-pub mod telegram;
-pub mod ticketing;
-pub mod tls;
-pub mod tm;
-pub mod tmux;
-pub mod tools;
-pub mod untrusted;
-pub mod update;
-pub mod usage;
-pub mod workflow;
-
 #[cfg(test)]
 pub mod test_env;
 
-pub mod runtime;
-
 /// Re-export `install_plugins` so external launchers can register agent
-/// plugins (e.g. `cto-assistant`) before calling `run()`.
+/// plugins before building a tool registry.
 ///
 /// Why: `trusty-agents` cannot depend on `publish = false` agent crates. A
 ///      downstream launcher wires the plugin registry at startup via this
 ///      re-export, keeping the published surface free of those crates.
-///      #7359: the in-workspace launcher that used this (`trusty-agents-local`)
-///      was a pass-through that installed nothing, and was removed. The
-///      re-export stays because it is published API.
 /// What: Forwards to `tools::agent_plugin::install_plugins`. The underlying
-///       store is a OnceLock — call exactly once before `run()`.
+///       store is a OnceLock — call exactly once.
 /// Test: `agent_plugin`'s unit tests; no in-workspace launcher installs plugins.
 pub use tools::agent_plugin::install_plugins;
 
-/// Re-export `run` at the crate root so launchers can call
-/// `trusty_agents::run().await` without referencing the `runtime` module.
-pub use runtime::run;
-
-/// Re-export the bounded-shutdown launcher (#3655) so a `main.rs` is one line.
-///
-/// Why: prefer this over driving [`run`] from `#[tokio::main]` — the attribute
-/// drops the runtime with an unbounded wait, which lets one wedged background
-/// task make the process un-exitable.
-pub use runtime::run_to_completion;
-
-/// Re-exports of items that internal modules historically referenced as
-/// `crate::AgentConfig` and `crate::default_bundled_config_dir`.
-///
-/// Why: Those references resolved to the `main.rs` crate root before the
-///      library target was added (when the crate was binary-only). Adding
-///      `lib.rs` shifted the meaning of `crate::` for every internal module
-///      to the library root; without these re-exports, paths in
-///      `ctrl/mod.rs`, `inspection/mod.rs`, etc. fail to resolve. Re-exporting
-///      here is the minimal change that keeps every internal call site
-///      working without a workspace-wide sweep.
-/// What: Re-publishes `AgentConfig` (defined in `agents/mod.rs`) at the lib
-///       root. `default_bundled_config_dir` lives in `main.rs` and is also
-///       re-defined here for lib consumers (the binary still calls it
-///       through `trusty_agents::default_bundled_config_dir`).
-/// Test: `cargo check --workspace` resolves the previously-broken paths.
+/// Re-publishes `AgentConfig` (defined in `agents/config.rs`) at the lib root,
+/// where internal modules historically reference it as `crate::AgentConfig`.
 pub use agents::AgentConfig;
 
 /// Default location of the bundled `.trusty-agents/` config directory.
@@ -291,12 +180,8 @@ fn default_bundled_config_dir_checking(search_root: &std::path::Path) -> std::pa
 ///
 /// Why: An out-of-workspace launcher should depend on a tiny, well-defined
 ///      slice of `trusty-agents` — not the whole internal module tree.
-///      Pinning the surface here lets us refactor internals without breaking
-///      downstream launchers.
 /// What: Re-exports `ToolExecutor`, `ToolResult`, `ToolExecutionTier`,
-///       `AgentPlugin`, and `ServiceTier`. Adding to this list is a
-///       conscious choice; nothing else should be considered "API" for
-///       external agents.
+///       `AgentPlugin`, and `ServiceTier`.
 /// Test: Compile-tested by the workspace build; the re-exported plugin type
 ///       is covered by `agent_plugin_lookup_returns_matching_plugin`.
 pub mod agent_api {
@@ -304,5 +189,3 @@ pub mod agent_api {
     pub use crate::tools::agent_plugin::AgentPlugin;
     pub use crate::tools::traits::{ToolExecutionTier, ToolExecutor, ToolResult};
 }
-
-pub(crate) mod chat_attachments;

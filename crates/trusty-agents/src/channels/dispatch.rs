@@ -24,7 +24,7 @@
 
 // #7609: slice 4, inbound dispatch generalized over channels.
 use super::model::{Channel, ChannelScope};
-use crate::api::server::agent_channels::Binding;
+use crate::operations::agent_channels::Binding;
 use crate::listeners::store::StoredEvent;
 
 /// Which of the three inbound sources selects an assistant for one event.

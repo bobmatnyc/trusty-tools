@@ -31,7 +31,7 @@
 // #8037: a provider that needs no credential, so send/read/inbound can be
 // exercised end to end.
 use super::{Capabilities, ChannelAdapter, ChannelError, InboundEvent, WakePrompt};
-use crate::api::server::agent_channels::Binding;
+use crate::operations::agent_channels::Binding;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};

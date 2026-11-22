@@ -180,7 +180,7 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::server::agent_channels::Binding;
+    use crate::operations::agent_channels::Binding;
     use crate::channels::ChannelAdapter;
     use trusty_common::credentials::test_sandbox::{CredentialSandbox, assert_secret_eq};
 

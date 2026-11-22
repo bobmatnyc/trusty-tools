@@ -24,6 +24,8 @@
 //! Test: `tests::*` cover create-on-absent, role gating, and rendering.
 
 mod defaults;
+// #11632: the `[github]` identity section, moved from the cut `ticketing`.
+pub mod github;
 mod types;
 
 #[cfg(test)]
@@ -63,7 +65,7 @@ pub struct GlobalConfig {
     /// empty section when absent so the field is non-optional and callers
     /// don't need to drill through `Option`.
     #[serde(default)]
-    pub github: crate::ticketing::GitHubSection,
+    pub github: github::GitHubSection,
     /// `[git]` section — controls native git tool wiring (#247).
     ///
     /// Why: Lets users restrict which agent roles see git tools and gate
@@ -174,7 +176,7 @@ pub struct GlobalConfig {
     /// struct declares, so an unmodelled `[log_drain]` table would be
     /// silently dropped by any unrelated `mcp_*`-tool write.
     /// What: absent or `enabled = false` (the default) means the scheduler
-    /// this daemon spawns (`crate::log_drain::spawn`) never uploads anything.
+    /// this process never uploads anything (#11632: no scheduler remains).
     /// Test: `crate::log_drain::resolve::tests::toml_round_trips_every_field`.
     #[serde(default)]
     pub log_drain: crate::log_drain::LogDrainConfig,
@@ -276,7 +278,7 @@ impl GlobalConfig {
     /// What: Returns `None` when no identity matches; otherwise returns a
     /// clone of the matched identity.
     /// Test: `tests::github_identity_resolves_default` (in ticketing tests).
-    pub fn github_identity(&self, name: Option<&str>) -> Option<crate::ticketing::GitHubIdentity> {
+    pub fn github_identity(&self, name: Option<&str>) -> Option<github::GitHubIdentity> {
         self.github.identity(name).cloned()
     }
 

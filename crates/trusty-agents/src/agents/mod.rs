@@ -11,20 +11,13 @@
 //! Test: `AgentConfig::load` on bundled `pm.toml` / `python-engineer.toml`
 //! returns Ok with expected `agent.name` / `agent.model`; see `tests.rs`.
 
-pub mod bundled;
-pub mod claude_code_runner;
 pub mod claude_mpm_loader;
 pub(crate) mod claude_mpm_role;
 mod config;
-pub mod context_filter;
-// #4172 (epic #4167): L0-only cross-project git/search scoping.
-pub mod cross_project;
 // ADR-0024: the KIND delegation predicate. `pub(crate)` — it is an
 // enforcement primitive, not part of the crate's public surface.
 pub(crate) mod delegation;
 pub mod extends;
-pub mod harness_protocol;
-pub mod in_process_runner;
 mod loader;
 mod model;
 // The shared-frontmatter bridge for trusty-mpm's deployed `.claude/agents`
@@ -33,12 +26,7 @@ pub(crate) mod mpm_bridge;
 mod params;
 pub mod permissions;
 pub mod persona;
-pub mod prompt_builder;
 pub mod registry;
-// #7881: the server-owned skill floor for assistant-kind agents — the skill
-// counterpart of `delegation`'s sub-agent floor, and `pub(crate)` for the same
-// reason: an enforcement primitive, not public surface.
-pub(crate) mod skill_floor;
 
 #[cfg(test)]
 pub(crate) mod tests;
@@ -54,8 +42,6 @@ pub use params::{
     AgentCompressConfig, AgentPluginsConfig, LlmParams, RbacConfig, RunnerConfig,
     SessionCompressionConfig, ToolChoice, WorkstreamContextConfig,
 };
-// #4172: the L0-only cross-project scope resolver (epic #4167).
-pub use cross_project::CrossProjectScope;
 // #3936: the `[permissions]` section (DOC-57 §7). #4158 adds `dropped_scopes`
 // — the operator-readable half of CC-9's silent supersession.
 pub use permissions::{
@@ -64,8 +50,7 @@ pub use permissions::{
 };
 
 // Model resolution: `resolve_model` and `ModelSource` are part of the public
-// surface; `agent_model_env` is crate-internal (claude_code_runner uses it).
-pub(crate) use model::agent_model_env;
+// surface.
 pub use model::{FALLBACK_MODEL, ModelSource, resolve_model};
 
 // `agent_env_suffix` and `agent_config_path` are exercised only by the unit

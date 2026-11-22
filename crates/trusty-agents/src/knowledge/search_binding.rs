@@ -48,7 +48,7 @@ pub fn bound_index(name: &str, stores: &StoresConfig) -> anyhow::Result<Option<S
 /// digest-generated id at `KnowledgeStore::initialize`
 /// (`crate::knowledge::mod`, `format!("assistant-okg-{digest}")`, lowercase
 /// hex), and the root-bound id at `Context::selected_store`
-/// (`crate::api::server::knowledge_pipeline`, `binding.resolved_index()` —
+/// (`crate::operations::knowledge_pipeline`, `binding.resolved_index()` —
 /// the same function). trusty-search's own `IndexId` mirrors this: a plain
 /// `String` newtype with a derived `PartialEq`/`Eq` and no folding, so two
 /// differently-spelled ids can never resolve to the same physical index

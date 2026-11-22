@@ -74,7 +74,7 @@ pub(crate) fn repaired(
 /// What: persist the repair once; any Settings revision or skill restriction prevents expansion.
 /// Test: `migration_preserves_later_tool_revocation`.
 pub async fn migrate(dirs: &[PathBuf], name: &str) -> Result<()> {
-    let Some((manifest, _)) = crate::api::server::agent_patch::resolve_agent_paths(dirs, name)
+    let Some((manifest, _)) = crate::operations::agent_paths::resolve_agent_paths(dirs, name)
     else {
         return Ok(());
     };

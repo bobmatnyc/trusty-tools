@@ -13,7 +13,7 @@ use anyhow::Result;
 use chrono::Utc;
 use tokio::fs;
 
-use super::{ProjectEntry, ProjectStatus, derive_project_name, extract_github_repo};
+use super::{ProjectEntry, ProjectStatus, derive_project_name};
 
 /// Global project registry backed by `~/.trusty-agents/projects.json`.
 ///
@@ -176,96 +176,6 @@ impl ProjectRegistry {
                 last_connected,
                 pm_count,
                 is_self: true,
-                git_origin,
-                open_issues_count,
-                open_prs_count,
-            },
-        );
-        self.save(&entries).await?;
-        Ok(())
-    }
-
-    /// Record that CTRL just spawned a PM for `project_dir`.
-    ///
-    /// Why: `register` is about "project exists"; `register_pm_start` is
-    /// about CTRL-level lifecycle (when did we last connect? how many
-    /// sessions so far?). Separating them keeps `last_run` semantics intact
-    /// for workflow tooling.
-    /// What: Upserts the entry (creating one if absent), sets
-    /// `last_connected = now`, and increments `pm_count`.
-    /// Test: `register_pm_start_increments_count`.
-    pub async fn register_pm_start(&self, project_dir: &Path) -> Result<()> {
-        let mut entries = self.load().await.unwrap_or_default();
-        let key = project_dir.to_string_lossy().to_string();
-        let name = derive_project_name(project_dir).await;
-        let existing = entries.get(&key).cloned();
-        let last_run = existing.as_ref().and_then(|e| e.last_run);
-        let prev_count = existing.as_ref().map(|e| e.pm_count).unwrap_or(0);
-        let prev_is_self = existing.as_ref().map(|e| e.is_self).unwrap_or(false);
-        let prev_manual = existing.as_ref().is_some_and(|e| e.manually_registered);
-        let mut git_origin = existing.as_ref().and_then(|e| e.git_origin.clone());
-        let mut open_issues_count = existing.as_ref().and_then(|e| e.open_issues_count);
-        let mut open_prs_count = existing.as_ref().and_then(|e| e.open_prs_count);
-
-        // #340: Populate git_origin if we don't already have it. Subprocess
-        // failures (no git on PATH, not a repo) are non-fatal — log at debug
-        // and move on so registration never blocks on an unrelated tool.
-        if git_origin.is_none() {
-            match tokio::process::Command::new("git")
-                .args([
-                    "-C",
-                    project_dir.to_str().unwrap_or("."),
-                    "remote",
-                    "get-url",
-                    "origin",
-                ])
-                .output()
-                .await
-            {
-                Ok(output) if output.status.success() => {
-                    let origin = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !origin.is_empty() {
-                        git_origin = Some(origin);
-                    }
-                }
-                Ok(_) => {
-                    tracing::debug!(path = %project_dir.display(), "git remote get-url origin: non-zero exit");
-                }
-                Err(e) => {
-                    tracing::debug!(error = %e, "git remote get-url origin: spawn failed");
-                }
-            }
-        }
-
-        // #340: Refresh issue/PR counts via gh CLI when we have a github
-        // origin. Errors are swallowed (debug log only) — `gh` may not be
-        // installed or authed, and that mustn't break PM startup.
-        if let Some(ref origin) = git_origin
-            && let Some(repo) = extract_github_repo(origin)
-        {
-            use crate::ticketing::TicketingClient as _;
-            let gh = crate::ticketing::gh_cli::GhCliClient::new(Some(repo.clone()));
-            match gh.count_open_issues(&repo).await {
-                Ok(n) => open_issues_count = Some(n),
-                Err(e) => tracing::debug!(error = %e, repo = %repo, "gh count_open_issues failed"),
-            }
-            match gh.count_open_prs(&repo).await {
-                Ok(n) => open_prs_count = Some(n),
-                Err(e) => tracing::debug!(error = %e, repo = %repo, "gh count_open_prs failed"),
-            }
-        }
-
-        entries.insert(
-            key,
-            ProjectEntry {
-                path: project_dir.to_path_buf(),
-                name: existing.map(|e| e.name).unwrap_or(name),
-                last_run,
-                status: ProjectStatus::Active,
-                last_connected: Some(Utc::now()),
-                pm_count: prev_count + 1,
-                is_self: prev_is_self,
-                manually_registered: prev_manual,
                 git_origin,
                 open_issues_count,
                 open_prs_count,

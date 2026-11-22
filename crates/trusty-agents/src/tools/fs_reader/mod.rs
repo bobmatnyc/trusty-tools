@@ -1,28 +1,22 @@
-//! Read-only filesystem tools: `read_file`, `list_dir`, `grep_files`.
+//! The read-only `grep_files` tool, kept as `vector_search`'s fallback.
 //!
 //! Why: #34 — an "explorer" agent needs to understand existing code by
 //! reading files, listing directories, and searching content, WITHOUT any
 //! ability to modify the codebase or execute arbitrary code. Keeping each
 //! tool narrow and read-only lets the PM delegate "understand this code"
 //! tasks safely.
-//! What: Three `ToolExecutor`s, split into focused submodules (#361):
-//!   - `ReadFileTool { path }` -> file contents, truncated at 50k chars.
-//!   - `ListDirTool { path, show_hidden }` -> one-level directory listing.
-//!   - `GrepFilesTool { pattern, path, max_results }` -> ripgrep (if
-//!     available) falling back to walkdir+regex.
-//! All three reject paths outside the current working directory to prevent
-//! path traversal out of the project (see `cwd::resolve_within_cwd`).
+//! What: `GrepFilesTool { pattern, path, max_results }` -> ripgrep (if
+//! available) falling back to walkdir+regex. It rejects paths outside the
+//! current working directory (see `cwd::resolve_within_cwd`). #11632:
+//! `read_file` and `list_dir` were cut with the coding-tool surface; grep
+//! stays because `tools::memory::vector_search` falls back to it.
 //! Test: See the `tests` submodule — each tool has happy-path + traversal-
 //! rejection coverage.
 
 mod cwd;
 mod grep;
-mod list_dir;
-mod read_file;
 
 pub use grep::GrepFilesTool;
-pub use list_dir::ListDirTool;
-pub use read_file::ReadFileTool;
 
 #[cfg(test)]
 mod tests {
@@ -32,7 +26,7 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    use super::cwd::{READ_FILE_MAX_CHARS, resolve_within_cwd};
+    use super::cwd::resolve_within_cwd;
 
     #[allow(dead_code)]
     fn tempdir() -> PathBuf {
@@ -61,83 +55,6 @@ mod tests {
             msg.contains("escapes") || msg.contains("does not exist"),
             "got: {msg}"
         );
-    }
-
-    #[tokio::test]
-    async fn read_file_returns_contents() {
-        // Use Cargo.toml as a reliable fixture.
-        let tool = ReadFileTool::new();
-        let r = tool.execute(json!({"path": "Cargo.toml"})).await;
-        assert!(!r.is_error(), "unexpected: {}", r.content());
-        assert!(r.content().contains("trusty-agents"));
-    }
-
-    #[tokio::test]
-    async fn read_file_rejects_outside_cwd() {
-        let tool = ReadFileTool::new();
-        let r = tool.execute(json!({"path": "../"})).await;
-        assert!(r.is_error());
-    }
-
-    #[tokio::test]
-    async fn read_file_missing_path_arg() {
-        let tool = ReadFileTool::new();
-        let r = tool.execute(json!({})).await;
-        assert!(r.is_error());
-        assert!(r.content().contains("path"));
-    }
-
-    #[tokio::test]
-    async fn read_file_truncates_large_content() {
-        // Write a large file into a subdir of CWD, then read it back.
-        let cwd = std::env::current_dir().unwrap();
-        let target_dir = cwd.join("target").join("_fs_reader_test");
-        fs::create_dir_all(&target_dir).unwrap();
-        let target = target_dir.join("big.txt");
-        let body = "x".repeat(READ_FILE_MAX_CHARS + 1000);
-        fs::write(&target, &body).unwrap();
-
-        let rel = pathdiff::diff_or_absolute(&target, &cwd);
-        let tool = ReadFileTool::new();
-        let r = tool.execute(json!({"path": rel})).await;
-        assert!(!r.is_error(), "unexpected: {}", r.content());
-        assert!(r.content().contains("truncated"));
-    }
-
-    #[tokio::test]
-    async fn list_dir_shows_files() {
-        let tool = ListDirTool::new();
-        let r = tool.execute(json!({"path": "."})).await;
-        assert!(!r.is_error(), "unexpected: {}", r.content());
-        assert!(r.content().contains("Cargo.toml"));
-    }
-
-    #[tokio::test]
-    async fn list_dir_hides_dotfiles_by_default() {
-        // Create a tempdir inside CWD with a visible + hidden file.
-        let cwd = std::env::current_dir().unwrap();
-        let dir = cwd.join("target").join("_list_dir_dotfile");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("visible.txt"), "v").unwrap();
-        fs::write(dir.join(".hidden"), "h").unwrap();
-
-        let rel = pathdiff::diff_or_absolute(&dir, &cwd);
-        let tool = ListDirTool::new();
-        let default_r = tool.execute(json!({"path": rel.clone()})).await;
-        assert!(default_r.content().contains("visible.txt"));
-        assert!(!default_r.content().contains(".hidden"));
-
-        let shown_r = tool
-            .execute(json!({"path": rel, "show_hidden": true}))
-            .await;
-        assert!(shown_r.content().contains(".hidden"));
-    }
-
-    #[tokio::test]
-    async fn list_dir_rejects_outside_cwd() {
-        let tool = ListDirTool::new();
-        let r = tool.execute(json!({"path": "/"})).await;
-        assert!(r.is_error());
     }
 
     #[tokio::test]

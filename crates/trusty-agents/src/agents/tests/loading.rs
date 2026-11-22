@@ -2498,7 +2498,7 @@ fn assistant_reachable_floor_names_resolve_in_the_bundled_roster() {
         let parsed: AgentConfig =
             toml::from_str(&raw).unwrap_or_else(|e| panic!("{name}.toml must parse: {e}"));
         assert!(
-            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
                 .contains(&parsed.agent.role.as_str()),
             "'{name}' declares role '{}', which is not role-eligible — the whitelist \
              could never reach it",

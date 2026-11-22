@@ -41,7 +41,7 @@ impl ToolExecutor for KnowledgeHistoryTool {
             Ok(v) => v,
             Err(e) => return ToolResult::err(e.to_string()),
         };
-        match crate::api::server::knowledge_pipeline::assistant_history(
+        match crate::operations::knowledge_pipeline::assistant_history(
             &self.assistant,
             &request.action,
             request.revision,

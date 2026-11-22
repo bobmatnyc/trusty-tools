@@ -107,7 +107,7 @@ impl AgentStoreBinding {
     /// auto-generated digest at
     /// `crate::knowledge::mod::KnowledgeStore::initialize`, and the
     /// root-bound path at
-    /// `crate::api::server::knowledge_pipeline::Context::selected_store`,
+    /// `crate::operations::knowledge_pipeline::Context::selected_store`,
     /// which itself calls THIS function) and because trusty-search's own
     /// `IndexId` (`trusty-search::core::registry::IndexId`) derives
     /// `PartialEq`/`Eq` over the same plain `String` with no folding either

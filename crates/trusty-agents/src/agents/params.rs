@@ -113,7 +113,7 @@ pub struct AgentCompressConfig {
     /// prompt. `none` disables; `lite`/`full`/`ultra` apply increasing density.
     /// Default: `full` (drops articles + filler, keeps fragments).
     #[serde(default)]
-    pub output_style: crate::compress::OutputStyle,
+    pub output_style: OutputStyle,
 }
 
 impl Default for AgentCompressConfig {
@@ -122,7 +122,7 @@ impl Default for AgentCompressConfig {
             enabled: true,
             token_budget: default_compress_token_budget(),
             compress_task: false,
-            output_style: crate::compress::OutputStyle::default(),
+            output_style: OutputStyle::default(),
         }
     }
 }
@@ -539,4 +539,25 @@ fn default_prompt_caching() -> bool {
 
 fn default_max_turns() -> u32 {
     20
+}
+
+/// Output-style compression level a manifest's `[compress] output_style` names.
+///
+/// Why: the manifest keeps the key, so a parse must still accept it.
+/// #11632: the prompt fragments this selected were cut with the agent loop
+/// (`compress::output_prompt`); only the parsed value remains.
+/// What: `none`, `lite`, `full` (the default) or `ultra`.
+/// Test: `agents::tests` manifest round trips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputStyle {
+    /// Disabled.
+    None,
+    /// Drop filler but keep full grammar.
+    Lite,
+    /// Fragments, no articles.
+    #[default]
+    Full,
+    /// Telegraphic.
+    Ultra,
 }

@@ -52,7 +52,7 @@ pub const FALLBACK_MEDIA_TYPE: &str = "application/octet-stream";
 /// the SAME constant, because a request that may stage more files than a turn
 /// may reference would accept work that can never be used.
 /// Test: `super::tests::store_tests::store_all_refuses_more_than_the_cap`,
-/// `crate::api::server::tests::attachments::send_refuses_too_many_attachments`.
+/// `crate::operations::tests::attachments::send_refuses_too_many_attachments`.
 pub const MAX_ATTACHMENTS_PER_TURN: usize = 8;
 
 /// One file as it arrived, before any guard has looked at it.

@@ -84,7 +84,7 @@ fn role_is_normalized_and_fails_closed() {
         "an unmappable declared role must not survive verbatim"
     );
     assert!(
-        !crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+        !crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
             .contains(&cfg.agent.role.as_str()),
         "the fail-closed sentinel must never be role-eligible"
     );
@@ -351,7 +351,7 @@ fn unmappable_agent_type_still_fails_closed() {
         crate::agents::claude_mpm_role::UNMAPPED_ROLE
     );
     assert!(
-        !crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+        !crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
             .contains(&cfg.agent.role.as_str())
     );
 }
@@ -410,7 +410,7 @@ impl crate::tools::traits::AgentRunner for RecordingRunner {
         Ok(crate::tools::traits::AgentOutput {
             content: "ok".into(),
             summary: None,
-            usage: crate::perf::TokenUsage::default(),
+            usage: trusty_agents_common::perf::TokenUsage::default(),
         })
     }
 }
@@ -467,7 +467,7 @@ async fn normalized_mpm_role_still_reaches_nothing() {
     let projected = load_mpm_agent(&path).expect("loads");
     assert_eq!(projected.agent.role, "ops", "the newly-derived role");
     assert!(
-        crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+        crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
             .contains(&projected.agent.role.as_str()),
         "precondition: this role IS in the coarse allowlist, so the role gate \
          cannot be what refuses the delegation below"
@@ -491,13 +491,13 @@ async fn normalized_mpm_role_still_reaches_nothing() {
     let tool = crate::tools::delegate::DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![roster.path().to_path_buf()])
         .with_allowed_target_roles(
-            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
         )
         .with_delegator(
-            crate::runtime::tool_registry::ASSISTANT_TIER_ROLE,
+            crate::agents::delegation::ASSISTANT_TIER_ROLE,
             crate::agents::AgentTier::L0Orchestration,
             crate::tools::subagent_allow::SubagentAllowSet::over(
                 crate::agents::delegation::ASSISTANT_REACHABLE_SUBAGENTS,

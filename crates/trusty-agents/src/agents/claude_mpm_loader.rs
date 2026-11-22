@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -21,7 +20,6 @@ use serde::Deserialize;
 use crate::agents::{
     AgentConfig, AgentInfo, LlmParams, RunnerKind, SystemPrompt, ToolChoice, ToolsConfig,
 };
-use crate::llm::adapter::adapter_for_model;
 
 /// Default model used when a claude-mpm agent file does not specify one.
 const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4-6";
@@ -100,8 +98,6 @@ impl ClaudeMpmAgent {
     /// `to_agent_config_carries_the_normalized_role`,
     /// `to_agent_config_role_fails_closed_for_an_unmappable_declaration`.
     pub fn to_agent_config(&self) -> AgentConfig {
-        let adapter: Arc<dyn crate::llm::adapter::ModelAdapter> =
-            Arc::from(adapter_for_model(&self.model));
         AgentConfig {
             agent: AgentInfo {
                 name: self.name.clone(),
@@ -160,7 +156,6 @@ impl ClaudeMpmAgent {
             rbac: crate::agents::RbacConfig::default(),
             workstreams: crate::agents::WorkstreamContextConfig::default(),
             declared: Default::default(),
-            adapter,
             residual_listeners: None,
             channels: Vec::new(),
             // #3816: claude-mpm agents carry no `[[stores]]` table — an
@@ -475,7 +470,7 @@ mod tests {
         let role = agent.to_agent_config().agent.role;
         assert_eq!(role, crate::agents::claude_mpm_role::UNMAPPED_ROLE);
         assert!(
-            !crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            !crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
                 .contains(&role.as_str()),
             "an unmappable claude-mpm agent must stay role-ineligible, exactly \
              as it was before #4502"

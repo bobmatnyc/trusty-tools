@@ -16,22 +16,17 @@
 //! What: [`LogDrainConfig`] is the `[log_drain]` section of
 //! `~/.trusty-agents/config.toml` (same field names as trusty-mpm's
 //! `log_drain:` section); [`resolve_log_drain`] turns it into a runnable
-//! [`LogDrainSetting`]; [`spawn`] starts the interval loop from
-//! `api::server::routes::serve_with_config`, beside `listeners::poll::spawn_listeners`.
-//! The drain CORE — `collect`, the manifest, `put`, `run_once` — is
-//! `trusty_common::log_drain`; nothing here reimplements it.
+//! [`LogDrainSetting`]. #11632: the scheduler that ran it lived in the cut
+//! `--api` daemon; the section still parses so a config round trip keeps it.
 //!
-//! Test: `resolve::tests`, `scheduler::tests`.
+//! Test: `resolve::tests`.
 //!
 //! [`LogDrainConfig`]: crate::log_drain::LogDrainConfig
 //! [`resolve_log_drain`]: crate::log_drain::resolve_log_drain
 //! [`LogDrainSetting`]: crate::log_drain::LogDrainSetting
-//! [`spawn`]: crate::log_drain::spawn
 
 mod resolve;
-mod scheduler;
 
 pub use resolve::{
     LogDrainConfig, LogDrainConfigError, LogDrainSetting, ResolvedLogDrain, resolve_log_drain,
 };
-pub use scheduler::spawn;

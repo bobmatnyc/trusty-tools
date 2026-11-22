@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 /// keeps it in step with `perf::pricing`. This is now a thin adapter, kept
 /// only so the two statusline call sites and the daily-total writer share one
 /// spelling of "cost for this session".
-/// What: Delegates to [`crate::perf::cost_usd`] — the single pricing entry
+/// What: Delegates to [`crate::usage::pricing::cost_usd`] — the single pricing entry
 /// point — passing `0` for both cache buckets. The REPL's `TokenUpdate` feed
 /// carries only in/out counts today; when #4101 threads cache tokens through
 /// `UsageRecord`, this call gains them rather than growing a rate of its own.
@@ -33,7 +33,7 @@ use std::path::{Path, PathBuf};
 /// `cost_from_tokens_matches_pricing_entry_point`.
 pub fn cost_from_tokens(model: &str, prompt: u64, completion: u64) -> f64 {
     // #4098: one pricing table for the whole crate — see perf::pricing's doc.
-    crate::perf::cost_usd(model, prompt, completion, 0, 0)
+    crate::usage::pricing::cost_usd(model, prompt, completion, 0, 0)
 }
 
 /// Persisted shape of `.trusty-agents/state/usage.json`.
@@ -151,7 +151,7 @@ mod tests {
     fn cost_from_tokens_matches_pricing_entry_point() {
         for model in ["anthropic/claude-sonnet-4-6", "claude-haiku-4", "mystery/x"] {
             let via_daily = cost_from_tokens(model, 12_345, 6_789);
-            let via_pricing = crate::perf::cost_usd(model, 12_345, 6_789, 0, 0);
+            let via_pricing = crate::usage::pricing::cost_usd(model, 12_345, 6_789, 0, 0);
             assert!(
                 (via_daily - via_pricing).abs() < f64::EPSILON,
                 "{model}: daily={via_daily} pricing={via_pricing}"

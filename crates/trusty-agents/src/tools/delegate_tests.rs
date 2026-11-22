@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::DelegateToAgentTool;
-use crate::perf::TokenUsage;
+use trusty_agents_common::perf::TokenUsage;
 use crate::tools::traits::{AgentOutput, AgentRunner, ToolExecutor};
 
 /// Mock runner that records whether it was invoked and with what args.
@@ -1123,7 +1123,7 @@ async fn delegate_assistant_reaches_a_whitelisted_sub_agent() {
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
         .with_allowed_target_roles(
-            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
                 .iter()
                 .map(|r| (*r).to_string())
                 .collect(),
@@ -1241,7 +1241,7 @@ async fn delegate_assistant_whitelist_cannot_widen_past_the_floor() {
     let tool = DelegateToAgentTool::new(runner.clone())
         .with_config_dirs(vec![dir.path().to_path_buf()])
         .with_allowed_target_roles(
-            crate::runtime::tool_registry::ASSISTANT_ALLOWED_DELEGATE_ROLES
+            crate::agents::delegation::ASSISTANT_ALLOWED_DELEGATE_ROLES
                 .iter()
                 .map(|r| (*r).to_string())
                 .collect(),

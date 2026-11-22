@@ -199,8 +199,8 @@ async fn a_credentialed_tool_write_stores_and_audits() {
     unsafe {
         std::env::set_var("HOME", home.path());
     }
-    let restore = crate::api::server::channel_auth::daemon_credential();
-    crate::api::server::channel_auth::record_daemon_credential(Some("recorded".into()));
+    let restore = crate::operations::channel_auth::daemon_credential();
+    crate::operations::channel_auth::record_daemon_credential(Some("recorded".into()));
 
     let tool = ChannelTool::new("fixture");
     let listed = tool
@@ -254,7 +254,7 @@ async fn a_credentialed_tool_write_stores_and_audits() {
         .await;
     assert!(stale.is_error(), "a stale revision is refused");
 
-    crate::api::server::channel_auth::record_daemon_credential(restore);
+    crate::operations::channel_auth::record_daemon_credential(restore);
 }
 
 /// A `tracing` writer that keeps every emitted line in memory.

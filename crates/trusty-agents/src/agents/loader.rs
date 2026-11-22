@@ -10,13 +10,11 @@
 //! `agent_directory_package_loads_correctly`, `agent_config_path_honors_env_var`).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
 use super::config::AgentConfig;
 use super::model::{CTRL_DEFAULT_TOML, resolve_model};
-use crate::llm::adapter::adapter_for_model;
 
 /// Reject an agent `name` that could path-traverse outside the agents
 /// directory (#3303 code-critic HIGH finding).
@@ -358,7 +356,6 @@ impl AgentConfig {
         )?;
         self.agent.model = resolved;
         self.apply_provider_pin()?;
-        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
         Ok(self)
     }
 
@@ -536,10 +533,10 @@ impl AgentConfig {
     /// behaviour: assign, rebuild, no validation.
     /// Test: `override_model_repins_a_pinned_agent`,
     /// `override_model_leaves_an_unpinned_agent_alone`.
+    #[allow(dead_code)] // #11632: its callers (the `/model` route, the runners) were cut.
     pub(crate) fn override_model(&mut self, model: &str) -> Result<()> {
         self.agent.model = model.to_string();
         self.apply_provider_pin()?;
-        self.adapter = Arc::from(adapter_for_model(&self.agent.model));
         Ok(())
     }
 
@@ -763,7 +760,6 @@ impl AgentConfig {
         // never the pre-pin one).
         cfg.apply_provider_pin()
             .with_context(|| format!("in {}", path.display()))?;
-        cfg.adapter = Arc::from(adapter_for_model(&cfg.agent.model));
         // Validate stop_sequences against API limits (#327).
         // Anthropic caps at 8 sequences (≤ 8191 chars each); Bedrock at 4.
         // We use 8 as the permissive upper bound here — the Bedrock caller
@@ -803,25 +799,10 @@ impl AgentConfig {
                 );
             }
         }
-        let endpoint = cfg.adapter.api_endpoint(cfg.llm.use_anthropic_direct);
-        let endpoint_host = endpoint
-            .base_url
-            .split("://")
-            .nth(1)
-            .and_then(|rest| rest.split('/').next())
-            .unwrap_or(endpoint.base_url.as_str())
-            .to_string();
-        let routing = if endpoint.auth_header_name == "x-api-key" {
-            "direct"
-        } else {
-            "openrouter"
-        };
         tracing::debug!(
             agent = %cfg.agent.name,
             model = %cfg.agent.model,
             source = source.as_tag(),
-            endpoint = %endpoint_host,
-            routing = %routing,
             "resolved model"
         );
         Ok(cfg)
@@ -1051,7 +1032,7 @@ fn load_agent_package(dir: &Path, name: &str) -> Result<Option<AgentConfig>> {
         .with_context(|| format!("failed to read agent persona {}", persona_path.display()))?;
     // #9014: a bundled persona carries `metadata: {version}` frontmatter
     // (ADR-0064); the prompt is the body only.
-    let mut prompt = crate::skills::strip_frontmatter(&raw_persona).to_owned();
+    let mut prompt = crate::agents::persona::strip_frontmatter(&raw_persona).to_owned();
     let skills_path = pkg_dir.join("skills.md");
     if skills_path.exists() {
         let skills = std::fs::read_to_string(&skills_path)

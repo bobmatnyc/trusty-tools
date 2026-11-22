@@ -15,6 +15,8 @@
 
 pub mod aggregate;
 pub mod daily;
+// #11632: the pricing table, moved from the cut `perf` module.
+pub mod pricing;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;

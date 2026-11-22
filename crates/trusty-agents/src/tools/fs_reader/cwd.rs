@@ -10,8 +10,6 @@
 
 use std::path::{Path, PathBuf};
 
-/// Maximum characters returned by `read_file` before truncation.
-pub(super) const READ_FILE_MAX_CHARS: usize = 50_000;
 /// Default `max_results` for `grep_files`.
 pub(super) const GREP_DEFAULT_MAX_RESULTS: usize = 50;
 /// Hard cap on `max_results` to bound result size regardless of caller.

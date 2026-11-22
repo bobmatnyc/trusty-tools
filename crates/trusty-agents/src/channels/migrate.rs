@@ -275,7 +275,7 @@ fn global_channels_to_write(
 /// Drain one assistant's `agent.toml` `[[listeners]]` into its channels file.
 ///
 /// Why: the per-assistant half of the same merge. It writes through the shape
-/// `crate::api::server::agent_channels` already reads, so the channel view and
+/// `crate::operations::agent_channels` already reads, so the channel view and
 /// every existing consumer see the migrated bindings without a format change.
 /// What: returns `Ok(None)` when `agent.toml` is absent, declares no
 /// `[[listeners]]`, when the channels file already exists, or when no binding
@@ -545,7 +545,7 @@ pub fn migrate_assistant_channels(
     let mut reports = Vec::new();
     for id in crate::assistants::discover_instances(dirs) {
         let Some((manifest, _)) =
-            crate::api::server::agent_patch::resolve_agent_paths(dirs, id.as_str())
+            crate::operations::agent_paths::resolve_agent_paths(dirs, id.as_str())
         else {
             continue;
         };
@@ -740,7 +740,7 @@ pub fn backfill_route_to(
 /// What: the binding's provider comes from the global channel it names, through
 /// [`super::adapter_id`] — a Gmail listener's provider is its `connector`,
 /// `gmail`, while the adapter that addresses its events is `gworkspace`. The
-/// gate is [`crate::api::server::agent_channels::Binding::validate_in`], the
+/// gate is [`crate::operations::agent_channels::Binding::validate_in`], the
 /// same check the read path applies, rather than a target check that agreed
 /// with it only by coincidence. An OVERLAY (the global is account-wide, so the
 /// binding has no destination of its own) passes that gate as of slice 4 and is
@@ -752,7 +752,7 @@ pub fn backfill_route_to(
 fn storable_records(
     bindings: Vec<AgentListenerBinding>,
     globals: &[Channel],
-) -> Vec<crate::api::server::agent_channels::Binding> {
+) -> Vec<crate::operations::agent_channels::Binding> {
     let mut records = Vec::new();
     for binding in bindings {
         let Some(global) = globals
@@ -771,7 +771,7 @@ fn storable_records(
         if !channel.target.is_empty() {
             channel.credential_ref = global.credential_ref.clone();
         }
-        let record: crate::api::server::agent_channels::Binding = (&channel).into();
+        let record: crate::operations::agent_channels::Binding = (&channel).into();
         if record.validate_in(globals).is_err() {
             tracing::info!(
                 channel = %channel.id,
