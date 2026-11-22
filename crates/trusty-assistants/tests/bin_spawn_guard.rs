@@ -108,7 +108,8 @@ fn a_direct_spawn_is_flagged_and_a_comment_is_not() {
     assert!(violations(HELPER, &planted).is_empty());
 }
 
-/// Why: this binary's own `$HOME` is the sandbox, not the real home.
+/// Why: this binary's own `$HOME` is the sandbox, not the real home, and no
+/// path-override variable in `common::SANDBOX_SCRUB` survives to redirect it.
 /// Test: itself.
 #[test]
 fn this_test_binary_runs_under_the_sandbox() {
@@ -120,6 +121,10 @@ fn this_test_binary_runs_under_the_sandbox() {
         "HOME is not a temp dir: {}",
         home.display()
     );
-    assert!(std::env::var_os("TA_ASSISTANTS_DIR").is_none());
-    assert!(std::env::var_os("TAGENT_ASSISTANTS_DIR").is_none());
+    let set: Vec<&str> = common::SANDBOX_SCRUB
+        .iter()
+        .copied()
+        .filter(|key| std::env::var_os(key).is_some())
+        .collect();
+    assert!(set.is_empty(), "path-override variables still set: {set:?}");
 }

@@ -413,7 +413,7 @@ mod tests {
     /// What: with `HOME_LOCK` held, the process-start hook has recorded its
     /// sandbox under the temp dir, `HOME` is under the temp dir too (tests
     /// that point it at their own temp dir may leave it there), and the
-    /// assistants-root variables are unset.
+    /// variables in `SANDBOX_SCRUB` are unset.
     /// Test: itself.
     #[test]
     fn test_process_home_is_a_sandbox() {
@@ -429,8 +429,12 @@ mod tests {
             home.as_ref().is_some_and(|h| h.starts_with(&tmp)),
             "HOME must be under the temp dir: {home:?}"
         );
-        assert!(std::env::var_os("TA_ASSISTANTS_DIR").is_none());
-        assert!(std::env::var_os("TAGENT_ASSISTANTS_DIR").is_none());
+        let set: Vec<&str> = SANDBOX_SCRUB
+            .iter()
+            .copied()
+            .filter(|key| std::env::var_os(key).is_some())
+            .collect();
+        assert!(set.is_empty(), "path-override variables still set: {set:?}");
     }
 
     /// #3957: acquiring `lock_home()` inside a multi-threaded tokio runtime

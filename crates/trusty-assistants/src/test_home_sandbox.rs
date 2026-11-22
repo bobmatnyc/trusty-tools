@@ -6,8 +6,7 @@
 // binary starts under a throwaway home whatever it forgets.
 // What: from the platform initializer (`__mod_init_func` on macOS,
 // `.init_array` on Linux) points `HOME` at a fresh `<tmp>/ta-test-home-<pid>`,
-// drops `USERPROFILE`, `TA_ASSISTANTS_DIR` and `TAGENT_ASSISTANTS_DIR`, and
-// records the path in `TA_TEST_HOME_SANDBOX`. A child test process that
+// removes every variable in `SANDBOX_SCRUB`, and records the path in `TA_TEST_HOME_SANDBOX`. A child test process that
 // inherits the marker keeps the environment its parent chose for it. The
 // directory is removed at exit. A failure to create it aborts the process
 // rather than let tests run against the real home.
@@ -19,6 +18,37 @@
 
 /// Set once the sandbox is in place; see the comment at the top of this file.
 const TEST_HOME_SANDBOX_MARKER: &str = "TA_TEST_HOME_SANDBOX";
+
+/// Every variable that can point this crate, or a library it calls, at a
+/// directory or socket outside `$HOME`.
+///
+/// Why (#11632 review): `HOME` alone is not the whole story. On Linux
+/// `dirs::data_dir()` prefers `XDG_DATA_HOME`, and the crate's own resolvers
+/// honour the overrides below before `HOME`, so a test run with any of them
+/// exported would still write to real directories.
+/// What: removed by the process-start hook and by `tests/common::sandboxed`
+/// for every spawned binary; both guards assert each one is unset.
+/// Found by grepping `env::var`/`var_os`/`env_var` under `src/` plus the
+/// `dirs` and `trusty-common` data-dir resolvers.
+pub const SANDBOX_SCRUB: &[&str] = &[
+    "USERPROFILE",
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+    "XDG_RUNTIME_DIR",
+    "TA_ASSISTANTS_DIR",
+    "TAGENT_ASSISTANTS_DIR",
+    "TAGENT_CONFIG_DIR",
+    "OPEN_MPM_CONFIG_DIR",
+    "TAGENT_PROJECT_DIR",
+    "OPEN_MPM_PROJECT_DIR",
+    "TRUSTY_DATA_DIR_OVERRIDE",
+    "KB_KNOWLEDGE_DIR",
+    "KB_ROOT",
+    "FASTEMBED_CACHE_DIR",
+    "TRUSTY_MEMORY_SOCKET",
+];
 
 extern "C" fn sandbox_test_home() {
     if std::env::var_os(TEST_HOME_SANDBOX_MARKER).is_some() {
@@ -33,9 +63,9 @@ extern "C" fn sandbox_test_home() {
     // the process has exactly one thread.
     unsafe {
         std::env::set_var("HOME", &home);
-        std::env::remove_var("USERPROFILE");
-        std::env::remove_var("TA_ASSISTANTS_DIR");
-        std::env::remove_var("TAGENT_ASSISTANTS_DIR");
+        for key in SANDBOX_SCRUB {
+            std::env::remove_var(key);
+        }
         std::env::set_var(TEST_HOME_SANDBOX_MARKER, &home);
         libc::atexit(remove_sandbox_test_home);
     }
