@@ -1,2 +1,0 @@
-Added
-- The Rust poller now raises the `token` alert kind: a port of the deployed `token_watch.step` (context buckets, cache-hit ratio, idle and unexpected cache misses, polling, polling rate, Opus share, burn, session churn, fan-out, watcher degraded), with its fingerprints, 24 h fired dedupe, rule cooldowns and the `token` 3600 s re-emit. Live runs share `inbox/token-watch-state.json` and write `local/usage/token-hourly.jsonl`; a shadow run keeps its own seeded copy and writes no rollup (MB1595 fix round).

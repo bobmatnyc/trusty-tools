@@ -6,6 +6,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.0.2] — 2026-11-23
+
+### Fixed
+
+- A palace open can no longer hang while it rebuilds the vector index. The workspace now builds a patched `hnsw_rs` 0.3.4 that releases a lock before it updates neighbouring points, so parallel replay stays fast and cannot deadlock (#10682).
+- The idle-evict sweep keeps a palace whose last open took 1 s or more, so the first call after an idle period no longer re-opens it past the client's 5 s exchange and fails with a broken pipe (#11613).
+- Every per-palace tool (`memory_remember`, `memory_note`, `memory_recall`, `memory_list`, `memory_forget`, the `kg_*` and `task_*` tools) now waits at most 3 s for a palace that is not resident, then answers `-32007` (`palace_opening`) while the open continues in the background. The handler has not run, so a refused write is safe to re-send (#11613).
+
+### Documentation
+
+- Comments and examples use neutral `acme` org names.
+
 ## [1.0.1] — 2026-11-16
 
 ### Fixed
