@@ -6,8 +6,8 @@
 //! stdio MCP server and the daemon-less `config` verbs, which were already
 //! dispatched ahead of the old startup path.
 //! What: [`run`] routes argv to `--version`, `--help`, `config …`,
-//! `config profile …` or `mcp-serve`; anything else is a usage error. No path
-//! here opens a network listener.
+//! `config profile …`, `mcp-serve`, `ask` or `ask-daemon` (#11650); anything
+//! else is a usage error. No path here opens a network listener.
 //! Test: `tests/version_provenance.rs`, `tests/help_exit_code.rs`,
 //! `tests/config_mount.rs`, `tests/no_network_listener.rs`.
 
@@ -43,7 +43,11 @@ const USAGE: &str = concat!(
     env!("TA_BIN_NAME"),
     " config profile <verb> Show or set the user profile\n  ",
     env!("TA_BIN_NAME"),
-    " mcp-serve             Serve the dispatch_task tool as a stdio MCP server\n",
+    " mcp-serve             Serve the dispatch_task tool as a stdio MCP server\n  ",
+    env!("TA_BIN_NAME"),
+    " ask <instance> <question…>\n                        Ask an assistant instance (starts its daemon on demand)\n  ",
+    env!("TA_BIN_NAME"),
+    " ask-daemon <instance> Run an instance's ask daemon (started by `ask`)\n",
 );
 
 /// Launch the binary: own the tokio runtime, run [`run`] on it, and tear the
@@ -79,6 +83,10 @@ enum Command {
     Config,
     ConfigProfile,
     McpServe,
+    /// #11650: `ask <instance> <question…>`.
+    Ask,
+    /// #11650: `ask-daemon <instance>`.
+    AskDaemon,
     Unknown(String),
 }
 
@@ -101,6 +109,8 @@ fn classify(args: &[String]) -> Command {
         }
         Some("config") => Command::Config,
         Some("mcp-serve") => Command::McpServe,
+        Some("ask") => Command::Ask,
+        Some(crate::ask::daemon::DAEMON_VERB) => Command::AskDaemon,
         Some(other) => Command::Unknown(other.to_string()),
     }
 }
@@ -128,6 +138,13 @@ pub async fn run() -> Result<()> {
         Command::Config => run_config_subcommand(&args[1..]).await,
         Command::ConfigProfile => run_config_profile_subcommand(&args[3..]),
         Command::McpServe => crate::mcp_serve::run_mcp_serve().await,
+        Command::Ask => run_ask(&args[2..]).await,
+        Command::AskDaemon => {
+            let Some(id) = args.get(2) else {
+                anyhow::bail!("usage: {BIN_NAME} ask-daemon <instance>");
+            };
+            Ok(crate::ask::daemon::run_daemon(id).await?)
+        }
         Command::Unknown(arg) => {
             eprint!("{USAGE}");
             anyhow::bail!(
@@ -135,6 +152,28 @@ pub async fn run() -> Result<()> {
             )
         }
     }
+}
+
+/// `ta ask <instance> <question…>`: print the instance's answer (#11650).
+///
+/// Why: the client half of slice 3b.
+/// What: the words after the instance id are joined into one question. The
+/// daemon is this executable (`ask-daemon`), started only when none serves
+/// the instance. Every failure is an error with a non-zero exit.
+/// Test: `ask_starts_the_daemon_on_demand_and_it_exits_idle`,
+/// `ask_names_an_unknown_instance` (`tests/ask_daemon.rs`).
+async fn run_ask(rest: &[String]) -> Result<()> {
+    use crate::ask::daemon::{DaemonLauncher, ask_instance};
+    let (Some(id), question) = (rest.first(), rest.get(1..).unwrap_or_default().join(" ")) else {
+        anyhow::bail!("usage: {BIN_NAME} ask <instance> <question…>");
+    };
+    if question.trim().is_empty() {
+        anyhow::bail!("usage: {BIN_NAME} ask <instance> <question…>");
+    }
+    let launcher = DaemonLauncher::current_exe()?;
+    let answer = ask_instance(None, id, &question, &launcher).await?;
+    println!("{answer}");
+    Ok(())
 }
 
 /// Parse and run the universal `config` command (#2405) from an argv tail.
@@ -306,6 +345,11 @@ mod tests {
             Command::ConfigProfile
         );
         assert_eq!(classify(&argv(&["mcp-serve", "-V"])), Command::Version);
+        assert_eq!(classify(&argv(&["ask", "izzie", "hi"])), Command::Ask);
+        assert_eq!(
+            classify(&argv(&["ask-daemon", "izzie"])),
+            Command::AskDaemon
+        );
     }
 
     /// Why (#11632): the binary is `ta`, and its name comes from the

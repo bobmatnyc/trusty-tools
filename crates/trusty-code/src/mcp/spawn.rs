@@ -52,11 +52,13 @@ pub struct Connected {
 /// a command that does not exist, a handshake that times out, a server that
 /// will not list its tools — comes back as `Err(reason)` for the caller to
 /// record as a per-server status, so one bad entry costs exactly itself.
-/// What: stdio only. `env` is overlaid on the inherited environment through
-/// `spawn_with_env`; its VALUES are never logged, here or in the returned
+/// What: stdio only. The child leads its own process group (#11650), so
+/// dropping the client kills a wrapper command's grandchildren too. `env` is
+/// overlaid on the inherited environment through `spawn_grouped_with_env`; its VALUES are never logged, here or in the returned
 /// reason, because they are credentials.
 /// Test: `super::tests::spawn_tests::a_remote_transport_is_refused_with_a_reason`,
 /// `super::tests::spawn_tests::a_missing_binary_is_refused_with_a_reason`,
+/// `super::tests::spawn_tests::a_wrapper_grandchild_dies_with_the_client`,
 /// `mcp_loader_e2e::spawn_failure_isolates_the_healthy_server`.
 pub async fn connect(server: &McpServerConfig) -> Result<Connected, String> {
     connect_within(server, HANDSHAKE_TIMEOUT).await
@@ -79,7 +81,9 @@ pub async fn connect_within(
 
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let envs: HashMap<String, String> = env.clone().into_iter().collect();
-    let mut client = StdioMcpClient::spawn_with_env(command, &arg_refs, CLIENT_NAME, &envs)
+    // #11650: own process group, so a wrapper's (`npx`, `uvx`) grandchild
+    // dies with the client.
+    let mut client = StdioMcpClient::spawn_grouped_with_env(command, &arg_refs, CLIENT_NAME, &envs)
         .await
         .map_err(|e| format!("could not start {command:?}: {e}"))?;
 

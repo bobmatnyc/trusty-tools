@@ -448,6 +448,10 @@ pub struct AssistantHomeConfig {
     /// [`super::project::set_project_dir`], which stores it canonical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_dir: Option<PathBuf>,
+    /// #11650: the ask engine's model and limits. See
+    /// [`crate::ask::AskSettings`]; absent means the defaults.
+    #[serde(default)]
+    pub ask: crate::ask::AskSettings,
 }
 
 /// The seeded `instructions.md` body for a fresh home.
