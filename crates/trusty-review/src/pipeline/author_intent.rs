@@ -7,13 +7,15 @@
 //! What: [`intent_section`] renders the intent and the grading rule as a
 //! prompt section. When the intent declares an as-is migration
 //! ([`declares_as_is_migration`]), [`withhold_carried_over`] withholds every
-//! low/medium finding whose quoted code sits verbatim on the diff's removed
-//! side, i.e. code the change moved rather than wrote. High and critical
-//! findings, and findings on new code, are kept. No intent: both are no-ops.
+//! low/medium finding whose non-trivial quoted code sits verbatim on both the
+//! removed and the added side, i.e. code the change moved rather than wrote.
+//! High, critical and unset-severity findings, and findings on new code, are
+//! kept. No intent: both are no-ops. Map-reduce reviews apply the prompt rule
+//! only; the gate runs on the single-pass path.
 //! Test: `author_intent_tests.rs`; end to end in
 //! `runner_author_intent_tests.rs`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crate::models::{Finding, Severity, WithheldFinding};
 
@@ -23,22 +25,42 @@ use crate::models::{Finding, Severity, WithheldFinding};
 pub const AS_IS_CARRYOVER_REASON: &str =
     "#10758 as-is carry-over: the quoted code is moved unchanged by a declared as-is migration";
 
-/// Phrases that mark an intent as an as-is (verbatim) migration.
-const AS_IS_MARKERS: [&str; 7] = [
-    "as-is",
-    "as is",
-    "verbatim",
-    "unchanged",
-    "lift-and-shift",
-    "lift and shift",
-    "no behavior change",
+/// Word sequences that mark an intent as an as-is (verbatim) migration.
+// #10758: whole-word sequences only; loose markers (`as is`, `unchanged`)
+// dropped because "public API unchanged" is not a migration declaration.
+const AS_IS_MARKERS: [&[&str]; 5] = [
+    &["as-is"],
+    &["verbatim"],
+    &["lift-and-shift"],
+    &["lift", "and", "shift"],
+    &["no", "behavior", "change"],
 ];
 
-/// Whether `intent` declares an as-is migration (case-insensitive phrase match).
-/// Test: `as_is_markers_are_recognised`.
+/// Words that negate a marker when one sits within [`NEGATION_WINDOW`] words
+/// before it ("not an as-is port", "rewrite, not verbatim").
+const NEGATIONS: [&str; 6] = ["not", "no", "never", "non", "without", "isn"];
+
+/// How many words before a marker the negation guard inspects.
+const NEGATION_WINDOW: usize = 3;
+
+/// Whether `intent` declares an as-is migration.
+///
+/// What: lowercases and splits `intent` into words (alphanumerics and `-`),
+/// then looks for a whole-word [`AS_IS_MARKERS`] sequence with no
+/// [`NEGATIONS`] word in the [`NEGATION_WINDOW`] words before it.
+/// Test: `as_is_markers_are_recognised`, `negated_or_loose_intent_is_not_as_is`.
 pub fn declares_as_is_migration(intent: &str) -> bool {
     let lower = intent.to_lowercase();
-    AS_IS_MARKERS.iter().any(|m| lower.contains(m))
+    let words: Vec<&str> = lower
+        .split(|c: char| !(c.is_alphanumeric() || c == '-'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    (0..words.len()).any(|i| {
+        AS_IS_MARKERS.iter().any(|m| words[i..].starts_with(m))
+            && !words[i.saturating_sub(NEGATION_WINDOW)..i]
+                .iter()
+                .any(|w| NEGATIONS.contains(w))
+    })
 }
 
 /// The `## Author Intent` prompt section, or `""` when `intent` is blank.
@@ -74,21 +96,27 @@ pub fn with_intent_section(intent: Option<&str>, sections: String) -> String {
     }
 }
 
+/// Minimum alphanumeric characters a quote needs before the gate may withhold
+/// it; `}` or `return;` match anywhere and prove nothing (#10758).
+const MIN_QUOTE_ALNUM: usize = 10;
+
 /// Withhold low/medium findings on code an as-is migration only moved.
 ///
 /// Why: a declared as-is migration copies legacy code on purpose; a finding
 /// that only restates that code's style or design is not a defect of the
 /// change. A finding on code the change wrote, or a high/critical one, stays.
-/// What: no-op unless `intent` declares an as-is migration. Builds the set of
-/// trimmed removed (`-`) lines of `raw_diff`. A finding is carried over when
-/// its severity is `Low`/`Medium` (or unset) and every non-blank line of its
-/// `quoted_snippet` is in that set; it moves to `withheld` with
-/// [`AS_IS_CARRYOVER_REASON`]. Order of the kept findings is unchanged.
-/// Returns the number withheld.
+/// What: no-op unless `intent` declares an as-is migration. Counts the
+/// trimmed removed (`-`) and added (`+`) lines of `raw_diff`. A finding is
+/// carried over when its severity is `Some(Low | Medium)`, its quote has at
+/// least [`MIN_QUOTE_ALNUM`] alphanumeric characters, and every trimmed
+/// non-blank quote line occurs on both sides at least as often as in the
+/// quote; it moves to `withheld` with [`AS_IS_CARRYOVER_REASON`]. Order of
+/// the kept findings is unchanged. Returns the number withheld.
 /// Postcondition: `findings.len() + returned == findings_before.len()`.
 /// Test: `carried_over_style_finding_is_withheld`,
 /// `introduced_bug_on_new_code_is_kept`, `no_intent_withholds_nothing`,
-/// `high_severity_carry_over_is_kept`.
+/// `high_severity_carry_over_is_kept`, `changed_context_or_trivial_quote_is_kept`,
+/// `unset_severity_is_kept`.
 pub fn withhold_carried_over(
     intent: Option<&str>,
     raw_diff: &str,
@@ -98,14 +126,15 @@ pub fn withhold_carried_over(
     if !intent.is_some_and(declares_as_is_migration) {
         return 0;
     }
-    let removed = removed_lines(raw_diff);
-    if removed.is_empty() {
+    let removed = side_lines(raw_diff, '-', "---");
+    let added = side_lines(raw_diff, '+', "+++");
+    if removed.is_empty() || added.is_empty() {
         return 0;
     }
     let before = findings.len();
     let mut kept = Vec::with_capacity(before);
     for f in std::mem::take(findings) {
-        if is_carried_over(&f, &removed) {
+        if is_carried_over(&f, &removed, &added) {
             withheld.push(WithheldFinding {
                 finding: f,
                 reason: AS_IS_CARRYOVER_REASON.to_string(),
@@ -123,29 +152,48 @@ pub fn withhold_carried_over(
     dropped
 }
 
-/// The trimmed, non-blank removed lines of a unified diff.
-fn removed_lines(raw_diff: &str) -> HashSet<&str> {
-    raw_diff
-        .lines()
-        .filter(|l| l.starts_with('-') && !l.starts_with("---"))
-        .map(|l| l[1..].trim())
-        .filter(|l| !l.is_empty())
-        .collect()
+/// Occurrence counts of the trimmed, non-blank lines on one side of a diff:
+/// lines starting with `marker` but not the file header `header`.
+fn side_lines<'a>(raw_diff: &'a str, marker: char, header: &str) -> HashMap<&'a str, usize> {
+    let mut counts = HashMap::new();
+    for l in raw_diff.lines() {
+        if let Some(body) = l.strip_prefix(marker).filter(|_| !l.starts_with(header)) {
+            let body = body.trim();
+            if !body.is_empty() {
+                *counts.entry(body).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
 }
 
-/// Whether `f` is a low/medium finding whose whole quote is on removed lines.
-fn is_carried_over(f: &Finding, removed: &HashSet<&str>) -> bool {
-    if matches!(f.severity, Some(Severity::High | Severity::Critical)) {
+/// Whether `f` is a low/medium finding whose whole, non-trivial quote is
+/// moved unchanged: on both diff sides with sufficient counts.
+fn is_carried_over(
+    f: &Finding,
+    removed: &HashMap<&str, usize>,
+    added: &HashMap<&str, usize>,
+) -> bool {
+    // #10758: only an explicit low/medium severity may be withheld; unset is kept.
+    if !matches!(f.severity, Some(Severity::Low | Severity::Medium)) {
         return false;
     }
     let Some(quote) = f.quoted_snippet.as_deref() else {
         return false;
     };
-    let mut lines = quote.lines().map(str::trim).filter(|l| !l.is_empty());
-    let Some(first) = lines.next() else {
+    // #10758: a trivial quote (`}`, `return;`) matches anywhere; keep it.
+    if quote.chars().filter(|c| c.is_alphanumeric()).count() < MIN_QUOTE_ALNUM {
         return false;
-    };
-    removed.contains(first) && lines.all(|l| removed.contains(l))
+    }
+    let mut need: HashMap<&str, usize> = HashMap::new();
+    for l in quote.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        *need.entry(l).or_insert(0) += 1;
+    }
+    // #10758: both sides, with counts, so code moved into new context is kept.
+    !need.is_empty()
+        && need.iter().all(|(l, n)| {
+            removed.get(l).copied().unwrap_or(0) >= *n && added.get(l).copied().unwrap_or(0) >= *n
+        })
 }
 
 #[cfg(test)]

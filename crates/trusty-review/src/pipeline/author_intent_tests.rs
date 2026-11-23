@@ -91,3 +91,46 @@ fn no_intent_withholds_nothing() {
         assert_eq!(findings.len(), 1);
     }
 }
+
+// #10758: negated or loose wording must not switch the gate on.
+#[test]
+fn negated_or_loose_intent_is_not_as_is() {
+    for intent in [
+        "this is not an as-is port",
+        "rewrite, not verbatim",
+        "public API unchanged",
+        "use the data as is",
+    ] {
+        assert!(!declares_as_is_migration(intent), "{intent}");
+    }
+    assert!(declares_as_is_migration("verbatim port"));
+}
+
+// #10758: a quote only on the removed side (moved into new context), a quote
+// whose repeat count the added side lacks, and a trivial quote are all kept.
+#[test]
+fn changed_context_or_trivial_quote_is_kept() {
+    let diff = "--- a/x.js\n+++ b/x.js\n@@ -1,4 +1,4 @@\n\
+                -  doWork(items);\n-  retryOnce(items);\n-  retryOnce(items);\n-  }\n\
+                +  if (flag) { doWork(items); }\n+  retryOnce(items);\n+  }\n";
+    for quote in [
+        "doWork(items);",
+        "retryOnce(items);\nretryOnce(items);",
+        "}",
+    ] {
+        let mut findings = vec![finding(quote, Severity::Low)];
+        let mut withheld = Vec::new();
+        withhold_carried_over(Some("as-is migration"), diff, &mut findings, &mut withheld);
+        assert!(withheld.is_empty(), "{quote}");
+        assert_eq!(findings.len(), 1);
+    }
+}
+
+// #10758: an unset severity is never withheld.
+#[test]
+fn unset_severity_is_kept() {
+    let mut findings = vec![finding(LEGACY, Severity::Low)];
+    findings[0].severity = None;
+    assert!(gate(Some("as-is legacy migration"), &mut findings).is_empty());
+    assert_eq!(findings.len(), 1);
+}
