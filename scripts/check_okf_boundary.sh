@@ -142,7 +142,7 @@ banned_src() {
 # #10746 S13: trusty-connectors holds the import adapters and their Google
 # credential; the edge runs trusty-connectors -> trusty-okf only.
 banned_deps c11_no_agent_or_connector_deps "$TMP/all" \
-  'trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services|trusty-connectors'
+  'trusty-assistants|trusty-agents|trusty-agents-common|trusty-agents-ui|trusty-mcp|trusty-mcp-services|trusty-gworkspace|trusty-channels|trusty-kb|tc-services|trusty-connectors'
 
 # B3 (env/home), B4 (agent home layout), B5 (index lifecycle and names).
 # #10746 H2: B3 bars deriving a path from an environment variable, so the bare
@@ -150,10 +150,11 @@ banned_deps c11_no_agent_or_connector_deps "$TMP/all" \
 # `use std::{env as e}`, a multi-line group) and env!/option_env! spell it.
 # #10746 H3: a string literal naming trusty-agents anywhere in it, matched
 # from either quote so a literal split across lines is still caught.
+# #11632: the crate's new name, trusty-assistants, is banned the same way.
 banned_src c12_no_agent_paths_or_index_names \
-  '\benv\b|knowledge_dir|TRUSTY_AGENTS_HOME|KB_KNOWLEDGE_DIR|home_dir|\.trusty-agents|"[^"]*trusty-agents|trusty-agents[^"]*"|\bokg\b|stores/|assistant-okg-|search\.index\.create|search\.index\.delete'
+  '\benv\b|knowledge_dir|TRUSTY_AGENTS_HOME|KB_KNOWLEDGE_DIR|home_dir|\.trusty-agents|"[^"]*trusty-agents|trusty-agents[^"]*"|\.trusty-assistants|"[^"]*trusty-assistants|trusty-assistants[^"]*"|\bokg\b|stores/|assistant-okg-|search\.index\.create|search\.index\.delete'
 
-# B6: connector-specific Locator variants stay in trusty-agents.
+# B6: connector-specific Locator variants stay in trusty-assistants.
 banned_src c13_no_connector_locator_variants '\bGmail\b|\bDrive\b'
 
 # B6: no credential handling.
@@ -192,7 +193,7 @@ fi
 # B9: no extraction backend is ever linked, under any feature.
 banned_deps b9_no_extraction_backend "$TMP/all" 'xberg|ort|ort-sys|candle-core'
 
-# B2 inverse half (#10746 S11): trusty-agents depends on trusty-okf. B1
+# B2 inverse half (#10746 S11): trusty-assistants depends on trusty-okf. B1
 # (c11 above) already bars the reverse edge.
 if [ -n "${OKF_TREE_INV:-}" ]; then
   cp "$OKF_TREE_INV" "$TMP/inv.raw"
@@ -202,10 +203,10 @@ else
 fi
 # #10746 S13 fix round: one awk with no early-exit pipe. `awk | grep -q`
 # under pipefail can return 141 (SIGPIPE) on a large tree, whatever grep found.
-if awk '$1 == "trusty-agents" { f = 1 } END { exit !f }' "$TMP/inv.raw"; then
-  echo "ok   b2_trusty_agents_depends_on_okf"
+if awk '$1 == "trusty-assistants" { f = 1 } END { exit !f }' "$TMP/inv.raw"; then
+  echo "ok   b2_trusty_assistants_depends_on_okf"
 else
-  fail b2_trusty_agents_depends_on_okf "cargo tree -i trusty-okf lists no trusty-agents"
+  fail b2_trusty_assistants_depends_on_okf "cargo tree -i trusty-okf lists no trusty-assistants"
 fi
 
 # #10746 S13: the connector crate holds the adapters' credentials, so the
@@ -213,13 +214,13 @@ fi
 if [ -n "${OKF_TREE_AGENTS:-}" ]; then
   cp "$OKF_TREE_AGENTS" "$TMP/agents.raw"
 else
-  cargo tree -q --locked -p trusty-agents -e normal,dev,build --target all \
+  cargo tree -q --locked -p trusty-assistants -e normal,dev,build --target all \
     --all-features --prefix none --format '{p}' > "$TMP/agents.raw"
 fi
-if [ "$(head -n 1 "$TMP/agents.raw" | awk '{print $1}')" != "trusty-agents" ]; then
-  fail b11_agents_do_not_link_connectors "trusty-agents' dependency tree does not start at trusty-agents"
+if [ "$(head -n 1 "$TMP/agents.raw" | awk '{print $1}')" != "trusty-assistants" ]; then
+  fail b11_agents_do_not_link_connectors "trusty-assistants' dependency tree does not start at trusty-assistants"
 elif awk '$1 == "trusty-connectors" { f = 1 } END { exit !f }' "$TMP/agents.raw"; then
-  fail b11_agents_do_not_link_connectors "trusty-agents depends on trusty-connectors"
+  fail b11_agents_do_not_link_connectors "trusty-assistants depends on trusty-connectors"
 else
   echo "ok   b11_agents_do_not_link_connectors"
 fi

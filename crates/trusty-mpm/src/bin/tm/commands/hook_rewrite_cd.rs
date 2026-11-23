@@ -318,15 +318,8 @@ mod tests {
             "cd sub && ls -la no-such-file",
             "cd missing && grep -n hi marker.txt",
         ];
-        for shell in ["sh", "bash", "zsh"] {
-            if std::process::Command::new(shell)
-                .args(["-c", "exit 0"])
-                .output()
-                .is_err()
-            {
-                eprintln!("SKIP a_cd_rewrite_runs_like_the_original_in_a_real_shell: no {shell}");
-                continue;
-            }
+        // See #11658: a missing zsh fails under CI instead of skipping.
+        for shell in super::super::hook_rewrite_shells::available_shells() {
             for command in cases {
                 let rewritten = rewrite_bash_command_for_compression(command)
                     .unwrap_or_else(|| panic!("{command} must be rewritten"));

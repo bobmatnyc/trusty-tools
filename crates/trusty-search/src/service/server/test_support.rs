@@ -31,7 +31,7 @@
 //!
 //! Test: every `create_index_*` / `relocate_index_*` test that needs a real,
 //! allowlist-passing root uses this helper (`tests_1073`, `tests_2336`,
-//! `tests_2984`, `tests_index`, `tests_state`). `tests_denylist` deliberately
+//! `tests_2984`, `tests_index`, `state_tests`). `tests_denylist` deliberately
 //! keeps using raw `tempfile::tempdir()` for its two "still rejects" /
 //! "opts in" tests — those exist to prove the denylist itself works, so
 //! they must not use an allowlisted root.

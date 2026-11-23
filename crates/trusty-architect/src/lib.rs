@@ -66,7 +66,8 @@ pub use error::{
 };
 pub use fake::FakeTmux;
 pub use input::{
-    InputState, SendReading, UnknownInputState, classify_input, send_guarded, send_line_guarded,
+    InputState, SendReading, UnknownInputState, box_holds_text, classify_input, send_guarded,
+    send_line_guarded,
 };
 pub use pyjson::to_python_json;
 pub use scripted::ScriptedTmux;

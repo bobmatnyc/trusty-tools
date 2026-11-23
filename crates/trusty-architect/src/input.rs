@@ -285,13 +285,46 @@ pub fn send_guarded<T: Tmux + ?Sized>(
     Ok(())
 }
 
+/// Characters of `text` the echo check compares (as `self-clear.sh` checks).
+const ECHO_PREFIX_CHARS: usize = 60;
+
+/// Claude Code's placeholder for a collapsed bracketed paste.
+const PASTE_PLACEHOLDER: &str = "[Pasted text #";
+
+/// True when the input box in `capture` holds `text`, typed but not submitted.
+///
+/// Why: a burst typed into a busy Claude Code pane can lose its head, and an
+/// Enter then submits only the tail (#10747). Every typed-then-Enter path
+/// checks the box with this one predicate before pressing Enter.
+/// What: the box text ([`classify_input`]) starts with the first
+/// [`ECHO_PREFIX_CHARS`] characters of `text`'s first line, or starts with
+/// Claude Code's `[Pasted text #N ...]` placeholder for a collapsed paste.
+/// An empty `text` never matches.
+/// Test: `box_holds_text_accepts_echo_and_placeholder_and_rejects_a_tail`.
+pub fn box_holds_text(capture: &str, text: &str) -> bool {
+    let want: String = text
+        .trim_start()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(ECHO_PREFIX_CHARS)
+        .collect();
+    let want = want.trim_end();
+    if want.is_empty() {
+        return false;
+    }
+    let (_, typed) = classify_input(capture);
+    typed.starts_with(want) || typed.starts_with(PASTE_PLACEHOLDER)
+}
+
 /// Types `text` into `pane` and submits it, each step guarded (#11365).
 ///
 /// Why: `tm architect restart` types one resume line; after typing, the box
 /// holds that line, so a second [`send_guarded`] for Enter would refuse.
 /// What: [`send_guarded`] types `text`; `settle` runs (the caller's echo
 /// delay); one `capture-pane` must then show the box starting with the first
-/// 60 characters of `text` (as `self-clear.sh` checks), else
+/// 60 characters of `text` or a paste placeholder ([`box_holds_text`]), else
 /// [`SendError::NotEchoed`] and no Enter. Then Enter.
 /// Test: `send_line_guarded_presses_enter_only_after_the_echo`.
 pub fn send_line_guarded<T: Tmux + ?Sized>(
@@ -304,8 +337,8 @@ pub fn send_line_guarded<T: Tmux + ?Sized>(
     send_guarded(tmux, pane, observed, Keys::Literal(text))?;
     settle();
     let cap = tmux.run(&["capture-pane", "-e", "-p", "-t", pane.as_target()])?;
-    let want: String = text.chars().take(60).collect();
-    if !classify_input(&cap).1.starts_with(&want) {
+    // #10747: the echo check is shared with trusty-mpm's `session_send`.
+    if !box_holds_text(&cap, text) {
         return Err(SendError::NotEchoed {
             pane: pane.to_string(),
         });
@@ -340,6 +373,21 @@ mod tests {
 
     use super::*;
     use crate::{FakeTmux, NamedKey};
+
+    #[test]
+    fn box_holds_text_accepts_echo_and_placeholder_and_rejects_a_tail() {
+        let sent = "Please review the guard first, to avoid chasing the guard by trial edits.";
+        let rule = "────────────";
+        let full = format!("out\n{rule}\n❯ {sent}\n{rule}\n");
+        assert!(box_holds_text(&full, sent));
+        let pasted = format!("out\n{rule}\n❯ [Pasted text #1 +3 lines]\n{rule}\n");
+        assert!(box_holds_text(&pasted, sent));
+        let tail = format!("out\n{rule}\n❯ to avoid chasing the guard by trial edits.\n{rule}\n");
+        assert!(!box_holds_text(&tail, sent), "a dropped head must not pass");
+        let empty = format!("out\n{rule}\n❯ \n{rule}\n");
+        assert!(!box_holds_text(&empty, sent));
+        assert!(!box_holds_text(&full, "   "), "empty text never matches");
+    }
 
     #[test]
     fn input_state_names_round_trip() {

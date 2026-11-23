@@ -22,6 +22,39 @@ async fn console_tile(socket: &Path) -> TileHealth {
     classify(on_demand_when_idle(ServiceId::Console, observed), true)
 }
 
+/// Leave a socket file at `socket` that refuses every connect.
+///
+/// Why (#11326): a bound-then-dropped listener was briefly a LISTENING
+/// socket, and a child forked by a parallel test in that window inherits it
+/// until exec; a connect then queues on it and is reset, reading as `Down`.
+/// What: binds a stream socket WITHOUT `listen` and closes it, so no copy of
+/// the descriptor can ever accept.
+/// Test: `an_absent_or_refused_console_socket_reads_as_on_demand_or_absent`.
+fn stale_socket_file(socket: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let bytes = socket.as_os_str().as_bytes();
+    // SAFETY: plain socket/bind/close on a zeroed, bounds-checked sockaddr_un.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        assert!(fd >= 0, "socket(): {}", std::io::Error::last_os_error());
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        assert!(bytes.len() < addr.sun_path.len(), "socket path too long");
+        for (dst, src) in addr.sun_path.iter_mut().zip(bytes) {
+            *dst = *src as libc::c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        let rc = libc::bind(fd, (&raw const addr).cast::<libc::sockaddr>(), len);
+        let err = std::io::Error::last_os_error();
+        libc::close(fd);
+        assert_eq!(rc, 0, "bind {socket:?}: {err}");
+    }
+    // The client refuses a socket looser than 0600 before it dials.
+    std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600))
+        .expect("narrow the stale socket");
+}
+
 /// The regression proof: with Console mapped to `NoUdsEndpoint` the tile
 /// never dials, so it reads "no UDS endpoint" instead of the stub's answer.
 #[tokio::test]
@@ -74,8 +107,7 @@ async fn an_absent_or_refused_console_socket_reads_as_on_demand_or_absent() {
     assert_eq!(console_tile(&socket).await, TileHealth::OnDemand);
 
     // A socket file whose listener is gone: connect is refused.
-    let listener = trusty_common::uds::bind_hardened(&socket).expect("bind stub");
-    drop(listener);
+    stale_socket_file(&socket);
     assert!(socket.exists(), "the stale socket file stays behind");
     let dialled = socket.clone();
     let refused = probe_service_at(ServiceId::Console, move || Ok(dialled), DEADLINE).await;

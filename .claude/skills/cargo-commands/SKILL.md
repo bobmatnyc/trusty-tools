@@ -130,7 +130,7 @@ everything regardless of `default-members`.
 **Crate names** match the `name` field in each crate's `Cargo.toml`, which is
 not always the directory name:
 
-- `crates/trusty-agents/` → `-p trusty-agents`
+- `crates/trusty-assistants/` → `-p trusty-assistants` (formerly `trusty-agents`, #11632)
 
 If you get "package not found", read the `name` field in that crate's
 `Cargo.toml`. The abbreviation table in `CLAUDE.md` resolves the conversational

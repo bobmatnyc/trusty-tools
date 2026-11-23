@@ -324,6 +324,12 @@ pub(super) const EMBEDDED: &[Embedded] = &[
         "scripts/dashboard_watch.py",
         false
     ),
+    // #10350: the Projects view's Secrets list (names only); dashboard-serve imports it.
+    embedded!(
+        "scripts/dashboard_keynames.py",
+        "scripts/dashboard_keynames.py",
+        false
+    ),
     embedded!(
         "scripts/dashboard_archctx.py",
         "scripts/dashboard_archctx.py",

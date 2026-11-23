@@ -80,7 +80,7 @@
 			Pick what you are installing
 		</h2>
 		<p class="mt-4 max-w-3xl text-foundry-secondary">
-			Nine paths. Seven go through tctl; trusty-code and trusty-agents do not, and are the two
+			Nine paths. Seven go through tctl; trusty-code and trusty-assistants do not, and are the two
 			places the commands genuinely differ rather than just naming a different crate.
 		</p>
 

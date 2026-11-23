@@ -27,7 +27,7 @@
  *     the doc; the surrounding `mcpServers` key is the config file's own
  *     schema, not a claim about any crate.
  *
- * Anything the doc leaves as prose stays prose here — trusty-agents' signing
+ * Anything the doc leaves as prose stays prose here — trusty-assistants' signing
  * script is named, not turned into a command block, because the doc gives no
  * exact invocation for it and inventing one is the failure mode this module
  * exists to prevent.
@@ -95,7 +95,7 @@ export interface InstallStep {
  *
  * `full-disk-access` is trusty-search alone. `app-data` is the SEPARATE,
  * narrower "would like to access data from other apps" category `tm` and
- * `tagent` need; a page that offers those two the disk-wide category instead
+ * `ta` need; a page that offers those two the disk-wide category instead
  * is a security regression, which is why `audiences.test.ts` asserts the wider
  * category's name appears nowhere in their copy.
  */
@@ -143,19 +143,19 @@ export const PREREQUISITES: Prerequisite[] = [
 	{
 		id: 'rust',
 		title: 'A Rust toolchain',
-		body: 'Rust 1.94 or newer — the workspace MSRV. Needed only when you build from source: on a prebuilt platform tctl never invokes cargo, and trusty-agents is the one product with no prebuilt at all.',
+		body: 'Rust 1.94 or newer — the workspace MSRV. Needed only when you build from source: on a prebuilt platform tctl never invokes cargo, and trusty-assistants is the one product with no prebuilt at all.',
 		commands: []
 	},
 	{
 		id: 'pnpm',
 		title: 'pnpm',
-		body: 'Only trusty-agents needs it. trusty-search, trusty-memory and trusty-analyze commit their built Svelte UI to git, so installing those from crates.io never runs a JavaScript build. trusty-agents does not commit its UI: without pnpm the crate still compiles, but its build script writes a placeholder page and the embedded UI does nothing.',
+		body: 'Only trusty-assistants needs it. trusty-search, trusty-memory and trusty-analyze commit their built Svelte UI to git, so installing those from crates.io never runs a JavaScript build. trusty-assistants does not commit its UI: without pnpm the crate still compiles, but its build script writes a placeholder page and the embedded UI does nothing.',
 		commands: []
 	},
 	{
 		id: 'git',
 		title: 'git',
-		body: 'trusty-agents is installed by cloning this repository, and trusty-code reads git metadata for branch context, so both want a git repository to point at.',
+		body: 'trusty-assistants will be installed by cloning this repository once installs resume, and trusty-code reads git metadata for branch context, so both want a git repository to point at.',
 		commands: []
 	},
 	{
@@ -173,7 +173,7 @@ export const PREREQUISITES: Prerequisite[] = [
 	{
 		id: 'llm-key',
 		title: 'A model provider key',
-		body: 'OpenRouter is the default provider everywhere a key is read. It is required only for trusty-review, which will not produce a review without one. It is optional for trusty-memory, trusty-analyze, trusty-code and trusty-agents: each starts fine with no key and asks for one only when a feature that needs it actually runs. AWS Bedrock is the documented alternative for trusty-analyze and trusty-review.',
+		body: 'OpenRouter is the default provider everywhere a key is read. It is required only for trusty-review, which will not produce a review without one. It is optional for trusty-memory, trusty-analyze, trusty-code and trusty-assistants: each starts fine with no key and asks for one only when a feature that needs it actually runs. AWS Bedrock is the documented alternative for trusty-analyze and trusty-review.',
 		commands: [
 			{
 				command: 'export OPENROUTER_API_KEY=<your-openrouter-key>',
@@ -589,13 +589,17 @@ export const AUDIENCES: Audience[] = [
 		}
 	},
 	{
-		id: 'trusty-agents',
-		label: 'trusty-agents (tagent)',
-		binary: 'tagent',
+		id: 'trusty-assistants',
+		label: 'trusty-assistants (ta)',
+		binary: 'ta',
 		tagline: 'The agentic harness',
-		lede: 'The only product here with no published crate and no release binary. Cloning this repository and building it is the install path, not a fallback from one.',
+		lede: 'Formerly trusty-agents (tagent). Installs of trusty-assistants are paused until a later release; there is no install command to run yet. The product has no published crate and no release binary.',
 		prerequisites: [
-			{ id: 'git', requirement: 'required', note: 'The install starts with a clone.' },
+			{
+				id: 'git',
+				requirement: 'required',
+				note: 'Needed once installs resume; the install starts with a clone.'
+			},
 			{
 				id: 'rust',
 				requirement: 'required',
@@ -609,37 +613,31 @@ export const AUDIENCES: Audience[] = [
 			{
 				id: 'llm-key',
 				requirement: 'optional',
-				note: 'Any ONE of CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY or OPENROUTER_API_KEY, checked in that order. None is required to launch; without one tagent prints an onboarding banner rather than failing.'
+				note: 'Any ONE of CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY or OPENROUTER_API_KEY, checked in that order. None is required to launch; without one ta prints an onboarding banner rather than failing.'
 			}
 		],
 		steps: [
 			{
-				title: 'Clone and build it',
-				body: 'This is the same cargo install --path form the project’s own signed-install script uses.',
-				commands: [
-					{
-						command:
-							'git clone https://github.com/bobmatnyc/trusty-tools\ncd trusty-tools\ncargo install --path crates/trusty-agents --locked',
-						label: 'Copy the trusty-agents clone and build'
-					}
-				],
+				title: 'Wait for installs to resume',
+				body: 'Installs of trusty-assistants (ta) are paused until a later release. This page offers no install command for it until then.',
+				commands: [],
 				notes: [
-					'tctl install trusty-agents fails — it is not a stable-set member. Older docs naming an open-mpm repository or crate are wrong; neither has ever existed.'
+					'tctl install trusty-assistants fails — it is not a stable-set member. Older docs naming an open-mpm repository or crate are wrong; neither has ever existed.'
 				]
 			},
 			{
 				title: 'Supply one credential, or none',
-				body: 'Each credential resolves from the environment, then a project or user .env.local, then the store tagent config keys set writes to. A run against Bedrock or a local Ollama model needs none of the three.',
+				body: 'Each credential resolves from the environment, then a project or user .env.local, then the store ta config keys set writes to. A run against Bedrock or a local Ollama model needs none of the three.',
 				commands: [],
 				notes: []
 			},
 			{
 				title: 'Register it as an MCP server',
-				body: 'tagent exposes itself to other MCP clients over stdio.',
+				body: 'ta exposes itself to other MCP clients over stdio.',
 				commands: [
 					{
-						command: mcpEntry('trusty-agents', 'tagent', ['mcp-serve']),
-						label: 'Copy the trusty-agents MCP entry'
+						command: mcpEntry('trusty-assistants', 'ta', ['mcp-serve']),
+						label: 'Copy the trusty-assistants MCP entry'
 					}
 				],
 				notes: []
@@ -648,7 +646,7 @@ export const AUDIENCES: Audience[] = [
 		tcc: {
 			category: 'app-data',
 			summary:
-				'tagent needs the App Data category, the same narrow one tm needs and nothing wider. It reads $HOME and project .trusty-agents/ state, and project-local .claude/ directories that live under another application’s data category. Because it is installed outside tctl, its signing identity is not maintained for you — run scripts/install-trusty-agents-signed.sh from the clone if you want the grant to survive a rebuild.'
+				'ta needs the App Data category, the same narrow one tm needs and nothing wider. It reads $HOME and project .trusty-agents/ state, and project-local .claude/ directories that live under another application’s data category. Because it is installed outside tctl, its signing identity is not maintained for you — run scripts/install-trusty-assistants-signed.sh from the clone if you want the grant to survive a rebuild.'
 		}
 	}
 ];

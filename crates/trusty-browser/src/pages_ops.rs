@@ -84,7 +84,7 @@ fn peer_of(core: &Core, grant: &Grant) -> Result<Arc<Peer>, Refusal> {
 }
 
 /// One page command with the contract's grant and lease fate on refusal (`Pages.send`).
-async fn send(
+pub(crate) async fn send(
     core: &Core,
     grant: &Grant,
     claim: Option<(String, i64)>,
@@ -234,11 +234,16 @@ pub async fn run(
     match op {
         "release" => {
             core.lock().drop_claim(&claim.token);
+            crate::emulation::reconcile(core).await; // #11371: reset on release.
             return Ok((Json::object([("ok", Json::Bool(true))]), Some(tab), None));
         }
         "switch" => return switch(core, grant, &claim).await,
         "page_read" | "page_find" => return query(core, grant, &claim, op, request).await,
         "page_downloads" => return downloads(core, grant, &claim).await,
+        "page_emulate" => {
+            let (token, peer, origin) = (&claim.token, &claim.peer, claim.origin.as_deref());
+            return crate::emulation::run(core, grant, token, tab, peer, origin, request).await;
+        }
         _ => {}
     }
     let rid = request_string(request, "request_id")?.to_owned();
@@ -415,9 +420,10 @@ async fn switch(core: &Core, grant: &Grant, claim: &Leased) -> Result<Ran, Stop>
 /// Why: two agents driving one tab would race each other's clicks. What: a
 /// tab another session holds answers `TabClaimed` with its holder and expiry;
 /// a new lease is taken before the `page_tab` probe and dropped if the probe
-/// fails; an existing one keeps its token.
+/// fails; an existing one keeps its token. A tab whose emulation reset failed
+/// answers `EmulationResetPending` before any probe (#11371).
 /// Test: `page_ops_replay_byte_identically` (`b-select-claimed`, `b-select-repeat`,
-/// `select-malformed-probe`).
+/// `select-malformed-probe`), `select_refuses_a_tab_whose_emulation_reset_failed`.
 async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) -> Result<Ran, Stop> {
     if grant.scope == "tab" && Some(tab) != grant.tab {
         return Err(Refusal::new("OutOfScope").with("tab", tab).into());
@@ -453,6 +459,17 @@ async fn select(core: &Arc<Core>, session: &Session, grant: &Grant, tab: i64) ->
             }
         }
     };
+    // #11371: a tab left emulated by an ended lease resets before the new holder sees it.
+    crate::emulation::reconcile(core).await;
+    if core.emulation.pending(&peer.generation, tab, &token) {
+        if created {
+            core.lock().drop_claim(&token);
+        }
+        return Err(Refusal::new(crate::refusal::EMULATION_RESET_PENDING)
+            .with("tab", tab)
+            .with("retryable", Json::Bool(true))
+            .into());
+    }
     let key = Some((peer.generation.clone(), tab));
     let args = vec![("tab", Json::Int(tab))];
     let probed = send(core, grant, key, &peer, "page_tab", args)

@@ -995,7 +995,7 @@ enum IntentArg {
 /// Embed-pool workers block on 30 s sidecar calls; with only num_cpus workers the
 /// axum accept loop starves under heavy CoreML/CUDA load → false "daemon down".
 /// What: `max(available_parallelism, 16)` workers. Blocking pool unchanged (512).
-/// Test: `worker_thread_count_at_least_16` in tests_state.rs.
+/// Test: `worker_thread_count_at_least_16` in state_tests.rs.
 fn main() {
     // #4764: panic payloads reach the log stream via the hook that
     // `trusty_common::init_tracing*` installs — see `trusty_common::panic_hook`.

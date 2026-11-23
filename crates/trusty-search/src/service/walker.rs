@@ -547,6 +547,11 @@ const MIN_LINES_FOR_READABLE_JS: usize = 5;
 /// - Files larger than [`MAX_FILE_BYTES`] (requires `fs::metadata` — only
 ///   called when extension checks pass).
 pub fn should_skip_path(path: &Path) -> bool {
+    skip_by_name(path) || oversize_len(path, u64::MAX).is_some()
+}
+
+/// The name/extension half of [`should_skip_path`]; never touches the disk.
+fn skip_by_name(path: &Path) -> bool {
     let file_name = match path.file_name().and_then(|n| n.to_str()) {
         Some(n) => n,
         None => return true, // no name → skip
@@ -599,17 +604,29 @@ pub fn should_skip_path(path: &Path) -> bool {
         }
     }
 
-    // File size guard — avoids reading giant generated files. Office
-    // documents (issue #2923) get the larger MAX_OFFICE_FILE_BYTES cap since
-    // real PDFs/spreadsheets routinely exceed the 1 MiB source-file cap from
-    // embedded fonts/images even when their extractable text is small.
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.len() > size_cap_for_ext(&ext) {
-            return true;
-        }
-    }
-
     false
+}
+
+/// #11651: the file's size when it exceeds its size cap, else `None`.
+///
+/// Why: the walker reports what the size gate refused, so the gate must say
+/// how large the file was, from one `stat`.
+/// What: the cap is [`size_cap_for_ext`] (office documents get
+/// `MAX_OFFICE_FILE_BYTES`, #2923), lowered to `data_cap` for [`DATA_EXTS`]
+/// (#1372). A failed `stat` is not oversize.
+/// Test: `oversized_file_is_recorded_with_reason_and_size`.
+fn oversize_len(path: &Path, data_cap: u64) -> Option<u64> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mut cap = size_cap_for_ext(&ext);
+    if DATA_EXTS.contains(&ext.as_str()) {
+        cap = cap.min(data_cap);
+    }
+    let len = std::fs::metadata(path).ok()?.len();
+    (len > cap).then_some(len)
 }
 
 /// The global size cap for a lowercased extension: office documents get
@@ -777,6 +794,8 @@ fn is_hashed_bundle_stem(stem: &str) -> bool {
 pub struct WalkResult {
     pub files: Vec<PathBuf>,
     pub skipped_dirs: usize,
+    /// #11651: files refused only for size, with their length in bytes.
+    pub oversized: Vec<(PathBuf, u64)>,
 }
 
 /// Walk `root` recursively and return every source file under it.
@@ -847,6 +866,7 @@ pub fn walk_source_files(root: &Path) -> WalkResult {
 pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkResult {
     let mut files = Vec::new();
     let mut skipped_dirs = 0usize;
+    let mut oversized = Vec::new();
 
     // Resolve any symlink components so emitted file paths never carry a
     // symlink alias the caller didn't intend. Falls back to the input on
@@ -886,20 +906,35 @@ pub fn walk_source_files_with_options(root: &Path, opts: &WalkOptions) -> WalkRe
             continue;
         }
         let path = entry.path();
-        if !path_admitted(&canonical_root, path, opts) {
-            continue;
+        match path_admission(&canonical_root, path, opts) {
+            Admission::Admitted => files.push(path.to_path_buf()),
+            Admission::TooLarge(len) => oversized.push((path.to_path_buf(), len)),
+            Admission::Rejected => {}
         }
-        files.push(path.to_path_buf());
     }
 
     WalkResult {
         files,
         skipped_dirs,
+        oversized,
     }
 }
 
 /// Shared path checks for walker and live events (#7379).
 pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> bool {
+    matches!(path_admission(root, path, opts), Admission::Admitted)
+}
+
+/// #11651: why [`path_admission`] accepted or refused a path.
+enum Admission {
+    Admitted,
+    Rejected,
+    /// Refused only by a size cap; carries the file's length.
+    TooLarge(u64),
+}
+
+/// [`path_admitted`] with the refusal reason the walk records (#11651).
+fn path_admission(root: &Path, path: &Path, opts: &WalkOptions) -> Admission {
     // Belt-and-suspenders: a project without a `.gitignore` (rare but
     // real, e.g. a `target/` left over from someone else's build) still
     // needs the hardcoded skip list to keep `node_modules` etc. out of
@@ -927,33 +962,30 @@ pub(crate) fn path_admitted(root: &Path, path: &Path, opts: &WalkOptions) -> boo
     // the watcher and the reconcile walk apply exactly these rules too.
     let rel = path.strip_prefix(root).unwrap_or(path);
     if rel_path_in_skipped_dir(rel, &opts.extra_skip_dirs) {
-        return false;
+        return Admission::Rejected;
     }
     // Extension allow-list: only known source extensions enter the indexer.
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
-        return false;
+        return Admission::Rejected;
     };
     if !SOURCE_EXTS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-        return false;
+        return Admission::Rejected;
     }
-    // Path-level skip: minified filenames, binaries, large files (global
-    // 1 MiB cap).
-    if should_skip_path(path) {
-        return false;
-    }
-    // Issue #1372: tighter per-extension cap for data-ish files
-    // (JSON/XML/TXT/log). Layered on top of the global cap above so a
-    // 200 KiB data export is pruned while a small `package.json` of the
-    // same extension stays indexable.
-    if exceeds_data_cap(path, opts.data_file_max_bytes) {
-        return false;
+    // Path-level skip: minified filenames, binaries.
+    if skip_by_name(path) {
+        return Admission::Rejected;
     }
     // Issue #77: default doc/changelog/license exclusion. Skipped before
     // the file is read so prose never enters BM25 / vector lanes.
     if !opts.include_docs && is_default_doc_excluded(path) {
-        return false;
+        return Admission::Rejected;
     }
-    true
+    // Size caps: global/office (#2923) and the tighter data cap (#1372).
+    // #11651: checked last so the refusal is reported as a size skip only.
+    match oversize_len(path, opts.data_file_max_bytes) {
+        Some(len) => Admission::TooLarge(len),
+        None => Admission::Admitted,
+    }
 }
 
 /// Use the same ignore sources for walking and single-file admission.
