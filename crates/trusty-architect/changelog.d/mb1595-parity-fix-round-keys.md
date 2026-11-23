@@ -1,2 +1,0 @@
-Fixed
-- `tm architect poll --dry-run` now prints structured `would alert key:` and `would wake key:` JSON lines (session, kind, fingerprint, and whether a wake took the Haiku path) after a `shadow keys: v1` marker, and the shadow record reads them instead of the display text. Older shadow output still parses through the display path, which now keys the selftest, owner, dashboard and token displays correctly (MB1595 fix round).
