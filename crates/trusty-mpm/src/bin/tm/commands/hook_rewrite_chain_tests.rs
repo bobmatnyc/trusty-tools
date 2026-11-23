@@ -347,6 +347,31 @@ fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
     }
 }
 
+/// The shells of `["sh", "bash", "zsh"]` this host can run.
+///
+/// See #11644: `run_in` panics on a missing shell, so the `exit 0` guards in
+/// the two tests below never skipped anything and a host without zsh (EVO)
+/// failed instead. The rewrite is POSIX-shaped and every case already runs
+/// under `sh` and `bash`, so a missing zsh drops only the zsh leg, named on
+/// stderr. `sh` must exist: a host without it fails rather than passing empty.
+fn available_shells() -> Vec<&'static str> {
+    let shells: Vec<&'static str> = ["sh", "bash", "zsh"]
+        .into_iter()
+        .filter(|shell| {
+            let present = std::process::Command::new(shell)
+                .args(["-c", "exit 0"])
+                .output()
+                .is_ok();
+            if !present {
+                eprintln!("no {shell} on this host; its leg of the shell parity test is not run");
+            }
+            present
+        })
+        .collect();
+    assert!(shells.contains(&"sh"), "sh is required: {shells:?}");
+    shells
+}
+
 /// #11507 (Architect, 07:45Z): a `cd <dir>;` or `cd <dir> && ` chain leaves the
 /// caller's shell in the same directory as the original, and a `cd` into a
 /// missing directory under `;` still runs the rest where the shell already was.
@@ -363,10 +388,8 @@ fn a_cd_semicolon_chain_leaves_the_same_cwd_in_a_real_shell() {
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "hi there\n").expect("write");
     std::fs::write(root.join("marker.txt"), "hi root\n").expect("write");
-    for shell in ["sh", "bash", "zsh"] {
-        if run_in(shell, &root, "exit 0").0.is_none() {
-            continue;
-        }
+    // See #11644: zsh is run where present.
+    for shell in available_shells() {
         for command in [
             "cd sub; grep -n hi marker.txt",
             "cd sub && grep -n hi marker.txt",
@@ -410,10 +433,8 @@ fn a_short_circuit_before_a_semicolon_runs_like_the_original() {
     let root = root.path().canonicalize().expect("canonical temp dir");
     std::fs::create_dir_all(root.join("sub")).expect("mkdir");
     std::fs::write(root.join("sub/marker.txt"), "hi there\nhi again\n").expect("write");
-    for shell in ["sh", "bash", "zsh"] {
-        if run_in(shell, &root, "exit 0").0.is_none() {
-            continue;
-        }
+    // See #11644: zsh is run where present.
+    for shell in available_shells() {
         for command in [
             "grep -q nomatch sub/marker.txt && grep -n hi sub/marker.txt; grep -c hi sub/marker.txt",
             "cd sub; grep -q nomatch marker.txt && grep -n hi marker.txt; grep -c hi marker.txt",
