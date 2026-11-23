@@ -57,6 +57,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tm daemon` and `tm sm serve --stdio` now settle buffered action events (send or spool) on SIGHUP, the same path as SIGTERM and SIGINT, before they exit. A SIGHUP inherited as ignored (`nohup`) stays ignored.
 - `/clear` in the Architect session now moves `last.architect-conversation` to the new conversation id, so `tm fleet relaunch` resumes the post-clear conversation instead of the pre-clear one.
 - Action events: a panicking project resolver no longer leaks its in-flight lookup slot, so later sessions keep their project attribution (#11040).
+- Architect seed history records the current bundle-provenance.json bytes (main CI red after #11601).
 
 ### Changed
 
