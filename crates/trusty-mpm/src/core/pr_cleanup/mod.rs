@@ -274,7 +274,10 @@ pub(crate) async fn run_with<G: Gh, T: Git, C: ClaimEnder>(
         view: &view,
     };
 
-    lines.push(step_remote_branch(git, req, &view));
+    // #11407: origin/<head> is deleted only after steps 3 and 4 decided — the
+    // dirt probe reads the upstream, so deleting it first let the real run
+    // judge trees on different input than its dry run. The line keeps its place.
+    let remote_at = lines.len();
     let standing = step_worktrees(
         git, claims, ownership, landing, probe_dirt, req, &merged, &mut lines,
     )
@@ -283,6 +286,7 @@ pub(crate) async fn run_with<G: Gh, T: Git, C: ClaimEnder>(
     // out, so branch deletion always follows the removals above — and #8489:
     // skips every branch a tree the removals left standing still holds.
     lines.push(step_local_branches(git, req, &merged, standing.as_deref()));
+    lines.insert(remote_at, step_remote_branch(git, req, &view));
     lines.push(step_prune(git, req));
 
     let report = CleanupReport { pr: req.pr, lines };
@@ -434,14 +438,11 @@ async fn step_worktrees<T: Git, C: ClaimEnder>(
     }
     let mut removed = Vec::new();
     for t in targets {
-        // A round-N sibling carries no merged pull request of its own, so its
-        // content is what proves the merge made it obsolete. The head branch,
-        // and any tree sitting on the merged head commit, already carry that
-        // proof from step 1 and are not asked again.
-        if !is_merged_head(view, t)
-            && let Some(branch) = t.branch.as_deref()
-            && let Some(refusal) = landed::unlanded(git, req, &merged.merge, branch)
-        {
+        // #11407: only a tree sitting ON the merged head carries step 1's
+        // proof. Any other tip — the head branch's own included — must show the
+        // merge carried it, through the one decision both modes share.
+        let tip = t.branch.as_deref().unwrap_or(t.head.as_str());
+        if let Some(refusal) = landed::beyond_merged_head(git, req, &merged.merge, tip, &t.head) {
             let line = StepLine::failed(STEP, format!("{}: {refusal}", t.path.display()));
             push_kept(git, req, view, t, line, lines);
             continue;
@@ -499,18 +500,6 @@ fn push_kept<T: Git>(
     }
 }
 
-/// Is this worktree the PR's own head — by branch name, or by sitting on the
-/// merged head commit?
-///
-/// Test: `cleanup_removes_a_round_sibling_whose_content_landed` (the sibling is
-/// asked), `cleanup_clean_path_removes_everything` (the head is not).
-fn is_merged_head(view: &PrView, entry: &plan::WorktreeEntry) -> bool {
-    let head = view.head_ref_name.trim();
-    let oid = view.head_ref_oid.trim();
-    (!head.is_empty() && entry.branch.as_deref().map(str::trim) == Some(head))
-        || (!oid.is_empty() && entry.head.eq_ignore_ascii_case(oid))
-}
-
 /// Build an owned argv from string slices.
 fn owned(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_string()).collect()
@@ -543,10 +532,17 @@ fn step_local_branches<T: Git>(
     let head = view.head_ref_name.trim();
     // #8301: a merge-chained run deletes the head branch and nothing else.
     if req.head_only {
-        let wanted = plan::pr_branches(&listing, head)
+        let wanted: Vec<String> = plan::pr_branches(&listing, head)
             .into_iter()
             .filter(|b| b == head)
             .collect();
+        // #11407: the head branch passes the merged-head check here too.
+        for b in &wanted {
+            let tip = plan::branch_tip(&listing, b).unwrap_or_default();
+            if let Some(reason) = landed::beyond_merged_head(git, req, &merged.merge, b, tip) {
+                return StepLine::failed(STEP, reason);
+            }
+        }
         return delete_branches(git, req, wanted, standing);
     }
     // The head branch and its round-N siblings first, then every
@@ -559,10 +555,10 @@ fn step_local_branches<T: Git>(
     let mut wanted: Vec<String> = siblings
         .into_iter()
         .filter(|b| {
-            if b == head {
-                return true;
-            }
-            match landed::unlanded(git, req, &merged.merge, b) {
+            // #11407: the head branch is asked too, unless it sits on the
+            // merged head — a branch that moved on holds work the merge lacks.
+            let tip = plan::branch_tip(&listing, b).unwrap_or_default();
+            match landed::beyond_merged_head(git, req, &merged.merge, b, tip) {
                 None => true,
                 Some(reason) => {
                     refusals.push(reason);

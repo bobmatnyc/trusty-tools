@@ -2952,3 +2952,7 @@ async fn cleanup_8603_an_unreadable_relation_is_stated_as_unknown() {
         "{rendered}"
     );
 }
+
+// #11407: dry-run / real-run parity for the beyond-merged-head check.
+#[path = "parity_tests.rs"]
+mod parity_tests;
