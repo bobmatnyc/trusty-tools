@@ -80,17 +80,40 @@ pub fn build_router_with_self_origins(
     build_router_inner(state, self_origins, None)
 }
 
-/// Wrap `router` in the loopback listener's Host/Origin guard, exactly as
-/// `tailnet_peer::serve_listeners` serves a loopback address.
+/// Wrap `router` in the loopback listener's Host/Origin guard for `listener`,
+/// exactly as `tailnet_peer::serve_listeners` serves a loopback address.
 ///
 /// Why: #11748 — the assistants routes answer only a request a gated listener
 /// admitted, so a test or an embedder that serves the router on loopback
-/// needs the production guard, not a forged marker.
-/// What: `guard_loopback` with no MagicDNS name: `Host` must be `listen` or
-/// `localhost:<port>`, and any `Origin` must be `http://<Host>`.
-/// Test: `tests/assistants_routes.rs`, `tests/assistants_ask.rs`.
-pub fn guard_loopback_listener(router: Router, listen: std::net::SocketAddr) -> Router {
-    crate::tailnet_peer::guard_loopback(router, listen, crate::tailnet_peer::OwnMagicDns::default())
+/// needs the production guard, not a forged marker. The guard admits by
+/// `Host`/`Origin` only, so it must never wrap a non-loopback socket: that
+/// would grant `AdmittedBy::Loopback` to remote peers (#11748 review).
+/// What: reads `listener`'s bound address; refuses a non-loopback one with
+/// `InvalidInput`; otherwise `guard_loopback` with no MagicDNS name: `Host`
+/// must be that address or `localhost:<port>`, and any `Origin` `http://<Host>`.
+///
+/// # Errors
+///
+/// `InvalidInput` when `listener` is not bound to a loopback address; any
+/// error reading its local address.
+/// Test: `guard_loopback_listener_refuses_a_non_loopback_socket`
+/// (`tests/assistants_ask.rs`); `tests/assistants_routes.rs`.
+pub fn guard_loopback_listener(
+    router: Router,
+    listener: &tokio::net::TcpListener,
+) -> std::io::Result<Router> {
+    let listen = listener.local_addr()?;
+    if !listen.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the loopback guard cannot serve a non-loopback socket ({listen})"),
+        ));
+    }
+    Ok(crate::tailnet_peer::guard_loopback(
+        router,
+        listen,
+        crate::tailnet_peer::OwnMagicDns::default(),
+    ))
 }
 
 /// The one router definition both public builders delegate to, so the mounted

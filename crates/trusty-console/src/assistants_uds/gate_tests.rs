@@ -149,3 +149,43 @@ fn a_tailnet_peer_without_whois_is_logged_unknown() {
     let (listener, _, login, _) = peer_fields(Some(&AdmittedBy::Loopback));
     assert_eq!((listener, login.as_str()), ("loopback", "loopback"));
 }
+
+/// #11748 review: the handler alone, mounted with no guard and no marker,
+/// refuses before it dials.
+#[tokio::test]
+async fn the_handler_alone_refuses_an_unmarked_request() {
+    use tower::ServiceExt;
+    let (_root, data, state) = seed("bare", "LEAK");
+    let app = axum::Router::new()
+        .route(
+            "/ask/{id}",
+            axum::routing::post(super::ask_route::ask_handler),
+        )
+        .with_state(state);
+    let resp = app
+        .oneshot(
+            axum::http::Request::post("/ask/bare")
+                .header("origin", "http://127.0.0.1:1")
+                .body(axum::body::Body::from(r#"{"question":"q"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(resp.status().as_u16(), 403);
+    // The one-shot fake daemon still answers its first connection: the
+    // handler never dialled it.
+    let socket = data.path().join("trusty-agents-bare.sock");
+    let mut probe = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("the fake daemon was never dialled");
+    probe.write_all(b"{}\n").await.expect("write");
+    let mut reply = String::new();
+    BufReader::new(probe)
+        .read_line(&mut reply)
+        .await
+        .expect("read");
+    assert!(
+        reply.contains("LEAK"),
+        "the daemon's one reply went elsewhere: {reply:?}"
+    );
+}

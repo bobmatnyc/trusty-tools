@@ -173,6 +173,8 @@ pub struct AppState {
     pub(crate) assistants_data_dir: Option<Arc<PathBuf>>,
     /// #11748: the bounds every ask runs under.
     pub(crate) assistants_ask_limits: crate::assistants_uds::ask::AskLimits,
+    /// #11748 review: one permit per in-flight ask.
+    pub(crate) assistants_ask_permits: Arc<tokio::sync::Semaphore>,
     /// #9076: what console's `trusty-events` client has seen — its state and
     /// the events it relays. `Starting` until `run_serve` starts the client.
     events: Arc<crate::events_uds::EventsRelay>,
@@ -300,6 +302,9 @@ impl AppState {
             assistants_root: None,
             assistants_data_dir: None,
             assistants_ask_limits: crate::assistants_uds::ask::AskLimits::default(),
+            assistants_ask_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::assistants_uds::ask_route::MAX_CONCURRENT_ASKS,
+            )),
             events: Arc::new(crate::events_uds::EventsRelay::new()),
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),

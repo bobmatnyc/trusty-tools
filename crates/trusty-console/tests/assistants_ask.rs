@@ -27,8 +27,9 @@ use tower::ServiceExt;
 use trusty_console::assistants_uds::ask::AskLimits;
 use trusty_console::server::{AppState, build_router, guard_loopback_listener};
 
-const LISTEN: &str = "127.0.0.1:7070";
-const ORIGIN: &str = "http://127.0.0.1:7070";
+/// Stands for the listener's own origin, `http://<bound addr>`; the port is
+/// only known once [`post_ask`] binds.
+const ORIGIN: &str = "self";
 
 // ─── log capture ─────────────────────────────────────────────────────────────
 
@@ -158,13 +159,22 @@ async fn post_ask(
     body: &str,
     origin: Option<&str>,
 ) -> (StatusCode, Value) {
-    let router = guard_loopback_listener(build_router(state), LISTEN.parse().expect("addr"));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let host = listener.local_addr().expect("addr").to_string();
+    let router = guard_loopback_listener(build_router(state), &listener).expect("loopback guard");
     let mut req = Request::builder()
         .method("POST")
         .uri(format!("/api/console/assistants/{id}/ask"))
-        .header("host", LISTEN)
+        .header("host", host.clone())
         .header("content-type", "application/json");
     if let Some(origin) = origin {
+        let origin = if origin == ORIGIN {
+            format!("http://{host}")
+        } else {
+            origin.to_owned()
+        };
         req = req.header("origin", origin);
     }
     let resp = router
@@ -225,14 +235,19 @@ async fn ask_with_a_daemon_error_is_502_with_its_kind() {
     );
 }
 
-/// AC2: no socket → 503 with the `ta ask` hint; nothing is started.
+/// AC2: no socket → 503 with the `ta ask-daemon` hint; nothing is started.
 #[tokio::test]
 async fn ask_with_no_socket_is_503_with_the_hint() {
     let fx = Fixture::new(&["izzie"]);
     let (status, body) = post_ask(fx.state(), "izzie", &question("q"), Some(ORIGIN)).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
     assert_eq!(body["error"], "assistant not running");
-    assert_eq!(body["hint"], "run `ta ask izzie \"…\"` once to start it");
+    // #11748 review: `ta ask` lets its daemon exit when idle; a hand-run
+    // `ta ask-daemon` stays, so the hint names that verb.
+    assert_eq!(
+        body["hint"],
+        "run `ta ask-daemon izzie` in a terminal and leave it running; the console never starts an assistant"
+    );
     assert!(
         !fx.socket("izzie").exists(),
         "the console must never start a daemon"
@@ -252,7 +267,7 @@ async fn ask_with_a_stale_socket_is_503() {
     assert!(
         body["hint"]
             .as_str()
-            .is_some_and(|h| h.contains("ta ask izzie"))
+            .is_some_and(|h| h.contains("`ta ask-daemon izzie`"))
     );
 }
 
@@ -498,4 +513,67 @@ async fn ask_log_names_the_peer_and_never_the_text() {
         "the question text reached the log"
     );
     assert!(!logs.contains(secret_a), "the answer text reached the log");
+}
+
+/// A fake daemon that accepts every connection and never replies.
+fn silent_daemon(path: &Path) -> JoinHandle<()> {
+    let listener = UnixListener::bind(path).expect("bind fake daemon");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    })
+}
+
+/// #11748 review: N+1 concurrent asks against a slow daemon get exactly one
+/// `429`, and the permits come back once the asks time out.
+#[tokio::test]
+async fn concurrent_asks_past_the_cap_are_429() {
+    const CAP: usize = 2;
+    let fx = Fixture::new(&["izzie"]);
+    let _daemon = silent_daemon(&fx.socket("izzie"));
+    let state = fx
+        .state()
+        .with_assistants_max_concurrent_asks(CAP)
+        .with_assistants_ask_limits(AskLimits {
+            ask_timeout: Duration::from_millis(600),
+            ..AskLimits::default()
+        });
+    let mut in_flight = Vec::new();
+    for _ in 0..CAP {
+        let state = state.clone();
+        in_flight.push(tokio::spawn(async move {
+            post_ask(state, "izzie", &question("q"), Some(ORIGIN)).await
+        }));
+    }
+    // Let the first CAP asks take their permits and reach the daemon.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let (status, body) = post_ask(state.clone(), "izzie", &question("q"), Some(ORIGIN)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    assert_eq!(body, json!({ "error": "assistants busy", "kind": "busy" }));
+    for task in in_flight {
+        let (status, body) = task.await.expect("ask task");
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+    }
+    // The timed-out asks released their permits: the next ask is not busy.
+    let (status, body) = post_ask(state, "izzie", &question("q"), Some(ORIGIN)).await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
+}
+
+/// #11748 review: the loopback guard never wraps a non-loopback socket, so it
+/// cannot grant `AdmittedBy::Loopback` to a remote peer.
+#[tokio::test]
+async fn guard_loopback_listener_refuses_a_non_loopback_socket() {
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        .await
+        .expect("bind");
+    let err = guard_loopback_listener(build_router(AppState::new(vec![])), &listener)
+        .expect_err("a wildcard socket must be refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    let loopback = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    assert!(guard_loopback_listener(build_router(AppState::new(vec![])), &loopback).is_ok());
 }

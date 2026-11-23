@@ -42,6 +42,13 @@ use crate::tailnet_peer::AdmittedBy;
 /// pasted paragraph while staying far under the daemon's 1 MiB line cap.
 pub const MAX_QUESTION_BYTES: usize = 16 * 1024;
 
+/// Asks one console runs at once; one more is `429` (#11748 review).
+///
+/// Why: each ask holds a connection, a daemon slot and up to [`super::ask::ASK_TIMEOUT`]
+/// of a request; the daemon answers one at a time anyway, so a deeper queue
+/// only piles up timeouts. Four leaves room for a few tabs and devices.
+pub const MAX_CONCURRENT_ASKS: usize = 4;
+
 /// Largest request body read; past it axum answers `413` before the handler.
 /// Four times the question cap leaves room for JSON escaping.
 pub const MAX_ASK_BODY_BYTES: usize = 4 * MAX_QUESTION_BYTES;
@@ -71,8 +78,10 @@ pub(crate) fn router(self_origins: SelfOrigins) -> Router<AppState> {
 
 /// Refuse with `403` a request no gated listener admitted.
 ///
-/// What: passes only when the request carries an [`AdmittedBy`], which the
-/// loopback guard and the tailnet peer gate insert and nothing else can.
+/// What: passes only when the request carries an [`AdmittedBy`]. Only the
+/// loopback guard and the tailnet peer gate insert one, and no code outside
+/// this crate can construct one; `guard_loopback_listener` refuses a
+/// non-loopback socket (#11748 review).
 /// Test: `ungated_listener_cannot_reach_assistants` (`tests/assistants_ask.rs`).
 async fn require_gated_listener(req: Request, next: Next) -> Response {
     if req.extensions().get::<AdmittedBy>().is_none() {
@@ -142,14 +151,19 @@ struct AskLog {
 /// order: `400` invalid id (before any filesystem or socket access); `413`
 /// body over [`MAX_ASK_BODY_BYTES`] or question over [`MAX_QUESTION_BYTES`];
 /// `400` malformed body or blank question; `404` an id `ta list` does not
-/// name, with `available`; `503` with a `ta ask` hint when no daemon serves
+/// name, with `available`; `503` with a `ta ask-daemon` hint when no daemon serves
 /// the socket (the console never starts one); `504` on a connect or ask
 /// timeout; `502` with a `kind` for a daemon error or a bad reply; `500` when
 /// the root or data directory cannot be resolved. No body names a path. One
 /// `info!` line per ask: instance, peer, question length, outcome, duration —
 /// never the question or the answer.
-/// Test: `tests/assistants_ask.rs`.
-pub async fn ask_handler(
+///
+/// #11748 review: the handler fails closed by itself — no [`AdmittedBy`] is
+/// `403` before any parse or dial — and a full ask pool
+/// ([`MAX_CONCURRENT_ASKS`]) is `429` `{"error":"assistants busy","kind":"busy"}`
+/// before any dial.
+/// Test: `tests/assistants_ask.rs`, `gate_tests::the_handler_alone_refuses_an_unmarked_request`.
+pub(crate) async fn ask_handler(
     State(state): State<AppState>,
     AxumPath(raw_id): AxumPath<String>,
     admitted: Option<Extension<AdmittedBy>>,
@@ -161,7 +175,16 @@ pub async fn ask_handler(
         question_bytes: None,
         outcome: "unknown",
     };
-    let response = ask(&state, &raw_id, body, &mut log).await;
+    let response = if admitted.is_some() {
+        ask(&state, &raw_id, body, &mut log).await
+    } else {
+        // #11748 review: fail closed even if the route layer is ever lost.
+        log.outcome = "ungated";
+        error(
+            StatusCode::FORBIDDEN,
+            "the assistants routes are served only on the loopback or tailnet-gated listener",
+        )
+    };
     let (listener, peer_addr, login, node) = peer_fields(admitted.as_ref().map(|e| &e.0));
     // #11748 item 7: lengths and labels only — never the question or answer.
     info!(
@@ -195,6 +218,16 @@ async fn ask(
         }
     };
     log.instance = Some(id.clone());
+    // #11748 review: bound concurrent asks; held until this fn returns,
+    // timeout path included, and taken before any dial.
+    let Ok(_permit) = Arc::clone(&state.assistants_ask_permits).try_acquire_owned() else {
+        log.outcome = "busy";
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({ "error": "assistants busy", "kind": "busy" })),
+        )
+            .into_response();
+    };
     let question = match parse_question(body) {
         Ok(q) => q,
         Err((status, outcome, message)) => {
@@ -296,7 +329,7 @@ fn parse_question(body: Result<Bytes, BytesRejection>) -> Result<String, Refusal
 
 /// Map an [`AskFailure`] to a status, a log outcome and a body naming no path.
 ///
-/// What: no daemon → `503` with the `ta ask` hint; a timeout → `504`; every
+/// What: no daemon → `503` with the [`super::daemon_hint`]; a timeout → `504`; every
 /// other failure → `502` with its `kind`. Never `200` (#11748 item 8).
 /// Test: the `ask_*` cases in `tests/assistants_ask.rs`.
 fn failure_response(
@@ -312,7 +345,7 @@ fn failure_response(
                 json!({
                     "error": "assistant not running",
                     "instance": instance,
-                    "hint": format!("run `ta ask {instance} \"…\"` once to start it"),
+                    "hint": super::daemon_hint(id),
                 }),
             );
         }
@@ -427,6 +460,14 @@ impl AppState {
     #[must_use]
     pub fn with_assistants_data_dir(mut self, dir: PathBuf) -> Self {
         self.assistants_data_dir = Some(Arc::new(dir));
+        self
+    }
+
+    /// Allow `permits` concurrent asks instead of [`MAX_CONCURRENT_ASKS`].
+    /// Test: `concurrent_asks_past_the_cap_are_429` (`tests/assistants_ask.rs`).
+    #[must_use]
+    pub fn with_assistants_max_concurrent_asks(mut self, permits: usize) -> Self {
+        self.assistants_ask_permits = Arc::new(tokio::sync::Semaphore::new(permits));
         self
     }
 

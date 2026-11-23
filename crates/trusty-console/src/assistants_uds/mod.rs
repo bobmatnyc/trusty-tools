@@ -67,6 +67,30 @@ pub const INSTRUCTIONS_FILE: &str = "instructions.md";
 /// Test: `tests::the_mirrored_constants_match_the_source`.
 pub const AGENTS_APP_NAME: &str = "trusty-agents";
 
+/// The `ta` binary's name (`trusty-assistants/Cargo.toml` `[[bin]] name`).
+/// Test: `tests::the_daemon_hint_names_the_real_verb`.
+pub const TA_BIN_NAME: &str = "ta";
+
+/// The verb that runs one instance's ask daemon in the foreground
+/// (`ask/daemon/mod.rs` `DAEMON_VERB`).
+/// Test: `tests::the_daemon_hint_names_the_real_verb`.
+pub const DAEMON_VERB: &str = "ask-daemon";
+
+/// The 503 hint when no daemon serves `id`'s socket.
+///
+/// Why: #11748 review (ruling (a)) — `ta ask` releases the daemon it starts,
+/// and the daemon then exits when idle, so it never leaves one for the
+/// console. A daemon run by hand keeps its terminal's stdin open, which is
+/// the lease its idle exit waits for (`ask/daemon/run.rs`), so it stays.
+/// Test: `tests::the_daemon_hint_names_the_real_verb`,
+/// `ask_with_no_socket_is_503_with_the_hint` (`tests/assistants_ask.rs`).
+pub fn daemon_hint(id: &InstanceId) -> String {
+    format!(
+        "run `{TA_BIN_NAME} {DAEMON_VERB} {}` in a terminal and leave it running; the console never starts an assistant",
+        id.as_str()
+    )
+}
+
 /// Longest accepted instance id (`assistants/instance.rs` `MAX_ID_LEN`).
 const MAX_ID_LEN: usize = 64;
 
