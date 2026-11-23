@@ -1,0 +1,5 @@
+Added
+- `ta handoff <instance> --to tm|tc [--key <key>] [--] <task…>` hands a task to trusty-mpm or trusty-code and prints the handle as one JSON line. The target is required; there is no default, and an unknown target is an error. The task text is passed through unchanged (#11650).
+- `--to tm` creates one durable trusty-mpm session for the instance on its first handoff and sends later tasks into it. A session trusty-mpm reports gone is replaced by a new one, and the output says so; a stopped or errored session is reported as a failure naming `tm session resume` (#11650).
+- `--to tc` calls `task.run` on the running `tcode serve` daemon and returns its session id. No daemon is started (#11650).
+- Each handoff is recorded in `<instance home>/stores/handoffs.jsonl`: an intent before the dispatch, a completion after it. A retry with the same `--key` returns the recorded handle without dispatching again. An intent with no completion, or a dispatch whose effect is not known, reads as `outcome_unknown` and exits non-zero, never as success (#11650).
