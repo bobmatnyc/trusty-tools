@@ -54,9 +54,16 @@ fn bound_returns_image_only() {
 
 #[test]
 fn bound_refuses_secure_field() {
-    for key in ["role", "subrole"] {
+    // #11694: the last row is how cua-driver 0.23.2 reports an NSSecureTextField.
+    let fields = [
+        json!({"element_index": 9, "role": "AXSecureTextField", "parent_index": 0}),
+        json!({"element_index": 9, "subrole": "AXSecureTextField", "parent_index": 0}),
+        json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
+            "value": "", "value_description": "contains secure text"}),
+    ];
+    for field in fields {
+        let key = field.to_string();
         let mut snap = capture();
-        let field = json!({"element_index": 9, key: "AXSecureTextField", "parent_index": 0});
         snap["structuredContent"]["elements"]
             .as_array_mut()
             .expect("elements")

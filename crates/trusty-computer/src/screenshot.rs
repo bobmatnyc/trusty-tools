@@ -52,13 +52,23 @@ fn refuse(code: &'static str, detail: impl Into<String>) -> Refusal {
 }
 
 /// True when `element` is a password field.
+///
+/// #11694: cua-driver 0.23.2 reports an `NSSecureTextField` as role
+/// `AXTextField` with `value_description` "contains secure text", so the
+/// description is read as well as the role and subrole.
+/// Test: `bound_refuses_secure_field`.
 fn sensitive(element: &Value) -> bool {
-    ["role", "subrole"].iter().any(|k| {
+    let by_role = ["role", "subrole"].iter().any(|k| {
         element
             .get(*k)
             .and_then(Value::as_str)
             .is_some_and(|r| SENSITIVE_ROLES.contains(&r))
-    })
+    });
+    let by_description = element
+        .get("value_description")
+        .and_then(Value::as_str)
+        .is_some_and(|d| d.to_ascii_lowercase().contains("secure"));
+    by_role || by_description
 }
 
 /// True when the walked AX tree is the whole window: `degraded` is false or
