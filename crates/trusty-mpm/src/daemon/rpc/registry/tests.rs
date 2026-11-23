@@ -733,6 +733,71 @@ async fn rpc_projects_current_unregistered_path_is_not_found() {
     assert_eq!(error["code"], json!(CODE_NOT_FOUND), "{error}");
 }
 
+/// #11345: a checkout registered in `projects.json` by URL, or in
+/// `project-paths.json` by alias, resolves after a daemon restart, which left
+/// the in-memory map empty; an unregistered directory is still a not-found.
+/// Test: this function IS the test.
+#[tokio::test]
+// The registry seeds from `$HOME`, and the URL checkout derives from it.
+#[serial_test::serial]
+async fn projects_current_resolves_persisted_registrations_after_restart_11345() {
+    let (before, dir, _home_dir, _home) = hermetic_isolated_home();
+    let url_checkout = crate::core::repo_paths::base_clone_path("acme", "widget");
+    std::fs::create_dir_all(&url_checkout).expect("mkdir url checkout");
+    before
+        .project_registry()
+        .await
+        .register(crate::project::Project {
+            name: "widget".to_string(),
+            repo_url: "https://github.com/acme/widget.git".to_string(),
+            default_branch: "main".to_string(),
+            stack_hint: None,
+            tags: Vec::new(),
+            description: None,
+            gh_user: None,
+            gh_account: None,
+            github: None,
+            commit_name: None,
+            commit_email: None,
+            worktree: None,
+            project_key: None,
+            decommissioned_at: None,
+            archived_at: None,
+        })
+        .await
+        .expect("persist the URL row");
+    let aliased = dir.path().join("aliased-checkout");
+    std::fs::create_dir_all(&aliased).expect("mkdir alias checkout");
+    let mut aliases =
+        crate::core::project_aliases::ProjectAliasStore::load(before.framework_root())
+            .expect("load alias store");
+    assert!(aliases.try_register("aliased", &aliased));
+    aliases.save().expect("persist the alias row");
+    drop(before);
+
+    // A fresh daemon over the same disk: nothing was announced to it.
+    let after = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
+    for (path, name) in [(&url_checkout, "widget"), (&aliased, "aliased")] {
+        let uri = format!("/projects/current?path={}", path.display());
+        let (status, body) = http(&after, "GET", &uri, None).await;
+        assert_eq!(status, StatusCode::OK, "{} -> {body}", path.display());
+        assert_eq!(body["name"], json!(name), "{body}");
+        let result = rpc_ok(
+            &rpc_router(&after),
+            "mpm.projects.current",
+            json!({ "path": path }),
+        )
+        .await;
+        assert_eq!(result["name"], json!(name), "{result}");
+    }
+
+    let unregistered = dir.path().join("never-registered");
+    std::fs::create_dir_all(&unregistered).expect("mkdir unregistered");
+    let uri = format!("/projects/current?path={}", unregistered.display());
+    let (status, _) = http(&after, "GET", &uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
 /// Why serial: discovery reads `~/.claude/projects/`, and other tests in this
 /// binary move `$HOME` process-wide. One landing between the two calls would
 /// make the HTTP answer read a temp home and the socket answer the real one,
