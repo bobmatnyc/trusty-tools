@@ -9,7 +9,8 @@ use common::rig::{Rig, WINDOW, consent, grant_req, pid};
 use serde_json::{Value, json};
 use trusty_computer::grants::DEFAULT_TOOLS;
 use trusty_computer::pointer::{
-    CLICK_AT_TOOL, DRAG_TOOL, Frame, GRANT_FLAG, frame, grant_name, within,
+    CLICK_AT_TOOL, DRAG_REFUSAL, DRAG_TOOL, Frame, GRANT_FLAG, driver_args, frame, grant_name,
+    within,
 };
 use trusty_computer::policy::{Scope, Verdict, check_call, rule};
 
@@ -251,29 +252,32 @@ fn shrunk_window_refuses_a_point_valid_in_the_agents_view() {
     assert_eq!(driver_calls(&rig, "click").len(), 1);
 }
 
+/// #11696: drag is refused before policy, bounds or any daemon call.
 #[test]
-fn drag_inside_the_frame_reaches_driver() {
+fn drag_is_refused_before_any_check_or_driver_call() {
     let mut rig = pointer_rig(420.0, 252.0);
-    let args = |to_x: f64| json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6, "to_x": to_x, "to_y": 100});
-    let reply = rig.call(DRAG_TOOL, "d1", args(400.0));
-    assert_eq!(reply["ok"], true, "{reply}");
-    assert_eq!(
-        driver_calls(&rig, "drag"),
-        [
-            json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6,
-            "to_x": 400.0, "to_y": 100, "delivery_mode": "foreground"})
-        ]
+    let inside = json!({"pid": pid(), "window_id": WINDOW, "from_x": 5, "from_y": 6, "to_x": 50, "to_y": 60});
+    let reply = rig.call(DRAG_TOOL, "d1", inside);
+    assert_eq!(reply["code"], DRAG_REFUSAL, "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("on top")),
+        "{reply}"
     );
-    // One endpoint outside the window refuses the whole drag.
-    let reply = rig.call(DRAG_TOOL, "d2", args(421.0));
-    assert_eq!(reply["code"], "coordinates_out_of_bounds", "{reply}");
-    assert_eq!(driver_calls(&rig, "drag").len(), 1);
-    let fronted = rig
-        .audit()
-        .into_iter()
-        .filter(|r| r["tool"] == DRAG_TOOL)
-        .all(|r| r["activates_app"] == true);
-    assert!(fronted, "every drag line records activates_app");
+    assert!(
+        rig.daemon(|d| d.calls())
+            .iter()
+            .all(|(n, _)| n != "drag" && n != "get_window_state")
+    );
+    assert!(!trusty_computer::manifest::TOOLS.contains(&"drag"));
+    // Kept for when it is enabled: the drag would be driven in the foreground.
+    let args = json!({"pid": 1, "window_id": 2, "from_x": 0, "from_y": 0, "to_x": 1, "to_y": 1});
+    let (name, request) = driver_args(DRAG_TOOL, args.as_object().expect("object"));
+    assert_eq!(
+        (name, &request["delivery_mode"]),
+        ("drag", &json!("foreground"))
+    );
 }
 
 #[test]

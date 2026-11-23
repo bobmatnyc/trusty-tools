@@ -507,7 +507,7 @@
  },
  {
   "name": "computer_drag",
-  "description": "Left-button drag between two window coordinates of the granted window, when the grant names coordinate_input; activates the target app for the drag (brings it to the front, then restores the prior app); both points are window-local with a top-left origin, in the coordinate space of the granted window image; refused unless both lie inside the window's frame as the broker reads it just before the drag.",
+  "description": "Currently refused (drag_unavailable_needs_window_on_top_check) until the broker can check the granted window is on top. Left-button drag between two window coordinates of the granted window, when the grant names coordinate_input; activates the target app for the drag (brings it to the front, then restores the prior app); both points are window-local with a top-left origin, in the coordinate space of the granted window image; refused unless both lie inside the window's frame as the broker reads it just before the drag.",
   "inputSchema": {
    "type": "object",
    "properties": {

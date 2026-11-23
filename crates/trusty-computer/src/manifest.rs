@@ -10,7 +10,7 @@
 //! daemon restart (plan section 3).
 //! What: [`LeaseScope`] is one pid plus one window id; [`render`] emits the
 //! version-3 YAML with the tool ceiling of `tests/fixtures/capabilities.live.yaml`
-//! plus `invoke_menu` (#11695) and `drag` (#11696)
+//! plus `invoke_menu` (#11695)
 //! and no `resources.apps` entry; the `write()` function stores it 0600 without following a
 //! symlink.
 //! Test: `manifest_pins_exact_pid_and_window_only`, `manifest_file_is_private`.
@@ -21,7 +21,7 @@ use std::path::Path;
 use crate::private;
 
 /// The daemon-side tool ceiling; the broker's policy narrows it further.
-pub const TOOLS: [&str; 13] = [
+pub const TOOLS: [&str; 12] = [
     "start_session",
     "end_session",
     "list_apps",
@@ -35,8 +35,7 @@ pub const TOOLS: [&str; 13] = [
     "check_permissions",
     // #11695: the broker admits it only under a grant naming it, path deny list applied.
     "invoke_menu",
-    // #11696: reached only through the broker's `drag_at`, after the frame check.
-    "drag",
+    // #11696: "drag" joins this ceiling when `pointer::DRAG_ENABLED` turns on.
 ];
 
 /// The one app window a lease may touch.

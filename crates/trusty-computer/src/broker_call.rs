@@ -214,6 +214,10 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
+        // #11696: drag_at is off until a window-on-top check exists; no gate or driver call runs.
+        if let Some((code, detail)) = pointer::disabled(&tool) {
+            return self.refuse(rec, code, detail);
+        }
         if tool == "invoke_menu" {
             // #11695: every menu invocation, refused or run, names its path in the audit.
             rec.insert("menu_path".into(), audit_path(&args_map));

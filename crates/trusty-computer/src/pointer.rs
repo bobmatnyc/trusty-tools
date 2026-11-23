@@ -16,6 +16,7 @@
 //! space the driver takes, so a window that moves keeps them valid (the
 //! driver anchors them to the window at event time); a window that shrinks
 //! between the agent's view and the call is caught by the fresh read.
+//! [`DRAG_TOOL`] is refused by [`disabled`] until a window-on-top check exists.
 //! Test: `tests/pointer.rs`; live: `tests/live_pointer.rs`.
 
 use serde_json::{Map, Value, json};
@@ -30,6 +31,27 @@ pub const DRAG_TOOL: &str = "drag_at";
 pub const TOOLS: [&str; 2] = [CLICK_AT_TOOL, DRAG_TOOL];
 /// The one grant name that admits both coordinate tools.
 pub const GRANT_FLAG: &str = "coordinate_input";
+/// False until a window-on-top check exists; `drag_at` is refused while false.
+///
+/// #11696 (architect decision fc7ec9af2b6d): cua-driver 0.23.2 drags only in
+/// the foreground, posted as global screen input, so a covered or unfocused
+/// granted window lets the drag reach another app. A click is posted to the
+/// pid and is unaffected.
+pub const DRAG_ENABLED: bool = false;
+/// The refusal code of a `drag_at` call while [`DRAG_ENABLED`] is false.
+pub const DRAG_REFUSAL: &str = "drag_unavailable_needs_window_on_top_check";
+
+/// The refusal of `tool` before any gate, when it is a disabled coordinate tool.
+///
+/// Test: `drag_is_refused_before_any_check_or_driver_call`.
+pub fn disabled(tool: &str) -> Option<(&'static str, &'static str)> {
+    (tool == DRAG_TOOL && !DRAG_ENABLED).then_some((
+        DRAG_REFUSAL,
+        "a drag is posted as global screen input and could reach a window covering the granted one; \
+         it is off until the broker can check the granted window is on top",
+    ))
+}
+
 /// The daemon tool the frame is read with.
 pub const FRAME_TOOL: &str = "get_window_state";
 
