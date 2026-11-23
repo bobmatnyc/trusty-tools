@@ -123,7 +123,7 @@ fn provisions_a_complete_instance() {
     assert!(got.created.contains(&got.agent_toml));
     assert!(got.created.contains(&f.agents.join("personal/persona.md")));
     assert_eq!(
-        discover_instances(&[f.agents.clone()]),
+        discover_instances(std::slice::from_ref(&f.agents)),
         vec![id("personal")]
     );
     assert_eq!(
