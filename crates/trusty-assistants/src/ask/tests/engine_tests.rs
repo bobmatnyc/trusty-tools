@@ -286,3 +286,28 @@ async fn a_cancel_does_not_reach_the_next_ask() {
     let turns = TurnLog::for_home(&home).read().unwrap();
     assert_eq!(turns.len(), 1, "only the answered ask is logged");
 }
+
+/// #11650 item 3: the wall-clock budget is a typed error and the log does not
+/// move.
+#[tokio::test(start_paused = true)]
+async fn a_timeout_is_typed_and_leaves_the_log_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let log = TurnLog::for_home(&home);
+    let llm = Arc::new(Scripted::new(vec![text("first answer")]));
+    engine(&home, &llm, &tmp).ask("first").await.unwrap();
+    let before = std::fs::read(log.path()).unwrap();
+
+    add_ask_table(&home, "[ask]\ntimeout_secs = 1\n");
+    // The model takes an hour; the paused clock jumps there at once.
+    let llm = Arc::new(
+        Scripted::new(vec![text("too late")]).delayed(std::time::Duration::from_secs(3600)),
+    );
+    let result = engine(&home, &llm, &tmp).ask("slow").await;
+    assert!(
+        matches!(result, Err(AskError::Timeout { timeout_secs: 1 })),
+        "{result:?}"
+    );
+    assert_eq!(llm.requests().len(), 1, "the request was in flight");
+    assert_eq!(std::fs::read(log.path()).unwrap(), before);
+}

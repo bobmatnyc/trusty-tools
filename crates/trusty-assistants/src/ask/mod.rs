@@ -127,6 +127,7 @@ impl AskEngine {
     /// Test: `tests::engine_tests::a_second_ask_sees_the_first_turn`,
     /// `tests::engine_tests::cancel_stops_at_the_next_turn_boundary`,
     /// `tests::engine_tests::a_cancel_does_not_reach_the_next_ask`,
+    /// `tests::engine_tests::a_timeout_is_typed_and_leaves_the_log_alone`,
     /// `tests::engine_tests::an_instructions_error_stops_the_ask`,
     /// `tests::engine_tests::a_failed_ask_never_advances_the_log`,
     /// `tests::engine_tests::an_empty_model_is_sent_as_the_default`.

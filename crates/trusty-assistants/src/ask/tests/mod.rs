@@ -29,6 +29,7 @@ pub(super) struct Scripted {
     replies: Mutex<VecDeque<ChatResponse>>,
     seen: Mutex<Vec<ChatRequest>>,
     on_call: Option<Box<dyn Fn() + Send + Sync>>,
+    delay: Option<std::time::Duration>,
 }
 
 impl Scripted {
@@ -37,7 +38,14 @@ impl Scripted {
             replies: Mutex::new(replies.into()),
             seen: Mutex::new(Vec::new()),
             on_call: None,
+            delay: None,
         }
+    }
+
+    /// Sleep `delay` inside every `chat` call before replying.
+    pub(super) fn delayed(mut self, delay: std::time::Duration) -> Self {
+        self.delay = Some(delay);
+        self
     }
 
     /// Run `hook` inside every `chat` call, after the request is recorded.
@@ -65,6 +73,9 @@ impl InferenceAdapter for Scripted {
         self.seen.lock().expect("lock").push(request.clone());
         if let Some(hook) = &self.on_call {
             hook();
+        }
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
         }
         self.replies
             .lock()
