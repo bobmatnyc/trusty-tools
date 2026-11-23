@@ -121,6 +121,7 @@ fn provisions_a_complete_instance() {
     assert_eq!(cfg.memory.fan_out, vec!["cto-assistant".to_string()]);
     assert_eq!(got.agent_toml, f.agents.join("personal/agent.toml"));
     assert!(got.created.contains(&got.agent_toml));
+    assert!(got.created.contains(&f.agents.join("personal/persona.md")));
     assert_eq!(
         discover_instances(&[f.agents.clone()]),
         vec![id("personal")]
