@@ -20,6 +20,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Shadow mode runs the poll cycle as a dry-run job against a scratch copy of the poll state and appends `inbox/shadow-wakes.jsonl`; `parity` joins it to `inbox/alerts.jsonl` and `inbox/poll.log` as matched / scheduler-only / poller-only counts. `cutover` and `rollback` move the wake duty between `poll-supervise.sh` and the scheduler and are idempotent; `plist` renders the `com.trusty.architect-sched` launchd user agent and loads nothing.
 - The scheduler poller reads tm health over its socket each cycle and raises the same urgent `dep_degraded` alert as `fleet-poll.py`: 2 consecutive degraded reads of trusty-memory or trusty-search, `pending` ignored, one alert per dependency per outage. `TM_HEALTH=off` turns the step off; `TM_HEALTH_SOCKET` names the socket. An unreachable tm health socket raises `dep_health_error` (class `unreachable`) like an unparseable answer; streaks are held, never reset.
 - `verbs::configured_interval` reads the poll cadence from `poll_interval_s` in `local/architect.json` (or the file `ARCHITECT_CONFIG` names), defaulting to 60 s, the same lookup as `architect_config.py`. A bad value, malformed file or missing named file is a usage error, never the default.
+- `box_holds_text` checks that a captured input box holds typed text or a paste placeholder; `send_line_guarded` and trusty-mpm `session_send` share it, and `send_line_guarded` now accepts a paste placeholder as the echo (#10747).
 
 ### Fixed
 

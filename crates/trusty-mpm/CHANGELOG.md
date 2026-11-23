@@ -18,6 +18,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The Architect fleet poller (`fleet-poll.py`, new `fleet_poll_deps.py`) raises one urgent `dep_degraded` alert per outage when tm health reports trusty-memory or trusty-search degraded on 2 consecutive reads; `pending` reads never count, and recovery re-arms the alert. An unparseable or unreachable tm health answer raises `dep_health_error` (one alert per error class); streaks are held, and a corrupt `dep_health` state book is coerced to defaults. `tm fleet init` ships the new script.
 - Test fixtures honor a `TM_TEST_TMP` environment variable that moves the `tm-test-*` temp root off `/tmp`; `TMPDIR` stays ignored and a root inside `$HOME` still panics (#10785).
 - `tm tui` fetches `console_metrics` over UDS: Events through `events.console_metrics`, MPM through `mpm.mcp.dispatch`. Other services keep the stdio spawn as a fallback. `i` opens any row's service view, MPM's included.
+- The Architect dashboard Projects view gains a Secrets list by owner/project: `GET /api/projects/key-names` lists key names from `tm secrets list` for each tm-registered project and never returns a value (#10350, DOC-82 §10).
 
 ### Fixed
 
@@ -50,6 +51,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Savings and opportunity ledgers store only the program name plus an allow-listed subcommand verb in `tool_name`, never a path, file name or search pattern; existing rows are left as written.
 - A single command rewritten through `tm compress` now exits with the command's own status instead of 0, so a failing command still reads as a failure.
 - The Architect dashboard shows a loading mark, not 0, on every list count and nav count until that list has loaded, and no empty-state text ("The Architect has no open tasks.") while it loads. A list whose first load fails shows "!" and an error.
+- `session_send` types the text, waits up to 2 s for the input box to show it (or a `[Pasted text #N]` placeholder), and only then presses Enter. When the box shows a dropped head it clears the box and returns `sent: false` with `submit_state: "not_echoed"` and a `reason`, instead of submitting the tail (#10747).
+- `session_send` reads the Claude Code input box before typing and returns `sent: false` with `submit_state: "input_not_empty"` when it holds a draft or a stale paste placeholder; it types nothing and sends no `C-u`. Runtimes other than Claude Code keep the type-plus-Enter send without the echo check (#10747).
+- `tm project info` resolves a checkout registered in the persisted project registry (`projects.json` by URL or path, or `project-paths.json` by alias) after a daemon restart, instead of reporting it as not registered. An unreadable registry is now an error, not "not a registered project".
 
 ### Changed
 
