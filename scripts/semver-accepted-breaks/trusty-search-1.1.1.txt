@@ -1,0 +1,4 @@
+crate   trusty-search
+version 1.1.1
+reason  Accepted under the versioning policy of 2026-09-26; Architect approval 2026-11-23. Additive field on a constructible struct, added by #11732 after the 1.1.0 tag.
+accept  constructible_struct_adds_field field WalkDiagnostics.walk_refused
