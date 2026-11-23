@@ -1,7 +1,9 @@
-//! `agents.health` on tagent's well-known socket (#11550).
+//! `agents.health` on the assistant core's well-known socket (#11550).
 //!
-//! Why: `tm tui` probes each service over a Unix socket (ADR-0032); tagent's
-//! only sockets were per-project, so its tile could not be probed.
+//! Why: `tm tui` probes each service over a Unix socket (ADR-0032); `ta`'s
+//! (`tagent` before #11632) only sockets were per-project, so its tile could
+//! not be probed. The socket keeps its `trusty-agents.sock` name: `tm tui`
+//! dials it by that name.
 //! What: [`router`] serves [`METHOD_AGENTS_HEALTH`]; [`spawn`] binds
 //! [`agents_socket`] with the singleton bind and serves it for the life of the
 //! `--api` server process. A second `--api` process finds the socket served
