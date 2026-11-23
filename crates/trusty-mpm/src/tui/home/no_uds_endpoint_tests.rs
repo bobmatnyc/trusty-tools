@@ -99,3 +99,27 @@ fn no_uds_endpoint_tiles_are_not_counted_as_down() {
     assert!(lines.contains(&"health    no UDS endpoint".to_string()));
     assert!(lines.contains(&"detail    example gap".to_string()));
 }
+
+/// #11667: a dial-side socket lookup creates nothing. A data dir it created
+/// would be 0755, which the dial's 0700 trust check then refuses.
+#[test]
+#[serial_test::serial]
+fn dial_side_socket_lookup_leaves_no_directory_behind() {
+    let (home, _guard) = crate::test_support::isolated_daemon_home(false);
+    for service in [
+        ServiceId::Agents,
+        ServiceId::Analyze,
+        ServiceId::Review,
+        ServiceId::Console,
+    ] {
+        let socket = service.socket().expect("socket path resolves");
+        assert!(socket.starts_with(home.path()), "{}", socket.display());
+        let dir = home.path().join(service.id());
+        assert!(
+            !dir.exists(),
+            "{} dial lookup created {}",
+            service.id(),
+            dir.display()
+        );
+    }
+}

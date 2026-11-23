@@ -217,10 +217,11 @@ impl ServiceId {
             ServiceId::Mpm => Ok(trusty_common::mpm_rpc::mpm_socket()),
             ServiceId::Events => trusty_common::control_bus::events_socket_path()
                 .map_err(|e| format!("events socket unresolved: {e:#}")),
-            // #11550: the one path tagent binds.
-            ServiceId::Agents => trusty_agents_common::health::agents_socket()
+            // #11550: the one path tagent binds. #11667: dial lookup, creates nothing.
+            ServiceId::Agents => trusty_agents_common::health::agents_dial_socket()
                 .map_err(|e| format!("agents socket unresolved: {e:#}")),
-            other => trusty_common::daemon_socket_path(other.id())
+            // #11667: dial lookup, creates nothing.
+            other => trusty_common::daemon_socket_path_no_create(other.id())
                 .map_err(|e| format!("{} socket unresolved: {e:#}", other.id())),
         }
     }
