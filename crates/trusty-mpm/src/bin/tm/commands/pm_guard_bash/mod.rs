@@ -149,7 +149,7 @@ pub(crate) use main_checkout::{
 };
 pub(crate) use persistence::command_is_persistence_only;
 pub(crate) use pod_env_dump::evaluate_pod_env_dump_command;
-pub(crate) use process_env_dump::evaluate_process_env_dump_command;
+pub(crate) use process_env_dump::{evaluate_process_env_dump_command, evaluate_quoted_ps_argv};
 pub(crate) use read_only_allow::evaluate_read_only_dispatch_command;
 // #8454 S3: the egress Bash arm walks the same segments and nested bodies
 // (`shell_segments_map`). #10033: one line, for the 500-SLOC cap.
