@@ -326,8 +326,10 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
         let sc = &mut snap["structuredContent"];
         match state.snapshot_mode {
             Some("secure") => {
-                let field = json!({"element_index": 8, "role": "AXTextField",
-                    "subrole": "AXSecureTextField", "parent_index": 0, "element_token": "tok-pw"});
+                // #11694: the 0.23.2 shape — no subrole, a localized description.
+                let field = json!({"element_index": 8, "role": "AXTextField", "value": "",
+                    "value_description": "contains secure text", "parent_index": 0,
+                    "element_token": "tok-pw"});
                 let elements = sc["elements"].as_array_mut().expect("elements");
                 elements.push(field);
                 // #11694: a full walk counts the field it returns.

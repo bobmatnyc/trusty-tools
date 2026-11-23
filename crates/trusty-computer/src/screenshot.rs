@@ -51,12 +51,15 @@ fn refuse(code: &'static str, detail: impl Into<String>) -> Refusal {
     (code, detail.into())
 }
 
-/// True when `element` is a password field.
+/// True when `element` is, or may be, a password field.
 ///
 /// #11694: cua-driver 0.23.2 reports an `NSSecureTextField` as role
-/// `AXTextField` with `value_description` "contains secure text", so the
-/// description is read as well as the role and subrole.
-/// Test: `bound_refuses_secure_field`.
+/// `AXTextField` with no subrole and a localized `value_description`
+/// ("contains secure text" in English). The text cannot be matched in every
+/// language, so any text field carrying a `value_description` that is not an
+/// empty string counts as a password field (fail closed). No description
+/// value is known to be safe, so there is no allowlist.
+/// Test: `bound_refuses_secure_field`, `bound_admits_plain_text_field`.
 fn sensitive(element: &Value) -> bool {
     let by_role = ["role", "subrole"].iter().any(|k| {
         element
@@ -64,11 +67,13 @@ fn sensitive(element: &Value) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|r| SENSITIVE_ROLES.contains(&r))
     });
-    let by_description = element
-        .get("value_description")
-        .and_then(Value::as_str)
-        .is_some_and(|d| d.to_ascii_lowercase().contains("secure"));
-    by_role || by_description
+    let described = match element.get("value_description") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(d)) => !d.trim().is_empty(),
+        Some(_) => true,
+    };
+    let text_field = element.get("role").and_then(Value::as_str) == Some("AXTextField");
+    by_role || (text_field && described)
 }
 
 /// True when the walked AX tree is the whole window: `degraded` is false or

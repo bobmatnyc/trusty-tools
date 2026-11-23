@@ -54,22 +54,45 @@ fn bound_returns_image_only() {
 
 #[test]
 fn bound_refuses_secure_field() {
-    // #11694: the last row is how cua-driver 0.23.2 reports an NSSecureTextField.
+    // #11694: cua-driver 0.23.2 reports an NSSecureTextField as AXTextField with
+    // a localized description; any description we cannot read refuses.
+    let text_field = |description: Value| {
+        json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
+            "value": "", "value_description": description})
+    };
     let fields = [
         json!({"element_index": 9, "role": "AXSecureTextField", "parent_index": 0}),
         json!({"element_index": 9, "subrole": "AXSecureTextField", "parent_index": 0}),
-        json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
-            "value": "", "value_description": "contains secure text"}),
+        text_field(json!("contains secure text")),
+        text_field(json!("contient du texte sécurisé")),
+        text_field(json!("enthält sicheren Text")),
+        text_field(json!(1)),
     ];
     for field in fields {
         let key = field.to_string();
-        let mut snap = counted(json!(false), json!(70), json!(70));
-        snap["structuredContent"]["elements"]
-            .as_array_mut()
-            .expect("elements")
-            .push(field);
-        assert_eq!(refused(&snap), "sensitive_content", "{key}");
+        assert_eq!(refused(&with_field(field)), "sensitive_content", "{key}");
     }
+}
+
+/// `counted()` at 70 elements, the 70th being `field`.
+fn with_field(field: Value) -> Value {
+    let mut snap = counted(json!(false), json!(70), json!(70));
+    snap["structuredContent"]["elements"]
+        .as_array_mut()
+        .expect("elements")
+        .push(field);
+    snap
+}
+
+#[test]
+fn bound_admits_plain_text_field() {
+    for description in [Value::Null, json!(""), json!("  ")] {
+        let field = json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
+            "value": "hello", "value_description": description});
+        assert!(bound(&with_field(field), 7).is_ok(), "{description}");
+    }
+    let bare = json!({"element_index": 9, "role": "AXTextField", "parent_index": 0});
+    assert!(bound(&with_field(bare), 7).is_ok());
 }
 
 /// `capture()` with the 0.23.2 completeness fields set to the given values,
