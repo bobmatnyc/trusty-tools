@@ -275,3 +275,19 @@ fn home_dir_path_scrubbed() {
         "{changes:?}"
     );
 }
+
+// See #9167: an `sk-` inside a word (`task-…`) is a path segment, not a key.
+#[test]
+fn sk_inside_a_word_survives_while_real_sk_keys_are_redacted() {
+    let path = "/var/tmp/evo/11674-subagent-task-roundtrip-x-da2d03d845/.tmpf8k9Ja";
+    assert_eq!(super::core::scrub_credentials(path), path);
+    for key in [
+        "sk-ant-abcdefghijklmnop1234",
+        "KEY=sk-proj-abcdefghijklmnop1234",
+        "\"sk-abcdefghijklmnop1234\"",
+    ] {
+        let out = super::core::scrub_credentials(key);
+        assert!(out.contains("[REDACTED_API_KEY]"), "{key} -> {out}");
+        assert!(!out.contains("abcdefghijklmnop"), "{key} -> {out}");
+    }
+}
