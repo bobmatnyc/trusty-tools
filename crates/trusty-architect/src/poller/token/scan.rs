@@ -104,9 +104,13 @@ impl<'a> Scan<'a> {
         }
     }
 
-    /// `label(f)`: the tmux session, else `<project>:<session[:8]>`.
+    /// `label(f)`: the tmux session, else the name an earlier cycle resolved,
+    /// else `<project>:<session[:8]>`.
+    // See ar-T9u parity window 5: E. A one-cycle lookup miss must not emit a
+    // fallback label or skip the name-keyed ctx_bar bucket swap.
     pub fn label(&self, f: &FileState) -> String {
-        self.names.get(&f.session).cloned().unwrap_or_else(|| {
+        let known = self.names.get(&f.session).or(f.name.as_ref());
+        known.cloned().unwrap_or_else(|| {
             let sid: String = f.session.chars().take(8).collect();
             format!("{}:{sid}", project_label(&f.project))
         })

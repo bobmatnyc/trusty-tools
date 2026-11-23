@@ -8,7 +8,9 @@
 //! Test: `ansi_strip_matches_python_alternatives`, `box_top_rule_accepts_a_short_label`,
 //! `timers_sub_removes_each_shape` (in `classify/tests.rs`).
 
-use crate::pystr::{contains_ci, is_digit, is_space, is_word, lstrip, parse_digits, rstrip, strip};
+use crate::pystr::{
+    is_digit, is_space, is_word, lstrip, parse_digits, rstrip, starts_with_ci, strip,
+};
 
 const ESC: char = '\u{1b}';
 const RULE_CHARS: [char; 2] = ['─', '━'];
@@ -274,19 +276,32 @@ pub(crate) fn is_footer_noise(line: &str) -> bool {
         || left.starts_with("⏺ ")
 }
 
-/// `LIMIT.search(line)`, case-insensitive: a usage-limit notice.
+/// The harness's own plan/usage-limit banner, case-insensitive, anchored at
+/// the start of the line (after blanks and one optional `⎿`):
+/// `(?i)^\s*(?:⎿\s*)?(?:claude (?:ai )?usage limit reached|you(?:'|’)ve hit
+/// your (?:usage )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)`.
+// See ar-T9u parity window 5: B. The old unanchored `resets at` / `limit
+// reached` matched chat prose ("GitHub rate limit resets at 06:38Z").
 pub(crate) fn is_limit(line: &str) -> bool {
-    let chars: Vec<char> = line.chars().collect();
+    let mut rest = lstrip(line);
+    if let Some(r) = rest.strip_prefix('⎿') {
+        rest = lstrip(r);
+    }
+    let chars: Vec<char> = rest.chars().collect();
     [
-        "usage limit reached",
-        "limit reached",
-        "hit your usage limit",
-        "hit your limit",
-        "resets at",
-        "limit will reset",
+        "claude usage limit reached",
+        "claude ai usage limit reached",
+        "you've hit your limit",
+        "you've hit your usage limit",
+        "you’ve hit your limit",
+        "you’ve hit your usage limit",
+        "5-hour limit reached",
+        "weekly limit reached",
+        "opus weekly limit reached",
+        "session limit reached",
     ]
     .iter()
-    .any(|p| contains_ci(&chars, p))
+    .any(|p| starts_with_ci(&chars, p))
 }
 
 /// `ERROR.search(line)`: `Traceback|API Error|Error: Exit code`.

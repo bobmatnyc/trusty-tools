@@ -91,7 +91,16 @@ struct EvalRow<'a> {
     case: &'a str,
     step: usize,
     alerts: Vec<Alert>,
-    ps: &'a PaneState,
+    ps: GoldenPs<'a>,
+}
+
+/// The `ps` keys the Python goldens carry. See ar-T9u parity window 5: C, D
+/// add episode bookkeeping that the goldens predate.
+#[derive(Serialize)]
+struct GoldenPs<'a> {
+    idle_since: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<&'a Vec<String>>,
 }
 
 #[test]
@@ -114,7 +123,10 @@ fn evaluate_matches_python_goldens() -> TestResult {
                 case: str_of(&sc["case"]),
                 step,
                 alerts,
-                ps: &ps,
+                ps: GoldenPs {
+                    idle_since: ps.idle_since,
+                    errors: ps.errors.as_ref(),
+                },
             };
             rows.push(to_python_json(&row, false)?);
         }

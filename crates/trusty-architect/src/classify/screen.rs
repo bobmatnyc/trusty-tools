@@ -3,7 +3,9 @@
 //!
 //! Why: Bob D9t (2026-11-21): an idle session alerts once, and again only when
 //! its screen changes. The deployed poller keys the `idle` fingerprint on this
-//! hash and gives `idle` no re-emit interval (MB1595).
+//! hash and gives `idle` no re-emit interval (MB1595). A changed screen on
+//! an already-alerted epoch waits until it has been idle `IDLE_AFTER` s
+//! (ar-T9u parity window 5: D).
 //! What: [`screen_hash`] takes the rows above the input box (all rows when
 //! there is no box), blanks the [`strip_volatile`] runs (timers, clock times,
 //! token counts, spinner glyphs), collapses whitespace per row, joins the rows

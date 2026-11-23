@@ -703,3 +703,38 @@ fn shadow_mode_keeps_its_own_token_state() {
         "a live run writes state and rollup"
     );
 }
+
+/// ar-T9u parity window 5, class E: the shadow emitted
+/// `trusty-mpm-projects-arch:1f14f88b` `ctx_main:400k` where the poller
+/// emitted `tm-architect` `ctx_main:405k`. The name lookup failed for one
+/// cycle, so the label fell back and the Architect's bucket swap was skipped.
+#[test]
+fn window5_unresolved_name_keeps_the_resolved_label() {
+    let d = tempfile::tempdir().expect("tmp");
+    let e = Env::new(d.path());
+    let sched = d.path().join("il-schedule.json");
+    let bar = json!({"thresholds": {"architect_bar_ctx": 368_182}}).to_string();
+    fs::write(&sched, bar).expect("schedule");
+    let sid = "1f14f88b-0000";
+    let main = e.main_in(sid, "-Users-masa-trusty-mpm-projects-architect");
+    let run = |names: std::collections::BTreeMap<String, String>| {
+        let paths = Paths {
+            base: &e.base,
+            sessions: d.path(),
+            thresholds: d.path().join("none.json"),
+            schedule: &sched,
+        };
+        step(NOW, &e.mode(false), &paths, Some(names)).expect("step")
+    };
+    e.write(&main, &[line("m1", NOW - 120.0, 190_000)]);
+    let named = std::collections::BTreeMap::from([(sid.to_owned(), "tm-architect".to_owned())]);
+    assert!(run(named).is_empty());
+    // The next cycle's lookup fails; the session crosses the guard.
+    e.append(&main, &[line("m2", NOW - 60.0, 405_500)]);
+    let got = run(std::collections::BTreeMap::new());
+    let seen: Vec<(&str, &str)> = got
+        .iter()
+        .map(|a| (a.session.as_str(), a.fingerprint.as_str()))
+        .collect();
+    assert_eq!(seen, [("tm-architect", "ctx_main:405k")]);
+}
