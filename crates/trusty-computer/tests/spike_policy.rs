@@ -1,6 +1,6 @@
 //! Port of the spike's `tests/test_policy.py`: 28 cases, one `#[test]` each,
-//! with the same inputs. `invoke_menu_is_denied` and
-//! `verdict_counts_match_the_plan` are added for the plan's one change.
+//! with the same inputs. `verdict_counts_match_the_plan` is added; `invoke_menu`
+//! moved to FILTER in #11695 (`tests/menu_policy.rs`).
 
 use std::collections::BTreeSet;
 
@@ -61,12 +61,6 @@ fn unknown_tool_is_denied() {
 }
 
 #[test]
-fn invoke_menu_is_denied() {
-    assert_eq!(rule("invoke_menu").map(|r| r.verdict), Some(Verdict::Deny));
-    assert_eq!(code("invoke_menu", json!({"pid": 100})), "denied_tool");
-}
-
-#[test]
 fn verdict_counts_match_the_plan() {
     let count = |v: Verdict| RULES.iter().filter(|r| r.verdict == v).count();
     assert_eq!(
@@ -75,7 +69,7 @@ fn verdict_counts_match_the_plan() {
             count(Verdict::Filter),
             count(Verdict::Deny)
         ),
-        (6, 13, 37)
+        (6, 14, 36)
     );
 }
 

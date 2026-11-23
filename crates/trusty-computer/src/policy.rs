@@ -5,8 +5,8 @@
 //! `policy.py`, plan section 4 step 3).
 //! What: every one of the 56 tools `cua-driver list-tools` reports has a
 //! [`Rule`] in [`RULES`]: ALLOW, FILTER or DENY. A FILTER tool passes only once
-//! every argument check accepts. A tool not in the table is denied. One change
-//! from the spike: `invoke_menu` is DENY (plan section 1, item 3).
+//! every argument check accepts. A tool not in the table is denied.
+//! `invoke_menu` is FILTER behind [`crate::menu::path_allowed`] (#11695).
 //! Test: `tests/spike_policy.rs`.
 
 use std::collections::BTreeSet;
@@ -15,7 +15,7 @@ use serde_json::{Map, Value};
 
 use crate::pyvalue::truthy;
 
-pub use crate::policy_rules::RULES;
+pub use crate::policy_rules::{BROKER_RULES, RULES};
 
 /// The cua-driver version this table was written against.
 pub const DRIVER_VERSION: &str = "0.23.2";
@@ -92,9 +92,9 @@ pub struct Rule {
     pub checks: &'static [Check],
 }
 
-/// The rule for `tool`, if the table has one.
+/// The rule for `tool`, if the driver table or the broker table has one.
 pub fn rule(tool: &str) -> Option<&'static Rule> {
-    RULES.iter().find(|r| r.tool == tool)
+    RULES.iter().chain(&BROKER_RULES).find(|r| r.tool == tool)
 }
 
 /// Return the rule a call passes, or the refusal.
@@ -105,7 +105,7 @@ pub fn rule(tool: &str) -> Option<&'static Rule> {
 /// Postcondition: an `Ok` rule is never DENY and every one of its checks
 /// accepted `args`.
 /// Test: `unknown_tool_is_denied`, `brief_named_tools_are_denied`,
-/// `invoke_menu_is_denied`, `non_object_args_are_refused`; the `refuses!` and
+/// `menu_denied_path_refused`, `non_object_args_are_refused`; the `refuses!` and
 /// `admits!` rows in `tests/spike_policy.rs`.
 pub fn check_call(tool: &str, args: &Value, scope: &Scope) -> Result<&'static Rule, PolicyError> {
     let rule = rule(tool).ok_or_else(|| PolicyError::new("unknown_tool", tool))?;
@@ -359,6 +359,26 @@ pub(crate) fn no_paths(args: &Map<String, Value>, _: &Scope) -> Result<(), Polic
         Some(hit) => Err(PolicyError::new(
             "path_write",
             format!("{hit} writes a file at a caller path"),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// #11694: a screenshot names exactly one integer `pid` and `window_id`, nothing else.
+pub(crate) fn window_only(args: &Map<String, Value>, _: &Scope) -> Result<(), PolicyError> {
+    if !args.get("window_id").is_some_and(|w| w.is_u64()) {
+        return Err(PolicyError::new(
+            "window_required",
+            "a screenshot must name an integer window_id",
+        ));
+    }
+    match args
+        .keys()
+        .find(|k| !matches!(k.as_str(), "pid" | "window_id"))
+    {
+        Some(extra) => Err(PolicyError::new(
+            "screenshot_arg",
+            format!("{extra} is not allowed"),
         )),
         None => Ok(()),
     }

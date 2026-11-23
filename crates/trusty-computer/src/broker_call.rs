@@ -11,8 +11,13 @@
 //! redacted snapshot of that window; audit `forward` (a failure refuses); the
 //! driver call; menu-bar strip of a snapshot (one with no structured part is
 //! refused) and of a `driver_refused` result; read-back confirmation of a
-//! mutating call; journal; audit `done`. The read tools are asked for no
-//! screenshot, and every reply loses any image part the driver sends.
+//! mutating call; journal; audit `done`. An `invoke_menu` call records its
+//! path in the audit, and a `get_window_state` under a grant naming
+//! `invoke_menu` carries [`menu::menu_paths`] as `menu`; an `invoke_menu`
+//! path must be one of the last snapshot's [`menu::allowed_paths`] (#11695). `screenshot_window` is driven as a
+//! `get_window_state` capture and reduced to one image by
+//! [`screenshot::bound`]; the read tools are asked for no screenshot, and
+//! every other reply loses any image part the driver sends (#11694).
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -27,8 +32,10 @@ use crate::broker::{Ctx, Inner, refusal};
 use crate::driver::{DriverError, is_manifest_idle};
 use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
+use crate::menu;
 use crate::policy::{self, Verdict};
 use crate::redact::{redact_reply, strip_markdown};
+use crate::screenshot::{self, SCREENSHOT_TOOL};
 use crate::supervisor::READ_ONLY_TOOLS;
 
 /// Tools that must name a token from the last redacted snapshot.
@@ -41,7 +48,7 @@ pub const TOKEN_TOOLS: [&str; 6] = [
     "type_text",
 ];
 /// Mutating tools confirmed by read-back.
-pub const CONFIRM_TOOLS: [&str; 9] = [
+pub const CONFIRM_TOOLS: [&str; 10] = [
     "click",
     "double_click",
     "right_click",
@@ -51,6 +58,7 @@ pub const CONFIRM_TOOLS: [&str; 9] = [
     "press_key",
     "hotkey",
     "launch_app",
+    "invoke_menu",
 ];
 /// Delays of the re-reads after a mutating call; the driver already waits ~1 s in a click.
 pub const CONFIRM_POLLS: [Duration; 2] = [Duration::ZERO, Duration::from_millis(250)];
@@ -60,19 +68,6 @@ pub const UNCONFIRMED_HINT: &str = "not confirmed: check with get_window_state, 
 /// Read tools the driver answers with a screenshot unless told otherwise.
 const IMAGE_READ_TOOLS: [&str; 2] = ["get_window_state", "verify_state"];
 
-/// `args` for the daemon: a read tool in [`IMAGE_READ_TOOLS`] is asked for no
-/// screenshot, whose pixels the redactor cannot clean.
-/// Test: `read_asks_driver_for_no_image`.
-fn read_args(tool: &str, args: &Value) -> Value {
-    let mut args = args.clone();
-    if IMAGE_READ_TOOLS.contains(&tool)
-        && let Some(map) = args.as_object_mut()
-    {
-        map.insert("include_screenshot".into(), json!(false));
-    }
-    args
-}
-
 /// Drop every non-text content part of any tool's reply, so an image the
 /// driver sends anyway never reaches the agent.
 /// Test: `read_drops_image_the_driver_sends_anyway`, `refused_read_drops_image`,
@@ -80,6 +75,43 @@ fn read_args(tool: &str, args: &Value) -> Value {
 fn strip_images(result: &mut Value) {
     if let Some(parts) = result.get_mut("content").and_then(Value::as_array_mut) {
         parts.retain(|p| p.get("type") == Some(&json!("text")));
+    }
+}
+
+/// The daemon tool and arguments for agent `tool` (#11694).
+///
+/// `screenshot_window` becomes [`screenshot::driver_args`]; a read tool in
+/// [`IMAGE_READ_TOOLS`] is asked for no screenshot, whose pixels the redactor
+/// cannot clean.
+/// Test: `read_asks_driver_for_no_image`.
+fn driver_request(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
+    if tool == SCREENSHOT_TOOL {
+        return (screenshot::DRIVER_TOOL, screenshot::driver_args(args));
+    }
+    let mut args = args.clone();
+    if IMAGE_READ_TOOLS.contains(&tool) {
+        args.insert("include_screenshot".into(), json!(false));
+    }
+    let name = policy::rule(tool).map_or("", |r| r.tool);
+    (name, Value::Object(args))
+}
+
+/// The `path` of an `invoke_menu` call as the audit records it (#11695).
+///
+/// A path the policy would refuse for its shape is recorded as its length only.
+fn audit_path(args: &Map<String, Value>) -> Value {
+    let path = args.get("path").and_then(Value::as_array);
+    let sane = path.is_some_and(|p| {
+        p.len() <= menu::MAX_PATH_SEGMENTS
+            && p.iter().all(|s| {
+                s.as_str()
+                    .is_some_and(|s| s.chars().count() <= menu::MAX_LABEL_CHARS)
+            })
+    });
+    match path {
+        Some(p) if sane => Value::Array(p.clone()),
+        Some(p) => json!({"unrecorded_segments": p.len()}),
+        None => Value::Null,
     }
 }
 
@@ -176,6 +208,12 @@ impl<L: Launcher> Inner<L> {
             return self.refuse(rec, "bad_args", "args must be an object");
         };
         rec.insert("args".into(), summarize_args(&args_map));
+        if tool == "invoke_menu" {
+            // #11695: every menu invocation, refused or run, names its path in the audit.
+            rec.insert("menu_path".into(), audit_path(&args_map));
+            // #11695: the driver brings the target app to the front to press a menu item.
+            rec.insert("activates_app".into(), json!(true));
+        }
         // 1. Policy verdict and argument filter, on the grant's app.
         let rule = match policy::check_call(&tool, &args, &grant.policy_scope()) {
             Ok(rule) => rule,
@@ -224,11 +262,23 @@ impl<L: Launcher> Inner<L> {
             let snap = key.and_then(|k| self.snaps.get(&k));
             let detail = match (snap, named_token(&args_map)) {
                 (None, _) => Some("take get_window_state of this pid and window_id first"),
-                (Some((tokens, _)), Some(t)) if tokens.contains(&t) => None,
+                (Some((tokens, _, _)), Some(t)) if tokens.contains(&t) => None,
                 (Some(_), _) => Some("token is not in the last redacted snapshot of this window"),
             };
             if let Some(detail) = detail {
                 return self.refuse(rec, "token_not_exposed", detail);
+            }
+        }
+        // #11695: menu gate; a path must be listed in the last snapshot of this window.
+        if tool == "invoke_menu" {
+            let snap = key.and_then(|k| self.snaps.get(&k));
+            let detail = match (snap, menu::call_path(&args_map)) {
+                (None, _) => Some("take get_window_state of this pid and window_id first"),
+                (Some((_, _, paths)), Some(p)) if paths.contains(&p) => None,
+                (Some(_), _) => Some("path is not an allowed menu path of the last snapshot"),
+            };
+            if let Some(detail) = detail {
+                return self.refuse(rec, "menu_path_not_exposed", detail);
             }
         }
         // 5. Audit `forward`; a failure refuses before the daemon is called.
@@ -239,11 +289,23 @@ impl<L: Launcher> Inner<L> {
         }
         self.grants.touch(grant_id, now);
         // 6. The driver call, then strip, confirm, journal, audit `done`.
-        let (mut reply, outcome) = self.drive(&tool, &read_args(&tool, &args), grant.scope);
-        strip_images(&mut reply["result"]);
+        let shot = tool == SCREENSHOT_TOOL;
+        let (driver_tool, driver_args) = driver_request(&tool, &args_map);
+        let (mut reply, outcome) = self.drive(driver_tool, &driver_args, grant.scope);
+        if !shot {
+            strip_images(&mut reply["result"]);
+        }
+        if shot && reply["ok"] != json!(true) {
+            // #11694: a refused or failed capture may still carry pixels or a tree.
+            if let Some(r) = reply.as_object_mut() {
+                r.remove("result");
+            }
+        }
         if reply["code"] == json!("driver_refused") {
             // #11460: a refusal can carry the tree it refused; strip it too.
-            reply["result"] = redact_reply(&reply["result"]).result;
+            if !shot {
+                reply["result"] = redact_reply(&reply["result"]).result;
+            }
             if let Some(error) = reply["error"].as_str().map(strip_markdown) {
                 reply["error"] = json!(error);
             }
@@ -261,13 +323,30 @@ impl<L: Launcher> Inner<L> {
                 "the snapshot has no structured part to redact",
             );
         }
-        if reply["ok"] == json!(true) {
+        if shot && reply["ok"] == json!(true) {
+            reply = match screenshot::bound(&reply["result"], grant.scope.window_id) {
+                Ok(image) => json!({"ok": true, "result": image}),
+                Err((code, detail)) => refusal(code, &detail),
+            };
+        } else if reply["ok"] == json!(true) {
+            screenshot::strip_images(&mut reply["result"]);
             if tool == "get_window_state" {
+                // #11695: the menu tree is shown only to a grant that names invoke_menu.
+                let (paths, truncated) = menu::allowed_paths(&reply["result"]);
+                let menu = grant
+                    .tools
+                    .contains("invoke_menu")
+                    .then(|| json!({"paths": paths, "truncated": truncated}));
                 let red = redact_reply(&reply["result"]);
                 rec.insert("redacted".into(), json!(red.removed));
                 reply["result"] = red.result;
+                if let (Some(menu), Some(sc)) =
+                    (menu, reply["result"]["structuredContent"].as_object_mut())
+                {
+                    sc.insert("menu".into(), menu);
+                }
                 if let Some(k) = key {
-                    self.snaps.insert(k, (red.tokens, red.fingerprint));
+                    self.snaps.insert(k, (red.tokens, red.fingerprint, paths));
                 }
             } else if CONFIRM_TOOLS.contains(&tool.as_str()) {
                 let confirmation = self.confirm(key, &reply["result"]);
@@ -279,8 +358,14 @@ impl<L: Launcher> Inner<L> {
                 }
             }
         }
+        let kept = if shot && reply["ok"] == json!(true) {
+            // #11694: the journal never holds pixels; a replay says to take a new one.
+            json!({"ok": true, "result": {"replayed_image": screenshot::REPLAY_NOTE}})
+        } else {
+            reply.clone()
+        };
         let journal = self.journals.entry(grant_id.to_owned()).or_default();
-        if let Err(e) = journal.record(&rid, reply.clone(), outcome) {
+        if let Err(e) = journal.record(&rid, kept, outcome) {
             reply = json!({"ok": false, "code": e.code(), "error": e.to_string(), "result": reply});
         }
         rec.insert("phase".into(), json!("done"));
@@ -382,10 +467,11 @@ impl<L: Launcher> Inner<L> {
                         "state_changed": false, "readback_error": e.to_string()});
                 }
             };
+            let (paths, _) = menu::allowed_paths(&snap);
             let red = redact_reply(&snap);
             after = red.fingerprint.clone();
             self.snaps
-                .insert((pid, window), (red.tokens, red.fingerprint));
+                .insert((pid, window), (red.tokens, red.fingerprint, paths));
             if after != before {
                 break;
             }

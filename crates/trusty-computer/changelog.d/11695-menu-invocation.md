@@ -1,0 +1,6 @@
+Added
+- `invoke_menu` moves from DENY to FILTER: it runs only under a grant that names it, on the granted pid and window, with a 2 to 16 label `path`. A path holding Quit, Close, Force Quit, Log Out, Shut Down, Restart, Services, Open With, Share, System Settings or the Apple menu is refused `denied_menu_path` before the driver (#11695).
+- `computer_invoke_menu` MCP tool; `computer_read` under an `invoke_menu` grant returns `menu.paths`, the allowed menu paths of the granted app, with denied items and the Apple menu left out (#11695).
+- A menu call activates the target app (the driver brings it to the front); the tool description and README say so, `bring_to_front` stays denied, and every `invoke_menu` call, refused or run, records its `menu_path` and `activates_app: true` in the audit log, and a run call is confirmed by read-back (#11695).
+- The bounded daemon manifest now lists `invoke_menu` in its tool ceiling, so a granted menu call reaches the driver (#11695).
+- `invoke_menu` takes only a path listed in the window's last `computer_read` snapshot (`menu_path_not_exposed` otherwise), and the Apple and app menus are refused by position, so a localized label such as "Dienste" cannot reach Services. Hide Others, Show All, Move to Trash, Print, Export and Save As join the deny list (#11695).

@@ -43,6 +43,44 @@ let button = NSButton(title: "Press Me", target: target, action: #selector(Targe
 button.frame = NSMakeRect(160, 50, 100, 32)
 win.contentView?.addSubview(label)
 win.contentView?.addSubview(button)
+// #11694: SIGNEDCHECK_SECURE=1 adds a filled password field; a screenshot must be refused.
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_SECURE"] == "1" {
+    let secret = NSSecureTextField(frame: NSMakeRect(20, 170, 180, 24))
+    secret.stringValue = "fixture-secret"
+    win.contentView?.addSubview(secret)
+}
+// #11695: SIGNEDCHECK_MENU=1 adds a safe menu item ("menu N" in the state
+// file) beside denied ones (Quit, Close Window) for the live menu check.
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_MENU"] == "1" {
+    final class MenuTarget: NSObject {
+        var n = 0
+        @objc func safe(_ sender: Any?) {
+            n += 1
+            log += "menu \(n)\n"
+            flush()
+        }
+    }
+    let menuTarget = MenuTarget()
+    objc_setAssociatedObject(app, "menuTarget", menuTarget, .OBJC_ASSOCIATION_RETAIN)
+    let bar = NSMenu()
+    let appItem = NSMenuItem()
+    let appMenu = NSMenu(title: "SignedCheck")
+    appMenu.addItem(withTitle: "Quit SignedCheck",
+                    action: #selector(NSApplication.terminate(_:)), keyEquivalent: "")
+    appItem.submenu = appMenu
+    bar.addItem(appItem)
+    let fixtureItem = NSMenuItem(title: "Fixture", action: nil, keyEquivalent: "")
+    let fixtureMenu = NSMenu(title: "Fixture")
+    let safe = NSMenuItem(title: "Safe Item", action: #selector(MenuTarget.safe(_:)),
+                          keyEquivalent: "")
+    safe.target = menuTarget
+    fixtureMenu.addItem(safe)
+    fixtureMenu.addItem(withTitle: "Close Window",
+                        action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
+    fixtureItem.submenu = fixtureMenu
+    bar.addItem(fixtureItem)
+    app.mainMenu = bar
+}
 win.makeKeyAndOrderFront(nil)
 log += "window \(win.windowNumber)\n"
 flush()

@@ -110,7 +110,7 @@
  },
  {
   "name": "computer_read",
-  "description": "AX tree of a granted window, menu bar removed, element tokens included.",
+  "description": "AX tree of a granted window, menu bar removed, element tokens included; with an invoke_menu grant, also the allowed menu paths.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -134,6 +134,29 @@
  {
   "name": "computer_verify",
   "description": "Check a predicate on window state.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_screenshot",
+  "description": "Image of the granted window only, when the grant names screenshot_window; no menu bar or AX tree; refused while a password field shows.",
   "inputSchema": {
    "type": "object",
    "properties": {
@@ -409,6 +432,41 @@
    },
    "required": [
     "bundle_id"
+   ]
+  }
+ },
+ {
+  "name": "computer_invoke_menu",
+  "description": "Invoke a menu item of the granted app by its label path, when the grant names invoke_menu; activates the target app (brings it to the front); the path must be one computer_read listed as menu for this window; the Apple and app menus, Quit, Close, Hide Others, Show All, Move to Trash, Print, Export, Save As, Services, Open With, Share and System Settings are never listed. Known limitation: Localized labels outside first two menus (e.g., 'Teilen' for Share in File menu) may not be blocked. First two menu items (Apple, app menu) are refused by position.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "path": {
+     "type": "array",
+     "items": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+     },
+     "minItems": 1,
+     "maxItems": 16,
+     "description": "Menu labels from the menu bar down, as computer_read lists them."
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id",
+    "path"
    ]
   }
  },

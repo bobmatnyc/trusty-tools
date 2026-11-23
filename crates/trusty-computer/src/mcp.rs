@@ -1,4 +1,4 @@
-//! The `trusty-computer-mcp` server: 20 static `computer_*` tools over stdio JSON-RPC.
+//! The `trusty-computer-mcp` server: 22 static `computer_*` tools over stdio JSON-RPC.
 //!
 //! Why: agents speak MCP; the broker speaks newline JSON on `agent.sock`.
 //! This is a thin translator with a fixed tool list, so the exposed surface
@@ -9,7 +9,10 @@
 //! grant id `computer_connect` returned. Each call carries a `request_id`,
 //! a uuid4 when the caller gave none. A broker refusal is an MCP tool error
 //! (`isError: true`) whose text and `structuredContent` carry its `code`.
-//! Test: `tools_list_is_the_plan_table`, `mcp_smoke_against_a_fake_broker`.
+//! `computer_screenshot` (#11694) answers an MCP `image` part plus its metadata.
+//! `computer_invoke_menu` (#11695) maps to the driver's `invoke_menu`.
+//! Test: `tools_list_is_the_plan_table`, `mcp_smoke_against_a_fake_broker`,
+//! `screenshot_result_is_an_image_part`.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -40,6 +43,7 @@ pub fn driver_tool(name: &str) -> Option<&'static str> {
         "computer_windows" => "list_windows",
         "computer_read" => "get_window_state",
         "computer_verify" => "verify_state",
+        "computer_screenshot" => crate::screenshot::SCREENSHOT_TOOL,
         "computer_click" => "click",
         "computer_double_click" => "double_click",
         "computer_right_click" => "right_click",
@@ -49,6 +53,7 @@ pub fn driver_tool(name: &str) -> Option<&'static str> {
         "computer_key" => "press_key",
         "computer_hotkey" => "hotkey",
         "computer_launch" => "launch_app",
+        "computer_invoke_menu" => "invoke_menu",
         _ => return None,
     })
 }
@@ -81,6 +86,21 @@ fn broker_op(name: &str) -> Option<&'static str> {
 fn tool_error(code: &str, detail: &str) -> Value {
     json!({"content": [{"type": "text", "text": format!("{code}: {detail}")}],
         "structuredContent": {"code": code, "error": detail}, "isError": true})
+}
+
+/// The MCP answer to a broker screenshot result: an `image` part, then its metadata.
+///
+/// A result without a string `image` (a journal replay) answers as text only.
+/// Test: `screenshot_result_is_an_image_part`.
+pub fn image_result(mut result: Value) -> Value {
+    let image = result.as_object_mut().and_then(|r| r.remove("image"));
+    let mut content = Vec::new();
+    if let Some(Value::String(data)) = image {
+        content.push(json!({"type": "image", "data": data,
+            "mimeType": result["mime_type"].clone()}));
+    }
+    content.push(json!({"type": "text", "text": result.to_string()}));
+    json!({"content": content, "structuredContent": result, "isError": false})
 }
 
 /// One MCP session over one broker connection.
@@ -185,6 +205,9 @@ impl McpServer {
             "computer_connect" => self.grant = result["grant"].as_str().map(str::to_owned),
             "computer_disconnect" => self.grant = None,
             _ => {}
+        }
+        if name == "computer_screenshot" {
+            return image_result(result);
         }
         let mut out = json!({"content": [{"type": "text", "text": result.to_string()}],
             "isError": false});

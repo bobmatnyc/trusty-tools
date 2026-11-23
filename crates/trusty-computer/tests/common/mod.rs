@@ -129,11 +129,18 @@ pub fn window_state(clicks: u64) -> Value {
 /// The base64 image the fake daemon attaches (a 1x1 PNG).
 pub const FAKE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 
-/// `snap` as cua-driver 0.23.2 answers `args`: an image part is appended
-/// unless `include_screenshot` is false (the driver default is true), or
-/// always when `force` (a driver that ignores the flag).
+/// `snap` as cua-driver 0.23.2 answers `args`: window fields, and an image
+/// part unless `include_screenshot` is false (the driver default is true,
+/// #11694), or always when `force` (a driver that ignores the flag).
 pub fn with_capture(mut snap: Value, args: &Value, force: bool) -> Value {
+    let sc = &mut snap["structuredContent"];
+    sc["pid"] = args["pid"].clone();
+    sc["window_id"] = args["window_id"].clone();
+    sc["elements_complete"] = json!(true);
     if force || args.get("include_screenshot") != Some(&json!(false)) {
+        sc["screenshot_frame_valid"] = json!(true);
+        sc["screenshot_width"] = json!(1);
+        sc["screenshot_height"] = json!(1);
         let image = json!({"type": "image", "data": FAKE_PNG, "mimeType": "image/png"});
         if let Some(parts) = snap["content"].as_array_mut() {
             parts.push(image);
@@ -154,8 +161,10 @@ struct Shared {
     /// `structuredContent.effect` of every non-snapshot result.
     effect: Option<String>,
     /// `get_window_state` answers text only (`"text_only"`), an `isError`
-    /// result carrying the whole tree and an image (`"refused"`), or attaches
-    /// an image even when asked for none, to every reply (`"image_always"`).
+    /// result carrying the whole tree and an image (`"refused"`), attaches
+    /// an image even when asked for none, to every reply (`"image_always"`),
+    /// or answers a tree with a password field (`"secure"`) or a degraded
+    /// tree (`"degraded"`).
     snapshot_mode: Option<&'static str>,
 }
 
@@ -311,7 +320,31 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     }
     if name == "get_window_state" {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
-        let snap = with_capture(window_state(clicks), &args, force_image);
+        let mut snap = with_capture(window_state(clicks), &args, force_image);
+        let sc = &mut snap["structuredContent"];
+        match state.snapshot_mode {
+            Some("secure") => {
+                let field = json!({"element_index": 8, "role": "AXTextField",
+                    "subrole": "AXSecureTextField", "parent_index": 0, "element_token": "tok-pw"});
+                sc["elements"].as_array_mut().expect("elements").push(field);
+            }
+            Some("degraded") => sc["degraded"] = json!(true),
+            Some("menus") => {
+                // #11695: an app menu holding German "Dienste" (Services), then File > New.
+                let rows = [
+                    (9, "AXMenuBarItem", "Fixture", 4),
+                    (10, "AXMenuItem", "Dienste", 9),
+                    (11, "AXMenuBarItem", "File", 4),
+                    (12, "AXMenuItem", "New", 11),
+                ];
+                let elements = sc["elements"].as_array_mut().expect("elements");
+                for (i, role, label, parent) in rows {
+                    elements.push(json!({"element_index": i, "role": role, "label": label,
+                        "parent_index": parent, "element_token": format!("tok-m{i}")}));
+                }
+            }
+            _ => {}
+        }
         return json!({"ok": true, "result": snap});
     }
     let token = args.get("element_token").and_then(Value::as_str);

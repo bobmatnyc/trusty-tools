@@ -16,11 +16,14 @@
 //! flow and the lockout), [`app_identity`] (the pid's real bundle) and
 //! [`operator_cli`]; `broker_unlock` persists the lockout across restarts. Phase 5 adds [`mcp`], the
 //! `trusty-computer-mcp` server. Phase 6 adds [`codesign`], [`launchd`] and
-//! [`service_cli`] (`install-service`, `uninstall-service`).
+//! [`service_cli`] (`install-service`, `uninstall-service`). #11694 adds
+//! [`screenshot`], the bounded window screenshot. #11695 adds [`menu`], the
+//! menu path deny list and the menu tree `computer_read` returns.
 //! Test: `tests/spike_policy.rs`, `tests/spike_redact.rs`, `tests/spike_audit.rs`,
 //! `tests/spike_journal.rs`, `tests/spike_supervisor.rs`, `tests/driver_client.rs`,
 //! `tests/broker_spike.rs`, `tests/broker_lease.rs`, `tests/broker_fail_closed.rs`,
-//! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`.
+//! `tests/consent_fail_closed.rs`, `tests/mcp_server.rs`, `tests/install.rs`,
+//! `tests/screenshot.rs`, `tests/menu_policy.rs`.
 
 pub mod app_identity;
 pub mod audit;
@@ -40,6 +43,7 @@ pub mod launcher;
 pub mod lease;
 pub mod manifest;
 pub mod mcp;
+pub mod menu;
 pub mod operator_cli;
 pub mod peer;
 pub mod policy;
@@ -48,6 +52,7 @@ mod policy_rules;
 pub use trusty_daemon_common::private;
 pub mod pyvalue;
 pub mod redact;
+pub mod screenshot;
 pub mod serve;
 pub mod service_cli;
 pub mod supervisor;
