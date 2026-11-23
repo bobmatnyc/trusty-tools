@@ -27,7 +27,7 @@ streams, and the delegation edges that exist in source today.
 **Out of scope:** per-harness internals, tool inventories, model routing, and
 release procedures. Those live in each harness's own documentation
 ([trusty-mpm](../trusty-mpm/README.md), [trusty-code](../trusty-code/README.md),
-[trusty-agents](../trusty-agents/README.md)).
+[trusty-agents](../trusty-assistants/README.md)).
 
 Every claim below is stated against the crate source in `crates/`. Where the
 source does not settle a question, the page says so rather than guessing —
@@ -404,7 +404,7 @@ Stated explicitly so nothing here reads as more settled than it is.
 ## References
 
 - [trusty-mpm](../trusty-mpm/README.md), [trusty-code](../trusty-code/README.md),
-  [trusty-agents](../trusty-agents/README.md) — per-harness documentation
+  [trusty-agents](../trusty-assistants/README.md) — per-harness documentation
 - [trusty-common](../trusty-common/README.md) — the workspace-wide shared crate
 
 Source of truth for everything above, in the repository:
