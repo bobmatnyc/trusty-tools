@@ -12,7 +12,8 @@ use trusty_code::tools::{ToolExecutor, ToolRegistry, ToolResult};
 use super::{Scripted, empty_servers, instance, text, tool_names};
 use crate::ask::okg_search::OkgSearchTool;
 use crate::ask::tools::{
-    REASON_SENDS, REASON_UNLISTED, REASON_WRITES, build_registry, classify, read_only_view,
+    REASON_PATH_ARG, REASON_SENDS, REASON_UNLISTED, REASON_WRITES, build_registry, classify,
+    is_read_only, read_only_view,
 };
 use crate::ask::{AskEngine, Exclusion, OKG_SEARCH_TOOL_NAME};
 
@@ -41,8 +42,18 @@ const KEPT: &[&str] = &[
     "mcp__trusty-search__search",
     "mcp__trusty-memory__memory_recall",
     "mcp__gworkspace__search_gmail_messages",
-    "mcp__granola-notes__granola_search",
     "mcp__trusty-mpm__session_status",
+];
+
+/// Tools whose schema takes a local path, or whose server cannot be audited
+/// (#11650 fix round). None may be registered.
+const PATH_OR_UNAUDITED: &[(&str, &str)] = &[
+    ("mcp__gworkspace__get_drive_file_content", REASON_WRITES),
+    ("mcp__gworkspace__download_gmail_attachment", REASON_WRITES),
+    ("mcp__trusty-search__search_similar", REASON_PATH_ARG),
+    ("mcp__granola-notes__granola_search", REASON_UNLISTED),
+    ("mcp__granola-notes__granola_get", REASON_UNLISTED),
+    ("mcp__granola-notes__granola_list_recent", REASON_UNLISTED),
 ];
 
 /// Tools a live catalog can carry, excluded, with the reason.
@@ -50,7 +61,6 @@ const EXCLUDED: &[(&str, &str)] = &[
     ("mcp__gworkspace__compose_email", REASON_SENDS),
     ("mcp__gworkspace__manage_events", REASON_WRITES),
     ("mcp__gworkspace__modify_gmail_messages", REASON_WRITES),
-    ("mcp__gworkspace__download_gmail_attachment", REASON_WRITES),
     ("mcp__trusty-mpm__session_send", REASON_SENDS),
     ("mcp__trusty-mpm__agent_delegate", REASON_SENDS),
     ("mcp__trusty-memory__memory_remember", REASON_WRITES),
@@ -69,7 +79,7 @@ const EXCLUDED: &[(&str, &str)] = &[
 fn catalog() -> Vec<String> {
     KEPT.iter()
         .copied()
-        .chain(EXCLUDED.iter().map(|(t, _)| *t))
+        .chain(EXCLUDED.iter().chain(PATH_OR_UNAUDITED).map(|(t, _)| *t))
         .map(str::to_string)
         .collect()
 }
@@ -80,12 +90,33 @@ fn the_catalog_split_lists_every_exclusion() {
     assert_eq!(kept, KEPT);
     let expected: Vec<Exclusion> = EXCLUDED
         .iter()
+        .chain(PATH_OR_UNAUDITED)
         .map(|(tool, reason)| Exclusion {
             tool: tool.to_string(),
             reason,
         })
         .collect();
     assert_eq!(excluded, expected);
+}
+
+#[test]
+fn path_argument_tools_are_never_registered() {
+    let mut scratch = ToolRegistry::new();
+    for (name, _) in PATH_OR_UNAUDITED {
+        assert!(!is_read_only(name), "{name} is on the allowlist");
+        scratch.register(Arc::new(Named(name.to_string())));
+    }
+    let loaded: Vec<String> = PATH_OR_UNAUDITED
+        .iter()
+        .map(|(t, _)| t.to_string())
+        .collect();
+    let (view, excluded) = read_only_view(&scratch, &loaded);
+    assert!(tool_names(&view).is_empty(), "{:?}", tool_names(&view));
+    let reasons: Vec<(&str, &str)> = excluded
+        .iter()
+        .map(|e| (e.tool.as_str(), e.reason))
+        .collect();
+    assert_eq!(reasons, PATH_OR_UNAUDITED);
 }
 
 /// A stand-in for a bridged MCP tool; only its name matters here.

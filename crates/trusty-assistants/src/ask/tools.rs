@@ -25,12 +25,24 @@ use super::okg_search::OkgSearchTool;
 /// Known read-only MCP tools, by the server name in `servers.toml`.
 ///
 /// Why: derived by reading each server's tool dispatch in this workspace
-/// (`trusty-search`, `trusty-memory`, `trusty-mpm`, `trusty-gworkspace`) and
-/// the operator's catalog (`granola-notes`). A tool is listed only when every
-/// call is a read; a tool that reads or writes by an `action` argument
-/// (`manage_events`) is not listed. A renamed server loses its tools, which is
-/// the safe direction.
-/// Test: `super::tests::tools_tests::the_catalog_split_lists_every_exclusion`.
+/// (`trusty-search`, `trusty-memory`, `trusty-mpm`, `trusty-gworkspace`). A
+/// tool is listed only when every call is a read; a tool that reads or writes
+/// by an `action` argument (`manage_events`) is not listed. A renamed server
+/// loses its tools, which is the safe direction.
+///
+/// Schema audit (#11650 fix round): every listed tool's `inputSchema` was read
+/// for a path, destination, output, file or URL-to-write argument. None of
+/// the listed tools has one. Excluded by that audit: `get_drive_file_content`
+/// and `download_gmail_attachment` (`save_path`, written with `std::fs::write`
+/// to any path), and trusty-search `search_similar` (a `file` argument). The
+/// remaining path-like arguments are read filters only: trusty-search
+/// `path_prefix`, `glob` and `entry_point` scope a query of the index.
+/// `memory_recall` and `memory_recall_all` bump a drawer's access count on
+/// disk; that is bookkeeping, not a write the model controls. `granola-notes`
+/// is not listed: its server is an external binary with no source or
+/// `tools/list` fixture in this repo, so its schemas cannot be audited.
+/// Test: `super::tests::tools_tests::the_catalog_split_lists_every_exclusion`,
+/// `super::tests::tools_tests::path_argument_tools_are_never_registered`.
 pub const READ_ONLY_MCP_TOOLS: &[(&str, &[&str])] = &[
     (
         "trusty-search",
@@ -40,7 +52,6 @@ pub const READ_ONLY_MCP_TOOLS: &[(&str, &[&str])] = &[
             "search_lexical",
             "search_semantic",
             "search_kg",
-            "search_similar",
             "grep",
             "typeahead",
             "get_call_chain",
@@ -69,10 +80,6 @@ pub const READ_ONLY_MCP_TOOLS: &[(&str, &[&str])] = &[
         &["session_list", "session_status", "project_list"],
     ),
     (
-        "granola-notes",
-        &["granola_search", "granola_get", "granola_list_recent"],
-    ),
-    (
         "gworkspace",
         &[
             "list_accounts",
@@ -81,7 +88,6 @@ pub const READ_ONLY_MCP_TOOLS: &[(&str, &[&str])] = &[
             "list_message_attachments",
             "list_drive_contents",
             "search_drive_files",
-            "get_drive_file_content",
             "list_shared_drives",
             "get_document",
             "get_document_structure",
@@ -109,8 +115,18 @@ pub struct Exclusion {
 pub const REASON_SENDS: &str = "sends a message or hands work to another agent";
 /// Exclusion reason for a tool whose name says it changes state.
 pub const REASON_WRITES: &str = "writes or changes state";
+/// Exclusion reason for a tool that takes a local file or path argument.
+pub const REASON_PATH_ARG: &str = "takes a local file or path argument";
 /// Exclusion reason for every other tool off the allowlist.
 pub const REASON_UNLISTED: &str = "not on the read-only allowlist";
+
+/// Tools excluded by the schema audit, by tool name, with the reason. Checked
+/// before the name heuristics below, which cannot see a `save_path`.
+const AUDITED_EXCLUSIONS: &[(&str, &str)] = &[
+    ("get_drive_file_content", REASON_WRITES),
+    ("download_gmail_attachment", REASON_WRITES),
+    ("search_similar", REASON_PATH_ARG),
+];
 
 /// Name fragments that mark a send or hand-off tool.
 const SEND_WORDS: &[&str] = &["send", "compose", "delegate", "chat"];
@@ -165,7 +181,9 @@ pub fn is_read_only(composed: &str) -> bool {
 /// the name; the decision is [`is_read_only`] alone.
 fn exclusion_reason(composed: &str) -> &'static str {
     let tool = composed.rsplit("__").next().unwrap_or(composed);
-    if SEND_WORDS.iter().any(|w| tool.contains(w)) {
+    if let Some((_, reason)) = AUDITED_EXCLUSIONS.iter().find(|(t, _)| *t == tool) {
+        reason
+    } else if SEND_WORDS.iter().any(|w| tool.contains(w)) {
         REASON_SENDS
     } else if WRITE_WORDS.iter().any(|w| tool.contains(w)) {
         REASON_WRITES

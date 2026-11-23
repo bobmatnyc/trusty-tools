@@ -32,9 +32,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use trusty_code::agent_loop::{AgentLoop, AgentLoopConfig, Transcript};
+use trusty_code::agent_loop::{AgentLoop, AgentLoopConfig, CompactionConfig, Transcript};
 use trusty_code::llm::InferenceAdapter;
 use trusty_code::mcp::McpToolSet;
+use trusty_code::provider::resolve_context_window;
 
 use crate::assistants::AssistantHome;
 use crate::assistants::own_index_id;
@@ -150,6 +151,8 @@ impl AskEngine {
         let turns = log.read()?;
 
         let tools = build_registry(&self.home.okg_dir(), &self.load_mcp(&project_root).await);
+        // #11650: a dead or broken MCP server must not be silent.
+        tools.diagnostics.log();
         if !tools.excluded.is_empty() {
             tracing::debug!(
                 instance = %self.home.id(),
@@ -162,6 +165,9 @@ impl AskEngine {
         let loop_config = AgentLoopConfig {
             max_turns: limits.max_turns,
             timeout_secs: limits.timeout_secs,
+            // #11650: size compaction to the model's window, as trusty-code's
+            // own loop sites do, not the test-only default.
+            compaction: CompactionConfig::for_context_window(resolve_context_window(&limits.model)),
             model: limits.model,
             ..AgentLoopConfig::default()
         };
