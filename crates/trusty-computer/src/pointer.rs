@@ -224,7 +224,7 @@ pub fn within(frame: Frame, points: &[(f64, f64)]) -> Result<(), Refusal> {
 /// `drag` from `from_x`, `from_y` to `to_x`, `to_y`. Both name the pid and
 /// window and a `delivery_mode` from [`activates_app`]; no other daemon
 /// argument is set.
-/// Test: `click_at_reaches_driver_inside_the_frame`, `drag_inside_the_frame_reaches_driver`.
+/// Test: `click_at_reaches_driver_inside_the_frame`, `drag_is_refused_before_any_check_or_driver_call`.
 pub fn driver_args(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
     let mut out = Map::new();
     for key in ["pid", "window_id"]
@@ -249,7 +249,7 @@ pub fn driver_args(tool: &str, args: &Map<String, Value>) -> (&'static str, Valu
 /// (`background_unavailable`), so a drag is delivered `foreground`: the
 /// driver fronts the app, drags, then restores the prior front app. A click
 /// stays background. The audit records `activates_app` as for `invoke_menu`.
-/// Test: `drag_inside_the_frame_reaches_driver`.
+/// Test: `drag_is_refused_before_any_check_or_driver_call`.
 pub fn activates_app(tool: &str) -> bool {
     tool == DRAG_TOOL
 }
