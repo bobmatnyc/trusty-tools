@@ -137,6 +137,12 @@ pub(super) struct HealthResponse {
     /// `stage_failed_5927_tests`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) indexes_stage_failed_ids: Option<Vec<String>>,
+    /// #10692: index id -> reason, for each index whose last walk was refused
+    /// over the index budget. Its Ready lanes still serve, but the corpus is
+    /// stale. Non-empty forces `status: "degraded"`; absent when empty.
+    /// Test: `refused_walk_keeps_ready_stages_ready` in `tests/index_budget_env.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) indexes_walk_refused: Option<std::collections::BTreeMap<String, String>>,
     /// Number of registered indexes with the KG component disabled
     /// (`skip_kg == true`) — issue #2984 Phase 1.
     ///
@@ -754,6 +760,7 @@ async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
     // #6688: name the failing indexes, not just count them — same scan, same
     // `stages` read, same `any_failed()` predicate as the counter below.
     let mut indexes_stage_failed_ids: Vec<String> = Vec::new();
+    let mut indexes_walk_refused = std::collections::BTreeMap::new();
     let indexes_stage_failed = state
         .registry
         .list_handles()
@@ -831,6 +838,11 @@ async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
                     // — a contended walk-diagnostics read undercounts this poll
                     // only, and the next 2 s poll re-scans.
                     if let Ok(diag) = handle.walk_diagnostics.try_read() {
+                        if diag.walk_refused {
+                            let why = diag.last_walk_error.clone().unwrap_or_default();
+                            indexes_walk_refused
+                                .insert(handle.id.to_string(), format!("walk refused: {why}"));
+                        }
                         let walk_started = diag.last_walk_started_at.is_some();
                         if crate::service::warm_boot::index_is_stuck_unwalked(
                             stages.lexical.status,
@@ -967,6 +979,7 @@ async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
         || indexes_stuck_empty > 0
         || indexes_stuck_mid_walk > 0
         || embedder_capability_degraded
+        || !indexes_walk_refused.is_empty()
     {
         "degraded"
     } else {
@@ -1012,6 +1025,8 @@ async fn health_response(state: Arc<SearchAppState>) -> HealthResponse {
         warmboot_summary,
         // #6688: which indexes the counter above is about.
         indexes_stage_failed_ids,
+        // #10692: absent when no walk was refused.
+        indexes_walk_refused: (!indexes_walk_refused.is_empty()).then_some(indexes_walk_refused),
         boot_reconcile,
         indexes_watcher_network_degraded,
         embedder_bootstrap,

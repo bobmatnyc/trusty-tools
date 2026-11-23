@@ -170,6 +170,7 @@ fn health_response_contains_stall_fields() {
         warmboot_summary: WarmBootSummary::default(),
         // #6688: nothing is failing in either fixture — the field is absent.
         indexes_stage_failed_ids: None,
+        indexes_walk_refused: None,
         boot_reconcile: None,
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",
@@ -243,6 +244,7 @@ fn health_response_omits_last_ok_when_none() {
         warmboot_summary: WarmBootSummary::default(),
         // #6688: nothing is failing in either fixture — the field is absent.
         indexes_stage_failed_ids: None,
+        indexes_walk_refused: None,
         boot_reconcile: None,
         indexes_watcher_network_degraded: 0,
         embedder_bootstrap: "n/a",

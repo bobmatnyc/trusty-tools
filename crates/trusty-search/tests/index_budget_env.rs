@@ -30,6 +30,9 @@
 //! Test: `reindex_refuses_walk_over_file_budget`,
 //! `reindex_budget_is_inclusive_at_the_boundary` below.
 
+#[path = "support/socket_daemon.rs"]
+mod socket_daemon;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -264,7 +267,9 @@ async fn reindex_budget_is_inclusive_at_the_boundary() {
 /// restart, although the corpus on disk was untouched.
 /// What: mark all three lanes Ready (the warm-boot state), refuse a walk over a
 /// one-file budget, assert the stages and the advertised search capabilities
-/// are unchanged and the refusal is recorded in `last_walk_error`.
+/// are unchanged and the refusal is recorded in `last_walk_error`; `/health`
+/// and the index status read degraded with a reason naming the refusal; a later
+/// walk inside the budget clears both.
 /// Test: this test. It fails against the pre-fix commit, where every lane reads
 /// `Failed` after the refusal.
 #[tokio::test]
@@ -276,11 +281,17 @@ async fn refused_walk_keeps_ready_stages_ready() {
     let (_tmp, root) = budget_fixture(3);
     let id = "budget-ready";
     let indexer = CodeIndexer::new(id.to_string(), root.clone());
-    let handle = Arc::new(IndexHandle::bare(
+    let registry = trusty_search::core::registry::IndexRegistry::new();
+    let handle = registry.register(IndexHandle::bare(
         IndexId::new(id),
         Arc::new(tokio::sync::RwLock::new(indexer)),
         root.clone(),
     ));
+    let state = Arc::new(trusty_search::service::server::SearchAppState::new(
+        registry,
+    ));
+    let dir = tempfile::tempdir().expect("socket dir");
+    let daemon = socket_daemon::serve_shared_state_at(state, &dir.path().join("ts.sock")).await;
     {
         let mut guard = handle.stages.write().await;
         let stages = &mut *guard;
@@ -334,4 +345,51 @@ async fn refused_walk_keeps_ready_stages_ready() {
         .clone()
         .expect("the refusal must be recorded in last_walk_error");
     assert!(reason.contains("TRUSTY_MAX_INDEX_FILES"), "{reason}");
+
+    // #10692: the refusal reads as degraded on both surfaces, naming the cause.
+    let status = index_status(&daemon, id).await;
+    assert_eq!(status["status"], "degraded", "{status}");
+    assert_eq!(status["walk_refused"], true, "{status}");
+    let why = status["degraded_reason"].as_str().unwrap_or_default();
+    assert!(
+        why.starts_with("walk refused: ") && why.contains("TRUSTY_MAX_INDEX_FILES"),
+        "{status}"
+    );
+    let health = daemon.client.health().await.expect("health");
+    assert_eq!(health["status"], "degraded", "{health}");
+    let why = health["indexes_walk_refused"][id]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        why.starts_with("walk refused: ") && why.contains("TRUSTY_MAX_INDEX_FILES"),
+        "{health}"
+    );
+
+    // A later walk inside the budget clears the refusal on both surfaces.
+    std::env::set_var(ENV_MAX_INDEX_FILES, "100");
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), false).expect("index is unclaimed");
+    for _ in 0..600 {
+        if progress.status.load() != ReindexStatus::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let diag = handle.walk_diagnostics.read().await.clone();
+    assert_eq!(diag.last_walk_error, None, "{diag:?}");
+    let status = index_status(&daemon, id).await;
+    assert_eq!(status["walk_refused"], false, "{status}");
+    assert!(status["degraded_reason"].is_null(), "{status}");
+    let health = daemon.client.health().await.expect("health");
+    assert!(health.get("indexes_walk_refused").is_none(), "{health}");
+}
+
+/// `search.index.status` for `id` on the served test daemon.
+async fn index_status(daemon: &socket_daemon::SocketDaemon, id: &str) -> serde_json::Value {
+    daemon
+        .client
+        .call("search.index.status", serde_json::json!({ "index_id": id }))
+        .await
+        .expect("index status")
 }

@@ -282,6 +282,10 @@ pub(super) async fn mark_reindex_failed_before_lexical(
     reason: &str,
     prior: &IndexStages,
 ) {
+    // #10692: record the refusal where `/health` and status read it.
+    let mut diag = handle.walk_diagnostics.write().await;
+    diag.record_refusal(reason.to_owned());
+    drop(diag);
     let mut guard = handle.stages.write().await;
     // Deref the guard ONCE: `&mut guard.lexical` would go through `DerefMut`
     // per field and borrow the whole guard each time, so the three field
