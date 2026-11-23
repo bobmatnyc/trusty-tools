@@ -101,6 +101,7 @@ async fn turns_returns_the_last_n_oldest_first() {
             "limit": 2,
             "total": 5,
             "skipped": 0,
+            "truncated": false,
             "turns": [
                 { "at": "2026-11-23T00:00:04Z", "question": "q4", "answer": "a4" },
                 { "at": "2026-11-23T00:00:05Z", "question": "q5", "answer": "a5" },
@@ -178,4 +179,115 @@ async fn turns_refuses_traversal_before_the_filesystem() {
     // The control: a valid id does reach the filesystem, and fails there.
     let (status, _) = get(&root, "/api/console/assistants/izzie/turns").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// #11747: a log larger than the 4 MiB window answers its newest records,
+/// says it was truncated, and counts only whole lines inside the window — the
+/// partial first line is dropped, not skipped.
+#[tokio::test]
+async fn turns_reads_only_the_tail_window() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    instance(dir.path(), "izzie");
+    // ~1 KiB lines; 5000 of them is ~5 MiB, past the 4 MiB window, and the
+    // window edge lands inside a line because the width does not divide it.
+    let pad = "x".repeat(1000);
+    let log: String = (0..5000)
+        .map(|n| format!(r#"{{"v":1,"at":"t{n}","question":"{pad}","answer":"a{n}"}}"#) + "\n")
+        .collect();
+    assert!(log.len() > 4 * 1024 * 1024);
+    write_log(dir.path(), "izzie", &log);
+
+    let (status, body) = get(dir.path(), "/api/console/assistants/izzie/turns?limit=2").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["truncated"], true);
+    assert_eq!(
+        body["skipped"], 0,
+        "the window's partial first line is not a bad line"
+    );
+    let total = body["total"].as_u64().expect("total");
+    assert!(
+        total < 5000 && total > 3000,
+        "only the window is counted: {total}"
+    );
+    let ats: Vec<_> = body["turns"]
+        .as_array()
+        .expect("turns")
+        .iter()
+        .map(|t| t["at"].clone())
+        .collect();
+    assert_eq!(ats, [json!("t4998"), json!("t4999")]);
+}
+
+/// #11747: a FIFO at the log path must not hang the request.
+#[cfg(unix)]
+#[tokio::test]
+async fn turns_on_a_fifo_returns_promptly() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    instance(dir.path(), "izzie");
+    let stores = dir.path().join("izzie").join("stores");
+    std::fs::create_dir_all(&stores).expect("mkdir");
+    let fifo = std::ffi::CString::new(
+        stores
+            .join("ask-turns.jsonl")
+            .into_os_string()
+            .into_encoded_bytes(),
+    )
+    .expect("path");
+    // SAFETY: `fifo` is a valid NUL-terminated path for the call's duration.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        get(dir.path(), "/api/console/assistants/izzie/turns"),
+    )
+    .await;
+    let Ok((status, body)) = answer else {
+        // Release a reader stuck on the blocking pool, so the runtime's drop
+        // does not hang the suite, then fail.
+        drop(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(stores.join("ask-turns.jsonl")),
+        );
+        panic!("a FIFO log must not hang the request");
+    };
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        body["error"],
+        "cannot read the turn log: the turn log is not a regular file"
+    );
+}
+
+/// #11747: a symlink to a directory or a device is refused, not read, and the
+/// body names no path.
+#[cfg(unix)]
+#[tokio::test]
+async fn turns_refuses_a_non_regular_log() {
+    for target in ["dir", "/dev/null"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        instance(dir.path(), "izzie");
+        let stores = dir.path().join("izzie").join("stores");
+        std::fs::create_dir_all(&stores).expect("mkdir");
+        let target = if target == "dir" {
+            let d = dir.path().join("elsewhere");
+            std::fs::create_dir_all(&d).expect("mkdir");
+            d
+        } else {
+            std::path::PathBuf::from(target)
+        };
+        std::os::unix::fs::symlink(&target, stores.join("ask-turns.jsonl")).expect("symlink");
+
+        let (status, body) = get(dir.path(), "/api/console/assistants/izzie/turns").await;
+        assert_eq!(
+            status,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{target:?}: {body}"
+        );
+        let error = body["error"].as_str().expect("error");
+        assert_eq!(
+            error,
+            "cannot read the turn log: the turn log is not a regular file"
+        );
+        assert!(!error.contains('/'), "the body names no path: {error}");
+    }
 }

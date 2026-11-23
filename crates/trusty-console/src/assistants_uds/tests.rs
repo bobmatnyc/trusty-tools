@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::routes::{DEFAULT_TURN_LIMIT, MAX_TURN_LIMIT, parse_limit};
-use super::turns::{TURN_LOG_FILE, TURN_RECORD_VERSION, read_tail};
+use super::turns::{TURN_LOG_FILE, TURN_RECORD_VERSION, read_tail, read_tail_window};
 use super::*;
 
 /// `crates/<rel>` in the running checkout.
@@ -299,4 +299,32 @@ fn a_bad_line_is_counted_not_fatal() {
     let ats: Vec<_> = tail.turns.iter().map(|t| t.at.as_str()).collect();
     assert_eq!(ats, ["t1", "t2"]);
     assert_eq!((tail.total, tail.skipped), (2, 5));
+}
+
+/// #11747: a cut window drops its first, partial line uncounted, and a window
+/// starting exactly on a line boundary keeps that line.
+#[test]
+fn the_window_drops_its_first_partial_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join(TURN_LOG_FILE);
+    let body: String = (1..=9).map(|n| line(n) + "\n").collect();
+    let width = (line(1).len() + 1) as u64;
+    std::fs::write(&log, &body).expect("write");
+
+    let ats = |t: &super::turns::TurnTail| -> Vec<String> {
+        t.turns.iter().map(|t| t.at.clone()).collect()
+    };
+    let mid = read_tail_window(&log, 10, 2 * width + 5).expect("read");
+    assert_eq!(ats(&mid), ["t8", "t9"]);
+    assert_eq!((mid.total, mid.skipped, mid.truncated), (2, 0, true));
+
+    let exact = read_tail_window(&log, 10, 3 * width).expect("read");
+    assert_eq!(ats(&exact), ["t7", "t8", "t9"]);
+    assert_eq!((exact.total, exact.skipped, exact.truncated), (3, 0, true));
+
+    let tiny = read_tail_window(&log, 10, 4).expect("read");
+    assert_eq!((tiny.total, tiny.skipped, tiny.truncated), (0, 0, true));
+
+    let whole = read_tail_window(&log, 10, 9 * width).expect("read");
+    assert_eq!((whole.total, whole.skipped, whole.truncated), (9, 0, false));
 }

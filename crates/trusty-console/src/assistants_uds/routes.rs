@@ -90,14 +90,20 @@ pub async fn list_handler(State(state): State<AppState>) -> Response {
 ///
 /// What: the id is validated before any filesystem access (`400` naming the
 /// rule). An id `ta list` does not name is `404` with `available`. Otherwise
-/// `{"instance","order":"oldest_first","limit","total","skipped","turns"}`,
+/// `{"instance","order":"oldest_first","limit","total","skipped","truncated","turns"}`,
 /// where `turns` holds the last `limit` good records in file order (newest
-/// last), `total` counts every good record and `skipped` every bad line.
+/// last). Only the last [`super::turns::TAIL_WINDOW_BYTES`] of the log are
+/// read (#11747): `total` counts the good records and `skipped` the bad lines
+/// INSIDE that window, and `truncated` is `true` when older lines were not
+/// read. A log path that is not a regular file (directory, FIFO, device, even
+/// through a symlink) is a `500` whose body names no path; the warning log does.
 /// `limit` defaults to [`DEFAULT_TURN_LIMIT`], is clamped to
 /// [`MAX_TURN_LIMIT`], and a non-integer or `0` is `400`.
 /// Test: `turns_returns_the_last_n_oldest_first`, `turns_on_a_missing_log_is_empty`,
 /// `turns_counts_a_malformed_line`, `turns_for_an_unknown_id_is_404_with_names`,
-/// `turns_refuses_traversal_before_the_filesystem` (`tests/assistants_routes.rs`).
+/// `turns_refuses_traversal_before_the_filesystem`, `turns_reads_only_the_tail_window`,
+/// `turns_on_a_fifo_returns_promptly`, `turns_refuses_a_non_regular_log`
+/// (`tests/assistants_routes.rs`).
 pub async fn turns_handler(
     State(state): State<AppState>,
     AxumPath(raw_id): AxumPath<String>,
@@ -156,6 +162,7 @@ pub async fn turns_handler(
         "limit": limit,
         "total": tail.total,
         "skipped": tail.skipped,
+        "truncated": tail.truncated,
         "turns": tail.turns,
     }))
     .into_response()
