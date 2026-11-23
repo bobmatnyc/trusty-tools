@@ -1003,7 +1003,7 @@ impl Judged<'_> {
 /// by file, with helpers followed across files.
 ///
 /// Why: the #9123 delta critic found tests clearing every credential through
-/// `trusty-agents/src/test_env.rs` helpers, which a same-file scan never saw.
+/// `trusty-assistants/src/test_env.rs` helpers, which a same-file scan never saw.
 /// What: a file's helpers are judged on their own first. Every helper found
 /// that way is exported; each round re-judges the files that name a new
 /// export, until a round adds none. A test-only file re-exports what it gains
@@ -1254,7 +1254,7 @@ fn a_helper_that_mutates_a_credential_flags_its_test() {
 }
 
 /// Why: the #9123 delta critic found tests that clear every credential through
-/// `trusty-agents/src/test_env.rs`'s `clear_all_credential_env_vars` and
+/// `trusty-assistants/src/test_env.rs`'s `clear_all_credential_env_vars` and
 /// `force_env_local_loaded`; a scan that follows same-file helpers only never
 /// saw them.
 /// What: helpers in `k/src/test_env.rs` and `k/src/c.rs`; callers in other
