@@ -348,7 +348,6 @@ impl ActionPublisher {
             tracing::warn!(error = %e, "action events: project lookup thread did not start");
         }
     }
-
 }
 
 /// One in-flight project lookup slot, released on drop (#11040).
