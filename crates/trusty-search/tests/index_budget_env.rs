@@ -256,3 +256,82 @@ async fn reindex_budget_is_inclusive_at_the_boundary() {
         "one file over the ceiling must refuse"
     );
 }
+
+/// #10692: a refused walk leaves every lane that was already Ready serving.
+///
+/// Why: the refusal used to write its reason into every stage, flipping a
+/// warm-booted Ready index to `failed` and dropping search to BM25 only until a
+/// restart, although the corpus on disk was untouched.
+/// What: mark all three lanes Ready (the warm-boot state), refuse a walk over a
+/// one-file budget, assert the stages and the advertised search capabilities
+/// are unchanged and the refusal is recorded in `last_walk_error`.
+/// Test: this test. It fails against the pre-fix commit, where every lane reads
+/// `Failed` after the refusal.
+#[tokio::test]
+#[serial_test::serial]
+async fn refused_walk_keeps_ready_stages_ready() {
+    use trusty_search::core::registry::StageState;
+
+    let _guard = MaxIndexFilesEnvGuard::set("1");
+    let (_tmp, root) = budget_fixture(3);
+    let id = "budget-ready";
+    let indexer = CodeIndexer::new(id.to_string(), root.clone());
+    let handle = Arc::new(IndexHandle::bare(
+        IndexId::new(id),
+        Arc::new(tokio::sync::RwLock::new(indexer)),
+        root.clone(),
+    ));
+    {
+        let mut guard = handle.stages.write().await;
+        let stages = &mut *guard;
+        for stage in [&mut stages.lexical, &mut stages.semantic, &mut stages.graph] {
+            *stage = StageState {
+                status: StageStatus::Ready,
+                ..Default::default()
+            };
+        }
+    }
+    let before = handle.stages.read().await.clone();
+    assert_eq!(
+        before.search_capabilities(),
+        vec!["bm25", "literal", "exact_match", "vector", "kg"]
+    );
+
+    let progress = Arc::new(ReindexProgress::new());
+    spawn_reindex(Arc::clone(&handle), Arc::clone(&progress), false).expect("index is unclaimed");
+    for _ in 0..600 {
+        if progress.status.load() != ReindexStatus::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        progress.status.load(),
+        ReindexStatus::Failed,
+        "the refusal itself is still a failed run"
+    );
+
+    let after = handle.stages.read().await.clone();
+    for (name, b, a) in [
+        ("lexical", &before.lexical, &after.lexical),
+        ("semantic", &before.semantic, &after.semantic),
+        ("graph", &before.graph, &after.graph),
+    ] {
+        assert_eq!(a.status, b.status, "{name} changed: {a:?}");
+        assert_eq!(a.failure, None, "{name} must not carry the refusal: {a:?}");
+    }
+    assert_eq!(
+        after.search_capabilities(),
+        before.search_capabilities(),
+        "search must keep the vector and kg lanes after a refused walk"
+    );
+    let reason = handle
+        .walk_diagnostics
+        .read()
+        .await
+        .last_walk_error
+        .clone()
+        .expect("the refusal must be recorded in last_walk_error");
+    assert!(reason.contains("TRUSTY_MAX_INDEX_FILES"), "{reason}");
+}
