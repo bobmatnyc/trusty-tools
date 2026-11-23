@@ -1,2 +1,0 @@
-Changed
-- `mpm.health` and `GET /health` report `status: "degraded"` when trusty-memory or trusty-search does not answer, with one `degraded[]` entry per down service naming the reason (`timeout` for a probe that outlives its 2 s budget). The probes are served from a 10 s single-flight cache, so a health request never waits on them. A new `alive` field (default `true`) is the liveness signal; liveness callers read it instead of `status == "ok"`.

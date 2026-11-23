@@ -6,6 +6,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.11.1] — 2026-11-23
+
+### Added
+
+- `health` module: `agents_socket()`, `METHOD_AGENTS_HEALTH` and `AgentsHealth`, the one path and method tagent serves and `tm tui` probes (#11550).
+
+### Documentation
+
+- The crate description names `trusty-assistants`, the new name of `trusty-agents` (#11632).
+
 ## [0.11.0] — 2026-11-20
 
 ### Added

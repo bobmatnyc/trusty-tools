@@ -6,6 +6,82 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.14.12] — 2026-11-23
+
+### Breaking
+
+- Note on 1.14.11: that release shipped a public-API break under the internal
+  numbering policy, recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.11.txt` (Refs #8699).
+
+### Added
+
+- The Architect fleet poller (`fleet-poll.py`, new `fleet_poll_deps.py`) raises one urgent `dep_degraded` alert per outage when tm health reports trusty-memory or trusty-search degraded on 2 consecutive reads; `pending` reads never count, and recovery re-arms the alert. An unparseable or unreachable tm health answer raises `dep_health_error` (one alert per error class); streaks are held, and a corrupt `dep_health` state book is coerced to defaults. `tm fleet init` ships the new script.
+- Test fixtures honor a `TM_TEST_TMP` environment variable that moves the `tm-test-*` temp root off `/tmp`; `TMPDIR` stays ignored and a root inside `$HOME` still panics (#10785).
+- `tm tui` fetches `console_metrics` over UDS: Events through `events.console_metrics`, MPM through `mpm.mcp.dispatch`. Other services keep the stdio spawn as a fallback. `i` opens any row's service view, MPM's included.
+- The Architect dashboard Projects view gains a Secrets list by owner/project: `GET /api/projects/key-names` lists key names from `tm secrets list` for each tm-registered project and never returns a value (#10350, DOC-82 §10).
+
+### Fixed
+
+- The bundled Architect `dashboard_derive.py` counts an item as relayed when `relayed` is `true` or `relayed_at` is a non-blank string, as well as a non-blank `relayed` string, matching the deployed copy.
+- Architect dashboard: requests queued behind a failed `/api/fleet` or cold `/api/harness` build share its error for the cache TTL, so N requests behind a hung store writer wait one lock wait, not N.
+- Architect dashboard: `/api/viz` answers 503 when the store is locked by a writer, instead of 200 with empty sessions and goals; other store errors are no longer turned into an empty view.
+- `tm hook --pm-guard` refuses a kill of the tmux server by process (`pkill tmux`, `killall tmux`, `kill $(tmux display -p '#{pid}')`, `pgrep tmux | xargs kill`); a scratch `-L`/`-S` server and unrelated kills still run.
+- The same guard reads the kill behind a wrapper (`timeout 5`, `sudo -u root`, `env -u X`), a compound head (`(`, `{`, `do`, `then`), a nested `$(...)`, backtick, `eval` or `find -exec`, and a `ps ... | xargs kill` pid list; a scratch server excuses only the operand that names it.
+- The kill reader matches `pkill`/`killall`/`kill` only in command position, so `grep kill tmux.log` runs, and it judges each `;`, `&&`, `||` or newline segment alone.
+- The guard also splits on a single `|` and a bare `&`, reads `if`/`while`/`until` heads, and refuses a kill behind an unlisted wrapper or leading redirect (`watch pkill tmux`, `>/dev/null pkill tmux`) unless the segment opens with a data program such as `grep`.
+- The PM guard refuses `pkill`/`kill` of tmux written directly after a `case` pattern (`a)pkill tmux`).
+- A daemon state with a pinned test home seeds its project registry from that home's `config.yaml`, so isolated test state no longer reads the real `~/.trusty-tools` project list (#11170).
+- `tm architect poll` and the seeded `fleet-poll.py` (started by `start-fleet-poll.sh`) now take their cycle length from `poll_interval_s` in `local/architect.json` (default 60 s) when `--interval` is not given, so every start path logs the same interval. Before, each path carried its own default. The seeded `local/architect.json` names the key.
+- `tm pr cleanup` now refuses whatever its `--dry-run` refuses: a head-branch worktree or branch whose tip moved past the merged head with work the merge did not carry is kept by both modes, and the remote head branch is deleted only after every tree is judged (#11407).
+- A session in a local-only repository gets `GH_TOKEN` and `GH_ENTERPRISE_TOKEN` set empty instead of the `tm-local-only-repo-no-gh` placeholder, so MCP children such as trusty-review no longer send the placeholder to GitHub; gh stays disabled.
+- The Architect dashboard's Secrets form no longer says "Not stored" when a save times out or gets no answer, as when a macOS Keychain access prompt blocks `tm secrets set` and the write lands after approval. On `keychain_access_prompt`, `backend_timeout`, a gateway time-out or no response it says the outcome is unknown and to verify with `tm secrets list`; a real refusal keeps "Not stored" ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+- The issue audit counts a list marker only when whitespace follows it, so a `**bold**` paragraph, `-1 …` or `1.5x …` after `Acceptance criteria:` / `- TBD` no longer passes as a criterion; the acceptance row WARNs.
+- `tm fleet init` reads a `local/state.md` line as a hold only when it starts with a hold format (`HOLD: …`, `usage state: HOLD …`, `On hold …`). A note that only uses the word "hold" or "merge" no longer stops init or becomes a merge hold. The state.md seed and the Architect instructions show the format.
+- `tm fleet init` never shortens a hold from `local/state.md`. A hold longer than its 1000-character field, or one that would push the Intent Ledger session record past 2048 B, stops init before the ledger and its hooks are created, and the error names the field, its size and the limit. A `datg.py` session-record size refusal now names the largest fields.
+- `tm install` exits non-zero and reports the install as incomplete when the Claude Code hook wiring fails, instead of printing "Framework installed".
+- `tm tui`: a degraded or down service row shows its probe reason under the SERVICES table, and a method-not-found answer reads "binary older than the TUI".
+- `tm tui`: an unreachable console reads "console socket not listening", and a blank `%CPU` or `MEM` cell reads "no source", "no samples" or "unmeasured" instead of a dash.
+- `tm tui`: an idle on-demand service row (Analyze, Review, Console) shows "on demand" in its Version column instead of "-".
+- `tm projects decommission` no longer refuses with "indexes may still be loaded" when the project's checkout is gone (#11551).
+- With no checkout, decommission derives the palace id from the project's remote or recorded path, asks trusty-memory whether that palace exists, and unloads it. An absent palace is skipped and reported as skipped; a failed lookup still refuses the decommission (#11551).
+- `tm tui` tree, Telegram `/fleet` and decommission now count local-only sessions: a session with no `repo_url` binds to the path-form project whose checkout it runs in, including from a `.worktrees/<name>` subdirectory (#11552).
+- `tm compress` records a zero-saving run's declined savings row as one line naming the reason `no_gain` in a day file, `usage/compress-declines/<YYYY-MM-DD>.jsonl`, under the trusty-mpm root, capped per day like the opportunity ledger. Before, it was a `debug` log the `info` filter hid. Nothing is added to `tm compress` stderr.
+- The opportunity ledger records a Bash call that went through `tm compress` but saved nothing as `skip_reason: "compressed_no_gain"`; a call that saved keeps `"compressed"`. `tm savings status` lists the two reasons apart.
+- `tm statusline` puts the `💸` savings segment second, after the version, so an 80-column pane no longer cuts it off.
+- Savings and opportunity ledgers store only the program name plus an allow-listed subcommand verb in `tool_name`, never a path, file name or search pattern; existing rows are left as written.
+- A single command rewritten through `tm compress` now exits with the command's own status instead of 0, so a failing command still reads as a failure.
+- The Architect dashboard shows a loading mark, not 0, on every list count and nav count until that list has loaded, and no empty-state text ("The Architect has no open tasks.") while it loads. A list whose first load fails shows "!" and an error.
+- `session_send` types the text, waits up to 2 s for the input box to show it (or a `[Pasted text #N]` placeholder), and only then presses Enter. When the box shows a dropped head it clears the box and returns `sent: false` with `submit_state: "not_echoed"` and a `reason`, instead of submitting the tail (#10747).
+- `session_send` reads the Claude Code input box before typing and returns `sent: false` with `submit_state: "input_not_empty"` when it holds a draft or a stale paste placeholder; it types nothing and sends no `C-u`. Runtimes other than Claude Code keep the type-plus-Enter send without the echo check (#10747).
+- `tm project info` resolves a checkout registered in the persisted project registry (`projects.json` by URL or path, or `project-paths.json` by alias) after a daemon restart, instead of reporting it as not registered. An unreadable registry is now an error, not "not a registered project".
+- `tm daemon` and `tm sm serve --stdio` now settle buffered action events (send or spool) on SIGHUP, the same path as SIGTERM and SIGINT, before they exit. A SIGHUP inherited as ignored (`nohup`) stays ignored.
+- `/clear` in the Architect session now moves `last.architect-conversation` to the new conversation id, so `tm fleet relaunch` resumes the post-clear conversation instead of the pre-clear one.
+- Action events: a panicking project resolver no longer leaks its in-flight lookup slot, so later sessions keep their project attribution (#11040).
+- Architect seed history records the current bundle-provenance.json bytes (main CI red after #11601).
+
+### Changed
+
+- The pinned memory and code-search protocols, and the Architect safety core, name the native `tm memory recall` and `trusty-search search` commands instead of the MCP tools; `tm memory recall|remember|note` help no longer calls itself a fallback.
+- `tm architect restart` now asks the Architect for an Intent Ledger checkpoint and waits up to 90 s for the write before it restarts only the Architect's `claude`; a timeout always refuses (exit 4) and no flag bypasses it (use `tm fleet relaunch`). `--no-checkpoint` skips the request and keeps the #11365 fresh-ledger gate. It finds the Architect by its fleet role and refuses when none is recorded. A failed stop or relaunch types nothing and reports "NOT restarted".
+- An Architect launch hides 22 never-dispatched bundled agents (the language, framework, `api-qa`, `data-designer`, `gcp-ops`, `ops`, manager and `prompt-engineer` agents) from its roster, cutting about 4k characters from the session start. The launch's one `--settings` payload carries `Agent(<name>)` and `Task(<name>)` deny rules for them. PM launches and the deployed agent files are unchanged, so a project's PM session can still dispatch any of them.
+- The Architect skill deployer records the earlier text of seven `architect-*` skills (operating-rules, strategy, workflow, completion-standard, project-provision, host-admin, tmux-ops), so `tm fleet init` refreshes an untouched copy to the slimmed manual's skills. The embedded Architect manual is about a quarter of its former size.
+- `mpm.health` and `GET /health` report `status: "degraded"` when trusty-memory or trusty-search does not answer, with one `degraded[]` entry per down service naming the reason (`timeout` for a probe that outlives its 2 s budget). The probes are served from a 10 s single-flight cache, so a health request never waits on them. A new `alive` field (default `true`) is the liveness signal; liveness callers read it instead of `status == "ok"`.
+- `mpm.health` lists a dependency whose probe has not answered yet in a new `pending[]` field instead of `degraded[]`, and `pending` alone no longer turns `status` to `"degraded"`. A read that lands more than 12 s after the last refresh, while a new probe is still running, reports `pending` for a dependency last seen up instead of `timeout`; one last seen down or timed out keeps that outcome.
+- `tm tui`: the Console row's service view now fetches its `console_metrics` report over the console socket (`console.console_metrics`, #10907), as the Events row does.
+- `tm fleet init` still keeps an Architect file whose bytes match no shipped version (an owner or Architect edit), and now also writes the new shipped copy beside it as `<file>.shipped`. The init report names the sibling path, so a release change to an edited file is visible and can be merged by hand. An unedited file still updates in place.
+- `tm secrets --help` names `git config --local trusty.secrets.repo <owner>/<repo>` for a checkout with no `origin` remote ([#11346](https://github.com/bobmatnyc/trusty-tools/issues/11346)).
+- The Architect hard limits, the supervisor hard limits, the `tm-secrets` skill and the agent and skill lines that say "record where a secret lives, never its value" now carry one exception (#11433): a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. Printing, logging and committing any other secret stay forbidden.
+- `session_launch::PrepError` is now `#[non_exhaustive]`, so a later variant no longer breaks a downstream exhaustive `match`. Code outside trusty-mpm that matches on `PrepError` needs a wildcard arm; this is a one-time public-API break shipped in 1.14.12 under the internal numbering policy (#11443).
+- Test-only change: a test identifier string in the restart-checkpoint tests is renamed so the public-content guard no longer flags it; no behavior change.
+- `tm tui` probes the Agents tile with `agents.health` on its well-known socket: running with a version when up, on demand when nothing listens. The tile no longer cites a closed issue (#11550).
+- `tm tui`: the Architect's project draws as a top-level `◆ architect  privileged` row above the owner groups, no longer under `(local)`.
+- The hook-rewrite shell-parity tests now fail under CI when zsh is missing, and drop only the zsh leg elsewhere (#11658).
+- The Intent Ledger session record limit is 8192 B, up from 2048 B, so a usage hold and a merge hold at full length fit beside the rest of the record. `tm fleet init` and the shipped `datg.py` use the new limit; a record over it is still refused whole, with the largest fields named.
+
+### Removed
+
+- The TCP listener allowlist drops its trusty-agents row: the `tagent --api` / `--serve` HTTP server it excused was cut (#11632).
+
 ## [1.14.11] — 2026-11-20
 
 ### Added
