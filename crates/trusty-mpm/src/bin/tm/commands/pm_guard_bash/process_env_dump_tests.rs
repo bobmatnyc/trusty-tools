@@ -128,6 +128,8 @@ fn refuses_a_ps_environment_listing() {
         "sudo ps -Ef",
         "/bin/ps eww",
         "ps auxeww | grep node",
+        "true; ps eww",
+        "cd /tmp && ps auxe",
         "ps eww 'unterminated",
         "echo \"$(ps eww)\"",
         "eval 'ps auxe'",

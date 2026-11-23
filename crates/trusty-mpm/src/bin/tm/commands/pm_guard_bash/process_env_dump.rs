@@ -153,10 +153,24 @@ fn argv_dumps_env(argv: &[String]) -> bool {
         dump_verbs(word)
             .is_some_and(|verbs| subcommands(rest).into_iter().any(|sub| verbs.contains(&sub)))
             // #8756: `ps e`/`ps -E`, `/proc/<pid>/environ`, `ssh host env`.
-            || (program_name(word) == "ps" && ps_shows_environment(rest))
+            // #10688: `ps = …` in a script body is a variable, not the command.
+            || (program_name(word) == "ps" && !assigns_to(rest) && ps_shows_environment(rest))
             || names_a_process_environ(word)
             || (program_name(word) == "ssh" && remote::ssh_dumps_remote_env(rest))
     })
+}
+
+/// Whether a `ps` word is a variable that `rest` assigns or compares.
+///
+/// #10688: a script body handed to an interpreter is read as program text, so
+/// Python's `ps = cell.paragraphs` reached the `ps` rule and the next `len`
+/// read as the BSD option cluster `e`. An operator word holding `=` (`=`,
+/// `+=`, `:=`, `==`) is no `ps` option, so `ps` there is no command.
+/// Test: `a_read_only_inspect_shape_allows`,
+/// `the_inspect_shape_plus_a_secret_read_refuses`.
+fn assigns_to(rest: &[String]) -> bool {
+    rest.first()
+        .is_some_and(|w| w.contains('=') && w.chars().all(|c| "=+-*/%:|&^<>!@".contains(c)))
 }
 
 /// Whether `ps <args>` prints each process's environment (#8756).
