@@ -496,6 +496,7 @@ fn a_python_ps_variable_allows_10688() {
 #[test]
 fn the_inspect_shape_plus_a_secret_read_refuses() {
     let dir = tempfile::tempdir().expect("dir");
+    let mut leaked = Vec::new();
     for (name, extra) in [
         ("key.py", "key = open('.env').read()\n"),
         (
@@ -507,6 +508,23 @@ fn the_inspect_shape_plus_a_secret_read_refuses() {
         (
             "pslist.py",
             "import subprocess\nsubprocess.run([\"ps\", \"eww\"])\n",
+        ),
+        (
+            "pscompact.py",
+            "import subprocess\nsubprocess.run([\"ps\",\"eww\"])\n",
+        ),
+        (
+            "psdashe.py",
+            "import subprocess\nsubprocess.run(['ps','-p','1','-E'])\n",
+        ),
+        (
+            "pstuple.py",
+            "import subprocess\nsubprocess.Popen(('ps','eww'))\n",
+        ),
+        ("psystem.py", "import os\nos.system(\"ps eww\")\n"),
+        (
+            "psshell.py",
+            "import subprocess\nsubprocess.run(\"ps eww\", shell=True)\n",
         ),
         (
             "lclist.py",
@@ -522,9 +540,9 @@ fn the_inspect_shape_plus_a_secret_read_refuses() {
             "python3"
         };
         let command = format!("{interp} {name} in.docx");
-        assert!(
-            eval(&command, dir.path()).is_some(),
-            "`{command}` must deny"
-        );
+        if eval(&command, dir.path()).is_none() {
+            leaked.push(command);
+        }
     }
+    assert!(leaked.is_empty(), "must deny: {leaked:#?}");
 }

@@ -128,8 +128,15 @@ fn refuses_a_ps_environment_listing() {
         "sudo ps -Ef",
         "/bin/ps eww",
         "ps auxeww | grep node",
-        "true; ps eww",
-        "cd /tmp && ps auxe",
+        // #10688: boundary of the `ps = …` allow.
+        "ps == x; ps eww",
+        // #10688: Python argv lists, tuples and command strings.
+        "python3 -c 'import subprocess; subprocess.run([\"ps\",\"eww\"])'",
+        "python3 -c 'subprocess.run([\"ps\", \"eww\"])'",
+        "python3 -c \"subprocess.run(['ps','-p','1','-E'])\"",
+        "python3 -c \"subprocess.Popen(('ps','eww'))\"",
+        "python3 -c 'import os; os.system(\"ps eww\")'",
+        "python3 -c 'subprocess.run(\"ps eww\", shell=True)'",
         "ps eww 'unterminated",
         "echo \"$(ps eww)\"",
         "eval 'ps auxe'",
@@ -215,6 +222,10 @@ fn allows_routine_ps_pm2_and_ssh_forms() {
         "ps -U steve",
         "ps aux | grep node",
         "man ps",
+        // #10688: `ps` as a Python variable is no command.
+        "ps = eww",
+        "ps = [a, b]",
+        "python3 -c 'ps = [a, b]; print(ps)'",
         "pm2 ls",
         "pm2 logs api",
         "ssh host",
