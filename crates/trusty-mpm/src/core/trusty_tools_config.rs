@@ -747,6 +747,21 @@ impl TrustyToolsConfig {
         }
         cfg
     }
+
+    /// Load the config under `home` when given, else the real one ([`Self::load`]).
+    ///
+    /// Why (#11170): an isolated daemon state pins a test home and must never
+    /// seed from the real `~/.trusty-tools` config.
+    /// Test: `isolated_state_seeds_projects_only_from_its_pinned_home_11170`.
+    pub fn load_under(home: Option<&Path>) -> Self {
+        match home {
+            Some(home) => trusty_common::crate_config::load_or_default_at(
+                &trusty_common::crate_config::crate_config_path_at(home, CRATE_NAME),
+                CRATE_NAME,
+            ),
+            None => Self::load(),
+        }
+    }
 }
 
 /// Resolve the shared tm-owned `CLAUDE_CONFIG_DIR` for daemon-managed sessions.
