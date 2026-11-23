@@ -632,6 +632,10 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
         super::hook_payload::build_hook_payload(&cwd, stdin_payload.as_ref(), idle_parking);
     // #8392: push a `Notification` to the configured inbox; bounded, never fails the hook.
     super::hook_notify::forward_notification(&event, stdin_payload.as_ref(), &cwd, &mut payload);
+    // #11674: the stop carries its dispatch's tool_use_id for the daemon join.
+    if event == SUBAGENT_STOP_EVENT {
+        super::subagent_task_hook::add_dispatch_key(stdin_payload.as_ref(), &mut payload);
+    }
     let body = serde_json::json!({
         "session_id": session_id,
         "event": event,
@@ -646,6 +650,8 @@ pub(crate) async fn hook(client: &reqwest::Client, url: &str) -> anyhow::Result<
     if event == SUBAGENT_STOP_EVENT {
         let outcome = super::hook_post::post_hook_with_retry(url, &body).await;
         super::hook_post::emit_hook_post_log(&outcome);
+        // #11674: judge the handback; prints the hook's stdout JSON.
+        super::subagent_task_hook::on_stop(stdin_payload.as_ref(), outcome.response.as_ref());
         if !outcome.delivered {
             // #6556: a stop neither delivered nor parked fails the hook (exit 1).
             super::hook_post::spool_undelivered_stop(&body)?;

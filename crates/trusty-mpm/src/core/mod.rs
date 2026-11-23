@@ -473,6 +473,8 @@ mod stale_copy_tests;
 // six hours of `RUNNING_STALE_AFTER_SECS`.
 pub mod startup_context;
 pub mod stop_spool;
+// #11674: ledger task id round trip for subagent dispatches.
+pub mod subagent_task_roundtrip;
 // #7617: the one seed-or-repair rule for the `statusLine` settings entry, which
 // every tier's writer and `tm doctor --fix` go through.
 pub mod statusline_settings;

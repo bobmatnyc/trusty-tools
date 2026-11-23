@@ -1,0 +1,2 @@
+Added
+- `tm hook` binds the ledger task (`Task: <id>@MMDD`) of each Agent/Task dispatch to its delegation record (`ledger_task`) and, at `SubagentStop`, checks the last line of the subagent's final message against it. The outcome (`ok`, `missing`, `mismatch` or `unbound`) is appended to the PM's datg `log.jsonl` as a `subagent_task` event and shown as a hook `systemMessage`; a `missing` or `mismatch` stop is sent back once to restate its last line.

@@ -156,7 +156,9 @@ pub(crate) mod il_auto_apply_ilio; // See G0b IL auto-apply
 pub(crate) mod hook_session_taint;
 // #6556: the retry-plus-log delivery, and the disk park, of the SubagentStop POST.
 pub(crate) mod hook_post;
+// #11674: the SubagentStop ledger task round-trip check.
 pub(crate) mod hook_rewrite;
+pub(crate) mod subagent_task_hook;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
 // #10973: chained commands judged per segment.
