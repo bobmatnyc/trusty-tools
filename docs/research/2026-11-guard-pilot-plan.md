@@ -1,6 +1,6 @@
 # Evidence-based guard pilot: plan
 
-Follow-up to task ar-T74 (`docs/research/2026-11-evidence-based-testing.md`, "the report"). Date: 2026-11-06. Doc only. No guard, test, source or config file changes; the pilot observes and changes no guard behaviour. Code waits for the D61 unfreeze and a builder slot.
+Follow-up to `docs/research/2026-11-evidence-based-testing.md` ("the report"). Date: 2026-11-06. Doc only. No guard, test, source or config file changes; the pilot observes and changes no guard behaviour. Code waits for the D61 unfreeze and a builder slot.
 
 Owner ruling (Bob, D6b, 2026-11-06 20:06Z): "Adversarial for the floor classes only; ordinary-use rubric for the rest; run the pilot".
 

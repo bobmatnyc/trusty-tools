@@ -16,6 +16,7 @@ What: scans `git ls-files` (or the paths given, for the pre-commit hook) with
   baselined: every hit fails unless its (path, sha256 of the matched run) pair
   is listed, with a hit count and a reason, in
   scripts/public_leak_private_allowlist.tsv. No matched text is printed.
+  A PUB_* class applies only under PUBLISHED_PREFIXES (#11720).
   Regenerate the baseline: python3 scripts/check_content.py public-leaks --update-baseline
 Test: scripts/check_public_leaks_selftest.sh
 """
@@ -34,6 +35,9 @@ ALLOW_REL = "scripts/public_leak_private_allowlist.tsv"
 SELF_FILES = {PATTERNS_REL, BASELINE_REL, ALLOW_REL}
 PRIVATE = "PRIVATE_NAME"
 NAMES_ENV = "PUBLIC_LEAK_PRIVATE_NAMES_FILE"
+# #11720: a PUB_* class binds only the paths the project publishes.
+PUB = "PUB_"
+PUBLISHED_PREFIXES = ("docs/", "website/src/content/")
 RUN_RE = re.compile(r"[A-Za-z0-9]+")
 BASELINE_HEADER = (
     "# Public-content leak baseline: path<TAB>pattern-id<TAB>hit-count. Shrink-only.\n"
@@ -216,13 +220,16 @@ def run(root, load_leak_rules, leak_findings, fail, paths=(), update=False):
         raise fail("SCAN_ROOT: git ls-files returned no text files")
     allow = read_allowlist(root / ALLOW_REL, fail)
     hits, lines = Counter(), {}
-    for cls, rel, num, shown in leak_findings(files, rules):
+    pub_rules = [r for r in rules if r[0].startswith(PUB)]
+    rules = [r for r in rules if not r[0].startswith(PUB)]
+    published = [(rel, data) for rel, data in files if rel.startswith(PUBLISHED_PREFIXES)]
+    for cls, rel, num, shown in leak_findings(files, rules) + leak_findings(published, pub_rules):
         if _excused(allow, cls, rel, shown):
             continue
         hits[(rel, cls)] += 1
         lines.setdefault((rel, cls), num)
     for rel, _ in files:  # a path that itself names a private place is a hit too
-        for cls, rx, ok in rules:
+        for cls, rx, ok in rules + (pub_rules if rel.startswith(PUBLISHED_PREFIXES) else []):
             bad = [m.group(0) for m in rx.finditer(rel) if ok is None or not ok.fullmatch(m.group(0))]
             if any(not _excused(allow, cls, rel, tok) for tok in bad):
                 hits[(rel, cls)] += 1

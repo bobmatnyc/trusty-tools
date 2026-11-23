@@ -1,6 +1,6 @@
 # Evidence-based testing and guard proportionality
 
-Task ar-T74 (goal ar-G01). Research and proposal only. No guard, test or source file was changed. Date: 2026-11-06.
+Research and proposal only. No guard, test or source file was changed. Date: 2026-11-06.
 
 ## 0. Conclusion
 

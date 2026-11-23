@@ -58,7 +58,7 @@ repos:
 
 ## Goal
 
-`--goal G01` (or `ar-G01`) reads the goals file: `$TM_GOALS_FILE`, else
+`--goal G01` (or `<code>-G01`) reads the goals file: `$TM_GOALS_FILE`, else
 `~/trusty-mpm-projects/architect/local/goals.md`. The goal's section is the
 `## ...` heading that contains `(G01)`, up to the next `## ` heading. An issue
 serves the goal when that section references it as `#N`, or when it carries a

@@ -30,3 +30,12 @@ EVO_HOST	-	evo-linux|instance-evo|evo-gate-log|(^|[^A-Za-z])EVO([^A-Za-z]|$)
 ORG_ALIAS	-	git@github-[A-Za-z0-9_.-]+:
 EMAIL	i	[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}	.*@([A-Za-z0-9-]+\.)*(example\.(com|org|net)|users\.noreply\.github\.com)
 SLACK_ID	-	(^|[^A-Za-z0-9])[UWCDT][A-Z0-9]{8,10}([^A-Za-z0-9]|$)	.?[UWCDT][A-Z]+.?
+# Class 5 — internal coordination ids and authority cites (#11720). A PUB_*
+# class binds published paths only (PUBLISHED_PREFIXES in
+# scripts/public_leaks.py: docs/, website/src/content/): ledger task and goal
+# ids (`<code>-<letter><hex>`), dashboard decision ids cited as rulings, and
+# owner-ruling wording used as a decision's authority. Cite the public reason,
+# issue, ADR or PR instead.
+PUB_IL_ID	-	(^|[^A-Za-z0-9_-])[a-z]{2}-[A-Z]([0-9][0-9a-f]{1,2}|[a-f][0-9][0-9a-f]?)([^A-Za-z0-9]|$)
+PUB_DECISION_ID	-	([Rr]ul(ing|ed)|RULED|[Oo]wner|[Dd]ashboard)[^.;|(/]{0,25}?(?<![A-Za-z0-9_/-])D[0-9][0-9a-f]{0,2}(?![A-Za-z0-9_])
+PUB_OWNER_RULING	-	[Oo]wner[- ]([Rr]ul(ing|ed)|[Dd]ecision|[Aa]nswer|[Dd]irection|[Cc]hoice)s?|OWNER DECISION|[Oo]wner's (ruling|decision|call|choice)|[Pp]er the owner

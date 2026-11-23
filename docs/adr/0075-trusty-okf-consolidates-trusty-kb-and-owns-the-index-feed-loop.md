@@ -2,15 +2,15 @@
 
 - **Status:** Accepted
 - **Date:** 2026-11-03
-- **Accepted:** 2026-11-03 (owner, Bob). Naming: ruling 03:06Z on [SPEC-OKF-01](../specs/SPEC-OKF-01.md) §3 (a), "consolidate generic trusty-kb functionality under trusty-okf, superseding planned trusty-okg naming; preserve agent glue boundary". Feed loop: ruling 06:58Z, "all recommended", which decides §3 (e) option A. SPEC-OKF-01 r7.1 accepted as written 09:16Z.
+- **Accepted:** 2026-11-03. Naming: [SPEC-OKF-01](../specs/SPEC-OKF-01.md) §3 (a) option A, consolidate generic trusty-kb functionality under trusty-okf, superseding the planned trusty-okg name, and keep the agent-glue boundary. Feed loop: §3 (e) option A, the recommended option. SPEC-OKF-01 r7.1 accepted as written.
 - **Scope:** crate `trusty-kb` (retires); new crate `trusty-okf` (`crates/trusty-okf`, SPEC-OKF-01 §7); `crates/trusty-agents` (call sites, retained agent glue, and `src/stores/index_feed.rs` / `index_feed_rpc.rs`, which move out); `trusty-search` (keeps chunking, embedding and ranking; no OKF indexing loop); ADR-0041 (amended)
 - **Reversibility Cost:** Low — `trusty-kb` was never released, so no published name changes. The cost is the call-site move in trusty-agents and the feed-loop move.
-- **Decision Drivers:** owner rulings 2026-11-03 03:06Z and 06:58Z; SPEC-OKF-01 §1 requirement that trusty-okf owns building and maintaining OKF repositories; ADR-0040's consumer criterion; the agent-glue boundary; trusty-search has no OKF indexing loop today (SPEC-OKF-01 §5.5)
+- **Decision Drivers:** the accepted SPEC-OKF-01 §3 (a) and §3 (e) options; SPEC-OKF-01 §1 requirement that trusty-okf owns building and maintaining OKF repositories; ADR-0040's consumer criterion; the agent-glue boundary; trusty-search has no OKF indexing loop today (SPEC-OKF-01 §5.5)
 - **Supersedes / Superseded by:** — (amends [ADR-0041](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md): Decision 1's `trusty-okg` name and rename path, and Decision 2's feed-loop ownership)
 - **Spec:** [SPEC-OKF-01](../specs/SPEC-OKF-01.md) §2.6, §2.7, §2.12, §3 (a), §3 (e), §5, §6.1 item 9
 - **Issue:** [#10743](https://github.com/bobmatnyc/trusty-tools/issues/10743) (tracker [#10737](https://github.com/bobmatnyc/trusty-tools/issues/10737))
 
-**Provenance.** This ADR files the trusty-okf project's proposal ADR-OKF-0001 and adds the §3 (e) feed-loop decision that SPEC-OKF-01 §6.1 item 9 names as a further amendment. The proposal, the spec reviews, the acceptance reconciliation, the owner-choices list and the readback stay in the trusty-okf project's `docs/specs/` and `docs/adr/`. Citations of the form `path:line@c1eed98441` refer to the trusty-tools checkout at that commit.
+**Provenance.** This ADR files the trusty-okf project's proposal ADR-OKF-0001 and adds the §3 (e) feed-loop decision that SPEC-OKF-01 §6.1 item 9 names as a further amendment. The proposal, the spec reviews, the acceptance reconciliation, the open-choices list and the readback stay in the trusty-okf project's `docs/specs/` and `docs/adr/`. Citations of the form `path:line@c1eed98441` refer to the trusty-tools checkout at that commit.
 
 ## Context
 
@@ -28,7 +28,7 @@ The rename in Decision 1 has not happened. The crate is still `crates/trusty-kb`
 
 ### Why the naming is amended
 
-On 2026-11-03 Bob set up trusty-okf as a separate Rust crate that owns building and maintaining OKF repositories (SPEC-OKF-01 §1). That role overlaps Decision 1 directly. Two crates, `trusty-okf` and `trusty-okg`, would split one capability.
+On 2026-11-03 trusty-okf was set up as a separate Rust crate that owns building and maintaining OKF repositories (SPEC-OKF-01 §1). That role overlaps Decision 1 directly. Two crates, `trusty-okf` and `trusty-okg`, would split one capability.
 
 SPEC-OKF-01 §2.7 surveyed the code. Almost all of `trusty-kb` is generic OKF bundle and build code: format, container rules, store operations, ingest, ledger, trust labels and the index journal. The agent-specific parts are small: the agent-slug root mapping in `roots.rs`, and the `kb_*` MCP server. With the generic code in trusty-okf, a separate `trusty-okg` crate would hold only agent glue, which already has a home in trusty-agents.
 
@@ -36,11 +36,11 @@ SPEC-OKF-01 §2.7 surveyed the code. Almost all of `trusty-kb` is generic OKF bu
 
 SPEC-OKF-01 §3 (e) asked who owns the loop that pushes concept files to trusty-search and withdraws them. Option C was ADR-0041 Decision 2: trusty-search absorbs OKF indexing. That depends on trusty-search work that is not built. Option A puts the loop in trusty-okf, in a feature-gated module moved from `crates/trusty-agents/src/stores/index_feed.rs`. The loop is generic, and ADR-0041 already wants it out of trusty-agents. Option A contradicts Decision 2 for the feed loop, so SPEC-OKF-01 §6.1 item 9 requires this amendment before implementation.
 
-### The owner rulings
+### What was accepted
 
-- Bob, 2026-11-03 03:06Z, after SPEC-OKF-01 §3 (a) recommended option A: "Let's consolidate and then give me the review." The Architect's brief records the scope: "consolidate generic trusty-kb functionality under trusty-okf, superseding planned trusty-okg naming; preserve agent glue boundary."
-- Bob, 2026-11-03 06:58Z: "all recommended" on the 26 owner choices. Item 14 is §3 (e); the recommended option is A.
-- Bob, 2026-11-03 09:16Z: SPEC-OKF-01 r7.1 accepted as written. Design only; implementation starts when Bob schedules it.
+- SPEC-OKF-01 §3 (a) option A: consolidate generic trusty-kb functionality under trusty-okf, superseding the planned trusty-okg name, and keep the agent-glue boundary.
+- The recommended option of each of the spec's 26 open choices. Item 14 is §3 (e); its recommended option is A.
+- SPEC-OKF-01 r7.1 as written. The acceptance is design only; implementation is scheduled separately.
 
 ## Decision
 
@@ -59,7 +59,7 @@ SPEC-OKF-01 §3 (e) asked who owns the loop that pushes concept files to trusty-
 5. **trusty-okf owns the index-feed loop, behind a cargo feature (SPEC-OKF-01 §3 (e) A).** The reconcile-and-push loop of `crates/trusty-agents/src/stores/index_feed.rs` and `index_feed_rpc.rs` moves to the module `trusty_okf::feed`, compiled only with the cargo feature `search-feed` (rule B8). The feed pushes concept files to trusty-search, withdraws them, and reads results back through trusty-search's query method. SPEC-OKF-01 §5 is its contract.
 6. **trusty-search keeps chunking, embedding and ranking.** trusty-okf never chunks, embeds or ranks (SPEC-OKF-01 §2.6). trusty-search does not take over the OKF feed loop. Gaps that need trusty-search changes are filed as external dependencies D1 and D2 (SPEC-OKF-01 §5.6), not built by trusty-okf.
 
-This ADR decides nothing else. SPEC-OKF-01 §3 and §7 record the other owner decisions: OKF version policy, correction model, verification fields, public surface, publishing, deprecated-concept indexing, crate location and import scope.
+This ADR decides nothing else. SPEC-OKF-01 §3 and §7 record the other accepted choices: OKF version policy, correction model, verification fields, public surface, publishing, deprecated-concept indexing, crate location and import scope.
 
 ## What this ADR replaces in ADR-0041, and what it keeps
 
@@ -111,7 +111,7 @@ At `c1eed98441`, outside `crates/trusty-kb`:
 
 ### Positive
 
-- One crate owns the OKF bundle, its build lifecycle and its index feed. This matches the owner's assignment in SPEC-OKF-01 §1.
+- One crate owns the OKF bundle, its build lifecycle and its index feed. This matches the role SPEC-OKF-01 §1 assigns.
 - The crate name matches what it implements: the OKF format and its bundles.
 - The feed-loop move needs no unbuilt trusty-search work. trusty-search stays a general search engine.
 - The boundary is testable in review with `cargo tree` and grep, not by judgment.
@@ -125,13 +125,13 @@ At `c1eed98441`, outside `crates/trusty-kb`:
 
 ### Neutral
 
-- DOC-63's owner decisions are untouched: one canonical OKG per agent at `<home>/<agent>/okg`, trust labels before connector grants, and a separate refresh runner.
+- DOC-63's decisions are untouched: one canonical OKG per agent at `<home>/<agent>/okg`, trust labels before connector grants, and a separate refresh runner.
 - ADR-0040 is untouched. Its consumer criterion still makes the crate native.
 - ADR-0022 is untouched by this ADR. The sync rule for `_sources/ops/` is a separate filing ([#10744](https://github.com/bobmatnyc/trusty-tools/issues/10744)).
 
 ## Alternatives considered
 
-- **Naming B. trusty-okf is the format crate; trusty-okg is the agent build crate on top.** trusty-okg would hold stores, ledger, ingest, trust labels and the feed. Not chosen by the 03:06Z ruling. Bob assigned building and maintaining, not only the format, to trusty-okf. Once build code is generic, trusty-okg would hold only agent glue, which belongs in trusty-agents.
+- **Naming B. trusty-okf is the format crate; trusty-okg is the agent build crate on top.** trusty-okg would hold stores, ledger, ingest, trust labels and the feed. Not chosen: SPEC-OKF-01 §1 assigns building and maintaining, not only the format, to trusty-okf. Once build code is generic, trusty-okg would hold only agent glue, which belongs in trusty-agents.
 - **Naming C. Keep ADR-0041 as written and drop trusty-okf.** Not chosen. It contradicts the 2026-11-03 requirement for a separate crate named `trusty-okf`.
 - **Feed loop B. trusty-agents keeps the loop.** Not chosen. The loop is generic, and ADR-0041 already wants it out of trusty-agents.
 - **Feed loop C. trusty-search absorbs OKF indexing, per ADR-0041 Decision 2.** Not chosen. It depends on trusty-search work that is not built.
@@ -143,7 +143,7 @@ Vetted against `docs/adr/INDEX.md` on 2026-11-03:
 - **ADR-0041 (Native trusty-okg with search indexing): Amends.** Decision 1's name and rename path, and Decision 2's feed-loop ownership. Decisions 3–5 stand. ADR-0041's status becomes `Amended by 0075`.
 - **ADR-0040 (Split MCP framework and services): Consistent.** The consumer criterion keeps trusty-okf native. Boundary rule B7 restates it.
 - **ADR-0022 (Knowledge-tree synchronization): Consistent.** This ADR changes no sync rule; the sync rule is amended separately by [#10744](https://github.com/bobmatnyc/trusty-tools/issues/10744) (#10743). The `trusty-kb-<tree>` repo naming is stale prose.
-- **ADR-0024 (Sub-agents are in-process leaves): Consistent.** A sub-agent gets the in-process import tier only, so ADR-0024 is not amended (SPEC-OKF-01 §2.12, owner-choices item 3 A).
+- **ADR-0024 (Sub-agents are in-process leaves): Consistent.** A sub-agent gets the in-process import tier only, so ADR-0024 is not amended (SPEC-OKF-01 §2.12, open-choices item 3, option A).
 - **ADR-0026 (A credential grant does not survive delegation): Consistent.** trusty-okf holds no grant (B6, B10). An authenticated source adapter's caller holds its own.
 - **ADR-0029 (MSRV 1.94): Consistent.** The extraction worker builds outside the workspace (SPEC-OKF-01 §3 (n) B); recording that is a separate filing ([#10745](https://github.com/bobmatnyc/trusty-tools/issues/10745)).
 - **ADR-0033 (Consolidate MCP services; Superseded by 0040): No interaction.**
@@ -155,7 +155,7 @@ No conflict with any other Accepted or Proposed ADR.
 ## References
 
 - [SPEC-OKF-01](../specs/SPEC-OKF-01.md) r7.1 — §2.6, §2.7, §2.12, §3 (a), §3 (e), §5, §6.1 item 9
-- trusty-okf project (outside this repository): ADR-OKF-0001 (the proposal this ADR files), and beside the spec the review, the acceptance reconciliation, the owner-choices list and the readback for Bob
+- trusty-okf project (outside this repository): ADR-OKF-0001 (the proposal this ADR files), and beside the spec the review, the acceptance reconciliation, the open-choices list and the readback
 - [`0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md`](0041-trusty-okg-native-crate-search-absorbs-okf-indexing.md) — amended by this ADR
 - [`0040-trusty-mcp-services-absorbs-trusty-gworkspace.md`](0040-trusty-mcp-services-absorbs-trusty-gworkspace.md)
 - `crates/trusty-agents/src/stores/index_feed.rs`, `index_feed_rpc.rs` — the loop that moves to `trusty_okf::feed`

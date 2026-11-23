@@ -8,7 +8,7 @@
 **DOC-N claim:** `DOC-91`, scan-before-claim per [DOC-38 §4.1](./spec-linked-documentation.md#SPEC-SLD-01~draft). The catalog's next-free note on `origin/main` at 2026-11-12 (`f126f298d9`) named `DOC-91`; no file or open PR claims it.
 **Issue:** [#11064](https://github.com/bobmatnyc/trusty-tools/issues/11064). Copied from the spec comment on that issue (2026-11-11 17:48Z); sections 1-7 keep its text. Section 8 records the framework port.
 
-Goal ar-G05, task ar-T16. Requested by Bob, 2026-11-11 17:29Z.
+Requested 2026-11-11.
 Owner ruling (Bob, 2026-11-11 17:47Z, decision Deb): "Accept all four" — six levels, Bob = pm with detail on request, default pm, violations warn only, applies to the morning brief and Slack.
 Bob's words: "in general, we need to elevate the language. I'm capable of understanding most things, but don't want to get into technical details unless I have to. We should have settable technical levels for the architect. Non-Technical, Vibe-Coder, PM, Engineer, Senior Engineer, CTO. Scope/spec/ticket"
 Requirement ids are `TL-n`. "MUST" marks a testable requirement.
