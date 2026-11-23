@@ -89,11 +89,9 @@ async fn a_sighup_settles_the_buffered_inject_event_10468() {
     });
 
     // The production stop, installed before the signal is raised.
-    let stop = crate::daemon::stop_signal::StopSignals::install_with(
-        tokio::signal::unix::signal,
-        false,
-    )
-    .recv();
+    let stop =
+        crate::daemon::stop_signal::StopSignals::install_with(tokio::signal::unix::signal, false)
+            .recv();
     // SAFETY: raising a signal this process has a handler for.
     assert_eq!(unsafe { libc::raise(libc::SIGHUP) }, 0);
     let ended = tokio::time::timeout(
