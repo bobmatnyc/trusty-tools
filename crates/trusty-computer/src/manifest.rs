@@ -1,9 +1,13 @@
 //! The bounded-mode capability manifest for one lease scope.
 //!
-//! Why: cua-driver 0.23.2 admits a bounded app only by exact pid and window
-//! (`desktop.applications` / `desktop.windows`); `executable` and `bundle_id`
-//! entries are refused (GO-STOP.md:140-141). So the manifest is rendered per
-//! lease scope, and a scope change means a daemon restart (plan section 3).
+//! Why: the daemon ceiling must name one process, not an app identity. In
+//! cua-driver 0.23.2 an `apps[].bundle_id` entry admits a signed bundle, but
+//! it matches the claimed bundle id only: an ad-hoc build of other code with
+//! the same id is admitted too, even when the real app is Developer ID signed
+//! (#11697, `tests/live_bundle_scope.rs`). Exact pid and window entries
+//! (`desktop.applications` / `desktop.windows`) refuse every other process.
+//! So the manifest is rendered per lease scope, and a scope change means a
+//! daemon restart (plan section 3).
 //! What: [`LeaseScope`] is one pid plus one window id; [`render`] emits the
 //! version-3 YAML with the tool ceiling of `tests/fixtures/capabilities.live.yaml`
 //! and no `resources.apps` entry; the `write()` function stores it 0600 without following a

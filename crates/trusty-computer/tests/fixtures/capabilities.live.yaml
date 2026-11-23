@@ -30,7 +30,9 @@ resources:
   desktop:
     # The bundle_id entry above did not admit the window (no attested bundle
     # id for an exec'd osascript); exact pid/window entries do. The broker
-    # fills these per run (grantcheck/live_manifest.sh).
+    # fills these per run (grantcheck/live_manifest.sh). A native signed
+    # bundle IS admitted by bundle_id, but so is any same-id impostor, so the
+    # broker ships pid-only scoping (#11697, tests/live_bundle_scope.rs).
     applications: [FIXTURE_PID]
     windows:
       - pid: FIXTURE_PID

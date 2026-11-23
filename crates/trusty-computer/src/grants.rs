@@ -4,7 +4,11 @@
 //! a broker restart must not drop the grant (plan section 4, "Grants").
 //! What: a [`Grant`] names one bundle id and the one window it may touch
 //! (pid plus window id, the bounded manifest's unit), a tool subset, a TTL
-//! and an idle TTL. [`Grants::mint`] takes an [`OperatorMint`], which only
+//! and an idle TTL. At mint, `app_identity` compares the bundle id with the
+//! pid's claimed id from LaunchServices; it does not verify the signature, so
+//! the operator's choice of pid is the only identity control. The daemon is
+//! scoped by pid only (#11697, `manifest.rs`).
+//! [`Grants::mint`] takes an [`OperatorMint`], which only
 //! the consent flow builds (`broker_operator.rs`: dialog confirmed and its
 //! code entered). Sensitive apps need `allow_sensitive`. Every change is
 //! written 0600 and fsynced before it takes effect; a write failure refuses.
