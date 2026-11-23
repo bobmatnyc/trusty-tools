@@ -19,7 +19,9 @@ Plan only; no code, no build. Owner ruling: "Build Phase 2 with the bounded mode
 2. **Bounded mode = caller-auth option (a)** (GO-STOP.md:113-115): daemon started with
    `--permission-mode bounded --capability-manifest <file>` on a private socket (`broker.py:237-239`). Option (c)
    (sandbox-exec, 2.5 d, GO-STOP.md:117) is not in the baseline; a 1-day proof of its LaunchServices rule is an
-   optional end of Phase 7 (GO-STOP.md:120). The residual gap stays: the broker is a guardrail, not a security
+   optional end of Phase 7 (GO-STOP.md:120). That proof ran for #11693: NOT FEASIBLE as a boundary, because a
+   sandboxed shell can still drive any unsandboxed helper such as tmux
+   (`docs/plans/trusty-computer-sandbox-exec-poc.md`). The residual gap stays: the broker is a guardrail, not a security
    boundary (GO-STOP.md:11-12, 103-111). Bob must accept that in writing (GO-STOP.md:17).
 3. **`invoke_menu` is denied** (GO-STOP.md:18). Every menu holds Restart, Shut Down, Log Out, and the spike rule
    checks only the pid (`policy.py:188-189`). A path allowlist is deferred.
