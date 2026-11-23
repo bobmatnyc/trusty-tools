@@ -233,13 +233,37 @@ pub struct StdioMcpClient {
     /// handshake. Caller-supplied so each consumer (trusty-agents, console,
     /// etc.) can identify itself accurately to the MCP server.
     pub(super) client_name: String,
+    /// #11650: the child leads its own process group, killed as a whole.
+    pub(super) own_group: bool,
+}
+
+impl StdioMcpClient {
+    /// `SIGKILL` the child's process group when it leads one.
+    ///
+    /// What: only while the leader is unreaped (`Child::id` is `Some`): its pid
+    /// cannot be reused until it is reaped, so the group id still names this
+    /// client's group. A no-op off unix and for ungrouped clients.
+    pub(super) fn kill_group(&mut self) {
+        #[cfg(unix)]
+        if self.own_group
+            && let Some(pid) = self.child.id()
+            && let Ok(pgid) = libc::pid_t::try_from(pid)
+        {
+            // SAFETY: killpg has no memory-safety preconditions.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
+    }
 }
 
 impl Drop for StdioMcpClient {
     /// Best-effort kill so we never leak child processes when a client is
     /// dropped without a clean shutdown. `kill_on_drop(true)` set at spawn
-    /// also covers this; the explicit call is belt-and-suspenders.
+    /// also covers this; the explicit call is belt-and-suspenders. A grouped
+    /// client (#11650) kills its whole process group first.
     fn drop(&mut self) {
+        self.kill_group();
         let _ = self.child.start_kill();
     }
 }
