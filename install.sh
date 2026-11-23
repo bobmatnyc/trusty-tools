@@ -60,6 +60,10 @@ BIN="trusty-installer"
 
 REPO_URL="https://github.com/${REPO}"
 API_RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
+# #11723: the monorepo publishes many crates, so the newest trusty-installer
+# tag can sit past the first 30 releases. Page 100 at a time, bounded.
+RELEASES_PER_PAGE=100
+RELEASES_MAX_PAGES=10
 RELEASE_DL_BASE="${REPO_URL}/releases/download"
 TAG_PREFIX="${CRATE}-v"
 # The published one-liner's URL, named in the no-terminal error (#11430).
@@ -232,8 +236,8 @@ auth_header() {
 #      Fetching to a file and inspecting curl's own HTTP status directly (via
 #      `-w '%{http_code}'`) fixes that, and retrying transient 403/5xx a few
 #      times absorbs momentary rate-limit blips.
-# What: GET ${API_RELEASES_URL} (with an auth header if available), write the
-#      body to a temp file, retry up to 3 times with backoff on 403/429/5xx,
+# What: GET the URL in $1 (default ${API_RELEASES_URL}), with an auth header
+#      if available, write the body to a temp file, retry up to 3 times with backoff on 403/429/5xx,
 #      then die with an accurate message on a non-2xx final status or echo the
 #      body file path on success. Caller is responsible for removing the file.
 # Test: query_releases_api against a live endpoint returns a body file with
@@ -241,6 +245,7 @@ auth_header() {
 #      confirms it retries then reports the rate-limit message (not "no
 #      release found").
 query_releases_api() {
+    _url="${1:-${API_RELEASES_URL}}"
     _hdr="$(auth_header)"
     _body_file="$(mktemp 2>/dev/null || mktemp -t trusty-releases)" \
         || die "failed to create temp file for release query"
@@ -250,9 +255,9 @@ query_releases_api() {
     _http_code="000"
     while [ "${_attempt}" -le "${_max_attempts}" ]; do
         if [ -n "${_hdr}" ]; then
-            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' -H "${_hdr}" "${API_RELEASES_URL}" 2>/dev/null)" || _http_code="000"
+            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' -H "${_hdr}" "${_url}" 2>/dev/null)" || _http_code="000"
         else
-            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' "${API_RELEASES_URL}" 2>/dev/null)" || _http_code="000"
+            _http_code="$(curl -sS -L -o "${_body_file}" -w '%{http_code}' "${_url}" 2>/dev/null)" || _http_code="000"
         fi
 
         case "${_http_code}" in
@@ -279,15 +284,15 @@ query_releases_api() {
             ;;
         403)
             rm -f "${_body_file}"
-            die "GitHub API rate limit hit (HTTP 403) while resolving ${CRATE} release at ${API_RELEASES_URL}. Set GITHUB_TOKEN (or GH_TOKEN) to raise the unauthenticated 60/hr limit to 5000/hr, then retry."
+            die "GitHub API rate limit hit (HTTP 403) while resolving ${CRATE} release at ${_url}. Set GITHUB_TOKEN (or GH_TOKEN) to raise the unauthenticated 60/hr limit to 5000/hr, then retry."
             ;;
         000)
             rm -f "${_body_file}"
-            die "failed to reach GitHub API at ${API_RELEASES_URL} (network error)"
+            die "failed to reach GitHub API at ${_url} (network error)"
             ;;
         *)
             rm -f "${_body_file}"
-            die "GitHub API returned HTTP ${_http_code} querying ${API_RELEASES_URL}"
+            die "GitHub API returned HTTP ${_http_code} querying ${_url}"
             ;;
     esac
 }
@@ -311,20 +316,34 @@ resolve_version() {
 
     say "Resolving latest ${CRATE} release..." >&2
 
-    # Fetch the releases list body (status already validated by
-    # query_releases_api; a non-2xx dies there with an accurate message) and
-    # extract the first trusty-installer-v* tag. No jq required — grep/sed only.
-    _body_file="$(query_releases_api)"
-    _ver="$(
-        grep '"tag_name"' "${_body_file}" \
-            | grep "${TAG_PREFIX}" \
-            | head -1 \
-            | sed "s/.*\"${TAG_PREFIX}\\([^\"]*\\)\".*/\\1/"
-    )"
-    rm -f "${_body_file}"
+    # Page through the releases list (status already validated by
+    # query_releases_api; a non-2xx dies there with an accurate message) until
+    # a trusty-installer-v* tag appears or a page has no tags (#11723). No jq
+    # required — grep/sed only. An empty or tagless first page is a hard error.
+    _ver=""
+    _page=1
+    while [ "${_page}" -le "${RELEASES_MAX_PAGES}" ]; do
+        _body_file="$(query_releases_api "${API_RELEASES_URL}?per_page=${RELEASES_PER_PAGE}&page=${_page}")" \
+            || exit 1
+        _tags="$(grep '"tag_name"' "${_body_file}" || true)"
+        rm -f "${_body_file}"
+        if [ -z "${_tags}" ]; then
+            break
+        fi
+        _ver="$(
+            printf '%s\n' "${_tags}" \
+                | grep "${TAG_PREFIX}" \
+                | head -1 \
+                | sed "s/.*\"${TAG_PREFIX}\\([^\"]*\\)\".*/\\1/"
+        )"
+        if [ -n "${_ver}" ]; then
+            break
+        fi
+        _page=$((_page + 1))
+    done
 
     if [ -z "${_ver}" ]; then
-        die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL} (query succeeded but no matching tag in the response)"
+        die "no ${TAG_PREFIX}* release found at ${API_RELEASES_URL} (searched ${_page} page(s) of ${RELEASES_PER_PAGE}; set TRUSTY_VERSION=X.Y.Z to pin)"
     fi
 
     # Sanity-check it looks like a strict X.Y.Z version (digits and dots only).
