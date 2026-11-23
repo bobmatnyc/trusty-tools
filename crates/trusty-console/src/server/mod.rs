@@ -165,6 +165,9 @@ pub struct AppState {
     /// What: `None` in production, which resolves the real path.
     /// Test: `tests/analyze_uds_bridge.rs` sets it on every case.
     pub(crate) analyze_socket: Option<Arc<PathBuf>>,
+    /// #11747: override for the assistants root; `None` resolves it as `ta`
+    /// does. Test: `tests/assistants_routes.rs` sets it on every case.
+    pub(crate) assistants_root: Option<Arc<PathBuf>>,
     /// #9076: what console's `trusty-events` client has seen — its state and
     /// the events it relays. `Starting` until `run_serve` starts the client.
     events: Arc<crate::events_uds::EventsRelay>,
@@ -289,6 +292,7 @@ impl AppState {
             search_socket: None,
             memory_socket: None,
             analyze_socket: None,
+            assistants_root: None,
             events: Arc::new(crate::events_uds::EventsRelay::new()),
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
