@@ -1,0 +1,2 @@
+Added
+- `computer_screenshot` MCP tool and `screenshot_window` broker tool: an image of the granted window only, served when the operator names `screenshot_window` in the grant. The reply carries no AX tree or menu bar, the journal keeps no pixels, and the broker refuses the capture when the window shows a password field, its AX tree is degraded or incomplete, or the daemon cannot prove the capture (#11694).

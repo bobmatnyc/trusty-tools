@@ -155,6 +155,29 @@
   }
  },
  {
+  "name": "computer_screenshot",
+  "description": "Image of the granted window only, when the grant names screenshot_window; no menu bar or AX tree; refused while a password field shows.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "pid": {
+     "type": "integer"
+    },
+    "window_id": {
+     "type": "integer"
+    },
+    "request_id": {
+     "type": "string",
+     "description": "Idempotency key; a uuid4 is filled when omitted."
+    }
+   },
+   "required": [
+    "pid",
+    "window_id"
+   ]
+  }
+ },
+ {
   "name": "computer_click",
   "description": "Click an element by token in background; returns confirmed by read-back.",
   "inputSchema": {

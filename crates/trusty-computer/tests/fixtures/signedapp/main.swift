@@ -43,6 +43,12 @@ let button = NSButton(title: "Press Me", target: target, action: #selector(Targe
 button.frame = NSMakeRect(160, 50, 100, 32)
 win.contentView?.addSubview(label)
 win.contentView?.addSubview(button)
+// #11694: SIGNEDCHECK_SECURE=1 adds a filled password field; a screenshot must be refused.
+if ProcessInfo.processInfo.environment["SIGNEDCHECK_SECURE"] == "1" {
+    let secret = NSSecureTextField(frame: NSMakeRect(20, 170, 180, 24))
+    secret.stringValue = "fixture-secret"
+    win.contentView?.addSubview(secret)
+}
 win.makeKeyAndOrderFront(nil)
 log += "window \(win.windowNumber)\n"
 flush()

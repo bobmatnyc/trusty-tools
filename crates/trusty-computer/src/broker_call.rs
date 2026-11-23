@@ -11,8 +11,10 @@
 //! redacted snapshot of that window; audit `forward` (a failure refuses); the
 //! driver call; menu-bar strip of a snapshot (one with no structured part is
 //! refused) and of a `driver_refused` result; read-back confirmation of a
-//! mutating call; journal; audit `done`. The read tools are asked for no
-//! screenshot, and every reply loses any image part the driver sends.
+//! mutating call; journal; audit `done`. `screenshot_window` is driven as a
+//! `get_window_state` capture and reduced to one image by
+//! [`screenshot::bound`]; the read tools are asked for no screenshot, and
+//! every other reply loses any image part the driver sends (#11694).
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -29,6 +31,7 @@ use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
 use crate::policy::{self, Verdict};
 use crate::redact::{redact_reply, strip_markdown};
+use crate::screenshot::{self, SCREENSHOT_TOOL};
 use crate::supervisor::READ_ONLY_TOOLS;
 
 /// Tools that must name a token from the last redacted snapshot.
@@ -60,19 +63,6 @@ pub const UNCONFIRMED_HINT: &str = "not confirmed: check with get_window_state, 
 /// Read tools the driver answers with a screenshot unless told otherwise.
 const IMAGE_READ_TOOLS: [&str; 2] = ["get_window_state", "verify_state"];
 
-/// `args` for the daemon: a read tool in [`IMAGE_READ_TOOLS`] is asked for no
-/// screenshot, whose pixels the redactor cannot clean.
-/// Test: `read_asks_driver_for_no_image`.
-fn read_args(tool: &str, args: &Value) -> Value {
-    let mut args = args.clone();
-    if IMAGE_READ_TOOLS.contains(&tool)
-        && let Some(map) = args.as_object_mut()
-    {
-        map.insert("include_screenshot".into(), json!(false));
-    }
-    args
-}
-
 /// Drop every non-text content part of any tool's reply, so an image the
 /// driver sends anyway never reaches the agent.
 /// Test: `read_drops_image_the_driver_sends_anyway`, `refused_read_drops_image`,
@@ -81,6 +71,24 @@ fn strip_images(result: &mut Value) {
     if let Some(parts) = result.get_mut("content").and_then(Value::as_array_mut) {
         parts.retain(|p| p.get("type") == Some(&json!("text")));
     }
+}
+
+/// The daemon tool and arguments for agent `tool` (#11694).
+///
+/// `screenshot_window` becomes [`screenshot::driver_args`]; a read tool in
+/// [`IMAGE_READ_TOOLS`] is asked for no screenshot, whose pixels the redactor
+/// cannot clean.
+/// Test: `read_asks_driver_for_no_image`.
+fn driver_request(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
+    if tool == SCREENSHOT_TOOL {
+        return (screenshot::DRIVER_TOOL, screenshot::driver_args(args));
+    }
+    let mut args = args.clone();
+    if IMAGE_READ_TOOLS.contains(&tool) {
+        args.insert("include_screenshot".into(), json!(false));
+    }
+    let name = policy::rule(tool).map_or("", |r| r.tool);
+    (name, Value::Object(args))
 }
 
 fn window_key(args: &Map<String, Value>) -> Option<(u32, u64)> {
@@ -239,11 +247,23 @@ impl<L: Launcher> Inner<L> {
         }
         self.grants.touch(grant_id, now);
         // 6. The driver call, then strip, confirm, journal, audit `done`.
-        let (mut reply, outcome) = self.drive(&tool, &read_args(&tool, &args), grant.scope);
-        strip_images(&mut reply["result"]);
+        let shot = tool == SCREENSHOT_TOOL;
+        let (driver_tool, driver_args) = driver_request(&tool, &args_map);
+        let (mut reply, outcome) = self.drive(driver_tool, &driver_args, grant.scope);
+        if !shot {
+            strip_images(&mut reply["result"]);
+        }
+        if shot && reply["ok"] != json!(true) {
+            // #11694: a refused or failed capture may still carry pixels or a tree.
+            if let Some(r) = reply.as_object_mut() {
+                r.remove("result");
+            }
+        }
         if reply["code"] == json!("driver_refused") {
             // #11460: a refusal can carry the tree it refused; strip it too.
-            reply["result"] = redact_reply(&reply["result"]).result;
+            if !shot {
+                reply["result"] = redact_reply(&reply["result"]).result;
+            }
             if let Some(error) = reply["error"].as_str().map(strip_markdown) {
                 reply["error"] = json!(error);
             }
@@ -261,7 +281,13 @@ impl<L: Launcher> Inner<L> {
                 "the snapshot has no structured part to redact",
             );
         }
-        if reply["ok"] == json!(true) {
+        if shot && reply["ok"] == json!(true) {
+            reply = match screenshot::bound(&reply["result"], grant.scope.window_id) {
+                Ok(image) => json!({"ok": true, "result": image}),
+                Err((code, detail)) => refusal(code, &detail),
+            };
+        } else if reply["ok"] == json!(true) {
+            screenshot::strip_images(&mut reply["result"]);
             if tool == "get_window_state" {
                 let red = redact_reply(&reply["result"]);
                 rec.insert("redacted".into(), json!(red.removed));
@@ -279,8 +305,14 @@ impl<L: Launcher> Inner<L> {
                 }
             }
         }
+        let kept = if shot && reply["ok"] == json!(true) {
+            // #11694: the journal never holds pixels; a replay says to take a new one.
+            json!({"ok": true, "result": {"replayed_image": screenshot::REPLAY_NOTE}})
+        } else {
+            reply.clone()
+        };
         let journal = self.journals.entry(grant_id.to_owned()).or_default();
-        if let Err(e) = journal.record(&rid, reply.clone(), outcome) {
+        if let Err(e) = journal.record(&rid, kept, outcome) {
             reply = json!({"ok": false, "code": e.code(), "error": e.to_string(), "result": reply});
         }
         rec.insert("phase".into(), json!("done"));

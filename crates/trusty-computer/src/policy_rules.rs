@@ -4,13 +4,14 @@
 //! dict (`policy.py:161-231`) row for row.
 //! What: 6 ALLOW, 13 FILTER and 37 DENY rows. `invoke_menu` is DENY here; the
 //! spike had it FILTER (plan section 1, item 3).
+//! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists.
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
-//! in `tests/spike_policy.rs`.
+//! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
 
 use crate::policy::{
     Check, Rule, Verdict, background_only, element_addressed, hotkey_safe, launch_in_scope,
     no_modifiers, no_paths, no_prompt, no_screenshot, pid_in_scope, press_key_safe, text_bounded,
-    window_scope_only,
+    window_only, window_scope_only,
 };
 
 const fn allow(tool: &'static str, reason: &'static str) -> Rule {
@@ -208,4 +209,14 @@ pub static RULES: [Rule; 56] = [
     deny("browser_pointer", "browser control"),
     deny("browser_set_input_files", "uploads local files"),
     deny("browser_type", "browser control"),
+];
+
+/// Broker tools: driven through a driver tool, never named to the daemon.
+pub static BROKER_RULES: [Rule; 1] = [
+    // #11694: driven as get_window_state with a screenshot; see `crate::screenshot`.
+    filter(
+        crate::screenshot::SCREENSHOT_TOOL,
+        "image of the granted window only; refused when a password field shows",
+        &[pid_in_scope, window_only],
+    ),
 ];

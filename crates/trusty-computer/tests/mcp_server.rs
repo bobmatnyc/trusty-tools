@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 use trusty_computer::mcp::{driver_tool, tools};
 use trusty_computer::policy::{self, Verdict};
 
-/// Plan section 5, in table order.
-const PLAN_TOOLS: [&str; 20] = [
+/// Plan section 5, in table order, plus `computer_screenshot` (#11694).
+const PLAN_TOOLS: [&str; 21] = [
     "computer_connect",
     "computer_status",
     "computer_release",
@@ -23,6 +23,7 @@ const PLAN_TOOLS: [&str; 20] = [
     "computer_windows",
     "computer_read",
     "computer_verify",
+    "computer_screenshot",
     "computer_click",
     "computer_double_click",
     "computer_right_click",
@@ -47,6 +48,10 @@ fn tools_list_is_the_plan_table() {
         assert!(t["inputSchema"]["properties"]["request_id"].is_object());
         let text = t.to_string().to_lowercase();
         for banned in ["screenshot", "pixel", "invoke_menu", "clipboard"] {
+            // #11694: the one screenshot tool is the bounded one.
+            if banned == "screenshot" && t["name"] == "computer_screenshot" {
+                continue;
+            }
             assert!(!text.contains(banned), "{banned} in {t}");
         }
         if let Some(tool) = driver_tool(t["name"].as_str().unwrap_or("")) {
@@ -125,7 +130,7 @@ fn mcp_smoke_against_a_fake_broker() {
     )
     .expect("notify");
     let listed = mcp.rpc("tools/list", json!({}));
-    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(20));
+    assert_eq!(listed["result"]["tools"].as_array().map(Vec::len), Some(21));
 
     let unbound = mcp.tool("computer_apps", json!({}));
     assert_eq!(unbound["structuredContent"]["code"], "not_connected");
