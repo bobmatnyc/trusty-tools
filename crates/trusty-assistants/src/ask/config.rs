@@ -20,6 +20,15 @@ pub const DEFAULT_MAX_TURNS: u32 = 8;
 /// Wall-clock budget in seconds when `[ask] timeout_secs` is absent.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
+/// Logged turns replayed into one ask when `[ask] max_replay_turns` is absent.
+// #11650: replay is bounded so a long-lived instance's requests stay inside
+// the model's context window.
+pub const DEFAULT_MAX_REPLAY_TURNS: usize = 20;
+
+/// Characters of replayed questions and answers allowed into one ask when
+/// `[ask] max_replay_chars` is absent (about 12k tokens at 4 chars a token).
+pub const DEFAULT_MAX_REPLAY_CHARS: usize = 48_000;
+
 /// The `[ask]` table as written; every key is optional.
 /// Test: `super::tests::config_tests::an_absent_table_resolves_to_the_defaults`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -33,6 +42,12 @@ pub struct AskSettings {
     /// Wall-clock budget for one ask, in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Most logged turns replayed into one ask; 0 replays none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_replay_turns: Option<usize>,
+    /// Most characters of replayed turns; 0 replays none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_replay_chars: Option<usize>,
 }
 
 /// The resolved settings one ask runs with.
@@ -45,15 +60,21 @@ pub struct AskLimits {
     pub max_turns: u32,
     /// Wall-clock budget in seconds, at least 1.
     pub timeout_secs: u64,
+    /// Most logged turns replayed into one ask.
+    pub max_replay_turns: usize,
+    /// Most characters of question plus answer text replayed into one ask.
+    pub max_replay_chars: usize,
 }
 
 impl AskSettings {
     /// Resolve against the defaults; `config_path` names the file in errors.
     ///
     /// What: a blank or absent `model` becomes [`FALLBACK_MODEL`]; absent
-    /// limits take [`DEFAULT_MAX_TURNS`] / [`DEFAULT_TIMEOUT_SECS`]; a zero
-    /// limit is [`AskError::InvalidSetting`], since it would end every ask
-    /// before the first turn.
+    /// limits take [`DEFAULT_MAX_TURNS`] / [`DEFAULT_TIMEOUT_SECS`] /
+    /// [`DEFAULT_MAX_REPLAY_TURNS`] / [`DEFAULT_MAX_REPLAY_CHARS`]; a zero
+    /// `max_turns` or `timeout_secs` is [`AskError::InvalidSetting`], since it
+    /// would end every ask before the first turn. A zero replay limit is valid
+    /// and replays nothing.
     /// Test: `super::tests::config_tests::an_empty_model_resolves_to_the_default`,
     /// `super::tests::config_tests::zero_limits_are_typed_errors`.
     pub fn resolve(&self, config_path: &Path) -> Result<AskLimits, AskError> {
@@ -81,6 +102,8 @@ impl AskSettings {
             model,
             max_turns,
             timeout_secs,
+            max_replay_turns: self.max_replay_turns.unwrap_or(DEFAULT_MAX_REPLAY_TURNS),
+            max_replay_chars: self.max_replay_chars.unwrap_or(DEFAULT_MAX_REPLAY_CHARS),
         })
     }
 }

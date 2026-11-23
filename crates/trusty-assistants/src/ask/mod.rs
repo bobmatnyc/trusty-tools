@@ -41,11 +41,14 @@ use crate::assistants::AssistantHome;
 use crate::assistants::own_index_id;
 use crate::assistants::project::read_home_config;
 
-pub use config::{AskLimits, AskSettings, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS};
+pub use config::{
+    AskLimits, AskSettings, DEFAULT_MAX_REPLAY_CHARS, DEFAULT_MAX_REPLAY_TURNS, DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_SECS,
+};
 pub use error::AskError;
 pub use okg_search::{OKG_SEARCH_TOOL_NAME, OkgSearchTool};
 pub use tools::{AskTools, Exclusion, READ_ONLY_MCP_TOOLS, build_registry, classify};
-pub use turn_log::{TURN_LOG_FILE, TurnLog, TurnRecord};
+pub use turn_log::{TURN_LOG_FILE, TurnLog, TurnRecord, replay_window};
 
 /// Answer `question` as the instance whose home is `home`.
 ///
@@ -161,7 +164,17 @@ impl AskEngine {
             );
         }
         let system = system_prompt(&self.home, &instructions);
-        let mut transcript = replay(&system, &turns, question);
+        // #11650: replay only the newest turns that fit the limits.
+        let window = replay_window(&turns, limits.max_replay_turns, limits.max_replay_chars);
+        if window.len() < turns.len() {
+            tracing::debug!(
+                instance = %self.home.id(),
+                logged = turns.len(),
+                replayed = window.len(),
+                "ask: older turns left out of the replay window",
+            );
+        }
+        let mut transcript = replay(&system, window, question);
         let loop_config = AgentLoopConfig {
             max_turns: limits.max_turns,
             timeout_secs: limits.timeout_secs,
@@ -209,8 +222,8 @@ pub fn system_prompt(home: &AssistantHome, instructions: &str) -> String {
     )
 }
 
-/// A transcript holding every logged turn, then `question` as the new user
-/// turn.
+/// A transcript holding `turns` (the replay window), then `question` as the
+/// new user turn.
 /// Test: `tests::engine_tests::a_second_ask_sees_the_first_turn`.
 fn replay(system: &str, turns: &[TurnRecord], question: &str) -> Transcript {
     let Some((first, rest)) = turns.split_first() else {

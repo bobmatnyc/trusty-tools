@@ -3,7 +3,7 @@
 //! Test: this module IS the test surface.
 
 use super::instance;
-use crate::ask::{AskError, TURN_LOG_FILE, TurnLog, TurnRecord};
+use crate::ask::{AskError, TURN_LOG_FILE, TurnLog, TurnRecord, replay_window};
 
 #[test]
 fn an_absent_log_is_empty() {
@@ -58,4 +58,23 @@ fn a_corrupt_line_is_a_typed_error() {
         // Reading never repairs or truncates the file.
         assert_eq!(std::fs::read_to_string(log.path()).unwrap(), body);
     }
+}
+
+#[test]
+fn the_replay_window_is_the_newest_suffix() {
+    let turns: Vec<TurnRecord> = (0..10)
+        .map(|i| TurnRecord::now(&format!("q{i}"), "aaaa"))
+        .collect();
+    // Turn cap: the last three.
+    assert_eq!(replay_window(&turns, 3, usize::MAX), &turns[7..]);
+    // Char cap: each turn is 6 chars, so 20 chars hold three.
+    assert_eq!(replay_window(&turns, 100, 20), &turns[7..]);
+    // A newest turn over the budget stops the window empty, never skipping it.
+    let mut big = turns.clone();
+    big.push(TurnRecord::now("q", &"x".repeat(50)));
+    assert!(replay_window(&big, 100, 20).is_empty());
+    // Zero limits replay nothing; a short log is replayed whole.
+    assert!(replay_window(&turns, 0, usize::MAX).is_empty());
+    assert!(replay_window(&turns, 100, 0).is_empty());
+    assert_eq!(replay_window(&turns, 100, usize::MAX), &turns[..]);
 }

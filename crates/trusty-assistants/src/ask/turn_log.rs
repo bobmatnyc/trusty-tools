@@ -139,3 +139,31 @@ impl TurnLog {
         file.sync_data().map_err(io)
     }
 }
+
+/// The newest turns that fit the replay limits, oldest first.
+///
+/// Why: #11650 — every ask used to replay the whole log, so requests grew
+/// with the log until the provider refused them on context length.
+/// What: walks back from the newest turn and keeps turns while both limits
+/// hold: at most `max_turns` turns and at most `max_chars` characters of
+/// question plus answer text. It stops at the first turn that does not fit,
+/// so the window is always a contiguous suffix of the log; older turns stay
+/// in the file and are only left out of this request.
+/// Test: `super::tests::turn_log_tests::the_replay_window_is_the_newest_suffix`,
+/// `super::tests::engine_tests::replay_is_bounded_by_the_turn_and_char_limits`.
+pub fn replay_window(turns: &[TurnRecord], max_turns: usize, max_chars: usize) -> &[TurnRecord] {
+    let mut chars = 0usize;
+    let mut kept = 0usize;
+    for turn in turns.iter().rev() {
+        if kept == max_turns {
+            break;
+        }
+        let size = turn.question.chars().count() + turn.answer.chars().count();
+        match chars.checked_add(size) {
+            Some(total) if total <= max_chars => chars = total,
+            _ => break,
+        }
+        kept += 1;
+    }
+    &turns[turns.len() - kept..]
+}

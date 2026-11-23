@@ -5,7 +5,10 @@
 use std::path::Path;
 
 use crate::agents::FALLBACK_MODEL;
-use crate::ask::{AskError, AskSettings, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT_SECS};
+use crate::ask::{
+    AskError, AskSettings, DEFAULT_MAX_REPLAY_CHARS, DEFAULT_MAX_REPLAY_TURNS, DEFAULT_MAX_TURNS,
+    DEFAULT_TIMEOUT_SECS,
+};
 use crate::assistants::AssistantHomeConfig;
 
 fn settings(toml_text: &str) -> AskSettings {
@@ -22,6 +25,8 @@ fn an_absent_table_resolves_to_the_defaults() {
     assert_eq!(limits.model, FALLBACK_MODEL);
     assert_eq!(limits.max_turns, DEFAULT_MAX_TURNS);
     assert_eq!(limits.timeout_secs, DEFAULT_TIMEOUT_SECS);
+    assert_eq!(limits.max_replay_turns, DEFAULT_MAX_REPLAY_TURNS);
+    assert_eq!(limits.max_replay_chars, DEFAULT_MAX_REPLAY_CHARS);
 }
 
 #[test]
@@ -37,12 +42,17 @@ fn an_empty_model_resolves_to_the_default() {
 
 #[test]
 fn set_values_are_used() {
-    let limits = settings("[ask]\nmodel = \"openai/gpt-4o\"\nmax_turns = 3\ntimeout_secs = 9\n")
-        .resolve(Path::new("config.toml"))
-        .unwrap();
+    let limits = settings(
+        "[ask]\nmodel = \"openai/gpt-4o\"\nmax_turns = 3\ntimeout_secs = 9\n\
+         max_replay_turns = 0\nmax_replay_chars = 7\n",
+    )
+    .resolve(Path::new("config.toml"))
+    .unwrap();
     assert_eq!(limits.model, "openai/gpt-4o");
     assert_eq!(limits.max_turns, 3);
     assert_eq!(limits.timeout_secs, 9);
+    assert_eq!(limits.max_replay_turns, 0);
+    assert_eq!(limits.max_replay_chars, 7);
 }
 
 #[test]

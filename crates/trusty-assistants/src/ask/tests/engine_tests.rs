@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::{Scripted, empty_servers, instance, text, tool_call};
 use crate::agents::FALLBACK_MODEL;
-use crate::ask::{AskEngine, AskError, OKG_SEARCH_TOOL_NAME, TurnLog};
+use crate::ask::{AskEngine, AskError, OKG_SEARCH_TOOL_NAME, TurnLog, TurnRecord};
 use crate::assistants::{AssistantError, AssistantHome};
 
 fn engine(home: &AssistantHome, llm: &Arc<Scripted>, tmp: &tempfile::TempDir) -> AskEngine {
@@ -185,4 +185,43 @@ async fn an_empty_model_is_sent_as_the_default() {
         engine(&home, &llm, &tmp).ask("hi").await.unwrap();
         assert_eq!(llm.requests()[0].model, expected, "{table:?}");
     }
+}
+
+/// #11650 item 1: a long log is not replayed whole.
+#[tokio::test]
+async fn replay_is_bounded_by_the_turn_and_char_limits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let log = TurnLog::for_home(&home);
+    for i in 0..200 {
+        log.append(&TurnRecord::now(&format!("q{i:03}"), &format!("a{i:03}")))
+            .unwrap();
+    }
+
+    // Defaults: the newest DEFAULT_MAX_REPLAY_TURNS turns, nothing older.
+    let llm = Arc::new(Scripted::new(vec![text("ok")]));
+    engine(&home, &llm, &tmp).ask("now").await.unwrap();
+    let messages = &llm.requests()[0].messages;
+    let turns = crate::ask::DEFAULT_MAX_REPLAY_TURNS;
+    assert_eq!(
+        messages.len(),
+        1 + 2 * turns + 1,
+        "system + window + question"
+    );
+    assert_eq!(messages[1].content.as_deref(), Some("q180"));
+    assert_eq!(messages[messages.len() - 1].content.as_deref(), Some("now"));
+
+    // A char budget of 16 holds two 8-char turns: the two newest.
+    add_ask_table(&home, "[ask]\nmax_replay_chars = 16\n");
+    let llm = Arc::new(Scripted::new(vec![text("ok")]));
+    engine(&home, &llm, &tmp).ask("again").await.unwrap();
+    let contents: Vec<String> = llm.requests()[0]
+        .messages
+        .iter()
+        .skip(1)
+        .map(|m| m.content.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(contents, ["q199", "a199", "now", "ok", "again"]);
+    // The file keeps every turn; only the request is bounded.
+    assert_eq!(log.read().unwrap().len(), 202);
 }
