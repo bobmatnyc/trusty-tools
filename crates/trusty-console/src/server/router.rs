@@ -251,6 +251,16 @@ fn build_router_inner(
             post(crate::routes::cleanup::compact_palace_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
+        // #11747: read-only Trusty Assistants routes; `{id}` is validated in
+        // the handler before any filesystem access.
+        .route(
+            "/api/console/assistants",
+            get(crate::assistants_uds::routes::list_handler),
+        )
+        .route(
+            "/api/console/assistants/{id}/turns",
+            get(crate::assistants_uds::routes::turns_handler),
+        )
         .route(
             "/api/console/metrics/analyze/indexes",
             get(analyze_indexes_handler),

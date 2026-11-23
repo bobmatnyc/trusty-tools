@@ -79,6 +79,8 @@ pub mod routes;
 // `search_uds`. Each maps one dashboard's REST-shaped paths onto that daemon's
 // own `<domain>.*` methods.
 pub mod analyze_uds;
+// #11747: the Trusty Assistants list and turn-history routes, and the ask wire.
+pub mod assistants_uds;
 pub mod memory_uds;
 pub mod search_uds;
 // #9066: the trusty-secrets bridge (`/api/secrets/*`), Unix only (Q8).
