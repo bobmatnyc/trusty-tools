@@ -48,6 +48,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The scheduler's shadow poll now dedupes across cycles: `tm architect poll --dry-run` reads and saves its own state file when `ARCHITECT_DRY_RUN_STATE` names one, and the shadow plan seeds `local/meta/shadow/dry-run-state.json` once instead of copying the live state every run. Before, every shadow cycle re-alerted everything (new=347).
 - The poll cycle (`tm architect poll`) raises one `owner_answer` alert per answered, cancelled or Architect-Do dashboard decision, fingerprinted `<id>@<at>` as `fleet-poll.py` does, re-emits it every 30 minutes while it stays pending, and raises `owner_answer_error` when the owner-queue store cannot be read. Before, an answer raised no alert.
 - `tm architect poll --dry-run` with `ARCHITECT_DRY_RUN_STATE` no longer saves over a state file it could not read, and keeps a `.corrupt.<ts>` copy of a corrupt one before replacing it, as the live poll does.
+- The `token` watcher now holds an exclusive `flock` on `token-watch-state.json.lock` from load to save, and saves through a per-process temp file, so a concurrent Python `token_watch.py` writer no longer loses its offsets or fired keys. A lock it cannot take within 30 s fails the scan instead of writing unlocked (#11629).
 
 ### Changed
 
