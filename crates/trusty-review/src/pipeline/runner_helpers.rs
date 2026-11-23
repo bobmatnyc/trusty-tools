@@ -599,6 +599,8 @@ pub(super) async fn finalize_run(
 pub(super) fn ground_parsed_findings(
     parsed: &mut crate::pipeline::parser::ParsedReview,
     filtered: &crate::pipeline::diff_analyzer::models::FilteredDiff,
+    intent: Option<&str>,
+    raw_diff: &str,
 ) -> (
     Vec<crate::models::WithheldFinding>,
     Option<crate::models::Verdict>,
@@ -620,6 +622,13 @@ pub(super) fn ground_parsed_findings(
     );
     // #10782: a finding that quotes no code never reaches grading or the gate.
     crate::pipeline::quote_admission::admit_quoted_findings(&mut parsed.findings, &mut withheld);
+    // #10758: a declared as-is migration's carried-over code is not graded.
+    crate::pipeline::author_intent::withhold_carried_over(
+        intent,
+        raw_diff,
+        &mut parsed.findings,
+        &mut withheld,
+    );
 
     let wiped_model_verdict = crate::pipeline::finding_hygiene::relax_wiped_verdict(
         &mut parsed.verdict,

@@ -1,0 +1,2 @@
+Added
+- `run --author-intent TEXT` and the optional `author_intent` review-request field carry the author's intent into a review. The reviewer prompt gets an `## Author Intent` section with the grading rule. When the intent declares an as-is migration, a low or medium finding whose quoted code is moved unchanged from removed lines is withheld as `as_is_carryover`; bugs on code the change wrote, and high or critical findings, are still reported. A review without intent is unchanged.

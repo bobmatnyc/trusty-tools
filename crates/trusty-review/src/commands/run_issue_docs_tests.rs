@@ -190,6 +190,24 @@ async fn local_diff_run_carries_issue_docs_to_the_reviewer() {
     assert_eq!(names.len(), 10, "{names:?}"); // #9196: `symbol_context` is the 10th
 }
 
+/// #10758: `--author-intent` reaches the caller context; a blank or absent
+/// value is no intent.
+#[test]
+fn author_intent_flag_reaches_the_caller_context() {
+    let parse = |argv: &[&str]| {
+        let args = RunArgs::try_parse_from(argv).expect("parse");
+        caller_context_from_args(&args)
+            .expect("context")
+            .author_intent
+    };
+    assert_eq!(
+        parse(&["run", "--author-intent", "as-is legacy migration"]).as_deref(),
+        Some("as-is legacy migration")
+    );
+    assert_eq!(parse(&["run", "--author-intent", "  "]), None);
+    assert_eq!(parse(&["run"]), None);
+}
+
 // #9194: `--report-context`, reusing this module's LLM capture and socket pin.
 #[path = "run_report_context_tests.rs"]
 mod report_context;

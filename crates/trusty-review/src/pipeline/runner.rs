@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 use super::runner_coverage::load_coverage_contrib;
 #[path = "runner_truncation.rs"]
 mod truncation;
+use super::author_intent::with_intent_section; // #10758
 #[cfg(test)]
 use super::runner_helpers::{ClaimGate, classify_claim}; // #8904: moved for SLOC headroom
 use super::runner_helpers::{
@@ -97,6 +98,8 @@ pub struct CallerContext {
     pub pr_discussion: Option<String>,
     /// Caller-supplied referenced/related code or domain context.
     pub referenced_code: Option<String>,
+    /// Free-text author intent, e.g. "as-is legacy migration" (#10758).
+    pub author_intent: Option<String>,
 }
 
 /// All inputs for a single review run.
@@ -603,7 +606,11 @@ async fn run_pipeline(
         &input.reviewer_model,
         &voice_config,
         config.coverage.enabled,
-        &applied.prompt_sections(), // #9193, #9195: issues, docs, then changed files
+        // #9193, #9195: issues, docs, then changed files; #10758: intent first.
+        &with_intent_section(
+            input.caller_context.author_intent.as_deref(),
+            applied.prompt_sections(),
+        ),
     );
     debug!(model = %input.reviewer_model, "calling LLM reviewer");
 
@@ -704,7 +711,9 @@ async fn run_pipeline(
     // and a self-reported verdict left resting on findings this run removed —
     // all four run before grading. See `ground_parsed_findings`. #4044: each
     // drop is recorded in the review record, never posted.
-    let (withheld, wiped_model_verdict) = ground_parsed_findings(&mut parsed, &filtered);
+    let intent = input.caller_context.author_intent.as_deref(); // #10758
+    let (withheld, wiped_model_verdict) =
+        ground_parsed_findings(&mut parsed, &filtered, intent, &raw_diff);
     result.withheld_findings.extend(withheld);
 
     // ── Step 7b–7e: grade derivation, coverage floor, verification, reconcile ─

@@ -81,7 +81,7 @@ enum Commands {
     /// [--head] to review an arbitrary local git ref range (`git diff -M
     /// <base>...<head>`; --head defaults to HEAD). All three local sources
     /// are always dry-run — they can never post (#2993).
-    Run(RunArgs),
+    Run(Box<RunArgs>), // #10758: boxed — the variant outgrew clippy::large_enum_variant
 
     /// Compare the same PR across multiple models to evaluate speed/cost/quality.
     ///
