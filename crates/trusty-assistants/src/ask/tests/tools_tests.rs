@@ -107,7 +107,10 @@ impl ToolExecutor for Named {
 #[test]
 fn gating_drops_write_and_send_tools_from_a_registry() {
     let mut scratch = ToolRegistry::new();
-    for name in catalog().into_iter().chain(CODING_TOOLS.iter().map(|t| t.to_string())) {
+    for name in catalog()
+        .into_iter()
+        .chain(CODING_TOOLS.iter().map(|t| t.to_string()))
+    {
         scratch.register(Arc::new(Named(name)));
     }
     let (view, _) = read_only_view(&scratch, &catalog());

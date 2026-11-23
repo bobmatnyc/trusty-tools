@@ -47,7 +47,10 @@ async fn a_second_ask_sees_the_first_turn() {
     let system = content(0);
     assert!(system.contains("INSTRUCTIONS-MARKER"), "{system}");
     assert!(system.contains("okg://izzie"), "{system}");
-    assert!(system.contains(&home.okg_dir().display().to_string()), "{system}");
+    assert!(
+        system.contains(&home.okg_dir().display().to_string()),
+        "{system}"
+    );
     assert!(system.contains(OKG_SEARCH_TOOL_NAME), "{system}");
     assert_eq!(content(1), first_q);
     assert_eq!(content(2), first_a);
@@ -93,7 +96,9 @@ async fn an_instructions_error_stops_the_ask() {
     assert!(
         matches!(
             result,
-            Err(AskError::Instructions(AssistantError::InstructionsEmpty { .. }))
+            Err(AskError::Instructions(
+                AssistantError::InstructionsEmpty { .. }
+            ))
         ),
         "{result:?}"
     );
@@ -103,11 +108,16 @@ async fn an_instructions_error_stops_the_ask() {
     assert!(
         matches!(
             result,
-            Err(AskError::Instructions(AssistantError::InstructionsMissing { .. }))
+            Err(AskError::Instructions(
+                AssistantError::InstructionsMissing { .. }
+            ))
         ),
         "{result:?}"
     );
-    assert!(llm.requests().is_empty(), "no model call without instructions");
+    assert!(
+        llm.requests().is_empty(),
+        "no model call without instructions"
+    );
 }
 
 #[tokio::test]

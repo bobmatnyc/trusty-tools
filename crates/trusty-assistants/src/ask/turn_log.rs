@@ -93,7 +93,10 @@ impl TurnLog {
             reason,
         };
         if !raw.is_empty() && !raw.ends_with('\n') {
-            return Err(corrupt(raw.lines().count(), "the last line is unterminated".into()));
+            return Err(corrupt(
+                raw.lines().count(),
+                "the last line is unterminated".into(),
+            ));
         }
         raw.lines()
             .enumerate()
@@ -101,7 +104,10 @@ impl TurnLog {
                 let record: TurnRecord =
                     serde_json::from_str(line).map_err(|e| corrupt(i + 1, e.to_string()))?;
                 if record.v != TURN_RECORD_VERSION {
-                    return Err(corrupt(i + 1, format!("unknown record version {}", record.v)));
+                    return Err(corrupt(
+                        i + 1,
+                        format!("unknown record version {}", record.v),
+                    ));
                 }
                 Ok(record)
             })
