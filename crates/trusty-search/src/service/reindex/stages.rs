@@ -55,9 +55,19 @@ pub(super) fn now_rfc3339() -> String {
 /// Why: a fresh reindex must announce itself by flipping capabilities back to
 /// Pending so concurrent searches see that the index is rebuilding, not stale.
 /// What: write-locks `handle.stages` and resets to the appropriate initial state.
+/// Returns the stages as they stood before the reset, so a refusal before the
+/// lexical phase can put the lanes that were serving back (#10692).
 /// Test: covered by reindex integration tests observing stage transitions.
-pub(crate) async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) {
+pub(crate) async fn reset_stages_for_reindex(handle: &Arc<IndexHandle>) -> IndexStages {
     let mut stages = handle.stages.write().await;
+    // #10692: keep the pre-walk state; a refused walk restores Ready lanes from it.
+    let prior = stages.clone();
+    reset_stages_locked(handle, &mut stages);
+    prior
+}
+
+/// Body of [`reset_stages_for_reindex`], run under the caller's write lock.
+fn reset_stages_locked(handle: &IndexHandle, stages: &mut IndexStages) {
     if handle.lexical_only {
         *stages = IndexStages {
             lexical: StageState {
@@ -261,18 +271,37 @@ pub(super) async fn mark_reindex_failed(handle: &Arc<IndexHandle>, reason: &str)
 /// [`StageState::failed`]. A lane already `Skipped` — `lexical_only`'s
 /// semantic/graph, `skip_kg`'s graph, `skip_vector`'s semantic — is left
 /// Skipped, because the operator turned it off and a refused walk says nothing
-/// about it.
-/// Test: `refusal_before_lexical_fails_every_running_lane` and
+/// about it. A lane that was `Ready` in `prior` (the snapshot
+/// [`reset_stages_for_reindex`] returned) is restored, not failed (#10692).
+/// Test: `refused_walk_keeps_ready_stages_ready` in
+/// `tests/index_budget_env.rs`, `refusal_before_lexical_fails_every_running_lane` and
 /// `refusal_before_lexical_preserves_skipped_lanes` below, plus
 /// `reindex_refuses_walk_over_file_budget` in `tests.rs`.
-pub(super) async fn mark_reindex_failed_before_lexical(handle: &Arc<IndexHandle>, reason: &str) {
+pub(super) async fn mark_reindex_failed_before_lexical(
+    handle: &Arc<IndexHandle>,
+    reason: &str,
+    prior: &IndexStages,
+) {
+    // #10692: record the refusal where `/health` and status read it.
+    let mut diag = handle.walk_diagnostics.write().await;
+    diag.record_refusal(reason.to_owned());
+    drop(diag);
     let mut guard = handle.stages.write().await;
     // Deref the guard ONCE: `&mut guard.lexical` would go through `DerefMut`
     // per field and borrow the whole guard each time, so the three field
     // borrows could not be disjoint.
     let stages = &mut *guard;
-    for stage in [&mut stages.lexical, &mut stages.semantic, &mut stages.graph] {
-        if stage.status != StageStatus::Skipped {
+    for (stage, before) in [
+        (&mut stages.lexical, &prior.lexical),
+        (&mut stages.semantic, &prior.semantic),
+        (&mut stages.graph, &prior.graph),
+    ] {
+        // #10692: the refusal committed nothing, so a lane that was Ready before
+        // the walk still serves its old data; restoring it keeps search on the
+        // vector/kg lanes. The refusal itself is reported via `last_walk_error`.
+        if before.status == StageStatus::Ready {
+            *stage = before.clone();
+        } else if stage.status != StageStatus::Skipped {
             *stage = StageState::failed(reason);
         }
     }
@@ -551,14 +580,14 @@ mod tests {
     #[tokio::test]
     async fn refusal_before_lexical_fails_every_running_lane() {
         let handle = handle_with(false).await;
-        reset_stages_for_reindex(&handle).await;
+        let prior = reset_stages_for_reindex(&handle).await;
         assert_eq!(
             handle.stages.read().await.lexical.status,
             StageStatus::InProgress,
             "fixture precondition: the reset must have armed lexical"
         );
 
-        mark_reindex_failed_before_lexical(&handle, "over the file budget").await;
+        mark_reindex_failed_before_lexical(&handle, "over the file budget", &prior).await;
 
         let stages = handle.stages.read().await;
         assert_eq!(stages.lexical.status, StageStatus::Failed);
@@ -584,10 +613,10 @@ mod tests {
     #[tokio::test]
     async fn refusal_before_lexical_preserves_skipped_lanes() {
         let handle = handle_with(false).await;
-        reset_stages_for_reindex(&handle).await;
+        let prior = reset_stages_for_reindex(&handle).await;
         handle.stages.write().await.graph = StageState::skipped();
 
-        mark_reindex_failed_before_lexical(&handle, "over the file budget").await;
+        mark_reindex_failed_before_lexical(&handle, "over the file budget", &prior).await;
 
         let stages = handle.stages.read().await;
         assert_eq!(

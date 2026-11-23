@@ -180,7 +180,7 @@ pub(super) async fn run_reindex(
     };
 
     // Issue #109, Phase 1: reset the staged-pipeline status surface.
-    super::stages::reset_stages_for_reindex(&handle).await;
+    let pre_walk_stages = super::stages::reset_stages_for_reindex(&handle).await;
 
     // Phase 1: walk + filter the source tree.
     {
@@ -188,7 +188,7 @@ pub(super) async fn run_reindex(
         diag.last_walk_started_at = Some(now_rfc3339());
         diag.last_walk_files_seen = 0;
         diag.last_walk_files_skipped = 0;
-        diag.last_walk_error = None;
+        diag.clear_walk_outcome();
     }
     // Issue #744: stamp the walk end time.
     //
@@ -261,12 +261,12 @@ pub(super) async fn run_reindex(
     if let Err(over) = budget {
         let reason = over.to_string();
         tracing::warn!("reindex[{}]: {}", index_id.0, reason);
-        handle.walk_diagnostics.write().await.last_walk_error = Some(reason.clone());
         // NOT `mark_reindex_failed`: that one leaves `lexical` alone because
         // the BM25 lane was genuinely built. Here nothing was, and leaving it
         // at the `InProgress` that `reset_stages_for_reindex` just set would
         // strand the index mid-walk with no reindex in flight.
-        super::stages::mark_reindex_failed_before_lexical(&handle, &reason).await;
+        // #10692: lanes Ready before the walk are restored from the snapshot.
+        super::stages::mark_reindex_failed_before_lexical(&handle, &reason, &pre_walk_stages).await;
         // #6386: status and frame in one hold — see `push_terminal`.
         let frame = serde_json::json!({
             "event": "error",
