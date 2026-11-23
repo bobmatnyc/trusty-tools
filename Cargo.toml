@@ -19,8 +19,11 @@ resolver = "2"
 # `workers/okf-extract` (#10745) holds the trusty-okf extraction worker. It
 # needs Rust 1.98 (xberg) and builds on its own rust-toolchain.toml, outside the
 # 1.94 workspace MSRV (ADR-0029). Guard: scripts/check_worker_dir_excluded.sh.
+# `workers/summarizer-convert` holds the trusty-summarizer converter worker; it
+# links xberg 1.3.10 (Rust 1.98) on its own rust-toolchain.toml, under the same
+# guard.
 # #10682: vendor/hnsw_rs is a patched dependency, not a member.
-exclude = ["workers/okf-extract", "vendor/hnsw_rs"]
+exclude = ["workers/okf-extract", "workers/summarizer-convert", "vendor/hnsw_rs"]
 # `default-members` — the crates a BARE `cargo build`/`test`/`check` (no
 # `--workspace`, no `-p`, run from this root) actually targets. Everything
 # except `trusty-code-gui` (#2983 — a Tauri desktop GUI needing the pnpm/Svelte
@@ -72,6 +75,7 @@ default-members = [
     "crates/trusty-review",
     "crates/trusty-search",
     "crates/trusty-sld-lint",
+    "crates/trusty-summarizer",
 ]
 
 [workspace.package]

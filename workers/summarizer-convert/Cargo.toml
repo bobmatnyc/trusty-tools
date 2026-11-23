@@ -1,0 +1,41 @@
+[package]
+name = "trusty-summarizer-convert"
+version = "0.2.0"
+edition = "2024"
+# Xberg 1.3.10 needs Rust 1.98, above the workspace MSRV (1.94), so the worker
+# builds on its own rust-toolchain.toml outside the root workspace.
+rust-version = "1.98"
+license = "MIT"
+repository = "https://github.com/bobmatnyc/trusty-tools"
+authors = ["bobmatnyc"]
+description = "Converter worker for trusty-summarizer: Xberg behind a stdin/stdout protocol."
+# Ships only beside the trusty-summarizer CLI, never on crates.io.
+publish = false
+
+# Its own workspace root, so the root `[workspace] exclude` keeps it out of the
+# trusty-tools workspace. Guard: scripts/check_worker_dir_excluded.sh.
+[workspace]
+
+[[bin]]
+name = "trusty-summarizer-convert"
+path = "src/main.rs"
+
+[dependencies]
+# The wire format (`trusty_summarizer::worker::proto`); the library itself
+# never links Xberg.
+trusty-summarizer = { path = "../../crates/trusty-summarizer" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# PDF, Word/PowerPoint, HTML and email only. `excel` stays off: calamine
+# 0.36.1 has RUSTSEC-2026-0436. No OCR or ML feature.
+xberg = { version = "=1.3.10", default-features = false, features = ["pdf", "office", "html", "email"] }
+# Drives Xberg's async `extract` on one thread; `rt` only.
+tokio = { version = "1.53.2", default-features = false, features = ["rt"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# `xberg14` was a feature of a separate Xberg 1.4 build that this monorepo does
+# not carry; its cfgs stay known names so the gated code still lints clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("xberg14"))'] }

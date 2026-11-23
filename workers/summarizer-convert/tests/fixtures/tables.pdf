@@ -1,0 +1,70 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R 6 0 R 8 0 R] /Count 3 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 60 >>
+stream
+0.5 w
+BT /F1 12 Tf 72 740 Td (Pier report opens here.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 7 0 R >>
+endobj
+7 0 obj
+<< /Length 422 >>
+stream
+0.5 w
+BT /F1 12 Tf 72 740 Td (Lamp counts follow.) Tj ET
+72 722 m 472 722 l S
+72 698 m 472 698 l S
+72 674 m 472 674 l S
+72 650 m 472 650 l S
+72 722 m 72 650 l S
+272 722 m 272 650 l S
+472 722 m 472 650 l S
+BT /F1 12 Tf 78 705 Td (Label) Tj ET
+BT /F1 12 Tf 278 705 Td (Value) Tj ET
+BT /F1 12 Tf 78 681 Td (Lights) Tj ET
+BT /F1 12 Tf 278 681 Td (42) Tj ET
+BT /F1 12 Tf 78 657 Td (Dark) Tj ET
+BT /F1 12 Tf 278 657 Td (3) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 9 0 R >>
+endobj
+9 0 obj
+<< /Length 60 >>
+stream
+0.5 w
+BT /F1 12 Tf 72 740 Td (Closing notes end here.) Tj ET
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000127 00000 n 
+0000000197 00000 n 
+0000000323 00000 n 
+0000000433 00000 n 
+0000000559 00000 n 
+0000001032 00000 n 
+0000001158 00000 n 
+trailer
+<< /Size 10 /Root 1 0 R >>
+startxref
+1268
+%%EOF

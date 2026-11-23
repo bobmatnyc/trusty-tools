@@ -1,0 +1,6 @@
+# The summarizer converter worker's own toolchain. Xberg 1.3.10 needs Rust
+# 1.98; the root workspace keeps its 1.94 MSRV. This pins the toolchain a build
+# from inside this directory uses, matching CI (summarizer-convert.yml).
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
