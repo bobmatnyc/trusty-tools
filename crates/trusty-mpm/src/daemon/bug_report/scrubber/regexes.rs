@@ -26,7 +26,8 @@ pub(super) static RE_JWT: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(
 
 pub(super) static RE_SK_PREFIX: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
     // sk-ant- / sk-or- / sk-proj- / bare sk- prefixes (OpenAI, Anthropic, OpenRouter, etc.)
-    Regex::new(r"sk-(?:ant-|or-|proj-)?[A-Za-z0-9_\-]{16,}").expect("valid sk- regex")
+    // See #9167: `\b` keeps `sk-` inside a word (`task-roundtrip-…`) unredacted.
+    Regex::new(r"\bsk-(?:ant-|or-|proj-)?[A-Za-z0-9_\-]{16,}").expect("valid sk- regex")
 });
 
 pub(super) static RE_GITHUB_TOKEN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
