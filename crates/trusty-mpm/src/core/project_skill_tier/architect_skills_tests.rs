@@ -551,3 +551,53 @@ fn architect_skills_never_join_the_bundled_pm_roster() {
         );
     }
 }
+
+/// Deploy `skills` the way a launch and `sync-assets` do.
+fn refresh(project: &Path, skills: &[ArchitectSkill]) -> DeployReport {
+    deploy_architect_skills(project, &[], skills)
+}
+
+/// #10596 criterion 2: status after a content update.
+///
+/// Why: `tm content update` moves the shipped skills; `tm fleet status` must
+/// read them stale until the refresh deploys, then current. The update's hint
+/// names the refresh command, so the status it promises has to be true.
+/// What: deploys the shipped skills (old pin), moves the shipped text (new
+/// pin), reads `health_with`, runs the deploy `deploy_for_launch` and
+/// `sync-assets` share, reads it again. Scratch project tier only: no HOME,
+/// no daemon.
+#[test]
+fn a_content_update_leaves_skills_stale_until_the_refresh_deploys() {
+    let project = tempdir().unwrap();
+    let old = shipped();
+    refresh(project.path(), &old);
+    let (ok, detail) = health_with(project.path(), &[], &old);
+    assert!(ok, "{detail}");
+
+    // The content update: every shipped skill's text moves.
+    let new: Vec<ArchitectSkill> = shipped()
+        .into_iter()
+        .map(|mut skill| {
+            skill
+                .contents
+                .push_str("\n<!-- pinned by a content update -->\n");
+            skill
+        })
+        .collect();
+    let (ok, detail) = health_with(project.path(), &[], &new);
+    assert!(!ok, "{detail}");
+    for stem in shipped_stems() {
+        assert!(
+            detail.contains(&format!(
+                "{stem}: stale (the next Architect launch refreshes it)"
+            )),
+            "{detail}"
+        );
+    }
+
+    let report = refresh(project.path(), &new);
+    assert_eq!(report.written.len(), new.len(), "{report:?}");
+    let (ok, detail) = health_with(project.path(), &[], &new);
+    assert!(ok, "{detail}");
+    assert_eq!(detail, format!("{} Architect skills current", new.len()));
+}
