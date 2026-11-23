@@ -769,3 +769,22 @@ async fn a_capped_project_lookup_retries_from_its_first_cwd_10906() {
         "the retry resolved from a later cwd, not the session's first"
     );
 }
+
+/// #11040 regression: a panicking resolver still releases its in-flight slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_panicking_project_lookup_releases_its_slot_11040() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let resolver: projection::ProjectResolver =
+        Arc::new(|_: &Path| panic!("resolver panicked (#11040 test)"));
+    let publisher = ActionPublisher::new(sock_in(&dir)).with_project_resolver(resolver);
+    publisher.publish(&pre_tool_use_in(SessionId::new(), Path::new("/boom")));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while publisher.lookups.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        publisher.lookups.load(Ordering::SeqCst),
+        0,
+        "a panicking resolver leaked its in-flight slot"
+    );
+}

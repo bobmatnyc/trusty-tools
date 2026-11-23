@@ -3,7 +3,7 @@
 //! Why: #9278 A2b marks these structs `#[non_exhaustive]`, which forbids a
 //! struct literal outside trusty-memory. Each one needs a constructor a
 //! dependent crate can call instead, and this file calls them from outside the
-//! crate, the same way trusty-mpm and trusty-agents do.
+//! crate, the same way trusty-mpm and trusty-assistants do.
 //! What: one test per constructor. Each pins the defaults the constructor
 //! documents and the fields its arguments set.
 //! Test: this file.

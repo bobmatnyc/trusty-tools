@@ -200,7 +200,7 @@ firing a cross-origin write.
   retirement. The daemon now serves five JSON-RPC methods on a hardened Unix
   socket and binds no TCP listener — see the trusty-agents (search daemon) row
   above for the boundary that replaces the origin guard, and the changelog
-  fragment `crates/trusty-agents/changelog.d/6433-s1-search-service-uds.md` for
+  fragment `crates/trusty-assistants/changelog.d/6433-s1-search-service-uds.md` for
   the wire change. The discovery file is deleted at every start.
 
 ## Credential delivery (not this document's scope)

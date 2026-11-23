@@ -5,7 +5,7 @@
 //! rusqlite + r2d2 to redb so the chat sidecar drops the heavy native
 //! dependency chain and lines up with the rest of the Memory Palace
 //! (`kg_redb.rs`, `palace_store.rs`). The public
-//! `ChatSessionStore` API is unchanged so `trusty-memory` and any trusty-agents
+//! `ChatSessionStore` API is unchanged so `trusty-memory` and any trusty-assistants
 //! consumers continue to work as drop-ins — callers still pass a path and
 //! get back a `ChatSessionStore`.
 //!
@@ -31,7 +31,7 @@ mod store;
 mod types;
 
 pub use store::ChatSessionStore;
-// #9278: only ChatMessage has a caller outside the library (trusty-agents).
+// #9278: only ChatMessage has a caller outside the library (trusty-assistants).
 // T2: ChatSessionStoreError is the error of the public open/create_session.
 pub use types::{ChatMessage, ChatSessionStoreError};
 

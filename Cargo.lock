@@ -11269,58 +11269,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-agents"
-version = "0.40.0"
-dependencies = [
- "anyhow",
- "async-openai",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "chrono-tz",
- "clap",
- "dirs 5.0.1",
- "fastembed",
- "flate2",
- "fs4 1.1.0",
- "futures",
- "indexmap 2.14.0",
- "libc",
- "mime_guess",
- "redb 4.3.0",
- "regex",
- "reqwest 0.12.28",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "serial_test",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.23",
- "toml_edit 0.22.27",
- "tracing",
- "tracing-subscriber",
- "trusty-agents-common",
- "trusty-channels",
- "trusty-code",
- "trusty-common",
- "trusty-gworkspace",
- "trusty-mcp",
- "trusty-memory",
- "trusty-okf",
- "trusty-search",
- "usearch",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "trusty-agents-common"
 version = "0.11.1"
 dependencies = [
@@ -11417,6 +11365,58 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "trusty-assistants"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "dirs 5.0.1",
+ "fastembed",
+ "flate2",
+ "fs4 1.1.0",
+ "futures",
+ "indexmap 2.14.0",
+ "libc",
+ "mime_guess",
+ "redb 4.3.0",
+ "regex",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serial_test",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-agents-common",
+ "trusty-channels",
+ "trusty-code",
+ "trusty-common",
+ "trusty-gworkspace",
+ "trusty-mcp",
+ "trusty-memory",
+ "trusty-okf",
+ "trusty-search",
+ "usearch",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]

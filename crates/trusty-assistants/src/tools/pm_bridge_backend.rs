@@ -1,0 +1,483 @@
+//! Backend seam for `dispatch_task` (epic #3052, PR B, lane 3): routes a
+//! `BridgeRoute` to either `tcode` (one-shot subprocess) or `tm` (MCP over
+//! stdio) and returns its raw output for the tool layer to scrub and return.
+//!
+//! Why: `PmBridgeTool` (see `crate::tools::pm_bridge`) must be testable
+//! without spawning real subprocesses — mirrors the `AgentRunner` DI seam
+//! `DelegateToAgentTool` already uses (`crate::tools::traits::AgentRunner`,
+//! tested via `delegate.rs`'s `RecordingRunner`). `PmBridgeBackend` is the
+//! same shape: one async method, object-safe, `Send + Sync`.
+//! What: `PmBridgeBackend` is the trait; `ProcessPmBridge` is the production
+//! implementation. Tcode invocation is a one-shot blocking subprocess —
+//! `tcode run-task pm <task> --project <dir> --json` (`crates/trusty-code/
+//! src/main.rs`'s `RunTask` variant, `crates/trusty-code/src/cli/run_task.rs`)
+//! — which itself blocks until the daemon-owned session reaches a terminal
+//! state before exiting, so a single subprocess call is genuinely
+//! synchronous end-to-end. Tm invocation spawns `tm serve --stdio`
+//! (`StdioMcpClient::spawn`) and calls the managed-session lifecycle tools;
+//! see `run_tm`'s docs for why this is a documented MVP deviation from a
+//! true one-shot RPC (tm has none — see the docs there).
+//! Test: `pm_bridge_backend_tests` covers `binary_on_path`, graceful
+//! "binary absent" errors for both routes, and binary-gated integration
+//! smokes against the real `tcode`/`tm` binaries when present on PATH.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use tokio::process::Command;
+use tokio::time::sleep;
+// #4351: the ONE definition of this wire type lives in the crate that produces
+// it — trusty-code's daemon. This crate relays, it does not redefine.
+use trusty_code::session::{TaskResult, TaskResultStatus};
+
+use crate::intent::route::BridgeRoute;
+use crate::plugins::stdio_mcp::StdioMcpClient;
+
+/// How many times `run_tm` polls `session_activity` before giving up and
+/// returning whatever transcript has been observed so far.
+///
+/// Why: tm's managed-session lifecycle is inherently async (tmux-attached,
+/// provisioned from a git clone) — there is no synchronous "run this and
+/// block until done" RPC (see `run_tm`'s docs). A bounded poll keeps
+/// `dispatch_task` from hanging the calling LLM turn indefinitely while
+/// still giving a fast-completing task a real chance to finish.
+const MAX_POLL_ATTEMPTS: u32 = 10;
+
+/// Delay between `session_activity` polls.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Number of trailing tmux pane lines requested per `session_activity` poll.
+const ACTIVITY_LINES: u64 = 200;
+
+/// Executes a routed `dispatch_task` call against a real backend.
+///
+/// Why: see the module docs — the DI seam that lets `PmBridgeTool` be unit
+/// tested with a `RecordingBackend` instead of spawning real subprocesses.
+/// What: `run` takes the already-decided `route` (never re-derives it) and
+/// the raw task text, and returns the backend's raw (un-scrubbed) output.
+/// Scrubbing is the TOOL layer's job (`crate::tools::pm_bridge::scrub_branding`),
+/// not the backend's — keeping backend identity out of this trait's contract
+/// would be a false promise given `ProcessPmBridge` inherently talks to
+/// processes named `tcode`/`tm`.
+/// Test: `RecordingBackend` in `pm_bridge_tests.rs`; `ProcessPmBridge` in
+/// `pm_bridge_backend_tests.rs`.
+///
+/// #4026: `run` gained a `target` parameter naming a specific external
+/// specialist. `None` preserves the pre-#4026 behaviour exactly (the `Tcode`
+/// leg's hardcoded default agent, the `Tm` leg unchanged). The name is
+/// ALREADY validated against the bridge-layer allow-set
+/// (`crate::tools::cross_product::SubagentAllowSet`) by the time it reaches
+/// here — this trait never re-decides admissibility, it only executes.
+#[async_trait]
+pub trait PmBridgeBackend: Send + Sync {
+    async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String>;
+
+    /// Same call as [`Self::run`], but keeping the backend's actionable result
+    /// alongside the transcript (#4351).
+    ///
+    /// Why: a transcript is prose. A caller that has to tell a user "the
+    /// change landed on branch X, here is the ref, it passed" cannot get that
+    /// out of prose reliably, which is exactly the gap #4351 names. This is a
+    /// SECOND method with a default body rather than a changed signature on
+    /// `run`, so every existing implementor — including the test doubles in
+    /// `pm_bridge_tests.rs` — keeps compiling untouched and simply reports no
+    /// result.
+    /// What: the default delegates to [`Self::run`] and reports `None`.
+    /// `ProcessPmBridge` overrides it.
+    /// Test: `pm_bridge_backend_tests::default_run_result_reports_no_result`.
+    async fn run_result(
+        &self,
+        route: BridgeRoute,
+        target: Option<&str>,
+        task: &str,
+    ) -> Result<BackendOutcome> {
+        Ok(BackendOutcome::opaque(self.run(route, target, task).await?))
+    }
+}
+
+/// What a backend produced: the raw transcript, plus the actionable result
+/// when the backend reports one (#4351).
+///
+/// Why: `run` has always returned a bare `String`, and everything downstream
+/// of it — the branding scrub, the `ProposalEnvelope` — is built around that.
+/// Widening it into a struct keeps the transcript exactly where it was while
+/// giving the refs somewhere to travel.
+/// What: `transcript` is the same un-scrubbed text `run` returns; `result` is
+/// `None` for a backend that cannot report one (the `Tm` leg, and every test
+/// double that only implements `run`). `#[non_exhaustive]`: construct through
+/// [`Self::opaque`] and [`Self::with_result`].
+/// Test: `pm_bridge_backend_tests::default_run_result_reports_no_result`,
+/// `pm_bridge_backend_tests::a_child_reporting_a_diff_relays_its_ref_and_partial_status`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct BackendOutcome {
+    /// The backend's raw, un-scrubbed output.
+    pub transcript: String,
+    /// The backend's actionable result, when it reports one.
+    pub result: Option<TaskResult>,
+}
+
+impl BackendOutcome {
+    /// An outcome carrying only a transcript — the pre-#4351 shape.
+    pub fn opaque(transcript: impl Into<String>) -> Self {
+        Self {
+            transcript: transcript.into(),
+            result: None,
+        }
+    }
+
+    /// Attach a result. `None` leaves the outcome opaque.
+    pub fn with_result(mut self, result: Option<TaskResult>) -> Self {
+        self.result = result;
+        self
+    }
+}
+
+/// The external agent the `Tcode` leg targets when no specialist is named.
+///
+/// Why: #4026 requires that omitting a specialist stay byte-identical to
+/// pre-change `dispatch_task` calls — which always ran this one agent. Naming
+/// the constant keeps that guarantee greppable instead of a bare string
+/// literal inside the command builder.
+/// What: the opaque orchestrator agent the bridge has always used.
+/// Test: `default_tcode_agent_is_unchanged_by_the_4026_widening`.
+const DEFAULT_TCODE_AGENT: &str = "pm";
+
+/// Production `PmBridgeBackend`: subprocess `tcode` for `Tcode`, MCP-over-
+/// stdio `tm` for `Tm`.
+pub struct ProcessPmBridge {
+    project_dir: PathBuf,
+}
+
+impl ProcessPmBridge {
+    /// Construct a backend rooted at `project_dir` — the repo/project both
+    /// backends operate against.
+    ///
+    /// Why: `dispatch_task` always acts on the calling session's own
+    /// project, never an LLM-supplied path (that would be an injection
+    /// vector); the project directory is threaded in once at registration
+    /// time (see `crate::ctrl::pm_task::dispatch::history` and
+    /// `crate::runtime::pm_mode`), not read from tool arguments.
+    /// What: stores `project_dir` for later use by both `run_tcode` and
+    /// `run_tm`.
+    /// Test: `process_pm_bridge_tcode_route_fails_closed_without_binary`,
+    /// `process_pm_bridge_tm_route_fails_closed_without_binary`.
+    pub fn from_project(project_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            project_dir: project_dir.into(),
+        }
+    }
+
+    /// Run the `Tcode` route: `tcode run-task pm <task> --project <dir> --json`.
+    ///
+    /// Why: see the module docs — this subcommand blocks until the
+    /// daemon-owned session it creates reaches a terminal state, so one
+    /// subprocess call is a genuine synchronous round trip. `--json` emits
+    /// the final `Session` snapshot (id/status/mode) as the process's only
+    /// stdout; it is NOT a full per-step transcript (no tool-call/diff
+    /// detail) — a documented scope limit, see the module docs' pointer to
+    /// `cli/run_task.rs`.
+    /// What: spawns the subprocess, waits for it to exit, and returns
+    /// stdout (falling back to stderr if stdout is empty) as the raw
+    /// transcript. Fails closed with a generic-shaped error when `tcode` is
+    /// not on PATH, mirroring `TrustySearchPlugin::try_spawn`'s
+    /// graceful-degradation contract.
+    /// Test: `process_pm_bridge_tcode_route_fails_closed_without_binary`;
+    /// `tcode_route_smoke` (binary-gated);
+    /// `default_tcode_agent_is_unchanged_by_the_4026_widening`.
+    ///
+    /// #4026: `target` names the external specialist to run. `None` uses
+    /// [`DEFAULT_TCODE_AGENT`], preserving the exact pre-#4026 command line.
+    /// The remote CLI already accepts any agent name (`run-task <AGENT>
+    /// <TASK>`, `crates/trusty-code/src/cli/run_task.rs`) — the bottleneck was
+    /// only ever this hardcoded argument.
+    ///
+    /// #4351: `--json`'s snapshot now carries a `result` object
+    /// (`trusty_code::session::TaskResult`), so this leg no longer relays only
+    /// opaque prose — it hands the refs back up alongside the transcript. The
+    /// pass/fail classification comes from the CHILD'S EXIT CODE rather than
+    /// the reported one, because that is the value trusty-code computes from
+    /// the terminal session status and the on-disk diff together; see
+    /// [`extract_child_result`] for why exit 6 must not collapse into failure.
+    async fn run_tcode(&self, target: Option<&str>, task: &str) -> Result<BackendOutcome> {
+        if !binary_on_path("tcode") {
+            bail!("tcode backend unavailable: binary not found on PATH");
+        }
+        let agent = target.unwrap_or(DEFAULT_TCODE_AGENT);
+        let output = Command::new("tcode")
+            .arg("run-task")
+            .arg(agent)
+            .arg(task)
+            .arg("--project")
+            .arg(&self.project_dir)
+            .arg("--json")
+            .output()
+            .await
+            .context("failed to spawn tcode run-task subprocess")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if !output.status.success() && stdout.trim().is_empty() {
+            bail!(
+                "tcode run-task exited with {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+        let result = extract_child_result(&stdout, output.status.code());
+        let transcript = if stdout.trim().is_empty() {
+            stderr
+        } else {
+            stdout
+        };
+        Ok(BackendOutcome::opaque(transcript).with_result(Some(result)))
+    }
+
+    /// Run the `Tm` route: spawn `tm serve --stdio` and drive the
+    /// managed-session lifecycle.
+    ///
+    /// Why (MVP DEVIATION — flagged design call): the owner's default
+    /// suggestion was `agent_delegate`, but that tool is explicitly
+    /// documented on the tm side as "a TRACKING/GATING companion, NOT an
+    /// execution path — it does not spawn the agent"
+    /// (`crates/trusty-mpm/src/mcp/tools/core.rs`). It cannot execute
+    /// anything. The only tm MCP surface that actually RUNS work is the
+    /// managed-session lifecycle (`session_new` / `session_activity` /
+    /// `session_decommission`), which is inherently asynchronous and
+    /// tmux-attached (it clones a repo into a fresh workspace and launches
+    /// a full harness) — there is no synchronous "run this task headlessly
+    /// and return the result" RPC on tm today. This implementation spawns
+    /// an EPHEMERAL managed session against `project_dir` (as a `file://`
+    /// URL) and does a BOUNDED poll of `session_activity` for its tmux pane
+    /// content, then best-effort tears the session down. For a task that
+    /// completes within the poll window this returns real output; for a
+    /// longer-running orchestration task it returns a partial transcript.
+    /// Recommend filing a follow-up for a proper synchronous tm "run task"
+    /// RPC so this bridge does not have to reimplement session polling.
+    /// What: `session_new(repo_url=file://<project_dir>, ref=HEAD, task,
+    /// ephemeral=true)` -> poll `session_activity` up to
+    /// `MAX_POLL_ATTEMPTS` times, `POLL_INTERVAL` apart, capturing the pane
+    /// content and stopping early once `runtime_active` goes false ->
+    /// best-effort `session_decommission` -> return the last captured pane
+    /// content.
+    /// Test: `process_pm_bridge_tm_route_fails_closed_without_binary`;
+    /// `tm_route_smoke` (binary-gated).
+    ///
+    /// #4351: this leg reports no [`TaskResult`]. tm's managed-session
+    /// lifecycle exposes tmux pane content and nothing structured — there is
+    /// no ref, branch or pass/fail to read — so the outcome stays opaque
+    /// rather than carrying invented fields.
+    async fn run_tm(&self, task: &str) -> Result<BackendOutcome> {
+        if !binary_on_path("tm") {
+            bail!("tm backend unavailable: binary not found on PATH");
+        }
+        let mut client = StdioMcpClient::spawn("tm", &["serve", "--stdio"], env!("CARGO_PKG_NAME"))
+            .await
+            .context("failed to spawn tm serve --stdio")?;
+        client
+            .initialize()
+            .await
+            .context("tm MCP handshake failed")?;
+
+        let repo_url = format!("file://{}", self.project_dir.display());
+        let new_result = client
+            .call_tool(
+                "session_new",
+                json!({
+                    "repo_url": repo_url,
+                    "ref": "HEAD",
+                    "task": task,
+                    "ephemeral": true,
+                }),
+            )
+            .await
+            .context("tm session_new failed")?;
+        let session_id = extract_session_id(&new_result)
+            .context("tm session_new response did not include a session id")?;
+
+        let mut transcript = String::new();
+        for _ in 0..MAX_POLL_ATTEMPTS {
+            sleep(POLL_INTERVAL).await;
+            match client
+                .call_tool(
+                    "session_activity",
+                    json!({ "session_id": session_id, "lines": ACTIVITY_LINES }),
+                )
+                .await
+            {
+                Ok(activity) => {
+                    if let Some(pane) = extract_pane_content(&activity) {
+                        transcript = pane;
+                    }
+                    if !is_runtime_active(&activity) {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "tm session_activity poll failed");
+                    break;
+                }
+            }
+        }
+
+        // Best-effort cleanup — an ephemeral session left running is
+        // eventually reaped, but tearing it down promptly avoids leaking
+        // fleet capacity across many dispatch_task calls. Never fails the
+        // overall call, but a failure here MUST be logged (code-critic HIGH
+        // finding 3): silently swallowing it left zero trace of an orphaned
+        // session/workspace, undiagnosable in production.
+        if let Err(e) = client
+            .call_tool("session_decommission", json!({ "session_id": session_id }))
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                error = %e,
+                "tm session_decommission failed; session may be orphaned"
+            );
+        }
+
+        if transcript.trim().is_empty() {
+            bail!("tm session produced no observable output within the poll window");
+        }
+        Ok(BackendOutcome::opaque(transcript))
+    }
+}
+
+#[async_trait]
+impl PmBridgeBackend for ProcessPmBridge {
+    async fn run(&self, route: BridgeRoute, target: Option<&str>, task: &str) -> Result<String> {
+        Ok(self.run_result(route, target, task).await?.transcript)
+    }
+
+    async fn run_result(
+        &self,
+        route: BridgeRoute,
+        target: Option<&str>,
+        task: &str,
+    ) -> Result<BackendOutcome> {
+        match route {
+            // #4026: only the Tcode leg can name a specialist; the Tm leg's
+            // managed-session lifecycle has no per-agent selector, so a target
+            // is deliberately ignored there rather than silently mis-routed.
+            BridgeRoute::Tcode => self.run_tcode(target, task).await,
+            BridgeRoute::Tm => self.run_tm(task).await,
+        }
+    }
+}
+
+/// Fold a `tcode run-task --json` child's stdout and exit code into a
+/// [`TaskResult`] (#4351).
+///
+/// Why: the two halves arrive from different places and both matter. The
+/// child's stdout carries the refs the daemon recorded (`diff_ref`, `branch`,
+/// `summary`); its EXIT CODE carries the pass/fail classification, and that
+/// distinction is load-free only if exit 6 is preserved — trusty-code spends
+/// that code on "the turn budget ran out but a real deliverable is on disk"
+/// (`trusty_code::run_task::report::ExitCode::Partial`), so reading non-zero
+/// as failure would throw away working code.
+/// What: parses stdout as the `Session` snapshot, lifts its `result` object if
+/// present, and stamps the exit-code-derived status over whatever status the
+/// child reported. Unparseable stdout (an older child, or prose on the
+/// fallback stderr path) degrades to a status-only result rather than an
+/// error — this runs after the child has already finished, so there is nothing
+/// left to fail.
+/// Test: `pm_bridge_backend_tests::a_child_reporting_a_diff_relays_its_ref_and_partial_status`,
+/// `pm_bridge_backend_tests::a_child_with_no_diff_relays_nones_and_the_status`,
+/// `pm_bridge_backend_tests::unparseable_child_output_still_yields_a_status`.
+fn extract_child_result(stdout: &str, exit_code: Option<i32>) -> TaskResult {
+    let status = TaskResultStatus::from_exit_code(exit_code);
+    serde_json::from_str::<Value>(stdout)
+        .ok()
+        .and_then(|snapshot| snapshot.get("result").cloned())
+        .and_then(|reported| serde_json::from_value::<TaskResult>(reported).ok())
+        .unwrap_or_else(|| TaskResult::new(status))
+        .with_status(status)
+}
+
+/// Decide whether `name` is on `$PATH`, without spawning a subprocess.
+///
+/// Why: same rationale as `plugins::trusty_search::binary_on_path` (avoid a
+/// `which` fork/exec on every check) — kept as a small local copy rather
+/// than reusing that one because it is `pub(super)`-scoped to `plugins` and
+/// this module lives in `tools`, a sibling tree; duplicating ~5 lines is
+/// cheaper than widening that visibility for one caller.
+/// What: returns true iff `<dir>/<name>` is a regular file for some `dir` on
+/// `$PATH`.
+/// Test: `binary_on_path_recognises_sh` in `pm_bridge_backend_tests.rs`.
+pub(super) fn binary_on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|p| p.join(name).is_file()))
+        .unwrap_or(false)
+}
+
+/// Pull a session id out of an MCP `tools/call` result for `session_new`.
+///
+/// Why: the tm daemon wraps its JSON result as `{"content":[{"type":"text",
+/// "text":"<json>"}]}` (see `crates/trusty-mpm/src/mcp/mod.rs`'s
+/// `success_result`), matching the same convention
+/// `plugins::trusty_search::extract_text_results` already decodes.
+/// What: parses the first `content[].text` frame as JSON and returns its
+/// `id` (falling back to `session_id`) field as a string.
+/// Test: `extract_session_id_parses_wrapped_text_frame`,
+/// `extract_session_id_missing_id_returns_none`.
+fn extract_session_id(call_tool_result: &Value) -> Option<String> {
+    let inner = decode_first_text_frame(call_tool_result)?;
+    inner
+        .get("id")
+        .or_else(|| inner.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Pull the raw tmux pane content out of a `session_activity` MCP result.
+///
+/// Why: `session_activity`'s daemon-side payload carries `pane_content`
+/// (the raw trailing tmux lines) alongside structured lifecycle fields —
+/// this is the closest thing tm has to a "transcript" for a managed
+/// session.
+/// What: decodes the wrapped text frame (see `extract_session_id`) and
+/// returns its `pane_content` field, or `None` if absent/non-string.
+/// Test: `extract_pane_content_parses_wrapped_text_frame`.
+fn extract_pane_content(call_tool_result: &Value) -> Option<String> {
+    let inner = decode_first_text_frame(call_tool_result)?;
+    inner
+        .get("pane_content")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Whether a `session_activity` result reports the runtime as still active.
+///
+/// Why: the poll loop in `run_tm` stops early once the session's harness is
+/// done rather than always burning the full `MAX_POLL_ATTEMPTS` window.
+/// What: decodes the wrapped text frame and reads its `runtime_active`
+/// boolean field, defaulting to `true` (keep polling) when absent/malformed
+/// — a fail-safe default that costs at most a few extra poll iterations
+/// rather than truncating a still-running session's transcript.
+/// Test: `is_runtime_active_defaults_true_when_absent`.
+fn is_runtime_active(call_tool_result: &Value) -> bool {
+    decode_first_text_frame(call_tool_result)
+        .and_then(|inner| inner.get("runtime_active").and_then(Value::as_bool))
+        .unwrap_or(true)
+}
+
+/// Shared decode step for `extract_session_id` / `extract_pane_content` /
+/// `is_runtime_active`: parse the first `content[].text` frame of an MCP
+/// `tools/call` result as JSON.
+fn decode_first_text_frame(call_tool_result: &Value) -> Option<Value> {
+    let text = call_tool_result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)?;
+    serde_json::from_str::<Value>(text).ok()
+}
+
+#[cfg(test)]
+#[path = "pm_bridge_backend_tests.rs"]
+mod pm_bridge_backend_tests;
