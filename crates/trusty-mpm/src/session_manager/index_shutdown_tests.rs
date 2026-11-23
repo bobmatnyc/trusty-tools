@@ -102,9 +102,10 @@ pub(crate) fn healthy_search() -> Answer {
     })
 }
 
-/// A trusty-memory that unloads any palace.
+/// A trusty-memory that has and unloads any palace.
 pub(crate) fn healthy_memory() -> Answer {
     Arc::new(|method, params| match method {
+        super::METHOD_PALACE_GET => Ok(json!({ "id": params["palace_id"] })),
         METHOD_PALACE_UNLOAD => Ok(json!({
             "palace_id": params["palace_id"], "unloaded": true, "exists": true,
             "was_resident": true, "data_kept": true,
@@ -133,6 +134,7 @@ fn target() -> ShutdownTarget {
     ShutdownTarget {
         search_queries: vec!["acme/widget".into()],
         palace: Ok(Some("acme-widget".into())),
+        palace_lookup: false,
     }
 }
 
@@ -306,6 +308,7 @@ async fn a_daemon_not_running_holds_nothing_and_an_unresolved_target_fails() {
     let unresolved = ShutdownTarget {
         search_queries: Vec::new(),
         palace: Err("could not resolve the palace: bad pin".into()),
+        palace_lookup: false,
     };
     let report = rig.capability().shut_down(&unresolved).await;
     // #11551: no queries is NotLoaded; a resolve error on a checkout stays Failed.
@@ -371,8 +374,14 @@ fn target_prefers_the_project_key_then_the_remote_then_the_path() {
         trusty_common::palace_id::owner_repo_from_git_remote("https://github.com/other/name");
     assert!(expected.is_some());
     assert_eq!(by_key.palace, Ok(expected));
+    // A path-form repo_url keys the palace by its parent-dir slug (#11551).
     let gone = ShutdownTarget::for_project(Some("local:1234"), "/x/y/gone", None);
-    assert_eq!(gone.palace, Ok(None), "no checkout, no identity, no palace");
+    assert_eq!(gone.palace, Ok(Some("y-gone".to_string())));
+    assert!(gone.palace_lookup && by_key.palace_lookup);
+    let none = ShutdownTarget::for_project(Some("local:1234"), "", None);
+    assert_eq!(none.palace, Ok(None), "nothing recorded, no palace");
+    let checkout = ShutdownTarget::for_project(None, "", Some(root));
+    assert!(!checkout.palace_lookup, "a checkout resolves as before");
 }
 
 /// A trusty-search whose resolve answers only `path`, and misses all else.

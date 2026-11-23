@@ -124,10 +124,13 @@ pub struct ShutdownTarget {
     /// The `search.project.resolve` queries, tried in order until one hits:
     /// the `owner/repo` identity, then the checkout paths.
     pub search_queries: Vec<String>,
-    /// The palace id; `Ok(None)` when no checkout is on disk and the remote
-    /// names no `owner/repo`, so no palace can be named (#11551); `Err` when
-    /// an existing checkout fails to resolve.
+    /// The palace id; `Ok(None)` when no checkout is on disk and neither the
+    /// remote nor a recorded path derives an id (#11551); `Err` when an
+    /// existing checkout fails to resolve.
     pub palace: Result<Option<String>, String>,
+    /// #11551: the id was derived without a checkout, so ask trusty-memory
+    /// whether the palace exists before unloading it.
+    pub palace_lookup: bool,
 }
 
 impl ShutdownTarget {
@@ -138,10 +141,13 @@ impl ShutdownTarget {
     /// then `root`, then `repo_url` when it is an absolute path, deduplicated.
     /// The palace resolves through `trusty_common::palace_resolve` from `root`
     /// and `repo_url`, the same call session launch exports
-    /// `TRUSTY_MEMORY_PALACE` from. With no `root`, the remote's `owner/repo`
-    /// palace id, else `Ok(None)`.
+    /// `TRUSTY_MEMORY_PALACE` from. With no `root`, the id the same derivation
+    /// gave from what is recorded: the remote's `owner/repo` slug (level 3),
+    /// else the `parent-dir` slug of a path-form `repo_url` (level 4), else
+    /// `Ok(None)`; `palace_lookup` is then set.
     /// Test: `target_prefers_the_project_key_then_the_remote_then_the_path`,
     /// `decommission_project_with_a_deleted_github_clone_unloads_its_palace`,
+    /// `decommission_scratch_project_without_checkout_unloads_its_palace`,
     /// `a_path_project_is_parked_by_its_path`.
     pub fn for_project(project_key: Option<&str>, repo_url: &str, root: Option<&Path>) -> Self {
         let path_url = Some(repo_url.trim()).filter(|u| u.starts_with('/'));
@@ -160,19 +166,31 @@ impl ShutdownTarget {
             Some(root) => trusty_common::palace_resolve::resolve_palace_with_remote(root, remote)
                 .map(|r| Some(r.id))
                 .map_err(|e| format!("could not resolve the palace: {e}")),
-            // #11551: with no checkout, the remote's `owner/repo` (resolution
-            // level 3) still names a palace that may be loaded; only a project
-            // with no such identity has no palace to unload.
-            // A path-form `repo_url` is a checkout, not a remote: no identity.
-            None => Ok(remote
-                .filter(|r| !matches!(r.trim().chars().next(), Some('/' | '~')))
-                .and_then(trusty_common::palace_id::owner_repo_from_git_remote)),
+            // #11551: with no checkout, derive the id memory keyed the palace
+            // by from what is recorded — the pin file went with the checkout.
+            None => Ok(palace_id_without_checkout(repo_url)),
         };
         Self {
             search_queries,
             palace,
+            palace_lookup: root.is_none(),
         }
     }
+}
+
+/// The palace id of a project whose checkout is gone (#11551): the remote's
+/// `owner/repo` slug, else the `parent-dir` slug of a path-form `repo_url`
+/// (`~` expanded), the levels `palace_resolve` would have used.
+fn palace_id_without_checkout(repo_url: &str) -> Option<String> {
+    let url = repo_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    if !matches!(url.chars().next(), Some('/' | '~')) {
+        return trusty_common::palace_id::owner_repo_from_git_remote(url);
+    }
+    crate::project::local_checkout_for_url(url)
+        .and_then(|p| trusty_common::palace_id::parent_dir_slug(&p))
 }
 
 /// A project's `owner/repo` identity: `project_key` when it is one, else
@@ -232,7 +250,7 @@ impl IndexShutdown {
     pub async fn shut_down(&self, target: &ShutdownTarget) -> IndexShutdownReport {
         IndexShutdownReport {
             search: park_search(self.search.as_deref(), &target.search_queries).await,
-            palace: unload_palace(self.memory.as_deref(), &target.palace).await,
+            palace: unload_palace(self.memory.as_deref(), target).await,
         }
     }
 }
@@ -378,11 +396,42 @@ async fn park_search(socket: Option<&Path>, queries: &[String]) -> ShutdownState
     }
 }
 
+/// `memory.palace_get` — trusty-memory's "does this palace exist" lookup.
+pub(crate) const METHOD_PALACE_GET: &str = "memory.palace_get";
+
+/// #11551: ask trusty-memory whether `palace` exists before unloading it.
+///
+/// What: `None` when it exists (go on to the unload); `NotLoaded` naming the
+/// skip on `CODE_NOT_FOUND`; `Failed` on any other answer — a lookup that
+/// errors never reads as "absent" (fail closed).
+/// Test: `decommission_scratch_project_with_no_palace_skips_the_unload`,
+/// `decommission_scratch_project_palace_lookup_error_refuses`.
+async fn palace_absent(socket: &Path, palace: &str) -> Option<ShutdownState> {
+    let params = json!({ "palace_id": palace });
+    let answer = memory_rpc::call_memory_tool_at_with_timeout(
+        socket,
+        METHOD_PALACE_GET,
+        params,
+        CALL_TIMEOUT,
+    )
+    .await;
+    match answer {
+        Ok(_) => None,
+        Err(e) => Some(match e.downcast_ref::<MemoryRpcError>() {
+            Some(r) if r.code == memory_rpc::CODE_NOT_FOUND => ShutdownState::NotLoaded {
+                reason: format!("no palace {palace} in trusty-memory; palace unload skipped"),
+            },
+            _ => ShutdownState::Failed {
+                id: Some(palace.to_string()),
+                error: format!("could not look up palace {palace}: {e:#}"),
+            },
+        }),
+    }
+}
+
 /// Unload the project's palace.
-async fn unload_palace(
-    socket: Option<&Path>,
-    palace: &Result<Option<String>, String>,
-) -> ShutdownState {
+async fn unload_palace(socket: Option<&Path>, target: &ShutdownTarget) -> ShutdownState {
+    let palace = &target.palace;
     let socket = match listening(socket).await {
         Ok(Some(socket)) => socket,
         Ok(None) => {
@@ -394,10 +443,10 @@ async fn unload_palace(
     };
     let palace = match palace {
         Ok(Some(p)) => p,
-        // #11551: no checkout on disk, so no palace was resolved or loaded.
+        // #11551: no checkout and nothing recorded to derive a palace id from.
         Ok(None) => {
             return ShutdownState::NotLoaded {
-                reason: "no checkout on disk, so no palace to unload".to_string(),
+                reason: "no checkout or recorded path names a palace; unload skipped".to_string(),
             };
         }
         Err(why) => {
@@ -407,6 +456,11 @@ async fn unload_palace(
             };
         }
     };
+    if target.palace_lookup
+        && let Some(skipped) = palace_absent(socket, palace).await
+    {
+        return skipped;
+    }
     let params = json!({ "palace_id": palace });
     let answer = memory_rpc::call_memory_tool_at_with_timeout(
         socket,
