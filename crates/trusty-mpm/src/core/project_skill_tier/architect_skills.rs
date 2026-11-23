@@ -610,6 +610,8 @@ pub fn health(project_dir: &Path) -> (bool, String) {
 }
 
 /// [`health`] against an explicit `reserved` list and shipped `skills`.
+///
+/// Test: `a_content_update_leaves_skills_stale_until_the_refresh_deploys`.
 pub fn health_with(
     project_dir: &Path,
     reserved: &[PathBuf],

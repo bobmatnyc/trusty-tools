@@ -249,3 +249,47 @@ fn a_record_owned_by_another_user_is_refused() {
         "{why}"
     );
 }
+
+const CLEARED: &str = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
+
+/// #10594: `/clear` in the Architect starts a new conversation; the record
+/// must follow it, so a relaunch resumes the post-clear conversation.
+#[test]
+fn a_clear_in_the_architect_dir_moves_the_record_to_the_new_id() {
+    let s = Scratch::new();
+    record_conversation(&s.root, &s.dir, ID).expect("record");
+    s.transcript(ID);
+    s.transcript(CLEARED);
+    assert_eq!(
+        follow_clear(&s.root, &s.dir, CLEARED, Some("clear")),
+        Ok(true)
+    );
+    assert_eq!(s.resolve(), ConversationStart::Resume(CLEARED.to_owned()));
+}
+
+/// #10594 Fail-Open Check: only a `clear` in the Architect's own directory
+/// writes; every other case leaves the record on the pre-clear id.
+#[test]
+fn a_clear_elsewhere_or_another_source_leaves_the_record_alone() {
+    let s = Scratch::new();
+    record_conversation(&s.root, &s.dir, ID).expect("record");
+    s.transcript(ID);
+    s.transcript(CLEARED);
+    let other = s.dir.parent().expect("parent").join("other");
+    std::fs::create_dir_all(&other).expect("other dir");
+    assert_eq!(
+        follow_clear(&s.root, &other, CLEARED, Some("clear")),
+        Ok(false)
+    );
+    for source in [None, Some("startup"), Some("resume"), Some("compact")] {
+        assert_eq!(follow_clear(&s.root, &s.dir, CLEARED, source), Ok(false));
+    }
+    assert!(follow_clear(&s.root, &s.dir, "not-a-uuid", Some("clear")).is_err());
+    assert_eq!(s.resolve(), ConversationStart::Resume(ID.to_owned()));
+    let none = Scratch::new();
+    assert_eq!(
+        follow_clear(&none.root, &none.dir, CLEARED, Some("clear")),
+        Ok(false)
+    );
+    assert!(!conversation_path(&none.root).exists());
+}

@@ -30,7 +30,7 @@ default = ["api", "store", "server"]
 # client — serde_json for its frames, libc for its fd and socket checks. Both
 # were already optional; still no tokio, keyring, fd-lock or trusty-common.
 api = ["dep:serde", "dep:thiserror", "dep:serde_json", "dep:libc"]
-store = ["api", "dep:keyring", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
+store = ["api", "dep:keyring", "dep:security-framework", "dep:fd-lock", "dep:serde_json", "dep:serde_yaml", "dep:dirs", "dep:libc", "dep:zeroize"]
 ancestry = ["dep:thiserror", "dep:libc"]
 server = ["store", "ancestry", "dep:tokio", "dep:trusty-common", "dep:sha2", "dep:rand_core"]
 # #7519: the blocking runner and template-file guard the CLI-backed backends
@@ -106,6 +106,9 @@ required-features = ["store"]
 # `SecretsError::UnknownBackend` instead (see store/keychain.rs).
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }
+# #10589: the `OSStatus` inside a `keyring` platform error, read by downcast.
+# Already in the graph through `keyring`'s `apple-native`; no new crate.
+security-framework = { version = "3", optional = true }
 
 # #9326: the file backend's `geteuid`, `O_NOFOLLOW` and `ELOOP`. Unix only,
 # because the file backend is.

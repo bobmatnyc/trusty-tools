@@ -49,7 +49,7 @@ consistency vetting happens before decisions land.
 - **Workspace-wide decisions** (affecting multiple crates or the whole repo)
   live **here**, in `docs/adr/`.
 - **Crate-specific decisions** live in **`docs/<crate>/decisions/`** — e.g.
-  [`docs/trusty-agents/decisions/`](../trusty-agents/decisions/).
+  [`docs/trusty-assistants/decisions/`](../trusty-assistants/decisions/).
 
 A crate-specific ADR may reference a workspace ADR, and vice versa.
 

@@ -139,7 +139,7 @@ const TIMEOUT: &str = "the secrets server ran out of time";
 /// What: one row per kind, in the server's declaration order.
 /// Test: `console_kind_table_matches_the_server_error_kinds` pins it to the
 /// server's `ErrorKind::as_str`.
-pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 42] = [
+pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 43] = [
     ("invalid_params", StatusCode::BAD_REQUEST, BAD_REQUEST),
     ("project_invalid", StatusCode::BAD_REQUEST, BAD_REQUEST),
     (
@@ -243,6 +243,8 @@ pub const UPSTREAM_KINDS: [(&str, StatusCode, &str); 42] = [
         StatusCode::GATEWAY_TIMEOUT,
         TIMEOUT,
     ),
+    // #10589: the server has no GUI login session, so no Keychain access.
+    ("keychain_no_session", StatusCode::BAD_GATEWAY, INTERNAL),
     ("internal", StatusCode::INTERNAL_SERVER_ERROR, INTERNAL),
 ];
 

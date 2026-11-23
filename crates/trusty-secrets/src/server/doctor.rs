@@ -89,6 +89,8 @@ pub enum Unavailable {
     Locked,
     /// It failed to open for another reason; the detail says which.
     OpenFailed,
+    /// The server's own process has no GUI session access to it (#10589).
+    NoSession,
     /// A reason this client does not know.
     // #7519 P4: `serde(other)`, so a reason added later never fails a decode.
     #[serde(other)]
@@ -106,6 +108,7 @@ impl Unavailable {
             Self::TrackedSettingRefused => "tracked_setting_refused",
             Self::Locked => "locked",
             Self::OpenFailed => "open_failed",
+            Self::NoSession => "no_session",
             Self::Other => "other",
         }
     }
@@ -122,6 +125,7 @@ impl Unavailable {
             SecretsError::TrackedCliSettingRefused { .. }
             | SecretsError::TrackedBackendRefused { .. } => Self::TrackedSettingRefused,
             SecretsError::BackendLocked { .. } => Self::Locked,
+            SecretsError::KeychainNoSession { .. } => Self::NoSession,
             _ => Self::OpenFailed,
         }
     }
@@ -357,8 +361,11 @@ impl Account {
 /// Judge backend `id` without spawning anything.
 ///
 /// What: see the module docs. The factory is called only for an id that
-/// passed the build and enablement checks; opening spawns no process.
-fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStatus {
+/// passed the build and enablement checks; opening spawns no process. With
+/// `probe`, an opened backend is then probed from this server's process
+/// (#10589); a no-session failure carries [`ErrorKind::KeychainNoSession`]'s
+/// remedy as its detail.
+fn judge(state: &State, account: Option<&Account>, id: BackendId, probe: bool) -> BackendStatus {
     if CLI_IDS.contains(&id.as_str()) {
         if !cli_backends().contains(&id) {
             return BackendStatus::unavailable(
@@ -374,8 +381,18 @@ fn judge(state: &State, account: Option<&Account>, id: BackendId) -> BackendStat
             return BackendStatus::unavailable(id, reason, detail);
         }
     }
-    match state.open(&id) {
+    let opened = state.open(&id).and_then(|backend| match probe {
+        // #10589: the Keychain is tested from the server's own context.
+        true => backend.probe().map(|()| backend),
+        false => Ok(backend),
+    });
+    match opened {
         Ok(backend) => BackendStatus::available(id, backend.capabilities()),
+        Err(e @ SecretsError::KeychainNoSession { .. }) => BackendStatus::unavailable(
+            id,
+            Unavailable::of(&e),
+            format!("{e}; {}", ErrorKind::KeychainNoSession.text()),
+        ),
         Err(e) => BackendStatus::unavailable(id, Unavailable::of(&e), e.to_string()),
     }
 }
@@ -445,7 +462,7 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
         other => serde_json::from_value(other).map_err(|_| ErrorKind::InvalidParams)?,
     };
     let target = Target::of(state, &request)?;
-    let mut backends = rows(state, &target.selected, target.refused);
+    let mut backends = rows(state, &target.selected, target.refused, true);
     // #9069: D15 — doctor lists sync targets; the console's copy dialog does not.
     backends.push(judge_sync_target(state, BackendId::github_actions()));
     backends.push(judge_sync_target(state, BackendId::vercel()));
@@ -473,8 +490,14 @@ pub(crate) fn doctor(state: &State, _caller: Caller, params: Value) -> Result<Va
 /// `selected` when it is none of them, each judged by [`judge`]. The
 /// selected row then says what a write meets first: `refused` (the tracked
 /// refusal), then the `file` consent check. Shared by [`doctor`] and
-/// [`backends`] (#9067 P1), so the page offers what doctor reports.
-fn rows(state: &State, selected: &BackendId, refused: Option<String>) -> Vec<BackendStatus> {
+/// [`backends`] (#9067 P1), so the page offers what doctor reports. Only
+/// doctor passes `probe` (#10589), so a page load writes no probe item.
+fn rows(
+    state: &State,
+    selected: &BackendId,
+    refused: Option<String>,
+    probe: bool,
+) -> Vec<BackendStatus> {
     // #9326: the file backend is listed beside the Keychain. #7519 P4: every
     // CLI-backed id is listed, linked or not, so a missing row never hides why.
     let mut ids = vec![
@@ -491,7 +514,7 @@ fn rows(state: &State, selected: &BackendId, refused: Option<String>) -> Vec<Bac
         (!cli_backends().is_empty()).then(|| Account::load(state.file_consent_config.as_deref()));
     let mut backends: Vec<BackendStatus> = ids
         .into_iter()
-        .map(|id| judge(state, account.as_ref(), id))
+        .map(|id| judge(state, account.as_ref(), id, probe))
         .collect();
     let refusal = match refused {
         Some(detail) => Some((Unavailable::TrackedSettingRefused, detail)),
@@ -543,7 +566,7 @@ pub(crate) fn backends(state: &State, caller: Caller, params: Value) -> Result<V
             gate.project(&project);
             gate.admit()?;
             let selected = project.resolved_config().backend;
-            let choices = rows(state, &selected, None)
+            let choices = rows(state, &selected, None, false)
                 .into_iter()
                 .map(|row| BackendChoice::new(row.id, row.available))
                 .collect();

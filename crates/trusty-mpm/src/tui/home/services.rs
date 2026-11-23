@@ -210,17 +210,21 @@ impl ServiceId {
     /// the console resolve it. `Err` carries an operator-facing reason.
     pub fn socket(self) -> Result<PathBuf, String> {
         match self {
-            ServiceId::Search => trusty_common::search_rpc::search_socket()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Search => trusty_common::search_rpc::search_dial_socket()
                 .map_err(|e| format!("search socket unresolved: {e:#}")),
-            ServiceId::Memory => trusty_common::memory_rpc::resolve_memory_socket()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Memory => trusty_common::memory_rpc::resolve_memory_dial_socket()
                 .map_err(|e| format!("memory socket unresolved: {e:#}")),
             ServiceId::Mpm => Ok(trusty_common::mpm_rpc::mpm_socket()),
-            ServiceId::Events => trusty_common::control_bus::events_socket_path()
+            // #11667: dial lookup, creates nothing.
+            ServiceId::Events => trusty_common::control_bus::events_dial_socket_path()
                 .map_err(|e| format!("events socket unresolved: {e:#}")),
-            // #11550: the one path tagent binds.
-            ServiceId::Agents => trusty_agents_common::health::agents_socket()
+            // #11550: the one path tagent binds. #11667: dial lookup, creates nothing.
+            ServiceId::Agents => trusty_agents_common::health::agents_dial_socket()
                 .map_err(|e| format!("agents socket unresolved: {e:#}")),
-            other => trusty_common::daemon_socket_path(other.id())
+            // #11667: dial lookup, creates nothing.
+            other => trusty_common::daemon_socket_path_no_create(other.id())
                 .map_err(|e| format!("{} socket unresolved: {e:#}", other.id())),
         }
     }

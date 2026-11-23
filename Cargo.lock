@@ -1932,9 +1932,9 @@ dependencies = [
 
 [[package]]
 name = "cookie"
-version = "0.18.1"
+version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ddef33a339a91ea89fb53151bd0a4689cfce27055c291dfa69945475d22c747"
+checksum = "d55f2d6c30eeec7d5c6f98bd4395d4abb1895629eab97ee6522d340623615f8a"
 dependencies = [
  "percent-encoding",
  "time",
@@ -3493,9 +3493,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -11269,58 +11269,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusty-agents"
-version = "0.40.0"
-dependencies = [
- "anyhow",
- "async-openai",
- "async-trait",
- "axum",
- "base64 0.22.1",
- "bytes",
- "chrono",
- "chrono-tz",
- "clap",
- "dirs 5.0.1",
- "fastembed",
- "flate2",
- "fs4 1.1.0",
- "futures",
- "indexmap 2.14.0",
- "libc",
- "mime_guess",
- "redb 4.3.0",
- "regex",
- "reqwest 0.12.28",
- "rustls",
- "serde",
- "serde_json",
- "serde_yaml",
- "serial_test",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-tungstenite",
- "toml 0.8.23",
- "toml_edit 0.22.27",
- "tracing",
- "tracing-subscriber",
- "trusty-agents-common",
- "trusty-channels",
- "trusty-code",
- "trusty-common",
- "trusty-gworkspace",
- "trusty-mcp",
- "trusty-memory",
- "trusty-okf",
- "trusty-search",
- "usearch",
- "uuid",
- "walkdir",
-]
-
-[[package]]
 name = "trusty-agents-common"
 version = "0.11.1"
 dependencies = [
@@ -11417,6 +11365,58 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.23",
  "tracing",
+]
+
+[[package]]
+name = "trusty-assistants"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-openai",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "dirs 5.0.1",
+ "fastembed",
+ "flate2",
+ "fs4 1.1.0",
+ "futures",
+ "indexmap 2.14.0",
+ "libc",
+ "mime_guess",
+ "redb 4.3.0",
+ "regex",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serial_test",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-tungstenite",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "tracing",
+ "tracing-subscriber",
+ "trusty-agents-common",
+ "trusty-channels",
+ "trusty-code",
+ "trusty-common",
+ "trusty-gworkspace",
+ "trusty-mcp",
+ "trusty-memory",
+ "trusty-okf",
+ "trusty-search",
+ "usearch",
+ "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -12167,6 +12167,7 @@ dependencies = [
  "keyring",
  "libc",
  "rand_core 0.6.4",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -12530,9 +12531,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

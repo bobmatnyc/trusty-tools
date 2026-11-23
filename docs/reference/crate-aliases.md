@@ -18,9 +18,9 @@ crate's `Cargo.toml`.
 | `tm` | trusty-memory | `-p trusty-memory` | `crates/trusty-memory/` |
 | `ts` | trusty-search | `-p trusty-search` | `crates/trusty-search/` |
 | `tc` | trusty-common | `-p trusty-common` | `crates/trusty-common/` |
-| `ta` | trusty-analyze | `-p trusty-analyze` | `crates/trusty-analyze/` |
+| `ta` | trusty-assistants | `-p trusty-assistants` | `crates/trusty-assistants/` (bin: `ta`; `tagent` is a one-release alias) |
 | `mpm` | trusty-mpm | `-p trusty-mpm` | `crates/trusty-mpm/` |
-| `tagent` or `t-agents` | trusty-agents | `-p trusty-agents` | `crates/trusty-agents/` (bin: `tagent`) |
+| `tagent` or `t-agents` | trusty-assistants (former name `trusty-agents`, #11632) | `-p trusty-assistants` | `crates/trusty-assistants/` |
 | `t-agents-common` | trusty-agents-common | `-p trusty-agents-common` | `crates/trusty-agents-common/` |
 | `tcode` | trusty-code | `-p trusty-code` | `crates/trusty-code/` |
 | `tctl` | trusty-installer | `-p trusty-installer` | `crates/trusty-installer/` |

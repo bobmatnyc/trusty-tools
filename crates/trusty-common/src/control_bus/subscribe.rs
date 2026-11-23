@@ -64,6 +64,16 @@ pub fn events_socket_path() -> anyhow::Result<PathBuf> {
     crate::daemon_addr::daemon_socket_path(EVENTS_SERVICE)
 }
 
+/// [`events_socket_path`] for a dialer: the same path, no directory created.
+///
+/// Why: a created data dir is 0755, which the dial's 0700 trust check refuses
+/// (#11667). The bus's bind side keeps [`events_socket_path`].
+/// Test: `events_dial_socket_path_matches_and_creates_nothing`.
+pub fn events_dial_socket_path() -> anyhow::Result<PathBuf> {
+    // #11667: dial lookup, creates nothing.
+    crate::daemon_addr::daemon_socket_path_no_create(EVENTS_SERVICE)
+}
+
 /// The params of one `events.subscribe` request.
 ///
 /// Why: DOC-73 §4.3 — a reader that opens mid-session replays what it missed

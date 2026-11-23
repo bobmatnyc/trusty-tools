@@ -390,4 +390,20 @@ pub enum SecretsError {
     // #10386: last, so no published discriminant moves.
     #[error("the audit record for an agent deny change could not be written; nothing was changed")]
     AuditUnavailable,
+
+    /// The Keychain refused a call because this process's security session
+    /// cannot reach it, e.g. a server started from an SSH login (#10589).
+    // #10589: last, so no published discriminant moves; never a miss.
+    #[error(
+        "keychain backend failed on {key} in {vault}: this process has no GUI login session \
+         access to the Keychain (OS status {status})"
+    )]
+    KeychainNoSession {
+        /// The vault (Keychain service) addressed.
+        vault: String,
+        /// The key (Keychain account) addressed.
+        key: String,
+        /// The macOS `OSStatus` the Keychain returned.
+        status: i32,
+    },
 }
