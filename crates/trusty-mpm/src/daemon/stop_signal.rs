@@ -29,7 +29,9 @@ impl StopSignals {
     pub fn install() -> Self {
         #[cfg(unix)]
         {
-            Self::install_with(tokio::signal::unix::signal, sighup_inherited_ignored())
+            let stop = Self::install_with(tokio::signal::unix::signal, sighup_inherited_ignored());
+            tracing::debug!("stop signals registered: {:?}", stop.names());
+            stop
         }
         #[cfg(not(unix))]
         {
