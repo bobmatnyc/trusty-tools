@@ -23,7 +23,7 @@ async fn broker() -> (tempfile::TempDir, Broker) {
 fn route() -> Route {
     Route {
         profile: "p".into(),
-        email: "a@example.test".into(),
+        email: "a@example.com".into(),
         workflow: None,
         url: None,
         account: None,
@@ -91,7 +91,7 @@ fn worker(core: &Arc<Core>, replies: Vec<&'static str>) -> tokio::task::JoinHand
     })
 }
 
-const RESET_OK: &str = r#"{"ok":true,"email":"a@example.test","tab":7,"result":{"javascript":true,"color_scheme":"none","width":0,"height":0}}"#;
+const RESET_OK: &str = r#"{"ok":true,"email":"a@example.com","tab":7,"result":{"javascript":true,"color_scheme":"none","width":0,"height":0}}"#;
 
 #[test]
 fn emulation_requests_are_validated() {
