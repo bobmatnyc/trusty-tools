@@ -24,7 +24,7 @@ pub enum ServiceId {
     Review,
     /// trusty-mpm, `mpm.health` on its socket. Enter opens the projects view.
     Mpm,
-    /// trusty-agents; no UDS socket yet, so the TUI does not probe it (#10899).
+    /// trusty-agents, `agents.health` on its well-known socket (#11550).
     Agents,
     /// trusty-events, the bus daemon, `events.health` on its socket.
     Events,
@@ -53,8 +53,10 @@ pub(crate) enum ProbeKind {
     /// What: carries the operator-facing detail naming the server-side gap.
     /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
     /// read, socket or process spawn.
-    /// Test: `agents_has_no_uds_endpoint_kind`,
-    /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+    /// Test: `no_service_maps_to_no_uds_endpoint`.
+    // #11550: Agents left this kind; no service uses it now. Removing it
+    // touches probe.rs, which a parallel branch (#11547, #11549) edits.
+    #[allow(dead_code)]
     NoUdsEndpoint(&'static str),
     /// No resident daemon: the binary on `PATH` is the whole answer.
     OnDemand,
@@ -138,8 +140,9 @@ impl ServiceId {
                 ProbeKind::UdsHealth(trusty_common::control_bus::METHOD_EVENTS_HEALTH)
             }
             // See #10899: the TUI sends no HTTP probe; agents has no UDS yet.
+            // #11550: tagent's `--api` server serves agents.health.
             ServiceId::Agents => {
-                ProbeKind::NoUdsEndpoint("trusty-agents has no UDS socket yet (#6433)")
+                ProbeKind::UdsHealth(trusty_agents_common::health::METHOD_AGENTS_HEALTH)
             }
             // #10966: the console's listener (#10902) serves its fleet view.
             ServiceId::Console => {
@@ -157,7 +160,11 @@ impl ServiceId {
     pub fn not_listening_is_on_demand(self) -> bool {
         // #10476: analyze is on demand; not listening is idle, not down.
         // #10966: the console is opened when wanted; a closed one is not down.
-        matches!(self, ServiceId::Analyze | ServiceId::Console)
+        // #11550: so is tagent's `--api` server.
+        matches!(
+            self,
+            ServiceId::Analyze | ServiceId::Console | ServiceId::Agents
+        )
     }
 
     /// The stdio MCP command trusty-console spawns to call `console_metrics`
@@ -205,6 +212,9 @@ impl ServiceId {
             ServiceId::Mpm => Ok(trusty_common::mpm_rpc::mpm_socket()),
             ServiceId::Events => trusty_common::control_bus::events_socket_path()
                 .map_err(|e| format!("events socket unresolved: {e:#}")),
+            // #11550: the one path tagent binds.
+            ServiceId::Agents => trusty_agents_common::health::agents_socket()
+                .map_err(|e| format!("agents socket unresolved: {e:#}")),
             other => trusty_common::daemon_socket_path(other.id())
                 .map_err(|e| format!("{} socket unresolved: {e:#}", other.id())),
         }

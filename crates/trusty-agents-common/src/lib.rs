@@ -55,6 +55,9 @@ pub mod workstreams;
 
 pub mod transport;
 
+// #11550: the agents.health socket path, shared by tagent and `tm tui`.
+pub mod health;
+
 // #7735: shared closing-block extraction (Improvement recommendations /
 // Prompt feedback), slice 1 of docs/specs/self-improvement-loop.md.
 pub mod self_improvement;

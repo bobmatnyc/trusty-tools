@@ -131,7 +131,7 @@ where
 /// a socket is reported as such, not dialled over HTTP and not shown as down.
 /// What: a pure mapping from [`ProbeKind::NoUdsEndpoint`]; it runs before the
 /// `PATH` lookup, so these tiles do no file read, socket or spawn.
-/// Test: `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+/// Test: `no_service_maps_to_no_uds_endpoint`.
 pub fn no_uds_endpoint(id: ServiceId) -> Option<TileHealth> {
     match id.probe() {
         ProbeKind::NoUdsEndpoint(detail) => Some(TileHealth::NoUdsEndpoint { detail }),
