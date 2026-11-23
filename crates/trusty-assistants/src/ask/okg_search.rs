@@ -5,9 +5,14 @@
 //! picks an ancestor index when the OKG has none, so it is not rooted.
 //! What: [`OkgSearchTool`] walks `<home>/okg` without following symlinks and
 //! returns `path:line: text` for each line containing the query,
-//! case-insensitively. It reads only; it never writes, spawns or connects.
+//! case-insensitively. It reads at most [`MAX_FILES_SCANNED`] files and says
+//! when it stopped early; a path it could not walk or read is reported, and
+//! with no hits that is an error, not "no matches" (#11650). It reads only;
+//! it never writes, spawns or connects.
 //! Test: `super::tests::tools_tests::okg_search_finds_lines_under_the_okg_only`,
-//! `super::tests::tools_tests::okg_search_rejects_an_empty_query`.
+//! `super::tests::tools_tests::okg_search_rejects_an_empty_query`,
+//! `super::tests::tools_tests::okg_search_reports_unreadable_paths`,
+//! `super::tests::tools_tests::okg_search_stops_at_the_scan_budget`.
 
 use std::path::{Path, PathBuf};
 
@@ -29,6 +34,13 @@ const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Characters kept from one matching line.
 const MAX_LINE_CHARS: usize = 300;
+
+/// Most files one search reads (#11650). The walk stops here and says so.
+/// Test: `super::tests::tools_tests::okg_search_stops_at_the_scan_budget`.
+pub const MAX_FILES_SCANNED: usize = 2_000;
+
+/// Unreadable paths named in a result; the rest are only counted.
+const MAX_ERRORS_SHOWN: usize = 5;
 
 /// File extensions searched: the OKG tree is markdown.
 const EXTENSIONS: &[&str] = &["md", "markdown", "txt"];
@@ -97,44 +109,149 @@ impl ToolExecutor for OkgSearchTool {
             ));
         }
         let root = self.root.clone();
-        match tokio::task::spawn_blocking(move || search(&root, &query, limit)).await {
-            Ok(hits) if hits.is_empty() => ToolResult::ok("no matches in this assistant's OKG"),
-            Ok(hits) => ToolResult::ok(hits.join("\n")),
+        match tokio::task::spawn_blocking(move || search(&root, &query, limit, MAX_FILES_SCANNED))
+            .await
+        {
+            Ok(scan) => scan.into_result(),
             Err(e) => ToolResult::err(format!("okg_search failed: {e}")),
         }
     }
 }
 
-/// Up to `limit` `relpath:line: text` hits for `query` (already lowercased).
-fn search(root: &Path, query: &str, limit: usize) -> Vec<String> {
-    let mut hits = Vec::new();
-    let files = walkdir::WalkDir::new(root)
+/// What one search found, and what it could not look at.
+/// Test: `super::tests::tools_tests::okg_search_reports_unreadable_paths`,
+/// `super::tests::tools_tests::okg_search_stops_at_the_scan_budget`.
+#[derive(Debug, Default)]
+struct Scan {
+    /// `relpath:line: text` matches.
+    hits: Vec<String>,
+    /// Files read.
+    scanned: usize,
+    /// The file budget ran out with files left unread.
+    budget_hit: bool,
+    /// Files skipped for being over [`MAX_FILE_BYTES`].
+    oversize: usize,
+    /// How many paths could not be walked, statted or read as UTF-8.
+    unreadable: usize,
+    /// The first few of those, as `path: error`.
+    unreadable_shown: Vec<String>,
+}
+
+impl Scan {
+    fn unreadable(&mut self, what: String) {
+        self.unreadable += 1;
+        if self.unreadable_shown.len() < MAX_ERRORS_SHOWN {
+            self.unreadable_shown.push(what);
+        }
+    }
+
+    /// The tool result. No hits plus an unreadable path is an error, never
+    /// "no matches" (#11650); every other gap is stated in a note.
+    fn into_result(self) -> ToolResult {
+        let mut notes = Vec::new();
+        if self.budget_hit {
+            notes.push(format!(
+                "note: the search stopped after {} files (the scan budget); \
+                 files after that were not searched",
+                self.scanned
+            ));
+        }
+        if self.oversize > 0 {
+            notes.push(format!(
+                "note: {} files over {} bytes were not searched",
+                self.oversize, MAX_FILE_BYTES
+            ));
+        }
+        let unreadable = (self.unreadable > 0).then(|| {
+            format!(
+                "{} paths in this assistant's OKG could not be read: {}",
+                self.unreadable,
+                self.unreadable_shown.join("; ")
+            )
+        });
+        if self.hits.is_empty() {
+            if let Some(unreadable) = unreadable {
+                notes.insert(0, format!("okg_search found no matches, but {unreadable}"));
+                return ToolResult::err(notes.join("\n"));
+            }
+            notes.insert(0, "no matches in this assistant's OKG".to_string());
+            return ToolResult::ok(notes.join("\n"));
+        }
+        if let Some(unreadable) = unreadable {
+            notes.push(format!("note: {unreadable}"));
+        }
+        let mut out = self.hits;
+        out.extend(notes);
+        ToolResult::ok(out.join("\n"))
+    }
+}
+
+/// Up to `limit` hits for `query` (already lowercased), reading at most
+/// `budget` files.
+fn search(root: &Path, query: &str, limit: usize, budget: usize) -> Scan {
+    let mut scan = Scan::default();
+    let rel = |path: &Path| {
+        path.strip_prefix(root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    };
+    for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .sort_by_file_name()
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|e| e.file_type().is_file())
-        .filter(|e| {
-            e.path()
+    {
+        // #11650: a walk error is reported, not read as "no matches".
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                let path = e.path().map_or_else(|| "?".to_string(), rel);
+                scan.unreadable(format!("{path}: {e}"));
+                continue;
+            }
+        };
+        let searched = entry.file_type().is_file()
+            && entry
+                .path()
                 .extension()
                 .and_then(|x| x.to_str())
-                .is_some_and(|x| EXTENSIONS.contains(&x))
-        })
-        .filter(|e| e.metadata().is_ok_and(|m| m.len() <= MAX_FILE_BYTES));
-    for entry in files {
-        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+                .is_some_and(|x| EXTENSIONS.contains(&x));
+        if !searched {
             continue;
+        }
+        let path = entry.path();
+        match entry.metadata() {
+            Ok(m) if m.len() > MAX_FILE_BYTES => {
+                scan.oversize += 1;
+                continue;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                scan.unreadable(format!("{}: {e}", rel(path)));
+                continue;
+            }
+        }
+        // #11650: bound the files read, not only their size and the hits.
+        if scan.scanned == budget {
+            scan.budget_hit = true;
+            break;
+        }
+        scan.scanned += 1;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                scan.unreadable(format!("{}: {e}", rel(path)));
+                continue;
+            }
         };
-        let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
         for (n, line) in text.lines().enumerate() {
             if line.to_lowercase().contains(query) {
                 let shown: String = line.trim().chars().take(MAX_LINE_CHARS).collect();
-                hits.push(format!("{}:{}: {shown}", rel.display(), n + 1));
-                if hits.len() >= limit {
-                    return hits;
+                scan.hits.push(format!("{}:{}: {shown}", rel(path), n + 1));
+                if scan.hits.len() >= limit {
+                    return scan;
                 }
             }
         }
     }
-    hits
+    scan
 }

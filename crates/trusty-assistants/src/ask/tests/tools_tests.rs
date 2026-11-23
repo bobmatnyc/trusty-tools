@@ -217,3 +217,63 @@ async fn okg_search_rejects_an_empty_query() {
     let missing = OkgSearchTool::new(tmp.path().join("no-such-okg"));
     assert!(missing.execute(json!({ "query": "x" })).await.is_error());
 }
+
+/// #11650 item 5: an unreadable path is reported; with no hits the result is
+/// an error, never "no matches".
+#[tokio::test]
+async fn okg_search_reports_unreadable_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let okg = instance(&tmp).okg_dir();
+    std::fs::create_dir_all(&okg).unwrap();
+    std::fs::write(okg.join("bad.md"), b"CFO \xff\xfe not utf-8\n").unwrap();
+    let tool = OkgSearchTool::new(&okg);
+
+    let result = tool.execute(json!({ "query": "cfo" })).await;
+    match &result {
+        ToolResult::Error { .. } => {}
+        other => panic!("an unread file must not read as no matches: {other:?}"),
+    }
+    let text = format!("{result:?}");
+    assert!(text.contains("bad.md"), "{text}");
+    assert!(!text.contains("no matches in this"), "{text}");
+
+    // With a hit elsewhere the hits come back, plus a note naming the path.
+    std::fs::write(okg.join("good.md"), "CFO is Jane.\n").unwrap();
+    match tool.execute(json!({ "query": "cfo" })).await {
+        ToolResult::Success { text, .. } => {
+            assert!(text.starts_with("good.md:1: CFO is Jane."), "{text}");
+            assert!(text.contains("could not be read: bad.md"), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// #11650 item 5: the walk reads at most `MAX_FILES_SCANNED` files and says
+/// it stopped.
+#[tokio::test]
+async fn okg_search_stops_at_the_scan_budget() {
+    use crate::ask::okg_search::MAX_FILES_SCANNED;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let okg = instance(&tmp).okg_dir();
+    std::fs::create_dir_all(&okg).unwrap();
+    for i in 0..MAX_FILES_SCANNED {
+        std::fs::write(okg.join(format!("a{i:05}.md")), "filler\n").unwrap();
+    }
+    // Sorted last, so only a walk past the budget would find it.
+    std::fs::write(okg.join("z-last.md"), "CFO is Jane.\n").unwrap();
+
+    match OkgSearchTool::new(&okg)
+        .execute(json!({ "query": "cfo" }))
+        .await
+    {
+        ToolResult::Success { text, .. } => {
+            assert!(text.starts_with("no matches"), "{text}");
+            assert!(
+                text.contains(&format!("stopped after {MAX_FILES_SCANNED} files")),
+                "{text}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
