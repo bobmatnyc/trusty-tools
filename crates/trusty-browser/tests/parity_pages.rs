@@ -456,3 +456,44 @@ async fn a_failed_emulation_reset_is_retried() {
     assert!(retry.is_ok(), "the refused reset was not retried");
     broker.close().await;
 }
+
+/// Select fails closed: while a refused reset is pending, a new lease on the
+/// tab is refused before any `page_tab` probe, and its claim is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn select_refuses_a_tab_whose_emulation_reset_failed() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    clock.set(5000.0 + 60.0);
+    send_json(&mut b, r#"{"op":"select","tab":7}"#).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(
+        cmd.get("op"),
+        Some(&Json::from("page_emulate")),
+        "{}",
+        wire(&cmd)
+    );
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    send_json(
+        &mut worker,
+        &format!(r#"{{"id":"{id}","ok":false,"error":"Unavailable"}}"#),
+    )
+    .await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), recv_json(&mut b))
+        .await
+        .expect("select answered without a page_tab probe");
+    assert_eq!(
+        wire(&reply),
+        r#"{"ok":false,"error":"EmulationResetPending","tab":7,"retryable":true}"#
+    );
+    // The next worker command is the retried reset, never a probe.
+    expect_reset(&mut worker).await;
+    broker.close().await;
+}

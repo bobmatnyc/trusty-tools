@@ -82,6 +82,13 @@ impl State {
         }
     }
 
+    /// `tab` still carries another lease's emulation: its reset failed (#11371).
+    pub(crate) fn pending(&self, generation: &str, tab: i64, token: &str) -> bool {
+        self.records()
+            .iter()
+            .any(|r| r.generation == generation && r.tab == tab && r.token != token)
+    }
+
     /// Forget `tab`: its emulation was reset by its own lease.
     fn forget(&self, generation: &str, tab: i64) {
         self.records()

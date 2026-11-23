@@ -111,5 +111,9 @@ async fn ended_records_cover_every_lease_end() {
     assert_eq!(core.emulation.snapshot(), [record("b", 7)]);
     core.emulation.restore(record("a", 8));
     assert_eq!(core.emulation.snapshot(), [record("b", 7), record("a", 8)]);
+    // Another lease's record on the tab is pending; the holder's own is not.
+    assert!(core.emulation.pending("gen", 8, "c"));
+    assert!(!core.emulation.pending("gen", 8, "a"));
+    assert!(!core.emulation.pending("gen", 9, "c"));
     broker.close().await;
 }
