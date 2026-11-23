@@ -570,7 +570,8 @@ fn refresh(project: &Path, skills: &[ArchitectSkill]) -> DeployReport {
 fn a_content_update_leaves_skills_stale_until_the_refresh_deploys() {
     let project = tempdir().unwrap();
     let old = shipped();
-    refresh(project.path(), &old);
+    // The earlier launch that deployed the old pin.
+    deploy_architect_skills(project.path(), &[], &old);
     let (ok, detail) = health_with(project.path(), &[], &old);
     assert!(ok, "{detail}");
 
