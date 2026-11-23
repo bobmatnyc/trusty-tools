@@ -628,7 +628,7 @@ mod tests {
         // `uds_consumer_contract.rs`'s
         // `shared_client_reaches_a_chat_tool_through_the_tools_call_envelope`
         // asserts a direct `chat_session_create` answers METHOD_NOT_FOUND, and
-        // both consumers send the envelope: trusty-agents' `persona_memory` and
+        // both consumers send the envelope: trusty-assistants' `persona_memory` and
         // trusty-code's `memory_sink`. Forwarding any of these fails that test.
         "chat_session_add_turn",
         "chat_session_create",

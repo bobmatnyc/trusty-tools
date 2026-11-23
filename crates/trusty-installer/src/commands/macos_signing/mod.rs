@@ -41,7 +41,7 @@
 //! - #2951 (retired, #7964): the `trusty-mpm-gui` Tauri shell once joined
 //!   [`MPM_SET`] as a third binary; the crate and its table row are gone.
 //!
-//! - #4277: `trusty-agents` joins as its own signable set ([`AGENTS_SET`]),
+//! - #4277: `trusty-agents` joins as its own signable set ([`ASSISTANTS_SET`]),
 //!   same cdhash-instability class as #2721/#873 — the `tagent` CLI binary
 //!   (`crates/trusty-agents`, `[[bin]] name = "tagent"`) is ad-hoc/linker-signed
 //!   by every `cargo install` and re-prompts a macOS TCC category on every
@@ -63,7 +63,7 @@
 //!   `Library`/`Applications` but NOT `~/Desktop`, `~/Documents`, or
 //!   `~/Downloads`, so a `read_dir` on each is attempted — the macOS
 //!   Files-and-Folders TCC categories, keyed by cdhash exactly like FDA and App
-//!   Data. Unlike [`AGENTS_SET`], `trusty-memory` links `ort`/`fastembed`
+//!   Data. Unlike [`ASSISTANTS_SET`], `trusty-memory` links `ort`/`fastembed`
 //!   through `trusty-common`'s `memory-core`, so it takes [`SEARCH_SET`]'s
 //!   conservative Hardened-Runtime policy (explicit signing only), not
 //!   [`MPM_SET`]'s always-on one — see [`use_hardened_runtime`].
@@ -115,15 +115,16 @@ pub const SEARCH_SET: &str = "trusty-search";
 /// stable Developer-ID `--identifier` for the grant to survive.
 pub const MPM_SET: &str = "trusty-mpm";
 
-/// The `trusty-agents` signable set: the `tagent` CLI/daemon binary
-/// (`cargo install --path crates/trusty-agents`).
+/// The `trusty-assistants` signable set: the `ta` binary and its one-release
+/// `tagent` alias (`cargo install --path crates/trusty-assistants`; #11632
+/// renamed it from `trusty-agents`).
 ///
 /// Why (#4277): Same cdhash-instability class as #873/#2721 — every
 /// `cargo install` mints a fresh ad-hoc identity for `tagent`, so macOS
 /// re-prompts a TCC category on every rebuild. Kept as its own set (rather
 /// than folded into [`MPM_SET`]) since `trusty-agents` is an independent
 /// crate with its own install path.
-pub const AGENTS_SET: &str = "trusty-agents";
+pub const ASSISTANTS_SET: &str = "trusty-assistants";
 
 /// The `trusty-memory` signable set: every binary `cargo install --path
 /// crates/trusty-memory` produces — `trusty-memory` and the deprecated
@@ -202,10 +203,14 @@ const SIGNABLE_BINARIES: &[(&str, &str, &str)] = &[
     // (#2721). Ordered after `trusty-mpm` so `binaries_for_set(MPM_SET).first()`
     // — the binary whose path the guidance/prompt names — stays `trusty-mpm`.
     ("tm", MPM_SET, "com.trusty.tm"),
-    // `tagent` (#4277): the trusty-agents CLI/daemon binary, installed via
-    // `cargo install --path crates/trusty-agents`. Own set ([`AGENTS_SET`]) —
-    // see that constant's doc for why it is not folded into `MPM_SET`.
-    ("tagent", AGENTS_SET, "com.trusty.tagent"),
+    // `ta` (#4277; `tagent` before #11632): the trusty-assistants binary,
+    // installed via `cargo install --path crates/trusty-assistants`. Own set
+    // ([`ASSISTANTS_SET`]) — see that constant's doc for why it is not folded
+    // into `MPM_SET`. Listed first so it is the binary guidance text names.
+    ("ta", ASSISTANTS_SET, "com.trusty.ta"),
+    // #11632: the one-release `tagent` alias the same install writes. Its
+    // identifier is unchanged, so its existing TCC grants survive.
+    ("tagent", ASSISTANTS_SET, "com.trusty.tagent"),
     // `trusty-memory` (owner ruling 2026-08-06): all three binaries `cargo
     // install --path crates/trusty-memory` produces. `trusty-memory` is listed
     // first so `binaries_for_set(MEMORY_SET).first()` — the binary any guidance
@@ -309,13 +314,13 @@ pub fn codesign_identifier(binary: &str) -> &'static str {
 /// What: `explicit` (the operator directly ran `tctl sign <target>`, or the
 /// wrapper script which shells out to it) → always `true`. Automatic
 /// (`tctl install`'s fail-soft hook, `explicit = false`) → `true` for
-/// [`MPM_SET`] and [`AGENTS_SET`]; `false` for [`SEARCH_SET`], [`MEMORY_SET`],
+/// [`MPM_SET`] and [`ASSISTANTS_SET`]; `false` for [`SEARCH_SET`], [`MEMORY_SET`],
 /// and [`ANALYZE_SET`] until ONNX-under-Hardened-Runtime is verified (see the
 /// tracking issue referenced in PR #2657).
 ///
 /// Test: `tests::hardened_runtime_policy`.
 pub fn use_hardened_runtime(set: &str, explicit: bool) -> bool {
-    explicit || set == MPM_SET || set == AGENTS_SET
+    explicit || set == MPM_SET || set == ASSISTANTS_SET
 }
 
 /// Parse the Developer ID Application identity out of `security
@@ -621,7 +626,7 @@ impl std::fmt::Display for SignSetError {
         match self {
             SignSetError::UnknownSet(set) => write!(
                 f,
-                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-agents')"
+                "unknown signable set '{set}' (expected 'trusty-search', 'trusty-mpm', 'trusty-memory', 'trusty-analyze', or 'trusty-assistants')"
             ),
             SignSetError::NoCertificate => {
                 write!(f, "no Developer ID Application certificate found")
@@ -814,7 +819,7 @@ pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
 /// install (trusty-search + trusty-mpm) printed it twice back to back.
 ///
 /// The target list was hand-maintained and had already gone stale — it still
-/// named only search and mpm after [`AGENTS_SET`] shipped in #4277.
+/// named only search and mpm after [`ASSISTANTS_SET`] shipped in #4277.
 /// `tests::signing_persistence_tip_names_every_signable_set` now derives the
 /// expected names from [`SIGNABLE_BINARIES`], so a new set cannot be added
 /// without this string being updated with it.
@@ -823,7 +828,7 @@ pub fn app_data_guidance(binary_path: &str, existed_before: bool) -> String {
 /// `tests::signing_persistence_tip_names_every_signable_set`.
 pub fn signing_persistence_tip() -> &'static str {
     "Tip: install a Developer ID Application certificate (or set TRUSTY_SIGN_IDENTITY) \
-     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-analyze|trusty-agents>` to make \
+     and run `tctl sign <trusty-search|trusty-mpm|trusty-memory|trusty-analyze|trusty-assistants>` to make \
      these grants persist across every future reinstall."
 }
 

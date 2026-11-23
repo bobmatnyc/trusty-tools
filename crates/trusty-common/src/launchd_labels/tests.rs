@@ -117,7 +117,7 @@ fn retired_services_are_not_installed() {
     let members: Vec<&str> = RETIRED_SERVICES.iter().map(|s| s.member).collect();
     assert_eq!(
         members,
-        vec!["trusty-review", "trusty-analyze"],
+        vec!["trusty-review", "trusty-analyze", "trusty-assistants"],
         "adding a retirement is a deliberate act — update this pin with it"
     );
 }
@@ -1343,4 +1343,23 @@ fn identifier_convention_violations_accept_the_repaired_shape() {
                 # local narrated=\"com.trusty.trusty-memory\"\n";
     let found = identifier_convention_violations("scripts/install-fixture-signed.sh", body);
     assert!(found.is_empty(), "expected no violations, got: {found:?}");
+}
+
+/// Why (#11632): `tagent --slack` no longer exists, so nothing may install
+/// `com.trusty.agents.slack`, but hosts that ran it still have the unit loaded
+/// and an upgrade must be able to boot it out.
+/// What: the label is in no `SERVICES` row, and is the one label
+/// `retired_labels_for_member("trusty-assistants")` returns.
+/// Test: this is the test.
+#[test]
+fn retired_agents_slack_is_evicted_not_registered() {
+    assert!(
+        !SERVICES.iter().any(|s| s.label == AGENTS_SLACK),
+        "the cut Slack gateway must not be installed"
+    );
+    assert_eq!(
+        retired_labels_for_member("trusty-assistants"),
+        vec![AGENTS_SLACK],
+        "the retired gateway must stay evictable"
+    );
 }

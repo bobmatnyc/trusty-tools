@@ -200,7 +200,7 @@ describe('what the rendered page must never do', () => {
 		const panel = root.querySelector('#panel-trusty-mpm')!;
 		expect(text(panel)).not.toContain('Full Disk Access');
 		expect(text(panel)).toContain('App Data');
-		expect(text(root.querySelector('#panel-trusty-agents')!)).not.toContain('Full Disk Access');
+		expect(text(root.querySelector('#panel-trusty-assistants')!)).not.toContain('Full Disk Access');
 		expect(text(root.querySelector('#panel-trusty-search')!)).toContain('Full Disk Access');
 	});
 });

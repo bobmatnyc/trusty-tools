@@ -122,7 +122,7 @@ fn registry_create_and_open() {
 /// Failing the whole `open` is the wrong surfacing — a multi-palace root would
 /// be bricked by one unrelated bad file, and the "one corrupt palace doesn't
 /// take the registry down" contract is what `SmMemory` / `PortfolioMemory` /
-/// trusty-agents construct against. So the palace is RETAINED as an observable
+/// trusty-assistants construct against. So the palace is RETAINED as an observable
 /// unopenable entry instead.
 ///
 /// What: persists a healthy palace, then hand-writes a SECOND palace this

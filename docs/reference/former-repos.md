@@ -10,7 +10,7 @@ PRs, issues, or commit messages that reference the former repo names.
 | `bobmatnyc/trusty-memory` | `crates/trusty-memory` — storage engine (`engine` module; in `trusty-common`'s `memory-core` feature until #9271) and MCP frontend |
 | `bobmatnyc/trusty-analyze` | `crates/trusty-analyze` |
 | `bobmatnyc/trusty-mpm` | `crates/trusty-mpm/` (unified crate); its Tauri client `trusty-mpm-gui` was retired (#7964) |
-| `bobmatnyc/open-mpm` | `crates/trusty-agents` (renamed from `open-mpm` in #831) |
+| `bobmatnyc/open-mpm` | `crates/trusty-assistants` (renamed from `open-mpm` to `trusty-agents` in #831, then to `trusty-assistants` in #11632) |
 
 ## Moved back out
 

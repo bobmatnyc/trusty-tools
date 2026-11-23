@@ -506,7 +506,7 @@ which derives the prefix from the directory unconditionally.
 - `trusty-git-analytics` → `-p tga` → tag: **`trusty-git-analytics-v1.4.2`** ✓
 - `trusty-search` → `-p trusty-search` → tag: **`trusty-search-v0.13.1`** ✓
 - `trusty-common` → `-p trusty-common` → tag: **`trusty-common-v0.8.0`** ✓
-- `trusty-agents` → `-p trusty-agents` → tag: **`trusty-agents-v0.2.3`** ✓
+- `trusty-assistants` → `-p trusty-assistants` → tag: **`trusty-assistants-v0.1.0`** (formerly `trusty-agents`, #11632)
 
 > **tga tag aliases (issue #1128) — push ONLY the canonical tag:** push
 > `trusty-git-analytics-v<version>` only. Never push a `tga-v*` alias tag.
