@@ -328,7 +328,12 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             Some("secure") => {
                 let field = json!({"element_index": 8, "role": "AXTextField",
                     "subrole": "AXSecureTextField", "parent_index": 0, "element_token": "tok-pw"});
-                sc["elements"].as_array_mut().expect("elements").push(field);
+                let elements = sc["elements"].as_array_mut().expect("elements");
+                elements.push(field);
+                // #11694: a full walk counts the field it returns.
+                let n = json!(elements.len());
+                sc["returned_element_count"] = n.clone();
+                sc["total_element_count"] = n;
             }
             Some("degraded") => sc["degraded"] = json!(true),
             Some("menus") => {

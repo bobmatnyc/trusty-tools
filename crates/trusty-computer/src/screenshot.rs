@@ -73,7 +73,8 @@ fn sensitive(element: &Value) -> bool {
 
 /// True when the walked AX tree is the whole window: `degraded` is false or
 /// absent, and `returned_element_count` and `total_element_count` are both
-/// present and equal. Anything else is incomplete.
+/// present and equal, and the `elements` array holds exactly that many
+/// entries. Anything else is incomplete.
 ///
 /// #11694: cua-driver 0.23.2 reports `elements_complete: false` on a full
 /// walk, so the flag is not read; the counts decide.
@@ -85,7 +86,12 @@ fn tree_complete(sc: &serde_json::Map<String, Value>) -> bool {
     };
     let returned = sc.get("returned_element_count").and_then(Value::as_u64);
     let total = sc.get("total_element_count").and_then(Value::as_u64);
-    !degraded && returned.is_some() && returned == total
+    // The counts vouch only for an elements array of the size they claim.
+    let walked = sc
+        .get("elements")
+        .and_then(Value::as_array)
+        .map(|e| e.len() as u64);
+    !degraded && returned.is_some() && returned == total && walked == returned
 }
 
 /// Reduce a daemon `get_window_state` result to one image of `window_id`.

@@ -63,7 +63,7 @@ fn bound_refuses_secure_field() {
     ];
     for field in fields {
         let key = field.to_string();
-        let mut snap = capture();
+        let mut snap = counted(json!(false), json!(70), json!(70));
         snap["structuredContent"]["elements"]
             .as_array_mut()
             .expect("elements")
@@ -72,10 +72,16 @@ fn bound_refuses_secure_field() {
     }
 }
 
-/// `capture()` with the 0.23.2 completeness fields set to the given values.
+/// `capture()` with the 0.23.2 completeness fields set to the given values,
+/// and its elements padded with plain buttons to 69, as the live window walks.
 fn counted(flag: Value, returned: Value, total: Value) -> Value {
     let mut snap = capture();
     let sc = &mut snap["structuredContent"];
+    let elements = sc["elements"].as_array_mut().expect("elements");
+    while elements.len() < 69 {
+        let i = elements.len();
+        elements.push(json!({"element_index": i, "role": "AXButton", "parent_index": 0}));
+    }
     sc["elements_complete"] = flag;
     sc["returned_element_count"] = returned;
     sc["total_element_count"] = total;
@@ -114,6 +120,19 @@ fn bound_refuses_incomplete_tree() {
             assert_eq!(refused(&snap), "screenshot_unverified", "{missing}");
         }
     }
+    // Equal counts vouch for nothing when the elements they count are absent.
+    let mut no_elements = counted(json!(false), json!(69), json!(69));
+    let sc = no_elements["structuredContent"]
+        .as_object_mut()
+        .expect("object");
+    sc.remove("elements");
+    assert_eq!(refused(&no_elements), "screenshot_unverified");
+    let mut short = counted(json!(false), json!(69), json!(69));
+    short["structuredContent"]["elements"]
+        .as_array_mut()
+        .expect("elements")
+        .pop();
+    assert_eq!(refused(&short), "screenshot_unverified");
     let mut removed = capture();
     let sc = removed["structuredContent"]
         .as_object_mut()
