@@ -96,14 +96,14 @@ pub fn build_router_with_self_origins(
 ///
 /// `InvalidInput` when `listener` is not bound to a loopback address; any
 /// error reading its local address.
-/// Test: `guard_loopback_listener_refuses_a_non_loopback_socket`
-/// (`tests/assistants_ask.rs`); `tests/assistants_routes.rs`.
+/// Test: `loopback_bind_decision` (the address rule, unit);
+/// `tests/assistants_routes.rs`, `tests/assistants_ask.rs` (the guarded router).
 pub fn guard_loopback_listener(
     router: Router,
     listener: &tokio::net::TcpListener,
 ) -> std::io::Result<Router> {
     let listen = listener.local_addr()?;
-    if !listen.ip().is_loopback() {
+    if !is_loopback_bind(listen) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("the loopback guard cannot serve a non-loopback socket ({listen})"),
@@ -114,6 +114,17 @@ pub fn guard_loopback_listener(
         listen,
         crate::tailnet_peer::OwnMagicDns::default(),
     ))
+}
+
+/// Whether the loopback guard may wrap a socket bound to `addr` (#11748 review).
+///
+/// What: true only for a loopback IP as `serve_listeners` judges it
+/// (`IpAddr::is_loopback`). A wildcard is refused, and so is an IPv4-mapped
+/// `::ffff:127.0.0.1`, which `serve_listeners` would also serve behind the
+/// peer gate rather than as loopback.
+/// Test: `loopback_bind_decision`.
+fn is_loopback_bind(addr: std::net::SocketAddr) -> bool {
+    addr.ip().is_loopback()
 }
 
 /// The one router definition both public builders delegate to, so the mounted
@@ -515,4 +526,25 @@ fn secrets_routes((): ()) -> Router {
         .route("/api/secrets", any(unsupported))
         .route("/api/secrets/", any(unsupported))
         .route("/api/secrets/{*rest}", any(unsupported))
+}
+
+#[cfg(test)]
+mod bind_tests {
+    use super::is_loopback_bind;
+
+    /// #11748 review: the loopback guard's address rule, with no socket bound.
+    #[test]
+    fn loopback_bind_decision() {
+        for (addr, loopback) in [
+            ("0.0.0.0:7070", false),
+            ("[::]:7070", false),
+            ("[::ffff:127.0.0.1]:7070", false),
+            ("192.0.2.1:7070", false),
+            ("127.0.0.1:7070", true),
+            ("[::1]:7070", true),
+        ] {
+            let parsed = addr.parse().expect("socket addr");
+            assert_eq!(is_loopback_bind(parsed), loopback, "{addr}");
+        }
+    }
 }

@@ -7,7 +7,7 @@
 //! `trusty-agents-<id>.sock` that speaks the one-line protocol and records
 //! what it saw. No real `ta` daemon runs. Requests go through the production
 //! loopback guard (`guard_loopback_listener`); the ungated case serves the
-//! bare router on a wildcard bind.
+//! bare router on `127.0.0.1:0` with neither guard.
 //! Test: this file IS the test.
 
 use std::net::SocketAddr;
@@ -444,12 +444,14 @@ async fn ask_with_no_origin_is_403() {
     daemon.abort();
 }
 
-/// AC4 / item 5: the bare router on a wildcard bind — no loopback guard, no
-/// peer gate — refuses all three assistants routes.
+/// AC4 / item 5: the bare router served with neither the loopback guard nor
+/// the peer gate — so no `AdmittedBy` marker — refuses all three assistants
+/// routes. Bound on `127.0.0.1:0`, the only address a test may bind; the
+/// refusal comes from the missing marker, not the address.
 #[tokio::test]
 async fn ungated_listener_cannot_reach_assistants() {
     let fx = Fixture::new(&["izzie"]);
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -560,20 +562,4 @@ async fn concurrent_asks_past_the_cap_are_429() {
     // The timed-out asks released their permits: the next ask is not busy.
     let (status, body) = post_ask(state, "izzie", &question("q"), Some(ORIGIN)).await;
     assert_eq!(status, StatusCode::GATEWAY_TIMEOUT, "{body}");
-}
-
-/// #11748 review: the loopback guard never wraps a non-loopback socket, so it
-/// cannot grant `AdmittedBy::Loopback` to a remote peer.
-#[tokio::test]
-async fn guard_loopback_listener_refuses_a_non_loopback_socket() {
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
-        .await
-        .expect("bind");
-    let err = guard_loopback_listener(build_router(AppState::new(vec![])), &listener)
-        .expect_err("a wildcard socket must be refused");
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    let loopback = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    assert!(guard_loopback_listener(build_router(AppState::new(vec![])), &loopback).is_ok());
 }
