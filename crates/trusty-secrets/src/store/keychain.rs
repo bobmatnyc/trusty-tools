@@ -257,6 +257,7 @@ pub(crate) fn os_error(id: &ItemId, err: &keyring::Error) -> SecretsError {
 pub(crate) const PROBE_SERVICE: &str = "trusty-secrets.doctor-probe";
 
 /// How long the doctor probe waits for the Keychain (#10589).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub const KEYCHAIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Write, then remove, the probe item from this process (#10589).
