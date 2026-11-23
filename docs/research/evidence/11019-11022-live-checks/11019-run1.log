@@ -1,0 +1,20 @@
+wrapper: sha256 8e6640be2c5c57885dda452dad18969fb4aafd6b5b311266026fcc290c0ec9bd
+INFO  binary: $HOME/live-checks/11019-bin/bin/trusty-search (trusty-search 0.64.0)
+INFO  run dir: $HOME/live-checks/runs/11019-20261112T000650Z-1913429
+PASS  binary carries the #11019 dead-run refusal message
+INFO  production daemon on :7879 before: pid=413
+== case SIGKILL: index lc11019-kill-1913429
+INFO  daemon pid=1913474 socket=$HOME/live-checks/runs/11019-20261112T000650Z-1913429/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T000650Z-1913429/KILL/daemon.log
+FAIL  [KILL] index created with defer_embed=false
+INFO  {"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"indexing refused: root is not approved for indexing (default-deny)"}}
+== case SIGTERM: index lc11019-term-1913429
+INFO  daemon pid=1913538 socket=$HOME/live-checks/runs/11019-20261112T000650Z-1913429/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T000650Z-1913429/TERM/daemon.log
+FAIL  [TERM] index created with defer_embed=false
+INFO  {"jsonrpc":"2.0","id":1,"error":{"code":-32003,"message":"indexing refused: root is not approved for indexing (default-deny)"}}
+NOT-COVERED  #11019: a put while a dead run's rollback is in flight is refused with 'is rolling back a staged reindex that died mid-run' (needs an in-process task abort)
+NOT-COVERED  #11019: the guard's rollback re-attaches live and raises the generation without a restart (needs an in-process task abort)
+NOT-COVERED  #11019: a failed rollback bump keeps puts refused until restart (needs a read-only identity dir during an in-process abort)
+NOT-COVERED  #11019/#11025: a delete racing the rollback waits for it; a delete that keeps the index finds live attached (needs an in-process abort)
+PASS  production daemon on :7879 untouched (before=413 after=413)
+== 2 passed, 2 failed; evidence in $HOME/live-checks/runs/11019-20261112T000650Z-1913429
+wrapper: script exit=1

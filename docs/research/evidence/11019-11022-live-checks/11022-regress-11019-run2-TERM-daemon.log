@@ -1,0 +1,190 @@
+2026-11-12T05:08:08.558732Z  WARN memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+2026-11-12T05:08:08.558810Z  INFO trusty-search: detected 47 GB RAM → tier=Large (daemon memory_limit_mb=12043, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=36129, 75% of RAM clamped to [2048, 98304])
+2026-11-12T05:08:08.558816Z  INFO   MEMORY_LIMIT_MB=12043  INDEX_MEMORY_LIMIT_MB=36129  MAX_CHUNKS=602150  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+2026-11-12T05:08:08.558830Z  INFO resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+2026-11-12T05:08:08.775464Z  INFO orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 1 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+2026-11-12T05:08:08.776356Z  INFO concurrency limiter: max_concurrent=8 queue_depth=32
+2026-11-12T05:08:08.776378Z  INFO query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+2026-11-12T05:08:08.830443Z  INFO embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+2026-11-12T05:08:08.830534Z  INFO embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+2026-11-12T05:08:08.830840Z  INFO embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+2026-11-12T05:08:08.831478Z  INFO embedder ready — vector lane online
+2026-11-12T05:08:08.831751Z  INFO warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+2026-11-12T05:08:08.831980Z  INFO project-map: migrated from the registry (#9169) path=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/project-map.toml pins=0
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock
+2026-11-12T05:08:08.832046Z  INFO daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/daemon.lock)
+2026-11-12T05:08:08.832064Z  INFO memory limits: max_chunks=602150 embedding_cache=10000 memory_limit_mb=12043 index_memory_limit_mb=36129
+2026-11-12T05:08:08.832145Z  INFO trusty-search serving rpc socket=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock methods=46 streams=3
+2026-11-12T05:08:10.236811Z  INFO warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data
+2026-11-12T05:08:10.236971Z  WARN warm-boot: no legacy index entries (indexes.toml absent/empty). Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718).
+2026-11-12T05:08:10.236997Z  INFO warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+2026-11-12T05:08:10.237008Z  INFO warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+2026-11-12T05:08:10.237029Z  INFO warm-boot: complete — 0 loaded, 0 cold (lazy), 0 eager successful (legacy + colocated)
+2026-11-12T05:08:10.237068Z  INFO auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+2026-11-12T05:08:10.816278Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:10.923279Z  INFO index generation raised (#10738) index_id="lc11019-term-658691" reason="corpus_created_empty" generation=1
+2026-11-12T05:08:10.942161Z  INFO migrations: applying 'chunks.json → index.redb' (v0 → v1)
+2026-11-12T05:08:10.965318Z  INFO create_index: 'lc11019-term-658691' registered — restored chunks=0 hnsw_snapshot=false graph_nodes=0 lexical_only=false skip_kg=false skip_vector=false → stages(lexical=Pending, semantic=Pending, graph=Pending) (issue #4110)
+2026-11-12T05:08:10.966298Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11019-term-658691 root=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/root
+2026-11-12T05:08:11.013876Z  INFO LazyEmbedderHandle: first embed request — spawning trusty-embedderd binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:11.013920Z  INFO LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) resolved_batch=256 forwarded_batch=256 is_coreml=false is_cuda=false coreml_cap=64 cuda_cap=64
+2026-11-12T05:08:11.014023Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660029-1-1794460091012.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:11.020676Z  INFO trusty_embedderd: trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:11.020707Z  INFO trusty_embedderd: loading embedding model...
+2026-11-12T05:08:11.021012Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) intra_threads=28 inter_threads=1 allow_spinning=false
+2026-11-12T05:08:11.021043Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+2026-11-12T05:08:11.021057Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: registering CPU(no-arena) execution provider
+2026-11-12T05:08:11.048225Z  INFO corpus: copied 0 chunks from live corpus into staging
+2026-11-12T05:08:11.196411Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+2026-11-12T05:08:11.196465Z  INFO trusty_embedderd: model loaded: model=all-MiniLM-L6-v2 dim=384
+2026-11-12T05:08:11.196504Z  INFO trusty_embedderd: BatchQueue started (batch_size=256, window_ms=10)
+2026-11-12T05:08:11.196557Z  INFO trusty_embedderd::batch_queue: embed batch worker started (batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:11.226307Z  INFO EmbedderSupervisor: sidecar started and responding binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:11.247708Z  INFO reindex[lc11019-term-658691]: embedder warm-up complete in 233ms (started 235ms after reindex began)
+2026-11-12T05:08:11.262051Z  INFO staged corpus swap: staging corpus opened for 'lc11019-term-658691' at $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660029-1-1794460091012.tmp
+2026-11-12T05:08:11.415944Z  INFO staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch for 'lc11019-term-658691' (issue #3970)
+2026-11-12T05:08:11.416049Z  INFO usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch (issue #6299)
+2026-11-12T05:08:11.467886Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:11.480376Z  INFO force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb for 'lc11019-term-658691'
+2026-11-12T05:08:11.558085Z  INFO reindex complete: index=lc11019-term-658691 files=1 indexed_new=1 skipped=0 chunks=1 elapsed_ms=545 peak_rss_mb=60 memory_limit_hit=false
+2026-11-12T05:08:11.558125Z  INFO reindex phase timings: index=lc11019-term-658691 walk=0ms hash_cache=0ms carryover=309ms pipeline=79ms prune=0ms hnsw_commit=0ms corpus_commit=83ms kg=30ms poller_stop=0ms other=44ms total=545ms | within pipeline: parse=3ms embed=51ms bm25=0ms vector_upsert=0ms defer_embed=false
+2026-11-12T05:08:13.117005Z  INFO search index_id=lc11019-term-658691 intent=Keyword latency_ms=24 results=1 query=alpha resolve_ms=0 lock_ms=0 embed_ms=21 vector_ms=0 lexical_ms=0 ripgrep_ms=0 fusion_ms=0 rehydrate_wait_ms=0 rehydrate_ran=false hnsw_promoted=false
+2026-11-12T05:08:13.155065Z  INFO embedding paused by operator (#6524) index_id=lc11019-term-658691
+2026-11-12T05:08:13.170222Z  INFO reindex: loaded 1 persisted file hashes from redb (warm skip-cache)
+2026-11-12T05:08:13.170381Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660029-2-1794460093169.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:13.181982Z  INFO reindex[lc11019-term-658691]: embedder warm-up complete in 11ms (started 12ms after reindex began)
+2026-11-12T05:08:13.578277Z  INFO corpus: copied 1 chunks from live corpus into staging
+2026-11-12T05:08:13.582927Z  INFO staged corpus swap: staging corpus opened for 'lc11019-term-658691' at $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660029-2-1794460093169.tmp
+2026-11-12T05:08:15.330675Z  INFO trusty-common: received SIGTERM — initiating graceful shutdown
+2026-11-12T05:08:15.330754Z  INFO shutdown: released 1 paused embedding stage(s)
+2026-11-12T05:08:15.330823Z  INFO shutdown: released 1 paused embedding stage(s)
+2026-11-12T05:08:15.331351Z  INFO stopped 1 file watcher(s) on shutdown
+2026-11-12T05:08:15.331410Z  INFO shutdown: stopped 1 file watcher(s)
+2026-11-12T05:08:15.331444Z  INFO shutdown: flushing 1 index snapshot(s) before exit (concurrency=4, window=54.99929779s remaining, #4393)
+2026-11-12T05:08:15.331465Z  WARN shutdown: skipping flush for 'lc11019-term-658691' — a background reindex is still in progress (issue #1717 — refusing to publish a possibly-partial in-memory state). On-disk snapshot is from the last incremental persist.
+2026-11-12T05:08:15.331508Z  WARN shutdown: closed 0 corpus file(s) cleanly; 1 were not closed within 3s and need repair on the next open (#9459): lc11019-term-658691: a reindex, relocate or embed pass holds the index; its corpus stays attached
+2026-11-12T05:08:15.339858Z  INFO trusty_embedderd::stdio_server: trusty-embedderd --stdio: stdin closed (parent terminated) — exiting
+2026-11-12T05:08:16.350257Z  WARN memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+2026-11-12T05:08:16.350327Z  INFO trusty-search: detected 47 GB RAM → tier=Large (daemon memory_limit_mb=12043, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=36129, 75% of RAM clamped to [2048, 98304])
+2026-11-12T05:08:16.350332Z  INFO   MEMORY_LIMIT_MB=12043  INDEX_MEMORY_LIMIT_MB=36129  MAX_CHUNKS=602150  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+2026-11-12T05:08:16.350349Z  INFO resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+2026-11-12T05:08:16.561327Z  INFO orphan reaper: leaving pid 660629 alone — serves a different data dir (/data/xdg/trusty-search) (#4395)
+2026-11-12T05:08:16.561367Z  INFO orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 2 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+2026-11-12T05:08:16.562220Z  INFO concurrency limiter: max_concurrent=8 queue_depth=32
+2026-11-12T05:08:16.562246Z  INFO query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+2026-11-12T05:08:16.620169Z  INFO embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+2026-11-12T05:08:16.620262Z  INFO embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+2026-11-12T05:08:16.620529Z  INFO embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+2026-11-12T05:08:16.620802Z  INFO embedder ready — vector lane online
+2026-11-12T05:08:16.620868Z  INFO warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+2026-11-12T05:08:16.621222Z  INFO warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data
+2026-11-12T05:08:16.621291Z  INFO warm-boot: loaded 1 legacy index(es) from $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes.toml
+2026-11-12T05:08:16.621494Z  INFO warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+2026-11-12T05:08:16.621567Z  INFO warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock
+2026-11-12T05:08:16.621670Z  INFO daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/daemon.lock)
+2026-11-12T05:08:16.621686Z  INFO memory limits: max_chunks=602150 embedding_cache=10000 memory_limit_mb=12043 index_memory_limit_mb=36129
+2026-11-12T05:08:16.621717Z  INFO warm-boot: restoring 1 legacy index(es) from indexes.toml
+2026-11-12T05:08:16.621842Z  INFO trusty-search serving rpc socket=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock methods=46 streams=3
+2026-11-12T05:08:16.625610Z  INFO warm-boot: restored HNSW snapshot for 'lc11019-term-658691' from $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch
+2026-11-12T05:08:16.626064Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:16.685983Z  INFO index generation raised (#10738) index_id="lc11019-term-658691" reason="identity_bump_pending" generation=2
+2026-11-12T05:08:16.694298Z  INFO warm-boot: loaded persisted symbol graph for 'lc11019-term-658691' (1 nodes / 0 edges, stale=false)
+2026-11-12T05:08:16.694317Z  INFO restored 1 chunks for index 'lc11019-term-658691' from redb corpus
+2026-11-12T05:08:16.694324Z  INFO warm-boot: restored 1 chunks for index 'lc11019-term-658691' from redb
+2026-11-12T05:08:16.695979Z  INFO warm-boot: index 'lc11019-term-658691' restored (colocated=false) — chunks=1 hnsw_snapshot=true graph_nodes=1 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None → stages(lexical=Ready, semantic=Ready, graph=Ready)
+2026-11-12T05:08:16.697330Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11019-term-658691 root=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/root
+2026-11-12T05:08:16.697445Z  INFO warm-boot: legacy phase complete — 1/1 (skipped tcc=0 timeout=0 panicked=0)
+2026-11-12T05:08:16.697501Z  INFO warm-boot: complete — 1 loaded, 0 cold (lazy), 1 eager successful (legacy + colocated)
+2026-11-12T05:08:16.697586Z  INFO boot reconcile: checking 1 registered index(es) for staleness (threshold=250 files, disable with TRUSTY_NO_BOOT_RECONCILE=1)
+2026-11-12T05:08:16.697633Z  INFO auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+2026-11-12T05:08:18.609540Z  INFO LazyEmbedderHandle: first embed request — spawning trusty-embedderd binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:18.609614Z  INFO LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) resolved_batch=256 forwarded_batch=256 is_coreml=false is_cuda=false coreml_cap=64 cuda_cap=64
+2026-11-12T05:08:18.617253Z  INFO trusty_embedderd: trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:18.617279Z  INFO trusty_embedderd: loading embedding model...
+2026-11-12T05:08:18.617496Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) intra_threads=28 inter_threads=1 allow_spinning=false
+2026-11-12T05:08:18.617521Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+2026-11-12T05:08:18.617533Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: registering CPU(no-arena) execution provider
+2026-11-12T05:08:18.776035Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+2026-11-12T05:08:18.776083Z  INFO trusty_embedderd: model loaded: model=all-MiniLM-L6-v2 dim=384
+2026-11-12T05:08:18.776117Z  INFO trusty_embedderd: BatchQueue started (batch_size=256, window_ms=10)
+2026-11-12T05:08:18.776164Z  INFO trusty_embedderd::batch_queue: embed batch worker started (batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:18.806145Z  INFO EmbedderSupervisor: sidecar started and responding binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:18.827858Z  INFO search index_id=lc11019-term-658691 intent=Keyword latency_ms=221 results=1 query=alpha resolve_ms=0 lock_ms=0 embed_ms=218 vector_ms=0 lexical_ms=0 ripgrep_ms=0 fusion_ms=0 rehydrate_wait_ms=0 rehydrate_ran=false hnsw_promoted=false
+2026-11-12T05:08:19.012000Z  INFO usearch: promoted view → mutable for $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch (1 vectors)
+2026-11-12T05:08:19.078393Z  INFO reindex[lc11019-term-658691]: took over leftover staging corpus $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660029-2-1794460093169.tmp as $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660873-1-1794460099077.tmp (#8889)
+2026-11-12T05:08:19.078724Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660873-1-1794460099077.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:19.094209Z  INFO reindex[lc11019-term-658691]: RESUMING from checkpoint at $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660873-1-1794460099077.tmp — 2 chunk(s) and 3 file hash(es) already staged under root $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/root; every staged file is still re-hashed against its current on-disk bytes before it can be skipped (issue #3979)
+2026-11-12T05:08:19.116878Z  INFO reindex[lc11019-term-658691]: adopted staging corpus $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb.run-660873-1-1794460099077.tmp (2 staged chunk(s)); dropped 4 in-memory cache entr(ies) built from the pre-crash live corpus so reads rehydrate from the adopted corpus (issue #3979)
+2026-11-12T05:08:19.138695Z  INFO reindex[lc11019-term-658691]: embedder warm-up complete in 21ms (started 60ms after reindex began)
+2026-11-12T05:08:19.139875Z  INFO reindex[lc11019-term-658691]: prune pass: 1 deleted file(s) detected — pruning stale data
+2026-11-12T05:08:19.146903Z  INFO index 'lc11019-term-658691': rehydrated 2 chunks + BM25 + 1 file entity lists from redb after idle eviction (detached task; survives caller cancellation, issue #3683)
+2026-11-12T05:08:19.146921Z  INFO index 'lc11019-term-658691': rehydrate cost 0 ms recorded for idle-evict scaling index_id=lc11019-term-658691 rehydrate_ms=0 scan_ms=0 sort_ms=0 entities_ms=0 bm25_build_ms=0 commit_ms=0 chunks=2
+2026-11-12T05:08:19.165903Z  INFO reindex[lc11019-term-658691]: prune pass: pruned 1 stale chunk(s) from 1 deleted file(s)
+2026-11-12T05:08:19.167281Z  INFO staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch for 'lc11019-term-658691' (issue #3970)
+2026-11-12T05:08:19.167302Z  INFO usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch (issue #6299)
+2026-11-12T05:08:19.212442Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:19.249654Z  INFO index generation raised (#10738) index_id="lc11019-term-658691" reason="identity_bump_pending" generation=3
+2026-11-12T05:08:19.256434Z  INFO force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb for 'lc11019-term-658691'
+2026-11-12T05:08:19.332287Z  INFO reindex complete: index=lc11019-term-658691 files=2 indexed_new=0 skipped=2 chunks=0 elapsed_ms=254 peak_rss_mb=62 memory_limit_hit=false
+2026-11-12T05:08:19.332345Z  INFO reindex phase timings: index=lc11019-term-658691 walk=0ms hash_cache=0ms carryover=22ms pipeline=0ms prune=26ms hnsw_commit=1ms corpus_commit=120ms kg=18ms poller_stop=0ms other=67ms total=254ms | within pipeline: parse=0ms embed=0ms bm25=0ms vector_upsert=0ms defer_embed=false
+2026-11-12T05:08:19.332674Z  INFO deferred_embed queue: 1 pending, order=[lc11019-term-658691(0)]
+2026-11-12T05:08:19.332759Z  INFO deferred_embed[lc11019-term-658691]: starting background embed pass (1 chunks)
+2026-11-12T05:08:19.332808Z  INFO deferred_embed[lc11019-term-658691]: embedded 0/1 chunks — marking semantic Ready
+2026-11-12T05:08:19.333498Z  INFO deferred_embed queue: drained — catch-up cycle complete
+2026-11-12T05:08:21.156041Z  INFO trusty-common: received SIGTERM — initiating graceful shutdown
+2026-11-12T05:08:21.156650Z  INFO stopped 1 file watcher(s) on shutdown
+2026-11-12T05:08:21.156686Z  INFO shutdown: stopped 1 file watcher(s)
+2026-11-12T05:08:21.156704Z  INFO shutdown: flushing 1 index snapshot(s) before exit (concurrency=4, window=54.999394445s remaining, #4393)
+2026-11-12T05:08:21.170780Z  INFO shutdown: closed 1 corpus file(s) cleanly
+2026-11-12T05:08:21.177503Z  INFO trusty_embedderd::stdio_server: trusty-embedderd --stdio: stdin closed (parent terminated) — exiting
+2026-11-12T05:08:22.172893Z  WARN memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+2026-11-12T05:08:22.172961Z  INFO trusty-search: detected 47 GB RAM → tier=Large (daemon memory_limit_mb=12043, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=36129, 75% of RAM clamped to [2048, 98304])
+2026-11-12T05:08:22.172966Z  INFO   MEMORY_LIMIT_MB=12043  INDEX_MEMORY_LIMIT_MB=36129  MAX_CHUNKS=602150  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+2026-11-12T05:08:22.172982Z  INFO resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+2026-11-12T05:08:22.385726Z  INFO orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+2026-11-12T05:08:22.385773Z  INFO orphan reaper: leaving pid 660629 alone — serves a different data dir (/data/xdg/trusty-search) (#4395)
+· 2 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+2026-11-12T05:08:22.386604Z  INFO concurrency limiter: max_concurrent=8 queue_depth=32
+2026-11-12T05:08:22.386623Z  INFO query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+2026-11-12T05:08:22.442216Z  INFO embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+2026-11-12T05:08:22.442280Z  INFO embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+2026-11-12T05:08:22.442612Z  INFO embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+2026-11-12T05:08:22.443081Z  INFO embedder ready — vector lane online
+2026-11-12T05:08:22.443179Z  INFO warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+2026-11-12T05:08:22.443540Z  INFO warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data
+2026-11-12T05:08:22.443602Z  INFO warm-boot: loaded 1 legacy index(es) from $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes.toml
+2026-11-12T05:08:22.443804Z  INFO warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+2026-11-12T05:08:22.443879Z  INFO warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+2026-11-12T05:08:22.444003Z  INFO warm-boot: restoring 1 legacy index(es) from indexes.toml
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock
+2026-11-12T05:08:22.444110Z  INFO daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/daemon.lock)
+2026-11-12T05:08:22.444139Z  INFO memory limits: max_chunks=602150 embedding_cache=10000 memory_limit_mb=12043 index_memory_limit_mb=36129
+2026-11-12T05:08:22.444206Z  INFO trusty-search serving rpc socket=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/trusty-search.sock methods=46 streams=3
+2026-11-12T05:08:22.448395Z  INFO warm-boot: restored HNSW snapshot for 'lc11019-term-658691' from $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/hnsw.usearch
+2026-11-12T05:08:22.448777Z  INFO corpus: opening $HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/data/indexes/lc11019-term-658691/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:08:22.462864Z  INFO warm-boot: loaded persisted symbol graph for 'lc11019-term-658691' (1 nodes / 0 edges, stale=true)
+2026-11-12T05:08:22.462882Z  INFO restored 1 chunks for index 'lc11019-term-658691' from redb corpus
+2026-11-12T05:08:22.462889Z  INFO warm-boot: restored 1 chunks for index 'lc11019-term-658691' from redb
+2026-11-12T05:08:22.464150Z  INFO warm-boot: index 'lc11019-term-658691' restored (colocated=false) — chunks=1 hnsw_snapshot=true graph_nodes=1 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None → stages(lexical=Ready, semantic=Ready, graph=Ready)
+2026-11-12T05:08:22.465164Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11019-term-658691 root=$HOME/live-checks/runs/11019-20261112T050752Z-658691/TERM/root
+2026-11-12T05:08:22.465274Z  INFO warm-boot: legacy phase complete — 1/1 (skipped tcc=0 timeout=0 panicked=0)
+2026-11-12T05:08:22.465317Z  INFO warm-boot: complete — 1 loaded, 0 cold (lazy), 1 eager successful (legacy + colocated)
+2026-11-12T05:08:22.465420Z  INFO boot reconcile: checking 1 registered index(es) for staleness (threshold=250 files, disable with TRUSTY_NO_BOOT_RECONCILE=1)
+2026-11-12T05:08:22.465476Z  INFO auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+2026-11-12T05:08:24.429542Z  INFO LazyEmbedderHandle: first embed request — spawning trusty-embedderd binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:24.429613Z  INFO LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) resolved_batch=256 forwarded_batch=256 is_coreml=false is_cuda=false coreml_cap=64 cuda_cap=64
+2026-11-12T05:08:24.437584Z  INFO trusty_embedderd: trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:24.437611Z  INFO trusty_embedderd: loading embedding model...
+2026-11-12T05:08:24.437860Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) intra_threads=28 inter_threads=1 allow_spinning=false
+2026-11-12T05:08:24.437884Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+2026-11-12T05:08:24.437895Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: registering CPU(no-arena) execution provider
+2026-11-12T05:08:24.596476Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+2026-11-12T05:08:24.600604Z  INFO trusty_embedderd: model loaded: model=all-MiniLM-L6-v2 dim=384
+2026-11-12T05:08:24.600642Z  INFO trusty_embedderd: BatchQueue started (batch_size=256, window_ms=10)
+2026-11-12T05:08:24.600690Z  INFO trusty_embedderd::batch_queue: embed batch worker started (batch_size=256, batch_window_ms=10)
+2026-11-12T05:08:24.629997Z  INFO EmbedderSupervisor: sidecar started and responding binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:08:24.651728Z  WARN corpus: chunk 'src/late_10738.rs::Function::late_10738::1::3' not found in redb — skipping
+2026-11-12T05:08:24.652002Z  INFO search index_id=lc11019-term-658691 intent=Keyword latency_ms=225 results=1 query=alpha resolve_ms=0 lock_ms=0 embed_ms=222 vector_ms=0 lexical_ms=0 ripgrep_ms=0 fusion_ms=0 rehydrate_wait_ms=0 rehydrate_ran=false hnsw_promoted=false

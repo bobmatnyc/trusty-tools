@@ -1,0 +1,399 @@
+== run dir $HOME/live-checks/runs/11019-20261112T003904Z-2600193
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193:
+total 32
+drwxr-xr-x 7 user user 4096 Nov 11 16:39 .
+drwxr-xr-x 3 user user 4096 Nov 11 16:39 ..
+drwxr-xr-x 4 user user 4096 Nov 11 16:39 KILL
+drwxr-xr-x 4 user user 4096 Nov 11 16:39 TERM
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 mpm-root
+-rw-r--r-- 1 user user  740 Nov 11 16:39 rpc.py
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 xdg-config
+drwxr-xr-x 3 user user 4096 Nov 11 16:39 xdg-data
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL:
+total 44
+drwxr-xr-x 4 user user  4096 Nov 11 16:39 .
+drwxr-xr-x 7 user user  4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user 27548 Nov 11 16:39 daemon.log
+drwx------ 4 user user  4096 Nov 11 16:39 data
+drwxr-xr-x 2 user user  4096 Nov 11 16:39 root
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data:
+total 48
+drwx------ 4 user user 4096 Nov 11 16:39 .
+drwxr-xr-x 4 user user 4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user   98 Nov 11 16:39 .grandfathered
+-rw-r--r-- 1 user user   88 Nov 11 16:39 allowlist.toml
+-rw-r--r-- 1 user user    7 Nov 11 16:39 daemon.lock
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 index-identity
+drwxr-xr-x 3 user user 4096 Nov 11 16:39 indexes
+-rw-r--r-- 1 user user  764 Nov 11 16:39 indexes.toml
+-rw-r--r-- 1 user user    7 Nov 11 16:39 indexes.toml.lock
+-rw-r--r-- 1 user user  282 Nov 11 16:39 project-map.toml
+-rw-r--r-- 1 user user    7 Nov 11 16:39 project-map.toml.lock
+-rw-r--r-- 1 user user   87 Nov 11 16:39 roots.toml
+srw------- 1 user user    0 Nov 11 16:39 trusty-search.sock
+-rw------- 1 user user    0 Nov 11 16:39 trusty-search.sock.lock
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/index-identity:
+total 12
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 .
+drwx------ 4 user user 4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user   65 Nov 11 16:39 lc11019-kill-2600193.json
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes:
+total 12
+drwxr-xr-x 3 user user 4096 Nov 11 16:39 .
+drwx------ 4 user user 4096 Nov 11 16:39 ..
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 lc11019-kill-2600193
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193:
+total 100
+drwxr-xr-x 2 user user   4096 Nov 11 16:39 .
+drwxr-xr-x 3 user user   4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user    223 Nov 11 16:39 hnsw.keys.json
+-rw-r--r-- 1 user user   2848 Nov 11 16:39 hnsw.usearch
+-rw-r--r-- 1 user user 557056 Nov 11 16:39 index.redb
+-rw-r--r-- 1 user user     20 Nov 11 16:39 schema_version.json
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/root:
+total 16
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 .
+drwxr-xr-x 4 user user 4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user   37 Nov 11 16:39 a.rs
+-rw-r--r-- 1 user user   36 Nov 11 16:39 b.rs
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM:
+total 48
+drwxr-xr-x 4 user user  4096 Nov 11 16:39 .
+drwxr-xr-x 7 user user  4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user 28905 Nov 11 16:39 daemon.log
+drwx------ 4 user user  4096 Nov 11 16:39 data
+drwxr-xr-x 2 user user  4096 Nov 11 16:39 root
+
+$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data:
+total 48
+drwx------ 4 user user 4096 Nov 11 16:39 .
+drwxr-xr-x 4 user user 4096 Nov 11 16:39 ..
+-rw-r--r-- 1 user user   98 Nov 11 16:39 .grandfathered
+-rw-r--r-- 1 user user   88 Nov 11 16:39 allowlist.toml
+-rw-r--r-- 1 user user    7 Nov 11 16:39 daemon.lock
+drwxr-xr-x 2 user user 4096 Nov 11 16:39 index-identity
+
+== KILL daemon.log (last 120 lines)
+[2m2026-11-12T00:39:04.803304Z[0m [32m INFO[0m concurrency limiter: max_concurrent=8 queue_depth=32
+[2m2026-11-12T00:39:04.803315Z[0m [32m INFO[0m query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+[2m2026-11-12T00:39:04.850864Z[0m [32m INFO[0m embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11019-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+[2m2026-11-12T00:39:04.850946Z[0m [32m INFO[0m embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+[2m2026-11-12T00:39:04.851128Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:04.851169Z[0m [32m INFO[0m embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+[2m2026-11-12T00:39:04.851489Z[0m [32m INFO[0m embedder ready — vector lane online
+[2m2026-11-12T00:39:04.851646Z[0m [32m INFO[0m warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+[2m2026-11-12T00:39:04.851830Z[0m [32m INFO[0m project-map: migrated from the registry (#9169) [3mpath[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/project-map.toml [3mpins[0m[2m=[0m0
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock
+[2m2026-11-12T00:39:04.852664Z[0m [32m INFO[0m daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/daemon.lock)
+[2m2026-11-12T00:39:04.852682Z[0m [32m INFO[0m memory limits: max_chunks=460800 embedding_cache=10000 memory_limit_mb=9216 index_memory_limit_mb=27648
+[2m2026-11-12T00:39:04.852783Z[0m [32m INFO[0m trusty-search serving rpc [3msocket[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock [3mmethods[0m[2m=[0m46 [3mstreams[0m[2m=[0m3
+[2m2026-11-12T00:39:04.863156Z[0m [32m INFO[0m warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data
+[2m2026-11-12T00:39:04.863206Z[0m [33m WARN[0m warm-boot: no legacy index entries (indexes.toml absent/empty). Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718).
+[2m2026-11-12T00:39:04.863225Z[0m [32m INFO[0m warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+[2m2026-11-12T00:39:04.863234Z[0m [32m INFO[0m warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+[2m2026-11-12T00:39:04.863245Z[0m [32m INFO[0m warm-boot: complete — 0 loaded, 0 cold (lazy), 0 eager successful (legacy + colocated)
+[2m2026-11-12T00:39:04.863280Z[0m [32m INFO[0m auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+[2m2026-11-12T00:39:06.845099Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:06.922833Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-kill-2600193" [3mreason[0m[2m=[0m"corpus_created_empty" [3mgeneration[0m[2m=[0m1
+[2m2026-11-12T00:39:06.927947Z[0m [32m INFO[0m migrations: applying 'chunks.json → index.redb' (v0 → v1)
+[2m2026-11-12T00:39:06.938670Z[0m [32m INFO[0m create_index: 'lc11019-kill-2600193' registered — restored chunks=0 hnsw_snapshot=false graph_nodes=0 lexical_only=false skip_kg=false skip_vector=false → stages(lexical=Pending, semantic=Pending, graph=Pending) (issue #4110)
+[2m2026-11-12T00:39:06.939618Z[0m [32m INFO[0m file watcher active — saves trigger incremental indexing (issue #1621) [3mindex_id[0m[2m=[0mlc11019-kill-2600193 [3mroot[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/root
+[2m2026-11-12T00:39:06.970838Z[0m [32m INFO[0m LazyEmbedderHandle: first embed request — spawning trusty-embedderd [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:06.970878Z[0m [32m INFO[0m LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) [3mresolved_batch[0m[2m=[0m256 [3mforwarded_batch[0m[2m=[0m256 [3mis_coreml[0m[2m=[0mfalse [3mis_cuda[0m[2m=[0mfalse [3mcoreml_cap[0m[2m=[0m64 [3mcuda_cap[0m[2m=[0m64
+[2m2026-11-12T00:39:06.971043Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-1-1794443946969.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:06.978167Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:06.978196Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m loading embedding model...
+[2m2026-11-12T00:39:06.978432Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) [3mintra_threads[0m[2m=[0m28 [3minter_threads[0m[2m=[0m1 [3mallow_spinning[0m[2m=[0mfalse
+[2m2026-11-12T00:39:06.978460Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+[2m2026-11-12T00:39:06.978469Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: registering CPU(no-arena) execution provider
+[2m2026-11-12T00:39:06.998101Z[0m [32m INFO[0m corpus: copied 0 chunks from live corpus into staging
+[2m2026-11-12T00:39:07.154178Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+[2m2026-11-12T00:39:07.154222Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m model loaded: model=all-MiniLM-L6-v2 dim=384
+[2m2026-11-12T00:39:07.154252Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m BatchQueue started (batch_size=256, window_ms=10)
+[2m2026-11-12T00:39:07.154298Z[0m [32m INFO[0m [2mtrusty_embedderd::batch_queue[0m[2m:[0m embed batch worker started (batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:07.182808Z[0m [32m INFO[0m EmbedderSupervisor: sidecar started and responding [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:07.203685Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: embedder warm-up complete in 232ms (started 234ms after reindex began)
+[2m2026-11-12T00:39:07.217071Z[0m [32m INFO[0m staged corpus swap: staging corpus opened for 'lc11019-kill-2600193' at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-1-1794443946969.tmp
+[2m2026-11-12T00:39:07.370154Z[0m [32m INFO[0m staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch for 'lc11019-kill-2600193' (issue #3970)
+[2m2026-11-12T00:39:07.370237Z[0m [32m INFO[0m usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch (issue #6299)
+[2m2026-11-12T00:39:07.417413Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:07.431602Z[0m [32m INFO[0m force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb for 'lc11019-kill-2600193'
+[2m2026-11-12T00:39:07.510479Z[0m [32m INFO[0m reindex complete: index=lc11019-kill-2600193 files=1 indexed_new=1 skipped=0 chunks=1 elapsed_ms=540 peak_rss_mb=59 memory_limit_hit=false
+[2m2026-11-12T00:39:07.510512Z[0m [32m INFO[0m reindex phase timings: index=lc11019-kill-2600193 walk=0ms hash_cache=0ms carryover=290ms pipeline=96ms prune=0ms hnsw_commit=0ms corpus_commit=93ms kg=24ms poller_stop=0ms other=37ms total=540ms | within pipeline: parse=2ms embed=50ms bm25=0ms vector_upsert=0ms defer_embed=false
+[2m2026-11-12T00:39:09.063263Z[0m [32m INFO[0m embedding paused by operator (#6524) [3mindex_id[0m[2m=[0mlc11019-kill-2600193
+[2m2026-11-12T00:39:09.080540Z[0m [32m INFO[0m reindex: loaded 1 persisted file hashes from redb (warm skip-cache)
+[2m2026-11-12T00:39:09.080695Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-2-1794443949079.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:09.092501Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: embedder warm-up complete in 11ms (started 12ms after reindex began)
+[2m2026-11-12T00:39:09.155964Z[0m [32m INFO[0m corpus: copied 1 chunks from live corpus into staging
+[2m2026-11-12T00:39:09.163207Z[0m [32m INFO[0m staged corpus swap: staging corpus opened for 'lc11019-kill-2600193' at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-2-1794443949079.tmp
+[2m2026-11-12T00:39:11.252606Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:11.252667Z[0m [33m WARN[0m memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+[2m2026-11-12T00:39:11.252681Z[0m [32m INFO[0m trusty-search: detected 36 GB RAM → tier=Large (daemon memory_limit_mb=9216, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=27648, 75% of RAM clamped to [2048, 98304])
+[2m2026-11-12T00:39:11.252685Z[0m [32m INFO[0m   MEMORY_LIMIT_MB=9216  INDEX_MEMORY_LIMIT_MB=27648  MAX_CHUNKS=460800  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+[2m2026-11-12T00:39:11.252702Z[0m [32m INFO[0m resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+[2m2026-11-12T00:39:11.448538Z[0m [32m INFO[0m orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 1 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+[2m2026-11-12T00:39:11.449397Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:11.449409Z[0m [32m INFO[0m concurrency limiter: max_concurrent=8 queue_depth=32
+[2m2026-11-12T00:39:11.449419Z[0m [32m INFO[0m query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+[2m2026-11-12T00:39:11.496012Z[0m [32m INFO[0m embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11019-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+[2m2026-11-12T00:39:11.496089Z[0m [32m INFO[0m embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+[2m2026-11-12T00:39:11.496356Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:11.496405Z[0m [32m INFO[0m embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+[2m2026-11-12T00:39:11.496661Z[0m [32m INFO[0m embedder ready — vector lane online
+[2m2026-11-12T00:39:11.496754Z[0m [32m INFO[0m warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+[2m2026-11-12T00:39:11.497135Z[0m [32m INFO[0m warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data
+[2m2026-11-12T00:39:11.497215Z[0m [32m INFO[0m warm-boot: loaded 1 legacy index(es) from $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes.toml
+[2m2026-11-12T00:39:11.497497Z[0m [32m INFO[0m warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+[2m2026-11-12T00:39:11.497575Z[0m [32m INFO[0m warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock
+[2m2026-11-12T00:39:11.497589Z[0m [32m INFO[0m warm-boot: parking 1/1 index(es) in cold store (lazy-load on first query, issue #993)
+[2m2026-11-12T00:39:11.497647Z[0m [32m INFO[0m warm-boot: complete — 0 loaded, 1 cold (lazy), 0 eager successful (legacy + colocated)
+[2m2026-11-12T00:39:11.497663Z[0m [32m INFO[0m daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/daemon.lock)
+[2m2026-11-12T00:39:11.497676Z[0m [32m INFO[0m auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+[2m2026-11-12T00:39:11.497684Z[0m [32m INFO[0m memory limits: max_chunks=460800 embedding_cache=10000 memory_limit_mb=9216 index_memory_limit_mb=27648
+[2m2026-11-12T00:39:11.497942Z[0m [32m INFO[0m trusty-search serving rpc [3msocket[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock [3mmethods[0m[2m=[0m46 [3mstreams[0m[2m=[0m3
+[2m2026-11-12T00:39:13.518974Z[0m [32m INFO[0m lazy-load: index 'lc11019-kill-2600193' not yet warm-booted — loading on demand (issue #993)
+[2m2026-11-12T00:39:13.519582Z[0m [32m INFO[0m warm-boot: restored HNSW snapshot for 'lc11019-kill-2600193' from $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch
+[2m2026-11-12T00:39:13.519934Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:13.550844Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-kill-2600193" [3mreason[0m[2m=[0m"identity_bump_pending" [3mgeneration[0m[2m=[0m2
+[2m2026-11-12T00:39:13.554052Z[0m [32m INFO[0m warm-boot: loaded persisted symbol graph for 'lc11019-kill-2600193' (1 nodes / 0 edges, stale=false)
+[2m2026-11-12T00:39:13.554072Z[0m [32m INFO[0m restored 1 chunks for index 'lc11019-kill-2600193' from redb corpus
+[2m2026-11-12T00:39:13.554079Z[0m [32m INFO[0m warm-boot: restored 1 chunks for index 'lc11019-kill-2600193' from redb
+[2m2026-11-12T00:39:13.556108Z[0m [32m INFO[0m lazy-load: index 'lc11019-kill-2600193' restored — chunks=1 hnsw_snapshot=true graph_nodes=1 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None
+[2m2026-11-12T00:39:13.614618Z[0m [32m INFO[0m LazyEmbedderHandle: first embed request — spawning trusty-embedderd [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:13.614745Z[0m [32m INFO[0m LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) [3mresolved_batch[0m[2m=[0m256 [3mforwarded_batch[0m[2m=[0m256 [3mis_coreml[0m[2m=[0mfalse [3mis_cuda[0m[2m=[0mfalse [3mcoreml_cap[0m[2m=[0m64 [3mcuda_cap[0m[2m=[0m64
+[2m2026-11-12T00:39:13.622181Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:13.622218Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m loading embedding model...
+[2m2026-11-12T00:39:13.622466Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) [3mintra_threads[0m[2m=[0m28 [3minter_threads[0m[2m=[0m1 [3mallow_spinning[0m[2m=[0mfalse
+[2m2026-11-12T00:39:13.622488Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+[2m2026-11-12T00:39:13.622496Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: registering CPU(no-arena) execution provider
+[2m2026-11-12T00:39:13.789935Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+[2m2026-11-12T00:39:13.789981Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m model loaded: model=all-MiniLM-L6-v2 dim=384
+[2m2026-11-12T00:39:13.790011Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m BatchQueue started (batch_size=256, window_ms=10)
+[2m2026-11-12T00:39:13.790056Z[0m [32m INFO[0m [2mtrusty_embedderd::batch_queue[0m[2m:[0m embed batch worker started (batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:13.819198Z[0m [32m INFO[0m EmbedderSupervisor: sidecar started and responding [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:13.860696Z[0m [32m INFO[0m usearch: promoted view → mutable for $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch (1 vectors)
+[2m2026-11-12T00:39:13.921766Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: took over leftover staging corpus $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-2-1794443949079.tmp as $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600552-1-1794443953920.tmp (#8889)
+[2m2026-11-12T00:39:13.922077Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600552-1-1794443953920.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:13.937871Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: RESUMING from checkpoint at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600552-1-1794443953920.tmp — 3 chunk(s) and 3 file hash(es) already staged under root $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/root; every staged file is still re-hashed against its current on-disk bytes before it can be skipped (issue #3979)
+[2m2026-11-12T00:39:13.952464Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: adopted staging corpus $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600552-1-1794443953920.tmp (3 staged chunk(s)); dropped 4 in-memory cache entr(ies) built from the pre-crash live corpus so reads rehydrate from the adopted corpus (issue #3979)
+[2m2026-11-12T00:39:13.962978Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: prune pass: 1 deleted file(s) detected — pruning stale data
+[2m2026-11-12T00:39:13.966083Z[0m [32m INFO[0m index 'lc11019-kill-2600193': rehydrated 3 chunks + BM25 + 1 file entity lists from redb after idle eviction (detached task; survives caller cancellation, issue #3683)
+[2m2026-11-12T00:39:13.966099Z[0m [32m INFO[0m index 'lc11019-kill-2600193': rehydrate cost 0 ms recorded for idle-evict scaling [3mindex_id[0m[2m=[0mlc11019-kill-2600193 [3mrehydrate_ms[0m[2m=[0m0 [3mscan_ms[0m[2m=[0m0 [3msort_ms[0m[2m=[0m0 [3mentities_ms[0m[2m=[0m0 [3mbm25_build_ms[0m[2m=[0m0 [3mcommit_ms[0m[2m=[0m0 [3mchunks[0m[2m=[0m3
+[2m2026-11-12T00:39:13.973613Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: prune pass: pruned 1 stale chunk(s) from 1 deleted file(s)
+[2m2026-11-12T00:39:13.974645Z[0m [32m INFO[0m staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch for 'lc11019-kill-2600193' (issue #3970)
+[2m2026-11-12T00:39:13.974683Z[0m [32m INFO[0m usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/hnsw.usearch (issue #6299)
+[2m2026-11-12T00:39:13.984142Z[0m [32m INFO[0m reindex[lc11019-kill-2600193]: embedder warm-up complete in 21ms (started 63ms after reindex began)
+[2m2026-11-12T00:39:14.003483Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:14.042218Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-kill-2600193" [3mreason[0m[2m=[0m"identity_bump_pending" [3mgeneration[0m[2m=[0m3
+[2m2026-11-12T00:39:14.048681Z[0m [32m INFO[0m force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb for 'lc11019-kill-2600193'
+[2m2026-11-12T00:39:14.098006Z[0m [32m INFO[0m reindex complete: index=lc11019-kill-2600193 files=2 indexed_new=0 skipped=2 chunks=0 elapsed_ms=177 peak_rss_mb=59 memory_limit_hit=false
+[2m2026-11-12T00:39:14.098031Z[0m [32m INFO[0m reindex phase timings: index=lc11019-kill-2600193 walk=0ms hash_cache=0ms carryover=14ms pipeline=0ms prune=10ms hnsw_commit=1ms corpus_commit=87ms kg=13ms poller_stop=0ms other=52ms total=177ms | within pipeline: parse=0ms embed=0ms bm25=0ms vector_upsert=0ms defer_embed=false
+[2m2026-11-12T00:39:14.098371Z[0m [32m INFO[0m deferred_embed queue: 1 pending, order=[lc11019-kill-2600193(1)]
+[2m2026-11-12T00:39:14.098434Z[0m [32m INFO[0m deferred_embed[lc11019-kill-2600193]: starting background embed pass (2 chunks)
+[2m2026-11-12T00:39:14.135125Z[0m [32m INFO[0m deferred_embed[lc11019-kill-2600193]: embedded 1/2 chunks — marking semantic Ready
+[2m2026-11-12T00:39:14.135589Z[0m [32m INFO[0m deferred_embed queue: drained — catch-up cycle complete
+
+== TERM daemon.log (last 120 lines)
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock
+[2m2026-11-12T00:39:16.333489Z[0m [32m INFO[0m daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/daemon.lock)
+[2m2026-11-12T00:39:16.333505Z[0m [32m INFO[0m memory limits: max_chunks=460800 embedding_cache=10000 memory_limit_mb=9216 index_memory_limit_mb=27648
+[2m2026-11-12T00:39:16.333583Z[0m [32m INFO[0m trusty-search serving rpc [3msocket[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock [3mmethods[0m[2m=[0m46 [3mstreams[0m[2m=[0m3
+[2m2026-11-12T00:39:16.358282Z[0m [32m INFO[0m warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data
+[2m2026-11-12T00:39:16.358348Z[0m [33m WARN[0m warm-boot: no legacy index entries (indexes.toml absent/empty). Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718).
+[2m2026-11-12T00:39:16.358366Z[0m [32m INFO[0m warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+[2m2026-11-12T00:39:16.358378Z[0m [32m INFO[0m warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+[2m2026-11-12T00:39:16.358390Z[0m [32m INFO[0m warm-boot: complete — 0 loaded, 0 cold (lazy), 0 eager successful (legacy + colocated)
+[2m2026-11-12T00:39:16.358420Z[0m [32m INFO[0m auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+[2m2026-11-12T00:39:18.321290Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:18.374932Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-term-2600193" [3mreason[0m[2m=[0m"corpus_created_empty" [3mgeneration[0m[2m=[0m1
+[2m2026-11-12T00:39:18.387881Z[0m [32m INFO[0m migrations: applying 'chunks.json → index.redb' (v0 → v1)
+[2m2026-11-12T00:39:18.407640Z[0m [32m INFO[0m create_index: 'lc11019-term-2600193' registered — restored chunks=0 hnsw_snapshot=false graph_nodes=0 lexical_only=false skip_kg=false skip_vector=false → stages(lexical=Pending, semantic=Pending, graph=Pending) (issue #4110)
+[2m2026-11-12T00:39:18.408835Z[0m [32m INFO[0m file watcher active — saves trigger incremental indexing (issue #1621) [3mindex_id[0m[2m=[0mlc11019-term-2600193 [3mroot[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/root
+[2m2026-11-12T00:39:18.457042Z[0m [32m INFO[0m LazyEmbedderHandle: first embed request — spawning trusty-embedderd [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:18.457079Z[0m [32m INFO[0m LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) [3mresolved_batch[0m[2m=[0m256 [3mforwarded_batch[0m[2m=[0m256 [3mis_coreml[0m[2m=[0mfalse [3mis_cuda[0m[2m=[0mfalse [3mcoreml_cap[0m[2m=[0m64 [3mcuda_cap[0m[2m=[0m64
+[2m2026-11-12T00:39:18.457214Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-1-1794443958455.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:18.465464Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:18.465492Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m loading embedding model...
+[2m2026-11-12T00:39:18.465924Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) [3mintra_threads[0m[2m=[0m28 [3minter_threads[0m[2m=[0m1 [3mallow_spinning[0m[2m=[0mfalse
+[2m2026-11-12T00:39:18.465963Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+[2m2026-11-12T00:39:18.465973Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: registering CPU(no-arena) execution provider
+[2m2026-11-12T00:39:18.543662Z[0m [32m INFO[0m corpus: copied 0 chunks from live corpus into staging
+[2m2026-11-12T00:39:18.652329Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+[2m2026-11-12T00:39:18.652375Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m model loaded: model=all-MiniLM-L6-v2 dim=384
+[2m2026-11-12T00:39:18.652412Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m BatchQueue started (batch_size=256, window_ms=10)
+[2m2026-11-12T00:39:18.652463Z[0m [32m INFO[0m [2mtrusty_embedderd::batch_queue[0m[2m:[0m embed batch worker started (batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:18.683539Z[0m [32m INFO[0m EmbedderSupervisor: sidecar started and responding [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:18.706178Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: embedder warm-up complete in 249ms (started 250ms after reindex began)
+[2m2026-11-12T00:39:18.712240Z[0m [32m INFO[0m staged corpus swap: staging corpus opened for 'lc11019-term-2600193' at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-1-1794443958455.tmp
+[2m2026-11-12T00:39:18.825375Z[0m [32m INFO[0m staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch for 'lc11019-term-2600193' (issue #3970)
+[2m2026-11-12T00:39:18.825472Z[0m [32m INFO[0m usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch (issue #6299)
+[2m2026-11-12T00:39:18.844190Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:18.849111Z[0m [32m INFO[0m force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb for 'lc11019-term-2600193'
+[2m2026-11-12T00:39:18.898565Z[0m [32m INFO[0m reindex complete: index=lc11019-term-2600193 files=1 indexed_new=1 skipped=0 chunks=1 elapsed_ms=442 peak_rss_mb=59 memory_limit_hit=false
+[2m2026-11-12T00:39:18.898598Z[0m [32m INFO[0m reindex phase timings: index=lc11019-term-2600193 walk=0ms hash_cache=0ms carryover=272ms pipeline=83ms prune=0ms hnsw_commit=0ms corpus_commit=32ms kg=16ms poller_stop=0ms other=39ms total=442ms | within pipeline: parse=4ms embed=55ms bm25=0ms vector_upsert=0ms defer_embed=false
+[2m2026-11-12T00:39:20.560101Z[0m [32m INFO[0m embedding paused by operator (#6524) [3mindex_id[0m[2m=[0mlc11019-term-2600193
+[2m2026-11-12T00:39:20.578328Z[0m [32m INFO[0m reindex: loaded 1 persisted file hashes from redb (warm skip-cache)
+[2m2026-11-12T00:39:20.578674Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-2-1794443960577.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:20.590271Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: embedder warm-up complete in 11ms (started 12ms after reindex began)
+[2m2026-11-12T00:39:20.606712Z[0m [32m INFO[0m corpus: copied 1 chunks from live corpus into staging
+[2m2026-11-12T00:39:20.609115Z[0m [32m INFO[0m staged corpus swap: staging corpus opened for 'lc11019-term-2600193' at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-2-1794443960577.tmp
+[2m2026-11-12T00:39:22.736174Z[0m [32m INFO[0m trusty-common: received SIGTERM — initiating graceful shutdown
+[2m2026-11-12T00:39:22.736238Z[0m [32m INFO[0m shutdown: released 1 paused embedding stage(s)
+[2m2026-11-12T00:39:22.736291Z[0m [32m INFO[0m shutdown: released 1 paused embedding stage(s)
+[2m2026-11-12T00:39:22.736899Z[0m [32m INFO[0m stopped 1 file watcher(s) on shutdown
+[2m2026-11-12T00:39:22.736923Z[0m [32m INFO[0m shutdown: stopped 1 file watcher(s)
+[2m2026-11-12T00:39:22.736941Z[0m [32m INFO[0m shutdown: flushing 1 index snapshot(s) before exit (concurrency=4, window=54.999287021s remaining, #4393)
+[2m2026-11-12T00:39:22.736960Z[0m [33m WARN[0m shutdown: skipping flush for 'lc11019-term-2600193' — a background reindex is still in progress (issue #1717 — refusing to publish a possibly-partial in-memory state). On-disk snapshot is from the last incremental persist.
+[2m2026-11-12T00:39:22.736982Z[0m [33m WARN[0m shutdown: closed 0 corpus file(s) cleanly; 1 were not closed within 3s and need repair on the next open (#9459): lc11019-term-2600193: a reindex, relocate or embed pass holds the index; its corpus stays attached
+[2m2026-11-12T00:39:22.749110Z[0m [32m INFO[0m [2mtrusty_embedderd::stdio_server[0m[2m:[0m trusty-embedderd --stdio: stdin closed (parent terminated) — exiting
+[2m2026-11-12T00:39:23.756998Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:23.757063Z[0m [33m WARN[0m memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+[2m2026-11-12T00:39:23.757078Z[0m [32m INFO[0m trusty-search: detected 36 GB RAM → tier=Large (daemon memory_limit_mb=9216, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=27648, 75% of RAM clamped to [2048, 98304])
+[2m2026-11-12T00:39:23.757082Z[0m [32m INFO[0m   MEMORY_LIMIT_MB=9216  INDEX_MEMORY_LIMIT_MB=27648  MAX_CHUNKS=460800  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+[2m2026-11-12T00:39:23.757096Z[0m [32m INFO[0m resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+[2m2026-11-12T00:39:23.938555Z[0m [32m INFO[0m orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 1 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+[2m2026-11-12T00:39:23.939447Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:23.939474Z[0m [32m INFO[0m concurrency limiter: max_concurrent=8 queue_depth=32
+[2m2026-11-12T00:39:23.939484Z[0m [32m INFO[0m query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+[2m2026-11-12T00:39:23.986124Z[0m [32m INFO[0m embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11019-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+[2m2026-11-12T00:39:23.986184Z[0m [32m INFO[0m embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+[2m2026-11-12T00:39:23.986398Z[0m [32m INFO[0m memory_policy: cgroup memory ceiling (36864 MB) is below host RAM (48172 MB) — using the cgroup ceiling for the 25%-of-RAM auto-tune so TRUSTY_MEMORY_LIMIT_MB stays under what systemd/Docker/Kubernetes actually enforces (issue #3657: on a host with far more physical RAM than the cgroup allows this service, auto-tuning off host RAM alone can compute a soft ceiling ABOVE the cgroup's hard limit, so the memory-pressure enforcement ticker never crosses its high-water mark before the kernel's cgroup OOM-killer fires)
+[2m2026-11-12T00:39:23.986429Z[0m [32m INFO[0m embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+[2m2026-11-12T00:39:23.986679Z[0m [32m INFO[0m embedder ready — vector lane online
+[2m2026-11-12T00:39:23.986743Z[0m [32m INFO[0m warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+[2m2026-11-12T00:39:23.987054Z[0m [32m INFO[0m warm-boot: data directory: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data
+[2m2026-11-12T00:39:23.987114Z[0m [32m INFO[0m warm-boot: loaded 1 legacy index(es) from $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes.toml
+[2m2026-11-12T00:39:23.987306Z[0m [32m INFO[0m warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock
+[2m2026-11-12T00:39:23.987380Z[0m [32m INFO[0m warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+[2m2026-11-12T00:39:23.987386Z[0m [32m INFO[0m warm-boot: parking 1/1 index(es) in cold store (lazy-load on first query, issue #993)
+[2m2026-11-12T00:39:23.987399Z[0m [32m INFO[0m warm-boot: complete — 0 loaded, 1 cold (lazy), 0 eager successful (legacy + colocated)
+[2m2026-11-12T00:39:23.987422Z[0m [32m INFO[0m auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+[2m2026-11-12T00:39:23.987433Z[0m [32m INFO[0m daemon serving the rpc socket $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock (lock $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/daemon.lock)
+[2m2026-11-12T00:39:23.987449Z[0m [32m INFO[0m memory limits: max_chunks=460800 embedding_cache=10000 memory_limit_mb=9216 index_memory_limit_mb=27648
+[2m2026-11-12T00:39:23.987482Z[0m [32m INFO[0m trusty-search serving rpc [3msocket[0m[2m=[0m$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock [3mmethods[0m[2m=[0m46 [3mstreams[0m[2m=[0m3
+[2m2026-11-12T00:39:26.025384Z[0m [32m INFO[0m lazy-load: index 'lc11019-term-2600193' not yet warm-booted — loading on demand (issue #993)
+[2m2026-11-12T00:39:26.026480Z[0m [32m INFO[0m warm-boot: restored HNSW snapshot for 'lc11019-term-2600193' from $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch
+[2m2026-11-12T00:39:26.026866Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:26.066577Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-term-2600193" [3mreason[0m[2m=[0m"identity_bump_pending" [3mgeneration[0m[2m=[0m2
+[2m2026-11-12T00:39:26.072975Z[0m [32m INFO[0m warm-boot: loaded persisted symbol graph for 'lc11019-term-2600193' (1 nodes / 0 edges, stale=false)
+[2m2026-11-12T00:39:26.072997Z[0m [32m INFO[0m restored 1 chunks for index 'lc11019-term-2600193' from redb corpus
+[2m2026-11-12T00:39:26.073026Z[0m [32m INFO[0m warm-boot: restored 1 chunks for index 'lc11019-term-2600193' from redb
+[2m2026-11-12T00:39:26.075173Z[0m [32m INFO[0m lazy-load: index 'lc11019-term-2600193' restored — chunks=1 hnsw_snapshot=true graph_nodes=1 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None
+[2m2026-11-12T00:39:26.133275Z[0m [32m INFO[0m LazyEmbedderHandle: first embed request — spawning trusty-embedderd [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:26.133351Z[0m [32m INFO[0m LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) [3mresolved_batch[0m[2m=[0m256 [3mforwarded_batch[0m[2m=[0m256 [3mis_coreml[0m[2m=[0mfalse [3mis_cuda[0m[2m=[0mfalse [3mcoreml_cap[0m[2m=[0m64 [3mcuda_cap[0m[2m=[0m64
+[2m2026-11-12T00:39:26.140512Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:26.140538Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m loading embedding model...
+[2m2026-11-12T00:39:26.140751Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) [3mintra_threads[0m[2m=[0m28 [3minter_threads[0m[2m=[0m1 [3mallow_spinning[0m[2m=[0mfalse
+[2m2026-11-12T00:39:26.140772Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+[2m2026-11-12T00:39:26.140781Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: registering CPU(no-arena) execution provider
+[2m2026-11-12T00:39:26.306496Z[0m [32m INFO[0m [2mtrusty_common::embedder::fast_embedder[0m[2m:[0m trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+[2m2026-11-12T00:39:26.306551Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m model loaded: model=all-MiniLM-L6-v2 dim=384
+[2m2026-11-12T00:39:26.306581Z[0m [32m INFO[0m [2mtrusty_embedderd[0m[2m:[0m BatchQueue started (batch_size=256, window_ms=10)
+[2m2026-11-12T00:39:26.306628Z[0m [32m INFO[0m [2mtrusty_embedderd::batch_queue[0m[2m:[0m embed batch worker started (batch_size=256, batch_window_ms=10)
+[2m2026-11-12T00:39:26.335744Z[0m [32m INFO[0m EmbedderSupervisor: sidecar started and responding [3mbinary[0m[2m=[0m$HOME/live-checks/11019-bin/bin/trusty-embedderd
+[2m2026-11-12T00:39:26.388471Z[0m [32m INFO[0m usearch: promoted view → mutable for $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch (1 vectors)
+[2m2026-11-12T00:39:26.501412Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: took over leftover staging corpus $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-2-1794443960577.tmp as $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2601145-1-1794443966500.tmp (#8889)
+[2m2026-11-12T00:39:26.501734Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2601145-1-1794443966500.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:26.516787Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: RESUMING from checkpoint at $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2601145-1-1794443966500.tmp — 2 chunk(s) and 3 file hash(es) already staged under root $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/root; every staged file is still re-hashed against its current on-disk bytes before it can be skipped (issue #3979)
+[2m2026-11-12T00:39:26.533605Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: adopted staging corpus $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2601145-1-1794443966500.tmp (2 staged chunk(s)); dropped 4 in-memory cache entr(ies) built from the pre-crash live corpus so reads rehydrate from the adopted corpus (issue #3979)
+[2m2026-11-12T00:39:26.552472Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: prune pass: 1 deleted file(s) detected — pruning stale data
+[2m2026-11-12T00:39:26.555631Z[0m [32m INFO[0m index 'lc11019-term-2600193': rehydrated 2 chunks + BM25 + 1 file entity lists from redb after idle eviction (detached task; survives caller cancellation, issue #3683)
+[2m2026-11-12T00:39:26.555694Z[0m [32m INFO[0m index 'lc11019-term-2600193': rehydrate cost 0 ms recorded for idle-evict scaling [3mindex_id[0m[2m=[0mlc11019-term-2600193 [3mrehydrate_ms[0m[2m=[0m0 [3mscan_ms[0m[2m=[0m0 [3msort_ms[0m[2m=[0m0 [3mentities_ms[0m[2m=[0m0 [3mbm25_build_ms[0m[2m=[0m0 [3mcommit_ms[0m[2m=[0m0 [3mchunks[0m[2m=[0m2
+[2m2026-11-12T00:39:26.563413Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: prune pass: pruned 1 stale chunk(s) from 1 deleted file(s)
+[2m2026-11-12T00:39:26.564276Z[0m [32m INFO[0m staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch for 'lc11019-term-2600193' (issue #3970)
+[2m2026-11-12T00:39:26.564311Z[0m [32m INFO[0m usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/hnsw.usearch (issue #6299)
+[2m2026-11-12T00:39:26.564550Z[0m [32m INFO[0m reindex[lc11019-term-2600193]: embedder warm-up complete in 21ms (started 64ms after reindex began)
+[2m2026-11-12T00:39:26.585177Z[0m [32m INFO[0m corpus: opening $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+[2m2026-11-12T00:39:26.620550Z[0m [32m INFO[0m index generation raised (#10738) [3mindex_id[0m[2m=[0m"lc11019-term-2600193" [3mreason[0m[2m=[0m"identity_bump_pending" [3mgeneration[0m[2m=[0m3
+[2m2026-11-12T00:39:26.627154Z[0m [32m INFO[0m force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb for 'lc11019-term-2600193'
+[2m2026-11-12T00:39:26.707529Z[0m [32m INFO[0m reindex complete: index=lc11019-term-2600193 files=2 indexed_new=0 skipped=2 chunks=0 elapsed_ms=207 peak_rss_mb=59 memory_limit_hit=false
+[2m2026-11-12T00:39:26.707556Z[0m [32m INFO[0m reindex phase timings: index=lc11019-term-2600193 walk=0ms hash_cache=0ms carryover=16ms pipeline=0ms prune=11ms hnsw_commit=0ms corpus_commit=100ms kg=20ms poller_stop=0ms other=60ms total=207ms | within pipeline: parse=0ms embed=0ms bm25=0ms vector_upsert=0ms defer_embed=false
+[2m2026-11-12T00:39:26.707828Z[0m [32m INFO[0m deferred_embed queue: 1 pending, order=[lc11019-term-2600193(0)]
+[2m2026-11-12T00:39:26.707886Z[0m [32m INFO[0m deferred_embed[lc11019-term-2600193]: starting background embed pass (1 chunks)
+[2m2026-11-12T00:39:26.707918Z[0m [32m INFO[0m deferred_embed[lc11019-term-2600193]: embedded 0/1 chunks — marking semantic Ready
+[2m2026-11-12T00:39:26.708565Z[0m [32m INFO[0m deferred_embed queue: drained — catch-up cycle complete
+
+== run2.log (full)
+INFO  binary: $HOME/live-checks/11019-bin/bin/trusty-search (trusty-search 0.64.0)
+INFO  run dir: $HOME/live-checks/runs/11019-20261112T003904Z-2600193
+PASS  binary carries the #11019 dead-run refusal message
+INFO  production daemon on :7879 before: pid=413
+== case SIGKILL: index lc11019-kill-2600193
+PASS  [KILL] case root approved in the isolated allowlist
+INFO  daemon pid=2600238 socket=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/daemon.log
+PASS  [KILL] index created with defer_embed=false
+PASS  [KILL] first reindex accepted
+PASS  [KILL] first reindex reaches ready
+PASS  [KILL] a.rs served after the first reindex
+INFO  [KILL] generation after first reindex: 1
+PASS  [KILL] embedding paused
+PASS  [KILL] second reindex accepted
+PASS  [KILL] second run is indexing with a staging corpus on disk
+INFO  [KILL] staging: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/indexes/lc11019-kill-2600193/index.redb.run-2600238-2-1794443949079.tmp 
+PASS  [KILL] put during the parked batch is acknowledged
+PASS  [KILL] the put reply carries a generation
+INFO  [KILL] put acknowledged under generation 1
+PASS  [KILL] the acknowledged put is in the attached (staging) corpus
+INFO  daemon 2600238 stopped by SIGKILL
+PASS  [KILL] staging corpus is still on disk after the kill
+INFO  daemon pid=2600552 socket=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/KILL/daemon.log
+INFO  [KILL] after restart: generation= pushed_present=error status=ready
+FAIL  [KILL] restart raises the generation above the put's (1 -> )
+PASS  [KILL] a put after the restart is accepted
+PASS  [KILL] that put carries a generation above the lost put's (1 -> 2)
+PASS  [KILL] the post-restart put is served
+PASS  [KILL] rerun after the restart reaches ready
+PASS  [KILL] a.rs served after the rerun
+PASS  [KILL] b.rs (the killed run's batch) served after the rerun
+FAIL  [KILL] the put acknowledged into staging is not served
+PASS  [KILL] final generation is above the lost put's (1 -> 3)
+PASS  [KILL] no staging corpus is left on disk
+INFO  daemon 2600552 stopped by SIGKILL
+== case SIGTERM: index lc11019-term-2600193
+PASS  [TERM] case root approved in the isolated allowlist
+INFO  daemon pid=2600818 socket=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/daemon.log
+PASS  [TERM] index created with defer_embed=false
+PASS  [TERM] first reindex accepted
+PASS  [TERM] first reindex reaches ready
+PASS  [TERM] a.rs served after the first reindex
+INFO  [TERM] generation after first reindex: 1
+PASS  [TERM] embedding paused
+PASS  [TERM] second reindex accepted
+PASS  [TERM] second run is indexing with a staging corpus on disk
+INFO  [TERM] staging: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-2-1794443960577.tmp 
+PASS  [TERM] put during the parked batch is acknowledged
+PASS  [TERM] the put reply carries a generation
+INFO  [TERM] put acknowledged under generation 1
+PASS  [TERM] the acknowledged put is in the attached (staging) corpus
+INFO  daemon 2600818 stopped by SIGTERM
+INFO  [TERM] staging on disk after the stop: $HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/indexes/lc11019-term-2600193/index.redb.run-2600818-2-1794443960577.tmp 
+INFO  daemon pid=2601145 socket=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261112T003904Z-2600193/TERM/daemon.log
+INFO  [TERM] after restart: generation= pushed_present=error status=ready
+FAIL  [TERM] the put is gone, so the generation rose (1 -> )
+PASS  [TERM] a put after the restart is accepted
+PASS  [TERM] that put carries a generation above the lost put's (1 -> 2)
+PASS  [TERM] the post-restart put is served
+PASS  [TERM] rerun after the restart reaches ready
+PASS  [TERM] a.rs served after the rerun
+FAIL  [TERM] b.rs (the killed run's batch) served after the rerun
+FAIL  [TERM] the put acknowledged into staging is not served
+PASS  [TERM] final generation is above the lost put's (1 -> 3)
+PASS  [TERM] no staging corpus is left on disk
+INFO  daemon 2601145 stopped by SIGKILL
+NOT-COVERED  #11019: a put while a dead run's rollback is in flight is refused with 'is rolling back a staged reindex that died mid-run' (needs an in-process task abort)
+NOT-COVERED  #11019: the guard's rollback re-attaches live and raises the generation without a restart (needs an in-process task abort)
+NOT-COVERED  #11019: a failed rollback bump keeps puts refused until restart (needs a read-only identity dir during an in-process abort)
+NOT-COVERED  #11019/#11025: a delete racing the rollback waits for it; a delete that keeps the index finds live attached (needs an in-process abort)
+PASS  production daemon on :7879 untouched (before=413 after=413)
+== 40 passed, 5 failed; evidence in $HOME/live-checks/runs/11019-20261112T003904Z-2600193

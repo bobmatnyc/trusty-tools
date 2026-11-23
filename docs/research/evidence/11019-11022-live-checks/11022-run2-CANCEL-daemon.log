@@ -1,0 +1,132 @@
+2026-11-12T05:07:08.075553Z  WARN memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+2026-11-12T05:07:08.075646Z  INFO trusty-search: detected 47 GB RAM → tier=Large (daemon memory_limit_mb=12043, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=36129, 75% of RAM clamped to [2048, 98304])
+2026-11-12T05:07:08.075652Z  INFO   MEMORY_LIMIT_MB=12043  INDEX_MEMORY_LIMIT_MB=36129  MAX_CHUNKS=602150  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+2026-11-12T05:07:08.075684Z  INFO resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+2026-11-12T05:07:08.296717Z  INFO orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 1 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+2026-11-12T05:07:08.297557Z  INFO concurrency limiter: max_concurrent=8 queue_depth=32
+2026-11-12T05:07:08.297570Z  INFO query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+2026-11-12T05:07:08.350224Z  INFO embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+2026-11-12T05:07:08.350315Z  INFO embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+2026-11-12T05:07:08.350558Z  INFO embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+2026-11-12T05:07:08.350830Z  INFO embedder ready — vector lane online
+2026-11-12T05:07:08.350984Z  INFO warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+2026-11-12T05:07:08.351174Z  INFO project-map: migrated from the registry (#9169) path=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/project-map.toml pins=0
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock
+2026-11-12T05:07:08.351391Z  INFO daemon serving the rpc socket $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock (lock $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/daemon.lock)
+2026-11-12T05:07:08.351408Z  INFO memory limits: max_chunks=602150 embedding_cache=10000 memory_limit_mb=12043 index_memory_limit_mb=36129
+2026-11-12T05:07:08.351490Z  INFO trusty-search serving rpc socket=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock methods=46 streams=3
+2026-11-12T05:07:08.375757Z  INFO warm-boot: data directory: $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data
+2026-11-12T05:07:08.375854Z  WARN warm-boot: no legacy index entries (indexes.toml absent/empty). Under launchd, set TRUSTY_DATA_DIR to an absolute path (issue #718).
+2026-11-12T05:07:08.375889Z  INFO warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+2026-11-12T05:07:08.375901Z  INFO warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+2026-11-12T05:07:08.375919Z  INFO warm-boot: complete — 0 loaded, 0 cold (lazy), 0 eager successful (legacy + colocated)
+2026-11-12T05:07:08.375975Z  INFO auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)
+2026-11-12T05:07:10.332991Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:10.426433Z  INFO index generation raised (#10738) index_id="lc11022-ctrl-656534" reason="corpus_created_empty" generation=1
+2026-11-12T05:07:10.431432Z  INFO migrations: applying 'chunks.json → index.redb' (v0 → v1)
+2026-11-12T05:07:10.443360Z  INFO create_index: 'lc11022-ctrl-656534' registered — restored chunks=0 hnsw_snapshot=false graph_nodes=0 lexical_only=false skip_kg=false skip_vector=false → stages(lexical=Pending, semantic=Pending, graph=Pending) (issue #4110)
+2026-11-12T05:07:10.444485Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11022-ctrl-656534 root=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/ctrl-root
+2026-11-12T05:07:10.478596Z  INFO LazyEmbedderHandle: first embed request — spawning trusty-embedderd binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:07:10.478641Z  INFO LazyEmbedderHandle: TRUSTY_EMBED_BATCH_SIZE=256 (resolved=256, is_cuda=false, cuda_cap=64) resolved_batch=256 forwarded_batch=256 is_coreml=false is_cuda=false coreml_cap=64 cuda_cap=64
+2026-11-12T05:07:10.478791Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb.run-656602-1-1794460030476.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:10.486118Z  INFO trusty_embedderd: trusty-embedderd starting (transport=Stdio, batch_size=256, batch_window_ms=10)
+2026-11-12T05:07:10.486145Z  INFO trusty_embedderd: loading embedding model...
+2026-11-12T05:07:10.486379Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: committed ORT global thread pool (deadlock fix PR #1668 — overrides fastembed's per-session with_intra_threads(num_cpus) via DisablePerSessionThreads) intra_threads=28 inter_threads=1 allow_spinning=false
+2026-11-12T05:07:10.486402Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: fastembed model cache dir = $HOME/.cache/fastembed
+2026-11-12T05:07:10.486416Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: registering CPU(no-arena) execution provider
+2026-11-12T05:07:10.547890Z  INFO corpus: copied 0 chunks from live corpus into staging
+2026-11-12T05:07:10.693342Z  INFO trusty_common::embedder::fast_embedder: trusty-embedder: FastEmbedder ready (provider=CPU, model=all-MiniLM-L6-v2, dim=384)
+2026-11-12T05:07:10.693388Z  INFO trusty_embedderd: model loaded: model=all-MiniLM-L6-v2 dim=384
+2026-11-12T05:07:10.693430Z  INFO trusty_embedderd: BatchQueue started (batch_size=256, window_ms=10)
+2026-11-12T05:07:10.693479Z  INFO trusty_embedderd::batch_queue: embed batch worker started (batch_size=256, batch_window_ms=10)
+2026-11-12T05:07:10.724012Z  INFO EmbedderSupervisor: sidecar started and responding binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd
+2026-11-12T05:07:10.746041Z  INFO reindex[lc11022-ctrl-656534]: embedder warm-up complete in 267ms (started 268ms after reindex began)
+2026-11-12T05:07:10.759732Z  INFO staged corpus swap: staging corpus opened for 'lc11022-ctrl-656534' at $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb.run-656602-1-1794460030476.tmp
+2026-11-12T05:07:10.920367Z  INFO staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/hnsw.usearch for 'lc11022-ctrl-656534' (issue #3970)
+2026-11-12T05:07:10.920412Z  INFO usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/hnsw.usearch (issue #6299)
+2026-11-12T05:07:10.958670Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:10.964411Z  INFO force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb for 'lc11022-ctrl-656534'
+2026-11-12T05:07:11.011296Z  INFO reindex complete: index=lc11022-ctrl-656534 files=1 indexed_new=1 skipped=0 chunks=1 elapsed_ms=534 peak_rss_mb=58 memory_limit_hit=false
+2026-11-12T05:07:11.011359Z  INFO reindex phase timings: index=lc11022-ctrl-656534 walk=0ms hash_cache=0ms carryover=336ms pipeline=92ms prune=0ms hnsw_commit=0ms corpus_commit=52ms kg=12ms poller_stop=0ms other=42ms total=534ms | within pipeline: parse=3ms embed=51ms bm25=0ms vector_upsert=0ms defer_embed=false
+2026-11-12T05:07:12.544226Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:12.635085Z  INFO index generation raised (#10738) index_id="lc11022-cancel-656534" reason="corpus_created_empty" generation=1
+2026-11-12T05:07:12.647987Z  INFO migrations: applying 'chunks.json → index.redb' (v0 → v1)
+2026-11-12T05:07:12.666362Z  INFO create_index: 'lc11022-cancel-656534' registered — restored chunks=0 hnsw_snapshot=false graph_nodes=0 lexical_only=false skip_kg=false skip_vector=false → stages(lexical=Pending, semantic=Pending, graph=Pending) (issue #4110)
+2026-11-12T05:07:12.667298Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11022-cancel-656534 root=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/root
+2026-11-12T05:07:12.707289Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb.run-656602-2-1794460032706.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:12.718758Z  INFO reindex[lc11022-cancel-656534]: embedder warm-up complete in 11ms (started 12ms after reindex began)
+2026-11-12T05:07:12.739471Z  INFO corpus: copied 0 chunks from live corpus into staging
+2026-11-12T05:07:12.745401Z  INFO staged corpus swap: staging corpus opened for 'lc11022-cancel-656534' at $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb.run-656602-2-1794460032706.tmp
+2026-11-12T05:07:12.845660Z  INFO staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.usearch for 'lc11022-cancel-656534' (issue #3970)
+2026-11-12T05:07:12.845757Z  INFO usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.usearch (issue #6299)
+2026-11-12T05:07:12.879147Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:12.891786Z  INFO force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb for 'lc11022-cancel-656534'
+2026-11-12T05:07:12.970935Z  INFO reindex complete: index=lc11022-cancel-656534 files=1 indexed_new=1 skipped=0 chunks=1 elapsed_ms=264 peak_rss_mb=59 memory_limit_hit=false
+2026-11-12T05:07:12.970994Z  INFO reindex phase timings: index=lc11022-cancel-656534 walk=0ms hash_cache=0ms carryover=57ms pipeline=58ms prune=0ms hnsw_commit=0ms corpus_commit=66ms kg=30ms poller_stop=0ms other=53ms total=264ms | within pipeline: parse=0ms embed=33ms bm25=0ms vector_upsert=0ms defer_embed=false
+2026-11-12T05:07:14.811249Z  INFO search index_id=lc11022-cancel-656534 intent=Keyword latency_ms=24 results=1 query=alpha resolve_ms=0 lock_ms=0 embed_ms=21 vector_ms=0 lexical_ms=0 ripgrep_ms=0 fusion_ms=0 rehydrate_wait_ms=0 rehydrate_ran=false hnsw_promoted=false
+2026-11-12T05:07:14.853386Z  INFO embedding paused by operator (#6524) index_id=lc11022-cancel-656534
+2026-11-12T05:07:14.872551Z  INFO reindex: loaded 1 persisted file hashes from redb (warm skip-cache)
+2026-11-12T05:07:14.872856Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb.run-656602-3-1794460034871.tmp with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:14.884274Z  INFO reindex[lc11022-cancel-656534]: embedder warm-up complete in 11ms (started 12ms after reindex began)
+2026-11-12T05:07:14.970377Z  INFO corpus: copied 1 chunks from live corpus into staging
+2026-11-12T05:07:14.978441Z  INFO staged corpus swap: staging corpus opened for 'lc11022-cancel-656534' at $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb.run-656602-3-1794460034871.tmp
+2026-11-12T05:07:47.018194Z ERROR delete[lc11022-cancel-656534]: ABANDONED — in-flight work did not drain within 30s, so nothing was changed (registration, indexes.toml and on-disk data are all intact). Re-issue the delete once the writer has stopped (issue #3049).
+2026-11-12T05:07:47.059105Z  INFO graph-refresh: heap trimmed after deferred rebuild (#10159) rebuilt=1 rss_before_mb=61 rss_after_mb=56
+2026-11-12T05:07:47.169738Z  INFO embedding resumed by operator (#6524) index_id=lc11022-cancel-656534
+2026-11-12T05:07:47.218608Z  INFO reindex[lc11022-cancel-656534]: prune pass: 2 deleted file(s) detected — pruning stale data
+2026-11-12T05:07:47.241371Z  INFO reindex[lc11022-cancel-656534]: prune pass: pruned 2 stale chunk(s) from 2 deleted file(s)
+2026-11-12T05:07:47.242054Z  INFO staged hnsw swap: committed — atomically published the reindexed HNSW snapshot to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.usearch for 'lc11022-cancel-656534' (issue #3970)
+2026-11-12T05:07:47.242099Z  INFO usearch: re-pointed store from the committed staging snapshot $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.reindex-staging.usearch to $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.usearch (issue #6299)
+2026-11-12T05:07:47.252726Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:47.272927Z  INFO index generation raised (#10738) index_id="lc11022-cancel-656534" reason="identity_bump_pending" generation=2
+2026-11-12T05:07:47.275209Z  INFO force reindex: atomically swapped rebuilt corpus into $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb for 'lc11022-cancel-656534'
+2026-11-12T05:07:47.310761Z  INFO reindex complete: index=lc11022-cancel-656534 files=2 indexed_new=1 skipped=1 chunks=1 elapsed_ms=32439 peak_rss_mb=61 memory_limit_hit=false
+2026-11-12T05:07:47.310856Z  INFO reindex phase timings: index=lc11022-cancel-656534 walk=0ms hash_cache=0ms carryover=177ms pipeline=32146ms prune=22ms hnsw_commit=0ms corpus_commit=37ms kg=4ms poller_stop=0ms other=53ms total=32439ms | within pipeline: parse=0ms embed=11ms bm25=0ms vector_upsert=0ms defer_embed=false
+2026-11-12T05:07:49.330948Z  INFO search index_id=lc11022-ctrl-656534 intent=Definition latency_ms=27 results=1 query=control_11022 resolve_ms=0 lock_ms=0 embed_ms=26 vector_ms=0 lexical_ms=0 ripgrep_ms=0 fusion_ms=0 rehydrate_wait_ms=0 rehydrate_ran=false hnsw_promoted=false
+2026-11-12T05:07:49.337859Z  INFO trusty-common: received SIGTERM — initiating graceful shutdown
+2026-11-12T05:07:49.338632Z  INFO stopped 2 file watcher(s) on shutdown
+2026-11-12T05:07:49.338678Z  INFO shutdown: stopped 2 file watcher(s)
+2026-11-12T05:07:49.338700Z  INFO shutdown: flushing 2 index snapshot(s) before exit (concurrency=4, window=54.999187442s remaining, #4393)
+2026-11-12T05:07:49.367116Z  INFO shutdown: closed 2 corpus file(s) cleanly
+2026-11-12T05:07:49.374586Z  INFO trusty_embedderd::stdio_server: trusty-embedderd --stdio: stdin closed (parent terminated) — exiting
+2026-11-12T05:07:50.355550Z  WARN memory_policy: TRUSTY_MAX_BATCH_SIZE=512 exceeds tier Large hard cap of 256; clamping to protect against ORT transient-arena spike (issue #89). Set TRUSTY_MAX_BATCH_SIZE_EXPLICIT=1 to bypass this clamp.
+2026-11-12T05:07:50.355620Z  INFO trusty-search: detected 47 GB RAM → tier=Large (daemon memory_limit_mb=12043, 25% of RAM clamped to [1024, 65536]; index memory_limit_mb=36129, 75% of RAM clamped to [2048, 98304])
+2026-11-12T05:07:50.355626Z  INFO   MEMORY_LIMIT_MB=12043  INDEX_MEMORY_LIMIT_MB=36129  MAX_CHUNKS=602150  EMBEDDING_CACHE=10000  MAX_BATCH_SIZE=256  COREML_BATCH_SIZE=64  BM25_CORPUS_CAP=200000  MAX_KG_NODES=300000
+2026-11-12T05:07:50.355645Z  INFO resident-index cap: 12 (source=tier default, tier=Large) — the residency sweep cold-parks everything beyond this; set TRUSTY_MAX_RESIDENT_INDEXES=off to disable
+2026-11-12T05:07:50.576000Z  INFO orphan reaper: leaving pid 413 alone — serves a different data dir (<prod-data-dir>) (#4395)
+· 1 other trusty-search daemon(s) are running and are not proven to be on this data dir — leaving them alone
+2026-11-12T05:07:50.576884Z  INFO concurrency limiter: max_concurrent=8 queue_depth=32
+2026-11-12T05:07:50.576900Z  INFO query timeout: 30s (TRUSTY_QUERY_TIMEOUT_SECS)
+2026-11-12T05:07:50.632083Z  INFO embedder mode: stdio-sidecar lazy (binary=$HOME/live-checks/11022-bin/bin/trusty-embedderd, idle_shutdown_secs=300)
+2026-11-12T05:07:50.632152Z  INFO embedderd supervisor armed, deferred spawn enabled (idle_shutdown_secs=300)
+2026-11-12T05:07:50.632343Z  INFO embed pool: 4 workers (isolated OS threads; autotune=4, inflight floor=2)
+2026-11-12T05:07:50.632621Z  INFO embedder ready — vector lane online
+2026-11-12T05:07:50.632690Z  INFO warm-boot: eager cap 12 (from resident-index cap) — will eager-load top-12 by recency, defer the rest to cold store (issues #993, #6821)
+2026-11-12T05:07:50.633067Z  INFO warm-boot: data directory: $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data
+2026-11-12T05:07:50.633155Z  INFO warm-boot: loaded 2 legacy index(es) from $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes.toml
+trusty-search v0.64.0 — rpc socket: $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock
+2026-11-12T05:07:50.633337Z  INFO daemon serving the rpc socket $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock (lock $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/daemon.lock)
+2026-11-12T05:07:50.633357Z  INFO memory limits: max_chunks=602150 embedding_cache=10000 memory_limit_mb=12043 index_memory_limit_mb=36129
+2026-11-12T05:07:50.633369Z  INFO warm-boot: skipping colocated-root discovery scan — --no-auto-discover / TRUSTY_NO_AUTO_DISCOVER is set (issue #3929); serving only indexes already in indexes.toml
+2026-11-12T05:07:50.633425Z  INFO trusty-search serving rpc socket=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock methods=46 streams=3
+2026-11-12T05:07:50.633486Z  INFO warm-boot: age gate 24h (from TRUSTY_WARMBOOT_MAX_AGE_HOURS) — indexes not used within it are deferred to the cold store (#8275)
+2026-11-12T05:07:50.633620Z  INFO warm-boot: restoring 2 legacy index(es) from indexes.toml
+2026-11-12T05:07:50.637388Z  INFO warm-boot: restored HNSW snapshot for 'lc11022-ctrl-656534' from $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/hnsw.usearch
+2026-11-12T05:07:50.637729Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-ctrl-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:50.647376Z  INFO warm-boot: loaded persisted symbol graph for 'lc11022-ctrl-656534' (1 nodes / 0 edges, stale=false)
+2026-11-12T05:07:50.647410Z  INFO restored 1 chunks for index 'lc11022-ctrl-656534' from redb corpus
+2026-11-12T05:07:50.647421Z  INFO warm-boot: restored 1 chunks for index 'lc11022-ctrl-656534' from redb
+2026-11-12T05:07:50.649039Z  INFO warm-boot: index 'lc11022-ctrl-656534' restored (colocated=false) — chunks=1 hnsw_snapshot=true graph_nodes=1 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None → stages(lexical=Ready, semantic=Ready, graph=Ready)
+2026-11-12T05:07:50.650120Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11022-ctrl-656534 root=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/ctrl-root
+2026-11-12T05:07:50.653957Z  INFO warm-boot: restored HNSW snapshot for 'lc11022-cancel-656534' from $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/hnsw.usearch
+2026-11-12T05:07:50.654226Z  INFO corpus: opening $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb with redb page cache = 64 MB (set TRUSTY_REDB_CACHE_MB to override)
+2026-11-12T05:07:50.659515Z  INFO warm-boot: loaded persisted symbol graph for 'lc11022-cancel-656534' (2 nodes / 0 edges, stale=false)
+2026-11-12T05:07:50.659532Z  INFO restored 2 chunks for index 'lc11022-cancel-656534' from redb corpus
+2026-11-12T05:07:50.659537Z  INFO warm-boot: restored 2 chunks for index 'lc11022-cancel-656534' from redb
+2026-11-12T05:07:50.661050Z  INFO warm-boot: index 'lc11022-cancel-656534' restored (colocated=false) — chunks=2 hnsw_snapshot=true graph_nodes=2 lexical_only=false skip_kg=false skip_vector=false corpus_open_failure=None → stages(lexical=Ready, semantic=Ready, graph=Ready)
+2026-11-12T05:07:50.661859Z  INFO file watcher active — saves trigger incremental indexing (issue #1621) index_id=lc11022-cancel-656534 root=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/root
+2026-11-12T05:07:50.661956Z  INFO warm-boot: legacy phase complete — 2/2 (skipped tcc=0 timeout=0 panicked=0)
+2026-11-12T05:07:50.662010Z  INFO warm-boot: complete — 2 loaded, 0 cold (lazy), 2 eager successful (legacy + colocated)
+2026-11-12T05:07:50.662101Z  INFO boot reconcile: checking 2 registered index(es) for staleness (threshold=250 files, disable with TRUSTY_NO_BOOT_RECONCILE=1)
+2026-11-12T05:07:50.662153Z  INFO auto-discover: disabled (--no-auto-discover, TRUSTY_NO_AUTO_DISCOVER, or an explicit data dir without --auto-discover)

@@ -1,0 +1,77 @@
+INFO  binary: $HOME/live-checks/11087-bin/bin/trusty-search (trusty-search 0.64.0)
+INFO  run dir: $HOME/live-checks/runs/11019-20261114T152831Z-1808532
+PASS  binary carries the #11019 dead-run refusal message
+PASS  binary no longer carries the #11022 cancel branch (PR #11025)
+INFO  production daemon on :7879 before: pid=413
+== case SIGKILL: index lc11019-kill-1808532
+PASS  [KILL] case root approved in the isolated allowlist
+INFO  daemon pid=1808579 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/daemon.log
+PASS  [KILL] index created with defer_embed=false
+PASS  [KILL] first reindex accepted
+PASS  [KILL] first reindex reaches ready
+PASS  [KILL] a.rs served after the first reindex
+INFO  [KILL] generation after first reindex: 1
+PASS  [KILL] embedding paused
+PASS  [KILL] second reindex accepted
+PASS  [KILL] second run is indexing with a staging corpus on disk
+INFO  [KILL] staging: $HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/data/indexes/lc11019-kill-1808532/index.redb.run-1808579-2-1794670115818.tmp 
+PASS  [KILL] put during the parked batch is acknowledged
+PASS  [KILL] the put reply carries a generation
+INFO  [KILL] put acknowledged under generation 1
+PASS  [KILL] the acknowledged put is in the attached (staging) corpus
+INFO  daemon 1808579 stopped by SIGKILL
+PASS  [KILL] staging corpus is still on disk after the kill
+INFO  daemon pid=1808885 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/daemon.log
+INFO  [KILL] after restart: generation=2 pushed_present=false status=ready
+INFO  [KILL] the leftover staging corpus is adopted; absence is checked after the rerun
+PASS  [KILL] a put after the restart is accepted
+PASS  [KILL] that put carries a generation above the lost put's (1 -> 2)
+PASS  [KILL] the post-restart put is served
+PASS  [KILL] rerun after the restart reaches ready
+INFO  daemon 1808885 stopped by SIGTERM
+INFO  daemon pid=1809178 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/KILL/daemon.log
+PASS  [KILL] a.rs served after the rerun and restart
+PASS  [KILL] b.rs (the killed run's batch) served after the rerun and restart
+PASS  [KILL] the put acknowledged into staging is not served
+PASS  [KILL] final generation is above the acked put's (1 -> 3)
+PASS  [KILL] no staging corpus is left on disk
+INFO  daemon 1809178 stopped by SIGKILL
+== case SIGTERM: index lc11019-term-1808532
+PASS  [TERM] case root approved in the isolated allowlist
+INFO  daemon pid=1809338 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/daemon.log
+PASS  [TERM] index created with defer_embed=false
+PASS  [TERM] first reindex accepted
+PASS  [TERM] first reindex reaches ready
+PASS  [TERM] a.rs served after the first reindex
+INFO  [TERM] generation after first reindex: 1
+PASS  [TERM] embedding paused
+PASS  [TERM] second reindex accepted
+PASS  [TERM] second run is indexing with a staging corpus on disk
+INFO  [TERM] staging: $HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/data/indexes/lc11019-term-1808532/index.redb.run-1809338-2-1794670131357.tmp 
+PASS  [TERM] put during the parked batch is acknowledged
+PASS  [TERM] the put reply carries a generation
+INFO  [TERM] put acknowledged under generation 1
+PASS  [TERM] the acknowledged put is in the attached (staging) corpus
+INFO  daemon 1809338 stopped by SIGTERM
+INFO  [TERM] staging on disk after the stop: $HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/data/indexes/lc11019-term-1808532/index.redb.run-1809338-2-1794670131357.tmp 
+INFO  daemon pid=1809634 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/daemon.log
+INFO  [TERM] after restart: generation=2 pushed_present=false status=ready
+INFO  [TERM] the leftover staging corpus is adopted; absence is checked after the rerun
+PASS  [TERM] a put after the restart is accepted
+PASS  [TERM] that put carries a generation above the lost put's (1 -> 2)
+PASS  [TERM] the post-restart put is served
+PASS  [TERM] rerun after the restart reaches ready
+INFO  daemon 1809634 stopped by SIGTERM
+INFO  daemon pid=1809894 socket=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/data/trusty-search.sock log=$HOME/live-checks/runs/11019-20261114T152831Z-1808532/TERM/daemon.log
+PASS  [TERM] a.rs served after the rerun and restart
+PASS  [TERM] b.rs (the killed run's batch) served after the rerun and restart
+PASS  [TERM] the put acknowledged into staging is not served
+PASS  [TERM] final generation is above the acked put's (1 -> 3)
+PASS  [TERM] no staging corpus is left on disk
+INFO  daemon 1809894 stopped by SIGKILL
+NOT-COVERED  #11019: a put while a dead run's rollback is in flight is refused with 'is rolling back a staged reindex that died mid-run' (needs an in-process task abort)
+NOT-COVERED  #11019: the guard's rollback re-attaches live and raises the generation without a restart (needs an in-process task abort)
+NOT-COVERED  #11019: a failed rollback bump keeps puts refused until restart (needs a read-only identity dir during an in-process abort)
+NOT-COVERED  #11019/#11025: a delete racing the rollback waits for it; a delete that keeps the index finds live attached (needs an in-process abort)
+PASS  production daemon on :7879 untouched (before=413 after=413)
+== 44 passed, 0 failed; evidence in $HOME/live-checks/runs/11019-20261114T152831Z-1808532

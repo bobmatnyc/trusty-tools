@@ -1,0 +1,50 @@
+INFO  build commit (from build host): 86d738c4a8b074add704c360f705116b4b45b88a
+INFO  binary sha256: e2e70d0ba57e5c005bc5a38fff9f7abcfcedd38f48e017681fc7fdadea8c405f
+INFO  binary: $HOME/live-checks/11022-bin/bin/trusty-search (trusty-search 0.64.0)
+INFO  run dir: $HOME/live-checks/runs/11022-20261112T050707Z-656534
+PASS  binary carries the #11019 dead-run refusal message
+PASS  binary no longer carries the #11022 cancel branch (PR #11025)
+INFO  production daemon on :7879 before: pid=413
+== case CANCEL-LIVE: index lc11022-cancel-656534, control lc11022-ctrl-656534
+INFO  daemon pid=656602 socket=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock log=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/daemon.log
+PASS  [CANCEL] control index created
+PASS  [CANCEL] control reindex accepted
+PASS  [CANCEL] control reindex reaches ready
+PASS  [CANCEL] target index created
+PASS  [CANCEL] first reindex accepted
+PASS  [CANCEL] first reindex reaches ready
+PASS  [CANCEL] a.rs served after the first reindex
+INFO  [CANCEL] generation after first reindex: 1
+PASS  [CANCEL] embedding paused
+PASS  [CANCEL] second reindex accepted
+PASS  [CANCEL] second run is indexing with a staging corpus on disk
+INFO  [CANCEL] staging: $HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/indexes/lc11022-cancel-656534/index.redb.run-656602-3-1794460034871.tmp 
+PASS  [CANCEL] put during the parked batch is acknowledged
+INFO  [CANCEL] put acknowledged under generation 1
+INFO  [CANCEL] delete rc=0 after 30s reply: {"jsonrpc":"2.0","id":1,"result":{"data_deleted":false,"id":"lc11022-cancel-656534","ok":true,"quiesced":false,"removed":false}}
+INFO  [CANCEL] daemon log (delete/cancel/rollback lines):
+    LOG  2026-11-12T05:07:47.018194Z ERROR delete[lc11022-cancel-656534]: ABANDONED — in-flight work did not drain within 30s, so nothing was changed (registration, indexes.toml and on-disk data are all intact). Re-issue the delete once the writer has stopped (issue #3049).
+PASS  [CANCEL] daemon alive after the delete
+INFO  [CANCEL] outcome: delete NOT completed (removed=<none>); checking the surviving index
+PASS  [CANCEL/kept] delete reply says removed=false quiesced=false
+PASS  [CANCEL/kept] index still registered and answers status
+PASS  [CANCEL/kept] index data dir still on disk
+PASS  [CANCEL/kept] a put after the abandoned delete is accepted (not refused)
+INFO  [CANCEL/kept] late put generation 1 (acked put was 1)
+PASS  [CANCEL/kept] generation did not go backwards (1 -> 1)
+PASS  [CANCEL/kept] rerun after the cancel reaches ready (cancel flag cleared)
+PASS  [CANCEL/kept] b.rs (the cancelled run's batch) is served after the rerun
+PASS  [CANCEL/kept] a.rs is served
+PASS  [CANCEL/kept] no staging corpus left on disk after the rerun
+PASS  [CANCEL] control index still serves c.rs after the delete
+PASS  [CANCEL] control index answers a query
+INFO  daemon 656602 stopped by SIGTERM
+INFO  daemon pid=658548 socket=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/data/trusty-search.sock log=$HOME/live-checks/runs/11022-20261112T050707Z-656534/CANCEL/daemon.log
+PASS  [CANCEL] control index serves c.rs after a restart
+PASS  [CANCEL/kept] a.rs served after the restart
+PASS  [CANCEL/kept] b.rs served after the restart
+PASS  [CANCEL/kept] no staging corpus left on disk after the restart
+INFO  daemon 658548 stopped by SIGKILL
+NOT-COVERED  #11022: the rollback of a DEAD reindex task (panic/abort) while a delete holds the cancel flag, followed by a delete that keeps the index (timeout, root mismatch, close failure) leaves a corpus attached (needs an in-process task abort; unit test a_cancelled_rollback_whose_delete_keeps_the_index_leaves_it_attached covers it)
+PASS  production daemon on :7879 untouched (before=413 after=413)
+== 30 passed, 0 failed; evidence in $HOME/live-checks/runs/11022-20261112T050707Z-656534
