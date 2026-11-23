@@ -7,13 +7,18 @@
 //! What: [`join`] pairs shadow events with live events. Pass 1 pairs equal
 //! identities (session, kind, fingerprint: the dedupe key; a PM message's id
 //! and an owner item's id are their fingerprints) within
-//! [`IDENTITY_CYCLES`] cycles of the record; pass 2, when asked, pairs what
+//! [`IDENTITY_CYCLES`] cycles of the record; pass 1b pairs what is left of
+//! `idle` by [`idle_screen`] (session, kind, screen hash: the two pollers keep
+//! separate idle timers, so the `since-<epoch>` part differs) in the same
+//! window; pass 2, when asked, pairs what
 //! is left by session and kind, only when at least one side has no identity
 //! (two keyed events with different identities never pair) within [`FALLBACK_CYCLES`] cycles. Each pass takes the nearest unused live
 //! event. A shadow event left over is `scheduler_only`; a live event left
 //! over counts as `poller_only` only when it falls inside some joined
 //! record's own window. [`IL_CRON`] is left out of both sides.
 //! Test: `join_pairs_identity_across_phase_skew`,
+//! `idle_pairs_on_screen_hash_across_epoch_skew`,
+//! `idle_with_different_screen_hashes_never_pairs`,
 //! `join_falls_back_to_two_cycles_without_identity`,
 //! `fallback_never_pairs_two_keyed_events_with_different_fingerprints`,
 //! `parity_reports_identity_and_fallback_numbers`.
@@ -29,6 +34,8 @@ pub const FALLBACK_CYCLES: i64 = 2;
 /// The kind left out of parity: `il-cron.py` only prints `would run` in a dry
 /// run (il-cron.py:249), so the shadow can never raise it.
 pub const IL_CRON: &str = "il_cron";
+/// Left out too: both pollers debounce on the one `ctx-watch-state.json`.
+pub const CTXWATCH: &str = "ctxwatch";
 
 /// One side's event: when, its identity if known, and its session and kind
 /// if known (`None` pairs with anything in the fallback).
@@ -66,6 +73,17 @@ pub struct Joined {
     pub by_identity: u64,
     /// Pairs made by the fallback.
     pub by_fallback: u64,
+    /// Of `by_identity`, the `idle` pairs made on the relaxed key (pass 1b).
+    pub by_relaxed: u64,
+}
+
+/// An `idle` key's (session, kind, screen hash), its `since-<epoch>-` prefix
+/// dropped; `None` for any other kind or fingerprint shape.
+pub fn idle_screen(k: &EventKey) -> Option<(&str, &str, &str)> {
+    let rest = k.fingerprint.strip_prefix("since-")?;
+    let (epoch, hash) = rest.split_once('-')?;
+    let numeric = !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit());
+    (k.kind == "idle" && numeric).then_some((&k.session, &k.kind, hash))
 }
 
 /// Seconds from `t` to the window `[from, to)`; 0 inside.
@@ -144,6 +162,21 @@ pub fn join(
         if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
             (used[i], paired[n]) = (true, true);
             out.by_identity += 1;
+        }
+    }
+    // Pass 1b, MB1595 window 4: idle pairs on the screen hash, epoch ignored.
+    for (n, s) in shadow.iter().enumerate() {
+        let Some(want) = s.key.as_ref().and_then(idle_screen) else {
+            continue;
+        };
+        if paired[n] {
+            continue;
+        }
+        let same = |l: &Event| l.key.as_ref().and_then(idle_screen) == Some(want);
+        if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
+            (used[i], paired[n]) = (true, true);
+            out.by_identity += 1;
+            out.by_relaxed += 1;
         }
     }
     if fallback {
@@ -254,6 +287,34 @@ mod tests {
         }];
         let live = [Event::keyed(1060, 0, key("tm-x", "token", "hit_low:1"))];
         assert_eq!(join(&shadow, &live, &|_| true, true).by_fallback, 1);
+    }
+
+    /// Window 4: same session, kind and screen, idle-since 98 s apart.
+    #[test]
+    fn idle_pairs_on_screen_hash_across_epoch_skew() {
+        let fp = |e: i64| format!("since-{e}-8e42f0ed439d");
+        let shadow = [Event::keyed(1000, 60, key("tm-a", "idle", &fp(900)))];
+        let live = [
+            Event::keyed(1130, 0, key("tm-a", "idle", &fp(998))),
+            Event::keyed(1190, 0, key("tm-a", "idle", &fp(998))),
+        ];
+        let j = join(&shadow, &live, &|_| true, false);
+        assert_eq!((j.counts.matched, j.by_identity, j.by_relaxed), (1, 1, 1));
+        // One to one: the second live idle of the same screen stays unpaired.
+        assert_eq!(j.counts.poller_only, 1);
+    }
+
+    #[test]
+    fn idle_with_different_screen_hashes_never_pairs() {
+        let shadow = [Event::keyed(1000, 60, key("tm-a", "idle", "since-900-aaaa"))];
+        let live = [Event::keyed(1030, 0, key("tm-a", "idle", "since-998-bbbb"))];
+        let j = join(&shadow, &live, &|_| true, true);
+        assert_eq!((j.counts.matched, j.by_relaxed), (0, 0));
+        assert_eq!((j.counts.scheduler_only, j.counts.poller_only), (1, 1));
+        // A non-idle kind with the same shape keeps exact identity.
+        let shadow = [Event::keyed(1000, 60, key("tm-a", "token", "since-900-aaaa"))];
+        let live = [Event::keyed(1030, 0, key("tm-a", "token", "since-998-aaaa"))];
+        assert_eq!(join(&shadow, &live, &|_| true, true).counts.matched, 0);
     }
 
     #[test]
