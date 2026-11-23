@@ -190,7 +190,9 @@ async fn run_ask(rest: &[String]) -> Result<()> {
 /// [`crate::handoff::handoff`] with tm over `tm serve --stdio` and tc on the
 /// shared `tcode serve` socket. Prints the report as one JSON line; every
 /// failure, `outcome_unknown` included, is an error with a non-zero exit.
-/// Test: `handoff::tests::flow_tests` (the flow); `cli::tests::verbs_route`.
+/// Test: `handoff_to_tm_creates_then_reuses_the_session`,
+/// `handoff_to_tc_prints_the_handle_once_per_key`,
+/// `handoff_without_a_target_is_refused` (`tests/handoff_cli.rs`).
 async fn run_handoff(rest: &[String]) -> Result<()> {
     use crate::handoff::{Clients, StdioTm, UdsTc, handoff, parse_args};
     let args = parse_args(rest)?;
