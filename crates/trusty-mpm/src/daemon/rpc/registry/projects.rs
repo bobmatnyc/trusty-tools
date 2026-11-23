@@ -248,7 +248,7 @@ pub fn list_projects_op(state: &Arc<DaemonState>) -> ProjectsResponse {
 /// Why: `tm project info` must answer for any registered checkout, not only
 /// one announced to this daemon process since it started (#11345).
 /// What: the in-memory map first; then the persisted registry
-/// (`projects.json`), matching each row's [`local_checkout_for`] against
+/// (`projects.json`), matching each row's [`local_checkout_for`](crate::project::local_checkout_for) against
 /// `path`; then the alias store (`project-paths.json`). Both stores are read
 /// on every call, so no second cache exists to drift.
 ///
