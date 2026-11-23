@@ -145,7 +145,7 @@ impl SmDispatcher {
 /// to [`SmDispatcher::dispatch`]. Returns `Ok(())` on stdin EOF.
 /// #9167 AC5: this process types into panes itself (`sm.session.send`), so
 /// it records each delivered inject on its own bus producer, flushed at EOF
-/// and, on SIGTERM or SIGINT, within the daemon's signal budget before exit.
+/// and, on SIGTERM, SIGINT or SIGHUP (#10468), within the daemon's signal budget before exit.
 /// Test: the dispatch logic is covered by `tests.rs`; the signal flush by
 /// `signal_tests.rs::a_signal_flushes_the_buffered_inject_event_9167`; the
 /// EOF and setup-error stops by `stop_tests.rs`.
@@ -159,7 +159,13 @@ pub async fn run_sm_stdio(state: Arc<crate::daemon::state::DaemonState>) -> anyh
             async move { dispatcher.dispatch(req).await }
         })
     };
-    match run_sm_stdio_with(&state, build, serve, signal::shutdown_signal()).await {
+    // #10468: SIGHUP settles too; registered before the serve starts.
+    let stop = crate::daemon::stop_signal::StopSignals::install().recv();
+    match run_sm_stdio_with(&state, build, serve, async move {
+        stop.await;
+    })
+    .await
+    {
         signal::Ended::Served(served) => served,
         // The stdin read is a blocking task a normal return would wait on.
         signal::Ended::Signalled => std::process::exit(0),
