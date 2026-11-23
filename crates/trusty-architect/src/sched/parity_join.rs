@@ -189,9 +189,10 @@ pub fn join(
             continue;
         }
         let same = |l: &Event| {
-            l.key.as_ref().and_then(idle_screen).is_some_and(|(got, e)| {
-                got == want && (e - epoch).abs() <= IDLE_EPOCH_TOLERANCE_S
-            })
+            l.key
+                .as_ref()
+                .and_then(idle_screen)
+                .is_some_and(|(got, e)| got == want && (e - epoch).abs() <= IDLE_EPOCH_TOLERANCE_S)
         };
         if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
             (used[i], paired[n]) = (true, true);
