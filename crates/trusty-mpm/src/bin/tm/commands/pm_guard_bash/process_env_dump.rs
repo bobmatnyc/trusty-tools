@@ -181,12 +181,14 @@ fn assigns_to(rest: &[String]) -> bool {
 /// these rows refused only because the rest of the body already did.
 fn argv_list(word: &str, rest: &[String]) -> Option<Vec<String>> {
     let first = word.strip_prefix('[')?;
-    let items = if first.ends_with(']') {
+    // `"command="],` closes the list too; the `,` after `]` is the call's.
+    let closes = |w: &str| w.trim_end_matches(',').ends_with(']');
+    let items = if closes(first) {
         &[][..]
     } else {
         let end = rest
             .iter()
-            .position(|w| w.ends_with(']'))
+            .position(|w| closes(w))
             .map_or(rest.len(), |at| at + 1);
         &rest[..end]
     };
