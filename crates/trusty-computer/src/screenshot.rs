@@ -51,14 +51,52 @@ fn refuse(code: &'static str, detail: impl Into<String>) -> Refusal {
     (code, detail.into())
 }
 
-/// True when `element` is a password field.
+/// True when `element` is, or may be, a password field.
+///
+/// #11694: cua-driver 0.23.2 reports an `NSSecureTextField` as role
+/// `AXTextField` with no subrole and a localized `value_description`
+/// ("contains secure text" in English). The text cannot be matched in every
+/// language, so any text field carrying a `value_description` that is not an
+/// empty string counts as a password field (fail closed). No description
+/// value is known to be safe, so there is no allowlist.
+/// Test: `bound_refuses_secure_field`, `bound_admits_plain_text_field`.
 fn sensitive(element: &Value) -> bool {
-    ["role", "subrole"].iter().any(|k| {
+    let by_role = ["role", "subrole"].iter().any(|k| {
         element
             .get(*k)
             .and_then(Value::as_str)
             .is_some_and(|r| SENSITIVE_ROLES.contains(&r))
-    })
+    });
+    let described = match element.get("value_description") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(d)) => !d.trim().is_empty(),
+        Some(_) => true,
+    };
+    let text_field = element.get("role").and_then(Value::as_str) == Some("AXTextField");
+    by_role || (text_field && described)
+}
+
+/// True when the walked AX tree is the whole window: `degraded` is false or
+/// absent, and `returned_element_count` and `total_element_count` are both
+/// present and equal, and the `elements` array holds exactly that many
+/// entries. Anything else is incomplete.
+///
+/// #11694: cua-driver 0.23.2 reports `elements_complete: false` on a full
+/// walk, so the flag is not read; the counts decide.
+/// Test: `bound_admits_equal_counts_without_flag`, `bound_refuses_incomplete_tree`.
+fn tree_complete(sc: &serde_json::Map<String, Value>) -> bool {
+    let degraded = match sc.get("degraded") {
+        None | Some(Value::Null) => false,
+        Some(v) => v != &json!(false),
+    };
+    let returned = sc.get("returned_element_count").and_then(Value::as_u64);
+    let total = sc.get("total_element_count").and_then(Value::as_u64);
+    // The counts vouch only for an elements array of the size they claim.
+    let walked = sc
+        .get("elements")
+        .and_then(Value::as_array)
+        .map(|e| e.len() as u64);
+    !degraded && returned.is_some() && returned == total && walked == returned
 }
 
 /// Reduce a daemon `get_window_state` result to one image of `window_id`.
@@ -66,8 +104,8 @@ fn sensitive(element: &Value) -> bool {
 /// Why: the agent gets pixels only when the broker can vouch for what they
 /// hold (#11694).
 /// What: refuses, in order: no structured part (`redaction_failed`); another
-/// window (`window_mismatch`); a degraded tree or one not marked
-/// `elements_complete` (`screenshot_unverified`), since a password field
+/// window (`window_mismatch`); a tree [`tree_complete`] does not vouch for
+/// (`screenshot_unverified`), since a password field
 /// could hide in the part not walked; a secure text field
 /// (`sensitive_content`); a capture error or `screenshot_frame_valid` not
 /// true (`screenshot_unavailable`); not exactly one PNG or JPEG image part
@@ -76,6 +114,7 @@ fn sensitive(element: &Value) -> bool {
 /// Postcondition: an `Ok` value holds `window_id`, `pid`, `mime_type`,
 /// `width`, `height` and `image`, and no element, token or markdown.
 /// Test: `bound_returns_image_only`, `bound_refuses_secure_field`,
+/// `bound_admits_equal_counts_without_flag`,
 /// `bound_refuses_incomplete_tree`, `bound_refuses_unproven_capture`,
 /// `bound_refuses_other_window`, `bound_refuses_oversized_image`.
 pub fn bound(result: &Value, window_id: u64) -> Result<Value, Refusal> {
@@ -91,8 +130,7 @@ pub fn bound(result: &Value, window_id: u64) -> Result<Value, Refusal> {
             "the capture is not of the granted window",
         ));
     }
-    if sc.get("degraded") == Some(&json!(true)) || sc.get("elements_complete") != Some(&json!(true))
-    {
+    if !tree_complete(sc) {
         return Err(refuse(
             "screenshot_unverified",
             "the window's AX tree is incomplete, so a password field cannot be ruled out",

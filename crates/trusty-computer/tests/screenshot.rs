@@ -54,27 +54,115 @@ fn bound_returns_image_only() {
 
 #[test]
 fn bound_refuses_secure_field() {
-    for key in ["role", "subrole"] {
-        let mut snap = capture();
-        let field = json!({"element_index": 9, key: "AXSecureTextField", "parent_index": 0});
-        snap["structuredContent"]["elements"]
-            .as_array_mut()
-            .expect("elements")
-            .push(field);
-        assert_eq!(refused(&snap), "sensitive_content", "{key}");
+    // #11694: cua-driver 0.23.2 reports an NSSecureTextField as AXTextField with
+    // a localized description; any description we cannot read refuses.
+    let text_field = |description: Value| {
+        json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
+            "value": "", "value_description": description})
+    };
+    let fields = [
+        json!({"element_index": 9, "role": "AXSecureTextField", "parent_index": 0}),
+        json!({"element_index": 9, "subrole": "AXSecureTextField", "parent_index": 0}),
+        text_field(json!("contains secure text")),
+        text_field(json!("contient du texte sécurisé")),
+        text_field(json!("enthält sicheren Text")),
+        text_field(json!(1)),
+    ];
+    for field in fields {
+        let key = field.to_string();
+        assert_eq!(refused(&with_field(field)), "sensitive_content", "{key}");
     }
+}
+
+/// `counted()` at 70 elements, the 70th being `field`.
+fn with_field(field: Value) -> Value {
+    let mut snap = counted(json!(false), json!(70), json!(70));
+    snap["structuredContent"]["elements"]
+        .as_array_mut()
+        .expect("elements")
+        .push(field);
+    snap
+}
+
+#[test]
+fn bound_admits_plain_text_field() {
+    for description in [Value::Null, json!(""), json!("  ")] {
+        let field = json!({"element_index": 9, "role": "AXTextField", "parent_index": 0,
+            "value": "hello", "value_description": description});
+        assert!(bound(&with_field(field), 7).is_ok(), "{description}");
+    }
+    let bare = json!({"element_index": 9, "role": "AXTextField", "parent_index": 0});
+    assert!(bound(&with_field(bare), 7).is_ok());
+}
+
+/// `capture()` with the 0.23.2 completeness fields set to the given values,
+/// and its elements padded with plain buttons to 69, as the live window walks.
+fn counted(flag: Value, returned: Value, total: Value) -> Value {
+    let mut snap = capture();
+    let sc = &mut snap["structuredContent"];
+    let elements = sc["elements"].as_array_mut().expect("elements");
+    while elements.len() < 69 {
+        let i = elements.len();
+        elements.push(json!({"element_index": i, "role": "AXButton", "parent_index": 0}));
+    }
+    sc["elements_complete"] = flag;
+    sc["returned_element_count"] = returned;
+    sc["total_element_count"] = total;
+    snap
+}
+
+#[test]
+fn bound_admits_equal_counts_without_flag() {
+    // #11694: cua-driver 0.23.2 says `elements_complete: false` on a full walk.
+    let snap = counted(json!(false), json!(69), json!(69));
+    assert_eq!(bound(&snap, 7).expect("admitted")["image"], FAKE_PNG);
+    let mut not_degraded = snap.clone();
+    not_degraded["structuredContent"]["degraded"] = json!(false);
+    assert!(bound(&not_degraded, 7).is_ok());
 }
 
 #[test]
 fn bound_refuses_incomplete_tree() {
-    let mut degraded = capture();
-    degraded["structuredContent"]["degraded"] = json!(true);
-    assert_eq!(refused(&degraded), "screenshot_unverified");
-    for complete in [json!(false), Value::Null] {
-        let mut snap = capture();
-        snap["structuredContent"]["elements_complete"] = complete;
-        assert_eq!(refused(&snap), "screenshot_unverified");
+    let unequal = counted(json!(false), json!(69), json!(70));
+    assert_eq!(refused(&unequal), "screenshot_unverified");
+    // The flag alone never vouches for a tree whose counts disagree.
+    let flagged = counted(json!(true), json!(69), json!(70));
+    assert_eq!(refused(&flagged), "screenshot_unverified");
+    let mut degraded = counted(json!(false), json!(69), json!(69));
+    for value in [json!(true), json!("yes"), json!(1)] {
+        degraded["structuredContent"]["degraded"] = value;
+        assert_eq!(refused(&degraded), "screenshot_unverified");
     }
+    let absent = [Value::Null, json!("69")];
+    for missing in &absent {
+        for snap in [
+            counted(json!(true), missing.clone(), json!(69)),
+            counted(json!(true), json!(69), missing.clone()),
+            counted(json!(true), missing.clone(), missing.clone()),
+        ] {
+            assert_eq!(refused(&snap), "screenshot_unverified", "{missing}");
+        }
+    }
+    // Equal counts vouch for nothing when the elements they count are absent.
+    let mut no_elements = counted(json!(false), json!(69), json!(69));
+    let sc = no_elements["structuredContent"]
+        .as_object_mut()
+        .expect("object");
+    sc.remove("elements");
+    assert_eq!(refused(&no_elements), "screenshot_unverified");
+    let mut short = counted(json!(false), json!(69), json!(69));
+    short["structuredContent"]["elements"]
+        .as_array_mut()
+        .expect("elements")
+        .pop();
+    assert_eq!(refused(&short), "screenshot_unverified");
+    let mut removed = capture();
+    let sc = removed["structuredContent"]
+        .as_object_mut()
+        .expect("object");
+    sc.remove("returned_element_count");
+    sc.remove("total_element_count");
+    assert_eq!(refused(&removed), "screenshot_unverified");
     let mut bare = capture();
     bare.as_object_mut()
         .expect("object")

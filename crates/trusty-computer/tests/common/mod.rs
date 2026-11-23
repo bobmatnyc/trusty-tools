@@ -136,7 +136,9 @@ pub fn with_capture(mut snap: Value, args: &Value, force: bool) -> Value {
     let sc = &mut snap["structuredContent"];
     sc["pid"] = args["pid"].clone();
     sc["window_id"] = args["window_id"].clone();
-    sc["elements_complete"] = json!(true);
+    // #11694: 0.23.2 says `false` even on a full walk; the counts carry it.
+    sc["elements_complete"] = json!(false);
+    sc["total_element_count"] = sc["returned_element_count"].clone();
     if force || args.get("include_screenshot") != Some(&json!(false)) {
         sc["screenshot_frame_valid"] = json!(true);
         sc["screenshot_width"] = json!(1);
@@ -324,9 +326,16 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
         let sc = &mut snap["structuredContent"];
         match state.snapshot_mode {
             Some("secure") => {
-                let field = json!({"element_index": 8, "role": "AXTextField",
-                    "subrole": "AXSecureTextField", "parent_index": 0, "element_token": "tok-pw"});
-                sc["elements"].as_array_mut().expect("elements").push(field);
+                // #11694: the 0.23.2 shape — no subrole, a localized description.
+                let field = json!({"element_index": 8, "role": "AXTextField", "value": "",
+                    "value_description": "contains secure text", "parent_index": 0,
+                    "element_token": "tok-pw"});
+                let elements = sc["elements"].as_array_mut().expect("elements");
+                elements.push(field);
+                // #11694: a full walk counts the field it returns.
+                let n = json!(elements.len());
+                sc["returned_element_count"] = n.clone();
+                sc["total_element_count"] = n;
             }
             Some("degraded") => sc["degraded"] = json!(true),
             Some("menus") => {
