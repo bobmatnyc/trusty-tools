@@ -263,7 +263,7 @@ fn every_pm_style_takes_identity_from_the_tmux_session_not_the_folder() {
         }
         let body = bundled.content(rc());
         assert!(
-            body.contains("tmux display-message -p -t \"$TMUX_PANE\" '#S'"),
+            body.contains("tmux display-message -p '#S'"),
             "{} does not take identity from the tmux session",
             bundled.id
         );
