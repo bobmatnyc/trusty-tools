@@ -209,7 +209,7 @@ jobs:
       # `config` step — i.e. all library-only crates. Examples: trusty-common
       # (shared lib), trusty-embedderd (a sidecar binary that ships INSIDE a
       # host crate, single-owner-per-binary), trusty-progress,
-      # the internal trusty-agents* libs, etc. Previously a library-only tag
+      # the internal trusty-assistants / trusty-agents-common libs, etc. Previously a library-only tag
       # (e.g. trusty-common-v0.15.3) errored RED; it now green-skips. (trusty-console
       # is NOT bundled — it has its own standalone release job.)
       bundled:  ${{ steps.config.outputs.bundled }}
@@ -562,7 +562,7 @@ jobs:
             echo "  trusty-code, trusty-console, trusty-installer (+ tctl alias)."
             echo "Library-only / internal crates (green-skip, no standalone binary):"
             echo "  trusty-common, trusty-embedderd, trusty-progress,"
-            echo "  trusty-agents*, tc-services,"
+            echo "  trusty-assistants, trusty-agents-common, tc-services,"
             echo "  trusty-gworkspace, and any future library crate."
             echo "If '$CRATE' SHOULD produce a released binary, add a config branch for it"
             echo "above (see the 'TO ADD A NEW CRATE' note) — otherwise this skip is correct."

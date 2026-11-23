@@ -40,7 +40,8 @@ pub(crate) async fn dispatch(command: crate::cli::Command) -> anyhow::Result<()>
 /// `tm compress` dispatch: the stdin filter, or the run mode for a command.
 ///
 /// What: a `--chain` nonce → `compress_chain::run_chain` (#11507), exiting
-/// with the chain's status; an empty `argv` → [`super::compress::run_compress`]; otherwise
+/// with the chain's status; an empty `argv` → [`super::compress::run_compress`],
+/// exiting with the sentinel's status (#11572); otherwise
 /// [`run_compress_command`], then exits with the program's status.
 /// Test: `cli_parses_compress_with_a_command`, and end to end
 /// `tm_compress_run_mode_compresses_and_keeps_the_exit_status`.
@@ -50,7 +51,12 @@ pub(crate) async fn run(tool: &str, argv: &[String], chain: Option<&str>) -> any
         std::process::exit(super::compress_chain::run_chain(tool, nonce).await?);
     }
     if argv.is_empty() {
-        return super::compress::run_compress(tool).await;
+        // #11572: exit with the wrapped command's status from the sentinel.
+        let code = super::compress::run_compress(tool).await?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
     }
     std::process::exit(run_compress_command(tool, argv).await)
 }

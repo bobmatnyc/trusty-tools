@@ -423,7 +423,17 @@ mod os_table {
         );
         // SAFETY: `getuid` has no preconditions and cannot fail.
         assert_eq!(own.uid, unsafe { libc::getuid() });
-        assert_eq!(OsProcessTable.comm(1).map(|c| c.uid), Ok(0));
+        // See #11644: pid 1's owner is root on a host, `nobody` in a
+        // container; the read is checked against `ps`, not a fixed 0.
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "uid=", "-p", "1"])
+            .output()
+            .expect("run ps");
+        let init_uid: u32 = String::from_utf8_lossy(&ps.stdout)
+            .trim()
+            .parse()
+            .expect("ps prints pid 1's uid");
+        assert_eq!(OsProcessTable.comm(1).map(|c| c.uid), Ok(init_uid));
     }
 
     #[test]

@@ -16,7 +16,10 @@
 //! The wake phrase is not the decision: a dry run never sends, so its carried
 //! `wake_pending` makes every later cycle print `would send`.
 //! Haiku-path wakes count only in `haiku_excluded`; `il_cron` alerts and
-//! wakes only in `il_cron_excluded` (unmeasurable in a dry run). The report
+//! wakes only in `il_cron_excluded` (unmeasurable in a dry run); `ctxwatch`
+//! alerts and wakes only in `ctxwatch_excluded` (the two pollers share one
+//! debounce file, so whichever runs first raises it). `idle` pairs on the
+//! screen hash, since-epochs within 300 s; `idle_relaxed` counts those. The report
 //! keeps both numbers, identity-only and identity plus fallback, and the
 //! pairs each method made; [`Report::passes`] uses identity plus fallback
 //! against [`Thresholds`] (default 120 cycles and 95% for alerts and wakes).
@@ -27,14 +30,16 @@
 //! `parity_counts_only_cycles_whose_triage_woke`,
 //! `parity_render_states_percentages_and_a_verdict`,
 //! `parity_load_reads_the_three_files`, `parity_reports_identity_and_fallback_numbers`,
-//! `parity_excludes_il_cron_with_its_reason`.
+//! `parity_excludes_il_cron_with_its_reason`,
+//! `parity_pairs_idle_alerts_whose_epochs_differ`,
+//! `parity_excludes_ctxwatch_with_its_reason`.
 
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use super::cutover::Thresholds;
-use super::parity_join::{Event, IL_CRON, Joined, join};
+use super::parity_join::{CTXWATCH, Event, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join};
 use super::shadow::{EventKey, ShadowAlert, ShadowRecord};
 use super::slot::parse_iso;
 use super::{Layout, SchedError};
@@ -77,6 +82,10 @@ pub struct Report {
     pub haiku_excluded: u64,
     /// `il_cron` alerts and wakes on either side, left out (MB1595 fix round).
     pub il_cron_excluded: u64,
+    /// `ctxwatch` alerts and wakes on either side, left out (MB1595 window 4).
+    pub ctxwatch_excluded: u64,
+    /// Alert and wake `idle` pairs made on (session, kind, screen hash).
+    pub idle_relaxed: (u64, u64),
 }
 
 /// One live `alerts.jsonl` row.
@@ -215,17 +224,27 @@ pub fn compute_full(
         })
         .collect();
     // MB1595 fix round: il_cron is unmeasurable in a dry run (il-cron.py:249).
-    let mut excluded = 0;
+    // MB1595 window 4: ctxwatch shares live debounce state (C4), likewise out.
+    let mut excluded = [0u64; 2];
     let mut drop_il = |v: Vec<Event>, live_side: bool| -> Vec<Event> {
-        let (il, rest): (Vec<Event>, Vec<Event>) = v
-            .into_iter()
-            .partition(|e| e.sk.as_ref().is_some_and(|(_, k)| k == IL_CRON));
-        excluded += il.iter().filter(|e| !live_side || in_scope(e.ts)).count() as u64;
+        let mut rest = Vec::with_capacity(v.len());
+        for e in v {
+            let kind = e.sk.as_ref().map(|(_, k)| k.as_str());
+            let slot = match kind {
+                Some(IL_CRON) => 0,
+                Some(CTXWATCH) => 1,
+                _ => {
+                    rest.push(e);
+                    continue;
+                }
+            };
+            excluded[slot] += u64::from(!live_side || in_scope(e.ts));
+        }
         rest
     };
     let (sa, la) = (drop_il(sa, false), drop_il(la, true));
     let (sw, lw) = (drop_il(sw, false), drop_il(lw, true));
-    rep.il_cron_excluded = excluded;
+    [rep.il_cron_excluded, rep.ctxwatch_excluded] = excluded;
     let both = |s: &[Event], l: &[Event]| -> (Joined, Joined) {
         (join(s, l, &in_scope, false), join(s, l, &in_scope, true))
     };
@@ -235,6 +254,7 @@ pub fn compute_full(
     (rep.wakes_identity, rep.wakes) = (wi.counts, wf.counts);
     rep.alert_pairs = (af.by_identity, af.by_fallback);
     rep.wake_pairs = (wf.by_identity, wf.by_fallback);
+    rep.idle_relaxed = (af.by_relaxed, wf.by_relaxed);
     rep
 }
 
@@ -396,11 +416,19 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         "pairs by identity / by +-2-cycle fallback: alerts {} / {}, wakes {} / {}\n",
         r.alert_pairs.0, r.alert_pairs.1, r.wake_pairs.0, r.wake_pairs.1
     );
+    s += &format!(
+        "idle pairs on (session, kind, screen hash), epochs within {} s: alerts {}, wakes {}\n",
+        IDLE_EPOCH_TOLERANCE_S, r.idle_relaxed.0, r.idle_relaxed.1
+    );
     s += &format!("live rows unread: {}\n", r.unread);
     s += &format!("haiku-path wakes excluded: {}\n", r.haiku_excluded);
     s += &format!(
         "il_cron excluded: {} (unmeasurable in dry run: il-cron.py:249)\n",
         r.il_cron_excluded
+    );
+    s += &format!(
+        "ctxwatch excluded: {} (shared debounce state: the first poller to run raises it)\n",
+        r.ctxwatch_excluded
     );
     s += &format!(
         "alert match: {:.1}% (identity only {:.1}%)\nwake match: {:.1}% (identity only {:.1}%)\n",

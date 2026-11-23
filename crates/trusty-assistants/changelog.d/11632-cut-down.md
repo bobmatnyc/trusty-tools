@@ -1,0 +1,7 @@
+Removed
+- The agent harness: the PM orchestrator and CTRL controller, sub-agent subprocesses and their NDJSON IPC, the REPL, the workflow engine and its direct/sub-agent modes, the tmux manager, and the coding tools (shell, git, filesystem read/list, AST, ticketing, web search, timers, session state) (#11632).
+- The HTTP API: `tagent --api`, `--serve` and `--port`, the `service` daemon spawner, the log-drain scheduler and the `POST /rpc` handler. `tagent` opens no network listener; `tests/no_network_listener.rs` fails on any non-test TCP or UDP bind (#11632).
+- The Svelte/Tauri desktop UI (`trusty-agents-ui`), the `pnpm` step in `build.rs`, the `tagent` wrapper script and its selftest, `evals/` and `examples/` (#11632).
+- The Slack and Telegram bot gateways that ran ctrl turns, the Gmail listener poll loop and the listener wake dispatcher, and knowledge extraction inference; the channel adapters, listener config and filters, and knowledge pipeline state remain (#11632).
+- The host-admin modules (`system_status`, `init`, `debugger`, `eval`, `update`, `inspection`, `perf`, `recap`, `docs_index`), `skills` loading and ranking, `context`, `compress`, the local code index and search daemon, and the LLM chat clients; the provider pin, lock and policy that validate an assistant's model choice remain (#11632).
+- The `list_agents` tool from `tagent mcp-serve`, whose agent roster was cut; `dispatch_task` remains (#11632).

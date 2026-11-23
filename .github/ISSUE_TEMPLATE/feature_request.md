@@ -37,7 +37,7 @@ Have you considered any alternative approaches?
 
 ## Crate(s) Affected
 
-Which crate or crates does this feature relate to? (e.g., `trusty-search`, `trusty-memory`, `trusty-agents`)
+Which crate or crates does this feature relate to? (e.g., `trusty-search`, `trusty-memory`, `trusty-assistants`)
 
 ## Additional Context
 

@@ -107,7 +107,7 @@ export interface CrateGroup {
  * What: two groups, split on release state rather than on subject matter.
  * Placement was checked per crate against crates.io and this repository's
  * release tags on 2026-08-08, not inferred from version numbers —
- * `trusty-agents` reads 0.38.6 in its manifest while having no tag and no
+ * `trusty-assistants` (formerly trusty-agents) reads 0.38.6 in its manifest while having no tag and no
  * crates.io release at all.
  *
  * Deliberately omitted here, like the crate COUNT above: any per-crate version
@@ -130,7 +130,7 @@ export const CRATE_GROUPS: CrateGroup[] = [
 	{
 		group: 'In development',
 		crates: [
-			{ name: 'trusty-agents', description: 'Agentic harness with multi-model routing (tagent)' },
+			{ name: 'trusty-assistants', description: 'Agentic harness with multi-model routing (ta)' },
 			{ name: 'trusty-channels', description: 'Chat-channel MCP servers, starting with Slack' },
 			{ name: 'trusty-sld-lint', description: 'Linter for spec-linked documentation' },
 			{ name: 'trusty-code-gui', description: 'Desktop shell for the tcode daemon' }

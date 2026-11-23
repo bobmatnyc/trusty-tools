@@ -186,13 +186,18 @@ impl ServiceId {
     ///
     /// Why (#10908): D95 has the reader pull each report over UDS. Events and
     /// MPM serve it on their sockets; the rest keep the stdio spawn as a
-    /// marked fallback ([`MetricsSource::Stdio`]). trusty-console serves no
-    /// `console_metrics` method on its socket yet, so it has no source.
-    /// Test: `metrics_sources_prefer_uds_for_events_and_mpm`.
+    /// marked fallback ([`MetricsSource::Stdio`]). trusty-console answers
+    /// `console.console_metrics` on its socket (#10907).
+    /// Test: `metrics_sources_prefer_uds_for_events_and_mpm`,
+    /// `console_console_metrics_over_uds_yields_a_report`.
     pub fn metrics_source(self) -> Option<MetricsSource> {
         match self {
             ServiceId::Events => Some(MetricsSource::Uds(
                 trusty_common::control_bus::METHOD_EVENTS_CONSOLE_METRICS,
+            )),
+            // #10907: the console's listener serves its own report.
+            ServiceId::Console => Some(MetricsSource::Uds(
+                trusty_common::console_rpc::METHOD_CONSOLE_METRICS,
             )),
             ServiceId::Mpm => Some(MetricsSource::UdsMcpDispatch),
             other => other

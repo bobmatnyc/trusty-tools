@@ -147,6 +147,7 @@ pub async fn agent(core: Arc<Core>, stream: UnixStream) {
     for (peer, claim) in held {
         clear(&core, peer.as_deref(), &claim).await;
     }
+    crate::emulation::reconcile(&core).await; // #11371: reset the session's emulated tabs.
 }
 
 async fn refuse_wire(e: WireError, writer: &mut OwnedWriteHalf) {

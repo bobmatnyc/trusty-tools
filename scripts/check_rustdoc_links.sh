@@ -315,7 +315,7 @@ done
 # and MSRV jobs all carry the same flags): they need WebKit2GTK, which no
 # headless CI runner has. They are not published to crates.io, so they have no
 # docs.rs page for a broken link to land on.
-EXCLUDES=(--exclude trusty-code-gui --exclude trusty-agents-ui)
+EXCLUDES=(--exclude trusty-code-gui)
 
 # Cleanup is the EXIT trap armed at the top of this script, which also writes
 # the terminal VERDICT line (#7633).

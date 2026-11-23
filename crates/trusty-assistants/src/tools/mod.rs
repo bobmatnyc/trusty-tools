@@ -1,0 +1,350 @@
+//! Tool registry and definitions for LLM function calling.
+//!
+//! Why: Replaces hardcoded `if tc.name == "delegate_to_agent"` dispatch with
+//! a polymorphic registry so new tools can
+//! be plugged in without touching the PM loop. This is the SOA seam.
+//! What: `ToolRegistry` holds `Arc<dyn ToolExecutor>` keyed by name; emits a
+//! vector of OpenAI-compatible JSON schemas for the LLM request; dispatches
+//! named tool calls to the right executor.
+//! Test: Unit tests construct a registry with a fake tool and assert that
+//! `dispatch("fake", args)` returns the fake's output and `schemas()`
+//! contains the fake's schema.
+
+pub mod agent_plugin;
+pub mod assistant_memory;
+pub mod channel;
+// #4026/#4028: cross-product subagent allow-set + propose-only envelope.
+pub mod cross_product;
+pub mod delegate;
+// #4349/#4350 (spec DOC-62): the closed ceremony vocabulary for coding
+// delegation, and the raise-never-lower resolution that applies it.
+pub mod execution_style;
+pub mod file_filter;
+// #11632: grep only, as `memory::vector_search`'s fallback.
+pub mod fs_reader;
+pub mod izzie;
+pub mod knowledge_history;
+pub mod mcp_live;
+pub mod mcp_service_tools;
+pub mod mcp_tools;
+pub mod memory;
+pub mod memory_search;
+pub mod okg;
+pub mod pm_bridge;
+pub mod pm_bridge_backend;
+pub mod registry;
+pub mod subagent_allow;
+pub mod traits;
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use async_openai::types::{ChatCompletionTool, ChatCompletionToolArgs, FunctionObjectArgs};
+use serde_json::Value;
+
+#[allow(unused_imports)]
+pub use traits::{
+    AgentOutput, AgentRunner, RunContext, SearchProvider, SearchResult, SkillResolver,
+    ToolExecutionTier, ToolExecutor, ToolResult,
+};
+
+/// Registry of tools available to an LLM session.
+///
+/// Why: Centralizes tool lookup and schema emission so the PM loop and the
+/// multi-turn sub-agent loop stay short and test-friendly.
+/// What: `HashMap<String, Arc<dyn ToolExecutor>>` with register/dispatch/schemas.
+/// Test: See unit tests below.
+#[derive(Default)]
+pub struct ToolRegistry {
+    activity_session: Option<String>,
+    activity_history: std::sync::Mutex<Vec<Value>>,
+    tools: HashMap<String, Arc<dyn ToolExecutor>>,
+}
+
+impl ToolRegistry {
+    /// Construct an empty registry.
+    pub fn new() -> Self {
+        Self {
+            tools: HashMap::new(),
+            activity_session: None,
+            activity_history: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Attach a task identity for safe, argument-free tool activity telemetry.
+    pub fn with_activity_session(mut self, session: &str) -> Self {
+        self.activity_session = (!session.is_empty()).then(|| session.to_owned());
+        self
+    }
+    pub fn activity_history(&self) -> Vec<Value> {
+        self.activity_history
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+    /// Register a tool by its `name()`.
+    ///
+    /// Why: Using the tool's own name prevents mismatches between registered
+    /// key and schema-declared function name.
+    /// What: Inserts into the map. #101 (MIN-5): a `debug_assert!` now
+    /// panics in debug builds on duplicate names so collisions surface
+    /// during development rather than silently overwriting the first tool.
+    /// In release builds the later registration still wins (existing
+    /// behavior preserved) to avoid aborting production binaries.
+    /// Test: `register` then `dispatch` by the same name and assert success;
+    /// see also `register_panics_on_duplicate_name_in_debug`.
+    pub fn register(&mut self, tool: Arc<dyn ToolExecutor>) {
+        let name = tool.name().to_string();
+        debug_assert!(
+            !self.tools.contains_key(&name),
+            "duplicate tool registration for '{name}' — collisions silently overwrite and cause dispatch bugs (see #101)"
+        );
+        self.tools.insert(name, tool);
+    }
+
+    /// Check whether a tool is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    /// Dispatch a named tool call.
+    ///
+    /// Why: Single place where missing-tool errors are surfaced as a structured
+    /// `ToolResult::Error` so the LLM loop can continue instead of aborting.
+    /// What: Looks up `name`, calls `execute(args)`, returns the `ToolResult`.
+    /// Test: Dispatch to an unregistered name returns a `ToolResult::Error`;
+    /// dispatch to a registered one returns `ToolResult::Success`.
+    pub async fn dispatch(&self, name: &str, args: Value) -> ToolResult {
+        let Some(tool) = self.tools.get(name) else {
+            return ToolResult::err(format!("no tool registered with name '{name}'"));
+        };
+        static NEXT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let call_id = NEXT_CALL
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .to_string();
+        let emit = |status: &str| {
+            if let Some(session_id) = &self.activity_session {
+                let mut history = self
+                    .activity_history
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let row = serde_json::json!({"kind":"trusty.tool-activity","version":1,"call_id":call_id,"tool":name,"status":status});
+                if let Some(existing) = history.iter_mut().find(|v| v["call_id"] == call_id) {
+                    *existing = row;
+                } else if history.len() < 128 {
+                    history.push(row);
+                }
+                drop(history);
+                crate::events::emit(crate::events::Event::ToolActivity {
+                    session_id: session_id.clone(),
+                    call_id: call_id.clone(),
+                    tool: name.to_owned(),
+                    status: status.to_owned(),
+                });
+            }
+        };
+        emit("running");
+        let result = tool.execute(args).await;
+        emit(if result.is_error() {
+            "error"
+        } else {
+            "complete"
+        });
+        result
+    }
+
+    /// Dispatch with an optional per-agent allowlist (see `ToolsConfig`).
+    ///
+    /// Why: Per-agent tool gating prevents, e.g., the plan-agent from shelling
+    /// out or the research-agent from delegating. Allowlist is checked
+    /// centrally so every call site inherits the same policy.
+    /// What: If `allowed` is `Some` and does not contain `name`, returns a
+    /// recoverable `ToolResult::Error` naming what is permitted. Otherwise
+    /// delegates to `dispatch`.
+    /// Test: See `ToolRegistry::dispatch_gated_rejects_disallowed` below.
+    pub async fn dispatch_gated(
+        &self,
+        name: &str,
+        args: Value,
+        allowed: Option<&[String]>,
+    ) -> ToolResult {
+        if let Some(list) = allowed
+            && !list.iter().any(|a| a == name)
+        {
+            return ToolResult::err(format!(
+                "Tool '{name}' is not permitted for this agent. Allowed: {}",
+                list.join(", ")
+            ));
+        }
+        self.dispatch(name, args).await
+    }
+
+    /// Emit all registered tool schemas as raw JSON values.
+    ///
+    /// Why: The sub-agent tool-calling loop needs raw JSON schemas to attach
+    /// to requests; the OpenAI-compatible schema is produced by each tool.
+    /// What: Collects `tool.schema()` for every registered tool.
+    /// Test: Registering two tools returns a vector of length 2.
+    pub fn schemas(&self) -> Vec<Value> {
+        self.tools.values().map(|t| t.schema()).collect()
+    }
+
+    /// Dispatch a tool call honoring a `UserIdentity`'s `ServiceTier` (#445).
+    ///
+    /// Why: Some tools must be denied to less-trusted transports (Slack guest
+    /// users, unauthenticated HTTP) even if the LLM tries to call them.
+    /// Enforcing the tier check at the dispatch boundary means transport
+    /// authors can't accidentally bypass RBAC by forgetting to pre-filter
+    /// the tool list before passing it to the LLM.
+    /// What: If the tool is registered AND `user.can_access_tier(tool.restricted_tiers())`
+    /// is `false`, returns a `ToolResult::Error` with a stable, user-facing
+    /// message ("This tool is not available for your access tier."). Otherwise
+    /// delegates to `dispatch_gated` so the per-agent allowlist still applies.
+    /// Test: `dispatch_for_user_*` below.
+    pub async fn dispatch_for_user(
+        &self,
+        name: &str,
+        args: Value,
+        allowed: Option<&[String]>,
+        user: &crate::rbac::UserIdentity,
+    ) -> ToolResult {
+        if let Some(tool) = self.tools.get(name)
+            && !user.can_access_tier(tool.restricted_tiers())
+        {
+            return ToolResult::err("This tool is not available for your access tier.");
+        }
+        self.dispatch_gated(name, args, allowed).await
+    }
+
+    /// Return the subset of registered tools that `user` may invoke (#445).
+    ///
+    /// Why: Schema emission for the LLM request must reflect what the user
+    /// can actually call, otherwise the model will hallucinate denied calls
+    /// and burn turns. Filtering here keeps the LLM's tool list and dispatch
+    /// enforcement in sync.
+    /// What: Returns cloned `Arc`s for tools where
+    /// `user.can_access_tier(tool.restricted_tiers())` is true. Order is
+    /// unspecified (HashMap iteration).
+    /// Test: `filter_tools_for_user_*` below.
+    pub fn filter_tools_for_user(
+        &self,
+        user: &crate::rbac::UserIdentity,
+    ) -> Vec<Arc<dyn ToolExecutor>> {
+        self.tools
+            .values()
+            .filter(|t| user.can_access_tier(t.restricted_tiers()))
+            .cloned()
+            .collect()
+    }
+
+    /// Map of tool name -> declared OpenRPC scope, for tools that advertise
+    /// one (#3208).
+    ///
+    /// Why: Agent-declared `[tools].scopes` patterns (`google.gmail.*`) are
+    /// matched against a tool's *scope*, not its name — but callers building
+    /// a per-agent allowlist only have tool names to hand. This gives them
+    /// the name -> scope lookup needed to consult
+    /// `tools::registry::scope::agent_can_use` per candidate name.
+    /// What: Only tools whose `ToolExecutor::scope()` returns `Some` are
+    /// present. Native/in-process tools (the trait default `None`) are
+    /// absent, since they aren't part of the scoped surface.
+    /// Test: `tool_scopes_includes_only_scoped_tools`.
+    pub fn tool_scopes(&self) -> HashMap<String, String> {
+        self.tools
+            .iter()
+            .filter_map(|(name, t)| t.scope().map(|s| (name.clone(), s.to_string())))
+            .collect()
+    }
+
+    /// Convert registered tool schemas into `ChatCompletionTool` values
+    /// suitable for the async-openai builder.
+    ///
+    /// Why: The PM loop uses async-openai's typed builder; this bridges the
+    /// raw JSON schemas back into that representation without duplicating
+    /// them at call sites.
+    /// What: Re-parses the `function` object into `FunctionObjectArgs` and
+    /// wraps with `ChatCompletionToolArgs`.
+    /// Test: Registering `delegate_to_agent` and calling this yields one
+    /// `ChatCompletionTool` with the expected name.
+    pub fn openai_tools(&self) -> Result<Vec<ChatCompletionTool>> {
+        let mut out = Vec::with_capacity(self.tools.len());
+        for schema in self.schemas() {
+            let function = schema
+                .get("function")
+                .cloned()
+                .context("tool schema missing 'function' object")?;
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .context("tool schema missing function.name")?
+                .to_string();
+            let description = function
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let parameters = function
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
+
+            let func = FunctionObjectArgs::default()
+                .name(name)
+                .description(description)
+                .parameters(parameters)
+                .build()
+                .context("failed to build FunctionObject from schema")?;
+            let tool = ChatCompletionToolArgs::default()
+                .function(func)
+                .build()
+                .context("failed to build ChatCompletionTool from schema")?;
+            out.push(tool);
+        }
+        Ok(out)
+    }
+}
+
+/// Legacy helper for the `delegate_to_agent` tool schema.
+///
+/// Why: Kept for backward-compatibility with the existing PM loop before it
+/// migrates to the registry fully; also used by the unit test for schema
+/// correctness.
+/// What: Builds a `ChatCompletionTool` with the hardcoded delegate schema.
+/// Test: Unit test below.
+#[allow(dead_code)]
+pub fn delegate_to_agent_tool() -> Result<ChatCompletionTool> {
+    let params = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "agent_name": {
+                "type": "string",
+                "description": "The short name of the sub-agent to delegate to (e.g. 'python-engineer')."
+            },
+            "task": {
+                "type": "string",
+                "description": "The concrete task description to send to the sub-agent."
+            }
+        },
+        "required": ["agent_name", "task"],
+        "additionalProperties": false
+    });
+
+    let function = FunctionObjectArgs::default()
+        .name("delegate_to_agent")
+        .description("Delegate a task to a specialized sub-agent. Use this for any implementation work (writing code, running analysis, etc.). The sub-agent will be spawned as a subprocess and its result returned to you.")
+        .parameters(params)
+        .build()
+        .context("failed to build delegate_to_agent function object")?;
+
+    let tool = ChatCompletionToolArgs::default()
+        .function(function)
+        .build()
+        .context("failed to build delegate_to_agent ChatCompletionTool")?;
+
+    Ok(tool)
+}
+
+#[cfg(test)]
+#[path = "registry_tests.rs"]
+mod tests;

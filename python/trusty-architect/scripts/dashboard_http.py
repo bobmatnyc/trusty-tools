@@ -183,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 return routes.fleet(self)
             if parts == ["api", "projects"]:
                 return routes.projects(self)
+            if parts == ["api", "projects", "key-names"]:   # #10350: the Secrets list, names only
+                return routes.key_names(self, url)
             if parts == ["api", "pane"]:   # #11065: a session's masked pane tail
                 return routes.pane(self, url)
             if parts == ["api", "cli-profiles"]:

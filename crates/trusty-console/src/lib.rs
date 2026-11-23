@@ -71,6 +71,8 @@ pub mod mcp_handle;
 pub mod metrics_poller;
 pub mod poller;
 pub mod proxy;
+// #10907: the console's own request counters behind `console.console_metrics`.
+pub mod request_metrics;
 pub mod routes;
 // #6285: the console's client to trusty-search, which no longer serves HTTP.
 // #6155: the trusty-memory and trusty-analyze bridges, siblings of

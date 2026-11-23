@@ -360,3 +360,52 @@ fn a_full_decline_day_drops_silently() {
         "the dropped line is not stored"
     );
 }
+
+/// #11563: `ls <path>` and `grep -n <pattern>` put the path or the pattern in
+/// `tool_name`; both ledgers (savings and opportunity) must store neither.
+#[test]
+fn a_compress_row_never_stores_a_path_or_pattern() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    for tool in ["ls /Users/x/p", "grep -n secret f"] {
+        record_compress_with(
+            dir.path(),
+            "sess-p",
+            tool,
+            400_000,
+            40_000,
+            "native_fallback",
+            sonnet_price,
+        );
+    }
+    let opportunity = [
+        crate::core::savings_opportunity::OpportunityRow::new(
+            "PostToolUse",
+            "s",
+            "bash",
+            "ls /Users/x/p",
+            9,
+            9,
+            1,
+        ),
+        crate::core::savings_opportunity::OpportunityRow::new(
+            "PostToolUse",
+            "s",
+            "bash",
+            "grep -n secret f",
+            9,
+            9,
+            1,
+        ),
+    ];
+    let text = std::fs::read_to_string(savings_log_in(dir.path())).expect("ledger");
+    let mut names: Vec<String> = text
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("json"))
+        .map(|v| v["tool_name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.extend(opportunity.iter().map(|r| r.tool_name.clone()));
+    assert_eq!(names, ["ls", "grep", "ls", "grep"], "{text}");
+    for name in &names {
+        assert!(!name.contains('/') && !name.contains("secret"), "{name}");
+    }
+}

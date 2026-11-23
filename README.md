@@ -215,9 +215,8 @@ package to its manifest, source, and documentation, use the
 
 | Crate | Description |
 |---|---|
-| `trusty-agents` | Agent orchestration platform |
+| `trusty-assistants` | Assistant core (formerly `trusty-agents`): channels, listeners, memory, knowledge, and a stdio MCP dispatch surface (`ta`) |
 | `trusty-agents-common` | Shared types and utilities for agent framework |
-| `trusty-agents-ui` | Nested Tauri desktop client for trusty-agents |
 
 ### Moved to their own repo
 
@@ -232,7 +231,7 @@ package to its manifest, source, and documentation, use the
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ User surfaces: tm · tcode · tagent · tctl · GUIs            │
+│ User surfaces: tm · tcode · ta · tctl · GUIs                │
 └──────────────────────────────┬────────────────────────────────┘
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
@@ -399,4 +398,4 @@ workspace field.
 - **I want to search code:** Read [crates/trusty-search/README.md](crates/trusty-search/README.md)
 - **I want persistent memory:** Read [crates/trusty-memory/README.md](crates/trusty-memory/README.md)
 - **I want multi-session orchestration:** Read [crates/trusty-mpm/README.md](crates/trusty-mpm/README.md)
-- **I want the agent harness:** Read [crates/trusty-agents/README.md](crates/trusty-agents/README.md)
+- **I want the assistant core:** Read [crates/trusty-assistants/README.md](crates/trusty-assistants/README.md)

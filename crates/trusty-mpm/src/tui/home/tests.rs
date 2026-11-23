@@ -440,7 +440,8 @@ async fn a_hung_probe_does_not_hold_back_the_other_tiles() {
 
 #[tokio::test]
 async fn a_service_without_console_metrics_is_refused_without_a_spawn() {
-    let update = fetch_metrics(ServiceId::Console, Duration::from_millis(50)).await;
+    // #10907: the console now serves console_metrics; Agents still serves none.
+    let update = fetch_metrics(ServiceId::Agents, Duration::from_millis(50)).await;
     assert!(update.result.is_err());
 }
 

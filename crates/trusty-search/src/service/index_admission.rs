@@ -193,14 +193,20 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
         .collect();
     let mut walked_files: Vec<PathBuf> = Vec::new();
     let mut total_skipped_dirs: usize = 0;
+    let mut oversized: Vec<(PathBuf, u64)> = Vec::new();
     let walk_opts = walk_options(handle);
     for subtree in &include_paths {
         let w = walk_source_files_with_options(subtree, &walk_opts);
         walked_files.extend(w.files);
+        oversized.extend(w.oversized);
         total_skipped_dirs = total_skipped_dirs.saturating_add(w.skipped_dirs);
     }
 
     walked_files.retain(|path| configured_file(handle, path));
+    // #11651: a file the index's own filters exclude is not a size skip.
+    oversized.retain(|(path, _)| configured_file(handle, path));
+    oversized.sort();
+    oversized.dedup();
 
     // De-duplicate when multiple `include_paths` overlap.
     walked_files.sort();
@@ -209,6 +215,7 @@ pub(crate) fn walk_roots(handle: &IndexHandle) -> (walker::WalkResult, Vec<PathB
     let walked = crate::service::walker::WalkResult {
         files: walked_files,
         skipped_dirs: total_skipped_dirs,
+        oversized,
     };
     (walked, missing)
 }

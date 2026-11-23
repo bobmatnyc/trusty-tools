@@ -142,7 +142,6 @@ fi
 # runs an ignored test of theirs.
 EXCLUDES=(
   --exclude trusty-code-gui
-  --exclude trusty-agents-ui
 )
 
 # #9663: the non-default features whose `#[ignore]` tests the enumeration
