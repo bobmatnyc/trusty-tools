@@ -136,7 +136,9 @@ pub fn with_capture(mut snap: Value, args: &Value, force: bool) -> Value {
     let sc = &mut snap["structuredContent"];
     sc["pid"] = args["pid"].clone();
     sc["window_id"] = args["window_id"].clone();
-    sc["elements_complete"] = json!(true);
+    // #11694: 0.23.2 says `false` even on a full walk; the counts carry it.
+    sc["elements_complete"] = json!(false);
+    sc["total_element_count"] = sc["returned_element_count"].clone();
     if force || args.get("include_screenshot") != Some(&json!(false)) {
         sc["screenshot_frame_valid"] = json!(true);
         sc["screenshot_width"] = json!(1);

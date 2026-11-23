@@ -65,16 +65,55 @@ fn bound_refuses_secure_field() {
     }
 }
 
+/// `capture()` with the 0.23.2 completeness fields set to the given values.
+fn counted(flag: Value, returned: Value, total: Value) -> Value {
+    let mut snap = capture();
+    let sc = &mut snap["structuredContent"];
+    sc["elements_complete"] = flag;
+    sc["returned_element_count"] = returned;
+    sc["total_element_count"] = total;
+    snap
+}
+
+#[test]
+fn bound_admits_equal_counts_without_flag() {
+    // #11694: cua-driver 0.23.2 says `elements_complete: false` on a full walk.
+    let snap = counted(json!(false), json!(69), json!(69));
+    assert_eq!(bound(&snap, 7).expect("admitted")["image"], FAKE_PNG);
+    let mut not_degraded = snap.clone();
+    not_degraded["structuredContent"]["degraded"] = json!(false);
+    assert!(bound(&not_degraded, 7).is_ok());
+}
+
 #[test]
 fn bound_refuses_incomplete_tree() {
-    let mut degraded = capture();
-    degraded["structuredContent"]["degraded"] = json!(true);
-    assert_eq!(refused(&degraded), "screenshot_unverified");
-    for complete in [json!(false), Value::Null] {
-        let mut snap = capture();
-        snap["structuredContent"]["elements_complete"] = complete;
-        assert_eq!(refused(&snap), "screenshot_unverified");
+    let unequal = counted(json!(false), json!(69), json!(70));
+    assert_eq!(refused(&unequal), "screenshot_unverified");
+    // The flag alone never vouches for a tree whose counts disagree.
+    let flagged = counted(json!(true), json!(69), json!(70));
+    assert_eq!(refused(&flagged), "screenshot_unverified");
+    let mut degraded = counted(json!(false), json!(69), json!(69));
+    for value in [json!(true), json!("yes"), json!(1)] {
+        degraded["structuredContent"]["degraded"] = value;
+        assert_eq!(refused(&degraded), "screenshot_unverified");
     }
+    let absent = [Value::Null, json!("69")];
+    for missing in &absent {
+        for snap in [
+            counted(json!(true), missing.clone(), json!(69)),
+            counted(json!(true), json!(69), missing.clone()),
+            counted(json!(true), missing.clone(), missing.clone()),
+        ] {
+            assert_eq!(refused(&snap), "screenshot_unverified", "{missing}");
+        }
+    }
+    let mut removed = capture();
+    let sc = removed["structuredContent"]
+        .as_object_mut()
+        .expect("object");
+    sc.remove("returned_element_count");
+    sc.remove("total_element_count");
+    assert_eq!(refused(&removed), "screenshot_unverified");
     let mut bare = capture();
     bare.as_object_mut()
         .expect("object")
