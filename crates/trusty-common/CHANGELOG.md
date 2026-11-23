@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.70.7] — 2026-11-23
+
+### Added
+
+- `StdioMcpClient::spawn_grouped_with_env` spawns an MCP server as the leader of its own process group (unix). Dropping or respawning the client sends `SIGKILL` to the whole group, so a wrapper command's grandchild (`npx`, `uvx`) does not outlive it. Existing spawn constructors are unchanged (#11650).
+
+### Fixed
+
+- The pause sanitizer keeps a JSON key's closing quote (`"token": "[REDACTED]"`), redacts a JWT after a credential key as one value across its dots, and redacts a letter-only value after `=` or `:` (#10595).
+- `resolve_data_dir_no_create`, `daemon_socket_path_no_create`, `search_dial_socket`, `resolve_memory_dial_socket` and `events_dial_socket_path` resolve the same paths as their creating versions and create no directory, for dial-side lookups (#11667).
+
+### Changed
+
+- `catchup::pause::write_pause_snapshot` keeps commit SHAs and message ids in the PM's free text instead of replacing them with `<sha?>`, so a resumed session reads them back exactly. It now redacts only secret-shaped tokens as `[REDACTED]`: a hex word longer than 40 characters (longer than any SHA-1 id) or a word of at least 20 characters opening with a credential prefix such as `ghp_`, `sk-`, `xoxb-` or `AKIA`, or a hex or base64-like value of 16 or more characters after a credential key such as `api_key=`, `token:` or `Bearer` (#10595).
+
+### Removed
+
+- The public `catchup::sha_scrub` module (`scrub_sha_like`, `is_sha_like`, `SHA_PLACEHOLDER`) is removed; use `catchup::secret_scrub` instead. This is a semver break for any caller of the old module (#10595).
+
 ## [0.70.6] — 2026-11-23
 
 ### Added
