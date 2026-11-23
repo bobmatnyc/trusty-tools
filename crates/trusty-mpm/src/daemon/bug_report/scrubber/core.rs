@@ -115,7 +115,7 @@ fn credential_rules(text: &str) -> (String, Vec<ScrubChange>) {
     }
 
     // Rule 4: sk-* prefixed API keys.
-    let (r, n) = apply_regex(&result, &RE_SK_PREFIX, "[REDACTED_API_KEY]");
+    let (r, n) = apply_regex(&result, &RE_SK_PREFIX, "${1}[REDACTED_API_KEY]"); // See #9167
     if n > 0 {
         result = r;
         changes.push(ScrubChange {
