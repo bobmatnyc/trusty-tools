@@ -13,6 +13,7 @@
 //! (`grant_end`, a dropped native port, a worker restart; `extension/emulation.js`).
 //! Test: `emulation_tests.rs`; `an_emulated_tab_resets_on_release`,
 //! `a_new_lease_resets_a_tab_left_emulated`, `an_expired_emulated_lease_resets_without_a_caller`,
+//! `a_failed_emulation_reset_is_retried`,
 //! `a_closed_session_resets_its_emulated_tab` in `tests/parity_pages.rs`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,6 +69,17 @@ impl State {
         let mut all = self.records();
         all.retain(|r| !(r.generation == record.generation && r.tab == record.tab));
         all.push(record);
+    }
+
+    /// Put back a record whose reset failed, unless a newer lease recorded the tab since.
+    fn restore(&self, record: Record) {
+        let mut all = self.records();
+        if !all
+            .iter()
+            .any(|r| r.generation == record.generation && r.tab == record.tab)
+        {
+            all.push(record);
+        }
     }
 
     /// Forget `tab`: its emulation was reset by its own lease.
@@ -207,12 +219,14 @@ pub(crate) fn ended(core: &Core, inner: &Inner, now: f64) -> Vec<Ended> {
         .collect()
 }
 
-/// Reset every emulated tab whose lease ended; a failed reset is not retried.
+/// Reset every emulated tab whose lease ended; a failed reset is retried.
 ///
 /// Why/What: see [`ended`]; the gate makes a new lease's probe wait for a
-/// reset already in flight. A refusal is dropped: the extension's own reset
-/// paths cover a worker or grant that went away.
-/// Test: `a_new_lease_resets_a_tab_left_emulated`.
+/// reset already in flight. A routed reset that fails puts its record back,
+/// so the next reconcile (watcher, release or select) sends it again. A record
+/// with no route is dropped: the extension resets a tab whose worker or grant
+/// went away.
+/// Test: `a_new_lease_resets_a_tab_left_emulated`, `a_failed_emulation_reset_is_retried`.
 pub(crate) async fn reconcile(core: &Core) {
     let _gate = core.emulation.gate.lock().await;
     let now = core.lease_clock.now();
@@ -223,9 +237,18 @@ pub(crate) async fn reconcile(core: &Core) {
     for (record, route) in due {
         if let Some((peer, grant)) = route {
             let args = reset_args(record.tab);
-            let _ = peer
+            // #11371: a reset that fails must not let the emulation reach a later lease.
+            if let Err(e) = peer
                 .page(&*core.entropy, "page_emulate", &grant, args)
-                .await;
+                .await
+            {
+                eprintln!(
+                    "trusty-browser: emulation reset of tab {} failed ({}); retrying",
+                    record.tab, e.code
+                );
+                core.emulation.restore(record);
+                watch(core);
+            }
         }
     }
 }

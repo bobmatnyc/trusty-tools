@@ -23,7 +23,7 @@ function event() {
 }
 
 // A chrome.debugger that tracks attachments and the CDP commands each tab received.
-function debuggerMock({attached = []} = {}) {
+function debuggerMock({attached = [], slow = false} = {}) {
   const on = new Set(), log = [];
   return {on, log, api:{
     onDetach:event(), onEvent:event(),
@@ -35,7 +35,7 @@ function debuggerMock({attached = []} = {}) {
       if (method === "Runtime.evaluate") return {};
       return {};
     },
-    async getTargets() { return attached.map(tabId => ({tabId, attached:true})); },
+    async getTargets() { if (slow) await settle(); return attached.map(tabId => ({tabId, attached:true})); },
   }};
 }
 
@@ -131,15 +131,16 @@ test("a debugger detached by Chrome forgets the tab", async () => {
 });
 
 // The service worker with a fake native port, as test_worker_pairing.mjs builds it.
-async function worker({attached = []} = {}) {
-  const dbg = debuggerMock({attached});
+async function worker({attached = [], slow = false} = {}) {
+  const dbg = debuggerMock({attached, slow});
   for (const tabId of attached) dbg.on.add(tabId);
   const native = {onMessage:event(), onDisconnect:event(), postMessage(){}, disconnect(){}};
   const store = {pairing:{profile:"5f0c6b1e-2d4a-4c8e-9b7a-1e2f3a4b5c6d", email, key:"a".repeat(64)}};
   const session = {incarnation:"epoch-1"};
   const chrome = {debugger:dbg.api,
     runtime:{id:"jabfhcolknbbdajilgpficniedhcfahc", onConnect:event(), onMessage:event(), onStartup:event(),
-      onInstalled:event(), getManifest:() => ({version:"0.2.0"}), reload(){}, connectNative:() => native},
+      onInstalled:event(), getManifest:() => ({version:"0.2.0"}), reload(){},
+      connectNative:() => { dbg.log.push(["connectNative"]); return native; }},
     storage:{local:{setAccessLevel:async () => {}, set:async () => {}, remove:async () => {},
       get:async keys => Object.fromEntries([keys].flat().map(k => [k, structuredClone(store[k])]))},
     session:{get:async key => ({[key]:session[key]}), set:async data => { Object.assign(session, data); }}},
@@ -168,4 +169,13 @@ test("a dropped native port resets every emulated tab", async () => {
 test("a worker start releases an attachment a previous run left", async () => {
   const w = await worker({attached:[9]});
   assert.ok(!w.dbg.on.has(9));
+});
+
+// A slow sweep still finishes before the native port opens, so it cannot detach an act() attachment.
+test("the worker connects only after the start sweep", async () => {
+  const w = await worker({attached:[9], slow:true});
+  await settle();
+  const order = w.dbg.log.map(e => e[0]);
+  assert.ok(order.includes("connectNative"), String(order));
+  assert.ok(order.indexOf("detach") < order.indexOf("connectNative"), String(order));
 });

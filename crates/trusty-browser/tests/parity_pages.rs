@@ -429,3 +429,30 @@ async fn a_closed_session_resets_its_emulated_tab() {
     assert!(soon.is_ok(), "no reset at session end");
     broker.close().await;
 }
+
+/// A reset the worker refuses keeps its record: the watcher sends it again
+/// until the worker accepts, so the emulation cannot reach a later lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_emulation_reset_is_retried() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    clock.set(5000.0 + 60.0);
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_emulate")));
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    send_json(
+        &mut worker,
+        &format!(r#"{{"id":"{id}","ok":false,"error":"Unavailable"}}"#),
+    )
+    .await;
+    let retry = tokio::time::timeout(Duration::from_secs(5), expect_reset(&mut worker)).await;
+    assert!(retry.is_ok(), "the refused reset was not retried");
+    broker.close().await;
+}

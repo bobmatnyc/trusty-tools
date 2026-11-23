@@ -106,5 +106,10 @@ async fn ended_records_cover_every_lease_end() {
     core.emulation.put(record("a", 7));
     core.emulation.put(record("b", 7));
     assert_eq!(core.emulation.snapshot(), [record("b", 7)]);
+    // A failed reset puts its record back, but never over a newer lease's record.
+    core.emulation.restore(record("a", 7));
+    assert_eq!(core.emulation.snapshot(), [record("b", 7)]);
+    core.emulation.restore(record("a", 8));
+    assert_eq!(core.emulation.snapshot(), [record("b", 7), record("a", 8)]);
     broker.close().await;
 }

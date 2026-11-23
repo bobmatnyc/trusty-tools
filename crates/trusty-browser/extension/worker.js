@@ -10,6 +10,9 @@ let timer;
 let readyWaiters = [];
 
 const storageReady = chrome.storage.local.setAccessLevel({accessLevel:"TRUSTED_CONTEXTS"});
+// #11371: an attachment a previous worker run held (its emulation) is released at start; connect waits for
+// it, so no act() attachment made under the new connection is swept.
+const swept = TrustyEmulation.sweep().catch(() => {});
 // #11363: a self-reload clears storage.session; a one-shot storage.local handoff, written just before
 // chrome.runtime.reload() and consumed here, keeps the browser incarnation so the grant survives a
 // republish. A real browser restart finds no fresh handoff and gets a new incarnation.
@@ -86,6 +89,7 @@ async function connect() {
   const generation = epoch;
   try {
     await storageReady;
+    await swept;
     // #11239: a pairing credential says hello exactly as an enrollment one does.
     const {credential:enrollment} = await codes.stored();
     if (!enrollment) return;
@@ -268,6 +272,4 @@ chrome.alarms.onAlarm.addListener(alarm => {
 chrome.alarms.create("reconnect", {periodInMinutes:1});
 // A (re)started worker is offline until the broker acknowledges it; the acknowledgement prunes the table.
 void codes.offline.lost();
-// #11371: an attachment a previous worker run held (its emulation) is released at start.
-void TrustyEmulation.sweep();
 void connect();
