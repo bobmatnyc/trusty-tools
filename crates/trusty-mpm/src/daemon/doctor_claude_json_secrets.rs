@@ -97,6 +97,12 @@ impl ClaudeJsonFinding {
         self.dir_mode.is_some_and(is_wide)
     }
 
+    /// Is the config dir known to be 0700-tight, so no other user can reach
+    /// a file in it? (#11195)
+    pub(crate) fn dir_is_owner_only(&self) -> bool {
+        self.dir_mode.is_some_and(|m| !is_wide(m))
+    }
+
     /// `0644`-style mode, or `unknown`.
     pub(crate) fn mode_text(&self) -> String {
         self.mode
@@ -243,14 +249,15 @@ fn wide_siblings(config_dir: &Path) -> Vec<(PathBuf, u32)> {
 
 /// The `claude_json_secrets` row.
 ///
-/// What: FAIL when an env block holds a credential value, when the file is
-/// wider than 0600, when a `.claude.json*` sibling is, or when the dir is
-/// wider than 0700 (#11195); UNKNOWN when the
+/// What: FAIL when an env block holds a credential value or the dir is wider
+/// than 0700 (#11195). A file or `.claude.json*` sibling wider than 0600 is a
+/// WARN inside a 0700 dir and a FAIL otherwise (#11195). UNKNOWN when the
 /// file cannot be read or parsed or there is no managed dir; OK otherwise
 /// (including an absent file).
-/// Test: `row_fails_on_mode_0644`, `row_passes_on_mode_0600`,
+/// Test: `row_warns_on_mode_0644_inside_a_0700_dir`,
+/// `row_fails_on_mode_0644_when_the_dir_is_not_0700`, `row_passes_on_mode_0600`,
 /// `row_fails_on_a_plaintext_credential`, `row_is_unknown_on_malformed_json`,
-/// `row_fails_on_a_wide_backup`, `row_fails_on_a_wide_config_dir`.
+/// `row_warns_on_a_wide_backup_inside_a_0700_dir`, `row_fails_on_a_wide_config_dir`.
 pub(crate) fn check_claude_json_secrets(config_dir: Option<&Path>) -> DoctorCheck {
     let Some(config_dir) = config_dir else {
         return DoctorCheck::new(
@@ -267,6 +274,9 @@ pub(crate) fn check_claude_json_secrets(config_dir: Option<&Path>) -> DoctorChec
 pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
     let path = f.path.display();
     let mut problems = Vec::new();
+    // #11195: Claude Code rewrites its files at 0644 between launches. Inside a
+    // 0700 dir no other user can reach them, so a wide file there is a WARN.
+    let mut wide_files = Vec::new();
     if !f.migratable.is_empty() || !f.unmapped.is_empty() || !f.third_party.is_empty() {
         let keys: Vec<String> = f
             .migratable
@@ -297,7 +307,7 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
         ));
     }
     if f.too_wide() {
-        problems.push(format!(
+        wide_files.push(format!(
             "the file is mode {}, readable beyond its owner",
             f.mode_text()
         ));
@@ -315,13 +325,32 @@ pub(crate) fn build_row(f: &ClaudeJsonFinding) -> DoctorCheck {
             .iter()
             .map(|(p, m)| format!("{} ({m:04o})", p.display()))
             .collect();
-        problems.push(format!(
+        wide_files.push(format!(
             "{} sibling copies are readable beyond their owner and may hold an older \
              plaintext copy: {}",
             list.len(),
             list.join("; ")
         ));
     }
+    if !wide_files.is_empty() && f.dir_is_owner_only() && problems.is_empty() {
+        return DoctorCheck::new(
+            CHECK_NAME,
+            CheckStatus::Warn,
+            format!(
+                "{path}: {}. Its directory is mode {:04o}, so no other user can reach these \
+                 files; Claude Code rewrites them at 0644 between launches and the next launch \
+                 tightens them to 0600, or run `tm doctor --fix --yes` now",
+                wide_files.join("; "),
+                f.dir_mode.unwrap_or_default()
+            ),
+        );
+    }
+    if !wide_files.is_empty() && f.dir_mode.is_none() {
+        // #11195: the dir mode is unknown, so the wide files cannot be shown
+        // unreachable.
+        wide_files.push("the directory's mode could not be read, so these files may be reachable by other users".to_string());
+    }
+    problems.extend(wide_files);
     if !problems.is_empty() {
         return DoctorCheck::new(
             CHECK_NAME,

@@ -80,15 +80,30 @@ fn clean_config() -> Value {
     json!({ "mcpServers": { "slack-mcp": { "type": "stdio", "command": "slack-mcp", "args": [] } } })
 }
 
+// #11195: a 0700 dir already keeps a wide file unreachable, so WARN.
 #[test]
-fn row_fails_on_mode_0644() {
+fn row_warns_on_mode_0644_inside_a_0700_dir() {
     let dir = tempfile::tempdir().unwrap();
     write_config(dir.path(), &clean_config(), 0o644);
 
     let row = check_claude_json_secrets(Some(dir.path()));
 
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
+    assert!(row.message.contains("0644"), "{}", row.message);
+    assert!(row.message.contains("0700"), "{}", row.message);
+}
+
+#[test]
+fn row_fails_on_mode_0644_when_the_dir_is_not_0700() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), &clean_config(), 0o644);
+    chmod(dir.path(), 0o755);
+
+    let row = check_claude_json_secrets(Some(dir.path()));
+
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("0644"), "{}", row.message);
+    assert!(row.message.contains("0755"), "{}", row.message);
 }
 
 #[test]
@@ -135,7 +150,7 @@ fn row_is_unknown_on_malformed_json() {
 }
 
 #[test]
-fn row_fails_on_a_wide_backup() {
+fn row_warns_on_a_wide_backup_inside_a_0700_dir() {
     let dir = tempfile::tempdir().unwrap();
     write_config(dir.path(), &clean_config(), 0o600);
     let bak = dir.path().join(".claude.json.bak");
@@ -144,7 +159,7 @@ fn row_fails_on_a_wide_backup() {
 
     let row = check_claude_json_secrets(Some(dir.path()));
 
-    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert_eq!(row.status, CheckStatus::Warn, "{}", row.message);
     assert!(row.message.contains(".claude.json.bak"), "{}", row.message);
 }
 
