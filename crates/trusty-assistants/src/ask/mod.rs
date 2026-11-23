@@ -48,7 +48,7 @@ pub use config::{
 pub use error::AskError;
 pub use okg_search::{OKG_SEARCH_TOOL_NAME, OkgSearchTool};
 pub use tools::{AskTools, Exclusion, READ_ONLY_MCP_TOOLS, build_registry, classify};
-pub use turn_log::{TURN_LOG_FILE, TurnLog, TurnRecord, replay_window};
+pub use turn_log::{LoadedLog, Recovery, TURN_LOG_FILE, TurnLog, TurnRecord, replay_window};
 
 /// Answer `question` as the instance whose home is `home`.
 ///
@@ -122,7 +122,7 @@ impl AskEngine {
     ///
     /// What, in order: refuse an empty question; read `instructions.md`
     /// ([`AskError::Instructions`]); read `config.toml` and resolve `[ask]`;
-    /// read the turn log; load MCP and build the read-only registry; replay
+    /// load the turn log ([`TurnLog::load`]); load MCP and build the read-only registry; replay
     /// the log into a transcript under the system prompt; run the loop with
     /// the cancel flag. Only a non-empty final answer is returned and
     /// appended to the log. Every other outcome is an [`AskError`] and leaves
@@ -151,7 +151,9 @@ impl AskEngine {
             .unwrap_or_default()
             .resolve(&self.home.config_path())?;
         let log = TurnLog::for_home(&self.home);
-        let turns = log.read()?;
+        // #11650: `load` moves a corrupt last line aside (and warns) instead of
+        // refusing every later ask; mid-file corruption is still an error.
+        let turns = log.load()?.turns;
 
         let tools = build_registry(&self.home.okg_dir(), &self.load_mcp(&project_root).await);
         // #11650: a dead or broken MCP server must not be silent.

@@ -78,3 +78,53 @@ fn the_replay_window_is_the_newest_suffix() {
     assert!(replay_window(&turns, 100, 0).is_empty());
     assert_eq!(replay_window(&turns, 100, usize::MAX), &turns[..]);
 }
+
+/// #11650 item 2: `load` moves a corrupt last line aside and reports it.
+#[test]
+fn a_corrupt_last_line_is_quarantined() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = TurnLog::for_home(&instance(&tmp));
+    log.append(&TurnRecord::now("q1", "a1")).unwrap();
+    let good = std::fs::read(log.path()).unwrap();
+
+    let tails: [&[u8]; 4] = [b"{not json\n", b"{\"v\":1", b"\n", b"\xff\xfe\n"];
+    for tail in tails {
+        let mut body = good.clone();
+        body.extend_from_slice(tail);
+        std::fs::write(log.path(), &body).unwrap();
+        let loaded = log.load().unwrap();
+        assert_eq!(loaded.turns.len(), 1, "{tail:?}");
+        let recovery = loaded.recovered.expect("a recovery is reported");
+        assert_eq!(recovery.line, 2);
+        assert_eq!(recovery.bytes, tail.len());
+        assert_eq!(std::fs::read(&recovery.quarantine).unwrap(), tail);
+        // Truncated to the good prefix; a strict read now passes.
+        assert_eq!(std::fs::read(log.path()).unwrap(), good);
+        assert_eq!(log.read().unwrap().len(), 1);
+        // A second load has nothing to recover.
+        assert!(log.load().unwrap().recovered.is_none());
+    }
+}
+
+/// #11650 item 2: only the last line is recovered; anything else still fails
+/// and leaves the file alone.
+#[test]
+fn mid_file_corruption_is_not_recovered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = TurnLog::for_home(&instance(&tmp));
+    log.append(&TurnRecord::now("q1", "a1")).unwrap();
+    let good = std::fs::read_to_string(log.path()).unwrap();
+
+    let cases = [
+        (format!("{good}not json\n{good}"), 2),
+        (good.replace("\"v\":1", "\"v\":2"), 1),
+    ];
+    for (body, line) in cases {
+        std::fs::write(log.path(), &body).unwrap();
+        match log.load() {
+            Err(AskError::CorruptTurnLog { line: l, .. }) => assert_eq!(l, line, "{body:?}"),
+            other => panic!("{body:?}: {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(log.path()).unwrap(), body);
+    }
+}

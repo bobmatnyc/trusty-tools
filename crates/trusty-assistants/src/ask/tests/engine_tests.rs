@@ -155,9 +155,10 @@ async fn a_failed_ask_never_advances_the_log() {
     );
     assert_eq!(std::fs::read(log.path()).unwrap(), before);
 
-    // A corrupt log stops the ask before any model call.
+    // A corrupt line before the last one stops the ask before any model call.
     let mut corrupt = before.clone();
     corrupt.extend_from_slice(b"{not json\n");
+    corrupt.extend_from_slice(&before);
     std::fs::write(log.path(), &corrupt).unwrap();
     let llm = Arc::new(Scripted::new(vec![text("unused")]));
     let result = engine(&home, &llm, &tmp).ask("q").await;
@@ -224,4 +225,39 @@ async fn replay_is_bounded_by_the_turn_and_char_limits() {
     assert_eq!(contents, ["q199", "a199", "now", "ok", "again"]);
     // The file keeps every turn; only the request is bounded.
     assert_eq!(log.read().unwrap().len(), 202);
+}
+
+/// #11650 item 2: a partial last line no longer blocks every later ask.
+#[tokio::test]
+async fn an_ask_recovers_from_a_corrupt_last_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let log = TurnLog::for_home(&home);
+    let llm = Arc::new(Scripted::new(vec![text("first answer")]));
+    engine(&home, &llm, &tmp).ask("first").await.unwrap();
+    let good = std::fs::read(log.path()).unwrap();
+    // A crash mid-append: half a record, no newline.
+    let mut torn = good.clone();
+    torn.extend_from_slice(b"{\"v\":1,\"at\":\"2026");
+    std::fs::write(log.path(), &torn).unwrap();
+
+    let llm = Arc::new(Scripted::new(vec![text("second answer")]));
+    let answer = engine(&home, &llm, &tmp).ask("second").await.unwrap();
+    assert_eq!(answer, "second answer");
+    // The good turn was replayed; the torn bytes were not.
+    assert_eq!(llm.requests()[0].messages.len(), 4);
+    let turns = log.read().unwrap();
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1].question, "second");
+    // The torn bytes were kept in a quarantine file, not dropped.
+    let quarantined: Vec<_> = std::fs::read_dir(home.stores_dir())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+        .collect();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(
+        std::fs::read(quarantined[0].path()).unwrap(),
+        b"{\"v\":1,\"at\":\"2026"
+    );
 }
