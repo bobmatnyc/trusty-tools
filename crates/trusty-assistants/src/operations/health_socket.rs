@@ -4,20 +4,18 @@
 //! (`tagent` before #11632) only sockets were per-project, so its tile could
 //! not be probed. The socket keeps its `trusty-agents.sock` name: `tm tui`
 //! dials it by that name.
-//! What: [`router`] serves [`METHOD_AGENTS_HEALTH`]; [`spawn`] binds
-//! [`agents_socket`] with the singleton bind and serves it for the life of the
-//! `--api` server process. A second `--api` process finds the socket served
-//! and leaves it to the first.
-//! #11632: the `--api` server was cut, so nothing calls [`spawn`] until the
-//! slice-3 UDS daemon wires it (See #11650). The `operations` module's
-//! `#[allow(dead_code)]` covers the unused items meanwhile.
+//! What: [`router`] serves [`METHOD_AGENTS_HEALTH`]; [`serve_at`] binds the
+//! socket with the singleton bind, serves it until shut down, and removes it.
+//! #11650: each per-instance ask daemon calls [`serve_at`] on
+//! `trusty_agents_common::health::agents_socket()`; the first one serves it
+//! and the others find it served and leave it alone.
 //! Test: `agents_health_answers_status_and_version`,
 //! `agents_health_round_trips_over_a_real_socket`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
-use trusty_agents_common::health::{AgentsHealth, METHOD_AGENTS_HEALTH, agents_socket};
+use trusty_agents_common::health::{AgentsHealth, METHOD_AGENTS_HEALTH};
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_until};
 
 /// The `agents.health` answer for this binary.
@@ -37,11 +35,16 @@ pub(crate) fn router() -> RpcRouter {
     )
 }
 
-/// Bind `socket` and serve [`router`] until `shutdown` resolves.
+/// Bind `socket` and serve [`router`] until `shutdown` resolves, then remove
+/// the socket.
+///
+/// What: #11650 — the socket is unlinked before the listener drops, and only
+/// while it still names the socket this call bound.
 ///
 /// # Errors
 ///
 /// The bind failed for a reason other than a live owner.
+/// Test: `agents_health_round_trips_over_a_real_socket`.
 pub(crate) async fn serve_at(
     socket: &Path,
     shutdown: impl std::future::Future<Output = ()> + Send,
@@ -54,6 +57,8 @@ pub(crate) async fn serve_at(
         }
         Err(e) => return Err(anyhow::anyhow!("bind {}: {e}", socket.display())),
     };
+    let owned = crate::ask::daemon::OwnedSocketPath::capture(socket)
+        .map_err(|e| anyhow::anyhow!("stat {}: {e}", socket.display()))?;
     serve_until(
         &listener,
         Arc::new(router()),
@@ -61,24 +66,9 @@ pub(crate) async fn serve_at(
         shutdown,
     )
     .await;
+    owned.remove();
+    drop(listener);
     Ok(())
-}
-
-/// Serve the health socket in the background for this process's lifetime.
-/// A resolve or bind failure is logged; it never stops the API server.
-pub(crate) fn spawn() {
-    let socket: PathBuf = match agents_socket() {
-        Ok(socket) => socket,
-        Err(e) => {
-            tracing::warn!(error = %e, "agents.health socket unresolved; not served");
-            return;
-        }
-    };
-    tokio::spawn(async move {
-        if let Err(e) = serve_at(&socket, std::future::pending()).await {
-            tracing::warn!(error = %e, "agents.health socket not served");
-        }
-    });
 }
 
 #[cfg(test)]
@@ -128,6 +118,8 @@ mod tests {
         }
         let _ = stop_tx.send(());
         server.await.expect("join").expect("served");
+        // #11650: the socket is gone once the server stops.
+        assert!(!socket.exists(), "health socket left behind");
         let answer = answer.expect("agents.health answered");
         assert_eq!(answer["result"]["status"], "ok", "{answer}");
         assert_eq!(answer["result"]["version"], env!("CARGO_PKG_VERSION"));

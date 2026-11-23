@@ -75,13 +75,41 @@ impl StdioMcpClient {
         client_name: impl Into<String>,
         envs: &std::collections::HashMap<String, String>,
     ) -> Result<Self> {
-        let mut child = Command::new(binary)
-            .args(args)
+        Self::spawn_inner(binary, args, client_name, envs, false).await
+    }
+
+    /// [`Self::spawn_with_env`], with the child leading a new process group
+    /// that is killed as a whole on drop and on respawn.
+    ///
+    /// Why: #11650 — a wrapper command (`npx`, `uvx`) starts the real server
+    /// as a grandchild. Killing only the direct child leaves that grandchild
+    /// running after the client is gone.
+    /// What: unix only: the child is spawned with `process_group(0)`; `Drop`
+    /// sends `SIGKILL` to the group while the leader is still unreaped, so the
+    /// group id cannot have been reused. Elsewhere identical to
+    /// `spawn_with_env`. Opt-in, so existing callers keep their process
+    /// layout (a terminal's Ctrl-C still reaches their children).
+    /// Test: `dropping_a_grouped_client_kills_its_grandchild` (in `mod.rs`).
+    pub async fn spawn_grouped_with_env(
+        binary: &str,
+        args: &[&str],
+        client_name: impl Into<String>,
+        envs: &std::collections::HashMap<String, String>,
+    ) -> Result<Self> {
+        Self::spawn_inner(binary, args, client_name, envs, true).await
+    }
+
+    /// The shared body of the spawn constructors.
+    async fn spawn_inner(
+        binary: &str,
+        args: &[&str],
+        client_name: impl Into<String>,
+        envs: &std::collections::HashMap<String, String>,
+        own_group: bool,
+    ) -> Result<Self> {
+        let mut command = server_command(binary, args, own_group);
+        let mut child = command
             .envs(envs.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(plugin_stderr_stdio(binary))
-            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("failed to spawn MCP binary {binary}"))?;
 
@@ -104,6 +132,7 @@ impl StdioMcpClient {
             binary: binary.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
             client_name: client_name.into(),
+            own_group,
         })
     }
 
@@ -137,12 +166,7 @@ impl StdioMcpClient {
     /// `stale_frame_after_respawn_is_not_returned_as_result` the id counter.
     async fn respawn(&mut self) -> Result<()> {
         let args_ref: Vec<&str> = self.args.iter().map(String::as_str).collect();
-        let mut new_child = Command::new(&self.binary)
-            .args(&args_ref)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(plugin_stderr_stdio(&self.binary))
-            .kill_on_drop(true)
+        let mut new_child = server_command(&self.binary, &args_ref, self.own_group)
             .spawn()
             .with_context(|| format!("failed to respawn MCP binary {}", self.binary))?;
 
@@ -155,7 +179,9 @@ impl StdioMcpClient {
             .take()
             .ok_or_else(|| anyhow!("child stdout not captured on respawn"))?;
 
-        // Best-effort reap of the old child before replacing it.
+        // Best-effort reap of the old child (and #11650 its group) before
+        // replacing it.
+        self.kill_group();
         let _ = self.child.start_kill();
 
         self.child = new_child;
@@ -529,4 +555,23 @@ pub fn is_response_to(frame: &Value, id: &Value) -> bool {
     frame.get("id") == Some(id)
         && frame.get("method").is_none()
         && (frame.get("result").is_some() || frame.get("error").is_some())
+}
+
+/// The `Command` for one server process: piped stdio, stderr to the plugin
+/// log, killed on drop, and (#11650) its own process group when `own_group`.
+fn server_command(binary: &str, args: &[&str], own_group: bool) -> Command {
+    let mut command = Command::new(binary);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(plugin_stderr_stdio(binary))
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    if own_group {
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = own_group;
+    command
 }

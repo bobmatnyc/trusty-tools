@@ -105,6 +105,10 @@ mod tip_relation;
 #[path = "tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "real_git_tests.rs"]
+mod real_git_tests;
+
 use std::path::{Path, PathBuf};
 
 use tracing::info;
@@ -286,7 +290,10 @@ pub(crate) async fn run_with<G: Gh, T: Git, C: ClaimEnder>(
     // out, so branch deletion always follows the removals above — and #8489:
     // skips every branch a tree the removals left standing still holds.
     lines.push(step_local_branches(git, req, &merged, standing.as_deref()));
-    lines.insert(remote_at, step_remote_branch(git, req, &view));
+    lines.insert(
+        remote_at,
+        step_remote_branch(git, req, &view, standing.as_deref()),
+    );
     lines.push(step_prune(git, req));
 
     let report = CleanupReport { pr: req.pr, lines };
@@ -315,11 +322,38 @@ fn view_pr<G: Gh>(gh: &G, req: &CleanupRequest) -> anyhow::Result<PrView> {
 }
 
 /// Step 2: delete the remote head branch when the remote still lists it.
-fn step_remote_branch<T: Git>(git: &T, req: &CleanupRequest, view: &PrView) -> StepLine {
+///
+/// `standing` is step 3's answer: the trees left after removal, or `None` when
+/// the listing was not read.
+/// Test: `cleanup_11714_a_refused_head_tree_keeps_the_remote_branch`.
+fn step_remote_branch<T: Git>(
+    git: &T,
+    req: &CleanupRequest,
+    view: &PrView,
+    standing: Option<&[plan::WorktreeEntry]>,
+) -> StepLine {
     const STEP: &str = "remote-branch";
     let branch = view.head_ref_name.trim();
     if branch.is_empty() {
         return StepLine::ok(STEP, "the PR names no head branch; nothing to delete");
+    }
+    // #11714: a tree still holding the head, or an unread listing, keeps
+    // origin/<head> — deleting it strands that tree's only remote copy.
+    let Some(standing) = standing else {
+        return StepLine::failed(
+            STEP,
+            format!("kept origin/{branch}: the worktree listing was not read (#11714)"),
+        );
+    };
+    if let Some(holder) = standing
+        .iter()
+        .find(|e| e.branch.as_deref() == Some(branch))
+    {
+        let shown = holder.path.display();
+        return StepLine::failed(
+            STEP,
+            format!("kept origin/{branch}: {shown} still holds it (#11714)"),
+        );
     }
     let listing = match run_git(git, req, &["ls-remote", "--heads", "origin", branch]) {
         Ok(s) => s,

@@ -162,7 +162,10 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 # #10746 S11: `knowledge-document` for `tests/okf_tombstone.rs` (SPEC-OKF-01
 # criterion 37), moved here from the deleted trusty-kb. trusty-search already
 # enables it in this graph, so no new code compiles.
-trusty-common = { path = "../trusty-common", version = "0.70", features = ["credential-test-sandbox", "knowledge-document"] }
+# #11650: `inference-client` for the ask tests' scripted adapter
+# (`ProviderCapabilities`). trusty-code already enables it in this graph, so no
+# new code compiles.
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["credential-test-sandbox", "knowledge-document", "inference-client"] }
 
 [lints.clippy]
 doc_lazy_continuation = "allow"

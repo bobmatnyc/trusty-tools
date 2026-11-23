@@ -1,0 +1,7 @@
+crate   trusty-architect
+version 0.4.2
+reason  PR #11691 adds four fields to PaneState (idle-episode state).
+accept  constructible_struct_adds_field field PaneState.idle_seen
+accept  constructible_struct_adds_field field PaneState.idle_held
+accept  constructible_struct_adds_field field PaneState.idle_alerted
+accept  constructible_struct_adds_field field PaneState.idle_screen

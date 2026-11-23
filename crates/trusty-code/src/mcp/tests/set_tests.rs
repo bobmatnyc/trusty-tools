@@ -85,3 +85,44 @@ async fn the_live_path_loads_nothing_under_a_test_harness() {
     assert!(set.is_empty());
     assert!(set.diagnostics().statuses.is_empty());
 }
+
+/// Why: #11650 — `load_at_only` must not spawn a server the caller did not
+/// ask for. Each server is a script that leaves a marker when it starts, so
+/// "not spawned" is observed directly, not inferred from the diagnostics.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unwanted_server_is_never_spawned() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempdir().expect("tempdir");
+    let project = tempdir().expect("tempdir");
+    let script = |name: &str| {
+        let marker = home.path().join(format!("{name}.started"));
+        let path = home.path().join(format!("{name}.sh"));
+        std::fs::write(&path, format!("#!/bin/sh\ntouch '{}'\n", marker.display()))
+            .expect("write script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (path, marker)
+    };
+    let (wanted_cmd, wanted_marker) = script("wanted");
+    let (other_cmd, other_marker) = script("other");
+    let mut text = one_stdio_server("wanted", &wanted_cmd.display().to_string());
+    text.push_str(&one_stdio_server("other", &other_cmd.display().to_string()));
+    let global = global_file(home.path(), &text);
+
+    let set =
+        McpToolSet::load_at_only(&global, project.path(), &|name: &str| name == "wanted").await;
+
+    assert!(wanted_marker.exists(), "the wanted server was started");
+    assert!(
+        !other_marker.exists(),
+        "the unwanted server must never start"
+    );
+    let names: Vec<&str> = set
+        .diagnostics()
+        .statuses
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect();
+    assert_eq!(names, ["wanted"], "only the wanted server is reported");
+}
