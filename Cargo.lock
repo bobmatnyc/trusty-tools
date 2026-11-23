@@ -12442,6 +12442,7 @@ dependencies = [
  "keyring",
  "libc",
  "rand_core 0.6.4",
+ "security-framework 3.7.0",
  "serde",
  "serde_json",
  "serde_yaml",

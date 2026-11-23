@@ -126,4 +126,9 @@ impl SecretBackend for HeldKeychain {
     fn blob_store(&self) -> Option<Arc<BlobStore>> {
         self.inner.blob_store()
     }
+
+    // #10589: the probe is always the OS call, never the held grant.
+    fn probe(&self) -> Result<(), SecretsError> {
+        self.inner.probe()
+    }
 }

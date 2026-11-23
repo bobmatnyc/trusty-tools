@@ -159,11 +159,15 @@ pub enum ErrorKind {
     // #11429: the next unused value; a Keychain time-out told apart from
     // `BackendTimeout`, with the outcome-unknown wording and the remedy.
     KeychainAccessPrompt = 41,
+    /// The Keychain refused this server: its process has no GUI login
+    /// session access, e.g. it was started from an SSH login.
+    // #10589: the next unused value; named so `set` says why it failed.
+    KeychainNoSession = 42,
 }
 
 impl ErrorKind {
     /// Every kind, for the wire-to-kind lookup and the kind-table tests.
-    pub(crate) const ALL: [Self; 42] = [
+    pub(crate) const ALL: [Self; 43] = [
         Self::InvalidParams,
         Self::ProjectInvalid,
         Self::ProjectUnresolved,
@@ -206,6 +210,7 @@ impl ErrorKind {
         Self::RemoteRefused,
         Self::GateRefused,
         Self::KeychainAccessPrompt,
+        Self::KeychainNoSession,
     ];
 
     /// The kind whose [`ErrorKind::as_str`] is `kind`; `None` for a kind this
@@ -259,6 +264,7 @@ impl ErrorKind {
             Self::RemoteRefused => "remote_refused",
             Self::GateRefused => "gate_refused",
             Self::KeychainAccessPrompt => "keychain_access_prompt",
+            Self::KeychainNoSession => "keychain_no_session",
             Self::Internal => "internal",
         }
     }
@@ -374,6 +380,10 @@ impl ErrorKind {
             Self::KeychainAccessPrompt => {
                 "the Keychain did not answer in time, usually because a macOS access prompt is open or the item's access list names an older trusty-secrets binary; outcome unknown: the call was abandoned, not stopped, so a write may still land once the prompt is approved; answer the prompt (Always Allow), then verify with `tm secrets list` before writing again"
             }
+            // #10589: names the cause and both ways out.
+            Self::KeychainNoSession => {
+                "the Keychain refused this trusty-secrets server: it was started outside a macOS GUI login session (for example from SSH), so it has no access to the login Keychain; unlock it for this session with `security unlock-keychain ~/Library/Keychains/login.keychain-db`, then end the server with `pkill -x trusty-secrets` and retry, or run the command from a terminal in the GUI login session"
+            }
             Self::Internal => "internal error",
         }
     }
@@ -440,6 +450,8 @@ impl ErrorKind {
             Self::GateRefused => -32088,
             // #11429: the next unused code.
             Self::KeychainAccessPrompt => -32089,
+            // #10589: the next unused code.
+            Self::KeychainNoSession => -32090,
         }
     }
 
@@ -580,6 +592,8 @@ impl From<SecretsError> for ErrorKind {
             SecretsError::HomeUnavailable => Self::HomeUnavailable,
             // #10386: a deny change whose write-ahead record failed.
             SecretsError::AuditUnavailable => Self::AuditUnavailable,
+            // #10589: a server with no GUI session access to the Keychain.
+            SecretsError::KeychainNoSession { .. } => Self::KeychainNoSession,
         }
     }
 }

@@ -145,7 +145,7 @@ struct OsItems;
 
 #[cfg(target_os = "macos")]
 fn os_entry(id: &ItemId) -> Result<keyring::Entry, SecretsError> {
-    keyring::Entry::new(&id.service, &id.account).map_err(|e| item_error(id, keyring_reason(&e)))
+    keyring::Entry::new(&id.service, &id.account).map_err(|e| os_error(id, &e))
 }
 
 impl ItemStore for OsItems {
@@ -163,7 +163,7 @@ impl ItemStore for OsItems {
     fn write(&self, id: &ItemId, text: &str) -> Result<(), SecretsError> {
         os_entry(id)?
             .set_password(text)
-            .map_err(|e| item_error(id, keyring_reason(&e)))
+            .map_err(|e| os_error(id, &e))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -208,6 +208,89 @@ pub(crate) fn keyring_reason(err: &keyring::Error) -> String {
     }
 }
 
+/// The macOS `OSStatus` values that mean this process's security session
+/// cannot reach the Keychain (#10589).
+///
+/// Why: a server started from an SSH login runs outside the GUI login
+/// session; the Keychain refuses it with one of these, and the caller saw
+/// only "the secrets backend failed".
+/// What: `errSecInteractionNotAllowed` (-25308), `errSecNotAvailable`
+/// (-25291) and `errSecNoSuchKeychain` (-25294).
+/// Test: `keychain_no_session_statuses_are_classified`.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn is_no_session_status(status: i32) -> bool {
+    matches!(status, -25308 | -25291 | -25294)
+}
+
+/// The `OSStatus` a `keyring` platform error carries, if any.
+#[cfg(target_os = "macos")]
+fn os_status(err: &keyring::Error) -> Option<i32> {
+    match err {
+        keyring::Error::PlatformFailure(e) | keyring::Error::NoStorageAccess(e) => e
+            .downcast_ref::<security_framework::base::Error>()
+            .map(|e| e.code()),
+        _ => None,
+    }
+}
+
+/// The store error for a failed `keyring` call on item `id`.
+///
+/// What: a no-session status (see [`is_no_session_status`]) is
+/// [`SecretsError::KeychainNoSession`]; anything else is the item's
+/// `Backend` error with [`keyring_reason`]'s text.
+/// Test: `keychain_interaction_not_allowed_maps_to_no_session`.
+#[cfg(target_os = "macos")]
+pub(crate) fn os_error(id: &ItemId, err: &keyring::Error) -> SecretsError {
+    // #10589: name the cause instead of a generic backend failure.
+    match os_status(err).filter(|s| is_no_session_status(*s)) {
+        Some(status) => SecretsError::KeychainNoSession {
+            vault: id.service.clone(),
+            key: id.account.clone(),
+            status,
+        },
+        None => item_error(id, keyring_reason(err)),
+    }
+}
+
+/// The Keychain service of the item the doctor probe writes, then removes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) const PROBE_SERVICE: &str = "trusty-secrets.doctor-probe";
+
+/// How long the doctor probe waits for the Keychain (#10589).
+pub const KEYCHAIN_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Write, then remove, the probe item from this process (#10589).
+///
+/// Why: doctor reported `READ | WRITE` from the backend's flags alone, so a
+/// server with no Keychain access looked healthy.
+/// What: runs on its own thread under [`KEYCHAIN_PROBE_TIMEOUT`]; a time-out
+/// is [`SecretsError::Timeout`] with operation `probe`.
+/// Test: `keychain_real_probe_round_trips` (ignored; touches the OS).
+#[cfg(target_os = "macos")]
+fn probe_os() -> Result<(), SecretsError> {
+    let id = ItemId::new(PROBE_SERVICE, "probe");
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let call_id = id.clone();
+    std::thread::Builder::new()
+        .name("trusty-secrets-keychain-probe".to_string())
+        .spawn(move || {
+            let result = OsItems
+                .write(&call_id, AGENTS_MARKER)
+                .and_then(|()| OsItems.delete(&call_id).map(|_| ()));
+            let _ = tx.send(result);
+        })
+        .map_err(|e| item_error(&id, format!("cannot start the probe thread: {e}")))?;
+    rx.recv_timeout(KEYCHAIN_PROBE_TIMEOUT).unwrap_or_else(|_| {
+        Err(SecretsError::Timeout {
+            backend: BackendId::KEYCHAIN.to_string(),
+            operation: "probe",
+            vault: id.service.clone(),
+            key: id.account.clone(),
+            waited: KEYCHAIN_PROBE_TIMEOUT,
+        })
+    })
+}
+
 /// Map a `get_password` result: `NoEntry` is a miss, anything else an error
 /// whose text carries no value bytes.
 ///
@@ -221,7 +304,7 @@ pub(crate) fn map_read(
     match result {
         Ok(value) => Ok(Some(Zeroizing::new(value))),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(item_error(id, keyring_reason(&e))),
+        Err(e) => Err(os_error(id, &e)),
     }
 }
 
@@ -233,7 +316,7 @@ pub(crate) fn map_remove(id: &ItemId, result: keyring::Result<()>) -> Result<boo
     match result {
         Ok(()) => Ok(true),
         Err(keyring::Error::NoEntry) => Ok(false),
-        Err(e) => Err(item_error(id, keyring_reason(&e))),
+        Err(e) => Err(os_error(id, &e)),
     }
 }
 
@@ -291,6 +374,17 @@ impl SecretBackend for KeychainBackend {
     // #10524: the store itself, for the unlock snapshot and the migration.
     fn blob_store(&self) -> Option<Arc<BlobStore>> {
         Self::limited().blob_store()
+    }
+
+    // #10589: doctor tests the Keychain from the server's own session.
+    #[cfg(target_os = "macos")]
+    fn probe(&self) -> Result<(), SecretsError> {
+        probe_os()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn probe(&self) -> Result<(), SecretsError> {
+        Err(no_os_backend())
     }
 }
 
