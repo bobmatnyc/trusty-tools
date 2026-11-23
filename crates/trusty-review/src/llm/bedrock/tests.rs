@@ -1219,3 +1219,120 @@ fn tool_use_reply_with_untitled_findings_parses() {
     assert_eq!(parsed.findings.len(), 1);
     assert_eq!(parsed.findings[0].kind, "The retry loop never backs off");
 }
+
+// ── Non-Anthropic reviewer via Converse (#10759) ──────────────────────────
+
+/// Example non-Anthropic Bedrock reviewer id (Qwen3-Coder 480B, on demand).
+const QWEN_CODER: &str = "qwen.qwen3-coder-480b-a35b-v1:0";
+
+/// A non-Anthropic Bedrock model id routes to Bedrock Converse and its reply
+/// parses into the reviewer JSON contract.
+///
+/// Why: the provider refused every id without a `us.`-style profile, an
+/// Anthropic-only rule, so Qwen3-Coder could not run as a second-opinion
+/// reviewer (#10759).
+/// What: the id resolves to Bedrock with and without a `bedrock/` prefix,
+/// builds a provider (no network: the client is lazy), gets `toolChoice =
+/// auto` plus the tool line, and a faked Converse reply in either block kind
+/// goes through `llm_response` and `parse_review_response`. A bare Anthropic
+/// id is still refused.
+/// Test: this test.
+#[test]
+fn non_anthropic_bedrock_reviewer_routes_through_converse_and_parses() {
+    use crate::config::Provider;
+    use crate::llm::resolve_provider_and_model;
+    use crate::models::Verdict;
+    use crate::pipeline::parser::parse_review_response;
+    use aws_sdk_bedrockruntime::types::ToolChoice;
+
+    for (requested, default) in [
+        (QWEN_CODER, Provider::Bedrock),
+        (QWEN_CODER, Provider::OpenRouter),
+        (
+            "bedrock/qwen.qwen3-coder-480b-a35b-v1:0",
+            Provider::OpenRouter,
+        ),
+    ] {
+        let (provider, model) =
+            resolve_provider_and_model(requested, &default).expect("id resolves");
+        assert_eq!(
+            provider,
+            Provider::Bedrock,
+            "{requested} must route to Bedrock"
+        );
+        assert_eq!(model, QWEN_CODER);
+    }
+    let provider = BedrockProvider::new(QWEN_CODER).expect("a Qwen id builds a Converse provider");
+    assert_eq!(provider.name(), "bedrock");
+    assert!(
+        BedrockProvider::new("anthropic.claude-sonnet-4-6").is_err(),
+        "a bare Anthropic id still needs a profile"
+    );
+
+    let config =
+        tool_use::build_tool_config_for_model(QWEN_CODER, "review_output", &review_schema())
+            .expect("config builds");
+    assert!(matches!(config.tool_choice(), Some(ToolChoice::Auto(_))));
+    let req = structured_request("You review code.");
+    assert_eq!(super::system_blocks(&req, QWEN_CODER).len(), 2);
+
+    let finding = serde_json::json!({
+        "verdict": "REQUEST_CHANGES",
+        "summary": "One defect.",
+        "findings": [{
+            "title": "Retry loop never backs off",
+            "body": "The retry loop never backs off. It hammers the API.",
+            "severity": "medium",
+            "confidence": 0.7,
+            "file": "src/client.rs",
+            "line": 40
+        }]
+    });
+    for reply in [
+        reply_with_blocks(vec![tool_use_block(finding.clone())]),
+        text_only_reply(&finding.to_string()),
+    ] {
+        let resp = super::llm_response(&req, QWEN_CODER, &reply, 1, None);
+        assert_eq!(resp.model, QWEN_CODER);
+        let parsed = parse_review_response(&resp.text);
+        assert!(
+            !parsed.is_fail_safe,
+            "reason: {:?}",
+            parsed.fail_safe_reason
+        );
+        assert_eq!(parsed.verdict, Verdict::RequestChanges);
+        assert_eq!(parsed.findings.len(), 1);
+    }
+}
+
+/// The vendor reader handles every id shape the provider accepts (#10759).
+///
+/// What: bare, profiled, prefixed and ARN ids; an application profile and an
+/// unknown vendor name none.
+/// Test: this test.
+#[test]
+fn bedrock_vendor_reads_every_id_shape() {
+    use super::vendor::bedrock_vendor;
+    for (model, expected) in [
+        (QWEN_CODER, Some("qwen")),
+        ("bedrock/qwen.qwen3-coder-480b-a35b-v1:0", Some("qwen")),
+        ("us.mistral.devstral-2", Some("mistral")),
+        ("us.anthropic.claude-sonnet-5-5", Some("anthropic")),
+        ("apac.anthropic.claude-sonnet-4-5", Some("anthropic")),
+        ("us.amazon.nova-pro-v1:0", Some("amazon")),
+        (
+            "arn:aws:bedrock:us-west-2::foundation-model/qwen.qwen3-coder-480b-a35b-v1:0",
+            Some("qwen"),
+        ),
+        (
+            "arn:aws:bedrock:us-west-2:111122223333:application-inference-profile/9iatxd8u1751",
+            None,
+        ),
+        ("claude-sonnet-5-5", None),
+        ("us.unknown.model", None),
+    ] {
+        assert_eq!(bedrock_vendor(model), expected, "bedrock_vendor({model})");
+    }
+    assert!(!tool_use::supports_forced_tool_choice(QWEN_CODER));
+    assert!(!tool_use::supports_forced_tool_choice("mistral.devstral-2"));
+}

@@ -72,8 +72,9 @@ struct LlmOutputBlock {
     #[serde(default)]
     summary: String,
     // #4491: accepts a double-encoded findings string as well as a real array.
+    // #10759: `None` when the key is absent, so a text reply can fail safe on it.
     #[serde(default, deserialize_with = "deserialize_findings")]
-    findings: Vec<LlmFinding>,
+    findings: Option<Vec<LlmFinding>>,
     /// #10782: notes with nothing to quote. Any JSON shape parses, so a
     /// malformed list never fails the reply; `question_texts` reads it.
     #[serde(default)]
@@ -160,11 +161,11 @@ impl<'de> de::Visitor<'de> for FindingsVisitor {
 /// than reporting zero findings for a payload that carried some.
 /// Test: `parse_double_encoded_findings_are_recovered`,
 /// `parse_unparseable_findings_is_loud_not_silently_empty`.
-fn deserialize_findings<'de, D>(deserializer: D) -> Result<Vec<LlmFinding>, D::Error>
+fn deserialize_findings<'de, D>(deserializer: D) -> Result<Option<Vec<LlmFinding>>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    deserializer.deserialize_any(FindingsVisitor)
+    deserializer.deserialize_any(FindingsVisitor).map(Some)
 }
 
 /// A single finding from the LLM JSON output block.
@@ -314,6 +315,20 @@ impl ParsedReview {
 /// `parse_fail_safe_unknown_on_empty_response`,
 /// `parse_double_encoded_findings_are_recovered`.
 pub fn parse_review_response(body: &str) -> ParsedReview {
+    parse_text_reply(body, false)
+}
+
+/// [`parse_review_response`], optionally failing safe on a missing `findings` key.
+///
+/// Why: #10759 — a non-Anthropic model in tool-choice `auto` can reply in text
+/// with `{"verdict":"APPROVE"}` and no `findings`; defaulting that to `[]`
+/// passed it as a clean APPROVE. Only a tool call has schema enforcement.
+/// What: with `require_findings`, a parsed object lacking the key is fail-safe
+/// UNKNOWN with a reason naming `findings`; otherwise identical to
+/// [`parse_review_response`].
+/// Test: `parse_review_reply_text_only_without_findings_key_is_fail_safe`,
+/// `parse_review_reply_text_only_with_empty_findings_parses`.
+fn parse_text_reply(body: &str, require_findings: bool) -> ParsedReview {
     if body.trim().is_empty() {
         warn!("LLM returned empty response — applying fail-safe UNKNOWN (fail-closed, #1241)");
         return ParsedReview::fail_safe("empty LLM response");
@@ -324,7 +339,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
 
     // Strategy 1: direct JSON parse (structured output path).
     // When response_schema is used, the provider returns only the JSON object.
-    match try_parse_direct_json(body) {
+    match try_parse_direct_json(body, require_findings) {
         Some(Ok(parsed)) => {
             debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via direct JSON (structured output)");
             return parsed;
@@ -334,7 +349,7 @@ pub fn parse_review_response(body: &str) -> ParsedReview {
     }
 
     // Strategy 2: JSON block (legacy free-text path).
-    match try_parse_json_block(body) {
+    match try_parse_json_block(body, require_findings) {
         Some(Ok(parsed)) => {
             debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed via JSON block");
             return parsed;
@@ -404,19 +419,20 @@ pub(crate) fn is_tool_call_reply(resp: &crate::llm::LlmResponse) -> bool {
 /// the tool input, so a ```json fence or a verdict keyword found in it is
 /// quoted text, not the reviewer's answer.
 /// What: a tool-call reply ([`is_tool_call_reply`]) is parsed by
-/// [`parse_tool_input`] alone; any other reply by [`parse_review_response`],
-/// unchanged.
+/// [`parse_tool_input`] alone; any other reply by [`parse_review_response`]'s
+/// strategies, except that a missing `findings` key fails safe (#10759).
 /// Fail-open check: a tool input that does not deserialize is fail-safe
 /// UNKNOWN, with the serde cause in the reason; no fallback can produce a
 /// verdict from it.
 /// Test: `parse_review_reply_reads_only_the_tool_input`,
 /// `a_tool_call_parse_failure_runs_no_keyword_scan`,
-/// `a_valid_tool_call_reply_parses`.
+/// `a_valid_tool_call_reply_parses`,
+/// `parse_review_reply_text_only_without_findings_key_is_fail_safe`.
 pub fn parse_review_reply(resp: &crate::llm::LlmResponse) -> ParsedReview {
     if is_tool_call_reply(resp) {
         parse_tool_input(&resp.text)
     } else {
-        parse_review_response(&resp.text)
+        parse_text_reply(&resp.text, true) // #10759: no schema enforcement here
     }
 }
 
@@ -431,7 +447,7 @@ fn parse_tool_input(body: &str) -> ParsedReview {
         warn!("reviewer tool call carried no input — applying fail-safe UNKNOWN (#9310)");
         return ParsedReview::fail_safe("the reviewer's tool call carried no input (#9310)");
     }
-    let reason = match try_parse_direct_json(body) {
+    let reason = match try_parse_direct_json(body, false) {
         Some(Ok(parsed)) => {
             debug!(verdict = ?parsed.verdict, findings = parsed.findings.len(), "parsed the reviewer's tool input");
             return parsed;
@@ -464,13 +480,30 @@ fn parse_tool_input(body: &str) -> ParsedReview {
 /// Test: `parse_direct_json_happy_path`,
 /// `parse_direct_json_request_changes_with_findings`,
 /// `parse_block_without_verdict_fails_safe_naming_verdict`.
-fn try_parse_direct_json(body: &str) -> Option<Result<ParsedReview, serde_json::Error>> {
+fn try_parse_direct_json(
+    body: &str,
+    require_findings: bool,
+) -> Option<Result<ParsedReview, serde_json::Error>> {
     let trimmed = body.trim();
     // Only attempt if it looks like a JSON object (starts with '{').
     if !trimmed.starts_with('{') {
         return None;
     }
-    Some(serde_json::from_str::<LlmOutputBlock>(trimmed).map(parsed_from_block))
+    Some(
+        serde_json::from_str::<LlmOutputBlock>(trimmed).map(|b| checked_block(b, require_findings)),
+    )
+}
+
+/// Convert a review object, failing safe on a missing `findings` key when required (#10759).
+fn checked_block(block: LlmOutputBlock, require_findings: bool) -> ParsedReview {
+    // #10759: a text reply without a `findings` key never passes as clean.
+    if require_findings && block.findings.is_none() {
+        warn!("text reply carried no findings key — applying fail-safe UNKNOWN (#10759)");
+        return ParsedReview::fail_safe(
+            "the reviewer's text reply has no `findings` key; a verdict without it is not trusted (#10759)",
+        );
+    }
+    parsed_from_block(block)
 }
 
 /// Build the `ParsedReview` for a deserialized review object.
@@ -483,26 +516,22 @@ fn try_parse_direct_json(body: &str) -> Option<Result<ParsedReview, serde_json::
 /// Test: `parse_untitled_finding_keeps_verdict_and_derives_title`,
 /// `parse_fail_safe_unknown_on_unparseable_verdict`.
 fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
+    let findings_in = block.findings.unwrap_or_default();
     let verdict = parse_verdict_string(&block.verdict).unwrap_or(Verdict::Unknown);
     let grade = extract_grade_field(&block.grade);
     // #9310: count derived titles so reviewer schema drift stays visible.
-    let derived = block
-        .findings
+    let derived = findings_in
         .iter()
         .filter(|f| f.title.as_deref().is_none_or(|t| t.trim().is_empty()))
         .count();
     if derived > 0 {
         warn!(
             derived_titles = derived,
-            findings = block.findings.len(),
+            findings = findings_in.len(),
             "reviewer findings arrived without a title; derived each from its body (#9310)"
         );
     }
-    let findings = block
-        .findings
-        .into_iter()
-        .map(convert_llm_finding)
-        .collect();
+    let findings = findings_in.into_iter().map(convert_llm_finding).collect();
     ParsedReview {
         verdict,
         grade,
@@ -527,7 +556,10 @@ fn parsed_from_block(block: LlmOutputBlock) -> ParsedReview {
 /// serde error when the fenced text is not a valid review object (#9310).
 /// Test: `parse_json_block_happy_path`, `parse_json_block_handles_fence_variants`,
 /// `parse_finding_without_body_fails_safe_naming_body`.
-fn try_parse_json_block(body: &str) -> Option<Result<ParsedReview, serde_json::Error>> {
+fn try_parse_json_block(
+    body: &str,
+    require_findings: bool,
+) -> Option<Result<ParsedReview, serde_json::Error>> {
     // Find the last ```json fence.
     let fence_start = body.rfind("```json")?;
     let after_fence = &body[fence_start + 7..]; // skip ```json
@@ -536,7 +568,10 @@ fn try_parse_json_block(body: &str) -> Option<Result<ParsedReview, serde_json::E
     let fence_end = after_fence.find("```")?;
     let json_text = after_fence[..fence_end].trim();
 
-    Some(serde_json::from_str::<LlmOutputBlock>(json_text).map(parsed_from_block))
+    Some(
+        serde_json::from_str::<LlmOutputBlock>(json_text)
+            .map(|b| checked_block(b, require_findings)),
+    )
 }
 
 /// Describe a review-object serde error without quoting the reply (#9310).
