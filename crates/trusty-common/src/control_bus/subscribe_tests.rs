@@ -540,3 +540,21 @@ mod frame {
         );
     }
 }
+
+/// #11667: same path as `events_socket_path`, and nothing created.
+#[test]
+fn events_dial_socket_path_matches_and_creates_nothing() {
+    use crate::data_dir::{DATA_DIR_OVERRIDE_ENV, ENV_LOCK};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // SAFETY: guarded by ENV_LOCK, this crate's lock for env mutation.
+    unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, tmp.path()) };
+    let dial = events_dial_socket_path();
+    let created = tmp.path().join(EVENTS_SERVICE).exists();
+    let bind = events_socket_path();
+    unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+
+    assert!(!created, "dial-side lookup created the data dir");
+    assert_eq!(dial.expect("dial path"), bind.expect("bind path"));
+}

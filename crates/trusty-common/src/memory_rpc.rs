@@ -236,6 +236,22 @@ pub fn resolve_memory_socket() -> Result<PathBuf> {
     crate::daemon_addr::daemon_socket_path(MEMORY_APP_NAME)
 }
 
+/// [`resolve_memory_socket`] for a dialer: the same path, no directory created.
+///
+/// Why: a created data dir is 0755, which the dial's 0700 trust check refuses
+/// (#11667). Bind callers keep [`resolve_memory_socket`].
+/// Test: `resolve_memory_dial_socket_matches_and_creates_nothing`.
+pub fn resolve_memory_dial_socket() -> Result<PathBuf> {
+    if let Ok(raw) = std::env::var(TRUSTY_MEMORY_SOCKET_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    // #11667: dial lookup, creates nothing.
+    crate::daemon_addr::daemon_socket_path_no_create(MEMORY_APP_NAME)
+}
+
 /// Fail-open variant of [`resolve_memory_socket`].
 ///
 /// Why: catch-up, identity seeding, and the TUI health poller all degrade
@@ -751,6 +767,23 @@ mod tests {
             resolved.expect("an override always resolves"),
             PathBuf::from("/tmp/example-memory.sock")
         );
+    }
+
+    /// #11667: same path as `resolve_memory_socket`, and nothing created.
+    #[test]
+    fn resolve_memory_dial_socket_matches_and_creates_nothing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::remove_var(TRUSTY_MEMORY_SOCKET_ENV);
+            std::env::set_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV, tmp.path());
+        }
+        let dial = resolve_memory_dial_socket();
+        let created = tmp.path().join(MEMORY_APP_NAME).exists();
+        let bind = resolve_memory_socket();
+        unsafe { std::env::remove_var(crate::data_dir::DATA_DIR_OVERRIDE_ENV) };
+        assert!(!created, "dial-side lookup created the data dir");
+        assert_eq!(dial.expect("dial path"), bind.expect("bind path"));
     }
 
     /// Why: `resolve_memory_socket` errs only when the data directory cannot be

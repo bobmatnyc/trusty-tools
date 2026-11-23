@@ -107,6 +107,9 @@ fn no_uds_endpoint_tiles_are_not_counted_as_down() {
 fn dial_side_socket_lookup_leaves_no_directory_behind() {
     let (home, _guard) = crate::test_support::isolated_daemon_home(false);
     for service in [
+        ServiceId::Search,
+        ServiceId::Memory,
+        ServiceId::Events,
         ServiceId::Agents,
         ServiceId::Analyze,
         ServiceId::Review,

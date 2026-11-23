@@ -265,8 +265,39 @@ pub fn search_socket() -> Result<PathBuf> {
 /// Test: `search_socket_under_treats_empty_as_unset_and_refuses_relative`,
 /// `search_socket_follows_trusty_data_dir_like_the_daemon`.
 pub fn search_socket_under(data_dir_override: Option<&OsStr>) -> Result<PathBuf> {
+    resolve_search_socket(data_dir_override, true)
+}
+
+/// [`search_socket`] for a dialer: the same path, no directory created.
+///
+/// Why: a dial-side lookup that created the directory would leave it 0755,
+/// which the dial's 0700 trust check refuses (#11667). Bind callers keep
+/// [`search_socket`] / [`search_socket_under`].
+/// What: the socket env override, else the [`search_socket_under`] rule
+/// without its `create_dir_all`.
+/// Test: `search_dial_socket_matches_and_creates_nothing`.
+pub fn search_dial_socket() -> Result<PathBuf> {
+    if let Ok(raw) = std::env::var(TRUSTY_SEARCH_SOCKET_ENV) {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    // #11667: dial lookup, creates nothing.
+    resolve_search_socket(
+        std::env::var_os(TRUSTY_SEARCH_DATA_DIR_ENV).as_deref(),
+        false,
+    )
+}
+
+/// The one search-socket rule; `create` is true only on the bind side (#11667).
+fn resolve_search_socket(data_dir_override: Option<&OsStr>, create: bool) -> Result<PathBuf> {
     let Some(dir) = data_dir_override.filter(|d| !d.is_empty()) else {
-        return crate::daemon_socket_path(SEARCH_APP_NAME);
+        return if create {
+            crate::daemon_socket_path(SEARCH_APP_NAME)
+        } else {
+            crate::daemon_socket_path_no_create(SEARCH_APP_NAME)
+        };
     };
     let dir = PathBuf::from(dir);
     anyhow::ensure!(
@@ -274,6 +305,9 @@ pub fn search_socket_under(data_dir_override: Option<&OsStr>) -> Result<PathBuf>
         "{TRUSTY_SEARCH_DATA_DIR_ENV} must be an absolute path (got: {})",
         dir.display()
     );
+    if !create {
+        return Ok(dir.join(format!("{SEARCH_APP_NAME}.sock")));
+    }
     std::fs::create_dir_all(&dir).with_context(|| {
         format!(
             "create {TRUSTY_SEARCH_DATA_DIR_ENV} socket directory {}",
