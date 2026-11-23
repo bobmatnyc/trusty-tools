@@ -6,6 +6,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [0.9.1] — 2026-11-23
+
+### Fixed
+
+- A checkout with no `origin` remote now resolves its secrets scope from `git config --local trusty.secrets.repo <owner>/<repo>`. Only the checkout's own `.git/config` is read, and an `origin` remote still wins. With neither, the `project_unresolved` error names the command to run ([#11346](https://github.com/bobmatnyc/trusty-tools/issues/11346)).
+- A Keychain call that outlasts its time limit, as when a macOS access prompt is open or the item's access list names an older `trusty-secrets` binary, now fails with the distinct kind `keychain_access_prompt` (-32089) instead of the generic `backend_timeout`. The reply says the outcome is unknown, names the remedy (answer the prompt, then verify with `tm secrets list`), and never reads as "not stored", since the abandoned write may still land. A time-out of any other backend stays `backend_timeout` ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+- `KEYCHAIN_CALL_TIMEOUT` drops from 60 s to 20 s, so the reply arrives before a 30 s client gives up ([#11429](https://github.com/bobmatnyc/trusty-tools/issues/11429)).
+
 ## [0.9.0] — 2026-11-20
 
 ### Added
