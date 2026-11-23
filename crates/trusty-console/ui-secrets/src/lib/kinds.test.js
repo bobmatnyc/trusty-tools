@@ -21,7 +21,7 @@ const nonBlank = (lines) => lines.length > 0 && lines.every((l) => l.trim() !== 
 
 describe('errorLines', () => {
   test('every upstream kind renders its own text', () => {
-    expect(UPSTREAM_KINDS).toHaveLength(42);
+    expect(UPSTREAM_KINDS).toHaveLength(43);
     expect(Object.keys(KIND_TEXT).sort()).toEqual([...UPSTREAM_KINDS].sort());
     for (const kind of UPSTREAM_KINDS) {
       const lines = errorLines({ status: 403, error: 'fixed', kind });
