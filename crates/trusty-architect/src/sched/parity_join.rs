@@ -10,15 +10,17 @@
 //! [`IDENTITY_CYCLES`] cycles of the record; pass 1b pairs what is left of
 //! `idle` by [`idle_screen`] (session, kind, screen hash: the two pollers keep
 //! separate idle timers, so the `since-<epoch>` part differs) in the same
-//! window; pass 2, when asked, pairs what
+//! window, only when the epochs are within [`IDLE_EPOCH_TOLERANCE_S`]; pass 2, when asked, pairs what
 //! is left by session and kind, only when at least one side has no identity
 //! (two keyed events with different identities never pair) within [`FALLBACK_CYCLES`] cycles. Each pass takes the nearest unused live
 //! event. A shadow event left over is `scheduler_only`; a live event left
 //! over counts as `poller_only` only when it falls inside some joined
-//! record's own window. [`IL_CRON`] is left out of both sides.
+//! record's own window. [`IL_CRON`] and [`CTXWATCH`] are dropped before the
+//! join, in `parity::compute_full`.
 //! Test: `join_pairs_identity_across_phase_skew`,
 //! `idle_pairs_on_screen_hash_across_epoch_skew`,
 //! `idle_with_different_screen_hashes_never_pairs`,
+//! `idle_episodes_beyond_the_epoch_tolerance_never_pair`,
 //! `join_falls_back_to_two_cycles_without_identity`,
 //! `fallback_never_pairs_two_keyed_events_with_different_fingerprints`,
 //! `parity_reports_identity_and_fallback_numbers`.
@@ -31,6 +33,17 @@ use super::shadow::EventKey;
 pub const IDENTITY_CYCLES: i64 = 15;
 /// The fallback's tolerance, in cycles, on each side of the record window.
 pub const FALLBACK_CYCLES: i64 = 2;
+/// Most seconds two `idle` epochs of one screen may differ and still pair.
+///
+/// Why: the pollers keep separate idle timers, so one episode carries two
+/// epochs; two episodes of one screen must still not pair (MB1595 review).
+/// What: measured skew, same session and screen, all logs to 2026-11-23: at
+/// most 189 s (window 4: 3, 28, 98, 189 s). The shortest gap between two
+/// live idle episodes of one session, any screen, is 820 s, and an idle alert
+/// needs 600 s of idle. 300 s sits between both.
+/// Test: `idle_episodes_beyond_the_epoch_tolerance_never_pair`,
+/// `idle_pairs_on_screen_hash_across_epoch_skew`.
+pub const IDLE_EPOCH_TOLERANCE_S: i64 = 300;
 /// The kind left out of parity: `il-cron.py` only prints `would run` in a dry
 /// run (il-cron.py:249), so the shadow can never raise it.
 pub const IL_CRON: &str = "il_cron";
@@ -77,13 +90,16 @@ pub struct Joined {
     pub by_relaxed: u64,
 }
 
-/// An `idle` key's (session, kind, screen hash), its `since-<epoch>-` prefix
-/// dropped; `None` for any other kind or fingerprint shape.
-pub fn idle_screen(k: &EventKey) -> Option<(&str, &str, &str)> {
+/// An `idle` key's (session, kind, screen hash) and its since-epoch;
+/// `None` for any other kind or fingerprint shape.
+/// Test: `idle_with_different_screen_hashes_never_pairs`,
+/// `idle_episodes_beyond_the_epoch_tolerance_never_pair`.
+pub fn idle_screen(k: &EventKey) -> Option<((&str, &str, &str), i64)> {
     let rest = k.fingerprint.strip_prefix("since-")?;
     let (epoch, hash) = rest.split_once('-')?;
     let numeric = !epoch.is_empty() && epoch.bytes().all(|b| b.is_ascii_digit());
-    (k.kind == "idle" && numeric).then_some((&k.session, &k.kind, hash))
+    let epoch: i64 = epoch.parse().ok().filter(|_| numeric)?;
+    (k.kind == "idle").then_some(((&k.session, &k.kind, hash), epoch))
 }
 
 /// Seconds from `t` to the window `[from, to)`; 0 inside.
@@ -166,13 +182,17 @@ pub fn join(
     }
     // Pass 1b, MB1595 window 4: idle pairs on the screen hash, epoch ignored.
     for (n, s) in shadow.iter().enumerate() {
-        let Some(want) = s.key.as_ref().and_then(idle_screen) else {
+        let Some((want, epoch)) = s.key.as_ref().and_then(idle_screen) else {
             continue;
         };
         if paired[n] {
             continue;
         }
-        let same = |l: &Event| l.key.as_ref().and_then(idle_screen) == Some(want);
+        let same = |l: &Event| {
+            l.key.as_ref().and_then(idle_screen).is_some_and(|(got, e)| {
+                got == want && (e - epoch).abs() <= IDLE_EPOCH_TOLERANCE_S
+            })
+        };
         if let Some(i) = nearest(s, live, &used, IDENTITY_CYCLES, &same) {
             (used[i], paired[n]) = (true, true);
             out.by_identity += 1;
@@ -302,6 +322,17 @@ mod tests {
         assert_eq!((j.counts.matched, j.by_identity, j.by_relaxed), (1, 1, 1));
         // One to one: the second live idle of the same screen stays unpaired.
         assert_eq!(j.counts.poller_only, 1);
+    }
+
+    /// Two idle episodes of one screen, epochs 600 s apart: no pair.
+    #[test]
+    fn idle_episodes_beyond_the_epoch_tolerance_never_pair() {
+        let ev = |ts, iv, fp: &str| Event::keyed(ts, iv, key("tm-a", "idle", fp));
+        let shadow = [ev(1000, 60, "since-400-8e42f0ed439d")];
+        let live = [ev(1060, 0, "since-1000-8e42f0ed439d")];
+        let j = join(&shadow, &live, &|_| true, true);
+        assert_eq!(j.counts.matched, 0);
+        assert_eq!((j.counts.scheduler_only, j.counts.poller_only), (1, 1));
     }
 
     #[test]
