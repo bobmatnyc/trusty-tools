@@ -1,6 +1,6 @@
 crate   trusty-common
 version 0.70.7
-reason  Accepted under owner ruling 2026-09-26 (a public-API break never forces a major version); Architect approval 2026-11-23. a9f5dc6b42 (PR #11681, issue #10595) deliberately removed the catchup::sha_scrub module, replaced by secret_scrub. cargo semver-checks against crates.io 0.70.6 reports four entries across three lints (CI run 45181972919), all from that removal. Refs #10595, #11650.
+reason  Accepted under the owner's 2026-09-26 versioning ruling (a public-API break never forces a major version); Architect approval 2026-11-23. a9f5dc6b42 (PR #11681, issue #10595) deliberately removed the catchup::sha_scrub module, replaced by secret_scrub. cargo semver-checks against crates.io 0.70.6 reports four entries across three lints (CI run 45181972919), all from that removal. Refs #10595, #11650.
 accept  function_missing                function trusty_common::catchup::sha_scrub::is_sha_like
 accept  function_missing                function trusty_common::catchup::sha_scrub::scrub_sha_like
 accept  module_missing                  mod trusty_common::catchup::sha_scrub
