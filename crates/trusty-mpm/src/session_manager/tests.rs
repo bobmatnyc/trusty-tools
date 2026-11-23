@@ -129,6 +129,8 @@ pub struct FakeTmuxDriver {
     /// Records every `send_keys_literal_to_pane` call as `(session_name,
     /// pane_id, text)` (issue #2468).
     pub pane_literal_calls: Mutex<Vec<(String, String, String)>>,
+    /// #10747: every `send_key_to_pane` call as `(pane_id, key)`.
+    pub pane_key_calls: Mutex<Vec<(String, String)>>,
     /// Records every `send_interrupt_to_pane` call as `(session_name,
     /// pane_id)` (issue #2468).
     pub pane_interrupt_calls: Mutex<Vec<(String, String)>>,
@@ -190,6 +192,7 @@ impl FakeTmuxDriver {
             pane_harness_calls: Mutex::new(Vec::new()),
             pane_send_calls: Mutex::new(Vec::new()),
             pane_literal_calls: Mutex::new(Vec::new()),
+            pane_key_calls: Mutex::new(Vec::new()),
             pane_interrupt_calls: Mutex::new(Vec::new()),
             pane_capture_calls: Mutex::new(Vec::new()),
             rename_calls: Mutex::new(Vec::new()),
@@ -476,6 +479,14 @@ impl ManagedTmuxDriver for FakeTmuxDriver {
 
     /// Records `(name, pane_id)` (issue #2468) — proves `inject`'s
     /// `Submit::Interrupt` dispatch chose the pane-scoped path.
+    fn send_key_to_pane(&self, _name: &str, pane_id: &str, key: &str) -> Result<(), ManagedError> {
+        self.pane_key_calls
+            .lock()
+            .unwrap()
+            .push((pane_id.to_owned(), key.to_owned()));
+        Ok(())
+    }
+
     fn send_interrupt_to_pane(&self, name: &str, pane_id: &str) -> Result<(), ManagedError> {
         self.pane_interrupt_calls
             .lock()
