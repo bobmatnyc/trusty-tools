@@ -30,6 +30,48 @@ fn encoded(pairs: &[(&ItemId, &str)]) -> String {
     blob.encode().unwrap().to_string()
 }
 
+/// A blob holding `pairs` with a `digest` field, as a later release writes
+/// it (#11738); this release writes none.
+fn encoded_with_digest(pairs: &[(&ItemId, &str)]) -> String {
+    let items: Vec<(&str, &str, &str)> = pairs
+        .iter()
+        .map(|(id, v)| (id.service.as_str(), id.account.as_str(), *v))
+        .collect();
+    serde_json::json!({
+        "format": FORMAT,
+        "version": VERSION,
+        "items": items,
+        "digest": digest_of(&items).unwrap(),
+    })
+    .to_string()
+}
+
+/// The pre-#11738 read struct, copied verbatim: an older tm or daemon
+/// rejects any field it does not know.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreFixWireIn {
+    format: String,
+    version: u32,
+    items: Vec<(String, String, String)>,
+}
+
+/// Why: #11738 mixed-version safety — a blob, backup or migrate output this
+/// build writes must still decode on a pre-fix binary, so it carries no
+/// `digest` field yet.
+/// Test: itself.
+#[test]
+fn encoded_blob_decodes_under_the_pre_fix_reader() {
+    for pairs in [vec![], vec![(&item(1), VALUE), (&item(2), "")]] {
+        let text = encoded(&pairs);
+        let old: PreFixWireIn =
+            serde_json::from_str(&text).expect("a pre-fix reader rejected the blob");
+        assert_eq!(old.items.len(), pairs.len());
+        assert!(!text.contains("digest"), "{}", pairs.len());
+    }
+}
+
 /// Why: #10524 — the blob round-trips, its `Debug` is a count, and a blob
 /// that does not parse is one fixed error that never quotes the input (a
 /// serde message would: `invalid type: string "<value>"`).
@@ -155,7 +197,9 @@ fn blob_store_corrupt_blob_without_backup_reads_per_item() {
 /// Test: itself.
 #[test]
 fn blob_store_tampered_blob_reads_the_backup() {
-    let tampered = encoded(&[(&item(1), VALUE)]).replace(VALUE, "sk-tampered");
+    let signed = encoded_with_digest(&[(&item(1), VALUE)]);
+    assert!(Blob::decode(&ItemId::blob(), &signed).is_ok());
+    let tampered = signed.replace(VALUE, "sk-tampered");
     assert!(serde_json::from_str::<serde_json::Value>(&tampered).is_ok());
     let items = Arc::new(MemItems::default());
     items.put_raw(&ItemId::backup(), &encoded(&[(&item(1), VALUE)]));

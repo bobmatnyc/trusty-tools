@@ -11,8 +11,9 @@
 //! value bytes). [`BlobStore`] serves item reads and writes: while the blob
 //! item exists every item lives in it (migrated layout); while it is absent
 //! each item is its own Keychain item (the per-item layout, unchanged). A
-//! blob carries a SHA-256 `digest` of its items, checked on read; a blob
-//! without one (written before #11738) still reads. A corrupt or tampered
+//! blob may carry a SHA-256 `digest` of its items, checked on read when
+//! present; this build writes none yet, so older readers still decode what
+//! it writes (#11738). A corrupt or tampered
 //! blob fails every write and is never rewritten; a read falls back to the
 //! migration backup, then to the per-item items, and notes a
 //! [`BlobFallback`] (#11738). Writes are read-modify-write under one lock and land
@@ -110,7 +111,6 @@ struct WireOut<'a> {
     format: &'a str,
     version: u32,
     items: Vec<(&'a str, &'a str, &'a str)>,
-    digest: String,
 }
 
 /// The serialized form, owned for reading.
@@ -200,13 +200,11 @@ impl Blob {
             .iter()
             .map(|(id, v)| (id.service.as_str(), id.account.as_str(), v.as_str()))
             .collect();
-        // #11738: the digest a read checks, so a tampered blob is corrupt.
-        let digest = digest_of(&items).map_err(|_| failed())?;
+        // #11738: verify-only this release; digest emission deferred until every reader verifies (mixed-version safety)
         let wire = WireOut {
             format: FORMAT,
             version: VERSION,
             items,
-            digest,
         };
         serde_json::to_string(&wire)
             .map(Zeroizing::new)
@@ -283,7 +281,8 @@ impl BlobStore {
     fn note_fallback(&self, fallback: BlobFallback) {
         eprintln!(
             "trusty-secrets: warning: the vault blob ({BLOB_SERVICE}/{BLOB_ACCOUNT}) is \
-             corrupt; read from {fallback:?}; the blob item is left as it is"
+             corrupt; read from {fallback:?}; {fallback:?} may be older than the \
+             current blob; the blob item is left as it is"
         );
         *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = Some(fallback);
     }
