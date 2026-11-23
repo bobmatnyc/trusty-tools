@@ -104,14 +104,23 @@ async fn parity_sessions_context_agrees_across_transports() {
 /// Why: a `@prefix:` turn is the chat leg that needs no model, so it is the
 /// success case both transports can run hermetically. The tmux name is unique
 /// so the send reaches no real pane.
+///
+/// Why the unroutable socket (#11718, the #10893 mechanism): with no socket
+/// the send reaches `TmuxDriver::discover`, which reads the live `$HOME` gate
+/// per call, so a concurrent test moving `$HOME` gave one transport "tmux
+/// unavailable" and the other a `send-keys` failure. A socket outside this
+/// process's socket directory is refused by `server_of_socket` first, so both
+/// calls answer from fixed inputs whether or not the host has tmux.
 /// Test: this function IS the test.
 #[tokio::test]
 async fn parity_sessions_chat_agrees_across_transports() {
-    let (state, _dir) = hermetic();
+    let (state, dir) = hermetic();
     let name = format!("tm-parity-{}", uuid::Uuid::new_v4().simple());
     let mut session = Session::new(SessionId::new(), "/tmp/p", ControlModel::Tmux, None);
     session.status = SessionStatus::Active;
     session.tmux_name = name.clone();
+    // See #11718: refused before `discover`, so no env read can differ between calls.
+    session.tmux_socket = Some(dir.path().join("tm-ws-parity-11718"));
     state.register_session(session);
     let prefix = name.trim_start_matches("tm-");
     let turn = json!({ "message": format!("@{prefix}: echo hi") });
@@ -119,6 +128,9 @@ async fn parity_sessions_chat_agrees_across_transports() {
     let (status, body) = http(&state, "POST", "/api/v1/sessions/chat", Some(turn.clone())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["routed_to_session"], json!(name), "{body}");
+    // See #11718: pin the branch taken; a route that reaches `discover` fails here.
+    let reply = body["reply"].as_str().unwrap_or_default();
+    assert!(reply.contains("cannot be reached"), "{body}");
     let frame = rpc(&state, "mpm.sessions.chat", turn).await;
     assert_eq!(body, frame["result"], "chat must match across transports");
 }
