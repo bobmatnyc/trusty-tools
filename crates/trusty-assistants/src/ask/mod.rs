@@ -3,8 +3,8 @@
 //! Why: slice 3a of the Trusty Assistants plan. An instance answers from its
 //! own `instructions.md`, its own OKG and the read-only part of the MCP
 //! catalog, and remembers earlier questions. It runs on trusty-code's
-//! `AgentLoop` as a library; this module adds no loop of its own and no
-//! socket or CLI verb (those are slice 3b).
+//! `AgentLoop` as a library; this module adds no loop of its own. Slice 3b
+//! serves it per instance over a Unix socket (`daemon`).
 //! What:
 //! - [`ask`] — the production entry point: the real inference client and the
 //!   operator's `servers.toml`.
@@ -16,10 +16,13 @@
 //! - `turn_log` — [`TurnLog`], the per-instance jsonl log replayed into each
 //!   new transcript and appended only after an answer exists.
 //! - `error` — [`AskError`].
+//! - `daemon` — the per-instance daemon and the `ta ask` client (#11650).
 //!
 //! Test: `tests` — the submodules under `ask/tests/`.
 
 pub mod config;
+// #11650: slice 3b, the per-instance daemon and the `ta ask` client.
+pub mod daemon;
 pub mod error;
 pub mod okg_search;
 pub mod tools;
@@ -61,9 +64,7 @@ pub use turn_log::{LoadedLog, Recovery, TURN_LOG_FILE, TurnLog, TurnRecord, repl
 /// Test: `tests::engine_tests` drives the same path through [`AskEngine`]
 /// with a scripted adapter.
 pub async fn ask(home: &AssistantHome, question: &str) -> Result<String, AskError> {
-    let llm = trusty_code::task::mock_llm::build_llm_client()
-        .map_err(|e| AskError::Client(e.to_string()))?;
-    AskEngine::new(home.clone(), llm).ask(question).await
+    AskEngine::production(home.clone())?.ask(question).await
 }
 
 /// Where the MCP server list comes from.
@@ -97,6 +98,18 @@ impl AskEngine {
             llm,
             mcp: McpSource::Live,
         }
+    }
+
+    /// An engine with the production inference client and MCP config.
+    ///
+    /// What: `trusty_code::task::mock_llm::build_llm_client`, which touches no
+    /// credential at construction and honours `TCODE_MOCK_LLM` for offline
+    /// runs. #11650: the daemon builds one per ask.
+    /// Test: `ask_starts_the_daemon_on_demand_and_it_exits_idle` (`tests/ask_daemon.rs`).
+    pub fn production(home: AssistantHome) -> Result<Self, AskError> {
+        let llm = trusty_code::task::mock_llm::build_llm_client()
+            .map_err(|e| AskError::Client(e.to_string()))?;
+        Ok(Self::new(home, llm))
     }
 
     /// Load MCP servers from `servers_toml` instead of the operator's file.
