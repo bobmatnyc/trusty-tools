@@ -41,12 +41,12 @@ caused: [test-ladder-baseline.md](docs/reference/test-ladder-baseline.md).
   override it EXCEPT with the builder slot the hook grants, and never point a
   gate at a worktree-local `target/` — that is a cold build of the whole
   dependency graph: [agent-cost-controls.md](docs/reference/agent-cost-controls.md).
-- 🔴 **A live check needing an isolated daemon starts it with
-  `scripts/sandbox_daemon.sh` (tm), `scripts/sandbox_search_daemon.sh`
-  (trusty-search), `scripts/sandbox_code_daemon.sh` (tcode, #6637),
-  `scripts/sandbox_secrets_console.sh` (trusty-secrets + console, #9793) or
-  `scripts/sandbox_computer_daemon.sh` (trusty-computer, #11460)
-  only (#9121)** — a hand-built daemon inherits bot tokens,
+- 🔴 **A live check needing an isolated daemon starts it with a `scripts/`
+  launcher only (#9121): `sandbox_daemon.sh` (tm),
+  `sandbox_search_daemon.sh` (trusty-search), `sandbox_code_daemon.sh`
+  (tcode, #6637), `sandbox_secrets_console.sh` (trusty-secrets + console,
+  #9793), `sandbox_computer_daemon.sh` (trusty-computer, #11460) or
+  `sandbox_assistants_ask.sh` (`ta ask`, #11650)** — a hand-built daemon inherits bot tokens,
   loads the `.env.local` at or above its cwd (#9161), and reaches the
   per-user Keychain.
 - 🔴 **k8s, container work and builds run on EVO whenever possible** via

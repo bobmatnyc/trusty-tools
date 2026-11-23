@@ -1625,6 +1625,10 @@ scripts/preflight-check5-selftest.sh	EMAIL	1
 scripts/prepublish-ignored-tests.tsv	EVO_HOST	7
 scripts/prepublish-ignored-tests.tsv	RULING_DATED	1
 scripts/roadmap/generate.mjs	RULING_DATED	1
+scripts/sandbox_assistants_ask.sh	HOSTNAME	4
+scripts/sandbox_assistants_ask.sh	OPERATOR_PATH	2
+scripts/sandbox_assistants_ask_selftest.sh	HOSTNAME	5
+scripts/sandbox_assistants_ask_selftest.sh	OPERATOR_PATH	1
 scripts/sandbox_code_daemon.sh	HOSTNAME	7
 scripts/sandbox_code_daemon_selftest.sh	HOSTNAME	4
 scripts/sandbox_daemon.sh	HOSTNAME	9

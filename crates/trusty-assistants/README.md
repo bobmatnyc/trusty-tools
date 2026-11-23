@@ -48,6 +48,26 @@ The rename did not move any data (#11632, owner ruling Dcm):
 | `intent` | The deterministic tm/tcode routing for `dispatch_task` |
 | `mcp`, `plugins`, `rbac`, `rpc`, `usage`, `identity`, `untrusted` | MCP config, plugins, access tiers, OpenRPC discovery, usage ledger, user profile, untrusted-content fencing |
 
+## Install
+
+Install `ta` only, with `scripts/install-trusty-assistants-signed.sh` (#11650).
+It runs `cargo install ... --bin ta --locked`, signs `ta` alone, and exits 1 if
+the `tagent` in the install root changed. Never install the `tagent` alias:
+the `tagent` in `~/.cargo/bin` comes from the older `trusty-agents` package and
+runs a launchd Slack bot. Sources and signing:
+[release-workflow.md](../../docs/reference/release-workflow.md#signed-install-trusty-assistants-4277).
+
+## Sandbox smoke run
+
+`scripts/sandbox_assistants_ask.sh` runs one `ta ask` under `env -i` with a
+temporary `HOME` and data directory, then checks that the instance's daemon
+exited idle. Offline, for both instances:
+
+```bash
+TCODE_MOCK_LLM=echo scripts/sandbox_assistants_ask.sh --dir "$D" --role personal personal "hello"
+TCODE_MOCK_LLM=echo scripts/sandbox_assistants_ask.sh --dir "$D" --role cto cto-assistant "hello"
+```
+
 ## Build and test
 
 ```bash

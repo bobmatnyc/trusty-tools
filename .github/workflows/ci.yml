@@ -327,6 +327,10 @@ jobs:
       - name: Sandbox secrets+console launcher selftest (#9793)
         run: bash scripts/sandbox_secrets_console_selftest.sh
 
+      # #11650: the `ta ask` sandbox launcher; stub binary, no build.
+      - name: Sandbox assistants-ask launcher selftest (#11650)
+        run: bash scripts/sandbox_assistants_ask_selftest.sh
+
       # #8998: the PM starting-context probe's stream readout and lever argv;
       # fixture streams only, no claude and no build.
       - name: PM context probe selftest (#8998)

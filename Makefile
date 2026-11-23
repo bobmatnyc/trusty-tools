@@ -119,30 +119,27 @@ install-search-signed:
 install-mpm-signed:
 	bash scripts/install-trusty-mpm-signed.sh
 
-# Install trusty-assistants (the ta CLI and its tagent alias) with Developer ID
-# signing for persistent macOS TCC grants.
+# Install trusty-assistants' `ta` CLI (only `ta`, never `tagent`) with
+# Developer ID signing for persistent macOS TCC grants.
 #
 # Why: fixes #4277 — `cargo install trusty-assistants` produces a fresh
 # ad-hoc/linker-signed identity for `ta`, so macOS re-prompts on every
 # rebuild. Signing with a Developer ID cert + fixed --identifier makes the
 # designated requirement (DR) stable, so the grant persists across reinstalls.
-# #11632: renamed from install-agents-signed with the crate.
+# #11632: renamed from install-agents-signed with the crate. #11650: `--bin ta`
+# only; the existing `tagent` runs a launchd bot and is left untouched.
 #
-# What: delegates to scripts/install-trusty-assistants-signed.sh, which runs
-# `cargo install --path crates/trusty-assistants --locked` and signs `ta` and
-# `tagent` via `tctl sign trusty-assistants`. No certificate present degrades
-# to an unsigned install with a clear warning — never a hard failure.
+# What: delegates to scripts/install-trusty-assistants-signed.sh with
+# TA_INSTALL_ARGS (e.g. `--git-rev <merged sha>`; the default is the crates.io
+# release of this checkout's version). The script installs `ta` and signs it
+# via `tctl sign trusty-assistants` in a staging dir that holds only `ta`. No
+# certificate degrades to an unsigned install with a warning.
 #
-# Test: run `make install-assistants-signed`; assert ta is signed with a
-# Developer ID (not ad-hoc) and `codesign --verify --strict` passes. Run with
-# TRUSTY_CODESIGN_DRY_RUN=1 (or the --dry-run flag) to exercise guidance paths.
+# Test: scripts/install_trusty_assistants_signed_selftest.sh.
 #
-# Overrides (passed as env vars, not make vars):
-#   TRUSTY_SIGN_IDENTITY=...    override the auto-detected signing identity
-#   TRUSTY_INSTALL_PATH=...     install from an explicit repo checkout path
-#   TRUSTY_CODESIGN_DRY_RUN=1   skip cargo install + codesign, test guidance only
+# Overrides (env vars): TRUSTY_SIGN_IDENTITY=..., TRUSTY_CODESIGN_DRY_RUN=1.
 install-assistants-signed:
-	bash scripts/install-trusty-assistants-signed.sh
+	bash scripts/install-trusty-assistants-signed.sh $(TA_INSTALL_ARGS)
 
 # Install trusty-memory (trusty-memory + trusty-bm25-daemon +
 # trusty-memory-mcp-bridge) with Developer ID signing for persistent macOS TCC
