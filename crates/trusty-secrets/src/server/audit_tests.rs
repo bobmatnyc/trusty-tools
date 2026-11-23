@@ -776,8 +776,18 @@ impl SecretBackend for HungValues {
     }
 }
 
-/// The time limit [`HungValues`] runs under in the #11215 test.
+/// The time limit [`HungValues`] runs under in the #11215 reply-shape tests.
 const HUNG_LIMIT: Duration = Duration::from_millis(300);
+
+// See #11609: the at-once refusal is bounded against the hang, not against
+// ordinary I/O latency. A 300 ms hang left no room: a loaded host spent
+// 437 ms on the socket round trip alone. With a 2 s hang the bound is 1 s,
+// so it sits 1 s above the slowest round trip seen (437 ms) and 1 s below
+// the wait a broken refusal would add, which is the full 2 s.
+/// The time limit the refusal test runs the hung Keychain under.
+const REFUSAL_HANG: Duration = Duration::from_secs(2);
+/// The most the at-once refusal may take: half the hang.
+const REFUSAL_BOUND: Duration = Duration::from_secs(1);
 
 /// Why: #11215 — the first call on a fresh server timed out on the Keychain
 /// and every retry failed at once, yet the reply was a bare
@@ -798,7 +808,7 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
     let (hung, release) = HungValues::new();
     let limited: Arc<dyn SecretBackend> = Arc::new(TimeLimited::new(
         Arc::clone(&hung) as Arc<dyn SecretBackend>,
-        HUNG_LIMIT,
+        REFUSAL_HANG,
     ));
     let base = fx.backends();
     let factory: BackendFactory = Arc::new(move |id: &BackendId| match id.as_str() {
@@ -831,12 +841,12 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
     let (message, data) = timeout_reply(&first);
     assert!(
         message.starts_with(
-            "secrets.set: the Keychain did not answer in time: this call waited 0.3 s"
+            "secrets.set: the Keychain did not answer in time: this call waited 2.0 s"
         ),
         "{message}"
     );
     assert_eq!(data["abandoned_item"], json!(false));
-    assert_eq!(data["waited_ms"], json!(300));
+    assert_eq!(data["waited_ms"], json!(2000));
     let (message, data) = timeout_reply(&second);
     assert!(
         message.starts_with("secrets.set: refused at once:"),
@@ -845,8 +855,8 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
     assert_eq!(data["abandoned_item"], json!(true));
     assert_eq!(data["waited_ms"], json!(0));
     assert!(
-        second_took < HUNG_LIMIT,
-        "the refusal waited {second_took:?}"
+        second_took < REFUSAL_BOUND,
+        "the refusal waited {second_took:?}, bound {REFUSAL_BOUND:?}, hang {REFUSAL_HANG:?}"
     );
 
     let waits: Vec<BackendWait> = records(&fx)
@@ -857,7 +867,7 @@ async fn server_keychain_timeout_reply_and_audit_name_the_wait_then_the_refusal(
     assert_eq!(waits.len(), 2, "{waits:?}");
     assert_eq!(
         (waits[0].backend.as_str(), waits[0].waited_ms),
-        ("keychain", 300)
+        ("keychain", 2000)
     );
     assert!(!waits[0].abandoned_item);
     assert_eq!((waits[1].waited_ms, waits[1].abandoned_item), (0, true));
