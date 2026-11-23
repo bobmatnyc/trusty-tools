@@ -333,6 +333,15 @@ fn a_credential_script_is_denied_whatever_its_arguments_10672() {
     }
 }
 
+/// 🔴 REGRESSION (#10688): the read-only inspect body, whose local `ps` read
+/// as the `ps` command, is allowed.
+#[test]
+fn a_read_only_inspect_shape_allows() {
+    let dir = fixtures();
+    let reason = verdict("python3 inspect.py in.docx", dir.path());
+    assert!(reason.is_none(), "must allow: {reason:?}");
+}
+
 /// The read-only inspect body plus a secret read or a dump the guard knows
 /// refuses.
 #[test]

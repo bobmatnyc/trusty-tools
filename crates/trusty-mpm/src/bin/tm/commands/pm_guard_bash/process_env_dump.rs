@@ -155,6 +155,7 @@ fn argv_dumps_env(argv: &[String]) -> bool {
             // #8756: `ps e`/`ps -E`, `/proc/<pid>/environ`, `ssh host env`.
             // #10688: `ps = …` in a script body is a variable, not the command.
             || (program_name(word) == "ps" && !assigns_to(rest) && ps_shows_environment(rest))
+            || argv_list(word, rest).is_some_and(|list| argv_dumps_env(&list))
             || names_a_process_environ(word)
             || (program_name(word) == "ssh" && remote::ssh_dumps_remote_env(rest))
     })
@@ -166,11 +167,35 @@ fn argv_dumps_env(argv: &[String]) -> bool {
 /// Python's `ps = cell.paragraphs` reached the `ps` rule and the next `len`
 /// read as the BSD option cluster `e`. An operator word holding `=` (`=`,
 /// `+=`, `:=`, `==`) is no `ps` option, so `ps` there is no command.
-/// Test: `a_read_only_inspect_shape_allows`,
+/// Test: `a_read_only_inspect_shape_allows`, `a_python_ps_variable_allows_10688`,
 /// `the_inspect_shape_plus_a_secret_read_refuses`.
 fn assigns_to(rest: &[String]) -> bool {
     rest.first()
         .is_some_and(|w| w.contains('=') && w.chars().all(|c| "=+-*/%:|&^<>!@".contains(c)))
+}
+
+/// The argv list `word` opens, each item without its `,` or closing `]`.
+///
+/// #10688: Python's `subprocess.run(["ps", "eww"])` lexes as `[ps,` then
+/// `eww]`; read as a list, it is the argv `ps eww`. Before the `ps = …` fix
+/// these rows refused only because the rest of the body already did.
+fn argv_list(word: &str, rest: &[String]) -> Option<Vec<String>> {
+    let first = word.strip_prefix('[')?;
+    let items = if first.ends_with(']') {
+        &[][..]
+    } else {
+        let end = rest
+            .iter()
+            .position(|w| w.ends_with(']'))
+            .map_or(rest.len(), |at| at + 1);
+        &rest[..end]
+    };
+    let clean = |w: &str| w.trim_end_matches([',', ']']).to_string();
+    Some(
+        std::iter::once(clean(first))
+            .chain(items.iter().map(|w| clean(w)))
+            .collect(),
+    )
 }
 
 /// Whether `ps <args>` prints each process's environment (#8756).

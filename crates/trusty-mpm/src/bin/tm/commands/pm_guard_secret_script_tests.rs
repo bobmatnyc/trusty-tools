@@ -485,7 +485,7 @@ const INSPECT_PY: &str = "import sys\nfrom docx import Document\n\ndoc = Documen
 /// 🔴 REGRESSION (#10688): a local variable named `ps` in a Python script is
 /// not the `ps` command; the read-only inspect run is allowed.
 #[test]
-fn a_read_only_inspect_shape_allows() {
+fn a_python_ps_variable_allows_10688() {
     let dir = tempfile::tempdir().expect("dir");
     script(dir.path(), "inspect.py", INSPECT_PY);
     let reason = eval("python3 inspect.py in.docx", dir.path());
@@ -504,6 +504,14 @@ fn the_inspect_shape_plus_a_secret_read_refuses() {
         ),
         ("pse.sh", "ps eww 1\n"),
         ("psauxe.sh", "ps auxe\n"),
+        (
+            "pslist.py",
+            "import subprocess\nsubprocess.run([\"ps\", \"eww\"])\n",
+        ),
+        (
+            "lclist.py",
+            "import subprocess\nsubprocess.run([\"launchctl\", \"print\", \"gui/501/x\"])\n",
+        ),
         ("environ.py", "print(open('/proc/1/environ').read())\n"),
         ("launchctl.sh", "launchctl print gui/501/com.example.fake\n"),
     ] {
