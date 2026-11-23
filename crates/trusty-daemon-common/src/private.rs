@@ -1,12 +1,11 @@
-//! Owner-only file and directory helpers for the state dir and audit log.
+//! Owner-only file and directory checks for daemon state, sockets and logs.
 //!
-//! Why: the broker's state, sockets and audit log must be readable by the
-//! current user only (plan section 4: dir 0700, files 0600).
+//! Why: broker state must be readable by the current user only (dir 0700,
+//! files 0600); both brokers refuse state they do not own exclusively.
 //! What: a path is private when it is owned by the current uid with no group
 //! or other permission bits; files must also be regular, directories directories.
-//! Test: `audit_line_per_call` in `tests/spike_audit.rs`.
-
-// copied from trusty-browser 275d713590 (src/private.rs), unchanged but this header.
+//! Test: `private_dir_is_created_0700_and_a_shared_one_refused`,
+//! `open_nofollow_creates_0600_and_refuses_a_symlink`.
 
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io;
@@ -62,4 +61,33 @@ pub fn open_nofollow(path: &Path, append: bool) -> io::Result<File> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn private_dir_is_created_0700_and_a_shared_one_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("a/state");
+        ensure_private_dir(&dir).expect("created");
+        let mode = fs::metadata(&dir).expect("meta").mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o750)).expect("chmod");
+        let err = ensure_private_dir(&dir).expect_err("group bits refused");
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn open_nofollow_creates_0600_and_refuses_a_symlink() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("log");
+        let f = open_nofollow(&file, true).expect("open");
+        assert!(private_file(&f.metadata().expect("meta")));
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).expect("symlink");
+        assert!(open_nofollow(&link, true).is_err());
+    }
 }

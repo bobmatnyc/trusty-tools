@@ -51,6 +51,8 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 # The launchd label registry (`launchd_labels::BROWSER`, #4919); no features.
 trusty-common = { workspace = true }
+# #11692: peer, codesign, launchd, private and audit-file helpers.
+trusty-daemon-common = { workspace = true }
 # The shared JSON-RPC envelope types; never rmcp (plan section 2).
 trusty-mcp = { workspace = true }
 unicode-normalization = { workspace = true }
