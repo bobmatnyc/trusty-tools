@@ -14,7 +14,7 @@ const UPSTREAM_KINDS = [
   'file_backend_not_selected', 'backend_not_enabled', 'deadline_exceeded',
   'vault_not_visible', 'backend_timeout', 'grant_refused', 'grant_limit_reached',
   'bridge_refused', 'agent_key_denied', 'ticket_refused', 'remote_refused', 'gate_refused',
-  'keychain_access_prompt', 'internal',
+  'keychain_access_prompt', 'keychain_no_session', 'internal',
 ];
 
 const nonBlank = (lines) => lines.length > 0 && lines.every((l) => l.trim() !== '');
