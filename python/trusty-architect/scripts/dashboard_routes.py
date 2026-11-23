@@ -7,12 +7,13 @@ What: `doc_put` (PUT /doc/<project>/<rel>, architect mode, same-origin, base_sha
 one content-free line per save in <inbox>/doc-edits.jsonl); `attach` (POST /api/attach/<item id>?name=<file> stores an
 Intent Ledger attachment, GET /api/attach/<item id>/<stored name> serves it sandboxed; dashboard_attach.py); `fleet`
 (GET /api/fleet: count plus working|waiting|paused|inactive per managed session); `projects` (GET /api/projects;
-dashboard_projects.py, with the watch state from the watch_changes docs); `cli_profiles` (GET /api/cli-profiles, only when the optional cli_profiles module is present,
+dashboard_projects.py, with the watch state from the watch_changes docs); `key_names` (GET /api/projects/key-names[?refresh=1]:
+the Secrets list by owner/project, key names only; dashboard_keynames.py, #10350); `cli_profiles` (GET /api/cli-profiles, only when the optional cli_profiles module is present,
 else 404); `pane` (GET /api/pane?session=<tm-name>&lines=<n>: a managed session's masked pane tail, #11065 phase 3);
 `static` (GET /static/<name>, the fixed STATIC_FILES names only). Every function returns the handler's
 _send/_err result. Standard library only.
 Test: tests/test_dashboard_doc.py, tests/test_dashboard_attach.py, tests/test_dashboard_routes.py,
-tests/test_dashboard_pane_route.py
+tests/test_dashboard_pane_route.py, tests/test_dashboard_keynames.py
 """
 import hashlib
 import json
@@ -166,6 +167,15 @@ def projects(h):
     # #10896: the Watch / Unwatch requests, read per request so a just-queued one shows at once
     return h._send(200, h.server.projects_view.get(sess_ids, h.server.store.list_docs("watch_changes")))
 
+
+def key_names(h, url):
+    """GET /api/projects/key-names[?refresh=1]: secret key names by owner/project, never a value; architect mode only.
+
+    #10350: the view runs `tm secrets list` per registered project and keeps only key-name lines (dashboard_keynames)."""
+    if _architect_get(h):
+        return None
+    refresh = (parse_qs(url.query).get("refresh") or [""])[0] == "1"
+    return h._send(200, h.server.key_names.get(refresh=refresh))
 
 def cli_profiles(h, url):
     """GET /api/cli-profiles: per-profile auth status (names only) and mappings; 404 while cli_profiles is not shipped."""
