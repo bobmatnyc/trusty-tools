@@ -10,8 +10,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Breaking
 
-- trusty-mpm 1.14.11 ships a public-API break under the internal numbering
-  policy; recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.11.txt` (Refs #8699).
+- Note on 1.14.11: that release shipped a public-API break under the internal
+  numbering policy, recorded in `scripts/semver-accepted-breaks/trusty-mpm-1.14.11.txt` (Refs #8699).
 
 ### Added
 
@@ -58,7 +58,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 
 - The pinned memory and code-search protocols, and the Architect safety core, name the native `tm memory recall` and `trusty-search search` commands instead of the MCP tools; `tm memory recall|remember|note` help no longer calls itself a fallback.
-- `tm architect restart` now asks the Architect for an Intent Ledger checkpoint and waits up to 90 s for the write before it restarts only the Architect's `claude`; a timeout always refuses (exit 4) and no flag bypasses it (ruling Dpg: use `tm fleet relaunch`). `--no-checkpoint` skips the request and keeps the #11365 fresh-ledger gate. It finds the Architect by its fleet role and refuses when none is recorded. A failed stop or relaunch types nothing and reports "NOT restarted".
+- `tm architect restart` now asks the Architect for an Intent Ledger checkpoint and waits up to 90 s for the write before it restarts only the Architect's `claude`; a timeout always refuses (exit 4) and no flag bypasses it (use `tm fleet relaunch`). `--no-checkpoint` skips the request and keeps the #11365 fresh-ledger gate. It finds the Architect by its fleet role and refuses when none is recorded. A failed stop or relaunch types nothing and reports "NOT restarted".
 - An Architect launch hides 22 never-dispatched bundled agents (the language, framework, `api-qa`, `data-designer`, `gcp-ops`, `ops`, manager and `prompt-engineer` agents) from its roster, cutting about 4k characters from the session start. The launch's one `--settings` payload carries `Agent(<name>)` and `Task(<name>)` deny rules for them. PM launches and the deployed agent files are unchanged, so a project's PM session can still dispatch any of them.
 - The Architect skill deployer records the earlier text of seven `architect-*` skills (operating-rules, strategy, workflow, completion-standard, project-provision, host-admin, tmux-ops), so `tm fleet init` refreshes an untouched copy to the slimmed manual's skills. The embedded Architect manual is about a quarter of its former size.
 - `mpm.health` and `GET /health` report `status: "degraded"` when trusty-memory or trusty-search does not answer, with one `degraded[]` entry per down service naming the reason (`timeout` for a probe that outlives its 2 s budget). The probes are served from a 10 s single-flight cache, so a health request never waits on them. A new `alive` field (default `true`) is the liveness signal; liveness callers read it instead of `status == "ok"`.
@@ -67,7 +67,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tm fleet init` still keeps an Architect file whose bytes match no shipped version (an owner or Architect edit), and now also writes the new shipped copy beside it as `<file>.shipped`. The init report names the sibling path, so a release change to an edited file is visible and can be merged by hand. An unedited file still updates in place.
 - `tm secrets --help` names `git config --local trusty.secrets.repo <owner>/<repo>` for a checkout with no `origin` remote ([#11346](https://github.com/bobmatnyc/trusty-tools/issues/11346)).
 - The Architect hard limits, the supervisor hard limits, the `tm-secrets` skill and the agent and skill lines that say "record where a secret lives, never its value" now carry one exception (#11433): a credential the owner explicitly declares throwaway or demo may be stored and used in plaintext in a project file, marked `throwaway` at the storage site, without a vault. Printing, logging and committing any other secret stay forbidden.
-- `session_launch::PrepError` is now `#[non_exhaustive]`, so a later variant no longer breaks a downstream exhaustive `match`. Code outside trusty-mpm that matches on `PrepError` needs a wildcard arm; this is a one-time public-API break, scheduled for 1.15.0 (#11443).
+- `session_launch::PrepError` is now `#[non_exhaustive]`, so a later variant no longer breaks a downstream exhaustive `match`. Code outside trusty-mpm that matches on `PrepError` needs a wildcard arm; this is a one-time public-API break shipped in 1.14.12 under the internal numbering policy (#11443).
 - Test-only change: a test identifier string in the restart-checkpoint tests is renamed so the public-content guard no longer flags it; no behavior change.
 - `tm tui` probes the Agents tile with `agents.health` on its well-known socket: running with a version when up, on demand when nothing listens. The tile no longer cites a closed issue (#11550).
 - `tm tui`: the Architect's project draws as a top-level `◆ architect  privileged` row above the owner groups, no longer under `(local)`.

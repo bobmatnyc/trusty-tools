@@ -8,6 +8,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.4.1] — 2026-11-23
 
+### Breaking
+
+- Public structs `Config` (fields `dry_run_state`, `read_inbox`, `tm_health_socket`, `triage_rules`) and `PaneInfo` (`screen`) gained fields, and `InputState` gained `Poll`; struct literals and exhaustive matches outside the crate need updating. Shipped as a patch under the internal numbering policy.
+
 ### Added
 
 - `il` module and the `trusty-architect-il` binary: the Intent Ledger reads and writes of `datg.py` and `ilio.py`, in Rust, on the same files and formats (`.trusty-mpm/datg/[<session>/]state.json`, `log.jsonl`, `archive.jsonl`, `.lock`). `trusty-architect-il datg <verb>` covers `init`, `add`, `update`, `close`, `act`, `acts`, `batch`, `session set`, `remind`, `remind-done`, `remind-fire`, `reminders`, `rebalance`, `prune`, `rotate`, `archive-show`, `show`, `digest` and `fresh`; `trusty-architect-il ilio <verb>` covers `table`, `parse`, `check`, `expand`, `relay`, `apply` (the ledger part: the dashboard store, steering log and `last-apply.json` stay in Python) and `collapse`. `hook`, `check-dispatch`, `stamp` and `ilio record` are not ported, and no caller is switched.
