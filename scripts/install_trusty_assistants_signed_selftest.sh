@@ -19,6 +19,8 @@
 #     guard-trips       a cargo that rewrites `tagent` makes the script exit 1
 #     refuse-bin        `--bin tagent`, `--bin ta`, `--bin=tagent` and a bare
 #                       `tagent` exit 2 before cargo runs
+#     fingerprint-fails a failing or empty-output `shasum` or `stat` makes the
+#                       script exit 1 before cargo runs, never "unchanged"
 #     path-cargo-home   `--from-source` into the cargo home exits 2 (ADR-0043)
 #     sign-fail-soft    a failing tctl leaves `ta` in place and exits 0
 #     old-tctl          a tctl that does not accept `trusty-assistants` is
@@ -118,7 +120,7 @@ run() {
   shift
   mkdir -p "$WORK/$name"
   RC=0
-  STUB_LOG="$WORK/$name" PATH="$STUBS:/usr/bin:/bin" CARGO_HOME="$WORK/cargo-home" \
+  STUB_LOG="$WORK/$name" PATH="${STUB_EXTRA_PATH:+$STUB_EXTRA_PATH:}$STUBS:/usr/bin:/bin" CARGO_HOME="$WORK/cargo-home" \
     "$SUT" "$@" > "$WORK/$name.out" 2>&1 || RC=$?
 }
 
@@ -168,6 +170,28 @@ root="$(new_root_with_tagent guard-trips)"
 STUB_CARGO_TOUCH_TAGENT=1 run guard-trips --from-source --root "$root"
 [ "$RC" -eq 1 ] || fail "guard-trips: exit $RC, want 1"
 grep -q 'changed during the install' "$WORK/guard-trips.out" || fail "guard-trips: no 'changed' error"
+
+# --- fingerprint-fails (#11650) ------------------------------------------
+# A hash or stat tool that fails, or prints nothing, must stop the script:
+# otherwise before == after trivially and a changed tagent goes unnoticed.
+for tool in shasum stat; do
+  for mode in fail empty; do
+    name="fingerprint-$tool-$mode"
+    mkdir -p "$WORK/$name-bin"
+    if [ "$mode" = "fail" ]; then
+      printf '#!/bin/sh\nexit 1\n' > "$WORK/$name-bin/$tool"
+    else
+      printf '#!/bin/sh\nexit 0\n' > "$WORK/$name-bin/$tool"
+    fi
+    chmod +x "$WORK/$name-bin/$tool"
+    root="$(new_root_with_tagent "$name")"
+    STUB_EXTRA_PATH="$WORK/$name-bin" run "$name" --from-source --root "$root"
+    [ "$RC" -eq 1 ] || fail "$name: exit $RC, want 1"
+    grep -q 'cannot fingerprint' "$WORK/$name.out" || fail "$name: no 'cannot fingerprint' error"
+    ! grep -q 'unchanged' "$WORK/$name.out" || fail "$name: reported unchanged"
+    [ ! -e "$WORK/$name/cargo.argv" ] || fail "$name: cargo ran"
+  done
+done
 
 # --- refuse-bin ---------------------------------------------------------
 i=0

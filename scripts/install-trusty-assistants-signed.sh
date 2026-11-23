@@ -115,6 +115,8 @@ physical() {
 }
 
 # fingerprint PATH: `absent`, or inode, size, mtime and sha256 of the file.
+# #11650: fails closed. errexit does not reach inside `$(...)`, so every step is
+# checked by hand; a missing field would make before == after and hide a change.
 fingerprint() {
     local path="$1" meta sum
     if [ ! -e "$path" ] && [ ! -L "$path" ]; then
@@ -122,10 +124,15 @@ fingerprint() {
         return 0
     fi
     case "$(uname -s)" in
-        Darwin|*BSD) meta="$(stat -f '%i %z %m' "$path")" ;;
-        *) meta="$(stat -c '%i %s %Y' "$path")" ;;
+        Darwin|*BSD) meta="$(stat -f '%i %z %m' "$path")" || meta="" ;;
+        *) meta="$(stat -c '%i %s %Y' "$path")" || meta="" ;;
     esac
-    sum="$(shasum -a 256 "$path" | cut -d' ' -f1)"
+    sum="$(shasum -a 256 "$path")" || sum=""
+    sum="${sum%% *}"
+    if [ -z "$meta" ] || [ -z "$sum" ]; then
+        error "cannot fingerprint $path (stat or sha256 failed); refusing to continue"
+        return 1
+    fi
     echo "$meta $sum"
 }
 
@@ -288,7 +295,7 @@ main() {
 
     resolve_root
     local guarded="$BIN_DIR/$GUARDED_BIN" before after
-    before="$(fingerprint "$guarded")"
+    before="$(fingerprint "$guarded")" || exit 1
     info "$GUARDED_BIN guard: $guarded is $before"
 
     trap restore_staged EXIT
@@ -296,7 +303,7 @@ main() {
     run_sign_ta
     trap - EXIT
 
-    after="$(fingerprint "$guarded")"
+    after="$(fingerprint "$guarded")" || exit 1
     if [ "$after" != "$before" ]; then
         error "$guarded changed during the install: before [$before], after [$after]"
         exit 1
