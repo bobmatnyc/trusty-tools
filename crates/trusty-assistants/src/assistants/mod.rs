@@ -122,7 +122,7 @@ pub use project::{
     set_project_dir,
 };
 pub use provision::{
-    ProvisionedHome, StartupProvisioning, provision, provision_all, provision_startup_homes,
+    ProvisionedHome, StartupProvisioning, provision_all, provision_home, provision_startup_homes,
     provision_startup_homes_in,
 };
 pub use roster::{ASSISTANT_BASE, discover_instances};
