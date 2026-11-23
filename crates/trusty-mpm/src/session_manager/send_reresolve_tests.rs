@@ -100,6 +100,10 @@ impl ManagedTmuxDriver for ReresolveTmux {
     fn send_key_to_pane(&self, _n: &str, _p: &str, _k: &str) -> Result<(), ManagedError> {
         Ok(())
     }
+    /// #10747: an empty input box, so `session_send` may type.
+    fn capture_pane_escaped(&self, _n: &str, _p: &str, _l: usize) -> Result<String, ManagedError> {
+        Ok("out\n────────────\n❯ \n────────────\n".into())
+    }
     fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }

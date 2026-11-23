@@ -222,6 +222,10 @@ async fn send_input_observed_reports_unsubmitted_paste() {
         "%1".to_string(),
         "❯ [Pasted text #1][Pasted text #2]".into(),
     );
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
 
     let state = mgr
         .send_input_observed(&record.id, "a very long coordination message")
@@ -279,6 +283,10 @@ async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
         .lock()
         .unwrap()
         .insert("%1".to_string(), "● Working…\n❯ short message".into());
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
 
     let state = mgr
         .send_input_observed(&record.id, "short message")
@@ -319,7 +327,89 @@ async fn active_session_showing(
         .lock()
         .unwrap()
         .insert("%1".to_string(), pane.into());
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
     (mgr, fake, record.id)
+}
+
+/// #10747: a Claude Code input box with nothing typed, as an escaped capture.
+const EMPTY_BOX: &str = "out\n────────────\n❯ \n────────────\n";
+
+/// #10747: the box already holds `held`; nothing may be typed or cleared.
+async fn assert_refused_on_a_full_box(held: &str) {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let box_text = format!("out\n────────────\n❯ {held}\n────────────\n");
+    let (mgr, fake, id) = active_session_showing(&dir, &box_text).await;
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), box_text);
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state.as_str(), "input_not_empty", "{held}");
+    assert!(!state.delivered());
+    assert!(
+        fake.pane_literal_calls.lock().unwrap().is_empty(),
+        "typed into {held}"
+    );
+    assert!(
+        fake.pane_key_calls.lock().unwrap().is_empty(),
+        "keys sent on {held}"
+    );
+    assert!(fake.pane_send_calls.lock().unwrap().is_empty());
+}
+
+/// #10747: a stale paste placeholder must not pass the echo check for a new
+/// message. Pre-fix the placeholder satisfied the check and Enter submitted
+/// the stale paste.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_refuses_a_stale_paste_placeholder() {
+    assert_refused_on_a_full_box("[Pasted text #1 +4 lines]").await;
+}
+
+/// #10747: text the user typed is never typed over and never cleared by C-u.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_refuses_a_user_draft() {
+    assert_refused_on_a_full_box("half-written owner reply").await;
+}
+
+/// #10747: a non-Claude Code runtime (tcode) has no `❯` box, so the echo
+/// check does not apply: text and Enter go in one send, as before.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_skips_the_echo_check_for_tcode() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) = active_session_showing(&dir, "$ tcode ready\n").await;
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&id).await.unwrap();
+        r.runtime = crate::runtime::RuntimeKind::Tcode;
+        store.upsert(r).await.unwrap();
+    }
+
+    let state = mgr
+        .send_input_observed(&id, "hello tcode")
+        .await
+        .expect("send");
+
+    assert!(state.delivered(), "{}", state.as_str());
+    assert!(
+        fake.pane_key_calls.lock().unwrap().is_empty(),
+        "no C-u for tcode"
+    );
+    assert!(
+        fake.pane_send_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, t)| t == "hello tcode"),
+        "text and Enter sent together"
+    );
 }
 
 /// The sent text of the #10747 incident, long enough to cross the paste threshold.

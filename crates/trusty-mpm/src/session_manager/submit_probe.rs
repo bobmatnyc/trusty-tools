@@ -76,6 +76,9 @@ pub enum SubmitState {
     /// #10747: the input box never showed the typed text (or a paste
     /// placeholder for it), so Enter was NOT pressed and the box was cleared.
     NotEchoed,
+    /// #10747: the input box already held text (a user draft or a stale
+    /// paste placeholder) or could not be read, so nothing was typed.
+    InputNotEmpty,
 }
 
 impl SubmitState {
@@ -86,6 +89,7 @@ impl SubmitState {
             Self::UnsubmittedPaste => "unsubmitted_paste",
             Self::Unverified => "unverified",
             Self::NotEchoed => "not_echoed",
+            Self::InputNotEmpty => "input_not_empty",
         }
     }
 
@@ -96,6 +100,10 @@ impl SubmitState {
             Self::NotEchoed => Some(
                 "the input box did not show the full text before Enter; nothing was \
                  submitted and the box was cleared",
+            ),
+            Self::InputNotEmpty => Some(
+                "input_not_empty: the input box was not provably empty before typing; \
+                 nothing was typed",
             ),
             Self::Submitted | Self::Unverified => None,
         }
@@ -111,7 +119,10 @@ impl SubmitState {
     /// cannot.
     /// Test: `classify_submit_unreadable_pane_is_unverified`.
     pub fn delivered(self) -> bool {
-        !matches!(self, Self::UnsubmittedPaste | Self::NotEchoed)
+        !matches!(
+            self,
+            Self::UnsubmittedPaste | Self::NotEchoed | Self::InputNotEmpty
+        )
     }
 }
 
@@ -151,7 +162,11 @@ impl SessionManager {
     /// [`Self::send_input`] is left untouched for the callers (task injection,
     /// the HTTP route, the proxy backend) whose contract is `Result<(), _>`.
     /// What: runs [`Self::send_input`]'s readiness/modal refusals, then types
-    /// `text` WITHOUT Enter through the same owned-pane gate. #10747: it polls
+    /// `text` WITHOUT Enter through the same owned-pane gate. #10747: only for
+    /// a Claude Code runtime (other runtimes have no `❯` box and keep the
+    /// type-plus-Enter send): it first reads the box with escapes and answers
+    /// [`SubmitState::InputNotEmpty`], typing nothing, unless
+    /// [`trusty_architect::input_state_for_send`] accepts input. It then polls
     /// the input box every [`ECHO_POLL`] for up to [`ECHO_DEADLINE`] until
     /// [`trusty_architect::box_holds_text`] holds; only then is Enter pressed.
     /// No echo by the deadline: `C-u` clears the box and the answer is
@@ -172,10 +187,26 @@ impl SessionManager {
         text: &str,
     ) -> Result<SubmitState, ManagedError> {
         self.check_send_input_ready(id).await?;
+        let record = self.get(id).await?;
+        // #10747: the echo check reads Claude Code's `❯` box; other runtimes
+        // have none, so they keep the type-plus-Enter send.
+        if record.runtime != crate::runtime::RuntimeKind::ClaudeCode {
+            let (name, pane) = self.inject_into_owned(id, text, Submit::Enter).await?;
+            return Ok(self.probe_after_enter(&name, &pane));
+        }
+        let (record, pane) = self.live_owned_pane(id, record).await?;
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        // #10747: never type into a box holding a draft or a stale paste
+        // placeholder; the echo check would pass on it and C-u would erase it.
+        let before = tmux
+            .capture_pane_escaped(&record.tmux_name, &pane, ECHO_PROBE_LINES)
+            .unwrap_or_default();
+        if !trusty_architect::input_state_for_send(&before).accepts_input() {
+            tracing::warn!(session = %id, "session_send: input box not empty; not typed (#10747)");
+            return Ok(SubmitState::InputNotEmpty);
+        }
         // #10747: type without Enter; Enter waits for the echo check below.
         let (name, pane) = self.inject_into_owned(id, text, Submit::NoSubmit).await?;
-        let record = self.get(id).await?;
-        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
         let key = |k: &str| tmux.send_key_to_pane(&name, &pane, k);
         let deadline = tokio::time::Instant::now() + ECHO_DEADLINE;
         loop {
@@ -194,11 +225,16 @@ impl SessionManager {
             }
         }
         key("Enter")?;
+        Ok(self.probe_after_enter(&name, &pane))
+    }
+
+    /// The #5699 read after Enter: [`classify_submit`] over the pane's tail.
+    fn probe_after_enter(&self, name: &str, pane: &str) -> SubmitState {
         let tail = self
             .tmux
-            .capture_pane(&name, &pane, SUBMIT_PROBE_LINES)
+            .capture_pane(name, pane, SUBMIT_PROBE_LINES)
             .unwrap_or_default();
-        Ok(classify_submit(&tail))
+        classify_submit(&tail)
     }
 }
 
