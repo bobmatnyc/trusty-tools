@@ -11,7 +11,7 @@
 
 use super::home_tests::temp_home;
 use crate::assistants::{
-    AssistantHome, AssistantInstanceId, HomeIssueKind, provision, provision_all,
+    AssistantHome, AssistantInstanceId, HomeIssueKind, provision_all, provision_home,
     provision_startup_homes_in,
 };
 
@@ -20,7 +20,7 @@ fn startup_creates_a_missing_home() {
     let (_tmp, home) = temp_home();
     assert!(!home.exists(), "precondition: nothing on disk yet");
 
-    let report = provision(&home);
+    let report = provision_home(&home);
 
     assert!(home.exists());
     assert!(report.is_healthy(), "issues: {:?}", report.health.issues);
@@ -33,10 +33,10 @@ fn startup_creates_a_missing_home() {
 #[test]
 fn second_startup_creates_nothing() {
     let (_tmp, home) = temp_home();
-    let first = provision(&home);
+    let first = provision_home(&home);
     assert!(first.created_anything());
 
-    let second = provision(&home);
+    let second = provision_home(&home);
 
     assert!(!second.created_anything(), "created: {:?}", second.created);
     assert!(second.is_healthy());
@@ -47,11 +47,11 @@ fn second_startup_creates_nothing() {
 #[test]
 fn startup_fills_only_the_gaps() {
     let (_tmp, home) = temp_home();
-    provision(&home);
+    provision_home(&home);
     std::fs::write(home.okg_dir().join("kept.md"), "mine").unwrap();
     std::fs::remove_dir_all(home.attachments_dir()).unwrap();
 
-    let report = provision(&home);
+    let report = provision_home(&home);
 
     assert_eq!(report.created, vec![home.attachments_dir()]);
     assert!(report.is_healthy());
@@ -67,12 +67,12 @@ fn startup_fills_only_the_gaps() {
 #[test]
 fn repeated_startup_never_disturbs_user_edits() {
     let (_tmp, home) = temp_home();
-    provision(&home);
+    provision_home(&home);
     std::fs::write(home.instructions_path(), "MY OWN INSTRUCTIONS\n").unwrap();
     std::fs::write(home.config_path(), "id = \"izzie\"\nmine = true\n").unwrap();
 
     for _ in 0..3 {
-        let report = provision(&home);
+        let report = provision_home(&home);
         assert!(!report.created_anything());
         assert!(report.is_healthy());
     }
@@ -99,7 +99,7 @@ fn startup_survives_a_home_it_cannot_create() {
     std::fs::write(home.path(), "a file, not a directory").unwrap();
 
     // The call itself returns — no panic, no Result to unwrap, no early exit.
-    let report = provision(&home);
+    let report = provision_home(&home);
 
     assert!(!report.is_healthy());
     let issue = &report.health.issues[0];
@@ -157,10 +157,10 @@ fn an_empty_roster_is_not_an_error() {
 #[test]
 fn startup_reports_but_never_repairs_a_broken_file() {
     let (_tmp, home) = temp_home();
-    provision(&home);
+    provision_home(&home);
     std::fs::write(home.config_path(), "not [[[ toml").unwrap();
 
-    let report = provision(&home);
+    let report = provision_home(&home);
 
     assert!(!report.is_healthy());
     assert!(

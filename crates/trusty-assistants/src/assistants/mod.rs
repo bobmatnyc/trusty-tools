@@ -46,6 +46,14 @@
 //!   one trusty-memory palace per assistant plus the opt-in fan-out to other
 //!   assistants' palaces (#7428). The binding's `palace` still wins where one
 //!   is declared, so nothing migrates.
+//! - `project` — (#11649) the optional `project_dir` key and
+//!   [`instance_for_project`], which resolves a working directory to exactly
+//!   one instance or a typed error.
+//! - `instructions` — (#11649) [`AssistantHome::read_instructions`] and the
+//!   role templates [`seed_role_instructions`] writes once.
+//! - `instance_provision` — (#11649) [`provision_instance`]: one named
+//!   instance with its role, project directory, fan-out peers and an
+//!   `agent.toml` whose first `[[stores]]` binding is its own OKG and index.
 //! - `error` — [`AssistantError`], for resolving and creating a home.
 //!   Inspecting one yields findings, not errors.
 //!
@@ -79,10 +87,13 @@ pub mod error;
 pub mod health;
 pub mod home;
 pub mod instance;
+pub mod instance_provision;
+pub mod instructions;
 pub mod mcp;
 pub mod memory;
 pub mod memory_grants;
 pub mod memory_policy;
+pub mod project;
 pub mod provision;
 pub mod roster;
 
@@ -90,20 +101,28 @@ pub mod roster;
 mod tests;
 
 pub use error::AssistantError;
-pub use health::{HomeHealth, HomeIssue, HomeIssueKind, inspect};
+pub use health::{HomeHealth, HomeIssue, HomeIssueKind, inspect, inspect_project_claims};
 pub use home::{
     AGENTS_DIR, APP_DIR_NAME, ASSISTANTS_DIR_ENV, ASSISTANTS_DIR_NAME, ATTACHMENTS_DIR,
     AssistantHome, AssistantHomeConfig, CONFIG_FILE, Created, INSTRUCTIONS_FILE,
     LEGACY_ASSISTANTS_DIR_ENV, OKG_DIR, STORES_DIR, app_dir, assistants_root,
 };
 pub use instance::{ASSISTANT_ROLE, AssistantInstanceId, is_assistant_role};
+pub use instance_provision::{
+    ProvisionedInstance, own_index_id, provision_instance, provision_instance_in,
+};
+pub use instructions::{AssistantRole, MAX_INSTRUCTIONS_BYTES, seed_role_instructions};
 pub use mcp::{McpOverrides, OverridesRead, read_overrides, write_overrides};
 pub use memory::{
     MemoryConfig, PalacePlan, PalaceSource, own_palace, read_memory_config, resolve_palace_plan,
     resolve_palace_plan_in, write_memory_config,
 };
+pub use project::{
+    PROJECT_DIR_KEY, ProjectClaim, canonical_project_dir, instance_for_project, project_claims,
+    set_project_dir,
+};
 pub use provision::{
-    ProvisionedHome, StartupProvisioning, provision, provision_all, provision_startup_homes,
+    ProvisionedHome, StartupProvisioning, provision_all, provision_home, provision_startup_homes,
     provision_startup_homes_in,
 };
 pub use roster::{ASSISTANT_BASE, discover_instances};
