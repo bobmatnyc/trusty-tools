@@ -17,6 +17,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Documentation
 
 - Comments and examples use neutral `acme` org names.
+- Comments and the README name `trusty-assistants`, the new name of the `trusty-agents` consumer; the workspace discovery test pins `ta` to the trusty-assistants binary (#11632).
 
 ## [1.0.1] — 2026-11-16
 

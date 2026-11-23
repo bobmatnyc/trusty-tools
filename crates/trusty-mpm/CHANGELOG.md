@@ -54,6 +54,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `session_send` types the text, waits up to 2 s for the input box to show it (or a `[Pasted text #N]` placeholder), and only then presses Enter. When the box shows a dropped head it clears the box and returns `sent: false` with `submit_state: "not_echoed"` and a `reason`, instead of submitting the tail (#10747).
 - `session_send` reads the Claude Code input box before typing and returns `sent: false` with `submit_state: "input_not_empty"` when it holds a draft or a stale paste placeholder; it types nothing and sends no `C-u`. Runtimes other than Claude Code keep the type-plus-Enter send without the echo check (#10747).
 - `tm project info` resolves a checkout registered in the persisted project registry (`projects.json` by URL or path, or `project-paths.json` by alias) after a daemon restart, instead of reporting it as not registered. An unreadable registry is now an error, not "not a registered project".
+- `tm daemon` and `tm sm serve --stdio` now settle buffered action events (send or spool) on SIGHUP, the same path as SIGTERM and SIGINT, before they exit. A SIGHUP inherited as ignored (`nohup`) stays ignored.
+- `/clear` in the Architect session now moves `last.architect-conversation` to the new conversation id, so `tm fleet relaunch` resumes the post-clear conversation instead of the pre-clear one.
+- Action events: a panicking project resolver no longer leaks its in-flight lookup slot, so later sessions keep their project attribution (#11040).
 
 ### Changed
 
@@ -72,6 +75,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `tm tui` probes the Agents tile with `agents.health` on its well-known socket: running with a version when up, on demand when nothing listens. The tile no longer cites a closed issue (#11550).
 - `tm tui`: the Architect's project draws as a top-level `◆ architect  privileged` row above the owner groups, no longer under `(local)`.
 - The hook-rewrite shell-parity tests now fail under CI when zsh is missing, and drop only the zsh leg elsewhere (#11658).
+- The Intent Ledger session record limit is 8192 B, up from 2048 B, so a usage hold and a merge hold at full length fit beside the rest of the record. `tm fleet init` and the shipped `datg.py` use the new limit; a record over it is still refused whole, with the largest fields named.
 
 ### Removed
 

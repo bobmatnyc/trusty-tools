@@ -54,6 +54,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `sched/plist.rs` points at the canonical `trusty_common::launchd_labels::ARCHITECT_SCHED` label it mirrors.
 - The scheduler's parity report pairs shadow and live events by identity first (session, kind and fingerprint; a live wake's fingerprint comes from its `triage.jsonl` id) within 15 cycles, then by session and kind within two cycles of the record, only when at least one side has no identity key (two keyed events with different identities never pair). It prints identity-only and identity-plus-fallback counts for alerts and wakes, the pairs each method made, and states that the verdict uses identity plus fallback; the 95% and 120-cycle thresholds are unchanged. Wakes compare per woken alert for records that carry wake keys (MB1595 fix round).
 - `il_cron` alerts and wakes are left out of the parity comparison and printed as `il_cron excluded: N (unmeasurable in dry run: il-cron.py:249)`.
+- The ledger session record limit (`SESSION_MAX`) is 8192 B, up from 2048 B, matching `datg.py` and `tm fleet init`. A record over it is still refused.
 
 ## [0.4.0] — 2026-11-20
 
