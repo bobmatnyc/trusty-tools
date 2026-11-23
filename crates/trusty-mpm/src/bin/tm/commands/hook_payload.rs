@@ -35,12 +35,12 @@ use trusty_mpm::core::agent::TOOL_RESPONSE_KEYS;
 
 /// Fields copied verbatim from the stdin hook payload when present.
 ///
-/// Why: all five are short, bounded scalars that the daemon's delegation
+/// Why: all six are short, bounded scalars that the daemon's delegation
 /// tracker needs and that no existing consumer reads, so copying them is cheap
 /// and cannot regress anything. `tool_response` is deliberately NOT in this list
 /// — see [`compact_tool_response`].
 /// What: `transcript_path` and `tool_use_id` (tool events), `agent_id`,
-/// `agent_type`, `agent_transcript_path` (`SubagentStop`).
+/// `agent_type`, `agent_transcript_path` (`SubagentStop`), `source` (`SessionStart`).
 /// Test: `forwards_pre_tool_use_correlation_keys`,
 /// `forwards_subagent_stop_correlation_keys`.
 const PASSTHROUGH_FIELDS: &[&str] = &[
@@ -49,6 +49,9 @@ const PASSTHROUGH_FIELDS: &[&str] = &[
     "agent_id",
     "agent_type",
     "agent_transcript_path",
+    // #10594: SessionStart's `startup|resume|clear|compact`; the daemon
+    // follows the Architect's `/clear` to its new conversation id.
+    "source",
 ];
 
 /// Reduce a subagent-dispatch `tool_response` to its correlation fields.
@@ -194,6 +197,14 @@ mod tests {
         // The #2864 additions.
         assert_eq!(p["tool_use_id"], "toolu_01DAvdgnCx8jYZQmn8NYpUge");
         assert_eq!(p["transcript_path"], "/tmp/proj/d6066d66.jsonl");
+    }
+
+    /// #10594: the daemon reads `source` to follow the Architect's `/clear`.
+    #[test]
+    fn forwards_session_start_source() {
+        let stdin = serde_json::json!({ "hook_event_name": "SessionStart", "source": "clear" });
+        let p = build_hook_payload("/w", Some(&stdin), None);
+        assert_eq!(p["source"], "clear");
     }
 
     #[test]

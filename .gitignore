@@ -197,7 +197,8 @@ docs/certificates/*.mobileprovision
 .agents/
 .codex/
 
-# trusty-agents (tagent) local runtime state at the repo root — machine-local, never a deliverable
+# trusty-assistants (`ta`) project-local runtime state at the repo root (the
+# directory keeps its pre-#11632 name) — machine-local, never a deliverable
 .trusty-agents/
 
 # The per-worktree ownership sentinel (#3649, #4311). It is written INTO a

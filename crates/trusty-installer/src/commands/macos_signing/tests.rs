@@ -19,12 +19,13 @@ fn binaries_for_set_covers_search_and_mpm() {
 }
 
 /// Why (#4277): `trusty-agents` is its own signable set, distinct from
-/// `trusty-mpm` — see [`AGENTS_SET`]'s doc for why it isn't folded in.
-/// What: Asserts `AGENTS_SET` resolves to exactly `["tagent"]`.
+/// `trusty-mpm` — see [`ASSISTANTS_SET`]'s doc for why it isn't folded in.
+/// What: Asserts `ASSISTANTS_SET` resolves to exactly `["ta", "tagent"]`
+/// (#11632: `ta`, plus the one-release `tagent` alias).
 /// Test: This is the test.
 #[test]
 fn binaries_for_set_covers_agents() {
-    assert_eq!(binaries_for_set(AGENTS_SET), vec!["tagent"]);
+    assert_eq!(binaries_for_set(ASSISTANTS_SET), vec!["ta", "tagent"]);
 }
 
 /// Why: An unrecognised set name must not silently sign nothing without
@@ -60,6 +61,7 @@ fn identifier_map_covers_all_signable_binaries() {
     );
     assert_eq!(codesign_identifier("trusty-mpm"), "com.trusty.trusty-mpm");
     assert_eq!(codesign_identifier("tm"), "com.trusty.tm");
+    assert_eq!(codesign_identifier("ta"), "com.trusty.ta");
     assert_eq!(codesign_identifier("tagent"), "com.trusty.tagent");
 }
 
@@ -70,7 +72,7 @@ fn identifier_map_covers_all_signable_binaries() {
 /// silently disagree.
 ///
 /// The set list used to be the hardcoded array `[SEARCH_SET, MPM_SET,
-/// AGENTS_SET]`, which made this vacuous for exactly the case it was meant to
+/// ASSISTANTS_SET]`, which made this vacuous for exactly the case it was meant to
 /// catch: a set added to the table but not to the array was never iterated, so
 /// the test passed without checking it. It now reads the set names out of
 /// `SIGNABLE_BINARIES` itself, so a new row is covered the moment it lands.
@@ -152,7 +154,7 @@ fn declared_sets() -> Vec<&'static str> {
 fn every_declared_set_is_a_named_constant() {
     assert_eq!(
         declared_sets(),
-        vec![SEARCH_SET, MPM_SET, AGENTS_SET, MEMORY_SET, ANALYZE_SET]
+        vec![SEARCH_SET, MPM_SET, ASSISTANTS_SET, MEMORY_SET, ANALYZE_SET]
     );
 }
 
@@ -186,7 +188,8 @@ fn signable_binaries_table_is_pinned() {
             ),
             ("trusty-mpm", MPM_SET, "com.trusty.trusty-mpm"),
             ("tm", MPM_SET, "com.trusty.tm"),
-            ("tagent", AGENTS_SET, "com.trusty.tagent"),
+            ("ta", ASSISTANTS_SET, "com.trusty.ta"),
+            ("tagent", ASSISTANTS_SET, "com.trusty.tagent"),
             ("trusty-memory", MEMORY_SET, "com.trusty.trusty-memory"),
             (
                 "trusty-memory-mcp-bridge",
@@ -321,10 +324,10 @@ fn signing_persistence_tip_names_every_signable_set() {
 
 /// Why: The PM decision (PR #2657 review HIGH) is a precise per-set,
 /// per-context split — pin the truth table so a future edit cannot
-/// silently flip either preserved pre-PR behavior. #4277 added `AGENTS_SET`
+/// silently flip either preserved pre-PR behavior. #4277 added `ASSISTANTS_SET`
 /// to the always-hardened side (no dylib-loading concern, same as MPM_SET).
 /// What: explicit=true is always hardened (all sets); explicit=false is
-/// hardened only for MPM_SET and AGENTS_SET. `MEMORY_SET` sits on the
+/// hardened only for MPM_SET and ASSISTANTS_SET. `MEMORY_SET` sits on the
 /// SEARCH_SET side (owner ruling 2026-08-06): `trusty-memory` links
 /// `ort`/`fastembed` via `trusty-common`'s `memory-core`, so it carries the
 /// same unverified ONNX-dylib-under-library-validation exposure that keeps
@@ -334,12 +337,12 @@ fn signing_persistence_tip_names_every_signable_set() {
 fn hardened_runtime_policy() {
     assert!(use_hardened_runtime(SEARCH_SET, true));
     assert!(use_hardened_runtime(MPM_SET, true));
-    assert!(use_hardened_runtime(AGENTS_SET, true));
+    assert!(use_hardened_runtime(ASSISTANTS_SET, true));
     assert!(use_hardened_runtime(MEMORY_SET, true));
     assert!(use_hardened_runtime(ANALYZE_SET, true));
     assert!(!use_hardened_runtime(SEARCH_SET, false));
     assert!(use_hardened_runtime(MPM_SET, false));
-    assert!(use_hardened_runtime(AGENTS_SET, false));
+    assert!(use_hardened_runtime(ASSISTANTS_SET, false));
     assert!(!use_hardened_runtime(MEMORY_SET, false));
     assert!(!use_hardened_runtime(ANALYZE_SET, false));
 }

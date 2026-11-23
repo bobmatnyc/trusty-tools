@@ -10,6 +10,9 @@ let timer;
 let readyWaiters = [];
 
 const storageReady = chrome.storage.local.setAccessLevel({accessLevel:"TRUSTED_CONTEXTS"});
+// #11371: an attachment a previous worker run held (its emulation) is released at start; connect waits for
+// it, so no act() attachment made under the new connection is swept.
+const swept = TrustyEmulation.sweep().catch(() => {});
 // #11363: a self-reload clears storage.session; a one-shot storage.local handoff, written just before
 // chrome.runtime.reload() and consumed here, keeps the browser incarnation so the grant survives a
 // republish. A real browser restart finds no fresh handoff and gets a new incarnation.
@@ -86,6 +89,7 @@ async function connect() {
   const generation = epoch;
   try {
     await storageReady;
+    await swept;
     // #11239: a pairing credential says hello exactly as an enrollment one does.
     const {credential:enrollment} = await codes.stored();
     if (!enrollment) return;
@@ -111,6 +115,7 @@ async function connect() {
       if (connection !== port) return;
       connection = null;
       void TrustyControlIndicator.clearAll();
+      void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
       lost();
       clearTimeout(timeout);
       port.disconnect();
@@ -121,6 +126,7 @@ async function connect() {
       if (connection === port) {
         connection = null;
         void TrustyControlIndicator.clearAll();
+        void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
         lost();
         clearTimeout(timeout);
         // #11529: before the acknowledgement the failure is the pairing's, not an idle port.
@@ -188,6 +194,7 @@ function reconnect() {
   epoch++;
   settleReady(false);
   void TrustyControlIndicator.clearAll();
+  void TrustyEmulation.resetAll(); // #11371: no emulation outlives the broker link.
   void codes.offline.lost();
   const port = connection;
   connection = null;

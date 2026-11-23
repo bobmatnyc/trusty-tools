@@ -144,7 +144,7 @@ mod mcp_message;
 pub use mcp_message::handle_message;
 // Why (issue #226): `chat` drives an LLM provider and a tool loop that only
 //      the daemon serves. Gating it behind `server` (#9269) is what lets a library
-//      consumer linking only `MemoryMcpService` — trusty-agents — keep it out
+//      consumer linking only `MemoryMcpService` — trusty-assistants — keep it out
 //      of its build graph.
 #[cfg(feature = "server")]
 pub mod chat;
