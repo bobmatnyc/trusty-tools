@@ -18,6 +18,8 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 pub mod agents;
+// #11650: the ask engine — one instance answers over trusty-code's AgentLoop.
+pub mod ask;
 // #4325: per-assistant home directory + OKG store model — "Assistant" is a
 // TYPE, `izzie`/`cto-assistant` are INSTANCES of it, each with its own home.
 pub mod assistants;
