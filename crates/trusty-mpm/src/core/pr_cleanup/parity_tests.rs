@@ -48,6 +48,18 @@ fn branches_beyond() -> String {
 
 /// Run both modes; answer (dry report, real report, real run's git calls).
 async fn both_modes(make: impl Fn() -> Scripted) -> (CleanupReport, CleanupReport, String) {
+    both_modes_as(make, false).await
+}
+
+/// [`both_modes`] with `head_only` set as asked (a merge-chained run, #8301).
+async fn both_modes_as(
+    make: impl Fn() -> Scripted,
+    head_only: bool,
+) -> (CleanupReport, CleanupReport, String) {
+    let req = |dry| CleanupRequest {
+        head_only,
+        ..super::req(dry)
+    };
     let dry_git = make();
     let dry = run(
         &gh_merged(),
@@ -124,6 +136,24 @@ async fn cleanup_11407_a_head_branch_beyond_the_merged_head_is_kept_by_both_mode
     };
     assert_eq!(branch_line(&dry), Some(true), "{}", dry.render());
     assert_eq!(branch_line(&real), Some(true), "{}", real.render());
+    assert!(!joined.contains("branch -D"), "{joined}");
+}
+
+/// 🔴 REGRESSION (#11407): a merge-chained (`head_only`) run keeps a head
+/// branch past the merged head, with no tree holding it, in both modes.
+///
+/// Fails on a4453702bc: the head-only arm deleted the branch unasked.
+#[tokio::test]
+async fn cleanup_11407_a_head_only_run_keeps_a_head_branch_beyond_the_merged_head() {
+    let listing =
+        "worktree /repo\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\n";
+    let (dry, real, joined) =
+        both_modes_as(|| git_beyond(listing, &branches_beyond(), false), true).await;
+    assert_eq!(verdicts(&dry), verdicts(&real));
+    for r in [&dry, &real] {
+        let line = r.lines.iter().find(|l| l.step == "local-branch");
+        assert_eq!(line.map(|l| l.is_failure()), Some(true), "{}", r.render());
+    }
     assert!(!joined.contains("branch -D"), "{joined}");
 }
 

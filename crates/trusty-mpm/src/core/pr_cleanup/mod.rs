@@ -532,10 +532,17 @@ fn step_local_branches<T: Git>(
     let head = view.head_ref_name.trim();
     // #8301: a merge-chained run deletes the head branch and nothing else.
     if req.head_only {
-        let wanted = plan::pr_branches(&listing, head)
+        let wanted: Vec<String> = plan::pr_branches(&listing, head)
             .into_iter()
             .filter(|b| b == head)
             .collect();
+        // #11407: the head branch passes the merged-head check here too.
+        for b in &wanted {
+            let tip = plan::branch_tip(&listing, b).unwrap_or_default();
+            if let Some(reason) = landed::beyond_merged_head(git, req, &merged.merge, b, tip) {
+                return StepLine::failed(STEP, reason);
+            }
+        }
         return delete_branches(git, req, wanted, standing);
     }
     // The head branch and its round-N siblings first, then every
