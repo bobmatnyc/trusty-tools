@@ -50,7 +50,9 @@ pub(crate) struct TokenEnvSeams<'a> {
 ///
 /// Why: see the module docs. A one-shot `tm` gh call keeps `env` as it is;
 /// only a session launch calls this.
-/// What: an `env` with no `GH_TOKEN` is returned unchanged. Otherwise the host
+/// What: an `env` with no `GH_TOKEN`, or one not from `github.token_env`
+/// ([`GhEnv::token_source`] is `None`, e.g. [`GhEnv::local_only`]), is
+/// returned unchanged. Otherwise the host
 /// is `GH_HOST`, else `github.com`; `GET /user` names the login; the token is
 /// stored for that login ([`crate::core::gh_session_account::store_proven_token`]);
 /// [`crate::core::gh_session_shim::launch_pinned_login`] reads it back and
@@ -60,16 +62,23 @@ pub(crate) struct TokenEnvSeams<'a> {
 /// failure is an `Err` naming the step, with the token redacted.
 /// Test: `a_token_env_binding_reaches_the_launch_env_as_the_shim_not_a_token_10487`,
 /// `a_binding_with_no_token_passes_through_unchanged_10487`,
+/// `a_local_only_env_passes_through_with_no_get_user_10487`,
 /// `a_token_env_keyring_failure_refuses_and_injects_no_token_10487`,
 /// `an_unproven_token_env_token_refuses_and_stores_nothing_10487`,
 /// `a_token_env_launch_with_no_gh_refuses_10487`.
 pub(crate) fn shim_token_env_with(env: &GhEnv, seams: TokenEnvSeams<'_>) -> Result<GhEnv, String> {
-    let Some(token) = env.var(GH_TOKEN) else {
+    // #10487 review: only a `github.token_env` binding is shimmed; the
+    // local-only clamp's empty `GH_TOKEN` must make no network call.
+    let (Some(token), Some(_)) = (env.var(GH_TOKEN), env.token_source()) else {
         return Ok(env.clone());
     };
     let refuse = |step: &str, reason: String| {
         // #10487: a reason quoting the token must not carry it into a message.
-        let reason = reason.replace(token, "<redacted>");
+        let reason = if token.is_empty() {
+            reason
+        } else {
+            reason.replace(token, "<redacted>")
+        };
         format!(
             "tm: cannot hand this project's github.token_env token to the session's gh shim: \
              {step}: {reason}. No token was injected into the session's environment."

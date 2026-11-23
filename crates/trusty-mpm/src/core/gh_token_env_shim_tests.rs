@@ -124,6 +124,22 @@ fn a_binding_with_no_token_passes_through_unchanged_10487() {
     );
 }
 
+/// 🔴 #10487 review: the local-only clamp's empty `GH_TOKEN` is no
+/// `token_env` binding; it passes through with no `GET /user`.
+#[test]
+fn a_local_only_env_passes_through_with_no_get_user_10487() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let env = GhEnv::local_only();
+    let (check, keyring) = (TableCheck::default(), TableKeyring::default());
+    let out = shim_token_env_with(
+        &env,
+        seams(&check, &keyring, tmp.path(), Ok("/bin/gh".into())),
+    )
+    .expect("a local-only env passes through");
+    assert_eq!(out, env);
+    assert!(check.calls().is_empty(), "local-only made a GET /user");
+}
+
 /// 🔴 #10487 Fail-Open Check: a keyring that refuses the write refuses the
 /// launch; nothing hands the token to the env instead.
 #[test]
