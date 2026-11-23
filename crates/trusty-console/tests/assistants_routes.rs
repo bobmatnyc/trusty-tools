@@ -5,7 +5,7 @@
 //! listing rule `ta list` applies, the turn tail, and the refusals.
 //! What: a temp assistants root per case, seeded with fake instance homes and
 //! turn logs, and a `build_router` pointed at it through
-//! `AppState::with_assistants_root`.
+//! `AppState::with_assistants_root`, served behind the loopback guard.
 //! Test: this file IS the test.
 
 use std::path::Path;
@@ -15,14 +15,22 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use trusty_console::server::{AppState, build_router};
+use trusty_console::server::{AppState, build_router, guard_loopback_listener};
+
+/// The loopback listener every case is served as (#11748: the assistants
+/// routes answer only a request a gated listener admitted).
+const LISTEN: &str = "127.0.0.1:7070";
 
 async fn get(root: &Path, uri: &str) -> (StatusCode, Value) {
-    let router = build_router(AppState::new(vec![]).with_assistants_root(root.to_path_buf()));
+    let router = guard_loopback_listener(
+        build_router(AppState::new(vec![]).with_assistants_root(root.to_path_buf())),
+        LISTEN.parse().expect("listen addr"),
+    );
     let resp = router
         .oneshot(
             Request::builder()
                 .uri(uri)
+                .header("host", LISTEN)
                 .body(Body::empty())
                 .expect("request"),
         )

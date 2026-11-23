@@ -80,6 +80,19 @@ pub fn build_router_with_self_origins(
     build_router_inner(state, self_origins, None)
 }
 
+/// Wrap `router` in the loopback listener's Host/Origin guard, exactly as
+/// `tailnet_peer::serve_listeners` serves a loopback address.
+///
+/// Why: #11748 — the assistants routes answer only a request a gated listener
+/// admitted, so a test or an embedder that serves the router on loopback
+/// needs the production guard, not a forged marker.
+/// What: `guard_loopback` with no MagicDNS name: `Host` must be `listen` or
+/// `localhost:<port>`, and any `Origin` must be `http://<Host>`.
+/// Test: `tests/assistants_routes.rs`, `tests/assistants_ask.rs`.
+pub fn guard_loopback_listener(router: Router, listen: std::net::SocketAddr) -> Router {
+    crate::tailnet_peer::guard_loopback(router, listen, crate::tailnet_peer::OwnMagicDns::default())
+}
+
 /// The one router definition both public builders delegate to, so the mounted
 /// route set cannot drift between them.
 fn build_router_inner(
@@ -251,16 +264,11 @@ fn build_router_inner(
             post(crate::routes::cleanup::compact_palace_handler),
         )
         // Analyze on-demand routes — call the analyze stdio MCP directly (no /proxy).
-        // #11747: read-only Trusty Assistants routes; `{id}` is validated in
-        // the handler before any filesystem access.
-        .route(
-            "/api/console/assistants",
-            get(crate::assistants_uds::routes::list_handler),
-        )
-        .route(
-            "/api/console/assistants/{id}/turns",
-            get(crate::assistants_uds::routes::turns_handler),
-        )
+        // #11747/#11748: the Trusty Assistants routes, refused on an ungated
+        // listener; the ask POST also needs a same-origin `Origin`.
+        .merge(crate::assistants_uds::ask_route::router(
+            self_origins.clone(),
+        ))
         .route(
             "/api/console/metrics/analyze/indexes",
             get(analyze_indexes_handler),

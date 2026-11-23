@@ -10,17 +10,24 @@
 //! - the assistants root and the instance rule `ta list` applies
 //!   ([`assistants_root`], [`list_instances`], [`InstanceId`]);
 //! - the ask daemon's wire structs and socket path ([`AskRequest`],
-//!   [`AskReply`], [`PROTOCOL_VERSION`], [`socket_path_in`]) — PR1 does not
-//!   dial the socket; #11748 does;
+//!   [`AskReply`], [`PROTOCOL_VERSION`], [`socket_path_in`]);
+//! - `ask` and `ask_route`, the #11748 ask client and
+//!   `POST /api/console/assistants/{id}/ask`, with the guards on every route;
 //! - `turns`, the tolerant tail read of `<home>/stores/ask-turns.jsonl`;
 //! - `routes`, the two `GET /api/console/assistants…` handlers.
 //!
 //! Test: `tests.rs` (rules and contract) and `tests/assistants_routes.rs`
 //! (the routes through the real router).
 
+pub mod ask;
+pub mod ask_route;
 pub mod routes;
 pub mod turns;
 
+#[cfg(test)]
+mod ask_tests;
+#[cfg(all(test, unix))]
+mod gate_tests;
 #[cfg(test)]
 mod tests;
 

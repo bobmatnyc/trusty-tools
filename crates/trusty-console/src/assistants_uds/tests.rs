@@ -102,6 +102,11 @@ fn the_mirrored_constants_match_the_source() {
         INSTANCE,
         "c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')",
     );
+    // #11748: the reply cap is the daemon's own line cap, 1 MiB.
+    assert_eq!(ask::MAX_REPLY_BYTES, 1024 * 1024);
+    declares(DAEMON, "pub const MAX_LINE_BYTES: u64 = 1024 * 1024;");
+    // #11748: the client keeps its write half open; EOF cancels the ask.
+    declares(DAEMON, "keeps its write half OPEN");
 }
 
 #[test]
