@@ -23,6 +23,7 @@
 trusty-assistants	lib	agents::registry::tests	runtime: loads the bundled roster from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-assistants	lib	agents::tests::loading	runtime: resolves bundled agents and persona.md from content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-assistants	lib	agents::tests::provider_policy	reads repo_tree and the bundled templates under content/agents/trusty-agents/agents (#9014)
+trusty-assistants	lib	assistants::tests::instance_provision_tests::each_instance_searches_its_own_index_by_default	runtime: reads content/agents/trusty-agents/agents via test_env::bundled_agents_dir (#11649)
 trusty-assistants	lib	operations::agent_names::tests::agent_name_allowlist_accepts_every_bundled_agent	runtime: walks content/agents/trusty-agents/agents via test_env::bundled_agents_dir (#9014, moved by #11632)
 trusty-assistants	lib	skills::manifest::tests::agent_roster_grants_only_tools_that_have_a_skill	runtime: walks content/agents/trusty-agents/agents via repo_tree_dir (#9014)
 trusty-agents-common	lib	agent_content::tests	reads checkout_content, AgentRoster::load, literal 'content/agents' (#9011)
