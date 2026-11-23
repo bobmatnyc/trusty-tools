@@ -19,7 +19,7 @@
 //! wakes only in `il_cron_excluded` (unmeasurable in a dry run); `ctxwatch`
 //! alerts and wakes only in `ctxwatch_excluded` (the two pollers share one
 //! debounce file, so whichever runs first raises it). `idle` pairs on the
-//! screen hash, its since-epoch ignored; `idle_relaxed` counts those. The report
+//! screen hash, since-epochs within 300 s; `idle_relaxed` counts those. The report
 //! keeps both numbers, identity-only and identity plus fallback, and the
 //! pairs each method made; [`Report::passes`] uses identity plus fallback
 //! against [`Thresholds`] (default 120 cycles and 95% for alerts and wakes).
@@ -39,7 +39,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::cutover::Thresholds;
-use super::parity_join::{CTXWATCH, Event, IL_CRON, Joined, join};
+use super::parity_join::{CTXWATCH, Event, IDLE_EPOCH_TOLERANCE_S, IL_CRON, Joined, join};
 use super::shadow::{EventKey, ShadowAlert, ShadowRecord};
 use super::slot::parse_iso;
 use super::{Layout, SchedError};
@@ -417,7 +417,8 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
         r.alert_pairs.0, r.alert_pairs.1, r.wake_pairs.0, r.wake_pairs.1
     );
     s += &format!(
-        "idle pairs on (session, kind, screen hash), epoch ignored: alerts {}, wakes {}\n",
+        "idle pairs on (session, kind, screen hash), epochs within {} s: alerts {}, wakes {}\n",
+        IDLE_EPOCH_TOLERANCE_S,
         r.idle_relaxed.0, r.idle_relaxed.1
     );
     s += &format!("live rows unread: {}\n", r.unread);

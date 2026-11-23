@@ -182,7 +182,7 @@ fn parity_pairs_idle_alerts_whose_epochs_differ() -> TestResult {
     let text = parity::render(&rep);
     assert!(
         text.contains(
-            "idle pairs on (session, kind, screen hash), epoch ignored: alerts 1, wakes 1\n"
+            "idle pairs on (session, kind, screen hash), epochs within 300 s: alerts 1, wakes 1\n"
         ),
         "{text}"
     );
