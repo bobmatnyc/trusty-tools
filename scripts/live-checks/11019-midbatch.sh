@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Live check for trusty-tools PR #11019 (issue #10738 R2) and PR #11025 (#11022).
 # v4: warm a cold-parked index before the generation probe; pause before writing b.rs.
-# v3: probe retry + restart before presence checks; see docs/evidence/11019-run2-evidence.txt
+# v3: probe retry + restart before presence checks; see docs/research/evidence/11019-11022-live-checks/11019-run2-evidence.txt
 #
 # Run on the dedicated live-check host only, after both PRs are merged and the binaries are installed to
 # an isolated root (see the install steps in the report). It never touches the
-# production daemon (127.0.0.1:7879, $PROD_DATA_ROOT) or any other daemon:
+# production daemon (127.0.0.1:7879, $PROD_DATA_ROOT, required) or any other daemon:
 # it starts its own trusty-search under an isolated data dir and socket, and
 # kills only the process groups it started.
 #
@@ -45,8 +45,8 @@ TS_BIN="${TS_BIN:-$HOME/live-checks/11019-bin/bin/trusty-search}"
 EMBEDDERD_BIN="${EMBEDDERD_BIN:-$(dirname "$TS_BIN")/trusty-embedderd}"
 FASTEMBED_CACHE="${FASTEMBED_CACHE:-$HOME/.cache/fastembed}"
 RUNS_DIR="${RUNS_DIR:-$HOME/live-checks/runs}"
-# Data root of the production daemon; the run-dir guard refuses anything inside it.
-PROD_DATA_ROOT="${PROD_DATA_ROOT:-$HOME/production-search}"
+# Data root of the production daemon (REQUIRED, no default); the run-dir guard refuses anything inside it.
+: "${PROD_DATA_ROOT:?set PROD_DATA_ROOT to the production daemon data dir}"
 # 1 when #11025 is installed too: assert its removed cancel branch is gone.
 EXPECT_11025="${EXPECT_11025:-1}"
 READY_TIMEOUT="${READY_TIMEOUT:-300}"

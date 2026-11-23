@@ -7,7 +7,7 @@
 # isolated root ($HOME/live-checks/11022-bin/bin). It starts its own
 # trusty-search under an isolated data dir and socket and kills only the
 # process groups it started. It never touches the production daemon
-# (127.0.0.1:7879). Never call `trusty-search stop` here: it stops EVERY
+# (127.0.0.1:7879; its data dir must be given as PROD_DATA_ROOT, required). Never call `trusty-search stop` here: it stops EVERY
 # trusty-search daemon on the host.
 #
 # Scenario CANCEL-LIVE: park a staged reindex mid-batch (embedding paused,
@@ -46,8 +46,8 @@ TS_BIN="${TS_BIN:-$HOME/live-checks/11022-bin/bin/trusty-search}"
 EMBEDDERD_BIN="${EMBEDDERD_BIN:-$(dirname "$TS_BIN")/trusty-embedderd}"
 FASTEMBED_CACHE="${FASTEMBED_CACHE:-$HOME/.cache/fastembed}"
 RUNS_DIR="${RUNS_DIR:-$HOME/live-checks/runs}"
-# Data root of the production daemon; the run-dir guard refuses anything inside it.
-PROD_DATA_ROOT="${PROD_DATA_ROOT:-$HOME/production-search}"
+# Data root of the production daemon (REQUIRED, no default); the run-dir guard refuses anything inside it.
+: "${PROD_DATA_ROOT:?set PROD_DATA_ROOT to the production daemon data dir}"
 # 1 when #11025 is installed too: assert its removed cancel branch is gone.
 EXPECT_11025="${EXPECT_11025:-1}"
 READY_TIMEOUT="${READY_TIMEOUT:-300}"

@@ -40,6 +40,6 @@ A release build has no external way to abort a reindex task in-process.
 
 ## Method
 
-The classification comes from a code read at [751559afac](https://github.com/bobmatnyc/trusty-tools/commit/751559afac), not from a re-run. Evidence is in `docs/evidence/11019-run2-evidence.txt` and `docs/evidence/11019-run2.log` in the trusty-okf workspace. The run 1 log is `docs/evidence/11019-run1.log`.
+The classification comes from a code read at [751559afac](https://github.com/bobmatnyc/trusty-tools/commit/751559afac), not from a re-run. Evidence is in `docs/research/evidence/11019-11022-live-checks/11019-run2-evidence.txt` and `docs/research/evidence/11019-11022-live-checks/11019-run2.log` in this repo. The run 1 log is `docs/research/evidence/11019-11022-live-checks/11019-run1.log`.
 
 Run 1 failed before the test, because the script had not approved its root under the [#767](https://github.com/bobmatnyc/trusty-tools/issues/767) allowlist. The script is fixed for future runs as v3 (probe retry, restart before presence checks).
