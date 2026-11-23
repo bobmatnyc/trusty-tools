@@ -60,6 +60,19 @@ pub(crate) enum ProbeKind {
     OnDemand,
 }
 
+/// Where a service's `console_metrics` report is fetched from (#10908).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricsSource {
+    /// A unary `<method>` on the service's socket that answers the report.
+    Uds(&'static str),
+    /// The `console_metrics` MCP tool, carried by `mpm.mcp.dispatch` on the
+    /// MPM daemon's socket.
+    UdsMcpDispatch,
+    /// Fallback until the service serves the report over UDS: spawn this
+    /// stdio MCP command (binary, args).
+    Stdio(&'static str, &'static [&'static str]),
+}
+
 impl ServiceId {
     /// Every service: MPM first, then the console's `all_connectors` order.
     // #10476: MPM tile first and selected on launch
@@ -158,6 +171,26 @@ impl ServiceId {
             ServiceId::Analyze => Some(("trusty-analyze", &["mcp"])),
             ServiceId::Review => Some(("trusty-review", &["serve", "--stdio"])),
             ServiceId::Mpm | ServiceId::Agents | ServiceId::Events | ServiceId::Console => None,
+        }
+    }
+
+    /// Where this service's `console_metrics` report comes from, or `None`
+    /// when it serves none.
+    ///
+    /// Why (#10908): D95 has the reader pull each report over UDS. Events and
+    /// MPM serve it on their sockets; the rest keep the stdio spawn as a
+    /// marked fallback ([`MetricsSource::Stdio`]). trusty-console serves no
+    /// `console_metrics` method on its socket yet, so it has no source.
+    /// Test: `metrics_sources_prefer_uds_for_events_and_mpm`.
+    pub fn metrics_source(self) -> Option<MetricsSource> {
+        match self {
+            ServiceId::Events => Some(MetricsSource::Uds(
+                trusty_common::control_bus::METHOD_EVENTS_CONSOLE_METRICS,
+            )),
+            ServiceId::Mpm => Some(MetricsSource::UdsMcpDispatch),
+            other => other
+                .metrics_command()
+                .map(|(binary, args)| MetricsSource::Stdio(binary, args)),
         }
     }
 

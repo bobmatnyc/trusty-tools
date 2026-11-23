@@ -22,10 +22,11 @@ use tokio::sync::mpsc;
 use trusty_common::console_metrics::{CONSOLE_METRICS_METHOD, ConsoleMetricsReport, parse_report};
 use trusty_common::console_rpc::{CONSOLE_SERVICE, ConsoleFleetStatus, ServiceStatus};
 use trusty_common::stdio_mcp_client::StdioMcpClient;
-use trusty_common::uds::server::RpcResponse;
+use trusty_common::uds::server::{CODE_METHOD_NOT_FOUND, RpcResponse};
 use trusty_common::uds::{UdsRpcError, UdsSecurityError};
 
-use super::services::{ProbeKind, ServiceId, binary_on_path};
+use super::metrics_uds::fetch_uds_metrics;
+use super::services::{MetricsSource, ProbeKind, ServiceId, binary_on_path};
 use super::state::{HealthUpdate, MetricsUpdate, TileHealth};
 
 /// What one probe observed, before the binary-on-`PATH` check folds in.
@@ -174,10 +175,7 @@ pub(super) async fn uds_health(socket: &Path, method: &str, deadline: Duration) 
         Err(e) => return transport_failure(&e),
     };
     if let Some(error) = response.error {
-        return Observation::Unhealthy(format!(
-            "{method} answered an error (code {}): {}",
-            error.code, error.message
-        ));
+        return rpc_error(method, error.code, &error.message);
     }
     health_version(response.result.as_ref())
 }
@@ -205,10 +203,7 @@ pub(super) async fn uds_fleet_status(
         Err(e) => return transport_failure(&e),
     };
     if let Some(error) = response.error {
-        return Observation::Unhealthy(format!(
-            "{method} answered an error (code {}): {}",
-            error.code, error.message
-        ));
+        return rpc_error(method, error.code, &error.message);
     }
     match response
         .result
@@ -218,6 +213,23 @@ pub(super) async fn uds_fleet_status(
         Some(Err(e)) => Observation::Silent(format!("{method} answer did not decode: {e}")),
         None => Observation::Silent(format!("{method} answered no result")),
     }
+}
+
+/// The [`Observation::Unhealthy`] reason for an RPC error answer.
+///
+/// Why (#11547): a Degraded tile must say why. Method-not-found means the
+/// installed service predates the method this TUI calls, so it says that.
+/// Test: `a_method_not_found_answer_reads_as_an_older_binary`.
+pub(super) fn rpc_error(method: &str, code: i64, message: &str) -> Observation {
+    if code == CODE_METHOD_NOT_FOUND {
+        // #11547: name the version skew, not just the code
+        return Observation::Unhealthy(format!(
+            "binary older than the TUI: {method} not served (code {code})"
+        ));
+    }
+    Observation::Unhealthy(format!(
+        "{method} answered an error (code {code}): {message}"
+    ))
 }
 
 /// Read the console's own row out of its fleet view.
@@ -317,7 +329,8 @@ pub fn spawn_health_poller<P, Fut>(
     }
 }
 
-/// Call `console_metrics` once over the service's stdio MCP command.
+/// Call `console_metrics` once: over the service's socket where it serves it
+/// (#10908), else over its stdio MCP command.
 ///
 /// Why (#10491): the first-level service view shows what trusty-console's
 /// metrics poller shows, through the same tool and the same report contract.
@@ -325,9 +338,17 @@ pub fn spawn_health_poller<P, Fut>(
 /// all under `deadline`. The child is killed when the client drops.
 /// Test: `a_service_without_console_metrics_is_refused_without_a_spawn`.
 pub async fn fetch_metrics(id: ServiceId, deadline: Duration) -> MetricsUpdate {
-    let result = match id.metrics_command() {
+    let result = match id.metrics_source() {
         None => Err(format!("{} offers no console_metrics tool", id.id())),
-        Some((binary, args)) => {
+        // #10908: Events and MPM answer over their own socket
+        Some(source @ (MetricsSource::Uds(_) | MetricsSource::UdsMcpDispatch)) => {
+            match id.socket() {
+                Ok(socket) => fetch_uds_metrics(source, &socket, deadline).await,
+                Err(reason) => Err(reason),
+            }
+        }
+        // Fallback: the stdio spawn, until the service serves UDS metrics.
+        Some(MetricsSource::Stdio(binary, args)) => {
             match tokio::time::timeout(deadline, call_metrics(binary, args, deadline)).await {
                 Ok(Ok(report)) => Ok(report),
                 Ok(Err(e)) => Err(format!("{e:#}")),

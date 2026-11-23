@@ -14,7 +14,7 @@ use super::machine::{
     Fault, Feed, MachineFeeds, MachineUpdate, STATUS_INTERVAL, fetch_history, fetch_machine_status,
     spawn_poller,
 };
-use super::machine_cards::{machine_model, service_figures};
+use super::machine_cards::{NO_SAMPLES, NO_SOURCE, UNMEASURED, machine_model, service_figures};
 use super::services::ServiceId;
 use super::state::HomeState;
 use crate::tui::theme::Tone;
@@ -210,7 +210,7 @@ fn every_fault_draws_its_own_label_and_no_values() {
     let faults = [
         (
             Fault::Absent("nothing listens".into()),
-            " CONSOLE ABSENT ",
+            " CONSOLE SOCKET NOT LISTENING ",
             Tone::Muted,
         ),
         (Fault::Timeout, " TIMEOUT ", Tone::Warn),
@@ -288,7 +288,10 @@ fn service_rows_take_cpu_and_memory_from_service_samples() {
     assert_eq!(figures.cpu_history, Some(vec![Some(20), None, Some(38)]));
     // A service the history has no ring for: empty series, no values.
     let other = service_figures(&history, ServiceId::Memory.id());
-    assert_eq!((other.cpu, other.cpu_history), (None, Some(vec![])));
+    assert_eq!(
+        (other.cpu.as_deref(), other.cpu_history),
+        (Some(NO_SAMPLES), Some(vec![]))
+    );
     // Not ready: nothing at all.
     assert_eq!(
         service_figures(&Feed::Pending, ServiceId::Search.id()),
@@ -324,6 +327,23 @@ fn an_unknown_service_status_is_a_gap_not_a_value() {
     assert_eq!(figures.mem.as_deref(), Some("unknown"));
     assert_eq!(figures.cpu_history, Some(vec![Some(20), None]));
     assert_eq!(figures.mem_history, Some(vec![Some(1), None]));
+}
+
+/// #11548: a blank `%CPU` / `MEM` cell names why — no source, no samples
+/// yet, or an unmeasured value — never a bare dash.
+#[test]
+fn blank_cpu_and_mem_cells_say_why() {
+    let text = screen(MachineFeeds::default());
+    let search = text.lines().find(|l| l.contains("Search")).expect("row");
+    assert_eq!(search.matches(NO_SOURCE).count(), 2, "{search}");
+    assert!(!search.contains('—'), "{search}");
+    let history = ready_history(search_ring());
+    let memory = service_figures(&history, ServiceId::Memory.id());
+    assert_eq!(memory.mem.as_deref(), Some(NO_SAMPLES));
+    let ring = json!([{"id": "trusty-search", "status": "running"}]);
+    let figures = service_figures(&ready_history(ring), ServiceId::Search.id());
+    assert_eq!(figures.cpu.as_deref(), Some(UNMEASURED));
+    assert_eq!(figures.mem.as_deref(), Some(UNMEASURED));
 }
 
 #[tokio::test(start_paused = true)]

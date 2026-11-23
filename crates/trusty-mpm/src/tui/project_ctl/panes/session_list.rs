@@ -98,7 +98,9 @@ fn source_name(state: &ProjectCtlState) -> Option<String> {
         .iter()
         .find(|r| &r.id == selected)
         .map(|r| match &r.kind {
-            TreeRowKind::Owner { name, .. } | TreeRowKind::Project { name, .. } => name.clone(),
+            TreeRowKind::Owner { name, .. }
+            | TreeRowKind::Project { name, .. }
+            | TreeRowKind::Architect { name, .. } => name.clone(),
         })
 }
 

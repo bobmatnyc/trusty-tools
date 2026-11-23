@@ -15,6 +15,7 @@ pub mod console;
 // #10942: MACHINE STATUS from `console.machine_status` and `console.history`.
 pub mod machine;
 pub mod machine_cards;
+pub mod metrics_uds;
 pub mod probe;
 pub mod render;
 pub mod services;
@@ -37,6 +38,9 @@ mod console_fleet_status_tests;
 // #10942: the machine feed over real sockets and its render states.
 #[cfg(test)]
 mod machine_tests;
+// #10908: `console_metrics` over UDS against stub sockets.
+#[cfg(test)]
+mod metrics_uds_tests;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

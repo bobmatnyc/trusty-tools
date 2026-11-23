@@ -148,6 +148,18 @@ fn enter_on_search_opens_its_view_and_esc_returns() {
     assert!(!state.should_exit);
 }
 
+/// #10908: `i` opens MPM's service view and fetches its UDS metrics; Enter
+/// on MPM still opens the projects view.
+#[test]
+fn i_opens_the_mpm_service_view() {
+    let mut state = HomeState::default();
+    select(&mut state, ServiceId::Mpm);
+    up(&mut state, ServiceId::Mpm);
+    let action = handle_key(&mut state, key(KeyCode::Char('i')), Instant::now());
+    assert_eq!(action, Some(HomeAction::FetchMetrics(ServiceId::Mpm)));
+    assert_eq!(state.view, View::Service(ServiceId::Mpm));
+}
+
 #[test]
 fn q_quits_from_any_view() {
     for view in [
@@ -428,7 +440,7 @@ async fn a_hung_probe_does_not_hold_back_the_other_tiles() {
 
 #[tokio::test]
 async fn a_service_without_console_metrics_is_refused_without_a_spawn() {
-    let update = fetch_metrics(ServiceId::Events, Duration::from_millis(50)).await;
+    let update = fetch_metrics(ServiceId::Console, Duration::from_millis(50)).await;
     assert!(update.result.is_err());
 }
 
