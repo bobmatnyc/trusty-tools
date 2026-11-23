@@ -350,7 +350,7 @@ fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
 /// The shells of `["sh", "bash", "zsh"]` this host can run.
 ///
 /// See #11644: `run_in` panics on a missing shell, so the `exit 0` guards in
-/// the two tests below never skipped anything and a host without zsh (EVO)
+/// the two tests below never skipped anything and a host without zsh (a Linux build box)
 /// failed instead. The rewrite is POSIX-shaped and every case already runs
 /// under `sh` and `bash`, so a missing zsh drops only the zsh leg, named on
 /// stderr. `sh` must exist: a host without it fails rather than passing empty.
