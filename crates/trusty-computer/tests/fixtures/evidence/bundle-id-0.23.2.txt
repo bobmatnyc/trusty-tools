@@ -1,0 +1,19 @@
+# #11697 live bundle-id scoping check, cua-driver 0.23.2, macOS 26.6.2, 2026-11-23
+## ad-hoc signed SignedCheck.app
+signed (-) pid=50787 window=17676
+impostor (-) pid=50937 window=17677
+control-pid: Ok(69)
+pid-vs-impostor: Err(ToolError { message: "protected resource is outside the capability manifest: desktop pid 50937 window 17677 is outside the capability manifest", result: Object {"content": Array [Object {"text": String("protected resource is outside the capability manifest: desktop pid 50937 window 17677 is outside the capability manifest"), "type": String("text")}], "isError": Bool(true), "structuredContent": Object {"refusal": Object {"code": String("bounded_resource_outside_manifest"), "message": String("protected resource is outside the capability manifest: desktop pid 50937 window 17677 is outside the capability manifest")}, "status": String("refused")}} })
+bundle: Ok(69)
+bundle-other-id: Err(ToolError { message: "protected resource is outside the capability manifest: desktop pid 50787 window 17676 is outside the capability manifest", result: Object {"content": Array [Object {"text": String("protected resource is outside the capability manifest: desktop pid 50787 window 17676 is outside the capability manifest"), "type": String("text")}], "isError": Bool(true), "structuredContent": Object {"refusal": Object {"code": String("bounded_resource_outside_manifest"), "message": String("protected resource is outside the capability manifest: desktop pid 50787 window 17676 is outside the capability manifest")}, "status": String("refused")}} })
+bundle-vs-impostor: Ok(69)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.86s
+## Developer ID signed SignedCheck.app (team 4JH68XUHC5), ad-hoc impostor
+signed (Developer ID Application: Bob Matsuoka (4JH68XUHC5)) pid=55306 window=17689
+impostor (-) pid=55339 window=17690
+control-pid: Ok(0)
+pid-vs-impostor: Err(ToolError { message: "protected resource is outside the capability manifest: desktop pid 55339 window 17690 is outside the capability manifest", result: Object {"content": Array [Object {"text": String("protected resource is outside the capability manifest: desktop pid 55339 window 17690 is outside the capability manifest"), "type": String("text")}], "isError": Bool(true), "structuredContent": Object {"refusal": Object {"code": String("bounded_resource_outside_manifest"), "message": String("protected resource is outside the capability manifest: desktop pid 55339 window 17690 is outside the capability manifest")}, "status": String("refused")}} })
+bundle: Ok(0)
+bundle-other-id: Err(ToolError { message: "protected resource is outside the capability manifest: desktop pid 55306 window 17689 is outside the capability manifest", result: Object {"content": Array [Object {"text": String("protected resource is outside the capability manifest: desktop pid 55306 window 17689 is outside the capability manifest"), "type": String("text")}], "isError": Bool(true), "structuredContent": Object {"refusal": Object {"code": String("bounded_resource_outside_manifest"), "message": String("protected resource is outside the capability manifest: desktop pid 55306 window 17689 is outside the capability manifest")}, "status": String("refused")}} })
+bundle-vs-impostor: Ok(0)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.27s

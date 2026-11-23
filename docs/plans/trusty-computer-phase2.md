@@ -81,8 +81,13 @@ serve` (`driver.py:106-111`). The broker never execs the binary directly.
 3. **Grants live broker-side.** The manifest is the daemon-side ceiling under the broker filter
    (`capabilities.yaml:1-3`). A grant naming an app with no live pid returns `app_not_running`.
 
-Unverified, so the first live check: whether bounded mode admits a signed bundle by `bundle_id`
-(GO-STOP.md:141-142). Test with a second signed fixture bundle, never a user app. If not, pid-only scoping ships.
+Verified live (#11697, `crates/trusty-computer/tests/live_bundle_scope.rs`, cua-driver 0.23.2): bounded mode
+DOES admit a signed bundle by `bundle_id` when the bundle's own executable owns the window (the spike's GrantCheck
+stub exec'd osascript, so it was never attested, GO-STOP.md:141-142). A different id is refused. But the entry
+matches the claimed id only: an ad-hoc impostor build with the same id is admitted, even with the real bundle
+Developer ID signed. **Pid-only scoping ships**: the manifest pins exact pid and window. At mint, `app_identity.rs`
+compares the grant's bundle id with the pid's claimed id from LaunchServices (`lsappinfo`); it does not verify
+the code signature, so the operator's choice of pid is the only identity control. Rescope on drift keeps its restart.
 
 **`session_ended`**: the daemon's implicit session ended and refused calls until `start_session` (GO-STOP.md:129).
 The supervisor owns an explicit session: `start_session` after each daemon start and lease acquire; on a
