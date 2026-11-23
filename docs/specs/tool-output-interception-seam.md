@@ -7,7 +7,7 @@
 **Subsystem:** TOOLPROXY
 **Owner:** Engineering / Architecture (trusty-mpm)
 **Last-updated:** 2026-07-03
-**Related:** [mpm-cutover-resume-native-optimization.md §C](./mpm-cutover-resume-native-optimization.md#SPEC-MPM-CUTOVER-03~draft), [token-compression-rtk-ztk.md](../trusty-agents/research/token-compression-rtk-ztk.md)
+**Related:** [mpm-cutover-resume-native-optimization.md §C](./mpm-cutover-resume-native-optimization.md#SPEC-MPM-CUTOVER-03~draft), [token-compression-rtk-ztk.md](../trusty-assistants/research/token-compression-rtk-ztk.md)
 
 ## Summary
 
@@ -598,7 +598,7 @@ this investigation):
 ## References
 
 - [`mpm-cutover-resume-native-optimization.md` §C `SPEC-MPM-CUTOVER-03`](./mpm-cutover-resume-native-optimization.md#SPEC-MPM-CUTOVER-03~draft) — the spec section this doc's Decision applies to.
-- [`token-compression-rtk-ztk.md`](../trusty-agents/research/token-compression-rtk-ztk.md) — background survey of rtk/ztk techniques and current implementation status.
+- [`token-compression-rtk-ztk.md`](../trusty-assistants/research/token-compression-rtk-ztk.md) — background survey of rtk/ztk techniques and current implementation status.
 - `crates/trusty-agents/src/compress/tool_output/rtk.rs` — `compress_tool_output_async`.
 - `crates/trusty-agents/src/compress/tool_output/mod.rs` — native filter dispatch table.
 - `crates/trusty-agents/examples/tool_output_compression_spike.rs` — this doc's spike.

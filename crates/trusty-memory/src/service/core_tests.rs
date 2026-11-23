@@ -750,7 +750,7 @@ async fn create_drawer_rejects_json_content_without_force() {
 
 /// Why (#3225): `force: true` must reach `RememberOptions::force` and bypass
 /// the QUALITY gate for exactly the content shape the test above proves is
-/// rejected without it. trusty-agents' client JSON-serialises its payload as
+/// rejected without it. trusty-assistants' client JSON-serialises its payload as
 /// `content` for lossless round-tripping and would otherwise fail every write.
 /// Test: itself.
 #[tokio::test]

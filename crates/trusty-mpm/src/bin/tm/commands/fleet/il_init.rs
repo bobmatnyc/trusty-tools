@@ -239,6 +239,8 @@ pub(crate) fn merge_hooks(root: &mut serde_json::Value, command: &str) -> Vec<&'
 
 #[path = "il_holds.rs"]
 mod holds;
+#[cfg(test)]
+pub(crate) use holds::SESSION_MAX;
 pub(crate) use holds::{Holds, holds_in_state_md};
 
 /// The active usage hold alone (see [`holds_in_state_md`]).

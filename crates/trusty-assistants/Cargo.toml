@@ -1,0 +1,168 @@
+[package]
+name = "trusty-assistants"
+# #11632: renamed from `trusty-agents` (MB1516 §11). The old crate was never
+# published, so the version restarts at 0.1.0 under the new name.
+version = "0.1.0"
+edition = "2024"
+description = "Trusty Assistants: the assistant core (channels, listeners, memory, knowledge, OKG) and a stdio MCP dispatch surface."
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage = "https://trustytools.dev"
+
+include = [
+    "src/**/*",
+    "assets/**/*",
+    "build.rs",
+    # #8787: `build.rs` `include!`s this, so a published crate without it
+    # would not build at all.
+    "build_git_paths.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
+
+[dependencies]
+# Why (#640): Phase 1 leaf/protocol modules (events, ipc, perf, intent,
+#      progress, build_info) now live in trusty-code. trusty-agents re-exports
+#      them so all existing consumers keep compiling unchanged. The
+#      reconciliation (removing trusty-agents's own copies) is tracked in #647.
+trusty-code = { workspace = true }
+# Why: issue #460 unified rpc.discover — host needs the ServiceDescriptor
+#      trait + OpenRpcBuilder, plus the in-process MemoryMcpService and
+#      SearchMcpService impls. trusty-search now aligns on tree-sitter 0.26
+#      (matches the symgraph parser) so the previous `links = "tree-sitter"`
+#      single-copy conflict is resolved and we link it directly.
+# #11632: the features the cut harness and HTTP API needed (`axum-server`,
+# `inference-client`, `bedrock`, `cli-help`, `gh-cli`, `session-naming`,
+# `update-check`, `symgraph-parser`, `palace-resolve`, `chat-attachments`)
+# are gone with them.
+trusty-mcp = { workspace = true, features = ["config"] }  # JSON-RPC / MCP primitives (ADR-0040, #5803); `config` (#7454, ADR-0060) is the one MCP-server config authority this crate's connectors are built from.
+# #10662: `memory::embed` imports `embedder::retry_transient_init`, first in
+# trusty-common 0.67.5. The workspace entry admits `^0.67`, so this crate states
+# its own floor, as trusty-memory does. The dev-dependency below matches it.
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["credentials", "stdio-mcp-client", "config-cli", "uds", "memory-rpc", "redb-open", "log-drain"] }  # `redb-open` (#5063): named explicitly, because `memory::redb_recovery` uses it directly. `log-drain` (#6537): the `[log_drain]` config section `crate::log_drain` resolves. `config-cli` (#2405): the shared `config` credential verbs.
+# Why (issue #226): trusty-agents only links `trusty_memory::MemoryMcpService` for
+#      in-process `rpc.discover` merging; it does not need the axum HTTP/SSE
+#      surface. Setting
+#      `default-features = false` drops the `axum-server` feature so we don't
+#      compile the trusty-memory HTTP daemon code paths just to pick up a
+#      zero-sized service descriptor.
+# #9269: `mcp-schema` is the opt-in that compiles `MemoryMcpService`; the
+#      `--no-default-features` build of trusty-memory carries no trusty-mcp.
+trusty-memory = { path = "../trusty-memory", version = "1", default-features = false, features = ["mcp-schema"] }
+trusty-search = { path = "../trusty-search", version = "1" }
+# Gmail/Calendar eventstream listeners (#3820, DOC-54 SPEC-AGENTS-06) call
+# trusty-gworkspace's connector layer (`api::client::BaseClient` +
+# `api::services::gmail::*`) DIRECTLY as library functions — the same code
+# `trusty-gworkspace-mcp`'s tool handlers call, reused here instead of routed
+# through MCP JSON-RPC. Not one of the `publish = false` "agent crate" deps
+# `install_plugins` exists to keep out of this Cargo.toml (see the
+# `trusty-agents-common` comment below) — trusty-gworkspace is a plain
+# connector library, no cargo-cycle concern.
+trusty-channels = { path = "../trusty-channels", version = "0.3.0" }
+trusty-gworkspace = { path = "../trusty-gworkspace", version = "0.3.1" }
+# trusty-okf: the OKF format, profile, bundle and build layer (source registry,
+# per-item ledger, ingest engine). #10746 S11: it replaces trusty-kb, which is
+# deleted. The agent glue trusty-kb also held (`Roots`, the typed `gmail` and
+# `drive` registry kinds, the `KbStore` entry points and the in-tree index
+# journal) now lives in `src/kb/`. The edge runs trusty-agents -> trusty-okf
+# only (SPEC-OKF-01 B1, B2). #10746 S12: `search-feed` is on; the agent's
+# index feed is `trusty_okf::feed` over machine-local `state::index`
+# (SPEC-OKF-01 §2.7.2, §4.9.1), and its in-tree journal is gone. No
+# extraction worker is spawned from here.
+trusty-okf = { path = "../trusty-okf", version = "0.1.0", features = ["search-feed"] }
+tokio = { version = "1", features = ["full"] }
+async-openai = "0.30"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+bytes = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+futures = "0.3"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+chrono-tz = { workspace = true }
+redb = { workspace = true }
+usearch = "2.25"
+fastembed = "5.13"
+walkdir = "2.5"
+fs4 = "1.0"
+regex = "1"
+dirs = "5"
+sha2 = "0.10"
+tempfile = "3"
+serde_yaml = { workspace = true }
+toml_edit = "0.22"
+clap = { version = "4", features = ["derive"] }
+indexmap = { version = "2", features = ["serde"] }
+mime_guess = "2"
+# #4825: needed by `tls::install_crypto_provider` — see the workspace entry.
+rustls = { workspace = true }
+flate2 = "1"
+libc = "0.2"
+
+# Stable plugin surface shared with external agent crates. Defined in its own
+# crate (rather than in trusty-agents/lib.rs) to break the trusty-agents ↔ agent-plugin
+# cargo cycle: both sides depend on this small lib, neither depends on the
+# other through it.
+#
+# Why: The `trusty-agents` crate must NOT depend on `publish = false`
+#      agent crates. A private launcher can depend on both `trusty-agents`
+#      and such an agent crate, wiring them at startup via
+#      `trusty_assistants::install_plugins(...)` before calling
+#      `trusty_assistants::run()`. No in-workspace launcher does this today: the
+#      last such crate was dissolved in #3732 once its tools became
+#      reachable declaratively via a Python skill. This `install_plugins` mechanism remains available for any
+#      future private launcher.
+trusty-agents-common = { path = "../trusty-agents-common", version = "0.11" }
+
+# [patch.crates-io] moved to workspace root Cargo.toml (Cargo requires
+# [patch] tables to live in the workspace root; see #460 for context).
+
+[lib]
+name = "trusty_assistants"
+path = "src/lib.rs"
+
+# #11632: the `name` of the `src/main.rs` target below is the ONE place the
+# binary's name is written. `build.rs` reads it back and exports it as
+# `TA_BIN_NAME`, so the help text, the `tagent` shim's notice and the tests all
+# follow this line.
+[[bin]]
+name = "ta"
+path = "src/main.rs"
+
+# #11632: one-release alias for the old binary name. Prints a deprecation
+# notice on stderr, then runs exactly what the binary above runs.
+[[bin]]
+name = "tagent"
+path = "src/bin/tagent.rs"
+
+[dev-dependencies]
+# test-util enables Tokio's paused clock (`#[tokio::test(start_paused = true)]`)
+# used by `discover_one_returns_none_on_timeout` to exercise the real 15s
+# `DISCOVERY_TIMEOUT` on the virtual clock. Declared explicitly rather than
+# relying on `tokio-test` happening to pull the same feature in.
+tokio = { version = "1", features = ["full", "test-util"] }
+serial_test = "3"
+# #11632: test-only since the HTTP API was cut. `axum` serves the throwaway
+# Slack/Telegram API stubs the channel adapter tests post to; `base64` and
+# `tokio-tungstenite` are read only by tests (`tests/slack_wss_crypto_provider.rs`
+# drives the WSS handshake against `tls::install_crypto_provider`).
+axum = { workspace = true }
+base64 = "0.22"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+# #9123: the shared credential test sandbox. Dev-only because it mutates the
+# process environment; it must never reach a normal build.
+# #10746 S11: `knowledge-document` for `tests/okf_tombstone.rs` (SPEC-OKF-01
+# criterion 37), moved here from the deleted trusty-kb. trusty-search already
+# enables it in this graph, so no new code compiles.
+trusty-common = { path = "../trusty-common", version = "0.70", features = ["credential-test-sandbox", "knowledge-document"] }
+
+[lints.clippy]
+doc_lazy_continuation = "allow"

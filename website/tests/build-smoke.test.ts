@@ -467,9 +467,9 @@ describe('production build', () => {
 			'curl -sSf https://raw.githubusercontent.com/bobmatnyc/trusty-tools/main/install.sh | sh'
 		);
 
-		// `tm` and `tagent` take the App Data category and must never be offered
+		// `tm` and `ta` take the App Data category and must never be offered
 		// the disk-wide one; trusty-search is the only product that gets it.
-		for (const id of ['trusty-mpm', 'trusty-agents']) {
+		for (const id of ['trusty-mpm', 'trusty-assistants']) {
 			const panel = visibleText(installPanel(html, id));
 			expect(panel.length, `${id} panel`).toBeGreaterThan(0);
 			expect(panel, `${id} is offered Full Disk Access`).not.toContain('Full Disk Access');

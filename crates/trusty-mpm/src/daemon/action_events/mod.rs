@@ -330,11 +330,12 @@ impl ActionPublisher {
             return;
         }
         let threader = Arc::clone(&self.threader);
-        let in_flight = Arc::clone(&self.lookups);
+        // #11040: the guard releases the slot on success, error and resolver panic.
+        let slot = LookupSlot(Arc::clone(&self.lookups));
         let run = move || {
+            let _slot = slot;
             let project = lookup.resolve();
             threader.lock().settle(&lookup, project);
-            in_flight.fetch_sub(1, Ordering::SeqCst);
         };
         if let Ok(rt) = tokio::runtime::Handle::try_current() {
             drop(rt.spawn_blocking(run));
@@ -342,12 +343,27 @@ impl ActionPublisher {
             .name("tm-project-lookup".into())
             .spawn(run)
         {
-            // The closure, and its lookup, are gone; the session stays unattributed.
-            self.lookups.fetch_sub(1, Ordering::SeqCst);
+            // The closure, its lookup and its slot guard are gone; the session
+            // stays unattributed and the slot is already released.
             tracing::warn!(error = %e, "action events: project lookup thread did not start");
         }
     }
+}
 
+/// One in-flight project lookup slot, released on drop (#11040).
+///
+/// Why: a resolver panic unwinds past any decrement written after `resolve()`.
+/// What: holds the publisher's lookup counter and decrements it once on drop.
+/// Test: `a_panicking_project_lookup_releases_its_slot_11040`.
+struct LookupSlot(Arc<AtomicUsize>);
+
+impl Drop for LookupSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ActionPublisher {
     /// Wait until no project lookup is running, at most 10 s (#10906 tests).
     #[cfg(test)]
     pub(crate) async fn lookups_settled(&self) {

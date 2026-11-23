@@ -234,6 +234,6 @@ mod tests {
 
 ## See Also
 
-- `crates/trusty-agents/README.md` for orchestrator implementation and the
+- `crates/trusty-assistants/README.md` for orchestrator implementation and the
   `tagent` launcher
 - Agent implementation examples in subdirectories

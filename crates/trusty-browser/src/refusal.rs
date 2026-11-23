@@ -98,6 +98,11 @@ pub const PAGE_ERRORS: &[&str] = &[
     "InvalidUrl",
 ];
 
+/// Broker refusal: a tab's emulation reset failed and is being retried; `select`
+/// refuses the tab until it lands, so the next holder never sees the old state (#11371).
+/// The MCP server relays the name as the tool error text; a later `select` may succeed.
+pub const EMULATION_RESET_PENDING: &str = "EmulationResetPending";
+
 /// Longest request string field, in code points.
 pub const MAX_STRING: usize = 8192;
 
