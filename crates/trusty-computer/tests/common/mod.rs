@@ -329,6 +329,20 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
                 sc["elements"].as_array_mut().expect("elements").push(field);
             }
             Some("degraded") => sc["degraded"] = json!(true),
+            Some("menus") => {
+                // #11695: an app menu holding German "Dienste" (Services), then File > New.
+                let rows = [
+                    (9, "AXMenuBarItem", "Fixture", 4),
+                    (10, "AXMenuItem", "Dienste", 9),
+                    (11, "AXMenuBarItem", "File", 4),
+                    (12, "AXMenuItem", "New", 11),
+                ];
+                let elements = sc["elements"].as_array_mut().expect("elements");
+                for (i, role, label, parent) in rows {
+                    elements.push(json!({"element_index": i, "role": role, "label": label,
+                        "parent_index": parent, "element_token": format!("tok-m{i}")}));
+                }
+            }
             _ => {}
         }
         return json!({"ok": true, "result": snap});

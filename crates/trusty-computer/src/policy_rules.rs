@@ -2,8 +2,8 @@
 //!
 //! Why: kept apart from the checks so the table reads as the spike's `RULES`
 //! dict (`policy.py:161-231`) row for row.
-//! What: 6 ALLOW, 13 FILTER and 37 DENY rows. `invoke_menu` is DENY here; the
-//! spike had it FILTER (plan section 1, item 3).
+//! What: 6 ALLOW, 14 FILTER and 36 DENY rows. `invoke_menu` is FILTER behind
+//! a path deny list (#11695; it was DENY in Phase 2, plan section 1, item 3).
 //! [`BROKER_RULES`] holds tools the broker serves itself, which no driver lists.
 //! Test: `every_inventory_tool_is_classified`, `verdict_counts_match_the_plan`
 //! in `tests/spike_policy.rs`; `screenshot_rule_is_filter_and_not_default`.
@@ -138,8 +138,16 @@ pub static RULES: [Rule; 56] = [
         "background launch of a scoped bundle id only",
         &[launch_in_scope],
     ),
-    // #11460: every menu holds Restart, Shut Down and Log Out; a path allowlist is deferred.
-    deny("invoke_menu", "menus reach Restart, Shut Down and Log Out"),
+    // #11695: granted only by name; scoped pid and window, path deny list.
+    filter(
+        "invoke_menu",
+        "menu path in a scoped pid; destructive and cross-app items refused",
+        &[
+            pid_in_scope,
+            crate::menu::menu_args_only,
+            crate::menu::path_allowed,
+        ],
+    ),
     // Denied: named by the brief.
     deny("kill_app", "kill -9 of any pid"),
     deny("clipboard_read", "returns privacy-sensitive clipboard text"),

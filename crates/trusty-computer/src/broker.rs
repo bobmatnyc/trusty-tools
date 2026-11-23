@@ -61,6 +61,9 @@ pub fn refusal(code: &str, detail: &str) -> Value {
     json!({"ok": false, "code": code, "error": detail})
 }
 
+/// Tokens, fingerprint and allowed menu paths of one redacted snapshot.
+pub(crate) type Snap = (BTreeSet<String>, String, Vec<Vec<String>>);
+
 /// The broker's state; one lock serialises every request.
 pub struct Inner<L: Launcher> {
     pub supervisor: Supervisor<L>,
@@ -68,8 +71,9 @@ pub struct Inner<L: Launcher> {
     pub(crate) grants: Grants,
     pub(crate) lease: DesktopLease,
     pub(crate) journals: HashMap<String, Journal>,
-    /// (pid, window_id) -> (tokens, fingerprint) of the last redacted snapshot.
-    pub(crate) snaps: HashMap<(u32, u64), (BTreeSet<String>, String)>,
+    /// (pid, window_id) -> (tokens, fingerprint, allowed menu paths) of the
+    /// last redacted snapshot (#11695: the menu paths gate `invoke_menu`).
+    pub(crate) snaps: HashMap<(u32, u64), Snap>,
     /// False after a failed rescope or restart; a call then rescopes first.
     pub(crate) scope_ready: bool,
     pub(crate) consent: ConsentState,

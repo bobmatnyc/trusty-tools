@@ -1,4 +1,4 @@
-//! The `trusty-computer-mcp` server: 21 static `computer_*` tools over stdio JSON-RPC.
+//! The `trusty-computer-mcp` server: 22 static `computer_*` tools over stdio JSON-RPC.
 //!
 //! Why: agents speak MCP; the broker speaks newline JSON on `agent.sock`.
 //! This is a thin translator with a fixed tool list, so the exposed surface
@@ -10,6 +10,7 @@
 //! a uuid4 when the caller gave none. A broker refusal is an MCP tool error
 //! (`isError: true`) whose text and `structuredContent` carry its `code`.
 //! `computer_screenshot` (#11694) answers an MCP `image` part plus its metadata.
+//! `computer_invoke_menu` (#11695) maps to the driver's `invoke_menu`.
 //! Test: `tools_list_is_the_plan_table`, `mcp_smoke_against_a_fake_broker`,
 //! `screenshot_result_is_an_image_part`.
 
@@ -52,6 +53,7 @@ pub fn driver_tool(name: &str) -> Option<&'static str> {
         "computer_key" => "press_key",
         "computer_hotkey" => "hotkey",
         "computer_launch" => "launch_app",
+        "computer_invoke_menu" => "invoke_menu",
         _ => return None,
     })
 }

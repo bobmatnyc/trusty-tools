@@ -25,12 +25,18 @@ driver, with the driver's bounded mode as its daemon-side limit. In detail:
   `agent.sock`, the operator to `operator.sock`. Both are 0600 in a 0700 state
   directory, and a peer with another uid is refused.
 - Each call passes the pipeline: `request_id` journal replay, the policy for
-  all 56 driver tools (`invoke_menu`, screenshots, desktop state and the
-  clipboard are denied), the grant's scope, the one desktop lease, the element
+  all 56 driver tools (unscoped screenshots, desktop state and the clipboard
+  are denied; `invoke_menu` needs a grant that names it and takes only a path the
+  window's last read listed: never the Apple or app menu, nor Quit, Close,
+  Log Out, Shut Down, Restart, Force Quit, Move to Trash, Print, Export,
+  Save As, Services, Open With, Share or System Settings; a menu call activates the
+  target app, so granting `invoke_menu` lets the agent bring it to the front),
+  the grant's scope, the one desktop lease, the element
   token gate, an audit line, the driver call, menu-bar removal, and a
   read-back that confirms a mutating call.
 - The audit log is fail-closed JSONL (0600, fsynced). It records argument
-  keys and text lengths, never values.
+  keys and text lengths, never values; an `invoke_menu` line also records
+  the menu path and `activates_app: true`.
 
 The broker is a guardrail, not a security boundary. See "Known gaps".
 
