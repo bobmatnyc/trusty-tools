@@ -11,7 +11,8 @@
 //! redacted snapshot of that window; audit `forward` (a failure refuses); the
 //! driver call; menu-bar strip of a snapshot (one with no structured part is
 //! refused) and of a `driver_refused` result; read-back confirmation of a
-//! mutating call; journal; audit `done`.
+//! mutating call; journal; audit `done`. The read tools are asked for no
+//! screenshot, and every reply loses any image part the driver sends.
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -55,6 +56,32 @@ pub const CONFIRM_TOOLS: [&str; 9] = [
 pub const CONFIRM_POLLS: [Duration; 2] = [Duration::ZERO, Duration::from_millis(250)];
 /// Told to the agent when a mutating call is not confirmed.
 pub const UNCONFIRMED_HINT: &str = "not confirmed: check with get_window_state, do not retry";
+
+/// Read tools the driver answers with a screenshot unless told otherwise.
+const IMAGE_READ_TOOLS: [&str; 2] = ["get_window_state", "verify_state"];
+
+/// `args` for the daemon: a read tool in [`IMAGE_READ_TOOLS`] is asked for no
+/// screenshot, whose pixels the redactor cannot clean.
+/// Test: `read_asks_driver_for_no_image`.
+fn read_args(tool: &str, args: &Value) -> Value {
+    let mut args = args.clone();
+    if IMAGE_READ_TOOLS.contains(&tool)
+        && let Some(map) = args.as_object_mut()
+    {
+        map.insert("include_screenshot".into(), json!(false));
+    }
+    args
+}
+
+/// Drop every non-text content part of any tool's reply, so an image the
+/// driver sends anyway never reaches the agent.
+/// Test: `read_drops_image_the_driver_sends_anyway`, `refused_read_drops_image`,
+/// `click_drops_image_the_driver_sends`.
+fn strip_images(result: &mut Value) {
+    if let Some(parts) = result.get_mut("content").and_then(Value::as_array_mut) {
+        parts.retain(|p| p.get("type") == Some(&json!("text")));
+    }
+}
 
 fn window_key(args: &Map<String, Value>) -> Option<(u32, u64)> {
     let pid = u32::try_from(args.get("pid")?.as_u64()?).ok()?;
@@ -212,7 +239,8 @@ impl<L: Launcher> Inner<L> {
         }
         self.grants.touch(grant_id, now);
         // 6. The driver call, then strip, confirm, journal, audit `done`.
-        let (mut reply, outcome) = self.drive(&tool, &args, grant.scope);
+        let (mut reply, outcome) = self.drive(&tool, &read_args(&tool, &args), grant.scope);
+        strip_images(&mut reply["result"]);
         if reply["code"] == json!("driver_refused") {
             // #11460: a refusal can carry the tree it refused; strip it too.
             reply["result"] = redact_reply(&reply["result"]).result;
