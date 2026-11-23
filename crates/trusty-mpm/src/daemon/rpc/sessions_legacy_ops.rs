@@ -759,12 +759,27 @@ pub async fn ingest_hook(
 
     // #2621 (code-critic MEDIUM): the idle-park surface+auto-nudge dispatch
     // lives inside `HookService::process` (daemon/services/hook_service.rs).
+    // #11674: the stop's join keys, read before `process` consumes the payload.
+    let stop_keys = matches!(
+        post.event,
+        HookEvent::SubagentStop | HookEvent::SubagentStopFailure
+    )
+    .then(|| crate::daemon::services::subagent_task_binding::stop_keys(&post.payload));
     let decision = HookService::new(Arc::clone(state)).process(session, post.event, post.payload);
+    let task_binding = stop_keys.map(|(agent_id, tool_use_id)| {
+        crate::daemon::services::subagent_task_binding::stop_binding(
+            state,
+            session,
+            agent_id.as_deref(),
+            tool_use_id.as_deref(),
+        )
+    });
     taint.map_err(DaemonError::Internal)?;
     match decision {
         HookDecision::Block { reason } => Err(DaemonError::OverseerBlocked { reason }),
         _ => Ok(HookAcceptedResponse {
             accepted: post.event,
+            task_binding,
         }),
     }
 }

@@ -202,6 +202,8 @@ pub mod gh_session_account;
 pub mod gh_session_shim;
 // #9750: tm's own gh children run the real gh, not a pinned session's shim.
 pub mod gh_shim_path;
+// #10487: a session's github.token_env binding runs through the gh shim.
+pub mod gh_token_env_shim;
 // #7059: the in-process stand-in for the scoped `gh` subprocesses — a test
 // seam, compiled out of every `--release` build (see the module docs).
 #[cfg(any(test, debug_assertions))]
@@ -473,6 +475,8 @@ mod stale_copy_tests;
 // six hours of `RUNNING_STALE_AFTER_SECS`.
 pub mod startup_context;
 pub mod stop_spool;
+// #11674: ledger task id round trip for subagent dispatches.
+pub mod subagent_task_roundtrip;
 // #7617: the one seed-or-repair rule for the `statusLine` settings entry, which
 // every tier's writer and `tm doctor --fix` go through.
 pub mod statusline_settings;

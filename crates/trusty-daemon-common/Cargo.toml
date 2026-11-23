@@ -1,0 +1,19 @@
+[package]
+name = "trusty-daemon-common"
+version = "0.1.0"
+description = "Shared macOS broker-daemon plumbing for trusty-browser and trusty-computer: peer uid check, owner-only files, Developer ID signing, launchd plist and audit-log rotation"
+readme = "README.md"
+homepage = "https://trustytools.dev"
+keywords = ["macos", "launchd", "codesign", "daemon"]
+categories = ["os::macos-apis"]
+rust-version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+include = ["/src/**/*", "/Cargo.toml", "/README.md", "/CHANGELOG.md"]
+
+[dependencies]
+libc = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }

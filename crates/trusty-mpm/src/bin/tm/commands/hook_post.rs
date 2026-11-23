@@ -113,6 +113,8 @@ pub(crate) struct HookPostOutcome {
     pub(crate) delivered: bool,
     /// One line per attempt, then the verdict.
     pub(crate) lines: Vec<String>,
+    /// #11674: the accepted response's JSON body, when it parsed.
+    pub(crate) response: Option<serde_json::Value>,
 }
 
 /// POST `body` to `<url>/hooks`, retrying a transient failure.
@@ -135,6 +137,7 @@ pub(crate) async fn post_hook_with_retry(url: &str, body: &serde_json::Value) ->
         attempts: 0,
         delivered: false,
         lines: Vec::new(),
+        response: None,
     };
     let budget = tokio::time::timeout(HOOK_POST_BUDGET, attempt_loop(url, body, &mut outcome));
     if budget.await.is_err() {
@@ -184,6 +187,8 @@ async fn attempt_loop(url: &str, body: &serde_json::Value, outcome: &mut HookPos
                     "{HOOK_POST_LOG_PREFIX} attempt {attempt}/{HOOK_POST_ATTEMPTS}: {}",
                     resp.status()
                 ));
+                // #11674: the body carries the stop's task binding.
+                outcome.response = resp.json::<serde_json::Value>().await.ok();
                 return;
             }
             Ok(resp) => {

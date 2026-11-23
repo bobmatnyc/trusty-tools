@@ -54,7 +54,8 @@ pub mod pairing;
 pub mod peer;
 pub mod peer_conn;
 pub mod peer_darwin;
-mod private;
+// #11692: owner-only file helpers, shared with trusty-computer.
+use trusty_daemon_common::private;
 pub mod proof;
 pub mod pyjson;
 pub mod refusal;

@@ -1,0 +1,43 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 321 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+14 TL
+(Harbor Lights Survey) Tj T*
+() Tj T*
+(The harbor survey counted forty two lights along the north pier.) Tj T*
+(Each light was checked at dusk and again at dawn.) Tj T*
+() Tj T*
+(Seven lights were dim and three were dark.) Tj T*
+(The keeper replaced every dark lamp within one week.) Tj T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000613 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+683
+%%EOF
