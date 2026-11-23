@@ -190,6 +190,19 @@ pub const CONNECT: &[Tool] = &[
         &["lease", "ref", "files", "request_id"],
     ),
     tool("page_downloads", &[LEASE], "page_downloads", &["lease"]),
+    // #11371: the full emulation state; the defaults reset it.
+    tool(
+        "page_emulate",
+        &[
+            LEASE,
+            field("javascript", K::Bool, D::Bool(true)),
+            field("color_scheme", K::OptStr, D::Null),
+            field("width", K::Int, D::Int(0)),
+            field("height", K::Int, D::Int(0)),
+        ],
+        "page_emulate",
+        &["lease", "javascript", "color_scheme", "width", "height"],
+    ),
     tool("browser_release", &[LEASE], "release", &["lease"]),
 ];
 

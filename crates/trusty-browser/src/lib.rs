@@ -24,9 +24,11 @@ mod broker_agent;
 mod broker_enroll;
 mod broker_service;
 pub mod casefold;
+// #11371: leased-tab emulation.
 pub mod cli;
 pub mod cli_operator;
 pub mod codesign;
+mod emulation;
 pub mod entropy;
 pub mod frame;
 pub mod grant_store;

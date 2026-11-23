@@ -304,3 +304,196 @@ async fn a_failed_result_line_ends_the_grant() {
     );
     broker.close().await;
 }
+
+// #11371: emulation resets on every lease end. Each test below fails when its
+// reset path is removed (`src/emulation.rs`).
+const EMULATED: &str = r#"{"javascript":false,"color_scheme":"dark","width":1440,"height":900}"#;
+const RESET: &str = r#"{"javascript":true,"color_scheme":null,"width":0,"height":0}"#;
+const A_LEASE: &str = "WKYMQmzaE-9QA7jfA8GUGUSwUOcWzFEK";
+const A_EARLY_LEASE: &str = "YtbbXmIbar4-E6OcqOQZedqh522fyHj2";
+
+/// Emulate on `lease` and answer the worker; returns the agent's reply.
+async fn emulate(agent: &mut UnixStream, worker: &mut UnixStream, lease: &str) -> Json {
+    let frame = format!(
+        r#"{{"op":"page_emulate","lease":"{lease}","javascript":false,"color_scheme":"dark","width":1440,"height":900}}"#
+    );
+    send_json(agent, &frame).await;
+    let cmd = answer(worker, EMULATED).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_emulate")));
+    assert_eq!(cmd.get("javascript"), Some(&Json::Bool(false)));
+    assert_eq!(cmd.get("width"), Some(&Json::Int(1440)));
+    recv_json(agent).await
+}
+
+/// The next worker command is the emulation reset of tab 7; answers it.
+async fn expect_reset(worker: &mut UnixStream) {
+    let cmd = answer(worker, RESET).await;
+    assert_eq!(
+        cmd.get("op"),
+        Some(&Json::from("page_emulate")),
+        "{}",
+        wire(&cmd)
+    );
+    assert_eq!(cmd.get("tab"), Some(&Json::Int(7)));
+    assert_eq!(cmd.get("javascript"), Some(&Json::Bool(true)));
+    assert_eq!(cmd.get("color_scheme"), Some(&Json::Null));
+    assert_eq!(cmd.get("width"), Some(&Json::Int(0)));
+    assert_eq!(cmd.get("height"), Some(&Json::Int(0)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_emulated_tab_resets_on_release() {
+    let dir = state_dir();
+    let broker = Broker::start(options(dir.path(), Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(dir.path(), Some("select-reply")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    let reply = emulate(&mut a, &mut worker, A_LEASE).await;
+    assert_eq!(
+        wire(&reply),
+        r#"{"ok":true,"tab":7,"javascript":false,"color_scheme":"dark","width":1440,"height":900}"#
+    );
+    send_json(
+        &mut a,
+        &format!(r#"{{"op":"release","lease":"{A_LEASE}"}}"#),
+    )
+    .await;
+    // The release answers only after the reset; the watcher alone would answer first.
+    let early = tokio::time::timeout(Duration::from_millis(300), recv_json(&mut a)).await;
+    assert!(
+        early.is_err(),
+        "release answered before the emulation reset"
+    );
+    expect_reset(&mut worker).await;
+    assert_eq!(wire(&recv_json(&mut a).await), r#"{"ok":true}"#);
+    broker.close().await;
+}
+
+/// A lease that expired while its tab was emulated: the next `select` resets
+/// the tab before it probes, so the new holder never sees the old state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_lease_resets_a_tab_left_emulated() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    let reply = emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    assert_eq!(reply.get("ok"), Some(&Json::Bool(true)), "{}", wire(&reply));
+    clock.set(5000.0 + 60.0);
+    send_json(&mut b, r#"{"op":"select","tab":7}"#).await;
+    expect_reset(&mut worker).await;
+    let probe = answer(
+        &mut worker,
+        r#"{"access":true,"document":"d","origin":"https://example.test","title":"t"}"#,
+    )
+    .await;
+    assert_eq!(probe.get("op"), Some(&Json::from("page_tab")));
+    assert_eq!(recv_json(&mut b).await.get("ok"), Some(&Json::Bool(true)));
+    broker.close().await;
+}
+
+/// An emulated lease that expires with nobody calling still resets (the watcher).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_emulated_lease_resets_without_a_caller() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    clock.set(5000.0 + 60.0);
+    expect_reset(&mut worker).await;
+    broker.close().await;
+}
+
+/// A session that closes while its tab is emulated resets the tab.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_session_resets_its_emulated_tab() {
+    let dir = state_dir();
+    let broker = Broker::start(options(dir.path(), Arc::new(At(5000.0)))).expect("start");
+    let mut conns = replay(dir.path(), Some("select-reply")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_LEASE).await;
+    drop(a);
+    // Well inside the watcher's one-second period, so only the session-end reset meets it.
+    let soon = tokio::time::timeout(Duration::from_millis(500), expect_reset(&mut worker)).await;
+    assert!(soon.is_ok(), "no reset at session end");
+    broker.close().await;
+}
+
+/// A reset the worker refuses keeps its record: the watcher sends it again
+/// until the worker accepts, so the emulation cannot reach a later lease.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_emulation_reset_is_retried() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    clock.set(5000.0 + 60.0);
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(cmd.get("op"), Some(&Json::from("page_emulate")));
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    send_json(
+        &mut worker,
+        &format!(r#"{{"id":"{id}","ok":false,"error":"Unavailable"}}"#),
+    )
+    .await;
+    let retry = tokio::time::timeout(Duration::from_secs(5), expect_reset(&mut worker)).await;
+    assert!(retry.is_ok(), "the refused reset was not retried");
+    broker.close().await;
+}
+
+/// Select fails closed: while a refused reset is pending, a new lease on the
+/// tab is refused before any `page_tab` probe, and its claim is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn select_refuses_a_tab_whose_emulation_reset_failed() {
+    let dir = state_dir();
+    let clock = Arc::new(Settable::default());
+    clock.set(5000.0);
+    let lease_clock = Arc::clone(&clock) as Arc<dyn Monotonic>;
+    let broker = Broker::start(options(dir.path(), lease_clock)).expect("start");
+    let mut conns = replay(dir.path(), Some("attach-b-ack")).await;
+    let mut a = conns.remove("a").expect("a");
+    let mut b = conns.remove("b").expect("b");
+    let mut worker = conns.remove("worker").expect("worker");
+    emulate(&mut a, &mut worker, A_EARLY_LEASE).await;
+    clock.set(5000.0 + 60.0);
+    send_json(&mut b, r#"{"op":"select","tab":7}"#).await;
+    let cmd = recv_json(&mut worker).await;
+    assert_eq!(
+        cmd.get("op"),
+        Some(&Json::from("page_emulate")),
+        "{}",
+        wire(&cmd)
+    );
+    let id = cmd.get("id").and_then(Json::as_str).expect("id");
+    send_json(
+        &mut worker,
+        &format!(r#"{{"id":"{id}","ok":false,"error":"Unavailable"}}"#),
+    )
+    .await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), recv_json(&mut b))
+        .await
+        .expect("select answered without a page_tab probe");
+    assert_eq!(
+        wire(&reply),
+        r#"{"ok":false,"error":"EmulationResetPending","tab":7,"retryable":true}"#
+    );
+    // The next worker command is the retried reset, never a probe.
+    expect_reset(&mut worker).await;
+    broker.close().await;
+}
