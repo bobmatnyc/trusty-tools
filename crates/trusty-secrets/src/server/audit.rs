@@ -321,6 +321,11 @@ pub struct AuditRecord {
     /// otherwise, and then not written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationAudit>,
+    /// On the extra record a call writes when a Keychain read fell back
+    /// from a corrupt vault blob: the source it read (#11738). Never a
+    /// value. `None` otherwise, and then not written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_fallback: Option<crate::store::BlobFallback>,
 }
 
 /// What one `secrets.migrate` call did (#10524).
@@ -432,6 +437,7 @@ impl AuditRecord {
             grant_drop: None,
             served_from: None,
             migration: None,
+            blob_fallback: None,
         }
     }
 

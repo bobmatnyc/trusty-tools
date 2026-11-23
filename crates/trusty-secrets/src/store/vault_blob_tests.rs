@@ -30,6 +30,48 @@ fn encoded(pairs: &[(&ItemId, &str)]) -> String {
     blob.encode().unwrap().to_string()
 }
 
+/// A blob holding `pairs` with a `digest` field, as a later release writes
+/// it (#11738); this release writes none.
+fn encoded_with_digest(pairs: &[(&ItemId, &str)]) -> String {
+    let items: Vec<(&str, &str, &str)> = pairs
+        .iter()
+        .map(|(id, v)| (id.service.as_str(), id.account.as_str(), *v))
+        .collect();
+    serde_json::json!({
+        "format": FORMAT,
+        "version": VERSION,
+        "items": items,
+        "digest": digest_of(&items).unwrap(),
+    })
+    .to_string()
+}
+
+/// The pre-#11738 read struct, copied verbatim: an older tm or daemon
+/// rejects any field it does not know.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreFixWireIn {
+    format: String,
+    version: u32,
+    items: Vec<(String, String, String)>,
+}
+
+/// Why: #11738 mixed-version safety — a blob, backup or migrate output this
+/// build writes must still decode on a pre-fix binary, so it carries no
+/// `digest` field yet.
+/// Test: itself.
+#[test]
+fn encoded_blob_decodes_under_the_pre_fix_reader() {
+    for pairs in [vec![], vec![(&item(1), VALUE), (&item(2), "")]] {
+        let text = encoded(&pairs);
+        let old: PreFixWireIn =
+            serde_json::from_str(&text).expect("a pre-fix reader rejected the blob");
+        assert_eq!(old.items.len(), pairs.len());
+        assert!(!text.contains("digest"), "{}", pairs.len());
+    }
+}
+
 /// Why: #10524 — the blob round-trips, its `Debug` is a count, and a blob
 /// that does not parse is one fixed error that never quotes the input (a
 /// serde message would: `invalid type: string "<value>"`).
@@ -87,22 +129,97 @@ fn blob_store_routes_by_layout() {
     assert!(store.read_blob().unwrap().unwrap().get(&item(1)).is_none());
 }
 
-/// Why: #10524 fail closed — a corrupt blob must fail every read and write;
-/// a variant that fell back to the (possibly stale) per-item items returns
-/// the old value and fails this test.
+/// Why: #10524 fail closed, kept by #11738 — a write on a corrupt blob fails
+/// and never rewrites it, so the damaged item stays for recovery.
 /// Test: itself.
 #[test]
-fn blob_store_corrupt_blob_fails_every_call() {
+fn blob_store_corrupt_blob_fails_every_write() {
     let items = Arc::new(MemItems::with(&[(&item(1), "stale")]));
     items.put_raw(&ItemId::blob(), "not json");
     let store = store_over(&items);
-    assert!(
-        store.get(&item(1)).is_err(),
-        "a corrupt blob read as per-item"
-    );
-    assert!(store.put(&item(1), Some("x")).is_err());
+    let err = store.put(&item(1), Some("x")).unwrap_err();
+    assert!(format!("{err}").contains("vault blob is corrupt"), "{err}");
     assert_eq!(items.raw(&item(1)).as_deref(), Some("stale"));
     assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some("not json"));
+}
+
+/// Corrupt blob texts (#11738): truncated, and random bytes.
+fn corrupt_blobs() -> Vec<String> {
+    let whole = encoded(&[(&item(1), VALUE)]);
+    let truncated = whole[..whole.len() / 2].to_owned();
+    let random: String = [0x9f_u8, 0x03, 0xc7, 0x5a, 0xee, 0x11, 0x80, 0x42]
+        .iter()
+        .map(|b| char::from(*b))
+        .collect();
+    vec![truncated, random]
+}
+
+/// Why: #11738 AC1 — a truncated or random-bytes blob read falls back to
+/// the backup (ahead of the stale per-item item), returns its value, and
+/// leaves the corrupt blob as it was. Before the fix every read failed.
+/// Test: itself.
+#[test]
+fn blob_store_corrupt_blob_reads_the_backup() {
+    for bad in corrupt_blobs() {
+        let items = Arc::new(MemItems::with(&[(&item(1), "stale")]));
+        items.put_raw(&ItemId::backup(), &encoded(&[(&item(1), VALUE)]));
+        items.put_raw(&ItemId::blob(), &bad);
+        let store = store_over(&items);
+        let got = store.get(&item(1)).expect("a corrupt blob failed the read");
+        assert_eq!(got.as_deref().map(String::as_str), Some(VALUE));
+        assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some(bad.as_str()));
+    }
+}
+
+/// Why: #11738 AC1 — with no backup a corrupt blob read falls back to the
+/// per-item item; a key neither source holds is a fixed error naming the
+/// key, never `None` and never a value.
+/// Test: itself.
+#[test]
+fn blob_store_corrupt_blob_without_backup_reads_per_item() {
+    for bad in corrupt_blobs() {
+        let items = Arc::new(MemItems::with(&[(&item(1), "sk-per-item-7f")]));
+        items.put_raw(&ItemId::blob(), &bad);
+        let store = store_over(&items);
+        let got = store.get(&item(1)).expect("a corrupt blob failed the read");
+        assert_eq!(got.as_deref().map(String::as_str), Some("sk-per-item-7f"));
+        let err = store.get(&item(2)).unwrap_err();
+        let shown = format!("{err} / {err:?}");
+        assert!(shown.contains("vault blob is corrupt"), "{shown}");
+        assert!(shown.contains("KEY_2"), "{shown}");
+        assert!(!shown.contains(VALUE) && !shown.contains("sk-per-item-7f"));
+    }
+}
+
+/// Why: #11738 AC2 — a blob that parses but whose value was changed after
+/// encoding fails its digest, counts as corrupt, and the read returns the
+/// backup's value, not the tampered one.
+/// Test: itself.
+#[test]
+fn blob_store_tampered_blob_reads_the_backup() {
+    let signed = encoded_with_digest(&[(&item(1), VALUE)]);
+    assert!(Blob::decode(&ItemId::blob(), &signed).is_ok());
+    let tampered = signed.replace(VALUE, "sk-tampered");
+    assert!(serde_json::from_str::<serde_json::Value>(&tampered).is_ok());
+    let items = Arc::new(MemItems::default());
+    items.put_raw(&ItemId::backup(), &encoded(&[(&item(1), VALUE)]));
+    items.put_raw(&ItemId::blob(), &tampered);
+    let store = store_over(&items);
+    let got = store
+        .get(&item(1))
+        .expect("a tampered blob failed the read");
+    assert_eq!(got.as_deref().map(String::as_str), Some(VALUE));
+}
+
+/// Why: #11738 — a blob written before the digest existed still decodes.
+/// Test: itself.
+#[test]
+fn vault_blob_without_digest_still_decodes() {
+    let legacy = format!(
+        r#"{{"format":"trusty-secrets.vault-blob","version":1,"items":[["trusty/acme/web","KEY_1","{VALUE}"]]}}"#
+    );
+    let blob = Blob::decode(&ItemId::blob(), &legacy).unwrap();
+    assert_eq!(blob.get(&item(1)), Some(VALUE));
 }
 
 /// Why: #10524 AC1 — a failed blob write is an error and leaves the blob as

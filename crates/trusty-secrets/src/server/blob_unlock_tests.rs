@@ -325,3 +325,29 @@ fn named_copy_reads_correctly_after_migrate_finish_10524() {
     assert_eq!(value_of(&state, &token, "FROM_VAULT"), OWNER_VALUE);
     assert_eq!(value_of(&state, &token, "FROM_ITEM"), ITEM_VALUE);
 }
+
+/// Why: #11738 AC1, AC3 — after `migrate`, a corrupt blob no longer fails
+/// `secrets.resolve`: each key reads its backup value, each read leaves an
+/// audit record naming the `backup` source, and no value reaches the log.
+/// Test: itself.
+#[test]
+fn resolve_with_a_corrupt_blob_reads_the_backup_and_audits_it() {
+    let fx = fixture();
+    let (items, state, token) = blob_state(&fx);
+    step(&state, "migrate", false).unwrap();
+    items.put_raw(&ItemId::blob(), "{\"format\":");
+    read_all(&state, &token);
+    let fallbacks = records(&fx)
+        .into_iter()
+        .filter(|r| r.method == AuditMethod::Resolve)
+        .filter_map(|r| r.blob_fallback)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fallbacks,
+        vec![crate::store::BlobFallback::Backup; KEYS.len()]
+    );
+    let log = std::fs::read_to_string(&fx.settings.audit_log).unwrap();
+    assert!(log.contains("\"blob_fallback\":\"backup\""), "{log}");
+    assert!(!log.contains(SENTINEL_VALUE));
+    assert_eq!(items.raw(&ItemId::blob()).as_deref(), Some("{\"format\":"));
+}

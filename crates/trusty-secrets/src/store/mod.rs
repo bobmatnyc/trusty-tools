@@ -124,6 +124,8 @@ pub use scope::{
     parse_remote_identity,
 };
 pub use secret_store::SecretStore;
+// #11738: named on an audit record when a read fell back from a corrupt blob.
+pub use vault_blob::BlobFallback;
 
 #[cfg(test)]
 #[path = "config_scope_tests.rs"]
