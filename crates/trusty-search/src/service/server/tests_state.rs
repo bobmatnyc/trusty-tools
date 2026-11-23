@@ -725,3 +725,40 @@ async fn index_status_truncated_stays_flat_on_the_deferred_path() {
     assert_eq!(window["truncated"], 0, "windows fit: {window}");
     assert_eq!(window["chunks_split"], 1, "{window}");
 }
+
+/// #11651: `GET /indexes/:id/status` lists the files the size cap refused.
+/// Test: this test.
+#[tokio::test]
+#[serial_test::parallel]
+async fn index_status_reports_files_skipped_for_size() {
+    use crate::core::{
+        indexer::CodeIndexer,
+        registry::{IndexHandle, IndexId},
+    };
+    use tokio::sync::RwLock;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let indexer = CodeIndexer::new("size-status", tmp.path());
+    let handle = IndexHandle::bare(
+        IndexId::new("size-status"),
+        Arc::new(RwLock::new(indexer)),
+        tmp.path().to_path_buf(),
+    );
+    let big = tmp.path().join("big.pdf");
+    handle
+        .walk_diagnostics
+        .write()
+        .await
+        .record_size_skips(&[(big.clone(), 11 * 1024 * 1024)]);
+    let registry = IndexRegistry::new();
+    registry.register(handle);
+    let state = Arc::new(SearchAppState::new(registry));
+    let body = super::status::index_status_report(&state, "size-status")
+        .await
+        .expect("status 200");
+    assert_eq!(body["skipped_for_size_total"], 1);
+    let rec = &body["skipped_files"][0];
+    assert_eq!(rec["path"], big.display().to_string());
+    assert_eq!(rec["size_bytes"], 11 * 1024 * 1024);
+    assert_eq!(rec["reason"], "exceeds_size_limit");
+}

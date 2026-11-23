@@ -318,6 +318,9 @@ mod root_hijack_tests;
 // #7434: the multi-root walk and the per-root corpus-path encoding.
 #[cfg(test)]
 mod multi_root_tests;
+// #11651: the walk records files the size cap refused.
+#[cfg(test)]
+mod size_skip_11651_tests;
 // #8438: the swap and staging paths honour the registry's layout.
 #[cfg(test)]
 mod registry_layout_8438_tests;
