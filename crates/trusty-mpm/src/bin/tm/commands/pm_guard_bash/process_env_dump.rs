@@ -121,6 +121,9 @@ fn dump_verbs(word: &str) -> Option<&'static [&'static str]> {
 
 /// Whether one segment runs a `launchctl`/`pm2` subcommand that prints env.
 fn segment_dumps_process_env(segment: &str) -> bool {
+    if quoted_ps_dumps_env(segment) {
+        return true;
+    }
     let Ok(argv) = tokenize(segment) else {
         // #8756: fail closed on a segment we cannot read that names the shape.
         let words: Vec<&str> = segment
@@ -153,10 +156,111 @@ fn argv_dumps_env(argv: &[String]) -> bool {
         dump_verbs(word)
             .is_some_and(|verbs| subcommands(rest).into_iter().any(|sub| verbs.contains(&sub)))
             // #8756: `ps e`/`ps -E`, `/proc/<pid>/environ`, `ssh host env`.
-            || (program_name(word) == "ps" && ps_shows_environment(rest))
+            // #10688: `ps = …` in a script body is a variable, not the command.
+            || (program_name(word) == "ps" && !assigns_to(rest) && ps_shows_environment(rest))
+            || argv_list(word, rest).is_some_and(|list| argv_dumps_env(&list))
             || names_a_process_environ(word)
             || (program_name(word) == "ssh" && remote::ssh_dumps_remote_env(rest))
     })
+}
+
+/// `Some(reason)` when a quoted `ps` argv in `command`, read before its parens
+/// are ungrouped, lists environments (#10688).
+///
+/// Test: `refuses_a_ps_environment_listing`.
+pub(crate) fn evaluate_quoted_ps_argv(command: &str) -> Option<String> {
+    (command.contains("ps") && quoted_ps_dumps_env(command)).then(deny_reason)
+}
+
+/// Whether a quoted `ps` argv in `text` lists environments (#10688).
+fn quoted_ps_dumps_env(text: &str) -> bool {
+    quoted_ps_argvs(text)
+        .iter()
+        .any(|argv| !assigns_to(&argv[1..]) && ps_shows_environment(&argv[1..]))
+}
+
+/// Each quoted `ps` argv that opens a `[`, `(` or call in the raw `segment`.
+///
+/// #10688: shlex folds `["ps","eww"]` into the one word `[ps,eww]` and
+/// `os.system("ps eww")` into `os.system(ps eww)`, so the argv is read from
+/// the raw text: an opener, then string literals joined by `,`, each split on
+/// whitespace. Only an argv whose first word is `ps` is kept, so the rule
+/// stays the `ps` env-dump rule and `print(ps)` (no literal) is untouched.
+/// Test: `refuses_a_ps_environment_listing`,
+/// `the_inspect_shape_plus_a_secret_read_refuses`.
+fn quoted_ps_argvs(segment: &str) -> Vec<Vec<String>> {
+    let text: Vec<char> = segment.chars().filter(|&c| c != '\\').collect();
+    let skip_ws = |mut at: usize| {
+        while text.get(at).is_some_and(|c| c.is_whitespace()) {
+            at += 1;
+        }
+        at
+    };
+    let mut argvs = Vec::new();
+    for (open, _) in text
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, '[' | '('))
+    {
+        let mut argv = Vec::new();
+        let mut at = skip_ws(open + 1);
+        while let Some(&quote @ ('"' | '\'')) = text.get(at) {
+            let Some(len) = text[at + 1..].iter().position(|&c| c == quote) else {
+                break;
+            };
+            let literal: String = text[at + 1..at + 1 + len].iter().collect();
+            argv.extend(literal.split_whitespace().map(str::to_string));
+            at = skip_ws(at + len + 2);
+            if text.get(at) != Some(&',') {
+                break;
+            }
+            at = skip_ws(at + 1);
+        }
+        if argv.first().is_some_and(|w| program_name(w) == "ps") {
+            argvs.push(argv);
+        }
+    }
+    argvs
+}
+
+/// Whether a `ps` word is a variable that `rest` assigns or compares.
+///
+/// #10688: a script body handed to an interpreter is read as program text, so
+/// Python's `ps = cell.paragraphs` reached the `ps` rule and the next `len`
+/// read as the BSD option cluster `e`. An operator word holding `=` (`=`,
+/// `+=`, `:=`, `==`) is no `ps` option, so `ps` there is no command. Verified
+/// against macOS `ps` only; procps was not checked.
+/// Test: `a_read_only_inspect_shape_allows`, `a_python_ps_variable_allows_10688`,
+/// `the_inspect_shape_plus_a_secret_read_refuses`.
+fn assigns_to(rest: &[String]) -> bool {
+    rest.first()
+        .is_some_and(|w| w.contains('=') && w.chars().all(|c| "=+-*/%:|&^<>!@".contains(c)))
+}
+
+/// The argv list `word` opens, each item without its `,` or closing `]`.
+///
+/// #10688: Python's `subprocess.run(["ps", "eww"])` lexes as `[ps,` then
+/// `eww]`; read as a list, it is the argv `ps eww`. Before the `ps = …` fix
+/// these rows refused only because the rest of the body already did.
+fn argv_list(word: &str, rest: &[String]) -> Option<Vec<String>> {
+    let first = word.strip_prefix('[')?;
+    // `"command="],` closes the list too; the `,` after `]` is the call's.
+    let closes = |w: &str| w.trim_end_matches(',').ends_with(']');
+    let items = if closes(first) {
+        &[][..]
+    } else {
+        let end = rest
+            .iter()
+            .position(|w| closes(w))
+            .map_or(rest.len(), |at| at + 1);
+        &rest[..end]
+    };
+    let clean = |w: &str| w.trim_end_matches([',', ']']).to_string();
+    Some(
+        std::iter::once(clean(first))
+            .chain(items.iter().map(|w| clean(w)))
+            .collect(),
+    )
 }
 
 /// Whether `ps <args>` prints each process's environment (#8756).
