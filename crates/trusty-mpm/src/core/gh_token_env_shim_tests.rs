@@ -11,6 +11,7 @@ use crate::core::gh_identity::{GhEnv, resolve_gh_env};
 use crate::core::gh_keyring_token::gh_keyring_token_tests::TableKeyring;
 use crate::core::gh_session_shim::GH_SHIM_ENV;
 use crate::core::trusty_tools_config::GithubConfig;
+use trusty_common::credentials::test_sandbox::CredentialSandbox;
 
 /// A planted token: no env value, message, shim or file may contain it.
 const SENTINEL: &str = "ghp_10487TokenEnvSentinelNeverInEnv";
@@ -67,7 +68,9 @@ fn all_text_under(dir: &Path) -> String {
 /// 🔴 #10487: the binding resolves to `GH_TOKEN`, and the launch env built
 /// from it carries no token value and names the shim instead.
 #[test]
+#[serial_test::serial]
 fn a_token_env_binding_reaches_the_launch_env_as_the_shim_not_a_token_10487() {
+    let _sandbox = CredentialSandbox::enter();
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = token_env_binding(None);
     let (check, keyring) = (check_as("octo"), TableKeyring::default());
@@ -192,8 +195,10 @@ fn is_credential_name(name: &str) -> bool {
 /// no `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
 /// `GITHUB_ENTERPRISE_TOKEN` or `token_env` variable with a secret value.
 #[test]
+#[serial_test::serial]
 fn the_whole_launch_env_carries_no_gh_token_value_10487() {
     use std::collections::BTreeMap;
+    let _sandbox = CredentialSandbox::enter();
     let tmp = tempfile::tempdir().expect("tempdir");
     let env = token_env_binding(None);
     let (check, keyring) = (check_as("octo"), TableKeyring::default());
@@ -204,7 +209,8 @@ fn the_whole_launch_env_carries_no_gh_token_value_10487() {
     .expect("the binding is shimmed");
     // The same last step `relaunch_gh_env` runs, with a probe that never runs gh.
     let launch = shimmed.for_session_launch_with(None, |_, _| Ok(()));
-    let mut cmd = std::process::Command::new("claude");
+    // Any program: only the env this launch builds is under test.
+    let mut cmd = std::process::Command::new("launched-session");
     launch.apply_to(&mut cmd);
 
     // tm's own process env, as the launched child would inherit it.
