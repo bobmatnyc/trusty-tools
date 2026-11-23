@@ -80,10 +80,10 @@ fn subagent_task_roundtrip_cases() {
     assert_eq!(ok.error, None);
     let missing = judge(Some(&b), Some("## Result\nall done"));
     assert_eq!(missing.outcome, Outcome::Missing);
-    let mismatch = judge(Some(&b), Some("Task: ar-Tab@1123 | done: r"));
+    let mismatch = judge(Some(&b), Some("Task: ts-T07@1123 | done: r"));
     assert_eq!(
         (mismatch.outcome, mismatch.returned.as_deref()),
-        (Outcome::Mismatch, Some("ar-Tab@1123"))
+        (Outcome::Mismatch, Some("ts-T07@1123"))
     );
     let stamp = judge(Some(&b), Some("Task: ti-T03@1122 | done: r"));
     assert_eq!(

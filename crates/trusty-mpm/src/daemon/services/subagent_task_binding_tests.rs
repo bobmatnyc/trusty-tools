@@ -62,7 +62,7 @@ fn subagent_task_roundtrip_dispatch_records_the_bound_task() {
         &state,
         sid,
         "toolu_b",
-        "Goal: ti-G01\nFix #11040 (ar-Ta9@1123).",
+        "Goal: ti-G01\nFix #11040 (ts-T09@1123).",
     );
     let all = state.delegations_for(sid);
     let a = all
