@@ -1,4 +1,4 @@
-# #10459 df-G04 — one main-thread ticket for (A) Architect set/copy and (B) 1-step direct commands
+# #10459 — one main-thread ticket for (A) Architect set/copy and (B) 1-step direct commands
 
 Design draft for the Architect. No code. Rev 3, 2026-10-30: owner rulings Dac and Daf, PR0
 spike verdict, design-critic BLOCK items applied.

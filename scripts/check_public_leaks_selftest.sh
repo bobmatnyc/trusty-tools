@@ -9,6 +9,9 @@
 #   clean                 no hit, empty baseline              OK
 #   new-hit               a planted hit, not baselined        FAIL
 #   new-hit-<ID>          one planted line per pattern id     FAIL naming the id
+#   pub-hit-<ID>          a PUB_* line under docs/            FAIL naming the id
+#   pub-unscoped-<ID>     the same line outside docs/         OK
+#   pub-clean             ADR/issue/SPEC ids, a SHA, D-words  OK
 #   baselined             the same hit, baselined             OK
 #   count-grew            a second hit in a baselined file    FAIL
 #   count-shrank          one of two baselined hits removed   OK, with a shrink note
@@ -123,6 +126,25 @@ ORG_ALIAS|git clone git@github${J}-work:org/repo
 EMAIL|mail jdoe@${J}corp.io
 SLACK_ID|ping U0123${J}ABCD9 now
 EOF
+
+# #11720: PUB_* classes bind published paths (docs/, website/src/content/) only.
+while IFS='|' read -r id line; do
+  new_repo "pub-$id"
+  w docs/planted.md "$(eval "printf '%s' \"$line\"")"
+  expect "pub-hit-$id" 1 "FAIL $id: docs/planted.md:1"
+  w notes.md "$(eval "printf '%s' \"$line\"")"
+  ARGS="notes.md" expect "pub-unscoped-$id" 0 "0 baselined hit(s) — OK"
+done <<'EOF'
+PUB_IL_ID|goal xx${J}-T4d is next
+PUB_DECISION_ID|per the ruling D${J}8d the cap holds
+PUB_OWNER_RULING|kept by owner${J} ruling
+EOF
+
+new_repo pub-clean
+w website/src/content/tools/x.md 'ADR-0075 and #11720 amend SPEC-OKF-01 at c1eed98441d.' \
+  'Decisions D1 to D4 hold; see ADR-0028 D6 and Dashboard design (DOC-82).' \
+  'Deploy the Daemon; a non-owner cannot re-Add it; ADR-0041 Decision D2 stands.'
+expect pub-clean 0 "2 file(s) scanned, 0 baselined hit(s) — OK"
 
 new_repo baselined
 w notes.md "$HOST_LINE"
