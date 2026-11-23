@@ -70,7 +70,7 @@ pub struct PalaceRebuildSummary {
 ///
 /// Why: #4678 added two flags to a command that had one. Bundling them keeps
 /// [`handle_kg_rebuild`]'s existing one-argument signature intact — that
-/// function is public API of a crate `trusty-agents` links against, so
+/// function is public API of a crate `trusty-assistants` links against, so
 /// widening it in place would be a breaking change for a bug fix.
 /// What: the palace filter plus the maintenance switches — #4678's purge,
 /// #5401's twin merge, and the shared dry run. `Default` is an ordinary rebuild

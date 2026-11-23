@@ -417,7 +417,7 @@ impl SearchAppState {
     /// What: `store`s into the wait-free `ArcSwapOption` — never blocks a
     /// concurrent reader (`/health`) or writer.
     /// Test: `switchable_embedder_installed_alongside_embedder` in
-    /// `tests_state.rs`.
+    /// `state_tests.rs`.
     pub fn install_switchable_embedder(
         &self,
         switchable: Arc<crate::service::embedder_supervisor::SwitchableEmbedder>,

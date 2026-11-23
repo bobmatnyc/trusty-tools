@@ -117,7 +117,7 @@ Closes #<issue>
 **Examples:**
 - `feat(trusty-search): add branch-aware query routing (#456)`
 - `fix(trusty-memory): resolve race condition in concurrent writes`
-- `refactor(trusty-agents): extract validation logic to separate module`
+- `refactor(trusty-assistants): extract validation logic to separate module`
 - `perf(trusty-analyze): optimize KG expansion with caching`
 
 ## Per-Crate Versioning & Release

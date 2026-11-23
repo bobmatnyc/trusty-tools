@@ -41,7 +41,7 @@
 # trusty-* codesign flags and identifiers
 # (`crates/trusty-installer/src/commands/macos_signing/mod.rs`, #2558). This
 # script duplicates NO codesign logic, mirroring
-# `install-trusty-agents-signed.sh`'s `resolve_tctl()` delegation exactly.
+# `install-trusty-assistants-signed.sh`'s `resolve_tctl()` delegation exactly.
 #
 # Signing all three rather than just the primary binary is the #2721 lesson
 # applied directly: signing part of an install set leaves the rest ad-hoc and
@@ -56,7 +56,7 @@
 # `macos_signing::use_hardened_runtime`, which puts `MEMORY_SET` on
 # `SEARCH_SET`'s conservative side for exactly that reason.
 #
-# Fail-soft requirement (matching install-trusty-agents-signed.sh, not the
+# Fail-soft requirement (matching install-trusty-assistants-signed.sh, not the
 # hard-failing mpm/search scripts): a missing Developer ID certificate must
 # not abort the run.
 #   1. `cargo install --path crates/trusty-memory --locked` always runs and,
@@ -101,7 +101,7 @@ readonly BRIDGE_BIN="$CARGO_BIN_DIR/trusty-memory-mcp-bridge"
 # normalised onto `com.trusty.<stem>` — renaming one invalidates the binary's
 # designated requirement and re-triggers macOS TCC prompts (#2558). The
 # `*_IDENTIFIER=` naming is what marks them as codesign identifiers, matching
-# install-trusty-mpm-signed.sh and install-trusty-agents-signed.sh.
+# install-trusty-mpm-signed.sh and install-trusty-assistants-signed.sh.
 # #4868: the previous inline `-> com.trusty.…` narration carried no such marker,
 # so the drift scan read them as unowned launchd labels.
 readonly MEMORY_IDENTIFIER="com.trusty.trusty-memory"
@@ -143,7 +143,7 @@ detect_repo_root() {
 # an already-installed `tctl`/`trusty-installer` on PATH; falls back to
 # `cargo run -p trusty-installer` from the detected repo root so a fresh
 # checkout with no prior tctl install still works. Mirrors
-# `install-trusty-agents-signed.sh`'s `resolve_tctl()` exactly.
+# `install-trusty-assistants-signed.sh`'s `resolve_tctl()` exactly.
 resolve_tctl() {
     if command -v tctl >/dev/null 2>&1; then
         echo "tctl"

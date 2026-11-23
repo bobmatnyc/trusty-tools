@@ -532,6 +532,21 @@ impl TmuxDriver {
         Ok(())
     }
 
+    /// Press one named key (`Enter`, `C-u`) in a session/pane (#10747).
+    ///
+    /// Why: `session_send` types its text, checks the echo, and only then
+    /// presses Enter, or clears the box with `C-u` when the check fails.
+    /// What: one non-literal `send-keys` invocation with `key`.
+    /// Test: argv shape covered by `trusty_common::tmux`'s `send_keys_keyname_argv`.
+    pub fn send_key(&self, target: &TmuxTarget, key: &str) -> Result<()> {
+        self.run(&TmuxCommand::SendKeys {
+            target: target.clone(),
+            keys: key.to_string(),
+            literal: false,
+        })?;
+        Ok(())
+    }
+
     /// Send a Ctrl-C interrupt to a session/pane.
     ///
     /// Why: restarting Claude Code in place means interrupting the running

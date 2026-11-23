@@ -184,6 +184,8 @@ async fn index_status_over_the_socket_matches_the_http_body() {
     .await;
     let over_http = http_body(index_status_report(&state, INDEX).await);
     assert_eq!(over_socket["chunk_count"], serde_json::json!(3));
+    // #11651: the size-skip fields ride the shared status body.
+    assert_eq!(over_socket["skipped_for_size_total"], serde_json::json!(0));
     assert_eq!(over_socket, over_http);
 }
 

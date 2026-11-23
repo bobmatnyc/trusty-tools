@@ -1101,7 +1101,13 @@ fn fleet_init_fails_and_stops_the_architect_when_its_record_cannot_be_written() 
         "the unbound session runs on"
     );
     assert!(!env.has_session("tm-architect-poll"), "the poller started");
-    let pid = launch_pids(&env).pop().expect("the fake claude started");
+    // #10783: take the PID tm bound from its own error, not the fake's PID
+    // log — the kill can land before the fake `claude` appends its line.
+    let pid: u32 = stderr
+        .split("for claude pid ")
+        .nth(1)
+        .and_then(|rest| rest.split(':').next()?.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the fake claude started: {}", text(&out)));
     wait_gone(pid);
 }
 

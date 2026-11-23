@@ -6,7 +6,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const dir = new URL("../../extension/", import.meta.url);
-const sources = await Promise.all(["pages_read.js", "pages.js"].map(f => readFile(new URL(f, dir), "utf8")));
+const sources = await Promise.all(["pages_read.js", "emulation.js", "pages.js"].map(f => readFile(new URL(f, dir), "utf8")));
 const email = "qa@example.org";
 const READ = {scope_ref:null, max_chars:50000, viewport_only:false, include_text:false};
 const FIND = {role:null, name:"CHILD-LABEL", text:null, within_ref:null, limit:10};

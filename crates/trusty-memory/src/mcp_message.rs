@@ -47,7 +47,7 @@ pub async fn handle_message(state: &AppState, msg: Value) -> Value {
             "result": tools::tool_definitions_with(state.default_palace.is_some())
         }),
         // OpenRPC 1.3.2 discovery — see `openrpc.rs`. Returns the full
-        // service description so orchestrators (trusty-agents, etc.) can
+        // service description so orchestrators (trusty-assistants, etc.) can
         // introspect every tool and its required `memory.read`/`memory.write`
         // scope without bespoke per-server adapters.
         "rpc.discover" => json!({

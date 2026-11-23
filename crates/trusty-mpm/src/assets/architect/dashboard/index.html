@@ -783,6 +783,11 @@ html[data-mode="session"] [data-arch-only] { display: none !important; }
 .pj-owner { display: block; margin: 12px 0 6px; font-weight: 600; color: var(--ink-1); text-decoration: none; }
 .pj-owner:hover, .pj-owner:focus-visible { color: var(--accent); outline: none; text-decoration: underline; }
 .pj-owner .pj-sub { margin-left: 6px; font-weight: 400; }
+/* #10350: the Projects view's Secrets list, names only (design tokens only, per the Foundry UI rule) */
+.pj-keys { margin-top: 16px; }
+.pj-keys > summary { cursor: pointer; }
+.pj-keys .pj-row { cursor: default; }
+.pj-kn { font-family: var(--font-mono); font-size: var(--fs-xs); padding: 1px 8px; border-radius: var(--r-pill); border: 1px solid var(--line); color: var(--ink-1); overflow-wrap: anywhere; }
 .pj-filter { margin: 4px 0 8px; font-size: var(--fs-sm); color: var(--ink-2); }
 .pj-filter a { color: var(--accent); display: inline-block; min-height: var(--h-compact); line-height: var(--h-compact); margin-left: 8px; }
 .pj-back { margin: 0 0 8px; font-size: var(--fs-sm); }
@@ -1292,6 +1297,7 @@ html.lib-strip.rd-open body { padding-right: 0; }
         <p class="sx-note" id="pj-note" role="status" aria-live="polite">Loading…</p>
         <p class="pj-filter" id="pj-ownerbar" hidden><span id="pj-ownertxt"></span> <a href="#view/projects/open" id="pj-ownerclear">All projects</a></p>
         <div id="pj-list"></div>
+        <details class="pj-keys" id="pj-keys"><summary class="pj-owner">Secrets <span class="pj-sub">key names by owner/project; values are never read or shown</span></summary><div class="pj-bar"><button type="button" id="pj-keys-refresh">Refresh</button></div><p class="sx-note" id="pj-keys-note" role="status" aria-live="polite">Open to list key names.</p><div id="pj-keys-list"></div></details>
       </div>
       <div data-sub="project" data-subp="project" id="pj-detail">
         <p class="pj-back"><a href="#view/projects/open" id="pj-back">Projects</a></p>
@@ -8309,6 +8315,62 @@ html.lib-strip.rd-open body { padding-right: 0; }
   if (document.documentElement.dataset.mode !== "session") load();   /* the nav count needs the list before the category is opened */
 })();
 /* END projectsNav */
+/* BEGIN projectsKeyNames */
+/* #10350 (DOC-82 §10): the Secrets list on the Projects view, by owner/project, key names only. GET /api/projects/key-names
+   (scripts/dashboard_keynames.py runs `tm secrets list` per tm-registered project and keeps only key-name lines). Loaded only when
+   the list is opened, since each load runs tm once per project. The owner filter is the Projects view's own (#view/projects/owner:<key>):
+   an owner header links there. Every string is set with textContent, never markup. */
+(function () {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const box = $("pj-keys"); if (!box) return;
+  let data = null, busy = false;
+  function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function curOwner() { const m = /^#view\/projects\/(.+)$/.exec(location.hash || ""); let s = ""; if (m) { try { s = decodeURIComponent(m[1]); } catch (_) { s = ""; } } return s.indexOf("owner:") === 0 ? s.slice(6) : ""; }
+  const ownerHref = (k) => "#view/projects/" + encodeURIComponent("owner:" + k);
+  function names(list, host) {
+    if (!list.length) { host.appendChild(el("span", "pj-none", "no keys")); return; }
+    list.forEach((n) => { const c = el("code", "pj-kn", n.name); if (n.push_only) c.title = "push-only for agents"; host.appendChild(c); });
+  }
+  function render() {
+    const list = $("pj-keys-list"), own = curOwner();
+    list.replaceChildren();
+    if (!data) return;
+    let shown = 0;
+    data.owners.forEach((g) => {
+      if (own && g.key !== own) return;
+      const h = el("a", "pj-owner", g.owner || "No owner"); h.href = ownerHref(g.key);
+      h.appendChild(el("span", "pj-sub", "(" + g.projects.length + ")"));
+      list.appendChild(h);
+      g.vaults.forEach((v) => { const r = el("div", "pj-row"); r.append(el("span", "pj-id", v.vault), el("span", "pj-chip", "owner scope")); names(v.names, r); list.appendChild(r); });
+      g.projects.forEach((p) => {
+        const r = el("div", "pj-row"); r.appendChild(el("span", "pj-id", p.label));
+        if (p.vault) r.appendChild(el("span", "pj-sub", p.vault));
+        if (p.error) r.appendChild(el("span", "pj-chip pj-err", p.error)); else names(p.names, r);
+        list.appendChild(r); shown++;
+      });
+    });
+    const err = data.registry_error;
+    $("pj-keys-note").classList.toggle("pj-err", !!err);
+    $("pj-keys-note").textContent = (err ? "tm registry unreadable: " + err + ". " : "") + (own ? "Owner " + own + ": " : "") + shown + (shown === 1 ? " project" : " projects") + ". Key names only, listed at " + (data.at || "unknown") + "; values are never read or shown.";
+  }
+  async function load(refresh) {
+    if (busy) return; busy = true;
+    $("pj-keys-note").classList.remove("pj-err"); $("pj-keys-note").textContent = "Listing key names…";
+    try {
+      const r = await fetch("/api/projects/key-names" + (refresh ? "?refresh=1" : ""), { cache: "no-store" });
+      if (!r.ok) throw new Error(r.status === 404 ? "this dashboard server predates the Secrets list; it needs a restart" : "HTTP " + r.status);
+      const d = await r.json();
+      if (!d || !Array.isArray(d.owners)) throw new Error("unexpected reply (no owners list)");
+      data = d; render();
+    } catch (e) { data = null; $("pj-keys-list").replaceChildren(); $("pj-keys-note").classList.add("pj-err"); $("pj-keys-note").textContent = "Secrets list unavailable: " + e.message; }
+    busy = false;
+  }
+  box.addEventListener("toggle", () => { if (box.open && !data) load(false); });
+  $("pj-keys-refresh").addEventListener("click", () => load(true));
+  window.addEventListener("hashchange", () => { if (data) render(); });
+})();
+/* END projectsKeyNames */
 /* BEGIN projectsLifecycle */
 /* Archive / Decommission / Restore (ar-Tb3, the owner 2026-10-27 14:4xZ). Buttons sit only in an expanded project (the detail view) or an expanded archived
    row, and use the session-row vocabulary: `row cmd` with `rm` buttons, a `line` confirm sentence, `rm` yes/Cancel (the Park confirm), `err` text.
