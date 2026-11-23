@@ -1,0 +1,9 @@
+crate   trusty-architect
+version 0.4.1
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field Config.dry_run_state
+accept  constructible_struct_adds_field field Config.read_inbox
+accept  constructible_struct_adds_field field Config.tm_health_socket
+accept  constructible_struct_adds_field field Config.triage_rules
+accept  constructible_struct_adds_field field PaneInfo.screen
+accept  enum_variant_added variant InputState:Poll

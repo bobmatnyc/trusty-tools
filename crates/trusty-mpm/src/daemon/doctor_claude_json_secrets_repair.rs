@@ -42,7 +42,7 @@ pub fn repair_claude_json_secrets(config_dir: &Path, mode: RepairMode) -> Vec<Re
 /// `fix_leaves_the_file_untouched_when_the_store_refuses`,
 /// `fix_leaves_the_original_bytes_when_the_rewrite_fails`,
 /// `fix_dry_run_writes_nothing`, `fix_tightens_a_wide_file_and_its_backups`,
-/// `fix_is_silent_on_a_clean_dir`,
+/// `fix_is_silent_on_a_clean_dir`, `fix_tightens_a_wide_config_dir`,
 /// `fix_never_strips_a_third_party_servers_credential`.
 pub(crate) fn repair_with_store(
     config_dir: &Path,
@@ -94,6 +94,10 @@ pub(crate) fn repair_with_store(
     // Re-read: the migration tightens the file itself.
     if mode_of(&finding.path).is_some_and(is_wide) {
         steps.push(tighten(&finding.path, mode, ""));
+    }
+    // #11195: launch re-applies this; `--fix` does it now.
+    if finding.dir_too_wide() {
+        steps.push(tighten_dir(config_dir, mode));
     }
     for (sibling, _) in &finding.wide_siblings {
         steps.push(tighten(
@@ -256,6 +260,29 @@ fn tighten(path: &Path, mode: RepairMode, note: &str) -> RepairStep {
         Ok(()) => step(path, what, StepStatus::Applied { backup: None }),
         Err(e) => step(
             path,
+            what,
+            StepStatus::Failed(format!("chmod failed: {}", e.kind())),
+        ),
+    }
+}
+
+/// Plan or apply `chmod 700` on the config dir (#11195).
+fn tighten_dir(dir: &Path, mode: RepairMode) -> RepairStep {
+    let what = "tighten the directory to 0700".to_string();
+    if mode == RepairMode::DryRun {
+        return step(dir, what, StepStatus::Planned);
+    }
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+    };
+    #[cfg(not(unix))]
+    let result: std::io::Result<()> = Ok(());
+    match result {
+        Ok(()) => step(dir, what, StepStatus::Applied { backup: None }),
+        Err(e) => step(
+            dir,
             what,
             StepStatus::Failed(format!("chmod failed: {}", e.kind())),
         ),
