@@ -1,0 +1,3 @@
+Fixed
+- A corrupt vault blob no longer fails every Keychain read. A read falls back to the migration backup, then to the per-item items, prints a warning naming the source, and adds an audit record with `blob_fallback`; writes still refuse and the corrupt blob is left as it is. A key no fallback source holds is an error naming the key ([#11738](https://github.com/bobmatnyc/trusty-tools/issues/11738)).
+- The vault blob now carries a SHA-256 `digest` of its items, checked on read, so a blob changed after it was written counts as corrupt. A blob written before this change, with no digest, still reads ([#11738](https://github.com/bobmatnyc/trusty-tools/issues/11738)).

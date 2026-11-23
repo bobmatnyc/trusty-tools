@@ -11,8 +11,11 @@
 //! value bytes). [`BlobStore`] serves item reads and writes: while the blob
 //! item exists every item lives in it (migrated layout); while it is absent
 //! each item is its own Keychain item (the per-item layout, unchanged). A
-//! corrupt blob fails every call; it never falls back to per-item items,
-//! which may be stale. Writes are read-modify-write under one lock and land
+//! blob carries a SHA-256 `digest` of its items, checked on read; a blob
+//! without one (written before #11738) still reads. A corrupt or tampered
+//! blob fails every write and is never rewritten; a read falls back to the
+//! migration backup, then to the per-item items, and notes a
+//! [`BlobFallback`] (#11738). Writes are read-modify-write under one lock and land
 //! as one item write, so a write is never partial and two writes in this
 //! process never lose each other. Values are zeroed on drop.
 //! Test: `vault_blob_tests.rs` beside this file.
@@ -107,6 +110,7 @@ struct WireOut<'a> {
     format: &'a str,
     version: u32,
     items: Vec<(&'a str, &'a str, &'a str)>,
+    digest: String,
 }
 
 /// The serialized form, owned for reading.
@@ -116,6 +120,39 @@ struct WireIn {
     format: String,
     version: u32,
     items: Vec<(String, String, String)>,
+    // #11738: absent on a blob written before the digest existed.
+    #[serde(default)]
+    digest: Option<String>,
+}
+
+/// The lowercase hex SHA-256 of `items` as JSON (#11738). The JSON holds
+/// values, so it is zeroed on drop.
+fn digest_of<T: AsRef<str>>(items: &[(T, T, T)]) -> Result<String, ()> {
+    use sha2::{Digest, Sha256};
+    let rows: Vec<(&str, &str, &str)> = items
+        .iter()
+        .map(|(s, a, v)| (s.as_ref(), a.as_ref(), v.as_ref()))
+        .collect();
+    let json = Zeroizing::new(serde_json::to_string(&rows).map_err(|_| ())?);
+    let hash = Sha256::digest(json.as_bytes());
+    Ok(hash.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Which source a read used because the vault blob was corrupt (#11738).
+///
+/// What: a typed warning; it names a source, never a value. Printed to
+/// stderr when it happens and put on the call's audit record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BlobFallback {
+    /// The migration backup item.
+    Backup,
+    /// The per-item Keychain items.
+    PerItem,
+    /// A fallback a newer build records. Never written by this build.
+    #[serde(other)]
+    Other,
 }
 
 impl Blob {
@@ -157,30 +194,43 @@ impl Blob {
 
     /// The blob as versioned JSON.
     pub(crate) fn encode(&self) -> Result<Zeroizing<String>, SecretsError> {
+        let failed = || item_error(&ItemId::blob(), "the vault blob cannot be encoded");
+        let items: Vec<(&str, &str, &str)> = self
+            .0
+            .iter()
+            .map(|(id, v)| (id.service.as_str(), id.account.as_str(), v.as_str()))
+            .collect();
+        // #11738: the digest a read checks, so a tampered blob is corrupt.
+        let digest = digest_of(&items).map_err(|_| failed())?;
         let wire = WireOut {
             format: FORMAT,
             version: VERSION,
-            items: self
-                .0
-                .iter()
-                .map(|(id, v)| (id.service.as_str(), id.account.as_str(), v.as_str()))
-                .collect(),
+            items,
+            digest,
         };
         serde_json::to_string(&wire)
             .map(Zeroizing::new)
-            .map_err(|_| item_error(&ItemId::blob(), "the vault blob cannot be encoded"))
+            .map_err(|_| failed())
     }
 
     /// Parse `text` read from item `from`.
     ///
-    /// What: any parse failure, a foreign format, an unknown version or a
-    /// repeated item is one fixed error naming `from`; the parser's own
-    /// message is dropped, because it can quote value bytes.
+    /// What: any parse failure, a foreign format, an unknown version, a
+    /// digest that does not match the items, or a repeated item is one
+    /// fixed error naming `from`; the parser's own message is dropped,
+    /// because it can quote value bytes. A blob with no digest is checked
+    /// for the rest only (#11738, backward compatible).
     pub(crate) fn decode(from: &ItemId, text: &str) -> Result<Self, SecretsError> {
         let corrupt = || item_error(from, "the vault blob is corrupt");
         // #10524: never format the serde error; it may quote a value.
         let wire: WireIn = serde_json::from_str(text).map_err(|_| corrupt())?;
         if wire.format != FORMAT || wire.version != VERSION {
+            return Err(corrupt());
+        }
+        // #11738: a blob that parses but whose items were changed is corrupt.
+        if let Some(digest) = &wire.digest
+            && digest_of(&wire.items).map_err(|_| corrupt())? != *digest
+        {
             return Err(corrupt());
         }
         let mut blob = Self::default();
@@ -203,11 +253,13 @@ impl Blob {
 /// Why: see the module docs.
 /// What: one per process for the OS Keychain, so every caller shares the
 /// write lock. `Debug` names no item.
-/// Test: `blob_store_routes_by_layout`, `blob_store_corrupt_blob_fails_every_call`,
+/// Test: `blob_store_routes_by_layout`, `blob_store_corrupt_blob_fails_every_write`,
 /// `blob_store_concurrent_writes_keep_both`.
 pub struct BlobStore {
     items: Arc<dyn ItemStore>,
     writes: Mutex<()>,
+    // #11738: the latest read fallback, until the audit takes it.
+    fallback: Mutex<Option<BlobFallback>>,
 }
 
 impl fmt::Debug for BlobStore {
@@ -222,7 +274,26 @@ impl BlobStore {
         Self {
             items,
             writes: Mutex::new(()),
+            fallback: Mutex::new(None),
         }
+    }
+
+    /// Note `fallback` (#11738): one stderr warning naming the blob item and
+    /// the source, and the note the server's audit takes.
+    fn note_fallback(&self, fallback: BlobFallback) {
+        eprintln!(
+            "trusty-secrets: warning: the vault blob ({BLOB_SERVICE}/{BLOB_ACCOUNT}) is \
+             corrupt; read from {fallback:?}; the blob item is left as it is"
+        );
+        *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = Some(fallback);
+    }
+
+    /// Take the fallback noted since the last take, if any (#11738).
+    pub(crate) fn take_fallback(&self) -> Option<BlobFallback> {
+        self.fallback
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
     /// The raw item store, for migration.
@@ -250,11 +321,40 @@ impl BlobStore {
     }
 
     /// Item `id`'s value under the current layout.
+    ///
+    /// Why: #11738 — one damaged blob item failed every read until a manual
+    /// `tm secrets migrate --rollback`.
+    /// What: reads the blob. When it is corrupt or tampered, reads the
+    /// backup, else the per-item item, and notes a [`BlobFallback`]; the
+    /// blob item is left untouched. A key the fallback source does not hold
+    /// is the blob's fixed corrupt error naming `id`, never `None`, because
+    /// the corrupt blob may hold it.
+    /// Test: `blob_store_corrupt_blob_reads_the_backup`,
+    /// `blob_store_corrupt_blob_without_backup_reads_per_item`,
+    /// `blob_store_tampered_blob_reads_the_backup`.
     pub(crate) fn get(&self, id: &ItemId) -> Result<Option<Zeroizing<String>>, SecretsError> {
-        match self.read_blob()? {
-            Some(blob) => Ok(blob.get(id).map(|v| Zeroizing::new(v.to_owned()))),
-            None => self.items.read(id),
+        let Some(text) = self.items.read(&ItemId::blob())? else {
+            return self.items.read(id);
+        };
+        if let Ok(blob) = Blob::decode(&ItemId::blob(), &text) {
+            return Ok(blob.get(id).map(|v| Zeroizing::new(v.to_owned())));
         }
+        // #11738: a corrupt blob falls back to the backup, then per-item.
+        let missing = || {
+            item_error(
+                id,
+                "the vault blob is corrupt and neither the backup nor a per-item item holds this key",
+            )
+        };
+        if let Ok(Some(backup)) = self.read_blob_at(&ItemId::backup()) {
+            self.note_fallback(BlobFallback::Backup);
+            if let Some(value) = backup.get(id) {
+                return Ok(Some(Zeroizing::new(value.to_owned())));
+            }
+        } else {
+            self.note_fallback(BlobFallback::PerItem);
+        }
+        self.items.read(id)?.map(Some).ok_or_else(missing)
     }
 
     /// Set (`Some`) or remove (`None`) item `id` under the current layout;
