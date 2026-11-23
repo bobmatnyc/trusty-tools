@@ -311,3 +311,46 @@ async fn a_timeout_is_typed_and_leaves_the_log_alone() {
     assert_eq!(llm.requests().len(), 1, "the request was in flight");
     assert_eq!(std::fs::read(log.path()).unwrap(), before);
 }
+
+/// #11650 item 6: a configured server with no allowlisted tool is never
+/// spawned by an ask; an allowlisted server still is. Each server is a script
+/// that leaves a marker when it starts.
+#[cfg(unix)]
+#[tokio::test]
+async fn only_servers_with_allowlisted_tools_are_spawned() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let mut servers = String::new();
+    let mut markers = Vec::new();
+    for name in ["trusty-search", "slack"] {
+        let marker = tmp.path().join(format!("{name}.started"));
+        let script = tmp.path().join(format!("{name}.sh"));
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        servers.push_str(&format!(
+            "[[servers]]\nname = {name:?}\n[servers.transport]\ntype = \"stdio\"\ncommand = {:?}\n",
+            script.display().to_string()
+        ));
+        markers.push(marker);
+    }
+    let servers_toml = tmp.path().join("servers.toml");
+    std::fs::write(&servers_toml, servers).unwrap();
+
+    let llm = Arc::new(Scripted::new(vec![text("ok")]));
+    AskEngine::new(home, llm.clone())
+        .with_mcp_config(servers_toml)
+        .ask("hi")
+        .await
+        .unwrap();
+    assert!(markers[0].exists(), "the allowlisted server is started");
+    assert!(
+        !markers[1].exists(),
+        "a server with no allowlisted tool must not start"
+    );
+}

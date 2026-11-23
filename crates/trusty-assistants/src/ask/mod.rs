@@ -47,7 +47,9 @@ pub use config::{
 };
 pub use error::AskError;
 pub use okg_search::{OKG_SEARCH_TOOL_NAME, OkgSearchTool};
-pub use tools::{AskTools, Exclusion, READ_ONLY_MCP_TOOLS, build_registry, classify};
+pub use tools::{
+    AskTools, Exclusion, READ_ONLY_MCP_TOOLS, build_registry, classify, serves_read_only_tools,
+};
 pub use turn_log::{LoadedLog, Recovery, TURN_LOG_FILE, TurnLog, TurnRecord, replay_window};
 
 /// Answer `question` as the instance whose home is `home`.
@@ -203,10 +205,15 @@ impl AskEngine {
     }
 
     /// Load the MCP tool set from this engine's source.
+    ///
+    /// What: #11650 — spawns only the servers with at least one allowlisted
+    /// tool ([`serves_read_only_tools`]); the others are never started.
+    /// Test: `tests::engine_tests::only_servers_with_allowlisted_tools_are_spawned`.
     async fn load_mcp(&self, project_root: &Path) -> McpToolSet {
+        let wanted = |server: &str| serves_read_only_tools(server);
         match &self.mcp {
-            McpSource::Live => McpToolSet::load(project_root).await,
-            McpSource::At(path) => McpToolSet::load_at(path, project_root).await,
+            McpSource::Live => McpToolSet::load_only(project_root, &wanted).await,
+            McpSource::At(path) => McpToolSet::load_at_only(path, project_root, &wanted).await,
         }
     }
 }

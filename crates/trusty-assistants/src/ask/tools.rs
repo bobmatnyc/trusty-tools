@@ -177,6 +177,17 @@ pub fn is_read_only(composed: &str) -> bool {
     })
 }
 
+/// Whether the server named `server` contributes any allowlisted tool.
+///
+/// Why: #11650 — the ask engine spawns only these servers; any other server
+/// could only contribute tools the allowlist drops.
+/// Test: `super::tests::engine_tests::only_servers_with_allowlisted_tools_are_spawned`.
+pub fn serves_read_only_tools(server: &str) -> bool {
+    READ_ONLY_MCP_TOOLS
+        .iter()
+        .any(|(name, tools)| *name == server && !tools.is_empty())
+}
+
 /// The reason an off-allowlist tool is excluded. Only the message depends on
 /// the name; the decision is [`is_read_only`] alone.
 fn exclusion_reason(composed: &str) -> &'static str {
