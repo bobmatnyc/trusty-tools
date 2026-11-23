@@ -42,6 +42,8 @@ pub mod session_registration;
 pub mod store;
 pub mod worktree_adoption;
 pub mod worktree_policy;
+// #10592: ledger-only removal of adopted worktrees.
+pub mod worktree_unadopt;
 
 pub use project_key::{
     accepted_index_ids_for, assign_project_key, index_id_for_registered_root, index_id_for_root_in,
@@ -69,3 +71,4 @@ pub use worktree_policy::{
     worktree_enabled_for_origin, worktree_enabled_for_origin_at, worktree_enabled_for_project,
     worktree_enabled_in, worktree_override_in_project,
 };
+pub use worktree_unadopt::{UnadoptReport, unadopt_paths};

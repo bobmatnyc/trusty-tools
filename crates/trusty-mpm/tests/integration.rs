@@ -41,6 +41,8 @@ mod orphan_gc_sweep;
 mod pid_registry_sweep;
 mod project_registry_routes;
 mod project_status_route;
+// #10592: `tm project unadopt` edits the adoption ledger only.
+mod project_unadopt_10592;
 mod projects_json_concurrency;
 mod proxy_routes;
 mod push_guard_hook;
