@@ -126,6 +126,22 @@ pub fn window_state(clicks: u64) -> Value {
     })
 }
 
+/// The base64 image the fake daemon attaches (a 1x1 PNG).
+pub const FAKE_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/// `snap` as cua-driver 0.23.2 answers `args`: an image part is appended
+/// unless `include_screenshot` is false (the driver default is true), or
+/// always when `force` (a driver that ignores the flag).
+pub fn with_capture(mut snap: Value, args: &Value, force: bool) -> Value {
+    if force || args.get("include_screenshot") != Some(&json!(false)) {
+        let image = json!({"type": "image", "data": FAKE_PNG, "mimeType": "image/png"});
+        if let Some(parts) = snap["content"].as_array_mut() {
+            parts.push(image);
+        }
+    }
+    snap
+}
+
 #[derive(Debug, Default)]
 struct Shared {
     calls: Vec<(String, Value)>,
@@ -137,8 +153,9 @@ struct Shared {
     readback_broken: bool,
     /// `structuredContent.effect` of every non-snapshot result.
     effect: Option<String>,
-    /// `get_window_state` answers text only (`"text_only"`) or an `isError`
-    /// result carrying the whole tree (`"refused"`).
+    /// `get_window_state` answers text only (`"text_only"`), an `isError`
+    /// result carrying the whole tree and an image (`"refused"`), or attaches
+    /// an image even when asked for none, to every reply (`"image_always"`).
     snapshot_mode: Option<&'static str>,
 }
 
@@ -282,8 +299,9 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     if name == "get_window_state" && state.readback_broken {
         return json!({"ok": false, "error": "snapshot failed", "exit_code": 1});
     }
-    if name == "get_window_state" && state.snapshot_mode.is_some() {
-        let mut snap = window_state(0);
+    let force_image = matches!(state.snapshot_mode, Some("refused" | "image_always"));
+    if name == "get_window_state" && matches!(state.snapshot_mode, Some("text_only" | "refused")) {
+        let mut snap = with_capture(window_state(0), &args, force_image);
         let obj = snap.as_object_mut().expect("object");
         obj.remove("structuredContent");
         if state.snapshot_mode == Some("refused") {
@@ -293,7 +311,8 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
     }
     if name == "get_window_state" {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
-        return json!({"ok": true, "result": window_state(clicks)});
+        let snap = with_capture(window_state(clicks), &args, force_image);
+        return json!({"ok": true, "result": snap});
     }
     let token = args.get("element_token").and_then(Value::as_str);
     if let Some(fixture) = state.fixture.as_mut() {
@@ -309,12 +328,15 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
             fixture.set_text(&text);
         }
     }
-    match &state.effect {
-        Some(effect) => {
-            json!({"ok": true, "result": {"tool": name, "ok": true, "structuredContent": {"effect": effect}}})
-        }
-        None => json!({"ok": true, "result": {"tool": name, "ok": true}}),
+    let mut result = match &state.effect {
+        Some(effect) => json!({"tool": name, "ok": true, "structuredContent": {"effect": effect}}),
+        None => json!({"tool": name, "ok": true}),
+    };
+    if state.snapshot_mode == Some("image_always") {
+        result["content"] = json!([{"type": "text", "text": "done"}]);
+        result = with_capture(result, &args, true);
     }
+    json!({"ok": true, "result": result})
 }
 
 /// Send one NDJSON request to `socket` and read one reply line.
