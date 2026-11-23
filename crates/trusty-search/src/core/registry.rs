@@ -1022,7 +1022,7 @@ impl IndexRegistry {
     /// What: wraps `DashMap::remove`; returns `(true, Some(handle))` when the
     /// id was present, `(false, None)` otherwise.
     /// Test: `registry_remove_and_get_returns_handle_atomically` in
-    /// `service::server::tests_state`.
+    /// `service::server::state_tests`.
     pub fn remove_and_get(&self, id: &IndexId) -> (bool, Option<Arc<IndexHandle>>) {
         match self.indexes.remove(id) {
             Some((_k, handle)) => (true, Some(handle)),

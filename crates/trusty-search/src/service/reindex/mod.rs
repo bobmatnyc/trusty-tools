@@ -95,7 +95,7 @@ pub(crate) mod validate;
 /// `crate::service::reindex::ReindexProgress` / `ReindexStatus` keep working.
 ///
 /// Why: `server::state`, `server::status`, `server::reindex_handlers`, and
-/// `server::tests_state` all import these types directly from this module.
+/// `server::state_tests` all import these types directly from this module.
 /// What: re-exports from `progress` submodule.
 /// Test: compilation of the consumer files is the gate.
 pub use progress::{ReindexProgress, ReindexStatus};
