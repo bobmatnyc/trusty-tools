@@ -39,7 +39,7 @@ use super::doctor_daemon_row::{self, DaemonReachability};
 /// [`project_header`] line naming the project it checked (#10565), one
 /// status-tagged line per check, appends the daemon rows from
 /// [`daemon_rows`], the `fleet_seed_wiring` row (#11058) and the `gcloud_auth` row (#8371, which spawns `gcloud`
-/// only under `--network`), the `hook-interpreter` and `notify-supervisor-asset`
+/// only under `--network`), the `secrets_signature` row (#11580), the `hook-interpreter` and `notify-supervisor-asset`
 /// rows over the machine-wide settings list (#10263), the `notification_hook`
 /// row over the managed settings (#10885), and folds every status
 /// into one overall verdict. When
@@ -106,6 +106,10 @@ pub(crate) async fn doctor(
     let gcloud = super::doctor_gcloud::gcloud_auth_row(flags.network).await;
     overall = overall.worst(gcloud.status);
     print_check(&gcloud);
+    // #11580: a re-signed trusty-secrets against the vault ACLs' pinned cdhash.
+    let secrets_sig = super::doctor_secrets_signature::secrets_signature_row();
+    overall = overall.worst(secrets_sig.status);
+    print_check(&secrets_sig);
     // #10263: bare-script hook commands, over the list `--fix` repairs.
     let settings_files = super::doctor_repair::machine_wide_settings_files(
         project_dir.as_deref(),

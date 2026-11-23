@@ -69,6 +69,8 @@ mod tm_compress_pipe;
 // #10425: `tm doctor --fix --dry-run` / `--only`, `tm validate --repair --dry-run`.
 mod tm_doctor_fix_dry_run;
 mod tm_doctor_network;
+// #11580: the secrets_signature row against codesign/security shims.
+mod tm_doctor_secrets_signature;
 mod tm_doctor_standalone;
 mod tm_register_url_id_10569;
 // #9822: `tm architect <verb>` against the Python goldens, fake tmux.

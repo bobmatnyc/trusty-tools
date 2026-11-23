@@ -114,6 +114,8 @@ pub(crate) mod doctor_local;
 pub(crate) mod doctor_orphan;
 // #4948: the `tm doctor --fix` driver — dry-run by default, `--yes` to write.
 pub(crate) mod doctor_repair;
+// #11580: trusty-secrets code-signature drift against the vault ACLs.
+pub(crate) mod doctor_secrets_signature;
 pub(crate) mod doctor_stale;
 // #9007: live records of unbound sessions waiting for the age-based stale.
 pub(crate) mod doctor_unbound_delegations;
