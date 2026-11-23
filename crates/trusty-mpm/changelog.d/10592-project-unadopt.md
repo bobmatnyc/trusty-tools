@@ -1,0 +1,2 @@
+Added
+- `tm project unadopt <path>... [--dry-run]` removes worktrees from the adoption ledger (`project-registry/worktrees.json`) by path. It never edits or deletes a worktree folder or git metadata, and a ledger that cannot be read or written fails the command with the ledger unchanged. `tm project init --help` and the canonical-clones guide now list init's git metadata changes and how to reverse each one.

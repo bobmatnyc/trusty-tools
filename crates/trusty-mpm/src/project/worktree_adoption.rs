@@ -203,6 +203,22 @@ impl AdoptionStore {
         RecordOutcome::Recorded
     }
 
+    /// Drop the record whose path is one of `candidates`, returning it (#10592).
+    ///
+    /// Why: `tm project unadopt` needs the one removal primitive; the store's
+    /// entries stay private so nothing else can edit them.
+    /// What: removes the first entry whose `path` equals a candidate. It edits
+    /// this in-memory value only; a caller publishes through
+    /// [`update`](Self::update).
+    /// Test: `unadopt_removes_only_the_named_record_and_keeps_the_folder`.
+    pub fn remove_path(&mut self, candidates: &[PathBuf]) -> Option<AdoptedWorktree> {
+        let idx = self
+            .entries
+            .iter()
+            .position(|e| candidates.contains(&e.path))?;
+        Some(self.entries.remove(idx))
+    }
+
     /// Run one read-modify-write against `<dir>/worktrees.json` under a lock
     /// (#7357).
     ///
