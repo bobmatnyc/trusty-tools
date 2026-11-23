@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [1.1.0] — 2026-11-23
+
+### Added
+
+- `trusty-search status --json` carries `healthy` (`true` when the daemon answers) and a separate `unhealthy_indexes` list of held, degraded, failed or unreadable indexes. The not-running body is `{"daemon":"not_running","healthy":false}` and still exits non-zero.
+- `index_status` (HTTP, MCP, socket) reports `skipped_files` (path, size_bytes, reason `exceeds_size_limit`; first 100) and `skipped_for_size_total` for files the walker refused for size, which were previously dropped with no record (#11651).
+
+### Fixed
+
+- `trusty-search doctor` checks the model cache at the path the live embedder uses (`~/.cache/fastembed`, or `FASTEMBED_CACHE_DIR`) and for the model it loads, so a cached model no longer reads as missing (#10590).
+- `trusty-search doctor` reads the Claude Code MCP registration from `~/.claude.json`, `CLAUDE_CONFIG_DIR` and the trusty-mpm managed tier, so a managed-profile registration no longer reads as absent. A registration missing from every tier still warns (#10590).
+- The reopen-versus-delete race test now waits on the queued DELETE instead of a fixed sleep, so it no longer flakes on a slow runner (#10938). Test-only; no runtime behavior change.
+- docs.rs builds the trusty-search docs again: the `reads::IndexScoped` module-level intra-doc link now names its full path (#11451).
+- A watcher rescan reconcile given its root through a symlink alias (macOS `/var` -> `/private/var`) now indexes the changed files; it returned Ok with zero stats and indexed nothing (#11456).
+
+### Documentation
+
+- Comments and examples use neutral `acme-*` index ids instead of a real organisation's repository names.
+
 ## [1.0.1] — 2026-11-16
 
 ### Fixed
