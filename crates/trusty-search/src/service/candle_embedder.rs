@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config, HiddenAct, DTYPE};
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
 
 /// HuggingFace repo id for the sentence-transformers MiniLM model.
@@ -74,7 +74,12 @@ impl CandleEmbedder {
         let metal = matches!(device, Device::Metal(_));
         tracing::info!("embedder: candle/{}", if metal { "metal" } else { "cpu" });
 
-        let api = Api::new().context("hf_hub api init")?;
+        // #10866: hf-hub 0.5 resolves HF's relative 307; `from_env` keeps
+        // HF_HOME, which 0.5's `Api::new()` ignores. Its blob lock gives up
+        // after ~5 s, so first-use downloads in one process are serialized.
+        static FETCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let fetch_guard = FETCH.lock().unwrap_or_else(|p| p.into_inner());
+        let api = ApiBuilder::from_env().build().context("hf_hub api init")?;
         let repo = api.repo(Repo::new(MODEL_REPO.to_string(), RepoType::Model));
         let config_filename = repo.get("config.json").context("download config.json")?;
         let tokenizer_filename = repo
@@ -83,6 +88,7 @@ impl CandleEmbedder {
         let weights_filename = repo
             .get("model.safetensors")
             .context("download model.safetensors")?;
+        drop(fetch_guard);
 
         let config_bytes = std::fs::read(&config_filename).context("read config.json")?;
         let mut config: Config =
