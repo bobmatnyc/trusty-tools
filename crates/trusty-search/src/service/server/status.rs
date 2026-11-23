@@ -365,7 +365,8 @@ pub(crate) async fn index_status_report(
         "indexing"
     } else if hold.is_some() {
         "held"
-    } else if stages_snapshot.any_failed() || !faults.is_empty() {
+    } else if stages_snapshot.any_failed() || !faults.is_empty() || walk_diag.walk_refused {
+        // #10692: a refused walk leaves Ready lanes serving a stale corpus.
         "degraded"
     } else {
         "ready"
@@ -414,6 +415,14 @@ pub(crate) async fn index_status_report(
     // #9235: BM25 corpus-cap truncation, distinct from `chunks_dropped_by_cap`
     // (the chunk cap) and from the search meta's `bm25_lane_degraded`.
     let bm25 = indexer.bm25_truncation().await;
+    // #10692: why `status` reads degraded after a refused walk, or null.
+    let walk_refused = walk_diag.walk_refused;
+    let degraded_reason = walk_refused.then(|| {
+        format!(
+            "walk refused: {}",
+            walk_diag.last_walk_error.as_deref().unwrap_or_default()
+        )
+    });
     let mut body = serde_json::json!({
         "index_id": index_id.0,
         "root_path": handle.root_path,
@@ -484,6 +493,8 @@ pub(crate) async fn index_status_report(
     // macro, which is at its recursion limit. `window: null` means either no
     // embed pass has run yet, or the embedder reports none (nothing counted).
     let embed_window = indexer.embed_window_stats();
+    body["walk_refused"] = walk_refused.into();
+    body["degraded_reason"] = degraded_reason.into();
     body["embed_window"] = serde_json::json!({
         "window": embed_window.window(),
         "truncated": embed_window.truncated(),

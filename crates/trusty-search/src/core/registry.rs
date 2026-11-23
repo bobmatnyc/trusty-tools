@@ -591,6 +591,11 @@ pub struct WalkDiagnostics {
     /// error.  `None` on a clean walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_walk_error: Option<String>,
+    /// #10692: the last walk was refused over the index budget, so the corpus
+    /// is stale even when every lane still reads Ready. Cleared at walk start.
+    /// Test: `refused_walk_keeps_ready_stages_ready` in `tests/index_budget_env.rs`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub walk_refused: bool,
     /// #7434: index roots absent (or not directories) at the last walk.
     ///
     /// Why: a multi-root index whose additional root is unmounted still walks
@@ -633,6 +638,18 @@ pub struct SkippedFile {
 }
 
 impl WalkDiagnostics {
+    /// #10692: a new walk starts with no error and no refusal on record.
+    pub fn clear_walk_outcome(&mut self) {
+        self.last_walk_error = None;
+        self.walk_refused = false;
+    }
+
+    /// #10692: record an over-budget refusal; `/health` and status read it.
+    pub fn record_refusal(&mut self, reason: String) {
+        self.last_walk_error = Some(reason);
+        self.walk_refused = true;
+    }
+
     /// #11651: replace the size-skip record with `oversized` (path, bytes).
     ///
     /// Why: a file over the size cap is never indexed and was invisible.
