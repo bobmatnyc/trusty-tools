@@ -208,7 +208,8 @@ pub enum RescanError {
 ///
 /// Test: `rescan_reconcile_indexes_files_written_during_the_gap`,
 /// `rescan_reconcile_drops_files_deleted_during_the_gap`,
-/// `rescan_reconcile_skips_files_whose_content_did_not_change`.
+/// `rescan_reconcile_skips_files_whose_content_did_not_change`,
+/// `rescan_reconcile_keys_files_under_a_symlinked_root_alias`.
 pub async fn reconcile_after_rescan(
     index_id: &IndexId,
     canonical_root: &Path,
@@ -216,8 +217,13 @@ pub async fn reconcile_after_rescan(
     indexer: &Arc<RwLock<CodeIndexer>>,
     indexed_files: &IndexedFiles,
 ) -> Result<RescanStats, RescanError> {
+    // #11456: the unfiltered walk emits canonicalized paths, so a root passed
+    // through a symlink alias (macOS `/var` -> `/private/var`) keyed nothing
+    // and the pass returned Ok with zero stats. Resolve it as the walker does.
+    let canonical_root =
+        std::fs::canonicalize(canonical_root).unwrap_or_else(|_| canonical_root.to_path_buf());
     // #7434: a single-root index is the one-entry case of the root table.
-    let roots = [WatchedRoot::from_pair(canonical_root, raw_root)];
+    let roots = [WatchedRoot::from_pair(&canonical_root, raw_root)];
     reconcile_with_policy(index_id, &roots, indexer, indexed_files, None).await
 }
 
