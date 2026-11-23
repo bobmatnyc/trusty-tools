@@ -53,6 +53,7 @@ export const KIND_TEXT = {
   remote_refused: 'The secrets server refused a remote-gate call.',
   gate_refused: 'The secrets server refused a caller that is not the remote gate.',
   keychain_access_prompt: 'The Keychain did not answer (a prompt may be open); outcome unknown, verify with tm secrets list.',
+  keychain_no_session: 'The secrets server has no macOS login session, so it cannot reach the Keychain; unlock the login keychain or restart it from a GUI terminal.',
   internal: 'The secrets server failed.',
 };
 

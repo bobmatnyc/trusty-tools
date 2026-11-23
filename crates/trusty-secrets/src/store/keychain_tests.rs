@@ -207,3 +207,57 @@ fn keychain_backend_runs_every_call_under_the_time_limit() {
         }
     }
 }
+
+/// Why: #10589 — only the statuses a process outside the GUI login session
+/// gets are folded to `KeychainNoSession`; a miss or a denial is not.
+/// Test: itself.
+#[test]
+fn keychain_no_session_statuses_are_classified() {
+    for status in [-25308, -25291, -25294] {
+        assert!(is_no_session_status(status), "{status}");
+    }
+    for status in [0, -25300, -25293, -128] {
+        assert!(!is_no_session_status(status), "{status}");
+    }
+}
+
+/// Why: #10589 — `errSecInteractionNotAllowed` from an SSH-spawned server
+/// reached the caller as a generic backend failure. Any other platform
+/// error keeps the `Backend` arm.
+/// Red before the fix: both errors mapped to `SecretsError::Backend`.
+/// Test: itself.
+#[cfg(target_os = "macos")]
+#[test]
+fn keychain_interaction_not_allowed_maps_to_no_session() {
+    let id = ItemId::new("trusty/acme/web", "API_KEY");
+    let platform = |code| {
+        keyring::Error::PlatformFailure(Box::new(security_framework::base::Error::from_code(code)))
+    };
+    match os_error(&id, &platform(-25308)) {
+        SecretsError::KeychainNoSession { vault, key, status } => {
+            assert_eq!(
+                (vault.as_str(), key.as_str(), status),
+                ("trusty/acme/web", "API_KEY", -25308)
+            );
+        }
+        other => panic!("expected KeychainNoSession, got {other:?}"),
+    }
+    assert!(matches!(
+        os_error(&id, &platform(-25293)),
+        SecretsError::Backend { .. }
+    ));
+    assert!(matches!(
+        map_read(&id, Err(platform(-25308))),
+        Err(SecretsError::KeychainNoSession { .. })
+    ));
+}
+
+/// Why: #10589 — the doctor probe writes and removes one item from this
+/// process. Touches the real login Keychain, so it is ignored by default.
+/// Test: itself.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "touches the real macOS Keychain"]
+fn keychain_real_probe_round_trips() {
+    KeychainBackend::new().probe().unwrap();
+}
