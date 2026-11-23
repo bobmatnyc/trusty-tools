@@ -116,7 +116,8 @@ impl OpportunityRow {
             session_id: session_id.to_string(),
             event: event.to_string(),
             tool_type: tool_type.to_string(),
-            tool_name: tool_name.to_string(),
+            // #11563: never a path or pattern from the command line.
+            tool_name: ledger_tool_name(tool_name),
             bytes_returned,
             bytes_scanned,
             would_compress_bytes,
@@ -385,6 +386,41 @@ pub struct TaggedSavingsRow<'a> {
     /// #11507: how many steps that chain has; omitted outside a chain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steps: Option<usize>,
+}
+
+/// Programs whose second word is a subcommand verb, never an argument (#11563).
+const VERB_PROGRAMS: &[&str] = &[
+    "git", "cargo", "gh", "npm", "pnpm", "yarn", "go", "docker", "kubectl", "uv", "tm",
+];
+
+/// The `tool_name` a savings or opportunity ledger row may store (#11563).
+///
+/// Why: the dispatch key is `<program> <second token>`, so `ls <path>` or
+/// `grep -n <pattern>` put a path or a search pattern in local ledgers that
+/// `tm savings status`, doctor and bug reports read.
+/// What: the first word's basename, plus the second word only when the program
+/// is in [`VERB_PROGRAMS`] and the word is verb-shaped (lowercase ASCII letter
+/// first, then letters, digits or `-`). A one-word name (`Read`, `mcp__a__b`)
+/// is returned unchanged. Applied at write time only; old rows stay as written.
+/// Test: `ledger_tool_name_keeps_verbs_and_drops_paths_and_patterns`,
+/// `a_compress_row_never_stores_a_path_or_pattern`.
+pub fn ledger_tool_name(tool_name: &str) -> String {
+    let mut words = tool_name.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let program = first.rsplit('/').next().unwrap_or(first);
+    let verb_shaped = |w: &str| {
+        w.starts_with(|c: char| c.is_ascii_lowercase())
+            && w.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    match words.next() {
+        Some(verb) if VERB_PROGRAMS.contains(&program) && verb_shaped(verb) => {
+            format!("{program} {verb}")
+        }
+        _ => program.to_string(),
+    }
 }
 
 /// The category a Claude Code tool name belongs to.

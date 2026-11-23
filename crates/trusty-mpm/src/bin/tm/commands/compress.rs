@@ -155,10 +155,10 @@ fn parse_exit_sentinel(line: &str) -> Option<i32> {
 /// tm compress --tool "cargo test" < /tmp/gate.txt   # only when non-zero
 /// ```
 ///
-/// The exit-0 contract itself is deliberate and unchanged — callers rely on
-/// this filter never failing them. #4837: the comment previously justified it
-/// as never breaking a pipeline's exit-code semantics, which is backwards. See
-/// `assets/agents/BASE-AGENT.md`, "Never end a gate chain in a pipe".
+/// #11572: a stdin that ends in the #7384 exit sentinel (the hook rewrite's
+/// shape) is the exception — this returns that status, so the rewritten
+/// pipeline exits as the original command did. Without a sentinel it returns
+/// 0. See `assets/agents/BASE-AGENT.md`, "Never end a gate chain in a pipe".
 /// What: Blocks until stdin reaches EOF (this is intentional — the whole
 /// point is to wait for the wrapped command to finish producing output), via
 /// [`tokio::io::AsyncReadExt::read_to_string`] rather than a synchronous
@@ -176,12 +176,13 @@ fn parse_exit_sentinel(line: &str) -> Option<i32> {
 /// accepts the full buffer (a trusty-review-flagged robustness gap, PR
 /// #1968 — `print!`'s panic-on-write-failure behavior is unrecoverable in a
 /// pipe filter, whereas `?` degrades to a clean non-zero exit).
-/// Test: See module tests; `tm compress` has no daemon-only tracing
+/// Test: `tm_compress_rewrite_exits_with_the_wrapped_commands_status` (#11572).
+/// See module tests; `tm compress` has no daemon-only tracing
 /// subscriber from `main()` (that only inits for `Daemon`/`Supervisor`), so
 /// this function installs its own stderr-writing subscriber via
 /// `try_init()` — idempotent, safe to call from every invocation including
 /// under `cargo test`.
-pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
+pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<i32> {
     init_stats_log_subscriber();
 
     let mut stdin_text = String::new();
@@ -189,7 +190,9 @@ pub(crate) async fn run_compress(tool: &str) -> anyhow::Result<()> {
     // #7384: the wrapped command's status rides in on a trailing sentinel line;
     // strip it here so it never reaches the caller's output.
     let (input, exit) = split_exit_sentinel(&stdin_text);
-    compress_and_emit(tool, input, exit).await
+    compress_and_emit(tool, input, exit).await?;
+    // #11572: the wrapped command's status, so a failure stays a failure.
+    Ok(exit.unwrap_or(0))
 }
 
 /// Compress `input`, record the run in both ledgers, and write it to stdout.
