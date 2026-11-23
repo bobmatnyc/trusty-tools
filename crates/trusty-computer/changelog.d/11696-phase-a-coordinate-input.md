@@ -1,0 +1,4 @@
+Added
+- `computer_click_at` and `computer_drag` MCP tools (broker tools `click_at` and `drag_at`, FILTER): a left click or left-button drag at window-local coordinates of the granted window. Both need the one grant flag `coordinate_input`; neither is a default tool, and neither can be granted by its own name (#11696).
+- Delegation-authority bound: the broker reads the granted window's frame from the daemon as the last gate before each event and refuses `coordinates_out_of_bounds` for any point outside it, so a window that shrank since the agent last looked cannot take a click outside the delegated scope. A frame the daemon cannot prove is refused `frame_unavailable`; the frame is recorded in the audit `forward` line (#11696).
+- A drag is delivered in the foreground (cua-driver 0.23.2 refuses a background drag): it activates the target app, and its audit line records `activates_app: true`. The bounded daemon manifest lists `drag` in its tool ceiling (#11696).

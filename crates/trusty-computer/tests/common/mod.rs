@@ -168,6 +168,8 @@ struct Shared {
     /// or answers a tree with a password field (`"secure"`) or a degraded
     /// tree (`"degraded"`).
     snapshot_mode: Option<&'static str>,
+    /// #11696: `screenshot_width` and `screenshot_height` of every later capture.
+    frame: Option<(f64, f64)>,
 }
 
 /// A fake daemon serving NDJSON on a Unix socket.
@@ -189,6 +191,7 @@ impl FakeDaemon {
             readback_broken: false,
             effect: None,
             snapshot_mode: None,
+            frame: None,
         }));
         let (state, version_owned) = (Arc::clone(&shared), version.to_owned());
         thread::spawn(move || {
@@ -236,6 +239,11 @@ impl FakeDaemon {
     /// Answer every later `get_window_state` as [`Shared::snapshot_mode`] says.
     pub fn set_snapshot_mode(&self, mode: &'static str) {
         self.lock().snapshot_mode = Some(mode);
+    }
+
+    /// Report a `width` x `height` window in every later capture (#11696).
+    pub fn set_frame(&self, width: f64, height: f64) {
+        self.lock().frame = Some((width, height));
     }
 
     /// The fixture's current state.
@@ -324,6 +332,10 @@ fn answer(req: &Value, shared: &Mutex<Shared>, version: &str) -> Value {
         let clicks = state.fixture.as_ref().map_or(0, |f| f.clicks);
         let mut snap = with_capture(window_state(clicks), &args, force_image);
         let sc = &mut snap["structuredContent"];
+        if let (Some((w, h)), Some(_)) = (state.frame, sc.get("screenshot_width")) {
+            sc["screenshot_width"] = json!(w);
+            sc["screenshot_height"] = json!(h);
+        }
         match state.snapshot_mode {
             Some("secure") => {
                 // #11694: the 0.23.2 shape — no subrole, a localized description.

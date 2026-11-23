@@ -18,6 +18,8 @@
 //! `get_window_state` capture and reduced to one image by
 //! [`screenshot::bound`]; the read tools are asked for no screenshot, and
 //! every other reply loses any image part the driver sends (#11694).
+//! A coordinate call (#11696) passes [`Inner::pointer_bounds`] last, against
+//! the window's frame read on that call, and is confirmed by read-back.
 //! A manifest idle-timeout lockout restarts the daemon; a read-only call is
 //! then retried once and a mutating one is answered `driver_restarted`, not run.
 //! Test: `tests/broker_spike.rs`, `tests/broker_fail_closed.rs`.
@@ -33,6 +35,7 @@ use crate::driver::{DriverError, is_manifest_idle};
 use crate::journal::{self, Outcome};
 use crate::launcher::Launcher;
 use crate::menu;
+use crate::pointer;
 use crate::policy::{self, Verdict};
 use crate::redact::{redact_reply, strip_markdown};
 use crate::screenshot::{self, SCREENSHOT_TOOL};
@@ -87,6 +90,9 @@ fn strip_images(result: &mut Value) {
 fn driver_request(tool: &str, args: &Map<String, Value>) -> (&'static str, Value) {
     if tool == SCREENSHOT_TOOL {
         return (screenshot::DRIVER_TOOL, screenshot::driver_args(args));
+    }
+    if pointer::is_pointer_tool(tool) {
+        return pointer::driver_args(tool, args);
     }
     let mut args = args.clone();
     if IMAGE_READ_TOOLS.contains(&tool) {
@@ -214,6 +220,10 @@ impl<L: Launcher> Inner<L> {
             // #11695: the driver brings the target app to the front to press a menu item.
             rec.insert("activates_app".into(), json!(true));
         }
+        if pointer::activates_app(&tool) {
+            // #11696: the driver fronts the app for a drag; see `pointer::activates_app`.
+            rec.insert("activates_app".into(), json!(true));
+        }
         // 1. Policy verdict and argument filter, on the grant's app.
         let rule = match policy::check_call(&tool, &args, &grant.policy_scope()) {
             Ok(rule) => rule,
@@ -226,7 +236,8 @@ impl<L: Launcher> Inner<L> {
         };
         rec.insert("verdict".into(), json!(verdict));
         // 2. Grant scope, per app (live was checked above).
-        if !grant.tools.contains(&tool) {
+        // #11696: both coordinate tools need the one `coordinate_input` grant flag.
+        if !grant.tools.contains(pointer::grant_name(&tool)) {
             return self.refuse(rec, "tool_not_granted", &tool);
         }
         if args_map
@@ -280,6 +291,13 @@ impl<L: Launcher> Inner<L> {
             if let Some(detail) = detail {
                 return self.refuse(rec, "menu_path_not_exposed", detail);
             }
+        }
+        // #11696: the last gate before the event; the window's frame as it is now.
+        if pointer::is_pointer_tool(&tool) {
+            match self.pointer_bounds(&tool, &args_map, grant.scope) {
+                Ok(frame) => rec.insert("frame".into(), frame),
+                Err((code, detail)) => return self.refuse(rec, code, &detail),
+            };
         }
         // 5. Audit `forward`; a failure refuses before the daemon is called.
         let mut forward = rec.clone();
@@ -348,7 +366,7 @@ impl<L: Launcher> Inner<L> {
                 if let Some(k) = key {
                     self.snaps.insert(k, (red.tokens, red.fingerprint, paths));
                 }
-            } else if CONFIRM_TOOLS.contains(&tool.as_str()) {
+            } else if CONFIRM_TOOLS.contains(&tool.as_str()) || pointer::is_pointer_tool(&tool) {
                 let confirmation = self.confirm(key, &reply["result"]);
                 let confirmed = confirmation["confirmed"] == json!(true);
                 rec.insert("confirmed".into(), json!(confirmed));
@@ -386,7 +404,7 @@ impl<L: Launcher> Inner<L> {
     /// Test: `tool_error_is_driver_refused`, `mutating_call_cut_by_session_end_is_outcome_unknown`,
     /// `idle_timeout_lockout_restarts_and_retries_read_only`,
     /// `idle_timeout_lockout_does_not_rerun_mutating_call`.
-    fn drive(
+    pub(crate) fn drive(
         &mut self,
         tool: &str,
         args: &Value,
