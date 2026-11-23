@@ -8,8 +8,8 @@
 //! What:
 //! - [`ask`] — the production entry point: the real inference client and the
 //!   operator's `servers.toml`.
-//! - [`AskEngine`] — the same ask with the adapter, the MCP config path and the
-//!   cancel flag injectable.
+//! - [`AskEngine`] — the same ask with the adapter and the MCP config path
+//!   injectable; [`AskEngine::ask_with_cancel`] takes a per-ask cancel flag.
 //! - `config` — the `[ask]` table ([`AskSettings`]).
 //! - `tools` — the read-only registry ([`build_registry`]).
 //! - `okg_search` — [`OkgSearchTool`].
@@ -76,15 +76,15 @@ enum McpSource {
 /// One instance's ask engine.
 ///
 /// Why: the injectable form of [`ask`]; tests pass a scripted adapter and a
-/// temp `servers.toml`, and a caller that wants to cancel keeps the flag.
-/// What: holds the home, the adapter, the MCP source and the cancel flag.
-/// Construction touches no filesystem and spawns nothing.
+/// temp `servers.toml`. A long-lived engine serves many asks, so it holds no
+/// cancel state of its own (#11650): each ask gets its own flag.
+/// What: holds the home, the adapter and the MCP source. Construction touches
+/// no filesystem and spawns nothing.
 /// Test: `tests::engine_tests` — the whole module.
 pub struct AskEngine {
     home: AssistantHome,
     llm: Arc<dyn InferenceAdapter>,
     mcp: McpSource,
-    cancel: Arc<AtomicBool>,
 }
 
 impl AskEngine {
@@ -94,7 +94,6 @@ impl AskEngine {
             home,
             llm,
             mcp: McpSource::Live,
-            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -105,34 +104,37 @@ impl AskEngine {
         self
     }
 
-    /// Use `flag` as the cancel flag; setting it stops the loop at the next
-    /// turn boundary.
-    /// Test: `tests::engine_tests::cancel_stops_at_the_next_turn_boundary`.
-    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
-        self.cancel = flag;
-        self
+    /// Answer `question` with a fresh cancel flag nobody else holds.
+    /// Test: `tests::engine_tests::a_cancel_does_not_reach_the_next_ask`.
+    pub async fn ask(&self, question: &str) -> Result<String, AskError> {
+        self.ask_with_cancel(question, Arc::new(AtomicBool::new(false)))
+            .await
     }
 
-    /// The cancel flag, for a caller that did not supply its own.
-    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.cancel)
-    }
-
-    /// Answer `question`, then record the turn.
+    /// Answer `question`, then record the turn. Setting `cancel` stops the
+    /// loop at the next turn boundary.
+    ///
+    /// Why: #11650 — the flag belongs to one ask. An engine-wide flag was never
+    /// reset, so one cancel failed every later ask on a long-lived engine.
     ///
     /// What, in order: refuse an empty question; read `instructions.md`
     /// ([`AskError::Instructions`]); read `config.toml` and resolve `[ask]`;
     /// load the turn log ([`TurnLog::load`]); load MCP and build the read-only registry; replay
     /// the log into a transcript under the system prompt; run the loop with
-    /// the cancel flag. Only a non-empty final answer is returned and
+    /// `cancel`. Only a non-empty final answer is returned and
     /// appended to the log. Every other outcome is an [`AskError`] and leaves
     /// the log unchanged.
     /// Test: `tests::engine_tests::a_second_ask_sees_the_first_turn`,
     /// `tests::engine_tests::cancel_stops_at_the_next_turn_boundary`,
+    /// `tests::engine_tests::a_cancel_does_not_reach_the_next_ask`,
     /// `tests::engine_tests::an_instructions_error_stops_the_ask`,
     /// `tests::engine_tests::a_failed_ask_never_advances_the_log`,
     /// `tests::engine_tests::an_empty_model_is_sent_as_the_default`.
-    pub async fn ask(&self, question: &str) -> Result<String, AskError> {
+    pub async fn ask_with_cancel(
+        &self,
+        question: &str,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<String, AskError> {
         let question = question.trim();
         if question.is_empty() {
             return Err(AskError::EmptyQuestion);
@@ -187,7 +189,7 @@ impl AskEngine {
             ..AgentLoopConfig::default()
         };
         let agent = AgentLoop::new(loop_config, Arc::clone(&self.llm), Arc::new(tools.registry))
-            .with_cancel_flag(Arc::clone(&self.cancel))
+            .with_cancel_flag(cancel)
             .with_session_id(format!("ta-ask:{}", self.home.id()));
         let output = agent.run_with_transcript(&mut transcript, question).await?;
 

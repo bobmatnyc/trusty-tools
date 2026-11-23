@@ -77,8 +77,7 @@ async fn cancel_stops_at_the_next_turn_boundary() {
         .on_call(move || flag.store(true, Ordering::Relaxed)),
     );
     let result = engine(&home, &llm, &tmp)
-        .with_cancel_flag(cancel)
-        .ask("Find x")
+        .ask_with_cancel("Find x", cancel)
         .await;
     assert!(matches!(result, Err(AskError::Cancelled)), "{result:?}");
     assert_eq!(llm.requests().len(), 1, "no turn after the boundary");
@@ -260,4 +259,30 @@ async fn an_ask_recovers_from_a_corrupt_last_line() {
         std::fs::read(quarantined[0].path()).unwrap(),
         b"{\"v\":1,\"at\":\"2026"
     );
+}
+
+/// #11650 item 4: a cancel belongs to one ask; the next ask on the same
+/// long-lived engine runs normally.
+#[tokio::test]
+async fn a_cancel_does_not_reach_the_next_ask() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let llm = Arc::new(Scripted::new(vec![
+        tool_call(OKG_SEARCH_TOOL_NAME, json!({ "query": "x" })),
+        text("second answer"),
+    ]));
+    let engine = engine(&home, &llm, &tmp);
+
+    let cancel = Arc::new(AtomicBool::new(true));
+    let first = engine.ask_with_cancel("first", Arc::clone(&cancel)).await;
+    assert!(matches!(first, Err(AskError::Cancelled)), "{first:?}");
+    assert!(
+        cancel.load(Ordering::Relaxed),
+        "the caller's flag is untouched"
+    );
+
+    let second = engine.ask("second").await;
+    assert_eq!(second.unwrap(), "second answer");
+    let turns = TurnLog::for_home(&home).read().unwrap();
+    assert_eq!(turns.len(), 1, "only the answered ask is logged");
 }
