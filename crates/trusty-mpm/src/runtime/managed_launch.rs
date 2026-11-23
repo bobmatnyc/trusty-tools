@@ -102,6 +102,22 @@ pub(crate) fn managed_env_unset(gh_env: &[(String, String)]) -> Vec<String> {
 /// [`crate::core::alt_screen::apply_default_to_command`] — the exec-path twin of
 /// the `${NAME-1}` shell operand. The config-decided renderer (#8405) is not a
 /// default and is added by [`ManagedLaunch::base`].
+///
+/// Secret inventory, every secret-valued variable tm sets on a launched
+/// `claude` (`ps -E` shows it to every same-uid process). See #10487.
+///   * `GH_TOKEN` from `github.token_env` (`core/gh_identity.rs`
+///     `resolve_gh_env`), reaching the in-place relaunch at
+///     `bin/tm/commands/guided_inplace.rs:866`: REMOVED — `relaunch_gh_env`
+///     routes it through the gh shim (`core::gh_token_env_shim`) and clears
+///     `GH_TOKEN`, `GITHUB_TOKEN`, both `*_ENTERPRISE_TOKEN` spellings and the
+///     `token_env` variable; a shim failure refuses the launch. This
+///     function's `gh_env` carries no token: the daemon pin path hands the
+///     #9750 shim, and a `token_env`-only pin injects nothing.
+///   * `CLAUDE_CODE_OAUTH_TOKEN`: STILL INJECTED, a known gap pending a
+///     file-descriptor handoff, at `runtime/managed_launch.rs:144`,
+///     `runtime/cli_launch.rs:151`, `bin/tm/commands/guided_inplace.rs:874`
+///     and `core/model_inject.rs:420`.
+///
 /// What: `(name, value)` pairs, in the order above.
 /// Test: `env_set_enables_todo_tools_unconditionally`,
 /// `env_set_disables_auto_memory_unconditionally`,
@@ -124,6 +140,7 @@ pub(super) fn managed_env_set(
         set.push(("CLAUDE_CONFIG_DIR".into(), dir.display().to_string()));
     }
     set.extend(mcp_env.iter().cloned());
+    // See #10487: still a token value in the env, pending a descriptor handoff.
     if let Some(token) = oauth_token {
         set.push((
             crate::core::oauth_token::OAUTH_TOKEN_ENV_VAR.to_owned(),

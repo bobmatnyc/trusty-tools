@@ -180,3 +180,55 @@ fn a_token_env_binding_names_its_source_variable_10487() {
     assert_eq!(env.token_source(), Some(SOURCE));
     assert!(!format!("{env:?}").contains(SENTINEL));
 }
+
+/// Is `name` a credential-bearing gh/GitHub token spelling (#10487)?
+fn is_credential_name(name: &str) -> bool {
+    name == SOURCE || (name.contains("TOKEN") && (name.starts_with("GH") || name.contains("GITHUB")))
+}
+
+/// 🔴 #10487: the WHOLE env a relaunched `claude` receives — tm's own env with
+/// every token spelling planted, then the launch's sets and removals — carries
+/// no `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
+/// `GITHUB_ENTERPRISE_TOKEN` or `token_env` variable with a secret value.
+#[test]
+fn the_whole_launch_env_carries_no_gh_token_value_10487() {
+    use std::collections::BTreeMap;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let env = token_env_binding(None);
+    let (check, keyring) = (check_as("octo"), TableKeyring::default());
+    let shimmed = shim_token_env_with(
+        &env,
+        seams(&check, &keyring, tmp.path(), Ok("/bin/gh".into())),
+    )
+    .expect("the binding is shimmed");
+    // The same last step `relaunch_gh_env` runs, with a probe that never runs gh.
+    let launch = shimmed.for_session_launch_with(None, |_, _| Ok(()));
+    let mut cmd = std::process::Command::new("claude");
+    launch.apply_to(&mut cmd);
+
+    // tm's own process env, as the launched child would inherit it.
+    let mut child: BTreeMap<String, String> = [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
+        SOURCE,
+    ]
+    .iter()
+    .map(|n| ((*n).to_string(), SENTINEL.to_string()))
+    .collect();
+    for (name, value) in cmd.get_envs() {
+        let name = name.to_string_lossy().into_owned();
+        match value {
+            Some(v) => child.insert(name, v.to_string_lossy().into_owned()),
+            None => child.remove(&name),
+        };
+    }
+    for (name, value) in &child {
+        assert!(!value.contains(SENTINEL), "{name} carries the token");
+        assert!(
+            !is_credential_name(name),
+            "{name} is set on the launch env: {launch:?}"
+        );
+    }
+}
