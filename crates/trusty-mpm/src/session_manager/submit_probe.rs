@@ -44,6 +44,18 @@ const SUBMIT_PROBE_LINES: usize = 20;
 /// either AFTER a send is direct evidence the Enter did not commit.
 const UNSUBMITTED_PASTE_MARKERS: &[&str] = &["[Pasted text #", "paste again to expand"];
 
+/// Interval between input-box reads while waiting for the typed text to echo.
+const ECHO_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Longest wait for the typed text to echo before the send is abandoned.
+///
+/// Why (#10747): a busy pane can take a moment to render a paste; a short
+/// message that echoes at once costs one [`ECHO_POLL`] of added latency.
+const ECHO_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Rows the echo check reads; the input box sits at the bottom of the pane.
+const ECHO_PROBE_LINES: usize = 40;
+
 /// What a post-send pane read could establish about the message's submission.
 ///
 /// Why: the pre-#5699 `sent: true` boolean conflated three distinct facts —
@@ -61,6 +73,9 @@ pub enum SubmitState {
     UnsubmittedPaste,
     /// The pane could not be read, so neither outcome was established.
     Unverified,
+    /// #10747: the input box never showed the typed text (or a paste
+    /// placeholder for it), so Enter was NOT pressed and the box was cleared.
+    NotEchoed,
 }
 
 impl SubmitState {
@@ -70,6 +85,19 @@ impl SubmitState {
             Self::Submitted => "submitted",
             Self::UnsubmittedPaste => "unsubmitted_paste",
             Self::Unverified => "unverified",
+            Self::NotEchoed => "not_echoed",
+        }
+    }
+
+    /// Why the message was not delivered; `None` when it may have been.
+    pub fn reason(self) -> Option<&'static str> {
+        match self {
+            Self::UnsubmittedPaste => Some("the text sits unsubmitted as a collapsed paste"),
+            Self::NotEchoed => Some(
+                "the input box did not show the full text before Enter; nothing was \
+                 submitted and the box was cleared",
+            ),
+            Self::Submitted | Self::Unverified => None,
         }
     }
 
@@ -83,7 +111,7 @@ impl SubmitState {
     /// cannot.
     /// Test: `classify_submit_unreadable_pane_is_unverified`.
     pub fn delivered(self) -> bool {
-        !matches!(self, Self::UnsubmittedPaste)
+        !matches!(self, Self::UnsubmittedPaste | Self::NotEchoed)
     }
 }
 
@@ -122,15 +150,21 @@ impl SessionManager {
     /// worse than no answer. This is the observing wrapper; plain
     /// [`Self::send_input`] is left untouched for the callers (task injection,
     /// the HTTP route, the proxy backend) whose contract is `Result<(), _>`.
-    /// What: runs [`Self::send_input`]'s readiness/modal refusals, dispatches
-    /// through the same owned-pane gate, then re-captures the tail of the pane
-    /// that gate proved (#9101: never a fresh, ungated lookup) and runs
+    /// What: runs [`Self::send_input`]'s readiness/modal refusals, then types
+    /// `text` WITHOUT Enter through the same owned-pane gate. #10747: it polls
+    /// the input box every [`ECHO_POLL`] for up to [`ECHO_DEADLINE`] until
+    /// [`trusty_architect::box_holds_text`] holds; only then is Enter pressed.
+    /// No echo by the deadline: `C-u` clears the box and the answer is
+    /// [`SubmitState::NotEchoed`]. After Enter it re-captures the tail of the
+    /// pane that gate proved (#9101: never a fresh, ungated lookup) and runs
     /// [`classify_submit`] over it. A send that was REFUSED never reaches the
     /// probe — the `Err` already says nothing was typed. A capture error
     /// yields an empty string, which [`classify_submit`] reads as
     /// [`SubmitState::Unverified`].
     /// Test: `send_input_observed_reports_unsubmitted_paste`,
-    /// `send_input_observed_reports_submitted_on_a_clean_prompt` in
+    /// `send_input_observed_reports_submitted_on_a_clean_prompt`,
+    /// `send_input_observed_withholds_enter_when_the_head_is_dropped`,
+    /// `send_input_observed_presses_enter_after_a_full_echo` in
     /// `send_input_gate_tests.rs`.
     pub async fn send_input_observed(
         &self,
@@ -138,7 +172,28 @@ impl SessionManager {
         text: &str,
     ) -> Result<SubmitState, ManagedError> {
         self.check_send_input_ready(id).await?;
-        let (name, pane) = self.inject_into_owned(id, text, Submit::Enter).await?;
+        // #10747: type without Enter; Enter waits for the echo check below.
+        let (name, pane) = self.inject_into_owned(id, text, Submit::NoSubmit).await?;
+        let record = self.get(id).await?;
+        let tmux = super::tmux_route::route(self.tmux.as_ref(), &record)?;
+        let key = |k: &str| tmux.send_key_to_pane(&name, &pane, k);
+        let deadline = tokio::time::Instant::now() + ECHO_DEADLINE;
+        loop {
+            tokio::time::sleep(ECHO_POLL).await;
+            let cap = tmux
+                .capture_pane(&name, &pane, ECHO_PROBE_LINES)
+                .unwrap_or_default();
+            if trusty_architect::box_holds_text(&cap, text) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // #10747: an unverified box is never submitted; clear it.
+                key("C-u")?;
+                tracing::warn!(session = %id, "session_send: text did not echo; not submitted (#10747)");
+                return Ok(SubmitState::NotEchoed);
+            }
+        }
+        key("Enter")?;
         let tail = self
             .tmux
             .capture_pane(&name, &pane, SUBMIT_PROBE_LINES)

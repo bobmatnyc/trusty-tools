@@ -88,11 +88,24 @@ impl ManagedTmuxDriver for ReresolveTmux {
             .push(format!("{name} {pane} {text}"));
         Ok(())
     }
+    /// #10747: `session_send` types without Enter, then presses Enter.
+    fn send_keys_literal_to_pane(
+        &self,
+        name: &str,
+        pane: &str,
+        text: &str,
+    ) -> Result<(), ManagedError> {
+        self.send_line_to_pane(name, pane, text)
+    }
+    fn send_key_to_pane(&self, _n: &str, _p: &str, _k: &str) -> Result<(), ManagedError> {
+        Ok(())
+    }
     fn capture(&self, _n: &str, _l: usize) -> Result<String, ManagedError> {
         Ok(String::new())
     }
     fn capture_pane(&self, _n: &str, _p: &str, _l: usize) -> Result<String, ManagedError> {
-        Ok("❯ ".into())
+        // #10747: the box shows the typed text, so the echo check passes.
+        Ok("❯ hello".into())
     }
     fn list_sessions(&self) -> Result<Vec<String>, ManagedError> {
         Ok(self.sessions.clone())

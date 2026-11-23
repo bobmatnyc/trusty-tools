@@ -279,6 +279,20 @@ pub trait ManagedTmuxDriver: Send + Sync {
         ))
     }
 
+    /// Press one named tmux key (`Enter`, `C-u`) in a SPECIFIC pane (#10747).
+    ///
+    /// Why: `session_send` presses Enter only after the typed text echoes,
+    /// and clears the box when it does not.
+    /// What: the default fails closed, like [`Self::send_keys_literal_to_pane`];
+    /// [`super::real_tmux::RealTmuxDriver`] overrides it.
+    /// Test: `send_input_observed_presses_enter_after_a_full_echo`.
+    fn send_key_to_pane(&self, name: &str, pane_id: &str, key: &str) -> Result<(), ManagedError> {
+        let _ = (name, pane_id, key);
+        Err(ManagedError::TmuxUnavailable(
+            "send_key_to_pane not implemented for this driver".into(),
+        ))
+    }
+
     /// Report whether `pane_id` still exists as a live pane within `name`'s
     /// tmux session.
     ///
