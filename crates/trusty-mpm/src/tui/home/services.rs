@@ -53,8 +53,10 @@ pub(crate) enum ProbeKind {
     /// What: carries the operator-facing detail naming the server-side gap.
     /// The probe maps it straight to `TileHealth::NoUdsEndpoint` with no file
     /// read, socket or process spawn.
-    /// Test: `agents_has_no_uds_endpoint_kind`,
-    /// `a_no_uds_endpoint_probe_does_no_io_and_is_not_down`.
+    /// Test: `no_service_maps_to_no_uds_endpoint`.
+    // #11550: Agents left this kind; no service uses it now. Removing it
+    // touches probe.rs, which a parallel branch (#11547, #11549) edits.
+    #[allow(dead_code)]
     NoUdsEndpoint(&'static str),
     /// No resident daemon: the binary on `PATH` is the whole answer.
     OnDemand,
