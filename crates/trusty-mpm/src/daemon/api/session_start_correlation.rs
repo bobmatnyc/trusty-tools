@@ -102,7 +102,9 @@ pub(crate) async fn correlate_session_start(
             "SessionStart(clear): Architect conversation record moved to the new id (#10594)"
         ),
         Ok(false) => {}
-        Err(e) => tracing::warn!("SessionStart(clear): Architect conversation record not updated: {e}"),
+        Err(e) => {
+            tracing::warn!("SessionStart(clear): Architect conversation record not updated: {e}")
+        }
     }
 
     let mgr = state.session_manager().await;
@@ -543,11 +545,11 @@ pub(crate) async fn handle_session_end(state: &Arc<DaemonState>, claude_session_
 }
 
 #[cfg(test)]
-#[path = "session_start_taint_tests.rs"]
-mod taint_tests;
-#[cfg(test)]
 #[path = "session_start_clear_tests.rs"]
 mod clear_tests;
+#[cfg(test)]
+#[path = "session_start_taint_tests.rs"]
+mod taint_tests;
 
 #[cfg(test)]
 #[path = "session_end_server_tests.rs"]

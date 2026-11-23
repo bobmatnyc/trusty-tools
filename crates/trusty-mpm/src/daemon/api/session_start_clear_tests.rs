@@ -33,7 +33,9 @@ fn transcript(config: &std::path::Path, dir: &std::path::Path, id: &str) {
 /// Architect's record on `OLD` and both transcripts present.
 async fn architect() -> (Arc<DaemonState>, tempfile::TempDir, std::path::PathBuf) {
     let root = crate::test_support::hermetic_temp_dir();
-    let arch = std::fs::canonicalize(root.path()).expect("canon").join("arch");
+    let arch = std::fs::canonicalize(root.path())
+        .expect("canon")
+        .join("arch");
     std::fs::create_dir_all(&arch).expect("arch dir");
     let state = Arc::new(DaemonState::with_root_isolated_managed(root.path().to_path_buf()).await);
     record_conversation(state.framework_root(), &arch, OLD).expect("record");
@@ -43,7 +45,11 @@ async fn architect() -> (Arc<DaemonState>, tempfile::TempDir, std::path::PathBuf
     (state, root, arch)
 }
 
-fn resolve(state: &DaemonState, root: &tempfile::TempDir, arch: &std::path::Path) -> ConversationStart {
+fn resolve(
+    state: &DaemonState,
+    root: &tempfile::TempDir,
+    arch: &std::path::Path,
+) -> ConversationStart {
     let config = root.path().join("claude-config");
     resolve_conversation(state.framework_root(), arch, Some(&config))
 }

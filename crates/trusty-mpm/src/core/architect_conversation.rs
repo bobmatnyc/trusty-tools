@@ -284,7 +284,12 @@ pub fn record_conversation(root: &Path, project_dir: &Path, id: &str) -> Result<
 /// nothing written. `Ok(true)` means the record now holds `id`.
 /// Test: `a_clear_in_the_architect_dir_moves_the_record_to_the_new_id`,
 /// `a_clear_elsewhere_or_another_source_leaves_the_record_alone`.
-pub fn follow_clear(root: &Path, cwd: &Path, id: &str, source: Option<&str>) -> Result<bool, String> {
+pub fn follow_clear(
+    root: &Path,
+    cwd: &Path,
+    id: &str,
+    source: Option<&str>,
+) -> Result<bool, String> {
     if source != Some("clear") {
         return Ok(false);
     }
@@ -292,8 +297,8 @@ pub fn follow_clear(root: &Path, cwd: &Path, id: &str, source: Option<&str>) -> 
     let Some(text) = read_owner_only(&path)? else {
         return Ok(false);
     };
-    let record: ConversationRecord = serde_json::from_str(&text)
-        .map_err(|e| format!("{} is corrupt: {e}", path.display()))?;
+    let record: ConversationRecord =
+        serde_json::from_str(&text).map_err(|e| format!("{} is corrupt: {e}", path.display()))?;
     if !same_dir(&record.project_dir, cwd) || record.conversation_id == id {
         return Ok(false);
     }
