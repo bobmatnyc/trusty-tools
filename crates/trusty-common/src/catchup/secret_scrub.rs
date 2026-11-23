@@ -14,9 +14,16 @@
 //! - a word of more than 40 hex characters is longer than any SHA-1 id, so it
 //!   is a hex key, HMAC or token, and is redacted;
 //! - a word opening with a known credential prefix (`ghp_`, `sk-`, `xoxb-`,
-//!   `AKIA`, ...) and at least [`MIN_PREFIXED_LEN`] long is redacted.
+//!   `AKIA`, ...) and at least [`MIN_PREFIXED_LEN`] long is redacted;
+//! - a value of [`MIN_KEYED_LEN`] or more hex or base64-like characters right
+//!   after a credential key (`api_key=`, `token:`, `Bearer`, ...) is redacted
+//!   at any length, because context, not length, makes it a secret.
+//!
+//! A stale PR head is not this module's concern: trusty-mpm's `resume_verify`
+//! re-reads every head at resume time.
 //!
 //! Test: `the_token_rule_keeps_shas_and_redacts_secrets`,
+//! `a_keyed_hex_value_is_redacted_and_a_bare_sha_kept`,
 //! `a_snapshot_keeps_shas_and_message_ids` and
 //! `a_snapshot_redacts_a_secret_shaped_hex_value` (catchup::pause).
 
@@ -30,6 +37,14 @@ const MAX_SHA_LEN: usize = 40;
 
 /// Shortest prefixed word treated as a credential, so `sk-1` in prose is kept.
 const MIN_PREFIXED_LEN: usize = 20;
+
+/// Shortest value after a credential key that is redacted (#10595).
+const MIN_KEYED_LEN: usize = 16;
+
+/// Word endings that name a credential, matched case-insensitively (#10595).
+const CREDENTIAL_KEYS: &[&str] = &[
+    "api_key", "apikey", "token", "secret", "password", "passwd", "auth", "bearer",
+];
 
 /// Prefixes that open a provider credential.
 const CREDENTIAL_PREFIXES: &[&str] = &[
@@ -62,6 +77,46 @@ pub fn is_secret_like(word: &str) -> bool {
     long_hex || prefixed
 }
 
+/// Does `word` name a credential (`api_key`, `GH_TOKEN`, `Bearer`, ...)?
+fn is_credential_key(word: &str) -> bool {
+    let lower = word.to_ascii_lowercase();
+    CREDENTIAL_KEYS.iter().any(|k| lower.ends_with(k))
+}
+
+/// Is `c` part of a hex or base64-like value?
+fn is_value_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-' | b'+' | b'/' | b'=')
+}
+
+/// The byte span of a keyed value starting after a key ending at `at`.
+///
+/// Why: #10595 — `api_key=<32 hex>` is a SHA by length but a secret by context.
+/// What: skips spaces, one optional `=` or `:`, spaces and one optional quote,
+/// then takes a run of value bytes. Returns it when it is at least
+/// [`MIN_KEYED_LEN`] long and holds a digit, so prose after a key is kept.
+/// Test: `a_keyed_hex_value_is_redacted_and_a_bare_sha_kept`.
+fn keyed_value_span(bytes: &[u8], at: usize) -> Option<(usize, usize)> {
+    let skip_spaces = |mut j: usize| {
+        while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        j
+    };
+    let mut j = skip_spaces(at);
+    if j < bytes.len() && matches!(bytes[j], b'=' | b':') {
+        j = skip_spaces(j + 1);
+    }
+    if j < bytes.len() && matches!(bytes[j], b'"' | b'\'') {
+        j += 1;
+    }
+    let from = j;
+    while j < bytes.len() && is_value_byte(bytes[j]) {
+        j += 1;
+    }
+    let value = &bytes[from..j];
+    (value.len() >= MIN_KEYED_LEN && value.iter().any(u8::is_ascii_digit)).then_some((from, j))
+}
+
 /// `text` with every secret-like word replaced by [`SECRET_PLACEHOLDER`].
 ///
 /// Why/What: see the module doc. Borrowed when nothing matched.
@@ -81,11 +136,21 @@ pub fn scrub_secret_like(text: &str) -> Cow<'_, str> {
             i += 1;
         }
         // Word bytes are ASCII, so `start..i` is a char boundary on both ends.
-        if is_secret_like(&text[start..i]) {
+        let word = &text[start..i];
+        // #10595: a value after a credential key is redacted at any length.
+        let span = if is_credential_key(word) {
+            keyed_value_span(bytes, i)
+        } else if is_secret_like(word) {
+            Some((start, i))
+        } else {
+            None
+        };
+        if let Some((from, to)) = span {
             let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
-            buf.push_str(&text[copied..start]);
+            buf.push_str(&text[copied..from]);
             buf.push_str(SECRET_PLACEHOLDER);
-            copied = i;
+            copied = to;
+            i = to;
         }
     }
     match out {
@@ -132,5 +197,30 @@ mod tests {
         );
         let akia = format!("AKIA{}", "Q7".repeat(8));
         assert_eq!(scrub_secret_like(&akia), SECRET_PLACEHOLDER);
+    }
+
+    /// Why (#10595 review): a keyed value no longer than a SHA leaked.
+    /// What: `api_key=<32 hex>` and `token: <40 hex>` are redacted, the bare
+    /// 40-hex SHA on the same line is kept, and prose after a key is kept.
+    /// Test: itself.
+    #[test]
+    fn a_keyed_hex_value_is_redacted_and_a_bare_sha_kept() {
+        let sha40 = "0123456789abcdef0123456789abcdef01234567";
+        let hex32 = "c0ffee12".repeat(4);
+        let hex40 = "f1e2d3c4b5".repeat(4);
+        let line = format!("head {sha40} api_key={hex32} token: {hex40}");
+        let want = format!("head {sha40} api_key={SECRET_PLACEHOLDER} token: {SECRET_PLACEHOLDER}");
+        assert_eq!(scrub_secret_like(&line), want);
+        let b64 = format!("Authorization: Bearer {}", "aB3+dE6/gH9=".repeat(2));
+        assert_eq!(
+            scrub_secret_like(&b64),
+            format!("Authorization: Bearer {SECRET_PLACEHOLDER}")
+        );
+        for kept in ["the token budget is fine", "auth flow for d3963848ab"] {
+            assert!(
+                matches!(scrub_secret_like(kept), Cow::Borrowed(_)),
+                "{kept:?}"
+            );
+        }
     }
 }
