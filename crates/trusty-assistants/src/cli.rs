@@ -143,7 +143,7 @@ pub async fn run() -> Result<()> {
     let command = classify(&args);
     // #11742: `<verb> --help` prints the verb's usage and exits 0.
     if let Some(verb) = hand_parsed_verb(&command)
-        && wants_help(&args[2..])
+        && wants_help(verb, &args[2..])
     {
         print!("{}", verb_usage(verb));
         return Ok(());
@@ -194,14 +194,22 @@ fn hand_parsed_verb(command: &Command) -> Option<Verb> {
 /// `ta ask <instance> <question…>`: print the instance's answer (#11650).
 ///
 /// Why: the client half of slice 3b.
-/// What: the words after the instance id are joined into one question. The
-/// daemon is this executable (`ask-daemon`), started only when none serves
-/// the instance. Every failure is an error with a non-zero exit.
+/// What: the words after the instance id are joined into one question; a
+/// leading `--` among them is dropped (#11742). The daemon is this
+/// executable (`ask-daemon`), started only when none serves the instance.
+/// Every failure is an error with a non-zero exit.
 /// Test: `ask_starts_the_daemon_on_demand_and_it_exits_idle`,
-/// `ask_names_an_unknown_instance` (`tests/ask_daemon.rs`).
+/// `ask_names_an_unknown_instance`,
+/// `help_words_inside_a_question_are_asked`,
+/// `a_leading_double_dash_is_dropped_from_the_question` (`tests/ask_daemon.rs`).
 async fn run_ask(rest: &[String]) -> Result<()> {
     use crate::ask::daemon::{DaemonLauncher, ask_instance};
-    let (Some(id), question) = (rest.first(), rest.get(1..).unwrap_or_default().join(" ")) else {
+    // #11742: a leading `--` ends options; the words after it are the question.
+    let words = match rest.get(1..).unwrap_or_default() {
+        [dashes, tail @ ..] if dashes == "--" => tail,
+        words => words,
+    };
+    let (Some(id), question) = (rest.first(), words.join(" ")) else {
         anyhow::bail!("usage: {BIN_NAME} ask <instance> <question…>");
     };
     if question.trim().is_empty() {
@@ -424,10 +432,20 @@ mod tests {
     #[test]
     fn help_words_before_the_terminator_ask_for_help() {
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert!(wants_help(&words(&["--help"])));
-        assert!(wants_help(&words(&["izzie", "--to", "tm", "-h"])));
-        assert!(!wants_help(&words(&["izzie", "--", "-h"])));
-        assert!(!wants_help(&words(&["izzie", "what does -h do"])));
+        let help = |verb, w: &[&str]| wants_help(verb, &words(w));
+        assert!(help(Verb::Ask, &["--help"]));
+        assert!(help(Verb::Ask, &["-h", "x"]));
+        assert!(help(Verb::Ask, &["izzie", "--help"]));
+        assert!(!help(Verb::Ask, &["izzie", "--help", "do"]));
+        assert!(!help(Verb::Ask, &["izzie", "what", "is", "-h"]));
+        assert!(!help(Verb::Ask, &["izzie", "--", "--help"]));
+        assert!(help(Verb::Handoff, &["--help"]));
+        assert!(help(Verb::Handoff, &["izzie", "--to", "tm", "-h"]));
+        assert!(help(Verb::Handoff, &["izzie", "--key=k", "--help"]));
+        assert!(!help(Verb::Handoff, &["izzie", "--to", "tm", "do", "-h"]));
+        assert!(!help(Verb::Handoff, &["izzie", "--", "-h"]));
+        assert!(help(Verb::List, &["-h"]));
+        assert!(!help(Verb::McpServe, &["--", "-h"]));
     }
 
     /// Why (#11632): the binary is `ta`, and its name comes from the

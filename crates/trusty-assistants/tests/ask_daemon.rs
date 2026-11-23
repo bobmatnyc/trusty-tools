@@ -154,6 +154,52 @@ fn a_cold_ask_reports_the_start_on_stderr_only() {
     assert!(wait_exit(&mut daemon).success());
 }
 
+/// The questions in `env`'s turn log, in order.
+fn asked(env: &Env) -> Vec<String> {
+    let log = env
+        .home
+        .path()
+        .join("trusty-agents/e2e/stores/ask-turns.jsonl");
+    std::fs::read_to_string(log)
+        .expect("turn log")
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("turn record");
+            v["question"].as_str().expect("question").to_string()
+        })
+        .collect()
+}
+
+/// Why (#11742): a help word inside a question is question text, not a
+/// request for usage.
+#[test]
+fn help_words_inside_a_question_are_asked() {
+    let env = Env::new();
+    assert_answered(
+        &env.ta()
+            .args(["ask", "e2e", "what", "is", "-h"])
+            .output()
+            .expect("run"),
+    );
+    env.wait_idle();
+    assert_eq!(asked(&env), ["what is -h"]);
+}
+
+/// Why (#11742): a leading `--` ends options, so `-- --help` asks the
+/// literal question `--help`, without the `--`.
+#[test]
+fn a_leading_double_dash_is_dropped_from_the_question() {
+    let env = Env::new();
+    assert_answered(
+        &env.ta()
+            .args(["ask", "e2e", "--", "--help"])
+            .output()
+            .expect("run"),
+    );
+    env.wait_idle();
+    assert_eq!(asked(&env), ["--help"]);
+}
+
 #[test]
 fn a_second_ask_reuses_the_running_daemon() {
     let env = Env::new();

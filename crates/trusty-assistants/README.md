@@ -38,7 +38,7 @@ non-test TCP or UDP bind in `src/`.
 
 An instance is a directory `~/trusty-agents/<id>/` that holds
 `instructions.md`. `ta` does not create instances. A machine where the older
-`tagent` ran already has homes for its shipped assistants, such as `izzie` and
+`tagent` ran may already have homes for its shipped assistants, such as `izzie` and
 `assistant`.
 
 1. List the instances:

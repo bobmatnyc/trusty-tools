@@ -23,7 +23,11 @@ daemon starts on demand; a cold start prints one progress line on stderr.\n\
 The daemon exits when idle. Instances live in ~/trusty-agents/<instance>/;\n`",
     env!("TA_BIN_NAME"),
     " list` names them.\n\n\
-Options:\n  -h, --help  Print this help (a quoted question may contain `-h`)\n",
+Options:\n  \
+-h, --help  Print this help. Only `ask --help` or `ask <instance> --help`\n              \
+with nothing after it; anywhere else it is question text\n  \
+--          Before the question: every later word is question text, so\n              \
+`ask <instance> -- --help` asks \"--help\"\n",
 );
 
 /// `ta handoff`'s usage text.
@@ -97,13 +101,43 @@ pub(crate) fn verb_usage(verb: Verb) -> &'static str {
 
 /// Whether a verb's argv tail asks for help.
 ///
-/// Why: one rule for every hand-parsed verb, like clap's for `config`.
-/// What: true when a word before the first `--` is exactly `--help` or `-h`.
+/// Why (#11742): a help word inside a question or task text is that text,
+/// not a request for usage; only the flag region may ask for help.
+/// What: `ask` — the first word, or the word after the instance when it is
+/// the last word. `handoff` — the instance slot or a word in the flag
+/// region, which ends at `--` or the first word that is not `--to`/`--key`
+/// (with their values). Other verbs take no free text: any word before `--`.
 /// Test: `cli::tests::help_words_before_the_terminator_ask_for_help`.
-pub(crate) fn wants_help(tail: &[String]) -> bool {
-    tail.iter()
-        .take_while(|w| w.as_str() != "--")
-        .any(|w| w == "--help" || w == "-h")
+pub(crate) fn wants_help(verb: Verb, tail: &[String]) -> bool {
+    let is_help = |w: &String| w == "--help" || w == "-h";
+    match verb {
+        Verb::Ask => match tail {
+            [first, ..] if is_help(first) => true,
+            [_, second] => is_help(second),
+            _ => false,
+        },
+        Verb::Handoff => {
+            let Some((instance, mut words)) = tail.split_first() else {
+                return false;
+            };
+            if is_help(instance) {
+                return true;
+            }
+            loop {
+                match words {
+                    [w, ..] if is_help(w) => return true,
+                    [w, _, ..] if w == "--to" || w == "--key" => words = &words[2..],
+                    [w, ..] if w.starts_with("--to=") || w.starts_with("--key=") => {
+                        words = &words[1..];
+                    }
+                    _ => return false,
+                }
+            }
+        }
+        Verb::AskDaemon | Verb::List | Verb::McpServe => {
+            tail.iter().take_while(|w| w.as_str() != "--").any(is_help)
+        }
+    }
 }
 
 /// `ta list`: print each instance id on stdout, one per line.

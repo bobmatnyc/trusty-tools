@@ -154,6 +154,23 @@ fn handoff_to_tm_creates_then_reuses_the_session() {
     assert_eq!(env.ledger().lines().count(), 4);
 }
 
+/// Why (#11742): `-h` after the flags is task text; the handoff is sent and
+/// usage is not printed.
+/// Test: itself.
+#[test]
+fn a_help_word_in_the_task_is_sent_not_treated_as_help() {
+    let env = Env::new();
+    let out = report(&env.handoff(&["e2e", "--to", "tm", "do", "-h"]));
+    assert_eq!(out["handle"], "tm-fake-1");
+    let log = std::fs::read_to_string(env.tm_log()).expect("tm log");
+    let task = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["params"]["name"] == "session_new")
+        .map(|v| v["params"]["arguments"]["task"].clone());
+    assert_eq!(task, Some(json!("do -h")), "{log}");
+}
+
 /// Records every `task.run` and answers a fixed session id.
 struct MockTcode(Arc<Mutex<Vec<Value>>>);
 
