@@ -409,7 +409,7 @@ fn record(
 
 /// The `datg` session name: `$DATG_SESSION`, else the tmux session of
 /// `$TMUX_PANE` (datg `per_pm_session`). Asked only once a block is seen.
-fn datg_session() -> Option<String> {
+pub(crate) fn datg_session() -> Option<String> {
     if let Some(s) = std::env::var("DATG_SESSION").ok().filter(|s| !s.is_empty()) {
         return Some(s);
     }

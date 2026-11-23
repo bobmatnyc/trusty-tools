@@ -5,16 +5,15 @@
 //! `audit.py` exactly.
 //! What: one compact `ensure_ascii` JSON line per event, `ts` (seconds rounded
 //! to 3 places) then `event` then the fields in call order, `None` fields
-//! dropped; the file is owner-only 0600, rotated at 5 MiB keeping `.1`, `.2`.
+//! dropped; the file is owner-only 0600, rotated at 5 MiB keeping `.1`, `.2`
+//! (`trusty_daemon_common::audit_file`, #11692).
 //! Test: `audit_lines_replay_byte_identically`, `audit_rotates_like_python`,
 //! `refusals_use_known_reasons` in `tests/parity_audit.rs`.
 
-use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::private;
 use crate::pyjson::Json;
 
 /// Fields an audit line may carry besides `ts` and `event`.
@@ -54,10 +53,9 @@ pub const REASONS: &[&str] = &[
     "status_unauthorized",
 ];
 
-/// Rotate once the file reaches this size.
-pub const ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-/// Rotated generations kept (`audit.jsonl.1` .. `.KEEP`).
-pub const KEEP: usize = 2;
+// #11692: append and rotation are shared with trusty-computer.
+use trusty_daemon_common::audit_file::{self, AppendError};
+pub use trusty_daemon_common::audit_file::{KEEP, ROTATE_BYTES};
 
 /// Why an audit line was not recorded.
 #[derive(Debug, thiserror::Error)]
@@ -151,39 +149,20 @@ impl Audit {
     pub fn write(&self, event: &str, fields: &[(&str, Option<Json>)]) -> Result<(), AuditError> {
         let mut line = self.line(event, fields)?;
         line.push('\n');
-        self.rotate()?;
-        let mut file = private::open_nofollow(&self.path, true)?;
-        if !private::private_file(&file.metadata()?) {
-            return Err(AuditError::NotPrivate);
-        }
-        file.write_all(line.as_bytes())?;
-        Ok(())
+        audit_file::append_line(&self.path, &line, false).map_err(|e| match e {
+            AppendError::NotPrivate => AuditError::NotPrivate,
+            AppendError::Io(e) => AuditError::Io(e),
+        })
     }
 
     /// `audit.jsonl` -> `.1` -> `.2` once the live file reaches 5 MiB.
     pub fn rotate(&self) -> io::Result<()> {
-        let size = match fs::symlink_metadata(&self.path) {
-            Ok(meta) => meta.len(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        if size < ROTATE_BYTES {
-            return Ok(());
-        }
-        for index in (2..=KEEP).rev() {
-            let older = self.generation(index - 1);
-            if older.exists() {
-                fs::rename(&older, self.generation(index))?;
-            }
-        }
-        fs::rename(&self.path, self.generation(1))
+        audit_file::rotate(&self.path, ROTATE_BYTES)
     }
 
     /// The path of rotated generation `index`.
     pub fn generation(&self, index: usize) -> PathBuf {
-        let mut name = self.path.as_os_str().to_owned();
-        name.push(format!(".{index}"));
-        PathBuf::from(name)
+        audit_file::generation(&self.path, index)
     }
 
     /// Record a revoke, lock or grant end; a failure only goes to stderr.

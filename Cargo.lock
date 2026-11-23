@@ -11440,6 +11440,7 @@ dependencies = [
  "tokio",
  "trusty-browser",
  "trusty-common",
+ "trusty-daemon-common",
  "trusty-mcp",
  "unicode-normalization",
 ]
@@ -11642,6 +11643,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "trusty-common",
+ "trusty-daemon-common",
 ]
 
 [[package]]
@@ -11713,6 +11715,15 @@ dependencies = [
  "trusty-memory",
  "trusty-mpm",
  "trusty-review",
+]
+
+[[package]]
+name = "trusty-daemon-common"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -11907,7 +11918,7 @@ dependencies = [
 
 [[package]]
 name = "trusty-mpm"
-version = "1.14.12"
+version = "1.14.13"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12194,6 +12205,22 @@ dependencies = [
  "thiserror 1.0.69",
  "trusty-common",
  "walkdir",
+]
+
+[[package]]
+name = "trusty-summarizer"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "fastembed",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "ureq 3.3.0",
 ]
 
 [[package]]

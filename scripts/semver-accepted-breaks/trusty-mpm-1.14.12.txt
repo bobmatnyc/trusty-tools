@@ -1,0 +1,29 @@
+crate   trusty-mpm
+version 1.14.12
+reason  Auto-recorded by preflight-publish.sh CHECK 5 under the internal numbering policy: a public-API break never forces a major version. See docs/reference/semver-gate.md.
+accept  constructible_struct_adds_field field HealthResponse.alive
+accept  constructible_struct_adds_field field HealthResponse.pending
+accept  constructible_struct_adds_field field HealthSnapshot.alive
+accept  constructible_struct_adds_field field ServiceRow.detail
+accept  constructible_struct_adds_field field ShutdownTarget.palace_lookup
+accept  enum_marked_non_exhaustive enum PrepError
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::Chained 3 -> 4
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::Denied 15 -> 16
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::EmptyCommand 10 -> 11
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::HeavyBuild 12 -> 13
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::NoCwd 11 -> 12
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::NoFilter 9 -> 10
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::NoGain 1 -> 2
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::NonBash 2 -> 3
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::NotExecutable 14 -> 15
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::Orchestrator 5 -> 6
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::SourceRead 7 -> 8
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::Unknown 16 -> 17
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::UnresolvedProgram 6 -> 7
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::UnsafeToolName 8 -> 9
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::Unwrappable 4 -> 5
+accept  enum_no_repr_variant_discriminant_changed variant SkipReason::WrapperPrefix 13 -> 14
+accept  enum_variant_added variant SkipReason:CompressedNoGain
+accept  enum_variant_added variant SubmitState:InputNotEmpty
+accept  enum_variant_added variant SubmitState:NotEchoed
+accept  enum_variant_added variant TreeRowKind:Architect

@@ -420,6 +420,10 @@ pub struct BreakersResponse {
 pub struct HookAcceptedResponse {
     /// The hook event that was accepted.
     pub accepted: HookEvent,
+    /// #11674: on `SubagentStop`, the delegation's bound ledger task, for the
+    /// hook's round-trip check. Absent on every other event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_binding: Option<crate::core::subagent_task_roundtrip::StopBinding>,
 }
 
 /// The overseer status block in [`OverseerResponse`].

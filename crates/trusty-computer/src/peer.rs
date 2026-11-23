@@ -4,16 +4,16 @@
 //! connection is still checked against the kernel's record of who connected
 //! (spike `broker.py:46-52`, `194-198`). A file-mode slip must not open the
 //! broker to another local user.
-//! What: Darwin reads `LOCAL_PEERCRED` (`struct xucred`; a non-zero
-//! `cr_version` is refused), Linux reads `SO_PEERCRED`; other platforms fail.
-//! [`admit`] refuses an unreadable credential and any uid but ours.
+//! What: [`peer_uid`] (from `trusty-daemon-common`) reads the kernel
+//! credential; [`admit`] refuses an unreadable credential and any uid but ours.
 //! Test: `same_user_socketpair_passes_peer_auth`, `foreign_or_unreadable_peer_is_refused`
 //! in `tests/broker_server.rs`.
 
-// copied from trusty-browser 275d713590 (src/peer.rs), trimmed: `Refusal` -> `PeerRefused`.
-
 use std::io;
 use std::os::fd::AsRawFd;
+
+// #11692: the credential read lives in trusty-daemon-common.
+pub use trusty_daemon_common::peer::peer_uid;
 
 use crate::private;
 
@@ -25,64 +25,6 @@ pub struct PeerRefused {
     pub code: &'static str,
     /// Human-readable detail.
     pub detail: String,
-}
-
-/// The connecting process's uid as the kernel recorded it.
-pub fn peer_uid(sock: &impl AsRawFd) -> io::Result<u32> {
-    peer_uid_fd(sock.as_raw_fd())
-}
-
-#[cfg(target_os = "macos")]
-fn peer_uid_fd(fd: i32) -> io::Result<u32> {
-    // SAFETY: xucred is plain old data; zeroed is a valid value.
-    let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::xucred>() as libc::socklen_t;
-    // SAFETY: the buffer and length describe `cred`, which outlives the call.
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_LOCAL,
-            libc::LOCAL_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if (len as usize) < 8 || cred.cr_version != 0 {
-        return Err(io::Error::other("unexpected peer credential version"));
-    }
-    Ok(cred.cr_uid)
-}
-
-#[cfg(target_os = "linux")]
-fn peer_uid_fd(fd: i32) -> io::Result<u32> {
-    // SAFETY: ucred is plain old data; zeroed is a valid value.
-    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: the buffer and length describe `cred`, which outlives the call.
-    let rc = unsafe {
-        libc::getsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            (&raw mut cred).cast(),
-            &mut len,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(cred.uid)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn peer_uid_fd(_fd: i32) -> io::Result<u32> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "peer credentials",
-    ))
 }
 
 /// Admit a peer whose credential read gave `peer` when this process is `me`.

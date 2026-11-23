@@ -162,6 +162,9 @@ pub struct GhEnv {
     /// #6668: identity vars to REMOVE from the child so an inherited one
     /// cannot outrank the binding in `vars`. Empty when nothing binds.
     unset: Vec<String>,
+    /// #10487: the `github.token_env` NAME the `GH_TOKEN` in `vars` was read
+    /// from, so a session launch can clear that variable too. Never a value.
+    token_source: Option<String>,
 }
 
 /// #8510 r4: `vars` can hold a real token; `Debug` redacts every `*TOKEN` value.
@@ -171,6 +174,7 @@ impl std::fmt::Debug for GhEnv {
         f.debug_struct("GhEnv")
             .field("vars", &RedactedVars(&self.vars))
             .field("unset", &self.unset)
+            .field("token_source", &self.token_source)
             .finish()
     }
 }
@@ -207,7 +211,34 @@ impl GhEnv {
     /// Test: `an_account_only_pin_uses_a_token_proven_under_the_static_dir`.
     pub(crate) fn from_identity_vars(vars: Vec<(String, String)>) -> Self {
         let unset = inherited_identity_to_clear(&vars);
-        Self { vars, unset }
+        Self {
+            vars,
+            unset,
+            token_source: None,
+        }
+    }
+
+    /// The value this binding sets for `name`, if any.
+    pub(crate) fn var(&self, name: &str) -> Option<&str> {
+        self.vars
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The `github.token_env` NAME this binding's `GH_TOKEN` came from (#10487).
+    /// Test: `a_token_env_binding_names_its_source_variable_10487`.
+    pub fn token_source(&self) -> Option<&str> {
+        self.token_source.as_deref()
+    }
+
+    /// This binding, also removing `name` from the child (#10487).
+    /// Test: `a_token_env_binding_reaches_the_launch_env_as_the_shim_not_a_token_10487`.
+    pub(crate) fn clearing(mut self, name: &str) -> Self {
+        if !self.unset.iter().any(|n| n == name) {
+            self.unset.push(name.to_string());
+        }
+        self
     }
 
     /// #8934: the "no remote, no gh" binding for a local-only repository.
@@ -482,6 +513,7 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
     };
 
     let mut vars: Vec<(String, String)> = Vec::new();
+    let mut token_source = None;
 
     // --- Identity selection (precedence: config_dir > token_env > account) ---
     if let Some(dir) = cfg
@@ -493,6 +525,8 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
         vars.push((ENV_GH_CONFIG_DIR.to_string(), dir));
     } else if let Some(token) = resolve_token_env(cfg.token_env.as_deref()) {
         vars.push((ENV_GH_TOKEN.to_string(), token));
+        // #10487: remember the NAME so a session launch can clear it too.
+        token_source = cfg.token_env.as_deref().map(|n| n.trim().to_string());
     } else if let Some(account) = cfg
         .account
         .as_deref()
@@ -515,7 +549,11 @@ pub fn resolve_gh_env(config: Option<&GithubConfig>) -> Result<GhEnv, GhIdentity
         vars.push((ENV_GH_HOST.to_string(), host.to_string()));
     }
 
-    Ok(GhEnv { vars, unset })
+    Ok(GhEnv {
+        vars,
+        unset,
+        token_source,
+    })
 }
 
 /// The inherited vars a launch clears once `host`'s credential resolves (#9750).

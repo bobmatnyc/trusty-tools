@@ -37,6 +37,8 @@ pub(crate) mod slot_pool_evict;
 // #6556: the reader for the `SubagentStop` records a hook parked on disk when
 // this daemon was unreachable.
 pub mod stop_spool_drain;
+// #11674: a SubagentStop's bound ledger task, for the round-trip check.
+pub mod subagent_task_binding;
 // #8059: the durable, cross-process half of that status — `tm doctor` runs
 // daemonless, so the in-memory timings alone reported every sweep idle.
 pub(crate) mod sweep_state_file;

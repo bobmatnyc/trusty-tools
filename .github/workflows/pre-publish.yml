@@ -357,6 +357,10 @@ jobs:
       - name: cargo audit (workers/okf-extract/Cargo.lock)
         run: cargo audit --file workers/okf-extract/Cargo.lock
 
+      # The summarizer converter worker's own lock, under the same audit.toml.
+      - name: cargo audit (workers/summarizer-convert/Cargo.lock)
+        run: cargo audit --file workers/summarizer-convert/Cargo.lock
+
   # ==========================================================================
   # deny — GATE 3. Licences, provenance, duplicate versions.
   #
@@ -407,6 +411,10 @@ jobs:
       # only; here duplicates stay warnings and every other check fails the step.
       - name: cargo deny check (workers/okf-extract)
         run: cargo deny --manifest-path workers/okf-extract/Cargo.toml check licenses sources advisories bans
+
+      # The summarizer converter worker's own graph, under the same deny.toml.
+      - name: cargo deny check (workers/summarizer-convert)
+        run: cargo deny --manifest-path workers/summarizer-convert/Cargo.toml check licenses sources advisories bans
 
   # ==========================================================================
   # ignored-tests — GATE 4. The `#[ignore]`d ONNX/embedder tests.

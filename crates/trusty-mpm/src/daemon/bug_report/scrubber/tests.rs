@@ -275,3 +275,38 @@ fn home_dir_path_scrubbed() {
         "{changes:?}"
     );
 }
+
+// See #9167: an `sk-` inside a word (`task-…`) is a path segment, not a key.
+#[test]
+fn sk_inside_a_word_survives_while_real_sk_keys_are_redacted() {
+    let path = "/var/tmp/evo/11674-subagent-task-roundtrip-x-da2d03d845/.tmpf8k9Ja";
+    assert_eq!(super::core::scrub_credentials(path), path);
+    let k = "sk-abcdefghijklmnop1234";
+    let cases: &[(&str, &str)] = &[
+        (k, ""),
+        ("sk-ant-abcdefghijklmnop1234", ""),
+        ("sk-or-abcdefghijklmnop1234", ""),
+        ("sk-proj-abcdefghijklmnop1234", ""),
+        (" sk-abcdefghijklmnop1234", " "),
+        ("\"sk-abcdefghijklmnop1234", "\""),
+        ("'sk-abcdefghijklmnop1234", "'"),
+        ("(sk-abcdefghijklmnop1234", "("),
+        ("=sk-abcdefghijklmnop1234", "="),
+        (":sk-abcdefghijklmnop1234", ":"),
+        ("/sk-abcdefghijklmnop1234", "/"),
+        ("?key=sk-abcdefghijklmnop1234", "?key="),
+        ("&sk-abcdefghijklmnop1234", "&"),
+        (",sk-abcdefghijklmnop1234", ","),
+        ("OPENAI_KEY_sk-abcdefghijklmnop1234", "OPENAI_KEY_"),
+        ("line\\nsk-abcdefghijklmnop1234", "line\\n"),
+    ];
+    for (input, prefix) in cases {
+        let (out, n) = super::rules::apply_regex(
+            input,
+            &super::regexes::RE_SK_PREFIX,
+            "${1}[REDACTED_API_KEY]",
+        );
+        assert_eq!(n, 1, "{input:?} -> {out:?}");
+        assert_eq!(out, format!("{prefix}[REDACTED_API_KEY]"), "{input:?}");
+    }
+}

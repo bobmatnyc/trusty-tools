@@ -75,6 +75,7 @@ on:
       - "OKF extract worker" # okf-extract-worker.yml (#11094)
       - "Public docs" # public-docs.yml
       - "SLD lint" # sld-lint.yml
+      - "Summarizer convert worker" # summarizer-convert.yml
       - "Test count" # test-count.yml
       - "Test pointers" # test-pointers.yml
       - "Token drift" # token-drift.yml

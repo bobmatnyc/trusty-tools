@@ -5,25 +5,21 @@
 //! `audit.py`, plan section 4 steps 5 and 9).
 //! What: [`Audit::write`] appends one key-sorted JSON object per line with a
 //! leading `ts`, to an owner-only 0600 file, and fsyncs it; the file rotates
-//! at 5 MiB keeping `.1` and `.2` (shape from trusty-browser `audit.rs`).
+//! at 5 MiB keeping `.1` and `.2` (`trusty_daemon_common::audit_file`, #11692).
 //! [`summarize_args`] logs argument keys and text lengths, never a value.
 //! Test: `tests/spike_audit.rs`.
 
-use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 
-use crate::private;
+use trusty_daemon_common::audit_file::{self, AppendError};
+pub use trusty_daemon_common::audit_file::{KEEP, ROTATE_BYTES};
 
 /// Argument keys whose string length is logged.
 pub const TEXT_KEYS: [&str; 2] = ["text", "value"];
-/// Rotate once the file reaches this size.
-pub const ROTATE_BYTES: u64 = 5 * 1024 * 1024;
-/// Rotated generations kept (`audit.jsonl.1` .. `.KEEP`).
-pub const KEEP: usize = 2;
 
 /// The audit line was not written; the caller must refuse the call.
 #[derive(Debug, thiserror::Error)]
@@ -120,14 +116,10 @@ impl Audit {
     pub fn write(&self, record: &Map<String, Value>) -> Result<(), AuditError> {
         let mut line = Audit::line(record, now());
         line.push('\n');
-        self.rotate()?;
-        let mut file = private::open_nofollow(&self.path, true)?;
-        if !private::private_file(&file.metadata()?) {
-            return Err(AuditError::NotPrivate);
-        }
-        file.write_all(line.as_bytes())?;
-        file.sync_all()?;
-        Ok(())
+        audit_file::append_line(&self.path, &line, true).map_err(|e| match e {
+            AppendError::NotPrivate => AuditError::NotPrivate,
+            AppendError::Io(e) => AuditError::Io(e),
+        })
     }
 
     /// `audit.jsonl` -> `.1` -> `.2` once the live file reaches [`ROTATE_BYTES`].
@@ -141,27 +133,11 @@ impl Audit {
 
     /// [`Audit::rotate`] with an explicit size threshold.
     pub fn rotate_at(&self, limit: u64) -> io::Result<()> {
-        let size = match fs::symlink_metadata(&self.path) {
-            Ok(meta) => meta.len(),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        if size < limit {
-            return Ok(());
-        }
-        for index in (2..=KEEP).rev() {
-            let older = self.generation(index - 1);
-            if older.exists() {
-                fs::rename(&older, self.generation(index))?;
-            }
-        }
-        fs::rename(&self.path, self.generation(1))
+        audit_file::rotate(&self.path, limit)
     }
 
     /// The path of rotated generation `index`.
     pub fn generation(&self, index: usize) -> PathBuf {
-        let mut name = self.path.as_os_str().to_owned();
-        name.push(format!(".{index}"));
-        PathBuf::from(name)
+        audit_file::generation(&self.path, index)
     }
 }

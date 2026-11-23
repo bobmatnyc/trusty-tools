@@ -1,0 +1,155 @@
+# trusty-summarizer example configuration.
+#
+# Copy to ~/.config/trusty-summarizer/config.toml, or pass --config PATH.
+# Every key is optional; the values below are the defaults unless a comment
+# says otherwise. `cargo test` parses this file (example_config_is_valid).
+
+concurrency = 4                 # default: CPU count, at most 8
+references = true               # line and paragraph ranges in the outline
+max_file_bytes = 67108864
+
+[outline]
+max_section_lines = 60          # with describe, no entry spans more lines
+describe = false                # true: names, numbers and terms per entry;
+                                # measured, not better (README "Defaults")
+max_terms = 6                   # per entry
+max_term_chars = 80             # per entry, joined with ", "
+
+[find]
+enabled = true                  # false turns `find` off
+max_hits = 20
+context_lines = 1
+max_line_chars = 160
+
+[summary]
+# The summary mode is the name of an inference backend:
+#   "extractive-tf"  sentences ranked by term frequency; no model (default)
+#   "extractive"     sentences ranked by the local embedding model; no LLM
+#   "<endpoint>"     any [backends.<name>] with type = "openai": the llm mode,
+#                    one call per file on a bounded excerpt
+# This example uses the llm mode with the local Ollama endpoint below.
+backend = "llm"
+instruction = "Summarize this document in two or three sentences. Answer with the summary only."
+# At most this many characters of a document are sent: the opening plus the
+# most central sections. Each record's summarize stage reports `chars_in`.
+max_input_chars = 32000
+max_output_tokens = 200
+
+[classifier]
+# "none" (default), "local" (embedding model, in-process, no tokens), or a
+# [backends.<name>] table with type = "embedding" or type = "llm".
+backend = "local"
+
+# Labels: name plus a short description, which is what the embedding is
+# compared with. Omit every [[classifier.labels]] to use the built-in set:
+# specification, report, contract or legal, financial, correspondence,
+# meeting notes, source code, data, presentation, other.
+[[classifier.labels]]
+name = "specification"
+description = "a specification, design document, plan or requirements"
+
+[[classifier.labels]]
+name = "report"
+description = "a report of findings, a survey, study or analysis"
+
+[[classifier.labels]]
+name = "source code"
+description = "program source code or a script"
+
+[[classifier.labels]]
+name = "other"
+description = "anything else"
+
+[backends.extractive-tf]
+max_sentences = 3
+
+[backends.extractive]
+max_sentences = 3
+# model = "all-MiniLM-L6-v2"    # or "bge-small-en-v1.5"
+# cache_dir = "~/.cache/fastembed" (default: $FASTEMBED_CACHE_DIR, else ~/.cache/fastembed)
+
+[backends.local]
+# model and cache_dir as above; the same model is loaded once per process and
+# shared with the `extractive` mode.
+chunk_chars = 1000              # the document is embedded in chunks of this size
+max_chunks = 8                  # at most this many chunks, spread across it
+
+# OpenAI-compatible chat-completions endpoints. Each is a [backends.<name>]
+# table with type = "openai"; select one with summary.backend = "<name>".
+# Options common to all of them:
+#   api_key_env         the NAME of the variable holding the key, read at
+#                       call time (an `api_key` option is refused)
+#   max_output_tokens   output budget for this backend; replaces
+#                       summary.max_output_tokens (and a labeller's budget)
+#   price_in_per_mtok   USD per million prompt tokens   } both or neither; used
+#   price_out_per_mtok  USD per million completion tokens} when the provider
+#                       reports no usage.cost. With neither, a record's
+#                       cost_usd is null and cost_source "unknown".
+#   [backends.<name>.request]  extra JSON fields merged into the request body
+#                       (model, messages and stream cannot be overridden)
+
+# Ollama, local. Start it first (`ollama serve`); it needs no key.
+[backends.llm]
+type = "openai"
+base_url = "http://localhost:11434/v1"
+model = "qwen3:8b"
+timeout_ms = 120000
+# temperature = 0.2
+# Extra JSON fields for the request body. qwen3 is a reasoning model; this
+# asks Ollama to skip the reasoning so the output budget goes to the summary.
+[backends.llm.request]
+reasoning_effort = "none"
+
+# OpenRouter. It reports usage.cost when asked to, so no prices are needed.
+# Run under `tm secrets exec --env OPENROUTER_API_KEY=<entry> -- trusty-summarizer ...`.
+# [backends.openrouter]
+# type = "openai"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "openai/gpt-4o-mini"
+# api_key_env = "OPENROUTER_API_KEY"
+# [backends.openrouter.request]
+# usage = { include = true }    # OpenRouter then reports `cost`
+
+# Atlas Cloud, GLM 5.3 Flash: the recommended remote model for summaries,
+# labels and the reader (README "Defaults"). It reports no cost, so the
+# prices compute it. GLM 5.3 Flash always reasons on Atlas (turning it off
+# gives HTTP 400); low effort used about 60 reasoning tokens, and the budget
+# leaves room for them (an empty answer is a backend_failed error naming it).
+# For documents beyond GLM's context: model = "deepseek-ai/deepseek-v4.1-flash",
+# prices 0.30 / 1.20, request field thinking = { type = "disabled" }.
+# [backends.atlas]
+# type = "openai"
+# base_url = "https://api.atlascloud.ai/v1"
+# model = "zai-org/glm-5.3-flash"
+# api_key_env = "ATLAS_API_KEY"
+# max_output_tokens = 1024
+# price_in_per_mtok = 0.15
+# price_out_per_mtok = 0.50
+# [backends.atlas.request]
+# reasoning_effort = "low"
+
+# A classifier that labels through an inference backend (one call per file);
+# recommended: the LLM labeller on GLM 5.3 Flash (the atlas table above):
+# [classifier]
+# backend = "llm-labels"
+# [backends.llm-labels]
+# type = "llm"
+# inference = "atlas"           # the name of an inference backend above
+# max_output_tokens = 200
+
+[cache]
+enabled = true
+# dir = "/path/to/cache"
+
+[warm]
+# summarize runs through an on-demand background server that keeps the model,
+# converter workers and HTTP connections warm; false (or --no-warm) runs
+# everything in the calling process.
+enabled = true
+idle_timeout_secs = 600         # the server exits after this long unused
+
+[convert]
+workers = 2
+timeout_ms = 60000
+start_timeout_ms = 10000
+max_output_bytes = 67108864
