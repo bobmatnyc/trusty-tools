@@ -428,6 +428,40 @@ mod tests {
         assert_eq!(line.trim(), "bar-value-123");
     }
 
+    /// Why: #11650 — a grouped client must take a wrapper's grandchild down
+    /// with it on drop.
+    /// What: the child backgrounds a `sleep` and prints its pid; after the
+    /// client is dropped the pid must stop existing within a few seconds.
+    /// Test: This test.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn dropping_a_grouped_client_kills_its_grandchild() {
+        use tokio::io::AsyncBufReadExt;
+        let mut client = StdioMcpClient::spawn_grouped_with_env(
+            "sh",
+            &["-c", "sleep 300 & echo $!; exec cat > /dev/null"],
+            "test-client",
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .unwrap();
+        let mut line = String::new();
+        client.stdout.read_line(&mut line).await.unwrap();
+        let pid: libc::pid_t = line.trim().parse().unwrap();
+        drop(client);
+        // SAFETY: signal 0 only probes for existence.
+        let alive = || unsafe { libc::kill(pid, 0) } == 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        if alive() {
+            // SAFETY: as above; clean up the leaked fixture before failing.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            panic!("grandchild {pid} outlived the grouped client");
+        }
+    }
+
     /// Why: Issue #421 — if the MCP child dies between calls, writing to its
     /// stdin blocks for the full 30s timeout. `is_alive()` must report false
     /// so callers can respawn before writing.

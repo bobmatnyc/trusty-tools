@@ -89,7 +89,7 @@ impl StdioMcpClient {
     /// group id cannot have been reused. Elsewhere identical to
     /// `spawn_with_env`. Opt-in, so existing callers keep their process
     /// layout (a terminal's Ctrl-C still reaches their children).
-    /// Test: `trusty_code` `mcp::tests::spawn_tests::a_wrapper_grandchild_dies_with_the_client`.
+    /// Test: `dropping_a_grouped_client_kills_its_grandchild` (in `mod.rs`).
     pub async fn spawn_grouped_with_env(
         binary: &str,
         args: &[&str],
