@@ -31,7 +31,8 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tower::ServiceExt;
 use trusty_common::uds::server::{
-    CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcError, RpcResponse, RpcRouter,
+    CODE_INTERNAL_ERROR, CODE_INVALID_PARAMS, CODE_METHOD_NOT_FOUND, RpcError, RpcResponse,
+    RpcRouter,
 };
 
 use super::{METHODS, register};
@@ -733,17 +734,38 @@ async fn rpc_projects_current_unregistered_path_is_not_found() {
     assert_eq!(error["code"], json!(CODE_NOT_FOUND), "{error}");
 }
 
-/// #11345: a checkout registered in `projects.json` by URL, or in
-/// `project-paths.json` by alias, resolves after a daemon restart, which left
-/// the in-memory map empty; an unregistered directory is still a not-found.
+/// #11345: a daemon restarted over `dir`; nothing was announced to it.
+fn restarted(dir: &TempDir) -> Arc<DaemonState> {
+    Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())))
+}
+
+/// #11345: `/projects/current` and `mpm.projects.current` for `path`; the
+/// HTTP status, HTTP body and RPC outcome (result on `Ok`, error on `Err`).
+async fn current_both(
+    state: &Arc<DaemonState>,
+    path: &std::path::Path,
+) -> (StatusCode, Value, Result<Value, Value>) {
+    let uri = format!("/projects/current?path={}", path.display());
+    let (status, body) = http(state, "GET", &uri, None).await;
+    let params = json!({ "path": path });
+    let rpc = if status == StatusCode::OK {
+        Ok(rpc_ok(&rpc_router(state), "mpm.projects.current", params).await)
+    } else {
+        Err(rpc_err(&rpc_router(state), "mpm.projects.current", params).await)
+    };
+    (status, body, rpc)
+}
+
+/// #11345: a checkout registered in `projects.json` by URL resolves after a
+/// restart that left the in-memory map empty.
 /// Test: this function IS the test.
 #[tokio::test]
 // The registry seeds from `$HOME`, and the URL checkout derives from it.
 #[serial_test::serial]
-async fn projects_current_resolves_persisted_registrations_after_restart_11345() {
+async fn projects_current_resolves_a_url_registration_after_restart_11345() {
     let (before, dir, _home_dir, _home) = hermetic_isolated_home();
-    let url_checkout = crate::core::repo_paths::base_clone_path("acme", "widget");
-    std::fs::create_dir_all(&url_checkout).expect("mkdir url checkout");
+    let checkout = crate::core::repo_paths::base_clone_path("acme", "widget");
+    std::fs::create_dir_all(&checkout).expect("mkdir url checkout");
     before
         .project_registry()
         .await
@@ -766,6 +788,21 @@ async fn projects_current_resolves_persisted_registrations_after_restart_11345()
         })
         .await
         .expect("persist the URL row");
+    drop(before);
+
+    let (status, body, rpc) = current_both(&restarted(&dir), &checkout).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("widget"), "{body}");
+    assert_eq!(rpc.expect("rpc ok")["name"], json!("widget"));
+}
+
+/// #11345: a checkout registered in `project-paths.json` by alias resolves
+/// after a restart.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn projects_current_resolves_an_alias_registration_after_restart_11345() {
+    let (before, dir, _home_dir, _home) = hermetic_isolated_home();
     let aliased = dir.path().join("aliased-checkout");
     std::fs::create_dir_all(&aliased).expect("mkdir alias checkout");
     let mut aliases =
@@ -775,27 +812,71 @@ async fn projects_current_resolves_persisted_registrations_after_restart_11345()
     aliases.save().expect("persist the alias row");
     drop(before);
 
-    // A fresh daemon over the same disk: nothing was announced to it.
-    let after = Arc::new(DaemonState::with_paths(&FrameworkPaths::under(dir.path())));
-    for (path, name) in [(&url_checkout, "widget"), (&aliased, "aliased")] {
-        let uri = format!("/projects/current?path={}", path.display());
-        let (status, body) = http(&after, "GET", &uri, None).await;
-        assert_eq!(status, StatusCode::OK, "{} -> {body}", path.display());
-        assert_eq!(body["name"], json!(name), "{body}");
-        let result = rpc_ok(
-            &rpc_router(&after),
-            "mpm.projects.current",
-            json!({ "path": path }),
-        )
-        .await;
-        assert_eq!(result["name"], json!(name), "{result}");
-    }
+    let (status, body, rpc) = current_both(&restarted(&dir), &aliased).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], json!("aliased"), "{body}");
+    assert_eq!(rpc.expect("rpc ok")["name"], json!("aliased"));
+}
 
+/// #11345: an unregistered directory is still a not-found, and a fresh
+/// install with no `project-paths.json` at all is not an error.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn projects_current_unregistered_without_alias_store_is_not_found_11345() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    assert!(!state.framework_root().join("project-paths.json").exists());
     let unregistered = dir.path().join("never-registered");
     std::fs::create_dir_all(&unregistered).expect("mkdir unregistered");
-    let uri = format!("/projects/current?path={}", unregistered.display());
-    let (status, _) = http(&after, "GET", &uri, None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, body, rpc) = current_both(&state, &unregistered).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(rpc.expect_err("rpc err")["code"], json!(CODE_NOT_FOUND));
+}
+
+/// #11345: an unreadable `project-paths.json` is an internal error on both
+/// transports, never a silent not-found.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn projects_current_unreadable_alias_store_is_internal_error_11345() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    std::fs::create_dir_all(state.framework_root()).expect("mkdir framework root");
+    std::fs::write(
+        state.framework_root().join("project-paths.json"),
+        "{ not json",
+    )
+    .expect("write corrupt alias store");
+    let path = dir.path().join("anything");
+
+    let (status, body, rpc) = current_both(&state, &path).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        rpc.expect_err("rpc err")["code"],
+        json!(CODE_INTERNAL_ERROR)
+    );
+}
+
+/// #11345: a `projects.json` corrupted after the registry loaded is an
+/// internal error on both transports, never a silent not-found.
+/// Test: this function IS the test.
+#[tokio::test]
+#[serial_test::serial]
+async fn projects_current_unreadable_registry_is_internal_error_11345() {
+    let (state, dir, _home_dir, _home) = hermetic_isolated_home();
+    // Load first; a load failure falls back to a temp registry by design.
+    state.project_registry().await;
+    let data_dir = crate::project::registry_data_dir_under(state.framework_root());
+    std::fs::create_dir_all(&data_dir).expect("mkdir registry dir");
+    std::fs::write(data_dir.join("projects.json"), "{ not json").expect("corrupt projects.json");
+    let path = dir.path().join("anything");
+
+    let (status, body, rpc) = current_both(&state, &path).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(
+        rpc.expect_err("rpc err")["code"],
+        json!(CODE_INTERNAL_ERROR)
+    );
 }
 
 /// Why serial: discovery reads `~/.claude/projects/`, and other tests in this
