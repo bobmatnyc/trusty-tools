@@ -58,7 +58,10 @@ fn config_with_token() -> Value {
 }
 
 /// Write `value` as `<dir>/.claude.json` at `mode`.
+/// The dir is set to 0700, as launch leaves it (#11195); a test about the dir
+/// mode loosens it afterwards.
 fn write_config(dir: &Path, value: &Value, mode: u32) -> PathBuf {
+    chmod(dir, 0o700);
     let path = dir.join(CLAUDE_JSON);
     std::fs::write(&path, serde_json::to_string_pretty(value).unwrap()).unwrap();
     chmod(&path, mode);
@@ -124,6 +127,7 @@ fn row_is_unknown_on_malformed_json() {
     let path = dir.path().join(CLAUDE_JSON);
     std::fs::write(&path, "{ not json").unwrap();
     chmod(&path, 0o600);
+    chmod(dir.path(), 0o700);
 
     let row = check_claude_json_secrets(Some(dir.path()));
 
@@ -340,4 +344,40 @@ fn fix_never_strips_a_third_party_servers_credential() {
     let row = check_claude_json_secrets(Some(dir.path()));
     assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
     assert!(row.message.contains("does not read"), "{}", row.message);
+}
+
+/// #11195: a 0755 config dir exposes every file in it, so the row fails even
+/// when `.claude.json` itself is 0600.
+#[test]
+fn row_fails_on_a_wide_config_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), &clean_config(), 0o600);
+    chmod(dir.path(), 0o755);
+
+    let row = check_claude_json_secrets(Some(dir.path()));
+
+    assert_eq!(row.status, CheckStatus::Fail, "{}", row.message);
+    assert!(
+        row.message.contains("directory is mode 0755"),
+        "{}",
+        row.message
+    );
+}
+
+/// #11195: `--fix` tightens a wide config dir to 0700.
+#[test]
+fn fix_tightens_a_wide_config_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    write_config(dir.path(), &clean_config(), 0o600);
+    chmod(dir.path(), 0o755);
+
+    let steps = repair_with_store(dir.path(), RepairMode::Apply, &MemoryKeyStore::new());
+
+    assert_eq!(mode(dir.path()), 0o700, "{steps:?}");
+    assert!(
+        steps
+            .iter()
+            .any(|s| s.path == dir.path() && matches!(s.status, StepStatus::Applied { .. })),
+        "{steps:?}"
+    );
 }
