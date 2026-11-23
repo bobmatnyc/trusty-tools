@@ -1,8 +1,8 @@
 """dashboard_keynames.py: the Projects view's Secrets list, names only (GET /api/projects/key-names), read-only.
 
 Why: #10350 (DOC-82 §10, owner ruling Dv3 2026-11-17): every user's install gets a Secrets list by owner/project on the
-Architect dashboard's Projects view, showing key names and never a value. The full Secrets nav (dashboard_secrets.py,
-with its write form) is not shipped (#10571), so this module is the read-only list that works on any install.
+Architect dashboard's Projects view, showing key names and never a value. The full Secrets nav (the
+Architect prototype's write form) is not shipped (#10571), so this module is the read-only list that works on any install.
 What: KeyNamesView.get() takes the tm-registered projects from the Projects view (dashboard_projects, so the list is
 `tm project list` and nothing else), runs `tm secrets list` once per project whose root exists (cwd = that root, stdin
 closed, TM_BIN overrides `tm`), and parses its "<vault> (Project|Owner):" headers and indented key lines with
