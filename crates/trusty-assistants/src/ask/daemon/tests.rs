@@ -6,7 +6,7 @@
 //! Every test bounds its waits and leaves no socket behind.
 //! Test: this module IS the test surface.
 
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -293,11 +293,18 @@ async fn a_connection_from_another_uid_is_refused() {
     )
     .await;
 
+    // #11650: the daemon closes the refused connection while the client may
+    // still be writing, so the client sees a clean EOF or a reset/broken pipe.
     let result = ask_at(&socket, "hi").await;
-    assert!(
-        matches!(result, Err(AskDaemonError::Disconnected)),
-        "{result:?}"
-    );
+    let refused = match &result {
+        Err(AskDaemonError::Disconnected) => true,
+        Err(AskDaemonError::Io { source, .. }) => matches!(
+            source.kind(),
+            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+        ),
+        _ => false,
+    };
+    assert!(refused, "{result:?}");
     let summary = running.finish().await;
     assert_eq!((summary.refused, summary.accepted), (1, 0), "{summary:?}");
     assert!(
@@ -359,20 +366,38 @@ async fn racing_binds_end_with_exactly_one_daemon() {
 
 #[tokio::test]
 async fn a_stale_socket_file_is_replaced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
     let dir = short_dir();
     let parent = dir.path().join("d");
     std::fs::create_dir(&parent).unwrap();
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
     let socket = parent.join("trusty-agents-stale.sock");
     drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
-    let stale = std::fs::symlink_metadata(&socket).unwrap().ino();
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket(),
+        "the stale socket file is present"
+    );
+    let dead = std::os::unix::net::UnixStream::connect(&socket);
+    assert!(dead.is_err(), "nothing serves the stale socket: {dead:?}");
 
-    let Bound::Serving(daemon) = bind(&socket).await.expect("bind") else {
-        panic!("a dead socket must be taken over");
-    };
-    assert_ne!(std::fs::symlink_metadata(&socket).unwrap().ino(), stale);
-    drop(daemon);
-    std::fs::remove_file(&socket).unwrap();
+    // #11650: Linux can reuse the inode after unlink + rebind, so the proof of
+    // replacement is the new daemon answering on the old path.
+    let llm = Arc::new(Scripted::new(vec![text("new daemon")]));
+    let running = serve(
+        &socket,
+        factory(&home, &llm, empty_servers(&tmp)),
+        own_uid(),
+        None,
+    )
+    .await;
+    assert_eq!(ask_at(&socket, "who?").await.expect("answer"), "new daemon");
+    let summary = running.finish().await;
+    assert_eq!((summary.accepted, summary.answered), (1, 1), "{summary:?}");
+    assert!(!socket.exists(), "the daemon removes its socket on exit");
 }
 
 #[tokio::test]
