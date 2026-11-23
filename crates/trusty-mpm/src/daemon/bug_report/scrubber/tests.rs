@@ -283,7 +283,7 @@ fn sk_inside_a_word_survives_while_real_sk_keys_are_redacted() {
     assert_eq!(super::core::scrub_credentials(path), path);
     for key in [
         "sk-ant-abcdefghijklmnop1234",
-        "KEY=sk-proj-abcdefghijklmnop1234",
+        "(sk-proj-abcdefghijklmnop1234)",
         "\"sk-abcdefghijklmnop1234\"",
     ] {
         let out = super::core::scrub_credentials(key);
