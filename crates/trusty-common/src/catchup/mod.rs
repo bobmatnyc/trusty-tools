@@ -26,7 +26,7 @@ pub mod session_log;
 // #7830 / ADR-0062: rebuild the local session cache from `refs/tm/sessions/**`.
 pub mod session_refs;
 // #9390: flags commit-SHA-like tokens in PM free text before a snapshot write.
-pub mod sha_scrub;
+pub mod secret_scrub; // #10595: replaces sha_scrub; keeps SHAs, redacts secrets.
 pub mod state;
 
 use std::path::{Path, PathBuf};

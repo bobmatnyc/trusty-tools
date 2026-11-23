@@ -1,0 +1,2 @@
+Changed
+- `catchup::pause::write_pause_snapshot` keeps commit SHAs and message ids in the PM's free text instead of replacing them with `<sha?>`, so a resumed session reads them back exactly. It now redacts only secret-shaped tokens as `[REDACTED]`: a hex word longer than 40 characters (longer than any SHA-1 id) or a word of at least 20 characters opening with a credential prefix such as `ghp_`, `sk-`, `xoxb-` or `AKIA`. `catchup::sha_scrub` is replaced by `catchup::secret_scrub` (#10595).
