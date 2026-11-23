@@ -155,6 +155,8 @@ pub(crate) fn record_tagged_with(
         tracing::debug!("no session id: writing no compress savings row");
         return;
     }
+    // #11563: both ledgers store the sanitised name, never a path or pattern.
+    let tool_name = &crate::core::savings_opportunity::ledger_tool_name(tool_name);
     if !compress_gains(bytes_before, bytes_after) {
         // #11560: a zero-gain decline goes to a file, never to stderr.
         record_decline(
