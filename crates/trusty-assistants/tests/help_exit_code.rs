@@ -54,3 +54,38 @@ fn help_flag_exits_zero_and_prints_usage_on_stdout() {
         );
     }
 }
+
+/// Why (#11742): `ta ask --help` and `ta handoff --help` failed as usage
+/// errors, so a new user had no way to read a verb's flags. Every verb's
+/// `--help` and `-h` must print that verb's usage on stdout and exit 0.
+/// Test: itself.
+#[test]
+fn subcommand_help_exits_zero_and_prints_usage() {
+    let cases: &[(&[&str], &str)] = &[
+        (&["ask"], "ta ask <instance> <question…>"),
+        (&["handoff"], "ta handoff <instance> --to tm|tc"),
+        (&["handoff", "izzie", "--to", "tm"], "ta handoff <instance>"),
+        (&["config", "profile"], "ta config profile"),
+        (&["config"], "ta config"),
+        (&["list"], "ta list"),
+        (&["mcp-serve"], "ta mcp-serve"),
+        (&["ask-daemon"], "ta ask-daemon <instance>"),
+    ];
+    for (verb, usage) in cases {
+        for flag in ["--help", "-h"] {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let out = common::ta(&tmp)
+                .args(*verb)
+                .arg(flag)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("spawn ta");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let argv = format!("ta {} {flag}", verb.join(" "));
+            assert_eq!(out.status.code(), Some(0), "`{argv}`; stderr:\n{stderr}");
+            assert!(stdout.contains("Usage:"), "`{argv}`; stdout:\n{stdout}");
+            assert!(stdout.contains(usage), "`{argv}`; stdout:\n{stdout}");
+        }
+    }
+}

@@ -6,14 +6,17 @@
 //! stdio MCP server and the daemon-less `config` verbs, which were already
 //! dispatched ahead of the old startup path.
 //! What: [`run`] routes argv to `--version`, `--help`, `config …`,
-//! `config profile …`, `mcp-serve`, `ask`, `ask-daemon` or `handoff` (#11650); anything
-//! else is a usage error. No path here opens a network listener.
+//! `config profile …`, `mcp-serve`, `ask`, `ask-daemon`, `handoff` (#11650) or
+//! `list` (#11742); anything else is a usage error. `<verb> --help` prints that
+//! verb's usage (#11742). No path here opens a network listener.
 //! Test: `tests/version_provenance.rs`, `tests/help_exit_code.rs`,
 //! `tests/config_mount.rs`, `tests/no_network_listener.rs`.
 
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+use crate::cli_verbs::{Verb, run_list, verb_usage, wants_help};
 
 /// How long process shutdown waits for background tasks after [`run`] returns.
 ///
@@ -45,11 +48,14 @@ const USAGE: &str = concat!(
     env!("TA_BIN_NAME"),
     " mcp-serve             Serve the dispatch_task tool as a stdio MCP server\n  ",
     env!("TA_BIN_NAME"),
+    " list                  List the assistant instances `ask` accepts\n  ",
+    env!("TA_BIN_NAME"),
     " ask <instance> <question…>\n                        Ask an assistant instance (starts its daemon on demand)\n  ",
     env!("TA_BIN_NAME"),
     " ask-daemon <instance> Run an instance's ask daemon (started by `ask`)\n  ",
     env!("TA_BIN_NAME"),
-    " handoff <instance> --to tm|tc [--key <key>] [--] <task…>\n                        Hand a task to trusty-mpm or trusty-code; prints the handle\n",
+    " handoff <instance> --to tm|tc [--key <key>] [--] <task…>\n                        Hand a task to trusty-mpm or trusty-code; prints the handle\n\n\
+`<verb> --help` prints that verb's usage. Instances live in ~/trusty-agents/<instance>/.\n",
 );
 
 /// Launch the binary: own the tokio runtime, run [`run`] on it, and tear the
@@ -91,6 +97,8 @@ enum Command {
     AskDaemon,
     /// #11650: `handoff <instance> --to tm|tc …` (slice 3c).
     Handoff,
+    /// #11742: `list`, the instance homes.
+    List,
     Unknown(String),
 }
 
@@ -116,6 +124,7 @@ fn classify(args: &[String]) -> Command {
         Some("ask") => Command::Ask,
         Some(crate::ask::daemon::DAEMON_VERB) => Command::AskDaemon,
         Some("handoff") => Command::Handoff,
+        Some("list") => Command::List,
         Some(other) => Command::Unknown(other.to_string()),
     }
 }
@@ -131,7 +140,15 @@ fn classify(args: &[String]) -> Command {
 pub async fn run() -> Result<()> {
     crate::tls::install_crypto_provider()?;
     let args: Vec<String> = std::env::args().collect();
-    match classify(&args) {
+    let command = classify(&args);
+    // #11742: `<verb> --help` prints the verb's usage and exits 0.
+    if let Some(verb) = hand_parsed_verb(&command)
+        && wants_help(verb, &args[2..])
+    {
+        print!("{}", verb_usage(verb));
+        return Ok(());
+    }
+    match command {
         Command::Version => {
             println!("{}", crate::build_info::version_string());
             Ok(())
@@ -151,6 +168,7 @@ pub async fn run() -> Result<()> {
             Ok(crate::ask::daemon::run_daemon(id).await?)
         }
         Command::Handoff => run_handoff(&args[2..]).await,
+        Command::List => run_list(),
         Command::Unknown(arg) => {
             eprint!("{USAGE}");
             anyhow::bail!(
@@ -160,23 +178,45 @@ pub async fn run() -> Result<()> {
     }
 }
 
+/// The [`Verb`] whose usage `--help` prints, for a verb `ta` parses by hand.
+/// `config` verbs are clap's and print their own help.
+fn hand_parsed_verb(command: &Command) -> Option<Verb> {
+    match command {
+        Command::Ask => Some(Verb::Ask),
+        Command::AskDaemon => Some(Verb::AskDaemon),
+        Command::Handoff => Some(Verb::Handoff),
+        Command::List => Some(Verb::List),
+        Command::McpServe => Some(Verb::McpServe),
+        _ => None,
+    }
+}
+
 /// `ta ask <instance> <question…>`: print the instance's answer (#11650).
 ///
 /// Why: the client half of slice 3b.
-/// What: the words after the instance id are joined into one question. The
-/// daemon is this executable (`ask-daemon`), started only when none serves
-/// the instance. Every failure is an error with a non-zero exit.
+/// What: the words after the instance id are joined into one question; a
+/// leading `--` among them is dropped (#11742). The daemon is this
+/// executable (`ask-daemon`), started only when none serves the instance.
+/// Every failure is an error with a non-zero exit.
 /// Test: `ask_starts_the_daemon_on_demand_and_it_exits_idle`,
-/// `ask_names_an_unknown_instance` (`tests/ask_daemon.rs`).
+/// `ask_names_an_unknown_instance`,
+/// `help_words_inside_a_question_are_asked`,
+/// `a_leading_double_dash_is_dropped_from_the_question` (`tests/ask_daemon.rs`).
 async fn run_ask(rest: &[String]) -> Result<()> {
     use crate::ask::daemon::{DaemonLauncher, ask_instance};
-    let (Some(id), question) = (rest.first(), rest.get(1..).unwrap_or_default().join(" ")) else {
+    // #11742: a leading `--` ends options; the words after it are the question.
+    let words = match rest.get(1..).unwrap_or_default() {
+        [dashes, tail @ ..] if dashes == "--" => tail,
+        words => words,
+    };
+    let (Some(id), question) = (rest.first(), words.join(" ")) else {
         anyhow::bail!("usage: {BIN_NAME} ask <instance> <question…>");
     };
     if question.trim().is_empty() {
         anyhow::bail!("usage: {BIN_NAME} ask <instance> <question…>");
     }
-    let launcher = DaemonLauncher::current_exe()?;
+    // #11742: a cold start prints one progress line on stderr.
+    let launcher = DaemonLauncher::current_exe()?.with_progress();
     let answer = ask_instance(None, id, &question, &launcher).await?;
     println!("{answer}");
     Ok(())
@@ -228,7 +268,9 @@ async fn run_config_subcommand(argv_tail: &[String]) -> Result<()> {
         cmd: trusty_common::inference::config::ConfigCommand,
     }
 
-    ConfigParser::parse_from(argv_tail).cmd.run().await
+    // #11742: clap names the program after argv[0]; make usage read `ta config`.
+    let argv = std::iter::once(format!("{BIN_NAME} config")).chain(argv_tail[1..].iter().cloned());
+    ConfigParser::parse_from(argv).cmd.run().await
 }
 
 /// Parse and run `ta config profile show|set` (#3406 follow-up).
@@ -382,6 +424,28 @@ mod tests {
             classify(&argv(&["handoff", "izzie", "--to", "tm", "x"])),
             Command::Handoff
         );
+        assert_eq!(classify(&argv(&["list"])), Command::List);
+    }
+
+    /// Why (#11742): one help rule for every hand-parsed verb; `--` ends it.
+    /// Test: itself.
+    #[test]
+    fn help_words_before_the_terminator_ask_for_help() {
+        let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let help = |verb, w: &[&str]| wants_help(verb, &words(w));
+        assert!(help(Verb::Ask, &["--help"]));
+        assert!(help(Verb::Ask, &["-h", "x"]));
+        assert!(help(Verb::Ask, &["izzie", "--help"]));
+        assert!(!help(Verb::Ask, &["izzie", "--help", "do"]));
+        assert!(!help(Verb::Ask, &["izzie", "what", "is", "-h"]));
+        assert!(!help(Verb::Ask, &["izzie", "--", "--help"]));
+        assert!(help(Verb::Handoff, &["--help"]));
+        assert!(help(Verb::Handoff, &["izzie", "--to", "tm", "-h"]));
+        assert!(help(Verb::Handoff, &["izzie", "--key=k", "--help"]));
+        assert!(!help(Verb::Handoff, &["izzie", "--to", "tm", "do", "-h"]));
+        assert!(!help(Verb::Handoff, &["izzie", "--", "-h"]));
+        assert!(help(Verb::List, &["-h"]));
+        assert!(!help(Verb::McpServe, &["--", "-h"]));
     }
 
     /// Why (#11632): the binary is `ta`, and its name comes from the

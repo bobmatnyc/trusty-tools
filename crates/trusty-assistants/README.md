@@ -19,13 +19,80 @@ belongs to `trusty-code`; multi-project orchestration belongs to `trusty-mpm`.
 ```
 ta --version             Print the version and the commit that built it
 ta --help                Print the usage text
+ta list                  List the assistant instances `ask` accepts
+ta ask <instance> <question…>
+                         Ask an instance; prints the answer on stdout
+ta handoff <instance> --to tm|tc [--key <key>] [--] <task…>
+                         Hand a task to trusty-mpm or trusty-code
 ta config <verb> …       Manage inference provider credentials (API keys)
 ta config profile <verb> Show or set the user profile
 ta mcp-serve             Serve the dispatch_task tool as a stdio MCP server
 ```
 
+`ta <verb> --help` (or `-h`) prints that verb's usage and exits 0.
+
 `ta` opens no network listener. `tests/no_network_listener.rs` fails on any
 non-test TCP or UDP bind in `src/`.
+
+## First steps
+
+An instance is a directory `~/trusty-agents/<id>/` that holds
+`instructions.md`. `ta` does not create instances. A machine where the older
+`tagent` ran may already have homes for its shipped assistants, such as `izzie` and
+`assistant`.
+
+1. List the instances:
+
+   ```bash
+   ta list
+   ```
+
+   With none, `ta list` prints one line naming the directory it searched.
+2. If the list is empty, create one. The id is lowercase letters, digits,
+   `-`, `_` or `.`:
+
+   ```bash
+   mkdir -p ~/trusty-agents/izzie
+   printf 'You are izzie, a personal assistant.\n' > ~/trusty-agents/izzie/instructions.md
+   ```
+
+3. Ask it a question. The words after the instance are one question:
+
+   ```bash
+   ta ask izzie "what is on my list today?"
+   ```
+
+The model call needs an inference provider key; `ta config keys --help` shows
+how to set one. An unknown instance is an error that names the instances that
+exist.
+
+## `ta ask`
+
+`ta ask <instance> <question…>` prints the instance's answer on stdout and
+nothing else, so a script can capture it. The first ask starts the instance's
+daemon (`ta ask-daemon <instance>`), which takes about 10 s; during that start
+`ta` prints one line on stderr, `ta: starting <instance> assistant…`. Later
+asks reuse the running daemon and print no progress line. The daemon exits
+when idle. Each turn is appended to `~/trusty-agents/<id>/stores/ask-turns.jsonl`.
+
+## `ta handoff`
+
+`ta handoff <instance> --to tm|tc [--key <key>] [--] <task…>` hands one task
+from an instance to trusty-mpm (`tm`) or trusty-code (`tc`) and prints one JSON
+line with the key, the target and the target's handle.
+
+| Flag | Meaning |
+|---|---|
+| `--to tm\|tc` | Required; there is no default. `tm` sends into the instance's durable `tm serve --stdio` session, created on the first handoff. `tc` runs `task.run` on the shared tcode socket. |
+| `--key <key>` | Idempotency key. The same key again replays the first handoff instead of sending twice. Omitted, a new key is minted and printed. |
+| `--` | End of options; every later word is task text. |
+
+Both targets run in the `project_dir` that the instance's `config.toml` names;
+without one, `tm` uses the instance home.
+
+```bash
+ta handoff izzie --to tc -- "add a --dry-run flag to the export script"
+```
 
 ## Where it keeps data
 
@@ -61,10 +128,11 @@ runs a launchd Slack bot. Sources and signing:
 
 `scripts/sandbox_assistants_ask.sh` runs one `ta ask` under `env -i` with a
 temporary `HOME` and data directory, then checks that the instance's daemon
-exited idle. Offline, for both instances:
+exited idle. `--role` writes the instance's `instructions.md` from the
+personal or CTO template. Offline, for both instances:
 
 ```bash
-TCODE_MOCK_LLM=echo scripts/sandbox_assistants_ask.sh --dir "$D" --role personal personal "hello"
+TCODE_MOCK_LLM=echo scripts/sandbox_assistants_ask.sh --dir "$D" --role personal izzie "hello"
 TCODE_MOCK_LLM=echo scripts/sandbox_assistants_ask.sh --dir "$D" --role cto cto-assistant "hello"
 ```
 

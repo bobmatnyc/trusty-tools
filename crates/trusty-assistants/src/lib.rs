@@ -43,6 +43,8 @@ pub mod bus;
 pub mod channels;
 // #11632: the `ta` argv dispatch left after the harness cut.
 pub mod cli;
+// #11742: per-verb help and `ta list`.
+mod cli_verbs;
 pub mod env_compat;
 pub mod events;
 pub mod identity;

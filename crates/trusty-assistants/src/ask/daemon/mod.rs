@@ -120,8 +120,18 @@ pub enum AskDaemonError {
     InvalidInstance(#[source] AssistantError),
 
     /// No home directory exists for the instance.
-    #[error("unknown assistant instance `{id}`: no home at {}", home.display())]
-    UnknownInstance { id: String, home: PathBuf },
+    // #11742: the message names the instances that do exist.
+    #[error(
+        "unknown assistant instance `{id}`: no home at {}; {}",
+        home.display(),
+        available_hint(available)
+    )]
+    UnknownInstance {
+        id: String,
+        home: PathBuf,
+        /// The instance homes beside `home` ([`crate::assistants::list_instances`]).
+        available: Vec<AssistantInstanceId>,
+    },
 
     /// The trusty-agents data directory could not be resolved.
     #[error("cannot resolve the trusty-agents data directory: {0}")]
@@ -209,6 +219,19 @@ pub enum AskDaemonError {
     },
 }
 
+/// The clause of [`AskDaemonError::UnknownInstance`] naming the instances.
+/// Test: `tests::an_unknown_instance_is_named_with_its_path`.
+fn available_hint(available: &[AssistantInstanceId]) -> String {
+    if available.is_empty() {
+        return format!(
+            "no instances exist yet; an instance is a directory holding {}",
+            crate::assistants::INSTRUCTIONS_FILE
+        );
+    }
+    let names: Vec<&str> = available.iter().map(AssistantInstanceId::as_str).collect();
+    format!("available instances: {}", names.join(", "))
+}
+
 impl AskDaemonError {
     /// An [`AskDaemonError::Io`] naming what was being done.
     pub(crate) fn io(what: &'static str) -> impl FnOnce(std::io::Error) -> Self {
@@ -249,9 +272,16 @@ pub fn resolve_home(root: Option<&Path>, raw_id: &str) -> Result<AssistantHome, 
         None => AssistantHome::for_instance(raw_id).map_err(AskDaemonError::InvalidInstance)?,
     };
     if !home.path().is_dir() {
+        // #11742: list the root's real instances; a failed read lists none.
+        let available = home
+            .path()
+            .parent()
+            .and_then(|root| crate::assistants::list_instances(root).ok())
+            .unwrap_or_default();
         return Err(AskDaemonError::UnknownInstance {
             id: home.id().to_string(),
             home: home.path().to_path_buf(),
+            available,
         });
     }
     Ok(home)

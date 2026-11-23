@@ -116,6 +116,90 @@ fn ask_starts_the_daemon_on_demand_and_it_exits_idle() {
     assert_eq!(env.turns(), 1);
 }
 
+/// Why (#11742): a cold ask waited about 10 s with no output. It now prints
+/// one progress line on stderr; stdout carries only the answer, and a warm
+/// ask prints no progress line.
+#[test]
+fn a_cold_ask_reports_the_start_on_stderr_only() {
+    const NOTICE: &str = "ta: starting e2e assistant";
+    let env = Env::new();
+    let cold = env.ask("hello there");
+    assert_answered(&cold);
+    let stderr = String::from_utf8_lossy(&cold.stderr);
+    assert_eq!(stderr.matches(NOTICE).count(), 1, "stderr: {stderr}");
+    assert!(!String::from_utf8_lossy(&cold.stdout).contains(NOTICE));
+    env.wait_idle();
+
+    // Warm: a daemon already serves the instance.
+    let mut daemon = env
+        .ta()
+        .args(["ask-daemon", "e2e"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let mut ready = String::new();
+    BufReader::new(daemon.stdout.take().expect("stdout"))
+        .read_line(&mut ready)
+        .expect("ready line");
+    assert_eq!(ready.trim(), "ready");
+    let hold = UnixStream::connect(env.socket()).expect("hold");
+    drop(daemon.stdin.take());
+    let warm = env.ask("again");
+    assert_answered(&warm);
+    let stderr = String::from_utf8_lossy(&warm.stderr);
+    assert!(!stderr.contains(NOTICE), "warm stderr: {stderr}");
+    drop(hold);
+    assert!(wait_exit(&mut daemon).success());
+}
+
+/// The questions in `env`'s turn log, in order.
+fn asked(env: &Env) -> Vec<String> {
+    let log = env
+        .home
+        .path()
+        .join("trusty-agents/e2e/stores/ask-turns.jsonl");
+    std::fs::read_to_string(log)
+        .expect("turn log")
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).expect("turn record");
+            v["question"].as_str().expect("question").to_string()
+        })
+        .collect()
+}
+
+/// Why (#11742): a help word inside a question is question text, not a
+/// request for usage.
+#[test]
+fn help_words_inside_a_question_are_asked() {
+    let env = Env::new();
+    assert_answered(
+        &env.ta()
+            .args(["ask", "e2e", "what", "is", "-h"])
+            .output()
+            .expect("run"),
+    );
+    env.wait_idle();
+    assert_eq!(asked(&env), ["what is -h"]);
+}
+
+/// Why (#11742): a leading `--` ends options, so `-- --help` asks the
+/// literal question `--help`, without the `--`.
+#[test]
+fn a_leading_double_dash_is_dropped_from_the_question() {
+    let env = Env::new();
+    assert_answered(
+        &env.ta()
+            .args(["ask", "e2e", "--", "--help"])
+            .output()
+            .expect("run"),
+    );
+    env.wait_idle();
+    assert_eq!(asked(&env), ["--help"]);
+}
+
 #[test]
 fn a_second_ask_reuses_the_running_daemon() {
     let env = Env::new();
