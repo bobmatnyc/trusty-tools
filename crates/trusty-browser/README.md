@@ -154,6 +154,7 @@ The mode you use with a profile connected in the popup. No code is needed.
 | `page_reload` | Reloads the page. |
 | `page_upload` | Sets local files under `--upload-root` on an `<input type=file>`. |
 | `page_downloads` | Lists the newest downloads started from the tab's origin, with path and state. |
+| `page_emulate` | Sets the tab's emulation state: `javascript` (false turns it off), `color_scheme` (`light`, `dark`, or null for none), and `width` x `height` (`0` and `0` reset the viewport). Resets when the lease ends. |
 | `browser_release` | Releases a lease taken with `browser_select`. |
 
 ### Workflow mode (`--workflow NAME` or `--credential FILE`)

@@ -391,7 +391,7 @@ rustup run 1.98.1 cargo clippy --version
 
 # The CI job's own invocation, copied from ci.yml's clippy step.
 rustup run 1.98.1 cargo clippy --workspace --all-targets \
-  --exclude trusty-code-gui --exclude trusty-agents-ui -- -D warnings
+  --exclude trusty-code-gui -- -D warnings
 ```
 
 Re-read the pin from `ci.yml` each time rather than trusting this snippet:

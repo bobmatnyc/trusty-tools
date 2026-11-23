@@ -462,6 +462,9 @@ pub(crate) async fn index_status_report(
         "last_walk_started_at": walk_diag.last_walk_started_at,
         "last_walk_files_seen": walk_diag.last_walk_files_seen,
         "last_walk_files_skipped": walk_diag.last_walk_files_skipped,
+        // #11651: files refused for size, capped list plus the full count.
+        "skipped_files": walk_diag.skipped_files,
+        "skipped_for_size_total": walk_diag.skipped_for_size_total,
         // #9059: a hold is why no walk runs, so it is the walk error.
         "last_walk_error": hold.map(|h| h.reason()).or(walk_diag.last_walk_error),
         // #5336: true when the walk started and was then abandoned. Surfaced,

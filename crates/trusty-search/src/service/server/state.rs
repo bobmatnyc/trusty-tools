@@ -358,7 +358,7 @@ pub struct SearchAppState {
     /// When the value becomes `true`, the axum `with_graceful_shutdown` future
     /// resolves and the normal post-serve flush path runs.
     ///
-    /// Test: `admin_stop_triggers_graceful_shutdown` in `tests_state.rs`.
+    /// Test: `admin_stop_triggers_graceful_shutdown` in `state_tests.rs`.
     pub shutdown_tx: Arc<watch::Sender<bool>>,
     /// Cached result of the startup update check (issue #537).
     ///
@@ -417,7 +417,7 @@ pub struct SearchAppState {
     /// What: an `AtomicU64` written on every successful `SysMetrics::sample()`
     /// call; read by `health_report` as a fallback when `try_lock()` fails.
     /// `0` only on the very first health poll before any sample has ever landed.
-    /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
+    /// Test: `health_rss_fallback_on_contention` in state_tests.rs.
     pub last_rss_mb: Arc<std::sync::atomic::AtomicU64>,
     /// RSS (MB) observed immediately after the most recent memory-pressure
     /// reclaim sweep; `0` = no reclaim has happened in the current pressure
@@ -448,7 +448,7 @@ pub struct SearchAppState {
     /// `cpu_pct == 0.0` when the metrics lock is transiently contended.
     /// What: stores `f32::to_bits()` in an `AtomicU32`; `health_report` reads
     /// it via `f32::from_bits()` on contention.
-    /// Test: `health_rss_fallback_on_contention` in tests_state.rs.
+    /// Test: `health_rss_fallback_on_contention` in state_tests.rs.
     pub last_cpu_pct_bits: Arc<std::sync::atomic::AtomicU32>,
     /// In-memory cache of the last Unix timestamp written to `last_queried_unix`
     /// for each index (PR #1103 — eliminate sync disk read on query hot path).
@@ -564,7 +564,7 @@ pub struct SearchAppState {
     /// with respect to a concurrent `store`, so there is no `try_read()`
     /// contention-fallback branch to reason about here at all.
     /// Test: `switchable_embedder_installed_alongside_embedder` in
-    /// `tests_state.rs`.
+    /// `state_tests.rs`.
     pub switchable_embedder:
         Arc<ArcSwapOption<crate::service::embedder_supervisor::SwitchableEmbedder>>,
     /// Last deferred-embed catch-up completion epoch this handler observed

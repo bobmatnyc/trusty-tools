@@ -147,6 +147,15 @@ fn strip_ansi(text: &str) -> String {
 /// filter's stdout plus its ANSI-stripped stderr. `inner` must not contain a
 /// single quote.
 fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
+    let output = wrapped_pipeline_output(inner, tool);
+    (
+        String::from_utf8(output.stdout).expect("stdout is utf8"),
+        strip_ansi(&String::from_utf8_lossy(&output.stderr)),
+    )
+}
+
+/// The rewritten pipeline's raw output, status included (#11572).
+fn wrapped_pipeline_output(inner: &str, tool: &str) -> std::process::Output {
     // #7568: a shell pipeline needs the PATH, not a `Command`, so the isolation
     // goes on the `sh` that runs it — the `tm compress` at the tail inherits it.
     // That also covers #7514: the scrubbed environment carries no live
@@ -158,7 +167,7 @@ fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
     );
     let mut command = Command::new("sh");
     common::isolate_spawned_tm(&mut command, common::tm_spawn_home());
-    let output = command
+    command
         .arg("-c")
         .arg(&script)
         .env(ENV_COMPRESS_NO_RTK, "1")
@@ -169,11 +178,7 @@ fn run_wrapped_pipeline(inner: &str, tool: &str) -> (String, String) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .expect("failed to run the rewritten pipeline");
-    (
-        String::from_utf8(output.stdout).expect("stdout is utf8"),
-        strip_ansi(&String::from_utf8_lossy(&output.stderr)),
-    )
+        .expect("failed to run the rewritten pipeline")
 }
 
 #[test]
@@ -191,6 +196,17 @@ fn tm_compress_reports_the_wrapped_commands_exit_status() {
         stdout, "boom",
         "the exit sentinel must never reach the caller's output"
     );
+}
+
+#[test]
+fn tm_compress_rewrite_exits_with_the_wrapped_commands_status() {
+    // #11572: the rewrite's pipeline status is `tm compress`'s, so before the
+    // fix a failing `git log -1 nonexistent_ref` (exit 128) exited 0. The error
+    // arm is the contract: a non-zero status must survive; a zero stays zero.
+    for (inner, want) in [("exit 128", 128), ("exit 1", 1), ("printf ok", 0)] {
+        let output = wrapped_pipeline_output(inner, "git log");
+        assert_eq!(output.status.code(), Some(want), "status for `{inner}`");
+    }
 }
 
 #[test]

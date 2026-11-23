@@ -222,6 +222,10 @@ async fn send_input_observed_reports_unsubmitted_paste() {
         "%1".to_string(),
         "❯ [Pasted text #1][Pasted text #2]".into(),
     );
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
 
     let state = mgr
         .send_input_observed(&record.id, "a very long coordination message")
@@ -237,7 +241,7 @@ async fn send_input_observed_reports_unsubmitted_paste() {
         "`sent` must be false for an observed unsubmitted paste (pre-fix: hardcoded true)"
     );
     assert!(
-        fake.pane_send_calls
+        fake.pane_literal_calls
             .lock()
             .unwrap()
             .iter()
@@ -278,7 +282,11 @@ async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
     fake.capture_responses
         .lock()
         .unwrap()
-        .insert("%1".to_string(), "● Working…\n❯ ".into());
+        .insert("%1".to_string(), "● Working…\n❯ short message".into());
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
 
     let state = mgr
         .send_input_observed(&record.id, "short message")
@@ -286,4 +294,197 @@ async fn send_input_observed_reports_submitted_on_a_clean_prompt() {
         .expect("send");
     assert_eq!(state, crate::session_manager::SubmitState::Submitted);
     assert!(state.delivered());
+}
+
+/// An Active ClaudeCode session on pane `%1` whose captures answer `pane`.
+async fn active_session_showing(
+    dir: &tempfile::TempDir,
+    pane: &str,
+) -> (
+    super::manager::SessionManager,
+    std::sync::Arc<super::tests::FakeTmuxDriver>,
+    crate::session_manager::ManagedSessionId,
+) {
+    let (mgr, fake) = make_manager_with_pane(dir).await;
+    let record = mgr
+        .create(
+            "task".into(),
+            Some(PathBuf::from("/tmp/x")),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create");
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&record.id).await.unwrap();
+        r.state = ManagedSessionState::Active;
+        store.upsert(r).await.unwrap();
+    }
+    fake.capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), pane.into());
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), EMPTY_BOX.into());
+    (mgr, fake, record.id)
+}
+
+/// #10747: a Claude Code input box with nothing typed, as an escaped capture.
+const EMPTY_BOX: &str = "out\n────────────\n❯ \n────────────\n";
+
+/// #10747: the box already holds `held`; nothing may be typed or cleared.
+async fn assert_refused_on_a_full_box(held: &str) {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let box_text = format!("out\n────────────\n❯ {held}\n────────────\n");
+    let (mgr, fake, id) = active_session_showing(&dir, &box_text).await;
+    fake.escaped_capture_responses
+        .lock()
+        .unwrap()
+        .insert("%1".to_string(), box_text);
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state.as_str(), "input_not_empty", "{held}");
+    assert!(!state.delivered());
+    assert!(
+        fake.pane_literal_calls.lock().unwrap().is_empty(),
+        "typed into {held}"
+    );
+    assert!(
+        fake.pane_key_calls.lock().unwrap().is_empty(),
+        "keys sent on {held}"
+    );
+    assert!(fake.pane_send_calls.lock().unwrap().is_empty());
+}
+
+/// #10747: a stale paste placeholder must not pass the echo check for a new
+/// message. Pre-fix the placeholder satisfied the check and Enter submitted
+/// the stale paste.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_refuses_a_stale_paste_placeholder() {
+    assert_refused_on_a_full_box("[Pasted text #1 +4 lines]").await;
+}
+
+/// #10747: text the user typed is never typed over and never cleared by C-u.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_refuses_a_user_draft() {
+    assert_refused_on_a_full_box("half-written owner reply").await;
+}
+
+/// #10747: a non-Claude Code runtime (tcode) has no `❯` box, so the echo
+/// check does not apply: text and Enter go in one send, as before.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_skips_the_echo_check_for_tcode() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) = active_session_showing(&dir, "$ tcode ready\n").await;
+    {
+        let mut store = mgr.store.write().await;
+        let mut r = store.get(&id).await.unwrap();
+        r.runtime = crate::runtime::RuntimeKind::Tcode;
+        store.upsert(r).await.unwrap();
+    }
+
+    let state = mgr
+        .send_input_observed(&id, "hello tcode")
+        .await
+        .expect("send");
+
+    assert!(state.delivered(), "{}", state.as_str());
+    assert!(
+        fake.pane_key_calls.lock().unwrap().is_empty(),
+        "no C-u for tcode"
+    );
+    assert!(
+        fake.pane_send_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, t)| t == "hello tcode"),
+        "text and Enter sent together"
+    );
+}
+
+/// The sent text of the #10747 incident, long enough to cross the paste threshold.
+const LONG: &str = "Check the guard source before editing anything, then report the rule \
+    it enforces, so we know which input trips it, to avoid chasing the guard by trial edits.";
+
+/// #10747: the box shows only the tail of the typed text (the head was
+/// dropped). Enter must NOT be pressed, the box is cleared, and the verdict
+/// is `not_echoed` with `delivered() == false`. Pre-fix, `send_line` pressed
+/// Enter unconditionally and the clean post-Enter pane read `Submitted`.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_withholds_enter_when_the_head_is_dropped() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) = active_session_showing(
+        &dir,
+        "● Bash(cargo test)\n❯ to avoid chasing the guard by trial edits.\n",
+    )
+    .await;
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state.as_str(), "not_echoed");
+    assert!(
+        !state.delivered(),
+        "an unverified send must not report sent:true"
+    );
+    assert!(state.reason().is_some());
+    let keys = fake.pane_key_calls.lock().unwrap().clone();
+    assert!(
+        !keys.iter().any(|(_, k)| k == "Enter"),
+        "no Enter: {keys:?}"
+    );
+    assert!(
+        keys.iter().any(|(_, k)| k == "C-u"),
+        "box cleared: {keys:?}"
+    );
+    assert!(
+        fake.pane_send_calls.lock().unwrap().is_empty(),
+        "no text+Enter send"
+    );
+}
+
+/// #10747: the box echoes the full text, so Enter is pressed and the send
+/// reports `submitted`.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_presses_enter_after_a_full_echo() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) = active_session_showing(&dir, &format!("● Working…\n❯ {LONG}\n")).await;
+
+    let state = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    assert_eq!(state, crate::session_manager::SubmitState::Submitted);
+    assert!(state.delivered());
+    let keys = fake.pane_key_calls.lock().unwrap().clone();
+    assert_eq!(keys, vec![("%1".to_string(), "Enter".to_string())]);
+    assert_eq!(
+        fake.pane_literal_calls.lock().unwrap().len(),
+        1,
+        "typed once"
+    );
+}
+
+/// #10747: Claude Code collapsed the text into its paste placeholder; that
+/// counts as the full text, so Enter is pressed.
+/// Test: this function IS the test.
+#[tokio::test(start_paused = true)]
+async fn send_input_observed_presses_enter_on_a_paste_placeholder() {
+    let dir = crate::test_support::hermetic_temp_dir();
+    let (mgr, fake, id) =
+        active_session_showing(&dir, "● Working…\n❯ [Pasted text #1 +2 lines]\n").await;
+
+    let _ = mgr.send_input_observed(&id, LONG).await.expect("send");
+
+    let keys = fake.pane_key_calls.lock().unwrap().clone();
+    assert_eq!(keys, vec![("%1".to_string(), "Enter".to_string())]);
 }

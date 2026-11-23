@@ -21,8 +21,8 @@ over its own redb store with whole-file sha256 idempotency. Its per-record upser
 key was `imported:{machine_id}:{id}`: machine plus local id could never recognise
 two machines' copies of one fact as the same fact.
 
-Those local commands are retired; their dispatcher now reports that boundary in
-`crates/trusty-agents/src/cli/memories_cmd/mod.rs`. Automatic import of
+Those local commands are retired; the dispatcher that reported that boundary
+was cut with the trusty-agents CLI (#11632). Automatic import of
 `shared-memories.jsonl` is also retired. Existing files remain preserved, without
 automatic migration; agent fact memory uses `trusty-memory` (#7360).
 

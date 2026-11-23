@@ -22,9 +22,9 @@ versions, publishability, and targets.
 | Package | Code | Primary targets | Documentation |
 |---|---|---|---|
 | `tc-services` | [`crates/tc-services/`](../../crates/tc-services/) | library | [crate README](../../crates/tc-services/README.md), [extended docs](../tc-services/README.md) |
-| `trusty-agents` | [`crates/trusty-agents/`](../../crates/trusty-agents/) | library, `tagent` | [crate README](../../crates/trusty-agents/README.md), [extended docs](../trusty-agents/README.md) |
 | `trusty-agents-common` | [`crates/trusty-agents-common/`](../../crates/trusty-agents-common/) | library | [crate README](../../crates/trusty-agents-common/README.md), [extended docs](../trusty-agents-common/README.md) |
 | `trusty-analyze` | [`crates/trusty-analyze/`](../../crates/trusty-analyze/) | library, `trusty-analyze` | [crate README](../../crates/trusty-analyze/README.md), [extended docs](../trusty-analyze/README.md) |
+| `trusty-assistants` | [`crates/trusty-assistants/`](../../crates/trusty-assistants/) | library, `ta`, `tagent` (one-release alias); formerly `trusty-agents` (#11632) | [crate README](../../crates/trusty-assistants/README.md), [extended docs](../trusty-assistants/README.md) |
 | `trusty-architect` | [`crates/trusty-architect/`](../../crates/trusty-architect/) | library — leaf crate for the trusty-mpm Architect: tmux access behind a trait and the guarded send path; never depends on `trusty-mpm` (#9171) | [crate README](../../crates/trusty-architect/README.md) |
 | `trusty-channels` | [`crates/trusty-channels/`](../../crates/trusty-channels/) | library, `slack-mcp`, `telegram-mcp` | [crate README](../../crates/trusty-channels/README.md) |
 | `trusty-code` | [`crates/trusty-code/`](../../crates/trusty-code/) | library, `tcode` | [crate README](../../crates/trusty-code/README.md), [extended docs](../trusty-code/README.md) |
@@ -50,15 +50,6 @@ versions, publishability, and targets.
 | `trusty-search` | [`crates/trusty-search/`](../../crates/trusty-search/) | library, `trusty-search`, bundled `trusty-embedderd` and `trusty-embedderd-py` | [crate README](../../crates/trusty-search/README.md), [extended docs](../trusty-search/README.md) |
 | `trusty-secrets` | [`crates/trusty-secrets/`](../../crates/trusty-secrets/) | library, `trusty-secrets` (on-demand socket server) | [crate README](../../crates/trusty-secrets/README.md), [extended docs](../trusty-secrets/README.md) |
 | `trusty-sld-lint` | [`crates/trusty-sld-lint/`](../../crates/trusty-sld-lint/) | library, `sld-lint` | [crate README](../../crates/trusty-sld-lint/README.md) |
-
-## Nested workspace packages
-
-The root manifest explicitly includes these packages because `crates/*` does
-not reach nested Tauri manifests.
-
-| Package | Code | Primary target | Documentation |
-|---|---|---|---|
-| `trusty-agents-ui` | [`crates/trusty-agents/ui/src-tauri/`](../../crates/trusty-agents/ui/src-tauri/) | `trusty-agents-ui` | [UI README](../../crates/trusty-agents/ui/README.md) |
 
 ## External tools
 

@@ -368,6 +368,7 @@ pub async fn session_send(
         "id": record.id.to_string(),
         "sent": submit.delivered(),
         "submit_state": submit.as_str(),
+        "reason": submit.reason(), // #10747: why `sent` is false
         "tmux_name": record.tmux_name,
     }))
 }
@@ -737,6 +738,20 @@ mod tests {
 
         fn capture_pane(&self, name: &str, _p: &str, lines: usize) -> Result<String, ManagedError> {
             self.capture(name, lines)
+        }
+
+        /// #10747: `session_send` types without Enter, then presses keys.
+        fn send_keys_literal_to_pane(
+            &self,
+            _n: &str,
+            _p: &str,
+            _t: &str,
+        ) -> Result<(), ManagedError> {
+            Ok(())
+        }
+
+        fn send_key_to_pane(&self, _n: &str, _p: &str, _k: &str) -> Result<(), ManagedError> {
+            Ok(())
         }
 
         /// #10127: the pane runs its harness; the paste is the subject here.

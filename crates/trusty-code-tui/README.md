@@ -1,7 +1,8 @@
 # trusty-code-tui
 
-The engine-agnostic terminal-UI seam shared by trusty-code's `tcode tui` and
-trusty-agents' tagent REPL.
+The engine-agnostic terminal-UI seam behind trusty-code's `tcode tui`. It was
+also shared with the `tagent` REPL until #11632 cut that REPL and renamed the
+crate to trusty-assistants.
 
 Both products need the same ratatui event loop, widgets, and line editing.
 Forking one for the other would duplicate that code and let the two drift, so
@@ -22,8 +23,8 @@ it lives here once and each product supplies a thin `TuiEngine` adapter.
 
 ## Dependency direction
 
-`trusty-code` and `trusty-agents` depend on `trusty-code-tui`;
-`trusty-code-tui` depends on neither. Its public API never references a
+`trusty-code` depends on `trusty-code-tui`; `trusty-code-tui` does not depend
+on it. Its public API never references a
 product-specific type.
 
 `ratatui` 0.30 / `crossterm` 0.29 are confined to `terminal`, `run`, and

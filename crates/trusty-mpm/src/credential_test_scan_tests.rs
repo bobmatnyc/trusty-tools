@@ -61,7 +61,7 @@ const MARKERS: &[&str] = &["TOKEN", "SECRET", "PASSWORD", "API_KEY", "_KEY"];
 /// fails until you do.
 const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
     (
-        "trusty-agents/src/agents/tests/mod.rs",
+        "trusty-assistants/src/agents/tests/mod.rs",
         &[
             "agent_config_anthropic_pin_forces_the_direct_path",
             "agent_config_pin_routes_atlascloud",
@@ -71,132 +71,26 @@ const KNOWN_UNSANDBOXED: &[(&str, &[&str])] = &[
         ],
     ),
     (
-        "trusty-agents/src/api/server/tests/channel_inbound.rs",
-        &[
-            "a_stub_channel_sends_and_reads_back_over_http",
-            "an_unauthenticated_injection_is_refused",
-        ],
-    ),
-    (
-        "trusty-agents/src/api/server/tests/global_channels.rs",
-        &[
-            "a_configured_token_is_never_disclosed_on_the_config_probe",
-            "a_credentialed_channel_write_is_admitted_and_audited",
-            "a_deleted_receiving_channel_says_its_receiver_runs_until_restart",
-            "a_forced_delete_audits_the_override_and_the_orphans",
-            "a_global_channel_is_created_and_updated_one_at_a_time",
-            "a_global_channel_is_deleted_and_an_unknown_id_is_404",
-            "a_referenced_global_channel_is_not_deleted_without_force",
-            "a_tokenless_daemon_refuses_every_channel_write",
-            "an_unaddressable_assistant_name_is_skipped_and_a_broken_file_is_named",
-            "an_unauthenticated_create_is_refused",
-            "an_unauthenticated_delete_is_refused",
-            "global_channels_round_trip_preserves_config_and_rejects_a_stale_revision",
-            "global_channels_serve_the_dispatchable_assistant_roster",
-            "the_assistant_channel_view_names_its_inert_overlays",
-            "the_retired_listener_routes_are_unregistered",
-        ],
-    ),
-    (
-        "trusty-agents/src/api/server/tests/models.rs",
-        &["credential_values_never_serialized"],
-    ),
-    (
-        "trusty-agents/src/api/server/tests/relay.rs",
-        &[
-            "relay_accepts_honest_identity",
-            "relay_accepts_with_matching_token",
-            "relay_rejects_malformed_body",
-            "relay_rejects_missing_token",
-            "relay_rejects_non_slack_kind",
-            "relay_rejects_unknown_identity",
-            "relay_rejects_unknown_tier",
-            "relay_rejects_when_token_unset_server_side",
-            "relay_rejects_wrong_token",
-        ],
-    ),
-    (
-        "trusty-agents/src/channels/slack.rs",
+        "trusty-assistants/src/channels/slack.rs",
         &[
             "slack_adapter_read_uses_the_credential_the_binding_names",
             "slack_adapter_send_uses_the_credential_the_binding_names",
         ],
     ),
     (
-        "trusty-agents/src/channels/telegram.rs",
+        "trusty-assistants/src/channels/telegram.rs",
         &[
             "telegram_adapter_send_uses_the_credential_the_binding_names",
             "telegram_poll_token_refuses_a_credential_outside_the_family",
         ],
     ),
     (
-        "trusty-agents/src/ctrl/ctrl_turn/dispatch.rs",
-        &[
-            "ctrl_creds_errors_when_nothing_configured",
-            "ctrl_creds_falls_back_to_openrouter",
-            "ctrl_creds_model_override_applied",
-            "ctrl_creds_prefers_anthropic_direct_over_openrouter",
-            "ctrl_turn_rest_recovers_from_a_real_local_transport_failure",
-        ],
-    ),
-    (
-        "trusty-agents/src/llm/helpers/tests.rs",
-        &[
-            "create_client_env_beats_store",
-            "create_client_missing_everywhere_errors_clearly",
-            "create_client_resolves_key_from_store_when_env_absent",
-        ],
-    ),
-    (
-        "trusty-agents/src/llm/http/tests.rs",
-        &[
-            // #9123 delta: `#[ignore]`d live calls; they need the real key.
-            "atlascloud_live_completion_round_trips",
-            "fireworks_live_completion_still_round_trips",
-            "send_raw_completion_empty_endpoint_credential_falls_back_to_store",
-            "send_raw_completion_fireworks_missing_key_errors_with_fireworks_name",
-            "send_raw_completion_fireworks_resolves_key_from_store_when_env_absent",
-            "send_raw_completion_missing_everywhere_errors_with_provider_name",
-            "send_raw_completion_resolves_key_from_store_when_env_absent",
-        ],
-    ),
-    (
-        "trusty-agents/src/mcp/tests/extensions_tests.rs",
+        "trusty-assistants/src/mcp/tests/extensions_tests.rs",
         &["auth_resolves_from_the_environment"],
     ),
     (
-        "trusty-agents/src/runtime/cli_def.rs",
-        &[
-            "banner_fires_when_nothing_resolves",
-            "banner_suppressed_when_store_configures_a_key",
-        ],
-    ),
-    (
-        "trusty-agents/src/runtime/startup.rs",
-        &["a_credential_is_resolved_from_argv_then_the_environment"],
-    ),
-    (
-        "trusty-agents/src/system_status/credentials.rs",
-        &[
-            "credential_status_never_leaks_a_value",
-            "env_local_tier_comes_from_the_injected_source",
-            "unconfigured_provider_reports_not_configured",
-        ],
-    ),
-    (
-        "trusty-agents/src/tools/mcp_tools/mod.rs",
+        "trusty-assistants/src/tools/mcp_tools/mod.rs",
         &["dispatch_mcp_add_strips_undeclared_env_field"],
-    ),
-    (
-        "trusty-agents/tests/inference_shared_adapter_e2e.rs",
-        &[
-            "bare_claude_model_routes_through_shared_adapter_when_flag_enabled",
-            "caching_active_keeps_raw_path_even_with_flag_enabled",
-        ],
-    ),
-    (
-        "trusty-agents/tests/persona_python_plugin_wiring.rs",
-        &["persona_python_plugin_is_registered_by_the_dispatch_path"],
     ),
     (
         "trusty-channels/tests/client_http.rs",
@@ -1109,7 +1003,7 @@ impl Judged<'_> {
 /// by file, with helpers followed across files.
 ///
 /// Why: the #9123 delta critic found tests clearing every credential through
-/// `trusty-agents/src/test_env.rs` helpers, which a same-file scan never saw.
+/// `trusty-assistants/src/test_env.rs` helpers, which a same-file scan never saw.
 /// What: a file's helpers are judged on their own first. Every helper found
 /// that way is exported; each round re-judges the files that name a new
 /// export, until a round adds none. A test-only file re-exports what it gains
@@ -1205,7 +1099,8 @@ fn every_credential_test_is_serial_and_sandboxed() {
     assert!(
         sources
             .iter()
-            .any(|(rel, _)| rel.starts_with("trusty-agents/")),
+            // #11632: the crate directory is `trusty-assistants`.
+            .any(|(rel, _)| rel.starts_with("trusty-assistants/")),
         "the scan did not reach the workspace's other crates ({} files)",
         sources.len()
     );
@@ -1359,7 +1254,7 @@ fn a_helper_that_mutates_a_credential_flags_its_test() {
 }
 
 /// Why: the #9123 delta critic found tests that clear every credential through
-/// `trusty-agents/src/test_env.rs`'s `clear_all_credential_env_vars` and
+/// `trusty-assistants/src/test_env.rs`'s `clear_all_credential_env_vars` and
 /// `force_env_local_loaded`; a scan that follows same-file helpers only never
 /// saw them.
 /// What: helpers in `k/src/test_env.rs` and `k/src/c.rs`; callers in other

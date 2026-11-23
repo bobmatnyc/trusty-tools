@@ -29,7 +29,7 @@
 //! | `trusty-search` | `LOCAL_PEERPID` / `SO_PEERCRED` on its Unix socket |
 //! | `trusty-memory` | the same, on its own Unix socket |
 //! | `trusty-console` | `std::process::id()` — the console IS this process (#6908) |
-//! | `trusty-agents` | none — it serves TCP loopback, and a TCP peer carries no pid |
+//! | `trusty-events` | none — no pid lookup is wired for its socket |
 //! | `trusty-analyze`, `trusty-review` | none — on-demand members with no resident process |
 //!
 //! A service with no pid reports `cpu_pct: None`. It does NOT report `0.0`: an
@@ -55,7 +55,7 @@ use crate::machine_history::service_samples::{ServiceSample, ServiceSampleBatch}
 /// How long before a failed pid lookup is retried.
 ///
 /// Why: a service that is `Running` but whose process the console cannot
-/// identify — trusty-agents, always — would otherwise be looked up every second
+/// identify — trusty-events, today — would otherwise be looked up every second
 /// forever. Fifteen seconds matches the health poller's cadence, which is the
 /// rate at which the answer can actually change.
 /// What: `15s`.
@@ -329,7 +329,7 @@ mod tests {
             info("trusty-search", ServiceStatus::Running),
             info("trusty-review", ServiceStatus::Available),
             info("trusty-analyze", ServiceStatus::Absent),
-            info("trusty-agents", ServiceStatus::Degraded),
+            info("trusty-events", ServiceStatus::Degraded),
         ];
         let batch = ServiceMetricsSampler::new().sample(&services, 42);
 
@@ -448,20 +448,21 @@ mod tests {
     /// REGRESSION (#6642): a lookup that failed must not be retried on the very
     /// next tick.
     ///
-    /// Why: trusty-agents can never yield a pid — it serves TCP loopback. Without
-    /// a backoff the console would attempt a resolution for it every second for
-    /// as long as it runs.
+    /// Why: a service with no pid source (trusty-events today; #11632 removed
+    /// trusty-agents, the original case) never yields a pid. Without a backoff
+    /// the console would attempt a resolution for it every second for as long
+    /// as it runs.
     /// What: records a failed lookup, asserts the service is not pending
     /// immediately, and that it is pending again once the backoff has elapsed.
     /// Test: this test itself.
     #[test]
     fn a_failed_lookup_is_not_retried_immediately() {
-        let services = vec![info("trusty-agents", ServiceStatus::Running)];
+        let services = vec![info("trusty-events", ServiceStatus::Running)];
         let now = Instant::now();
         let mut sampler = ServiceMetricsSampler::new();
 
         assert_eq!(sampler.pending_lookups(&services, now).len(), 1);
-        sampler.record_lookups(vec![("trusty-agents".to_string(), None)], now);
+        sampler.record_lookups(vec![("trusty-events".to_string(), None)], now);
         assert!(
             sampler.pending_lookups(&services, now).is_empty(),
             "a failed lookup must back off, not retry on the next tick"
@@ -561,7 +562,7 @@ mod tests {
         let pid = child.id();
         let services = vec![
             info("trusty-search", ServiceStatus::Running),
-            info("trusty-agents", ServiceStatus::Running),
+            info("trusty-events", ServiceStatus::Running),
         ];
 
         let mut sampler = ServiceMetricsSampler::new();
@@ -630,7 +631,7 @@ mod tests {
         let mut services = vec![
             info("trusty-search", ServiceStatus::Running),
             info("trusty-review", ServiceStatus::Available),
-            info("trusty-agents", ServiceStatus::Absent),
+            info("trusty-events", ServiceStatus::Absent),
         ];
         apply_metrics_overlay(&mut services, &history).await;
 
@@ -657,7 +658,7 @@ mod tests {
     /// Test: this test itself.
     #[test]
     fn resolve_pid_is_none_for_a_service_with_no_source() {
-        assert_eq!(resolve_pid("trusty-agents"), None);
+        assert_eq!(resolve_pid("trusty-events"), None);
         assert_eq!(resolve_pid("trusty-review"), None);
         assert_eq!(resolve_pid("not-a-service"), None);
     }

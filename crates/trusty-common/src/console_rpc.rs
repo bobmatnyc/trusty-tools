@@ -53,17 +53,26 @@ pub const METHOD_MACHINE_STATUS: &str = "console.machine_status";
 /// `metrics::HistorySnapshot` (#10942, #10943).
 pub const METHOD_HISTORY: &str = "console.history";
 
+/// The console's own request and webhook counters, as a
+/// `console_metrics::ConsoleMetricsReport` (#10907, D95).
+///
+/// Its `metrics` payload follows the `by_*` breakdown convention: each
+/// `by_<dimension>` key is an object keyed by that dimension's value.
+pub const METHOD_CONSOLE_METRICS: &str = "console.console_metrics";
+
 /// Every method the console's socket serves.
 ///
 /// Why: a contract test compares the router's names against this list, so a
 /// rename shows up as a failing assertion rather than as a consumer reporting
 /// `method_not_found`. trusty-console's router test compares against it.
 /// Test: `console_fleet_status_decodes_a_payload_missing_new_fields`.
+// #10907: `console.console_metrics` joins the list.
 pub const METHODS: &[&str] = &[
     METHOD_HEALTH,
     METHOD_FLEET_STATUS,
     METHOD_MACHINE_STATUS,
     METHOD_HISTORY,
+    METHOD_CONSOLE_METRICS,
 ];
 
 /// The `console.health` answer.
@@ -271,7 +280,8 @@ mod console_rpc_tests {
                 METHOD_HEALTH,
                 METHOD_FLEET_STATUS,
                 METHOD_MACHINE_STATUS,
-                METHOD_HISTORY
+                METHOD_HISTORY,
+                METHOD_CONSOLE_METRICS
             ]
         );
     }

@@ -778,15 +778,6 @@ mod tests {
         }
     }
 
-    /// Whether `shell` can be spawned on this host.
-    fn shell_is_available(shell: &str) -> bool {
-        std::process::Command::new(shell)
-            .arg("-c")
-            .arg("exit 0")
-            .output()
-            .is_ok()
-    }
-
     /// Run `script` under `shell`, returning its exit code, stdout and stderr.
     fn run_script(shell: &str, script: &str) -> (Option<i32>, String, String) {
         let out = std::process::Command::new(shell)
@@ -831,14 +822,8 @@ mod tests {
             (format!("{plain} \\"), "hi there"),
         ];
 
-        for shell in ["sh", "bash", "zsh"] {
-            if !shell_is_available(shell) {
-                // Announce the skip: a silently-skipped shell reads as a pass.
-                eprintln!(
-                    "SKIP every_rewrite_this_module_emits_runs_correctly_in_a_real_shell: no {shell} on this host"
-                );
-                continue;
-            }
+        // See #11658: a missing zsh fails under CI instead of skipping.
+        for shell in super::super::hook_rewrite_shells::available_shells() {
             for (command, expected) in &cases {
                 let Some(rewritten) = rewrite_bash_command_for_compression(command) else {
                     // The no-op arm: forwarded unmodified, so it must still

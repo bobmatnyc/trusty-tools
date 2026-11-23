@@ -49,9 +49,8 @@
 # with no Rust code referencing it; this move takes the bundle, the build.rs and
 # the row with it.
 #
-# crates/trusty-agents has a ui/ but its dist is gitignored (Tauri packages it
-# at build time, nothing is embedded from git), so it ships no committed bundle
-# and correctly has no row. Adding one would fail NO-BUNDLE.
+# crates/trusty-agents had a ui/ with a gitignored dist and so no row; #11632
+# deleted that ui/.
 #
 # #6155: trusty-console ships a SECOND bundle. Under ADR-0032 the console is the
 # only HTTP surface, so it serves the search dashboard at /tools/search/ from

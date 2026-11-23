@@ -121,11 +121,10 @@ confidence-threshold = 0.8
 # NO `[[licenses.exceptions]]` ROWS, AND NO `[licenses.private]` SKIP.
 #
 # The one crate in this workspace that reported `Unlicensed` was
-# `trusty-agents-ui` (crates/trusty-agents/ui/src-tauri/Cargo.toml) — a real
-# defect, not a policy question: it declared no `license` field at all, and no
-# `publish = false`, unlike its two sibling Tauri GUIs which declare both. The
-# remedy was to fix the manifest, not to add a row here teaching the gate to
-# accept an unlicensed crate. See that file and this PR's changelog fragment.
+# `trusty-agents-ui` — a real defect, not a policy question: it declared no
+# `license` field at all. The remedy was to fix the manifest, not to add a row
+# here teaching the gate to accept an unlicensed crate. (#11632 later deleted
+# that crate.)
 #
 # `[licenses.private] ignore = true` would have hidden the same defect by
 # skipping every `publish = false` workspace member. It is deliberately not set:

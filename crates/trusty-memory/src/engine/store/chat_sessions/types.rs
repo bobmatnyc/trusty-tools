@@ -32,7 +32,7 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    /// Why: trusty-agents builds a `ChatMessage` without a struct literal (#9278).
+    /// Why: trusty-assistants builds a `ChatMessage` without a struct literal (#9278).
     /// What: sets `role` and `content`; `attachments` is empty.
     /// Test: `chat_message_new_has_no_attachments_until_with_attachments`.
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {

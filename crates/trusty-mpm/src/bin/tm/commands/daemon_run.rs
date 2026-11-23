@@ -1,7 +1,7 @@
 //! Daemon entry point and its private helpers.
 //!
-//! Why: `run_daemon` and its private helpers (`wait_for_shutdown_signal`,
-//! `spawn_telegram_bot`, `tailscale_deprecated_error`) are a coherent "boot
+//! Why: `run_daemon` and its private helpers (`spawn_telegram_bot`,
+//! `tailscale_deprecated_error`) are a coherent "boot
 //! and serve" group; extracting them keeps `daemon.rs` under the 500-line cap
 //! while co-locating the helpers that are only meaningful together.
 //! What: `run_daemon` (the `daemon` subcommand handler) plus private helpers.
@@ -166,9 +166,12 @@ pub(crate) async fn run_daemon(
     // #6849: this handler exits before the serve drain, so it flushes the bus
     // producer itself, within `SIGNAL_FLUSH_BUDGET` (200 ms) and before the
     // lock goes; a no-op with no bus attached.
+    // #10468: SIGHUP (closed terminal, killed pane) settles like SIGTERM.
     let action_events_state = std::sync::Arc::clone(&state);
+    let stop = trusty_mpm::daemon::stop_signal::StopSignals::install();
     tokio::spawn(async move {
-        wait_for_shutdown_signal().await;
+        let name = stop.recv().await;
+        tracing::info!("received {name}: settling action events before exit");
         // Stop the supervised Telegram bot first so it does not log a spurious
         // restart while the process is on its way down.
         if let Some(token) = bot_shutdown {
@@ -260,39 +263,6 @@ async fn bind_socket_then_publish(
     let rpc = trusty_mpm::daemon::socket::bind(socket).await?;
     trusty_mpm::core::daemon_identity::write_lock_at(lock_path, &socket.display().to_string());
     Ok(rpc)
-}
-
-/// Block until the process receives a shutdown signal (SIGINT or SIGTERM).
-///
-/// Why: the daemon must remove its lock file on every graceful stop, not just
-/// Ctrl-C. `tm restart` stops the old daemon with `pkill`, which delivers
-/// SIGTERM; trapping only SIGINT would leak a stale lock file and break daemon
-/// discovery for the next client.
-/// What: races a `ctrl_c()` future against a Unix SIGTERM stream; on non-Unix
-/// platforms (no SIGTERM) it just awaits Ctrl-C.
-/// Test: covered indirectly by `tm restart` — the new daemon binds cleanly and
-/// the lock file reflects its address rather than the killed daemon's.
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut term = match signal(SignalKind::terminate()) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("failed to register SIGTERM handler: {e}");
-                let _ = tokio::signal::ctrl_c().await;
-                return;
-            }
-        };
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-    }
 }
 
 /// Compute and store the launchd-supervision signal on `state` (issue #2486).

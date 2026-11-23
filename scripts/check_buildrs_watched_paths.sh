@@ -48,8 +48,8 @@ ROOT="$(cd "$ROOT" && pwd)"
 # A row that no longer matches anything only warns, so the PR that fixes the
 # path is not blocked by this list.
 EXEMPT=(
-    "crates/trusty-agents/build.rs|.git/HEAD|#8808 replaces it with the resolved git dir"
-    "crates/trusty-agents/build.rs|.git/index|#8808 replaces it with the resolved git dir"
+    "crates/trusty-assistants/build.rs|.git/HEAD|#8808 replaces it with the resolved git dir"
+    "crates/trusty-assistants/build.rs|.git/index|#8808 replaces it with the resolved git dir"
 )
 
 IN_GIT=0

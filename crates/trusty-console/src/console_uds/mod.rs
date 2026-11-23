@@ -1,6 +1,7 @@
 //! trusty-console's own Unix socket: `console.health`,
 //! `console.fleet_status` (#10902, D8b (a), ADR-0065), `console.machine_status`
-//! and `console.history` (#10942, #10943).
+//! `console.history` (#10942, #10943) and `console.console_metrics` (#10907,
+//! D95).
 //!
 //! Why: ADR-0032 puts service-to-service traffic on UDS and keeps the console
 //! as the only HTTP surface; ADR-0035 has the console aggregate health over
@@ -32,12 +33,13 @@ use serde::Deserialize;
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use trusty_common::console_metrics::ConsoleMetricsReport;
 use trusty_common::console_rpc::metrics::{
     ConsoleMachineStatus, HistoryRequest, HistorySnapshot, MachineStatusRequest,
 };
 use trusty_common::console_rpc::{
-    CONSOLE_SERVICE, ConsoleFleetStatus, ConsoleHealth, METHOD_FLEET_STATUS, METHOD_HEALTH,
-    METHOD_HISTORY, METHOD_MACHINE_STATUS,
+    CONSOLE_SERVICE, ConsoleFleetStatus, ConsoleHealth, METHOD_CONSOLE_METRICS,
+    METHOD_FLEET_STATUS, METHOD_HEALTH, METHOD_HISTORY, METHOD_MACHINE_STATUS,
 };
 use trusty_common::uds::server::{RpcError, RpcRouter, RpcServeOptions, serve_until};
 use trusty_common::uds::{UdsSecurityError, bind_singleton_hardened};
@@ -147,12 +149,22 @@ pub async fn history(state: &AppState) -> HistorySnapshot {
     state.machine_history().snapshot().await
 }
 
+/// The `console.console_metrics` answer: the request counters since start.
+///
+/// Why: D95 has each service report its own metrics over UDS (#10907).
+/// What: a `ConsoleMetricsReport` built by `make_report` with the console's
+/// own `METRICS_SCHEMA_VERSION`.
+/// Test: `console_metrics_over_uds_reports_http_traffic`.
+pub fn console_metrics(state: &AppState) -> ConsoleMetricsReport {
+    state.request_metrics().report(state.uptime_secs())
+}
+
 /// The console socket's method table.
 ///
 /// Why: the only console-specific half of the server; framing, the peer check
 /// and the accept loop are `trusty_common::uds::server`'s.
 /// What: `console.health` is registered with `typed_liveness` (a pure status
-/// answer); the other three with `typed`, so a params value their request
+/// answer); the other four with `typed`, so a params value their request
 /// type refuses is answered `invalid_params` (#10942). Any other name gets the
 /// router's `method_not_found` error.
 /// Test: `router_answers_both_methods`,
@@ -179,9 +191,17 @@ pub fn router(state: AppState) -> RpcRouter {
                 async move { Ok::<_, RpcError>(machine_status(&state).await) }
             }
         })
-        .typed::<HistoryRequest, HistorySnapshot, _, _>(METHOD_HISTORY, move |_| {
+        .typed::<HistoryRequest, HistorySnapshot, _, _>(METHOD_HISTORY, {
             let state = state.clone();
-            async move { Ok::<_, RpcError>(history(&state).await) }
+            move |_| {
+                let state = state.clone();
+                async move { Ok::<_, RpcError>(history(&state).await) }
+            }
+        })
+        // #10907 (D95): the console's own request and webhook counters.
+        .typed::<NoParams, ConsoleMetricsReport, _, _>(METHOD_CONSOLE_METRICS, move |_| {
+            let state = state.clone();
+            async move { Ok::<_, RpcError>(console_metrics(&state)) }
         })
 }
 
