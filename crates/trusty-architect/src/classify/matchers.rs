@@ -283,7 +283,7 @@ pub(crate) fn is_footer_noise(line: &str) -> bool {
 /// )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)`.
 /// Test: `window5_plan_limit_ignores_prose_but_keeps_the_banner`,
 /// `window5_plan_limit_banner_variants`.
-// See ar-T9u parity window 5: B. The old unanchored `resets at` / `limit
+// See parity window 5: B. The old unanchored `resets at` / `limit
 // reached` matched chat prose ("GitHub rate limit resets at 06:38Z").
 pub(crate) fn is_limit(line: &str) -> bool {
     let mut rest = lstrip(line);

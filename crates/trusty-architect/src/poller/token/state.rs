@@ -49,7 +49,7 @@ pub struct FileState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     /// The tmux session name last resolved for `session`.
-    // See ar-T9u parity window 5: E.
+    // See parity window 5: E.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// When a scan last stat'ed the file.

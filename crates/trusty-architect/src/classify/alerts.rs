@@ -63,26 +63,26 @@ pub struct PaneState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub errors: Option<Vec<String>>,
     /// The last cycle that read the pane idle.
-    // See ar-T9u parity window 5: C.
+    // See parity window 5: C.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_seen: Option<f64>,
     /// The epoch a not-idle read cleared, kept for [`IDLE_GRACE`] s.
-    // See ar-T9u parity window 5: C.
+    // See parity window 5: C.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_held: Option<f64>,
     /// The `idle` fingerprint this pane last alerted.
-    // See ar-T9u parity window 5: D.
+    // See parity window 5: D.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_alerted: Option<String>,
     /// The idle screen hash last read, and when it first appeared.
-    // See ar-T9u parity window 5: D.
+    // See parity window 5: D.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_screen: Option<(String, f64)>,
 }
 
 /// Seconds between two idle reads within which one idle episode continues
 /// across not-idle reads: one missed 60 s cycle, with slack.
-// See ar-T9u parity window 5: C.
+// See parity window 5: C.
 pub const IDLE_GRACE: f64 = 150.0;
 
 /// Short stable fingerprint: the first 12 hex digits of SHA-1.
@@ -253,7 +253,7 @@ pub fn evaluate(
         super::BoxReading::Input(InputState::Empty | InputState::Suggestion)
     );
     if info.has_box && idle_box && info.dialog.is_none() && !info.busy {
-        // See ar-T9u parity window 5: C. A not-idle stretch shorter than
+        // See parity window 5: C. A not-idle stretch shorter than
         // IDLE_GRACE between two idle reads keeps the episode's epoch.
         let held = ps
             .idle_held
@@ -274,7 +274,7 @@ pub fn evaluate(
             let epoch = format!("since-{}-", since.trunc() as i64);
             // See MB1595: the screen hash re-alerts a changed idle screen.
             let fp = format!("{epoch}{}", info.screen);
-            // See ar-T9u parity window 5: D. An alerted epoch re-alerts a new
+            // See parity window 5: D. An alerted epoch re-alerts a new
             // screen only once that screen has itself been idle IDLE_AFTER s;
             // a transitional screen on a stale epoch never alerts.
             let settled = ps
@@ -292,7 +292,7 @@ pub fn evaluate(
             }
         }
     } else {
-        // See ar-T9u parity window 5: C. Held, not dropped, until IDLE_GRACE.
+        // See parity window 5: C. Held, not dropped, until IDLE_GRACE.
         if let Some(since) = ps.idle_since.take() {
             ps.idle_held = Some(since);
         }

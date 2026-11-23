@@ -704,7 +704,7 @@ fn shadow_mode_keeps_its_own_token_state() {
     );
 }
 
-/// ar-T9u parity window 5, class E: the shadow emitted
+/// parity window 5, class E: the shadow emitted
 /// `trusty-mpm-projects-arch:1f14f88b` `ctx_main:400k` where the poller
 /// emitted `tm-architect` `ctx_main:405k`. The name lookup failed for one
 /// cycle, so the label fell back and the Architect's bucket swap was skipped.
@@ -716,7 +716,7 @@ fn window5_unresolved_name_keeps_the_resolved_label() {
     let bar = json!({"thresholds": {"architect_bar_ctx": 368_182}}).to_string();
     fs::write(&sched, bar).expect("schedule");
     let sid = "1f14f88b-0000";
-    let main = e.main_in(sid, "-Users-masa-trusty-mpm-projects-architect");
+    let main = e.main_in(sid, "-Users-x-trusty-mpm-projects-architect");
     let run = |names: std::collections::BTreeMap<String, String>| {
         let paths = Paths {
             base: &e.base,

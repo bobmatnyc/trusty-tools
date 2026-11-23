@@ -171,7 +171,7 @@ pub fn step(
                 agent_id: found.agent_id.clone(),
                 ..FileState::default()
             });
-        // See ar-T9u parity window 5: E. Remember the resolved name.
+        // See parity window 5: E. Remember the resolved name.
         if let Some(n) = sc.names.get(&f.session) {
             f.name = Some(n.clone());
         }

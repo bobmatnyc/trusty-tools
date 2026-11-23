@@ -1,4 +1,4 @@
-//! ar-T9u parity window 5: one regression test per divergence class (B, C,
+//! parity window 5: one regression test per divergence class (B, C,
 //! D), each red on the pre-fix commit. Class E lives in the token watcher's
 //! own tests (`src/poller/token/tests.rs`), because its state is crate-private.
 //! The epochs keep window 5's values where the brief gives them in full and

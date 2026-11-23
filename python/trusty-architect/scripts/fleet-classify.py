@@ -64,7 +64,7 @@ WAITING = re.compile(r"Waiting for \d+ background agent")
 AGENT_ROW = re.compile(r"^\s*◯ ")
 DIALOG_MARKERS = ("Do you want to proceed?", "Esc to cancel", "Enter to select")
 FOOTER_NOISE = re.compile(r"^\s*TM \d|bypass permissions|/rc\s*$|Update installed|^\s*[◯⏺] ")
-# ar-T9u B: the usage-limit banner only, matched at a line start (same pattern as the Rust scheduler); chat prose about a rate limit never matches.
+# parity window 5 (B): the usage-limit banner only, matched at a line start (same pattern as the Rust scheduler); chat prose about a rate limit never matches.
 LIMIT = re.compile(r"(?i)^\s*(?:[⎿│●]\s*)?(?:claude (?:ai )?usage limit reached|usage limit reached|limit reached ∙ resets|you(?:'|’)ve hit your (?:\w+ )?(?:usage )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)")
 ERROR = re.compile(r"Traceback|API Error|Error: Exit code")
 TIMERS = re.compile(r"\d+m \d+s|\b\d+s\b|↓ [\d.]+k tokens|\d+:\d\d(?: [AP]M)?")

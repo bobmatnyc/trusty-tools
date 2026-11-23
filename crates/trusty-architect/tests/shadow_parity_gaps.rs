@@ -60,7 +60,7 @@ fn test_idle_same_screen_no_repeat() {
 fn test_idle_changed_screen_alerts() {
     let a = idle_screen("Done.", "6m 34s");
     let b = idle_screen("Finished a different task.", "6m 34s");
-    // See ar-T9u parity window 5: D. The changed screen alerts once it has
+    // See parity window 5: D. The changed screen alerts once it has
     // itself been idle IDLE_AFTER s on the same epoch, not on first sight.
     let steps = [(&*a, 1000.0), (&*a, 1700.0), (&*b, 3600.0), (&*b, 4200.0)];
     let n = poll_idle(
