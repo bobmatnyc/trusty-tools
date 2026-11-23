@@ -265,9 +265,10 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split("\n## ").next())
             .unwrap_or_default();
+        // #10595: SHA scrub removed (owner ruling Deg); head id is kept
         assert!(
-            !summary_body.contains(&full) && !summary_body.contains("d3963848ab"),
-            "the PM's copy of a head id is flagged, not kept:\n{md}"
+            summary_body.contains(&full) && summary_body.contains("d3963848ab"),
+            "the PM's copy of a head id is kept, not scrubbed:\n{md}"
         );
         assert_eq!(
             assess_snapshot(dir, &snapshot),
