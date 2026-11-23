@@ -183,7 +183,8 @@ fn a_token_env_binding_names_its_source_variable_10487() {
 
 /// Is `name` a credential-bearing gh/GitHub token spelling (#10487)?
 fn is_credential_name(name: &str) -> bool {
-    name == SOURCE || (name.contains("TOKEN") && (name.starts_with("GH") || name.contains("GITHUB")))
+    name == SOURCE
+        || (name.contains("TOKEN") && (name.starts_with("GH") || name.contains("GITHUB")))
 }
 
 /// 🔴 #10487: the WHOLE env a relaunched `claude` receives — tm's own env with
