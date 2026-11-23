@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+#
+# install_trusty_assistants_signed_selftest.sh — self-test for
+# scripts/install-trusty-assistants-signed.sh (#11650 slice 3d).
+#
+# Why: the script's job is what it does NOT touch: the `tagent` a launchd
+#   Slack bot runs. An install that replaced or re-signed that file would
+#   still print success, so only a check of the file itself proves the guard.
+# What: runs the script against temp `--root` directories with a stub `cargo`
+#   (writes `<root>/bin/ta`, records argv) and a stub `tctl` (appends a
+#   "signed" line to EVERY file in its `--dir`, the way a `tctl` whose
+#   assistants set still lists `tagent` would). No real build, install or
+#   codesign runs. Cases:
+#     tagent-untouched  a pre-existing `<root>/bin/tagent` keeps its inode,
+#                       size, mtime and sha256; `ta` is installed and signed;
+#                       cargo got `--bin ta` and never `tagent`; tctl saw a
+#                       directory holding only `ta`; no staging dir is left
+#     tagent-absent     a root with no `tagent` still has none afterwards
+#     guard-trips       a cargo that rewrites `tagent` makes the script exit 1
+#     refuse-bin        `--bin tagent`, `--bin ta`, `--bin=tagent` and a bare
+#                       `tagent` exit 2 before cargo runs
+#     path-cargo-home   `--from-source` into the cargo home exits 2 (ADR-0043)
+#     sign-fail-soft    a failing tctl leaves `ta` in place and exits 0
+#     old-tctl          a tctl that does not accept `trusty-assistants` is
+#                       never asked to sign; this checkout's trusty-installer
+#                       is built and signs the staging dir (only `ta`)
+#     source-argv       `--git-rev` and the registry default build the
+#                       expected `cargo install` argv
+#     dry-run           runs neither stub and creates nothing
+#
+# Usage: ./scripts/install_trusty_assistants_signed_selftest.sh
+# Exit:  0 when every case behaves (or skipped off macOS); 1 naming each
+#        failing case.
+# Portability: bash 3.2 (macOS). The script under test is macOS-only.
+
+# #7812: re-exec under bash when started from zsh.
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
+set -euo pipefail
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "install_trusty_assistants_signed_selftest: skipped (the script is macOS-only)"
+  exit 0
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+SUT="$SCRIPT_DIR/install-trusty-assistants-signed.sh"
+WORK="$(mktemp -d /tmp/tasig.XXXXXX)"
+WORK="$(cd "$WORK" && pwd -P)"
+trap 'rm -rf "$WORK"' EXIT
+
+FAILED=""
+fail() {
+  echo "FAIL: $1" >&2
+  FAILED="$FAILED $1"
+}
+
+STUBS="$WORK/stubs"
+mkdir -p "$STUBS"
+cat > "$STUBS/cargo" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$STUB_LOG/cargo.argv"
+case "${1:-}" in
+  install) ;;
+  build) exit 0 ;;
+  run)
+    # `cargo run -p trusty-installer -- sign <set> --dir D`: sign like tctl.
+    dir=""
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--dir" ]; then dir="$2"; fi
+      shift
+    done
+    ls -A "$dir" > "$STUB_LOG/tctl.dir"
+    for f in "$dir"/*; do printf 'signed\n' >> "$f"; done
+    exit 0 ;;
+  *) exit 97 ;;
+esac
+root=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--root" ]; then root="$2"; fi
+  shift
+done
+mkdir -p "$root/bin"
+printf 'ta-binary\n' > "$root/bin/ta"
+chmod +x "$root/bin/ta"
+if [ "${STUB_CARGO_TOUCH_TAGENT:-0}" = "1" ]; then
+  printf 'replaced\n' > "$root/bin/tagent"
+fi
+STUB
+cat > "$STUBS/tctl" <<'STUB'
+#!/usr/bin/env bash
+set -eu
+if [ "${2:-}" = "--help" ]; then
+  # STUB_TCTL_OLD: a tctl from before #11632, which knows only trusty-agents.
+  if [ "${STUB_TCTL_OLD:-0}" = "1" ]; then
+    echo "[possible values: trusty-search, trusty-mpm, trusty-agents]"
+  else
+    echo "[possible values: trusty-search, trusty-mpm, trusty-assistants]"
+  fi
+  exit 0
+fi
+printf '%s\n' "$*" >> "$STUB_LOG/tctl.argv"
+dir=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--dir" ]; then dir="$2"; fi
+  shift
+done
+ls -A "$dir" > "$STUB_LOG/tctl.dir"
+[ "${STUB_TCTL_FAIL:-0}" = "1" ] && exit 1
+for f in "$dir"/*; do printf 'signed\n' >> "$f"; done
+STUB
+chmod +x "$STUBS/cargo" "$STUBS/tctl"
+
+# run CASE ARGS...: run the script with the stubs first on PATH; sets $RC,
+# and leaves stdout+stderr in $WORK/CASE.out and the stub logs in $WORK/CASE/.
+run() {
+  local name="$1"
+  shift
+  mkdir -p "$WORK/$name"
+  RC=0
+  STUB_LOG="$WORK/$name" PATH="$STUBS:/usr/bin:/bin" CARGO_HOME="$WORK/cargo-home" \
+    "$SUT" "$@" > "$WORK/$name.out" 2>&1 || RC=$?
+}
+
+fp() {
+  if [ ! -e "$1" ]; then echo absent; return; fi
+  echo "$(stat -f '%i %z %m' "$1") $(shasum -a 256 "$1" | cut -d' ' -f1)"
+}
+
+new_root_with_tagent() {
+  local root="$WORK/$1/root"
+  mkdir -p "$root/bin"
+  printf 'live tagent the launchd bot runs\n' > "$root/bin/tagent"
+  chmod +x "$root/bin/tagent"
+  touch -t 202610281508 "$root/bin/tagent"
+  echo "$root"
+}
+
+# --- tagent-untouched ---------------------------------------------------
+root="$(new_root_with_tagent tagent-untouched)"
+before="$(fp "$root/bin/tagent")"
+run tagent-untouched --from-source --root "$root"
+after="$(fp "$root/bin/tagent")"
+[ "$RC" -eq 0 ] || fail "tagent-untouched: exit $RC: $(cat "$WORK/tagent-untouched.out")"
+[ "$before" = "$after" ] || fail "tagent-untouched: tagent changed [$before] -> [$after]"
+grep -q 'signed' "$root/bin/ta" 2>/dev/null || fail "tagent-untouched: ta was not signed in place"
+[ "$(cat "$WORK/tagent-untouched/tctl.dir" 2>/dev/null)" = "ta" ] \
+  || fail "tagent-untouched: tctl saw [$(cat "$WORK/tagent-untouched/tctl.dir" 2>/dev/null)], not only ta"
+argv="$(cat "$WORK/tagent-untouched/cargo.argv")"
+case "$argv" in *"--bin ta --locked --root $root"*) ;; *) fail "tagent-untouched: cargo argv [$argv]" ;; esac
+for word in $argv; do
+  [ "$word" != "tagent" ] || fail "tagent-untouched: cargo argv names tagent [$argv]"
+done
+case "$argv" in *"--path $SCRIPT_DIR/../crates/trusty-assistants"*|*"--path "*"/crates/trusty-assistants"*) ;; *) fail "tagent-untouched: not a path install [$argv]" ;; esac
+leftover="$(find "$root" -maxdepth 1 -name '.ta-sign.*' | head -n 1)"
+[ -z "$leftover" ] || fail "tagent-untouched: staging dir left behind: $leftover"
+
+# --- tagent-absent ------------------------------------------------------
+root="$WORK/tagent-absent/root"
+mkdir -p "$root"
+run tagent-absent --from-source --root "$root"
+[ "$RC" -eq 0 ] || fail "tagent-absent: exit $RC"
+[ ! -e "$root/bin/tagent" ] || fail "tagent-absent: a tagent appeared"
+[ -f "$root/bin/ta" ] || fail "tagent-absent: ta not installed"
+
+# --- guard-trips --------------------------------------------------------
+root="$(new_root_with_tagent guard-trips)"
+STUB_CARGO_TOUCH_TAGENT=1 run guard-trips --from-source --root "$root"
+[ "$RC" -eq 1 ] || fail "guard-trips: exit $RC, want 1"
+grep -q 'changed during the install' "$WORK/guard-trips.out" || fail "guard-trips: no 'changed' error"
+
+# --- refuse-bin ---------------------------------------------------------
+i=0
+for args in "--bin tagent" "--bin ta" "--bin=tagent" "tagent"; do
+  i=$((i + 1))
+  root="$(new_root_with_tagent "refuse-bin-$i")"
+  # shellcheck disable=SC2086  # word-split on purpose
+  run "refuse-bin-$i" --from-source --root "$root" $args
+  [ "$RC" -eq 2 ] || fail "refuse-bin [$args]: exit $RC, want 2"
+  [ ! -e "$WORK/refuse-bin-$i/cargo.argv" ] || fail "refuse-bin [$args]: cargo ran"
+  grep -q 'installs only .ta.' "$WORK/refuse-bin-$i.out" || fail "refuse-bin [$args]: no refusal text"
+done
+
+# --- path-cargo-home ----------------------------------------------------
+mkdir -p "$WORK/cargo-home"
+run path-cargo-home --from-source
+[ "$RC" -eq 2 ] || fail "path-cargo-home: exit $RC, want 2"
+grep -q 'ADR-0043' "$WORK/path-cargo-home.out" || fail "path-cargo-home: no ADR-0043 refusal"
+[ ! -e "$WORK/path-cargo-home/cargo.argv" ] || fail "path-cargo-home: cargo ran"
+
+# --- sign-fail-soft -----------------------------------------------------
+root="$(new_root_with_tagent sign-fail-soft)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_FAIL=1 run sign-fail-soft --from-source --root "$root"
+[ "$RC" -eq 0 ] || fail "sign-fail-soft: exit $RC, want 0"
+[ "$(cat "$root/bin/ta" 2>/dev/null)" = "ta-binary" ] || fail "sign-fail-soft: ta not restored unsigned"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "sign-fail-soft: tagent changed"
+grep -q 'signing ta failed' "$WORK/sign-fail-soft.out" || fail "sign-fail-soft: no warning"
+
+# --- old-tctl -----------------------------------------------------------
+root="$(new_root_with_tagent old-tctl)"
+before="$(fp "$root/bin/tagent")"
+STUB_TCTL_OLD=1 run old-tctl --from-source --root "$root"
+[ "$RC" -eq 0 ] || fail "old-tctl: exit $RC"
+[ ! -e "$WORK/old-tctl/tctl.argv" ] || fail "old-tctl: the pre-#11632 tctl was asked to sign"
+grep -q '^build --quiet -p trusty-installer --bin tctl$' "$WORK/old-tctl/cargo.argv" || fail "old-tctl: trusty-installer not built"
+grep -q '^run --quiet -p trusty-installer --bin tctl -- sign trusty-assistants --dir .*/\.ta-sign\.' "$WORK/old-tctl/cargo.argv" \
+  || fail "old-tctl: no fallback sign on the staging dir"
+[ "$(cat "$WORK/old-tctl/tctl.dir" 2>/dev/null)" = "ta" ] || fail "old-tctl: fallback saw more than ta"
+grep -q 'signed' "$root/bin/ta" || fail "old-tctl: ta not signed"
+[ "$(fp "$root/bin/tagent")" = "$before" ] || fail "old-tctl: tagent changed"
+
+# --- source-argv --------------------------------------------------------
+root="$WORK/git/root"
+mkdir -p "$root"
+run git --git-rev 0123abcd --root "$root"
+[ "$(cat "$WORK/git/cargo.argv")" = "install --git https://github.com/bobmatnyc/trusty-tools --rev 0123abcd trusty-assistants --bin ta --locked --root $root" ] \
+  || fail "source-argv git: [$(cat "$WORK/git/cargo.argv")]"
+root="$WORK/registry/root"
+mkdir -p "$root"
+run registry --root "$root"
+want_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$SCRIPT_DIR/../crates/trusty-assistants/Cargo.toml" | head -n 1)"
+[ "$(cat "$WORK/registry/cargo.argv")" = "install trusty-assistants --version $want_version --bin ta --locked --root $root" ] \
+  || fail "source-argv registry: [$(cat "$WORK/registry/cargo.argv")]"
+run bad-rev --git-rev 'main;rm' --root "$root"
+[ "$RC" -eq 2 ] || fail "source-argv: a non-hex --git-rev exit $RC, want 2"
+
+# --- dry-run ------------------------------------------------------------
+root="$WORK/dry/never"
+run dry --git-rev 0123abcd --root "$root" --dry-run
+[ "$RC" -eq 0 ] || fail "dry-run: exit $RC"
+[ ! -e "$root" ] || fail "dry-run: created $root"
+[ ! -e "$WORK/dry/cargo.argv" ] && [ ! -e "$WORK/dry/tctl.argv" ] || fail "dry-run: a stub ran"
+grep -q '\[DRY RUN\] cargo install --git' "$WORK/dry.out" || fail "dry-run: install command not printed"
+
+if [ -n "$FAILED" ]; then
+  echo "install_trusty_assistants_signed_selftest: FAILED:$FAILED" >&2
+  exit 1
+fi
+echo "install_trusty_assistants_signed_selftest: all cases passed"

@@ -754,39 +754,48 @@ scoped to trusty-search and other external-volume daemons.
 ### Signed Install: trusty-assistants (#4277)
 
 `trusty-assistants` (formerly `trusty-agents`, renamed in #11632) ships the
-`ta` binary and, for one release, the `tagent` alias. Both re-prompt for TCC
-access on every ad-hoc rebuild. (#11632 also deleted the `Trusty Agents.app`
-desktop shell this section used to cover.)
+`ta` binary. It re-prompts for TCC access on every ad-hoc rebuild. (#11632
+also deleted the `Trusty Agents.app` desktop shell this section used to
+cover.)
 
-On macOS the preferred local-source install path is
-`scripts/install-trusty-assistants-signed.sh` (or
-`make install-assistants-signed`):
+**Install `ta` only (#11650).** The crate still builds a one-release `tagent`
+alias, but nothing installs it: the `tagent` already in `~/.cargo/bin` comes
+from the older `trusty-agents` package and runs a launchd Slack bot. Never run
+`cargo install trusty-assistants` without `--bin ta`.
+
+On macOS the install path is `scripts/install-trusty-assistants-signed.sh`
+(or `make install-assistants-signed TA_INSTALL_ARGS=...`):
 
 ```bash
-# From the repo root (or any worktree) — installs ta and tagent and signs them
+# Real install from a commit on merged main (ADR-0043: a pinned, persistent source)
+scripts/install-trusty-assistants-signed.sh --git-rev <sha>
+# Once trusty-assistants is on crates.io: the default is this checkout's version
 scripts/install-trusty-assistants-signed.sh
-# or
-make install-assistants-signed
-# dry-run (prints every cargo/tctl command without executing):
-scripts/install-trusty-assistants-signed.sh --dry-run
+# Scratch install of this checkout into a temp root (refused for the cargo home)
+scripts/install-trusty-assistants-signed.sh --from-source --root "$(mktemp -d)"
+# Print every cargo/tctl command without running any:
+scripts/install-trusty-assistants-signed.sh --git-rev <sha> --dry-run
 ```
 
-The script runs `cargo install --path crates/trusty-assistants --locked`, then
-signs `ta` and `tagent` by shelling out to `tctl sign trusty-assistants`
-(`SIGNABLE_BINARIES` carries `("ta", ASSISTANTS_SET, "com.trusty.ta")` and
-`("tagent", ASSISTANTS_SET, "com.trusty.tagent")` — the same
-single-source-of-truth table used by `trusty-search`/`trusty-mpm`, extended for
-#4277). `tctl sign trusty-agents` still parses for one release.
+The script runs `cargo install ... --bin ta --locked --root <root>` and refuses
+`--bin` and `tagent` as arguments. It then moves `ta` into a staging directory
+under the root, runs `tctl sign trusty-assistants --dir <staging>` there, and
+moves it back; both moves are renames. The `trusty-assistants` set in
+`SIGNABLE_BINARIES` lists `ta` and `tagent` (it must match the crate's `[[bin]]`
+targets), so signing in place would re-sign the bot's binary; the staging
+directory holds only `ta`. A `tctl` on PATH that does not accept
+`trusty-assistants` (installed before #11632) is skipped, and this checkout's
+`trusty-installer` is built and signs instead. The script fingerprints
+`<root>/bin/tagent` before and after, and exits 1 if anything changed.
 
 **No Developer ID certificate present is never a hard failure** — `ta` stays
 ad-hoc signed with a clear warning and remains fully functional; it simply
 re-prompts for TCC access on the next rebuild.
 
-Already have `ta` on PATH and just want to (re-)sign it? Skip straight to:
-
-```bash
-tctl sign trusty-assistants
-```
+Already have `ta` installed and just want to (re-)sign it? Re-run the script
+with the same source. Do not point a bare `tctl sign trusty-assistants` (or
+`trusty-agents`) at `~/.cargo/bin`: it signs every set binary it finds there,
+including the bot's `tagent`.
 
 ### Signed Install: trusty-memory
 
