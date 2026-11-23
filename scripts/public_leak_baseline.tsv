@@ -1191,6 +1191,8 @@ crates/trusty-secrets/tests/live_flag_peer.rs	HOSTNAME	1
 crates/trusty-secrets/tests/on_demand_server.rs	EMAIL	5
 crates/trusty-secrets/tests/remote_gate_bin.rs	EMAIL	1
 crates/trusty-secrets/tests/remote_gate_bin.rs	EVO_HOST	3
+crates/trusty-summarizer/config.example.toml	HOSTNAME	1
+crates/trusty-summarizer/src/config.rs	HOSTNAME	1
 docker/cloudtest/Dockerfile	EVO_HOST	1
 docker/cloudtest/README.md	EVO_HOST	3
 docker/sled/check_tailscale.sh	TAILNET_IP	1

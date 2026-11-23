@@ -1,0 +1,2 @@
+Added
+- `trusty-summarizer` 0.2.0 joins the trusty-tools workspace as `crates/trusty-summarizer` (library and CLI, `publish = false`), with its README, `config.example.toml` and the `hooks/route-documents` Read hook. The converter worker that links Xberg 1.3.10 is `workers/summarizer-convert`, its own Cargo workspace on Rust 1.98.1; install both binaries into one directory so the CLI finds the worker beside itself.

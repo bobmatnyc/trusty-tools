@@ -1,0 +1,46 @@
+[package]
+name = "trusty-summarizer"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fast, low-inference file summarizer and classifier with line-range outlines."
+# Not published yet. The converter worker that links Xberg lives in
+# `workers/summarizer-convert`, its own workspace (README, "Build").
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "trusty-summarizer"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+# Local embedding classifier: all-MiniLM-L6-v2 on ONNX Runtime, at the release
+# the other trusty crates lock, so the ORT binaries and the model download are
+# shared. No image models.
+fastembed = { workspace = true, features = ["ort-download-binaries-native-tls", "hf-hub-native-tls"] }
+# getuid and poll for the warm server (unix socket, owner checks).
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# The workspace pins thiserror 1, toml 0.8 and no ureq; these are the majors
+# the crate was written against.
+thiserror = "2"
+toml = "1"
+# Blocking HTTP client for OpenAI-compatible endpoints; the same major release
+# hf-hub links. native-tls matches fastembed's TLS choice.
+ureq = { version = "3", default-features = false, features = ["native-tls"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# `xberg14` was a feature of a separate Xberg 1.4 build that this monorepo does
+# not carry; its cfgs stay known names so the gated code still lints clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("xberg14"))'] }
