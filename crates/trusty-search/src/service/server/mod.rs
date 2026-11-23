@@ -114,6 +114,8 @@ mod facet_route_tests;
 mod list_last_used_tests;
 #[cfg(test)]
 mod list_repo_identity_tests;
+#[cfg(test)]
+mod state_tests;
 // #6699: vector-lane health on the index list, and its agreement with status.
 #[cfg(test)]
 mod list_vector_health_tests;
@@ -295,8 +297,6 @@ mod tests_list;
 mod tests_search;
 #[cfg(test)]
 mod tests_stall;
-#[cfg(test)]
-mod tests_state;
 
 // Re-export the public surface that was previously at `crate::service::server::*`.
 // External callers (`daemon.rs`, `start.rs`, `service/mod.rs`) use these names.

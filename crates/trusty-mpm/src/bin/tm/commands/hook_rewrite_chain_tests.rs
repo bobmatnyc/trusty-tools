@@ -6,6 +6,8 @@ use super::super::hook_rewrite::{
     compression_rewrite_decision, rewrite_bash_command_for_compression,
 };
 use super::super::hook_rewrite_isolated::cwd_rewrite_decision;
+// See #11658: the shell list, with zsh required under CI, lives in one place.
+use super::super::hook_rewrite_shells::available_shells;
 use super::chain_rewrite_with_nonce;
 use std::path::Path;
 use trusty_mpm::core::savings_opportunity::SkipReason;
@@ -259,15 +261,8 @@ fn a_chain_rewrite_runs_like_the_original_in_a_real_shell() {
         "cd sub && grep -n nomatch marker.txt | wc -l",
         "export X=1 && grep -c hi sub/marker.txt; date +%Y; true",
     ];
-    for shell in ["sh", "bash", "zsh"] {
-        if std::process::Command::new(shell)
-            .args(["-c", "exit 0"])
-            .output()
-            .is_err()
-        {
-            eprintln!("SKIP a_chain_rewrite_runs_like_the_original_in_a_real_shell: no {shell}");
-            continue;
-        }
+    // See #11658: a missing zsh fails under CI instead of skipping.
+    for shell in available_shells() {
         for command in cases {
             let original = run_in(shell, &root, command);
             let rewritten = run_rewrite(shell, &root, "", command);
@@ -345,31 +340,6 @@ fn a_diff_then_log_chain_keeps_every_diff_line_through_the_real_filter() {
             "the diff step lost line {i}:\n{filtered}"
         );
     }
-}
-
-/// The shells of `["sh", "bash", "zsh"]` this host can run.
-///
-/// See #11644: `run_in` panics on a missing shell, so the `exit 0` guards in
-/// the two tests below never skipped anything and a host without zsh (a Linux build box)
-/// failed instead. The rewrite is POSIX-shaped and every case already runs
-/// under `sh` and `bash`, so a missing zsh drops only the zsh leg, named on
-/// stderr. `sh` must exist: a host without it fails rather than passing empty.
-fn available_shells() -> Vec<&'static str> {
-    let shells: Vec<&'static str> = ["sh", "bash", "zsh"]
-        .into_iter()
-        .filter(|shell| {
-            let present = std::process::Command::new(shell)
-                .args(["-c", "exit 0"])
-                .output()
-                .is_ok();
-            if !present {
-                eprintln!("no {shell} on this host; its leg of the shell parity test is not run");
-            }
-            present
-        })
-        .collect();
-    assert!(shells.contains(&"sh"), "sh is required: {shells:?}");
-    shells
 }
 
 /// #11507 (Architect, 07:45Z): a `cd <dir>;` or `cd <dir> && ` chain leaves the

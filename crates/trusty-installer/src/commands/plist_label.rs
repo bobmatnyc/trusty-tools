@@ -39,19 +39,26 @@ use trusty_common::launchd_labels;
 /// #4868 review: delegating straight to `canonical_label` skipped `SERVICES`
 /// entirely, so a member whose only unit is a SUB-unit resolved wrongly —
 /// `trusty-agents` returned `com.trusty.agents`, not the
-/// `com.trusty.agents.slack` that is actually loaded. The registry is consulted
-/// first; the convention is the fallback, not the answer.
+/// `com.trusty.agents.slack` that was then loaded. The registry is consulted
+/// first; the convention is the fallback, not the answer. (#11632 retired that
+/// sub-unit; [`label_in`] keeps the rule testable without a live example.)
 ///
 /// Test: `tests::labels_match_the_daemon_crates`, `tests::default_derivation`,
 /// `tests::sub_unit_members_resolve_to_their_registered_label`.
 pub fn plist_label_for(binary: &str) -> String {
+    label_in(launchd_labels::SERVICES, binary)
+}
+
+/// [`plist_label_for`] against an explicit service table.
+///
+/// Why: #11632 moved the only sub-unit-only member (`com.trusty.agents.slack`)
+/// to the retired table, so the sub-unit rule needs an injected table to stay
+/// covered.
+/// Test: `tests::sub_unit_members_resolve_to_their_registered_label`.
+fn label_in(services: &[launchd_labels::Service], binary: &str) -> String {
     // #4868: delegate rather than restate — the local override table this
     // replaces is what drifted from the daemons it claimed to mirror.
-    let for_member = || {
-        launchd_labels::SERVICES
-            .iter()
-            .filter(|s| s.member == binary)
-    };
+    let for_member = || services.iter().filter(|s| s.member == binary);
     // A member's MAIN daemon wins when it has one; otherwise its sole sub-unit
     // is what `tctl` must target. Selecting explicitly rather than by table
     // order keeps the answer stable if `SERVICES` is ever reordered.
@@ -138,19 +145,33 @@ mod tests {
 
     /// Why (#4868 review): delegating straight to the convention could not
     /// express a member whose only unit is a sub-unit — `trusty-agents`
-    /// resolved to `com.trusty.agents` while the loaded unit is
+    /// resolved to `com.trusty.agents` while the loaded unit was
     /// `com.trusty.agents.slack`, so `tctl` would have targeted a job that does
     /// not exist. That is the same failure this issue is about, one member over.
     /// What: a sub-unit-only member resolves to its registered label; a member
     /// with both a main daemon and a sub-unit resolves to the main daemon.
+    /// #11632 retired the one live sub-unit-only member, so that half runs
+    /// against an injected table holding its old row.
     /// Test: This is the test.
     #[test]
     fn sub_unit_members_resolve_to_their_registered_label() {
+        let table = [launchd_labels::Service {
+            member: "trusty-assistants",
+            sub_unit: Some("slack"),
+            label: launchd_labels::AGENTS_SLACK,
+            legacy: &[],
+        }];
         assert_eq!(
-            plist_label_for("trusty-agents"),
+            label_in(&table, "trusty-assistants"),
             launchd_labels::AGENTS_SLACK,
             "a member whose only registered unit is a sub-unit must resolve to \
              that sub-unit's label"
+        );
+        assert_eq!(
+            plist_label_for("trusty-assistants"),
+            "com.trusty.assistants",
+            "a retired sub-unit is never a target: the member falls back to \
+             the convention"
         );
         assert_eq!(
             plist_label_for("trusty-search"),

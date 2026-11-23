@@ -230,6 +230,8 @@ pub struct Core {
     /// name a revoked grant; `connect` refuses new grants until a persist succeeds. Lives on
     /// `Core`, not `Inner`, so the public `Inner` struct gains no field (SemVer, 0.8.x).
     pub(crate) store_stale: AtomicBool,
+    /// #11371: emulated tabs, reset when their lease ends.
+    pub(crate) emulation: crate::emulation::State,
     /// Self, for spawned tasks.
     pub this: Weak<Core>,
     inner: Mutex<Inner>,
@@ -320,6 +322,7 @@ impl Broker {
             host_check: Arc::new(ChromeHostCheck),
             store_io,
             store_stale: AtomicBool::new(false),
+            emulation: Default::default(),
             this: this.clone(),
             inner: Mutex::new(inner),
         });

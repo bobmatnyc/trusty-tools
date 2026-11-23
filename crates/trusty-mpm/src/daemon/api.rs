@@ -1327,7 +1327,7 @@ pub async fn current_project(
 ) -> Result<Json<ProjectInfo>, DaemonError> {
     // #6288: the body is shared with `mpm.projects.current`.
     Ok(Json(
-        crate::daemon::rpc::registry::projects::current_project_op(&state, &query.path)?,
+        crate::daemon::rpc::registry::projects::current_project_op(&state, &query.path).await?,
     ))
 }
 

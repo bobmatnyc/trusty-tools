@@ -161,6 +161,9 @@ pub(crate) mod hook_rewrite;
 pub(crate) mod subagent_task_hook;
 // D60: the one chained form the compression rewrite accepts, `cd <dir> && <cmd>`.
 pub(crate) mod hook_rewrite_cd;
+// #11658: the real-shell legs the rewrite tests run, zsh required under CI.
+#[cfg(test)]
+pub(crate) mod hook_rewrite_shells;
 // #10973: chained commands judged per segment.
 pub(crate) mod hook_chain_shape;
 pub(crate) mod hook_rewrite_chain;

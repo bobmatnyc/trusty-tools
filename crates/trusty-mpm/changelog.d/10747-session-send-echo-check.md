@@ -1,0 +1,3 @@
+Fixed
+- `session_send` types the text, waits up to 2 s for the input box to show it (or a `[Pasted text #N]` placeholder), and only then presses Enter. When the box shows a dropped head it clears the box and returns `sent: false` with `submit_state: "not_echoed"` and a `reason`, instead of submitting the tail (#10747).
+- `session_send` reads the Claude Code input box before typing and returns `sent: false` with `submit_state: "input_not_empty"` when it holds a draft or a stale paste placeholder; it types nothing and sends no `C-u`. Runtimes other than Claude Code keep the type-plus-Enter send without the echo check (#10747).

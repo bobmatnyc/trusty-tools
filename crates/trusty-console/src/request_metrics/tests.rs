@@ -116,10 +116,13 @@ fn classify_maps_unbounded_input_onto_closed_sets() {
         ),
         (
             "/proxy/{daemon}/{*path}",
-            "/proxy/agents/x",
-            Some("trusty-agents"),
+            "/proxy/review/x",
+            Some("trusty-review"),
             None,
         ),
+        // #11668: agents gateway removed in #11635, so no upstream.
+        ("/proxy/{daemon}/{*path}", "/proxy/agents/x", None, None),
+        ("/api/{service}/{*path}", "/api/agents/x", None, None),
         ("/api/{service}/{*path}", "/api/whatever/x", None, None),
         // Console-local route: no upstream.
         ("/api/console/services", "/api/console/services", None, None),
@@ -222,13 +225,15 @@ async fn router_counts_requests_by_route_upstream_and_source() {
     assert_eq!(send(&router, Method::GET, "/health").await, StatusCode::OK);
     let unmatched = send(&router, Method::GET, "/no/such/route").await;
     let memory = send(&router, Method::GET, "/api/memory/palaces").await;
-    let agents = send(&router, Method::GET, "/api/agents/x").await;
+    // #11668: agents gateway removed in #11635; this request has no upstream.
+    send(&router, Method::GET, "/api/agents/x").await;
+    let review = send(&router, Method::GET, "/api/review/x").await;
     let review_hook = send(&router, Method::POST, "/api/webhooks/review").await;
     let bogus_hook = send(&router, Method::POST, "/api/webhooks/bogus").await;
 
     let m = state.request_metrics().metrics_json(0);
     let status = |s: StatusCode| s.as_u16().to_string();
-    assert_eq!(m["totals"]["requests"], 6);
+    assert_eq!(m["totals"]["requests"], 7);
     assert_eq!(m["by_route"]["/health"]["by_status"]["200"], 1);
     assert_eq!(
         m["by_route"][UNMATCHED_ROUTE]["by_status"][status(unmatched)],
@@ -240,8 +245,12 @@ async fn router_counts_requests_by_route_upstream_and_source() {
         1
     );
     assert_eq!(
-        m["by_upstream"]["trusty-agents"]["by_status"][status(agents)],
+        m["by_upstream"]["trusty-review"]["by_status"][status(review)],
         1
+    );
+    assert!(
+        m["by_upstream"].get("trusty-agents").is_none(),
+        "#11668: no trusty-agents upstream key"
     );
     assert_eq!(
         m["by_source"]["review"]["by_status"][status(review_hook)],

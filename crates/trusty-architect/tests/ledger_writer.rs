@@ -322,8 +322,10 @@ fn ledger_writer_session_limits_refuse_and_leave_files() -> R {
         json!({"refs": [{"key": "Bad Key", "value": "v"}]}),
         json!({"refs": [{"key": "k", "value": ""}]}),
         json!({"refs": (0..13).map(|i| json!({"key": format!("k{i}"), "value": "v"})).collect::<Vec<_>>()}),
-        json!({"waiting_on": rep(json!({"who": "ci", "what": "w".repeat(120)}), 5),
-               "owed": rep(json!({"check": "c".repeat(80), "expect": "e".repeat(80), "ref": "r".repeat(80)}), 8)}),
+        // #11498: over the 8192 B record cap (about 8.4 KB), refused whole, never cut.
+        json!({"waiting_on": rep(json!({"who": "ci", "what": "é".repeat(120)}), 5),
+               "owed": rep(json!({"check": "é".repeat(80), "expect": "é".repeat(80), "ref": "é".repeat(80)}), 8),
+               "refs": (0..12).map(|i| json!({"key": format!("k{i}"), "value": "v".repeat(200)})).collect::<Vec<_>>()}),
     ];
     for mut op in bad {
         op["op"] = json!("session");
@@ -347,6 +349,24 @@ fn ledger_writer_session_limits_refuse_and_leave_files() -> R {
     );
     s.ok(json!([{"op": "session", "refs": []}]))?;
     assert_eq!(s.state()["session"]["refs"], json!([]));
+    Ok(())
+}
+
+/// #11498: a record over the old 2048 B cap (about 5.6 KB) is written in full.
+#[test]
+fn ledger_writer_session_over_the_old_cap_fits() -> R {
+    let s = Store::new()?;
+    let refs: Vec<_> = (0..12)
+        .map(|i| json!({"key": format!("k{i}"), "value": "v".repeat(200)}))
+        .collect();
+    s.ok(json!([{"op": "session",
+        "waiting_on": rep(json!({"who": "ci", "what": "w".repeat(120)}), 5),
+        "owed": rep(json!({"check": "c".repeat(80), "expect": "e".repeat(80), "ref": "r".repeat(80)}), 8),
+        "refs": refs}]))?;
+    let ses = s.state()["session"].clone();
+    assert!(serde_json::to_string(&ses)?.len() > 2048, "{ses}");
+    assert_eq!(ses["refs"], json!(refs));
+    assert_eq!(ses["owed"].as_array().map(Vec::len), Some(8));
     Ok(())
 }
 

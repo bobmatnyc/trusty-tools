@@ -245,22 +245,65 @@ pub fn list_projects_op(state: &Arc<DaemonState>) -> ProjectsResponse {
 
 /// `GET /projects/current`, `mpm.projects.current` — resolve one directory.
 ///
+/// Why: `tm project info` must answer for any registered checkout, not only
+/// one announced to this daemon process since it started (#11345).
+/// What: the in-memory map first; then the persisted registry
+/// (`projects.json`), matching each row's [`local_checkout_for`](crate::project::local_checkout_for) against
+/// `path`; then the alias store (`project-paths.json`). Both stores are read
+/// on every call, so no second cache exists to drift.
+///
 /// # Errors
 ///
 /// [`DaemonError::SessionNotFound`] when `path` is not a registered project —
 /// the variant this route has always used, so its `404` is unchanged.
+/// [`DaemonError::Internal`] when either persisted store cannot be read: an
+/// unreadable store is never reported as "not registered".
 ///
 /// Test: `parity_projects_current_agrees_across_transports`,
-/// `rpc_projects_current_unregistered_path_is_not_found`.
-pub fn current_project_op(
+/// `rpc_projects_current_unregistered_path_is_not_found`,
+/// `projects_current_resolves_a_url_registration_after_restart_11345`,
+/// `projects_current_resolves_an_alias_registration_after_restart_11345`,
+/// `projects_current_unregistered_without_alias_store_is_not_found_11345`,
+/// `projects_current_unreadable_alias_store_is_internal_error_11345`,
+/// `projects_current_unreadable_registry_is_internal_error_11345`.
+pub async fn current_project_op(
     state: &Arc<DaemonState>,
     path: &Path,
 ) -> Result<ProjectInfo, DaemonError> {
-    state
-        .project(path)
-        .ok_or_else(|| DaemonError::SessionNotFound {
+    if let Some(info) = state.project(path) {
+        return Ok(info);
+    }
+    // #11345: the in-memory map holds only paths announced since start; the
+    // persisted stores are the source of truth. A read failure is an error
+    // (fail closed), never a silent "not registered".
+    let projects = state
+        .project_registry()
+        .await
+        .list()
+        .await
+        .map_err(|e| DaemonError::Internal(format!("project registry read failed: {e}")))?;
+    let registered = projects.iter().find(|p| {
+        crate::project::local_checkout_for(p)
+            .is_some_and(|checkout| trusty_common::identifies_same_path(&checkout, path))
+    });
+    let name = match registered {
+        Some(p) => Some(p.name.clone()),
+        None => crate::core::project_aliases::ProjectAliasStore::load(state.framework_root())
+            .map_err(|e| DaemonError::Internal(format!("project alias store read failed: {e}")))?
+            .list()
+            .into_iter()
+            .find(|a| trusty_common::identifies_same_path(&a.path, path))
+            .map(|a| a.alias),
+    };
+    match name {
+        Some(name) => Ok(ProjectInfo {
+            name,
+            ..ProjectInfo::new(path.to_path_buf())
+        }),
+        None => Err(DaemonError::SessionNotFound {
             id: path.display().to_string(),
-        })
+        }),
+    }
 }
 
 /// `GET /projects/discover`, `mpm.projects.discover` — the projects Claude Code
@@ -305,7 +348,7 @@ pub fn register(router: RpcRouter, state: &Arc<DaemonState>) -> RpcRouter {
     let held = Arc::clone(state);
     let r = r.typed::<PathParams, ProjectInfo, _, _>("mpm.projects.current", move |p| {
         let s = Arc::clone(&held);
-        async move { current_project_op(&s, &p.path).map_err(Into::into) }
+        async move { current_project_op(&s, &p.path).await.map_err(Into::into) }
     });
 
     let r = r.typed::<NoParams, DiscoverProjectsResponse, _, _>(

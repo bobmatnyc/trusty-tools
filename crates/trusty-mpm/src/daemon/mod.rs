@@ -145,6 +145,8 @@ pub mod sm_stdio;
 pub mod socket;
 pub(crate) mod spawn_command;
 pub mod state;
+// #10468: SIGTERM, SIGINT and SIGHUP share one settle path.
+pub mod stop_signal;
 pub mod tmux;
 pub mod watcher;
 

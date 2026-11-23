@@ -42,4 +42,4 @@ pub trait Agent {
 ## See Also
 
 - [`crates/trusty-agents-common/README.md`](../../crates/trusty-agents-common/README.md) for full API reference
-- [`crates/trusty-agents/README.md`](../../crates/trusty-agents/README.md) for orchestrator implementation
+- [`crates/trusty-assistants/README.md`](../../crates/trusty-assistants/README.md) for orchestrator implementation
