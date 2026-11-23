@@ -376,3 +376,16 @@ Follow-ups for consumers; none is implemented by this amendment.
 - Architect-side `datg` and `task_tag` scripts (private project): they already emit base-34 ids and stamps; confirm they reject the `R` item prefix and compare the stamp to `created`.
 - tm `--turn-task` stamp (#11398): `Task: <id>@MMDD` no longer needs the stamp stripped before id parsing; the parser splits the stamp off and checks it.
 - A stored `R` item, if one exists in a prototype store, is migrated to an `A` item.
+
+---
+
+## 10. Projects view {#SPEC-LEDGER-10~draft}
+
+**ID:** SPEC-LEDGER-10~draft
+
+Owner ruling Dv3, 2026-11-17 ([#10350](https://github.com/bobmatnyc/trusty-tools/issues/10350)): the Projects view lives on the Architect dashboard and ships with every install through `tm fleet init`. It is served by the Python dashboard tm seeds (ruling Dpe, 2026-11-16), not by the console.
+
+- **LDG-10.1** The Projects view MUST list tm-registered projects only: the records of `<tm root>/project-registry/projects.json`, the list `tm project list` prints. A path-only entry (project map, document allowlist) never adds a row. Each row is labelled `owner/project` from the registered GitHub URL; a project with no GitHub URL is labelled by its alias and flagged, and no owner is guessed. Check: `tests/test_dashboard_projects_registry.py`.
+- **LDG-10.2** Projects MUST be grouped by GitHub owner, "No owner" last. Clicking an owner opens `#view/projects/owner:<owner>`, which filters the list to that owner. Check: the `ownerGroups` and `curOwner` page code, and a browser live check.
+- **LDG-10.3** The view MUST carry a Secrets list by owner/project: `GET /api/projects/key-names` (architect mode, GET only) runs `tm secrets list` once per registered project whose folder exists and returns, per owner, the owner-scope vault once and each project's project-scope vault with its key names. Only a line whose first word is a valid key name is kept; tm stderr and any other text are never returned, and a failure is a fixed sentence with the exit status; an exit 0 with no project vault header is also a fixed-sentence error, never an empty list. Only a same-origin request (`Sec-Fetch-Site: same-origin` or an allowed `Origin`) can force a refresh past the cache. The list never shows a value. The page loads it only when the list is opened, and the owner filter of LDG-10.2 applies to it. Check: `tests/test_dashboard_keynames.py`, which asserts that a value the fake tm prints is absent from the response.
+- **LDG-10.4** Writing secrets (the full Secrets nav with its form) is out of scope here; it stays unshipped until its own issue ships the trusty-secrets bridge.
