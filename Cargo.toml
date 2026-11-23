@@ -115,6 +115,9 @@ trusty-secrets = { path = "crates/trusty-secrets", version = "0.9", default-feat
 # Shared JSON-RPC 2.0 / MCP protocol primitives, extracted from
 # `trusty_common::mcp` by ADR-0040 (#5803).
 trusty-mcp = { path = "crates/trusty-mcp", version = "0.2" }
+# #11692: peer, codesign, launchd, private and audit-file helpers shared by
+# trusty-browser and trusty-computer.
+trusty-daemon-common = { path = "crates/trusty-daemon-common", version = "0.1" }
 # #8454 S2c: the deny-by-default channel route policy; trusty-mpm reads it
 # for `tm doctor`.
 trusty-channels = { path = "crates/trusty-channels", version = "0.3.0" }

@@ -27,87 +27,13 @@ use crate::install_host::{self, Registration};
 /// The launchd label, from the shared registry (#4919: no label literal outside it).
 pub const LABEL: &str = trusty_common::launchd_labels::BROWSER;
 
-/// Why a launchd action failed.
-#[derive(Debug, thiserror::Error)]
-pub enum LaunchdError {
-    /// A refusal or I/O error; the CLI prints the message.
-    #[error("{0}")]
-    Io(#[from] io::Error),
-    /// `launchctl` exited non-zero on a checked call.
-    #[error("launchctl failed: {0}")]
-    Launchctl(String),
-}
-
-/// One `launchctl` result.
-#[derive(Debug, Clone, Default)]
-pub struct Outcome {
-    /// Exit status (0 = success).
-    pub code: i32,
-    /// Captured stdout.
-    pub stdout: String,
-    /// Captured stderr.
-    pub stderr: String,
-}
-
-/// Runs `/bin/launchctl <args>`; a seam so tests never touch launchd.
-pub trait Launchctl {
-    /// Run once and capture the result.
-    fn run(&self, args: &[&str]) -> io::Result<Outcome>;
-}
-
-/// The real `/bin/launchctl`.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct SystemLaunchctl;
-
-impl Launchctl for SystemLaunchctl {
-    fn run(&self, args: &[&str]) -> io::Result<Outcome> {
-        let out = std::process::Command::new("/bin/launchctl")
-            .args(args)
-            .output()?;
-        Ok(Outcome {
-            code: out.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-        })
-    }
-}
-
-/// `plistlib` string escaping; control characters are refused as plistlib does.
-fn escape(s: &str) -> io::Result<String> {
-    if s.chars()
-        .any(|c| (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r'))
-    {
-        return Err(io::Error::other(
-            "strings can't contain control characters; use bytes instead",
-        ));
-    }
-    let s = s.replace("\r\n", "\n").replace('\r', "\n");
-    Ok(s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;"))
-}
+// #11692: the plist writer and `launchctl` seam are shared with trusty-computer.
+use trusty_daemon_common::launchd::checked;
+pub use trusty_daemon_common::launchd::{Launchctl, LaunchdError, Outcome, SystemLaunchctl};
 
 /// `plistlib.dumps(launch_configuration)` for `argv` and `state`.
 pub fn plist(argv: &[&str], state: &Path) -> io::Result<String> {
-    let mut args = String::new();
-    for a in argv {
-        args.push_str(&format!("\t\t<string>{}</string>\n", escape(a)?));
-    }
-    let err = escape(&state.join("service.stderr.log").to_string_lossy())?;
-    let out = escape(&state.join("service.stdout.log").to_string_lossy())?;
-    Ok(format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-<plist version=\"1.0\">\n<dict>\n\
-\t<key>KeepAlive</key>\n\t<true/>\n\
-\t<key>Label</key>\n\t<string>{LABEL}</string>\n\
-\t<key>ProgramArguments</key>\n\t<array>\n{args}\t</array>\n\
-\t<key>RunAtLoad</key>\n\t<true/>\n\
-\t<key>StandardErrorPath</key>\n\t<string>{err}</string>\n\
-\t<key>StandardOutPath</key>\n\t<string>{out}</string>\n\
-\t<key>Umask</key>\n\t<integer>63</integer>\n\
-</dict>\n</plist>\n"
-    ))
+    trusty_daemon_common::launchd::plist(LABEL, argv, state)
 }
 
 /// The Rust job's argv: `<exe> --state <state> serve`.
@@ -319,13 +245,4 @@ pub fn manage(
         }
     }
     Ok(())
-}
-
-fn checked(ctl: &dyn Launchctl, args: &[&str]) -> Result<(), LaunchdError> {
-    let out = ctl.run(args)?;
-    if out.code == 0 {
-        Ok(())
-    } else {
-        Err(LaunchdError::Launchctl(out.stderr.trim().to_owned()))
-    }
 }

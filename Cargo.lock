@@ -11440,6 +11440,7 @@ dependencies = [
  "tokio",
  "trusty-browser",
  "trusty-common",
+ "trusty-daemon-common",
  "trusty-mcp",
  "unicode-normalization",
 ]
@@ -11642,6 +11643,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "trusty-common",
+ "trusty-daemon-common",
 ]
 
 [[package]]
@@ -11713,6 +11715,15 @@ dependencies = [
  "trusty-memory",
  "trusty-mpm",
  "trusty-review",
+]
+
+[[package]]
+name = "trusty-daemon-common"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

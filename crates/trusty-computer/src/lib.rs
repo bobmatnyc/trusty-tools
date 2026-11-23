@@ -44,7 +44,8 @@ pub mod operator_cli;
 pub mod peer;
 pub mod policy;
 mod policy_rules;
-pub mod private;
+// #11692: owner-only file helpers, shared with trusty-browser.
+pub use trusty_daemon_common::private;
 pub mod pyvalue;
 pub mod redact;
 pub mod serve;
