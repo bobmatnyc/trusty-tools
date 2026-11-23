@@ -277,31 +277,57 @@ pub(crate) fn is_footer_noise(line: &str) -> bool {
 }
 
 /// The harness's own plan/usage-limit banner, case-insensitive, anchored at
-/// the start of the line (after blanks and one optional `⎿`):
-/// `(?i)^\s*(?:⎿\s*)?(?:claude (?:ai )?usage limit reached|you(?:'|’)ve hit
-/// your (?:usage )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)`.
+/// the start of the line (after blanks and one optional `⎿`, `│` or `●`):
+/// `(?i)^\s*(?:[⎿│●]\s*)?(?:claude (?:ai )?usage limit reached|usage limit
+/// reached|limit reached ∙ resets|you(?:'|’)ve hit your (?:\w+ )?(?:usage
+/// )?limit|(?:5-hour|weekly|opus weekly|session) limit reached)`.
+/// Test: `window5_plan_limit_ignores_prose_but_keeps_the_banner`,
+/// `window5_plan_limit_banner_variants`.
 // See ar-T9u parity window 5: B. The old unanchored `resets at` / `limit
 // reached` matched chat prose ("GitHub rate limit resets at 06:38Z").
 pub(crate) fn is_limit(line: &str) -> bool {
     let mut rest = lstrip(line);
-    if let Some(r) = rest.strip_prefix('⎿') {
+    if let Some(r) = rest.strip_prefix(['⎿', '│', '●']) {
         rest = lstrip(r);
     }
     let chars: Vec<char> = rest.chars().collect();
-    [
+    let fixed = [
         "claude usage limit reached",
         "claude ai usage limit reached",
-        "you've hit your limit",
-        "you've hit your usage limit",
-        "you’ve hit your limit",
-        "you’ve hit your usage limit",
+        "usage limit reached",
+        "limit reached ∙ resets",
         "5-hour limit reached",
         "weekly limit reached",
         "opus weekly limit reached",
         "session limit reached",
     ]
     .iter()
-    .any(|p| starts_with_ci(&chars, p))
+    .any(|p| starts_with_ci(&chars, p));
+    fixed || hit_your_limit(&chars)
+}
+
+/// `you(?:'|’)ve hit your (?:\w+ )?(?:usage )?limit`, caselessly, at the start.
+fn hit_your_limit(s: &[char]) -> bool {
+    let Some(tail) = ["you've hit your ", "you’ve hit your "]
+        .iter()
+        .find(|p| starts_with_ci(s, p))
+        .map(|p| &s[p.chars().count()..])
+    else {
+        return false;
+    };
+    let usage_limit = |t: &[char]| {
+        let t = if starts_with_ci(t, "usage ") {
+            &t[6..]
+        } else {
+            t
+        };
+        starts_with_ci(t, "limit")
+    };
+    if usage_limit(tail) {
+        return true;
+    }
+    let word = tail.iter().take_while(|c| is_word(**c)).count();
+    word > 0 && tail.get(word) == Some(&' ') && usage_limit(&tail[word + 1..])
 }
 
 /// `ERROR.search(line)`: `Traceback|API Error|Error: Exit code`.

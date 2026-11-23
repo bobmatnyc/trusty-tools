@@ -110,11 +110,30 @@ fn window5_real_busy_stretch_ends_the_idle_episode() {
     assert!(got[0].starts_with("since-1795409655-"), "{got:?}");
 }
 
-// --- D: an alerted epoch never alerts again -------------------------------------
+/// Window 5, class B, critic round: the generalised banner forms still alert.
+#[test]
+fn window5_plan_limit_banner_variants() {
+    let banners = [
+        "  ⎿  You've hit your session limit · resets 2pm",
+        "  You’ve hit your weekly limit · resets Mon 9am",
+        "  You've hit your opus limit · resets Mon 9am",
+        "  You've hit your usage limit",
+        "  Usage limit reached. Resets at 5pm.",
+        "  Limit reached ∙ resets 3am",
+        "  │ Claude usage limit reached. Your limit will reset at 5pm.",
+        "● 5-hour limit reached ∙ resets 3am",
+    ];
+    for line in banners {
+        assert!(parse_pane(&idle_with(line)).limit.is_some(), "{line}");
+    }
+}
+
+// --- D: an alerted epoch does not alert on an unsettled screen -------------------
 
 /// Window 5, class D: tm-trusty-computer at 05:24:02 alerted epoch
 /// 1795296612, already alerted at 04:46:39, with the new screen hash, 18 s
-/// before the new episode began at 1795411460.
+/// before the new episode began at 1795411460. An alerted epoch does not
+/// alert on an unsettled new screen.
 #[test]
 fn window5_alerted_epoch_does_not_alert_again_on_a_new_screen() {
     let old = 1_795_296_612.0;
