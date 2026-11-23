@@ -35,6 +35,9 @@ use crate::llm::error::LlmError;
 /// (`tool` or `any`) with `ValidationException` (#9292).
 const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-opus-5-5"];
 
+/// Vendors whose Bedrock models accept a forced `toolChoice` (#10759).
+const FORCED_TOOL_CHOICE_VENDORS: &[&str] = &[super::vendor::ANTHROPIC_VENDOR, "amazon"];
+
 /// Whether Bedrock accepts a forced `toolChoice` (`tool` / `any`) for `model`.
 ///
 /// Why: Sonnet 5.5 and Opus 5.5 on Bedrock reject `toolChoice = tool` with
@@ -43,13 +46,21 @@ const NO_FORCED_TOOL_CHOICE_FAMILIES: &[&str] = &["claude-sonnet-5-5", "claude-o
 /// What: reads the family with [`bedrock_model_family`], whatever single
 /// region segment precedes the `anthropic.` vendor (`us.`, `apac.`, `au.`,
 /// ...), then returns `false` for the 5.5 families and `true` for
-/// everything else. An application-inference-profile ARN names no model, so
+/// everything else. A vendor outside [`FORCED_TOOL_CHOICE_VENDORS`] gets
+/// `false` (#10759). An application-inference-profile ARN names no model, so
 /// forcing is unknown there; it returns `false`, because `auto` is the one
 /// choice every model accepts and a non-tool reply already fails closed in
 /// the parsers.
 /// Test: `forced_tool_choice_capability_per_model_id_shape`,
 /// `forced_tool_choice_capability_covers_every_compare_candidate`.
 pub(crate) fn supports_forced_tool_choice(model: &str) -> bool {
+    // #10759: only Anthropic and Amazon Nova are known to accept forcing;
+    // another vendor (Qwen, Mistral Devstral) gets `auto`.
+    if super::vendor::bedrock_vendor(model)
+        .is_some_and(|v| !FORCED_TOOL_CHOICE_VENDORS.contains(&v))
+    {
+        return false;
+    }
     // #9292: an application inference profile hides its model (`None`).
     bedrock_model_family(model).is_some_and(|f| !NO_FORCED_TOOL_CHOICE_FAMILIES.contains(&f))
 }
