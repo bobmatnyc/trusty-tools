@@ -1079,6 +1079,8 @@ crates/trusty-mpm/src/tui/home/console_tests.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/machine.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/machine_cards.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/machine_tests.rs	OPERATOR_PATH	1
+crates/trusty-mpm/src/tui/home/metrics_uds.rs	OPERATOR_PATH	1
+crates/trusty-mpm/src/tui/home/metrics_uds_tests.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/mod.rs	ARCH_ID	1
 crates/trusty-mpm/src/tui/home/mod.rs	OPERATOR_PATH	1
 crates/trusty-mpm/src/tui/home/no_uds_endpoint_tests.rs	OPERATOR_PATH	1
