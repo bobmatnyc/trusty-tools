@@ -418,8 +418,7 @@ pub fn render_with(r: &Report, th: &Thresholds) -> String {
     );
     s += &format!(
         "idle pairs on (session, kind, screen hash), epochs within {} s: alerts {}, wakes {}\n",
-        IDLE_EPOCH_TOLERANCE_S,
-        r.idle_relaxed.0, r.idle_relaxed.1
+        IDLE_EPOCH_TOLERANCE_S, r.idle_relaxed.0, r.idle_relaxed.1
     );
     s += &format!("live rows unread: {}\n", r.unread);
     s += &format!("haiku-path wakes excluded: {}\n", r.haiku_excluded);
