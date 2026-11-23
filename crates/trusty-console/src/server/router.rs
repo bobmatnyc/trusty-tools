@@ -92,6 +92,8 @@ fn build_router_inner(
     let secrets = state.secrets();
     #[cfg(not(unix))]
     let secrets = ();
+    // #10907: taken before `with_state` consumes the state.
+    let request_metrics = state.request_metrics();
     let core = Router::new()
         .route("/health", get(health_handler))
         .route("/api/console/services", get(services_handler))
@@ -442,6 +444,13 @@ fn build_router_inner(
         // #9066 A6: merged after the write-origin guard, so it does not apply
         // to `/api/secrets/*`; the bridge has its own.
         .merge(secrets_routes(secrets))
+        // #10907: counts every request, merged sub-routers and the 404
+        // fallback included; `Router::layer` runs after routing, so the
+        // matched template is visible to it.
+        .layer(axum::middleware::from_fn_with_state(
+            request_metrics,
+            crate::request_metrics::record_requests,
+        ))
         .layer(TraceLayer::new_for_http())
 }
 

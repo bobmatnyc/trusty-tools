@@ -184,6 +184,9 @@ pub struct AppState {
     /// What: set once in [`AppState::new`]; read only by [`health_handler`].
     /// Test: `test_health_route`, `health_uptime_is_monotonic`.
     started_at: Instant,
+    /// #10907: request counters, written by the router-wide middleware and
+    /// read by `console.console_metrics`.
+    request_metrics: Arc<crate::request_metrics::RequestMetrics>,
 }
 
 impl AppState {
@@ -290,6 +293,7 @@ impl AppState {
             #[cfg(unix)]
             secrets: Arc::new(crate::secrets_uds::SecretsBridge::disabled()),
             started_at: Instant::now(),
+            request_metrics: Arc::new(crate::request_metrics::RequestMetrics::new()),
         }
     }
 
@@ -323,6 +327,12 @@ impl AppState {
     /// Test: Used by `run_serve` in `main.rs`.
     pub fn connectors(&self) -> Arc<Vec<Box<dyn ServiceConnector>>> {
         Arc::clone(&self.connectors)
+    }
+
+    /// The request counters (#10907): the router's middleware writes them and
+    /// `console.console_metrics` reads them.
+    pub fn request_metrics(&self) -> Arc<crate::request_metrics::RequestMetrics> {
+        Arc::clone(&self.request_metrics)
     }
 
     /// Whole seconds since this state was built (#10902: `console.health`).

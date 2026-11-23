@@ -39,7 +39,29 @@ fn metrics_sources_prefer_uds_for_events_and_mpm() {
         ServiceId::Search.metrics_source(),
         Some(MetricsSource::Stdio("trusty-search", _))
     ));
-    assert_eq!(ServiceId::Console.metrics_source(), None);
+    assert!(matches!(
+        ServiceId::Console.metrics_source(),
+        Some(MetricsSource::Uds("console.console_metrics"))
+    ));
+}
+
+/// #10907: the Console row reads its report over the console socket.
+#[tokio::test]
+async fn console_console_metrics_over_uds_yields_a_report() {
+    let (_dir, socket) = socket_dir();
+    let mut report = events_report();
+    report.service_id = "trusty-console".into();
+    serve(
+        &socket,
+        Peer::Reply(answer(serde_json::to_value(&report).expect("encode"))),
+    );
+    let source = ServiceId::Console
+        .metrics_source()
+        .expect("the console serves console_metrics");
+    let got = fetch_uds_metrics(source, &socket, DEADLINE)
+        .await
+        .expect("a report");
+    assert_eq!(got.service_id, "trusty-console");
 }
 
 #[tokio::test]

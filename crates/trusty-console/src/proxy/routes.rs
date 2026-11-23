@@ -56,7 +56,8 @@ static HOP_BY_HOP: &[&str] = &[
 /// `mpm` left the allowlist in #6288 PR 1b.
 /// What: Returns the full service ID, or `None` for unknown/disallowed keys.
 /// Test: `test_service_key_mapping` below.
-fn full_id(service_key: &str) -> Option<&'static str> {
+// #10907: also read by `request_metrics::upstream_for`.
+pub(crate) fn full_id(service_key: &str) -> Option<&'static str> {
     match service_key {
         // #6285: NO `search` row. trusty-search moved to UDS (ADR-0032) and
         // stopped writing the `http_addr` file this proxy resolves a base URL
