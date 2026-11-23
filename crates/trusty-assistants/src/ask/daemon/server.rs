@@ -6,6 +6,8 @@
 //! Test: `super::tests`.
 
 use std::future::Future;
+use std::os::fd::AsFd as _;
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -39,6 +41,10 @@ pub enum Bound {
 #[derive(Debug)]
 pub struct BoundDaemon {
     listener: UnixListener,
+    /// #11650: a second handle on the listening socket. Its `accept` asks the
+    /// kernel directly, so it sees a queued connection the runtime has not
+    /// reported yet.
+    backlog: StdUnixListener,
     socket: OwnedSocketPath,
 }
 
@@ -83,7 +89,9 @@ pub struct ServeSummary {
 /// racing binders on a lock beside the socket; the socket is published at
 /// 0600 inside a 0700 directory it owns (requirement 3).
 /// What: `Busy` when another process serves or is binding the path; any other
-/// failure is [`AskDaemonError::Bind`]. There is no unhardened fallback.
+/// failure is [`AskDaemonError::Bind`]. There is no unhardened fallback. A
+/// failure to duplicate the listener for the backlog check is an I/O error:
+/// a daemon that cannot see its backlog does not serve.
 /// Test: `super::tests::a_second_daemon_cannot_bind_a_served_socket`,
 /// `super::tests::racing_binds_end_with_exactly_one_daemon`,
 /// `super::tests::a_stale_socket_file_is_replaced`,
@@ -100,9 +108,19 @@ pub async fn bind(socket: &Path) -> Result<Bound, AskDaemonError> {
         }
         Err(e) => return Err(bind_error(e)),
     };
+    let backlog = listener
+        .as_fd()
+        .try_clone_to_owned()
+        .map(StdUnixListener::from)
+        .and_then(|backlog| backlog.set_nonblocking(true).map(|()| backlog))
+        .map_err(AskDaemonError::io("duplicate the listener"))?;
     let socket =
         OwnedSocketPath::capture(socket).map_err(AskDaemonError::io("stat the bound socket"))?;
-    Ok(Bound::Serving(BoundDaemon { listener, socket }))
+    Ok(Bound::Serving(BoundDaemon {
+        listener,
+        backlog,
+        socket,
+    }))
 }
 
 /// Open connections, plus whether the spawner has let go.
@@ -176,12 +194,14 @@ impl BoundDaemon {
     /// is dropped unread. Asks run one at a time through `factory`'s engine
     /// and `AskEngine::ask_with_cancel`; a client EOF sets that ask's cancel
     /// flag. `lease` resolving marks the spawner's release. The loop ends when
-    /// released with nothing open, or when `shutdown` resolves (which cancels
+    /// released with nothing open and nothing queued in the listen backlog
+    /// ([`accept_queued`]), or when `shutdown` resolves (which cancels
     /// every in-flight ask). On the way out it unlinks the socket first, so no
     /// new client can reach it, accepts any connection already queued, waits
     /// for every handler, and stops the health socket.
     /// Test: `super::tests::an_ask_round_trips_and_the_daemon_exits_idle`,
     /// `super::tests::the_daemon_stays_while_a_connection_is_open`,
+    /// `super::tests::a_connection_queued_before_the_release_keeps_the_daemon`,
     /// `super::tests::a_client_disconnect_cancels_its_ask`,
     /// `super::tests::a_connection_from_another_uid_is_refused`,
     /// `super::tests::shutdown_removes_the_socket`,
@@ -213,12 +233,33 @@ impl BoundDaemon {
             }),
         });
         let accept = |stream: UnixStream| admit(stream, options.own_uid, &activity, &shared);
+        let Self {
+            listener,
+            backlog,
+            socket,
+        } = self;
 
         tokio::pin!(lease, shutdown);
         let mut leased = true;
         let exit = loop {
             if activity.idle() {
-                break ServeExit::Idle;
+                // #11650: idle only when the kernel backlog is empty too. The
+                // runtime may not have reported a connection whose `connect()`
+                // already returned, and its client may have released us since.
+                // Fail-Open Check: an accept error ends the daemon (the drain
+                // below still tries the queue); it never loops or reads as
+                // "nothing queued" silently.
+                match accept_queued(&backlog) {
+                    Ok(None) => break ServeExit::Idle,
+                    Ok(Some(stream)) => {
+                        admit_queued(stream, &accept);
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "ask daemon: backlog check failed; exiting");
+                        break ServeExit::Idle;
+                    }
+                }
             }
             tokio::select! {
                 () = &mut shutdown => break ServeExit::Shutdown,
@@ -227,7 +268,7 @@ impl BoundDaemon {
                     activity.release();
                 }
                 () = activity.wake.notified() => {}
-                accepted = self.listener.accept() => match accepted {
+                accepted = listener.accept() => match accepted {
                     Ok((stream, _)) => accept(stream),
                     Err(e) => {
                         tracing::error!(error = %e, "ask daemon: accept failed; shutting down");
@@ -241,11 +282,11 @@ impl BoundDaemon {
         }
         // #11650: unlink first, so a new client starts a new daemon instead of
         // queueing on a listener that is about to close.
-        self.socket.remove();
-        match self.listener.into_std() {
-            Ok(listener) => drain_backlog(&listener, exit, &accept),
-            Err(e) => tracing::warn!(error = %e, "ask daemon: queued connections not drained"),
-        }
+        socket.remove();
+        drop(listener);
+        drain_backlog(&backlog, exit, &accept);
+        // Closing the last handle refuses any later connect.
+        drop(backlog);
         activity.drained().await;
         let _ = stop_tx.send(true);
         if let Some(health) = health
@@ -266,28 +307,56 @@ impl BoundDaemon {
 /// Accept every connection already queued on the unlinked socket.
 ///
 /// Why: a client that connected just before the unlink sits in the backlog;
-/// dropping it unanswered would turn a race into a failed ask. Non-blocking
-/// `accept` returns `WouldBlock` once the queue is empty, so this never waits.
-fn drain_backlog(
-    listener: &std::os::unix::net::UnixListener,
-    exit: ServeExit,
-    accept: &impl Fn(UnixStream),
-) {
-    if let Err(e) = listener.set_nonblocking(true) {
-        tracing::warn!(error = %e, "ask daemon: queued connections not drained");
-        return;
+/// dropping it unanswered would turn a race into a failed ask.
+/// What: [`accept_queued`] until the queue is empty, so this never waits.
+/// After a shutdown each queued connection is dropped unread.
+fn drain_backlog(listener: &StdUnixListener, exit: ServeExit, accept: &impl Fn(UnixStream)) {
+    loop {
+        match accept_queued(listener) {
+            Ok(Some(_)) if exit == ServeExit::Shutdown => {} // the client sees EOF
+            Ok(Some(stream)) => admit_queued(stream, accept),
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "ask daemon: queued connections not drained");
+                return;
+            }
+        }
     }
-    while let Ok((stream, _)) = listener.accept() {
-        if exit == ServeExit::Shutdown {
-            continue; // dropped: the client sees EOF without a reply
+}
+
+/// Take one connection from the kernel's listen backlog, without waiting.
+///
+/// Why: #11650 — the idle decision must see every connection whose
+/// `connect()` has returned. The runtime's accept only reports one after its
+/// reactor has run, so a queued connection could be missed.
+/// What: `Ok(None)` when the queue is empty (`WouldBlock`); an interrupted
+/// call or a connection its client reset first is skipped; any other error
+/// is returned.
+/// Test: `super::tests::a_connection_queued_before_the_release_keeps_the_daemon`.
+fn accept_queued(listener: &StdUnixListener) -> std::io::Result<Option<StdUnixStream>> {
+    use std::io::ErrorKind;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => return Ok(Some(stream)),
+            Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::Interrupted | ErrorKind::ConnectionAborted
+                ) => {}
+            Err(e) => return Err(e),
         }
-        match stream
-            .set_nonblocking(true)
-            .and_then(|()| UnixStream::from_std(stream))
-        {
-            Ok(stream) => accept(stream),
-            Err(e) => tracing::warn!(error = %e, "ask daemon: queued connection dropped"),
-        }
+    }
+}
+
+/// Hand a connection taken by [`accept_queued`] to `accept`, on the runtime.
+fn admit_queued(stream: StdUnixStream, accept: &impl Fn(UnixStream)) {
+    match stream
+        .set_nonblocking(true)
+        .and_then(|()| UnixStream::from_std(stream))
+    {
+        Ok(stream) => accept(stream),
+        Err(e) => tracing::warn!(error = %e, "ask daemon: queued connection dropped"),
     }
 }
 

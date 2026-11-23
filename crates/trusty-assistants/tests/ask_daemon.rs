@@ -135,7 +135,10 @@ fn a_second_ask_reuses_the_running_daemon() {
     assert_eq!(ready.trim(), "ready");
     let inode = std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(env.socket()).unwrap());
 
-    // An open connection keeps the daemon up between the two asks.
+    // An open connection keeps the daemon up between the two asks. #11650:
+    // `connect` returning is the synchronisation point: the daemon checks its
+    // listen backlog before an idle exit, so a connection made before the
+    // release is never missed, whether or not it was accepted yet.
     let hold = UnixStream::connect(env.socket()).expect("hold");
     drop(daemon.stdin.take());
     assert_answered(&env.ask("first"));

@@ -190,6 +190,46 @@ async fn the_daemon_stays_while_a_connection_is_open() {
     assert!(!socket.exists());
 }
 
+/// #11650: a connection queued before the release keeps the daemon serving.
+///
+/// The hold connects and the lease is released before the serve loop first
+/// runs, with no await in between, so the loop sees the release before its
+/// listener reports the queued connection. The ask after it must find the
+/// same daemon still serving its socket.
+#[tokio::test]
+async fn a_connection_queued_before_the_release_keeps_the_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = instance(&tmp);
+    let dir = short_dir();
+    let socket = instance_socket_in(&dir.path().join("d"), home.id());
+    let llm = Arc::new(Scripted::new(vec![text("still here")]));
+    let mut running = serve(
+        &socket,
+        factory(&home, &llm, empty_servers(&tmp)),
+        own_uid(),
+        None,
+    )
+    .await;
+
+    let hold = std::os::unix::net::UnixStream::connect(&socket).expect("hold");
+    running.release();
+    assert_eq!(
+        ask_at(&socket, "are you there?").await.expect("answer"),
+        "still here"
+    );
+    assert!(
+        socket.exists(),
+        "the daemon kept its socket while a queued connection was open"
+    );
+    assert!(!running.task.is_finished(), "the hold keeps the daemon");
+
+    drop(hold);
+    let summary = running.finish().await;
+    assert_eq!(summary.exit, ServeExit::Idle);
+    assert_eq!((summary.accepted, summary.answered), (2, 1), "{summary:?}");
+    assert!(!socket.exists());
+}
+
 #[tokio::test]
 async fn a_client_disconnect_cancels_its_ask() {
     let tmp = tempfile::tempdir().unwrap();
