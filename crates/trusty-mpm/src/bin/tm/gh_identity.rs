@@ -159,8 +159,10 @@ pub(crate) fn load_gh_env_for(dir: &std::path::Path) -> anyhow::Result<GhEnv> {
 /// What: [`trusty_mpm::core::gh_session_shim::pinned_relaunch_env`] when a pin
 /// applies, its refusal as `Err` (the plan's message). Otherwise
 /// [`load_gh_env_for`] — #8233 review: its refusal is printed, not fatal, and
-/// the relaunch runs on the ambient identity — then
-/// [`GhEnv::for_session_launch`].
+/// the relaunch runs on the ambient identity — then, #10487, a
+/// `github.token_env` token goes through the gh shim
+/// ([`trusty_mpm::core::gh_token_env_shim::shim_token_env`], whose refusal is
+/// this `Err`), then [`GhEnv::for_session_launch`].
 /// Test: the pinned arm is `a_pinned_relaunch_env_clears_inherited_tokens_and_adds_the_shim`
 /// and `a_refused_pinned_relaunch_is_the_launch_refusal`; the unpinned arm is
 /// `inplace_exec_command_clears_a_stale_token_under_a_keyring_login_9750` and
@@ -173,6 +175,8 @@ pub(crate) fn relaunch_gh_env(dir: &std::path::Path) -> Result<GhEnv, String> {
         eprintln!("tm: could not resolve this project's gh identity for the relaunch: {e}");
         GhEnv::default()
     });
+    // #10487: no GH_TOKEN value in a launched session's env; a failure refuses.
+    let env = trusty_mpm::core::gh_token_env_shim::shim_token_env(&env)?;
     Ok(env.for_session_launch())
 }
 
