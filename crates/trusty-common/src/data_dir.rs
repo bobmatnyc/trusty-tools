@@ -127,6 +127,20 @@ pub fn sanitize_data_root(candidate: PathBuf, app_name: &str) -> PathBuf {
 /// `resolve_data_dir_whitespace_override_uses_platform_dir`,
 /// `resolve_data_dir_relative_override_errors`, `resolve_data_dir_root_override_errors`.
 pub fn resolve_data_dir(app_name: &str) -> Result<PathBuf> {
+    let dir = resolve_data_dir_no_create(app_name)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create data directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Resolve the same path as [`resolve_data_dir`] without creating it.
+///
+/// Why: a dial-side lookup that creates the directory leaves it at 0755, and
+/// the dial's 0700 trust check then refuses it (#11667). Only the bind side
+/// (`uds::prepare_socket_dir`) may create the directory.
+/// What: identical resolution and guards; never touches the filesystem.
+/// Test: `resolve_data_dir_no_create_matches_and_creates_nothing`.
+pub fn resolve_data_dir_no_create(app_name: &str) -> Result<PathBuf> {
     let base = match std::env::var(DATA_DIR_OVERRIDE_ENV) {
         Ok(raw) if raw.trim().is_empty() => {
             tracing::warn!(
@@ -167,10 +181,7 @@ pub fn resolve_data_dir(app_name: &str) -> Result<PathBuf> {
     } else {
         base.join(app_name)
     };
-    let dir = sanitize_data_root(dir, app_name);
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create data directory {}", dir.display()))?;
-    Ok(dir)
+    Ok(sanitize_data_root(dir, app_name))
 }
 
 /// Check whether a path exists and is a directory.
@@ -245,6 +256,21 @@ mod tests {
         unsafe {
             std::env::remove_var(DATA_DIR_OVERRIDE_ENV);
         }
+    }
+
+    /// #11667: same path as `resolve_data_dir`, and nothing created.
+    #[test]
+    fn resolve_data_dir_no_create_matches_and_creates_nothing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp) };
+        let lookup = resolve_data_dir_no_create("trusty-test-nocreate");
+        let created = tmp.join("trusty-test-nocreate").exists();
+        let made = resolve_data_dir("trusty-test-nocreate");
+        unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+
+        assert!(!created, "the no-create lookup created the directory");
+        assert_eq!(lookup.expect("lookup"), made.expect("resolve"));
     }
 
     /// Why: guard introduced in #503 — an empty override must not produce a

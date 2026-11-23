@@ -141,6 +141,18 @@ pub fn daemon_socket_path(app_name: &str) -> Result<std::path::PathBuf> {
     Ok(dir.join(format!("{app_name}.sock")))
 }
 
+/// [`daemon_socket_path`] for a dialer: the same path, no directory created.
+///
+/// Why: a client that created the data dir would leave it 0755, which the
+/// dial's 0700 trust check refuses (#11667). Bind callers keep
+/// [`daemon_socket_path`].
+/// What: `resolve_data_dir_no_create(app_name)/<app_name>.sock`.
+/// Test: `daemon_socket_path_no_create_matches_and_creates_nothing`.
+pub fn daemon_socket_path_no_create(app_name: &str) -> Result<std::path::PathBuf> {
+    let dir = crate::data_dir::resolve_data_dir_no_create(app_name)?;
+    Ok(dir.join(format!("{app_name}.sock")))
+}
+
 /// Probe whether an existing daemon recorded at `addr_file` is healthy and,
 /// if so, return its base URL so the caller can refuse to start a duplicate.
 ///
@@ -328,6 +340,22 @@ mod tests {
             socket.display(),
             tmp.display()
         );
+    }
+
+    /// #11667: the dial-side path equals the bind-side path and creates nothing.
+    #[test]
+    fn daemon_socket_path_no_create_matches_and_creates_nothing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile_like_dir();
+        // SAFETY: guarded by ENV_LOCK, this module's convention for the override.
+        unsafe { std::env::set_var(DATA_DIR_OVERRIDE_ENV, &tmp) };
+        let dial = daemon_socket_path_no_create("trusty-review");
+        let created_after_dial = tmp.join("trusty-review").exists();
+        let bind = daemon_socket_path("trusty-review");
+        unsafe { std::env::remove_var(DATA_DIR_OVERRIDE_ENV) };
+
+        assert!(!created_after_dial, "dial-side lookup created the data dir");
+        assert_eq!(dial.expect("dial path"), bind.expect("bind path"));
     }
 
     // ── Code Contract tests (#5724, ADR-0047) ────────────────────────────────
