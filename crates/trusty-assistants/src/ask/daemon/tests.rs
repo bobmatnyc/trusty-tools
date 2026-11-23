@@ -124,6 +124,8 @@ fn an_unknown_instance_is_named_with_its_path() {
         text.contains(&tmp.path().join("nosuch").display().to_string()),
         "{text}"
     );
+    // #11742: an empty root says no instance exists.
+    assert!(text.contains("no instances exist yet"), "{text}");
     let err = resolve_home(Some(tmp.path()), "../x").unwrap_err();
     assert!(matches!(err, AskDaemonError::InvalidInstance(_)), "{err}");
 }

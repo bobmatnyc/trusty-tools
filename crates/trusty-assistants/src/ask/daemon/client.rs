@@ -47,6 +47,8 @@ pub struct DaemonLauncher {
     program: PathBuf,
     args: Vec<String>,
     budget: Duration,
+    /// #11742: print one stderr line before the first start.
+    progress: bool,
 }
 
 impl DaemonLauncher {
@@ -63,6 +65,7 @@ impl DaemonLauncher {
             program: program.into(),
             args: Vec::new(),
             budget: START_BUDGET,
+            progress: false,
         }
     }
 
@@ -70,6 +73,19 @@ impl DaemonLauncher {
     #[must_use]
     pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Print `<bin>: starting <id> assistant…` on stderr before a start.
+    ///
+    /// Why (#11742): a cold ask waits about 10 s for the daemon with no
+    /// output. What: one line per ask, on stderr only, so a script reading
+    /// stdout sees only the answer; a warm ask starts nothing and prints
+    /// nothing.
+    /// Test: `a_cold_ask_reports_the_start_on_stderr_only` (`tests/ask_daemon.rs`).
+    #[must_use]
+    pub fn with_progress(mut self) -> Self {
+        self.progress = true;
         self
     }
 
@@ -123,9 +139,15 @@ pub(super) async fn ask_home_in(
     let socket = instance_socket_in(dir, home.id());
     let log = instance_log_in(dir, home.id());
     let id = home.id().to_string();
+    let mut announced = !launcher.progress;
     for _ in 0..MAX_STARTS {
         if let Some(stream) = connect(&socket).await? {
             return exchange(stream, question).await;
+        }
+        if !announced {
+            // #11742: the cold-start notice; stderr, so stdout stays the answer.
+            eprintln!("{}: starting {id} assistant…", crate::cli::BIN_NAME);
+            announced = true;
         }
         match start(launcher, &id, &log).await? {
             Started::Ready(lease) => {

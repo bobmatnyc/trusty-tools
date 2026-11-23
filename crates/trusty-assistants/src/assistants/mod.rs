@@ -89,6 +89,8 @@ pub mod home;
 pub mod instance;
 pub mod instance_provision;
 pub mod instructions;
+// #11742: which root entries are instance homes, for `ta list` and `ta ask`.
+pub mod listing;
 pub mod mcp;
 pub mod memory;
 pub mod memory_grants;
@@ -112,6 +114,7 @@ pub use instance_provision::{
     ProvisionedInstance, own_index_id, provision_instance, provision_instance_in,
 };
 pub use instructions::{AssistantRole, MAX_INSTRUCTIONS_BYTES, seed_role_instructions};
+pub use listing::list_instances;
 pub use mcp::{McpOverrides, OverridesRead, read_overrides, write_overrides};
 pub use memory::{
     MemoryConfig, PalacePlan, PalaceSource, own_palace, read_memory_config, resolve_palace_plan,

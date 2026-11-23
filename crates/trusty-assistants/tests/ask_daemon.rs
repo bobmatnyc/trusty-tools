@@ -116,6 +116,44 @@ fn ask_starts_the_daemon_on_demand_and_it_exits_idle() {
     assert_eq!(env.turns(), 1);
 }
 
+/// Why (#11742): a cold ask waited about 10 s with no output. It now prints
+/// one progress line on stderr; stdout carries only the answer, and a warm
+/// ask prints no progress line.
+#[test]
+fn a_cold_ask_reports_the_start_on_stderr_only() {
+    const NOTICE: &str = "ta: starting e2e assistant";
+    let env = Env::new();
+    let cold = env.ask("hello there");
+    assert_answered(&cold);
+    let stderr = String::from_utf8_lossy(&cold.stderr);
+    assert_eq!(stderr.matches(NOTICE).count(), 1, "stderr: {stderr}");
+    assert!(!String::from_utf8_lossy(&cold.stdout).contains(NOTICE));
+    env.wait_idle();
+
+    // Warm: a daemon already serves the instance.
+    let mut daemon = env
+        .ta()
+        .args(["ask-daemon", "e2e"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let mut ready = String::new();
+    BufReader::new(daemon.stdout.take().expect("stdout"))
+        .read_line(&mut ready)
+        .expect("ready line");
+    assert_eq!(ready.trim(), "ready");
+    let hold = UnixStream::connect(env.socket()).expect("hold");
+    drop(daemon.stdin.take());
+    let warm = env.ask("again");
+    assert_answered(&warm);
+    let stderr = String::from_utf8_lossy(&warm.stderr);
+    assert!(!stderr.contains(NOTICE), "warm stderr: {stderr}");
+    drop(hold);
+    assert!(wait_exit(&mut daemon).success());
+}
+
 #[test]
 fn a_second_ask_reuses_the_running_daemon() {
     let env = Env::new();
