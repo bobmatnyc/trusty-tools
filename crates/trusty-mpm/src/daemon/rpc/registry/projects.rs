@@ -261,7 +261,11 @@ pub fn list_projects_op(state: &Arc<DaemonState>) -> ProjectsResponse {
 ///
 /// Test: `parity_projects_current_agrees_across_transports`,
 /// `rpc_projects_current_unregistered_path_is_not_found`,
-/// `projects_current_resolves_persisted_registrations_after_restart_11345`.
+/// `projects_current_resolves_a_url_registration_after_restart_11345`,
+/// `projects_current_resolves_an_alias_registration_after_restart_11345`,
+/// `projects_current_unregistered_without_alias_store_is_not_found_11345`,
+/// `projects_current_unreadable_alias_store_is_internal_error_11345`,
+/// `projects_current_unreadable_registry_is_internal_error_11345`.
 pub async fn current_project_op(
     state: &Arc<DaemonState>,
     path: &Path,
