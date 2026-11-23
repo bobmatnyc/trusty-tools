@@ -8,7 +8,8 @@ What: KeyNamesView.get() takes the tm-registered projects from the Projects view
 closed, TM_BIN overrides `tm`), and parses its "<vault> (Project|Owner):" headers and indented key lines with
 parse_list(). Only a line whose first word is a valid trusty-secrets key name is kept, as {name, push_only}; every
 other line is dropped, so a value can never pass through. tm's stdout text beyond those names and its stderr are never
-returned: a failure is a fixed sentence with the exit status. The answer groups by GitHub owner:
+returned: a failure is a fixed sentence with the exit status, and an exit 0 with no project vault header is the fixed
+UNPARSEABLE error, never an empty list. The answer groups by GitHub owner:
   {"owners": [{key, owner, vaults: [{vault, names}], projects: [{id, label, vault, names, error}]}],
    "registry_error", "at"}
 The owner vault is listed once per owner, not once per project. Projects with no GitHub URL sit under key "~none".
@@ -31,6 +32,8 @@ NONE_KEY = "~none"
 KEY_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,255}")
 VAULT_LINE = re.compile(r"^(\S+) \((Project|Owner)\):$")
 PUSH_ONLY = "(push-only for agents)"
+UNPARSEABLE = ("Not listed: `tm secrets list` printed no project vault, so its output could not be read. "
+               "Run it in the project folder to see why.")
 
 
 def tm_bin():
@@ -91,6 +94,9 @@ def _project_entry(p, runner):
             row["vault"], row["names"] = v["vault"], v["names"]
         elif v["kind"] == "owner":
             owners.append(v)
+    if row["vault"] is None:   # #10350: tm's empty vault prints "  (no keys)" under a header; no header is unreadable, never empty
+        row["error"] = UNPARSEABLE
+        return row, []
     return row, owners
 
 

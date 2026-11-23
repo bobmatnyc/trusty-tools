@@ -168,13 +168,26 @@ def projects(h):
     return h._send(200, h.server.projects_view.get(sess_ids, h.server.store.list_docs("watch_changes")))
 
 
+def _same_origin(h):
+    """True when the browser says the request came from this page (#10350): Sec-Fetch-Site same-origin, or an allowed Origin."""
+    if (h.headers.get("Sec-Fetch-Site") or "").lower() == "same-origin":
+        return True
+    origin = h.headers.get("Origin")
+    if not origin:
+        return False
+    from dashboard_http import origin_allowed   # deferred: dashboard_http imports this module
+    return origin_allowed(origin, h.server.server_address[1], getattr(h.server, "tailnet_names", frozenset()))
+
+
 def key_names(h, url):
     """GET /api/projects/key-names[?refresh=1]: secret key names by owner/project, never a value; architect mode only.
 
-    #10350: the view runs `tm secrets list` per registered project and keeps only key-name lines (dashboard_keynames)."""
+    #10350: the view runs `tm secrets list` per registered project and keeps only key-name lines (dashboard_keynames).
+    A refresh skips the cache and runs tm again, so only a same-origin request may ask for one: Sec-Fetch-Site
+    same-origin, or an Origin the write guard admits. Any other request (a cross-site no-cors GET) gets the cache."""
     if _architect_get(h):
         return None
-    refresh = (parse_qs(url.query).get("refresh") or [""])[0] == "1"
+    refresh = (parse_qs(url.query).get("refresh") or [""])[0] == "1" and _same_origin(h)
     return h._send(200, h.server.key_names.get(refresh=refresh))
 
 def cli_profiles(h, url):

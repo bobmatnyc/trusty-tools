@@ -71,11 +71,20 @@ class KeyNames(unittest.TestCase):
         self.assertTrue(out["owners"][1]["projects"][0]["error"].startswith("Not listed: this project's folder"))
         self.assertNotIn(VALUE, json.dumps(out))
 
+    def test_exit_zero_without_a_project_header_fails_closed(self):
+        # #10350 fix round: tm's empty vault prints "  (no keys)" under a header, so no header is never "no keys"
+        for text in ("", "garbage\n", "garbage " + VALUE + "\n"):
+            row = kn.build(rows(self.tmp)[:1], lambda root, t=text: (0, t))["owners"][0]["projects"][0]
+            self.assertEqual(row["error"], "Not listed: `tm secrets list` printed no project vault, so its output "
+                                           "could not be read. Run it in the project folder to see why.", text)
+            self.assertEqual((row["vault"], row["names"]), (None, []))
+            self.assertNotIn(VALUE, json.dumps(row))
+
     def test_tm_not_runnable_is_a_fixed_sentence(self):
         out = kn.build(rows(self.tmp)[:1], lambda root: (None, ""))
         self.assertIn("tm could not be run", out["owners"][0]["projects"][0]["error"])
 
-    def _server(self, mode="architect"):
+    def _server(self, mode="architect", runner=fake_runner):
         spec = importlib.util.spec_from_file_location("dashboard_serve_keynames", os.path.join(SCRIPTS, "dashboard-serve.py"))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
@@ -85,15 +94,15 @@ class KeyNames(unittest.TestCase):
         pv = FakeProjects(self.tmp)
         cfg = dict(mod.ARCHITECT_CONFIG, mode=mode)
         srv = mod.DashboardServer(0, mod.ds.Store(os.path.join(self.tmp, "store")), page, projects={}, projects_view=pv,
-                                  config=cfg, key_names=kn.KeyNamesView(pv, runner=fake_runner))
+                                  config=cfg, key_names=kn.KeyNamesView(pv, runner=runner))
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
         return srv.server_address[1]
 
-    def _req(self, port, method="GET", path="/api/projects/key-names"):
+    def _req(self, port, method="GET", path="/api/projects/key-names", headers=None):
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-        h = {"Host": f"127.0.0.1:{port}"}
+        h = {"Host": f"127.0.0.1:{port}", **(headers or {})}
         if method != "GET":
             h.update({"Origin": f"http://127.0.0.1:{port}", "Content-Type": "application/json"})
         c.request(method, path, body=b"{}" if method != "GET" else None, headers=h)
@@ -111,6 +120,25 @@ class KeyNames(unittest.TestCase):
         d = json.loads(body)
         self.assertEqual([g["owner"] for g in d["owners"]], ["acme", None])
         self.assertIn("API_KEY", [n["name"] for p in d["owners"][0]["projects"] for n in p["names"]])
+
+    def test_only_a_same_origin_request_can_force_a_refresh(self):
+        # #10350 fix round: a cross-site no-cors GET passes the Host guard; it must not skip the cache and run tm
+        calls = []
+
+        def counting(root):
+            calls.append(root)
+            return fake_runner(root)
+        port = self._server(runner=counting)
+        self._req(port)
+        first = len(calls)
+        self.assertGreater(first, 0)
+        for headers in ({}, {"Sec-Fetch-Site": "cross-site"}, {"Origin": "https://evil.example"}):
+            self.assertEqual(self._req(port, path="/api/projects/key-names?refresh=1", headers=headers)[0], 200)
+        self.assertEqual(len(calls), first, "a cross-origin or header-less refresh ran tm")
+        self._req(port, path="/api/projects/key-names?refresh=1", headers={"Sec-Fetch-Site": "same-origin"})
+        self.assertEqual(len(calls), 2 * first)
+        self._req(port, path="/api/projects/key-names?refresh=1", headers={"Origin": f"http://127.0.0.1:{port}"})
+        self.assertEqual(len(calls), 3 * first)
 
     def test_route_is_architect_only_and_get_only(self):
         self.assertEqual(self._req(self._server(), method="POST")[0], 405)
